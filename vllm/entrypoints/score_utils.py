@@ -11,22 +11,24 @@ from vllm.entrypoints.chat_utils import (
     ChatCompletionContentPartImageEmbedsParam,
     ChatCompletionContentPartImageParam,
     ChatCompletionContentPartTextParam,
+    ChatCompletionContentPartVideoParam,
+    ChatTemplateResolutionError,
     MultiModalItemTracker,
     _ContentPart,
     _parse_chat_message_content_part,
+    apply_hf_chat_template,
 )
 from vllm.inputs import TokensPrompt
 from vllm.model_executor.models.interfaces import supports_score_template
 from vllm.multimodal.inputs import MultiModalDataDict
 from vllm.outputs import PoolingRequestOutput
-from vllm.transformers_utils.tokenizer import (
-    AnyTokenizer,
-    PreTrainedTokenizer,
-    PreTrainedTokenizerFast,
-)
+from vllm.tokenizers import TokenizerLike
 
 ScoreContentPartParam: TypeAlias = (
-    ChatCompletionContentPartImageParam | ChatCompletionContentPartImageEmbedsParam
+    ChatCompletionContentPartImageParam
+    | ChatCompletionContentPartImageEmbedsParam
+    | ChatCompletionContentPartTextParam
+    | ChatCompletionContentPartVideoParam
 )
 
 
@@ -45,7 +47,7 @@ class ScoreMultiModalParam(TypedDict, total=False):
 
 
 def _cosine_similarity(
-    tokenizer: PreTrainedTokenizer | PreTrainedTokenizerFast,
+    tokenizer: TokenizerLike,
     embed_1: list[PoolingRequestOutput],
     embed_2: list[PoolingRequestOutput],
 ) -> list[PoolingRequestOutput]:
@@ -55,8 +57,8 @@ def _cosine_similarity(
     for emb_1, emb_2 in zip(embed_1, embed_2):
         pair_score = scorer(emb_1.outputs.data, emb_2.outputs.data)
 
-        padding = []
-        if (pad_token_id := getattr(tokenizer, "pad_token_id", None)) is not None:
+        padding: list[int] = []
+        if (pad_token_id := tokenizer.pad_token_id) is not None:
             padding = [pad_token_id]
 
         tokens = emb_1.prompt_token_ids + padding + emb_2.prompt_token_ids
@@ -93,12 +95,10 @@ def parse_score_data(
     data_1: str | ScoreContentPartParam,
     data_2: str | ScoreContentPartParam,
     model_config: ModelConfig,
-    tokenizer: AnyTokenizer,
 ) -> tuple[str, str, MultiModalDataDict | None]:
-    mm_tracker = MultiModalItemTracker(model_config, tokenizer)
+    mm_tracker = MultiModalItemTracker(model_config)
 
     content_1 = _parse_score_content(data_1, mm_tracker)
-
     content_2 = _parse_score_content(data_2, mm_tracker)
 
     def ensure_str(content: _ContentPart | None) -> str:
@@ -118,12 +118,14 @@ def _parse_score_content(
     mm_tracker: BaseMultiModalItemTracker,
 ) -> _ContentPart | None:
     if isinstance(data, str):
-        data = ChatCompletionContentPartTextParam(type="text", text=data)
+        part = ChatCompletionContentPartTextParam(type="text", text=data)
+    else:
+        part = data
 
     mm_parser = mm_tracker.create_parser()
 
     parse_res = _parse_chat_message_content_part(
-        data,
+        part,
         mm_parser,
         wrap_dicts=False,
         interleave_strings=False,
@@ -143,10 +145,8 @@ def _parse_score_content(
     return next(iter(mm_placeholder_storage.values()))[0]
 
 
-def apply_score_template(
-    model_config: ModelConfig,
-    prompt_1: str,
-    prompt_2: str,
+def _apply_model_score_template(
+    model_config: ModelConfig, prompt_1: str, prompt_2: str
 ) -> str:
     # NOTE(Simon): lazy import to avoid bring in all dependencies (e.g. gguf)
     from vllm.model_executor.model_loader import get_model_cls
@@ -181,33 +181,62 @@ def post_process_tokens(
 
 def get_score_prompt(
     model_config: ModelConfig,
-    tokenizer: AnyTokenizer,
+    tokenizer: TokenizerLike,
     tokenization_kwargs: dict[str, Any],
     data_1: str | ScoreContentPartParam,
     data_2: str | ScoreContentPartParam,
+    score_template: str | None = None,
 ) -> tuple[str, TokensPrompt]:
     prompt_1, prompt_2, mm_data = parse_score_data(
         data_1,
         data_2,
         model_config,
-        tokenizer,
     )
     from vllm.model_executor.model_loader import get_model_cls
 
     model = get_model_cls(model_config)
-    if supports_score_template(model):
-        full_prompt = apply_score_template(model_config, prompt_1, prompt_2)
-        prompt_inputs = tokenizer(full_prompt, **tokenization_kwargs)
-    elif model_config.use_pad_token:
-        # cross_encoder models defaults to using pad_token.
-        prompt_inputs = tokenizer(
-            text=prompt_1, text_pair=prompt_2, **tokenization_kwargs
-        )
-        full_prompt = tokenizer.decode(prompt_inputs["input_ids"])
+
+    def default_tokenizer_encode():
+        if supports_score_template(model):
+            full_prompt = _apply_model_score_template(model_config, prompt_1, prompt_2)
+            prompt_inputs = tokenizer(full_prompt, **tokenization_kwargs)
+        else:
+            if model_config.use_sep_token:
+                # cross_encoder models defaults to using separating token.
+                prompt_inputs = tokenizer(
+                    text=prompt_1, text_pair=prompt_2, **tokenization_kwargs
+                )
+                full_prompt = tokenizer.decode(prompt_inputs["input_ids"])
+            else:
+                # `llm as reranker` defaults to not using separating token.
+                full_prompt = prompt_1 + prompt_2
+                prompt_inputs = tokenizer(text=full_prompt, **tokenization_kwargs)
+        return full_prompt, prompt_inputs
+
+    # FIXME: For now, we only apply a template when one is explicitly provided.
+    # We cannot rely on the tokenizer's chat template because many models
+    # inherit junk templates from their base LLM, which breaks both the models
+    # and the tests that use them.
+    if score_template is None:
+        full_prompt, prompt_inputs = default_tokenizer_encode()
     else:
-        # `llm as reranker` models defaults to not using pad_token.
-        full_prompt = prompt_1 + prompt_2
-        prompt_inputs = tokenizer(text=full_prompt, **tokenization_kwargs)
+        # FIXME: Try applying a score template from the CLI arg or tokenizer_config.json
+        # If that fails because there is no such template,
+        # fall back to the default implementation.
+        try:
+            full_prompt = apply_hf_chat_template(
+                tokenizer,
+                [
+                    {"role": "query", "content": prompt_1},
+                    {"role": "document", "content": prompt_2},
+                ],
+                score_template,
+                tools=None,
+                model_config=model_config,
+            )
+            prompt_inputs = tokenizer(full_prompt, **tokenization_kwargs)
+        except ChatTemplateResolutionError:
+            full_prompt, prompt_inputs = default_tokenizer_encode()
 
     engine_prompt = TokensPrompt(prompt_token_ids=prompt_inputs["input_ids"])
 

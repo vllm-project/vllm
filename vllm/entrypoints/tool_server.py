@@ -80,7 +80,9 @@ class ToolServer(ABC):
         pass
 
     @abstractmethod
-    def get_tool_description(self, tool_name: str) -> ToolNamespaceConfig | None:
+    def get_tool_description(
+        self, tool_name: str, allowed_tools: list[str] | None = None
+    ) -> ToolNamespaceConfig | None:
         """
         Return the tool description for the given tool name.
         If the tool is not supported, return None.
@@ -147,8 +149,29 @@ class MCPToolServer(ToolServer):
     def has_tool(self, tool_name: str):
         return tool_name in self.harmony_tool_descriptions
 
-    def get_tool_description(self, tool_name: str):
-        return self.harmony_tool_descriptions.get(tool_name)
+    def get_tool_description(
+        self,
+        server_label: str,
+        allowed_tools: list[str] | None = None,
+    ) -> ToolNamespaceConfig | None:
+        cfg = self.harmony_tool_descriptions.get(server_label)
+        if cfg is None:
+            return None
+
+        # No restrictions: all tools from this MCP server
+        if allowed_tools is None:
+            return cfg
+
+        filtered = [t for t in cfg.tools if t.name in allowed_tools]
+
+        if not filtered:
+            return None
+
+        return ToolNamespaceConfig(
+            name=cfg.name,
+            description=cfg.description,
+            tools=filtered,
+        )
 
     @asynccontextmanager
     async def new_session(
@@ -190,7 +213,9 @@ class DemoToolServer(ToolServer):
     def has_tool(self, tool_name: str) -> bool:
         return tool_name in self.tools
 
-    def get_tool_description(self, tool_name: str) -> ToolNamespaceConfig | None:
+    def get_tool_description(
+        self, tool_name: str, allowed_tools: list[str] | None = None
+    ) -> ToolNamespaceConfig | None:
         if tool_name not in self.tools:
             return None
         if tool_name == "browser":

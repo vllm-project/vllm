@@ -6,64 +6,37 @@ Contains helpers that are applied to collections.
 This is similar in concept to the `collections` module.
 """
 
-from collections import UserDict, defaultdict
+from collections import defaultdict
 from collections.abc import Callable, Generator, Hashable, Iterable, Mapping
 from typing import Generic, Literal, TypeVar
 
 from typing_extensions import TypeIs, assert_never
 
 T = TypeVar("T")
-U = TypeVar("U")
 
 _K = TypeVar("_K", bound=Hashable)
 _V = TypeVar("_V")
 
 
-class ClassRegistry(UserDict[type[T], _V]):
-    """
-    A registry that acts like a dictionary but searches for other classes
-    in the MRO if the original class is not found.
-    """
-
-    def __getitem__(self, key: type[T]) -> _V:
-        for cls in key.mro():
-            if cls in self.data:
-                return self.data[cls]
-
-        raise KeyError(key)
-
-    def __contains__(self, key: object) -> bool:
-        return self.contains(key)
-
-    def contains(self, key: object, *, strict: bool = False) -> bool:
-        if not isinstance(key, type):
-            return False
-
-        if strict:
-            return key in self.data
-
-        return any(cls in self.data for cls in key.mro())
-
-
-class LazyDict(Mapping[str, T], Generic[T]):
+class LazyDict(Mapping[str, _V], Generic[_V]):
     """
     Evaluates dictionary items only when they are accessed.
 
     Adapted from: https://stackoverflow.com/a/47212782/5082708
     """
 
-    def __init__(self, factory: dict[str, Callable[[], T]]):
+    def __init__(self, factory: dict[str, Callable[[], _V]]):
         self._factory = factory
-        self._dict: dict[str, T] = {}
+        self._dict: dict[str, _V] = {}
 
-    def __getitem__(self, key: str) -> T:
+    def __getitem__(self, key: str) -> _V:
         if key not in self._dict:
             if key not in self._factory:
                 raise KeyError(key)
             self._dict[key] = self._factory[key]()
         return self._dict[key]
 
-    def __setitem__(self, key: str, value: Callable[[], T]):
+    def __setitem__(self, key: str, value: Callable[[], _V]):
         self._factory[key] = value
 
     def __iter__(self):

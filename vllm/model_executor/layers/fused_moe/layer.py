@@ -4,7 +4,6 @@
 from collections.abc import Callable, Iterable
 from contextlib import nullcontext
 from enum import Enum
-from functools import partial
 from typing import Literal, cast, get_args, overload
 
 import torch
@@ -32,11 +31,7 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEQuantConfig,
     RoutingMethodType,
 )
-from vllm.model_executor.layers.fused_moe.fused_moe import zero_experts_compute_triton
-from vllm.model_executor.layers.fused_moe.modular_kernel import (
-    FusedMoEPermuteExpertsUnpermute,
-    FusedMoEPrepareAndFinalize,
-)
+from vllm.model_executor.layers.fused_moe.fused_moe_router import FusedMoERouter
 from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (
     init_aiter_topK_meta_data,
 )
@@ -44,10 +39,8 @@ from vllm.model_executor.layers.fused_moe.routing_simulator import RoutingSimula
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig,
 )
-from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
-    is_flashinfer_supporting_global_sf,
-)
 from vllm.platforms import current_platform
+from vllm.utils.flashinfer import has_flashinfer_trtllm_fused_moe
 from vllm.utils.math_utils import cdiv, round_up
 from vllm.utils.torch_utils import (
     aux_stream,
@@ -57,11 +50,8 @@ from vllm.utils.torch_utils import (
 from vllm.v1.worker.ubatching import dbo_current_ubatch_id
 
 if current_platform.is_cuda_alike():
-    from .fused_moe import eplb_map_to_physical_and_record, fused_experts
+    from .fused_moe import eplb_map_to_physical_and_record
 else:
-    fused_experts = None  # type: ignore
-    FusedMoEPermuteExpertsUnpermute = object  # type: ignore
-    FusedMoEPrepareAndFinalize = object  # type: ignore
 
     def _eplb_map_to_physical_and_record(
         topk_ids: torch.Tensor,
@@ -73,16 +63,7 @@ else:
         return topk_ids
 
     eplb_map_to_physical_and_record = _eplb_map_to_physical_and_record
-from vllm.model_executor.layers.fused_moe.fused_moe import grouped_topk
-from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (  # noqa: E501
-    rocm_aiter_grouped_topk,
-)
-
-if current_platform.is_tpu():
-    from .moe_pallas import fused_moe as fused_moe_pallas
-else:
-    fused_moe_pallas = None  # type: ignore
-
+from vllm.model_executor.layers.fused_moe.fused_moe import GroupedTopk
 from vllm.model_executor.layers.fused_moe.fused_moe_method_base import (
     FusedMoEMethodBase,
 )
@@ -304,6 +285,24 @@ def maybe_roundup_hidden_size(
     return hidden_size
 
 
+class FusedMoERouterImpl(FusedMoERouter):
+    def __init__(self, layer: "FusedMoE"):
+        super().__init__()
+        self.layer = layer
+
+    @property
+    def routing_method_type(self) -> RoutingMethodType:
+        return self.layer.routing_method_type
+
+    def select_experts(
+        self,
+        hidden_states: torch.Tensor,
+        router_logits: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        return self.layer._select_experts(hidden_states, router_logits)
+
+
+# --8<-- [start:fused_moe]
 @CustomOp.register("fused_moe")
 class FusedMoE(CustomOp):
     """FusedMoE layer for MoE models.
@@ -325,7 +324,10 @@ class FusedMoE(CustomOp):
         renormalize: Whether to renormalize the logits in the fused_moe kernel
         quant_config: Quantization configure.
         enable_eplb: Whether to enable expert parallelism load balancer.
+        router_logits_dtype: Data type for router logits buffers.
     """
+
+    # --8<-- [end:fused_moe]
 
     def __init__(
         self,
@@ -356,11 +358,10 @@ class FusedMoE(CustomOp):
         num_redundant_experts: int = 0,
         has_bias: bool = False,
         is_sequence_parallel=False,
-        zero_expert_num: int | None = 0,
-        zero_expert_type: str | None = None,
         expert_mapping: list[tuple[str, str, int, str]] | None = None,
         n_shared_experts: int | None = None,
-        routing_method_type: int | None = None,
+        routing_method_type: RoutingMethodType | None = None,
+        router_logits_dtype: torch.dtype | None = None,
     ):
         super().__init__()
 
@@ -369,14 +370,16 @@ class FusedMoE(CustomOp):
         # TODO: Remove this after more extensive testings with TP/DP
         # and other execution modes
         if envs.VLLM_DISABLE_SHARED_EXPERTS_STREAM:
-            logger.info_once("Disabling MoE shared_experts cuda stream")
+            logger.debug_once("Disabling MoE shared_experts cuda stream", scope="local")
             self.shared_experts_stream = None
         else:
             # TODO(rob): enable shared expert overlap with non-cuda-alike.
             # aux_stream() returns None on non-cuda-alike platforms.
             self.shared_experts_stream = aux_stream()
             if self.shared_experts_stream is not None:
-                logger.info_once("Enabled separate cuda stream for MoE shared_experts")
+                logger.debug_once(
+                    "Enabled separate cuda stream for MoE shared_experts", scope="local"
+                )
 
         if params_dtype is None:
             params_dtype = torch.get_default_dtype()
@@ -413,8 +416,6 @@ class FusedMoE(CustomOp):
 
         self.global_num_experts = num_experts + num_redundant_experts
         self.logical_num_experts = num_experts
-        self.zero_expert_num = zero_expert_num
-        self.zero_expert_type = zero_expert_type
 
         # Expert mapping used in self.load_weights
         self.expert_mapping = expert_mapping
@@ -483,7 +484,7 @@ class FusedMoE(CustomOp):
                 enable_eplb=self.enable_eplb,
             )
 
-            self.expert_map: torch.Tensor | None
+            self._expert_map: torch.Tensor | None
             local_num_experts, expert_map, expert_mask = determine_expert_map(
                 ep_size=self.ep_size,
                 ep_rank=self.ep_rank,
@@ -493,7 +494,7 @@ class FusedMoE(CustomOp):
                 return_expert_mask=self.rocm_aiter_fmoe_enabled,
             )
             self.local_num_experts = local_num_experts
-            self.register_buffer("expert_map", expert_map)
+            self.register_buffer("_expert_map", expert_map)
             self.register_buffer("expert_mask", expert_mask)
             self._maybe_init_expert_routing_tables()
             logger.info_once(
@@ -506,10 +507,10 @@ class FusedMoE(CustomOp):
                 self.expert_placement_strategy,
                 self.local_num_experts,
                 self.global_num_experts,
-                get_compressed_expert_map(self.expert_map),
+                get_compressed_expert_map(self._expert_map),
             )
         else:
-            self.local_num_experts, self.expert_map, self.expert_mask = (
+            self.local_num_experts, self._expert_map, self.expert_mask = (
                 self.global_num_experts,
                 None,
                 None,
@@ -520,6 +521,10 @@ class FusedMoE(CustomOp):
         self._init_aiter_shared_experts_topK_buffer(
             vllm_config=vllm_config, dp_size=dp_size_
         )
+        if self.use_ep and self.rocm_aiter_fmoe_enabled:
+            assert self.expert_mask is None or torch.all(
+                (expert_mask == 0) | (expert_mask == 1)
+            ), "Aiter Fused MoE kernel only supports expert_map with 0 and 1s."
 
         assert intermediate_size % self.tp_size == 0
         self.hidden_size = hidden_size
@@ -538,6 +543,20 @@ class FusedMoE(CustomOp):
         self.apply_router_weight_on_input = apply_router_weight_on_input
         self.activation = activation
 
+        self._grouped_topk_impl: GroupedTopk | None = None
+        if self.use_grouped_topk:
+            assert self.num_expert_group is not None
+            assert self.topk_group is not None
+            self._grouped_topk_impl = GroupedTopk(
+                topk=self.top_k,
+                renormalize=self.renormalize,
+                num_expert_group=self.num_expert_group,
+                topk_group=self.topk_group,
+                scoring_func=self.scoring_func,
+                routed_scaling_factor=self.routed_scaling_factor,
+                num_fused_shared_experts=self.num_fused_shared_experts,
+            )
+
         if self.scoring_func != "softmax" and not self.use_grouped_topk:
             raise ValueError(
                 "Only softmax scoring function is supported for non-grouped topk."
@@ -545,7 +564,7 @@ class FusedMoE(CustomOp):
 
         # ToDo: Better logic to determine the routing method type
         if routing_method_type is not None:
-            self.routing_method_type = routing_method_type
+            self.routing_method_type: RoutingMethodType = routing_method_type
         else:
             if scoring_func == "sigmoid":
                 if self.use_grouped_topk:
@@ -568,6 +587,7 @@ class FusedMoE(CustomOp):
             num_local_experts=self.local_num_experts,
             moe_parallel_config=self.moe_parallel_config,
             in_dtype=moe_in_dtype,
+            router_logits_dtype=router_logits_dtype,
             max_num_tokens=envs.VLLM_MOE_DP_CHUNK_SIZE,
             has_bias=has_bias,
             is_act_and_mul=is_act_and_mul,
@@ -600,14 +620,20 @@ class FusedMoE(CustomOp):
             # Avoid circular import
             from vllm.model_executor.layers.quantization.modelopt import (
                 ModelOptFp8MoEMethod,
+                ModelOptNvFp4FusedMoE,
             )
 
             if not isinstance(
-                self.quant_method, (UnquantizedFusedMoEMethod, ModelOptFp8MoEMethod)
+                self.quant_method,
+                (
+                    UnquantizedFusedMoEMethod,
+                    ModelOptFp8MoEMethod,
+                    ModelOptNvFp4FusedMoE,
+                ),
             ):
                 raise NotImplementedError(
                     "is_act_and_mul=False is supported only for unquantized "
-                    "and ModelOpt FP8 moe for now"
+                    ", ModelOpt FP8, and ModelOpt NvFp4 checkpoints"
                 )
             if not current_platform.is_cuda():
                 raise NotImplementedError(
@@ -648,6 +674,8 @@ class FusedMoE(CustomOp):
         # Chunked all2all staging tensor
         self.batched_hidden_states: torch.Tensor | None = None
         self.batched_router_logits: torch.Tensor | None = None
+
+        self.router = FusedMoERouterImpl(self)
 
     # Note: maybe_init_modular_kernel should only be called by
     # prepare_communication_buffer_for_model.
@@ -743,7 +771,7 @@ class FusedMoE(CustomOp):
             self.moe_parallel_config.use_pplx_kernels
             or self.moe_parallel_config.use_deepep_ll_kernels
             or (self.dp_size > 1 and self.use_flashinfer_cutlass_kernels)
-        )
+        ) and envs.VLLM_ENABLE_MOE_DP_CHUNK
 
     @property
     def is_internal_router(self) -> bool:
@@ -771,7 +799,7 @@ class FusedMoE(CustomOp):
                 ),
             )
 
-        if self.expert_map is None:
+        if self._expert_map is None:
             return None
 
         routing_tables = self.ensure_round_robin_expert_routing_tables(
@@ -779,7 +807,7 @@ class FusedMoE(CustomOp):
             ep_size=self.ep_size,
             ep_rank=self.ep_rank,
             local_num_experts=self.local_num_experts,
-            device=self.expert_map.device,
+            device=self._expert_map.device,
         )
 
         global_to_physical, physical_to_global, local_global = routing_tables
@@ -830,8 +858,8 @@ class FusedMoE(CustomOp):
 
     def update_expert_map(self):
         # ep_size and ep_rank should already be updated
-        assert self.expert_map is not None
-        with self.expert_map.device:
+        assert self._expert_map is not None
+        with self._expert_map.device:
             local_num_experts, expert_map, expert_mask = determine_expert_map(
                 ep_size=self.ep_size,
                 ep_rank=self.ep_rank,
@@ -841,7 +869,7 @@ class FusedMoE(CustomOp):
                 return_expert_mask=self.rocm_aiter_fmoe_enabled,
             )
             self.local_num_experts = local_num_experts
-            self.register_buffer("expert_map", expert_map)
+            self.register_buffer("_expert_map", expert_map)
             self.register_buffer("expert_mask", expert_mask)
             self._maybe_init_expert_routing_tables()
             if self.aiter_fmoe_shared_expert_enabled:
@@ -857,7 +885,8 @@ class FusedMoE(CustomOp):
         use_chunked_impl: bool,
     ) -> tuple[bool, torch.Tensor | None]:
         use_shared_experts_stream = (
-            has_separate_shared_experts
+            current_platform.is_cuda()
+            and has_separate_shared_experts
             and not use_chunked_impl
             and self.shared_experts_stream is not None
             and (
@@ -877,7 +906,7 @@ class FusedMoE(CustomOp):
             # Record that the clone will be used by shared_experts_stream
             # to avoid gc issue from deallocation of hidden_states_clone
             # For more details: https://docs.pytorch.org/docs/stable/generated/torch.Tensor.record_stream.html # noqa: E501
-            # NOTE: We dont need shared_output.record_stream(current_stream())
+            # NOTE: We don't need shared_output.record_stream(current_stream())
             # because we synch the streams before using shared_output.
             hidden_states_clone.record_stream(self.shared_experts_stream)
 
@@ -1057,9 +1086,9 @@ class FusedMoE(CustomOp):
             expert_data.copy_(loaded_weight)
 
     def _map_global_expert_id_to_local_expert_id(self, expert_id: int) -> int:
-        if self.expert_map is None:
+        if self._expert_map is None:
             return expert_id
-        return self.expert_map[expert_id].item()
+        return self._expert_map[expert_id].item()
 
     def _init_aiter_shared_experts_topK_buffer(
         self, vllm_config: VllmConfig, dp_size: int
@@ -1124,14 +1153,9 @@ class FusedMoE(CustomOp):
         global_expert_id = expert_id
         expert_id = self._map_global_expert_id_to_local_expert_id(global_expert_id)
 
-        allow_flashinfer = getattr(self.quant_method, "allow_flashinfer", False)
-        moe_backend = getattr(self.quant_method, "flashinfer_moe_backend", None)
-
         use_global_sf = (
-            allow_flashinfer
-            and is_flashinfer_supporting_global_sf(moe_backend)
+            getattr(self.quant_method, "use_global_sf", False)
             and "input_scale" in weight_name
-            and quant_method_name == "ModelOptNvFp4FusedMoE"
         )
 
         if expert_id == -1 and not use_global_sf:
@@ -1196,10 +1220,14 @@ class FusedMoE(CustomOp):
         if full_load:
             shard_dim += 1
 
-        # Materialize GGUF UninitializedParameter
+        # Materialize GGUF UninitializedParameter accounting merged weights
         if is_gguf_weight and isinstance(param, UninitializedParameter):
+            # To materialize a tensor, we must have full shape including
+            # number of experts, making this portion to require `full_load`.
+            assert full_load
             final_shape = list(loaded_weight.shape)
-            if shard_id in ["w1", "w3"]:
+            # w1 and w3 are merged per expert.
+            if shard_id in {"w1", "w3"}:
                 final_shape[1] *= 2
             final_shape[shard_dim] = final_shape[shard_dim] // self.tp_size
             param.materialize(final_shape, dtype=loaded_weight.dtype)
@@ -1277,7 +1305,7 @@ class FusedMoE(CustomOp):
                     self._load_combined_w13_weight_scale(
                         shard_dim=shard_dim,
                         loaded_weight=loaded_weight,
-                        param=param,
+                        param=expert_data,
                         tp_rank=self.tp_rank,
                     )
                     return True if return_success else None
@@ -1422,7 +1450,7 @@ class FusedMoE(CustomOp):
                 # do nothing.
                 return p
 
-            # Do not update the layer paramater as the layer's MoE operations would
+            # Do not update the layer parameter as the layer's MoE operations would
             # expect the parameter's tensor to the same shape / stride. Instead,
             # make a new torch.nn.Parameter that is used just in the context of
             # EPLB.
@@ -1507,41 +1535,24 @@ class FusedMoE(CustomOp):
         )
 
         self.batched_router_logits = torch.zeros(
-            logits_shape, dtype=moe.in_dtype, device=torch.cuda.current_device()
+            logits_shape,
+            dtype=moe.router_logits_dtype,
+            device=torch.cuda.current_device(),
         )
 
-    @staticmethod
-    def select_experts(
+    def _select_experts(
+        self,
         hidden_states: torch.Tensor,
         router_logits: torch.Tensor,
-        top_k: int,
-        use_grouped_topk: bool,
-        renormalize: bool,
-        topk_group: int | None = None,
-        num_expert_group: int | None = None,
-        custom_routing_function: Callable | None = None,
-        scoring_func: str = "softmax",
-        routed_scaling_factor: float = 1.0,
-        e_score_correction_bias: torch.Tensor | None = None,
-        indices_type: torch.dtype | None = None,
-        enable_eplb: bool = False,
-        expert_map: torch.Tensor | None = None,
-        expert_load_view: torch.Tensor | None = None,
-        logical_to_physical_map: torch.Tensor | None = None,
-        logical_replica_count: torch.Tensor | None = None,
-        global_num_experts: int | None = None,
-        zero_expert_num: int | None = None,
-        zero_expert_type: str | None = None,
-        num_fused_shared_experts: int = 0,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         """
         Route the input hidden states to the top-k experts based on the
         router logits.
 
         Returns:
-                (topk_weights, topk_ids, zero_expert_result)
-                (tuple[torch.Tensor, torch.Tensor, torch.Tensor]):
-                The weights, expert ids, and zero expert computation result.
+                (topk_weights, topk_ids)
+                (tuple[torch.Tensor, torch.Tensor]):
+                The weights and expert ids.
 
             **Compatibility**: When EPLB is not enabled, the returned ids are
             equivalent to global logical ids, so should be compatible with
@@ -1552,6 +1563,35 @@ class FusedMoE(CustomOp):
             fused_topk_bias,
         )
 
+        if self.enable_eplb:
+            if self.quant_method.supports_eplb:
+                if self.expert_load_view is None:
+                    raise ValueError(
+                        "enable_eplb=True requiere expert_load_view != None"
+                    )
+                if self.logical_to_physical_map is None:
+                    raise ValueError(
+                        "enable_eplb=True requiere logical_to_physical_map != None"
+                    )
+                if self.logical_replica_count is None:
+                    raise ValueError(
+                        "enable_eplb=True requiere logical_replica_count != None"
+                    )
+            else:
+                raise NotImplementedError(
+                    f"EPLB is not supported for {self.quant_method.method_name}."
+                )
+
+        def valid_grouping() -> bool:
+            # Check if num_experts is greater than num_expert_group
+            # and is divisible by num_expert_group
+            num_experts = router_logits.shape[-1]
+            if num_experts <= self.num_expert_group:
+                return False
+            return num_experts % self.num_expert_group == 0
+
+        indices_type = self.quant_method.topk_indices_dtype
+
         # Check if we should use a routing simulation strategy
         routing_strategy = envs.VLLM_MOE_ROUTING_SIMULATION_STRATEGY
         if routing_strategy != "":
@@ -1559,71 +1599,50 @@ class FusedMoE(CustomOp):
                 hidden_states=hidden_states,
                 router_logits=router_logits,
                 strategy_name=routing_strategy,
-                top_k=top_k,
+                top_k=self.top_k,
                 indices_type=indices_type,
             )
 
         # DeepSeekv2 uses grouped_top_k
-        elif use_grouped_topk:
-            assert topk_group is not None
-            assert num_expert_group is not None
-            if rocm_aiter_ops.is_fused_moe_enabled():
-                if not rocm_aiter_ops.is_fusion_moe_shared_experts_enabled():
-                    assert num_fused_shared_experts == 0
-                grouped_topk_impl = partial(
-                    rocm_aiter_grouped_topk,
-                    num_fused_shared_experts=num_fused_shared_experts,
-                )
-            else:
-                grouped_topk_impl = grouped_topk
-
-            topk_weights, topk_ids = grouped_topk_impl(
+        elif self.use_grouped_topk and valid_grouping():
+            assert self._grouped_topk_impl is not None
+            topk_weights, topk_ids = self._grouped_topk_impl(
                 hidden_states=hidden_states,
                 gating_output=router_logits,
-                topk=top_k,
-                renormalize=renormalize,
-                num_expert_group=num_expert_group,
-                topk_group=topk_group,
-                scoring_func=scoring_func,
-                routed_scaling_factor=routed_scaling_factor,
-                e_score_correction_bias=e_score_correction_bias,
+                e_score_correction_bias=self.e_score_correction_bias,
             )
-        elif e_score_correction_bias is not None:
+        elif self.e_score_correction_bias is not None:
             topk_weights, topk_ids = fused_topk_bias(
                 hidden_states=hidden_states,
                 gating_output=router_logits,
-                e_score_correction_bias=e_score_correction_bias.data,
-                topk=top_k,
-                renormalize=renormalize,
+                e_score_correction_bias=self.e_score_correction_bias.data,
+                topk=self.top_k,
+                renormalize=self.renormalize,
             )
-            if routed_scaling_factor != 1.0:
-                topk_weights *= routed_scaling_factor
-        elif custom_routing_function is None:
+            if self.routed_scaling_factor != 1.0:
+                topk_weights *= self.routed_scaling_factor
+        elif self.custom_routing_function is None:
             topk_weights, topk_ids, token_expert_indices = fused_topk(
                 hidden_states=hidden_states,
                 gating_output=router_logits,
-                topk=top_k,
-                renormalize=renormalize,
+                topk=self.top_k,
+                renormalize=self.renormalize,
                 indices_type=indices_type,
             )
         else:
-            topk_weights, topk_ids = custom_routing_function(
+            topk_weights, topk_ids = self.custom_routing_function(
                 hidden_states=hidden_states,
                 gating_output=router_logits,
-                topk=top_k,
-                renormalize=renormalize,
+                topk=self.top_k,
+                renormalize=self.renormalize,
             )
 
-        if enable_eplb:
-            assert expert_load_view is not None
-            assert logical_to_physical_map is not None
-            assert logical_replica_count is not None
-
+        if self.enable_eplb:
             topk_ids = eplb_map_to_physical_and_record(
                 topk_ids=topk_ids,
-                expert_load_view=expert_load_view,
-                logical_to_physical_map=logical_to_physical_map,
-                logical_replica_count=logical_replica_count,
+                expert_load_view=self.expert_load_view,
+                logical_to_physical_map=self.logical_to_physical_map,
+                logical_replica_count=self.logical_replica_count,
             )
 
         if (indices_type is not None) and topk_ids.dtype != indices_type:
@@ -1631,23 +1650,7 @@ class FusedMoE(CustomOp):
 
         assert topk_ids.dtype == indices_type or indices_type is None
 
-        # Compute zero expert result if needed
-        if (
-            zero_expert_num is not None
-            and zero_expert_num > 0
-            and zero_expert_type is not None
-            and global_num_experts is not None
-        ):
-            zero_expert_result = zero_experts_compute_triton(
-                expert_indices=topk_ids,
-                expert_scales=topk_weights,
-                num_experts=global_num_experts,
-                zero_expert_type=zero_expert_type,
-                hidden_states=hidden_states,
-            )
-        else:
-            zero_expert_result = None
-        return topk_weights, topk_ids, zero_expert_result
+        return topk_weights, topk_ids
 
     def must_reduce_shared_expert_outputs(self) -> bool:
         """
@@ -1702,27 +1705,22 @@ class FusedMoE(CustomOp):
             return states
 
         if self.shared_experts is None:
-            if current_platform.is_tpu():
+            if current_platform.is_tpu() or current_platform.is_cpu():
                 # TODO: Once the OOM issue for the TPU backend is resolved, we
                 # will switch to using the moe_forward custom op.
+                # Note: CPU doesn't require wrapped forward_impl.
                 fused_output = self.forward_impl(hidden_states, router_logits)
                 assert not isinstance(fused_output, tuple)
             else:
                 fused_output = torch.ops.vllm.moe_forward(
                     hidden_states, router_logits, self.layer_name
                 )
-            if self.zero_expert_num is not None and self.zero_expert_num > 0:
-                assert isinstance(fused_output, tuple)
-                fused_output, zero_expert_result = fused_output
-                return (reduce_output(fused_output) + zero_expert_result)[
-                    ..., :og_hidden_states
-                ]
-            else:
-                return reduce_output(fused_output)[..., :og_hidden_states]
+            return reduce_output(fused_output)[..., :og_hidden_states]
         else:
-            if current_platform.is_tpu():
+            if current_platform.is_tpu() or current_platform.is_cpu():
                 # TODO: Once the OOM issue for the TPU backend is resolved, we
                 # will switch to using the moe_forward custom op.
+                # Note: CPU doesn't require wrapped forward_impl.
                 shared_output, fused_output = self.forward_impl(
                     hidden_states, router_logits
                 )
@@ -1734,6 +1732,12 @@ class FusedMoE(CustomOp):
                 reduce_output(shared_output)[..., :og_hidden_states],
                 reduce_output(fused_output)[..., :og_hidden_states],
             )
+
+    @property
+    def expert_map(self) -> torch.Tensor | None:
+        return (
+            self._expert_map if not self.rocm_aiter_fmoe_enabled else self.expert_mask
+        )
 
     def forward_cuda(
         self,
@@ -1794,26 +1798,9 @@ class FusedMoE(CustomOp):
             # Matrix multiply.
             final_hidden_states = self.quant_method.apply(
                 layer=self,
+                router=self.router,
                 x=staged_hidden_states,
                 router_logits=staged_router_logits,
-                top_k=self.top_k,
-                renormalize=self.renormalize,
-                use_grouped_topk=self.use_grouped_topk,
-                global_num_experts=self.global_num_experts,
-                expert_map=self.expert_map
-                if not self.rocm_aiter_fmoe_enabled
-                else self.expert_mask,
-                topk_group=self.topk_group,
-                num_expert_group=self.num_expert_group,
-                custom_routing_function=self.custom_routing_function,
-                scoring_func=self.scoring_func,
-                routed_scaling_factor=self.routed_scaling_factor,
-                e_score_correction_bias=self.e_score_correction_bias,
-                activation=self.activation,
-                enable_eplb=self.enable_eplb,
-                expert_load_view=self.expert_load_view,
-                logical_to_physical_map=self.logical_to_physical_map,
-                logical_replica_count=self.logical_replica_count,
             )
 
             if has_separate_shared_experts:
@@ -1826,13 +1813,6 @@ class FusedMoE(CustomOp):
                     shared_output,
                     final_hidden_states,
                 )
-
-            if self.zero_expert_num is not None and self.zero_expert_num > 0:
-                assert isinstance(final_hidden_states, tuple)
-                assert self.shared_experts is None
-                final_hidden_states, zero_expert_result = final_hidden_states
-                if zero_expert_result is not None:
-                    final_hidden_states += zero_expert_result
 
             if not skip_result_store:
                 if self.shared_experts is None:
@@ -1929,10 +1909,46 @@ class FusedMoE(CustomOp):
         )
 
         with sp_ctx:
+            extra_tensors = None
             if do_naive_dispatch_combine:
-                hidden_states_combined, router_logits = get_ep_group().dispatch(
-                    hidden_states, router_logits, self.is_sequence_parallel
+                # Avoid circular import
+                from vllm.model_executor.layers.quantization.modelopt import (
+                    ModelOptNvFp4FusedMoE,
                 )
+
+                post_quant_allgather = (
+                    self.quant_method is not None
+                    and self.dp_size > 1
+                    and self.use_ep
+                    and isinstance(self.quant_method, ModelOptNvFp4FusedMoE)
+                    and has_flashinfer_trtllm_fused_moe()
+                )
+                if post_quant_allgather:
+                    hidden_states_to_dispatch, extra_tensors = (
+                        self.quant_method.prepare_dp_allgather_tensor(
+                            self, hidden_states, router_logits
+                        )
+                    )
+                else:
+                    hidden_states_to_dispatch = hidden_states
+
+                dispatch_res = get_ep_group().dispatch(
+                    hidden_states_to_dispatch,
+                    router_logits,
+                    self.is_sequence_parallel,
+                    extra_tensors=extra_tensors,
+                )
+                if extra_tensors is not None:
+                    hidden_states_combined, router_logits, extra_tensors_combined = (
+                        dispatch_res
+                    )
+                    hidden_states_combined = (
+                        hidden_states_combined,
+                        extra_tensors_combined[0],
+                    )
+                else:
+                    hidden_states_combined, router_logits = dispatch_res
+
             # Run shared experts before matrix multiply.
             # because matrix multiply maybe modify the hidden_states.
             if has_separate_shared_experts and not use_shared_experts_stream:
@@ -1955,29 +1971,11 @@ class FusedMoE(CustomOp):
             # Matrix multiply.
             final_hidden_states = self.quant_method.apply(
                 layer=self,
+                router=self.router,
                 x=hidden_states_combined
                 if do_naive_dispatch_combine
                 else hidden_states,
                 router_logits=router_logits,
-                top_k=self.top_k,
-                renormalize=self.renormalize,
-                use_grouped_topk=self.use_grouped_topk,
-                global_num_experts=self.global_num_experts,
-                expert_map=self.expert_map
-                if not self.rocm_aiter_fmoe_enabled
-                else self.expert_mask,
-                topk_group=self.topk_group,
-                num_expert_group=self.num_expert_group,
-                custom_routing_function=self.custom_routing_function,
-                scoring_func=self.scoring_func,
-                routed_scaling_factor=self.routed_scaling_factor,
-                e_score_correction_bias=self.e_score_correction_bias,
-                activation=self.activation,
-                apply_router_weight_on_input=self.apply_router_weight_on_input,
-                enable_eplb=self.enable_eplb,
-                expert_load_view=self.expert_load_view,
-                logical_to_physical_map=self.logical_to_physical_map,
-                logical_replica_count=self.logical_replica_count,
             )
 
             if has_separate_shared_experts:
@@ -1999,9 +1997,6 @@ class FusedMoE(CustomOp):
                     shared_output,
                     final_hidden_states,
                 )
-            elif self.zero_expert_num is not None and self.zero_expert_num > 0:
-                assert isinstance(final_hidden_states, tuple)
-                final_hidden_states, zero_expert_result = final_hidden_states
 
             def combine_output(states: torch.Tensor) -> torch.Tensor:
                 if do_naive_dispatch_combine:
@@ -2020,15 +2015,13 @@ class FusedMoE(CustomOp):
                     final_hidden_states[0],
                     combine_output(final_hidden_states[1]),
                 )
-            elif self.zero_expert_num is not None and self.zero_expert_num > 0:
-                assert isinstance(final_hidden_states, torch.Tensor)
-                return (combine_output(final_hidden_states), zero_expert_result)
             else:
                 return combine_output(final_hidden_states)
 
     @classmethod
     def make_expert_params_mapping(
         cls,
+        model: torch.nn.Module,
         ckpt_gate_proj_name: str,
         ckpt_down_proj_name: str,
         ckpt_up_proj_name: str,
@@ -2047,13 +2040,19 @@ class FusedMoE(CustomOp):
             )
         )
 
+        base_layer = (
+            "base_layer."
+            if any(".base_layer." in name for name, _ in model.named_parameters())
+            else ""
+        )
+
         return [
             # (param_name, weight_name, expert_id, shard_id)
             (
-                "experts.w13_"
+                f"experts.{base_layer}w13_"
                 if weight_name in [ckpt_gate_proj_name, ckpt_up_proj_name]
-                else "experts.w2_",
-                f"experts.{physical_to_logical_map[expert_id]}.{weight_name}.",
+                else f"experts.{base_layer}w2_",
+                f"experts.{physical_to_logical_map[expert_id]}.{weight_name}.{base_layer}",
                 expert_id,
                 shard_id,
             )

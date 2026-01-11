@@ -1,34 +1,35 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from collections.abc import Iterable, Set
+from collections.abc import Iterable
 
 import torch
 from torch import nn
 from transformers import ModernBertConfig
 from transformers.activations import ACT2FN
 
-from vllm.attention.layers.encoder_only_attention import EncoderOnlyAttention
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import VllmConfig
 from vllm.distributed import get_tensor_model_parallel_world_size
-from vllm.model_executor.layers.linear import QKVParallelLinear, RowParallelLinear
-from vllm.model_executor.layers.pooler import (
-    ClassifierPooler,
-    DispatchPooler,
-    Pooler,
-    PoolingMethod,
-    PoolingParamsUpdate,
-    PoolingType,
+from vllm.model_executor.layers.attention.encoder_only_attention import (
+    EncoderOnlyAttention,
 )
-from vllm.model_executor.layers.rotary_embedding import RotaryEmbedding
+from vllm.model_executor.layers.linear import QKVParallelLinear, RowParallelLinear
+from vllm.model_executor.layers.pooler import DispatchPooler
+from vllm.model_executor.layers.pooler.seqwise import (
+    SequencePooler,
+    SequencePoolerHeadOutput,
+    SequencePoolingMethodOutput,
+    get_seq_pooling_method,
+)
+from vllm.model_executor.layers.pooler.tokwise import pooler_for_token_classify
+from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmbedding
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.sequence import IntermediateTensors
-from vllm.tasks import PoolingTask
 from vllm.v1.pool.metadata import PoolingMetadata
 
 from .interfaces import SupportsCrossEncoding
-from .interfaces_base import default_pooling_type
+from .interfaces_base import attn_type, default_pooling_type
 from .utils import AutoWeightsLoader, WeightsMapper, maybe_prefix
 
 
@@ -62,21 +63,10 @@ class ModernBertEmbeddings(nn.Module):
             return embeddings
 
 
-class ModernBertRotaryEmbedding(RotaryEmbedding):
-    def __init__(self, config: ModernBertConfig, head_size: int, dim: int, base: float):
-        super().__init__(
-            head_size=head_size,
-            rotary_dim=dim,
-            max_position_embeddings=config.max_position_embeddings,
-            base=base,
-            is_neox_style=True,
-            dtype=torch.float16,
-        )
-        self.config = config
-
-
 class ModernBertAttention(nn.Module):
-    def __init__(self, config: ModernBertConfig, layer_id: int | None = None):
+    def __init__(
+        self, config: ModernBertConfig, layer_id: int | None = None, prefix: str = ""
+    ):
         super().__init__()
         self.config = config
         self.hidden_size = config.hidden_size
@@ -93,21 +83,35 @@ class ModernBertAttention(nn.Module):
             self.head_dim,
             self.num_heads,
             bias=config.attention_bias,
+            prefix=f"{prefix}.Wqkv",
         )
 
-        sliding_window = None
-        if layer_id % config.global_attn_every_n_layers != 0:
-            sliding_window = config.local_attention // 2
-            rope_theta = (
-                config.local_rope_theta
-                if config.local_rope_theta is not None
-                else config.global_rope_theta
-            )
+        if layer_types := getattr(config, "layer_types", None):
+            # Transformers v5
+            layer_type = layer_types[layer_id]
+            rope_parameters = config.rope_parameters[layer_type]
+            sliding_window: int | None = None
+            if layer_type == "sliding_attention":
+                sliding_window = config.local_attention // 2
         else:
-            rope_theta = config.global_rope_theta
+            # Transformers v4
+            sliding_window = None
+            if layer_id % config.global_attn_every_n_layers != 0:
+                sliding_window = config.local_attention // 2
+                rope_theta = (
+                    config.local_rope_theta
+                    if config.local_rope_theta is not None
+                    else config.global_rope_theta
+                )
+            else:
+                rope_theta = config.global_rope_theta
+            rope_parameters = {"rope_type": "default", "rope_theta": rope_theta}
 
-        self.rotary_emb = ModernBertRotaryEmbedding(
-            config=config, head_size=self.head_dim, dim=self.head_dim, base=rope_theta
+        self.rotary_emb = get_rope(
+            head_size=self.head_dim,
+            max_position=config.max_position_embeddings,
+            rope_parameters=rope_parameters,
+            dtype=torch.float16,
         )
         self.attn = EncoderOnlyAttention(
             self.num_heads,
@@ -117,7 +121,10 @@ class ModernBertAttention(nn.Module):
             per_layer_sliding_window=sliding_window,
         )
         self.Wo = RowParallelLinear(
-            config.hidden_size, config.hidden_size, bias=config.attention_bias
+            config.hidden_size,
+            config.hidden_size,
+            bias=config.attention_bias,
+            prefix=f"{prefix}.Wo",
         )
 
     def forward(
@@ -135,7 +142,7 @@ class ModernBertAttention(nn.Module):
 
 
 class ModernBertMLP(nn.Module):
-    def __init__(self, config: ModernBertConfig):
+    def __init__(self, config: ModernBertConfig, prefix: str = ""):
         super().__init__()
         self.config = config
         self.Wi = nn.Linear(
@@ -143,7 +150,10 @@ class ModernBertMLP(nn.Module):
         )
         self.act = nn.GELU()
         self.Wo = RowParallelLinear(
-            config.intermediate_size, config.hidden_size, bias=config.mlp_bias
+            config.intermediate_size,
+            config.hidden_size,
+            bias=config.mlp_bias,
+            prefix=f"{prefix}.Wo",
         )
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
@@ -163,11 +173,13 @@ class ModernBertLayer(nn.Module):
             self.attn_norm = nn.LayerNorm(
                 config.hidden_size, eps=config.norm_eps, bias=config.norm_bias
             )
-        self.attn = ModernBertAttention(config=config, layer_id=layer_id)
+        self.attn = ModernBertAttention(
+            config=config, layer_id=layer_id, prefix=f"{prefix}.attn"
+        )
         self.mlp_norm = nn.LayerNorm(
             config.hidden_size, eps=config.norm_eps, bias=config.norm_bias
         )
-        self.mlp = ModernBertMLP(config)
+        self.mlp = ModernBertMLP(config, prefix=f"{prefix}.mlp")
 
     def forward(
         self,
@@ -189,7 +201,11 @@ class ModernBertEncoderLayer(nn.Module):
         config = vllm_config.model_config.hf_config
         self.layers = nn.ModuleList(
             [
-                ModernBertLayer(config=config, layer_id=layer_id)
+                ModernBertLayer(
+                    config=config,
+                    layer_id=layer_id,
+                    prefix=f"{prefix}.layers.{layer_id}",
+                )
                 for layer_id in range(config.num_hidden_layers)
             ]
         )
@@ -205,7 +221,7 @@ class ModernBertEncoderLayer(nn.Module):
 
 
 @support_torch_compile
-@default_pooling_type("CLS")
+@default_pooling_type(seq_pooling_type="CLS")
 class ModernBertModel(nn.Module):
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_prefix={"layers.": "encoder_layer.layers."}
@@ -220,7 +236,9 @@ class ModernBertModel(nn.Module):
         config = vllm_config.model_config.hf_config
         self.config = config
         self.embeddings = ModernBertEmbeddings(config)
-        self.encoder_layer = ModernBertEncoderLayer(vllm_config)
+        self.encoder_layer = ModernBertEncoderLayer(
+            vllm_config, prefix=f"{prefix}.encoder_layer"
+        )
         self.final_norm = nn.LayerNorm(
             config.hidden_size, eps=config.norm_eps, bias=config.norm_bias
         )
@@ -263,12 +281,13 @@ class ModernBertModel(nn.Module):
         return norm_outputs
 
 
-class ModernBertPooler(Pooler):
+class ModernBertPooler(SequencePooler):
     def __init__(self, config: ModernBertConfig):
-        super().__init__()
+        super().__init__(
+            pooling=get_seq_pooling_method(config.classifier_pooling.upper()),
+            head=self.head,
+        )
 
-        pooling_type = PoolingType[config.classifier_pooling.upper()]
-        self.pooling = PoolingMethod.from_pooling_type(pooling_type)
         self.dense = nn.Linear(
             config.hidden_size, config.hidden_size, config.classifier_bias
         )
@@ -277,32 +296,19 @@ class ModernBertPooler(Pooler):
             config.hidden_size, eps=config.norm_eps, bias=config.norm_bias
         )
 
-    def get_supported_tasks(self) -> Set[PoolingTask]:
-        return self.pooling.get_supported_tasks()
-
-    def get_pooling_updates(self, task: PoolingTask) -> PoolingParamsUpdate:
-        return self.pooling.get_pooling_updates(task)
-
-    def _head(self, pooled_output: torch.Tensor):
-        pooled_output = pooled_output.to(self.dense.weight.dtype)
-        return self.norm(self.act(self.dense(pooled_output)))
-
-    def forward(
+    def head(
         self,
-        hidden_states: torch.Tensor | list[torch.Tensor],
+        pooled_data: SequencePoolingMethodOutput,
         pooling_metadata: PoolingMetadata,
-    ) -> torch.Tensor | list[torch.Tensor]:
-        pooled_output = self.pooling(hidden_states, pooling_metadata)
+    ) -> SequencePoolerHeadOutput:
+        if isinstance(pooled_data, list):
+            pooled_data = torch.stack(pooled_data)
 
-        if isinstance(pooled_output, list):
-            pooled_output = [self._head(output) for output in pooled_output]
-        else:
-            pooled_output = self._head(pooled_output)
-
-        return pooled_output
+        pooled_data = pooled_data.to(self.dense.weight.dtype)
+        return self.norm(self.act(self.dense(pooled_data)))
 
 
-@default_pooling_type("CLS")
+@default_pooling_type(seq_pooling_type="CLS")
 class ModernBertForSequenceClassification(nn.Module, SupportsCrossEncoding):
     is_pooling_model = True
 
@@ -323,18 +329,10 @@ class ModernBertForSequenceClassification(nn.Module, SupportsCrossEncoding):
         pooler_config = vllm_config.model_config.pooler_config
         assert pooler_config is not None
 
-        self.pooler = DispatchPooler(
-            {
-                "token_classify": Pooler.for_token_classify(
-                    pooler_config, classifier=self.classifier
-                ),
-                "classify": ClassifierPooler(
-                    pooling=self.pooling, classifier=self.classifier, act_fn="classify"
-                ),
-                "score": ClassifierPooler(
-                    pooling=self.pooling, classifier=self.classifier, act_fn="score"
-                ),
-            }
+        self.pooler = DispatchPooler.for_seq_cls(
+            pooler_config,
+            pooling=self.pooling,
+            classifier=self.classifier,
         )
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
@@ -396,7 +394,8 @@ class ModernBertPredictionHead(nn.Module):
         return self.norm(self.act(self.dense(hidden_states)))
 
 
-@default_pooling_type("ALL")
+@attn_type("encoder_only")
+@default_pooling_type(tok_pooling_type="ALL")
 class ModernBertForTokenClassification(nn.Module):
     is_pooling_model = True
 
@@ -416,13 +415,7 @@ class ModernBertForTokenClassification(nn.Module):
         pooler_config = vllm_config.model_config.pooler_config
         assert pooler_config is not None
 
-        self.pooler = DispatchPooler(
-            {
-                "token_classify": Pooler.for_token_classify(
-                    pooler_config=pooler_config
-                ),
-            }
-        )
+        self.pooler = pooler_for_token_classify(pooler_config)
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.model.embed_input_ids(input_ids)

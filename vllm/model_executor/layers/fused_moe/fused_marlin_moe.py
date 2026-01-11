@@ -13,9 +13,6 @@ from vllm.model_executor.layers.fused_moe.moe_align_block_size import (
     batched_moe_align_block_size,
     moe_align_block_size,
 )
-from vllm.model_executor.layers.fused_moe.prepare_finalize import (
-    MoEPrepareAndFinalizeNoEP,
-)
 from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceDelegate,
     TopKWeightAndReduceNoOP,
@@ -24,8 +21,9 @@ from vllm.model_executor.layers.fused_moe.utils import _resize_cache, disable_in
 from vllm.model_executor.layers.quantization.utils.marlin_utils import (
     marlin_make_workspace_new,
     marlin_moe_intermediate_size,
-    maybe_warn_marlin_atomic_add,
+    marlin_quant_input,
 )
+from vllm.platforms import current_platform
 from vllm.scalar_type import ScalarType, scalar_types
 
 
@@ -65,6 +63,8 @@ def _fused_marlin_moe(
     activation_func: Callable[
         [str, torch.Tensor, torch.Tensor], None
     ] = default_activation_func,
+    input_global_scale1: torch.Tensor | None = None,
+    input_global_scale2: torch.Tensor | None = None,
     global_scale1: torch.Tensor | None = None,
     global_scale2: torch.Tensor | None = None,
     g_idx1: torch.Tensor | None = None,
@@ -77,6 +77,7 @@ def _fused_marlin_moe(
     intermediate_cache13: torch.Tensor | None = None,
     intermediate_cache2: torch.Tensor | None = None,
     output: torch.Tensor | None = None,
+    input_dtype: torch.dtype | None = None,
     is_k_full: bool = True,
 ) -> torch.Tensor:
     assert hidden_states.ndim == 2
@@ -106,18 +107,22 @@ def _fused_marlin_moe(
 
     intermediate_cache2 = _resize_cache(intermediate_cache2, (M * num_topk, N))
 
-    maybe_warn_marlin_atomic_add(hidden_states.device, hidden_states.dtype)
-    use_atomic_add = (
-        hidden_states.dtype == torch.half
-        or torch.cuda.get_device_capability(hidden_states.device)[0] >= 9
-    )
+    a_scales1 = None
+    gate_up_input = hidden_states
+    if input_dtype == torch.int8:
+        gate_up_input, a_scales1 = marlin_quant_input(hidden_states, input_dtype)
+        if input_global_scale1 is not None:
+            a_scales1 = a_scales1 * input_global_scale1
+    elif input_dtype == torch.float8_e4m3fn:
+        gate_up_input, a_scales1 = marlin_quant_input(hidden_states, input_dtype)
 
     intermediate_cache1 = ops.moe_wna16_marlin_gemm(
-        hidden_states,
+        gate_up_input,
         intermediate_cache1,
         w1,
         bias1,
         w1_scale,
+        a_scales1,
         global_scale1,
         w1_zeros,
         g_idx1,
@@ -130,13 +135,12 @@ def _fused_marlin_moe(
         moe_block_size=block_size_m,
         top_k=num_topk,
         mul_topk_weights=apply_router_weight_on_input,
-        is_ep=expert_map is not None,
         b_q_type=quant_type,
         size_m=M,
         size_n=2 * N,
         size_k=K,
         is_k_full=is_k_full,
-        use_atomic_add=use_atomic_add,
+        use_atomic_add=False,
         use_fp32_reduce=True,
         is_zp_float=False,
     )
@@ -151,12 +155,25 @@ def _fused_marlin_moe(
     if expert_map is not None:
         output.zero_()
 
+    a_scales2 = None
+    if input_dtype == torch.int8:
+        intermediate_cache2, a_scales2 = marlin_quant_input(
+            intermediate_cache2, input_dtype
+        )
+        if input_global_scale2 is not None:
+            a_scales2 = a_scales2 * input_global_scale2
+    elif input_dtype == torch.float8_e4m3fn:
+        intermediate_cache2, a_scales2 = marlin_quant_input(
+            intermediate_cache2, input_dtype
+        )
+
     output = ops.moe_wna16_marlin_gemm(
         intermediate_cache2,
         output,
         w2,
         bias2,
         w2_scale,
+        a_scales2,
         global_scale2,
         w2_zeros,
         g_idx2,
@@ -169,13 +186,12 @@ def _fused_marlin_moe(
         moe_block_size=block_size_m,
         top_k=1,
         mul_topk_weights=not apply_router_weight_on_input,
-        is_ep=expert_map is not None,
         b_q_type=quant_type,
         size_m=M * num_topk,
         size_n=K,
         size_k=N,
         is_k_full=is_k_full,
-        use_atomic_add=use_atomic_add,
+        use_atomic_add=False,
         use_fp32_reduce=True,
         is_zp_float=False,
     )
@@ -203,6 +219,8 @@ def fused_marlin_moe(
     ] = default_activation_func,
     moe_sum: Callable[[torch.Tensor, torch.Tensor], None] | None = None,
     expert_map: torch.Tensor | None = None,
+    input_global_scale1: torch.Tensor | None = None,
+    input_global_scale2: torch.Tensor | None = None,
     global_scale1: torch.Tensor | None = None,
     global_scale2: torch.Tensor | None = None,
     g_idx1: torch.Tensor | None = None,
@@ -216,6 +234,7 @@ def fused_marlin_moe(
     intermediate_cache2: torch.Tensor | None = None,
     is_k_full: bool = True,
     output: torch.Tensor | None = None,
+    input_dtype: torch.dtype | None = None,
     inplace: bool = False,
 ) -> torch.Tensor:
     """
@@ -287,10 +306,17 @@ def fused_marlin_moe(
         if M * topk / E / block_size_m < 0.9:
             break
 
+    if input_dtype is not None and input_dtype.itemsize == 1:
+        block_size_m = max(block_size_m, 16)
+
     if global_num_experts == -1:
         global_num_experts = E
     sorted_token_ids, expert_ids, num_tokens_post_padded = moe_align_block_size(
-        topk_ids, block_size_m, global_num_experts, expert_map
+        topk_ids,
+        block_size_m,
+        global_num_experts,
+        expert_map,
+        ignore_invalid_experts=True,
     )
 
     assert activation is not None
@@ -313,6 +339,8 @@ def fused_marlin_moe(
         num_tokens_post_padded=num_tokens_post_padded,
         activation=activation,
         activation_func=activation_func,
+        input_global_scale1=input_global_scale1,
+        input_global_scale2=input_global_scale2,
         global_scale1=global_scale1,
         global_scale2=global_scale2,
         g_idx1=g_idx1,
@@ -325,6 +353,7 @@ def fused_marlin_moe(
         intermediate_cache13=intermediate_cache13,
         intermediate_cache2=intermediate_cache2,
         output=None,
+        input_dtype=input_dtype,
         is_k_full=is_k_full,
     ).view(-1, topk, K)
 
@@ -509,9 +538,12 @@ class MarlinExpertsBase(mk.FusedMoEPermuteExpertsUnpermute):
         is_k_full: bool = True,
     ):
         # TODO (varun) : Enable activation quantization
-        assert quant_config.use_mxfp4_w4a16 or quant_config.use_int4_w4a16, (
-            "Supports only mxfp4_w4a16 or int4_w4a16"
-        )
+        assert (
+            quant_config.use_mxfp4_w4a16
+            or quant_config.use_nvfp4_w4a16
+            or quant_config.use_int4_w4a16
+            or quant_config.use_fp8_w8a16
+        ), "Supports only {mxfp,nvfp,int}4_w4a16 or fp8_w8a16"
         self.w13_g_idx = w13_g_idx
         self.w2_g_idx = w2_g_idx
         self.w13_g_idx_sort_indices = w13_g_idx_sort_indices
@@ -522,11 +554,17 @@ class MarlinExpertsBase(mk.FusedMoEPermuteExpertsUnpermute):
     @property
     def quant_type_id(self) -> int:
         # uint4b8 will be set for int4 weight and float4_e2m1f will be used for mxfp4
-        return (
-            scalar_types.uint4b8.id
-            if self.quant_config.use_int4_w4a16
-            else scalar_types.float4_e2m1f.id
-        )
+        if self.quant_config.use_int4_w4a16:
+            return scalar_types.uint4b8.id
+        elif self.quant_config.use_mxfp4_w4a16 or self.quant_config.use_nvfp4_w4a16:
+            return scalar_types.float4_e2m1f.id
+        elif (
+            self.quant_config.use_fp8_w8a16
+            and current_platform.fp8_dtype() == torch.float8_e4m3fn
+        ):
+            return scalar_types.float8_e4m3fn.id
+        else:
+            raise NotImplementedError("Unsupported quantization type.")
 
     def moe_problem_size(
         self,
@@ -655,6 +693,8 @@ class MarlinExperts(MarlinExpertsBase):
             gating_output=None,
             topk_weights=topk_weights,
             topk_ids=topk_ids,
+            global_scale1=self.g1_alphas,
+            global_scale2=self.g2_alphas,
             quant_type_id=self.quant_type_id,
             apply_router_weight_on_input=apply_router_weight_on_input,
             global_num_experts=global_num_experts,
@@ -676,16 +716,6 @@ class MarlinExperts(MarlinExpertsBase):
 
     def moe_sum(self, input: torch.Tensor, output: torch.Tensor) -> None:
         ops.moe_sum(input, output)
-
-
-def modular_marlin_fused_moe(
-    quant_config: FusedMoEQuantConfig, shared_experts: torch.nn.Module | None = None
-) -> mk.FusedMoEModularKernel:
-    return mk.FusedMoEModularKernel(
-        MoEPrepareAndFinalizeNoEP(),
-        MarlinExperts(quant_config),
-        shared_experts,
-    )
 
 
 class BatchedMarlinExperts(MarlinExpertsBase):

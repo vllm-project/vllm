@@ -133,7 +133,7 @@ def main(args):
         tensor_parallel_size=args.tp,
         enable_chunked_prefill=args.enable_chunked_prefill,
         enforce_eager=args.enforce_eager,
-        gpu_memory_utilization=0.8,
+        gpu_memory_utilization=0.9,
         speculative_config=speculative_config,
         disable_log_stats=False,
         max_model_len=args.max_model_len,
@@ -152,9 +152,12 @@ def main(args):
 
     # print the generated text
     if args.print_output:
-        for output in outputs:
+        for i, output in enumerate(outputs):
             print("-" * 50)
-            print(f"prompt: {output.prompt}")
+            if not args.custom_mm_prompts:
+                print(f"prompt: {prompts[i].prompt}")
+            else:
+                print(f"prompt: {prompts[i]}")
             print(f"generated text: {output.outputs[0].text}")
             print("-" * 50)
 

@@ -56,22 +56,22 @@ class AutoRoundConfig(QuantizationConfig):
         if weight_bits not in self.SUPPORTED_BITS:
             raise ValueError(
                 f"Unsupported weight_bits: {weight_bits}, "
-                f"currently only support  {self.SUPPORTED_BITS}"
+                f"currently only support {self.SUPPORTED_BITS}."
             )
         if data_type not in self.SUPPORTED_DTYPES:
             raise ValueError(
-                f"Unsupported data_type: {data_type},"
-                f" currently only support  {self.SUPPORTED_DTYPES}"
+                f"Unsupported data_type: {data_type}, "
+                f"currently only support {self.SUPPORTED_DTYPES}."
             )
         if packing_format not in self.SUPPORTED_FORMATS:
             raise ValueError(
                 f"Unsupported packing_format: {packing_format}, "
-                f"currently only support  {self.SUPPORTED_FORMATS}"
+                f"currently only support {self.SUPPORTED_FORMATS}."
             )
         if backend not in self.SUPPORTED_BACKENDS:
             raise ValueError(
-                f"Unsupported backend: {backend},  "
-                f"currently only support  {self.SUPPORTED_BACKENDS}"
+                f"Unsupported backend: {backend}, "
+                f"currently only support {self.SUPPORTED_BACKENDS}."
             )
 
         self.weight_bits = weight_bits
@@ -266,7 +266,7 @@ class AutoRoundConfig(QuantizationConfig):
             from vllm.model_executor.layers.quantization.awq_marlin import (
                 AWQMarlinConfig,
                 AWQMarlinLinearMethod,
-                AWQMoEMethod,
+                AWQMarlinMoEMethod,
             )
 
             quant_args_marlin = AWQMarlinConfig(
@@ -291,7 +291,7 @@ class AutoRoundConfig(QuantizationConfig):
 
         if isinstance(layer, FusedMoE):
             if use_marlin:
-                return AWQMoEMethod(quant_args_marlin, layer.moe_config)
+                return AWQMarlinMoEMethod(quant_args_marlin, layer.moe)
             from vllm.model_executor.layers.quantization.moe_wna16 import MoeWNA16Config
 
             config = {

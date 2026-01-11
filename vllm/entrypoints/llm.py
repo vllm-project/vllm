@@ -9,7 +9,7 @@ import cloudpickle
 import torch.nn as nn
 from pydantic import ValidationError
 from tqdm.auto import tqdm
-from typing_extensions import TypeVar, deprecated
+from typing_extensions import TypeVar
 
 from vllm.beam_search import (
     BeamSearchInstance,
@@ -18,8 +18,10 @@ from vllm.beam_search import (
     create_sort_beams_key_function,
 )
 from vllm.config import (
+    AttentionConfig,
     CompilationConfig,
     PoolerConfig,
+    ProfilerConfig,
     StructuredOutputsConfig,
     is_init_field,
 )
@@ -71,11 +73,8 @@ from vllm.platforms import current_platform
 from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import BeamSearchParams, RequestOutputKind, SamplingParams
 from vllm.tasks import PoolingTask
-from vllm.transformers_utils.tokenizer import (
-    AnyTokenizer,
-    MistralTokenizer,
-    get_cached_tokenizer,
-)
+from vllm.tokenizers import TokenizerLike
+from vllm.tokenizers.mistral import MistralTokenizer
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils.collection_utils import as_iter, is_list_of
 from vllm.utils.counter import Counter
@@ -173,13 +172,14 @@ class LLM:
             The available overrides depend on the model that is being run.
             For example, for Phi-3-Vision: `{"num_crops": 4}`.
         pooler_config: Initialize non-default pooling config for the pooling
-            model. e.g. `PoolerConfig(pooling_type="mean", normalize=False)`.
-        override_pooler_config: [DEPRECATED] Use `pooler_config` instead. This
-            argument is deprecated and will be removed in v0.12.0 or v1.0.0,
-            whichever is sooner.
+            model. e.g. `PoolerConfig(seq_pooling_type="MEAN", normalize=False)`.
         compilation_config: Either an integer or a dictionary. If it is an
             integer, it is used as the mode of compilation optimization. If it
             is a dictionary, it can specify the full compilation configuration.
+        attention_config: Configuration for attention mechanisms. Can be a
+            dictionary or an AttentionConfig instance. If a dictionary, it will
+            be converted to an AttentionConfig. Allows specifying the attention
+            backend and other attention-related settings.
         **kwargs: Arguments for [`EngineArgs`][vllm.EngineArgs].
 
     Note:
@@ -194,7 +194,7 @@ class LLM:
         runner: RunnerOption = "auto",
         convert: ConvertOption = "auto",
         tokenizer: str | None = None,
-        tokenizer_mode: TokenizerMode = "auto",
+        tokenizer_mode: TokenizerMode | str = "auto",
         skip_tokenizer_init: bool = False,
         trust_remote_code: bool = False,
         allowed_local_media_path: str = "",
@@ -204,7 +204,7 @@ class LLM:
         quantization: QuantizationMethods | None = None,
         revision: str | None = None,
         tokenizer_revision: str | None = None,
-        seed: int | None = None,
+        seed: int = 0,
         gpu_memory_utilization: float = 0.9,
         swap_space: float = 4,
         cpu_offload_gb: float = 0,
@@ -214,10 +214,11 @@ class LLM:
         hf_overrides: HfOverrides | None = None,
         mm_processor_kwargs: dict[str, Any] | None = None,
         pooler_config: PoolerConfig | None = None,
-        override_pooler_config: PoolerConfig | None = None,
         structured_outputs_config: dict[str, Any]
         | StructuredOutputsConfig
         | None = None,
+        profiler_config: dict[str, Any] | ProfilerConfig | None = None,
+        attention_config: dict[str, Any] | AttentionConfig | None = None,
         kv_cache_memory_bytes: int | None = None,
         compilation_config: int | dict[str, Any] | CompilationConfig | None = None,
         logits_processors: list[str | type[LogitsProcessor]] | None = None,
@@ -257,37 +258,28 @@ class LLM:
         if hf_overrides is None:
             hf_overrides = {}
 
-        if compilation_config is not None:
-            if isinstance(compilation_config, int):
-                compilation_config_instance = CompilationConfig(
-                    mode=CompilationMode(compilation_config)
-                )
-            elif isinstance(compilation_config, dict):
-                compilation_config_instance = CompilationConfig(
-                    **{
-                        k: v
-                        for k, v in compilation_config.items()
-                        if is_init_field(CompilationConfig, k)
-                    }
-                )
-            else:
-                compilation_config_instance = compilation_config
-        else:
-            compilation_config_instance = CompilationConfig()
+        def _make_config(value: Any, cls: type[_R]) -> _R:
+            """Convert dict/None/instance to a config instance."""
+            if value is None:
+                return cls()
+            if isinstance(value, dict):
+                return cls(**{k: v for k, v in value.items() if is_init_field(cls, k)})  # type: ignore[arg-type]
+            return value
 
-        if structured_outputs_config is not None:
-            if isinstance(structured_outputs_config, dict):
-                structured_outputs_instance = StructuredOutputsConfig(
-                    **{
-                        k: v
-                        for k, v in structured_outputs_config.items()
-                        if is_init_field(StructuredOutputsConfig, k)
-                    }
-                )
-            else:
-                structured_outputs_instance = structured_outputs_config
+        if isinstance(compilation_config, int):
+            compilation_config_instance = CompilationConfig(
+                mode=CompilationMode(compilation_config)
+            )
         else:
-            structured_outputs_instance = StructuredOutputsConfig()
+            compilation_config_instance = _make_config(
+                compilation_config, CompilationConfig
+            )
+
+        structured_outputs_instance = _make_config(
+            structured_outputs_config, StructuredOutputsConfig
+        )
+        profiler_config_instance = _make_config(profiler_config, ProfilerConfig)
+        attention_config_instance = _make_config(attention_config, AttentionConfig)
 
         # warn about single-process data parallel usage.
         _dp_size = int(kwargs.get("data_parallel_size", 1))
@@ -330,8 +322,9 @@ class LLM:
             hf_overrides=hf_overrides,
             mm_processor_kwargs=mm_processor_kwargs,
             pooler_config=pooler_config,
-            override_pooler_config=override_pooler_config,
             structured_outputs_config=structured_outputs_instance,
+            profiler_config=profiler_config_instance,
+            attention_config=attention_config_instance,
             compilation_config=compilation_config_instance,
             logits_processors=logits_processors,
             **kwargs,
@@ -352,24 +345,17 @@ class LLM:
         self.supported_tasks = supported_tasks
 
         self.model_config = self.llm_engine.model_config
-        self.processor = self.llm_engine.processor
+        self.input_processor = self.llm_engine.input_processor
         self.io_processor = self.llm_engine.io_processor
 
-    def get_tokenizer(self) -> AnyTokenizer:
+        # Cache for __repr__ to avoid repeated collective_rpc calls
+        self._cached_repr: str | None = None
+
+    def get_tokenizer(self) -> TokenizerLike:
         return self.llm_engine.get_tokenizer()
 
-    @deprecated("`set_tokenizer` is deprecated and will be removed in v0.13.")
-    def set_tokenizer(self, tokenizer: AnyTokenizer) -> None:
-        # While CachedTokenizer is dynamic, have no choice but
-        # compare class name. Misjudgment will arise from
-        # user-defined tokenizer started with 'Cached'
-        if tokenizer.__class__.__name__.startswith("Cached"):
-            self.llm_engine.tokenizer = tokenizer
-        else:
-            self.llm_engine.tokenizer = get_cached_tokenizer(tokenizer)
-
     def reset_mm_cache(self) -> None:
-        self.processor.clear_mm_cache()
+        self.input_processor.clear_mm_cache()
         self.llm_engine.reset_mm_cache()
 
     def get_default_sampling_params(self) -> SamplingParams:
@@ -410,6 +396,9 @@ class LLM:
             lora_request: LoRA request to use for generation, if any.
             priority: The priority of the requests, if any.
                 Only applicable when priority scheduling policy is enabled.
+                If provided, must be a list of integers matching the length
+                of `prompts`, where each priority value corresponds to the prompt
+                at the same index.
 
         Returns:
             A list of `RequestOutput` objects containing the
@@ -656,7 +645,10 @@ class LLM:
         # following the huggingface transformers implementation
         # at https://github.com/huggingface/transformers/blob/e15687fffe5c9d20598a19aeab721ae0a7580f8a/src/transformers/generation/beam_search.py#L534 # noqa
         beam_search_params = SamplingParams(
-            logprobs=2 * beam_width, max_tokens=1, temperature=temperature
+            logprobs=2 * beam_width,
+            max_tokens=1,
+            temperature=temperature,
+            skip_clone=True,  # Internal beam search, safe to skip clone
         )
         instances: list[BeamSearchInstance] = []
 
@@ -839,7 +831,6 @@ class LLM:
             conversation, mm_data, mm_uuids = parse_chat_messages(
                 msgs,
                 model_config,
-                tokenizer,
                 content_format=resolved_content_format,
             )
 
@@ -1082,6 +1073,7 @@ class LLM:
             params=pooling_params,
             use_tqdm=use_tqdm,
             lora_request=lora_request,
+            tokenization_kwargs=tokenization_kwargs,
         )
 
         outputs = self._run_engine(use_tqdm=use_tqdm)
@@ -1119,6 +1111,7 @@ class LLM:
         use_tqdm: bool | Callable[..., tqdm] = True,
         pooling_params: PoolingParams | Sequence[PoolingParams] | None = None,
         lora_request: list[LoRARequest] | LoRARequest | None = None,
+        tokenization_kwargs: dict[str, Any] | None = None,
     ) -> list[EmbeddingRequestOutput]:
         """
         Generate an embedding vector for each prompt.
@@ -1156,6 +1149,7 @@ class LLM:
             pooling_params=pooling_params,
             lora_request=lora_request,
             pooling_task="embed",
+            tokenization_kwargs=tokenization_kwargs,
         )
 
         return [EmbeddingRequestOutput.from_base(item) for item in items]
@@ -1167,6 +1161,7 @@ class LLM:
         use_tqdm: bool | Callable[..., tqdm] = True,
         pooling_params: PoolingParams | Sequence[PoolingParams] | None = None,
         lora_request: list[LoRARequest] | LoRARequest | None = None,
+        tokenization_kwargs: dict[str, Any] | None = None,
     ) -> list[ClassificationRequestOutput]:
         """
         Generate class logits for each prompt.
@@ -1202,6 +1197,7 @@ class LLM:
             pooling_params=pooling_params,
             lora_request=lora_request,
             pooling_task="classify",
+            tokenization_kwargs=tokenization_kwargs,
         )
 
         return [ClassificationRequestOutput.from_base(item) for item in items]
@@ -1215,6 +1211,7 @@ class LLM:
         use_tqdm: bool | Callable[..., tqdm] = True,
         pooling_params: PoolingParams | Sequence[PoolingParams] | None = None,
         lora_request: list[LoRARequest] | LoRARequest | None = None,
+        tokenization_kwargs: dict[str, Any] | None = None,
     ) -> list[PoolingRequestOutput]:
         """
         Generate rewards for each prompt.
@@ -1242,17 +1239,19 @@ class LLM:
             pooling_params=pooling_params,
             truncate_prompt_tokens=truncate_prompt_tokens,
             pooling_task="token_classify",
+            tokenization_kwargs=tokenization_kwargs,
         )
 
     def _embedding_score(
         self,
-        tokenizer: AnyTokenizer,
+        tokenizer: TokenizerLike,
         text_1: list[str | TextPrompt | TokensPrompt],
         text_2: list[str | TextPrompt | TokensPrompt],
         truncate_prompt_tokens: int | None = None,
         use_tqdm: bool | Callable[..., tqdm] = True,
         pooling_params: PoolingParams | None = None,
         lora_request: list[LoRARequest] | LoRARequest | None = None,
+        tokenization_kwargs: dict[str, Any] | None = None,
     ) -> list[ScoringRequestOutput]:
         encoded_output: list[PoolingRequestOutput] = self.encode(
             text_1 + text_2,
@@ -1261,6 +1260,7 @@ class LLM:
             lora_request=lora_request,
             pooling_params=pooling_params,
             pooling_task="embed",
+            tokenization_kwargs=tokenization_kwargs,
         )
 
         encoded_output_1: list[PoolingRequestOutput] = encoded_output[0 : len(text_1)]
@@ -1278,13 +1278,15 @@ class LLM:
 
     def _cross_encoding_score(
         self,
-        tokenizer: AnyTokenizer,
+        tokenizer: TokenizerLike,
         data_1: list[str] | list[ScoreContentPartParam],
         data_2: list[str] | list[ScoreContentPartParam],
         truncate_prompt_tokens: int | None = None,
         use_tqdm: bool | Callable[..., tqdm] = True,
         pooling_params: PoolingParams | None = None,
         lora_request: list[LoRARequest] | LoRARequest | None = None,
+        tokenization_kwargs: dict[str, Any] | None = None,
+        score_template: str | None = None,
     ) -> list[ScoringRequestOutput]:
         model_config = self.model_config
 
@@ -1300,7 +1302,8 @@ class LLM:
         pooling_params.verify("score", model_config)
         pooling_params_list = list[PoolingParams]()
 
-        tokenization_kwargs: dict[str, Any] = {}
+        local_kwargs = tokenization_kwargs or {}
+        tokenization_kwargs = local_kwargs.copy()
 
         _validate_truncation_size(
             model_config.max_model_len, truncate_prompt_tokens, tokenization_kwargs
@@ -1317,6 +1320,7 @@ class LLM:
                 data_2=d,
                 tokenizer=tokenizer,
                 tokenization_kwargs=tokenization_kwargs,
+                score_template=score_template,
             )
 
             if token_type_ids := engine_prompt.pop("token_type_ids", None):
@@ -1351,6 +1355,7 @@ class LLM:
         use_tqdm: bool | Callable[..., tqdm] = True,
         pooling_params: PoolingParams | None = None,
         lora_request: list[LoRARequest] | LoRARequest | None = None,
+        chat_template: str | None = None,
     ) -> list[ScoringRequestOutput]:
         """Generate similarity scores for all pairs `<text,text_pair>` or
           `<multi-modal data, multi-modal data pair>`.
@@ -1383,6 +1388,8 @@ class LLM:
             lora_request: LoRA request to use for generation, if any.
             pooling_params: The pooling parameters for pooling. If None, we
                 use the default pooling parameters.
+            chat_template: The chat template to use for the scoring. If None, we
+                use the model's default chat template.
         Returns:
             A list of `ScoringRequestOutput` objects containing the
             generated scores in the same order as the input prompts.
@@ -1409,6 +1416,11 @@ class LLM:
             and getattr(model_config.hf_config, "num_labels", 0) != 1
         ):
             raise ValueError("Score API is only enabled for num_labels == 1.")
+
+        if not model_config.is_cross_encoder and chat_template is not None:
+            raise ValueError(
+                "chat_template is only supported for cross-encoder models."
+            )
 
         # the tokenizer for models such as
         # "cross-encoder/ms-marco-MiniLM-L-6-v2" doesn't support passing
@@ -1479,6 +1491,7 @@ class LLM:
                 use_tqdm,
                 pooling_params,
                 lora_request,
+                score_template=chat_template,
             )
         else:
             return self._embedding_score(
@@ -1497,8 +1510,12 @@ class LLM:
     def stop_profile(self) -> None:
         self.llm_engine.stop_profile()
 
-    def reset_prefix_cache(self) -> None:
-        self.llm_engine.reset_prefix_cache()
+    def reset_prefix_cache(
+        self, reset_running_requests: bool = False, reset_connector: bool = False
+    ) -> bool:
+        return self.llm_engine.reset_prefix_cache(
+            reset_running_requests, reset_connector
+        )
 
     def sleep(self, level: int = 1):
         """
@@ -1559,6 +1576,7 @@ class LLM:
         use_tqdm: bool | Callable[..., tqdm] = True,
         lora_request: Sequence[LoRARequest] | LoRARequest | None,
         priority: list[int] | None = None,
+        tokenization_kwargs: dict[str, Any] | None = None,
     ) -> None:
         if isinstance(prompts, (str, dict)):
             # Convert a single prompt to a list.
@@ -1604,11 +1622,12 @@ class LLM:
                     if isinstance(lora_request, Sequence)
                     else lora_request,
                     priority=priority[i] if priority else 0,
+                    tokenization_kwargs=tokenization_kwargs,
                 )
                 added_request_ids.append(request_id)
         except Exception as e:
             if added_request_ids:
-                self.llm_engine.abort_request(added_request_ids)
+                self.llm_engine.abort_request(added_request_ids, internal=True)
             raise e
 
     def _validate_mm_data_and_uuids(
@@ -1667,16 +1686,19 @@ class LLM:
         *,
         lora_request: LoRARequest | None,
         priority: int,
+        tokenization_kwargs: dict[str, Any] | None = None,
     ) -> tuple[EngineCoreRequest, dict[str, Any]]:
         """Use the Processor to process inputs for LLMEngine."""
-        tokenization_kwargs: dict[str, Any] = {}
+
+        local_kwargs = tokenization_kwargs or {}
+        tokenization_kwargs = local_kwargs.copy()
         _validate_truncation_size(
             self.model_config.max_model_len,
             params.truncate_prompt_tokens,
             tokenization_kwargs,
         )
 
-        engine_request = self.processor.process_inputs(
+        engine_request = self.input_processor.process_inputs(
             request_id,
             engine_prompt,
             params,
@@ -1692,6 +1714,7 @@ class LLM:
         params: SamplingParams | PoolingParams,
         lora_request: LoRARequest | None = None,
         priority: int = 0,
+        tokenization_kwargs: dict[str, Any] | None = None,
     ) -> str:
         prompt_text, _, _ = get_prompt_components(prompt)
         request_id = str(next(self.request_counter))
@@ -1702,6 +1725,7 @@ class LLM:
             params,
             lora_request=lora_request,
             priority=priority,
+            tokenization_kwargs=tokenization_kwargs,
         )
 
         self.llm_engine.add_request(
@@ -1713,7 +1737,7 @@ class LLM:
             priority=priority,
             prompt_text=prompt_text,
         )
-        return request_id
+        return engine_request.request_id
 
     def _run_engine(
         self, *, use_tqdm: bool | Callable[..., tqdm] = True
@@ -1765,3 +1789,16 @@ class LLM:
         # This is necessary because some requests may be finished earlier than
         # its previous requests.
         return sorted(outputs, key=lambda x: int(x.request_id))
+
+    def __repr__(self) -> str:
+        """Return a transformers-style hierarchical view of the model."""
+        # Cache the result to avoid repeated collective_rpc calls
+        if self._cached_repr is None:
+            results = self.llm_engine.collective_rpc("get_model_inspection")
+            # In distributed settings, we get results from all workers
+            # Just return the first one (they should all be the same)
+            if results:
+                self._cached_repr = results[0]
+            else:
+                self._cached_repr = f"LLM(model={self.model_config.model!r})"
+        return self._cached_repr

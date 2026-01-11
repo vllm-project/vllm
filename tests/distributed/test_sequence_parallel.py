@@ -32,7 +32,8 @@ VLLM_MULTI_NODE = os.getenv("VLLM_MULTI_NODE", "0") == "1"
 class ParallelSetup(NamedTuple):
     tp_size: int
     pp_size: int
-    enable_fusion: bool
+    fuse_norm_quant: bool
+    fuse_act_quant: bool
     eager_mode: bool
     chunked_prefill: bool
 
@@ -66,7 +67,8 @@ class SPTestSettings:
                         ParallelSetup(
                             tp_size=tp_base,
                             pp_size=pp_multiplier * pp_base,
-                            enable_fusion=False,
+                            fuse_norm_quant=False,
+                            fuse_act_quant=False,
                             eager_mode=eager_mode_val,
                             chunked_prefill=chunked_prefill_val,
                         )
@@ -97,7 +99,8 @@ class SPTestSettings:
                         ParallelSetup(
                             tp_size=tp_base,
                             pp_size=pp_multiplier * pp_base,
-                            enable_fusion=False,
+                            fuse_norm_quant=False,
+                            fuse_act_quant=False,
                             eager_mode=eager_mode_val,
                             chunked_prefill=chunked_prefill_val,
                         )
@@ -126,7 +129,8 @@ class SPTestSettings:
                 ParallelSetup(
                     tp_size=tp_base,
                     pp_size=pp_base,
-                    enable_fusion=fusion_val,
+                    fuse_norm_quant=fusion_val,
+                    fuse_act_quant=fusion_val,
                     eager_mode=True,
                     chunked_prefill=False,
                 )
@@ -162,7 +166,7 @@ def _compare_sp(
     test_options: SPTestOptions,
     num_gpus_available: int,
     use_inductor_graph_partition: bool,
-    enable_async_tp: bool,
+    fuse_gemm_comms: bool,
     *,
     method: Literal["generate", "encode"],
     is_multimodal: bool,
@@ -170,7 +174,8 @@ def _compare_sp(
     (
         tp_size,
         pp_size,
-        enable_fusion,
+        fuse_norm_quant,
+        fuse_act_quant,
         eager_mode,
         chunked_prefill,
     ) = parallel_setup
@@ -248,10 +253,11 @@ def _compare_sp(
         "mode": CompilationMode.VLLM_COMPILE,
         "compile_sizes": [4, 8],
         "pass_config": {
-            "enable_sequence_parallelism": True,
-            "enable_async_tp": enable_async_tp,
-            "enable_fusion": enable_fusion,
-            "enable_noop": True,
+            "enable_sp": True,
+            "fuse_gemm_comms": fuse_gemm_comms,
+            "fuse_norm_quant": fuse_norm_quant,
+            "fuse_act_quant": fuse_act_quant,
+            "eliminate_noops": True,
         },
         "use_inductor_graph_partition": use_inductor_graph_partition,
     }
@@ -309,7 +315,7 @@ SP_TEST_MODELS = [
     ],
 )
 @pytest.mark.parametrize("use_inductor_graph_partition", [True, False])
-@pytest.mark.parametrize("enable_async_tp", [False])  # TODO: enable async TP
+@pytest.mark.parametrize("fuse_gemm_comms", [False])  # TODO: enable async TP
 @create_new_process_for_each_test()
 def test_tp_sp_generation(
     model_id: str,
@@ -319,7 +325,7 @@ def test_tp_sp_generation(
     test_options: SPTestOptions,
     num_gpus_available,
     use_inductor_graph_partition: bool,
-    enable_async_tp: bool,
+    fuse_gemm_comms: bool,
 ):
     if use_inductor_graph_partition and not is_torch_equal_or_newer("2.9.0.dev"):
         pytest.skip("inductor graph partition is only available in PyTorch 2.9+")
@@ -328,7 +334,7 @@ def test_tp_sp_generation(
     if (
         "fp8" in model_id.lower()
         and current_platform.get_device_capability() < (9, 0)
-        and (not enable_async_tp)
+        and (not fuse_gemm_comms)
     ):
         pytest.skip("FP8 reduction support begins with sm90 capable devices.")
 
@@ -340,7 +346,7 @@ def test_tp_sp_generation(
         test_options,
         num_gpus_available,
         use_inductor_graph_partition,
-        enable_async_tp=enable_async_tp,
+        fuse_gemm_comms=fuse_gemm_comms,
         method="generate",
         is_multimodal=False,
     )

@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import math
 from dataclasses import field
 from typing import TYPE_CHECKING, Any, Literal
 
@@ -10,7 +11,7 @@ from pydantic.dataclasses import dataclass
 from vllm.config.utils import config
 from vllm.logger import init_logger
 from vllm.utils.mem_constants import GiB_bytes
-from vllm.utils.mem_utils import get_cpu_memory
+from vllm.utils.mem_utils import format_gib, get_cpu_memory
 
 if TYPE_CHECKING:
     from vllm.config.parallel import ParallelConfig
@@ -29,8 +30,8 @@ CacheDType = Literal[
     "fp8_inc",
     "fp8_ds_mla",
 ]
-MambaDType = Literal["auto", "float32"]
-PrefixCachingHashAlgo = Literal["sha256", "sha256_cbor"]
+MambaDType = Literal["auto", "float32", "float16"]
+PrefixCachingHashAlgo = Literal["sha256", "sha256_cbor", "xxhash", "xxhash_cbor"]
 KVOffloadingBackend = Literal["native", "lmcache"]
 
 
@@ -77,9 +78,21 @@ class CacheConfig:
     """Whether to enable prefix caching."""
     prefix_caching_hash_algo: PrefixCachingHashAlgo = "sha256"
     """Set the hash algorithm for prefix caching:\n
-    - "sha256" uses Pickle for object serialization before hashing.\n
+    - "sha256" uses Pickle for object serialization before hashing. This is the
+    current default, as SHA256 is the most secure choice to avoid potential
+    hash collisions.\n
     - "sha256_cbor" provides a reproducible, cross-language compatible hash. It
-    serializes objects using canonical CBOR and hashes them with SHA-256."""
+    serializes objects using canonical CBOR and hashes them with SHA-256.\n
+    - "xxhash" uses Pickle serialization with xxHash (128-bit) for faster,
+    non-cryptographic hashing. Requires the optional ``xxhash`` package.
+    IMPORTANT: Use of a hashing algorithm that is not considered 
+    cryptographically secure theoretically increases the risk of hash collisions,
+    which can cause undefined behavior or even leak private information in
+    multi-tenant environments. Even if collisions are still very unlikely, it is
+    important to consider your security risk tolerance against the performance
+    benefits before turning this on.\n
+    - "xxhash_cbor" combines canonical CBOR serialization with xxHash for
+    reproducible hashing. Requires the optional ``xxhash`` package."""
     cpu_offload_gb: float = Field(default=0, ge=0)
     """The space in GiB to offload to CPU, per GPU. Default is 0, which means
     no offloading. Intuitively, this argument can be seen as a virtual way to
@@ -144,7 +157,7 @@ class CacheConfig:
 
     kv_offloading_backend: KVOffloadingBackend | None = None
     """The backend to use for KV cache offloading. Supported backends include
-    'native' (vLLM native CPU offloading), 'lmcache' This option must be used 
+    'native' (vLLM native CPU offloading), 'lmcache' This option must be used
     together with kv_offloading_size."""
 
     def compute_hash(self) -> str:
@@ -167,8 +180,6 @@ class CacheConfig:
             "num_gpu_blocks_override",
             "enable_prefix_caching",
             "prefix_caching_hash_algo",
-            # `cpu_offload_gb` does not use `torch.compile` yet.
-            "cpu_offload_gb",
             "cpu_kvcache_space_bytes",
             "mamba_page_size_padded",
             # Post-init/derived counters
@@ -204,7 +215,7 @@ class CacheConfig:
         self,
         parallel_config: ParallelConfig,
     ) -> None:
-        swap_space_bytes = self.swap_space * GiB_bytes
+        swap_space_bytes = math.ceil(self.swap_space * GiB_bytes)
         total_cpu_memory = get_cpu_memory()
         # FIXME(woosuk): Here, it is assumed that the GPUs in a tensor parallel
         # group are in the same node. However, the GPUs may span multiple nodes.
@@ -212,8 +223,8 @@ class CacheConfig:
         cpu_memory_usage = swap_space_bytes * num_gpus_per_node
 
         msg = (
-            f"{cpu_memory_usage / GiB_bytes:.2f} GiB out of the "
-            f"{total_cpu_memory / GiB_bytes:.2f} GiB total CPU memory "
+            f"{format_gib(cpu_memory_usage)} GiB out of the "
+            f"{format_gib(total_cpu_memory)} GiB total CPU memory "
             "is allocated for the swap space."
         )
         if cpu_memory_usage > 0.7 * total_cpu_memory:
