@@ -86,7 +86,10 @@ from vllm.entrypoints.responses_utils import (
     construct_input_messages,
 )
 from vllm.entrypoints.serve.disagg.protocol import GenerateRequest, GenerateResponse
-from vllm.entrypoints.utils import _validate_truncation_size
+from vllm.entrypoints.utils import (
+    _validate_text_prompt_char_length,
+    _validate_truncation_size,
+)
 from vllm.inputs.data import PromptType, TokensPrompt
 from vllm.inputs.parse import (
     PromptComponents,
@@ -953,26 +956,21 @@ class OpenAIServing:
             prompt = prompt.lower()
 
         truncate_prompt_tokens = getattr(request, "truncate_prompt_tokens", None)
+        # Keep consistent behavior with renderer: 0 means "empty input".
+        if truncate_prompt_tokens == 0:
+            return TokensPrompt(prompt="", prompt_token_ids=[])
+        _validate_text_prompt_char_length(
+            prompt, self.max_model_len, truncate_prompt_tokens
+        )
 
-        if truncate_prompt_tokens is None:
-            encoded = await async_tokenizer(
-                prompt, add_special_tokens=add_special_tokens
-            )
-        elif truncate_prompt_tokens < 0:
-            # Negative means we cap at the model's max length
-            encoded = await async_tokenizer(
-                prompt,
-                add_special_tokens=add_special_tokens,
-                truncation=True,
-                max_length=self.max_model_len,
-            )
-        else:
-            encoded = await async_tokenizer(
-                prompt,
-                add_special_tokens=add_special_tokens,
-                truncation=True,
-                max_length=truncate_prompt_tokens,
-            )
+        tokenizer_kwargs: dict[str, bool | int] = {
+            "add_special_tokens": add_special_tokens
+        }
+        truncate_prompt_tokens = _validate_truncation_size(
+            self.max_model_len, truncate_prompt_tokens, tokenizer_kwargs
+        )
+
+        encoded = await async_tokenizer(prompt, **tokenizer_kwargs)
 
         input_ids = encoded.input_ids
         input_text = prompt
@@ -994,13 +992,17 @@ class OpenAIServing:
         else:
             input_ids = prompt_ids[-truncate_prompt_tokens:]
 
+        # Validate lengths before any decode to avoid extra work on very long inputs.
+        self._validate_length_only(request, len(input_ids))
+
         if tokenizer is None:
             input_text = ""
         else:
             async_tokenizer = self._get_async_tokenizer(tokenizer)
             input_text = await async_tokenizer.decode(input_ids)
 
-        return self._validate_input(request, input_ids, input_text)
+        # Length validation has already been performed above; avoid repeating it.
+        return TokensPrompt(prompt=input_text, prompt_token_ids=input_ids)
 
     def _validate_input(
         self,
@@ -1008,8 +1010,10 @@ class OpenAIServing:
         input_ids: list[int],
         input_text: str,
     ) -> TokensPrompt:
-        token_num = len(input_ids)
+        self._validate_length_only(request, len(input_ids))
+        return TokensPrompt(prompt=input_text, prompt_token_ids=input_ids)
 
+    def _validate_length_only(self, request: AnyRequest, token_num: int) -> None:
         # Note: EmbeddingRequest, ClassificationRequest,
         # and ScoreRequest doesn't have max_tokens
         if isinstance(
@@ -1034,13 +1038,11 @@ class OpenAIServing:
                 operation = operations.get(type(request), "embedding generation")
                 raise VLLMValidationError(
                     f"This model's maximum context length is "
-                    f"{self.max_model_len} tokens. However, you requested "
-                    f"{token_num} tokens in the input for {operation}. "
-                    f"Please reduce the length of the input.",
-                    parameter="input_tokens",
-                    value=token_num,
+                    f"{self.max_model_len} tokens. However, your requested "
+                    f"tokens in the input for {operation} are too long. "
+                    "Please reduce the length of the input."
                 )
-            return TokensPrompt(prompt=input_text, prompt_token_ids=input_ids)
+            return
 
         # Note: TokenizeRequest and DetokenizeRequest doesn't have max_tokens
         # and does not require model context length validation
@@ -1048,7 +1050,7 @@ class OpenAIServing:
             request,
             (TokenizeCompletionRequest, TokenizeChatRequest, DetokenizeRequest),
         ):
-            return TokensPrompt(prompt=input_text, prompt_token_ids=input_ids)
+            return
 
         # chat completion endpoint supports max_completion_tokens
         if isinstance(request, ChatCompletionRequest):
@@ -1063,10 +1065,8 @@ class OpenAIServing:
             raise VLLMValidationError(
                 f"This model's maximum context length is "
                 f"{self.max_model_len} tokens. However, your request has "
-                f"{token_num} input tokens. Please reduce the length of "
-                "the input messages.",
-                parameter="input_tokens",
-                value=token_num,
+                f"more input tokens. Please reduce the length of the "
+                f"input messages."
             )
 
         if max_tokens is not None and token_num + max_tokens > self.max_model_len:
@@ -1079,8 +1079,6 @@ class OpenAIServing:
                 parameter="max_tokens",
                 value=max_tokens,
             )
-
-        return TokensPrompt(prompt=input_text, prompt_token_ids=input_ids)
 
     async def _tokenize_prompt_input_async(
         self,
