@@ -288,8 +288,6 @@ class EagleSpeculator:
         # Run eager mode.
         query_start_loc.np[: num_reqs + 1] = np.arange(num_reqs + 1)
         query_start_loc_cpu = query_start_loc.cpu[: num_reqs + 1]
-        # HACK(woosuk)
-        seq_lens_np = np.full(num_reqs, self.max_model_len, dtype=np.int32)
         block_tables = [x[:num_reqs] for x in self.block_tables.input_block_tables]
 
         # FIXME(woosuk): This is UNSAFE!!
@@ -300,8 +298,7 @@ class EagleSpeculator:
             query_start_loc_gpu=query_start_loc_gpu,
             query_start_loc_cpu=query_start_loc_cpu,
             seq_lens=self.input_buffers.seq_lens[:num_reqs],
-            seq_lens_np=seq_lens_np,
-            num_computed_tokens_cpu=None,  # FIXME
+            max_seq_len=self.max_model_len,
             block_tables=block_tables,
             slot_mappings=slot_mappings,
             kv_cache_config=self.kv_cache_config,
