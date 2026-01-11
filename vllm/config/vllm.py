@@ -241,6 +241,8 @@ class VllmConfig:
     performance, with -O0 having the best startup time and -O3 having the best
     performance. -02 is used by defult. See  OptimizationLevel for full
     description."""
+    disable_flashinfer_autotune: bool = False
+    """If True, skip FlashInfer autotuning during kernel warmup."""
 
     def compute_hash(self) -> str:
         """
