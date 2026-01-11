@@ -10,6 +10,10 @@ from vllm import _custom_ops as ops
 from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.config.cache import CacheDType
 from vllm.logger import init_logger
+from vllm.model_executor.layers.attention.mla_attention import (
+    MLACommonBaseImpl,
+    get_mla_dims,
+)
 from vllm.platforms import current_platform
 from vllm.platforms.interface import DeviceCapability
 from vllm.triton_utils import tl, triton
@@ -20,7 +24,6 @@ from vllm.v1.attention.backend import (
     AttentionMetadata,
     MultipleOf,
 )
-from vllm.v1.attention.backends.mla.common import MLACommonBaseImpl, get_mla_dims
 from vllm.v1.attention.backends.utils import (
     AttentionCGSupport,
     AttentionMetadataBuilder,
