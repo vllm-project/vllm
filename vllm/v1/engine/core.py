@@ -936,10 +936,15 @@ class EngineCoreProc(EngineCore):
             if data_parallel and vllm_config.model_config.is_moe:
                 # Set data parallel rank for this engine process.
                 parallel_config.data_parallel_rank = dp_rank
-                parallel_config.data_parallel_rank_local = local_dp_rank
                 engine_core = DPEngineCoreProc(*args, tensor_queues=tensor_queues, **kwargs)
             else:
-                engine_core = EngineCoreProc(*args, engine_index=dp_rank, tensor_queues=tensor_queues, **kwargs)
+                # Non-MoE DP ranks are completely independent, so treat like DP=1.
+                # Note that parallel_config.data_parallel_index will still reflect
+                # the original DP rank.
+                parallel_config.data_parallel_size = 1
+                parallel_config.data_parallel_size_local = 1
+                parallel_config.data_parallel_rank = 0
+                engine_core = EngineCoreProc(*args, tensor_queues=tensor_queues, **kwargs)
 
             engine_core.run_busy_loop()
 
