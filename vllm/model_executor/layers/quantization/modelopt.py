@@ -733,6 +733,7 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
             block_quant=False,
             tp_size=moe_config.moe_parallel_config.tp_size,
             with_lora_support=self.moe.is_lora_enabled,
+            is_act_and_mul=self.moe.is_act_and_mul,
         )
         self.kernel: mk.FusedMoEModularKernel | None = None
 
@@ -934,6 +935,7 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
             w2_scale=w2_scale,
             a1_scale=a1_scale,
             a2_scale=a2_scale,
+            is_act_and_mul=self.moe.is_act_and_mul,
         )
 
     def apply(
