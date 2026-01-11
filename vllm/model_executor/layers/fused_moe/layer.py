@@ -233,10 +233,11 @@ def get_compressed_expert_map(expert_map: torch.Tensor) -> str:
 def maybe_roundup_hidden_size(
     hidden_size: int,
     act_dtype: torch.dtype,
-    quant_config: QuantizationConfig | None,
     moe_parallel_config: FusedMoEParallelConfig,
+    model_type: str | None,
+    is_mxfp4_quant: bool,
     is_lora_enabled: bool,
-) -> int:
+) -> tuple[int, bool]:
     """
     Given layer hidden size and MoE configurations, round up hidden_size
     if necessary.
@@ -244,7 +245,6 @@ def maybe_roundup_hidden_size(
     Args:
         hidden_size: Layer hidden-size
         act_dtype: Data type of the layer activations.
-        quant_config: Fused MoE quantization configuration.
         moe_parallel_config: Fused MoE parallelization strategy configuration.
         is_lora_enabled: True if the engine is enabled with LoRA. This
             is used in the case of mxfp4 quantization in selecting the
@@ -263,7 +263,7 @@ def maybe_roundup_hidden_size(
     )
 
     # we are padding globally so EP buffer allocation works
-    if quant_config and quant_config.get_name() == "mxfp4":
+    if model_type is not None and model_type == "gpt_oss" and is_mxfp4_quant:
         from vllm.model_executor.layers.quantization.mxfp4 import (
             Mxfp4Backend,
             get_mxfp4_backend,
@@ -281,8 +281,9 @@ def maybe_roundup_hidden_size(
             or current_mxfp4_backend == Mxfp4Backend.SM100_FI_MXFP4_BF16
         ):
             hidden_size = round_up(hidden_size, 256)
+        return hidden_size, True
 
-    return hidden_size
+    return hidden_size, False
 
 
 class FusedMoERouterImpl(FusedMoERouter):
@@ -419,15 +420,6 @@ class FusedMoE(CustomOp):
 
         # Expert mapping used in self.load_weights
         self.expert_mapping = expert_mapping
-
-        # Round up hidden size if needed.
-        hidden_size = maybe_roundup_hidden_size(
-            hidden_size,
-            moe_in_dtype,
-            quant_config,
-            self.moe_parallel_config,
-            is_lora_enabled=self.vllm_config.lora_config is not None,
-        )
 
         # For smuggling this layer into the fused moe custom op
         compilation_config = vllm_config.compilation_config
@@ -615,6 +607,38 @@ class FusedMoE(CustomOp):
         # Note: get_quant_method will look at the layer's local_num_experts
         # for heuristic purposes, so it must be initialized first.
         self.quant_method: FusedMoEMethodBase = _get_quant_method()
+
+        self.model_type = (
+            self.vllm_config.model_config.hf_config.model_type
+            if self.vllm_config.model_config is not None
+            else None
+        )
+        self.is_mxfp4_quant = self._is_mxfp4_quant(quant_config, self.quant_method)
+
+        # Round up hidden size if needed.
+        hidden_size, is_rounded_hidden_size = maybe_roundup_hidden_size(
+            hidden_size,
+            moe_in_dtype,
+            self.moe_parallel_config,
+            self.model_type,
+            self.is_mxfp4_quant,
+            is_lora_enabled=self.vllm_config.lora_config is not None,
+        )
+
+        if is_rounded_hidden_size:
+            self.hidden_size = hidden_size
+            self.moe_config = FusedMoEConfig(
+                num_experts=self.global_num_experts,
+                experts_per_token=top_k,
+                hidden_dim=hidden_size,
+                num_local_experts=self.local_num_experts,
+                moe_parallel_config=self.moe_parallel_config,
+                in_dtype=moe_in_dtype,
+                max_num_tokens=envs.VLLM_MOE_DP_CHUNK_SIZE,
+                has_bias=has_bias,
+                is_act_and_mul=is_act_and_mul,
+                is_lora_enabled=vllm_config.lora_config is not None,
+            )
 
         if not self.moe_config.is_act_and_mul:
             # Avoid circular import
@@ -878,6 +902,30 @@ class FusedMoE(CustomOp):
                     dp_size=get_dp_group().world_size,
                 )
 
+    def _is_mxfp4_quant(
+        self,
+        quant_config: QuantizationConfig | None,
+        quant_method: FusedMoEMethodBase,
+    ) -> bool:
+        from vllm.model_executor.layers.quantization.quark.quark_moe import (
+            QuarkOCP_MX_MoEMethod,
+        )
+
+        if not quant_config:
+            return False
+
+        name = quant_config.get_name()
+        if name == "mxfp4":
+            return True
+
+        if name == "quark" and isinstance(quant_method, QuarkOCP_MX_MoEMethod):
+            return (
+                quant_method.weight_dtype == "mxfp4"
+                and quant_method.fp4_dtype == torch.float4_e2m1fn_x2
+            )
+
+        return False
+
     def _maybe_setup_shared_experts_stream(
         self,
         hidden_states: torch.Tensor,
@@ -923,7 +971,7 @@ class FusedMoE(CustomOp):
         shard_id: str,
         param: torch.nn.Parameter,
         loaded_weight: torch.Tensor,
-        expert_id: int,
+        expert_id: int | None,
     ):
         param_data = param.data
         # for per tensor weight quantization
@@ -1059,7 +1107,10 @@ class FusedMoE(CustomOp):
         expert_data.copy_(loaded_weight)
 
     def _load_single_value(
-        self, param: torch.nn.Parameter, loaded_weight: torch.Tensor, expert_id: int
+        self,
+        param: torch.nn.Parameter,
+        loaded_weight: torch.Tensor,
+        expert_id: int | None,
     ):
         param_data = param.data
 
@@ -1135,23 +1186,42 @@ class FusedMoE(CustomOp):
         loaded_weight: torch.Tensor,
         weight_name: str,
         shard_id: str,
-        expert_id: int,
+        expert_id: int | None = None,
         return_success: bool = False,
+        mxfp4_or_bias: bool | None = False,
     ) -> bool | None:
-        if self.quant_config and self.quant_config.get_name() == "mxfp4":
-            # (FIXME) for gpt-oss all experts are combined
-            if "bias" in weight_name:
-                dim1 = loaded_weight.shape[1]
-                param.data[:, :dim1].copy_(loaded_weight)
-            else:
-                dim1 = loaded_weight.shape[1]
-                dim2 = loaded_weight.shape[2]
-                param.data[:, :dim1, :dim2].copy_(loaded_weight)
-            return True if return_success else None
+        # TODO (xuebwang-amd): further unification without specifying the model type?
+        if (
+            self.quant_config is not None
+            and self.model_type == "gpt_oss"
+            and mxfp4_or_bias
+        ):
+            if any(
+                self.quant_config.get_name() == quant_name
+                for quant_name in ["mxfp4", "quark"]
+            ):
+                if expert_id is None:
+                    dim1 = loaded_weight.shape[1]
+                    if "bias" in weight_name:
+                        param.data[:, :dim1].copy_(loaded_weight)
+                    else:
+                        dim2 = loaded_weight.shape[2]
+                        param.data[:, :dim1, :dim2].copy_(loaded_weight)
+                else:
+                    expert_data = param.data[expert_id]
+                    dim1 = loaded_weight.shape[0]
+                    if "bias" in weight_name:
+                        expert_data.data[:dim1].copy_(loaded_weight)
+                    else:
+                        dim2 = loaded_weight.shape[1]
+                        expert_data.data[:dim1, :dim2].copy_(loaded_weight)
+                return True if return_success else None
+            return False
 
         quant_method_name = self.quant_method.__class__.__name__
         global_expert_id = expert_id
-        expert_id = self._map_global_expert_id_to_local_expert_id(global_expert_id)
+        if global_expert_id is not None:
+            expert_id = self._map_global_expert_id_to_local_expert_id(global_expert_id)
 
         use_global_sf = (
             getattr(self.quant_method, "use_global_sf", False)
