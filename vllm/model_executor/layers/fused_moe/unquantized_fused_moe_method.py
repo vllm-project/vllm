@@ -34,6 +34,11 @@ from vllm.model_executor.layers.fused_moe.prepare_finalize import (
 from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (
     AiterExperts,
 )
+from vllm.model_executor.layers.fused_moe.sonic_moe import (
+    SonicMoeExperts,
+    is_sonic_moe_supported,
+    permute_weights_for_sonic,
+)
 from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
     swap_w13_to_w31,
 )
@@ -92,6 +97,33 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
                     "FlashInfer CUTLASS MoE is currently not available for DP.",
                     scope="local",
                 )
+
+        sonic_supported = is_sonic_moe_supported()
+        sonic_requested = envs.VLLM_USE_SONIC_MOE
+        self.sonic_moe_enabled = (
+            sonic_supported
+            and sonic_requested
+            and current_platform.has_device_capability(90)
+            and self.moe.is_act_and_mul
+            and not self.moe.has_bias
+            and not self.moe.moe_parallel_config.use_ep
+            and not self.flashinfer_cutlass_moe_enabled
+        )
+        if self.sonic_moe_enabled:
+            logger.info_once("Enabling Sonic MoE for UnquantizedFusedMoEMethod")
+        elif sonic_requested and sonic_supported:
+            if self.flashinfer_cutlass_moe_enabled:
+                logger.debug_once(
+                    "Sonic MoE disabled because FlashInfer CUTLASS MoE is enabled."
+                )
+            elif self.moe.has_bias:
+                logger.debug_once("Sonic MoE disabled because MoE biases are enabled.")
+            elif self.moe.moe_parallel_config.use_ep:
+                logger.debug_once(
+                    "Sonic MoE disabled because expert parallelism is enabled."
+                )
+            elif not self.moe.is_act_and_mul:
+                logger.debug_once("Sonic MoE disabled because is_act_and_mul is False.")
 
     @property
     def supports_eplb(self) -> bool:
@@ -277,6 +309,20 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
                         ep_rank=self.moe.moe_parallel_config.ep_rank,
                         ep_size=self.moe.moe_parallel_config.ep_size,
                     ),
+                )
+            elif self.sonic_moe_enabled:
+                # Permute weights for Sonic's swiglu format
+                w13_permuted = permute_weights_for_sonic(layer.w13_weight.data)
+                replace_parameter(layer, "w13_weight", w13_permuted)
+
+                self.use_inplace = False
+                self.kernel = mk.FusedMoEModularKernel(
+                    MoEPrepareAndFinalizeNoEP(),
+                    SonicMoeExperts(
+                        out_dtype=layer.w13_weight.dtype,
+                        weights_prepermuted=True,
+                    ),
+                    shared_experts=None,
                 )
             else:
                 self.use_inplace = True
