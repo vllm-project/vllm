@@ -325,23 +325,6 @@ def initialize_ray_cluster(
     assert_ray_available()
     from vllm.platforms import current_platform
 
-    # Prevalidate GPU requirements before Ray processing
-    if current_platform.is_cuda() and parallel_config.world_size > 1:
-        from vllm.utils.torch_utils import cuda_device_count_stateless
-
-        available_gpus = cuda_device_count_stateless()
-        if parallel_config.world_size > available_gpus:
-            logger.warning(
-                "Tensor parallel size (%d) exceeds available GPUs (%d). "
-                "This may result in Ray placement group allocation failures. "
-                "Consider reducing tensor_parallel_size to %d or less, "
-                "or ensure your Ray cluster has %d GPUs available.",
-                parallel_config.world_size,
-                available_gpus,
-                available_gpus,
-                parallel_config.world_size,
-            )
-
     if ray.is_initialized():
         logger.info("Ray is already initialized. Skipping Ray initialization.")
     elif current_platform.is_rocm() or current_platform.is_xpu():
