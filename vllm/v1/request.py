@@ -255,6 +255,7 @@ class RequestStatus(enum.IntEnum):
     FINISHED_ABORTED = enum.auto()
     FINISHED_IGNORED = enum.auto()
     FINISHED_ERROR = enum.auto()
+    FINISHED_REPETITION = enum.auto()
 
     def __str__(self):
         return self.name
@@ -278,4 +279,5 @@ _FINISHED_REASON_MAP = {
     RequestStatus.FINISHED_ABORTED: FinishReason.ABORT,
     RequestStatus.FINISHED_IGNORED: FinishReason.LENGTH,
     RequestStatus.FINISHED_ERROR: FinishReason.ERROR,
+    RequestStatus.FINISHED_REPETITION: FinishReason.REPETITION,
 }
