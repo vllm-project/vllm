@@ -152,9 +152,12 @@ def main(args):
 
     # print the generated text
     if args.print_output:
-        for output in outputs:
+        for i, output in enumerate(outputs):
             print("-" * 50)
-            print(f"prompt: {output.prompt}")
+            if not args.custom_mm_prompts:
+                print(f"prompt: {prompts[i].prompt}")
+            else:
+                print(f"prompt: {prompts[i]}")
             print(f"generated text: {output.outputs[0].text}")
             print("-" * 50)
 
