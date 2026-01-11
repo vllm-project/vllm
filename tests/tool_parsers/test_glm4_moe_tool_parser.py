@@ -11,6 +11,7 @@ from vllm.tokenizers import get_tokenizer
 from vllm.tool_parsers.glm4_moe_tool_parser import (
     Glm4MoeModelToolParser,
 )
+from vllm.tool_parsers.glm47_moe_tool_parser import Glm47MoeModelToolParser
 
 pytest.skip("skip glm4_moe parser test", allow_module_level=True)
 # Use a common model that is likely to be available
@@ -25,6 +26,11 @@ def glm4_moe_tokenizer():
 @pytest.fixture
 def glm4_moe_tool_parser(glm4_moe_tokenizer):
     return Glm4MoeModelToolParser(glm4_moe_tokenizer)
+
+
+@pytest.fixture
+def glm47_moe_tool_parser(glm4_moe_tokenizer):
+    return Glm47MoeModelToolParser(glm4_moe_tokenizer)
 
 
 def assert_tool_calls(
@@ -268,14 +274,17 @@ def test_extract_tool_calls_malformed_xml(glm4_moe_tool_parser):
     assert isinstance(extracted_tool_calls.tool_calls, list)
 
 
-def test_extract_tool_calls_empty_arguments(glm4_moe_tool_parser):
+@pytest.mark.parametrize(
+    "tool_parser_name",
+    ["glm4_moe_tool_parser", "glm47_moe_tool_parser"],
+)
+def test_extract_tool_calls_empty_arguments(request, tool_parser_name):
     """Test tool calls with no arguments."""
+    tool_parser = request.getfixturevalue(tool_parser_name)
     model_output = """<tool_call>get_current_time
 </tool_call>"""
 
-    extracted_tool_calls = glm4_moe_tool_parser.extract_tool_calls(
-        model_output, request=None
-    )  # type: ignore[arg-type]
+    extracted_tool_calls = tool_parser.extract_tool_calls(model_output, request=None)  # type: ignore[arg-type]
 
     assert extracted_tool_calls.tools_called
     assert len(extracted_tool_calls.tool_calls) == 1
