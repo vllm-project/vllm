@@ -31,6 +31,9 @@ from vllm.v1.metrics.stats import (
     SchedulerStats,
 )
 
+# shared empty CPU tensor used as a placeholder pooling output
+EMPTY_CPU_TENSOR = torch.empty(0, device="cpu")
+
 
 class RequestOutputCollector:
     """
@@ -339,10 +342,7 @@ class RequestState:
             stop_reason=stop_reason if finished else None,
         )
 
-    def _new_pooling_output(
-        self,
-        pooling_output: torch.Tensor,
-    ) -> PoolingOutput:
+    def _new_pooling_output(self, pooling_output: torch.Tensor) -> PoolingOutput:
         return PoolingOutput(data=pooling_output)
 
 
@@ -429,7 +429,7 @@ class OutputProcessor:
                         new_token_ids=[],
                         # Set pooling_output is not None to
                         # correctly enter the abort pooling branch
-                        pooling_output=torch.randn(0, device="cpu")
+                        pooling_output=EMPTY_CPU_TENSOR
                         if req_state.detokenizer is None
                         else None,
                         finish_reason=FinishReason.ABORT,
@@ -695,9 +695,7 @@ class OutputProcessor:
         assert req_state.stats is not None
         iteration_stats.update_from_finished_request(
             finish_reason=finish_reason,
-            num_prompt_tokens=length_from_prompt_token_ids_or_embeds(
-                req_state.prompt_token_ids, req_state.prompt_embeds
-            ),
+            num_prompt_tokens=req_state.prompt_len,
             max_tokens_param=req_state.max_tokens_param,
             req_stats=req_state.stats,
             num_cached_tokens=req_state.num_cached_tokens,

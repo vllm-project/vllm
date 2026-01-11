@@ -231,8 +231,7 @@ def rocm_aiter_fused_experts(
         # w8a8 block-scaled
         if quant_config.block_shape is not None and quant_config.use_fp8_w8a8:
             assert not apply_router_weight_on_input, (
-                "apply_router_weight_on_input is\
-                not supported for block scaled moe"
+                "apply_router_weight_on_input is not supported for block scaled moe"
             )
             assert quant_config.w1_scale is not None
             assert quant_config.w2_scale is not None
@@ -325,8 +324,11 @@ class AiterExperts(mk.FusedMoEPermuteExpertsUnpermute):
         expert_tokens_meta: mk.ExpertTokensMetadata | None,
         apply_router_weight_on_input: bool,
     ):
+        # TODO(rob): rocm_aiter_fused_experts uses self.quant_config's
+        # a_scales for static quantization. Update this to fit better
+        # with the interface once all quant integrations are complete.
         assert a1q_scale is None
-        assert a2_scale is None
+        assert a2_scale == self.quant_config.a2_scale
         assert expert_tokens_meta is None
 
         result = rocm_aiter_fused_experts(

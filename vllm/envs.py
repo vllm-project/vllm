@@ -75,7 +75,7 @@ if TYPE_CHECKING:
     VLLM_MEDIA_CONNECTOR: str = "http"
     VLLM_TARGET_DEVICE: str = "cuda"
     VLLM_MAIN_CUDA_VERSION: str = "12.9"
-    VLLM_FLOAT32_MATMUL_PRECISION: Literal["ieee", "tf32"] = "ieee"
+    VLLM_FLOAT32_MATMUL_PRECISION: Literal["highest", "high", "medium"] = "highest"
     MAX_JOBS: str | None = None
     NVCC_THREADS: str | None = None
     VLLM_USE_PRECOMPILED: bool = False
@@ -168,6 +168,7 @@ if TYPE_CHECKING:
         "relax",
     ] = "relax"
     VLLM_USE_FUSED_MOE_GROUPED_TOPK: bool = True
+    VLLM_BLOCKSCALE_FP8_GEMM_FLASHINFER: bool = False
     VLLM_USE_FLASHINFER_MOE_FP16: bool = False
     VLLM_USE_FLASHINFER_MOE_FP8: bool = False
     VLLM_USE_FLASHINFER_MOE_FP4: bool = False
@@ -203,6 +204,10 @@ if TYPE_CHECKING:
     VLLM_ROCM_QUICK_REDUCE_CAST_BF16_TO_FP16: bool = True
     VLLM_ROCM_QUICK_REDUCE_MAX_SIZE_BYTES_MB: int | None = None
     VLLM_NIXL_ABORT_REQUEST_TIMEOUT: int = 480
+    VLLM_MORIIO_CONNECTOR_READ_MODE: bool = False
+    VLLM_MORIIO_QP_PER_TRANSFER: int = 1
+    VLLM_MORIIO_POST_BATCH_SIZE: int = -1
+    VLLM_MORIIO_NUM_WORKERS: int = 1
     VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT: int = 480
     VLLM_USE_CUDNN_PREFILL: bool = False
     VLLM_USE_TRTLLM_RAGGED_DEEPSEEK_PREFILL: bool = False
@@ -245,6 +250,7 @@ if TYPE_CHECKING:
     VLLM_SHARED_EXPERTS_STREAM_TOKEN_THRESHOLD: int = 256
     VLLM_COMPILE_CACHE_SAVE_FORMAT: Literal["binary", "unpacked"] = "binary"
     VLLM_USE_V2_MODEL_RUNNER: bool = False
+    VLLM_LOG_MODEL_INSPECTION: bool = False
     VLLM_DEBUG_MFU_METRICS: bool = False
 
 
@@ -282,11 +288,16 @@ def use_aot_compile() -> bool:
     from vllm.model_executor.layers.batch_invariant import (
         vllm_is_batch_invariant,
     )
+    from vllm.platforms import current_platform
     from vllm.utils.torch_utils import is_torch_equal_or_newer
 
     default_value = (
         "1"
-        if is_torch_equal_or_newer("2.10.0.dev") and not disable_compile_cache()
+        if is_torch_equal_or_newer("2.10.0.dev")
+        and not disable_compile_cache()
+        # Disabling AOT_COMPILE for CPU
+        # See: https://github.com/vllm-project/vllm/issues/32033
+        and not current_platform.is_cpu()
         else "0"
     )
 
@@ -459,13 +470,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_MAIN_CUDA_VERSION": lambda: os.getenv("VLLM_MAIN_CUDA_VERSION", "").lower()
     or "12.9",
     # Controls PyTorch float32 matmul precision mode within vLLM workers.
-    # Accepted values:
-    #   - "ieee" (default): force full IEEE FP32 matmul precision.
-    #   - "tf32": enable TensorFloat32-based fast matmul.
+    # Valid options mirror torch.set_float32_matmul_precision
     "VLLM_FLOAT32_MATMUL_PRECISION": env_with_choices(
         "VLLM_FLOAT32_MATMUL_PRECISION",
-        "ieee",
-        ["ieee", "tf32"],
+        "highest",
+        ["highest", "high", "medium"],
         case_sensitive=False,
     ),
     # Maximum number of compilation jobs to run in parallel.
@@ -680,7 +689,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
         None,
         lambda: list(
             __import__(
-                "vllm.attention.backends.registry", fromlist=["AttentionBackendEnum"]
+                "vllm.v1.attention.backends.registry", fromlist=["AttentionBackendEnum"]
             ).AttentionBackendEnum.__members__.keys()
         ),
     ),
@@ -1208,6 +1217,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_USE_FUSED_MOE_GROUPED_TOPK": lambda: bool(
         int(os.getenv("VLLM_USE_FUSED_MOE_GROUPED_TOPK", "1"))
     ),
+    # Allow use of FlashInfer FP8 block-scale GEMM for linear layers.
+    # This uses TensorRT-LLM kernels and requires SM90+ (Hopper).
+    "VLLM_BLOCKSCALE_FP8_GEMM_FLASHINFER": lambda: bool(
+        int(os.getenv("VLLM_BLOCKSCALE_FP8_GEMM_FLASHINFER", "0"))
+    ),
     # Allow use of FlashInfer MoE kernels for fused moe ops.
     "VLLM_USE_FLASHINFER_MOE_FP16": lambda: bool(
         int(os.getenv("VLLM_USE_FLASHINFER_MOE_FP16", "0"))
@@ -1379,6 +1393,20 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_NIXL_ABORT_REQUEST_TIMEOUT": lambda: int(
         os.getenv("VLLM_NIXL_ABORT_REQUEST_TIMEOUT", "480")
     ),
+    # Controls the read mode for the Mori-IO connector
+    "VLLM_MORIIO_CONNECTOR_READ_MODE": lambda: (
+        os.getenv("VLLM_MORIIO_CONNECTOR_READ_MODE", "False").lower() in ("true", "1")
+    ),
+    # Controls the QP (Queue Pair) per transfer configuration for the Mori-IO connector
+    "VLLM_MORIIO_QP_PER_TRANSFER": lambda: int(
+        os.getenv("VLLM_MORIIO_QP_PER_TRANSFER", "1")
+    ),
+    # Controls the post-processing batch size for the Mori-IO connector
+    "VLLM_MORIIO_POST_BATCH_SIZE": lambda: int(
+        os.getenv("VLLM_MORIIO_POST_BATCH_SIZE", "-1")
+    ),
+    # Controls the number of workers for Mori operations for the Mori-IO connector
+    "VLLM_MORIIO_NUM_WORKERS": lambda: int(os.getenv("VLLM_MORIIO_NUM_WORKERS", "1")),
     # Timeout (in seconds) for MooncakeConnector in PD disaggregated setup.
     "VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT": lambda: int(
         os.getenv("VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT", "480")
@@ -1572,6 +1600,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Flag to enable v2 model runner.
     "VLLM_USE_V2_MODEL_RUNNER": lambda: bool(
         int(os.getenv("VLLM_USE_V2_MODEL_RUNNER", "0"))
+    ),
+    # Log model inspection after loading.
+    # If enabled, logs a transformers-style hierarchical view of the model
+    # with quantization methods and attention backends.
+    "VLLM_LOG_MODEL_INSPECTION": lambda: bool(
+        int(os.getenv("VLLM_LOG_MODEL_INSPECTION", "0"))
     ),
     # Debug logging for --enable-mfu-metrics
     "VLLM_DEBUG_MFU_METRICS": lambda: bool(
