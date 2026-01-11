@@ -53,7 +53,7 @@ from vllm.v1.worker.gpu.sample.sampler import Sampler
 from vllm.v1.worker.gpu.spec_decode import init_speculator
 from vllm.v1.worker.gpu.spec_decode.rejection_sample import rejection_sample
 from vllm.v1.worker.gpu.states import RequestState
-from vllm.v1.worker.gpu.structured_outputs import apply_grammar_bitmask
+from vllm.v1.worker.gpu.structured_outputs import StructuredOutputsWorker
 from vllm.v1.worker.kv_connector_model_runner_mixin import KVConnectorModelRunnerMixin
 from vllm.v1.worker.lora_model_runner_mixin import LoRAModelRunnerMixin
 
@@ -132,6 +132,12 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
         # CUDA graphs.
         self.cudagraph_manager = CudaGraphManager(self.vllm_config, self.device)
+        # Structured outputs worker.
+        self.structured_outputs_worker = StructuredOutputsWorker(
+            max_num_logits=self.max_num_reqs * (self.num_speculative_steps + 1),
+            vocab_size=self.vocab_size,
+            device=self.device,
+        )
 
     def update_max_model_len(self, max_model_len: int) -> None:
         self.max_model_len = max_model_len
@@ -440,6 +446,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             # No draft token scheduled (common case).
             total_num_draft_tokens = 0
             total_num_logits = num_reqs
+            cu_num_logits_np = np.arange(num_reqs + 1, dtype=np.int32)
             cu_num_logits = torch.arange(
                 num_reqs + 1, device=self.device, dtype=torch.int32
             )
@@ -460,6 +467,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 num_draft_tokens + 1,
                 out=self.input_buffers.cu_num_logits.np[1 : num_reqs + 1],
             )
+            cu_num_logits_np = self.input_buffers.cu_num_logits.np[: num_reqs + 1]
             cu_num_logits = self.input_buffers.cu_num_logits.copy_to_gpu(num_reqs + 1)
             expanded_idx_mapping = expand_idx_mapping(
                 idx_mapping,
@@ -570,6 +578,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             attn_metadata=attn_metadata,
             logits_indices=logits_indices,
             cu_num_logits=cu_num_logits,
+            cu_num_logits_np=cu_num_logits_np,
         )
 
     def sample(
@@ -583,14 +592,11 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         logits = self.model.compute_logits(sample_hidden_states)
         if grammar_output is not None:
             # Apply grammar bitmask to the logits in-place.
-            # TODO(woosuk): Make compatible with spec decoding.
-            assert input_batch.num_draft_tokens == 0
-            apply_grammar_bitmask(
+            self.structured_outputs_worker.apply_grammar_bitmask(
                 logits,
-                input_batch.req_ids,
+                input_batch,
                 grammar_output.structured_output_request_ids,
                 grammar_output.grammar_bitmask,
-                self.input_buffers,
             )
 
         # Sample tokens and compute logprobs (if needed).

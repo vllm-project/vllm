@@ -72,6 +72,7 @@ class InputBatch:
     logits_indices: torch.Tensor
     # [num_reqs + 1]
     cu_num_logits: torch.Tensor
+    cu_num_logits_np: np.ndarray
 
     @classmethod
     def make_dummy(
@@ -110,6 +111,7 @@ class InputBatch:
         # attn_metadata = defaultdict(lambda: None)
         logits_indices = query_start_loc[1:] - 1
         cu_num_logits = torch.arange(num_reqs + 1, device=device, dtype=torch.int32)
+        cu_num_logits_np = np.arange(num_reqs + 1, dtype=np.int32)
         return cls(
             req_ids=req_ids,
             num_reqs=num_reqs,
@@ -129,6 +131,7 @@ class InputBatch:
             attn_metadata=None,  # type: ignore
             logits_indices=logits_indices,
             cu_num_logits=cu_num_logits,
+            cu_num_logits_np=cu_num_logits_np,
         )
 
 
