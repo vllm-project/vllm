@@ -590,7 +590,7 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
             assert state_indices_tensor_d is not None
             assert block_idx_last_computed_token_d is not None
             assert block_idx_last_scheduled_token_d is not None
-            # Get the cached block indices (ssm state) and last scheduled block indices
+            # Get the state indices for the cached ssm state and last scheduled state
             state_indices_decode = state_indices_tensor_d.gather(
                 1, block_idx_last_scheduled_token_d.unsqueeze(1)
             ).squeeze(1)
@@ -666,11 +666,10 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
             if prefix_caching_enabled:
                 assert state_indices_tensor_p is not None
                 # Use the block indices for all chunks in the sequence
-                # TODO: probably remove
                 cache_indices_prefill = state_indices_tensor_p
 
             # - "cache_indices" updates the conv_state cache in positions
-            #   pointed to by "state_indices_tensor"
+            #   pointed to by "cache_indices_prefill"
             mixed_qkv_non_spec = causal_conv1d_fn(
                 mixed_qkv_non_spec_T,
                 conv_weights,
