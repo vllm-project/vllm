@@ -207,7 +207,7 @@ docker run \
     --gpus all \
     -it \
     --rm \
-    --ipc=host nvcr.io/nvidia/pytorch:23.10-py3
+    --ipc=host nvcr.io/nvidia/pytorch:25.12-py3
 ```
 
 If you don't want to use docker, it is recommended to have a full installation of CUDA Toolkit. You can download and install it from [the official website](https://developer.nvidia.com/cuda-toolkit-archive). After installation, set the environment variable `CUDA_HOME` to the installation path of CUDA Toolkit, and make sure that the `nvcc` compiler is in your `PATH`, e.g.:
