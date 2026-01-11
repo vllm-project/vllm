@@ -9,6 +9,8 @@ from PIL import Image, ImageOps
 from transformers import AutoProcessor, BatchFeature, LlamaTokenizerFast
 from transformers.processing_utils import ProcessorMixin
 
+from vllm.model_executor.models.utils import find_closest_aspect_ratio
+
 # TODO(Isotr0py): change modes for variants
 # see: https://github.com/deepseek-ai/DeepSeek-OCR/blob/8cf003d38821fa1b19c73da3bd1b0dc262ea8136/DeepSeek-OCR-master/DeepSeek-OCR-vllm/config.py#L1-L6
 # Tiny: base_size = 512, image_size = 512, crop_mode = False
@@ -23,22 +25,6 @@ CROP_MODE = True
 # TODO(Isotr0py): Expose as mm_kwargs
 MIN_CROPS = 2
 MAX_CROPS = 6  # max:9; If your GPU memory is small, it is recommended to set it to 6.
-
-
-def find_closest_aspect_ratio(aspect_ratio, target_ratios, width, height, image_size):
-    best_ratio_diff = float("inf")
-    best_ratio = (1, 1)
-    area = width * height
-    for ratio in target_ratios:
-        target_aspect_ratio = ratio[0] / ratio[1]
-        ratio_diff = abs(aspect_ratio - target_aspect_ratio)
-        if ratio_diff < best_ratio_diff:
-            best_ratio_diff = ratio_diff
-            best_ratio = ratio
-        elif ratio_diff == best_ratio_diff:
-            if area > 0.5 * image_size * image_size * ratio[0] * ratio[1]:
-                best_ratio = ratio
-    return best_ratio
 
 
 def calculate_aspect_ratios(
@@ -70,7 +56,11 @@ def count_tiles(
 
     # find the closest aspect ratio to the target
     target_aspect_ratio = find_closest_aspect_ratio(
-        aspect_ratio, target_ratios, orig_width, orig_height, image_size
+        aspect_ratio,
+        target_ratios,
+        width=orig_width,
+        height=orig_height,
+        image_size=image_size,
     )
 
     return target_aspect_ratio
@@ -87,7 +77,11 @@ def dynamic_preprocess(
 
     # find the closest aspect ratio to the target
     target_aspect_ratio = find_closest_aspect_ratio(
-        aspect_ratio, target_ratios, orig_width, orig_height, image_size
+        aspect_ratio,
+        target_ratios,
+        width=orig_width,
+        height=orig_height,
+        image_size=image_size,
     )
 
     # calculate the target width and height

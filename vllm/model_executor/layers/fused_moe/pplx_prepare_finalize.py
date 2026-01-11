@@ -32,7 +32,7 @@ def pplx_hidden_dim_scale_bytes(
     align = 16
 
     # For blocked per token: set to
-    #   ceil_div(hidden_dim, block_size) * sizeof(float32)
+    #   cdiv(hidden_dim, block_size) * sizeof(float32)
     # For per-token: set to 4 * sizeof(float32) (x4 for alignment)
     if quant_dtype is not None:
         assert isinstance(quant_dtype, torch.dtype)
