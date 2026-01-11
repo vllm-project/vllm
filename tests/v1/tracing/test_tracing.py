@@ -18,9 +18,11 @@ from opentelemetry.proto.collector.trace.v1.trace_service_pb2_grpc import (
 )
 from opentelemetry.proto.common.v1.common_pb2 import AnyValue, KeyValue
 from opentelemetry.sdk.environment_variables import OTEL_EXPORTER_OTLP_TRACES_INSECURE
+from opentelemetry.sdk.trace.export import ConsoleSpanExporter
+from unittest.mock import patch, MagicMock
 
 from vllm import LLM, SamplingParams
-from vllm.tracing import SpanAttributes
+from vllm.tracing import SpanAttributes, get_span_exporters, OTEL_TRACES_EXPORTER
 
 FAKE_TRACE_SERVER_ADDRESS = "localhost:4317"
 
@@ -146,3 +148,74 @@ def test_traces(
         assert attributes.get(SpanAttributes.GEN_AI_LATENCY_TIME_IN_QUEUE) > 0
         assert attributes.get(SpanAttributes.GEN_AI_LATENCY_TIME_TO_FIRST_TOKEN) > 0
         assert attributes.get(SpanAttributes.GEN_AI_LATENCY_E2E) > 0
+
+
+# Unit tests for get_span_exporters
+class TestGetSpanExporters:
+    """Unit tests for get_span_exporters function."""
+
+    def test_default_otlp_exporter(self, monkeypatch: pytest.MonkeyPatch):
+        """Default should be OTLP exporter when env var not set."""
+        monkeypatch.delenv(OTEL_TRACES_EXPORTER, raising=False)
+        with patch("vllm.tracing._get_otlp_span_exporter") as mock_otlp:
+            mock_otlp.return_value = MagicMock(name="OTLPSpanExporter")
+            exporters = get_span_exporters("http://localhost:4317")
+            assert len(exporters) == 1
+            mock_otlp.assert_called_once_with("http://localhost:4317")
+
+    def test_console_exporter(self, monkeypatch: pytest.MonkeyPatch):
+        """OTEL_TRACES_EXPORTER=console should return ConsoleSpanExporter."""
+        monkeypatch.setenv(OTEL_TRACES_EXPORTER, "console")
+        exporters = get_span_exporters("http://localhost:4317")
+        assert len(exporters) == 1
+        assert isinstance(exporters[0], ConsoleSpanExporter)
+
+    def test_none_exporter(self, monkeypatch: pytest.MonkeyPatch):
+        """OTEL_TRACES_EXPORTER=none should return empty list."""
+        monkeypatch.setenv(OTEL_TRACES_EXPORTER, "none")
+        exporters = get_span_exporters("http://localhost:4317")
+        assert exporters == []
+
+    def test_multiple_exporters(self, monkeypatch: pytest.MonkeyPatch):
+        """OTEL_TRACES_EXPORTER=console,otlp should return both exporters."""
+        monkeypatch.setenv(OTEL_TRACES_EXPORTER, "console,otlp")
+        with patch("vllm.tracing._get_otlp_span_exporter") as mock_otlp:
+            mock_otlp.return_value = MagicMock(name="OTLPSpanExporter")
+            exporters = get_span_exporters("http://localhost:4317")
+            assert len(exporters) == 2
+            assert isinstance(exporters[0], ConsoleSpanExporter)
+            mock_otlp.assert_called_once()
+
+    def test_multiple_exporters_with_spaces(self, monkeypatch: pytest.MonkeyPatch):
+        """Should handle spaces in comma-separated values."""
+        monkeypatch.setenv(OTEL_TRACES_EXPORTER, " console , otlp ")
+        with patch("vllm.tracing._get_otlp_span_exporter") as mock_otlp:
+            mock_otlp.return_value = MagicMock(name="OTLPSpanExporter")
+            exporters = get_span_exporters("http://localhost:4317")
+            assert len(exporters) == 2
+
+    def test_none_takes_precedence(self, monkeypatch: pytest.MonkeyPatch):
+        """When 'none' is combined with others, none should take precedence."""
+        monkeypatch.setenv(OTEL_TRACES_EXPORTER, "none,otlp")
+        exporters = get_span_exporters("http://localhost:4317")
+        assert exporters == []
+
+    def test_invalid_exporter_raises_error(self, monkeypatch: pytest.MonkeyPatch):
+        """Invalid exporter type should raise ValueError."""
+        monkeypatch.setenv(OTEL_TRACES_EXPORTER, "invalid")
+        with pytest.raises(ValueError, match="Unsupported OTEL_TRACES_EXPORTER"):
+            get_span_exporters("http://localhost:4317")
+
+    def test_case_insensitive(self, monkeypatch: pytest.MonkeyPatch):
+        """Exporter types should be case-insensitive."""
+        monkeypatch.setenv(OTEL_TRACES_EXPORTER, "CONSOLE")
+        exporters = get_span_exporters("http://localhost:4317")
+        assert len(exporters) == 1
+        assert isinstance(exporters[0], ConsoleSpanExporter)
+
+    def test_duplicate_exporters_deduplicated(self, monkeypatch: pytest.MonkeyPatch):
+        """Duplicate exporter types should be deduplicated."""
+        monkeypatch.setenv(OTEL_TRACES_EXPORTER, "console,console")
+        exporters = get_span_exporters("http://localhost:4317")
+        assert len(exporters) == 1
+        assert isinstance(exporters[0], ConsoleSpanExporter)

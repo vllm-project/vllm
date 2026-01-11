@@ -9,6 +9,10 @@ from vllm.utils.func_utils import run_once
 
 TRACE_HEADERS = ["traceparent", "tracestate"]
 
+# Environment variable for selecting the traces exporter type.
+# Supported values: "otlp" (default), "console", "none"
+OTEL_TRACES_EXPORTER = "OTEL_TRACES_EXPORTER"
+
 logger = init_logger(__name__)
 
 _is_otel_imported = False
@@ -19,7 +23,12 @@ try:
         OTEL_EXPORTER_OTLP_TRACES_PROTOCOL,
     )
     from opentelemetry.sdk.trace import TracerProvider
-    from opentelemetry.sdk.trace.export import BatchSpanProcessor
+    from opentelemetry.sdk.trace.export import (
+        BatchSpanProcessor,
+        ConsoleSpanExporter,
+        SimpleSpanProcessor,
+        SpanExporter,
+    )
     from opentelemetry.trace import SpanKind, Tracer, set_tracer_provider
     from opentelemetry.trace.propagation.tracecontext import (
         TraceContextTextMapPropagator,
@@ -47,6 +56,9 @@ except ImportError:
     class Tracer:  # type: ignore
         pass
 
+    class SpanExporter:  # type: ignore
+        pass
+
 
 def is_otel_available() -> bool:
     return _is_otel_imported
@@ -63,15 +75,76 @@ def init_tracer(
         )
     trace_provider = TracerProvider()
 
-    span_exporter = get_span_exporter(otlp_traces_endpoint)
-    trace_provider.add_span_processor(BatchSpanProcessor(span_exporter))
+    span_exporters = get_span_exporters(otlp_traces_endpoint)
+    for span_exporter in span_exporters:
+        # Use SimpleSpanProcessor for ConsoleSpanExporter to ensure
+        # immediate output, use BatchSpanProcessor for others for
+        # better performance.
+        if isinstance(span_exporter, ConsoleSpanExporter):
+            trace_provider.add_span_processor(SimpleSpanProcessor(span_exporter))
+        else:
+            trace_provider.add_span_processor(BatchSpanProcessor(span_exporter))
     set_tracer_provider(trace_provider)
 
     tracer = trace_provider.get_tracer(instrumenting_module_name)
     return tracer
 
 
-def get_span_exporter(endpoint):
+def get_span_exporters(endpoint: str) -> list[SpanExporter]:
+    """Get span exporters based on OTEL_TRACES_EXPORTER environment variable.
+
+    Args:
+        endpoint: The OTLP endpoint URL (used when exporter is "otlp").
+
+    Returns:
+        A list of SpanExporter instances. Empty list if exporter is "none".
+
+    Supported OTEL_TRACES_EXPORTER values (comma-separated):
+        - "otlp" (default): Export traces via OTLP protocol to the specified
+          endpoint. The protocol (grpc/http) is controlled by
+          OTEL_EXPORTER_OTLP_TRACES_PROTOCOL.
+        - "console": Print traces to stdout. Useful for local debugging.
+        - "none": Disable trace export (must be used alone).
+
+    Examples:
+        OTEL_TRACES_EXPORTER=otlp          # Export to OTLP collector
+        OTEL_TRACES_EXPORTER=console       # Print to stdout
+        OTEL_TRACES_EXPORTER=console,otlp  # Both console and OTLP
+        OTEL_TRACES_EXPORTER=none          # Disable tracing
+    """
+    exporter_env = os.environ.get(OTEL_TRACES_EXPORTER, "otlp")
+    exporter_types_raw = [e.strip().lower() for e in exporter_env.split(",")]
+    # Deduplicate exporter types while preserving order
+    exporter_types = list(dict.fromkeys(exporter_types_raw))
+
+    # Handle "none" - must be used alone
+    if "none" in exporter_types:
+        if len(exporter_types) > 1:
+            logger.warning(
+                "OTEL_TRACES_EXPORTER contains 'none' with other exporters. "
+                "'none' takes precedence, tracing is disabled."
+            )
+        logger.info("Trace exporter is disabled (OTEL_TRACES_EXPORTER=none)")
+        return []
+
+    exporters: list[SpanExporter] = []
+    for exporter_type in exporter_types:
+        if exporter_type == "console":
+            logger.info("Using ConsoleSpanExporter for tracing")
+            exporters.append(ConsoleSpanExporter())
+        elif exporter_type == "otlp":
+            exporters.append(_get_otlp_span_exporter(endpoint))
+        else:
+            raise ValueError(
+                f"Unsupported OTEL_TRACES_EXPORTER value: '{exporter_type}'. "
+                "Supported values are: 'otlp', 'console', 'none'."
+            )
+
+    return exporters
+
+
+def _get_otlp_span_exporter(endpoint: str):
+    """Get OTLP span exporter based on protocol configuration."""
     protocol = os.environ.get(OTEL_EXPORTER_OTLP_TRACES_PROTOCOL, "grpc")
     if protocol == "grpc":
         from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import (
@@ -82,8 +155,16 @@ def get_span_exporter(endpoint):
             OTLPSpanExporter,  # type: ignore
         )
     else:
-        raise ValueError(f"Unsupported OTLP protocol '{protocol}' is configured")
+        raise ValueError(
+            f"Unsupported OTLP protocol '{protocol}' is configured. "
+            "Supported values are: 'grpc', 'http/protobuf'."
+        )
 
+    logger.info(
+        "Using OTLPSpanExporter for tracing (endpoint=%s, protocol=%s)",
+        endpoint,
+        protocol,
+    )
     return OTLPSpanExporter(endpoint=endpoint)
 
 
