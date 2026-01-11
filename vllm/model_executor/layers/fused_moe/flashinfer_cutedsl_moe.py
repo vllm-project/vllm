@@ -3,6 +3,7 @@
 
 import torch
 
+from vllm.platforms import current_platform
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm import envs
 from vllm.logger import init_logger
@@ -68,6 +69,24 @@ class FlashInferCuteDSLExperts(mk.FusedMoEPermuteExpertsUnpermute):
             mk.FusedMoEActivationFormat.BatchedExperts,
             mk.FusedMoEActivationFormat.BatchedExperts,
         )
+
+    def supports_current_device(self) -> bool:
+        return (
+            current_platform.is_cuda() and
+            current_platform.has_device_capability(10,0)
+        )
+    
+    def supports_no_act_and_mul(self) -> bool:
+        return False
+
+    def supports_quant_config(self, quant_config: FusedMoEQuantConfig) -> bool:
+        return quant_config.use_nvfp4_w4a4
+
+    def supports_act_fn(self, activation: str) -> bool:
+        return activation in ["silu"]
+
+    def supports_ep(self) -> bool:
+        return True
 
     def supports_expert_map(self) -> bool:
         return False

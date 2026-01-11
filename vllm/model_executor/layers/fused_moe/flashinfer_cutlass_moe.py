@@ -3,6 +3,7 @@
 
 import torch
 
+from vllm.platforms import current_platform
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
@@ -74,6 +75,43 @@ class FlashInferExperts(mk.FusedMoEPermuteExpertsUnpermute):
         # - pass per-block weight scales to the kernel
         # - skip input activation quantization (kernel applies scaling)
         self.use_deepseek_fp8_block_scale = use_deepseek_fp8_block_scale
+    
+    def supports_current_device(self) -> bool:
+        return (
+            current_platform.is_cuda() and
+            current_platform.has_device_capability(9,0)
+        )
+    
+    def supports_no_act_and_mul(self) -> bool:
+        return False
+
+    def supports_quant_config(self, quant_config: FusedMoEQuantConfig) -> bool:
+        # Supports unquantized, fp8, and nvfp4.
+        if not (
+            quant_config.use_nvfp4_w4a4 or
+            quant_config.use_fp8_w8a8 or 
+            quant_config.quant_dtype == None # TODO: how to express unquantized?
+        ):
+            return False
+        
+        # For FP8, only support static per tensor or DeepGEMM SwapAB for hopper.
+        if quant_config.use_fp8_w8a8:
+            if quant_config.is_per_tensor:
+                return True
+            elif quant_config.is_per_act_token:
+                return False
+            elif quant_config.is_block_quantized:
+                if (current_platform.is_cuda and current_platform.is_device_capability(9,0) and quant_config.block_shape[0] == 128 and quant_config.block_shape[1] == 128):
+                    return True
+            return False
+        
+        return True
+
+    def supports_act_fn(self, activation: str) -> bool:
+        return activation in ["silu", "relu2_no_mul"]
+
+    def supports_ep(self) -> bool:
+        return True
 
     @property
     def activation_formats(
@@ -225,85 +263,3 @@ class FlashInferExperts(mk.FusedMoEPermuteExpertsUnpermute):
             # Informs FlashInfer to use the block-scale decoding path when True
             use_deepseek_fp8_block_scale=self.use_deepseek_fp8_block_scale,
         )
-
-
-def flashinfer_cutlass_moe_fp4(
-    hidden_states: torch.Tensor,
-    w1: torch.Tensor,
-    w2: torch.Tensor,
-    topk_weights: torch.Tensor,
-    topk_ids: torch.Tensor,
-    quant_config: FusedMoEQuantConfig,
-    inplace: bool = False,
-    activation: str = "silu",
-    global_num_experts: int = -1,
-    expert_map: torch.Tensor | None = None,
-    apply_router_weight_on_input: bool = False,
-) -> torch.Tensor:
-    fused_experts = mk.FusedMoEModularKernel(
-        create_flashinfer_prepare_finalize(
-            use_dp=False, use_nvfp4=True, enable_alltoallv=False
-        ),
-        FlashInferExperts(
-            out_dtype=hidden_states.dtype,
-            quant_config=quant_config,
-            use_dp=False,
-        ),
-    )
-
-    return fused_experts(
-        hidden_states=hidden_states,
-        w1=w1,
-        w2=w2,
-        topk_weights=topk_weights,
-        topk_ids=topk_ids,
-        inplace=inplace,
-        activation=activation,
-        global_num_experts=global_num_experts,
-        expert_map=expert_map,
-        apply_router_weight_on_input=apply_router_weight_on_input,
-    )
-
-
-def flashinfer_cutlass_moe(
-    hidden_states: torch.Tensor,
-    w1: torch.Tensor,
-    w2: torch.Tensor,
-    topk_weights: torch.Tensor,
-    topk_ids: torch.Tensor,
-    quant_config: FusedMoEQuantConfig,
-    inplace: bool = False,
-    activation: str = "silu",
-    global_num_experts: int = -1,
-    expert_map: torch.Tensor | None = None,
-    apply_router_weight_on_input: bool = False,
-    tp_rank: int = 0,
-    tp_size: int = 1,
-    ep_rank: int = 0,
-    ep_size: int = 1,
-    use_dp: bool = False,
-) -> torch.Tensor:
-    fused_experts = mk.FusedMoEModularKernel(
-        create_flashinfer_prepare_finalize(use_dp=use_dp),
-        FlashInferExperts(
-            out_dtype=hidden_states.dtype,
-            quant_config=quant_config,
-            tp_rank=tp_rank,
-            tp_size=tp_size,
-            ep_rank=ep_rank,
-            ep_size=ep_size,
-        ),
-    )
-
-    return fused_experts(
-        hidden_states=hidden_states,
-        w1=w1,
-        w2=w2,
-        topk_weights=topk_weights,
-        topk_ids=topk_ids,
-        inplace=inplace,
-        activation=activation,
-        global_num_experts=global_num_experts,
-        expert_map=expert_map,
-        apply_router_weight_on_input=apply_router_weight_on_input,
-    )
