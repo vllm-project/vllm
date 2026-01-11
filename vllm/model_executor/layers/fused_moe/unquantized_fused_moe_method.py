@@ -22,7 +22,6 @@ from vllm.model_executor.layers.fused_moe.flashinfer_cutlass_moe import (
 from vllm.model_executor.layers.fused_moe.fused_moe_method_base import (
     FusedMoEMethodBase,
 )
-from vllm.model_executor.layers.fused_moe.fused_moe_router import FusedMoERouter
 from vllm.model_executor.layers.fused_moe.modular_kernel import (
     FusedMoEActivationFormat,
     FusedMoEPermuteExpertsUnpermute,
@@ -52,6 +51,7 @@ else:
 logger = init_logger(__name__)
 
 
+# TODO(bnell): check why this needs to be a CustomOp, get rid of it?
 # --8<-- [start:unquantized_fused_moe]
 @CustomOp.register("unquantized_fused_moe")
 class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
@@ -92,6 +92,12 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
                     "FlashInfer CUTLASS MoE is currently not available for DP.",
                     scope="local",
                 )
+
+        self._is_monolithic = current_platform.is_cpu() or current_platform.is_xpu()
+
+    @property
+    def is_monolithic(self) -> bool:
+        return self._is_monolithic
 
     @property
     def supports_eplb(self) -> bool:
@@ -289,12 +295,19 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
     def apply(
         self,
         layer: "FusedMoE",  # type: ignore[name-defined] # noqa: F821
-        router: FusedMoERouter,
+        x: torch.Tensor,
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+        return self.forward(layer, x, topk_weights, topk_ids)
+
+    def apply_monolithic(
+        self,
+        layer: "FusedMoE",  # type: ignore[name-defined] # noqa: F821
         x: torch.Tensor,
         router_logits: torch.Tensor,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         return self.forward(
-            router=router,
             layer=layer,
             x=x,
             router_logits=router_logits,
@@ -312,20 +325,15 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
     def forward_cuda(
         self,
         layer: "FusedMoE",  # type: ignore[name-defined] # noqa: F821
-        router: FusedMoERouter,
         x: torch.Tensor,
-        router_logits: torch.Tensor,
+        router_logits_or_topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        topk_weights, topk_ids = router.select_experts(
-            hidden_states=x,
-            router_logits=router_logits,
-        )
-
-        result = self.kernel(
+        return self.kernel(
             hidden_states=x,
             w1=layer.w13_weight,
             w2=layer.w2_weight,
-            topk_weights=topk_weights,
+            topk_weights=router_logits_or_topk_weights,
             topk_ids=topk_ids,
             inplace=self.use_inplace,
             activation=layer.activation,
@@ -334,14 +342,12 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
             expert_map=layer.expert_map,
         )
 
-        return result
-
     def forward_cpu(
         self,
         layer: "FusedMoE",  # type: ignore[name-defined] # noqa: F821
-        router: FusedMoERouter,
         x: torch.Tensor,
-        router_logits: torch.Tensor,
+        router_logits_or_topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         if (
             layer.enable_eplb is not False
@@ -356,7 +362,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
             x,
             layer.use_grouped_topk,
             layer.top_k,
-            router_logits,
+            router_logits_or_topk_weights,
             layer.renormalize,
             layer.topk_group,
             layer.num_expert_group,
@@ -373,9 +379,9 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
     def forward_xpu(
         self,
         layer: "FusedMoE",  # type: ignore[name-defined] # noqa: F821
-        router: FusedMoERouter,
         x: torch.Tensor,
-        router_logits: torch.Tensor,
+        router_logits_or_topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         if (
             layer.enable_eplb is not False
@@ -388,7 +394,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
             x,
             layer.use_grouped_topk,
             layer.top_k,
-            router_logits,
+            router_logits_or_topk_weights,
             layer.renormalize,
             layer.topk_group,
             layer.num_expert_group,

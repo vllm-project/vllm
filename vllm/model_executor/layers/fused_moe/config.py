@@ -117,8 +117,12 @@ class RoutingMethodType(IntEnum):
     RenormalizeNaive = (4,)
     # TopK: TopK (no softmax)
     TopK = (5,)
+    # Custom
+    Custom = (6,)
+    # Simulated
+    Simulated = (7,)
     # Unspecified
-    Unspecified = 6.0
+    Unspecified = 8.0
 
 
 @dataclass
@@ -1039,6 +1043,8 @@ class FusedMoEConfig:
     is_act_and_mul: bool = True
 
     is_lora_enabled: bool = False
+
+    enable_eplb: bool = False
 
     def __post_init__(self):
         if self.dp_size > 1:
