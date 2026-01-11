@@ -90,6 +90,7 @@ def determine_expert_map(
     global_num_experts: int,
     expert_placement_strategy: ExpertPlacementStrategy = "linear",
     num_fused_shared_experts: int = 0,
+    mix_placement: bool = False,
     return_expert_mask: bool = False,
 ) -> tuple[int, torch.Tensor | None, torch.Tensor | None]:
     """
@@ -126,6 +127,9 @@ def determine_expert_map(
 
     # Distribute experts as evenly as possible to each rank.
     base_experts = global_num_experts // ep_size
+    if mix_placement:
+        base_experts += num_fused_shared_experts
+        global_num_experts += num_fused_shared_experts * ep_size
     remainder = global_num_experts % ep_size
     local_num_experts = base_experts + 1 if ep_rank < remainder else base_experts
 
@@ -443,7 +447,11 @@ class FusedMoE(CustomOp):
         self.expert_placement_strategy: ExpertPlacementStrategy = (
             vllm_config.parallel_config.expert_placement_strategy
         )
-
+        additional_config = self.vllm_config.additional_config
+        if isinstance(additional_config, dict):
+            self.mix_placement = additional_config.get("mix_placement", False)
+        else:
+            self.mix_placement = getattr(additional_config, "mix_placement", False)
         # ROCm aiter shared experts fusion
         self.rocm_aiter_fmoe_enabled = rocm_aiter_ops.is_fused_moe_enabled()
         self.aiter_fmoe_shared_expert_enabled = (
@@ -452,11 +460,12 @@ class FusedMoE(CustomOp):
 
         self.num_fused_shared_experts = (
             n_shared_experts
-            if n_shared_experts is not None and self.aiter_fmoe_shared_expert_enabled
+            if n_shared_experts is not None
+            and (self.aiter_fmoe_shared_expert_enabled or self.mix_placement)
             else 0
         )
         if (
-            not self.aiter_fmoe_shared_expert_enabled
+            not (self.aiter_fmoe_shared_expert_enabled or self.mix_placement)
             and self.num_fused_shared_experts != 0
         ):
             raise ValueError(
@@ -491,9 +500,11 @@ class FusedMoE(CustomOp):
                 global_num_experts=self.global_num_experts,
                 expert_placement_strategy=self.expert_placement_strategy,
                 num_fused_shared_experts=self.num_fused_shared_experts,
+                mix_placement=self.mix_placement,
                 return_expert_mask=self.rocm_aiter_fmoe_enabled,
             )
             self.local_num_experts = local_num_experts
+            self.global_num_experts = self.local_num_experts * self.ep_size
             self.register_buffer("_expert_map", expert_map)
             self.register_buffer("expert_mask", expert_mask)
             self._maybe_init_expert_routing_tables()
@@ -517,10 +528,10 @@ class FusedMoE(CustomOp):
             )
 
         self.top_k = top_k
-
-        self._init_aiter_shared_experts_topK_buffer(
-            vllm_config=vllm_config, dp_size=dp_size_
-        )
+        if self.aiter_fmoe_shared_expert_enabled:
+            self._init_aiter_shared_experts_topK_buffer(
+                vllm_config=vllm_config, dp_size=dp_size_
+            )
         if self.use_ep and self.rocm_aiter_fmoe_enabled:
             assert self.expert_mask is None or torch.all(
                 (expert_mask == 0) | (expert_mask == 1)
@@ -1637,6 +1648,24 @@ class FusedMoE(CustomOp):
                 renormalize=self.renormalize,
             )
 
+        if self.mix_placement:
+            shared_expert_routing_factor = 1.0 / self.routed_scaling_factor
+            batch_size = topk_ids.shape[0]
+            shared_expert_ids = torch.arange(
+                self.logical_num_experts,
+                self.logical_num_experts + self.num_fused_shared_experts,
+                dtype=topk_ids.dtype,
+                device=topk_ids.device,
+            ).repeat(batch_size, 1)
+            shared_expert_weights = torch.full(
+                (batch_size, self.num_fused_shared_experts),
+                shared_expert_routing_factor,
+                dtype=topk_ids.dtype,
+                device=topk_ids.device,
+            )
+            topk_ids = torch.cat([topk_ids, shared_expert_ids], dim=1)
+            topk_weights = torch.cat([topk_weights, shared_expert_weights], dim=1)
+
         if self.enable_eplb:
             topk_ids = eplb_map_to_physical_and_record(
                 topk_ids=topk_ids,
@@ -2027,19 +2056,23 @@ class FusedMoE(CustomOp):
         ckpt_up_proj_name: str,
         num_experts: int,
         num_redundant_experts: int = 0,
+        num_shared_experts: int = 0,
+        mix_placement: bool = False,
     ) -> list[tuple[str, str, int, str]]:
-        num_physical_experts = num_experts + num_redundant_experts
-
         # In the returned mapping:
         # - `expert_id` is the physical expert id
         # - `weight_name` contains the weight name of the logical expert
         # So that we should map the expert id to logical in `weight_name`
         physical_to_logical_map = (
             EplbState.build_initial_global_physical_to_logical_map(
-                num_experts, num_redundant_experts
+                num_experts,
+                num_redundant_experts,
+                num_shared_experts,
+                mix_placement,
             )
         )
 
+        num_physical_experts = len(physical_to_logical_map)
         base_layer = (
             "base_layer."
             if any(".base_layer." in name for name, _ in model.named_parameters())
