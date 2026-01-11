@@ -142,7 +142,7 @@ class EagleSpeculator:
         num_tokens_across_dp: torch.Tensor | None,
     ) -> None:
         pos = self.input_buffers.positions[:num_reqs]
-        query_start_loc = self.input_buffers.query_start_loc.gpu[: num_reqs + 1]
+        query_start_loc = self.input_buffers.query_start_loc[: num_reqs + 1]
         for step in range(1, self.num_speculative_steps):
             # Run the eagle model.
             last_hidden_states, hidden_states = self.run_model(
@@ -280,11 +280,8 @@ class EagleSpeculator:
             self.max_model_len,
             self.max_num_reqs,
         )
-        query_start_loc = self.input_buffers.query_start_loc
-        query_start_loc_gpu = query_start_loc.gpu[: num_reqs + 1]
-        slot_mappings = self.block_tables.compute_slot_mappings(
-            query_start_loc_gpu, pos
-        )
+        query_start_loc = self.input_buffers.query_start_loc[: num_reqs + 1]
+        slot_mappings = self.block_tables.compute_slot_mappings(query_start_loc, pos)
 
         cudagraph_size = self.cudagraph_manager.get_cudagraph_size(num_reqs)
         if cudagraph_size is not None:
@@ -293,8 +290,9 @@ class EagleSpeculator:
             return self.draft_tokens[:num_reqs]
 
         # Run eager mode.
-        query_start_loc.np[: num_reqs + 1] = np.arange(num_reqs + 1)
-        query_start_loc_cpu = query_start_loc.cpu[: num_reqs + 1]
+        query_start_loc_cpu = torch.arange(
+            num_reqs + 1, dtype=torch.int32, device="cpu"
+        )
         # HACK(woosuk)
         seq_lens_np = np.full(num_reqs, self.max_model_len, dtype=np.int32)
         block_tables = [x[:num_reqs] for x in self.block_tables.input_block_tables]
@@ -304,7 +302,7 @@ class EagleSpeculator:
             attn_metadata_builders=self.attn_metadata_builders,
             num_reqs=num_reqs,
             num_tokens=num_reqs,
-            query_start_loc_gpu=query_start_loc_gpu,
+            query_start_loc_gpu=query_start_loc,
             query_start_loc_cpu=query_start_loc_cpu,
             seq_lens=self.input_buffers.seq_lens[:num_reqs],
             seq_lens_np=seq_lens_np,
@@ -494,7 +492,7 @@ def prepare_eagle_decode(
         input_buffers.positions,
         input_hidden_states,
         input_hidden_states.stride(0),
-        input_buffers.query_start_loc.gpu,
+        input_buffers.query_start_loc,
         input_buffers.seq_lens,
         hidden_size,
         max_model_len,

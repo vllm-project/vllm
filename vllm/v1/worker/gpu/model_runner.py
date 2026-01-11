@@ -31,6 +31,7 @@ from vllm.v1.worker.gpu.attn_utils import (
     init_kv_cache,
 )
 from vllm.v1.worker.gpu.block_table import BlockTables
+from vllm.v1.worker.gpu.buffer_utils import UvaBufferPool
 from vllm.v1.worker.gpu.cudagraph_utils import CudaGraphManager
 from vllm.v1.worker.gpu.dp_utils import (
     get_batch_metadata_across_dp,
@@ -136,8 +137,12 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         self.structured_outputs_worker = StructuredOutputsWorker(
             max_num_logits=self.max_num_reqs * (self.num_speculative_steps + 1),
             vocab_size=self.vocab_size,
-            device=self.device,
         )
+
+        # Buffers for CPU-to-GPU copies.
+        self.tmp_idx_mapping = UvaBufferPool(self.max_num_reqs, torch.int32)
+        self.tmp_cu_num_logits = UvaBufferPool(self.max_num_reqs + 1, torch.int32)
+        self.tmp_query_start_loc = UvaBufferPool(self.max_num_reqs + 1, torch.int32)
 
     def update_max_model_len(self, max_model_len: int) -> None:
         self.max_model_len = max_model_len
@@ -436,10 +441,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         idx_mapping_list = [
             self.req_states.req_id_to_index[req_id] for req_id in req_ids
         ]
-        idx_mapping = self.input_buffers.idx_mapping
-        idx_mapping.np[:num_reqs] = idx_mapping_list
-        idx_mapping_np = idx_mapping.np[:num_reqs]
-        idx_mapping = idx_mapping.copy_to_gpu(num_reqs)
+        idx_mapping_np = np.array(idx_mapping_list, dtype=np.int32)
+        idx_mapping = self.tmp_idx_mapping.copy_to_gpu(idx_mapping_np)
 
         # Get the number of draft tokens for each request.
         if not scheduler_output.scheduled_spec_decode_tokens:
@@ -463,12 +466,12 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             total_num_draft_tokens = int(num_draft_tokens.sum())
             total_num_logits = num_reqs + total_num_draft_tokens
 
-            np.cumsum(
-                num_draft_tokens + 1,
-                out=self.input_buffers.cu_num_logits.np[1 : num_reqs + 1],
-            )
-            cu_num_logits_np = self.input_buffers.cu_num_logits.np[: num_reqs + 1]
-            cu_num_logits = self.input_buffers.cu_num_logits.copy_to_gpu(num_reqs + 1)
+            num_logits = num_draft_tokens + 1
+            cu_num_logits_np = np.empty(num_reqs + 1, dtype=np.int32)
+            cu_num_logits_np[0] = 0
+            np.cumsum(num_logits, out=cu_num_logits_np[1:])
+            cu_num_logits = self.tmp_cu_num_logits.copy_to_gpu(cu_num_logits_np)
+
             expanded_idx_mapping = expand_idx_mapping(
                 idx_mapping,
                 total_num_logits,
@@ -480,24 +483,26 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         block_tables = self.block_tables.gather_block_tables(idx_mapping)
 
         # Get query_start_loc.
-        np.cumsum(
-            num_scheduled_tokens,
-            out=self.input_buffers.query_start_loc.np[1 : num_reqs + 1],
-        )
+        query_start_loc_np = np.empty(self.max_num_reqs + 1, dtype=np.int32)
+        query_start_loc_np[0] = 0
+        np.cumsum(num_scheduled_tokens, out=query_start_loc_np[1 : num_reqs + 1])
         # Pad for full CUDA graph mode.
         # Some attention backends like FA3 require query_start_loc to be non-decreasing.
-        self.input_buffers.query_start_loc.np[num_reqs + 1 :] = num_tokens
-        self.input_buffers.query_start_loc.copy_to_gpu()
-        query_start_loc_gpu = self.input_buffers.query_start_loc.gpu[: num_reqs + 1]
-        query_start_loc_cpu = self.input_buffers.query_start_loc.cpu[: num_reqs + 1]
-        query_start_loc_np = self.input_buffers.query_start_loc.np[: num_reqs + 1]
+        query_start_loc_np[num_reqs + 1 :] = num_tokens
+        self.tmp_query_start_loc.copy_to_gpu(
+            query_start_loc_np,
+            out=self.input_buffers.query_start_loc,
+        )
+        query_start_loc_np = query_start_loc_np[: num_reqs + 1]
+        query_start_loc_cpu = torch.from_numpy(query_start_loc_np)
+        query_start_loc = self.input_buffers.query_start_loc[: num_reqs + 1]
 
         # Get prefill tokens.
         prepare_prefill_inputs(
             self.input_buffers.input_ids,
             self.req_states.next_prefill_tokens,
             idx_mapping,
-            query_start_loc_gpu,
+            query_start_loc,
             self.req_states.prefill_token_ids.gpu,
             self.req_states.prefill_len.gpu,
             self.req_states.num_computed_tokens.gpu,
@@ -506,7 +511,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         # Prepare positions and seq_lens.
         prepare_pos_seq_lens(
             idx_mapping,
-            query_start_loc_gpu,
+            query_start_loc,
             self.req_states.num_computed_tokens.gpu,
             self.input_buffers.positions,
             self.input_buffers.seq_lens,
@@ -519,7 +524,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             self.input_buffers.input_ids,
             idx_mapping,
             self.req_states.last_sampled_tokens,
-            query_start_loc_gpu,
+            query_start_loc,
             seq_lens,
             self.req_states.prefill_len.gpu,
             self.req_states.draft_tokens,
@@ -529,7 +534,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
         # Compute slot mappings: [num_kv_cache_groups, num_tokens]
         slot_mappings = self.block_tables.compute_slot_mappings(
-            query_start_loc_gpu, self.input_buffers.positions[:num_tokens]
+            query_start_loc, self.input_buffers.positions[:num_tokens]
         )
 
         # Get num_computed_tokens.
@@ -547,7 +552,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             attn_metadata_builders=self.attn_metadata_builders,
             num_reqs=num_reqs,
             num_tokens=num_tokens,
-            query_start_loc_gpu=query_start_loc_gpu,
+            query_start_loc_gpu=query_start_loc,
             query_start_loc_cpu=query_start_loc_cpu,
             seq_lens=self.input_buffers.seq_lens,
             seq_lens_np=seq_lens_np,
@@ -569,7 +574,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             num_tokens=num_tokens,
             num_tokens_after_padding=num_tokens_after_padding,
             num_draft_tokens=total_num_draft_tokens,
-            query_start_loc=query_start_loc_gpu,
+            query_start_loc=query_start_loc,
             query_start_loc_np=query_start_loc_np,
             seq_lens=seq_lens,
             seq_lens_np=seq_lens_np,

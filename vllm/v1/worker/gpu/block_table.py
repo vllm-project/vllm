@@ -93,7 +93,7 @@ class BlockTables:
         # block table. Implement a kernel to handle all block tables at once.
         for block_table in self.block_tables:
             block_table.apply_write()
-        self.num_blocks.copy_to_gpu()
+        self.num_blocks.copy_to_uva()
 
     def gather_block_tables(
         self,
