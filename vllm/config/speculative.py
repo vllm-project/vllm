@@ -9,7 +9,6 @@ from pydantic import Field, SkipValidation, model_validator
 from pydantic.dataclasses import dataclass
 from typing_extensions import Self
 
-import vllm.envs as envs
 from vllm.config.model import ModelConfig
 from vllm.config.parallel import ParallelConfig
 from vllm.config.utils import config
@@ -114,6 +113,11 @@ class SpeculativeConfig:
     For example, if num_speculative_tokens=5, defaults to [2, 5, 8]. The system
     will dynamically select the optimal draft length at runtime based on recent
     acceptance rates to balance compute cost vs. speculation benefit."""
+    enable_adaptive_draft_length: bool = False
+    """Enable adaptive draft length selection based on acceptance rate.
+    When enabled and draft_length_options is None, draft_length_options will be
+    auto-computed. The system will then dynamically select the optimal draft
+    length at runtime based on recent acceptance rates."""
 
     # Ngram proposer configuration
     prompt_lookup_max: int | None = Field(default=None, ge=1)
@@ -472,7 +476,7 @@ class SpeculativeConfig:
         if (
             self.draft_length_options is None
             and self.num_speculative_tokens is not None
-            and envs.VLLM_SPEC_ADAPTIVE_DRAFT_LENGTH
+            and self.enable_adaptive_draft_length
         ):
             # Adaptive draft length enabled: compute draft length options
             n = self.num_speculative_tokens
@@ -483,19 +487,6 @@ class SpeculativeConfig:
             ]
             # Remove duplicates and sort
             self.draft_length_options = sorted(set(self.draft_length_options))
-        # else: keep draft_length_options as None (fixed draft length)
-
-        # Override confidence threshold from environment if set
-        # This allows independent control of early exit
-        env_confidence = envs.VLLM_SPEC_CONFIDENCE_THRESHOLD
-        if env_confidence < 0.0 or env_confidence > 1.0:
-            raise ValueError(
-                f"VLLM_SPEC_CONFIDENCE_THRESHOLD must be in [0.0, 1.0], "
-                f"got {env_confidence}"
-            )
-        if env_confidence != 0.0:
-            # Environment variable overrides default when explicitly set
-            self.draft_confidence_threshold = env_confidence
 
         return self
 
