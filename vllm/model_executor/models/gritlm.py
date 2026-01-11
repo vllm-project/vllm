@@ -17,6 +17,7 @@ from vllm.model_executor.layers.pooler.seqwise import (
     SequencePoolerHeadOutput,
     SequencePoolingMethod,
     SequencePoolingMethodOutput,
+    pooler_for_embed,
 )
 from vllm.model_executor.layers.pooler.tokwise import pooler_for_token_embed
 from vllm.model_executor.models.llama import LlamaForCausalLM
@@ -235,6 +236,10 @@ class GritLM(LlamaForCausalLM):
             self.pooler = DispatchPooler(
                 {
                     "token_embed": pooler_for_token_embed(pooler_config),
-                    "embed": GritLMPooler(vllm_config.model_config),
+                    "embed": (
+                        GritLMPooler(vllm_config.model_config)
+                        if pooler_config.seq_pooling_type == "MEAN"
+                        else pooler_for_embed(pooler_config)
+                    ),
                 }
             )

@@ -282,9 +282,9 @@ class ModernBertModel(nn.Module):
 
 
 class ModernBertPooler(SequencePooler):
-    def __init__(self, config: ModernBertConfig):
+    def __init__(self, config: ModernBertConfig, seq_pooling_type: str):
         super().__init__(
-            pooling=get_seq_pooling_method(config.classifier_pooling.upper()),
+            pooling=get_seq_pooling_method(seq_pooling_type),
             head=self.head,
         )
 
@@ -314,7 +314,9 @@ class ModernBertForSequenceClassification(nn.Module, SupportsCrossEncoding):
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
+
         config = vllm_config.model_config.hf_config
+
         self.config = config
         self.model = ModernBertModel(
             vllm_config=vllm_config, prefix=maybe_prefix(prefix, "modernbert")
@@ -324,10 +326,17 @@ class ModernBertForSequenceClassification(nn.Module, SupportsCrossEncoding):
             config.num_labels,
             dtype=vllm_config.model_config.head_dtype,
         )
-        self.pooling = ModernBertPooler(config)
 
         pooler_config = vllm_config.model_config.pooler_config
         assert pooler_config is not None
+
+        hf_pooling_type = config.classifier_pooling.upper()
+        vllm_pooling_type = pooler_config.seq_pooling_type
+        assert hf_pooling_type == vllm_pooling_type, (
+            f"Found inconsistent sequence pooling type: {hf_pooling_type=!r} "
+            f"vs. {vllm_pooling_type=!r}"
+        )
+        self.pooling = ModernBertPooler(config, vllm_pooling_type)
 
         self.pooler = DispatchPooler.for_seq_cls(
             pooler_config,

@@ -23,7 +23,6 @@ from transformers import AutoModelForSequenceClassification
 
 from vllm.config.utils import getattr_iter
 from vllm.model_executor.layers.pooler import DispatchPooler
-from vllm.model_executor.layers.pooler.seqwise import CLSPool
 from vllm.model_executor.models.interfaces import SupportsCrossEncoding
 from vllm.model_executor.models.interfaces_base import VllmModelForPooling
 
@@ -85,8 +84,10 @@ class SequenceClassificationMixin(SupportsCrossEncoding, VllmModelForPooling):
         self.init_parameters(self.classifier, dtype=self.model_config.head_dtype)
 
         class ClassifierWithReshape(self.classifier.__class__):
-            """CLSPool has already been applied in `pooling`.
-            Add dim to match expected input shape of `classifier.forward`."""
+            """
+            Token extraction has already been applied in `pooler.pooling`.
+            Add dim to match expected input shape of `classifier.forward`.
+            """
 
             def forward(self, *args, **kwargs):
                 if len(args) > 0:
@@ -97,6 +98,5 @@ class SequenceClassificationMixin(SupportsCrossEncoding, VllmModelForPooling):
 
         self.pooler = DispatchPooler.for_seq_cls(
             pooler_config,
-            pooling=CLSPool(),
             classifier=self.classifier,
         )
