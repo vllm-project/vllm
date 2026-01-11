@@ -136,6 +136,9 @@ class Mamba2AttentionMetadata(BaseMambaAttentionMetadata):
     # Number of accepted tokens for each spec sequence (for loading correct checkpoint)
     num_accepted_tokens: torch.Tensor | None = None  # shape: [batch,]
 
+    # Number of computed tokens per request
+    num_computed_tokens: torch.Tensor | None = None  # shape: [batch,]
+
 
 class Mamba2AttentionMetadataBuilder(
     BaseMambaAttentionMetadataBuilder[Mamba2AttentionMetadata]
@@ -328,13 +331,14 @@ class Mamba2AttentionMetadataBuilder(
         block_idx_first_scheduled_token = None
         block_idx_first_scheduled_token_p = None
 
+        num_computed_tokens = common_attn_metadata.compute_num_computed_tokens()
+        # Shahar look for a different places where
+        # num_computed_tokens is used and replace it with the new one
+
         if self.vllm_config.cache_config.enable_prefix_caching:
             # Return a tensor of shape (#requests, #max blocks)
             # Additional cache-related varaiables:
             mamba_block_size = self.kv_cache_spec.block_size
-            num_computed_tokens = common_attn_metadata.num_computed_tokens_cpu.to(
-                self.device
-            )
             (
                 block_idx_last_computed_token,
                 block_idx_first_scheduled_token,
@@ -771,6 +775,7 @@ class Mamba2AttentionMetadataBuilder(
             spec_token_indx=spec_token_indx,
             non_spec_token_indx=non_spec_token_indx,
             num_accepted_tokens=num_accepted_tokens_filtered,
+            num_computed_tokens=num_computed_tokens,
         )
 
         return attn_metadata
@@ -841,11 +846,18 @@ class Mamba2AttentionMetadataBuilder(
 
         if new_metadata.num_prefills == 0:  # decode only batch
             if prefix_caching:
-                raise NotImplementedError(
-                    "enable_prefix_caching is temporarily disabled. "
-                    " When enabled, find a non deprecated way to get "
-                    "num_computed_tokens_cpu"
+                num_computed_tokens = new_metadata.num_computed_tokens
+                num_cacheable_blocks = (
+                    num_computed_tokens // self.kv_cache_spec.block_size
                 )
+                block_indices = num_cacheable_blocks.unsqueeze(1) + torch.arange(
+                    self.num_spec + 1, device=self.device
+                ).unsqueeze(0)
+                batch_indices = torch.arange(
+                    blk_table.size(0),
+                    device=self.device,
+                ).unsqueeze(1)
+                spec_state_indices_tensor = blk_table[batch_indices, block_indices]
             else:
                 spec_state_indices_tensor = blk_table[:, : self.num_spec + 1]
 
