@@ -73,7 +73,7 @@ def select_fp8_moe_backend(
     if (
         current_platform.is_cuda()
         and (
-            current_platform.is_device_capability_family(100)
+            current_platform.is_blackwell_class()
             or current_platform.is_device_capability(90)
         )
         and envs.VLLM_USE_FLASHINFER_MOE_FP8
@@ -91,7 +91,7 @@ def select_fp8_moe_backend(
                 )
             return Fp8MoeBackend.FLASHINFER_TRTLLM
         else:
-            if block_quant and current_platform.is_device_capability_family(100):
+            if block_quant and current_platform.is_blackwell_class():
                 raise ValueError(
                     "FlashInfer FP8 MoE throughput backend does not "
                     "support block quantization on SM100. Please use "

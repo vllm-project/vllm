@@ -273,14 +273,19 @@ def has_nvidia_artifactory() -> bool:
 @functools.cache
 def supports_trtllm_attention() -> bool:
     """
-    TRTLLM attention is supported if the platform is SM100,
+    TRTLLM attention is supported if the platform is SM100/SM103,
     NVIDIA artifactory is accessible, and batch-invariant mode is not enabled.
+
+    Note: TRTLLM attention kernels are NOT supported on SM12x (GB10).
+    FlashInfer's benchmark matrix confirms trtllm-native is only available
+    for SM10.0/10.3 (B200/GB200), not SM12.0/12.1 (GB10). SM12x devices should
+    fall back to other attention backends (FA2, cuDNN, etc.).
     """
     # Batch-invariant mode disables TRTLLM attention
     if vllm_is_batch_invariant():
         return False
 
-    # Requires SM100 and NVIDIA artifactory to be accessible to download cubins
+    # Requires SM100/SM103 only (NOT SM12x) and NVIDIA artifactory for cubins
     return (
         current_platform.is_device_capability_family(100) and has_nvidia_artifactory()
     )

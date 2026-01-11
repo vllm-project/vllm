@@ -934,7 +934,7 @@ def enable_batch_invariant_mode():
     _batch_invariant_LIB = torch.library.Library("aten", "IMPL")
 
     if (
-        current_platform.is_device_capability_family(100)
+        current_platform.is_blackwell_class()
         or current_platform.is_device_capability(80)
         or current_platform.is_device_capability(89)
     ):
