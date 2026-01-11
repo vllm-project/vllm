@@ -746,8 +746,16 @@ class SyncMPClient(MPClient):
     def _send_input(self, request_type: EngineCoreRequestType, request: Any):
         self.ensure_alive()
         self.free_pending_messages()
+
+        # Set request context if this is an ADD request with a request_id
+        if request_type == EngineCoreRequestType.ADD and hasattr(request, "request_id"):
+            self.encoder.set_request_context(request.request_id)
+
         # (Identity, RequestType, SerializedRequest)
         msg = (self.core_engine, request_type.value, *self.encoder.encode(request))
+
+        # Clear request context after encoding
+        self.encoder.set_request_context(None)
 
         if len(msg) <= 3:
             # No auxiliary buffers => no tensor backing buffers in request.
@@ -932,7 +940,15 @@ class AsyncMPClient(MPClient):
         engine_index = int.from_bytes(engine, "little")
         self.encoder.set_target_engine(engine_index)
 
+        # Set request context if this is an ADD request with a request_id
+        if request_type == EngineCoreRequestType.ADD and hasattr(request, "request_id"):
+            self.encoder.set_request_context(request.request_id)
+
         message = (request_type.value, *self.encoder.encode(request))
+
+        # Clear request context after encoding
+        self.encoder.set_request_context(None)
+
         return self._send_input_message(message, engine, request)
 
     def _send_input_message(

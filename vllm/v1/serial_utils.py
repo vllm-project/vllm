@@ -47,10 +47,11 @@ class TensorIpcData:
     """
     Data sent via torch.multiprocessing.Queue for zero-copy IPC.
 
-    Contains the tensor_id and the actual tensor. The tensor is shared
+    Contains the request_id, tensor_id and the actual tensor. The tensor is shared
     in memory (GPU or CPU) for efficient inter-process communication.
     """
 
+    request_id: str | None
     tensor_id: str
     tensor: torch.Tensor
 
@@ -66,6 +67,7 @@ class TensorIpcHandle:
     as TensorIpcData. Works for both CUDA and CPU tensors.
     """
 
+    request_id: str | None
     tensor_id: str
     shape: list[int]
     dtype: str
@@ -178,12 +180,18 @@ class MsgpackEncoder:
         self.target_engine_index: int | None = None
         # Counter for generating unique tensor IDs
         self._tensor_id_counter = 0
+        # Current request ID being encoded (for associating tensors with requests)
+        self._current_request_id: str | None = None
         if envs.VLLM_ALLOW_INSECURE_SERIALIZATION:
             _log_insecure_serialization_warning()
 
     def set_target_engine(self, engine_index: int | None) -> None:
         """Set the target engine index for routing multimodal tensors to IPC queues."""
         self.target_engine_index = engine_index
+
+    def set_request_context(self, request_id: str | None) -> None:
+        """Set the current request ID being encoded (for tensor association)."""
+        self._current_request_id = request_id
 
     def encode(self, obj: Any) -> Sequence[bytestr]:
         try:
@@ -287,7 +295,7 @@ class MsgpackEncoder:
         ):
             # Send tensor via torch.multiprocessing.Queue for zero-copy IPC
             # This works for both CUDA and CPU tensors
-            # Generate unique tensor ID
+            # Generate unique tensor ID (without request ID embedded)
             tensor_id = f"{id(self)}_{self._tensor_id_counter}"
             self._tensor_id_counter += 1
 
@@ -297,22 +305,27 @@ class MsgpackEncoder:
                 if not obj.is_shared():
                     obj = obj.share_memory_()
 
-                # Put TensorIpcData (tensor_id + tensor) into the target engine's queue
                 target_queue = self.tensor_queues[self.target_engine_index]
-                ipc_data = TensorIpcData(tensor_id=tensor_id, tensor=obj)
+                ipc_data = TensorIpcData(
+                    request_id=self._current_request_id,
+                    tensor_id=tensor_id,
+                    tensor=obj,
+                )
                 # Use a timeout to avoid blocking indefinitely
                 target_queue.put(ipc_data, timeout=10.0)
 
                 logger.debug(
-                    "Sent tensor %s (shape=%s, device=%s) to engine %d "
+                    "Sent tensor %s for request %s (shape=%s, device=%s) to engine %d "
                     "via IPC queue (shared memory)",
                     tensor_id,
+                    self._current_request_id,
                     obj.shape,
                     obj.device,
                     self.target_engine_index,
                 )
 
                 return TensorIpcHandle(
+                    request_id=self._current_request_id,
                     tensor_id=tensor_id,
                     shape=list(obj.shape),
                     dtype=str(obj.dtype).removeprefix("torch."),
@@ -417,8 +430,10 @@ class MsgpackDecoder:
         # Tensor IPC queue for receiving multimodal tensors from API servers
         self.tensor_queue = tensor_queue
         # Buffer for temporarily storing tensors retrieved from queue
-        # that don't match the current request
-        self._tensor_buffer: dict[str, torch.Tensor] = {}
+        # Keys are tuples: (request_id, tensor_id) or (None, tensor_id) for legacy
+        self._tensor_buffer: dict[tuple[str | None, str], torch.Tensor] = {}
+        # Mapping from request_id to list of tensor keys for cleanup
+        self._request_to_tensors: dict[str, list[tuple[str | None, str]]] = {}
         if envs.VLLM_ALLOW_INSECURE_SERIALIZATION:
             _log_insecure_serialization_warning()
 
@@ -516,13 +531,40 @@ class MsgpackDecoder:
         Works for CUDA and CPU.
         """
 
+        # Create lookup key from handle
+        lookup_key = (handle.request_id, handle.tensor_id)
+
         # Drain all available tensors. We save them regardless if this is the one
         # we're waiting for as they may arrive out of order from multiple producers.
-        while handle.tensor_id not in self._tensor_buffer:
+        while lookup_key not in self._tensor_buffer:
             ipc_data: TensorIpcData = self.tensor_queue.get(timeout=10.0)
-            self._tensor_buffer[ipc_data.tensor_id] = ipc_data.tensor
 
-        tensor = self._tensor_buffer.pop(handle.tensor_id)
+            # Store tensor with tuple key (request_id, tensor_id)
+            tensor_key = (ipc_data.request_id, ipc_data.tensor_id)
+            self._tensor_buffer[tensor_key] = ipc_data.tensor
+
+            # Track which request this tensor belongs to for cleanup
+            if ipc_data.request_id is not None:
+                if ipc_data.request_id not in self._request_to_tensors:
+                    self._request_to_tensors[ipc_data.request_id] = []
+                self._request_to_tensors[ipc_data.request_id].append(tensor_key)
+
+        # Retrieve and remove tensor from buffer
+        tensor = self._tensor_buffer.pop(lookup_key)
+
+        # Remove from request tracking when consumed
+        if (
+            handle.request_id is not None
+            and handle.request_id in self._request_to_tensors
+        ):
+            try:
+                self._request_to_tensors[handle.request_id].remove(lookup_key)
+                if not self._request_to_tensors[handle.request_id]:
+                    del self._request_to_tensors[handle.request_id]
+            except ValueError:
+                # Tensor was already removed, ignore
+                pass
+
         return tensor
 
     def _decode_mm_items(self, obj: dict[str, Any]) -> MultiModalKwargsItems:
@@ -572,6 +614,7 @@ class MsgpackDecoder:
             and "device" in obj
         ):
             # Convert dict to TensorIpcHandle and decode it
+            # Handle both new format (with request_id) and old format (without)
             handle = TensorIpcHandle(**obj)
             return self._decode_cuda_queue_tensor(handle)
         if not isinstance(obj, list):
@@ -585,6 +628,36 @@ class MsgpackDecoder:
         if obj and not isinstance(obj[0], (list, tuple)):
             return slice(*obj)
         return [self._decode_nested_slices(x) for x in obj]
+
+    def cleanup_request_tensors(self, request_id: str) -> int:
+        """Remove all orphaned tensors associated with a request.
+
+        This should be called when a request is aborted, times out, or fails
+        to ensure tensors in the buffer don't accumulate indefinitely.
+
+        Args:
+            request_id: The request ID whose tensors should be cleaned up.
+
+        Returns:
+            The number of tensors that were removed from the buffer.
+        """
+        if request_id not in self._request_to_tensors:
+            return 0
+
+        tensor_keys = self._request_to_tensors.pop(request_id)
+        removed_count = 0
+
+        for tensor_key in tensor_keys:
+            if tensor_key in self._tensor_buffer:
+                del self._tensor_buffer[tensor_key]
+                removed_count += 1
+                logger.debug(
+                    "Cleaned up orphaned tensor %s for request %s",
+                    tensor_key[1],  # Just log the tensor_id part
+                    request_id,
+                )
+
+        return removed_count
 
     def ext_hook(self, code: int, data: memoryview) -> Any:
         if code == CUSTOM_TYPE_RAW_VIEW:

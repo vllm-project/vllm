@@ -660,6 +660,9 @@ class EngineCoreProc(EngineCore):
         identity = self.engine_index.to_bytes(length=2, byteorder="little")
         self.engines_running = False
 
+        # Decoder for cleanup (set by process_input_sockets thread)
+        self.tensor_decoder: MsgpackDecoder | None = None
+
         with self._perform_handshakes(
             handshake_address,
             identity,
@@ -1024,6 +1027,16 @@ class EngineCoreProc(EngineCore):
 
         return model_executed
 
+    def abort_requests(self, request_ids: list[str]):
+        """Abort requests and cleanup any orphaned tensors."""
+        # First, abort the requests in the scheduler
+        super().abort_requests(request_ids)
+
+        # Then cleanup any orphaned tensors for these requests
+        if self.tensor_decoder is not None:
+            for request_id in request_ids:
+                self.tensor_decoder.cleanup_request_tensors(request_id)
+
     def _handle_client_request(
         self, request_type: EngineCoreRequestType, request: Any
     ) -> None:
@@ -1101,6 +1114,9 @@ class EngineCoreProc(EngineCore):
             EngineCoreRequest, tensor_queue=self.tensor_queue
         )
         generic_decoder = MsgpackDecoder(tensor_queue=self.tensor_queue)
+
+        # Store decoder reference for tensor cleanup on abort
+        self.tensor_decoder = add_request_decoder
 
         with ExitStack() as stack, zmq.Context() as ctx:
             input_sockets = [
