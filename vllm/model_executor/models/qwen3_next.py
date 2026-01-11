@@ -561,7 +561,7 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
         block_idx_last_scheduled_token_p: torch.Tensor | None = None
         if prefix_caching_enabled:
             state_indices_tensor_d, state_indices_tensor_p = torch.split(
-                state_indices_tensor[:num_actual_tokens],
+                state_indices_tensor,
                 [num_decodes, num_prefills],
                 dim=0,
             )
@@ -664,7 +664,7 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
             assert non_spec_query_start_loc is not None
             mixed_qkv_non_spec_T = mixed_qkv_non_spec.transpose(0, 1)
             # - "cache_indices" updates the conv_state cache in positions
-            #   pointed to by "states_indices_tensor"
+            #   pointed to by "state_indices_tensor"
             mixed_qkv_non_spec = causal_conv1d_fn(
                 mixed_qkv_non_spec_T,
                 conv_weights,
@@ -856,12 +856,13 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
             )
 
             # For decode sequences (if any), copy their existing state from ssm_state
-            if num_decodes > 0 and state_indices_decode is not None:
+            if num_decodes > 0:
+                assert ssm_state_indices_decode is not None
                 valid_decode_positions = torch.nonzero(
-                    state_indices_decode >= 0, as_tuple=False
+                    ssm_state_indices_decode >= 0, as_tuple=False
                 ).squeeze(-1)
                 if valid_decode_positions.numel() > 0:
-                    decode_state_indices = state_indices_decode.index_select(
+                    decode_state_indices = ssm_state_indices_decode.index_select(
                         0, valid_decode_positions
                     ).to(device=ssm_state.device, dtype=torch.long)
                     decode_states = ssm_state.index_select(0, decode_state_indices)
