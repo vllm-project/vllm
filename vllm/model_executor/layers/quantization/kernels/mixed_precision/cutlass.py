@@ -25,17 +25,27 @@ class CutlassW4A8LinearKernel(MPLinearKernel):
         self.quant_fp8 = QuantFP8(static=False, group_shape=GroupShape.PER_TOKEN)
 
     @classmethod
-    def get_min_capability(cls) -> int:
-        return 90
+    def is_supported(
+        cls, compute_capability: int | None = None
+    ) -> tuple[bool, str | None]:
+        if not current_platform.is_cuda():
+            return False, "requires CUDA"
+
+        if compute_capability is None:
+            _cc = current_platform.get_device_capability()
+            if _cc is not None:
+                compute_capability = _cc.major * 10 + _cc.minor
+
+        if compute_capability is not None and compute_capability != 90:
+            return (
+                False,
+                f"requires capability == 90, got {compute_capability}",
+            )
+
+        return True, None
 
     @classmethod
     def can_implement(cls, c: MPLinearLayerConfig) -> tuple[bool, str | None]:
-        if not current_platform.is_cuda():
-            return False, "CUTLASS only supported on CUDA"
-
-        if not current_platform.is_device_capability(90):
-            return False, "CUTLASS W4A8 requires compute capability of 90 (Hopper)"
-
         if c.act_type != torch.float8_e4m3fn:
             return False, "CUTLASS W4A8 only supports FP8 (e4m3) activations"
 

@@ -21,17 +21,15 @@ class ExllamaLinearKernel(MPLinearKernel):
     # currently untested so not added to the list
 
     @classmethod
-    def get_min_capability(cls) -> int:
-        return 60
+    def is_supported(
+        cls, compute_capability: int | None = None
+    ) -> tuple[bool, str | None]:
+        if not current_platform.is_cuda_alike():
+            return False, "requires ROCm or CUDA"
+        return True, None
 
     @classmethod
     def can_implement(cls, c: MPLinearLayerConfig) -> tuple[bool, str | None]:
-        if not current_platform.is_cuda_alike():
-            return (
-                False,
-                "Exllama is only supported on CUDA and ROCm",
-            )
-
         if c.has_g_idx and c.partition_weight_shape[0] != c.full_weight_shape[0]:
             return (
                 False,

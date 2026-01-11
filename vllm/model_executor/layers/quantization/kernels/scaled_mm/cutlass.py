@@ -20,13 +20,14 @@ class CutlassScaledMMLinearKernel(ScaledMMLinearKernel):
         cls, compute_capability: int | None = None
     ) -> tuple[bool, str | None]:
         if not current_platform.is_cuda():
-            return False, "Requires CUDA."
+            return False, "requires CUDA"
+
         if compute_capability is None:
             _cc = current_platform.get_device_capability()
             if _cc is not None:
                 compute_capability = _cc.major * 10 + _cc.minor
         if compute_capability is not None and compute_capability < 75:
-            return False, f"requires capability 75, got {compute_capability}"
+            return False, f"requires capability >= 75, got {compute_capability}"
         return True, None
 
     @classmethod

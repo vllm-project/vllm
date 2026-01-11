@@ -11,14 +11,15 @@ from .MPLinearKernel import MPLinearKernel, MPLinearLayerConfig
 
 class XPUwNa16LinearKernel(MPLinearKernel):
     @classmethod
-    def get_min_capability(cls) -> int:
-        return 0
+    def is_supported(
+        cls, compute_capability: int | None = None
+    ) -> tuple[bool, str | None]:
+        if not current_platform.is_xpu():
+            return False, "requires XPU/CPU devices"
+        return True, None
 
     @classmethod
     def can_implement(cls, c: MPLinearLayerConfig) -> tuple[bool, str | None]:
-        if not current_platform.is_xpu():
-            return False, "IPEX wNa16 only supported on XPU/CPU devices"
-
         # TODO: (yiliu30) relax these restrictions in later PRs
         if c.zero_points:
             return False, "Zero points not supported for Now"
