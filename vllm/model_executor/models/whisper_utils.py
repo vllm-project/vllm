@@ -16,10 +16,10 @@ from vllm.v1.attention.backend import (
     AttentionBackend,
     AttentionMetadata,
     AttentionType,
+    CommonAttentionMetadata,
 )
 from vllm.v1.attention.backends.flash_attn import FlashAttentionBackend
 from vllm.v1.attention.backends.utils import (
-    CommonAttentionMetadata,
     subclass_attention_backend_with_overrides,
 )
 from vllm.v1.attention.selector import get_attn_backend

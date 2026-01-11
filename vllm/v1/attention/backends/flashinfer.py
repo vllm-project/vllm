@@ -43,14 +43,14 @@ from vllm.utils.platform_utils import is_pin_memory_available
 from vllm.utils.torch_utils import is_strictly_contiguous
 from vllm.v1.attention.backend import (
     AttentionBackend,
+    AttentionCGSupport,
     AttentionImpl,
+    AttentionMetadataBuilder,
     AttentionType,
+    CommonAttentionMetadata,
     MultipleOf,
 )
 from vllm.v1.attention.backends.utils import (
-    AttentionCGSupport,
-    AttentionMetadataBuilder,
-    CommonAttentionMetadata,
     KVCacheLayoutType,
     get_dcp_local_seq_lens,
     get_kv_cache_layout,
