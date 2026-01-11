@@ -242,33 +242,49 @@ class Qwen3MoeLLMModel(Qwen3MoeModel):
                     if is_pp_missing_parameter(name_mapped, self):
                         continue
                     if is_fused_expert:
-                        loaded_weight = loaded_weight.transpose(-1, -2)  # no bias
-                        if "experts.gate_up_proj" in name:
-                            loaded_weight = loaded_weight.chunk(2, dim=-2)
-                            success_w1 = self.load_fused_expert_weights(
-                                name_mapped,
-                                params_dict,
-                                loaded_weight[0],
-                                "w1",
-                                num_experts,
-                            )
-                            success_w3 = self.load_fused_expert_weights(
-                                name_mapped,
-                                params_dict,
-                                loaded_weight[1],
-                                "w3",
-                                num_experts,
-                            )
-                            success = success_w1 and success_w3
+                        # Check if this is a BNB quantized weight
+                        param = params_dict.get(name_mapped)
+                        is_bnb_quantized = (
+                            param is not None
+                            and getattr(param, "use_bitsandbytes_4bit", False)
+                        )
+
+                        if is_bnb_quantized:
+                            # BNB loader already quantized and properly shaped
+                            # the 3D MoE weights. Just copy directly.
+                            # The weight shape is [num_experts, quantized_size, 1]
+                            param.data.copy_(loaded_weight)
+                            success = True
                         else:
-                            # down_proj
-                            success = self.load_fused_expert_weights(
-                                name_mapped,
-                                params_dict,
-                                loaded_weight,
-                                shard_id,
-                                num_experts,
-                            )
+                            # Non-BNB path: transpose and chunk as before
+                            loaded_weight = loaded_weight.transpose(-1, -2)  # no bias
+                            if "experts.gate_up_proj" in name:
+                                loaded_weight = loaded_weight.chunk(2, dim=-2)
+                                success_w1 = self.load_fused_expert_weights(
+                                    name_mapped,
+                                    params_dict,
+                                    loaded_weight[0],
+                                    "w1",
+                                    num_experts,
+                                )
+                                success_w3 = self.load_fused_expert_weights(
+                                    name_mapped,
+                                    params_dict,
+                                    loaded_weight[1],
+                                    "w3",
+                                    num_experts,
+                                )
+                                success = success_w1 and success_w3
+                            else:
+                                # down_proj
+                                success = self.load_fused_expert_weights(
+                                    name_mapped,
+                                    params_dict,
+                                    loaded_weight,
+                                    shard_id,
+                                    num_experts,
+                                )
+
                     else:
                         # Skip loading extra parameters for GPTQ/modelopt models
                         if (
