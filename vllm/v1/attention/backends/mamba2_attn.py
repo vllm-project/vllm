@@ -112,7 +112,7 @@ class Mamba2AttentionMetadata(BaseMambaAttentionMetadata):
     # last_chunk_indices_p is a tensor of shape (batch,) that contains the
     # index of the last chunk for every sequence in the (prefill) batch.
     last_chunk_indices_p: torch.Tensor | None = None
-    
+
     # Speculative decoding support
     num_spec_decodes: int = 0
     num_spec_decode_tokens: int = 0
@@ -136,6 +136,7 @@ class Mamba2AttentionMetadata(BaseMambaAttentionMetadata):
     # Number of accepted tokens for each spec sequence (for loading correct checkpoint)
     num_accepted_tokens: torch.Tensor | None = None  # shape: [batch,]
 
+
 class Mamba2AttentionMetadataBuilder(
     BaseMambaAttentionMetadataBuilder[Mamba2AttentionMetadata]
 ):
@@ -154,7 +155,7 @@ class Mamba2AttentionMetadataBuilder(
             "chunk_size needs to be set in the model config for Mamba2 models"
         )
         self.chunk_size: int = chunk_size
-        
+
         self.speculative_config = vllm_config.speculative_config
         self.num_spec: int = 0
         if (
@@ -169,13 +170,15 @@ class Mamba2AttentionMetadataBuilder(
         if self.use_spec_decode:
             # TODO smor- a lot of code duplication here, should be refactored,
             # depends on if we want to support spec decode only here on base class
-            self.decode_cudagraph_max_bs = self.vllm_config.scheduler_config.max_num_seqs * (self.num_spec + 1)
+            self.decode_cudagraph_max_bs = (
+                self.vllm_config.scheduler_config.max_num_seqs * (self.num_spec + 1)
+            )
             if self.compilation_config.max_cudagraph_capture_size is not None:
                 self.decode_cudagraph_max_bs = min(
                     self.decode_cudagraph_max_bs,
                     self.compilation_config.max_cudagraph_capture_size,
                 )
-            
+
             self.block_idx_last_scheduled_token = torch.empty(
                 (self.decode_cudagraph_max_bs,),
                 dtype=torch.int32,
@@ -186,7 +189,7 @@ class Mamba2AttentionMetadataBuilder(
                 dtype=torch.int32,
                 device=device,
             )
-            
+
             # Spec decode state indices: [batch, num_spec+1]
             self.spec_state_indices_tensor_buffer = torch.empty(
                 (self.decode_cudagraph_max_bs, self.num_spec + 1),
@@ -233,12 +236,12 @@ class Mamba2AttentionMetadataBuilder(
                 dtype=torch.int32,
                 device=device,
             )
-        
+
     def stable_boolean_sort(self, mask: torch.Tensor):
         idx = torch.arange(mask.numel(), device=mask.device)
         key = mask.to(torch.int32) * (mask.numel() + 1) + idx
         return torch.argsort(key, stable=True)
-    
+
     def _compute_chunk_metadata(
         self,
         num_prefills: int,
@@ -771,7 +774,7 @@ class Mamba2AttentionMetadataBuilder(
         )
 
         return attn_metadata
-    
+
     def build_for_cudagraph_capture(
         self, common_attn_metadata: CommonAttentionMetadata
     ) -> Mamba2AttentionMetadata:
@@ -811,55 +814,63 @@ class Mamba2AttentionMetadataBuilder(
         prefix_caching = self.vllm_config.cache_config.enable_prefix_caching
         num_reqs = blk_table.shape[0]
         non_spec_state_indices_tensor = blk_table if prefix_caching else blk_table[:, 0]
-        
+
         if (
             metadata.num_prefills == 0
             and num_reqs <= self.decode_cudagraph_max_bs
             and self.compilation_config.cudagraph_mode.has_full_cudagraphs()
         ):
-            if self.use_spec_decode:
-                raise NotImplementedError("update_block_table not implemented for full CUDA graphs with spec decode")
-            else:
-                persistent_state_indices_t = self.state_indices_tensor[:num_reqs]
-                persistent_state_indices_t.copy_(non_spec_state_indices_tensor, non_blocking=True)
-                non_spec_state_indices_tensor = persistent_state_indices_t
-        
+            assert self.use_spec_decode is False, (
+                "Mamba2AttentionBackend metadata caching isn't supported for "
+                "full CUDA graphs with spec decode"
+            )
+
+            persistent_state_indices_t = self.state_indices_tensor[:num_reqs]
+            persistent_state_indices_t.copy_(
+                non_spec_state_indices_tensor, non_blocking=True
+            )
+            non_spec_state_indices_tensor = persistent_state_indices_t
+
         if spec_sequence_masks is None:
             new_metadata.non_spec_state_indices_tensor = non_spec_state_indices_tensor
-            new_metadata.state_indices_tensor = new_metadata.non_spec_state_indices_tensor
-            
+            new_metadata.state_indices_tensor = (
+                new_metadata.non_spec_state_indices_tensor
+            )
+
             return new_metadata
-        
-        if new_metadata.num_prefills == 0:
+
+        if new_metadata.num_prefills == 0:  # decode only batch
             if prefix_caching:
-                raise NotImplementedError("enable_prefix_caching is temporarily disabled. "
-                                          " When enabled, find a non deprecated way to get num_computed_tokens_cpu")
-                num_cacheable_blocks = num_computed_tokens // mamba_block_size
-                block_indices = num_cacheable_blocks.unsqueeze(1) + torch.arange(
-                    self.num_spec + 1, device=self.device
-                ).unsqueeze(0)
-                batch_indices = torch.arange(
-                    blk_table.size(0),
-                    device=self.device,
-                ).unsqueeze(1)
-                spec_state_indices_tensor = blk_table[batch_indices, block_indices]
+                raise NotImplementedError(
+                    "enable_prefix_caching is temporarily disabled. "
+                    " When enabled, find a non deprecated way to get "
+                    "num_computed_tokens_cpu"
+                )
             else:
                 spec_state_indices_tensor = blk_table[:, : self.num_spec + 1]
-            
+
             new_metadata.spec_state_indices_tensor = spec_state_indices_tensor
-        else:
+        else:  # mixed batch
             if prefix_caching:
-                raise NotImplementedError("enable_prefix_caching is temporarily disabled. "
-                                          " When enabled, find a non deprecated way to get num_computed_tokens_cpu")
+                raise NotImplementedError(
+                    "enable_prefix_caching is temporarily disabled. "
+                    " When enabled, find a non deprecated way to get "
+                    "num_computed_tokens_cpu"
+                )
             else:
                 if prefix_caching:
-                    raise NotImplementedError("enable_prefix_caching is temporarily disabled. "
-                                          " When enabled, find a non deprecated way to get num_computed_tokens_cpu")
+                    raise NotImplementedError(
+                        "enable_prefix_caching is temporarily disabled. "
+                        " When enabled, find a non deprecated way to get "
+                        "num_computed_tokens_cpu"
+                    )
                 else:
-                    spec_state_indices_tensor = blk_table[spec_sequence_masks, : self.num_spec + 1]
+                    spec_state_indices_tensor = blk_table[
+                        spec_sequence_masks, : self.num_spec + 1
+                    ]
                     non_spec_state_indices_tensor = blk_table[~spec_sequence_masks, 0]
-            
+
             new_metadata.spec_state_indices_tensor = spec_state_indices_tensor
             new_metadata.non_spec_state_indices_tensor = non_spec_state_indices_tensor
-        
+
         return new_metadata
