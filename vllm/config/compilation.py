@@ -278,7 +278,11 @@ class DynamicShapesConfig:
     artifacts also.
     When type is backed, aot_compile must be disabled for this mode to work.
     until this change picked up https://github.com/pytorch/pytorch/pull/169239.
+    """
 
+    assume_32_bit_indexing: bool = True
+    """
+    whether all tensor sizes can use 32 bit indexing.
     """
 
     def compute_hash(self) -> str:
@@ -640,6 +644,7 @@ class CompilationConfig:
             "compilation_time",
             "static_forward_context",
             "pass_config",  # handled separately below
+            "dynamic_shapes_config",  # handled separately below
         }
 
         from vllm.config.utils import get_hash_factors, hash_factors
@@ -647,6 +652,7 @@ class CompilationConfig:
         factors = get_hash_factors(self, ignored_factors)
 
         factors["pass_config"] = self.pass_config.compute_hash()
+        factors["dynamic_shapes_config"] = self.dynamic_shapes_config.compute_hash()
         return hash_factors(factors)
 
     def __repr__(self) -> str:
