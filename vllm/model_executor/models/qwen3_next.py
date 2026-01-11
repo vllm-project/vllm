@@ -590,31 +590,19 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
                 assert block_idx_last_scheduled_token_d is not None
                 # Get the state indices for the cached ssm state and last
                 # scheduled state
-                state_indices_decode = (
-                    state_indices_tensor_d.gather(
-                        1, block_idx_last_scheduled_token_d.unsqueeze(1)
-                    )
-                    .squeeze(1)
-                    .contiguous()
-                )
-                ssm_state_indices_decode = (
-                    state_indices_tensor_d.gather(
-                        1, block_idx_last_computed_token_d.unsqueeze(1)
-                    )
-                    .squeeze(1)
-                    .contiguous()
-                )
+                state_indices_decode = state_indices_tensor_d.gather(
+                    1, block_idx_last_scheduled_token_d.unsqueeze(1)
+                ).squeeze(1)
+                ssm_state_indices_decode = state_indices_tensor_d.gather(
+                    1, block_idx_last_computed_token_d.unsqueeze(1)
+                ).squeeze(1)
 
             if num_prefills > 0:
                 assert state_indices_tensor_p is not None
                 assert block_idx_last_scheduled_token_p is not None
-                state_indices_prefill = (
-                    state_indices_tensor_p.gather(
-                        1, block_idx_last_scheduled_token_p.unsqueeze(1)
-                    )
-                    .squeeze(1)
-                    .contiguous()
-                )
+                state_indices_prefill = state_indices_tensor_p.gather(
+                    1, block_idx_last_scheduled_token_p.unsqueeze(1)
+                ).squeeze(1)
         elif non_spec_state_indices_tensor is not None:
             # Otherwise we get the previous state indices
             state_indices_decode = non_spec_state_indices_tensor[:num_decodes]
@@ -982,6 +970,9 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
                     decode_states = torch.where(
                         valid_decode_slots_broadcast, decode_states, prior_state
                     )
+                    ssm_state.index_copy_(
+                        0, dest_slots, decode_states.to(ssm_state.dtype)
+                    )
                 else:
                     # Without APC we can save directly, but validate indices
                     # are in bounds
@@ -1001,11 +992,6 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
                                 state_indices_decode[valid_positions],
                                 decode_states[valid_positions].to(ssm_state.dtype),
                             )
-                    # Without APC we can save directly
-                    dest_slots = state_indices_decode.to(
-                        device=ssm_state.device, dtype=torch.long
-                    )
-                ssm_state.index_copy_(0, dest_slots, decode_states.to(ssm_state.dtype))
 
             if prefix_caching_enabled:
                 # Write intermediate states (one per block) to the ssm state as well
