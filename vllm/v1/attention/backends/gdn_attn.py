@@ -38,13 +38,6 @@ class GDNAttentionMetadata:
     num_spec_decode_tokens: int
     num_actual_tokens: int
 
-    # When APC is enabled, the state_indices_tensor is the mapping from logical
-    # block indices to the state indices used to extract the (ssm, conv) state.
-    # When prefix caching is enabled: shape [batch, max_num_blocks]
-    # When APC is disabled, state_indices_tensor is unused and logic is driven by the
-    # spec/non_spec_state_indices_tensor
-    state_indices_tensor: torch.Tensor
-
     has_initial_state: torch.Tensor | None = None
     block_size: int | None = None
     chunk_size: int | None = None
@@ -63,6 +56,13 @@ class GDNAttentionMetadata:
     non_spec_token_indx: torch.Tensor | None = None
 
     num_accepted_tokens: torch.Tensor | None = None  # shape: [batch,]
+
+    # When APC is enabled, the state_indices_tensor is the mapping from logical
+    # block indices to the state indices used to extract the (ssm, conv) state.
+    # When prefix caching is enabled: shape [batch, max_num_blocks]
+    # When APC is disabled, state_indices_tensor is None and unused and logic is
+    # driven by the spec/non_spec_state_indices_tensor
+    state_indices_tensor: torch.Tensor | None = None
 
     # The following tensors are only used for prefix caching and are None if disabled
     # E.g., for a request i with cached state we can think of the corresponding
