@@ -453,7 +453,6 @@ async def create_messages(request: AnthropicMessagesRequest, raw_request: Reques
     try:
         generator = await handler.create_messages(request, raw_request)
     except Exception as e:
-        logger.exception("Error in create_messages: %s", e)
         return JSONResponse(
             status_code=HTTPStatus.INTERNAL_SERVER_ERROR.value,
             content=AnthropicErrorResponse(
@@ -902,6 +901,8 @@ def build_app(args: Namespace) -> FastAPI:
 
     @app.exception_handler(HTTPException)
     async def http_exception_handler(_: Request, exc: HTTPException):
+        if app.state.args.log_error_stack:
+            logger.exception("HTTPException caught")
         err = ErrorResponse(
             error=ErrorInfo(
                 message=sanitize_message(exc.detail),
@@ -913,6 +914,9 @@ def build_app(args: Namespace) -> FastAPI:
 
     @app.exception_handler(RequestValidationError)
     async def validation_exception_handler(_: Request, exc: RequestValidationError):
+        if app.state.args.log_error_stack:
+            logger.exception("RequestValidationError caught")
+
         param = None
         for error in exc.errors():
             if "ctx" in error and "error" in error["ctx"]:
@@ -1068,7 +1072,6 @@ async def init_app_state(
             enable_prompt_tokens_details=args.enable_prompt_tokens_details,
             enable_force_include_usage=args.enable_force_include_usage,
             enable_log_outputs=args.enable_log_outputs,
-            log_error_stack=args.log_error_stack,
         )
         if "generate" in supported_tasks
         else None
@@ -1092,7 +1095,6 @@ async def init_app_state(
             enable_force_include_usage=args.enable_force_include_usage,
             enable_log_outputs=args.enable_log_outputs,
             enable_log_deltas=args.enable_log_deltas,
-            log_error_stack=args.log_error_stack,
         )
         if "generate" in supported_tasks
         else None
@@ -1108,7 +1110,6 @@ async def init_app_state(
             return_tokens_as_token_ids=args.return_tokens_as_token_ids,
             enable_prompt_tokens_details=args.enable_prompt_tokens_details,
             enable_force_include_usage=args.enable_force_include_usage,
-            log_error_stack=args.log_error_stack,
         )
         if "generate" in supported_tasks
         else None
@@ -1123,7 +1124,6 @@ async def init_app_state(
                 chat_template=resolved_chat_template,
                 chat_template_content_format=args.chat_template_content_format,
                 trust_request_chat_template=args.trust_request_chat_template,
-                log_error_stack=args.log_error_stack,
             )
         )
         if any(task in POOLING_TASKS for task in supported_tasks)
@@ -1137,7 +1137,6 @@ async def init_app_state(
             chat_template=resolved_chat_template,
             chat_template_content_format=args.chat_template_content_format,
             trust_request_chat_template=args.trust_request_chat_template,
-            log_error_stack=args.log_error_stack,
         )
         if "embed" in supported_tasks
         else None
@@ -1150,7 +1149,6 @@ async def init_app_state(
             chat_template=resolved_chat_template,
             chat_template_content_format=args.chat_template_content_format,
             trust_request_chat_template=args.trust_request_chat_template,
-            log_error_stack=args.log_error_stack,
         )
         if "classify" in supported_tasks
         else None
@@ -1161,7 +1159,6 @@ async def init_app_state(
             state.openai_serving_models,
             request_logger=request_logger,
             score_template=resolved_chat_template,
-            log_error_stack=args.log_error_stack,
         )
         if ("embed" in supported_tasks or "score" in supported_tasks)
         else None
@@ -1173,14 +1170,12 @@ async def init_app_state(
         chat_template=resolved_chat_template,
         chat_template_content_format=args.chat_template_content_format,
         trust_request_chat_template=args.trust_request_chat_template,
-        log_error_stack=args.log_error_stack,
     )
     state.openai_serving_transcription = (
         OpenAIServingTranscription(
             engine_client,
             state.openai_serving_models,
             request_logger=request_logger,
-            log_error_stack=args.log_error_stack,
             enable_force_include_usage=args.enable_force_include_usage,
         )
         if "transcription" in supported_tasks
@@ -1191,7 +1186,6 @@ async def init_app_state(
             engine_client,
             state.openai_serving_models,
             request_logger=request_logger,
-            log_error_stack=args.log_error_stack,
             enable_force_include_usage=args.enable_force_include_usage,
         )
         if "transcription" in supported_tasks
@@ -1221,7 +1215,6 @@ async def init_app_state(
             state.openai_serving_models,
             request_logger=request_logger,
             return_tokens_as_token_ids=args.return_tokens_as_token_ids,
-            log_error_stack=args.log_error_stack,
             enable_prompt_tokens_details=args.enable_prompt_tokens_details,
             enable_log_outputs=args.enable_log_outputs,
             force_no_detokenize=args.tokens_only,

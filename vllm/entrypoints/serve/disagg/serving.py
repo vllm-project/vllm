@@ -48,7 +48,6 @@ class ServingTokens(OpenAIServing):
         request_logger: RequestLogger | None,
         force_no_detokenize: bool = False,
         return_tokens_as_token_ids: bool = False,
-        log_error_stack: bool = False,
         enable_prompt_tokens_details: bool = False,
         enable_log_outputs: bool = False,
     ):
@@ -57,7 +56,6 @@ class ServingTokens(OpenAIServing):
             models=models,
             request_logger=request_logger,
             return_tokens_as_token_ids=return_tokens_as_token_ids,
-            log_error_stack=log_error_stack,
         )
         self.enable_prompt_tokens_details = enable_prompt_tokens_details
         self.enable_log_outputs = enable_log_outputs
