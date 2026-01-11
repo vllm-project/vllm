@@ -425,9 +425,8 @@ class EagleProposer:
             input_ids = draft_token_ids_list[-1].int()
             # Mask stopped sequences to PAD token for early stopping
             if token_index > 0:
-                input_ids = torch.where(
-                    self.continue_mask[:batch_size], input_ids, self.pad_token_id
-                )
+                input_ids.masked_fill_(~self.continue_mask[:batch_size],
+                                       self.pad_token_id)
             if self.uses_mrope:
                 positions += 1
                 # NOTE(woosuk): We should handle the case where the draft model
