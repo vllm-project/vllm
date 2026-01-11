@@ -1157,7 +1157,7 @@ class OpenAIServingChat(OpenAIServing):
                             if tool_args:
                                 delta_content_parts.append(f"[tool_calls: {tool_args}]")
 
-                        if delta_content_parts and not self.enable_log_deltas:
+                        if delta_content_parts and self.enable_log_deltas:
                             delta_content = " ".join(delta_content_parts)
                             self.request_logger.log_outputs(
                                 request_id=request_id,
