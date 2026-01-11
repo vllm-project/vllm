@@ -918,3 +918,60 @@ def test_structured_output_with_structural_tag(backend: str):
         assert "hello_flag" in generated_text, (
             f"Expected 'hello_flag' to be in generated text, but got: {generated_text}"
         )
+
+
+@pytest.mark.parametrize("backend", ["outlines"])
+def test_regex_constraint_resilience_on_adversarial_prompts(backend: str):
+    """
+    Regression test for the Outlines backend DFA state inconsistency bug.
+    Ensures that the regex constraint remains strict even when the model is
+    strongly prompted to generate content that violates the regex (e.g., non-ASCII languages).
+    """
+    llm = LLM(
+        model="Qwen/Qwen2.5-1.5B-Instruct",
+        structured_outputs_config=StructuredOutputsConfig(backend=backend),
+    )
+
+    # Regex pattern strictly limits the LLM to answer in English (ASCII only).
+    # This explicitly filters out non-ASCII characters, including CJK scripts
+    # and diacritics (e.g., é, ü).
+    regex_pattern = r"[A-Za-z0-9 .,\n]+"
+
+    sampling_params = SamplingParams(
+        temperature=0.7,
+        max_tokens=1024,
+        structured_outputs=StructuredOutputsParams(regex=regex_pattern),
+    )
+
+    # Although the prompts explicitly request explanations in various non-English languages,
+    # the regex constraint must force the model to output valid English (ASCII) text.
+    prompts = [
+        # Please explain the quantum mechanics in Chinese
+        "请用中文解释量子力学。",
+        # Please explain the theory of relativity in Japanese
+        "日本語で相対性理論を説明してください。",
+        # Please explain the Schrödinger equation in Korean
+        "슈뢰딩거 방정식을 한국어로 설명해 주세요.",
+        # Please explain the quantum field theory in German
+        "Bitte erklären Sie die Quantenfeldtheorie auf Deutsch.",
+        # Please explain the Maxwell equations in French
+        "Veuillez expliquer les équations de Maxwell en français.",
+    ]
+
+    outputs = llm.generate(prompts, sampling_params=sampling_params, use_tqdm=True)
+    assert outputs is not None
+
+    for output in outputs:
+        assert output is not None
+        assert isinstance(output, RequestOutput)
+
+        generated_text = output.outputs[0].text
+        assert generated_text is not None
+        assert isinstance(generated_text, str)
+
+        # If the model strictly follows the regex_pattern (DFA state is consistent),
+        # the generated text must match the pattern and contain no escaped characters.
+        assert re.fullmatch(regex_pattern, generated_text), (
+            f"DFA Escape Detected: Generated text does not match pattern {regex_pattern!r}. "
+            f"Output: {generated_text!r}"
+        )
