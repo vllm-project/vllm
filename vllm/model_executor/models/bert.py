@@ -454,7 +454,7 @@ class BertPoolingModel(BertModel):
         pooler_config = vllm_config.model_config.pooler_config
         assert pooler_config is not None
 
-        self.pooler = BertPooler(config, pooler_config.seq_pooling_type)
+        self.pooler = BertPooler(config, pooler_config)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         other_weights, loaded_stacked_params = self._load_weights(weights)
