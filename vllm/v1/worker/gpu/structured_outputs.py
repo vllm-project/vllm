@@ -39,20 +39,19 @@ class StructuredOutputsWorker:
         # Construct bitmask -> logits mapping
         mapping: list[int] = []
         req_ids = input_batch.req_ids
-        cu_num_logits_np = input_batch.cu_num_logits_np
+        cu_num_logits = input_batch.cu_num_logits_np.tolist()
         req_id_to_idx = {req_id: i for i, req_id in enumerate(req_ids)}
-        req_id_to_cnt = {req_id: 0 for req_id in req_ids}
         for grammar_req_id in grammar_req_ids:
             req_idx = req_id_to_idx[grammar_req_id]
-            req_cnt = req_id_to_cnt[grammar_req_id]
-            logits_start_idx = cu_num_logits_np[req_idx]
-            mapping.append(logits_start_idx + req_cnt)
-            req_id_to_cnt[grammar_req_id] = req_cnt + 1
+            logits_start_idx = cu_num_logits[req_idx]
+            logits_end_idx = cu_num_logits[req_idx + 1]
+            mapping.extend(range(logits_start_idx, logits_end_idx))
         # Copy mapping to GPU
         mapping_np = np.array(mapping, dtype=np.int32)
         logits_indices = self.logits_indices.copy_to_gpu(mapping_np)
 
         num_masks = bitmask.shape[0]
+        assert num_masks == len(mapping)
         vocab_size = logits.shape[-1]
         BLOCK_SIZE = 8192
         grid = (num_masks, triton.cdiv(vocab_size, BLOCK_SIZE))
