@@ -248,7 +248,9 @@ def mteb_test_rerank_models(
 
         # Confirm whether vllm is using the correct architecture
         if model_info.architecture:
-            assert model_info.architecture in model_config.architectures
+            assert (
+                model_info.architecture == model_config.model_arch_config.architecture
+            )
 
         # Score API is only enabled for num_labels == 1
         assert model_config.hf_config.num_labels == 1
