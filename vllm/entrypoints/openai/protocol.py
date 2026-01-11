@@ -583,6 +583,23 @@ class ChatCompletionRequest(OpenAIBaseModel):
     prompt_logprobs: int | None = None
     allowed_token_ids: list[int] | None = None
     bad_words: list[str] = Field(default_factory=list)
+    enforced_str: str | None = Field(
+        default=None,
+        description=(
+            "If provided, the model will output this exact string, "
+            "bypassing normal sampling. Used for validation/testing purposes."
+        ),
+    )
+    enforced_tokens: dict | list[int] | str | None = Field(
+        default=None,
+        description=(
+            "If provided, the model will output this exact sequence of token IDs, "
+            "bypassing normal sampling. Used for validation/testing purposes. "
+            "Takes precedence over enforced_str if both are provided. "
+            "Can be a list of integers, a JSON string of integers, or a dict "
+            "with 'tokens' key containing token objects with 'token' field."
+        ),
+    )
     # --8<-- [end:chat-completion-sampling-params]
 
     # --8<-- [start:chat-completion-extra-params]
