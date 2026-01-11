@@ -137,37 +137,86 @@ steps:
       - text: "What is the release version?"
         key: release-version
 
-  - block: "Build CPU release image"
-    key: block-cpu-release-image-build
-    depends_on: ~
+  # CPU Release Image Build and Docker Hub Publishing
+  # These steps build CPU images for both architectures and publish to Docker Hub
+  # Manual trigger: Unblock "Build and publish CPU release images to Docker Hub" to start
+  - block: "Build and publish CPU release images to Docker Hub"
+    key: block-cpu-release-dockerhub
+    depends_on:
+      - input-release-version
 
-  - label: "Build and publish CPU release image"
-    depends_on: block-cpu-release-image-build
+  - label: "Build and publish CPU release image (x86_64)"
+    id: build-cpu-release-x86
+    depends_on: block-cpu-release-dockerhub
     agents:
       queue: cpu_queue_postmerge
     commands:
       - "aws ecr-public get-login-password --region us-east-1 | docker login --username AWS --password-stdin public.ecr.aws/q9t5s3a7"
-      - "DOCKER_BUILDKIT=1 docker build --build-arg max_jobs=16 --build-arg GIT_REPO_CHECK=1 --build-arg VLLM_CPU_AVX512BF16=true --build-arg VLLM_CPU_AVX512VNNI=true --build-arg VLLM_CPU_AMXBF16=true --tag public.ecr.aws/q9t5s3a7/vllm-cpu-release-repo:$(buildkite-agent meta-data get release-version) --tag public.ecr.aws/q9t5s3a7/vllm-cpu-release-repo:latest --progress plain --target vllm-openai -f docker/Dockerfile.cpu ."
+      - "DOCKER_BUILDKIT=1 docker build --build-arg max_jobs=16 --build-arg GIT_REPO_CHECK=1 --build-arg VLLM_CPU_AVX512BF16=true --build-arg VLLM_CPU_AVX512VNNI=true --build-arg VLLM_CPU_AMXBF16=true --tag public.ecr.aws/q9t5s3a7/vllm-cpu-release-repo:$(buildkite-agent meta-data get release-version) --tag public.ecr.aws/q9t5s3a7/vllm-cpu-release-repo:latest --tag public.ecr.aws/q9t5s3a7/vllm-cpu-release-repo:$BUILDKITE_COMMIT-x86_64 --progress plain --target vllm-openai -f docker/Dockerfile.cpu ."
+      # Push to ECR
       - "docker push public.ecr.aws/q9t5s3a7/vllm-cpu-release-repo:latest"
       - "docker push public.ecr.aws/q9t5s3a7/vllm-cpu-release-repo:$(buildkite-agent meta-data get release-version)"
+      - "docker push public.ecr.aws/q9t5s3a7/vllm-cpu-release-repo:$BUILDKITE_COMMIT-x86_64"
+      # Tag and push to Docker Hub
+      - "docker tag public.ecr.aws/q9t5s3a7/vllm-cpu-release-repo:$BUILDKITE_COMMIT-x86_64 vllm/vllm-openai:v$(buildkite-agent meta-data get release-version)-cpu-x86_64"
+      - "docker tag public.ecr.aws/q9t5s3a7/vllm-cpu-release-repo:$BUILDKITE_COMMIT-x86_64 vllm/vllm-openai:latest-cpu-x86_64"
+      - "docker push vllm/vllm-openai:v$(buildkite-agent meta-data get release-version)-cpu-x86_64"
+      - "docker push vllm/vllm-openai:latest-cpu-x86_64"
+    plugins:
+      - docker-login#v3.0.0:
+          username: vllmbot
+          password-env: DOCKERHUB_TOKEN
     env:
       DOCKER_BUILDKIT: "1"
+      DOCKERHUB_USERNAME: "vllmbot"
 
-  - block: "Build arm64 CPU release image"
-    key: block-arm64-cpu-release-image-build
-    depends_on: ~
-
-  - label: "Build and publish arm64 CPU release image"
-    depends_on: block-arm64-cpu-release-image-build
+  - label: "Build and publish CPU release image (arm64)"
+    id: build-cpu-release-arm64
+    depends_on: block-cpu-release-dockerhub
     agents:
       queue: arm64_cpu_queue_postmerge
     commands:
       - "aws ecr-public get-login-password --region us-east-1 | docker login --username AWS --password-stdin public.ecr.aws/q9t5s3a7"
-      - "DOCKER_BUILDKIT=1 docker build --build-arg max_jobs=16 --build-arg GIT_REPO_CHECK=1 --tag public.ecr.aws/q9t5s3a7/vllm-arm64-cpu-release-repo:$(buildkite-agent meta-data get release-version) --tag public.ecr.aws/q9t5s3a7/vllm-arm64-cpu-release-repo:latest --progress plain --target vllm-openai -f docker/Dockerfile.cpu ."
+      - "DOCKER_BUILDKIT=1 docker build --build-arg max_jobs=16 --build-arg GIT_REPO_CHECK=1 --build-arg VLLM_BUILD_ACL=ON --tag public.ecr.aws/q9t5s3a7/vllm-arm64-cpu-release-repo:$(buildkite-agent meta-data get release-version) --tag public.ecr.aws/q9t5s3a7/vllm-arm64-cpu-release-repo:latest --tag public.ecr.aws/q9t5s3a7/vllm-arm64-cpu-release-repo:$BUILDKITE_COMMIT-aarch64 --progress plain --target vllm-openai -f docker/Dockerfile.cpu ."
+      # Push to ECR
       - "docker push public.ecr.aws/q9t5s3a7/vllm-arm64-cpu-release-repo:latest"
       - "docker push public.ecr.aws/q9t5s3a7/vllm-arm64-cpu-release-repo:$(buildkite-agent meta-data get release-version)"
+      - "docker push public.ecr.aws/q9t5s3a7/vllm-arm64-cpu-release-repo:$BUILDKITE_COMMIT-aarch64"
+      # Tag and push to Docker Hub
+      - "docker tag public.ecr.aws/q9t5s3a7/vllm-arm64-cpu-release-repo:$BUILDKITE_COMMIT-aarch64 vllm/vllm-openai:v$(buildkite-agent meta-data get release-version)-cpu-aarch64"
+      - "docker tag public.ecr.aws/q9t5s3a7/vllm-arm64-cpu-release-repo:$BUILDKITE_COMMIT-aarch64 vllm/vllm-openai:latest-cpu-aarch64"
+      - "docker push vllm/vllm-openai:v$(buildkite-agent meta-data get release-version)-cpu-aarch64"
+      - "docker push vllm/vllm-openai:latest-cpu-aarch64"
+    plugins:
+      - docker-login#v3.0.0:
+          username: vllmbot
+          password-env: DOCKERHUB_TOKEN
     env:
       DOCKER_BUILDKIT: "1"
+      DOCKERHUB_USERNAME: "vllmbot"
+
+  - label: "Create CPU multi-arch manifest on Docker Hub"
+    id: create-cpu-multi-arch-manifest
+    depends_on:
+      - build-cpu-release-x86
+      - build-cpu-release-arm64
+    agents:
+      queue: cpu_queue_postmerge
+    commands:
+      # Create versioned multi-arch manifest
+      - "docker manifest create vllm/vllm-openai:v$(buildkite-agent meta-data get release-version)-cpu vllm/vllm-openai:v$(buildkite-agent meta-data get release-version)-cpu-x86_64 vllm/vllm-openai:v$(buildkite-agent meta-data get release-version)-cpu-aarch64 --amend"
+      - "docker manifest push vllm/vllm-openai:v$(buildkite-agent meta-data get release-version)-cpu"
+      # Create latest-cpu multi-arch manifest
+      - "docker manifest rm vllm/vllm-openai:latest-cpu || true"
+      - "docker manifest create vllm/vllm-openai:latest-cpu vllm/vllm-openai:latest-cpu-x86_64 vllm/vllm-openai:latest-cpu-aarch64 --amend"
+      - "docker manifest push vllm/vllm-openai:latest-cpu"
+    plugins:
+      - docker-login#v3.0.0:
+          username: vllmbot
+          password-env: DOCKERHUB_TOKEN
+    env:
+      DOCKER_BUILDKIT: "1"
+      DOCKERHUB_USERNAME: "vllmbot"
 
   - label: "Build and publish nightly multi-arch image to DockerHub"
     depends_on:
