@@ -7,8 +7,8 @@ from dataclasses import dataclass
 import torch
 
 from vllm.config import VllmConfig
+from vllm.utils.math_utils import cdiv
 from vllm.v1.attention.backend import AttentionBackend
-from vllm.v1.attention.backends.mamba2_attn import Mamba2AttentionMetadataBuilder
 from vllm.v1.attention.backends.mamba_attn import (
     BaseMambaAttentionMetadataBuilder,
 )
@@ -179,6 +179,57 @@ class GDNAttentionMetadataBuilder(
             device=device,
         )
 
+    @staticmethod
+    def _compute_chunk_metadata(
+        num_prefills: int,
+        query_start_loc_p_cpu: torch.Tensor,
+        chunk_size: int,
+    ) -> tuple[list[int], list[int], list[int]]:
+        """
+        Compute chunk-specific metadata for GDN.
+
+        Unlike Mamba2, the FLA GDN kernel simply divides sequences into
+        chunk_size-token chunks based on total sequence length, without
+        any alignment logic based on num_computed_tokens. This function
+        matches that behavior.
+
+        Args:
+            num_prefills: Number of prefill sequences
+            query_start_loc_p_cpu: Cumulative sequence lengths for prefill sequences,
+                shape [num_prefills + 1]
+            chunk_size: Size of each chunk (64 for GDN)
+
+        Returns:
+            cu_chunk_seqlen: Cumulative chunk sequence lengths
+            seq_idx: Sequence index for each chunk
+            last_chunk_indices: Last chunk index for each sequence
+        """
+        cu_chunk_seqlen = []
+        seq_idx = []
+        last_chunk_indices = []
+        chunk_pos = 0
+
+        for req_idx in range(num_prefills):
+            seq_len = (
+                query_start_loc_p_cpu[req_idx + 1].item()
+                - query_start_loc_p_cpu[req_idx].item()
+            )
+            # Simply divide the sequence into chunks based on total length
+            # This matches how prepare_chunk_indices works in the FLA kernel
+            n_chunks = cdiv(seq_len, chunk_size)
+            for _ in range(n_chunks):
+                seq_idx.append(req_idx)
+                cu_chunk_seqlen.append(chunk_pos)
+                chunk_pos += 1
+
+            # Record the last chunk index for this sequence
+            if n_chunks > 0:
+                last_chunk_indices.append(chunk_pos - 1)
+            else:
+                last_chunk_indices.append(-1)
+
+        return cu_chunk_seqlen, seq_idx, last_chunk_indices
+
     def build(  # type: ignore[override]
         self,
         common_prefix_len: int,
@@ -191,9 +242,6 @@ class GDNAttentionMetadataBuilder(
 
         query_start_loc = m.query_start_loc
         context_lens_tensor = m.compute_num_computed_tokens()
-        context_lens_cpu = context_lens_tensor.to(
-            m.query_start_loc_cpu.device, non_blocking=True
-        )
         nums_dict, batch_ptr, token_chunk_offset_ptr = None, None, None
 
         prefix_caching_enabled = self.vllm_config.cache_config.enable_prefix_caching
@@ -345,17 +393,13 @@ class GDNAttentionMetadataBuilder(
                 prefill_start:prefill_end
             ]
             num_computed_tokens_p = context_lens_tensor[prefill_start:prefill_end]
-            num_computed_tokens_p_cpu = context_lens_cpu[prefill_start:prefill_end]
             query_start_loc_p_cpu = (
                 non_spec_query_start_loc_cpu[-num_prefills - 1 :] - num_decode_tokens
             )
-            cu_chunk_seqlen, seq_idx, last_chunk_indices = (
-                Mamba2AttentionMetadataBuilder._compute_chunk_metadata(
-                    num_prefills=int(num_prefills),
-                    num_computed_tokens_p_cpu=num_computed_tokens_p_cpu,
-                    query_start_loc_p_cpu=query_start_loc_p_cpu,
-                    chunk_size=self.chunk_size,
-                )
+            cu_chunk_seqlen, seq_idx, last_chunk_indices = self._compute_chunk_metadata(
+                num_prefills=int(num_prefills),
+                query_start_loc_p_cpu=query_start_loc_p_cpu,
+                chunk_size=self.chunk_size,
             )
             seq_idx_p = torch.as_tensor(
                 seq_idx,

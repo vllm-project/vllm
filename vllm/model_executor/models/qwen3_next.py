@@ -616,6 +616,7 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
 
         if num_decodes > 0:
             assert state_indices_decode is not None
+            assert ssm_state_indices_decode is not None
         if num_prefills > 0:
             assert state_indices_prefill is not None
 
