@@ -1010,10 +1010,11 @@ class EngineArgs:
             action=argparse.BooleanOptionalAction,
             default=None,
             help="Enable IPC (inter-process communication) for multimodal tensors. "
-            "When enabled, all multimodal tensors (CUDA and CPU) are transferred "
-            "via torch.multiprocessing shared memory for zero-copy IPC. "
-            "When disabled, all tensors use standard serialization. "
-            "If not specified, defaults to VLLM_MULTIMODAL_TENSOR_IPC env var (default: False).",
+            "When enabled, all multimodal tensors (CUDA and CPU) are "
+            "transferred via torch.multiprocessing shared memory for "
+            "zero-copy IPC. When disabled, all tensors use standard "
+            "serialization. If not specified, defaults to "
+            "VLLM_MULTIMODAL_TENSOR_IPC env var (default: False).",
             dest="multimodal_tensor_ipc",
         )
 

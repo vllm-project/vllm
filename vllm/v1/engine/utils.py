@@ -817,10 +817,8 @@ def launch_core_engines(
     # and engine cores. One queue per engine core.
     # Use torch.multiprocessing for tensor sharing via IPC/shared memory.
     # Set start method to 'spawn' for compatibility with multiprocessing.
-    torch_mp.set_start_method('spawn', force=True)
-    tensor_queues: list[torch_mp.Queue] = [
-        torch_mp.Queue() for _ in range(dp_size)
-    ]
+    torch_mp.set_start_method("spawn", force=True)
+    tensor_queues: list[torch_mp.Queue] = [torch_mp.Queue() for _ in range(dp_size)]
 
     # Set up input and output addresses.
     addresses = EngineZmqAddresses(
@@ -1062,7 +1060,9 @@ def wait_for_engine_startup(
                             "_data_parallel_master_port_list",
                             "data_parallel_size",
                         )
-                    } if coordinated_dp else {},
+                    }
+                    if coordinated_dp
+                    else {},
                     tensor_queue_index=eng_index,
                 )
             )

@@ -889,7 +889,7 @@ class EngineCoreProc(EngineCore):
         # Store tensor_queue_index for engine to access
         addresses = init_message.addresses
         addresses.tensor_queue_index = init_message.tensor_queue_index
-        
+
         return addresses
 
     @staticmethod
@@ -898,7 +898,7 @@ class EngineCoreProc(EngineCore):
         dp_rank: int = 0,
         local_dp_rank: int = 0,
         tensor_queues: list[Any] | None = None,
-        **kwargs
+        **kwargs,
     ):
         """Launch EngineCore busy loop in background process."""
 
@@ -936,7 +936,7 @@ class EngineCoreProc(EngineCore):
             if data_parallel and vllm_config.model_config.is_moe:
                 # Set data parallel rank for this engine process.
                 parallel_config.data_parallel_rank = dp_rank
-                engine_core = DPEngineCoreProc(*args, tensor_queues=tensor_queues, **kwargs)
+                engine_core = DPEngineCoreProc(**kwargs, tensor_queues=tensor_queues)
             else:
                 # Non-MoE DP ranks are completely independent, so treat like DP=1.
                 # Note that parallel_config.data_parallel_index will still reflect
@@ -944,7 +944,9 @@ class EngineCoreProc(EngineCore):
                 parallel_config.data_parallel_size = 1
                 parallel_config.data_parallel_size_local = 1
                 parallel_config.data_parallel_rank = 0
-                engine_core = EngineCoreProc(*args, tensor_queues=tensor_queues, **kwargs)
+                engine_core = EngineCoreProc(
+                    **kwargs, engine_index=dp_rank, tensor_queues=tensor_queues
+                )
 
             engine_core.run_busy_loop()
 

@@ -46,10 +46,11 @@ CUSTOM_TYPE_RAW_VIEW = 3
 class TensorIpcData:
     """
     Data sent via torch.multiprocessing.Queue for zero-copy IPC.
-    
+
     Contains the tensor_id and the actual tensor. The tensor is shared
     in memory (GPU or CPU) for efficient inter-process communication.
     """
+
     tensor_id: str
     tensor: torch.Tensor
 
@@ -58,12 +59,13 @@ class TensorIpcData:
 class TensorIpcHandle:
     """
     Handle for a tensor sent via IPC queue (zero-copy transfer).
-    
+
     Contains only metadata about the tensor. This is serialized via msgpack
     and used by the decoder to retrieve the actual tensor from the queue.
     The actual tensor is sent separately via torch.multiprocessing.Queue
     as TensorIpcData. Works for both CUDA and CPU tensors.
     """
+
     tensor_id: str
     shape: list[int]
     dtype: str
@@ -148,7 +150,7 @@ class MsgpackEncoder:
 
     By default, arrays below 256B are serialized inline Larger will get sent
     via dedicated messages. Note that this is a per-tensor limit.
-    
+
     When multimodal_tensor_ipc is enabled and tensor_queues is provided,
     all multimodal tensors (CUDA and CPU) will be sent via
     torch.multiprocessing.Queue for zero-copy IPC instead of serialization.
@@ -218,7 +220,7 @@ class MsgpackEncoder:
                 int(v) if v is not None else None
                 for v in (obj.start, obj.stop, obj.step)
             )
-        
+
         if isinstance(obj, MultiModalKwargsItem):
             return self._encode_mm_item(obj)
 
@@ -274,7 +276,7 @@ class MsgpackEncoder:
         self, obj: torch.Tensor
     ) -> tuple[str, tuple[int, ...], int | memoryview] | dict[str, Any]:
         assert self.aux_buffers is not None
-        
+
         # Check if we should use IPC for this tensor
         # IPC is used when: multimodal_tensor_ipc is enabled, queues are available,
         # and we have a target engine
@@ -288,28 +290,34 @@ class MsgpackEncoder:
             # Generate unique tensor ID
             tensor_id = f"{id(self)}_{self._tensor_id_counter}"
             self._tensor_id_counter += 1
-            
+
             try:
                 # Move tensor to shared memory for IPC
                 # This is required for proper inter-process communication
                 if not obj.is_shared():
                     obj = obj.share_memory_()
-                
+
                 # Put TensorIpcData (tensor_id + tensor) into the target engine's queue
                 target_queue = self.tensor_queues[self.target_engine_index]
                 ipc_data = TensorIpcData(tensor_id=tensor_id, tensor=obj)
                 # Use a timeout to avoid blocking indefinitely
                 target_queue.put(ipc_data, timeout=10.0)
-                
+
                 logger.debug(
-                    "Sent tensor %s (shape=%s, device=%s) to engine %d via IPC queue (shared memory)",
+                    "Sent tensor %s (shape=%s, device=%s) to engine %d "
+                    "via IPC queue (shared memory)",
                     tensor_id,
                     obj.shape,
                     obj.device,
                     self.target_engine_index,
                 )
-                
-                return TensorIpcHandle(tensor_id=tensor_id, shape=list(obj.shape), dtype=str(obj.dtype).removeprefix("torch."), device=str(obj.device))
+
+                return TensorIpcHandle(
+                    tensor_id=tensor_id,
+                    shape=list(obj.shape),
+                    dtype=str(obj.dtype).removeprefix("torch."),
+                    device=str(obj.device),
+                )
             except Exception as e:
                 logger.warning(
                     "Failed to send tensor via IPC queue: %s. "
@@ -317,19 +325,19 @@ class MsgpackEncoder:
                     e,
                 )
                 # Fall through to standard serialization
-        
-        
+
         # Standard serialization fallback
         # For CUDA tensors without IPC support, we need to move to CPU first
         if obj.is_cuda:
             if self.multimodal_tensor_ipc and self.tensor_queues is not None:
                 # Only warn if IPC was expected but unavailable
                 logger.warning(
-                    "CUDA tensor without IPC support encountered (no target engine set). "
-                    "Moving to CPU for serialization. This will be slow."
+                    "CUDA tensor without IPC support encountered "
+                    "(no target engine set). Moving to CPU for "
+                    "serialization. This will be slow."
                 )
             obj = obj.cpu()
-        
+
         # view the tensor as a contiguous 1D array of bytes
         arr_data = tensor_data(obj)
         if obj.nbytes < self.size_threshold:
@@ -387,9 +395,10 @@ class MsgpackDecoder:
 
     Note that unlike vanilla `msgspec` Decoders, this interface is generally
     not thread-safe when encoding tensors / numpy arrays.
-    
-    For multimodal tensors sent via torch.multiprocessing.Queue (when IPC is enabled),
-    they will be retrieved from the queue during decoding. Works for both CUDA and CPU tensors.
+
+    For multimodal tensors sent via torch.multiprocessing.Queue (when IPC
+    is enabled), they will be retrieved from the queue during decoding.
+    Works for both CUDA and CPU tensors.
     """
 
     def __init__(
@@ -429,7 +438,8 @@ class MsgpackDecoder:
             if issubclass(t, np.ndarray):
                 return self._decode_ndarray(obj)
             if issubclass(t, TensorIpcHandle):
-                # msgspec deserializes dataclasses to dicts, so convert to TensorIpcHandle
+                # msgspec deserializes dataclasses to dicts, so convert
+                # to TensorIpcHandle
                 if isinstance(obj, dict):
                     obj = TensorIpcHandle(**obj)
                 return self._decode_cuda_queue_tensor(obj)
@@ -499,10 +509,13 @@ class MsgpackDecoder:
             arr = arr.pin_memory() if self.pin_tensors else arr.clone()
         # Convert back to proper shape & type
         return arr.view(torch_dtype).view(shape)
-    
+
     def _decode_cuda_queue_tensor(self, handle: TensorIpcHandle) -> torch.Tensor:
-        """Retrieve a tensor from the torch.multiprocessing.Queue (works for CUDA and CPU)."""
-        
+        """Retrieve a tensor from torch.multiprocessing.Queue.
+
+        Works for CUDA and CPU.
+        """
+
         # Drain all available tensors. We save them regardless if this is the one
         # we're waiting for as they may arrive out of order from multiple producers.
         while handle.tensor_id not in self._tensor_buffer:
@@ -549,8 +562,15 @@ class MsgpackDecoder:
         if isinstance(obj, TensorIpcHandle):
             return self._decode_cuda_queue_tensor(obj)
         # Check if this is a dict that represents a TensorIpcHandle
-        # (msgspec serializes dataclasses as dicts without type info in nested structures)
-        if isinstance(obj, dict) and 'tensor_id' in obj and 'shape' in obj and 'dtype' in obj and 'device' in obj:
+        # (msgspec serializes dataclasses as dicts without type info
+        # in nested structures)
+        if (
+            isinstance(obj, dict)
+            and "tensor_id" in obj
+            and "shape" in obj
+            and "dtype" in obj
+            and "device" in obj
+        ):
             # Convert dict to TensorIpcHandle and decode it
             handle = TensorIpcHandle(**obj)
             return self._decode_cuda_queue_tensor(handle)

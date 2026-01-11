@@ -3,24 +3,30 @@
 
 """Tests for tensor IPC queue functionality."""
 
+import contextlib
 import multiprocessing as mp
+from multiprocessing.synchronize import Barrier as BarrierType
+from multiprocessing.synchronize import Event as EventType
 from typing import Any
 
 import pytest
 import torch
 import torch.multiprocessing as torch_mp
 
-from vllm.v1.serial_utils import MsgpackDecoder, MsgpackEncoder, TensorIpcData, TensorIpcHandle
+from vllm.v1.serial_utils import (
+    MsgpackDecoder,
+    MsgpackEncoder,
+    TensorIpcData,
+    TensorIpcHandle,
+)
 
 
 @pytest.fixture(scope="module", autouse=True)
 def setup_multiprocessing():
     """Set multiprocessing start method to 'spawn' for compatibility."""
-    try:
-        torch_mp.set_start_method('spawn', force=True)
-    except RuntimeError:
+    with contextlib.suppress(RuntimeError):
         # Already set, which is fine
-        pass
+        torch_mp.set_start_method("spawn", force=True)
     yield
 
 
@@ -29,7 +35,7 @@ def encoder_process(
     result_queue: mp.Queue,
     target_engine: int,
     tensor_data: dict[str, Any],
-    ready_event: mp.Event,
+    ready_event: EventType,
 ):
     """Process that encodes and sends CUDA tensors via queue."""
     try:
@@ -64,25 +70,21 @@ def encoder_process(
         )
     except Exception as e:
         import traceback
+
         ready_event.set()  # Signal even on failure
-        result_queue.put({
-            "success": False, 
-            "error": str(e),
-            "traceback": traceback.format_exc()
-        })
+        result_queue.put(
+            {"success": False, "error": str(e), "traceback": traceback.format_exc()}
+        )
 
 
 def decoder_process(
     tensor_queue: torch_mp.Queue,
     result_queue: mp.Queue,
     expected_shape: tuple,
-    encoder_ready: mp.Event,
+    encoder_ready: EventType,
 ):
     """Process that decodes and receives CUDA tensors from queue."""
     try:
-        # Create decoder with tensor queue
-        decoder = MsgpackDecoder(tensor_queue=tensor_queue)
-
         # Wait for encoder to finish sending
         if not encoder_ready.wait(timeout=10.0):
             raise TimeoutError("Encoder did not signal ready")
@@ -101,11 +103,10 @@ def decoder_process(
         )
     except Exception as e:
         import traceback
-        result_queue.put({
-            "success": False, 
-            "error": str(e),
-            "traceback": traceback.format_exc()
-        })
+
+        result_queue.put(
+            {"success": False, "error": str(e), "traceback": traceback.format_exc()}
+        )
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
@@ -114,7 +115,7 @@ def test_cuda_tensor_queue_basic():
     # Set up queues and synchronization
     num_engines = 2
     tensor_queues = [torch_mp.Queue() for _ in range(num_engines)]
-    result_queue = mp.Queue()
+    result_queue: mp.Queue = mp.Queue()
     encoder_ready = mp.Event()
 
     target_engine = 0
@@ -149,8 +150,14 @@ def test_cuda_tensor_queue_basic():
     decoder_proc.join(timeout=5.0)
 
     # Verify results
-    assert encoder_result["success"], f"Encoder failed: {encoder_result.get('error')}\n{encoder_result.get('traceback', '')}"
-    assert decoder_result["success"], f"Decoder failed: {decoder_result.get('error')}\n{decoder_result.get('traceback', '')}"
+    assert encoder_result["success"], (
+        f"Encoder failed: {encoder_result.get('error')}\n"
+        f"{encoder_result.get('traceback', '')}"
+    )
+    assert decoder_result["success"], (
+        f"Decoder failed: {decoder_result.get('error')}\n"
+        f"{decoder_result.get('traceback', '')}"
+    )
     assert decoder_result["matches_expected"], "Tensor shape mismatch"
     assert "cuda" in decoder_result["device"], "Tensor not on CUDA device"
 
@@ -168,7 +175,7 @@ def test_cpu_tensor_fallback():
     # Verify encoding succeeded
     assert len(encoded) > 0
     assert isinstance(encoded, (list, tuple))
-    
+
     # Basic check: no queue should be used, so tensor goes through standard path
     # This is mainly to ensure no exceptions are raised
 
@@ -240,42 +247,45 @@ def api_server_worker(
     server_id: int,
     tensor_queue: torch_mp.Queue,
     result_queue: mp.Queue,
-    barrier: mp.Barrier,
-    retrieval_done: mp.Event,
+    barrier: BarrierType,
+    retrieval_done: EventType,
 ):
     """Worker simulating an API server sending tensors."""
     try:
         # Each server sends a unique tensor
         tensor = torch.ones(server_id + 1, server_id + 2) * server_id
         tensor_id = f"server_{server_id}_tensor"
-        
+
         # Wait for all servers to be ready
         barrier.wait()
-        
+
         # Send tensor using TensorIpcData
         ipc_data = TensorIpcData(tensor_id=tensor_id, tensor=tensor)
         tensor_queue.put(ipc_data)
-        
+
         result_queue.put({"server_id": server_id, "success": True})
-        
+
         # Keep process alive until main process has retrieved all tensors
         # This prevents shared memory handles from being invalidated
         retrieval_done.wait(timeout=30.0)
     except Exception as e:
         import traceback
-        result_queue.put({
-            "server_id": server_id,
-            "success": False,
-            "error": str(e),
-            "traceback": traceback.format_exc()
-        })
+
+        result_queue.put(
+            {
+                "server_id": server_id,
+                "success": False,
+                "error": str(e),
+                "traceback": traceback.format_exc(),
+            }
+        )
 
 
 def test_multiple_api_servers_to_engine():
     """Test multiple API servers sending to one engine core via multiprocessing."""
     num_api_servers = 3
     tensor_queue = torch_mp.Queue()
-    result_queue = mp.Queue()
+    result_queue: mp.Queue = mp.Queue()
     barrier = mp.Barrier(num_api_servers)
     retrieval_done = mp.Event()
 
@@ -297,7 +307,9 @@ def test_multiple_api_servers_to_engine():
 
     # Verify all servers succeeded
     for result in results:
-        assert result["success"], f"Server {result['server_id']} failed: {result.get('error')}"
+        assert result["success"], (
+            f"Server {result['server_id']} failed: {result.get('error')}"
+        )
 
     # Verify all tensors are in queue
     received_tensors = []
@@ -306,7 +318,7 @@ def test_multiple_api_servers_to_engine():
         received_tensors.append((ipc_data.tensor_id, ipc_data.tensor))
 
     assert len(received_tensors) == num_api_servers
-    
+
     # Verify tensor content (order may vary with multiprocessing)
     tensor_by_id = {tid: t for tid, t in received_tensors}
     for server_id in range(num_api_servers):
@@ -314,10 +326,10 @@ def test_multiple_api_servers_to_engine():
         assert expected_id in tensor_by_id, f"Missing tensor from server {server_id}"
         expected_tensor = torch.ones(server_id + 1, server_id + 2) * server_id
         assert torch.allclose(tensor_by_id[expected_id], expected_tensor)
-    
+
     # Signal workers that retrieval is complete
     retrieval_done.set()
-    
+
     # Wait for all processes to complete
     for proc in processes:
         proc.join(timeout=5.0)
@@ -326,51 +338,59 @@ def test_multiple_api_servers_to_engine():
 def mixed_tensor_encoder_process(
     tensor_queues: list[torch_mp.Queue],
     result_queue: mp.Queue,
-    ready_event: mp.Event,
-    retrieval_done: mp.Event,
+    ready_event: EventType,
+    retrieval_done: EventType,
 ):
-    """Process that encodes mixed CPU/CUDA tensors (old behavior: only CUDA via IPC)."""
+    """Process that encodes mixed CPU/CUDA tensors.
+
+    Old behavior: only CUDA via IPC.
+    """
     try:
-        # Use old behavior: multimodal_tensor_ipc defaults to True but only CUDA went through
-        # For this test, we want to test the old behavior where only CUDA uses IPC
-        encoder = MsgpackEncoder(tensor_queues=tensor_queues, multimodal_tensor_ipc=False)
+        # Use old behavior: multimodal_tensor_ipc defaults to True but only CUDA went
+        # through. For this test, we want to test the old behavior where only CUDA
+        # uses IPC.
+        encoder = MsgpackEncoder(
+            tensor_queues=tensor_queues, multimodal_tensor_ipc=False
+        )
         encoder.set_target_engine(0)
 
         # Create only CUDA tensor for IPC (CPU will be serialized)
         # But actually, let's just send CUDA tensor directly
         cuda_tensor = torch.randn(4, 5, device="cuda:0")
-        
+
         # Manually send via IPC to test the mechanism
         tensor_id = "test_cuda_tensor"
         cuda_tensor_shared = cuda_tensor.share_memory_()
         from vllm.v1.serial_utils import TensorIpcData
+
         ipc_data = TensorIpcData(tensor_id=tensor_id, tensor=cuda_tensor_shared)
         tensor_queues[0].put(ipc_data, timeout=10.0)
-        
+
         ready_event.set()
-        
-        result_queue.put({
-            "success": True,
-            "sent_cuda": True,
-        })
-        
+
+        result_queue.put(
+            {
+                "success": True,
+                "sent_cuda": True,
+            }
+        )
+
         # Keep process alive until decoder has retrieved the tensor
         retrieval_done.wait(timeout=30.0)
     except Exception as e:
         import traceback
+
         ready_event.set()
-        result_queue.put({
-            "success": False,
-            "error": str(e),
-            "traceback": traceback.format_exc()
-        })
+        result_queue.put(
+            {"success": False, "error": str(e), "traceback": traceback.format_exc()}
+        )
 
 
 def mixed_tensor_decoder_process(
     tensor_queue: torch_mp.Queue,
     result_queue: mp.Queue,
-    encoder_ready: mp.Event,
-    retrieval_done: mp.Event,
+    encoder_ready: EventType,
+    retrieval_done: EventType,
 ):
     """Process that retrieves mixed tensors from queue."""
     try:
@@ -380,30 +400,31 @@ def mixed_tensor_decoder_process(
 
         # Try to get CUDA tensor from queue
         ipc_data = tensor_queue.get(timeout=5.0)
-        
-        result_queue.put({
-            "success": True,
-            "is_cuda": ipc_data.tensor.is_cuda,
-            "shape": tuple(ipc_data.tensor.shape),
-        })
-        
+
+        result_queue.put(
+            {
+                "success": True,
+                "is_cuda": ipc_data.tensor.is_cuda,
+                "shape": tuple(ipc_data.tensor.shape),
+            }
+        )
+
         # Signal that retrieval is complete
         retrieval_done.set()
     except Exception as e:
         import traceback
+
         retrieval_done.set()  # Signal even on failure
-        result_queue.put({
-            "success": False,
-            "error": str(e),
-            "traceback": traceback.format_exc()
-        })
+        result_queue.put(
+            {"success": False, "error": str(e), "traceback": traceback.format_exc()}
+        )
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
 def test_mixed_cpu_cuda_tensors():
     """Test encoding with mixed CPU and CUDA tensors using multiprocessing."""
     tensor_queues = [torch_mp.Queue()]
-    result_queue = mp.Queue()
+    result_queue: mp.Queue = mp.Queue()
     encoder_ready = mp.Event()
     retrieval_done = mp.Event()
 
@@ -429,12 +450,20 @@ def test_mixed_cpu_cuda_tensors():
     decoder_proc.join(timeout=5.0)
 
     # Verify encoder succeeded
-    assert encoder_result["success"], f"Encoder failed: {encoder_result.get('error')}\n{encoder_result.get('traceback', '')}"
-    
+    assert encoder_result["success"], (
+        f"Encoder failed: {encoder_result.get('error')}\n"
+        f"{encoder_result.get('traceback', '')}"
+    )
+
     # Verify decoder succeeded and got CUDA tensor
-    assert decoder_result["success"], f"Decoder failed: {decoder_result.get('error')}\n{decoder_result.get('traceback', '')}"
+    assert decoder_result["success"], (
+        f"Decoder failed: {decoder_result.get('error')}\n"
+        f"{decoder_result.get('traceback', '')}"
+    )
     assert decoder_result["is_cuda"], "Retrieved tensor is not on CUDA"
-    assert decoder_result["shape"] == (4, 5), f"Unexpected shape: {decoder_result['shape']}"
+    assert decoder_result["shape"] == (4, 5), (
+        f"Unexpected shape: {decoder_result['shape']}"
+    )
 
 
 def cpu_tensor_ipc_encoder_process(
@@ -442,13 +471,15 @@ def cpu_tensor_ipc_encoder_process(
     result_queue: mp.Queue,
     target_engine: int,
     tensor_shape: tuple,
-    ready_event: mp.Event,
-    retrieval_done: mp.Event,
+    ready_event: EventType,
+    retrieval_done: EventType,
 ):
     """Process that encodes and sends CPU tensors via IPC queue."""
     try:
         # Create encoder with IPC enabled for all tensors
-        encoder = MsgpackEncoder(tensor_queues=tensor_queues, multimodal_tensor_ipc=True)
+        encoder = MsgpackEncoder(
+            tensor_queues=tensor_queues, multimodal_tensor_ipc=True
+        )
         encoder.set_target_engine(target_engine)
 
         # Create a CPU tensor
@@ -468,32 +499,28 @@ def cpu_tensor_ipc_encoder_process(
                 "tensor_shape": tuple(tensor.shape),
             }
         )
-        
+
         # Keep process alive until decoder has retrieved the tensor
         # This is necessary for CPU tensor shared memory to remain valid
         retrieval_done.wait(timeout=30.0)
     except Exception as e:
         import traceback
+
         ready_event.set()
-        result_queue.put({
-            "success": False,
-            "error": str(e),
-            "traceback": traceback.format_exc()
-        })
+        result_queue.put(
+            {"success": False, "error": str(e), "traceback": traceback.format_exc()}
+        )
 
 
 def cpu_tensor_ipc_decoder_process(
     tensor_queue: torch_mp.Queue,
     result_queue: mp.Queue,
     expected_shape: tuple,
-    encoder_ready: mp.Event,
-    retrieval_done: mp.Event,
+    encoder_ready: EventType,
+    retrieval_done: EventType,
 ):
     """Process that decodes and receives CPU tensors from IPC queue."""
     try:
-        # Create decoder with tensor queue
-        decoder = MsgpackDecoder(tensor_queue=tensor_queue)
-
         # Wait for encoder to finish sending
         if not encoder_ready.wait(timeout=10.0):
             raise TimeoutError("Encoder did not signal ready")
@@ -511,17 +538,16 @@ def cpu_tensor_ipc_decoder_process(
                 "is_cpu": ipc_data.tensor.device.type == "cpu",
             }
         )
-        
+
         # Signal that retrieval is complete
         retrieval_done.set()
     except Exception as e:
         import traceback
+
         retrieval_done.set()  # Signal even on failure
-        result_queue.put({
-            "success": False,
-            "error": str(e),
-            "traceback": traceback.format_exc()
-        })
+        result_queue.put(
+            {"success": False, "error": str(e), "traceback": traceback.format_exc()}
+        )
 
 
 def test_cpu_tensor_ipc():
@@ -529,7 +555,7 @@ def test_cpu_tensor_ipc():
     # Set up queues and synchronization
     num_engines = 2
     tensor_queues = [torch_mp.Queue() for _ in range(num_engines)]
-    result_queue = mp.Queue()
+    result_queue: mp.Queue = mp.Queue()
     encoder_ready = mp.Event()
     retrieval_done = mp.Event()
 
@@ -553,7 +579,13 @@ def test_cpu_tensor_ipc():
     # Start decoder process
     decoder_proc = mp.Process(
         target=cpu_tensor_ipc_decoder_process,
-        args=(tensor_queues[target_engine], result_queue, tensor_shape, encoder_ready, retrieval_done),
+        args=(
+            tensor_queues[target_engine],
+            result_queue,
+            tensor_shape,
+            encoder_ready,
+            retrieval_done,
+        ),
     )
     decoder_proc.start()
 
@@ -565,8 +597,14 @@ def test_cpu_tensor_ipc():
     decoder_proc.join(timeout=5.0)
 
     # Verify results
-    assert encoder_result["success"], f"Encoder failed: {encoder_result.get('error')}\n{encoder_result.get('traceback', '')}"
-    assert decoder_result["success"], f"Decoder failed: {decoder_result.get('error')}\n{decoder_result.get('traceback', '')}"
+    assert encoder_result["success"], (
+        f"Encoder failed: {encoder_result.get('error')}\n"
+        f"{encoder_result.get('traceback', '')}"
+    )
+    assert decoder_result["success"], (
+        f"Decoder failed: {decoder_result.get('error')}\n"
+        f"{decoder_result.get('traceback', '')}"
+    )
     assert decoder_result["matches_expected"], "Tensor shape mismatch"
     assert decoder_result["is_cpu"], "Tensor not on CPU device"
 
@@ -574,7 +612,7 @@ def test_cpu_tensor_ipc():
 def test_ipc_disabled_mode():
     """Test that IPC is disabled when multimodal_tensor_ipc=False."""
     tensor_queues = [torch_mp.Queue()]
-    
+
     # Create encoder with IPC disabled
     encoder = MsgpackEncoder(tensor_queues=tensor_queues, multimodal_tensor_ipc=False)
     encoder.set_target_engine(0)
@@ -597,7 +635,9 @@ def test_ipc_disabled_mode():
         cuda_tensor = torch.randn(4, 5, device="cuda:0")
         encoded_cuda = encoder.encode({"cuda_tensor": cuda_tensor})
         assert len(encoded_cuda) > 0
-        assert tensor_queues[0].empty(), "Tensor queue should be empty for CUDA tensor when IPC is disabled"
+        assert tensor_queues[0].empty(), (
+            "Tensor queue should be empty for CUDA tensor when IPC is disabled"
+        )
 
 
 def test_mixed_cpu_cuda_with_ipc_enabled():
@@ -606,7 +646,7 @@ def test_mixed_cpu_cuda_with_ipc_enabled():
         pytest.skip("CUDA not available")
 
     tensor_queues = [torch_mp.Queue()]
-    
+
     # Create encoder with IPC enabled for all tensors
     encoder = MsgpackEncoder(tensor_queues=tensor_queues, multimodal_tensor_ipc=True)
     encoder.set_target_engine(0)
@@ -615,7 +655,7 @@ def test_mixed_cpu_cuda_with_ipc_enabled():
     assert encoder.multimodal_tensor_ipc is True, "IPC should be enabled"
     assert encoder.tensor_queues is not None, "Tensor queues should be set"
     assert encoder.target_engine_index == 0, "Target engine should be set"
-    
-    # Note: Actual IPC transfer only works across processes (tested in test_cpu_tensor_ipc)
-    # This test just verifies the configuration is correct
 
+    # Note: Actual IPC transfer only works across processes
+    # (tested in test_cpu_tensor_ipc)
+    # This test just verifies the configuration is correct
