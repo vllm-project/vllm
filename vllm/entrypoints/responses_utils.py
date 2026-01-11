@@ -79,7 +79,7 @@ def _maybe_combine_reasoning_and_tool_call(
     the current message is a tool call"""
     if not (
         isinstance(item, ResponseFunctionToolCall)
-        and item.id is not None
+        and item.id
         and item.id.startswith(MCP_PREFIX)
     ):
         return None

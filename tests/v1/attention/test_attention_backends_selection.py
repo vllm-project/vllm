@@ -79,7 +79,12 @@ from vllm.v1.attention.backends.short_conv_attn import ShortConvAttentionBackend
     ],
 )
 def test_mamba_layers_get_attn_backend(
-    dist_init, layer_class, init_kwargs, expected_backend, expected_mamba_type
+    default_vllm_config,
+    dist_init,
+    layer_class,
+    init_kwargs,
+    expected_backend,
+    expected_mamba_type,
 ):
     """Test that Mamba-like layers return the correct attention backend."""
     layer = layer_class(**init_kwargs)

@@ -6,6 +6,7 @@ from collections.abc import Mapping
 from typing import Any, Literal, cast
 
 from vllm.config import VllmConfig
+from vllm.exceptions import VLLMValidationError
 from vllm.inputs import ProcessorInputs, PromptType, SingletonInputs
 from vllm.inputs.parse import split_enc_dec_inputs
 from vllm.inputs.preprocess import InputPreprocessor
@@ -15,10 +16,10 @@ from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
 from vllm.multimodal.cache import processor_cache_from_config
 from vllm.multimodal.inputs import MultiModalFeatureSpec, MultiModalUUIDDict
 from vllm.multimodal.parse import MultiModalDataParser
-from vllm.multimodal.processing import EncDecMultiModalProcessor
+from vllm.multimodal.processing import EncDecMultiModalProcessor, set_request_id
 from vllm.multimodal.utils import argsort_mm_positions
 from vllm.pooling_params import PoolingParams
-from vllm.sampling_params import SamplingParams
+from vllm.sampling_params import _SAMPLING_EPS, SamplingParams
 from vllm.tokenizers import TokenizerLike
 from vllm.tokenizers.mistral import MistralTokenizer
 from vllm.utils import length_from_prompt_token_ids_or_embeds, random_uuid
@@ -60,6 +61,7 @@ class InputProcessor:
         self.input_preprocessor = InputPreprocessor(
             self.model_config,
             tokenizer,
+            self.vllm_config.observability_config,
             mm_registry,
             mm_processor_cache=self.mm_processor_cache,
         )
@@ -82,9 +84,11 @@ class InputProcessor:
             if num_logprobs == -1:
                 num_logprobs = self.model_config.get_vocab_size()
             if num_logprobs > max_logprobs:
-                raise ValueError(
+                raise VLLMValidationError(
                     f"Requested sample logprobs of {num_logprobs}, "
-                    f"which is greater than max allowed: {max_logprobs}"
+                    f"which is greater than max allowed: {max_logprobs}",
+                    parameter="logprobs",
+                    value=num_logprobs,
                 )
 
         # Validate prompt logprobs.
@@ -93,9 +97,11 @@ class InputProcessor:
             if num_prompt_logprobs == -1:
                 num_prompt_logprobs = self.model_config.get_vocab_size()
             if num_prompt_logprobs > max_logprobs:
-                raise ValueError(
+                raise VLLMValidationError(
                     f"Requested prompt logprobs of {num_prompt_logprobs}, "
-                    f"which is greater than max allowed: {max_logprobs}"
+                    f"which is greater than max allowed: {max_logprobs}",
+                    parameter="prompt_logprobs",
+                    value=num_prompt_logprobs,
                 )
 
     def _validate_sampling_params(
@@ -133,9 +139,11 @@ class InputProcessor:
                 invalid_token_ids.append(token_id)
 
         if invalid_token_ids:
-            raise ValueError(
+            raise VLLMValidationError(
                 f"token_id(s) {invalid_token_ids} in logit_bias contain "
-                f"out-of-vocab token ids. Vocabulary size: {vocab_size}"
+                f"out-of-vocab token ids. Vocabulary size: {vocab_size}",
+                parameter="logit_bias",
+                value=invalid_token_ids,
             )
 
     def _validate_supported_sampling_params(
@@ -145,24 +153,16 @@ class InputProcessor:
         # Logits processors not supported.
         if params.logits_processors:
             raise ValueError(
-                "vLLM V1 does not support per request user provided logits processors."
+                "vLLM V1 does not support per request user-provided logits processors."
             )
-        # Async scheduling + spec decode currently incompatible with some
-        # sampling parameters.
-        if (
-            self.vllm_config.speculative_config is not None
-            and self.vllm_config.scheduler_config.async_scheduling
-            and (
-                params.frequency_penalty != 0.0
-                or params.presence_penalty != 0.0
-                or params.repetition_penalty != 1.0
-                or params.bad_words_token_ids
-                or params.structured_outputs
-            )
+
+        # Some sampling parameters are not yet compatible with spec decoding.
+        if self.vllm_config.speculative_config is not None and (
+            params.min_tokens > 1 or params.min_p > _SAMPLING_EPS or params.logit_bias
         ):
             raise ValueError(
-                "async scheduling with spec decoding doesn't yet support "
-                "penalties, bad words or structured outputs in sampling parameters."
+                "The min_tokens, min_p, and logit_bias sampling parameters "
+                "are not yet supported with speculative decoding."
             )
 
     def _validate_params(
@@ -493,11 +493,13 @@ class InputProcessor:
         # 1. Tokenize text prompt, with LoRA request if one exists.
         # 2. For multimodal models with a merged preprocessor, preprocess
         #   multimodal data and expand prompt token ids accordingly.
-        processed_inputs: ProcessorInputs = self.input_preprocessor.preprocess(
-            prompt,
-            tokenization_kwargs=tokenization_kwargs,
-            mm_uuids=mm_uuids,
-        )
+        with set_request_id(request_id):
+            processed_inputs: ProcessorInputs = self.input_preprocessor.preprocess(
+                prompt,
+                tokenization_kwargs=tokenization_kwargs,
+                mm_uuids=mm_uuids,
+            )
+
         from vllm.platforms import current_platform
 
         current_platform.validate_request(
@@ -553,15 +555,17 @@ class InputProcessor:
 
             mm_features = []
             for modality, idx in sorted_mm_idxs:
+                base_mm_hash = decoder_mm_hashes[modality][idx]
                 mm_features.append(
                     MultiModalFeatureSpec(
                         data=decoder_mm_inputs[modality][idx],
                         modality=modality,
                         identifier=self._get_mm_identifier(
-                            decoder_mm_hashes[modality][idx],
+                            base_mm_hash,
                             lora_request,
                         ),
                         mm_position=decoder_mm_positions[modality][idx],
+                        mm_hash=base_mm_hash,
                     )
                 )
 
@@ -641,6 +645,7 @@ class InputProcessor:
                 mm_registry = self.input_preprocessor.mm_registry
                 mm_processor = mm_registry.create_processor(
                     model_config,
+                    self.vllm_config.observability_config,
                     tokenizer=tokenizer,
                 )
                 assert isinstance(mm_processor, EncDecMultiModalProcessor)

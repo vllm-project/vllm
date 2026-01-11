@@ -8,16 +8,15 @@ from typing import TYPE_CHECKING, Optional
 import torch
 
 import vllm.envs as envs
-from vllm.attention.backends.abstract import AttentionType
-from vllm.attention.backends.registry import AttentionBackendEnum
 from vllm.logger import init_logger
 from vllm.utils.torch_utils import cuda_device_count_stateless
+from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 from .interface import DeviceCapability, Platform, PlatformEnum
 
 if TYPE_CHECKING:
-    from vllm.attention.selector import AttentionSelectorConfig
     from vllm.config import VllmConfig
+    from vllm.v1.attention.selector import AttentionSelectorConfig
 
 logger = init_logger(__name__)
 
@@ -289,14 +288,6 @@ class RocmPlatform(Platform):
                 logger.info("Using Aiter Flash Attention backend.")
                 return AttentionBackendEnum.ROCM_AITER_FA.get_path()
 
-            # Priority 5: If model is Encoder-only self-attention type
-            if (
-                attn_selector_config.attn_type is not None
-                and attn_selector_config.attn_type == AttentionType.ENCODER_ONLY
-            ):
-                logger.info("Using FlexAttention backend.")
-                return AttentionBackendEnum.FLEX_ATTENTION.get_path()
-
             # Default: Triton Unified Attention
             logger.info("Using Triton Attention backend.")
             return AttentionBackendEnum.TRITON_ATTN.get_path()
@@ -407,8 +398,10 @@ class RocmPlatform(Platform):
         compilation_config = vllm_config.compilation_config
         parallel_config = vllm_config.parallel_config
         is_eager_execution = compilation_config == CUDAGraphMode.NONE
+        use_aiter_fused_moe = rocm_aiter_ops.is_fused_moe_enabled()
         use_aiter_rms_norm = rocm_aiter_ops.is_rmsnorm_enabled()
         use_aiter_fp8_linear = rocm_aiter_ops.is_linear_fp8_enabled()
+        use_aiter_fused_se = rocm_aiter_ops.is_fusion_moe_shared_experts_enabled()
 
         if compilation_config.cudagraph_mode.has_full_cudagraphs():
             # decode context parallel does not support full cudagraphs
@@ -457,6 +450,22 @@ class RocmPlatform(Platform):
 
         if use_aiter_fp8_linear and "-quant_fp8" not in compilation_config.custom_ops:
             compilation_config.custom_ops.append("+quant_fp8")
+
+        if use_aiter_fused_se and "-grouped_topk" in compilation_config.custom_ops:
+            logger.warning_once(
+                "VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS is enabled, which "
+                "requires the 'grouped_topk' custom op. Overriding the "
+                "user-provided '-grouped_topk'."
+            )
+            compilation_config.custom_ops.remove("-grouped_topk")
+        # Ensure grouped_topk is always enabled when using AITER if
+        # its not disabled by user
+        if (
+            use_aiter_fused_moe
+            and "+grouped_topk" not in compilation_config.custom_ops
+            and "-grouped_topk" not in compilation_config.custom_ops
+        ):
+            compilation_config.custom_ops.append("+grouped_topk")
 
     @classmethod
     def verify_model_arch(cls, model_arch: str) -> None:

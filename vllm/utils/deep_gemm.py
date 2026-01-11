@@ -16,6 +16,9 @@ import torch
 
 import vllm.envs as envs
 from vllm.logger import logger
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    get_fp8_min_max,
+)
 from vllm.platforms import current_platform
 from vllm.utils.import_utils import has_deep_gemm
 from vllm.utils.math_utils import cdiv
@@ -355,7 +358,8 @@ def per_block_cast_to_fp8(
     x_padded[:m, :n] = x
     x_view = x_padded.view(-1, block_m, x_padded.size(1) // block_n, block_n)
     x_amax = x_view.abs().float().amax(dim=(1, 3), keepdim=True).clamp(1e-4)
-    sf = x_amax / 224.0 if current_platform.is_fp8_fnuz() else x_amax / 448.0
+    _, fp8_max = get_fp8_min_max()
+    sf = x_amax / fp8_max
     sf = _ceil_to_ue8m0(sf) if use_ue8m0 else sf
     x_scaled = (x_view * (1.0 / sf)).to(fp8_dtype)
     return x_scaled.view_as(x_padded)[:m, :n].contiguous(), sf.view(
