@@ -1104,6 +1104,7 @@ class FusedMoE(CustomOp):
                 max_num_tokens=vllm_config.scheduler_config.max_num_batched_tokens
                 * dp_size,
                 is_EP=self.use_ep,
+                device=current_platform.device_type,
             )
         self.local_num_experts += self.num_fused_shared_experts
 
