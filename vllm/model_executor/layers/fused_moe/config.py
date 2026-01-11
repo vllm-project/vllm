@@ -868,6 +868,10 @@ class FusedMoEParallelConfig:
         return self.use_all2all_kernels and self.all2all_backend == "pplx"
 
     @property
+    def use_pplx_garden_kernels(self):
+        return self.use_all2all_kernels and envs.VLLM_ALL2ALL_BACKEND == "pplx_garden"
+
+    @property
     def use_deepep_ht_kernels(self):
         return (
             self.use_all2all_kernels
@@ -1090,6 +1094,10 @@ class FusedMoEConfig:
     @property
     def use_pplx_kernels(self):
         return self.moe_parallel_config.use_pplx_kernels
+
+    @property
+    def use_pplx_garden_kernels(self):
+        return self.moe_parallel_config.use_pplx_garden_kernels
 
     @property
     def use_deepep_ht_kernels(self):
