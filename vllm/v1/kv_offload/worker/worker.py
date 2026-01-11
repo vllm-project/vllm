@@ -53,6 +53,15 @@ class OffloadingHandler(ABC):
         """
         pass
 
+    @abstractmethod
+    def wait(self, job_ids: set[int]) -> None:
+        """
+        Wait for jobs to finish (blocking).
+
+        Args:
+            job_ids: The set of job IDs to wait for.
+        """
+
 
 class OffloadingWorker:
     """
@@ -142,3 +151,13 @@ class OffloadingWorker:
         for handler in self.handlers:
             finished.extend(handler.get_finished())
         return finished
+
+    def wait(self, job_ids: set[int]) -> None:
+        """
+        Wait for jobs to finish (blocking).
+
+        Args:
+            job_ids: The set of job IDs to wait for.
+        """
+        for handler in self.handlers:
+            handler.wait(job_ids)

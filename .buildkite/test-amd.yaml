@@ -731,7 +731,7 @@ steps:
 
 - label: Quantization Test # 70min
   timeout_in_minutes: 90
-  mirror_hardwares: [amdexperimental]
+  mirror_hardwares: [amdexperimental, amdproduction]
   agent_pool: mi325_1
   # grade: Blocking
   source_file_dependencies:
@@ -1105,8 +1105,8 @@ steps:
   - vllm/v1/attention/backends/flashinfer.py
   - vllm/v1/attention/backends/mla/cutlass_mla.py
   - vllm/v1/attention/backends/mla/flashinfer_mla.py
+  - vllm/v1/attention/selector.py
   - vllm/platforms/cuda.py
-  - vllm/attention/selector.py
   commands:
     - nvidia-smi
     - python3 examples/offline_inference/basic/chat.py

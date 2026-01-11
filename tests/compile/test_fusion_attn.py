@@ -9,8 +9,6 @@ from tests.compile.backend import LazyInitPass, TestBackend
 from tests.utils import flat_product
 from tests.v1.attention.utils import BatchSpec, create_common_attn_metadata
 from vllm._custom_ops import cutlass_scaled_fp4_mm, scaled_fp4_quant
-from vllm.attention.backends.abstract import AttentionMetadata
-from vllm.attention.backends.registry import AttentionBackendEnum
 from vllm.attention.layer import Attention
 from vllm.compilation.fusion_attn import ATTN_OP, AttnFusionPass
 from vllm.compilation.fx_utils import find_op_nodes
@@ -37,6 +35,8 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import Fp8LinearOp
 from vllm.platforms import current_platform
 from vllm.utils.flashinfer import has_flashinfer
+from vllm.v1.attention.backend import AttentionMetadata
+from vllm.v1.attention.backends.registry import AttentionBackendEnum
 from vllm.v1.kv_cache_interface import AttentionSpec
 
 FP8_DTYPE = current_platform.fp8_dtype()

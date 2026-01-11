@@ -32,7 +32,6 @@ from pydantic.fields import FieldInfo
 from typing_extensions import TypeIs
 
 import vllm.envs as envs
-from vllm.attention.backends.registry import AttentionBackendEnum
 from vllm.config import (
     AttentionConfig,
     CacheConfig,
@@ -94,6 +93,7 @@ from vllm.utils.argparse_utils import FlexibleArgumentParser
 from vllm.utils.mem_constants import GiB_bytes
 from vllm.utils.network_utils import get_ip
 from vllm.utils.torch_utils import resolve_kv_cache_dtype_string
+from vllm.v1.attention.backends.registry import AttentionBackendEnum
 from vllm.v1.sample.logits_processor import LogitsProcessor
 
 if TYPE_CHECKING:
@@ -451,6 +451,7 @@ class EngineArgs:
     hf_overrides: HfOverrides = get_field(ModelConfig, "hf_overrides")
     tokenizer_revision: str | None = ModelConfig.tokenizer_revision
     quantization: QuantizationMethods | None = ModelConfig.quantization
+    allow_deprecated_quantization: bool = ModelConfig.allow_deprecated_quantization
     enforce_eager: bool = ModelConfig.enforce_eager
     disable_custom_all_reduce: bool = ParallelConfig.disable_custom_all_reduce
     limit_mm_per_prompt: dict[str, int | dict[str, int]] = get_field(
@@ -524,6 +525,9 @@ class EngineArgs:
         ObservabilityConfig.enable_layerwise_nvtx_tracing
     )
     enable_mfu_metrics: bool = ObservabilityConfig.enable_mfu_metrics
+    enable_logging_iteration_details: bool = (
+        ObservabilityConfig.enable_logging_iteration_details
+    )
     enable_mm_processor_stats: bool = ObservabilityConfig.enable_mm_processor_stats
     scheduling_policy: SchedulerPolicy = SchedulerConfig.policy
     scheduler_cls: str | type[object] | None = SchedulerConfig.scheduler_cls
@@ -648,6 +652,10 @@ class EngineArgs:
         )
         model_group.add_argument("--max-model-len", **model_kwargs["max_model_len"])
         model_group.add_argument("--quantization", "-q", **model_kwargs["quantization"])
+        model_group.add_argument(
+            "--allow-deprecated-quantization",
+            **model_kwargs["allow_deprecated_quantization"],
+        )
         model_group.add_argument("--enforce-eager", **model_kwargs["enforce_eager"])
         model_group.add_argument("--max-logprobs", **model_kwargs["max_logprobs"])
         model_group.add_argument("--logprobs-mode", **model_kwargs["logprobs_mode"])
@@ -1054,6 +1062,10 @@ class EngineArgs:
             "--enable-mfu-metrics",
             **observability_kwargs["enable_mfu_metrics"],
         )
+        observability_group.add_argument(
+            "--enable-logging-iteration-details",
+            **observability_kwargs["enable_logging_iteration_details"],
+        )
 
         # Scheduler arguments
         scheduler_kwargs = get_kwargs(SchedulerConfig)
@@ -1225,6 +1237,7 @@ class EngineArgs:
             tokenizer_revision=self.tokenizer_revision,
             max_model_len=self.max_model_len,
             quantization=self.quantization,
+            allow_deprecated_quantization=self.allow_deprecated_quantization,
             enforce_eager=self.enforce_eager,
             max_logprobs=self.max_logprobs,
             logprobs_mode=self.logprobs_mode,
@@ -1707,6 +1720,7 @@ class EngineArgs:
             enable_layerwise_nvtx_tracing=self.enable_layerwise_nvtx_tracing,
             enable_mfu_metrics=self.enable_mfu_metrics,
             enable_mm_processor_stats=self.enable_mm_processor_stats,
+            enable_logging_iteration_details=self.enable_logging_iteration_details,
         )
 
         # Compilation config overrides

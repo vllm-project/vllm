@@ -9,13 +9,13 @@ import torch
 
 from vllm import _custom_ops as ops
 from vllm._aiter_ops import rocm_aiter_ops
-from vllm.attention.backends.abstract import (
+from vllm.config import VllmConfig
+from vllm.logger import init_logger
+from vllm.v1.attention.backend import (
     AttentionBackend,
     AttentionLayer,
     AttentionMetadata,
 )
-from vllm.config import VllmConfig
-from vllm.logger import init_logger
 from vllm.v1.attention.backends.mla.common import MLACommonBaseImpl, get_mla_dims
 from vllm.v1.attention.backends.mla.flashmla_sparse import (
     triton_convert_req_index_to_global_index,
