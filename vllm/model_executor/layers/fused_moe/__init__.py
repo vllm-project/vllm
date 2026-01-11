@@ -31,6 +31,10 @@ from vllm.model_executor.layers.fused_moe.utils import activation_without_mul
 from vllm.model_executor.layers.fused_moe.zero_expert_fused_moe import (
     ZeroExpertFusedMoE,
 )
+from vllm.model_executor.layers.router import (
+    GroupedTopk,
+    fused_topk,
+)
 from vllm.triton_utils import HAS_TRITON
 
 _config: dict[str, Any] | None = None
@@ -59,11 +63,13 @@ __all__ = [
     "FusedMoEPermuteExpertsUnpermute",
     "FusedMoEActivationFormat",
     "FusedMoEPrepareAndFinalize",
+    "GroupedTopk",
     "RoutingMethodType",
     "SharedFusedMoE",
     "ZeroExpertFusedMoE",
     "activation_without_mul",
     "override_config",
+    "fused_topk",
     "get_config",
 ]
 
@@ -83,11 +89,9 @@ if HAS_TRITON:
         BatchedTritonExperts,
     )
     from vllm.model_executor.layers.fused_moe.fused_moe import (
-        GroupedTopk,
         TritonExperts,
         TritonWNA16Experts,
         fused_experts,
-        fused_topk,
         get_config_file_name,
     )
     from vllm.model_executor.layers.fused_moe.triton_deep_gemm_moe import (
@@ -95,10 +99,8 @@ if HAS_TRITON:
     )
 
     __all__ += [
-        "fused_topk",
         "fused_experts",
         "get_config_file_name",
-        "GroupedTopk",
         "cutlass_moe_w4a8_fp8",
         "CutlassExpertsFp8",
         "CutlassBatchedExpertsFp8",
