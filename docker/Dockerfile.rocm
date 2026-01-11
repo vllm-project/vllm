@@ -115,7 +115,7 @@ RUN mkdir src && mv vllm src/vllm
 
 # -----------------------
 # Final vLLM image
-FROM base AS final
+FROM base AS vllm-openai
 
 RUN python3 -m pip install --upgrade pip && rm -rf /var/lib/apt/lists/*
 # Error related to odd state for numpy 1.20.3 where there is no METADATA etc, but an extra LICENSES_bundled.txt.
@@ -158,4 +158,4 @@ RUN echo "ROCTRACER_MAX_EVENTS=10000000" > ${COMMON_WORKDIR}/libkineto.conf
 ENV KINETO_CONFIG="${COMMON_WORKDIR}/libkineto.conf"
 RUN echo "VLLM_BASE_IMAGE=${BASE_IMAGE}" >> ${COMMON_WORKDIR}/versions.txt
 
-CMD ["/bin/bash"]
+ENTRYPOINT ["vllm", "serve"]
