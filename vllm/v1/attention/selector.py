@@ -6,14 +6,14 @@ from typing import NamedTuple, cast, get_args
 
 import torch
 
-from vllm.attention.backends.abstract import AttentionBackend, AttentionType
-from vllm.attention.backends.registry import (
-    MAMBA_TYPE_TO_BACKEND_MAP,
-    MambaAttentionBackendEnum,
-)
 from vllm.config.cache import CacheDType
 from vllm.logger import init_logger
 from vllm.utils.import_utils import resolve_obj_by_qualname
+from vllm.v1.attention.backend import AttentionBackend, AttentionType
+from vllm.v1.attention.backends.registry import (
+    MAMBA_TYPE_TO_BACKEND_MAP,
+    MambaAttentionBackendEnum,
+)
 
 logger = init_logger(__name__)
 

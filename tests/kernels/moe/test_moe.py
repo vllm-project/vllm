@@ -64,8 +64,10 @@ from vllm.utils.torch_utils import set_random_seed
 from vllm.v1.worker.workspace import init_workspace_manager
 
 NUM_EXPERTS = [8, 64, 192]
+NUM_EXPERTS_LARGE = [128, 256]
 EP_SIZE = [1, 4]
 TOP_KS = [2, 6]
+TOP_KS_SMALL = [1, 2]
 
 MOE_MARLIN_QUANT_TEST_CONFIGS = [
     # AWQ-INT4
@@ -131,6 +133,13 @@ FUSED_MOE_MNK_FACTORS = [
     (33, 2048, 128),
     (32768, 2048, 511),
     (40000, 1024, 1024),
+]
+
+FUSED_MOE_MNK_FACTORS_SMALL_M = [
+    (1, 128, 128),
+    (1, 2048, 128),
+    (2, 2048, 128),
+    (2, 2048, 511),
 ]
 
 FUSED_MOE_WN16_MNK_FACTORS = [
@@ -262,6 +271,111 @@ def test_fused_moe(
         w2 = w2[e_ids]
     else:
         e_map = None
+
+    #
+    # Setup test functions
+    #
+    quant_config = FUSED_MOE_UNQUANTIZED_CONFIG
+
+    m_fused_moe_fn = modular_triton_fused_moe(quant_config)
+
+    def m_fused_moe(
+        a: torch.Tensor,
+        w1: torch.Tensor,
+        w2: torch.Tensor,
+        score: torch.Tensor,
+        topk: int,
+        global_num_experts: int = -1,
+        expert_map: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        topk_weights, topk_ids, _ = fused_topk(a, score, topk, False)
+        return m_fused_moe_fn(
+            a,
+            w1,
+            w2,
+            topk_weights,
+            topk_ids,
+            global_num_experts=global_num_experts,
+            expert_map=expert_map,
+        )
+
+    fused_moe_fn = functools.partial(fused_moe, renormalize=False)
+
+    #
+    # Run tests
+    #
+    runner = functools.partial(
+        run_moe_test,
+        a=a,
+        w1=w1,
+        w2=w2,
+        score=score,
+        topk=topk,
+        global_num_experts=e,
+        expert_map=e_map,
+        padding=padding,
+    )
+
+    # Note: for now use_compile will error out if the problem size is
+    # large enough to trigger chunking. I'm leaving the flag and
+    # setup code in case we are able to revisit this later.
+    use_compile = False
+
+    use_cudagraph = n >= 1024 and k >= 1024 and current_platform.is_cuda_alike()
+
+    with set_current_vllm_config(vllm_config):
+        baseline_output = runner(torch_moe, iterative_moe)
+        runner(
+            baseline_output,
+            fused_moe_fn,
+            use_compile=use_compile,
+            use_cudagraph=use_cudagraph,
+        )
+        runner(
+            baseline_output,
+            m_fused_moe,
+            use_compile=use_compile,
+            use_cudagraph=use_cudagraph,
+        )
+
+
+@pytest.mark.parametrize("m,n,k", FUSED_MOE_MNK_FACTORS_SMALL_M)
+@pytest.mark.parametrize("e", NUM_EXPERTS_LARGE)
+@pytest.mark.parametrize("topk", TOP_KS_SMALL)
+@pytest.mark.parametrize("dtype", [torch.bfloat16])
+@pytest.mark.parametrize("padding", [True, False])
+@pytest.mark.parametrize("chunk_size", [8192])
+def test_naive_block_assignment_moe(
+    m: int,
+    n: int,
+    k: int,
+    e: int,
+    topk: int,
+    dtype: torch.dtype,
+    padding: bool,
+    chunk_size: int,
+    monkeypatch,
+    workspace_init,
+):
+    current_platform.seed_everything(7)
+
+    monkeypatch.setenv("VLLM_FUSED_MOE_CHUNK_SIZE", str(chunk_size))
+
+    #
+    # Setup test data
+    #
+
+    #
+    # Setup test data
+    #
+
+    a = torch.randn((m, k), device="cuda", dtype=dtype) / 10
+    w1 = torch.randn((e, 2 * n, k), device="cuda", dtype=dtype) / 10
+    w2 = torch.randn((e, k, n), device="cuda", dtype=dtype) / 10
+
+    score = torch.randn((m, e), device="cuda", dtype=dtype)
+
+    e_map = None
 
     #
     # Setup test functions
