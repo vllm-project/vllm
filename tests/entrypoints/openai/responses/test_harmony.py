@@ -12,7 +12,7 @@ from openai_harmony import (
     Message,
 )
 
-from ...utils import RemoteOpenAIServer
+from ....utils import RemoteOpenAIServer
 
 MODEL_NAME = "openai/gpt-oss-20b"
 
