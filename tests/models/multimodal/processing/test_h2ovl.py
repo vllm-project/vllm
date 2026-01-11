@@ -175,3 +175,32 @@ def test_processor_override(
         max_num,
         hf_processor_mm_kwargs,
     )
+
+
+@pytest.mark.parametrize(
+    "model_id",
+    [
+        "h2oai/h2ovl-mississippi-800m",
+        "h2oai/h2ovl-mississippi-2b",
+    ],
+)
+def test_model_token_methods(model_id: str):
+    from vllm.model_executor.models.h2ovl import H2OVLChatModel
+
+    ctx = build_model_context(model_id)
+    model = H2OVLChatModel.__new__(H2OVLChatModel)
+    model.config = ctx.model_config.hf_config
+    model.ctx = ctx
+
+    # Check 1: Standard Calculation
+    tokens = model.get_num_mm_encoder_tokens(32768)
+    assert tokens % 256 == 0, "H2OVL tokens should be multiples of the patch grid (256)"
+
+    # Check 2: 1:1 Mapping
+    assert model.get_num_mm_connector_tokens(tokens) == tokens
+
+    # Check 3: Budget Clipping
+    assert model.get_num_mm_encoder_tokens(100) == 100
+
+    # Check 4: Minimal Budget
+    assert model.get_num_mm_encoder_tokens(0) == 0
