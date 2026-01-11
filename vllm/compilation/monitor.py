@@ -13,8 +13,6 @@ torch_compile_start_time: float = 0.0
 
 
 def start_monitoring_torch_compile(vllm_config: VllmConfig) -> None:
-    vllm_config.is_in_compile = True
-
     global torch_compile_start_time
     torch_compile_start_time = time.time()
 
@@ -43,7 +41,6 @@ def end_monitoring_torch_compile(vllm_config: VllmConfig) -> None:
             context_manager.__exit__(None, None, None)
             context_manager = None
 
-    vllm_config.is_in_compile = False
 
 cudagraph_capturing_enabled: bool = True
 

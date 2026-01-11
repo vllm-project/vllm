@@ -257,8 +257,13 @@ class VllmConfig:
     performance, with -O0 having the best startup time and -O3 having the best
     performance. -02 is used by defult. See  OptimizationLevel for full
     description."""
-    is_in_compile: bool = False
-    """For ViT Compile, Compile Status Flag"""
+    is_in_compile_or_vit_cuda_graph_capture: bool = False
+    """Flag for ViT compilation or ViT CUDA graph capture.
+    
+    If true, ViT in DP mode will execute the ViT model directly instead of
+    `run_dp_sharded_mrope_vision_model` to ensure correct memory profiling
+    and compilation for each rank.
+    """
 
     def compute_hash(self) -> str:
         """

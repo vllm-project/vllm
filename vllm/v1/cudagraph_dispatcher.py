@@ -125,10 +125,14 @@ class CudagraphDispatcher:
         uniform_decode: bool,
         has_lora: bool,
         num_active_loras: int = 0,
+        is_vit: bool = False,
     ) -> BatchDescriptor:
         max_num_seqs = self.vllm_config.scheduler_config.max_num_seqs
         uniform_decode_query_len = self.uniform_decode_query_len
-        num_tokens_padded = self._bs_to_padded_graph_size[num_tokens]
+        if is_vit:
+            num_tokens_padded = self.vllm_config.pad_for_vit_cudagraph(num_tokens)
+        else:
+            num_tokens_padded = self._bs_to_padded_graph_size[num_tokens]
 
         if uniform_decode and self.cudagraph_mode.has_mode(CUDAGraphMode.FULL):
             num_reqs = num_tokens_padded // uniform_decode_query_len
@@ -143,6 +147,7 @@ class CudagraphDispatcher:
             uniform=uniform_decode,
             has_lora=has_lora,
             num_active_loras=num_active_loras,
+            is_vit=is_vit
         )
 
     def add_cudagraph_key(
@@ -187,12 +192,12 @@ class CudagraphDispatcher:
                     ).relax_for_mixed_batch_cudagraphs(),
                 )
             # ViT CUDAGraph Entry
-            for vit_patch_len in self.compilation_config.vit_cudagraph_capture_sizes:
+            for patch_len in self.compilation_config.vit_cudagraph_capture_sizes:
                 self.add_cudagraph_key(
                     cudagraph_mode.mixed_mode(),
-                    BatchDescriptor(
-                        num_tokens=vit_patch_len, uniform_decode=False, is_vit=True
-                    ),
+                    self._create_padded_batch_descriptor(
+                        patch_len, False, False, is_vit=True
+                    ).relax_for_mixed_batch_cudagraphs(),
                 )
 
         # if decode cudagraph mode is FULL, and we don't already have mixed
@@ -229,6 +234,7 @@ class CudagraphDispatcher:
         has_lora: bool = False,
         disable_full: bool = False,
         num_active_loras: int = 0,
+        is_vit: bool = False,
     ) -> tuple[CUDAGraphMode, BatchDescriptor]:
         """
         Given conditions(e.g.,batch descriptor and if using piecewise only),
@@ -249,9 +255,10 @@ class CudagraphDispatcher:
         if (
             not self.keys_initialized
             or self.cudagraph_mode == CUDAGraphMode.NONE
-            or num_tokens > self.compilation_config.max_cudagraph_capture_size
+            or (not is_vit and num_tokens > self.compilation_config.max_cudagraph_capture_size)
+            or (is_vit and num_tokens > self.compilation_config.max_vit_cudagraph_capture_size)
         ):
-            return CUDAGraphMode.NONE, BatchDescriptor(num_tokens)
+            return CUDAGraphMode.NONE, BatchDescriptor(num_tokens, is_vit=is_vit)
 
         effective_num_active_loras = num_active_loras
         if has_lora and num_active_loras > 0:
@@ -270,7 +277,7 @@ class CudagraphDispatcher:
                 effective_num_active_loras = self.vllm_config.lora_config.max_loras + 1
 
         batch_desc = self._create_padded_batch_descriptor(
-            num_tokens, uniform_decode, has_lora, effective_num_active_loras
+            num_tokens, uniform_decode, has_lora, effective_num_active_loras, is_vit
         )
         relaxed_batch_desc = batch_desc.relax_for_mixed_batch_cudagraphs()
 

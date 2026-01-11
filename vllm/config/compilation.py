@@ -534,7 +534,7 @@ class CompilationConfig:
     """Sizes to capture vit cudagraph.
     - None (default): capture sizes are inferred from vllm config.
     - list[int]: capture sizes are specified as given."""
-    max_vit_cudagraph_capture_size: int | None = field(default=None)
+    max_vit_cudagraph_capture_size: int = field(default=None)
     """The maximum vit cudagraph capture size.
     """
     cudagraph_copy_inputs: bool = False

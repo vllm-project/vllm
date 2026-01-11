@@ -10,7 +10,7 @@ from typing import Final, Generic, Literal, Protocol, TypeAlias, TypeVar
 import torch
 from transformers import PretrainedConfig
 
-from vllm.config import MultiModalConfig, VllmConfig, get_current_vllm_config
+from vllm.config import MultiModalConfig, VllmConfig, CUDAGraphMode, get_current_vllm_config
 from vllm.distributed import (
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
@@ -479,10 +479,25 @@ def run_dp_sharded_mrope_vision_model(
     vllm_config = get_current_vllm_config()
     use_cudagraph = False
 
+    # Context setup
+    if cudagraph_dispatcher is not None:
+        dispatcher = cudagraph_dispatcher
+    else:
+        dispatcher = CudagraphDispatcher(vllm_config)
+    cudagraph_runtime_mode = CUDAGraphMode.NONE
+    batch_descriptor = None
+
     if (vllm_config and
         vllm_config.compilation_config.vit_cudagraph_capture_sizes):
         max_input_len = max(grouped_pixel_values_len) if grouped_pixel_values_len else 0
-        target_input_len = vllm_config.pad_for_vit_cudagraph(max_input_len)
+        cudagraph_runtime_mode, batch_descriptor = dispatcher.dispatch(
+            num_tokens=max_input_len,
+            uniform_decode=False,
+            has_lora=False,
+            disable_full=False,
+            is_vit=True,
+        )
+        target_input_len = batch_descriptor.num_tokens
         max_len_per_rank = target_input_len // embed_dim_reduction_factor
         use_cudagraph = True
     else:
@@ -506,17 +521,10 @@ def run_dp_sharded_mrope_vision_model(
             pixel_values_local = torch.cat([pixel_values_local, padding], dim=0)
             local_grid_thw_list.append([1, merge_size, padding_size // merge_size])
 
-    # Context setup
-    if cudagraph_dispatcher is not None:
-        dispatcher = cudagraph_dispatcher
-    else:
-        dispatcher = CudagraphDispatcher(vllm_config)
-    batch_descriptor = BatchDescriptor(num_tokens=pixel_values_local.shape[0], is_vit=True)
-    cudagraph_runtime_mode, batch_descriptor = dispatcher.dispatch(batch_descriptor, False)
     with set_forward_context(
-        None, 
-        vllm_config=vllm_config, 
-        cudagraph_runtime_mode=cudagraph_runtime_mode, 
+        None,
+        vllm_config=vllm_config,
+        cudagraph_runtime_mode=cudagraph_runtime_mode,
         batch_descriptor=batch_descriptor
     ):
         # Run the vision model on the local pixel_values_local

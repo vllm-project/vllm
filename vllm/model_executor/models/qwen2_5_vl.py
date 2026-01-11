@@ -27,7 +27,6 @@
 """Inference-only Qwen2.5-VL model compatible with HuggingFace weights."""
 
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
-from contextlib import nullcontext
 from functools import lru_cache, partial
 from typing import Annotated, Any, Literal, TypeAlias
 
@@ -44,10 +43,10 @@ from transformers.models.qwen2_5_vl.configuration_qwen2_5_vl import (
 )
 
 from vllm.compilation.decorators import support_torch_compile
-from vllm.config import CUDAGraphMode, MultiModalConfig, VllmConfig, get_current_vllm_config
+from vllm.config import CUDAGraphMode, MultiModalConfig, VllmConfig, set_current_vllm_config, get_current_vllm_config
 from vllm.distributed import parallel_state
 from vllm.distributed import utils as dist_utils
-from vllm.forward_context import get_forward_context, set_forward_context, is_forward_context_available
+from vllm.forward_context import get_forward_context, is_forward_context_available
 from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import get_act_and_mul_fn
 from vllm.model_executor.layers.attention import MMEncoderAttention
@@ -643,7 +642,8 @@ class Qwen2_5_VisionTransformer(nn.Module):
             )
         vllm_config: VllmConfig = get_current_vllm_config()
         self._persistent_hidden_states_buffer: torch.Tensor | None = None
-        self._persistent_rotary_pos_emb_buffer: torch.Tensor | None = None
+        self._persistent_rotary_pos_emb_cos_buffer: torch.Tensor | None = None
+        self._persistent_rotary_pos_emb_sin_buffer: torch.Tensor | None = None
         if vllm_config.compilation_config.vit_cudagraph_capture_sizes:
             max_compile_size = (
                 vllm_config.compilation_config.vit_cudagraph_capture_sizes[-1]
@@ -653,10 +653,11 @@ class Qwen2_5_VisionTransformer(nn.Module):
                 device=self.device,
                 dtype=self.dtype,
             )
-            self._persistent_rotary_pos_emb_buffer = torch.empty(
-                (max_compile_size, head_dim // 2),
-                device=self.device,
-                dtype=torch.float32,
+            self._persistent_rotary_pos_emb_cos_buffer = torch.empty(
+                (max_compile_size, head_dim // 2), device=self.device, dtype=torch.bfloat16
+            )
+            self._persistent_rotary_pos_emb_sin_buffer = torch.empty(
+                (max_compile_size, head_dim // 2), device=self.device, dtype=torch.bfloat16
             )
 
     @property
@@ -802,7 +803,9 @@ class Qwen2_5_VisionTransformer(nn.Module):
         cu_window_seqlens: list = [torch.tensor([0], dtype=torch.int32)]
         cu_seqlens: list = []
 
-        fwd_ctx = get_forward_context()
+        fwd_ctx = None
+        if is_forward_context_available():  
+            fwd_ctx = get_forward_context()
         if (
             self._persistent_hidden_states_buffer is not None
             and fwd_ctx
@@ -872,14 +875,17 @@ class Qwen2_5_VisionTransformer(nn.Module):
         rotary_pos_emb_sin = rotary_pos_emb_sin.to(
             device=self.device, non_blocking=True
         )
-        rotary_pos_emb = rotary_pos_emb.to(device=self.device, non_blocking=True)
         if (
-            self._persistent_rotary_pos_emb_buffer is not None
+            self._persistent_rotary_pos_emb_sin_buffer is not None
+            and self._persistent_rotary_pos_emb_cos_buffer is not None
             and fwd_ctx
             and fwd_ctx.cudagraph_runtime_mode == CUDAGraphMode.PIECEWISE
         ):
-            rotary_pos_emb = self._persistent_rotary_pos_emb_buffer[:seq_len].copy_(
-                rotary_pos_emb
+            rotary_pos_emb_sin = self._persistent_rotary_pos_emb_sin_buffer[:seq_len].copy_(
+                rotary_pos_emb_sin
+            )
+            rotary_pos_emb_cos = self._persistent_rotary_pos_emb_cos_buffer[:seq_len].copy_(
+                rotary_pos_emb_cos
             )
         window_index = window_index.to(device=hidden_states.device, non_blocking=True)
         reverse_indices = reverse_indices.to(
@@ -1268,18 +1274,8 @@ class Qwen2_5_VLForConditionalGeneration(
             image_embeds = image_input["image_embeds"].type(self.visual.dtype)
         else:
             pixel_values = image_input["pixel_values"]
-            maybe_in_vit_cuda_graph_capture = False
-            if is_forward_context_available():
-                ctx = get_forward_context()
-                if ctx.cudagraph_runtime_mode != CUDAGraphMode.NONE:
-                    maybe_in_vit_cuda_graph_capture = True
-            context = (
-                set_forward_context(None, self.vllm_config)
-                if self.vllm_config.is_in_compile
-                else nullcontext()
-            )
-            with context:
-                if self.use_data_parallel and not maybe_in_vit_cuda_graph_capture:
+            with set_current_vllm_config(self.vllm_config):
+                if self.use_data_parallel and not self.vllm_config.is_in_compile_or_vit_cuda_graph_capture:
                     return run_dp_sharded_mrope_vision_model(
                         self.visual,
                         pixel_values,
@@ -1338,8 +1334,8 @@ class Qwen2_5_VLForConditionalGeneration(
             video_embeds = video_input["video_embeds"].type(self.visual.dtype)
         else:
             pixel_values_videos = video_input["pixel_values_videos"]
-            with set_forward_context(None, self.vllm_config):
-                if self.use_data_parallel:
+            with set_current_vllm_config(self.vllm_config):
+                if self.use_data_parallel and not self.vllm_config.is_in_compile_or_vit_cuda_graph_capture:
                     return run_dp_sharded_mrope_vision_model(
                         self.visual,
                         pixel_values_videos,
