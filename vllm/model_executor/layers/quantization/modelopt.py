@@ -51,6 +51,7 @@ from vllm.model_executor.layers.quantization.base_config import (
 )
 from vllm.model_executor.layers.quantization.kv_cache import BaseKVCacheMethod
 from vllm.model_executor.layers.quantization.utils.flashinfer_fp4_moe import (
+    _quantize_input_fp4_with_linear_scales,
     build_flashinfer_fp4_cutlass_moe_prepare_finalize,
     flashinfer_trtllm_fp4_moe,
     flashinfer_trtllm_fp4_routed_moe,
@@ -73,9 +74,6 @@ from vllm.model_executor.layers.quantization.utils.marlin_utils_fp4 import (
     apply_fp4_marlin_linear,
     is_fp4_marlin_supported,
     prepare_fp4_layer_for_marlin,
-)
-from vllm.model_executor.layers.quantization.utils.nvfp4_emulation_utils import (
-    convert_swizzled_to_linear,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     GroupShape,
@@ -1577,29 +1575,9 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
         assert self.moe_quant_config is not None
         a1_gscale = self.moe_quant_config.a1_gscale
 
-        # Normalize a1_gscale to a scalar tensor on the correct device
-        if not isinstance(a1_gscale, torch.Tensor):
-            a1_gscale_tensor = torch.tensor(
-                a1_gscale, device=hidden_states.device, dtype=torch.float32
-            )
-        else:
-            a1_gscale_tensor = (
-                (a1_gscale.max() if a1_gscale.numel() != 1 else a1_gscale)
-                .to(hidden_states.device)
-                .to(torch.float32)
-            )
-
-        # Quantize using vLLM native op (outputs swizzled scales)
-        hidden_states_fp4, hidden_states_scale_swizzled = scaled_fp4_quant(
-            hidden_states, a1_gscale_tensor
-        )
-
-        # Convert swizzled scales to linear layout (required by DP allgather path)
-        hidden_states_sf = convert_swizzled_to_linear(
-            hidden_states_scale_swizzled,
-            hidden_states.shape[0],
-            hidden_states.shape[1],
-            block_size=16,
+        # Quantize using vLLM native op and convert to linear layout
+        hidden_states_fp4, hidden_states_sf = _quantize_input_fp4_with_linear_scales(
+            hidden_states, a1_gscale
         )
 
         extra_tensors: list[torch.Tensor] = [hidden_states_sf]
