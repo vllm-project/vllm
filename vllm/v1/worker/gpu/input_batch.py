@@ -57,7 +57,6 @@ class InputBatch:
     query_start_loc_np: np.ndarray
     # [num_reqs]
     seq_lens: torch.Tensor
-    seq_lens_np: np.ndarray
 
     # [num_tokens_after_padding]
     input_ids: torch.Tensor
@@ -91,7 +90,6 @@ class InputBatch:
         assert int(num_scheduled_tokens.sum()) == num_tokens
 
         # seq_len equals to query_len
-        seq_lens_np = num_scheduled_tokens
         input_buffers.seq_lens[:num_reqs] = num_tokens // num_reqs
         input_buffers.seq_lens[num_reqs - 1] += num_tokens % num_reqs
         # Pad for full CUDA graph mode.
@@ -128,7 +126,6 @@ class InputBatch:
             query_start_loc=query_start_loc,
             query_start_loc_np=query_start_loc_np,
             seq_lens=seq_lens,
-            seq_lens_np=seq_lens_np,
             input_ids=input_ids,
             positions=positions,
             attn_metadata=None,  # type: ignore
