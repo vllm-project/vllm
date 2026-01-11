@@ -268,11 +268,6 @@ class Glm4MoeMTP(nn.Module, SupportsPP, Glm4MixtureOfExperts):
                 if spec_layer is None:
                     continue
                 name = self._rewrite_spec_layer_name(spec_layer, name)
-            # Some checkpoints include weight scale tensors for the LM head even
-            # when the quantized head isn't built. Skip them if the model does
-            # not expose a matching parameter to avoid KeyError during load.
-            if name.endswith(".weight_scale") and name not in params_dict:
-                continue
             for param_name, weight_name, shard_id in stacked_params_mapping:
                 # Skip non-stacked layers and experts (experts handled below).
                 if weight_name not in name:
@@ -314,6 +309,12 @@ class Glm4MoeMTP(nn.Module, SupportsPP, Glm4MixtureOfExperts):
                 else:
                     # Skip loading extra bias for GPTQ models.
                     if name.endswith(".bias") and name not in params_dict:
+                        continue
+                    # Some checkpoints include weight scale tensors for the
+                    # LM head even when the quantized head isn't built. Skip
+                    # them if the model does not expose a matching parameter
+                    # to avoid KeyError during load.
+                    if name.endswith(".weight_scale") and name not in params_dict:
                         continue
 
                     # According to DeepSeek-V3 Technical Report, MTP modules
