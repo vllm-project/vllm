@@ -11,10 +11,9 @@ from vllm.model_executor.layers.fused_moe.router_factory import create_fused_moe
 from vllm.model_executor.models.llama4 import Llama4MoE
 
 # Test parameters
-# TODO: reduce
-MK_S = [(16, 128), (32, 256), (64, 512)]
+MK_S = [(32, 256), (64, 512)]
 TOP_KS = [2, 4, 6]
-NUM_EXPERTS = [8, 16, 32, 64]
+NUM_EXPERTS = [8, 16, 64]
 
 
 def setup_eplb_state(enable_eplb: bool, global_num_experts: int) -> EplbLayerState:
@@ -297,7 +296,7 @@ def test_fused_topk(
 @pytest.mark.parametrize("global_num_experts", NUM_EXPERTS)
 @pytest.mark.parametrize("renormalize", [False, True])
 @pytest.mark.parametrize("enable_eplb", [False, True])
-@pytest.mark.parametrize("e_score_correction_bias_val", [1.0])
+@pytest.mark.parametrize("e_score_correction_bias_val", [0.9])
 @pytest.mark.parametrize("routed_scaling_factor", [1.0, 1.1])
 def test_fused_topk_bias(
     m: int,
@@ -358,7 +357,7 @@ def test_fused_topk_bias(
 )
 @pytest.mark.parametrize("renormalize", [False, True])
 @pytest.mark.parametrize("enable_eplb", [False, True])
-@pytest.mark.parametrize("e_score_correction_bias_val", [1.0])
+@pytest.mark.parametrize("e_score_correction_bias_val", [0.9])
 @pytest.mark.parametrize("routed_scaling_factor", [1.0, 1.1])
 @pytest.mark.parametrize("scoring_func", ["sigmoid", "softmax"])
 def test_grouped_topk(

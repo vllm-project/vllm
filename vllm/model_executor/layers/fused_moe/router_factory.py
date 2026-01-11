@@ -85,7 +85,6 @@ def create_fused_moe_router(
         An instance of the appropriate FusedMoERouter subclass
     """
 
-    # Priority 1: Check if routing simulation is enabled via environment variable
     routing_strategy = envs.VLLM_MOE_ROUTING_SIMULATION_STRATEGY
     if routing_strategy != "":
         return RoutingSimulatorRouter(
@@ -96,7 +95,6 @@ def create_fused_moe_router(
             indices_type_getter=indices_type_getter,
         )
 
-    # Priority 2: Check if grouped top-k routing is requested
     if use_grouped_topk:
         if num_expert_group is None or topk_group is None:
             raise ValueError(
@@ -119,7 +117,22 @@ def create_fused_moe_router(
             routing_method_type=routing_method_type,
         )
 
-    # Priority 3: Check if bias correction is provided
+    if custom_routing_function is not None:
+        return CustomRoutingRouter(
+            top_k=top_k,
+            global_num_experts=global_num_experts,
+            eplb_state=eplb_state,
+            custom_routing_function=custom_routing_function,
+            renormalize=renormalize,
+            enable_eplb=enable_eplb,
+            indices_type_getter=indices_type_getter,
+        )
+
+    if scoring_func != "softmax":
+        raise ValueError(
+            "Only softmax scoring function is supported for non-grouped topk."
+        )
+
     if e_score_correction_bias is not None:
         return FusedTopKBiasRouter(
             top_k=top_k,
@@ -132,19 +145,6 @@ def create_fused_moe_router(
             indices_type_getter=indices_type_getter,
         )
 
-    # Priority 4: Check if custom routing function is provided
-    if custom_routing_function is not None:
-        return CustomRoutingRouter(
-            top_k=top_k,
-            global_num_experts=global_num_experts,
-            eplb_state=eplb_state,
-            custom_routing_function=custom_routing_function,
-            renormalize=renormalize,
-            enable_eplb=enable_eplb,
-            indices_type_getter=indices_type_getter,
-        )
-
-    # Priority 5: Default to standard fused top-k routing
     return FusedTopKRouter(
         top_k=top_k,
         global_num_experts=global_num_experts,
