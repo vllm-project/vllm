@@ -9,7 +9,7 @@ from collections.abc import AsyncGenerator, Callable, Iterable, Mapping
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from http import HTTPStatus
-from typing import Any, ClassVar, Generic, TypeAlias, TypeVar
+from typing import Any, ClassVar, Generic, Literal, TypeAlias, TypeVar
 
 import numpy as np
 from fastapi import Request
@@ -1173,6 +1173,8 @@ class OpenAIServing:
         default_chat_template_kwargs: dict[str, Any] | None = None,
         tool_parser: Callable[[TokenizerLike], ToolParser] | None = None,
         add_special_tokens: bool = False,
+        reasoning_effort: Literal["none", "minimal", "low", "medium", "high", "xhigh"]
+        | None = None,
     ) -> tuple[list[ConversationMessage], list[TokensPrompt]]:
         model_config = self.model_config
 
@@ -1195,6 +1197,7 @@ class OpenAIServing:
             continue_final_message=continue_final_message,
             tools=tool_dicts,
             documents=documents,
+            reasoning_effort=reasoning_effort,
         )
         _chat_template_kwargs |= self._prepare_extra_chat_template_kwargs(
             chat_template_kwargs,
