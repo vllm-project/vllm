@@ -422,7 +422,6 @@ class FusedMoE(CustomOp):
             if n_shared_experts is not None and self.aiter_fmoe_shared_expert_enabled
             else 0
         )
-
         if (
             not self.aiter_fmoe_shared_expert_enabled
             and self.num_fused_shared_experts != 0

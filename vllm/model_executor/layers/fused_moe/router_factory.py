@@ -56,36 +56,31 @@ def create_fused_moe_router(
     4. CustomRoutingRouter - if custom_routing_function is not None
     5. FusedTopKRouter - default fallback
 
-    Args:
-        Common arguments
-        ----------------
+    Common arguments:
         top_k: Number of experts to select per token
         global_num_experts: Total number of experts in the model
         renormalize: Whether to renormalize the routing weights
         indices_type_getter: Function to get the desired indices dtype
         routing_method_type: Optional explicit routing method type
 
-        Grouped topk arguments
-        ----------------------
+    Grouped topk arguments:
         use_grouped_topk: Whether to use grouped top-k routing
         num_expert_group: Number of expert groups (for grouped routing)
         topk_group: Top-k within each group (for grouped routing)
         scoring_func: Scoring function to use ("softmax" or "sigmoid")
         num_fused_shared_experts: Number of fused shared experts (for ROCm AITER)
 
-        Grouped topk and fused topk bias arguments
-        ------------------------------------------
+    Grouped topk and fused topk bias arguments:
         routed_scaling_factor: Scaling factor for routed weights
         e_score_correction_bias: Optional bias correction for expert scores
 
-        Custom routing arguments
-        ------------------------
+    Custom routing arguments:
         custom_routing_function: Optional custom routing function
 
-        EPLB arguments
-        --------------
+    EPLB arguments:
         enable_eplb: Whether EPLB is enabled
         eplb_state: EPLB (Expert Parallelism Load Balancing) state
+
     Returns:
         An instance of the appropriate FusedMoERouter subclass
     """
