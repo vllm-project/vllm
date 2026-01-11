@@ -104,6 +104,7 @@ class PunicaWrapperGPU(PunicaWrapperBase):
             y,
             *self.token_mapping_meta.meta_args(x.size(0)),
             scale,
+            specialize_active_lora=self.lora_config.specialize_active_lora,
         )
 
     def add_expand(
@@ -146,6 +147,7 @@ class PunicaWrapperGPU(PunicaWrapperBase):
             *self.token_mapping_meta.meta_args(num_tokens),
             offset_start=offset_start,
             add_inputs=True,
+            specialize_active_lora=self.lora_config.specialize_active_lora,
         )
 
         y = y.view_as(y_org)
@@ -178,6 +180,7 @@ class PunicaWrapperGPU(PunicaWrapperBase):
             *self.token_mapping_meta.meta_args(x.size(0)),
             offset_start=0,
             add_inputs=add_inputs,
+            specialize_active_lora=self.lora_config.specialize_active_lora,
         )
 
     def add_lora_linear(
@@ -334,8 +337,8 @@ class PunicaWrapperGPU(PunicaWrapperBase):
             (max_loras), dtype=torch.int32, device=topk_ids.device
         )
 
-        (token_lora_mapping, _, _, _, lora_ids, _) = self.token_mapping_meta.meta_args(
-            num_tokens
+        (token_lora_mapping, _, _, _, lora_ids, _, _) = (
+            self.token_mapping_meta.meta_args(num_tokens)
         )
 
         ops.moe_lora_align_block_size(
@@ -379,7 +382,9 @@ class PunicaWrapperGPU(PunicaWrapperBase):
         """
         Performs a fused forward computation for LoRA of Mixture-of-Experts (MoE) layer.
         """
-        (_, _, _, _, lora_ids, _) = self.token_mapping_meta.meta_args(x.size(0))
+        (_, _, _, _, lora_ids, _, num_active_loras) = self.token_mapping_meta.meta_args(
+            x.size(0)
+        )
         fused_moe_lora(
             y,
             x,
@@ -392,6 +397,7 @@ class PunicaWrapperGPU(PunicaWrapperBase):
             max_lora_rank,
             top_k_num,
             lora_ids,
+            num_active_loras,
             adapter_enabled,
             shrink_config.get("BLOCK_SIZE_M", 64),
             shrink_config.get("BLOCK_SIZE_N", 64),
@@ -410,4 +416,5 @@ class PunicaWrapperGPU(PunicaWrapperBase):
             mul_routed_weight,
             fully_sharded,
             offset,
+            self.lora_config.specialize_active_lora,
         )

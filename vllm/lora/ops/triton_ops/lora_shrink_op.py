@@ -134,7 +134,9 @@ def _lora_shrink(
     lora_token_start_loc: torch.Tensor,  # shape [max-loras + 2]
     lora_ids: torch.Tensor,  # shape [max-loras + 1]
     no_lora_flag_cpu: torch.Tensor,  # shape [1]
+    num_active_loras: int,  # number of active LoRAs (unused here, for API compat)
     scaling: float,
+    specialize_active_lora: bool = False,
 ) -> None:
     """
     Args:
@@ -217,7 +219,7 @@ def _lora_shrink(
         # Each LoRA receives its own set of thread blocks for output
         # computation. If some LoRA doesn't have any tokens to process, its
         # thread blocks exit early.
-        MAX_LORAS,
+        num_active_loras if specialize_active_lora else MAX_LORAS,
     )
     # We disable PDL temporarily because LoRA kernels are not launching back-to-back,
     # making PDL invalid and affecting the kernel performance.
@@ -269,7 +271,9 @@ def _lora_shrink_fake(
     lora_token_start_loc: torch.Tensor,
     lora_ids: torch.Tensor,
     no_lora_flag_cpu: torch.Tensor,
+    num_active_loras: int,
     scaling: float,
+    specialize_active_lora: bool = False,
 ) -> None:
     return
 
