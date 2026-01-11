@@ -6,6 +6,11 @@ import torch
 import torch.nn as nn
 
 from vllm.config.model import LogprobsMode
+from vllm.distributed import (
+    tensor_model_parallel_all_gather,
+    tensor_model_parallel_gather,
+)
+from vllm.platforms import current_platform
 from vllm.utils.platform_utils import is_pin_memory_available
 from vllm.v1.outputs import LogprobsTensors, SamplerOutput
 from vllm.v1.sample.metadata import SamplingMetadata
@@ -15,6 +20,21 @@ from vllm.v1.sample.ops.penalties import apply_all_penalties
 from vllm.v1.sample.ops.topk_topp_sampler import TopKTopPSampler
 
 _SAMPLING_EPS = 1e-5
+
+
+def _gather_data_tp(data: torch.Tensor) -> torch.Tensor:
+    """gather/all-gather the logits tensor across model parallel group."""
+    if current_platform.use_all_gather():
+        # Gather is not supported for some devices such as TPUs.
+        # Use all-gather instead.
+        # NOTE(woosuk): Here, the outputs of every device should not be None
+        # because XLA requires strict SPMD among all devices. Every device
+        # should execute the same operations after gathering the logits.
+        data = tensor_model_parallel_all_gather(data)
+    else:
+        # None may be returned for rank > 0
+        data = tensor_model_parallel_gather(data)
+    return data
 
 
 class Sampler(nn.Module):
@@ -71,6 +91,9 @@ class Sampler(nn.Module):
         predict_bonus_token: bool = False,
         logprobs_mode_override: LogprobsMode | None = None,
     ) -> SamplerOutput:
+        logits_need_gather = self.logits_need_gather(sampling_metadata)
+        if logits_need_gather:
+            logits = _gather_data_tp(logits)
         logprobs_mode = logprobs_mode_override or self.logprobs_mode
         # NOTE(woosuk): Use the original logits (before any penalties or
         # temperature scaling) for the top-k logprobs.
@@ -144,6 +167,20 @@ class Sampler(nn.Module):
     def greedy_sample(logits: torch.Tensor) -> torch.Tensor:
         return logits.argmax(dim=-1).view(-1)
 
+    @staticmethod
+    def greedy_sample_with_gather(logits: torch.Tensor) -> torch.Tensor:
+        local_vocab_size = logits.size(-1)
+        local_max_values, local_max_indices = torch.max(logits, dim=-1)
+        max_values = _gather_data_tp(local_max_values.unsqueeze(0))  # (tp, batch_size)
+        max_indices = _gather_data_tp(
+            local_max_indices.unsqueeze(0)
+        )  # (tp, batch_size)
+        _, max_rank_id = torch.max(max_values.transpose(0, 1), dim=-1)  # (batch_size, )
+        max_local_indices = torch.gather(
+            max_indices.transpose(0, 1), 1, max_rank_id.unsqueeze(0)
+        ).squeeze(0)
+        return max_local_indices + max_rank_id * local_vocab_size
+
     def sample(
         self,
         logits: torch.Tensor,
@@ -161,8 +198,8 @@ class Sampler(nn.Module):
         if sampling_metadata.all_random:
             greedy_sampled = None
         else:
-            greedy_sampled = self.greedy_sample(logits)
             if sampling_metadata.all_greedy:
+                greedy_sampled = self.greedy_sample_with_gather(logits)
                 processed_logprobs = None
                 if sampling_metadata.max_num_logprobs is not None:
                     if logprobs_mode == "processed_logits":
@@ -170,6 +207,7 @@ class Sampler(nn.Module):
                     elif logprobs_mode == "processed_logprobs":
                         processed_logprobs = self.compute_logprobs(logits)
                 return greedy_sampled, processed_logprobs
+            greedy_sampled = self.greedy_sample(logits)
 
         assert sampling_metadata.temperature is not None
 
@@ -262,6 +300,20 @@ class Sampler(nn.Module):
             [*out, *spec] if spec else out
             for out, spec in zip(output_token_ids, spec_token_ids)
         ]
+
+    @staticmethod
+    def logits_need_gather(sampling_metadata: SamplingMetadata) -> bool:
+        """Check if logits needed to be gathered before argmax."""
+        no_logits_processors = (
+            sampling_metadata.no_penalties
+            and not bool(sampling_metadata.bad_words_token_ids)
+            and sampling_metadata.allowed_token_ids_mask is None
+        )
+        return (
+            not no_logits_processors
+            or not sampling_metadata.all_greedy
+            or sampling_metadata.max_num_logprobs is not None
+        )
 
     def apply_logits_processors(
         self,
