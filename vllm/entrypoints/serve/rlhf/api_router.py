@@ -100,3 +100,4 @@ async def is_paused(raw_request: Request) -> JSONResponse:
 
 def attach_router(app: FastAPI):
     app.include_router(router)
+
