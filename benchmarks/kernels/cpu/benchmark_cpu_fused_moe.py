@@ -1,22 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import os
 import sys
 import time
 
 import numpy as np
 import torch
-
-# Check VLLM_TARGET_DEVICE before importing vllm modules
-if os.environ.get("VLLM_TARGET_DEVICE", "").lower() != "cpu":
-    print("ERROR: This benchmark is for CPU platforms only.")
-    print("Hint: Set VLLM_TARGET_DEVICE=cpu before running the script.")
-    print(
-        "Example: VLLM_TARGET_DEVICE=cpu python "
-        "benchmarks/kernels/cpu/benchmark_cpu_fused_moe.py"
-    )
-    sys.exit(1)
 
 from vllm.platforms import current_platform
 from vllm.utils.argparse_utils import FlexibleArgumentParser
@@ -107,6 +96,10 @@ def main(
     # benchmark
     times = run_benchmark(iters)
 
+    if not times:
+        print("No iterations to measure. Set --iters > 0.")
+        return
+
     time_min = min(times)
     time_max = max(times)
     time_mean = np.mean(times)
@@ -166,16 +159,6 @@ if __name__ == "__main__":
     )
 
     print(args)
-
-    print(
-        f"\nBenchmarking CPU fused MoE: "
-        f"batch_size={args.batch_size}, "
-        f"experts={args.expert_num}, "
-        f"hidden={args.hidden_size}, "
-        f"intermediate={args.intermediate_size}, "
-        f"topk={topk_num}, "
-        f"isa={args.isa}"
-    )
 
     main(
         batch_size=args.batch_size,
