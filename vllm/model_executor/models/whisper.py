@@ -953,6 +953,7 @@ class WhisperForConditionalGeneration(
         *,
         is_multimodal: torch.Tensor | None = None,
         handle_oov_mm_token: bool = False,
+        lora_enabled: bool = False,
     ) -> torch.Tensor:
         # This method just returns the decoder sequence embeddings since
         # Whisper does not have encoder text tokens.

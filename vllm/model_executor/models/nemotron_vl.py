@@ -585,6 +585,7 @@ class LlamaNemotronVLChatModel(nn.Module, SupportsMultiModal, SupportsPP, Suppor
         *,
         is_multimodal: torch.Tensor | None = None,
         handle_oov_mm_token: bool = False,
+        lora_enabled: bool = False,
     ) -> torch.Tensor:
         if multimodal_embeddings is not None and len(multimodal_embeddings) > 0:
             self._set_visual_token_mask(input_ids)
@@ -598,6 +599,7 @@ class LlamaNemotronVLChatModel(nn.Module, SupportsMultiModal, SupportsPP, Suppor
             multimodal_embeddings=multimodal_embeddings,
             is_multimodal=is_multimodal,
             handle_oov_mm_token=handle_oov_mm_token,
+            lora_enabled=lora_enabled,
         )
 
     def forward(

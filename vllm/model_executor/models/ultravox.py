@@ -699,6 +699,7 @@ class UltravoxModel(nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA):
         is_multimodal: torch.Tensor | None = None,
         # Multi-modal token ID may exceed vocab size
         handle_oov_mm_token: bool = True,
+        lora_enabled: bool = False,
     ) -> torch.Tensor:
         # This is to satisfy the type checker for each overload
         if multimodal_embeddings is None or is_multimodal is None:
@@ -709,6 +710,7 @@ class UltravoxModel(nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA):
             multimodal_embeddings=multimodal_embeddings,
             is_multimodal=is_multimodal,
             handle_oov_mm_token=handle_oov_mm_token,
+            lora_enabled=lora_enabled,
         )
 
     def forward(
