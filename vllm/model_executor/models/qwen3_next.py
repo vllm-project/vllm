@@ -551,9 +551,6 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
             and block_idx_last_scheduled_token is not None
             and block_idx_last_computed_token is not None
         )
-        if prefix_caching_enabled:
-            assert spec_sequence_masks is None
-            assert state_indices_tensor is not None
 
         # Set up auxiliary P/D tensors for prefix caching logic
         state_indices_tensor_d: torch.Tensor | None = None
@@ -673,17 +670,13 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
             )
 
         # 1.2: Process the remaining part
-        if attn_metadata.num_prefills > 0:
+        if not prefix_caching_enabled and attn_metadata.num_prefills > 0:
             assert mixed_qkv_non_spec is not None
+            assert non_spec_state_indices_tensor is not None
+            assert non_spec_query_start_loc is not None
             mixed_qkv_non_spec_T = mixed_qkv_non_spec.transpose(0, 1)
-            cache_indices_prefill = state_indices_prefill
-            if prefix_caching_enabled:
-                assert state_indices_tensor_p is not None
-                # Use the block indices for all chunks in the sequence
-                cache_indices_prefill = state_indices_tensor_p
-
             # - "cache_indices" updates the conv_state cache in positions
-            #   pointed to by "cache_indices_prefill"
+            #   pointed to by "states_indices_tensor"
             mixed_qkv_non_spec = causal_conv1d_fn(
                 mixed_qkv_non_spec_T,
                 conv_weights,
@@ -691,16 +684,150 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
                 activation=self.activation,
                 conv_states=conv_state,
                 has_initial_state=has_initial_state,
-                cache_indices=cache_indices_prefill,
+                cache_indices=non_spec_state_indices_tensor,
                 query_start_loc=non_spec_query_start_loc,
-                block_idx_first_scheduled_token=block_idx_first_scheduled_token_p,
-                block_idx_last_scheduled_token=block_idx_last_scheduled_token_p,
-                initial_state_idx=block_idx_last_computed_token_p,
-                block_size_to_align=block_size or 0,
-                num_computed_tokens=num_computed_tokens_p,
                 metadata=attn_metadata,
             ).transpose(0, 1)
+        elif prefix_caching_enabled:
+            # When APC is enabled, process decode and prefill tokens separately
+            # then concatenate them back together
+            mixed_qkv_decode = None
+            mixed_qkv_prefill = None
+
+            if attn_metadata.num_decodes > 0:
+                assert mixed_qkv_non_spec is not None
+                input_device = mixed_qkv_non_spec.device
+                num_decode_tokens = attn_metadata.num_decode_tokens
+
+                # Extract decode tokens (first num_decode_tokens)
+                mixed_qkv_decode = mixed_qkv_non_spec[:num_decode_tokens]
+
+                # When APC is enabled, pass the full block table so the kernel
+                # can index into it using block_idx_last_scheduled_token and
+                # initial_state_idx
+                assert state_indices_tensor_d is not None
+                assert block_idx_last_scheduled_token_d is not None
+                assert block_idx_last_computed_token_d is not None
+                conv_state_indices = state_indices_tensor_d.to(
+                    device=input_device, dtype=torch.long
+                )
+                block_idx_last_scheduled_token_d = block_idx_last_scheduled_token_d.to(
+                    device=input_device, dtype=torch.long
+                )
+                block_idx_last_computed_token_d = block_idx_last_computed_token_d.to(
+                    device=input_device, dtype=torch.long
+                )
+
+                # Process decode tokens through convolution
+                mixed_qkv_decode = causal_conv1d_update(
+                    mixed_qkv_decode,
+                    conv_state,
+                    conv_weights,
+                    self.conv1d.bias,
+                    self.activation,
+                    conv_state_indices=conv_state_indices,
+                    block_idx_last_scheduled_token=block_idx_last_scheduled_token_d,
+                    initial_state_idx=block_idx_last_computed_token_d,
+                    validate_data=True,
+                )
+
+            if attn_metadata.num_prefills > 0:
+                assert mixed_qkv_non_spec is not None
+                input_device = mixed_qkv_non_spec.device
+                num_decode_tokens = attn_metadata.num_decode_tokens
+
+                # Extract prefill tokens (after num_decode_tokens)
+                # When num_decode_tokens == 0, this is just mixed_qkv_non_spec (backwards compatible)
+                mixed_qkv_prefill = mixed_qkv_non_spec[num_decode_tokens:]
+                mixed_qkv_prefill_T = mixed_qkv_prefill.transpose(0, 1)
+
+                # For mixed batches, slice tensors to only include prefills
+                # When num_decodes == 0, these slices are identity operations (backwards compatible)
+                has_initial_state_prefill = (
+                    has_initial_state[num_decodes : num_decodes + num_prefills]
+                    if has_initial_state is not None
+                    else None
+                )
+
+                # non_spec_query_start_loc includes both decodes and prefills
+                # When num_decodes == 0, this slice is just the original tensor (backwards compatible)
+                assert non_spec_query_start_loc is not None
+                query_start_loc_prefill = non_spec_query_start_loc[
+                    num_decodes : num_decodes + num_prefills + 1
+                ].clone()
+                # Only adjust if not already starting at 0 (for mixed batches)
+                if query_start_loc_prefill[0] != 0:
+                    # Adjust to start at 0 for prefills
+                    query_start_loc_prefill = (
+                        query_start_loc_prefill - query_start_loc_prefill[0]
+                    )
+
+                assert state_indices_tensor_p is not None
+                # Use the block indices for all chunks in the sequence
+                # Make contiguous to ensure correct stride for kernel access
+                cache_indices_prefill = state_indices_tensor_p.to(
+                    device=input_device, dtype=torch.long
+                ).contiguous()
+                if block_idx_first_scheduled_token_p is not None:
+                    block_idx_first_scheduled_token_p = (
+                        block_idx_first_scheduled_token_p.to(
+                            device=input_device, dtype=torch.long
+                        )
+                    )
+                if block_idx_last_scheduled_token_p is not None:
+                    block_idx_last_scheduled_token_p = (
+                        block_idx_last_scheduled_token_p.to(
+                            device=input_device, dtype=torch.long
+                        )
+                    )
+                if block_idx_last_computed_token_p is not None:
+                    block_idx_last_computed_token_p = (
+                        block_idx_last_computed_token_p.to(
+                            device=input_device, dtype=torch.long
+                        )
+                    )
+                if num_computed_tokens_p is not None:
+                    num_computed_tokens_p = num_computed_tokens_p.to(
+                        device=input_device, dtype=torch.long
+                    )
+
+                # - "cache_indices" updates the conv_state cache in positions
+                #   pointed to by "cache_indices_prefill"
+                # When processing only prefills, don't pass metadata since it contains
+                # all sequences (decodes + prefills), but our tensors are prefill-only.
+                # The kernel will compute metadata from query_start_loc_prefill instead.
+                mixed_qkv_prefill = causal_conv1d_fn(
+                    mixed_qkv_prefill_T,
+                    conv_weights,
+                    self.conv1d.bias,
+                    activation=self.activation,
+                    conv_states=conv_state,
+                    has_initial_state=has_initial_state_prefill,
+                    cache_indices=cache_indices_prefill,
+                    query_start_loc=query_start_loc_prefill,
+                    block_idx_first_scheduled_token=block_idx_first_scheduled_token_p,
+                    block_idx_last_scheduled_token=block_idx_last_scheduled_token_p,
+                    initial_state_idx=block_idx_last_computed_token_p,
+                    block_size_to_align=block_size or 0,
+                    num_computed_tokens=num_computed_tokens_p,
+                    metadata=None,  # Don't pass metadata - kernel will compute from query_start_loc
+                ).transpose(0, 1)
+
+            # Concatenate decode and prefill results back together
+            if mixed_qkv_decode is not None and mixed_qkv_prefill is not None:
+                mixed_qkv_non_spec = torch.cat(
+                    [mixed_qkv_decode, mixed_qkv_prefill], dim=0
+                )
+            elif mixed_qkv_decode is not None:
+                mixed_qkv_non_spec = mixed_qkv_decode
+            elif mixed_qkv_prefill is not None:
+                mixed_qkv_non_spec = mixed_qkv_prefill
+            else:
+                mixed_qkv_non_spec = None
+
         elif attn_metadata.num_decodes > 0:
+            # Pure decode batches
+            # TODO: remove
             if prefix_caching_enabled:
                 # When APC is enabled, pass the full block table so the kernel
                 # can index into it using block_idx_last_scheduled_token and
@@ -714,15 +841,17 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
                 conv_state_indices = non_spec_state_indices_tensor[
                     : attn_metadata.num_actual_tokens
                 ]
+            assert non_spec_state_indices_tensor is not None
+            assert mixed_qkv_non_spec is not None
             mixed_qkv_non_spec = causal_conv1d_update(
                 mixed_qkv_non_spec,
                 conv_state,
                 conv_weights,
                 self.conv1d.bias,
                 self.activation,
-                conv_state_indices=conv_state_indices,
-                block_idx_last_scheduled_token=block_idx_last_scheduled_token_d,
-                initial_state_idx=block_idx_last_computed_token_d,
+                conv_state_indices=non_spec_state_indices_tensor[
+                    : attn_metadata.num_actual_tokens
+                ],
                 validate_data=True,
             )
         else:
