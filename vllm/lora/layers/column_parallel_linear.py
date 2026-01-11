@@ -130,6 +130,9 @@ class ColumnParallelLinearWithLoRA(BaseLinearLayerWithLoRA):
             - output
             - bias
         """
+        # synchronizing lora load
+        self._sync_lora_loads()
+
         bias = self.base_layer.bias if not self.base_layer.skip_bias_add else None
 
         # Matrix multiply.
@@ -194,6 +197,12 @@ class MergedColumnParallelLinearWithLoRA(ColumnParallelLinearWithLoRA):
         The main reason for overriding this function is to enhance  code
         maintainability.
         """
+        # Warmup: trigger Triton JIT for load syncing compilation for CUDA graph capture
+        self.lora_ready = torch.zeros(1, dtype=torch.int8, device=self.device)
+        self.lora_ready.fill_(1)
+        self._sync_lora_loads()
+        self.lora_ready.fill_(0)
+
         self.lora_config = lora_config
 
         lora_a_output_size_per_partition = (
@@ -249,21 +258,12 @@ class MergedColumnParallelLinearWithLoRA(ColumnParallelLinearWithLoRA):
         lora_a: torch.Tensor | list[torch.Tensor],
         lora_b: torch.Tensor | list[torch.Tensor],
     ):
-        self.reset_lora(index)
-
-        if self.tp_size > 1:
-            lora_a = self.slice_lora_a(lora_a)
-            lora_b = self.slice_lora_b(lora_b)
-
+        # Weights are already sliced and padded
         for i in range(self.n_slices):
             if (lora_a_i := lora_a[i]) is not None:
-                self.lora_a_stacked[i][
-                    index, 0, : lora_a_i.shape[0], : lora_a_i.shape[1]
-                ].copy_(lora_a_i, non_blocking=True)
+                self.lora_a_stacked[i][index, 0].copy_(lora_a_i, non_blocking=True)
             if (lora_b_i := lora_b[i]) is not None:
-                self.lora_b_stacked[i][
-                    index, 0, : lora_b_i.shape[0], : lora_b_i.shape[1]
-                ].copy_(lora_b_i, non_blocking=True)
+                self.lora_b_stacked[i][index, 0].copy_(lora_b_i, non_blocking=True)
 
     @classmethod
     @_not_fully_sharded_can_replace

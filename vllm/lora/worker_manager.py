@@ -197,7 +197,8 @@ class WorkerLoRAManager:
         return loaded
 
     def remove_adapter(self, adapter_id: int) -> bool:
-        return self._adapter_manager.remove_adapter(adapter_id)
+        bool_val = self._adapter_manager.remove_adapter(adapter_id)
+        return bool_val
 
     def remove_all_adapters(self):
         self._adapter_manager.remove_all_adapters()
