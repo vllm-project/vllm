@@ -119,7 +119,7 @@ class ChunkGatedDeltaRuleFunction(torch.autograd.Function):
         intermediate_states = None
         if return_intermediate_states:
             assert h is not None
-            # Convert into chunk-major form, i.e. shape (num_chunks, H, K, V)
+            # Convert into chunk-major form, i.e. shape (num_total_chunks, H, K, V)
             intermediate_states = h.reshape(-1, *h.shape[-3:])
         return o.to(q.dtype), final_state, intermediate_states
 
