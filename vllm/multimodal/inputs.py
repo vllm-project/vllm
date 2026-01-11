@@ -581,6 +581,34 @@ class MultiModalFlatField(BaseMultiModalField):
                 )
                 return torch.concat(batch, dim=self.dim, out=out)
 
+            # Shapes don't match on non-concat dimensions (e.g., variable-length
+            # audio). Pad all tensors to max size before concatenating.
+            # This handles cases like Ultravox with different audio durations.
+            # See: https://github.com/vllm-project/vllm/issues/31658
+            import torch.nn.functional as F  # Local import for lazy loading
+
+            ndim = batch[0].ndim
+            max_sizes = [max(t.shape[d] for t in batch) for d in range(ndim)]
+            padded = []
+            for t in batch:
+                # F.pad expects padding in reverse dimension order
+                pad_widths: list[int] = []
+                for d in range(ndim - 1, -1, -1):
+                    pad_widths.extend([0, max_sizes[d] - t.shape[d]])
+                if any(p > 0 for p in pad_widths):
+                    padded.append(F.pad(t, pad_widths))
+                else:
+                    padded.append(t)
+            shape_before, shape_after = _shape_before_after(padded[0])
+            shape_concat = sum(item.shape[dim] for item in padded)
+            out = torch.empty(
+                (*shape_before, shape_concat, *shape_after),
+                dtype=padded[0].dtype,
+                device=padded[0].device,
+                pin_memory=pin_memory,
+            )
+            return torch.concat(padded, dim=self.dim, out=out)
+
         assert self.dim == 0, "dim == 0 is required for nested list"
         return [e for elem in batch for e in elem]
 
