@@ -731,7 +731,7 @@ class BatchedTritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
 
     def supports_quant_config(self, quant_config: FusedMoEQuantConfig) -> bool:
         # Supports unquantized and fp8.
-        # TODO(rob): allow int4 (for kimi?)
+        # TODO(rob): allow int4 (for kimi --- no, we have marlinexperts for this.
         if not (
             quant_config.use_fp8_w8a8 or 
             quant_config.quant_dtype == None # TODO: how to express unquantized?

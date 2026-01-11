@@ -551,6 +551,28 @@ class MarlinExpertsBase(mk.FusedMoEPermuteExpertsUnpermute):
         self.is_k_full = is_k_full
         super().__init__(quant_config)
 
+    def supports_current_device(self) -> bool:
+        return current_platform.is_cuda() and current_platform.has_device_capability(8,0)
+
+    def supports_no_act_and_mul(self) -> bool:
+        return False
+
+    def supports_quant_config(self, quant_config: FusedMoEQuantConfig) -> bool:
+        # TODO(rob): check if we support the Fp8 activation
+        return (
+            quant_config.use_fp8_w8a16 or
+            quant_config.use_int8_w8a16 or
+            quant_config.use_int4_w4a16 or
+            quant_config.use_nvfp4_w4a16 or
+            quant_config.use_mxfp4_w4a16
+        )
+
+    def supports_act_fn(self, activation: str) -> bool:
+        return activation in ["silu", "swigluoai"]
+
+    def supports_ep(self) -> bool:
+        return True
+
     @property
     def quant_type_id(self) -> int:
         # uint4b8 will be set for int4 weight and float4_e2m1f will be used for mxfp4
