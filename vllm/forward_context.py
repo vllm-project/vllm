@@ -44,11 +44,6 @@ class BatchDescriptor(NamedTuple):
     """
     Whether this batch has active LoRA adapters.
     """
-    draft_length: int = 0
-    """
-    Number of draft tokens for speculative decoding. 0 means not using
-    variable draft lengths (uses default num_speculative_tokens).
-    """
 
     @property
     def non_uniform(self) -> "BatchDescriptor":
@@ -59,7 +54,6 @@ class BatchDescriptor(NamedTuple):
             self.num_tokens,
             uniform_decode=False,
             has_lora=self.has_lora,
-            draft_length=self.draft_length,
         )
 
 

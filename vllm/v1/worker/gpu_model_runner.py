@@ -2780,14 +2780,10 @@ class GPUModelRunner(
             uniform_decode = (
                 max_num_scheduled_tokens == self.uniform_decode_query_len
             ) and (num_scheduled_tokens == num_reqs * max_num_scheduled_tokens)
-            draft_length_for_cudagraph = self._resolve_draft_length_for_cudagraph(
-                spec_decode_metadata=spec_decode_metadata
-            )
             original_batch_descriptor = BatchDescriptor(
                 num_tokens=num_input_tokens,
                 uniform_decode=uniform_decode,
                 has_lora=len(self.input_batch.lora_id_to_lora_request) > 0,
-                draft_length=draft_length_for_cudagraph,
             )
             cudagraph_runtime_mode, batch_descriptor = (
                 self.cudagraph_dispatcher.dispatch(
@@ -3604,44 +3600,6 @@ class GPUModelRunner(
         except IndexError:
             return {}
 
-    def _resolve_draft_length_for_cudagraph(
-        self,
-        spec_decode_metadata: SpecDecodeMetadata | None = None,
-        default_draft_length: int = 0,
-    ) -> int:
-        """Return the draft length used to specialize CUDA graph keys.
-
-        Returns draft_length if in adaptive mode and the length is in configured
-        options. Otherwise returns 0 to use the generic CUDA graph.
-
-        Args:
-            spec_decode_metadata: Metadata containing max_spec_len from runtime
-            default_draft_length: Fallback value for capture (when no metadata)
-
-        Returns:
-            draft_length for CUDA graph key, or 0 if not specializing
-        """
-        # Only specialize if draft_length_options is configured (adaptive mode)
-        # and specialization is explicitly enabled
-        if (
-            self.speculative_config is None
-            or not self.speculative_config.draft_length_options
-            or not self.speculative_config.enable_draft_length_cudagraph_specialization
-        ):
-            return 0
-
-        # Extract draft length from metadata or use default
-        if spec_decode_metadata is not None:
-            length = int(spec_decode_metadata.max_spec_len)
-        else:
-            length = int(default_draft_length)
-
-        # Validate it's in configured options (defensive: prevents graph misses)
-        if length in self.speculative_config.draft_length_options:
-            return length
-
-        return 0
-
     @contextmanager
     def maybe_randomize_inputs(self, input_ids: torch.Tensor):
         """
@@ -3716,7 +3674,6 @@ class GPUModelRunner(
         create_mixed_batch: bool = False,
         remove_lora: bool = True,
         activate_lora: bool = False,
-        draft_length: int = 0,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """
         Run a dummy forward pass to warm up/profile run or capture the
@@ -3890,16 +3847,12 @@ class GPUModelRunner(
                 )
 
             # filter out the valid batch descriptor
-            draft_length_for_cudagraph = self._resolve_draft_length_for_cudagraph(
-                default_draft_length=draft_length
-            )
             _cg_mode, batch_descriptor = (
                 self.cudagraph_dispatcher.dispatch(
                     BatchDescriptor(
                         num_tokens=num_tokens_after_padding,
                         uniform_decode=uniform_decode,
                         has_lora=activate_lora and self.lora_config is not None,
-                        draft_length=draft_length_for_cudagraph,
                     )
                 )
                 if not is_profile
@@ -4279,20 +4232,6 @@ class GPUModelRunner(
             else:
                 lora_cases = [False]
 
-            # Compute draft_length cases for CUDA graph capture
-            if (
-                self.speculative_config is not None
-                and self.speculative_config.draft_length_options
-                and self.speculative_config.enable_draft_length_cudagraph_specialization
-            ):
-                # Capture graphs for each configured draft length option
-                draft_length_cases = [0] + sorted(
-                    set(self.speculative_config.draft_length_options) - {0}
-                )
-            else:
-                # Use only draft_length=0 (saves 3-4x CUDA graph memory)
-                draft_length_cases = [0]
-
             if cudagraph_mode.mixed_mode() != CUDAGraphMode.NONE:
                 cudagraph_runtime_mode = cudagraph_mode.mixed_mode()
                 # make sure we capture the largest batch size first
@@ -4300,7 +4239,6 @@ class GPUModelRunner(
                     product(
                         reversed(self.cudagraph_batch_sizes),
                         lora_cases,
-                        draft_length_cases,
                     )
                 )
                 self._capture_cudagraphs(
@@ -4327,7 +4265,6 @@ class GPUModelRunner(
                     product(
                         reversed(decode_cudagraph_batch_sizes),
                         lora_cases,
-                        draft_length_cases,
                     )
                 )
                 self._capture_cudagraphs(
@@ -4360,7 +4297,7 @@ class GPUModelRunner(
 
     def _capture_cudagraphs(
         self,
-        compilation_cases: list[tuple[int, bool, int]],
+        compilation_cases: list[tuple[int, bool]],
         cudagraph_runtime_mode: CUDAGraphMode,
         uniform_decode: bool,
     ):
@@ -4381,7 +4318,7 @@ class GPUModelRunner(
             )
 
         # We skip EPLB here since we don't want to record dummy metrics
-        for num_tokens, activate_lora, draft_length in compilation_cases:
+        for num_tokens, activate_lora in compilation_cases:
             # We currently only capture ubatched graphs when its a FULL
             # cudagraph, a uniform decode batch, and the number of tokens
             # is above the threshold. Otherwise we just capture a non-ubatched
@@ -4413,7 +4350,6 @@ class GPUModelRunner(
                     skip_eplb=True,
                     remove_lora=False,
                     activate_lora=activate_lora,
-                    draft_length=draft_length,
                 )
             self._dummy_run(
                 num_tokens,
@@ -4423,7 +4359,6 @@ class GPUModelRunner(
                 skip_eplb=True,
                 remove_lora=False,
                 activate_lora=activate_lora,
-                draft_length=draft_length,
             )
         self.maybe_remove_all_loras(self.lora_config)
 
@@ -4678,15 +4613,9 @@ class GPUModelRunner(
 
         # Trigger cudagraph dispatching keys initialization after
         # resolved cudagraph mode.
-        draft_lengths = (
-            self.speculative_config.draft_length_options
-            if self.speculative_config
-            else None
-        )
         self.cudagraph_dispatcher.initialize_cudagraph_keys(
             cudagraph_mode,
             self.uniform_decode_query_len,
-            draft_lengths,
         )
 
     def calculate_reorder_batch_threshold(self) -> None:

@@ -109,20 +109,11 @@ class SpeculativeConfig:
     bandwidth. Set to 0.0 to disable early stopping (always write all tokens).
     Set to 1.0 to stop after any non-certain prediction. Default: 0.0 (disabled)."""
     draft_length_options: list[int] | None = None
-    """List of draft lengths to capture as CUDA graphs for adaptive speculative
-    decoding. If None, auto-computed as [max(2, n//2), n, min(8, n*2)] where
-    n=num_speculative_tokens. For example, if num_speculative_tokens=5,
-    defaults to [2, 5, 8]. The system will dynamically select the optimal
-    draft length based on recent acceptance rates to balance compute cost
-    vs. speculation benefit."""
-    enable_draft_length_cudagraph_specialization: bool = False
-    """Enable CUDA graph specialization by draft_length for adaptive speculation.
-    When enabled, captures separate CUDA graphs for each draft_length in
-    draft_length_options (typically [0, 5, 8, 10]), resulting in ~4x more graphs.
-    This provides 10-20% speedup for small-to-medium batches but consumes
-    significant additional GPU memory (200MB-3GB depending on model size).
-    Default: False (use single draft_length=0 graph, saves memory).
-    Recommended: Enable only if gpu_memory_utilization < 0.85 and batch_size <= 16."""
+    """List of draft lengths for adaptive speculative decoding. If None,
+    auto-computed as [max(2, n//2), n, min(8, n*2)] where n=num_speculative_tokens.
+    For example, if num_speculative_tokens=5, defaults to [2, 5, 8]. The system
+    will dynamically select the optimal draft length at runtime based on recent
+    acceptance rates to balance compute cost vs. speculation benefit."""
 
     # Ngram proposer configuration
     prompt_lookup_max: int | None = Field(default=None, ge=1)
