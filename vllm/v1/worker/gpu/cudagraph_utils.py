@@ -80,6 +80,7 @@ class CudaGraphManager:
         num_reqs = min(num_tokens, self.max_num_reqs)
         input_ids = input_buffers.input_ids[:num_tokens]
         positions = input_buffers.positions[:num_tokens]
+        parallel_config = self.vllm_config.parallel_config
         attn_metadata = prepare_inputs_to_capture(
             num_reqs,
             num_tokens,
@@ -88,6 +89,8 @@ class CudaGraphManager:
             attn_metadata_builders,
             self.max_model_len,
             kv_cache_config,
+            dcp_world_size=parallel_config.decode_context_parallel_size,
+            cp_kv_cache_interleave_size=parallel_config.cp_kv_cache_interleave_size,
         )
         num_tokens_across_dp = make_num_tokens_across_dp(self.dp_size, num_tokens)
 
@@ -226,6 +229,8 @@ def prepare_inputs_to_capture(
     attn_metadata_builders: list[AttentionMetadataBuilder],
     max_model_len: int,
     kv_cache_config: KVCacheConfig,
+    dcp_world_size: int = 1,
+    cp_kv_cache_interleave_size: int = 1,
 ) -> dict[str, Any]:
     num_tokens_per_req = num_tokens // num_reqs
     query_start_loc = input_buffers.query_start_loc
@@ -255,5 +260,7 @@ def prepare_inputs_to_capture(
         block_tables=input_block_tables,
         slot_mappings=slot_mappings,
         kv_cache_config=kv_cache_config,
+        dcp_world_size=dcp_world_size,
+        cp_kv_cache_interleave_size=cp_kv_cache_interleave_size,
     )
     return attn_metadata
