@@ -32,7 +32,7 @@ class AiterScaledMMLinearKernel(CutlassScaledMMLinearKernel):
 
         try:
             import aiter  # noqa: F401 # deliberately attempt to import aiter
-        except Exception:
+        except ImportError:
             return (
                 False,
                 "AiterScaledMMLinearKernel requires `aiter` which is not "
