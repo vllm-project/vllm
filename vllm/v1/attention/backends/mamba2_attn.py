@@ -326,14 +326,11 @@ class Mamba2AttentionMetadataBuilder(
         # for causal_conv1d
         nums_dict, batch_ptr, token_chunk_offset_ptr = None, None, None
 
-        num_computed_tokens = None
         num_computed_tokens_p = None
         block_idx_first_scheduled_token = None
         block_idx_first_scheduled_token_p = None
 
         num_computed_tokens = common_attn_metadata.compute_num_computed_tokens()
-        # Shahar look for a different places where
-        # num_computed_tokens is used and replace it with the new one
 
         if self.vllm_config.cache_config.enable_prefix_caching:
             # Return a tensor of shape (#requests, #max blocks)
@@ -435,7 +432,9 @@ class Mamba2AttentionMetadataBuilder(
                 )
 
                 if self.vllm_config.cache_config.enable_prefix_caching:
-                    num_cacheable_blocks = num_computed_tokens // mamba_block_size
+                    num_cacheable_blocks = (
+                        num_computed_tokens // self.kv_cache_spec.block_size
+                    )
                     block_indices = num_cacheable_blocks.unsqueeze(1) + torch.arange(
                         self.num_spec + 1, device=self.device
                     ).unsqueeze(0)
@@ -475,7 +474,9 @@ class Mamba2AttentionMetadataBuilder(
                 spec_token_indx = index[num_non_spec_tokens:]
 
                 if self.vllm_config.cache_config.enable_prefix_caching:
-                    num_cacheable_blocks = num_computed_tokens // mamba_block_size
+                    num_cacheable_blocks = (
+                        num_computed_tokens // self.kv_cache_spec.block_size
+                    )
                     block_indices = num_cacheable_blocks[spec_sequence_masks].unsqueeze(
                         1
                     ) + torch.arange(self.num_spec + 1, device=self.device).unsqueeze(0)
@@ -844,15 +845,23 @@ class Mamba2AttentionMetadataBuilder(
 
             return new_metadata
 
-        if new_metadata.num_prefills == 0:  # decode only batch
+        num_cacheable_blocks = None
+        spec_token_range = None
+
+        if prefix_caching:
+            num_computed_tokens = new_metadata.num_computed_tokens
+            assert num_computed_tokens is not None
+
+            num_cacheable_blocks = num_computed_tokens // self.kv_cache_spec.block_size
+
+            spec_token_range = torch.arange(self.num_spec + 1, device=self.device)
+
+        is_decode_only = new_metadata.num_prefills == 0
+
+        if is_decode_only:
             if prefix_caching:
-                num_computed_tokens = new_metadata.num_computed_tokens
-                num_cacheable_blocks = (
-                    num_computed_tokens // self.kv_cache_spec.block_size
-                )
-                block_indices = num_cacheable_blocks.unsqueeze(1) + torch.arange(
-                    self.num_spec + 1, device=self.device
-                ).unsqueeze(0)
+                assert num_cacheable_blocks is not None
+                block_indices = num_cacheable_blocks.unsqueeze(1) + spec_token_range
                 batch_indices = torch.arange(
                     blk_table.size(0),
                     device=self.device,
@@ -861,28 +870,27 @@ class Mamba2AttentionMetadataBuilder(
             else:
                 spec_state_indices_tensor = blk_table[:, : self.num_spec + 1]
 
-            new_metadata.spec_state_indices_tensor = spec_state_indices_tensor
         else:  # mixed batch
             if prefix_caching:
-                raise NotImplementedError(
-                    "enable_prefix_caching is temporarily disabled. "
-                    " When enabled, find a non deprecated way to get "
-                    "num_computed_tokens_cpu"
+                assert num_cacheable_blocks is not None
+                block_indices = (
+                    num_cacheable_blocks[spec_sequence_masks].unsqueeze(1)
+                    + spec_token_range
                 )
+                batch_indices = torch.arange(
+                    spec_sequence_masks.sum().item(), device=self.device
+                ).unsqueeze(1)
+                spec_state_indices_tensor = blk_table[spec_sequence_masks][
+                    batch_indices, block_indices
+                ]
+                non_spec_state_indices_tensor = blk_table[~spec_sequence_masks]
             else:
-                if prefix_caching:
-                    raise NotImplementedError(
-                        "enable_prefix_caching is temporarily disabled. "
-                        " When enabled, find a non deprecated way to get "
-                        "num_computed_tokens_cpu"
-                    )
-                else:
-                    spec_state_indices_tensor = blk_table[
-                        spec_sequence_masks, : self.num_spec + 1
-                    ]
-                    non_spec_state_indices_tensor = blk_table[~spec_sequence_masks, 0]
+                spec_state_indices_tensor = blk_table[
+                    spec_sequence_masks, : self.num_spec + 1
+                ]
+                non_spec_state_indices_tensor = blk_table[~spec_sequence_masks, 0]
 
-            new_metadata.spec_state_indices_tensor = spec_state_indices_tensor
             new_metadata.non_spec_state_indices_tensor = non_spec_state_indices_tensor
 
+        new_metadata.spec_state_indices_tensor = spec_state_indices_tensor
         return new_metadata
