@@ -80,6 +80,7 @@ from vllm.multimodal.inputs import (
     PlaceholderRange,
 )
 from vllm.multimodal.utils import group_mm_kwargs_by_modality
+from vllm.platforms import current_platform
 from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import SamplingType
 from vllm.sequence import IntermediateTensors
@@ -718,7 +719,9 @@ class GPUModelRunner(
         self.layerwise_nvtx_hooks_registered = False
 
         # Timing events for profiling.
-        self.timer = GPURunnerTimer()
+        self.timer: GPURunnerTimer | None = None
+        if current_platform.is_cuda_alike():
+            self.timer = GPURunnerTimer()
 
     def update_max_model_len(self, max_model_len: int) -> None:
         self.max_model_len = max_model_len
@@ -3535,7 +3538,9 @@ class GPUModelRunner(
                 else None,
                 num_nans_in_logits=num_nans_in_logits,
                 cudagraph_stats=cudagraph_stats,
-                runner_stats=RunnerStats(timings=self.timer.collect_timings()),
+                runner_stats=RunnerStats(timings=self.timer.collect_timings())
+                if self.timer
+                else None,
             )
 
         if not self.use_async_scheduling:
@@ -5761,7 +5766,7 @@ class GPUModelRunner(
             # in `sample_tokens()` calls.
             with (
                 self.timer.track(event)
-                if get_pp_group().is_last_rank
+                if (self.timer and get_pp_group().is_last_rank)
                 else nullcontext(),
                 record_function_or_nullcontext(f"gpu_model_runner: {event.name}"),
             ):
