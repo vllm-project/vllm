@@ -1802,7 +1802,10 @@ class OpenAIServingChat(OpenAIServing):
         """
         Check to see if we should check for unstreamed tool arguments tokens.
         This is only applicable when auto tool parsing is enabled, the delta
-        is a tool call with arguments.
+        is a tool call with arguments. We only enter this branch when arguments
+        are being streamed incrementally (i.e., when name is not present).
+        This branch is skipped if the complete tool call (including name) is present
+        or will be streamed.
         """
 
         return bool(
@@ -1816,6 +1819,9 @@ class OpenAIServingChat(OpenAIServing):
             and delta_message.tool_calls[0]
             and delta_message.tool_calls[0].function
             and delta_message.tool_calls[0].function.arguments is not None
+            # Only enter this branch when name is not already streamed
+            # (i.e., when arguments are being streamed incrementally)
+            and not delta_message.tool_calls[0].function.name
         )
 
     @staticmethod
