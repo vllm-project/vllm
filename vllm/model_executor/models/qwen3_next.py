@@ -584,9 +584,6 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
         state_indices_decode = None
         state_indices_prefill = None
         ssm_state_indices_decode = None
-        if num_decodes > 0:
-            pass
-            # __import__('fpdb').ForkedPdb().set_trace()
 
         # Extract the cache and destination block indices for decode and prefill
         if prefix_caching_enabled:
@@ -801,7 +798,6 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
                         valid_block_positions,
                         ssm_state_initials,
                     )
-                    # __import__('fpdb').ForkedPdb().set_trace()
 
                 if has_initial_state is not None:
                     req_has_initial_state = has_initial_state[:end_non_spec_prefill]
@@ -843,7 +839,6 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
                     dest_slots = state_indices_prefill.index_select(
                         0, valid_block_positions
                     ).to(device=ssm_state.device, dtype=torch.long)
-                    # __import__('fpdb').ForkedPdb().set_trace()
                     ssm_state.index_copy_(
                         0,
                         dest_slots,
