@@ -173,6 +173,7 @@ class SupportsMultiModal(Protocol):
         *,
         is_multimodal: torch.Tensor,
         handle_oov_mm_token: bool = False,
+        lora_enabled: bool = False,
     ) -> Tensor: ...
 
     def _embed_text_input_ids(
@@ -182,10 +183,21 @@ class SupportsMultiModal(Protocol):
         *,
         is_multimodal: Tensor | None,
         handle_oov_mm_token: bool,
+        lora_enabled: bool,
     ) -> Tensor:
         if handle_oov_mm_token and is_multimodal is not None:
             is_text = ~is_multimodal
-            text_embeds = embed_input_ids(input_ids[is_text])
+            if not lora_enabled:
+                text_embeds = embed_input_ids(input_ids[is_text])
+
+            else:
+                # HACK: For LoRA case with OOV placeholders, replace the
+                # OOV placeholders with in vocabulary tokens during the
+                # forward call, then index the result; this is done to
+                # avoid incorrect offsets in the LoRA expand kernel call.
+                in_vocab_ids = torch.zeros_like(input_ids)
+                in_vocab_ids[is_text] = input_ids[is_text]
+                text_embeds = embed_input_ids(in_vocab_ids)[is_text]
 
             return torch.empty(
                 (input_ids.shape[0], text_embeds.shape[1]),
@@ -202,6 +214,7 @@ class SupportsMultiModal(Protocol):
         *,
         is_multimodal: Tensor | None = None,
         handle_oov_mm_token: bool = False,
+        lora_enabled: bool = False,
     ) -> Tensor:
         """
         Apply token embeddings to `input_ids`.
@@ -214,6 +227,16 @@ class SupportsMultiModal(Protocol):
         to avoid calling the language model's `embed_input_ids` method
         on those tokens. Note however that doing so increases memory usage
         as an additional buffer is needed to hold the input embeddings.
+
+        NOTE: In the case of oov multimodal tokens with LoRA; we currently
+        use the `is_multimodal` mask to replace with in vocab tokens, and
+        clobber the results; this is done because the offsets determined
+        in the LoRA mappings currently include multimodal tokens, and will
+        be incorrect if the multimodal tokens are removed.
+
+        TODO (Alex): Refactor to track multimodal token offsets as part
+        of the LoRA mapping to avoid unnecessary computation when we
+        have many placeholders.
         """
         from .utils import _merge_multimodal_embeddings
 
@@ -222,6 +245,7 @@ class SupportsMultiModal(Protocol):
             self.get_language_model().embed_input_ids,
             is_multimodal=is_multimodal,
             handle_oov_mm_token=handle_oov_mm_token,
+            lora_enabled=lora_enabled,
         )
 
         if multimodal_embeddings is None or len(multimodal_embeddings) == 0:
