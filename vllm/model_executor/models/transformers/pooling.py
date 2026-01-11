@@ -31,7 +31,7 @@ if TYPE_CHECKING:
 
 
 class EmbeddingMixin(VllmModelForPooling):
-    default_pooling_type = "CLS"
+    default_seq_pooling_type = "CLS"
 
     def __init__(self, *, vllm_config: "VllmConfig", prefix: str = ""):
         # Skip VllmModelForPooling.__init__ and call the next class in MRO
@@ -46,7 +46,7 @@ class EmbeddingMixin(VllmModelForPooling):
 
 
 class SequenceClassificationMixin(SupportsCrossEncoding, VllmModelForPooling):
-    default_pooling_type = "CLS"
+    default_seq_pooling_type = "CLS"
 
     def __init__(self, *, vllm_config: "VllmConfig", prefix: str = ""):
         # Skip VllmModelForPooling.__init__ and call the next class in MRO
