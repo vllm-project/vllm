@@ -94,9 +94,9 @@ class PyNcclCommunicator:
             return
         try:
             self.nccl = NCCLLibrary(library_path)
-        except Exception:
-            # disable because of missing NCCL library
-            # e.g. in a non-GPU environment
+        except (OSError, ValueError, RuntimeError):
+            # disable because of missing NCCL/RCCL library
+            # e.g. in a non-GPU environment or ROCm without RCCL
             self.available = False
             self.disabled = True
             return
