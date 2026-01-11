@@ -239,10 +239,16 @@ class ExaoneMoeMTP(nn.Module, SupportsPP):
         hidden_states: torch.Tensor,
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,
+        spec_step_idx: int = 0,
         **kwargs: object,
     ):
         hidden_states = self.model(
-            input_ids, positions, hidden_states, intermediate_tensors, inputs_embeds
+            input_ids,
+            positions,
+            hidden_states,
+            intermediate_tensors,
+            inputs_embeds,
+            spec_step_idx,
         )
         return hidden_states
 
