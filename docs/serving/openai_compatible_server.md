@@ -173,6 +173,14 @@ with `--enable-request-id-headers`.
     print(completion._request_id)
     ```
 
+## Offline API Documentation
+
+The FastAPI `/docs` endpoint requires an internet connection by default. To enable offline access in air-gapped environments, use the `--enable-offline-docs` flag:
+
+```bash
+vllm serve NousResearch/Meta-Llama-3-8B-Instruct --enable-offline-docs
+```
+
 ## API Reference
 
 ### Completions API
