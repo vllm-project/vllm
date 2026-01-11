@@ -228,7 +228,6 @@ class Siglip2Attention(nn.Module):
             head_size=self.head_dim,
             scale=self.scale,
             prefix=f"{prefix}.attn",
-            multimodal_config=multimodal_config,
         )
 
         self.apply_rotary_emb = ApplyRotaryEmb(

@@ -42,7 +42,7 @@ from transformers.models.qwen2_5_vl.configuration_qwen2_5_vl import (
 )
 
 from vllm.compilation.decorators import support_torch_compile
-from vllm.config import MultiModalConfig, VllmConfig
+from vllm.config import VllmConfig
 from vllm.distributed import parallel_state
 from vllm.distributed import utils as dist_utils
 from vllm.forward_context import set_forward_context
@@ -108,6 +108,7 @@ from .utils import (
 )
 from .vision import (
     get_vit_attn_backend,
+    is_vit_use_data_parallel,
     run_dp_sharded_mrope_vision_model,
 )
 
@@ -265,15 +266,10 @@ class Qwen2_5_VisionMLP(nn.Module):
         bias: bool = False,
         act_fn: Callable[[torch.Tensor], torch.Tensor] = F.silu,
         quant_config: QuantizationConfig | None = None,
-        multimodal_config: MultiModalConfig | None = None,
         prefix: str = "",
     ):
         super().__init__()
-        use_data_parallel = (
-            multimodal_config.mm_encoder_tp_mode == "data"
-            if multimodal_config
-            else False
-        )
+        use_data_parallel = is_vit_use_data_parallel()
         self.gate_up_proj = MergedColumnParallelLinear(
             input_size=in_features,
             output_sizes=[hidden_features] * 2,  # [gate_proj, up_proj]
@@ -307,16 +303,11 @@ class Qwen2_5_VisionAttention(nn.Module):
         num_heads: int,
         projection_size: int,
         quant_config: QuantizationConfig | None = None,
-        multimodal_config: MultiModalConfig | None = None,
         prefix: str = "",
     ) -> None:
         super().__init__()
         # Per attention head and per partition values.
-        use_data_parallel = (
-            multimodal_config.mm_encoder_tp_mode == "data"
-            if multimodal_config
-            else False
-        )
+        use_data_parallel = is_vit_use_data_parallel()
         self.tp_size = (
             1
             if use_data_parallel
@@ -353,7 +344,6 @@ class Qwen2_5_VisionAttention(nn.Module):
             num_heads=self.num_attention_heads_per_partition,
             head_size=self.hidden_size_per_attention_head,
             scale=self.hidden_size_per_attention_head**-0.5,
-            multimodal_config=multimodal_config,
         )
 
         self.apply_rotary_emb = ApplyRotaryEmb(enforce_enable=True)
@@ -433,7 +423,6 @@ class Qwen2_5_VisionBlock(nn.Module):
         act_fn: Callable[[torch.Tensor], torch.Tensor] = F.silu,
         norm_layer: Callable[[int], nn.Module] | None = None,
         quant_config: QuantizationConfig | None = None,
-        multimodal_config: MultiModalConfig | None = None,
         prefix: str = "",
     ) -> None:
         super().__init__()
@@ -446,7 +435,6 @@ class Qwen2_5_VisionBlock(nn.Module):
             num_heads=num_heads,
             projection_size=dim,
             quant_config=quant_config,
-            multimodal_config=multimodal_config,
             prefix=f"{prefix}.attn",
         )
         self.mlp = Qwen2_5_VisionMLP(
@@ -455,7 +443,6 @@ class Qwen2_5_VisionBlock(nn.Module):
             act_fn=act_fn,
             bias=True,
             quant_config=quant_config,
-            multimodal_config=multimodal_config,
             prefix=f"{prefix}.mlp",
         )
 
@@ -528,15 +515,10 @@ class Qwen2_5_VisionPatchMerger(nn.Module):
         norm_layer: Callable[[int], nn.Module] | None = None,
         spatial_merge_size: int = 2,
         quant_config: QuantizationConfig | None = None,
-        multimodal_config: MultiModalConfig | None = None,
         prefix: str = "",
     ) -> None:
         super().__init__()
-        use_data_parallel = (
-            multimodal_config.mm_encoder_tp_mode == "data"
-            if multimodal_config
-            else False
-        )
+        use_data_parallel = is_vit_use_data_parallel()
         self.hidden_size = context_dim * (spatial_merge_size**2)
         if norm_layer is None:
             norm_layer = partial(nn.LayerNorm, eps=1e-6)
@@ -577,7 +559,6 @@ class Qwen2_5_VisionTransformer(nn.Module):
         vision_config: Qwen2_5_VLVisionConfig,
         norm_eps: float = 1e-6,
         quant_config: QuantizationConfig | None = None,
-        multimodal_config: MultiModalConfig | None = None,
         prefix: str = "",
     ) -> None:
         super().__init__()
@@ -618,15 +599,9 @@ class Qwen2_5_VisionTransformer(nn.Module):
             rope_parameters={"partial_rotary_factor": 0.5},
         )
 
-        attn_backend_override = (
-            multimodal_config.mm_encoder_attn_backend
-            if multimodal_config is not None
-            else None
-        )
         self.attn_backend = get_vit_attn_backend(
             head_size=head_dim,
             dtype=torch.get_default_dtype(),
-            attn_backend_override=attn_backend_override,
         )
 
         if self.attn_backend not in {
@@ -648,7 +623,6 @@ class Qwen2_5_VisionTransformer(nn.Module):
                         act_fn=get_act_and_mul_fn(vision_config.hidden_act),
                         norm_layer=norm_layer,
                         quant_config=quant_config,
-                        multimodal_config=multimodal_config,
                         prefix=f"{prefix}.blocks.{layer_idx}",
                     )
                     for layer_idx in range(depth)
@@ -662,7 +636,6 @@ class Qwen2_5_VisionTransformer(nn.Module):
                 norm_layer=norm_layer,
                 spatial_merge_size=self.spatial_merge_size,
                 quant_config=quant_config,
-                multimodal_config=multimodal_config,
                 prefix=f"{prefix}.merger",
             )
 

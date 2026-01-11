@@ -4,7 +4,6 @@
 
 import torch
 
-from vllm.config import MultiModalConfig
 from vllm.logger import init_logger
 from vllm.model_executor.custom_op import CustomOp
 from vllm.model_executor.models.vision import get_vit_attn_backend
@@ -32,7 +31,6 @@ class MMEncoderAttention(CustomOp):
         scale: float | None = None,
         num_kv_heads: int | None = None,
         prefix: str = "",
-        multimodal_config: MultiModalConfig | None = None,
     ) -> None:
         """
         Args:
@@ -62,16 +60,10 @@ class MMEncoderAttention(CustomOp):
         # weight and activation dtype.
         dtype = torch.get_default_dtype()
 
-        # Try to get vision attention backend from multimodal_config.
-        attn_backend_override = None
-        if multimodal_config is not None:
-            attn_backend_override = multimodal_config.mm_encoder_attn_backend
-
         # Get device-specific vision attention backend.
         self.attn_backend = get_vit_attn_backend(
             head_size=head_size,
             dtype=dtype,
-            attn_backend_override=attn_backend_override,
         )
 
         self.is_flash_attn_backend = self.attn_backend in {

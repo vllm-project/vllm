@@ -237,7 +237,6 @@ class HunYuanVisionAttention(nn.Module):
             self.hidden_size_per_attention_head,
             self.scale,
             prefix=f"{prefix}.attn",
-            multimodal_config=multimodal_config,
         )
 
     def forward(
