@@ -548,7 +548,7 @@ class QuarkW4A8Fp8MoEMethod(QuarkMoEMethod):
         x: torch.Tensor,
         router_logits: torch.Tensor,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        topk_weights, topk_ids = layer.select_experts(
+        topk_weights, topk_ids = router.select_experts(
             hidden_states=x,
             router_logits=router_logits,
         )
