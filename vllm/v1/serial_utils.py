@@ -429,6 +429,9 @@ class MsgpackDecoder:
             if issubclass(t, np.ndarray):
                 return self._decode_ndarray(obj)
             if issubclass(t, TensorIpcHandle):
+                # msgspec deserializes dataclasses to dicts, so convert to TensorIpcHandle
+                if isinstance(obj, dict):
+                    obj = TensorIpcHandle(**obj)
                 return self._decode_cuda_queue_tensor(obj)
             if issubclass(t, torch.Tensor):
                 return self._decode_tensor(obj)
