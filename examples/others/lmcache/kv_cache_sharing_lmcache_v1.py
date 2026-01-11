@@ -91,7 +91,7 @@ def run_retrieve(store_done, prompts, timeout=1):
     )
 
     print("Waiting for KV cache store to finish...")
-    store_done.wait()
+    store_done.wait(timeout=60)
     time.sleep(timeout)
 
     outputs = llm.generate(prompts, sampling_params)
@@ -124,7 +124,7 @@ def main():
 
     # Clean up the processes
     store_process.join()
-    retrieve_process.terminate()
+    retrieve_process.join()
     lmcache_server_process.terminate()
     lmcache_server_process.wait()
 
