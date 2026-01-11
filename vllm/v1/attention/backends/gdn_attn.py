@@ -41,7 +41,6 @@ class GDNAttentionMetadata:
     # When APC is enabled, the state_indices_tensor is the mapping from logical
     # block indices to the state indices used to extract the (ssm, conv) state.
     # When prefix caching is enabled: shape [batch, max_num_blocks]
-    # otherwise [batch_size,]
     # When APC is disabled, state_indices_tensor is unused and logic is driven by the
     # spec/non_spec_state_indices_tensor
     state_indices_tensor: torch.Tensor
