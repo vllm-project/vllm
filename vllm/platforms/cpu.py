@@ -15,16 +15,16 @@ import regex as re
 import torch
 
 from vllm import envs
-from vllm.attention.backends.registry import AttentionBackendEnum
 from vllm.logger import init_logger
+from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 from .interface import CpuArchEnum, Platform, PlatformEnum
 
 logger = init_logger(__name__)
 
 if TYPE_CHECKING:
-    from vllm.attention.selector import AttentionSelectorConfig
     from vllm.config import VllmConfig
+    from vllm.v1.attention.selector import AttentionSelectorConfig
 else:
     VllmConfig = None
 
@@ -140,6 +140,7 @@ class CpuPlatform(Platform):
     @classmethod
     def get_device_total_memory(cls, device_id: int = 0) -> int:
         from vllm.utils.mem_constants import GiB_bytes
+        from vllm.utils.mem_utils import format_gib
 
         kv_cache_space = envs.VLLM_CPU_KVCACHE_SPACE
         node_dir = "/sys/devices/system/node"
@@ -153,10 +154,9 @@ class CpuPlatform(Platform):
             free_cpu_memory = psutil.virtual_memory().total // num_numa_nodes
             DEFAULT_CPU_MEM_UTILIZATION = 0.5
             kv_cache_space = int(free_cpu_memory * DEFAULT_CPU_MEM_UTILIZATION)
-            kv_cache_space_gib = kv_cache_space / GiB_bytes
             logger.warning_once(
-                "VLLM_CPU_KVCACHE_SPACE not set. Using "
-                f"{kv_cache_space_gib:.2f} GiB for KV cache."
+                "VLLM_CPU_KVCACHE_SPACE not set. Using %s GiB for KV cache.",
+                format_gib(kv_cache_space),
             )
         else:
             kv_cache_space *= GiB_bytes
@@ -193,6 +193,8 @@ class CpuPlatform(Platform):
             )
 
         scheduler_config = vllm_config.scheduler_config
+        # async scheduling is not required on CPU
+        scheduler_config.async_scheduling = False
         if (
             scheduler_config.enable_chunked_prefill
             or cache_config.enable_prefix_caching
@@ -388,7 +390,7 @@ class CpuPlatform(Platform):
         if env_key in os.environ and os.environ[env_key] != "":
             visible_nodes = [int(s) for s in os.environ[env_key].split(",")]
             allowed_numa_nodes_list = [
-                x for x in visible_nodes if x in allowed_cpu_id_list
+                x for x in sorted(list(set(visible_nodes))) if x in allowed_numa_nodes
             ]
 
         return allowed_numa_nodes_list, logical_cpu_list

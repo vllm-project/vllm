@@ -6,13 +6,14 @@ import json
 import time
 from collections.abc import AsyncGenerator, AsyncIterator
 from collections.abc import Sequence as GenericSequence
-from typing import Final
+from typing import Any, Final
 
 import jinja2
 import partial_json_parser
 import regex as re
 from fastapi import Request
 from openai_harmony import Message as OpenAIMessage
+from partial_json_parser.core.options import Allow
 
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.chat_utils import (
@@ -76,6 +77,7 @@ from vllm.tokenizers.mistral import (
 )
 from vllm.tool_parsers import ToolParser
 from vllm.tool_parsers.mistral_tool_parser import MistralToolCall
+from vllm.tool_parsers.utils import partial_json_loads
 from vllm.utils.collection_utils import as_list
 from vllm.v1.sample.logits_processor import validate_logits_processors_parameters
 
@@ -101,7 +103,9 @@ class OpenAIServingChat(OpenAIServing):
         enable_prompt_tokens_details: bool = False,
         enable_force_include_usage: bool = False,
         enable_log_outputs: bool = False,
+        enable_log_deltas: bool = True,
         log_error_stack: bool = False,
+        default_chat_template_kwargs: dict[str, Any] | None = None,
     ) -> None:
         super().__init__(
             engine_client=engine_client,
@@ -115,7 +119,9 @@ class OpenAIServingChat(OpenAIServing):
         self.chat_template = chat_template
         self.chat_template_content_format: Final = chat_template_content_format
         self.trust_request_chat_template = trust_request_chat_template
+        self.default_chat_template_kwargs = default_chat_template_kwargs or {}
         self.enable_log_outputs = enable_log_outputs
+        self.enable_log_deltas = enable_log_deltas
 
         # set up logits processors
         self.logits_processors = self.model_config.logits_processors
@@ -203,6 +209,7 @@ class OpenAIServingChat(OpenAIServing):
                 tool_dicts=None,
                 documents=None,
                 chat_template_kwargs=None,
+                default_chat_template_kwargs=self.default_chat_template_kwargs,
                 tool_parser=None,
                 add_special_tokens=False,
             )
@@ -310,6 +317,7 @@ class OpenAIServingChat(OpenAIServing):
                     tool_dicts=tool_dicts,
                     documents=request.documents,
                     chat_template_kwargs=request.chat_template_kwargs,
+                    default_chat_template_kwargs=self.default_chat_template_kwargs,
                     tool_parser=tool_parser,
                     add_special_tokens=request.add_special_tokens,
                 )
@@ -505,8 +513,12 @@ class OpenAIServingChat(OpenAIServing):
             # if the current text is empty, we cannot parse it
             return None, function_name_returned
         try:
-            obj = partial_json_parser.loads(current_text)
-        except partial_json_parser.core.exceptions.MalformedJSON:
+            flags = Allow.ALL
+            obj, _ = partial_json_loads(current_text, flags)
+        except (
+            partial_json_parser.core.exceptions.MalformedJSON,
+            json.JSONDecodeError,
+        ):
             logger.debug("not enough tokens to parse into JSON yet")
             obj = None
 
@@ -655,9 +667,14 @@ class OpenAIServingChat(OpenAIServing):
                         "Tokenizer not available when `skip_tokenizer_init=True`"
                     )
 
+                # Pass the same chat template kwargs as used in tokenization
+                chat_template_kwargs = self._prepare_extra_chat_template_kwargs(
+                    request.chat_template_kwargs,
+                    self.default_chat_template_kwargs,
+                )
                 reasoning_parser = self.reasoning_parser(
                     tokenizer,
-                    chat_template_kwargs=request.chat_template_kwargs,  # type: ignore
+                    chat_template_kwargs=chat_template_kwargs,  # type: ignore[call-arg]
                 )
         except RuntimeError as e:
             logger.exception("Error in reasoning parser creation.")
@@ -1126,7 +1143,7 @@ class OpenAIServingChat(OpenAIServing):
                                 if tc.function and tc.function.arguments
                             )
 
-                        if delta_content:
+                        if delta_content and self.enable_log_deltas:
                             self.request_logger.log_outputs(
                                 request_id=request_id,
                                 outputs=delta_content,
@@ -1208,15 +1225,8 @@ class OpenAIServingChat(OpenAIServing):
                             # check to see if there's anything left to stream
                             remaining_call = expected_call.replace(actual_call, "", 1)
                             # set that as a delta message
-                            delta_message = DeltaMessage(
-                                tool_calls=[
-                                    DeltaToolCall(
-                                        index=index,
-                                        function=DeltaFunctionCall(
-                                            arguments=remaining_call
-                                        ).model_dump(exclude_none=True),
-                                    )
-                                ]
+                            delta_message = self._create_remaining_args_delta(
+                                delta_message, remaining_call, index
                             )
 
                         # Send the finish response for each request.n only once
@@ -1440,9 +1450,14 @@ class OpenAIServingChat(OpenAIServing):
                             "Tokenizer not available when `skip_tokenizer_init=True`"
                         )
 
+                    # Pass the same chat template kwargs as used in tokenization
+                    chat_template_kwargs = self._prepare_extra_chat_template_kwargs(
+                        request.chat_template_kwargs,
+                        self.default_chat_template_kwargs,
+                    )
                     reasoning_parser = self.reasoning_parser(
                         tokenizer,
-                        chat_template_kwargs=request.chat_template_kwargs,  # type: ignore
+                        chat_template_kwargs=chat_template_kwargs,  # type: ignore[call-arg]
                     )
                 except RuntimeError as e:
                     logger.exception("Error in reasoning parser creation.")
@@ -1801,6 +1816,35 @@ class OpenAIServingChat(OpenAIServing):
             and delta_message.tool_calls[0]
             and delta_message.tool_calls[0].function
             and delta_message.tool_calls[0].function.arguments is not None
+        )
+
+    @staticmethod
+    def _create_remaining_args_delta(
+        delta_message: DeltaMessage,
+        remaining_call: str,
+        index: int,
+    ) -> DeltaMessage:
+        """
+        Create a delta message for remaining tool arguments, preserving
+        id/type/name from the original delta.
+        """
+        original_tc = next(
+            (tc for tc in delta_message.tool_calls if tc.index == index),
+            None,
+        )
+        original_fn = original_tc.function if original_tc else None
+        return DeltaMessage(
+            tool_calls=[
+                DeltaToolCall(
+                    index=index,
+                    id=original_tc.id if original_tc else None,
+                    type=original_tc.type if original_tc else None,
+                    function=DeltaFunctionCall(
+                        name=original_fn.name if original_fn else None,
+                        arguments=remaining_call,
+                    ),
+                )
+            ]
         )
 
     def _make_request_with_harmony(

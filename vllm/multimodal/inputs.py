@@ -171,10 +171,7 @@ class PlaceholderRange:
 
     @cached_property
     def embeds_cumsum(self) -> torch.Tensor | None:
-        if self.is_embed is None:
-            return None
-
-        return self.is_embed.cumsum(dim=0)
+        return None if self.is_embed is None else self.is_embed.cumsum(dim=0)
 
     @cached_property
     def get_num_embeds(self) -> int:
@@ -308,13 +305,7 @@ def batched_tensors_equal(a: BatchedTensorInputs, b: BatchedTensorInputs) -> boo
     Equality check between
     [`BatchedTensorInputs`][vllm.multimodal.inputs.BatchedTensorInputs] objects.
     """
-    for k in a:
-        if k not in b:
-            return False
-        if not nested_tensors_equal(a[k], b[k]):
-            return False
-
-    return True
+    return all(k in b and nested_tensors_equal(a[k], b[k]) for k in a)
 
 
 @dataclass
@@ -338,6 +329,9 @@ class MultiModalFeatureSpec:
 
     mm_position: PlaceholderRange
     """e.g., PlaceholderRange(offset=2, length=336)"""
+
+    mm_hash: str | None = None
+    """Base mm_hash for processor cache (without LoRA prefix)."""
 
     @staticmethod
     def gather_kwargs(features: list["MultiModalFeatureSpec"], keys: set[str]):
