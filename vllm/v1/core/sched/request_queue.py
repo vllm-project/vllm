@@ -15,6 +15,7 @@ class SchedulingPolicy(Enum):
 
     FCFS = "fcfs"
     PRIORITY = "priority"
+    WFQ = "wfq"
 
 
 class RequestQueue(ABC):
@@ -213,5 +214,9 @@ def create_request_queue(policy: SchedulingPolicy) -> RequestQueue:
         return PriorityRequestQueue()
     elif policy == SchedulingPolicy.FCFS:
         return FCFSRequestQueue()
+    elif policy == SchedulingPolicy.WFQ:
+        from vllm.v1.core.sched.wfq_queue import WFQRequestQueue
+
+        return WFQRequestQueue()
     else:
         raise ValueError(f"Unknown scheduling policy: {policy}")
