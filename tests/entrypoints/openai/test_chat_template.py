@@ -4,7 +4,11 @@
 import pytest
 
 from vllm.config import ModelConfig
-from vllm.entrypoints.chat_utils import apply_hf_chat_template, load_chat_template
+from vllm.entrypoints.chat_utils import (
+    apply_hf_chat_template,
+    apply_hf_chat_template_tokenize,
+    load_chat_template,
+)
 from vllm.entrypoints.openai.protocol import ChatCompletionRequest
 from vllm.tokenizers import get_tokenizer
 
@@ -138,7 +142,7 @@ def test_get_gen_prompt(
         continue_final_message=continue_final_message,
     )
 
-    # Call the function and get the result
+    # Call the function and get the result (without tokenize)
     result = apply_hf_chat_template(
         tokenizer=tokenizer,
         conversation=mock_request.messages,
@@ -152,5 +156,22 @@ def test_get_gen_prompt(
     # Test assertion
     assert result == expected_output, (
         f"The generated prompt does not match the expected output for "
+        f"model {model} and template {template}"
+    )
+
+    # Call the function and get the result (with tokenize)
+    result = apply_hf_chat_template_tokenize(
+        tokenizer=tokenizer,
+        conversation=mock_request.messages,
+        chat_template=mock_request.chat_template or template_content,
+        model_config=model_config,
+        tools=None,
+        add_generation_prompt=mock_request.add_generation_prompt,
+        continue_final_message=mock_request.continue_final_message,
+    )
+
+    # Test assertion
+    assert tokenizer.decode(result) == expected_output, (
+        f"The generated prompt_ids does not match the expected output for "
         f"model {model} and template {template}"
     )
