@@ -2638,6 +2638,7 @@ class GPUModelRunner(
                 self.input_ids.gpu[:num_scheduled_tokens],
                 multimodal_embeddings=mm_embeds,
                 is_multimodal=is_mm_embed,
+                lora_enabled=self.lora_config is not None,
             )
 
             # TODO(woosuk): Avoid the copy. Optimize.
