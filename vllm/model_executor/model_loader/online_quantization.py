@@ -7,7 +7,7 @@ from collections.abc import Iterable
 import torch
 from torch import nn
 
-from vllm.config import ModelConfig
+from vllm.config import LoadConfig, ModelConfig
 from vllm.logger import init_logger
 from vllm.model_executor.model_loader.utils import process_weights_after_loading
 
@@ -74,7 +74,7 @@ def maybe_save_metadata_and_attributes_for_weight_reloading(
 
     from vllm.model_executor.model_loader.weight_utils import get_quant_config
 
-    quant_config = get_quant_config(model_config, None)
+    quant_config = get_quant_config(model_config, LoadConfig())
 
     # If checkpoint is already torchao serialized, this means it's
     # pre-quantized quantization case, we'll skip saving the metadata
