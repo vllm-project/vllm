@@ -950,7 +950,10 @@ class BatchedTritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
         # We can reuse the memory between these because by the time we need
         # cache3, we're done with cache1
         intermediate_cache1 = _resize_cache(workspace13, (E, max_num_tokens, N))
-        intermediate_cache2 = _resize_cache(workspace2, (E, max_num_tokens, N // 2))
+        activation_out_dim = self.adjust_N_for_activation(N, activation)
+        intermediate_cache2 = _resize_cache(
+            workspace2, (E, max_num_tokens, activation_out_dim)
+        )
 
         # TODO(bnell): should this be done for any quantized type?
         if self.quant_config.use_fp8_w8a8:
@@ -981,7 +984,7 @@ class BatchedTritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
         # TODO (bnell): use triton utility from batched deep gemm.
         self.activation(
             activation,
-            intermediate_cache2.view(-1, N // 2),
+            intermediate_cache2.view(-1, activation_out_dim),
             intermediate_cache1.view(-1, N),
         )
 

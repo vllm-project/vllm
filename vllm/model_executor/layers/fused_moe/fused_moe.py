@@ -2088,8 +2088,13 @@ def fused_experts_impl(
     intermediate_cache3 = cache13[: M * top_k_num * K].view(M, top_k_num, K)
 
     # This needs separate memory since it's used concurrently with cache1
+    activation_out_dim = mk.FusedMoEPermuteExpertsUnpermute.adjust_N_for_activation(
+        N, activation
+    )
     intermediate_cache2 = torch.empty(
-        (M * top_k_num, N // 2), device=hidden_states.device, dtype=hidden_states.dtype
+        (M * top_k_num, activation_out_dim),
+        device=hidden_states.device,
+        dtype=hidden_states.dtype,
     )
 
     if hidden_states.dtype == torch.bfloat16:
@@ -2313,8 +2318,8 @@ class TritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
         activation: str,
     ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...]]:
         activation_out_dim = self.adjust_N_for_activation(N, activation)
-        workspace1 = (M, topk, max(N, K))
-        workspace2 = (M, topk, max(activation_out_dim, K))
+        workspace1 = (M, topk, max(activation_out_dim, K))
+        workspace2 = (M, topk, max(N, K))
         output = (M, K)
         return (workspace1, workspace2, output)
 
@@ -2542,8 +2547,9 @@ class TritonWNA16Experts(TritonExperts):
 
         # Note that the output tensor might be in workspace1
         intermediate_cache1 = _resize_cache(workspace2, (num_tokens, top_k_num, N))
+        activation_out_dim = self.adjust_N_for_activation(N, activation)
         intermediate_cache2 = _resize_cache(
-            workspace13, (num_tokens * top_k_num, N // 2)
+            workspace13, (num_tokens * top_k_num, activation_out_dim)
         )
         intermediate_cache3 = _resize_cache(workspace2, (num_tokens, top_k_num, K))
 

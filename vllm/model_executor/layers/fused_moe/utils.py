@@ -363,7 +363,7 @@ def apply_moe_activation(
         torch.ops._C.swigluoai_and_mul(output, input)
     # Activations without gated multiplication
     elif activation == SILU_NO_MUL:
-        F.silu(input, out=output)
+        output.copy_(F.silu(input))
     elif activation == GELU_NO_MUL:
         output.copy_(F.gelu(input))
     elif activation == RELU2_NO_MUL:
