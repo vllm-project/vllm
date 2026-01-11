@@ -179,7 +179,7 @@ class RequestState:
         self.needs_prompt_logprobs[req_idx] = needs_prompt_logprobs
 
     def apply_staged_writes(self) -> None:
-        self.prefill_len.copy_to_gpu()
+        self.prefill_len.copy_to_uva()
         self.prefill_token_ids.apply_write()
         self.num_computed_tokens.apply_write()
 
@@ -209,25 +209,25 @@ class RequestState:
         idx_mapping_np: np.ndarray,
         pos: torch.Tensor,
     ) -> SamplingMetadata:
-        temperature = self.temperature.copy_to_gpu()
+        temperature = self.temperature.copy_to_uva()
 
         top_p = self.top_p.np[idx_mapping_np]
         no_top_p = np.all(top_p == 1.0)
-        top_p = self.top_p.copy_to_gpu()[idx_mapping] if not no_top_p else None
+        top_p = self.top_p.copy_to_uva()[idx_mapping] if not no_top_p else None
 
         top_k = self.top_k.np[idx_mapping_np]
         no_top_k = np.all(top_k == self.vocab_size)
-        top_k = self.top_k.copy_to_gpu()[idx_mapping] if not no_top_k else None
+        top_k = self.top_k.copy_to_uva()[idx_mapping] if not no_top_k else None
 
         min_p = self.min_p.np[idx_mapping_np]
         no_min_p = np.all(min_p == 0.0)
-        min_p = self.min_p.copy_to_gpu() if not no_min_p else None
+        min_p = self.min_p.copy_to_uva() if not no_min_p else None
 
-        rep_penalty = self.repetition_penalty.copy_to_gpu()
-        freq_penalty = self.frequency_penalty.copy_to_gpu()
-        pres_penalty = self.presence_penalty.copy_to_gpu()
+        rep_penalty = self.repetition_penalty.copy_to_uva()
+        freq_penalty = self.frequency_penalty.copy_to_uva()
+        pres_penalty = self.presence_penalty.copy_to_uva()
 
-        seeds = self.seeds.copy_to_gpu()
+        seeds = self.seeds.copy_to_uva()
 
         num_logprobs = self.num_logprobs[idx_mapping_np]
         max_num_logprobs: int | None = int(np.max(num_logprobs))

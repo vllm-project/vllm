@@ -8,7 +8,6 @@ import torch
 
 from vllm.triton_utils import tl, triton
 from vllm.utils import random_uuid
-from vllm.v1.worker.gpu.buffer_utils import UvaBackedGpuTensor
 
 
 class InputBuffers:
@@ -25,12 +24,12 @@ class InputBuffers:
         self.max_num_tokens = max_num_tokens
         self.device = device
 
-        self.idx_mapping = UvaBackedGpuTensor(max_num_reqs, torch.int32, device)
         self.input_ids = torch.zeros(max_num_tokens, dtype=torch.int32, device=device)
         self.positions = torch.zeros(max_num_tokens, dtype=torch.int64, device=device)
-        self.query_start_loc = UvaBackedGpuTensor(max_num_reqs + 1, torch.int32, device)
+        self.query_start_loc = torch.zeros(
+            max_num_reqs + 1, dtype=torch.int32, device=device
+        )
         self.seq_lens = torch.zeros(max_num_reqs, dtype=torch.int32, device=device)
-        self.cu_num_logits = UvaBackedGpuTensor(max_num_reqs + 1, torch.int32, device)
 
 
 @dataclass
@@ -91,20 +90,24 @@ class InputBatch:
         num_scheduled_tokens[-1] += num_tokens % num_reqs
         assert int(num_scheduled_tokens.sum()) == num_tokens
 
-        input_buffers.query_start_loc.np[0] = 0
-        input_buffers.query_start_loc.np[1 : num_reqs + 1] = np.cumsum(
-            num_scheduled_tokens
-        )
-        input_buffers.query_start_loc.np[num_reqs + 1 :] = num_tokens
-        query_start_loc_np = input_buffers.query_start_loc.np[: num_reqs + 1]
-        query_start_loc = input_buffers.query_start_loc.copy_to_gpu()[: num_reqs + 1]
         # seq_len equals to query_len
-        seq_lens_np = np.full(num_reqs, num_tokens // num_reqs, dtype=np.int32)
-        seq_lens_np[-1] += num_tokens % num_reqs
+        seq_lens_np = num_scheduled_tokens
         input_buffers.seq_lens[:num_reqs] = num_tokens // num_reqs
         input_buffers.seq_lens[num_reqs - 1] += num_tokens % num_reqs
+        # Pad for full CUDA graph mode.
         input_buffers.seq_lens[num_reqs:] = 0
         seq_lens = input_buffers.seq_lens[:num_reqs]
+
+        query_start_loc_np = np.empty(num_reqs + 1, dtype=np.int32)
+        query_start_loc_np[0] = 0
+        np.cumsum(num_scheduled_tokens, out=query_start_loc_np[1:])
+        input_buffers.query_start_loc[0] = 0
+        torch.cumsum(
+            seq_lens, dim=0, out=input_buffers.query_start_loc[1 : num_reqs + 1]
+        )
+        # Pad for full CUDA graph mode.
+        input_buffers.query_start_loc[num_reqs + 1 :] = num_tokens
+        query_start_loc = input_buffers.query_start_loc[: num_reqs + 1]
 
         input_ids = input_buffers.input_ids[:num_tokens]
         positions = input_buffers.positions[:num_tokens]

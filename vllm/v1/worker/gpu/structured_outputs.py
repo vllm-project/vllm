@@ -14,13 +14,12 @@ class StructuredOutputsWorker:
         self,
         max_num_logits: int,
         vocab_size: int,
-        device: torch.device,
     ):
         # NOTE(woosuk): Here, we use UvaBufferPool instead of UvaBackedTensor
-        # to save a CPU-to-CPU copy.
-        self.logits_indices = UvaBufferPool(max_num_logits, torch.int32, device)
+        # to save a unnecessary CPU-to-CPU copy.
+        self.logits_indices = UvaBufferPool(max_num_logits, torch.int32)
         self.grammar_bitmask = UvaBufferPool(
-            (max_num_logits, cdiv(vocab_size, 32)), torch.int32, device
+            (max_num_logits, cdiv(vocab_size, 32)), torch.int32
         )
 
     def apply_grammar_bitmask(
@@ -33,9 +32,6 @@ class StructuredOutputsWorker:
         if not grammar_req_ids:
             return
 
-        # Copy bitmask to GPU
-        bitmask = self.grammar_bitmask.copy_to_gpu(grammar_bitmask)
-
         # Construct bitmask -> logits mapping
         mapping: list[int] = []
         req_ids = input_batch.req_ids
@@ -46,9 +42,12 @@ class StructuredOutputsWorker:
             logits_start_idx = cu_num_logits[req_idx]
             logits_end_idx = cu_num_logits[req_idx + 1]
             mapping.extend(range(logits_start_idx, logits_end_idx))
-        # Copy mapping to GPU
+        # Copy the mapping.
         mapping_np = np.array(mapping, dtype=np.int32)
-        logits_indices = self.logits_indices.copy_to_gpu(mapping_np)
+        logits_indices = self.logits_indices.copy_to_uva(mapping_np)
+
+        # Copy the bitmask.
+        bitmask = self.grammar_bitmask.copy_to_uva(grammar_bitmask)
 
         num_masks = bitmask.shape[0]
         assert num_masks == len(mapping)

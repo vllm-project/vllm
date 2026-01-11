@@ -12,7 +12,7 @@ from vllm.utils.torch_utils import get_cuda_view_from_cpu_tensor
 
 
 class UvaBuffer:
-    def __init__(self, size: int | Sequence[int | torch.SymInt], dtype: torch.dtype):
+    def __init__(self, size: int | Sequence[int], dtype: torch.dtype):
         if not is_uva_available():
             raise RuntimeError("UVA is not available")
         self.cpu = torch.zeros(size, dtype=dtype, device="cpu", pin_memory=True)
@@ -23,42 +23,46 @@ class UvaBuffer:
 class UvaBufferPool:
     def __init__(
         self,
-        size: int | Sequence[int | torch.SymInt],
+        size: int | Sequence[int],
         dtype: torch.dtype,
-        device: torch.device,
         max_concurrency: int = 2,
     ):
+        self.size = size
         self.dtype = dtype
-        self.device = device
         self.max_concurrency = max_concurrency
 
         # UVA buffers for concurrency
         self._uva_bufs = [UvaBuffer(size, dtype) for _ in range(max_concurrency)]
-        # Current buffer index and its GPU view
+        # Current buffer index
         self._curr = 0
-        self.gpu = self._uva_bufs[self._curr].uva
 
-    def copy_to_gpu(self, x: torch.Tensor | np.ndarray) -> torch.Tensor:
+    def copy_to_uva(self, x: torch.Tensor | np.ndarray | list) -> torch.Tensor:
         # Round robin to the next buffer.
         self._curr = (self._curr + 1) % self.max_concurrency
         buf = self._uva_bufs[self._curr]
-
         # CPU-to-CPU copy
-        n = x.shape[0]
-        if isinstance(x, torch.Tensor):
-            buf.cpu[:n] = x[:n]
-        else:
-            buf.np[:n] = x[:n]
+        dst = buf.cpu if isinstance(x, torch.Tensor) else buf.np
+        n = len(x)
+        dst[:n] = x
+        return buf.uva[:n]
 
-        # No GPU-to-CPU copy needed, thanks to UVA.
-        self.gpu = buf.uva
-        return self.gpu[:n]
+    def copy_to_gpu(
+        self,
+        x: torch.Tensor | np.ndarray,
+        out: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        uva = self.copy_to_uva(x)
+        if out is None:
+            # CPU-to-GPU copy
+            return uva.clone()
+        # CPU-to-GPU copy
+        return out.copy_(uva, non_blocking=True)
 
 
 class UvaBackedTensor:
     def __init__(
         self,
-        size: int | Sequence[int | torch.SymInt],
+        size: int | Sequence[int],
         dtype: torch.dtype,
         max_concurrency: int = 2,
     ):
@@ -70,39 +74,19 @@ class UvaBackedTensor:
         self.np = self.cpu.numpy()
 
         # Buffers for concurrency
-        self._bufs = UvaBufferPool(size, dtype, max_concurrency)
-        self.gpu = self._bufs.gpu
+        self.pool = UvaBufferPool(size, dtype, max_concurrency)
+        self.gpu = self.pool.copy_to_uva(self.np)
 
-    def copy_to_gpu(self, n: int | None = None) -> torch.Tensor:
+    def copy_to_uva(self, n: int | None = None) -> torch.Tensor:
         # CPU-to-CPU copy
-        x = self._bufs.copy_to_gpu(self.np[:n])
-        # No GPU-to-CPU copy needed, thanks to UVA.
-        self.gpu = self._bufs.gpu
-        return x
-
-
-class UvaBackedGpuTensor(UvaBackedTensor):
-    def __init__(
-        self,
-        size: int | Sequence[int | torch.SymInt],
-        dtype: torch.dtype,
-        device: torch.device,
-        max_concurrency: int = 2,
-    ):
-        super().__init__(size, dtype, max_concurrency)
-        self.gpu = torch.zeros_like(self.cpu, device=device)
-
-    def copy_to_gpu(self, n: int | None = None) -> torch.Tensor:
-        # CPU-to-CPU copy
-        x = self._bufs.copy_to_gpu(self.np[:n])
-        # CPU-to-GPU copy
-        return self.gpu[:n].copy_(x, non_blocking=True)
+        self.gpu = self.pool.copy_to_uva(self.np[:n] if n is not None else self.np)
+        return self.gpu
 
 
 class StagedWriteTensor:
     def __init__(
         self,
-        size: int | Sequence[int | torch.SymInt],
+        size: int | Sequence[int],
         dtype: torch.dtype,
         device: torch.device,
         max_concurrency: int = 2,
@@ -130,17 +114,17 @@ class StagedWriteTensor:
         self._staged_write_contents: list[int] = []
         self._staged_write_cu_lens: list[int] = []
 
-        self.write_indices = UvaBackedTensor(
+        self.write_indices = UvaBufferPool(
             self.num_rows, dtype=torch.int32, max_concurrency=max_concurrency
         )
-        self.write_starts = UvaBackedTensor(
+        self.write_starts = UvaBufferPool(
             self.num_rows, dtype=torch.int32, max_concurrency=max_concurrency
         )
         init_size = next_power_of_2(self.num_rows)
-        self.write_contents = UvaBackedTensor(
+        self.write_contents = UvaBufferPool(
             init_size, dtype=dtype, max_concurrency=max_concurrency
         )
-        self.write_cu_lens = UvaBackedTensor(
+        self.write_cu_lens = UvaBufferPool(
             self.num_rows, dtype=torch.int32, max_concurrency=max_concurrency
         )
 
@@ -161,26 +145,22 @@ class StagedWriteTensor:
         self._staged_write_contents.append(x)
         self._staged_write_cu_lens.append(len(self._staged_write_contents))
 
-    def prepare(self) -> None:
+    def apply_write(self) -> None:
         n = len(self._staged_write_indices)
         if n == 0:
             return
 
-        self.write_indices.np[:n] = self._staged_write_indices
-        self.write_indices.copy_to_gpu(n)
-
-        self.write_starts.np[:n] = self._staged_write_starts
-        self.write_starts.copy_to_gpu(n)
-
-        self.write_cu_lens.np[:n] = self._staged_write_cu_lens
-        self.write_cu_lens.copy_to_gpu(n)
+        indices_uva = self.write_indices.copy_to_uva(self._staged_write_indices)
+        starts_uva = self.write_starts.copy_to_uva(self._staged_write_starts)
+        cu_lens_uva = self.write_cu_lens.copy_to_uva(self._staged_write_cu_lens)
 
         # Special handling for write_contents
         diff_len = len(self._staged_write_contents)
-        if diff_len > self.write_contents.np.shape[0]:
+        assert isinstance(self.write_contents.size, int)
+        if diff_len > self.write_contents.size:
             # Re-allocate a larger buffer for the write_contents
             new_size = next_power_of_2(diff_len)
-            self.write_contents = UvaBackedTensor(
+            self.write_contents = UvaBufferPool(
                 new_size, dtype=self.dtype, max_concurrency=self.max_concurrency
             )
             # NOTE(woosuk): Since the previous write_contents buffer is released,
@@ -189,24 +169,16 @@ class StagedWriteTensor:
             # This prevents potential race conditions. The slight overhead is
             # negligible because the reallocations are infrequent in practice.
             torch.cuda.synchronize()
-        self.write_contents.np[:diff_len] = self._staged_write_contents
-        self.write_contents.copy_to_gpu(diff_len)
+        contents_uva = self.write_contents.copy_to_uva(self._staged_write_contents)
 
-    def apply_write(self) -> None:
-        n = len(self._staged_write_indices)
-        if n == 0:
-            return
-
-        # Prepare the buffers for staging writes
-        self.prepare()
         # Write diffs to the GPU buffer
         _apply_write_kernel[(n,)](
             self.gpu,
             self.gpu.stride(0),
-            self.write_indices.gpu,
-            self.write_starts.gpu,
-            self.write_contents.gpu,
-            self.write_cu_lens.gpu,
+            indices_uva,
+            starts_uva,
+            contents_uva,
+            cu_lens_uva,
             BLOCK_SIZE=1024,
         )
         # Clear the staged writes
