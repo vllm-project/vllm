@@ -258,8 +258,16 @@ class LlamaModel(nn.Module):
             loaded_params.add(name)
         return loaded_params
 
+class Eagle3Llama:
+    """
+    Interface for Llama models that support Eagle3
+    """
 
-class Eagle3LlamaForCausalLM(LlamaForCausalLM):
+    pass
+
+
+
+class Eagle3LlamaForCausalLM(LlamaForCausalLM, Eagle3Llama):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         nn.Module.__init__(self)
         self.config = vllm_config.speculative_config.draft_model_config.hf_config
