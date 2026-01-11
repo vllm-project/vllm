@@ -27,7 +27,7 @@ except ImportError:
     PchipInterpolator = (
         PlaceholderModule("scipy")
         .placeholder_attr("interpolate")
-        .placeholder_attr("PlaceholderModule")
+        .placeholder_attr("PchipInterpolator")
     )
 
 
