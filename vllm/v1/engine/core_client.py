@@ -533,7 +533,7 @@ class MPClient(EngineCoreClient):
                     timeout=VLLM_ENGINE_READY_TIMEOUT_S * 1000  # convert to ms
                 ):
                     raise TimeoutError(
-                        "Timed out waiting for engines to send"
+                        "Timed out waiting for engines to send "
                         "initial message on input socket."
                     )
                 identity, _ = sync_input_socket.recv_multipart()
