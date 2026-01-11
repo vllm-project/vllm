@@ -196,11 +196,11 @@ class GDNAttentionMetadataBuilder(
         )
         nums_dict, batch_ptr, token_chunk_offset_ptr = None, None, None
 
-        enable_apc = self.vllm_config.cache_config.enable_prefix_caching
-        block_size_value: int | None = None
+        prefix_caching_enabled = self.vllm_config.cache_config.enable_prefix_caching
+        block_size: int | None = None
         chunk_size_value: int | None = None
-        if enable_apc:
-            block_size_value = self.kv_cache_spec.block_size
+        if prefix_caching_enabled:
+            block_size = self.kv_cache_spec.block_size
             chunk_size_value = self.chunk_size
 
         # APC related tensors
@@ -228,7 +228,7 @@ class GDNAttentionMetadataBuilder(
             num_spec_decodes = 0
         else:
             spec_sequence_masks = num_decode_draft_tokens_cpu >= 0
-            num_spec_decodes = int(spec_sequence_masks.sum().item())
+            num_spec_decodes = spec_sequence_masks.sum().item()
             if num_spec_decodes == 0:
                 spec_sequence_masks = None
             else:
@@ -326,18 +326,16 @@ class GDNAttentionMetadataBuilder(
             assert num_accepted_tokens is not None
             num_accepted_tokens = num_accepted_tokens[spec_sequence_masks]
 
-        # TODO: rename var
-        if enable_apc:
-            assert spec_sequence_masks is None
-            assert block_size_value is not None
+        if prefix_caching_enabled:
+            assert block_size is not None
             state_indices_tensor = m.block_table_tensor
             (
                 block_idx_last_computed_token,
                 block_idx_first_scheduled_token,
                 block_idx_last_scheduled_token,
-            ) = self._compute_prefix_caching_block_indices(m, block_size_value)
+            ) = self._compute_prefix_caching_block_indices(m, block_size)
 
-        if enable_apc and num_prefills > 0:
+        if prefix_caching_enabled and num_prefills > 0:
             assert block_idx_first_scheduled_token is not None
             assert non_spec_query_start_loc_cpu is not None
 
@@ -457,7 +455,7 @@ class GDNAttentionMetadataBuilder(
             non_spec_query_start_loc = self.non_spec_query_start_loc[: batch_size + 1]
             non_spec_query_start_loc[num_decodes + 1 :].fill_(non_spec_num_query_tokens)
 
-            if enable_apc and num_decodes > 0:
+            if prefix_caching_enabled and num_decodes > 0:
                 self.state_indices_tensor[:num_decodes].copy_(
                     state_indices_tensor, non_blocking=True
                 )
@@ -489,7 +487,7 @@ class GDNAttentionMetadataBuilder(
             num_spec_decode_tokens=num_spec_decode_tokens,
             num_actual_tokens=m.num_actual_tokens,
             has_initial_state=has_initial_state,
-            block_size=block_size_value,
+            block_size=block_size,
             chunk_size=chunk_size_value,
             spec_query_start_loc=spec_query_start_loc,
             non_spec_query_start_loc=non_spec_query_start_loc,
