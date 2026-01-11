@@ -72,3 +72,30 @@ def test_bench_serve_chat(server):
     print(result.stderr)
 
     assert result.returncode == 0, f"Benchmark failed: {result.stderr}"
+
+
+@pytest.mark.benchmark
+def test_bench_serve_num_test_prompts(server):
+    # Test that --num-test-prompts argument is accepted
+    command = [
+        "vllm",
+        "bench",
+        "serve",
+        "--host",
+        server.host,
+        "--port",
+        str(server.port),
+        "--input-len",
+        "32",
+        "--output-len",
+        "4",
+        "--num-prompts",
+        "5",
+        "--num-test-prompts",
+        "3",
+    ]
+    result = subprocess.run(command, capture_output=True, text=True)
+    print(result.stdout)
+    print(result.stderr)
+
+    assert result.returncode == 0, f"Benchmark failed: {result.stderr}"
