@@ -9,7 +9,6 @@ from collections.abc import Callable
 from typing import Any
 
 import torch
-import torch.nn.functional as F
 
 import vllm.envs as envs
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
@@ -43,7 +42,7 @@ from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
 )
 from vllm.model_executor.layers.fused_moe.utils import (
     _resize_cache,
-    activation_without_mul,
+    apply_moe_activation,
     disable_inplace,
     moe_kernel_quantize_input,
 )
@@ -1957,11 +1956,6 @@ def fused_experts(
         )
 
 
-SILU_NO_MUL: str = activation_without_mul("silu")
-GELU_NO_MUL: str = activation_without_mul("gelu")
-RELU2_NO_MUL: str = activation_without_mul("relu2")
-
-
 def _get_config_quant_dtype(
     use_fp8_w8a8: bool,
     use_int8_w8a8: bool,
@@ -2094,8 +2088,13 @@ def fused_experts_impl(
     intermediate_cache3 = cache13[: M * top_k_num * K].view(M, top_k_num, K)
 
     # This needs separate memory since it's used concurrently with cache1
+    activation_out_dim = mk.FusedMoEPermuteExpertsUnpermute.adjust_N_for_activation(
+        N, activation
+    )
     intermediate_cache2 = torch.empty(
-        (M * top_k_num, N // 2), device=hidden_states.device, dtype=hidden_states.dtype
+        (M * top_k_num, activation_out_dim),
+        device=hidden_states.device,
+        dtype=hidden_states.dtype,
     )
 
     if hidden_states.dtype == torch.bfloat16:
@@ -2235,29 +2234,9 @@ def fused_experts_impl(
             B_bias=w1_bias,
         )
 
-        # Activation function with multiplication
-        if activation == "silu":
-            torch.ops._C.silu_and_mul(
-                intermediate_cache2, intermediate_cache1.view(-1, N)
-            )
-        elif activation == "gelu":
-            torch.ops._C.gelu_and_mul(
-                intermediate_cache2, intermediate_cache1.view(-1, N)
-            )
-        elif activation == "swigluoai":
-            # alpha = 1.702, limit = 7.0
-            torch.ops._C.swigluoai_and_mul(
-                intermediate_cache2, intermediate_cache1.view(-1, N)
-            )
-        # Activation function without multiplication
-        elif activation == SILU_NO_MUL:
-            intermediate_cache2 = F.silu(intermediate_cache1.view(-1, N))
-        elif activation == GELU_NO_MUL:
-            intermediate_cache2 = F.gelu(intermediate_cache1.view(-1, N))
-        elif activation == RELU2_NO_MUL:
-            intermediate_cache2 = torch.square(F.relu(intermediate_cache1.view(-1, N)))
-        else:
-            raise ValueError(f"Unsupported FusedMoe activation: {activation}.")
+        apply_moe_activation(
+            activation, intermediate_cache2, intermediate_cache1.view(-1, N)
+        )
 
         qintermediate_cache2, a2q_scale = moe_kernel_quantize_input(
             A=intermediate_cache2,
@@ -2336,8 +2315,10 @@ class TritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
         global_num_experts: int,
         local_num_experts: int,
         expert_tokens_meta: mk.ExpertTokensMetadata | None,
+        activation: str,
     ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...]]:
-        workspace1 = (M, topk, max(N // 2, K))
+        activation_out_dim = self.adjust_N_for_activation(N, activation)
+        workspace1 = (M, topk, max(activation_out_dim, K))
         workspace2 = (M, topk, max(N, K))
         output = (M, K)
         return (workspace1, workspace2, output)
@@ -2412,8 +2393,9 @@ class TritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
 
         # Note that the output tensor might be in workspace1
         intermediate_cache1 = _resize_cache(workspace2, (num_tokens, top_k_num, N))
+        cache2_dim = self.adjust_N_for_activation(N, activation)
         intermediate_cache2 = _resize_cache(
-            workspace13, (num_tokens * top_k_num, N // 2)
+            workspace13, (num_tokens * top_k_num, cache2_dim)
         )
         intermediate_cache3 = _resize_cache(workspace2, (num_tokens, top_k_num, K))
 
@@ -2565,8 +2547,9 @@ class TritonWNA16Experts(TritonExperts):
 
         # Note that the output tensor might be in workspace1
         intermediate_cache1 = _resize_cache(workspace2, (num_tokens, top_k_num, N))
+        activation_out_dim = self.adjust_N_for_activation(N, activation)
         intermediate_cache2 = _resize_cache(
-            workspace13, (num_tokens * top_k_num, N // 2)
+            workspace13, (num_tokens * top_k_num, activation_out_dim)
         )
         intermediate_cache3 = _resize_cache(workspace2, (num_tokens, top_k_num, K))
 
