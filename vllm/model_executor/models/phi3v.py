@@ -29,7 +29,7 @@ from transformers import (
 )
 
 from vllm.config import VllmConfig
-from vllm.config.multimodal import BaseDummyOptions
+from vllm.config.multimodal import BaseDummyOptions, MultiModalConfig
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmbedding
@@ -96,6 +96,7 @@ CLIP_VIT_LARGE_PATCH14_336_CONFIG = CLIPVisionConfig(
 def _init_img_processor(
     hf_config: PretrainedConfig,
     quant_config: QuantizationConfig | None,
+    multimodal_config: MultiModalConfig | None,
     prefix: str = "",
 ) -> CLIPVisionModel:
     clip_config = CLIP_VIT_LARGE_PATCH14_336_CONFIG
@@ -109,7 +110,8 @@ def _init_img_processor(
 
     img_processor = CLIPVisionModel(
         clip_config,
-        quant_config,
+        quant_config=quant_config,
+        multimodal_config=multimodal_config,
         num_hidden_layers_override=num_hidden_layers,
         prefix=prefix,
     )
@@ -160,38 +162,15 @@ class Phi3VImageEmbeddingInputs(TensorSchema):
 Phi3VImageInputs: TypeAlias = Phi3VImagePixelInputs | Phi3VImageEmbeddingInputs
 
 
-class Phi3ImageEmbeddingBase(nn.Module):
-    def __init__(self) -> None:
-        super().__init__()
-        self.layer_idx: int
-        self.type_feature: str
-        self.img_processor: CLIPVisionModel
-
-    def get_img_features(self, img_embeds: torch.FloatTensor) -> torch.FloatTensor:
-        TYPE_FEATURE = self.type_feature
-
-        # NOTE: we skip the step to select the vision feature layer since
-        # this is already done inside the img_processor
-        img_feature = self.img_processor(img_embeds)
-
-        if TYPE_FEATURE == "patch":
-            patch_feature = img_feature[:, 1:]
-            return patch_feature
-
-        if TYPE_FEATURE == "cls_patch":
-            return img_feature
-
-        raise NotImplementedError
-
-
 # adapted from https://huggingface.co/microsoft/Phi-3-vision-128k-instruct/blob/main/image_embedding_phi3_v.py
-class Phi3HDImageEmbedding(Phi3ImageEmbeddingBase):
+class Phi3HDImageEmbedding(nn.Module):
     """Phi3 Image embedding with HD transform."""
 
     def __init__(
         self,
         config: PretrainedConfig,
         quant_config: QuantizationConfig | None,
+        multimodal_config: MultiModalConfig | None,
         prefix: str = "",
     ) -> None:
         super().__init__()
@@ -200,7 +179,10 @@ class Phi3HDImageEmbedding(Phi3ImageEmbeddingBase):
         hidden_size = config.n_embd if hasattr(config, "n_embd") else config.hidden_size
 
         self.img_processor = _init_img_processor(
-            config, quant_config, prefix=f"{prefix}.img_processor"
+            config,
+            quant_config=quant_config,
+            multimodal_config=multimodal_config,
+            prefix=f"{prefix}.img_processor",
         )
 
         image_dim_out = config.img_processor["image_dim_out"]
@@ -223,12 +205,28 @@ class Phi3HDImageEmbedding(Phi3ImageEmbeddingBase):
 
         dim_projection = hidden_size
         depth = 2
-        layers = [nn.Linear(image_dim_out * 4, dim_projection)]
+        layers: list[nn.Module] = [nn.Linear(image_dim_out * 4, dim_projection)]
         for _ in range(1, depth):
             layers.extend([nn.GELU(), nn.Linear(dim_projection, dim_projection)])
         self.img_projection = nn.Sequential(*layers)
 
         self.type_feature = config.img_processor.get("type_feature", "patch")
+
+    def get_img_features(self, img_embeds: torch.FloatTensor) -> torch.FloatTensor:
+        type_feature = self.type_feature
+
+        # NOTE: we skip the step to select the vision feature layer since
+        # this is already done inside the img_processor
+        img_feature = self.img_processor(img_embeds)
+
+        if type_feature == "patch":
+            patch_feature = img_feature[:, 1:]
+            return patch_feature
+
+        if type_feature == "cls_patch":
+            return img_feature
+
+        raise NotImplementedError(type_feature)
 
     def forward(
         self, pixel_values: torch.FloatTensor, image_sizes: torch.Tensor
@@ -582,6 +580,7 @@ class Phi3VForCausalLM(nn.Module, SupportsMultiModal, SupportsPP, SupportsQuant)
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
         config = vllm_config.model_config.hf_config
+        quant_config = vllm_config.quant_config
         multimodal_config = vllm_config.model_config.multimodal_config
         self.config = config
         self.multimodal_config = multimodal_config
@@ -590,14 +589,15 @@ class Phi3VForCausalLM(nn.Module, SupportsMultiModal, SupportsPP, SupportsQuant)
         self.embed_tokens = VocabParallelEmbedding(
             config.vocab_size,
             config.hidden_size,
-            quant_config=self.quant_config,
+            quant_config=quant_config,
             prefix=maybe_prefix(prefix, "model.embed_tokens"),
         )
 
         # TODO: Optionally initializes this for supporting input embeddings.
         self.vision_embed_tokens = Phi3HDImageEmbedding(
             config,
-            self.quant_config,
+            quant_config=quant_config,
+            multimodal_config=multimodal_config,
             prefix=maybe_prefix(prefix, "model.vision_embed_tokens"),
         )
 

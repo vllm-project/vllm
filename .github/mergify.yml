@@ -222,10 +222,10 @@ pull_request_rules:
       - files~=^csrc/rocm/
       - files~=^docker/Dockerfile.rocm
       - files~=^requirements/rocm.*\.txt
-      - files~=^vllm/attention/backends/rocm.*\.py
-      - files~=^vllm/attention/ops/rocm.*\.py
       - files~=^vllm/model_executor/layers/fused_moe/rocm.*\.py
+      - files~=^vllm/v1/attention/backends/rocm.*\.py
       - files~=^vllm/v1/attention/backends/mla/rocm.*\.py
+      - files~=^vllm/v1/attention/ops/rocm.*\.py
       - files~=^tests/kernels/.*_rocm.*\.py
       - files=vllm/platforms/rocm.py
       - title~=(?i)AMD
