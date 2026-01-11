@@ -242,7 +242,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             num_tokens=input_batch.num_tokens,
             query_start_loc_gpu=input_batch.query_start_loc,
             query_start_loc_cpu=torch.from_numpy(input_batch.query_start_loc_np),
-            seq_lens=self.input_buffers.seq_lens,
+            seq_lens=input_batch.seq_lens,
             seq_lens_np=input_batch.seq_lens_np,
             num_computed_tokens_cpu=num_computed_tokens,
             block_tables=block_tables,
@@ -668,7 +668,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         pos_after_step = computed_prefill + input_batch.num_scheduled_tokens
         is_prompt_chunked = pos_after_step < prompt_lens
         prefill_token_ids = self.req_states.prefill_token_ids.gpu
-        query_start_loc = self.input_buffers.query_start_loc.np
+        query_start_loc_np = input_batch.query_start_loc_np
         for i, req_id in enumerate(input_batch.req_ids):
             if not needs_prompt_logprobs[i]:
                 continue
@@ -676,7 +676,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 continue
             # The prompt is chunked. Get the next prompt token.
             req_idx = input_batch.idx_mapping_np[i]
-            idx = int(query_start_loc[i + 1] - 1)
+            idx = int(query_start_loc_np[i + 1] - 1)
             # NOTE(woosuk): This triggers two GPU operations.
             next_prompt_token = prefill_token_ids[req_idx, pos_after_step[i]]
             token_ids[idx] = next_prompt_token
@@ -694,8 +694,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             if not needs_prompt_logprobs[i]:
                 continue
 
-            start_idx = query_start_loc[i]
-            end_idx = query_start_loc[i + 1]
+            start_idx = query_start_loc_np[i]
+            end_idx = query_start_loc_np[i + 1]
             assert start_idx < end_idx, (
                 f"start_idx ({start_idx}) >= end_idx ({end_idx})"
             )
