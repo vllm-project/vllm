@@ -10,7 +10,7 @@ from http import HTTPStatus
 import pytest
 import requests
 
-from ...utils import RemoteOpenAIServer
+from tests.utils import RemoteOpenAIServer
 
 # Use a small embeddings model for faster startup and smaller memory footprint.
 # Since we are not testing any chat functionality,

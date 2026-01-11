@@ -6,7 +6,7 @@ import pytest
 import pytest_asyncio
 from openai import OpenAI
 
-from ...utils import RemoteOpenAIServer
+from tests.utils import RemoteOpenAIServer
 
 MODEL_NAME = "Qwen/Qwen3-8B"
 

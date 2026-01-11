@@ -5,11 +5,10 @@ import json
 
 import pytest
 
+from tests.utils import RemoteOpenAIServer
 from vllm.entrypoints.openai.protocol import ChatCompletionRequest
 from vllm.tokenizers import TokenizerLike
 from vllm.tool_parsers.hermes_tool_parser import Hermes2ProToolParser
-
-from ....utils import RemoteOpenAIServer
 
 MODEL_NAME = "meta-llama/Llama-3.2-1B-Instruct"
 LORA_MODEL = "minpeter/LoRA-Llama-3.2-1B-tool-vllm-ci"

@@ -5,7 +5,7 @@ import json
 
 import pytest
 
-from tests.entrypoints.openai.tool_parsers.utils import (
+from tests.entrypoints.unit.tool_parsers.utils import (
     run_tool_extraction,
     run_tool_extraction_streaming,
 )

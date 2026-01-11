@@ -8,11 +8,10 @@ import pytest
 import pytest_asyncio
 from transformers import AutoProcessor
 
+from tests.utils import RemoteOpenAIServer
 from vllm.multimodal.base import MediaWithBytes
 from vllm.multimodal.utils import encode_image_url, fetch_image
 from vllm.platforms import current_platform
-
-from ...utils import RemoteOpenAIServer
 
 MODEL_NAME = "microsoft/Phi-3.5-vision-instruct"
 MAXIMUM_IMAGES = 2

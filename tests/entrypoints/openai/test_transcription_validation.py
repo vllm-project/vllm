@@ -6,7 +6,8 @@ import json
 
 import pytest
 
-from ...utils import RemoteOpenAIServer
+from tests.utils import RemoteOpenAIServer
+
 from .conftest import add_attention_backend
 
 MISTRAL_FORMAT_ARGS = [

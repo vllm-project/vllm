@@ -13,7 +13,8 @@ import pytest
 import pytest_asyncio
 import soundfile as sf
 
-from ...utils import RemoteOpenAIServer
+from tests.utils import RemoteOpenAIServer
+
 from .conftest import add_attention_backend
 
 SERVER_ARGS = ["--enforce-eager"]

@@ -9,7 +9,7 @@ from vllm.entrypoints.chat_utils import apply_hf_chat_template, load_chat_templa
 from vllm.entrypoints.openai.protocol import ChatCompletionRequest
 from vllm.tokenizers import get_tokenizer
 
-from ...models.registry import HF_EXAMPLE_MODELS
+from ....models.registry import HF_EXAMPLE_MODELS
 
 chatml_jinja_path = VLLM_PATH / "examples/template_chatml.jinja"
 assert chatml_jinja_path.exists()
