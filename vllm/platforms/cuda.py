@@ -247,14 +247,18 @@ class CudaPlatformBase(Platform):
             )
             scheduler_config.disable_chunked_mm_input = True
 
+        # NCCL_GRAPH_MIXING_SUPPORT has a significant impact on the performance of
+        # context parallelism. Reference: https://github.com/vllm-project/vllm/pull/32106.
         if (
             vllm_config.parallel_config.decode_context_parallel_size > 1
             or vllm_config.parallel_config.prefill_context_parallel_size > 1
         ) and os.environ.get("NCCL_GRAPH_MIXING_SUPPORT", None) is None:
             logger.info(
-                "For optimal performance with context parallel, "
-                "consider setting NCCL_GRAPH_MIXING_SUPPORT=0"
+                "Setting NCCL_GRAPH_MIXING_SUPPORT=0 for optimal performance with "
+                "context parallel. To override this, please set the "
+                "NCCL_GRAPH_MIXING_SUPPORT environment variable."
             )
+            os.environ["NCCL_GRAPH_MIXING_SUPPORT"] = "0"
 
     @classmethod
     def get_current_memory_usage(
