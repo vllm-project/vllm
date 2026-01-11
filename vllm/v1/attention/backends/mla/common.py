@@ -800,6 +800,7 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
         query_start_loc_cpu = common_attn_metadata.query_start_loc_cpu
         seq_lens = common_attn_metadata.seq_lens
         dcp_local_seq_lens = common_attn_metadata.dcp_local_seq_lens
+        dcp_local_seq_lens_cpu = common_attn_metadata.dcp_local_seq_lens_cpu
 
         num_decodes, num_prefills, num_decode_tokens, num_prefill_tokens = (
             split_decodes_and_prefills(
@@ -1014,6 +1015,13 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
             dcp_tot_seq_lens_device = None
             if self.dcp_world_size > 1:
                 dcp_tot_seq_lens_device = seq_lens[:num_decodes]
+                assert dcp_local_seq_lens_cpu is not None, (
+                    "dcp_local_seq_lens_cpu must be set when DCP is enabled"
+                )
+                if dcp_local_seq_lens is None:
+                    dcp_local_seq_lens = dcp_local_seq_lens_cpu.to(
+                        seq_lens.device, non_blocking=True
+                    )
                 seq_lens = dcp_local_seq_lens
 
                 # After DCP distribution, the maximum number of tokens for any rank is

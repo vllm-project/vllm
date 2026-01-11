@@ -12,6 +12,7 @@ from vllm.v1.attention.backend import AttentionBackend
 from vllm.v1.attention.backends.utils import (
     AttentionMetadataBuilder,
     CommonAttentionMetadata,
+    get_dcp_local_seq_lens,
 )
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
@@ -152,11 +153,24 @@ def build_attn_metadata(
     block_tables: Sequence[torch.Tensor],
     slot_mappings: torch.Tensor,
     kv_cache_config: KVCacheConfig,
+    dcp_world_size: int = 1,
+    cp_kv_cache_interleave_size: int = 1,
 ) -> dict[str, Any]:
     max_query_len = int(query_start_loc_cpu.max())
     seq_lens = seq_lens[:num_reqs]
     seq_lens_cpu = torch.from_numpy(seq_lens_np)
     max_seq_len = int(seq_lens_np.max())
+
+    # Compute DCP local sequence lengths if DCP is enabled
+    dcp_local_seq_lens: torch.Tensor | None = None
+    dcp_local_seq_lens_cpu: torch.Tensor | None = None
+    if dcp_world_size > 1:
+        dcp_local_seq_lens_cpu = get_dcp_local_seq_lens(
+            seq_lens_cpu,
+            dcp_size=dcp_world_size,
+            cp_kv_cache_interleave_size=cp_kv_cache_interleave_size,
+        )
+        dcp_local_seq_lens = dcp_local_seq_lens_cpu.to(seq_lens.device)
 
     attn_metadata: dict[str, Any] = {}
     kv_cache_groups = kv_cache_config.kv_cache_groups
@@ -177,6 +191,8 @@ def build_attn_metadata(
             block_table_tensor=block_table,
             slot_mapping=slot_mapping,
             causal=True,
+            dcp_local_seq_lens=dcp_local_seq_lens,
+            dcp_local_seq_lens_cpu=dcp_local_seq_lens_cpu,
         )
 
         attn_metadata_builder = attn_metadata_builders[i]
