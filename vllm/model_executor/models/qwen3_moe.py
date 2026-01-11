@@ -168,10 +168,13 @@ class Qwen3MoeSparseMoeBlock(nn.Module):
             prefix=f"{prefix}.gate",
         )
 
-        if config.shared_expert_intermediate_size > 0:
+        shared_expert_intermediate_size = getattr(
+            config, "shared_expert_intermediate_size", 0
+        )
+        if shared_expert_intermediate_size > 0:
             self.shared_expert = Qwen3MoeMLP(
                 hidden_size=config.hidden_size,
-                intermediate_size=config.shared_expert_intermediate_size,
+                intermediate_size=shared_expert_intermediate_size,
                 hidden_act=config.hidden_act,
                 quant_config=quant_config,
                 reduce_results=False,
@@ -211,8 +214,11 @@ class Qwen3MoeSparseMoeBlock(nn.Module):
 
         # router_logits: (num_tokens, n_experts)
         router_logits, _ = self.gate(hidden_states)
-        final_hidden_states = self.experts(
+        shared_out, fused_out = self.experts(
             hidden_states=hidden_states, router_logits=router_logits
+        )
+        final_hidden_states = (
+            shared_out + fused_out if shared_out is not None else fused_out
         )
 
         if self.is_sequence_parallel:
