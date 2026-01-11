@@ -7,8 +7,8 @@ from dataclasses import dataclass
 import torch
 
 from vllm.config import VllmConfig
-from vllm.utils.math_utils import cdiv
 from vllm.v1.attention.backend import AttentionBackend
+from vllm.v1.attention.backends.mamba2_attn import Mamba2AttentionMetadataBuilder
 from vllm.v1.attention.backends.mamba_attn import BaseMambaAttentionMetadataBuilder
 from vllm.v1.attention.backends.utils import (
     PAD_SLOT_ID,
@@ -55,14 +55,23 @@ class GDNAttentionMetadata:
 
     num_accepted_tokens: torch.Tensor | None = None  # shape: [batch,]
 
-    # APC metadata, similar definitions to Mamba2
-    # state_indices_tensor is None when APC is disabled.
-    # When APC is enabled, it takes the role of non_spec_state_indices_tensor
-    state_indices_tensor: torch.Tensor | None = None  # shape: [batch, max_num_blocks]
+    # When APC is enabled, state_indices_tensor is the mapping from logical block indices
+    # to the state indices used to extract the (ssm, conv) state.
+    # When prefix caching is enabled: shape [batch, max_num_blocks]
+    # otherwise [batch_size,]
+    # When APC is disabled, state_indices_tensor is None and logic is driven by the
+    # spec/non_spec_state_indices_tensor
+    state_indices_tensor: torch.Tensor | None = None
+
+    # The following tensors are only used for prefix caching and are None if disabled
+    # E.g., for a request i with cached state we can think of the corresponding
+    # cached state index as state_indices_tensor[i, block_idx_last_computed_token]
     block_idx_last_scheduled_token: torch.Tensor | None = None  # shape: [batch,]
     block_idx_first_scheduled_token_p: torch.Tensor | None = None  # shape: [batch,]
     block_idx_last_computed_token: torch.Tensor | None = None  # shape: [batch,]
     num_computed_tokens_p: torch.Tensor | None = None  # shape: [batch,]
+
+    # These are non-None if there are prefill requests in the batch
     seq_idx_p: torch.Tensor | None = None  # shape: [batch,]
     cu_chunk_seqlen_p: torch.Tensor | None = None  # shape: [batch,]
     last_chunk_indices_p: torch.Tensor | None = None  # shape: [batch,]
@@ -329,6 +338,8 @@ class GDNAttentionMetadataBuilder(
 
         if enable_apc and num_prefills > 0:
             assert block_idx_first_scheduled_token is not None
+            assert non_spec_query_start_loc_cpu is not None
+
             prefill_start = num_decodes
             prefill_end = prefill_start + num_prefills
             block_idx_first_scheduled_token_p = block_idx_first_scheduled_token[
@@ -336,56 +347,31 @@ class GDNAttentionMetadataBuilder(
             ]
             num_computed_tokens_p = context_lens_tensor[prefill_start:prefill_end]
             num_computed_tokens_p_cpu = context_lens_cpu[prefill_start:prefill_end]
-
-            assert non_spec_query_start_loc_cpu is not None
             query_start_loc_p_cpu = (
                 non_spec_query_start_loc_cpu[-num_prefills - 1 :] - num_decode_tokens
             )
-
-            cu_chunk_seqlen: list[int] = []
-            seq_idx_list: list[int] = []
-            last_chunk_indices_list: list[int] = []
-            seqlen_pos = 0
-
-            for req_idx in range(num_prefills):
-                this_num_computed = int(num_computed_tokens_p_cpu[req_idx].item())
-                this_new_tokens = int(
-                    query_start_loc_p_cpu[req_idx + 1].item()
-                    - query_start_loc_p_cpu[req_idx].item()
+            cu_chunk_seqlen, seq_idx, last_chunk_indices = (
+                Mamba2AttentionMetadataBuilder._compute_chunk_metadata(
+                    num_prefills=int(num_prefills),
+                    num_computed_tokens_p_cpu=num_computed_tokens_p_cpu,
+                    query_start_loc_p_cpu=query_start_loc_p_cpu,
+                    chunk_size=self.chunk_size,
                 )
-                # TODO: check the device of everything here - should be CPU
-
-                if this_num_computed % self.chunk_size != 0:
-                    seq_idx_list.append(req_idx)
-                    cu_chunk_seqlen.append(seqlen_pos)
-                    chunk_len = (
-                        cdiv(this_num_computed, self.chunk_size) * self.chunk_size
-                        - this_num_computed
-                    )
-                    chunk_len = min(chunk_len, this_new_tokens)
-                    seqlen_pos += chunk_len
-                    this_new_tokens -= chunk_len
-
-                n_chunks = cdiv(this_new_tokens, self.chunk_size)
-                for _ in range(n_chunks):
-                    seq_idx_list.append(req_idx)
-                    cu_chunk_seqlen.append(seqlen_pos)
-                    chunk_len = min(self.chunk_size, this_new_tokens)
-                    seqlen_pos += chunk_len
-                    this_new_tokens -= chunk_len
-
-                assert this_new_tokens == 0
-                last_chunk_indices_list.append(len(cu_chunk_seqlen) - 1)
-
-            cu_chunk_seqlen.append(seqlen_pos)
-
-            device = query_start_loc.device
-            seq_idx_p = torch.as_tensor(seq_idx_list, device=device, dtype=torch.int32)
+            )
+            seq_idx_p = torch.as_tensor(
+                seq_idx,
+                device=m.query_start_loc.device,
+                dtype=torch.int32,
+            )
             cu_chunk_seqlen_p = torch.as_tensor(
-                cu_chunk_seqlen, device=device, dtype=torch.int32
+                cu_chunk_seqlen,
+                device=m.query_start_loc.device,
+                dtype=torch.int32,
             )
             last_chunk_indices_p = torch.as_tensor(
-                last_chunk_indices_list, device=device, dtype=torch.int32
+                last_chunk_indices,
+                device=m.query_start_loc.device,
+                dtype=torch.int32,
             )
 
         if num_prefills > 0:

@@ -814,9 +814,8 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
             assert beta_non_spec is not None
             assert non_spec_query_start_loc is not None
             cu_seqlens = non_spec_query_start_loc[: end_non_spec_prefill + 1]
-            # The first initial state is the zero matrix,
-            # chunk_state_history contains the chunks_per_block (including the zero matrix initial state in the first slot in the first iteration)
-            # excluding the last recurrent state
+            # chunk_state_history contains the `chunks_per_block` matrix states,
+            # *excluding* the last recurrent state
             (
                 core_attn_out_non_spec,
                 last_recurrent_state,
