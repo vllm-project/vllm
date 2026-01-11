@@ -211,6 +211,7 @@ steps:
   - vllm/
   - tests/entrypoints/openai/responses
   commands:
+  - export VLLM_WORKER_MULTIPROC_METHOD=spawn
   - pytest -v -s entrypoints/openai/responses
 
 - label: Distributed Tests (4 GPUs) # 35min
