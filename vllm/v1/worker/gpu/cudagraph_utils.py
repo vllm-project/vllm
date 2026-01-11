@@ -236,11 +236,8 @@ def prepare_inputs_to_capture(
     input_buffers.query_start_loc[num_reqs + 1 :] = num_tokens
     query_start_loc = input_buffers.query_start_loc[: num_reqs + 1]
 
-    seq_lens_np = np.full(num_reqs, max_model_len, dtype=np.int32)
     # HACK(woosuk): For faster warmup, we set seq_lens (GPU) to num_tokens
-    # rather than max_model_len. This introduces a discrepancy between
-    # seq_lens (on GPU) and seq_lens_np (on CPU), which may cause issues for
-    # certain attention backends.
+    # rather than max_model_len.
     input_buffers.seq_lens[:num_reqs] = num_tokens
     input_buffers.seq_lens[num_reqs:] = 0
 
@@ -254,8 +251,7 @@ def prepare_inputs_to_capture(
         query_start_loc_gpu=query_start_loc,
         query_start_loc_cpu=query_start_loc_cpu,
         seq_lens=input_buffers.seq_lens,
-        seq_lens_np=seq_lens_np,
-        num_computed_tokens_cpu=None,  # FIXME
+        max_seq_len=max_model_len,
         block_tables=input_block_tables,
         slot_mappings=slot_mappings,
         kv_cache_config=kv_cache_config,
