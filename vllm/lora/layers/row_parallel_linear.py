@@ -89,7 +89,7 @@ class RowParallelLinearWithLoRA(BaseLinearLayerWithLoRA):
         packed_modules_list: list,
         model_config: PretrainedConfig | None = None,
     ) -> bool:
-        return type(source_layer) is RowParallelLinear
+        return isinstance(source_layer, RowParallelLinear)
 
 
 # The following layer is based on the tensor parallelism strategy given in
