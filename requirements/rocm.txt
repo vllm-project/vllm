@@ -15,5 +15,4 @@ setuptools-scm>=8
 runai-model-streamer[s3,gcs]==0.15.3
 conch-triton-kernels==1.2.1
 timm>=1.0.17
-fastsafetensors @ git+https://github.com/foundation-model-stack/fastsafetensors.git@d6f998a03432b2452f8de2bb5cefb5af9795d459
 grpcio-tools>=1.76.0
