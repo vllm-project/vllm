@@ -29,6 +29,7 @@ from itertools import islice
 from typing import Any
 
 import torch
+import torch.nn.functional as F
 from torch import nn
 
 from vllm.attention.layer import Attention
@@ -87,6 +88,7 @@ class Qwen3MoeMLP(nn.Module):
         hidden_act: str,
         quant_config: QuantizationConfig | None = None,
         reduce_results: bool = True,
+        expert_gate: torch.nn.Linear | None = None,
         prefix: str = "",
     ) -> None:
         super().__init__()
@@ -110,11 +112,15 @@ class Qwen3MoeMLP(nn.Module):
                 f"Unsupported activation: {hidden_act}. Only silu is supported for now."
             )
         self.act_fn = SiluAndMul()
+        self.expert_gate = expert_gate
 
     def forward(self, x):
         gate_up, _ = self.gate_up_proj(x)
         x = self.act_fn(gate_up)
         x, _ = self.down_proj(x)
+
+        if self.expert_gate is not None:
+            x = F.sigmoid(self.expert_gate(x)[0]) * x
         return x
 
 
@@ -172,6 +178,13 @@ class Qwen3MoeSparseMoeBlock(nn.Module):
             config, "shared_expert_intermediate_size", 0
         )
         if shared_expert_intermediate_size > 0:
+            self.shared_expert_gate = ReplicatedLinear(
+                config.hidden_size,
+                1,
+                bias=False,
+                quant_config=None,
+                prefix=f"{prefix}.shared_expert_gate",
+            )
             self.shared_expert = Qwen3MoeMLP(
                 hidden_size=config.hidden_size,
                 intermediate_size=shared_expert_intermediate_size,
@@ -182,6 +195,7 @@ class Qwen3MoeSparseMoeBlock(nn.Module):
                 prefix=f"{prefix}.shared_expert",
             )
         else:
+            self.shared_expert_gate = None
             self.shared_expert = None
 
         self.experts = SharedFusedMoE(
