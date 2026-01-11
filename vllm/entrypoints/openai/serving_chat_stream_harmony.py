@@ -48,6 +48,13 @@ def extract_harmony_streaming_delta(
         and cur_recipient
         and cur_recipient.startswith("functions.")
     ):
+        # Sanitize recipient: the model sometimes outputs malformed sequences
+        # like "functions.bash<|channel|>commentary" instead of "functions.bash".
+        # Strip the malformed part.
+        sanitized_recipient = cur_recipient
+        if "<|channel|>" in sanitized_recipient:
+            sanitized_recipient = sanitized_recipient.split("<|channel|>")[0].strip()
+
         # Count completed tool calls to determine index
         base_index = 0
         for msg in harmony_parser.messages:
@@ -59,7 +66,7 @@ def extract_harmony_streaming_delta(
                 base_index += 1
 
         if prev_recipient != cur_recipient:
-            tool_name = cur_recipient.split("functions.", 1)[1]
+            tool_name = sanitized_recipient.split("functions.", 1)[1]
             delta_message = DeltaMessage(
                 tool_calls=[
                     DeltaToolCall(

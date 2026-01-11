@@ -65,11 +65,17 @@ class OpenAIToolParser(ToolParser):
                             tool_args = msg_text
                     else:
                         tool_args = msg_text
+                    # Sanitize recipient: the model sometimes outputs malformed
+                    # sequences like "functions.bash<|channel|>commentary"
+                    # instead of "functions.bash". Strip the malformed part.
+                    recipient = msg.recipient
+                    if "<|channel|>" in recipient:
+                        recipient = recipient.split("<|channel|>")[0].strip()
                     tool_calls.append(
                         ToolCall(
                             type="function",
                             function=FunctionCall(
-                                name=msg.recipient.split("functions.")[1],
+                                name=recipient.split("functions.")[1],
                                 arguments=tool_args,
                             ),
                         )
