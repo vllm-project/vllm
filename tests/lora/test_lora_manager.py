@@ -132,6 +132,93 @@ def test_replace_submodules(default_vllm_config, dist_init, dummy_model):
     assert isinstance(model.get_submodule("layer1.dense2"), RowParallelLinearWithLoRA)
 
 
+@pytest.mark.parametrize(
+    "target_modules,expected_lora_modules",
+    [
+        (
+            None,
+            ["dense1", "layer1.dense1", "dense2", "layer1.dense2", "output"],
+        ),  # All modules
+        (
+            "dense1",
+            ["dense1", "layer1.dense1"],
+        ),  # Suffix match
+        (
+            ["dense1", "dense2"],
+            ["dense1", "layer1.dense1", "dense2", "layer1.dense2"],
+        ),
+        (
+            [".*dense1"],
+            ["dense1", "layer1.dense1"],
+        ),  # Regex match in list
+        (
+            ["dense1", ".*dense2"],
+            ["dense1", "layer1.dense1", "dense2", "layer1.dense2"],
+        ),  # Mixed suffix and regex in list
+    ],
+)
+def test_replace_submodules_with_target_modules(
+    dist_init,
+    dummy_model,
+    target_modules,
+    expected_lora_modules,
+):
+    model = dummy_model
+    # The dummy model has these modules that support LoRA:
+    # dense1, layer1.dense1, dense2, layer1.dense2, output, lm_head
+    # Note: lm_head is excluded from expected_lora_modules check in this test
+    # because it's handled differently in some contexts, but let's stick to
+    # the linear layers for simplicity unless specified.
+
+    manager = LoRAModelManager(
+        model,
+        1,
+        1,
+        1,
+        LoRAConfig(
+            max_lora_rank=8,
+            max_cpu_loras=8,
+            max_loras=8,
+            lora_dtype=DEFAULT_DTYPE,
+            lora_target_modules=target_modules,
+        ),
+        torch.device(DEVICES[0]),
+    )
+    model = manager.model
+
+    # Check that expected modules are replaced with LoRA wrappers
+    for module_name in expected_lora_modules:
+        module = model.get_submodule(module_name)
+        assert isinstance(
+            module,
+            (
+                ColumnParallelLinearWithLoRA,
+                RowParallelLinearWithLoRA,
+                MergedColumnParallelLinearWithLoRA,
+            ),
+        ), f"Module {module_name} should be a LoRA layer"
+
+    # Check that other modules are NOT replaced
+    all_lora_candidates = [
+        "dense1",
+        "layer1.dense1",
+        "dense2",
+        "layer1.dense2",
+        "output",
+    ]
+    for module_name in all_lora_candidates:
+        if module_name not in expected_lora_modules:
+            module = model.get_submodule(module_name)
+            assert not isinstance(
+                module,
+                (
+                    ColumnParallelLinearWithLoRA,
+                    RowParallelLinearWithLoRA,
+                    MergedColumnParallelLinearWithLoRA,
+                ),
+            ), f"Module {module_name} should NOT be a LoRA layer"
+
+
 @pytest.mark.parametrize("device", DEVICES)
 def test_lora_model_manager(default_vllm_config, dist_init, dummy_model, device):
     model = dummy_model
