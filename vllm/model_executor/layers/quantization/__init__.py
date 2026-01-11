@@ -5,6 +5,7 @@ from typing import Literal, get_args
 
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.base_config import QuantizationConfig
+from vllm.platforms import current_platform
 
 logger = init_logger(__name__)
 
@@ -98,6 +99,9 @@ def register_quantization_config(quantization: str):
             )
         else:
             QUANTIZATION_METHODS.append(quantization)
+            # Automatically assume the custom quantization config is supported
+            if sq := current_platform.supported_quantization:
+                sq.append(quantization)
 
         if not issubclass(quant_config_cls, QuantizationConfig):
             raise ValueError(
