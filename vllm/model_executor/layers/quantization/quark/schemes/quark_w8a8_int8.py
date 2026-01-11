@@ -29,7 +29,12 @@ class QuarkW8A8Int8(QuarkScheme):
         qscheme: str,
         is_static_input_scheme: bool | None,
         input_symmetric: bool | None,
+        is_online_quant: bool = False,
     ):
+        if is_online_quant:
+            raise NotImplementedError(
+                "Quark online int8 quant has not been supported yet!"
+            )
         self.qscheme = qscheme
         self.is_static_input_scheme = is_static_input_scheme
         self.input_symmetric = input_symmetric
