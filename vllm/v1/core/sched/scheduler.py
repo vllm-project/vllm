@@ -127,7 +127,7 @@ class Scheduler(SchedulerInterface):
 
         self.kv_event_publisher = EventPublisherFactory.create(
             self.kv_events_config,
-            self.parallel_config.data_parallel_rank,
+            self.parallel_config.data_parallel_index,
         )
         self.ec_connector = None
         if self.vllm_config.ec_transfer_config is not None:
@@ -445,7 +445,12 @@ class Scheduler(SchedulerInterface):
                 if request.status == RequestStatus.WAITING_FOR_REMOTE_KVS:
                     is_ready = self._update_waiting_for_remote_kv(request)
                     if is_ready:
-                        request.status = RequestStatus.WAITING
+                        if request.num_preemptions:
+                            # We must be loading for a resumed preemption
+                            # rather than a new request.
+                            request.status = RequestStatus.PREEMPTED
+                        else:
+                            request.status = RequestStatus.WAITING
                     else:
                         logger.debug(
                             "%s is still in WAITING_FOR_REMOTE_KVS state.",
@@ -587,16 +592,22 @@ class Scheduler(SchedulerInterface):
 
                 new_blocks = self.kv_cache_manager.allocate_slots(
                     request,
-                    num_new_tokens + num_external_computed_tokens,
-                    num_new_local_computed_tokens,
-                    new_computed_blocks,
+                    num_new_tokens,
+                    num_new_computed_tokens=num_new_local_computed_tokens,
+                    new_computed_blocks=new_computed_blocks,
                     num_lookahead_tokens=effective_lookahead_tokens,
+                    num_external_computed_tokens=num_external_computed_tokens,
                     delay_cache_blocks=load_kv_async,
                     num_encoder_tokens=num_encoder_tokens,
                 )
 
                 if new_blocks is None:
                     # The request cannot be scheduled.
+
+                    # NOTE: we need to untouch the request from the encode cache
+                    # manager
+                    if request.has_encoder_inputs:
+                        self.encoder_cache_manager.free(request)
                     break
 
                 # KVTransfer: the connector uses this info to determine
@@ -606,7 +617,7 @@ class Scheduler(SchedulerInterface):
                 if self.connector is not None:
                     self.connector.update_state_after_alloc(
                         request,
-                        new_computed_blocks + new_blocks,
+                        self.kv_cache_manager.get_blocks(request.request_id),
                         num_external_computed_tokens,
                     )
 
@@ -761,11 +772,7 @@ class Scheduler(SchedulerInterface):
             self._update_after_schedule(scheduler_output)
         return scheduler_output
 
-    def _preempt_request(
-        self,
-        request: Request,
-        timestamp: float,
-    ) -> None:
+    def _preempt_request(self, request: Request, timestamp: float) -> None:
         """Preempt a request and put it back to the waiting queue.
 
         NOTE: The request should be popped from the running queue outside of this
@@ -778,6 +785,7 @@ class Scheduler(SchedulerInterface):
         self.encoder_cache_manager.free(request)
         request.status = RequestStatus.PREEMPTED
         request.num_computed_tokens = 0
+        request.spec_token_ids.clear()
         request.num_preemptions += 1
         if self.log_stats:
             request.record_event(EngineCoreEventType.PREEMPTED, timestamp)
@@ -785,10 +793,7 @@ class Scheduler(SchedulerInterface):
         # Put the request back to the waiting queue.
         self.waiting.prepend_request(request)
 
-    def _update_after_schedule(
-        self,
-        scheduler_output: SchedulerOutput,
-    ) -> None:
+    def _update_after_schedule(self, scheduler_output: SchedulerOutput) -> None:
         # Advance the number of computed tokens for the request AFTER
         # the request is scheduled.
         # 1. The scheduler_output of the current step has to include the
@@ -1005,8 +1010,7 @@ class Scheduler(SchedulerInterface):
             )
             curr_embeds_start, curr_embeds_end = (
                 mm_feature.mm_position.get_embeds_indices_in_range(
-                    start_idx_rel,
-                    end_idx_rel,
+                    start_idx_rel, end_idx_rel
                 )
             )
             # There's no embeddings in the current range of encoder placeholder tokens
@@ -1033,8 +1037,7 @@ class Scheduler(SchedulerInterface):
         )
 
     def get_grammar_bitmask(
-        self,
-        scheduler_output: SchedulerOutput,
+        self, scheduler_output: SchedulerOutput
     ) -> GrammarOutput | None:
         # Collect list of scheduled request ids that use structured output.
         # The corresponding rows of the bitmask will be in this order.
@@ -1138,6 +1141,8 @@ class Scheduler(SchedulerInterface):
                     spec_decoding_stats,
                     num_draft_tokens=num_draft_tokens,
                     num_accepted_tokens=num_accepted,
+                    num_invalid_spec_tokens=scheduler_output.num_invalid_spec_tokens,
+                    request_id=req_id,
                 )
 
             stopped = False
@@ -1176,7 +1181,13 @@ class Scheduler(SchedulerInterface):
                 struct_output_request = request.structured_output_request
                 assert struct_output_request is not None
                 assert struct_output_request.grammar is not None
-                struct_output_request.grammar.accept_tokens(req_id, new_token_ids)
+                ok = struct_output_request.grammar.accept_tokens(req_id, new_token_ids)
+                if not ok:
+                    logger.warning(
+                        "Unexpected: grammar rejected tokens %s for request %s.",
+                        new_token_ids,
+                        req_id,
+                    )
 
             if num_nans_in_logits is not None and req_id in num_nans_in_logits:
                 request.num_nans_in_logits = num_nans_in_logits[req_id]
@@ -1284,9 +1295,7 @@ class Scheduler(SchedulerInterface):
         return engine_core_outputs
 
     def _update_request_with_output(
-        self,
-        request: Request,
-        new_token_ids: list[int],
+        self, request: Request, new_token_ids: list[int]
     ) -> tuple[list[int], bool]:
         # Append generated tokens and check for stop. Note that if
         # a request is still being prefilled, we expect the model runner
@@ -1327,10 +1336,7 @@ class Scheduler(SchedulerInterface):
                 # in the decoder's KV cache.
                 self.encoder_cache_manager.free_encoder_input(request, input_id)
 
-    def update_draft_token_ids(
-        self,
-        draft_token_ids: DraftTokenIds,
-    ) -> None:
+    def update_draft_token_ids(self, draft_token_ids: DraftTokenIds) -> None:
         for req_id, spec_token_ids in zip(
             draft_token_ids.req_ids,
             draft_token_ids.draft_token_ids,
@@ -1343,11 +1349,46 @@ class Scheduler(SchedulerInterface):
             # Add newly generated spec token ids to the request.
             if self.structured_output_manager.should_advance(request):
                 metadata = request.structured_output_request
-                request.spec_token_ids = metadata.grammar.validate_tokens(  # type: ignore[union-attr]
-                    spec_token_ids
-                )
-            else:
-                request.spec_token_ids = spec_token_ids
+                spec_token_ids = metadata.grammar.validate_tokens(spec_token_ids)  # type: ignore[union-attr]
+            request.spec_token_ids = spec_token_ids
+
+    def update_draft_token_ids_in_output(
+        self, draft_token_ids: DraftTokenIds, scheduler_output: SchedulerOutput
+    ) -> None:
+        num_invalid_spec_tokens: dict[str, int] = {}
+
+        sched_spec_tokens = scheduler_output.scheduled_spec_decode_tokens
+        for req_id, spec_token_ids in zip(
+            draft_token_ids.req_ids,
+            draft_token_ids.draft_token_ids,
+        ):
+            request = self.requests.get(req_id)
+            if request is None or request.is_finished():
+                # The request may have been finished. Skip.
+                continue
+
+            placeholder_spec_tokens = sched_spec_tokens.get(req_id)
+            if not placeholder_spec_tokens:
+                continue
+
+            orig_num_spec_tokens = len(placeholder_spec_tokens)
+            # Trim drafts to scheduled number of spec tokens
+            # (needed for chunked prefill case for example).
+            del spec_token_ids[orig_num_spec_tokens:]
+            # Filter out spec tokens which do not adhere to the grammar.
+            if self.structured_output_manager.should_advance(request):
+                metadata = request.structured_output_request
+                assert metadata is not None and metadata.grammar is not None
+                spec_token_ids = metadata.grammar.validate_tokens(spec_token_ids)
+            # Pad to original number of spec tokens.
+            num_invalid_tokens = orig_num_spec_tokens - len(spec_token_ids)
+            if num_invalid_tokens:
+                spec_token_ids.extend([-1] * num_invalid_tokens)
+                num_invalid_spec_tokens[req_id] = num_invalid_tokens
+
+            sched_spec_tokens[req_id] = spec_token_ids
+
+        scheduler_output.num_invalid_spec_tokens = num_invalid_spec_tokens
 
     def get_request_counts(self) -> tuple[int, int]:
         """Returns (num_running_reqs, num_waiting_reqs)."""
@@ -1360,9 +1401,7 @@ class Scheduler(SchedulerInterface):
             request.record_event(EngineCoreEventType.QUEUED)
 
     def finish_requests(
-        self,
-        request_ids: str | Iterable[str],
-        finished_status: RequestStatus,
+        self, request_ids: str | Iterable[str], finished_status: RequestStatus
     ) -> None:
         """Handles the finish signal from outside the scheduler.
 
@@ -1528,11 +1567,15 @@ class Scheduler(SchedulerInterface):
         spec_decoding_stats: SpecDecodingStats | None,
         num_draft_tokens: int,
         num_accepted_tokens: int,
+        num_invalid_spec_tokens: dict[str, int] | None,
+        request_id: str,
     ) -> SpecDecodingStats | None:
-        if not self.log_stats:
+        if not self.log_stats or not num_draft_tokens:
             return None
         if spec_decoding_stats is None:
             spec_decoding_stats = SpecDecodingStats.new(self.num_spec_tokens)
+        if num_invalid_spec_tokens:
+            num_draft_tokens -= num_invalid_spec_tokens.get(request_id, 0)
         spec_decoding_stats.observe_draft(
             num_draft_tokens=num_draft_tokens, num_accepted_tokens=num_accepted_tokens
         )
@@ -1579,6 +1622,13 @@ class Scheduler(SchedulerInterface):
         """
         if self.connector is None:
             return False, None
+
+        # Free any out-of-window prefix blocks before we hand the block table to
+        # the connector.
+        self.kv_cache_manager.remove_skipped_blocks(
+            request_id=request.request_id,
+            total_computed_tokens=request.num_tokens,
+        )
 
         block_ids = self.kv_cache_manager.get_block_ids(request.request_id)
 

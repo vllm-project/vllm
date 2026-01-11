@@ -6,12 +6,12 @@ from dataclasses import dataclass
 
 import torch
 
-from vllm.attention.backends.abstract import AttentionBackend
-from vllm.attention.backends.utils import PAD_SLOT_ID
 from vllm.config import VllmConfig
 from vllm.utils.math_utils import cdiv
+from vllm.v1.attention.backend import AttentionBackend
 from vllm.v1.attention.backends.mamba_attn import BaseMambaAttentionMetadataBuilder
 from vllm.v1.attention.backends.utils import (
+    PAD_SLOT_ID,
     AttentionCGSupport,
     CommonAttentionMetadata,
     compute_causal_conv1d_metadata,
@@ -89,9 +89,10 @@ class GDNAttentionMetadataBuilder(
         self.vllm_config = vllm_config
         self.speculative_config = vllm_config.speculative_config
         self.kv_cache_spec = kv_cache_spec
-        self.device = device
+
         if self.speculative_config:
-            self.num_spec = self.speculative_config.num_speculative_tokens
+            assert self.speculative_config.num_speculative_tokens is not None
+            self.num_spec: int = self.speculative_config.num_speculative_tokens
         else:
             self.num_spec = 0
         self.use_spec_decode = self.num_spec > 0
@@ -117,10 +118,15 @@ class GDNAttentionMetadataBuilder(
         self.use_full_cuda_graph = (
             self.compilation_config.cudagraph_mode.has_full_cudagraphs()
         )
-        self.decode_cudagraph_max_bs = min(
-            self.vllm_config.scheduler_config.max_num_seqs * (self.num_spec + 1),
-            self.compilation_config.max_cudagraph_capture_size,
+
+        self.decode_cudagraph_max_bs = (
+            self.vllm_config.scheduler_config.max_num_seqs * (self.num_spec + 1)
         )
+        if self.compilation_config.max_cudagraph_capture_size is not None:
+            self.decode_cudagraph_max_bs = min(
+                self.decode_cudagraph_max_bs,
+                self.compilation_config.max_cudagraph_capture_size,
+            )
 
         self.spec_state_indices_tensor = torch.empty(
             (self.decode_cudagraph_max_bs, self.num_spec + 1),
@@ -174,8 +180,10 @@ class GDNAttentionMetadataBuilder(
         m = common_attn_metadata
 
         query_start_loc = m.query_start_loc
-        context_lens_cpu = m.num_computed_tokens_cpu
-        context_lens = context_lens_cpu.to(query_start_loc.device, non_blocking=True)
+        context_lens_tensor = m.compute_num_computed_tokens()
+        context_lens_cpu = context_lens_tensor.to(
+            m.query_start_loc_cpu.device, non_blocking=True
+        )
         nums_dict, batch_ptr, token_chunk_offset_ptr = None, None, None
 
         enable_apc = self.vllm_config.cache_config.enable_prefix_caching
@@ -308,6 +316,7 @@ class GDNAttentionMetadataBuilder(
             assert num_accepted_tokens is not None
             num_accepted_tokens = num_accepted_tokens[spec_sequence_masks]
 
+        # TODO: rename var
         if enable_apc:
             assert spec_sequence_masks is None
             assert block_size_value is not None
@@ -325,7 +334,7 @@ class GDNAttentionMetadataBuilder(
             block_idx_first_scheduled_token_p = block_idx_first_scheduled_token[
                 prefill_start:prefill_end
             ]
-            num_computed_tokens_p = context_lens[prefill_start:prefill_end]
+            num_computed_tokens_p = context_lens_tensor[prefill_start:prefill_end]
             num_computed_tokens_p_cpu = context_lens_cpu[prefill_start:prefill_end]
 
             assert non_spec_query_start_loc_cpu is not None
@@ -344,6 +353,7 @@ class GDNAttentionMetadataBuilder(
                     query_start_loc_p_cpu[req_idx + 1].item()
                     - query_start_loc_p_cpu[req_idx].item()
                 )
+                # TODO: check the device of everything here - should be CPU
 
                 if this_num_computed % self.chunk_size != 0:
                     seq_idx_list.append(req_idx)
@@ -379,7 +389,7 @@ class GDNAttentionMetadataBuilder(
             )
 
         if num_prefills > 0:
-            has_initial_state = context_lens > 0
+            has_initial_state = context_lens_tensor > 0
             if spec_sequence_masks is not None:
                 has_initial_state = has_initial_state[~spec_sequence_masks]
             nums_dict, batch_ptr, token_chunk_offset_ptr = (
@@ -538,6 +548,5 @@ class GDNAttentionMetadataBuilder(
 
         num_accepted_tokens = torch.diff(m.query_start_loc)
         num_decode_draft_tokens_cpu = (num_accepted_tokens - 1).cpu()
-        m._num_computed_tokens_cpu = m.seq_lens_cpu - num_accepted_tokens.cpu()
 
         return self.build(0, m, num_accepted_tokens, num_decode_draft_tokens_cpu)
