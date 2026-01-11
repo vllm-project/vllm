@@ -67,6 +67,7 @@ class ToolParser:
                 # tool_choice: "Forced Function" or "required" will override
                 # structured output json settings to make tool calling work correctly
                 request.structured_outputs.json = json_schema_from_tool
+                request.response_format = None
             if isinstance(request, ResponsesRequest):
                 request.text = ResponseTextConfig()
                 request.text.format = ResponseFormatTextJSONSchemaConfig(
