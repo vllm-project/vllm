@@ -1910,3 +1910,17 @@ def make_tool_call_id(id_type: str = "random", func_name=None, idx=None):
     else:
         # by default return random
         return f"chatcmpl-tool-{random_uuid()}"
+
+
+def count_reasoning_tokens(lst: list[int], sub: list[int] | None) -> int:
+    if sub is None:
+        return 0
+    n, m = len(lst), len(sub)
+    if m == 0 or m > n:
+        return 0
+
+    # Search from the end for the last occurrence
+    for i in range(n - m, -1, -1):
+        if lst[i : i + m] == sub:
+            return i + m
+    return 0

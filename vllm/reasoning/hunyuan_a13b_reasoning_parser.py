@@ -76,6 +76,11 @@ class HunyuanA13BReasoningParser(ReasoningParser):
         self.token_buffer = []
         self.text_buffer = ""
 
+    @property
+    def end_token_ids(self) -> list[int] | None:
+        """The token IDs that end reasoning content."""
+        return self.response_end_ids
+
     def is_reasoning_end(self, input_ids: list[int]) -> bool:
         return self.current_state == "response"
 

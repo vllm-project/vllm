@@ -40,6 +40,11 @@ class Step3ReasoningParser(ReasoningParser):
                 "token in the tokenizer!"
             )
 
+    @property
+    def end_token_ids(self) -> list[int] | None:
+        """The token IDs that end reasoning content."""
+        return [self.think_end_token_id]
+
     def extract_reasoning_streaming(
         self,
         previous_text: str,

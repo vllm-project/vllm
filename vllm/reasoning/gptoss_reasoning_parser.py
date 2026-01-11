@@ -75,6 +75,11 @@ class GptOssReasoningParser(ReasoningParser):
         self.reasoning_end_token_ids_suffix = self.model_tokenizer.encode("<|message|>")
         self.reasoning_max_num_between_tokens = 20
 
+    @property
+    def end_token_ids(self) -> list[int] | None:
+        """The token IDs that end reasoning content."""
+        return self.reasoning_end_token_ids_suffix
+
     def is_reasoning_end(self, input_ids: list[int]) -> bool:
         end_token_ids_prefix = self.reasoning_end_token_ids_prefix
         end_token_ids_suffix = self.reasoning_end_token_ids_suffix
