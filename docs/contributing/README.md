@@ -176,6 +176,25 @@ Using `-s` with `git commit` will automatically add this header.
     - **VSCode**: Open the [Settings editor](https://code.visualstudio.com/docs/configure/settings)
       and enable the `Git: Always Sign Off` (`git.alwaysSignOff`) field.
 
+### AI Assisted Contributions
+
+When AI tools provide non-trivial assistance in generating or modifying code, you must:
+
+1. **Review thoroughly**: You remain responsible for all code you submit. Review and understand AI-generated code with the same care as code you write manually.
+2. **Disclose in PR**: Always mention when a pull request includes AI-generated code. Add a note in the PR description.
+3. **Mark commits**: Add attribution using commit trailers such as `Co-authored-by:` (other projects use `Assisted-by:` or `Generated-by:`). For example:
+
+   ```text
+   Your commit message here
+
+   Co-authored-by: GitHub Copilot
+   Co-authored-by: Claude
+   Co-authored-by: gemini-code-assist
+   Signed-off-by: Your Name <your.email@example.com>
+   ```
+
+AI-assisted code must meet all quality standards: proper testing, documentation, adherence to style guides, and thorough review. Attribution helps reviewers evaluate contributions in context and maintains legal clarity for the project.
+
 ### PR Title and Classification
 
 Only specific types of PRs will be reviewed. The PR title is prefixed
