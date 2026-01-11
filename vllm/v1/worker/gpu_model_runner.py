@@ -2294,51 +2294,28 @@ class GPUModelRunner(
                 and modality == "video"
                 and num_items > 1
             ):
-                if should_time:
-                    torch.cuda.synchronize()
-                    start_time = time.perf_counter()
-
-                curr_group_outputs_lst = list[torch.Tensor]()
-                for video_mm_kwargs_item in filter(
-                    lambda item: item.modality == "video", mm_kwargs
+                with self._timed_encoder_operation(
+                    should_time, mm_lora_refs, current_item_idx, num_items
                 ):
-                    _, _, micro_batch_mm_inputs = next(
-                        group_mm_kwargs_by_modality(
-                            [video_mm_kwargs_item],
-                            device=self.device,
-                            pin_memory=self.pin_memory,
+                    curr_group_outputs_lst = list[torch.Tensor]()
+                    for video_mm_kwargs_item in filter(
+                        lambda item: item.modality == "video", mm_kwargs
+                    ):
+                        _, _, micro_batch_mm_inputs = next(
+                            group_mm_kwargs_by_modality(
+                                [video_mm_kwargs_item],
+                                device=self.device,
+                                pin_memory=self.pin_memory,
+                            )
                         )
-                    )
 
-                    micro_batch_outputs = model.embed_multimodal(
-                        **micro_batch_mm_inputs
-                    )
+                        micro_batch_outputs = model.embed_multimodal(
+                            **micro_batch_mm_inputs
+                        )
 
-                    curr_group_outputs_lst.extend(micro_batch_outputs)
+                        curr_group_outputs_lst.extend(micro_batch_outputs)
 
-                curr_group_outputs = curr_group_outputs_lst
-
-                if should_time:
-                    torch.cuda.synchronize()
-                    elapsed = time.perf_counter() - start_time
-
-                    group_lora_refs = mm_lora_refs[
-                        current_item_idx : current_item_idx + num_items
-                    ]
-                    group_request_ids = {req_id for req_id, _ in group_lora_refs}
-
-                    per_request_time = elapsed / max(len(group_request_ids), 1)
-
-                    with self._encoder_timing_lock:
-                        for req_id in group_request_ids:
-                            if req_id not in self.encoder_timing_registry:
-                                self.encoder_timing_registry[req_id] = (
-                                    EncoderTimingStats()
-                                )
-
-                            stats = self.encoder_timing_registry[req_id]
-                            stats.encoder_forward_time += per_request_time
-                            stats.num_encoder_calls += 1
+                    curr_group_outputs = curr_group_outputs_lst
             else:
                 # Run the encoder.
                 # `curr_group_outputs` is either of the following:
@@ -2348,33 +2325,10 @@ class GPUModelRunner(
                 # each of shape (feature_size, hidden_size) in case the feature
                 # size is dynamic depending on the input multimodal items.
 
-                if should_time:
-                    torch.cuda.synchronize()
-                    start_time = time.perf_counter()
-
-                curr_group_outputs = model.embed_multimodal(**mm_kwargs_group)
-
-                if should_time:
-                    torch.cuda.synchronize()
-                    elapsed = time.perf_counter() - start_time
-
-                    group_lora_refs = mm_lora_refs[
-                        current_item_idx : current_item_idx + num_items
-                    ]
-                    group_request_ids = {req_id for req_id, _ in group_lora_refs}
-
-                    per_request_time = elapsed / max(len(group_request_ids), 1)
-
-                    with self._encoder_timing_lock:
-                        for req_id in group_request_ids:
-                            if req_id not in self.encoder_timing_registry:
-                                self.encoder_timing_registry[req_id] = (
-                                    EncoderTimingStats()
-                                )
-
-                            stats = self.encoder_timing_registry[req_id]
-                            stats.encoder_forward_time += per_request_time
-                            stats.num_encoder_calls += 1
+                with self._timed_encoder_operation(
+                    should_time, mm_lora_refs, current_item_idx, num_items
+                ):
+                    curr_group_outputs = model.embed_multimodal(**mm_kwargs_group)
 
             sanity_check_mm_encoder_outputs(
                 curr_group_outputs,
@@ -5789,6 +5743,50 @@ class GPUModelRunner(
             }
             self.encoder_timing_registry.clear()
             return stats
+
+    @contextmanager
+    def _timed_encoder_operation(
+        self,
+        should_time: bool,
+        group_lora_refs: list[tuple[str, Any]],
+        current_item_idx: int,
+        num_items: int,
+    ):
+        """
+        Context manager to time encoder forward operations.
+
+        Args:
+            should_time: Whether timing is enabled
+            group_lora_refs: Full list of (request_id, pos_info) tuples
+            current_item_idx: Starting index for this group
+            num_items: Number of items in this group
+        """
+        if not should_time:
+            yield
+            return
+
+        group_refs = group_lora_refs[current_item_idx : current_item_idx + num_items]
+        group_request_ids = {req_id for req_id, _ in group_refs}
+
+        torch.cuda.synchronize()
+        start_time = time.perf_counter()
+
+        try:
+            yield
+        finally:
+            torch.cuda.synchronize()
+            elapsed = time.perf_counter() - start_time
+
+            per_request_time = elapsed / max(len(group_request_ids), 1)
+
+            with self._encoder_timing_lock:
+                for req_id in group_request_ids:
+                    if req_id not in self.encoder_timing_registry:
+                        self.encoder_timing_registry[req_id] = EncoderTimingStats()
+
+                    stats = self.encoder_timing_registry[req_id]
+                    stats.encoder_forward_time += per_request_time
+                    stats.num_encoder_calls += 1
 
 
 @dataclass
