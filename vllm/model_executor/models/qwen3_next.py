@@ -837,8 +837,6 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
                     )
                     initial_state[prefill_indices[~req_has_initial_state], ...] = 0
 
-            # chunk_state_history contains the `chunks_per_block` matrix states,
-            # *excluding* the last recurrent state
             (
                 core_attn_out_non_spec,
                 last_recurrent_state,
@@ -856,7 +854,8 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
                 use_qk_l2norm_in_kernel=True,
                 return_intermediate_states=prefix_caching_enabled,
             )
-            # TODO: check if we can remove this data-dependent branching
+
+            # Write the last recurrent state, prefill requests
             if block_state_indices.numel() > 0:
                 assert state_indices_prefill is not None
                 valid_block_positions = torch.nonzero(
@@ -866,15 +865,49 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
                     dest_slots = state_indices_prefill.index_select(
                         0, valid_block_positions
                     ).to(device=ssm_state.device, dtype=torch.long)
+                    prefill_positions_in_last_state = (
+                        valid_block_positions + num_decodes
+                    )
                     ssm_state.index_copy_(
                         0,
                         dest_slots,
-                        last_recurrent_state.index_select(0, valid_block_positions).to(
-                            ssm_state.dtype
-                        ),
+                        last_recurrent_state.index_select(
+                            0, prefill_positions_in_last_state
+                        ).to(ssm_state.dtype),
                     )
+
+            # Write the last recurrent state, decode requests (if any)
+            if num_decodes > 0:
+                assert state_indices_decode is not None
+                decode_states = last_recurrent_state[:num_decodes]
+                if prefix_caching_enabled:
+                    # With APC, we need to handle invalid slots (-1) that may exist
+                    # Record the valid slots as invalid slots are lost when clamping
+                    valid_decode_slots = state_indices_decode >= 0
+                    dest_slots = state_indices_decode.clamp(min=0).to(
+                        device=ssm_state.device, dtype=torch.long
+                    )
+                    # Broadcast the mask to (num_decodes, 1, 1, 1) to match
+                    # last_recurrent_state's shapes to update only valid slots
+                    valid_decode_slots_broadcast = valid_decode_slots.view(
+                        -1,
+                        *([1] * (last_recurrent_state.dim() - 1)),
+                    )
+                    prior_state = ssm_state.index_select(0, dest_slots).to(
+                        last_recurrent_state.dtype
+                    )
+                    decode_states = torch.where(
+                        valid_decode_slots_broadcast, decode_states, prior_state
+                    )
+                else:
+                    # Without APC we can save directly
+                    dest_slots = state_indices_decode.to(
+                        device=ssm_state.device, dtype=torch.long
+                    )
+                ssm_state.index_copy_(0, dest_slots, decode_states.to(ssm_state.dtype))
+
             if prefix_caching_enabled:
-                # TODO: check that these can be asserts instead
+                # Write intermediate states (one per block) to the ssm state as well
                 assert chunk_state_history is not None
                 assert chunk_state_history.numel() > 0
                 assert block_idx_first_scheduled_token_p is not None
