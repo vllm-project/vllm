@@ -67,7 +67,7 @@ def get_flash_attn_version(requires_alibi: bool = False) -> int | None:
         # 3. fallback for unsupported combinations
         if device_capability.major == 10 and fa_version == 3:
             logger.warning_once(
-                "Cannot use FA version 3 on Blackwell platform "
+                "Cannot use FA version 3 on Blackwell platform, "
                 "defaulting to FA version 2."
             )
             fa_version = 2
