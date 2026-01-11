@@ -36,6 +36,7 @@ _CLASS_TO_MODULE: dict[str, str] = {
     "MiDashengLMConfig": "vllm.transformers_utils.configs.midashenglm",
     "MLPSpeculatorConfig": "vllm.transformers_utils.configs.mlp_speculator",
     "MoonViTConfig": "vllm.transformers_utils.configs.moonvit",
+    "KimiAudioConfig": "vllm.transformers_utils.configs.kimi_audio",
     "KimiLinearConfig": "vllm.transformers_utils.configs.kimi_linear",
     "KimiVLConfig": "vllm.transformers_utils.configs.kimi_vl",
     "NemotronConfig": "vllm.transformers_utils.configs.nemotron",
@@ -51,6 +52,7 @@ _CLASS_TO_MODULE: dict[str, str] = {
     "Step3TextConfig": "vllm.transformers_utils.configs.step3_vl",
     "Qwen3NextConfig": "vllm.transformers_utils.configs.qwen3_next",
     "Tarsier2Config": "vllm.transformers_utils.configs.tarsier2",
+    "WhisperVQConfig": "vllm.transformers_utils.configs.whisper_vq",
     # Special case: DeepseekV3Config is from HuggingFace Transformers
     "DeepseekV3Config": "transformers",
 }
@@ -75,6 +77,7 @@ __all__ = [
     "MiDashengLMConfig",
     "MLPSpeculatorConfig",
     "MoonViTConfig",
+    "KimiAudioConfig",
     "KimiLinearConfig",
     "KimiVLConfig",
     "NemotronConfig",
@@ -88,6 +91,7 @@ __all__ = [
     "Step3VLConfig",
     "Step3VisionEncoderConfig",
     "Step3TextConfig",
+    "WhisperVQConfig",
     "Qwen3NextConfig",
     "Tarsier2Config",
 ]
