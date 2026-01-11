@@ -180,7 +180,12 @@ class FastIncrementalDetokenizer(BaseIncrementalDetokenizer):
         self.tokenizer: Tokenizer = tokenizer._tokenizer
 
         # Find a safe place to start.
+        # Skip prefix/meta tokens that were prepended to the prompt
         prompt_token_ids = request.prompt_token_ids or []
+        num_prefix = getattr(request, "num_prefix_tokens", 0)
+        if num_prefix > 0:
+            prompt_token_ids = prompt_token_ids[num_prefix:]
+
         prompt_suffix = prompt_token_ids
         prompt_len = len(prompt_suffix)
         if prompt_len > 4:
