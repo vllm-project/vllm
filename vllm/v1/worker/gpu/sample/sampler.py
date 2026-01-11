@@ -71,7 +71,7 @@ class Sampler:
         apply_penalties_and_temperature(logits, sampling_metadata)
         # Apply min_p in place.
         if sampling_metadata.min_p is not None:
-            apply_min_p(logits, sampling_metadata.min_p)
+            apply_min_p(logits, sampling_metadata.idx_mapping, sampling_metadata.min_p)
         # Apply top_k and/or top_p. This might return a new tensor.
         logits = apply_top_k_top_p(
             logits, sampling_metadata.top_k, sampling_metadata.top_p
@@ -79,6 +79,7 @@ class Sampler:
 
         sampled = gumbel_sample(
             logits,
+            sampling_metadata.idx_mapping,
             sampling_metadata.temperature,
             sampling_metadata.seeds,
             sampling_metadata.pos,
