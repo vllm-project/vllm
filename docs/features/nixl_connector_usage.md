@@ -164,6 +164,19 @@ For multi-host DP deployment, only need to provide the host/port of the head ins
     NixlConnector currently does not distinguish `kv_role`; the actual prefiller/decoder roles are determined by the upper-level proxy (e.g., `toy_proxy_server.py` using `--prefiller-hosts` and `--decoder-hosts`).
     Therefore, `kv_role` in `--kv-transfer-config` is effectively a placeholder and does not affect NixlConnector's behavior.
 
+## Advanced KV-Connector Configuration Options
+
+- `kv_buffer_device`: where to register the KV transfer buffer memory
+    - Default: `"cuda"`
+    - Usage: `--kv-transfer-config '{"kv_connector": "NixlConnector", "kv_role": "kv_both", "kv_buffer_device": "cuda"}'`
+    - `"cuda"`: register on GPU memory
+    - `"cpu"`: on TPU/XPU or when NIXL cannot register device memory, use a host transfer buffer; prefetched KV blocks are saved to the host buffer
+
+- `kv_connector_extra_config.backends`: List of NIXL transport backends
+    - Default: `["UCX"]`
+    - Usage: `--kv-transfer-config '{"kv_connector": "NixlConnector", "kv_role": "kv_both", "kv_connector_extra_config": {"backends": ["UCX", "GDS"]}}'`
+    - Additional backends (e.g., `"GDS"`) can be appended if supported by NIXL and properly installed
+    (refer to code `nixl_wrapper.register_memory()` in `nixl_connector.py` )
 ## Experimental Feature
 
 ### Heterogeneous KV Layout support
