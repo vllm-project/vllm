@@ -1660,9 +1660,13 @@ class FusedMoE(CustomOp):
 
         assert topk_ids.dtype == indices_type or indices_type is None
 
-        if self.vllm_config.model_config.enable_return_routed_experts:
+        if (
+            self.vllm_config.model_config is not None
+            and self.vllm_config.model_config.enable_return_routed_experts
+        ):
+            # In dummy runs, the capturer is not initialized.
             capturer = RoutedExpertsCapturer.get_instance()
-            if capturer is not None:
+            if capturer is not None:  # in dummmy_run may be None
                 capturer.capture(  # noqa
                     layer_id=self.layer_id,
                     topk_ids=topk_ids,
