@@ -8,7 +8,7 @@ from transformers import ModernBertConfig
 from transformers.activations import ACT2FN
 
 from vllm.compilation.decorators import support_torch_compile
-from vllm.config import PoolerConfig, VllmConfig
+from vllm.config import VllmConfig
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.attention.encoder_only_attention import (
     EncoderOnlyAttention,
@@ -16,9 +16,8 @@ from vllm.model_executor.layers.attention.encoder_only_attention import (
 from vllm.model_executor.layers.linear import QKVParallelLinear, RowParallelLinear
 from vllm.model_executor.layers.pooler import DispatchPooler
 from vllm.model_executor.layers.pooler.seqwise import (
+    EmbeddingPoolerHead,
     SequencePooler,
-    SequencePoolerHeadOutput,
-    SequencePoolingMethodOutput,
     get_seq_pooling_method,
 )
 from vllm.model_executor.layers.pooler.tokwise import pooler_for_token_classify
@@ -26,7 +25,6 @@ from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmbedding
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.sequence import IntermediateTensors
-from vllm.v1.pool.metadata import PoolingMetadata
 
 from .interfaces import SupportsCrossEncoding
 from .interfaces_base import attn_type, default_pooling_type
@@ -282,16 +280,16 @@ class ModernBertModel(nn.Module):
 
 
 class ModernBertPooler(SequencePooler):
-    def __init__(self, config: ModernBertConfig, pooler_config: PoolerConfig):
+    def __init__(self, vllm_config: VllmConfig):
+        model_config = vllm_config.model_config
+        pooler_config = vllm_config.pooler_config
+        assert pooler_config is not None
+
+        config: ModernBertConfig = model_config.hf_config
         hf_pooling_type = config.classifier_pooling.upper()
         # vllm_pooling_type = pooler_config.seq_pooling_type
         # Currently we don't have a way to see if the user set the pooling type
         # explicitly or not, so we always use the HF pooling type for now.
-
-        super().__init__(
-            pooling=get_seq_pooling_method(hf_pooling_type),
-            head=self.head,
-        )
 
         self.dense = nn.Linear(
             config.hidden_size, config.hidden_size, config.classifier_bias
@@ -301,16 +299,14 @@ class ModernBertPooler(SequencePooler):
             config.hidden_size, eps=config.norm_eps, bias=config.norm_bias
         )
 
-    def head(
-        self,
-        pooled_data: SequencePoolingMethodOutput,
-        pooling_metadata: PoolingMetadata,
-    ) -> SequencePoolerHeadOutput:
-        if isinstance(pooled_data, list):
-            pooled_data = torch.stack(pooled_data)
-
-        pooled_data = pooled_data.to(self.dense.weight.dtype)
-        return self.norm(self.act(self.dense(pooled_data)))
+        super().__init__(
+            pooling=get_seq_pooling_method(hf_pooling_type),
+            head=EmbeddingPoolerHead(
+                projector=self.dense,
+                head_dtype=model_config.head_dtype,
+                activation=lambda x: self.norm(self.act(x)),
+            ),
+        )
 
 
 @default_pooling_type(seq_pooling_type="CLS")
@@ -335,7 +331,7 @@ class ModernBertForSequenceClassification(nn.Module, SupportsCrossEncoding):
         pooler_config = vllm_config.model_config.pooler_config
         assert pooler_config is not None
 
-        self.pooling = ModernBertPooler(config, pooler_config)
+        self.pooling = ModernBertPooler(vllm_config)
 
         self.pooler = DispatchPooler.for_seq_cls(
             pooler_config,

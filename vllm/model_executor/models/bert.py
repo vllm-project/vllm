@@ -25,10 +25,9 @@ from vllm.model_executor.layers.pooler import (
     PoolingParamsUpdate,
 )
 from vllm.model_executor.layers.pooler.seqwise import (
+    EmbeddingPoolerHead,
     SequencePooler,
-    SequencePoolerHeadOutput,
     SequencePoolerOutput,
-    SequencePoolingMethodOutput,
     get_seq_pooling_method,
 )
 from vllm.model_executor.layers.pooler.tokwise import (
@@ -94,26 +93,24 @@ class BertEmbedding(nn.Module):
 
 
 class BertPooler(SequencePooler):
-    def __init__(self, config: BertConfig, pooler_config: PoolerConfig):
-        super().__init__(
-            pooling=get_seq_pooling_method(pooler_config.seq_pooling_type),
-            head=self.head,
-        )
+    def __init__(self, vllm_config: VllmConfig):
+        model_config = vllm_config.model_config
+        pooler_config = vllm_config.pooler_config
+        assert pooler_config is not None
+
+        config: BertConfig = model_config.hf_config
 
         self.dense = nn.Linear(config.hidden_size, config.hidden_size)
         self.activation = nn.Tanh()
 
-    def head(
-        self,
-        pooled_data: SequencePoolingMethodOutput,
-        pooling_metadata: PoolingMetadata,
-    ) -> SequencePoolerHeadOutput:
-        if isinstance(pooled_data, list):
-            pooled_data = torch.stack(pooled_data)
-
-        pooled_data = self.dense(pooled_data)
-        pooled_data = self.activation(pooled_data)
-        return pooled_data
+        super().__init__(
+            pooling=get_seq_pooling_method(pooler_config.seq_pooling_type),
+            head=EmbeddingPoolerHead(
+                projector=self.dense,
+                head_dtype=model_config.head_dtype,
+                activation=self.activation,
+            ),
+        )
 
 
 class BertEncoder(nn.Module):
@@ -449,12 +446,7 @@ class BertPoolingModel(BertModel):
             embedding_class=embedding_class,
         )
 
-        config = vllm_config.model_config.hf_config
-
-        pooler_config = vllm_config.model_config.pooler_config
-        assert pooler_config is not None
-
-        self.pooler = BertPooler(config, pooler_config)
+        self.pooler = BertPooler(vllm_config)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         other_weights, loaded_stacked_params = self._load_weights(weights)
