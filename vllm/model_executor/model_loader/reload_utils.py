@@ -17,6 +17,7 @@ RESTORE_ATTRS = ["weight_loader"]
 
 """
 TODO:
+* decide on reloading interface, back-compat with reload_weights
 * pass arguments to process_weights_after_loading
 * check composability with MLA processing
 * check composability with EPLB
@@ -109,10 +110,7 @@ def unwrap_weight_loaders(layer: torch.nn.Module):
 
 
 def get_layer_size(layer: torch.nn.Module) -> int:
-    return sum(
-        tensor.numel()
-        for tensor in chain(layer._parameters.values(), layer._buffers.values())
-    )
+    return sum(tensor.numel() for tensor in get_module_tensors(layer).values())
 
 
 def materialize_meta_tensor(tensor: torch.Tensor) -> torch.Tensor:
