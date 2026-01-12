@@ -608,6 +608,7 @@ class GptOssModel(nn.Module):
                 weight_loader = param.weight_loader
 
                 weight_loader(param, loaded_weight, shard_id)
+                loaded_params.add(name)
                 break
             else:
                 for mapping in expert_params_mapping:
@@ -641,6 +642,7 @@ class GptOssModel(nn.Module):
                     )
                     if success:
                         name = fused_name
+                        loaded_params.add(name)
                         break
                 else:
                     if name not in params_dict:

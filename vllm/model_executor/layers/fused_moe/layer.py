@@ -887,7 +887,7 @@ class FusedMoE(CustomOp):
         if name == "quark" and isinstance(quant_method, QuarkOCP_MX_MoEMethod):
             return (
                 quant_method.weight_dtype == "mxfp4"
-                and quant_method.fp4_dtype == torch.float4_e2m1fn_x2
+                and quant_method.fp4_dtype == getattr(torch, "float4_e2m1fn_x2", None)
             )
 
         return False
