@@ -43,7 +43,7 @@ from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (
     MultiModalDataDict,
     MultiModalFieldConfig,
-    MultiModalKwargs,
+    MultiModalKwargsItems,
     NestedTensors,
     VisionChunk,
     VisionChunkImage,
@@ -265,7 +265,7 @@ class KimiK25MultiModalProcessor(BaseMultiModalProcessor[KimiK25ProcessingInfo])
         self,
         mm_items: MultiModalDataItems,
         hf_processor_mm_kwargs: Mapping[str, Any],
-        out_mm_kwargs: MultiModalKwargs,
+        out_mm_kwargs: MultiModalKwargsItems,
     ) -> Sequence[PromptUpdate]:
         hf_config = self.info.get_hf_config()
         media_token_id = hf_config.media_placeholder_token_id
@@ -396,7 +396,9 @@ class KimiK25ForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP)
         )
         # In some cases (e.g. with merger), grid_thws has an extra middle dimension
         grid_thws = grid_thws.reshape(-1, grid_thws.shape[-1])
-        assert grid_thws.ndim == 2, f"unexpected shape for grid_thws: {grid_thws.shape}"
+        assert grid_thws.ndim == 2 and grid_thws.size(1) == 3, (
+            f"unexpected shape for grid_thws: {grid_thws.shape}"
+        )
 
         return KimiK25MediaPixelInputs(
             type="pixel_values",

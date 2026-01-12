@@ -17,7 +17,6 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from transformers.activations import GELUActivation
-from transformers.modeling_utils import PreTrainedModel
 
 from vllm.attention.layers.mm_encoder_attention import MMEncoderAttention
 from vllm.config import MultiModalConfig
@@ -553,27 +552,19 @@ def tpool_patch_merger(
     return outputs
 
 
-class MoonViT3dPretrainedModel(PreTrainedModel):
+class MoonViT3dPretrainedModel(nn.Module):
     """Main vision tower model.
 
     Uses KimiK25VisionConfig directly from transformers_utils/configs/kimi_k25.py.
     """
 
-    config_class = KimiK25VisionConfig
-    model_type = "kimi_k25_vision"
-    _no_split_modules = ["PackingTransformer"]
-    _supports_flash_attn_2 = True
-    _supports_sdpa = True
-
     def __init__(
         self,
-        config,
+        config: KimiK25VisionConfig,
         multimodal_config: MultiModalConfig | None = None,
         prefix: str = "",
-        *inputs,
-        **kwargs,
     ):
-        super().__init__(config, *inputs, **kwargs)
+        super().__init__()
         config = deepcopy(config)
         self.merge_kernel_size = config.merge_kernel_size
         self.patch_size = config.patch_size
@@ -614,8 +605,6 @@ class MoonViT3dPretrainedModel(PreTrainedModel):
         Returns:
             torch.Tensor: The output tokens.
         """
-        assert grid_thws.ndim == 2, f"grid_thws should be 2D, got {grid_thws.ndim}"
-        assert grid_thws.size(1) == 3, f"No support for thws: {grid_thws}"
         hidden_states = self.patch_embed(pixel_values, grid_thws)
         hidden_states = self.encoder(hidden_states, grid_thws)
         if (
@@ -649,9 +638,6 @@ def vision_tower_forward(
     mm_projector: Any,
 ) -> list[torch.Tensor]:
     """Auto-batched vision tower forward."""
-    assert isinstance(pixel_values, torch.Tensor), (
-        "expect pixel_values to be a tensor, get {}".format(type(pixel_values))
-    )
     n = grid_thw.shape[0]
     n_patches_each_media = grid_thw.prod(-1)
     max_infer_batch = max(n_patches_each_media.max(), KIMIV_VT_INFER_MAX_PATCH_NUM)
