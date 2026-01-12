@@ -28,10 +28,10 @@ from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     per_token_group_quant_fp8_packed_for_deepgemm,
     silu_mul_per_token_group_quant_fp8_colmajor,
 )
-from vllm.platforms import current_platform
 from vllm.utils.deep_gemm import (
     DeepGemmQuantScaleFMT,
     get_mk_alignment_for_contiguous_layout,
+    is_deep_gemm_supported,
     m_grouped_fp8_gemm_nt_contiguous,
 )
 from vllm.utils.import_utils import has_deep_gemm
@@ -125,7 +125,7 @@ class DeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
 
     @staticmethod
     def _supports_current_device() -> bool:
-        return current_platform.has_device_capability((9, 0))
+        return is_deep_gemm_supported()
 
     @staticmethod
     def _supports_no_act_and_mul() -> bool:

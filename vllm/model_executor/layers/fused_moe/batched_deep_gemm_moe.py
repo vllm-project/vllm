@@ -23,6 +23,7 @@ from vllm.utils.deep_gemm import (
     fp8_m_grouped_gemm_nt_masked,
     get_mk_alignment_for_contiguous_layout,
     is_deep_gemm_e8m0_used,
+    is_deep_gemm_supported,
 )
 from vllm.utils.math_utils import cdiv, round_up
 
@@ -278,7 +279,7 @@ class BatchedDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
 
     @staticmethod
     def _supports_current_device() -> bool:
-        return current_platform.has_device_capability((9, 0))
+        return is_deep_gemm_supported()
 
     @staticmethod
     def _supports_no_act_and_mul() -> bool:

@@ -26,6 +26,9 @@ from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceNoOP,
 )
 from vllm.model_executor.layers.fused_moe.utils import _resize_cache
+from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
+    cutlass_group_gemm_supported,
+)
 from vllm.platforms import current_platform
 from vllm.scalar_type import scalar_types
 
@@ -266,7 +269,7 @@ class CutlassExpertsFp8Base(mk.FusedMoEPermuteExpertsUnpermute):
 
     @staticmethod
     def _supports_current_device() -> bool:
-        return current_platform.has_device_capability((9, 0))
+        return cutlass_group_gemm_supported()
 
     @staticmethod
     def _supports_no_act_and_mul() -> bool:
@@ -274,12 +277,7 @@ class CutlassExpertsFp8Base(mk.FusedMoEPermuteExpertsUnpermute):
 
     @staticmethod
     def _supports_quant_scheme(quant_scheme: FusedMoEQuantScheme) -> bool:
-        if not current_platform.has_device_capability((9, 0)):
-            return False
-
-        return quant_scheme.is_fp8_w8a8 and (
-            quant_scheme.per_tensor_quant or quant_scheme.per_token_quant
-        )
+        return quant_scheme.is_fp8_w8a8 and not quant_scheme.per_block_quant
 
     @staticmethod
     def _supports_activation(activation: str) -> bool:
