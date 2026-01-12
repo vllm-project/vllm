@@ -78,6 +78,12 @@ class ObservabilityConfig:
     between metrics and individual requests. Adds minimal overhead (~100 bytes
     per exemplar). Requires Prometheus server with --enable-feature=exemplar-storage."""
 
+    enable_logging_iteration_details: bool = False
+    """Enable detailed logging of iteration details.
+    If set, vllm EngineCore will log iteration details
+    This includes number of context/generation requests and tokens
+    and the elapsed cpu time for the iteration."""
+
     @cached_property
     def collect_model_forward_time(self) -> bool:
         """Whether to collect model forward time for the request."""

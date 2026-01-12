@@ -11,19 +11,20 @@ from typing import TYPE_CHECKING, Any, NamedTuple, Optional
 
 import numpy as np
 import torch
+from typing_extensions import deprecated
 
-from vllm.attention.backends.registry import AttentionBackendEnum
 from vllm.logger import init_logger
+from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 if TYPE_CHECKING:
     from torch.distributed import PrefixStore, ProcessGroup
 
-    from vllm.attention.selector import AttentionSelectorConfig
     from vllm.config import VllmConfig
     from vllm.inputs import ProcessorInputs, PromptType
     from vllm.pooling_params import PoolingParams
     from vllm.sampling_params import SamplingParams
     from vllm.utils.argparse_utils import FlexibleArgumentParser
+    from vllm.v1.attention.selector import AttentionSelectorConfig
 else:
     FlexibleArgumentParser = object
 
@@ -365,6 +366,10 @@ class Platform:
         return torch.inference_mode(mode=True)
 
     @classmethod
+    @deprecated(
+        "`seed_everything` is deprecated. It will be removed in v0.15.0 or later. "
+        "Please use `vllm.utils.torch_utils.set_random_seed` instead."
+    )
     def seed_everything(cls, seed: int | None = None) -> None:
         """
         Set the seed of each random module.
@@ -372,10 +377,6 @@ class Platform:
 
         Loosely based on: https://github.com/Lightning-AI/pytorch-lightning/blob/2.4.0/src/lightning/fabric/utilities/seed.py#L20
         """
-        logger.info_once(
-            "`seed_everything` is deprecated. It will be removed in v0.14.0 or later. "
-            "Please use `vllm.utils.torch_utils.set_random_seed` instead."
-        )
         if seed is not None:
             random.seed(seed)
             np.random.seed(seed)
