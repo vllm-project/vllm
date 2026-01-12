@@ -5,7 +5,6 @@
 
 Refer to each `run_*` function for the command to run the server for that model.
 """
-# ruff: noqa: E501
 
 import argparse
 import base64
