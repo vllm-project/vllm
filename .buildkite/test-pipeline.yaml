@@ -550,7 +550,6 @@ steps:
   mirror_hardwares: [amdexperimental]
   source_file_dependencies:
   - csrc/attention/
-  - vllm/attention
   - vllm/v1/attention
   - tests/kernels/attention
   commands:

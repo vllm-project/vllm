@@ -15,7 +15,6 @@ steps:
   timeout_in_minutes: 35
   source_file_dependencies:
   - csrc/attention/
-  - vllm/attention
   - vllm/v1/attention
   - tests/kernels/attention
   commands:
