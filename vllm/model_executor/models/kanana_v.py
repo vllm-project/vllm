@@ -629,8 +629,11 @@ class KananaVForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP)
             pixel_values = torch.concat(pixel_values)
 
         # Normalize vision_grid_thw to 2D tensor (num_images, 3)
-        if vision_grid_thw.ndim == 3:
-            vision_grid_thw = vision_grid_thw.flatten(0, 1)
+        if isinstance(vision_grid_thw, torch.Tensor):
+            if vision_grid_thw.ndim == 3:
+                vision_grid_thw = vision_grid_thw.flatten(0, 1)
+        else:
+            vision_grid_thw = torch.concat(vision_grid_thw)
 
         return KananaVImagePixelInputs(
             type="pixel_values",
@@ -639,12 +642,6 @@ class KananaVForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP)
         )
 
     def _process_image_input(self, image_input: KananaVImageInputs) -> torch.Tensor:
-        """Compute multimodal embeddings for image inputs.
-
-        This expands media tokens into grids of visual tokens with row and
-        global/local separator tokens, then replaces the media-token
-        embeddings with projected visual features.
-        """
         pixel_values = image_input["pixel_values"]
         vision_grid_thw = image_input["vision_grid_thw"]
 
@@ -673,7 +670,7 @@ class KananaVForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP)
         v_output: Sequence[torch.Tensor],
         layer_index: int | Sequence[int],
     ) -> torch.Tensor:
-        if isinstance(layer_index, list):
+        if isinstance(layer_index, (list, tuple)):
             visual_features = torch.stack(v_output, dim=1)[
                 :, layer_index
             ]  # [B, n_scales, L, dim]
@@ -686,7 +683,6 @@ class KananaVForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP)
         pixel_values: torch.Tensor,
         image_metas: dict | None = None,
     ) -> torch.Tensor:
-        """Run the vision backbone and return hidden states at the target layer."""
         vision_model_args = {
             "pixel_values": pixel_values,
             "return_dict": True,
@@ -705,7 +701,6 @@ class KananaVForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP)
         visual_features: torch.Tensor,
         image_metas: dict | None = None,
     ) -> torch.Tensor:
-        """Run the projector / abstractor over vision features."""
         visual_embeds = self.abstractor(
             visual_features,
             grid_thw=image_metas["vision_grid_thw"],
@@ -717,7 +712,6 @@ class KananaVForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP)
         pixel_values: torch.Tensor,
         image_metas: dict | None = None,
     ) -> torch.Tensor:
-        """Convenience wrapper for vision backbone + projector."""
         assert pixel_values is not None
         visual_features = self.forward_vision(pixel_values, image_metas=image_metas)
         visual_embeds = self.forward_projector(visual_features, image_metas=image_metas)
@@ -738,17 +732,20 @@ class KananaVForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP)
         input_ids: torch.Tensor,
         positions: torch.Tensor,
         intermediate_tensors: IntermediateTensors | None = None,
+        inputs_embeds: torch.Tensor | None = None,
         **kwargs,
     ):
-        inputs_embeds = kwargs.get("inputs_embeds")
+        if intermediate_tensors is not None:
+            inputs_embeds = None
 
-        outputs = self.language_model(
+        hidden_states = self.language_model(
             input_ids=input_ids,
             positions=positions,
             intermediate_tensors=intermediate_tensors,
             inputs_embeds=inputs_embeds,
         )
-        return outputs
+
+        return hidden_states
 
     def compute_logits(self, hidden_states: torch.Tensor) -> torch.Tensor:
         return self.language_model.compute_logits(hidden_states)
