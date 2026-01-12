@@ -125,7 +125,7 @@ class LlamaDecoderLayer(LlamaDecoderLayer):
             self._residual_norm = self._norm_after_residual
 
     def get_cache_config(self, vllm_config: VllmConfig):
-        cache_config = copy.deepcopy(vllmconfig.cache_config)
+        cache_config = copy.deepcopy(vllm_config.cache_config)
         kv_cache_dtype = vllm_config.speculative_config.kv_cache_dtype
         if kv_cache_dtype is not None:
             cache_config.cache_dtype = kv_cache_dtype
