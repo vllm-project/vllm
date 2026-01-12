@@ -25,6 +25,7 @@
 # limitations under the License.
 """Inference-only Qwen2 model compatible with HuggingFace weights."""
 
+import logging
 from collections.abc import Iterable
 from itertools import islice
 from typing import Any
@@ -256,14 +257,18 @@ class Qwen2DecoderLayer(nn.Module):
             attn_type = AttentionType.DECODER
         else:
             attn_type = AttentionType.ENCODER_ONLY
-        head_dim = getattr(config, "head_dim", None)
         # Check if QK normalization is enabled (used in BAGEL and some other models)
+        logging.info("在这呢")
         if isinstance(config, Qwen3Config):
             qk_norm = True
             qkv_bias = getattr(config, "attention_bias", False)
+            head_dim = getattr(config, "head_dim", None)
+            logging.info("进来qwen3config了， %s", head_dim)
         else:
             qk_norm = getattr(config, "qk_norm", False)
             qkv_bias = True
+            head_dim = None
+            logging.info("进来qwen2config了， %s", head_dim)
 
         self.self_attn = Qwen2Attention(
             hidden_size=self.hidden_size,
