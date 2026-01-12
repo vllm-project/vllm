@@ -166,6 +166,10 @@ class FusedMoEQuantScheme:
     def is_nvfp4_w4a4(self) -> bool:
         return self.weight_dtype == "nvfp4" and self.act_dtype == "nvfp4"
 
+    @property
+    def is_mxfp4_w4a4(self) -> bool:
+        return self.weight_dtype == "mxfp4" and self.act_dtype == "mxfp4"
+
 
 @dataclass
 class FusedMoEQuantDesc:
