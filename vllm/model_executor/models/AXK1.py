@@ -29,14 +29,11 @@ from itertools import islice
 
 import torch
 from torch import nn
-from transformers import DeepseekV2Config, DeepseekV3Config
 
 from vllm._aiter_ops import rocm_aiter_ops
-from vllm.attention.backends.abstract import AttentionBackend
 from vllm.attention.layer import Attention
-from vllm.attention.ops.common import pack_seq_triton, unpack_seq_triton
 from vllm.compilation.decorators import support_torch_compile
-from vllm.config import CacheConfig, ParallelConfig, VllmConfig, get_current_vllm_config
+from vllm.config import CacheConfig, ParallelConfig, VllmConfig
 from vllm.distributed import (
     get_ep_group,
     get_pp_group,
@@ -44,25 +41,18 @@ from vllm.distributed import (
     get_tensor_model_parallel_world_size,
     tensor_model_parallel_all_gather,
 )
-from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
-from vllm.model_executor.layers.activation import SiluAndMul
-from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.layers.fused_moe import SharedFusedMoE
-from vllm.model_executor.layers.layernorm import LayerNorm, RMSNorm
+from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
     MergedColumnParallelLinear,
-    QKVParallelLinear,
     ReplicatedLinear,
     RowParallelLinear,
 )
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.mla import MLAModules, MultiHeadLatentAttentionWrapper
 from vllm.model_executor.layers.quantization import QuantizationConfig
-from vllm.model_executor.layers.quantization.utils.fp8_utils import (
-    per_token_group_quant_fp8,
-)
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
@@ -72,17 +62,16 @@ from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader,
     maybe_remap_kv_scale_name,
 )
+from vllm.model_executor.models.deepseek_v2 import (
+    DeepseekAttention,
+    DeepseekV2MLP,
+    Indexer,
+    yarn_get_mscale,
+)
 from vllm.model_executor.models.utils import sequence_parallel_chunk
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
-from vllm.utils.deep_gemm import fp8_mqa_logits, fp8_paged_mqa_logits
-from vllm.utils.torch_utils import direct_register_custom_op
-from vllm.v1.attention.backends.mla.indexer import (
-    DeepseekV32IndexerBackend,
-    DeepseekV32IndexerMetadata,
-)
-from vllm.v1.kv_cache_interface import KVCacheSpec, MLAAttentionSpec
-from vllm.v1.worker.workspace import current_workspace_manager
+from vllm.transformers_utils.configs.AXK1 import AXK1Config
 
 from .interfaces import MixtureOfExperts, SupportsEagle, SupportsLoRA, SupportsPP
 from .utils import (
@@ -93,18 +82,9 @@ from .utils import (
     maybe_prefix,
 )
 
-if current_platform.is_cuda_alike():
-    from vllm import _custom_ops as ops
-elif current_platform.is_xpu():
-    from vllm._ipex_ops import ipex_ops as ops
 
 logger = init_logger(__name__)
 
-from vllm.model_executor.models.deepseek_v2 import (
-    DeepseekAttention,
-    DeepseekV2MLP,
-    Indexer,
-)
 
 
 class AXK1MLP(DeepseekV2MLP):
@@ -114,7 +94,7 @@ class AXK1MLP(DeepseekV2MLP):
 class AXK1MoE(nn.Module):
     def __init__(
         self,
-        config,
+        config: AXK1Config,
         parallel_config: ParallelConfig,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
@@ -123,7 +103,7 @@ class AXK1MoE(nn.Module):
         self.tp_size = get_tensor_model_parallel_world_size()
         self.tp_rank = get_tensor_model_parallel_rank()
 
-        self.routed_scaling_factor = getattr(config, "routed_scaling_factor", 1.0)
+        self.routed_scaling_factor = config.routed_scaling_factor
 
         self.ep_group = get_ep_group().device_group
         self.ep_rank = get_ep_group().rank_in_group
@@ -146,7 +126,7 @@ class AXK1MoE(nn.Module):
             quant_config=None,
             prefix=f"{prefix}.gate",
         )
-        if getattr(config, "topk_method", None) == "noaux_tc":
+        if config.topk_method == "noaux_tc":
             self.gate.e_score_correction_bias = nn.Parameter(
                 torch.empty(config.n_routed_experts, dtype=torch.float32)
             )
@@ -197,10 +177,10 @@ class AXK1MoE(nn.Module):
             renormalize=config.norm_topk_prob,
             quant_config=quant_config,
             use_grouped_topk=True,
-            num_expert_group=getattr(config, "n_group", 1),
-            topk_group=getattr(config, "topk_group", 1),
+            num_expert_group=config.n_group,
+            topk_group=config.topk_group,
             prefix=f"{prefix}.experts",
-            scoring_func=getattr(config, "scoring_func", "softmax"),
+            scoring_func=config.scoring_func,
             # we do scaling outside, set factor to 1.0 to avoid double mul
             # aiter applies routed_scaling_factor internally
             routed_scaling_factor=1.0
@@ -268,14 +248,6 @@ class AXK1MoE(nn.Module):
         return final_hidden_states.view(num_tokens, hidden_dim)
 
 
-def yarn_get_mscale(scale: float = 1, mscale: float = 1) -> float:
-    import math
-
-    if scale <= 1:
-        return 1.0
-    return 0.1 * mscale * math.log(scale) + 1.0
-
-
 def _get_llama_4_scaling(
     original_max_position_embeddings: int, scaling_beta: float, positions: torch.Tensor
 ) -> torch.Tensor:
@@ -290,7 +262,7 @@ class AXK1Attention(nn.Module):
     def __init__(
         self,
         vllm_config: VllmConfig,
-        config,
+        config: AXK1Config,
         hidden_size: int,
         num_heads: int,
         qk_nope_head_dim: int,
@@ -385,10 +357,7 @@ class AXK1Attention(nn.Module):
             is_neox_style=False,
         )
 
-        if (
-            config.rope_parameters["rope_type"] != "default"
-            and config.rope_parameters["rope_type"] == "deepseek_yarn"
-        ):
+        if config.rope_parameters["rope_type"] == "deepseek_yarn":
             mscale_all_dim = config.rope_parameters.get("mscale_all_dim", False)
             scaling_factor = config.rope_parameters["factor"]
             mscale = yarn_get_mscale(scaling_factor, float(mscale_all_dim))
@@ -463,7 +432,7 @@ class AXK1MLAAttention(nn.Module):
     def __init__(
         self,
         vllm_config: VllmConfig,
-        config,
+        config: AXK1Config,
         hidden_size: int,
         num_heads: int,
         qk_nope_head_dim: int,
@@ -560,16 +529,14 @@ class AXK1MLAAttention(nn.Module):
             is_neox_style=False,
         )
 
-        if (
-            config.rope_parameters["rope_type"] != "default"
-            and config.rope_parameters["rope_type"] == "deepseek_yarn"
-        ):
+        if config.rope_parameters["rope_type"] == "deepseek_yarn":
             mscale_all_dim = config.rope_parameters.get("mscale_all_dim", False)
             scaling_factor = config.rope_parameters["factor"]
             mscale = yarn_get_mscale(scaling_factor, float(mscale_all_dim))
             self.scaling = self.scaling * mscale * mscale
 
         self.is_v32 = hasattr(config, "index_topk")
+        logger.info(f"[DEBUG!!!] is_v32: {self.is_v32}")
 
         if self.is_v32:
             self.indexer_rope_emb = get_rope(
@@ -641,7 +608,7 @@ class AXK1DecoderLayer(nn.Module):
         self,
         vllm_config: VllmConfig,
         prefix: str,
-        config = None,
+        config: AXK1Config | None = None,
         topk_indices_buffer: torch.Tensor | None = None,
     ) -> None:
         super().__init__()
@@ -654,22 +621,19 @@ class AXK1DecoderLayer(nn.Module):
         parallel_config = vllm_config.parallel_config
 
         self.hidden_size = config.hidden_size
-        max_position_embeddings = getattr(config, "max_position_embeddings", 8192)
-        moe_layer_freq = getattr(config, "moe_layer_freq", 1)
+        max_position_embeddings = config.max_position_embeddings
+        moe_layer_freq = config.moe_layer_freq
         # DecoderLayers are created with `make_layers` which passes the prefix
         # with the layer's index.
         layer_idx = int(prefix.split(sep=".")[-1])
         self.layer_idx = layer_idx
 
         # verify MLA attention specific fields
-        qk_nope_head_dim = getattr(config, "qk_nope_head_dim", 0)
-        qk_rope_head_dim = getattr(config, "qk_rope_head_dim", 0)
-        v_head_dim = getattr(config, "v_head_dim", 0)
-        kv_lora_rank = getattr(config, "kv_lora_rank", 0)
-        use_mha = config.model_type == "deepseek" or all(
-            dim == 0 for dim in (qk_nope_head_dim, qk_rope_head_dim)
-        )
-
+        qk_nope_head_dim = config.qk_nope_head_dim
+        qk_rope_head_dim = config.qk_rope_head_dim
+        v_head_dim = config.v_head_dim
+        kv_lora_rank = config.kv_lora_rank
+        use_mha = all(dim == 0 for dim in (qk_nope_head_dim, qk_rope_head_dim))
         self.use_mha = use_mha
 
         if use_mha:
@@ -686,7 +650,7 @@ class AXK1DecoderLayer(nn.Module):
             qk_nope_head_dim=qk_nope_head_dim,
             qk_rope_head_dim=qk_rope_head_dim,
             v_head_dim=v_head_dim,
-            q_lora_rank=config.q_lora_rank if hasattr(config, "q_lora_rank") else None,
+            q_lora_rank=config.q_lora_rank,
             kv_lora_rank=kv_lora_rank,
             max_position_embeddings=max_position_embeddings,
             cache_config=cache_config,
@@ -721,7 +685,7 @@ class AXK1DecoderLayer(nn.Module):
         self.post_mlp_layernorm = RMSNorm(
             config.hidden_size, eps=config.rms_norm_eps
         )
-        self.routed_scaling_factor = getattr(config, "routed_scaling_factor", 1.0)
+        self.routed_scaling_factor = config.routed_scaling_factor
         self.config = config
 
     def forward(
@@ -795,6 +759,7 @@ class AXK1Model(nn.Module):
 
         self.vocab_size = config.vocab_size
         self.is_v32 = hasattr(config, "index_topk")
+        logger.info(f"[DEBUG!!!] is_v32: {self.is_v32}")
         if self.is_v32:
             topk_tokens = config.index_topk
             topk_indices_buffer = torch.empty(
@@ -896,7 +861,7 @@ class AXK1MixtureOfExperts(MixtureOfExperts):
             self.num_routed_experts = 0
             self.num_shared_experts = 0
             self.num_redundant_experts = 0
-            logger.warning("DeepSeekV2: No AXK1MoE layer found in model.layers.")
+            logger.warning("AXK1: No AXK1MoE layer found in model.layers.")
         else:
             self.num_logical_experts = example_moe.n_logical_experts
             self.num_physical_experts = example_moe.n_physical_experts
@@ -931,16 +896,14 @@ class AXK1ForCausalLM(
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
-        config = vllm_config.model_config.hf_config
+        config: AXK1Config = vllm_config.model_config.hf_config
         quant_config = vllm_config.quant_config
         self.config = config
         self.quant_config = quant_config
 
-        qk_nope_head_dim = getattr(config, "qk_nope_head_dim", 0)
-        qk_rope_head_dim = getattr(config, "qk_rope_head_dim", 0)
-        self.use_mha = config.model_type == "deepseek" or all(
-            dim == 0 for dim in (qk_nope_head_dim, qk_rope_head_dim)
-        )
+        qk_nope_head_dim = config.qk_nope_head_dim
+        qk_rope_head_dim = config.qk_rope_head_dim
+        self.use_mha = all(dim == 0 for dim in (qk_nope_head_dim, qk_rope_head_dim))
 
         if self.use_mha:
             self.packed_modules_mapping["qkv_proj"] = ["q_proj", "k_proj", "v_proj"]
@@ -949,9 +912,7 @@ class AXK1ForCausalLM(
         # initializing AXK1Model, as it is passed inplace to
         # quantization config init and may be used to select the
         # quant_method for relevant layers during initialization.
-        self.fuse_qkv_a_proj = (
-            hasattr(config, "q_lora_rank") and config.q_lora_rank is not None
-        )
+        self.fuse_qkv_a_proj = config.q_lora_rank is not None
         if self.fuse_qkv_a_proj:
             self.packed_modules_mapping["fused_qkv_a_proj"] = [
                 "q_a_proj",
@@ -1240,15 +1201,8 @@ class AXK1ForCausalLM(
         return loaded_params
 
 
-# Compatibility with
-# https://huggingface.co/deepseek-ai/DeepSeek-V3-Base/blob/main/configuration_deepseek.py
-def get_spec_layer_idx_from_weight_name(
-    config, weight_name: str
-) -> int | None:
-    if (
-        hasattr(config, "num_nextn_predict_layers")
-        and config.num_nextn_predict_layers > 0
-    ):
+def get_spec_layer_idx_from_weight_name(config: AXK1Config, weight_name: str) -> int | None:
+    if config.num_nextn_predict_layers and config.num_nextn_predict_layers > 0:
         layer_idx = config.num_hidden_layers
         for i in range(config.num_nextn_predict_layers):
             if weight_name.startswith(f"model.layers.{layer_idx + i}."):
