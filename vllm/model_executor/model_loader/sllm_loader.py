@@ -98,7 +98,10 @@ class ServerlessLLMLoader(BaseModelLoader):
         # ServerlessLLM Store requires a global model path as the model ID
         storage_path = os.getenv("SLLM_STORAGE_PATH")
         if storage_path is None:
-            raise ValueError("Please set the SLLM_STORAGE_PATH environment variable. This path should point to the root of the ServerlessLLM storage.")
+            raise ValueError(
+                "Please set the SLLM_STORAGE_PATH environment variable. "
+                "This path should point to the root of the ServerlessLLM storage."
+            )
         model_path = remove_prefix(local_model_path, storage_path)
 
         device_id = torch.cuda.current_device()
@@ -115,35 +118,35 @@ class ServerlessLLMLoader(BaseModelLoader):
             device_map = {"": device_id}
             sllm_state_dict = load_dict(model_path, device_map)
 
-            # Build mapping of model parameter names and track unloaded keys
-            param_dict = dict(model.named_parameters())
-            unloaded_params = set(param_dict.keys())
+            # Filter out subtensors (tensors sharing memory) before validation
+            state_dict = self._filter_subtensors(model.state_dict())
+            unloaded_keys = set(state_dict.keys())
 
             # Directly assign pre-sharded weights to parameters
+            param_dict = dict(model.named_parameters())
             for name, loaded_tensor in sllm_state_dict.items():
                 if name in param_dict:
                     param = param_dict[name]
                     # Weights are already sharded, directly assign
                     param.data.copy_(loaded_tensor)
-                    unloaded_params.discard(name)
+                    unloaded_keys.discard(name)
 
             # Load other weights (e.g., buffers)
             buff_dict = dict(model.named_buffers())
-            unloaded_buffers = set(buff_dict.keys())
             for name, loaded_tensor in sllm_state_dict.items():
                 if name in buff_dict:
                     buff = buff_dict[name]
                     buff.data.copy_(loaded_tensor)
-                    unloaded_buffers.discard(name)
+                    unloaded_keys.discard(name)
+
+            for name, buffer in model.named_buffers(recurse=True):
+                if buffer.device.type != "cuda":
+                    buffer.data = buffer.data.to(f"cuda:{device_id}")
 
             # Validate that all parameters were loaded
-            if unloaded_params:
+            if unloaded_keys:
                 raise ValueError(
-                    f"Missing keys {tuple(sorted(unloaded_params))} in loaded state!"
-                )
-            if unloaded_buffers:
-                raise ValueError(
-                    f"Missing buffer keys {tuple(sorted(unloaded_buffers))} in loaded state!"  # noqa: E501
+                    f"Missing keys {tuple(sorted(unloaded_keys))} in loaded state!"
                 )
 
             # Process weights after loading (initializes attention buffers with correct dtype) #noqa: E501
@@ -155,7 +158,9 @@ class ServerlessLLMLoader(BaseModelLoader):
         pass
 
     def load_weights(self, model, model_config):
-        raise NotImplementedError("ServerlessLLMLoader does not support in-place weight reloading.")
+        raise NotImplementedError(
+            "ServerlessLLMLoader does not support in-place weight reloading."
+        )
 
     @staticmethod
     def save_model(
