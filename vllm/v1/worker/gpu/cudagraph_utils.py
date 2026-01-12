@@ -10,7 +10,11 @@ from tqdm import tqdm
 
 from vllm.config import VllmConfig
 from vllm.config.compilation import CUDAGraphMode
-from vllm.distributed.parallel_state import graph_capture, is_global_first_rank
+from vllm.distributed.parallel_state import (
+    get_dcp_group,
+    graph_capture,
+    is_global_first_rank,
+)
 from vllm.forward_context import set_forward_context
 from vllm.v1.attention.backends.utils import AttentionMetadataBuilder
 from vllm.v1.core.sched.output import SchedulerOutput
@@ -80,6 +84,12 @@ class CudaGraphManager:
         num_reqs = min(num_tokens, self.max_num_reqs)
         input_ids = input_buffers.input_ids[:num_tokens]
         positions = input_buffers.positions[:num_tokens]
+        parallel_config = self.vllm_config.parallel_config
+        dcp_world_size = parallel_config.decode_context_parallel_size
+        try:
+            dcp_rank = get_dcp_group().rank_in_group
+        except AssertionError:
+            dcp_rank = 0
         attn_metadata = prepare_inputs_to_capture(
             num_reqs,
             num_tokens,
@@ -88,6 +98,9 @@ class CudaGraphManager:
             attn_metadata_builders,
             self.max_model_len,
             kv_cache_config,
+            dcp_world_size=dcp_world_size,
+            dcp_rank=dcp_rank,
+            cp_kv_cache_interleave_size=parallel_config.cp_kv_cache_interleave_size,
         )
         num_tokens_across_dp = make_num_tokens_across_dp(self.dp_size, num_tokens)
 
@@ -226,6 +239,9 @@ def prepare_inputs_to_capture(
     attn_metadata_builders: list[AttentionMetadataBuilder],
     max_model_len: int,
     kv_cache_config: KVCacheConfig,
+    dcp_world_size: int = 1,
+    dcp_rank: int = 0,
+    cp_kv_cache_interleave_size: int = 1,
 ) -> dict[str, Any]:
     num_tokens_per_req = num_tokens // num_reqs
 
@@ -255,5 +271,8 @@ def prepare_inputs_to_capture(
         block_tables=input_block_tables,
         slot_mappings=slot_mappings,
         kv_cache_config=kv_cache_config,
+        dcp_world_size=dcp_world_size,
+        dcp_rank=dcp_rank,
+        cp_kv_cache_interleave_size=cp_kv_cache_interleave_size,
     )
     return attn_metadata
