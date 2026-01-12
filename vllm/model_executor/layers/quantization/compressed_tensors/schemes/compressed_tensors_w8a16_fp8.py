@@ -165,8 +165,6 @@ class CompressedTensorsW8A16Fp8(CompressedTensorsScheme):
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
         if current_platform.is_xpu():
-            import vllm_xpu_kernels._C  # noqa: F401
-            import vllm_xpu_kernels._xpu_C  # noqa: F401
             return torch.ops._xpu_C.fp8_gemm_w8a16(x, layer.weight, layer.weight_scale, bias)
         return apply_fp8_marlin_linear(
             input=x,
