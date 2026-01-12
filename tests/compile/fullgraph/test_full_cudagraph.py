@@ -9,10 +9,10 @@ import pytest
 from tests.utils import wait_for_gpu_memory_to_clear
 from tests.v1.attention.utils import full_cg_backend_configs as backend_configs
 from vllm import LLM, SamplingParams
-from vllm.attention.backends.registry import AttentionBackendEnum
 from vllm.config import CompilationConfig
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import is_torch_equal_or_newer
+from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 
 @contextlib.contextmanager

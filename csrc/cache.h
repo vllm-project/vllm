@@ -27,6 +27,13 @@ void concat_and_cache_mla(torch::Tensor& kv_c, torch::Tensor& k_pe,
                           const std::string& kv_cache_dtype,
                           torch::Tensor& scale);
 
+// NOTE: k_pe and kv_c order is flipped compared to concat_and_cache_mla
+void concat_and_cache_mla_rope_fused(
+    torch::Tensor& positions, torch::Tensor& q_pe, torch::Tensor& k_pe,
+    torch::Tensor& kv_c, torch::Tensor& rope_cos_sin_cache, bool rope_is_neox,
+    torch::Tensor& kv_cache_slot_mapping, torch::Tensor& kv_cache,
+    const std::string& kv_cache_dtype, torch::Tensor& kv_cache_quant_scale);
+
 // Just for unittest
 void convert_fp8(torch::Tensor& dst_cache, torch::Tensor& src_cache,
                  const double scale, const std::string& kv_cache_dtype);

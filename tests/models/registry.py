@@ -306,6 +306,12 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
     "InternLM3ForCausalLM": _HfExamplesInfo(
         "internlm/internlm3-8b-instruct", trust_remote_code=True
     ),
+    "IQuestCoderForCausalLM": _HfExamplesInfo(
+        "IQuestLab/IQuest-Coder-V1-40B-Instruct", trust_remote_code=True
+    ),
+    "IQuestLoopCoderForCausalLM": _HfExamplesInfo(
+        "IQuestLab/IQuest-Coder-V1-40B-Loop-Instruct", trust_remote_code=True
+    ),
     "JAISLMHeadModel": _HfExamplesInfo("inceptionai/jais-13b-chat"),
     "Jais2ForCausalLM": _HfExamplesInfo(
         "inceptionai/Jais-2-8B-Chat", min_transformers_version="4.58"
@@ -702,6 +708,7 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     "IsaacForConditionalGeneration": _HfExamplesInfo(
         "PerceptronAI/Isaac-0.1",
         trust_remote_code=True,
+        extras={"0.2-2B-Preview": "PerceptronAI/Isaac-0.2-2B-Preview"},
     ),
     "InternS1ForConditionalGeneration": _HfExamplesInfo(
         "internlm/Intern-S1", trust_remote_code=True

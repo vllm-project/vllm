@@ -577,7 +577,9 @@ class ChatCompletionRequest(OpenAIBaseModel):
     min_tokens: int = 0
     skip_special_tokens: bool = True
     spaces_between_special_tokens: bool = True
-    truncate_prompt_tokens: Annotated[int, Field(ge=-1)] | None = None
+    truncate_prompt_tokens: Annotated[int, Field(ge=-1, le=_LONG_INFO.max)] | None = (
+        None
+    )
     prompt_logprobs: int | None = None
     allowed_token_ids: list[int] | None = None
     bad_words: list[str] = Field(default_factory=list)
@@ -1058,7 +1060,9 @@ class CompletionRequest(OpenAIBaseModel):
     min_tokens: int = 0
     skip_special_tokens: bool = True
     spaces_between_special_tokens: bool = True
-    truncate_prompt_tokens: Annotated[int, Field(ge=-1)] | None = None
+    truncate_prompt_tokens: Annotated[int, Field(ge=-1, le=_LONG_INFO.max)] | None = (
+        None
+    )
     allowed_token_ids: list[int] | None = None
     prompt_logprobs: int | None = None
     # --8<-- [end:completion-sampling-params]
