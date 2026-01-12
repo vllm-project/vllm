@@ -1040,9 +1040,9 @@ def reorder_batch_to_split_decodes_and_prefills(
     num_scheduled_tokens_np = np.array(num_scheduled_tokens)
     num_computed_tokens_np = input_batch.num_computed_tokens_cpu[:num_reqs]
 
-    is_decode = num_scheduled_tokens_np <= decode_threshold
-    is_extend = (~is_decode) & (num_computed_tokens_np > 0)
-    is_prefill = (~is_decode) & (num_computed_tokens_np == 0)
+    is_prefill = num_computed_tokens_np == 0
+    is_decode = (num_scheduled_tokens_np <= decode_threshold) & (~is_prefill)
+    is_extend = (num_scheduled_tokens_np > decode_threshold) & (~is_prefill)
 
     # Desired order: decode → extend → prefill
     req_regions = np.zeros(is_decode.shape, dtype=np.int32)  # 0 = decode by default
