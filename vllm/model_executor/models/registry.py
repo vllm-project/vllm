@@ -35,10 +35,11 @@ from vllm.utils.hashing import safe_hash
 
 if TYPE_CHECKING:
     from vllm.config.model import AttnTypeStr
-    from vllm.config.pooler import PoolingTypeStr
+    from vllm.config.pooler import SequencePoolingType, TokenPoolingType
 else:
     AttnTypeStr = Any
-    PoolingTypeStr = Any
+    SequencePoolingType = Any
+    TokenPoolingType = Any
 
 
 from .interfaces import (
@@ -57,7 +58,8 @@ from .interfaces import (
 )
 from .interfaces_base import (
     get_attn_type,
-    get_default_pooling_type,
+    get_default_seq_pooling_type,
+    get_default_tok_pooling_type,
     is_pooling_model,
     is_text_generation_model,
 )
@@ -119,7 +121,8 @@ _TEXT_GENERATION_MODELS = {
     "GraniteMoeHybridForCausalLM": ("granitemoehybrid", "GraniteMoeHybridForCausalLM"),  # noqa: E501
     "GraniteMoeSharedForCausalLM": ("granitemoeshared", "GraniteMoeSharedForCausalLM"),  # noqa: E501
     "GritLM": ("gritlm", "GritLM"),
-    "Grok1ModelForCausalLM": ("grok1", "Grok1ForCausalLM"),
+    "Grok1ModelForCausalLM": ("grok1", "GrokForCausalLM"),
+    "Grok1ForCausalLM": ("grok1", "GrokForCausalLM"),
     "HunYuanMoEV1ForCausalLM": ("hunyuan_v1", "HunYuanMoEV1ForCausalLM"),
     "HunYuanDenseV1ForCausalLM": ("hunyuan_v1", "HunYuanDenseV1ForCausalLM"),
     "HCXVisionForCausalLM": ("hyperclovax_vision", "HCXVisionForCausalLM"),
@@ -127,6 +130,8 @@ _TEXT_GENERATION_MODELS = {
     "InternLM2ForCausalLM": ("internlm2", "InternLM2ForCausalLM"),
     "InternLM2VEForCausalLM": ("internlm2_ve", "InternLM2VEForCausalLM"),
     "InternLM3ForCausalLM": ("llama", "LlamaForCausalLM"),
+    "IQuestCoderForCausalLM": ("llama", "LlamaForCausalLM"),
+    "IQuestLoopCoderForCausalLM": ("iquest_loopcoder", "IQuestLoopCoderForCausalLM"),
     "JAISLMHeadModel": ("jais", "JAISLMHeadModel"),
     "Jais2ForCausalLM": ("jais2", "Jais2ForCausalLM"),
     "JambaForCausalLM": ("jamba", "JambaForCausalLM"),
@@ -348,6 +353,7 @@ _MULTIMODAL_MODELS = {
         "lightonocr",
         "LightOnOCRForConditionalGeneration",
     ),
+    "Lfm2VlForConditionalGeneration": ("lfm2_vl", "Lfm2VLForConditionalGeneration"),
     "Llama_Nemotron_Nano_VL": ("nemotron_vl", "LlamaNemotronVLChatModel"),
     "Llama4ForConditionalGeneration": ("mllama4", "Llama4ForConditionalGeneration"),  # noqa: E501
     "LlavaForConditionalGeneration": ("llava", "LlavaForConditionalGeneration"),
@@ -544,7 +550,8 @@ class _ModelInfo:
     is_text_generation_model: bool
     is_pooling_model: bool
     attn_type: AttnTypeStr
-    default_pooling_type: PoolingTypeStr
+    default_seq_pooling_type: SequencePoolingType
+    default_tok_pooling_type: TokenPoolingType
     supports_cross_encoding: bool
     supports_multimodal: bool
     supports_multimodal_raw_input_only: bool
@@ -565,7 +572,8 @@ class _ModelInfo:
             architecture=model.__name__,
             is_text_generation_model=is_text_generation_model(model),
             is_pooling_model=is_pooling_model(model),
-            default_pooling_type=get_default_pooling_type(model),
+            default_seq_pooling_type=get_default_seq_pooling_type(model),
+            default_tok_pooling_type=get_default_tok_pooling_type(model),
             attn_type=get_attn_type(model),
             supports_cross_encoding=supports_cross_encoding(model),
             supports_multimodal=supports_multimodal(model),

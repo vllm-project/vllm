@@ -404,6 +404,11 @@ def test_processing_correctness(
         pytest.skip("Fix later")
     if model_id == "jinaai/jina-reranker-m0":
         pytest.skip("Fix later")
+    if model_id in {"Qwen/Qwen-VL", "Qwen/Qwen-VL-Chat"}:
+        pytest.skip(
+            "Qwen-VL tokenizer requires downloading a font file from "
+            "servers that often refuse connections in CI"
+        )
 
     _test_processing_correctness(
         model_id,

@@ -88,6 +88,7 @@ def dispatch_rocm_rmsnorm_func(
     return rms_norm
 
 
+# --8<-- [start:rms_norm]
 @CustomOp.register("rms_norm")
 class RMSNorm(CustomOp):
     """Root mean square normalization.
@@ -95,6 +96,8 @@ class RMSNorm(CustomOp):
     Computes x -> w * x / sqrt(E[x^2] + eps) where w is the learned weight.
     Refer to https://arxiv.org/abs/1910.07467
     """
+
+    # --8<-- [end:rms_norm]
 
     def __init__(
         self,
@@ -253,6 +256,7 @@ class RMSNorm(CustomOp):
         return s
 
 
+# --8<-- [start:gemma_rms_norm]
 @CustomOp.register("gemma_rms_norm")
 class GemmaRMSNorm(CustomOp):
     """RMS normalization for Gemma.
@@ -261,6 +265,8 @@ class GemmaRMSNorm(CustomOp):
         1. x * (1 + w) instead of x * w.
         2. (x * w).to(orig_dtype) instead of x.to(orig_dtype) * w.
     """
+
+    # --8<-- [end:gemma_rms_norm]
 
     def __init__(
         self,
@@ -321,6 +327,7 @@ class GemmaRMSNorm(CustomOp):
         return self.forward_native(x, residual)
 
 
+# --8<-- [start:rms_norm_gated]
 @CustomOp.register("rms_norm_gated")
 class RMSNormGated(CustomOp):
     """RMS Normalization with optional gating.
@@ -330,6 +337,8 @@ class RMSNormGated(CustomOp):
     - Group RMS normalization
     - Optional gating with SiLU activation
     """
+
+    # --8<-- [end:rms_norm_gated]
 
     def __init__(
         self,
