@@ -16,6 +16,7 @@ from typing import Any, TypeVar, cast
 import msgspec
 import zmq
 
+from vllm import envs
 from vllm.config import ParallelConfig, VllmConfig
 from vllm.distributed import stateless_destroy_torch_distributed_process_group
 from vllm.envs import enable_envs_cache
@@ -660,6 +661,10 @@ class EngineCoreProc(EngineCore):
         identity = self.engine_index.to_bytes(length=2, byteorder="little")
         self.engines_running = False
 
+        self._coord_heartbeat_timeout_s = envs.VLLM_DP_COORDINATOR_HEARTBEAT_TIMEOUT_S
+        self._last_coord_heartbeat: float | None = None
+        self._coord_watchdog_thread: threading.Thread | None = None
+
         with self._perform_handshakes(
             handshake_address,
             identity,
@@ -733,6 +738,8 @@ class EngineCoreProc(EngineCore):
                     raise RuntimeError("Input socket thread died during startup")
                 assert addresses.coordinator_input is not None
                 logger.info("Waiting for READY message from DP Coordinator...")
+            if self.has_coordinator:
+                self._start_coord_watchdog()
 
     @contextmanager
     def _perform_handshakes(
@@ -1065,6 +1072,34 @@ class EngineCoreProc(EngineCore):
                 "to send. Please report this issue."
             )
 
+    def _mark_coord_heartbeat(self) -> None:
+        self._last_coord_heartbeat = time.monotonic()
+
+    def _start_coord_watchdog(self) -> None:
+        if self._coord_heartbeat_timeout_s <= 0:
+            return
+        self._mark_coord_heartbeat()
+        timeout_s = self._coord_heartbeat_timeout_s
+
+        def monitor():
+            interval = max(0.5, min(2.0, timeout_s / 3))
+            while True:
+                time.sleep(interval)
+                last = self._last_coord_heartbeat
+                if last is None:
+                    continue
+                if time.monotonic() - last > timeout_s:
+                    logger.error(
+                        "DP coordinator heartbeat timed out (>%ss); exiting.",
+                        timeout_s,
+                    )
+                    os._exit(1)
+
+        self._coord_watchdog_thread = threading.Thread(
+            target=monitor, daemon=True, name="DPCoordWatchdog"
+        )
+        self._coord_watchdog_thread.start()
+
     def process_input_sockets(
         self,
         input_addresses: list[str],
@@ -1114,6 +1149,7 @@ class EngineCoreProc(EngineCore):
             if coord_socket is not None:
                 # Wait for ready message from coordinator.
                 assert coord_socket.recv() == b"READY"
+                self._mark_coord_heartbeat()
                 poller.register(coord_socket, zmq.POLLIN)
 
             ready_event.set()
@@ -1123,6 +1159,9 @@ class EngineCoreProc(EngineCore):
                     # (RequestType, RequestData)
                     type_frame, *data_frames = input_socket.recv_multipart(copy=False)
                     request_type = EngineCoreRequestType(bytes(type_frame.buffer))
+                    if request_type == EngineCoreRequestType.HEARTBEAT:
+                        self._mark_coord_heartbeat()
+                        continue
 
                     # Deserialize the request data.
                     request: Any

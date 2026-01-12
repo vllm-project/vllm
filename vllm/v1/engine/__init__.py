@@ -205,6 +205,8 @@ class EngineCoreRequestType(enum.Enum):
     UTILITY = b"\x03"
     # Sentinel used within EngineCoreProc.
     EXECUTOR_FAILED = b"\x04"
+    # DP headless process heartbeat.
+    HEARTBEAT = b"\x05"
 
 
 class ReconfigureDistributedRequest(msgspec.Struct):

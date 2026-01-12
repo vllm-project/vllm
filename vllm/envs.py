@@ -619,6 +619,14 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_ENGINE_READY_TIMEOUT_S": lambda: int(
         os.environ.get("VLLM_ENGINE_READY_TIMEOUT_S", "600")
     ),
+    # Interval in seconds for DP coordinator heartbeat messages.
+    "VLLM_DP_COORDINATOR_HEARTBEAT_INTERVAL_S": lambda: float(
+        os.environ.get("VLLM_DP_COORDINATOR_HEARTBEAT_INTERVAL_S", "2")
+    ),
+    # Timeout in seconds before engines exit if DP coordinator is unreachable.
+    "VLLM_DP_COORDINATOR_HEARTBEAT_TIMEOUT_S": lambda: float(
+        os.environ.get("VLLM_DP_COORDINATOR_HEARTBEAT_TIMEOUT_S", "10")
+    ),
     # API key for vLLM API server
     "VLLM_API_KEY": lambda: os.environ.get("VLLM_API_KEY", None),
     # Whether to log responses from API Server for debugging
