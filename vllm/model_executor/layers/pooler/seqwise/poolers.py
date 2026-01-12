@@ -5,10 +5,15 @@ from typing import TypeAlias
 
 import torch
 
-from vllm.config import PoolerConfig
+from vllm.config import PoolerConfig, get_current_vllm_config
 from vllm.model_executor.layers.pooler import ClassifierFn, PoolingParamsUpdate
 from vllm.model_executor.layers.pooler.abstract import Pooler
-from vllm.model_executor.layers.pooler.activations import PoolerActivation
+from vllm.model_executor.layers.pooler.activations import (
+    PoolerActivation,
+    PoolerNormalize,
+    resolve_classifier_act_fn,
+)
+from vllm.model_executor.models.adapters import _load_st_projector
 from vllm.tasks import POOLING_TASKS, PoolingTask
 from vllm.v1.pool.metadata import PoolingMetadata
 
@@ -86,7 +91,14 @@ class SequencePooler(Pooler):
 
 def pooler_for_embed(pooler_config: PoolerConfig):
     pooling = get_seq_pooling_method(pooler_config.get_seq_pooling_type())
-    head = EmbeddingPoolerHead()
+
+    vllm_config = get_current_vllm_config()
+    model_config = vllm_config.model_config
+    head = EmbeddingPoolerHead(
+        projector=_load_st_projector(model_config),
+        head_dtype=model_config.head_dtype,
+        activation=PoolerNormalize(),
+    )
 
     return SequencePooler(pooling=pooling, head=head)
 
@@ -101,6 +113,15 @@ def pooler_for_classify(
     if pooling is None:
         pooling = get_seq_pooling_method(pooler_config.get_seq_pooling_type())
 
-    head = ClassifierPoolerHead(classifier=classifier, act_fn=act_fn)
+    vllm_config = get_current_vllm_config()
+    model_config = vllm_config.model_config
+    head = ClassifierPoolerHead(
+        classifier=classifier,
+        logit_bias=model_config.pooler_config.logit_bias,
+        head_dtype=model_config.head_dtype,
+        activation=resolve_classifier_act_fn(
+            model_config, static_num_labels=True, act_fn=act_fn
+        ),
+    )
 
     return SequencePooler(pooling=pooling, head=head)
