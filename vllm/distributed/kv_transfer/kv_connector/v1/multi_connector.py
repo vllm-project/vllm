@@ -394,23 +394,26 @@ class MultiConnector(KVConnectorBase_V1):
         return metadata
 
     def update_connector_output(self, connector_output: KVConnectorOutput):
-        multi_connector_kv_cache_events = None
-        if connector_output.kv_cache_events is not None:
-            multi_connector_kv_cache_events = copy.deepcopy(
-                connector_output.kv_cache_events
-            )
+        import dataclasses
+
+        original_kv_cache_events = connector_output.kv_cache_events
+        if not isinstance(original_kv_cache_events, MultiConnectorKVEvents):
+            for c in self._connectors:
+                c.update_connector_output(connector_output)
+            return
+
         for c in self._connectors:
-            if multi_connector_kv_cache_events is not None:
-                try:
-                    connector_output.kv_cache_events = (
-                        multi_connector_kv_cache_events.get_connector_events(
-                            c.__class__.__name__
-                        )
-                    )
-                except KeyError:
-                    connector_output.kv_cache_events = None
-            c.update_connector_output(connector_output)
-        connector_output.kv_cache_events = multi_connector_kv_cache_events
+            try:
+                kv_cache_events_per_connector = (
+                    original_kv_cache_events.get_connector_events(c.__class__.__name__)
+                )
+            except KeyError:
+                kv_cache_events_per_connector = None
+
+            connector_output_per_connector = dataclasses.replace(
+                connector_output, kv_cache_events=kv_cache_events_per_connector
+            )
+            c.update_connector_output(connector_output_per_connector)
 
     def get_handshake_metadata(self) -> KVConnectorHandshakeMetadata | None:
         """
