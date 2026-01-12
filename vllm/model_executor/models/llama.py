@@ -31,13 +31,14 @@ import torch
 from torch import nn
 from transformers import LlamaConfig
 
-from vllm.attention.backends.abstract import AttentionType
 from vllm.attention.layer import Attention
-from vllm.attention.layers.encoder_only_attention import EncoderOnlyAttention
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.activation import SiluAndMul
+from vllm.model_executor.layers.attention.encoder_only_attention import (
+    EncoderOnlyAttention,
+)
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
     MergedColumnParallelLinear,
@@ -56,6 +57,7 @@ from vllm.model_executor.model_loader.weight_utils import (
     maybe_remap_kv_scale_name,
 )
 from vllm.sequence import IntermediateTensors
+from vllm.v1.attention.backend import AttentionType
 
 from .adapters import as_embedding_model, as_seq_cls_model
 from .interfaces import (
@@ -367,7 +369,11 @@ def llama_model_invariants(
         torch._check(positions.size()[0] == input_ids.size()[0])
 
 
-@support_torch_compile(shape_invariants=llama_model_invariants)
+@support_torch_compile(
+    # TODO[#32068]: Investigate recompilation
+    # mark_unbacked_dims={"input_ids": 0},
+    shape_invariants=llama_model_invariants
+)
 class LlamaModel(nn.Module):
     def __init__(
         self,
