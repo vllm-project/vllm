@@ -36,7 +36,7 @@ class TritonScaledMMLinearKernel(CutlassScaledMMLinearKernel):
         return True, None
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
-        w_q, _, i_s, _, _ = self._get_layer_params(layer)
+        w_q, w_s_name, i_s, _, _ = self._get_layer_params(layer)
         w_q_name, _, i_s_name, i_zp_name, azp_adj_name = self.layer_param_names
 
         replace_parameter(
@@ -50,12 +50,12 @@ class TritonScaledMMLinearKernel(CutlassScaledMMLinearKernel):
         # If we have a fused module (QKV, MLP) with per tensor scales (thus N
         # scales being passed to the kernel), convert to the per-channel case.
         is_fused_module = len(layer.logical_widths) > 1
-        weight_scale = getattr(layer, self.w_s_name)
+        weight_scale = getattr(layer, w_s_name)
         if is_fused_module and not self.config.is_channelwise:
             weight_scale = convert_to_channelwise(weight_scale, layer.logical_widths)
         replace_parameter(
             layer,
-            self.w_s_name,
+            w_s_name,
             torch.nn.Parameter(weight_scale.data, requires_grad=False),
         )
 

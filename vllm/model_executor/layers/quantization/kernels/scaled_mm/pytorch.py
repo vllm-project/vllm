@@ -25,8 +25,8 @@ class TorchScaledMMLinearKernel(FP8ScaledMMLinearKernel):
     def is_supported(
         cls, compute_capability: int | None = None
     ) -> tuple[bool, str | None]:
-        if not current_platform.is_cuda_alike():
-            return False, "requires ROCm or CUDA."
+        if not (current_platform.is_cuda_alike() or current_platform.is_cpu()):
+            return False, "requires ROCm, CUDA or CPU."
 
         if compute_capability is not None and compute_capability < 89:
             return False, "requires compute capability 89 and above."
