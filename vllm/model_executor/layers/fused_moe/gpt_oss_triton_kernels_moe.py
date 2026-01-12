@@ -258,8 +258,7 @@ class BaseOAITritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
 
     @staticmethod
     def _supports_quant_scheme(quant_scheme: FusedMoEQuantScheme) -> bool:
-        return True
-        # return quant_scheme.is_mxfp4_w4a16
+        return quant_scheme.is_mxfp4_w4a16
 
     @staticmethod
     def _supports_activation(activation: str) -> bool:
