@@ -4,6 +4,7 @@
 import dataclasses
 import importlib
 import pickle
+import threading
 from collections.abc import Callable, Sequence
 from functools import partial
 from inspect import isclass
@@ -434,6 +435,8 @@ class MsgpackDecoder:
         self._tensor_buffer: dict[tuple[str | None, str], torch.Tensor] = {}
         # Mapping from request_id to list of tensor keys for cleanup
         self._request_to_tensors: dict[str, list[tuple[str | None, str]]] = {}
+        # Lock to synchronize access between cleanup and decode threads
+        self._buffer_lock = threading.Lock()
         if envs.VLLM_ALLOW_INSECURE_SERIALIZATION:
             _log_insecure_serialization_warning()
 
@@ -536,36 +539,44 @@ class MsgpackDecoder:
 
         # Drain all available tensors. We save them regardless if this is the one
         # we're waiting for as they may arrive out of order from multiple producers.
-        while lookup_key not in self._tensor_buffer:
+        while True:
+            # Check if tensor is already in buffer (with lock)
+            with self._buffer_lock:
+                if lookup_key in self._tensor_buffer:
+                    # Retrieve and remove tensor from buffer
+                    tensor = self._tensor_buffer.pop(lookup_key)
+
+                    # Remove from request tracking when consumed
+                    if (
+                        handle.request_id is not None
+                        and handle.request_id in self._request_to_tensors
+                    ):
+                        try:
+                            self._request_to_tensors[handle.request_id].remove(
+                                lookup_key
+                            )
+                            if not self._request_to_tensors[handle.request_id]:
+                                del self._request_to_tensors[handle.request_id]
+                        except ValueError:
+                            # Tensor was already removed, ignore
+                            pass
+
+                    return tensor
+
+            # Release lock while waiting on queue (important to avoid blocking cleanup)
             ipc_data: TensorIpcData = self.tensor_queue.get(timeout=10.0)
 
-            # Store tensor with tuple key (request_id, tensor_id)
-            tensor_key = (ipc_data.request_id, ipc_data.tensor_id)
-            self._tensor_buffer[tensor_key] = ipc_data.tensor
+            # Store the received tensor (with lock)
+            with self._buffer_lock:
+                # Store tensor with tuple key (request_id, tensor_id)
+                tensor_key = (ipc_data.request_id, ipc_data.tensor_id)
+                self._tensor_buffer[tensor_key] = ipc_data.tensor
 
-            # Track which request this tensor belongs to for cleanup
-            if ipc_data.request_id is not None:
-                if ipc_data.request_id not in self._request_to_tensors:
-                    self._request_to_tensors[ipc_data.request_id] = []
-                self._request_to_tensors[ipc_data.request_id].append(tensor_key)
-
-        # Retrieve and remove tensor from buffer
-        tensor = self._tensor_buffer.pop(lookup_key)
-
-        # Remove from request tracking when consumed
-        if (
-            handle.request_id is not None
-            and handle.request_id in self._request_to_tensors
-        ):
-            try:
-                self._request_to_tensors[handle.request_id].remove(lookup_key)
-                if not self._request_to_tensors[handle.request_id]:
-                    del self._request_to_tensors[handle.request_id]
-            except ValueError:
-                # Tensor was already removed, ignore
-                pass
-
-        return tensor
+                # Track which request this tensor belongs to for cleanup
+                if ipc_data.request_id is not None:
+                    if ipc_data.request_id not in self._request_to_tensors:
+                        self._request_to_tensors[ipc_data.request_id] = []
+                    self._request_to_tensors[ipc_data.request_id].append(tensor_key)
 
     def _decode_mm_items(self, obj: dict[str, Any]) -> MultiModalKwargsItems:
         return MultiModalKwargsItems(
@@ -641,23 +652,24 @@ class MsgpackDecoder:
         Returns:
             The number of tensors that were removed from the buffer.
         """
-        if request_id not in self._request_to_tensors:
-            return 0
+        with self._buffer_lock:
+            if request_id not in self._request_to_tensors:
+                return 0
 
-        tensor_keys = self._request_to_tensors.pop(request_id)
-        removed_count = 0
+            tensor_keys = self._request_to_tensors.pop(request_id)
+            removed_count = 0
 
-        for tensor_key in tensor_keys:
-            if tensor_key in self._tensor_buffer:
-                del self._tensor_buffer[tensor_key]
-                removed_count += 1
-                logger.debug(
-                    "Cleaned up orphaned tensor %s for request %s",
-                    tensor_key[1],  # Just log the tensor_id part
-                    request_id,
-                )
+            for tensor_key in tensor_keys:
+                if tensor_key in self._tensor_buffer:
+                    del self._tensor_buffer[tensor_key]
+                    removed_count += 1
+                    logger.debug(
+                        "Cleaned up orphaned tensor %s for request %s",
+                        tensor_key[1],  # Just log the tensor_id part
+                        request_id,
+                    )
 
-        return removed_count
+            return removed_count
 
     def ext_hook(self, code: int, data: memoryview) -> Any:
         if code == CUSTOM_TYPE_RAW_VIEW:
