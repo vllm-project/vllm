@@ -110,7 +110,7 @@ class BertPooler(SequencePooler):
 
         self.head = EmbeddingPoolerHead(
             projector=self.dense,
-            head_dtype=self.model_config.head_dtype,
+            head_dtype=model_config.head_dtype,
             activation=self.activation,
         )
 
