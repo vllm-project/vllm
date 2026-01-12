@@ -102,25 +102,26 @@ def _prepare_mrope_positions_kernel(
     query_len = query_end - query_start
 
     mrope_delta = tl.load(prefill_mrope_delta_ptr + req_state_idx)
-    for i in tl.static_range(3):
-        for j in range(0, query_len, BLOCK_SIZE):
-            block = j + tl.arange(0, BLOCK_SIZE)
-            mask = block < query_len
-            pos = num_computed + block
+    for i in range(0, query_len, BLOCK_SIZE):
+        block = i + tl.arange(0, BLOCK_SIZE)
+        mask = block < query_len
+        orig_pos = num_computed + block
+
+        for j in tl.static_range(3):
             if is_prefill:
                 # Read from pre-computed M-RoPE positions.
                 pos = tl.load(
                     prefill_mrope_positions_ptr
                     + req_state_idx * prefill_mrope_positions_stride0
-                    + i * prefill_mrope_positions_stride1
-                    + pos,
+                    + j * prefill_mrope_positions_stride1
+                    + orig_pos,
                     mask=mask,
                 )
             else:
                 # Apply M-RoPE delta.
-                pos += mrope_delta
+                pos = orig_pos + mrope_delta
             tl.store(
-                mrope_positions_ptr + i * mrope_positions_stride + query_start + block,
+                mrope_positions_ptr + j * mrope_positions_stride + query_start + block,
                 pos,
                 mask=mask,
             )
