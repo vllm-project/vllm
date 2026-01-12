@@ -223,7 +223,7 @@ def test_decoder_buffer_management():
         device="cpu",
     )
 
-    result = decoder._decode_cuda_queue_tensor(handle)
+    result = decoder._decode_ipc_queue_tensor(handle)
     assert result.shape == (6, 7)
 
     # Verify buffer has tensor_1 and tensor_2 using tuple keys
@@ -239,7 +239,7 @@ def test_decoder_buffer_management():
         device="cpu",
     )
 
-    result2 = decoder._decode_cuda_queue_tensor(handle2)
+    result2 = decoder._decode_ipc_queue_tensor(handle2)
     assert result2.shape == (2, 3)
     # tensor_1 should be removed from buffer
     assert (None, "tensor_1") not in decoder._tensor_buffer
@@ -754,7 +754,7 @@ def test_tensor_cleanup_after_decode():
     )
 
     # Decode the tensor - this should retrieve it from the queue
-    decoded_tensor = decoder._decode_cuda_queue_tensor(handle)
+    decoded_tensor = decoder._decode_ipc_queue_tensor(handle)
 
     # Verify the tensor was decoded
     assert decoded_tensor.shape == tensor.shape, "Decoded tensor should match shape"

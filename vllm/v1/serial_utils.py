@@ -460,7 +460,7 @@ class MsgpackDecoder:
                 # to TensorIpcHandle
                 if isinstance(obj, dict):
                     obj = TensorIpcHandle(**obj)
-                return self._decode_cuda_queue_tensor(obj)
+                return self._decode_ipc_queue_tensor(obj)
             if issubclass(t, torch.Tensor):
                 return self._decode_tensor(obj)
             if t is slice:
@@ -528,7 +528,7 @@ class MsgpackDecoder:
         # Convert back to proper shape & type
         return arr.view(torch_dtype).view(shape)
 
-    def _decode_cuda_queue_tensor(self, handle: TensorIpcHandle) -> torch.Tensor:
+    def _decode_ipc_queue_tensor(self, handle: TensorIpcHandle) -> torch.Tensor:
         """Retrieve a tensor from torch.multiprocessing.Queue.
 
         Works for CUDA and CPU.
@@ -615,7 +615,7 @@ class MsgpackDecoder:
             # values are sometimes floats.
             return obj
         if isinstance(obj, TensorIpcHandle):
-            return self._decode_cuda_queue_tensor(obj)
+            return self._decode_ipc_queue_tensor(obj)
         # Check if this is a dict that represents a TensorIpcHandle
         # (msgspec serializes dataclasses as dicts without type info
         # in nested structures)
@@ -629,7 +629,7 @@ class MsgpackDecoder:
             # Convert dict to TensorIpcHandle and decode it
             # Handle both new format (with request_id) and old format (without)
             handle = TensorIpcHandle(**obj)
-            return self._decode_cuda_queue_tensor(handle)
+            return self._decode_ipc_queue_tensor(handle)
         if not isinstance(obj, list):
             raise TypeError(f"Unexpected NestedTensors contents: {type(obj)}")
         if obj and isinstance(obj[0], str):
