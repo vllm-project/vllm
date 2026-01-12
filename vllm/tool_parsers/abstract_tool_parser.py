@@ -76,17 +76,8 @@ class ToolParser:
 
     def adjust_request(self, request: ChatCompletionRequest) -> ChatCompletionRequest:
         """
-        Adjust the request to add structured output constraints for tool calling.
-
-        This method sets up either:
-        1. Structural tags (preferred) - Constrains only the JSON arguments region
-           while allowing the model to use its native tool call format
-        2. Full JSON schema (fallback) - Constrains the entire output to JSON
-
-        Structural tags are preferred because they:
-        - Allow the model to generate native tool tokens (e.g., <tool_call>)
-        - Enable reasoning/thinking before tool calls
-        - Only constrain the arguments portion to the schema
+        Adjust the request to add structured output constraints for tool calling,
+        either using structural tags or full JSON schema.
         """
         if not request.tools:
             return request
