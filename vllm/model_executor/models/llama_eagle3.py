@@ -48,8 +48,7 @@ class LlamaDecoderLayer(LlamaDecoderLayer):
 
         config = config or vllm_config.model_config.hf_config
         quant_config = self.get_quant_config(vllm_config)
-        cache_config = copy.deepcopy(vllmconfig.cache_config)
-        cache_config.cache_dtype = self.get_kv_cache_dtype(vllm_config, cache_config)
+        cache_config = self.get_cache_config(vllm_config)
 
         # First layer uses 2*hidden_size (embeds + hidden_states concatenated)
         # Subsequent layers use hidden_size (only hidden_states, no embeds)
@@ -76,6 +75,7 @@ class LlamaDecoderLayer(LlamaDecoderLayer):
         else:
             attn_type = AttentionType.ENCODER_ONLY
 
+        # override self_attn
         self.self_attn = LlamaAttention(
             config=config,
             hidden_size=self.hidden_size,
@@ -91,6 +91,7 @@ class LlamaDecoderLayer(LlamaDecoderLayer):
             prefix=f"{prefix}.self_attn",
             attn_type=attn_type,
         )
+        # override mlp
         self.mlp = LlamaMLP(
             hidden_size=self.hidden_size,
             intermediate_size=config.intermediate_size,
@@ -123,11 +124,12 @@ class LlamaDecoderLayer(LlamaDecoderLayer):
         else:
             self._residual_norm = self._norm_after_residual
 
-    def get_kv_cache_dtype(self, vllm_config: VllmConfig, cache_config) -> torch.dtype:
+    def get_cache_config(self, vllm_config: VllmConfig):
+        cache_config = copy.deepcopy(vllmconfig.cache_config)
         kv_cache_dtype = vllm_config.speculative_config.kv_cache_dtype
         if kv_cache_dtype is not None:
             cache_config.cache_dtype = kv_cache_dtype
-        return cache_config.cache_dtype
+        return cache_config
 
     def get_quant_config(self, vllm_config: VllmConfig) -> QuantizationConfig | None:
         """Use drafter's quantization config instead of verifier's."""
