@@ -12,14 +12,13 @@ import tempfile
 from collections.abc import Generator
 from contextlib import contextmanager
 from multiprocessing import shared_memory
-from typing import TYPE_CHECKING
 from unittest.mock import patch
 
 import numpy as np
 import torch
 
-if TYPE_CHECKING:
-    from vllm.config import ModelConfig
+from vllm.config import ModelConfig
+from vllm.distributed import get_tensor_model_parallel_rank
 
 logger = logging.getLogger(__name__)
 
@@ -113,7 +112,6 @@ class RoutedExpertsCapturer:
         max_num_kv_tokens: int,
         model_config: ModelConfig,
         instance_id: str,
-        enable_shared_memory: bool,
     ) -> None:
         """
         Initialize the device buffer and optionally shared memory buffer.
@@ -123,7 +121,6 @@ class RoutedExpertsCapturer:
             max_num_kv_tokens: Maximum number of KV tokens for shared memory.
             model_config: Model configuration containing layer and expert info.
             instance_id: Unique identifier for the shared memory buffer.
-            enable_shared_memory: Whether to enable shared memory for IPC.
         """
 
         if self._device_buffer is not None:
@@ -140,7 +137,7 @@ class RoutedExpertsCapturer:
             device="cuda",
         )
 
-        if not enable_shared_memory:
+        if get_tensor_model_parallel_rank() != 0:
             return
 
         # Initialize shared memory
@@ -191,6 +188,8 @@ class RoutedExpertsCapturer:
         Args:
             indices: Array of indices indicating where to store the data.
         """
+        if get_tensor_model_parallel_rank() != 0:
+            return
         if self._lock_file is None:
             raise RuntimeError("Shared memory not initialized.")
         if self._host_buffer_view is None:

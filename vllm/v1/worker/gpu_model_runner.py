@@ -31,7 +31,6 @@ from vllm.config import (
     get_layers_from_vllm_config,
     update_config,
 )
-from vllm.distributed import get_tensor_model_parallel_rank
 from vllm.distributed.ec_transfer import get_ec_transfer, has_ec_transfer
 from vllm.distributed.eplb.eplb_state import EplbState
 from vllm.distributed.kv_transfer import get_kv_transfer_group, has_kv_transfer_group
@@ -3498,10 +3497,7 @@ class GPUModelRunner(
             self.eplb_step()
 
         with record_function_or_nullcontext("gpu_model_runner: ModelRunnerOutput"):
-            if (
-                self.model_config.enable_return_routed_experts
-                and get_tensor_model_parallel_rank() == 0
-            ):
+            if self.model_config.enable_return_routed_experts:
                 capturer = RoutedExpertsCapturer.get_instance()
                 if capturer is not None:
                     capturer.save_captured_experts(indices=self.slot_mapping)  # noqa
@@ -5689,7 +5685,6 @@ class GPUModelRunner(
             max_num_kv_tokens=self.max_num_kv_tokens,
             model_config=self.model_config,
             instance_id=self.vllm_config.instance_id,
-            enable_shared_memory=get_tensor_model_parallel_rank() == 0,
         )
 
     def may_add_encoder_only_layers_to_kv_cache_config(self) -> None:
