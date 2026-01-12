@@ -10,7 +10,7 @@ from vllm.logger import init_logger
 from vllm.utils.import_utils import resolve_obj_by_qualname
 
 if TYPE_CHECKING:
-    from vllm.attention.backends.abstract import AttentionBackend
+    from vllm.v1.attention.backend import AttentionBackend
 
 logger = init_logger(__name__)
 

@@ -487,6 +487,17 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   ops.impl("get_cutlass_moe_mm_problem_sizes", torch::kCUDA,
            &get_cutlass_moe_mm_problem_sizes);
 
+  // compute per-expert problem sizes from expert_first_token_offset
+  // produced by vLLM's moe_permute kernel
+  ops.def(
+      "get_cutlass_moe_mm_problem_sizes_from_expert_offsets("
+      "    Tensor expert_first_token_offset, "
+      "    Tensor! problem_sizes1, "
+      "    Tensor! problem_sizes2, "
+      "    int n, int k, bool swap_ab) -> ()");
+  ops.impl("get_cutlass_moe_mm_problem_sizes_from_expert_offsets", torch::kCUDA,
+           &get_cutlass_moe_mm_problem_sizes_from_expert_offsets);
+
   // A function that computes data required to run fused MoE with w8a8 grouped
   // GEMM and PPLX. It takes expert_num_tokens and non_zero_expert_idxs
   // as an input, and computes expert_offsets (token start indices of each
@@ -588,9 +599,12 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   ops.impl("gptq_shuffle", torch::kCUDA, &gptq_shuffle);
 
   // Compute FP8 quantized tensor for given scaling factor.
+  // Supports per-tensor, per-channel, per-token, and arbitrary 2D group
+  // scaling. Optional group_m/group_n specify the group shape explicitly;
+  // required for 1D scales to disambiguate per-channel vs per-token.
   ops.def(
-      "static_scaled_fp8_quant(Tensor! result, Tensor input, Tensor scale) -> "
-      "()");
+      "static_scaled_fp8_quant(Tensor! result, Tensor input, Tensor scale, "
+      "(int, int)? group_shape=None) -> ()");
   ops.impl("static_scaled_fp8_quant", torch::kCUDA, &static_scaled_fp8_quant);
 
   // Compute dynamic-per-tensor FP8 quantized tensor and scaling factor.
@@ -722,6 +736,22 @@ TORCH_LIBRARY_EXPAND(CONCAT(TORCH_EXTENSION_NAME, _cache_ops), cache_ops) {
       "                     str kv_cache_dtype,"
       "                     Tensor scale) -> ()");
   cache_ops.impl("concat_and_cache_mla", torch::kCUDA, &concat_and_cache_mla);
+
+  // Rotate Q and K, then write to kv cache for MLA
+  cache_ops.def(
+      "concat_and_cache_mla_rope_fused("
+      "                     Tensor positions,"
+      "                     Tensor! q_pe,"
+      "                     Tensor! k_pe,"
+      "                     Tensor kv_c,"
+      "                     Tensor cos_sin_cache,"
+      "                     bool is_neox,"
+      "                     Tensor slot_mapping,"
+      "                     Tensor! kv_cache,"
+      "                     str kv_cache_dtype,"
+      "                     Tensor kv_cache_scale) -> ()");
+  cache_ops.impl("concat_and_cache_mla_rope_fused", torch::kCUDA,
+                 &concat_and_cache_mla_rope_fused);
 
   // Convert the key and value cache to fp8 data type.
   cache_ops.def(

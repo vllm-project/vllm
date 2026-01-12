@@ -35,7 +35,7 @@ def flash_attn_maxseqlen_wrapper(
     if is_rocm_aiter:
         from aiter import flash_attn_varlen_func
     else:
-        from vllm.attention.utils.fa_utils import flash_attn_varlen_func
+        from vllm.v1.attention.backends.fa_utils import flash_attn_varlen_func
 
         if not current_platform.is_rocm() and fa_version is not None:
             kwargs["fa_version"] = fa_version
@@ -72,9 +72,9 @@ def flash_attn_maxseqlen_wrapper_fake(
     batch_size: int,
     is_rocm_aiter: bool,
     fa_version: int | None,
-    scale: float | None,
-    cu_seqlens: torch.Tensor | None,
-    max_seqlen: torch.Tensor | None,
+    scale: float | None = None,
+    cu_seqlens: torch.Tensor | None = None,
+    max_seqlen: torch.Tensor | None = None,
 ) -> torch.Tensor:
     return torch.empty_like(q)
 

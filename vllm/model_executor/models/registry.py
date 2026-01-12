@@ -35,10 +35,11 @@ from vllm.utils.hashing import safe_hash
 
 if TYPE_CHECKING:
     from vllm.config.model import AttnTypeStr
-    from vllm.config.pooler import PoolingTypeStr
+    from vllm.config.pooler import SequencePoolingType, TokenPoolingType
 else:
     AttnTypeStr = Any
-    PoolingTypeStr = Any
+    SequencePoolingType = Any
+    TokenPoolingType = Any
 
 
 from .interfaces import (
@@ -57,7 +58,8 @@ from .interfaces import (
 )
 from .interfaces_base import (
     get_attn_type,
-    get_default_pooling_type,
+    get_default_seq_pooling_type,
+    get_default_tok_pooling_type,
     is_pooling_model,
     is_text_generation_model,
 )
@@ -96,6 +98,7 @@ _TEXT_GENERATION_MODELS = {
     "Ernie4_5_MoeForCausalLM": ("ernie45_moe", "Ernie4_5_MoeForCausalLM"),
     "ExaoneForCausalLM": ("exaone", "ExaoneForCausalLM"),
     "Exaone4ForCausalLM": ("exaone4", "Exaone4ForCausalLM"),
+    "ExaoneMoEForCausalLM": ("exaone_moe", "ExaoneMoeForCausalLM"),
     "Fairseq2LlamaForCausalLM": ("fairseq2_llama", "Fairseq2LlamaForCausalLM"),
     "FalconForCausalLM": ("falcon", "FalconForCausalLM"),
     "FalconMambaForCausalLM": ("mamba", "MambaForCausalLM"),
@@ -340,6 +343,7 @@ _MULTIMODAL_MODELS = {
     ),
     "IsaacForConditionalGeneration": ("isaac", "IsaacForConditionalGeneration"),
     "SmolVLMForConditionalGeneration": ("smolvlm", "SmolVLMForConditionalGeneration"),  # noqa: E501
+    "KananaVForConditionalGeneration": ("kanana_v", "KananaVForConditionalGeneration"),
     "KeyeForConditionalGeneration": ("keye", "KeyeForConditionalGeneration"),
     "KeyeVL1_5ForConditionalGeneration": (
         "keye_vl1_5",
@@ -455,6 +459,7 @@ _SPECULATIVE_DECODING_MODELS = {
     "EagleDeepSeekMTPModel": ("deepseek_eagle", "EagleDeepseekV3ForCausalLM"),
     "DeepSeekMTPModel": ("deepseek_mtp", "DeepSeekMTP"),
     "ErnieMTPModel": ("ernie_mtp", "ErnieMTP"),
+    "ExaoneMoeMTP": ("exaone_moe_mtp", "ExaoneMoeMTP"),
     "LongCatFlashMTPModel": ("longcat_flash_mtp", "LongCatFlashMTP"),
     "Glm4MoeMTPModel": ("glm4_moe_mtp", "Glm4MoeMTP"),
     "MedusaModel": ("medusa", "Medusa"),
@@ -548,7 +553,8 @@ class _ModelInfo:
     is_text_generation_model: bool
     is_pooling_model: bool
     attn_type: AttnTypeStr
-    default_pooling_type: PoolingTypeStr
+    default_seq_pooling_type: SequencePoolingType
+    default_tok_pooling_type: TokenPoolingType
     supports_cross_encoding: bool
     supports_multimodal: bool
     supports_multimodal_raw_input_only: bool
@@ -569,7 +575,8 @@ class _ModelInfo:
             architecture=model.__name__,
             is_text_generation_model=is_text_generation_model(model),
             is_pooling_model=is_pooling_model(model),
-            default_pooling_type=get_default_pooling_type(model),
+            default_seq_pooling_type=get_default_seq_pooling_type(model),
+            default_tok_pooling_type=get_default_tok_pooling_type(model),
             attn_type=get_attn_type(model),
             supports_cross_encoding=supports_cross_encoding(model),
             supports_multimodal=supports_multimodal(model),

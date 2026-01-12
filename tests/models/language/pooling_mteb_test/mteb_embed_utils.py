@@ -162,8 +162,11 @@ def mteb_test_embed_models(
             assert model_info.architecture in model_config.architectures
 
         # Confirm whether the important configs in model_config are correct.
-        if model_info.pooling_type is not None:
-            assert model_config.pooler_config.pooling_type == model_info.pooling_type
+        pooler_config = model_config.pooler_config
+        if model_info.seq_pooling_type is not None:
+            assert pooler_config.seq_pooling_type == model_info.seq_pooling_type
+        if model_info.tok_pooling_type is not None:
+            assert pooler_config.tok_pooling_type == model_info.tok_pooling_type
         if model_info.attn_type is not None:
             assert model_config.attn_type == model_info.attn_type
         if model_info.is_prefix_caching_supported is not None:

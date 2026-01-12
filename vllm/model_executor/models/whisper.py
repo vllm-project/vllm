@@ -18,18 +18,15 @@ from transformers import (
 )
 from transformers.models.whisper.modeling_whisper import sinusoids
 
-from vllm.attention.backends.abstract import (
-    AttentionType,
-)
 from vllm.attention.layer import Attention
-from vllm.attention.layers.cross_attention import CrossAttention
-from vllm.attention.layers.mm_encoder_attention import MMEncoderAttention
 from vllm.config import CacheConfig, ModelConfig, SpeechToTextConfig, VllmConfig
 from vllm.config.multimodal import BaseDummyOptions
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.inputs.data import PromptType
 from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import get_act_fn
+from vllm.model_executor.layers.attention.cross_attention import CrossAttention
+from vllm.model_executor.layers.attention.mm_encoder_attention import MMEncoderAttention
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
     QKVParallelLinear,
@@ -62,6 +59,9 @@ from vllm.transformers_utils.processor import cached_processor_from_config
 from vllm.utils.jsontree import json_map_leaves
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 from vllm.utils.torch_utils import set_default_torch_dtype
+from vllm.v1.attention.backend import (
+    AttentionType,
+)
 
 from .interfaces import MultiModalEmbeddings, SupportsMultiModal, SupportsTranscription
 from .utils import (
@@ -690,6 +690,10 @@ class WhisperProcessingInfo(BaseProcessingInfo):
         assert isinstance(feature_extractor, WhisperFeatureExtractor)
         return feature_extractor
 
+    def get_target_channels(self) -> int:
+        """Return target audio channels for Whisper models (mono)."""
+        return 1
+
     def get_num_audio_tokens(self) -> int:
         return self.get_hf_config().max_source_positions
 
@@ -724,7 +728,10 @@ class WhisperDummyInputsBuilder(BaseDummyInputsBuilder[WhisperProcessingInfo]):
 class WhisperMultiModalProcessor(EncDecMultiModalProcessor[WhisperProcessingInfo]):
     def _get_data_parser(self) -> MultiModalDataParser:
         feature_extractor = self.info.get_feature_extractor()
-        return MultiModalDataParser(target_sr=feature_extractor.sampling_rate)
+        return MultiModalDataParser(
+            target_sr=feature_extractor.sampling_rate,
+            target_channels=self.info.get_target_channels(),
+        )
 
     @property
     def pad_dummy_encoder_prompt(self) -> bool:
