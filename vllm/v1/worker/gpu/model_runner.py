@@ -139,6 +139,10 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         # CUDA graphs.
         self.cudagraph_manager = CudaGraphManager(self.vllm_config, self.device)
 
+    def update_max_model_len(self, max_model_len: int) -> None:
+        self.max_model_len = max_model_len
+        self.req_states.max_model_len = max_model_len
+
     def get_supported_tasks(self) -> tuple[str]:
         return ("generate",)
 
@@ -189,7 +193,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             max_num_batched_tokens=self.max_num_tokens,
             max_model_len=self.max_model_len,
             device=self.device,
-            pin_memory=self.pin_memory,
         )
 
         self.attn_backends, self.attn_metadata_builders = init_attn_backend(
@@ -225,9 +228,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         slot_mappings = self.block_tables.get_dummy_slot_mappings(
             input_batch.num_tokens
         )
-        num_computed_tokens = torch.zeros(
-            input_batch.num_reqs, dtype=torch.int32, device=self.device
-        )
         query_start_loc = self.input_buffers.query_start_loc
         query_start_loc_gpu = query_start_loc.gpu[: input_batch.num_reqs + 1]
         query_start_loc_cpu = query_start_loc.cpu[: input_batch.num_reqs + 1]
@@ -238,8 +238,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             query_start_loc_gpu=query_start_loc_gpu,
             query_start_loc_cpu=query_start_loc_cpu,
             seq_lens=self.input_buffers.seq_lens,
-            seq_lens_np=input_batch.seq_lens_np,
-            num_computed_tokens_cpu=num_computed_tokens,
+            max_seq_len=self.max_model_len,
             block_tables=block_tables,
             slot_mappings=slot_mappings,
             kv_cache_config=self.kv_cache_config,
@@ -378,16 +377,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         for req_id in scheduler_output.finished_req_ids:
             self.req_states.remove_request(req_id)
 
-        # TODO(woosuk): Change SchedulerOutput.
-        req_indices: list[int] = []
-        cu_num_new_blocks = tuple(
-            [0] for _ in range(self.block_tables.num_kv_cache_groups)
-        )
-        new_block_ids: tuple[list[int], ...] = tuple(
-            [] for _ in range(self.block_tables.num_kv_cache_groups)
-        )
-        overwrite: list[bool] = []
-
         # Add new requests.
         for new_req_data in scheduler_output.scheduled_new_reqs:
             assert new_req_data.prompt_token_ids is not None
@@ -404,12 +393,9 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             )
 
             req_index = self.req_states.req_id_to_index[req_id]
-            req_indices.append(req_index)
-            for i, block_ids in enumerate(new_req_data.block_ids):
-                x = cu_num_new_blocks[i][-1]
-                cu_num_new_blocks[i].append(x + len(block_ids))
-                new_block_ids[i].extend(block_ids)
-            overwrite.append(True)
+            self.block_tables.append_block_ids(
+                req_index, new_req_data.block_ids, overwrite=True
+            )
         if scheduler_output.scheduled_new_reqs:
             self.req_states.prefill_len.copy_to_gpu()
 
@@ -417,23 +403,11 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         cached_reqs = scheduler_output.scheduled_cached_reqs
         for i, req_id in enumerate(cached_reqs.req_ids):
             req_index = self.req_states.req_id_to_index[req_id]
-
             req_new_block_ids = cached_reqs.new_block_ids[i]
             if req_new_block_ids is not None:
-                req_indices.append(req_index)
-                for group_id, block_ids in enumerate(req_new_block_ids):
-                    x = cu_num_new_blocks[group_id][-1]
-                    cu_num_new_blocks[group_id].append(x + len(block_ids))
-                    new_block_ids[group_id].extend(block_ids)
-                overwrite.append(False)
-
-        if req_indices:
-            self.block_tables.append_block_ids(
-                req_indices=req_indices,
-                cu_num_new_blocks=cu_num_new_blocks,
-                new_block_ids=new_block_ids,
-                overwrite=overwrite,
-            )
+                self.block_tables.append_block_ids(
+                    req_index, req_new_block_ids, overwrite=False
+                )
 
     def prepare_inputs(
         self,
@@ -544,16 +518,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             query_start_loc_gpu, self.input_buffers.positions[:num_tokens]
         )
 
-        # Get num_computed_tokens.
-        # HACK(woosuk): Here, we use num_computed_tokens on GPU instead of
-        # num_computed_tokens_cpu. This works for most cases.
-        num_computed_tokens = self.req_states.num_computed_tokens[idx_mapping]
-        # HACK(woosuk): Only GPU has the exact seq_lens because at this point
-        # CPU does not know how many draft tokens are accepted/rejected in the
-        # previous step. Therefore, we use max_model_len to be safe.
-        # NOTE(woosuk): This only works for FA3 backend.
-        seq_lens_np = np.full(num_reqs, self.max_model_len, dtype=np.int32)
-
         # Layer name -> attention metadata.
         attn_metadata = build_attn_metadata(
             attn_metadata_builders=self.attn_metadata_builders,
@@ -562,8 +526,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             query_start_loc_gpu=query_start_loc_gpu,
             query_start_loc_cpu=query_start_loc_cpu,
             seq_lens=self.input_buffers.seq_lens,
-            seq_lens_np=seq_lens_np,
-            num_computed_tokens_cpu=num_computed_tokens,
+            max_seq_len=self.max_model_len,
             block_tables=block_tables,
             slot_mappings=slot_mappings,
             kv_cache_config=self.kv_cache_config,
@@ -583,7 +546,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             query_start_loc=query_start_loc_gpu,
             query_start_loc_np=query_start_loc_np,
             seq_lens=seq_lens,
-            seq_lens_np=seq_lens_np,
             input_ids=input_ids,
             positions=positions,
             attn_metadata=attn_metadata,

@@ -5,7 +5,7 @@ import pytest
 import torch
 import torch.nn.functional as F
 
-from vllm.attention.ops.triton_prefill_attention import context_attention_fwd
+from vllm.v1.attention.ops.triton_prefill_attention import context_attention_fwd
 
 
 def ref_masked_attention(
