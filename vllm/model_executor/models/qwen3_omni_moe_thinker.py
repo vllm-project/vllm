@@ -106,11 +106,6 @@ from .vision import (
     get_vit_attn_backend,
 )
 
-try:
-    import flash_attn
-except (ImportError, ModuleNotFoundError):
-    flash_attn = None
-
 logger = init_logger(__name__)
 
 
