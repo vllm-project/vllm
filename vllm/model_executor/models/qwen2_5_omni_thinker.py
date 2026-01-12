@@ -1140,7 +1140,7 @@ class Qwen2_5OmniThinkerForConditionalGeneration(
         *,
         is_multimodal: torch.Tensor | None = None,
         handle_oov_mm_token: bool = False,
-        lora_enabled: bool = False,
+        has_lora: bool = False,
     ) -> torch.Tensor:
         # This is to satisfy the type checker for each overload
         if multimodal_embeddings is None or is_multimodal is None:
@@ -1151,7 +1151,7 @@ class Qwen2_5OmniThinkerForConditionalGeneration(
             multimodal_embeddings=multimodal_embeddings,
             is_multimodal=is_multimodal,
             handle_oov_mm_token=handle_oov_mm_token,
-            lora_enabled=lora_enabled,
+            has_lora=has_lora,
         )
 
     def forward(

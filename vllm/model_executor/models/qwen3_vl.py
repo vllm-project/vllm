@@ -1973,14 +1973,14 @@ class Qwen3VLForConditionalGeneration(
         *,
         is_multimodal: torch.Tensor | None = None,
         handle_oov_mm_token: bool = False,
-        lora_enabled: bool = False,
+        has_lora: bool = False,
     ) -> torch.Tensor:
         inputs_embeds = self._embed_text_input_ids(
             input_ids,
             self.language_model.embed_input_ids,
             is_multimodal=is_multimodal,
             handle_oov_mm_token=handle_oov_mm_token,
-            lora_enabled=lora_enabled,
+            has_lora=has_lora,
         )
 
         if multimodal_embeddings is None or len(multimodal_embeddings) == 0:

@@ -173,7 +173,7 @@ class SupportsMultiModal(Protocol):
         *,
         is_multimodal: torch.Tensor,
         handle_oov_mm_token: bool = False,
-        lora_enabled: bool = False,
+        has_lora: bool = False,
     ) -> Tensor: ...
 
     def _embed_text_input_ids(
@@ -183,11 +183,11 @@ class SupportsMultiModal(Protocol):
         *,
         is_multimodal: Tensor | None,
         handle_oov_mm_token: bool,
-        lora_enabled: bool,
+        has_lora: bool,
     ) -> Tensor:
         if handle_oov_mm_token and is_multimodal is not None:
             is_text = ~is_multimodal
-            if not lora_enabled:
+            if not has_lora:
                 text_embeds = embed_input_ids(input_ids[is_text])
 
             else:
@@ -214,7 +214,7 @@ class SupportsMultiModal(Protocol):
         *,
         is_multimodal: Tensor | None = None,
         handle_oov_mm_token: bool = False,
-        lora_enabled: bool = False,
+        has_lora: bool = False,
     ) -> Tensor:
         """
         Apply token embeddings to `input_ids`.
@@ -245,7 +245,7 @@ class SupportsMultiModal(Protocol):
             self.get_language_model().embed_input_ids,
             is_multimodal=is_multimodal,
             handle_oov_mm_token=handle_oov_mm_token,
-            lora_enabled=lora_enabled,
+            has_lora=has_lora,
         )
 
         if multimodal_embeddings is None or len(multimodal_embeddings) == 0:

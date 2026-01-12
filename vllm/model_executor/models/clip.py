@@ -950,14 +950,14 @@ class CLIPEmbeddingModel(nn.Module, SupportsMultiModal, SupportsQuant):
         *,
         is_multimodal: torch.Tensor | None,
         handle_oov_mm_token: bool,
-        lora_enabled: bool = False,
+        has_lora: bool = False,
     ) -> torch.Tensor:
         inputs_embeds = super()._embed_text_input_ids(
             input_ids,
             embed_input_ids,
             is_multimodal=is_multimodal,
             handle_oov_mm_token=handle_oov_mm_token,
-            lora_enabled=lora_enabled,
+            has_lora=has_lora,
         )
 
         # NOTE: inputs_embeds in model runner has size text_config.projection_dim
@@ -987,7 +987,7 @@ class CLIPEmbeddingModel(nn.Module, SupportsMultiModal, SupportsQuant):
         *,
         is_multimodal: torch.Tensor | None = None,
         handle_oov_mm_token: bool = False,
-        lora_enabled: bool = False,
+        has_lora: bool = False,
     ) -> torch.Tensor:
         self._is_text_input = (
             multimodal_embeddings is None or len(multimodal_embeddings) == 0
@@ -1002,7 +1002,7 @@ class CLIPEmbeddingModel(nn.Module, SupportsMultiModal, SupportsQuant):
             multimodal_embeddings=multimodal_embeddings,
             is_multimodal=is_multimodal,
             handle_oov_mm_token=handle_oov_mm_token,
-            lora_enabled=lora_enabled,
+            has_lora=has_lora,
         )
 
     def embed_multimodal(self, **kwargs: object) -> MultiModalEmbeddings:

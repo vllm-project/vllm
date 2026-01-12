@@ -1646,7 +1646,7 @@ class Ernie4_5_VLMoeForConditionalGeneration(
         *,
         is_multimodal: torch.Tensor | None = None,
         handle_oov_mm_token: bool = False,
-        lora_enabled: bool = False,
+        has_lora: bool = False,
     ) -> torch.Tensor:
         if multimodal_embeddings is not None and len(multimodal_embeddings) > 0:
             self._set_visual_token_mask(input_ids)
@@ -1660,7 +1660,7 @@ class Ernie4_5_VLMoeForConditionalGeneration(
             multimodal_embeddings=multimodal_embeddings,
             is_multimodal=is_multimodal,
             handle_oov_mm_token=handle_oov_mm_token,
-            lora_enabled=lora_enabled,
+            has_lora=has_lora,
         )
 
     def forward(
