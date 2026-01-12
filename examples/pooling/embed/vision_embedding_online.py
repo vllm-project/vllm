@@ -22,8 +22,9 @@ from PIL import Image
 openai_api_key = "EMPTY"
 openai_api_base = "http://localhost:8000/v1"
 
-image_url = "https://qianwen-res.oss-cn-beijing.aliyuncs.com/Qwen-VL/assets/demo.jpeg"
-text = "A woman shares a joyful moment with her golden retriever on a sun-drenched beach at sunset, as the dog offers its paw in a heartwarming display of companionship and trust."
+image_url = "https://vllm-public-assets.s3.us-west-2.amazonaws.com/multimodal_asset/cat_snow.jpg"
+text = "A cat standing in the snow."
+
 
 def create_chat_embeddings(
     client: OpenAI,
@@ -31,6 +32,8 @@ def create_chat_embeddings(
     messages: list[ChatCompletionMessageParam],
     model: str,
     encoding_format: Literal["base64", "float"] | NotGiven = NOT_GIVEN,
+    continue_final_message: bool = False,
+    add_special_tokens: bool = False,
 ) -> CreateEmbeddingResponse:
     """
     Convenience function for accessing vLLM's Chat Embeddings API,
@@ -39,7 +42,13 @@ def create_chat_embeddings(
     return client.post(
         "/embeddings",
         cast_to=CreateEmbeddingResponse,
-        body={"messages": messages, "model": model, "encoding_format": encoding_format},
+        body={
+            "messages": messages,
+            "model": model,
+            "encoding_format": encoding_format,
+            "continue_final_message": continue_final_message,
+            "add_special_tokens": add_special_tokens,
+        },
     )
 
 
@@ -160,21 +169,35 @@ def run_qwen3_vl(client: OpenAI, model: str):
         --max-model-len 8192
     """
 
-    image_placeholder = "<|vision_start|><|image_pad|><|vision_end|>"
+    default_instruction = "Represent the user's input."
 
     print("Text embedding output:")
     response = create_chat_embeddings(
         client,
         messages=[
             {
+                "role": "system",
+                "content": [
+                    {"type": "text", "text": default_instruction},
+                ],
+            },
+            {
                 "role": "user",
                 "content": [
                     {"type": "text", "text": text},
                 ],
-            }
+            },
+            {
+                "role": "assistant",
+                "content": [
+                    {"type": "text", "text": ""},
+                ],
+            },
         ],
         model=model,
         encoding_format="float",
+        continue_final_message=True,
+        add_special_tokens=True,
     )
     print_embeddings(response.data[0].embedding)
 
@@ -183,15 +206,29 @@ def run_qwen3_vl(client: OpenAI, model: str):
         client,
         messages=[
             {
+                "role": "system",
+                "content": [
+                    {"type": "text", "text": default_instruction},
+                ],
+            },
+            {
                 "role": "user",
                 "content": [
                     {"type": "image_url", "image_url": {"url": image_url}},
-                    {"type": "text", "text": f"{image_placeholder}"},
+                    {"type": "text", "text": ""},
                 ],
-            }
+            },
+            {
+                "role": "assistant",
+                "content": [
+                    {"type": "text", "text": ""},
+                ],
+            },
         ],
         model=model,
         encoding_format="float",
+        continue_final_message=True,
+        add_special_tokens=True,
     )
     print_embeddings(response.data[0].embedding)
 
@@ -200,18 +237,32 @@ def run_qwen3_vl(client: OpenAI, model: str):
         client,
         messages=[
             {
+                "role": "system",
+                "content": [
+                    {"type": "text", "text": default_instruction},
+                ],
+            },
+            {
                 "role": "user",
                 "content": [
                     {"type": "image_url", "image_url": {"url": image_url}},
                     {
                         "type": "text",
-                        "text": f"{image_placeholder}\n{text}",
+                        "text": f"{text}",
                     },
                 ],
-            }
+            },
+            {
+                "role": "assistant",
+                "content": [
+                    {"type": "text", "text": ""},
+                ],
+            },
         ],
         model=model,
         encoding_format="float",
+        continue_final_message=True,
+        add_special_tokens=True,
     )
     print_embeddings(response.data[0].embedding)
 

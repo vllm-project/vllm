@@ -15,9 +15,9 @@ from dataclasses import asdict
 from vllm import LLM, EngineArgs
 from vllm.multimodal.utils import fetch_image
 
-image_url = "https://qianwen-res.oss-cn-beijing.aliyuncs.com/Qwen-VL/assets/demo.jpeg"
-text = "A woman shares a joyful moment with her golden retriever on a sun-drenched beach at sunset, as the dog offers its paw in a heartwarming display of companionship and trust."
-mm_data = {"image": fetch_image(image_url)}
+image_url = "https://vllm-public-assets.s3.us-west-2.amazonaws.com/multimodal_asset/cat_snow.jpg"
+text = "A cat standing in the snow."
+multi_modal_data = {"image": fetch_image(image_url)}
 
 
 def print_embeddings(embeds):
@@ -32,19 +32,23 @@ def run_qwen3_vl():
         max_model_len=8192,
         limit_mm_per_prompt={"image": 1},
     )
+    default_instruction = "Represent the user's input."
     image_placeholder = "<|vision_start|><|image_pad|><|vision_end|>"
+    text_prompt = f"<|im_start|>system\n{default_instruction}<|im_end|>\n<|im_start|>user\n{text}<|im_end|>\n<|im_start|>assistant\n"
+    image_prompt = f"<|im_start|>system\n{default_instruction}<|im_end|>\n<|im_start|>user\n{image_placeholder}<|im_end|>\n<|im_start|>assistant\n"
+    image_text_prompt = f"<|im_start|>system\n{default_instruction}<|im_end|>\n<|im_start|>user\n{image_placeholder}{text}<|im_end|>\n<|im_start|>assistant\n"
 
     llm = LLM(**asdict(engine_args))
 
     print("Text embedding output:")
-    outputs = llm.embed(text, use_tqdm=False)
+    outputs = llm.embed(text_prompt, use_tqdm=False)
     print_embeddings(outputs[0].outputs.embedding)
 
     print("Image embedding output:")
     outputs = llm.embed(
         {
-            "prompt": image_placeholder,
-            "multi_modal_data": mm_data,
+            "prompt": image_prompt,
+            "multi_modal_data": multi_modal_data,
         },
         use_tqdm=False,
     )
@@ -53,8 +57,8 @@ def run_qwen3_vl():
     print("Image+Text embedding output:")
     outputs = llm.embed(
         {
-            "prompt": f"{image_placeholder}\n{text}",
-            "multi_modal_data": mm_data,
+            "prompt": image_text_prompt,
+            "multi_modal_data": multi_modal_data,
         },
         use_tqdm=False,
     )
