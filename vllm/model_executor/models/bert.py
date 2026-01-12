@@ -7,11 +7,13 @@ import torch
 from torch import nn
 from transformers import BertConfig
 
-from vllm.attention.layers.encoder_only_attention import EncoderOnlyAttention
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, PoolerConfig, VllmConfig
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.activation import get_act_fn
+from vllm.model_executor.layers.attention.encoder_only_attention import (
+    EncoderOnlyAttention,
+)
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
     QKVParallelLinear,
@@ -23,11 +25,11 @@ from vllm.model_executor.layers.pooler import (
     PoolingParamsUpdate,
 )
 from vllm.model_executor.layers.pooler.seqwise import (
-    CLSPool,
     SequencePooler,
     SequencePoolerHeadOutput,
     SequencePoolerOutput,
     SequencePoolingMethodOutput,
+    get_seq_pooling_method,
 )
 from vllm.model_executor.layers.pooler.tokwise import (
     pooler_for_token_classify,
@@ -92,9 +94,9 @@ class BertEmbedding(nn.Module):
 
 
 class BertPooler(SequencePooler):
-    def __init__(self, config: BertConfig):
+    def __init__(self, config: BertConfig, pooler_config: PoolerConfig):
         super().__init__(
-            pooling=CLSPool(),
+            pooling=get_seq_pooling_method(pooler_config.seq_pooling_type),
             head=self.head,
         )
 
@@ -355,7 +357,7 @@ class BertOutput(nn.Module):
 
 
 @support_torch_compile
-@default_pooling_type("CLS")
+@default_pooling_type(seq_pooling_type="CLS")
 class BertModel(nn.Module, SupportsQuant):
     is_pooling_model = True
 
@@ -448,7 +450,11 @@ class BertPoolingModel(BertModel):
         )
 
         config = vllm_config.model_config.hf_config
-        self.pooler = BertPooler(config)
+
+        pooler_config = vllm_config.model_config.pooler_config
+        assert pooler_config is not None
+
+        self.pooler = BertPooler(config, pooler_config)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         other_weights, loaded_stacked_params = self._load_weights(weights)
@@ -459,7 +465,7 @@ class BertPoolingModel(BertModel):
         return loaded_params
 
 
-@default_pooling_type("CLS")
+@default_pooling_type(seq_pooling_type="CLS")
 class BertEmbeddingModel(nn.Module, SupportsQuant):
     """A model that uses Bert to provide embedding functionalities.
 
@@ -673,7 +679,7 @@ class SPLADESparsePooler(Pooler):
         return torch.stack(pooled_list, dim=0).contiguous()
 
 
-@default_pooling_type("CLS")
+@default_pooling_type(seq_pooling_type="CLS")
 class BertSpladeSparseEmbeddingModel(BertEmbeddingModel):
     """
     BertEmbeddingModel + SPLADE sparse embedding.
@@ -709,6 +715,8 @@ class BertSpladeSparseEmbeddingModel(BertEmbeddingModel):
                 layer_norm_eps=getattr(cfg, "layer_norm_eps", 1e-12),
             )
 
+        # None of vLLM's built-in sequence pooling types are
+        # applicable so it is overwritten by SPLADESparsePooler
         pooling_mode = getattr(self, "_splade_pooling", "max")
 
         cls_id = getattr(cfg, "cls_token_id", None)
@@ -778,7 +786,7 @@ class BertSpladeSparseEmbeddingModel(BertEmbeddingModel):
         return loaded
 
 
-@default_pooling_type("CLS")
+@default_pooling_type(seq_pooling_type="CLS")
 class BertForSequenceClassification(nn.Module, SupportsCrossEncoding, SupportsQuant):
     """A model that uses Bert to provide embedding functionalities.
 
@@ -847,7 +855,7 @@ class BertForSequenceClassification(nn.Module, SupportsCrossEncoding, SupportsQu
 
 
 @attn_type("encoder_only")
-@default_pooling_type("ALL")
+@default_pooling_type(tok_pooling_type="ALL")
 class BertForTokenClassification(nn.Module):
     is_pooling_model = True
 
