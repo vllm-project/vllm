@@ -835,39 +835,41 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
         )
 
         # Deprecated in 0.11 - Renamed as vllm:inter_token_latency_seconds
-        # TODO: in 0.12, only enable if show_hidden_metrics=True
-        histogram_time_per_output_token = self.backend.create_histogram(
-            name="vllm:time_per_output_token_seconds",
-            documentation=(
-                "Histogram of time per output token in seconds."
-                "DEPRECATED: Use vllm:inter_token_latency_seconds instead."
-            ),
-            buckets=[
-                0.01,
-                0.025,
-                0.05,
-                0.075,
-                0.1,
-                0.15,
-                0.2,
-                0.3,
-                0.4,
-                0.5,
-                0.75,
-                1.0,
-                2.5,
-                5.0,
-                7.5,
-                10.0,
-                20.0,
-                40.0,
-                80.0,
-            ],
-            labelnames=labelnames,
-        )
-        self.histogram_time_per_output_token = make_per_engine(
-            histogram_time_per_output_token, engine_indexes, model_name
-        )
+        # With 0.11.x you can enable with --show-hidden-metrics-for-version=0.10
+        # TODO: remove in 0.12.0
+        if self.show_hidden_metrics:
+            histogram_time_per_output_token = self.backend.create_histogram(
+                name="vllm:time_per_output_token_seconds",
+                documentation=(
+                    "Histogram of time per output token in seconds."
+                    "DEPRECATED: Use vllm:inter_token_latency_seconds instead."
+                ),
+                buckets=[
+                    0.01,
+                    0.025,
+                    0.05,
+                    0.075,
+                    0.1,
+                    0.15,
+                    0.2,
+                    0.3,
+                    0.4,
+                    0.5,
+                    0.75,
+                    1.0,
+                    2.5,
+                    5.0,
+                    7.5,
+                    10.0,
+                    20.0,
+                    40.0,
+                    80.0,
+                ],
+                labelnames=labelnames,
+            )
+            self.histogram_time_per_output_token = make_per_engine(
+                histogram_time_per_output_token, engine_indexes, model_name
+            )
 
         histogram_inter_token_latency = self.backend.create_histogram(
             name="vllm:inter_token_latency_seconds",
@@ -1157,6 +1159,10 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
                 scheduler_stats.num_waiting_reqs
             )
             self.gauge_kv_cache_usage[engine_idx].set(scheduler_stats.kv_cache_usage)
+            if self.show_hidden_metrics:
+                self.gauge_gpu_cache_usage[engine_idx].set(
+                    scheduler_stats.kv_cache_usage
+                )
 
             self.counter_prefix_cache_queries[engine_idx].inc(
                 scheduler_stats.prefix_cache_stats.queries
@@ -1164,6 +1170,13 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
             self.counter_prefix_cache_hits[engine_idx].inc(
                 scheduler_stats.prefix_cache_stats.hits
             )
+            if self.show_hidden_metrics:
+                self.counter_gpu_prefix_cache_queries[engine_idx].inc(
+                    scheduler_stats.prefix_cache_stats.queries
+                )
+                self.counter_gpu_prefix_cache_hits[engine_idx].inc(
+                    scheduler_stats.prefix_cache_stats.hits
+                )
 
             if scheduler_stats.connector_prefix_cache_stats is not None:
                 self.counter_connector_prefix_cache_queries[engine_idx].inc(
