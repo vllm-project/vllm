@@ -59,6 +59,33 @@ _R = TypeVar("_R")  # Return type for collective_rpc
 EngineIdentity = bytes
 
 
+@contextlib.contextmanager
+def encoder_request_context(
+    encoder: MsgpackEncoder,
+    engine: EngineIdentity,
+    request_type: EngineCoreRequestType,
+    request: Any,
+):
+    """Context manager for setting encoder state during request encoding.
+
+    Sets the target engine and request context (for ADD requests) on entry,
+    and clears the request context on exit.
+    """
+    # Set target engine index for tensor routing
+    engine_index = int.from_bytes(engine, "little")
+    encoder.set_target_engine(engine_index)
+
+    # Set request context if this is an ADD request with a request_id
+    if request_type == EngineCoreRequestType.ADD and hasattr(request, "request_id"):
+        encoder.set_request_context(request.request_id)
+
+    try:
+        yield encoder
+    finally:
+        # Clear request context after encoding
+        encoder.set_request_context(None)
+
+
 class EngineCoreClient(ABC):
     """
     EngineCoreClient: subclasses handle different methods for pushing
@@ -747,19 +774,11 @@ class SyncMPClient(MPClient):
         self.ensure_alive()
         self.free_pending_messages()
 
-        # Set target engine index for tensor routing
-        engine_index = int.from_bytes(self.core_engine, "little")
-        self.encoder.set_target_engine(engine_index)
-
-        # Set request context if this is an ADD request with a request_id
-        if request_type == EngineCoreRequestType.ADD and hasattr(request, "request_id"):
-            self.encoder.set_request_context(request.request_id)
-
         # (Identity, RequestType, SerializedRequest)
-        msg = (self.core_engine, request_type.value, *self.encoder.encode(request))
-
-        # Clear request context after encoding
-        self.encoder.set_request_context(None)
+        with encoder_request_context(
+            self.encoder, self.core_engine, request_type, request
+        ):
+            msg = (self.core_engine, request_type.value, *self.encoder.encode(request))
 
         if len(msg) <= 3:
             # No auxiliary buffers => no tensor backing buffers in request.
@@ -940,18 +959,8 @@ class AsyncMPClient(MPClient):
         if engine is None:
             engine = self.core_engine
 
-        # Set target engine index for CUDA tensor routing
-        engine_index = int.from_bytes(engine, "little")
-        self.encoder.set_target_engine(engine_index)
-
-        # Set request context if this is an ADD request with a request_id
-        if request_type == EngineCoreRequestType.ADD and hasattr(request, "request_id"):
-            self.encoder.set_request_context(request.request_id)
-
-        message = (request_type.value, *self.encoder.encode(request))
-
-        # Clear request context after encoding
-        self.encoder.set_request_context(None)
+        with encoder_request_context(self.encoder, engine, request_type, request):
+            message = (request_type.value, *self.encoder.encode(request))
 
         return self._send_input_message(message, engine, request)
 
