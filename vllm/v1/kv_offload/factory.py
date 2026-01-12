@@ -9,6 +9,7 @@ from vllm.v1.kv_offload.spec import OffloadingSpec
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
+    from vllm.v1.kv_cache_interface import KVCacheConfig
 
 logger = init_logger(__name__)
 
@@ -32,6 +33,7 @@ class OffloadingSpecFactory:
     def create_spec(
         cls,
         config: "VllmConfig",
+        kv_cache_config: "KVCacheConfig | None",
     ) -> OffloadingSpec:
         kv_transfer_config = config.kv_transfer_config
         assert kv_transfer_config is not None
@@ -47,7 +49,7 @@ class OffloadingSpecFactory:
             spec_cls = getattr(spec_module, spec_name)
         assert issubclass(spec_cls, OffloadingSpec)
         logger.info("Creating offloading spec with name: %s", spec_name)
-        return spec_cls(config)
+        return spec_cls(config, kv_cache_config)
 
 
 # Register various specs here.

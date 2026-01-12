@@ -32,6 +32,9 @@ else:
 
 logger = init_logger(__name__)
 
+# Explicitly exports Range
+__all__ = ["Range"]
+
 
 class CompilationMode(enum.IntEnum):
     """The compilation approach used for torch.compile-based compilation of the
@@ -275,7 +278,11 @@ class DynamicShapesConfig:
     artifacts also.
     When type is backed, aot_compile must be disabled for this mode to work.
     until this change picked up https://github.com/pytorch/pytorch/pull/169239.
+    """
 
+    assume_32_bit_indexing: bool = True
+    """
+    whether all tensor sizes can use 32 bit indexing.
     """
 
     def compute_hash(self) -> str:
@@ -427,8 +434,9 @@ class CompilationConfig:
     If empty list [], no ops are excluded (suitable for full cudagraphs)."""
     compile_mm_encoder: bool = False
     """Whether or not to compile the multimodal encoder.
-    Currently, this only works for `Qwen2_5_vl` on selected platforms.
-    Disabled by default until more models are supported/tested to work."""
+    Currently, this only works for `Qwen2_5_vl` and `mLLaMa4` models
+    on selected platforms. Disabled by default until more models
+    are supported/tested to work."""
 
     # Inductor capture
     compile_sizes: list[int | str] | None = None
@@ -636,6 +644,7 @@ class CompilationConfig:
             "compilation_time",
             "static_forward_context",
             "pass_config",  # handled separately below
+            "dynamic_shapes_config",  # handled separately below
         }
 
         from vllm.config.utils import get_hash_factors, hash_factors
@@ -643,6 +652,7 @@ class CompilationConfig:
         factors = get_hash_factors(self, ignored_factors)
 
         factors["pass_config"] = self.pass_config.compute_hash()
+        factors["dynamic_shapes_config"] = self.dynamic_shapes_config.compute_hash()
         return hash_factors(factors)
 
     def __repr__(self) -> str:

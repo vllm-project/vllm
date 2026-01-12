@@ -27,6 +27,12 @@ try:
 except ImportError:
     soundfile = PlaceholderModule("soundfile")  # type: ignore[assignment]
 
+
+try:
+    import scipy.signal as scipy_signal
+except ImportError:
+    scipy_signal = PlaceholderModule("scipy").placeholder_attr("signal")  # type: ignore[assignment]
+
 # ============================================================
 
 
@@ -173,13 +179,10 @@ def resample_audio_scipy(
     orig_sr: float,
     target_sr: float,
 ):
-    # lazy import scipy.signal, otherwise it will crash doc build.
-    import scipy.signal
-
     if orig_sr > target_sr:
-        return scipy.signal.resample_poly(audio, 1, orig_sr // target_sr)
+        return scipy_signal.resample_poly(audio, 1, orig_sr // target_sr)
     elif orig_sr < target_sr:
-        return scipy.signal.resample_poly(audio, target_sr // orig_sr, 1)
+        return scipy_signal.resample_poly(audio, target_sr // orig_sr, 1)
     return audio
 
 

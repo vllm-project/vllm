@@ -171,12 +171,12 @@ class MMEncoderAttention(CustomOp):
             q=query,
             k=key,
             v=value,
-            scale=self.scale,
-            cu_seqlens=cu_seqlens,
-            max_seqlen=max_seqlen,
             batch_size=bsz,
             is_rocm_aiter=(self.attn_backend == AttentionBackendEnum.ROCM_AITER_FA),
             fa_version=self._fa_version,
+            scale=self.scale,
+            cu_seqlens=cu_seqlens,
+            max_seqlen=max_seqlen,
         )
         if is_reshaped:
             output = output.reshape(bsz, q_len, -1)
