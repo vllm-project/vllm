@@ -1328,6 +1328,7 @@ class VllmConfig:
             f"disable_custom_all_reduce={self.parallel_config.disable_custom_all_reduce}, "  # noqa
             f"quantization={self.model_config.quantization}, "
             f"enforce_eager={self.model_config.enforce_eager}, "
+            f"enable_return_routed_experts={self.model_config.enable_return_routed_experts}, "  # noqa
             f"kv_cache_dtype={self.cache_config.cache_dtype}, "
             f"device_config={self.device_config.device}, "
             f"structured_outputs_config={self.structured_outputs_config!r}, "
