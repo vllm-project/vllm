@@ -27,6 +27,7 @@ from vllm.distributed.kv_transfer.kv_connector.utils import (
     EngineId,
     TpKVTopology,
     get_current_attn_backend,
+    get_blocks_in_fa_kv_group,
     kv_postprocess_blksize_and_layout_on_receive,
     kv_postprocess_blksize_on_receive,
     kv_postprocess_layout_on_receive,
@@ -328,10 +329,9 @@ class NixlConnector(KVConnectorBase_V1, SupportsHMA):
         self,
         vllm_config: VllmConfig,
         role: KVConnectorRole,
-        kv_cache_config: KVCacheConfig,
+        kv_cache_config: "KVCacheConfig",
     ):
         super().__init__(vllm_config, role, kv_cache_config)
-        print("NixlConnector init", kv_cache_config.kv_cache_groups, "\n", flush=True)
 
         assert vllm_config.kv_transfer_config is not None
         assert vllm_config.kv_transfer_config.engine_id is not None
@@ -395,25 +395,12 @@ class NixlConnector(KVConnectorBase_V1, SupportsHMA):
         assert self.connector_scheduler is not None
         return self.connector_scheduler.build_connector_meta(scheduler_output)
 
-    def request_finished(
-        self,
-        request: "Request",
-        block_ids: list[int],
-    ) -> tuple[bool, dict[str, Any] | None]:
-        # Hybrid memory allocator (HMA) disabled
-        assert self.connector_scheduler is not None
-        return self.connector_scheduler.request_finished(request, block_ids)
-    
     def request_finished_all_groups(
         self,
         request: "Request",
         block_ids: tuple[list[int], ...],
     ) -> tuple[bool, dict[str, Any] | None]:
         # Hybrid memory allocator (HMA) enabled
-        print(
-            f"request_finished_all_groups: {request.request_id}, {block_ids}",
-            flush=True,
-        )
         assert self.connector_scheduler is not None
         return self.connector_scheduler.request_finished(request, block_ids)
 
@@ -536,7 +523,7 @@ class NixlConnector(KVConnectorBase_V1, SupportsHMA):
 class NixlConnectorScheduler:
     """Implementation of Scheduler side methods"""
 
-    def __init__(self, vllm_config: VllmConfig, engine_id: str, kv_cache_config: KVCacheConfig):
+    def __init__(self, vllm_config: VllmConfig, engine_id: str, kv_cache_config: "KVCacheConfig"):
         self.vllm_config = vllm_config
         self.block_size = vllm_config.cache_config.block_size
         self.engine_id: EngineId = engine_id
@@ -578,7 +565,6 @@ class NixlConnectorScheduler:
         # blocks per KV cache group. This is used to clip the local attention window.
         sw_sizes_tokens = [group.kv_cache_spec.sliding_window if isinstance(group.kv_cache_spec, SlidingWindowSpec) else 0 for group in kv_cache_config.kv_cache_groups]
         self.sw_sizes = [n_tokens // self.block_size for n_tokens in sw_sizes_tokens]
-        print(f"sw_sizes: {self.sw_sizes}\n", flush=True)
 
     def shutdown(self):
         self._stop_event.set()
@@ -602,8 +588,6 @@ class NixlConnectorScheduler:
         # because offloading connectors might want to receive the whole sequence even
         # for SWA groups. We will abstract this logic once the interface is more stable
         assert len(block_ids) == len(self.sw_sizes), "Number of KV cache groups must match"
-        print("CLIPPING BLOCKS", block_ids)
-        print("to ", tuple([blocks[-self.sw_sizes[i]:] for i, blocks in enumerate(block_ids)]), "\n", flush=True)
         return tuple([blocks[-self.sw_sizes[i]:] for i, blocks in enumerate(block_ids)])
 
     def set_xfer_handshake_metadata(
@@ -760,10 +744,7 @@ class NixlConnectorScheduler:
                         else []
                     )
                     local_block_ids = self.get_sw_clippped_blocks(local_block_ids)
-                    print(
-                        f"update_state_after_alloc local_block_ids unhashed: {local_block_ids}\n",
-                        flush=True,
-                    )
+
                     # Get unhashed blocks to pull from remote. Mind that a full prefix
                     # cache hit is indicated with an empty list.
                     self._reqs_need_recv[request.request_id] = (
@@ -809,7 +790,6 @@ class NixlConnectorScheduler:
             new_block_id_groups = self.get_sw_clippped_blocks(new_block_id_groups)
             meta.add_new_req_to_save(
                 request_id=req_id,
-                # FIXME new_block_id_groups[0] when hma is off?
                 local_block_ids=new_block_id_groups,
                 kv_transfer_params=req.kv_transfer_params,
             )
@@ -835,8 +815,6 @@ class NixlConnectorScheduler:
         self._reqs_in_batch = set()
         self._reqs_not_processed = set()
         self._reqs_need_send = {}
-        if len(meta.reqs_to_recv) > 0:
-            print("build_connector_meta", meta.reqs_to_recv, "\n", flush=True)
 
         return meta
 
@@ -885,11 +863,7 @@ class NixlConnectorScheduler:
 
         # TODO: check whether block_ids actually ever be 0. If not we could
         # remove the conditional below
-        print(f"request_finished block_ids: {block_ids}\n\n", flush=True)
-        if self._is_hma_enabled:
-            delay_free_blocks = any(len(group) > 0 for group in block_ids)
-        else:
-            delay_free_blocks = len(block_ids) > 0
+        delay_free_blocks = any(len(group) > 0 for group in block_ids)
 
         if delay_free_blocks:
             # Prefill request on remote. It will be read from D upon completion
@@ -907,7 +881,6 @@ class NixlConnectorScheduler:
             # blocks are always at the start of the list.
             # Here we "unpad" blocks to send the actual remote blocks to be read.
             block_ids = self.get_sw_clippped_blocks(block_ids)
-            print(f"request_finished unpadded block_ids: {block_ids}\n\n", flush=True)
 
         return delay_free_blocks, dict(
             do_remote_prefill=True,
@@ -924,7 +897,7 @@ class NixlConnectorScheduler:
 class NixlConnectorWorker:
     """Implementation of Worker side methods"""
 
-    def __init__(self, vllm_config: VllmConfig, engine_id: str, kv_cache_config: KVCacheConfig):
+    def __init__(self, vllm_config: VllmConfig, engine_id: str, kv_cache_config: "KVCacheConfig"):
         if NixlWrapper is None:
             logger.error("NIXL is not available")
             raise RuntimeError("NIXL is not available")
@@ -1352,7 +1325,8 @@ class NixlConnectorWorker:
                     meta=meta,
                 )
                 if req_meta := self._recving_metadata.get(req_id):
-                    self._invalid_block_ids.update(req_meta.local_block_ids)
+                    local_block_ids = get_blocks_in_fa_kv_group(req_meta.local_block_ids)
+                    self._invalid_block_ids.update(local_block_ids)
                 self._failed_recv_reqs.add(req_id)
 
         fut.add_done_callback(request_ready)
@@ -1424,7 +1398,6 @@ class NixlConnectorWorker:
                     # across groups. This results in skipping all tensors but the ones
                     # pointed to by group0. Also, generally we will have more blocks
                     # per tensor but fewer regions.
-                    print(f"layer {layer_name} already seen, skipping", flush=True)
                     continue
 
                 logger.debug(
@@ -2144,7 +2117,10 @@ class NixlConnectorWorker:
         """
         # Use .get() here as the metadata cleanup is handled by get_finished()
         if meta := self._recving_metadata.get(req_id):
-            self._invalid_block_ids.update(meta.local_block_ids)
+            # For the purpose of marking blocks as invalid, only report FA ones to 
+            # handle blocks<>tokens mapping consistently. 
+            local_block_ids = get_blocks_in_fa_kv_group(meta.local_block_ids)
+            self._invalid_block_ids.update(local_block_ids)
         self.nixl_wrapper.release_xfer_handle(handle)
         self.xfer_stats.record_failed_transfer()
 
@@ -2283,6 +2259,9 @@ class NixlConnectorWorker:
         assert self.kv_topo is not None
         block_size_ratio = self.kv_topo.block_size_ratio_from_engine_id(dst_engine_id)
         if block_size_ratio > 1:
+            # TODO (NickLucche) assume HMA is off. Change to handle multiple KV groups.
+            local_block_ids = local_block_ids[0] if local_block_ids else []
+            remote_block_ids = remote_block_ids[0]
             local_block_ids = self.get_mapped_blocks(
                 np.asarray(local_block_ids), block_size_ratio
             )
@@ -2293,12 +2272,14 @@ class NixlConnectorWorker:
                 # prefill block_ids with block_size as 4:
                 # [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
                 # Local decode block_ids with block_size as 16: [1, 2, 3]
-                # expland ecode block_ids with get_mapped_blocks from [1, 2, 3] to
+                # expanded decode block_ids with get_mapped_blocks from [1, 2, 3] to
                 # [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]
                 # Then we clip local to align with prefill
                 # [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12] to
                 # [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
                 local_block_ids = local_block_ids[: len(remote_block_ids)]
+            local_block_ids = tuple(local_block_ids) if local_block_ids else []
+            remote_block_ids = tuple(remote_block_ids)
         # NOTE(rob): having the staging blocks be on the READER side is
         # not going to work well (since we will have to call rearrange tensors).
         # after we detect the txn is complete (which means we cannot make the
@@ -2388,13 +2369,14 @@ class NixlConnectorWorker:
                 remote_rank=remote_rank,
             )
             if meta := self._recving_metadata.get(request_id):
-                self._invalid_block_ids.update(meta.local_block_ids)
+                local_block_ids = get_blocks_in_fa_kv_group(meta.local_block_ids)
+                self._invalid_block_ids.update(local_block_ids)
             self.xfer_stats.record_failed_transfer()
             if handle is not None:
                 self.nixl_wrapper.release_xfer_handle(handle)
             self._failed_recv_reqs.add(request_id)
 
-    def get_mapped_blocks(self, block_ids, block_size_ratio):
+    def get_mapped_blocks(self, block_ids: np.ndarray, block_size_ratio: int) -> np.ndarray:
         """
           Calculates the new set of block IDs by mapping every element
           in the (potentially sparse) input array.
@@ -2431,7 +2413,6 @@ class NixlConnectorWorker:
         # same for [3], but group0-group1 blocks will always differ (different areas).
         # Therefore we can just flatten the block_ids and compute the descs ids for all
         # groups at once.
-        print("get_block_descs_ids", block_ids, "\n")
         num_blocks = self.dst_num_blocks[engine_id]
         if block_size_ratio is not None:
             num_blocks = int(num_blocks * block_size_ratio)
@@ -2439,18 +2420,10 @@ class NixlConnectorWorker:
         # Compute the desc ids for each block.
         region_ids = region_ids[:, None]
         block_ids = np.concatenate(block_ids)[None, :]
-        if self._is_hma_enabled:
-            block_ids = np.concatenate(block_ids)[None, :]
-        else:
-            # FIXME check if this can be folded to equivalent concat
-            block_ids = np.array(block_ids)[None, :]
         descs_ids = region_ids * num_blocks + block_ids
-        print(
-            "get_block_descs_ids num output", len(descs_ids.flatten()), "\n", flush=True
-        )
         return descs_ids.flatten()
 
-    def _logical_to_kernel_block_ids(self, block_ids: list[int]) -> list[int]:
+    def _logical_to_kernel_block_ids(self, block_ids: BlockIds) -> BlockIds:
         """
         Convert logical block ids to kernel physical block ids.
         This is required when the logical block size (the one set by the user)
@@ -2459,14 +2432,12 @@ class NixlConnectorWorker:
         if self._physical_blocks_per_logical_kv_block == 1:
             # Noop when physical and logical block sizes are the same
             return block_ids
-        # FIXME should you just flatten the tuple here? Result should be the same
-        block_ids_np = np.array(block_ids)
         block_arange = np.arange(0, self._physical_blocks_per_logical_kv_block).reshape(
             1, -1
         )
-        return BlockTable.map_to_kernel_blocks(
-            block_ids_np, self._physical_blocks_per_logical_kv_block, block_arange
-        ).tolist()
+        return [BlockTable.map_to_kernel_blocks(
+            np.array(group), self._physical_blocks_per_logical_kv_block, block_arange
+        ).tolist() for group in block_ids]
 
     def get_backend_aware_kv_block_len(self, layer_idx: int) -> int:
         """

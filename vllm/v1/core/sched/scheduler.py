@@ -112,6 +112,7 @@ class Scheduler(SchedulerInterface):
         self.connector = None
         self.connector_prefix_cache_stats: PrefixCacheStats | None = None
         self.recompute_kv_load_failures = True
+        self._connector_supports_hma = False
         if self.vllm_config.kv_transfer_config is not None:
             assert not self.is_encoder_decoder, (
                 "Encoder-decoder models are not currently supported with KV connectors"
@@ -127,6 +128,7 @@ class Scheduler(SchedulerInterface):
                 self.vllm_config.kv_transfer_config.kv_load_failure_policy
             )
             self.recompute_kv_load_failures = kv_load_failure_policy == "recompute"
+            self._connector_supports_hma = isinstance(self.connector, SupportsHMA)
 
         self.kv_event_publisher = EventPublisherFactory.create(
             self.kv_events_config,
@@ -1912,7 +1914,7 @@ class Scheduler(SchedulerInterface):
 
         block_ids = self.kv_cache_manager.get_block_ids(request.request_id)
 
-        if not isinstance(self.connector, SupportsHMA):
+        if not self._connector_supports_hma:
             # NOTE(Kuntai): We should deprecate this code path after we enforce
             # all connectors to support HMA.
             # Hybrid memory allocator should be already turned off for this
@@ -1952,12 +1954,11 @@ class Scheduler(SchedulerInterface):
             self.failed_recving_kv_req_ids.remove(request.request_id)
         else:
             # Now that the blocks are ready, actually cache them.
-            # FIXME this should only be changed if hma is enabled support_hma check here!
-            # (block_ids,) = self.kv_cache_manager.get_block_ids(request.request_id)
             block_ids = self.kv_cache_manager.get_block_ids(request.request_id)
+            # When connector does not support HMA, a single group is present here
+            num_computed_tokens = max(len(group) for group in block_ids) * self.block_size
             # Get number of blocks on full attention layer, we can retrieve at most
             # this many tokens
-            num_computed_tokens = max(len(group) for group in block_ids) * self.block_size            # Handle the case where num request tokens less than one block.
             num_computed_tokens = min(num_computed_tokens, request.num_tokens)
             if num_computed_tokens == request.num_tokens:
                 num_computed_tokens -= 1
@@ -2040,8 +2041,11 @@ class Scheduler(SchedulerInterface):
             is_affected = False
             marked_invalid_block = False
             req_id = request.request_id
-            # TODO (davidb): add support for hybrid memory allocator
-            (req_block_ids,) = self.kv_cache_manager.get_block_ids(req_id)
+            req_block_ids = self.kv_cache_manager.get_block_ids(req_id)
+            # Assume FA group is present to infer number of computed tokens
+            # TODO this is not padded for SW right?
+            fa_blocks_idx = max(range(len(req_block_ids)), key=lambda x: len(req_block_ids[x]))
+            max_num_blocks = len(req_block_ids[fa_blocks_idx])
             # We iterate only over blocks that may contain externally computed
             # tokens
             if request.status == RequestStatus.WAITING_FOR_REMOTE_KVS:
@@ -2050,7 +2054,7 @@ class Scheduler(SchedulerInterface):
                 req_num_computed_tokens = (
                     request.num_computed_tokens
                     if req_id in self.failed_recving_kv_req_ids
-                    else len(req_block_ids) * self.block_size
+                    else max_num_blocks * self.block_size
                 )
             else:
                 # Sync loading. num_computed_tokens includes new tokens
@@ -2059,7 +2063,10 @@ class Scheduler(SchedulerInterface):
             req_num_computed_blocks = (
                 req_num_computed_tokens + self.block_size - 1
             ) // self.block_size
-            for idx, block_id in zip(range(req_num_computed_blocks), req_block_ids):
+            # For the purpose of marking blocks as invalid, only report FA ones to 
+            # handle blocks<>tokens mapping consistently. 
+            # for idx, block_id in zip(range(req_num_computed_blocks), req_block_ids):
+            for idx, block_id in zip(range(req_num_computed_blocks), req_block_ids[fa_blocks_idx]):
                 if block_id not in invalid_block_ids:
                     continue
 
@@ -2089,9 +2096,17 @@ class Scheduler(SchedulerInterface):
                 )
                 total_affected_tokens += num_affected_tokens
                 request.num_external_computed_tokens -= num_affected_tokens
-                # collect invalid block and all downstream dependent blocks
+                # Collect invalid block and all downstream dependent blocks, across 
+                # all groups.
                 if evict_blocks:
-                    blocks_to_evict.update(req_block_ids[idx:])
+                    # Assuming groups are not padded, do SW-aware eviction, example:
+                    # FA: [A B C D C]
+                    # SW: [      E F] 
+                    # =>Evict E only when failure index <= E.
+                    for group in req_block_ids:
+                        offset = max_num_blocks - len(group)
+                        start_idx = max(0, idx - offset)
+                        blocks_to_evict.update(group[start_idx:])
 
             if is_affected:
                 if not marked_invalid_block:
