@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from pathlib import Path
-from typing import Any
+from typing import Any, overload
 
 from transformers import BatchEncoding
 
@@ -65,6 +65,7 @@ class DeepseekV32Tokenizer(CachedHfTokenizer):
         drop_thinking = messages[-1]["role"] == "user"
 
         encode_config = dict(thinking_mode=thinking_mode, drop_thinking=drop_thinking)
+
         prompt_str = encode_messages(messages, **encode_config)  # type: ignore
 
         if kwargs.get("tokenize", True):
@@ -160,6 +161,15 @@ class DeepseekV32Tokenizer(CachedHfTokenizer):
             max_length=max_length,
             add_special_tokens=add_special_tokens,
         )
+
+    @overload
+    def convert_tokens_to_ids(self, tokens: str) -> int: ...
+
+    @overload
+    def convert_tokens_to_ids(self, tokens: list[str]) -> list[int]: ...
+
+    def convert_tokens_to_ids(self, tokens: str | list[str]) -> int | list[int]:
+        return self.tokenizer.convert_tokens_to_ids(tokens)
 
     def convert_tokens_to_string(self, tokens: list[str]) -> str:
         return self.tokenizer.convert_tokens_to_string(tokens)

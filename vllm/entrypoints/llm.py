@@ -172,7 +172,7 @@ class LLM:
             The available overrides depend on the model that is being run.
             For example, for Phi-3-Vision: `{"num_crops": 4}`.
         pooler_config: Initialize non-default pooling config for the pooling
-            model. e.g. `PoolerConfig(pooling_type="mean", normalize=False)`.
+            model. e.g. `PoolerConfig(seq_pooling_type="MEAN", normalize=False)`.
         compilation_config: Either an integer or a dictionary. If it is an
             integer, it is used as the mode of compilation optimization. If it
             is a dictionary, it can specify the full compilation configuration.
@@ -347,6 +347,9 @@ class LLM:
         self.model_config = self.llm_engine.model_config
         self.input_processor = self.llm_engine.input_processor
         self.io_processor = self.llm_engine.io_processor
+
+        # Cache for __repr__ to avoid repeated collective_rpc calls
+        self._cached_repr: str | None = None
 
     def get_tokenizer(self) -> TokenizerLike:
         return self.llm_engine.get_tokenizer()
@@ -642,7 +645,10 @@ class LLM:
         # following the huggingface transformers implementation
         # at https://github.com/huggingface/transformers/blob/e15687fffe5c9d20598a19aeab721ae0a7580f8a/src/transformers/generation/beam_search.py#L534 # noqa
         beam_search_params = SamplingParams(
-            logprobs=2 * beam_width, max_tokens=1, temperature=temperature
+            logprobs=2 * beam_width,
+            max_tokens=1,
+            temperature=temperature,
+            skip_clone=True,  # Internal beam search, safe to skip clone
         )
         instances: list[BeamSearchInstance] = []
 
@@ -1783,3 +1789,16 @@ class LLM:
         # This is necessary because some requests may be finished earlier than
         # its previous requests.
         return sorted(outputs, key=lambda x: int(x.request_id))
+
+    def __repr__(self) -> str:
+        """Return a transformers-style hierarchical view of the model."""
+        # Cache the result to avoid repeated collective_rpc calls
+        if self._cached_repr is None:
+            results = self.llm_engine.collective_rpc("get_model_inspection")
+            # In distributed settings, we get results from all workers
+            # Just return the first one (they should all be the same)
+            if results:
+                self._cached_repr = results[0]
+            else:
+                self._cached_repr = f"LLM(model={self.model_config.model!r})"
+        return self._cached_repr

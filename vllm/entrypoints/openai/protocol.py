@@ -72,6 +72,7 @@ from pydantic import (
 )
 
 from vllm.entrypoints.chat_utils import ChatCompletionMessageParam, make_tool_call_id
+from vllm.exceptions import VLLMValidationError
 from vllm.logger import init_logger
 from vllm.logprobs import Logprob
 from vllm.sampling_params import (
@@ -129,36 +130,6 @@ class ErrorInfo(OpenAIBaseModel):
 
 class ErrorResponse(OpenAIBaseModel):
     error: ErrorInfo
-
-
-class VLLMValidationError(ValueError):
-    """vLLM-specific validation error for request validation failures.
-
-    Args:
-        message: The error message describing the validation failure.
-        parameter: Optional parameter name that failed validation.
-        value: Optional value that was rejected during validation.
-    """
-
-    def __init__(
-        self,
-        message: str,
-        *,
-        parameter: str | None = None,
-        value: Any = None,
-    ) -> None:
-        super().__init__(message)
-        self.parameter = parameter
-        self.value = value
-
-    def __str__(self):
-        base = super().__str__()
-        extras = []
-        if self.parameter is not None:
-            extras.append(f"parameter={self.parameter}")
-        if self.value is not None:
-            extras.append(f"value={self.value}")
-        return f"{base} ({', '.join(extras)})" if extras else base
 
 
 class ModelPermission(OpenAIBaseModel):
@@ -474,6 +445,7 @@ class ResponsesRequest(OpenAIBaseModel):
             ),
             structured_outputs=structured_outputs,
             logit_bias=self.logit_bias,
+            skip_clone=True,  # Created fresh per request, safe to skip clone
         )
 
     def is_include_output_logprobs(self) -> bool:
@@ -605,7 +577,9 @@ class ChatCompletionRequest(OpenAIBaseModel):
     min_tokens: int = 0
     skip_special_tokens: bool = True
     spaces_between_special_tokens: bool = True
-    truncate_prompt_tokens: Annotated[int, Field(ge=-1)] | None = None
+    truncate_prompt_tokens: Annotated[int, Field(ge=-1, le=_LONG_INFO.max)] | None = (
+        None
+    )
     prompt_logprobs: int | None = None
     allowed_token_ids: list[int] | None = None
     bad_words: list[str] = Field(default_factory=list)
@@ -876,6 +850,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
             bad_words=self.bad_words,
             allowed_token_ids=self.allowed_token_ids,
             extra_args=extra_args or None,
+            skip_clone=True,  # Created fresh per request, safe to skip clone
         )
 
     @model_validator(mode="before")
@@ -1085,7 +1060,9 @@ class CompletionRequest(OpenAIBaseModel):
     min_tokens: int = 0
     skip_special_tokens: bool = True
     spaces_between_special_tokens: bool = True
-    truncate_prompt_tokens: Annotated[int, Field(ge=-1)] | None = None
+    truncate_prompt_tokens: Annotated[int, Field(ge=-1, le=_LONG_INFO.max)] | None = (
+        None
+    )
     allowed_token_ids: list[int] | None = None
     prompt_logprobs: int | None = None
     # --8<-- [end:completion-sampling-params]
@@ -1316,6 +1293,7 @@ class CompletionRequest(OpenAIBaseModel):
             logit_bias=self.logit_bias,
             allowed_token_ids=self.allowed_token_ids,
             extra_args=extra_args or None,
+            skip_clone=True,  # Created fresh per request, safe to skip clone
         )
 
     @model_validator(mode="before")
@@ -2182,6 +2160,7 @@ class TranscriptionRequest(OpenAIBaseModel):
             if self.stream
             else RequestOutputKind.FINAL_ONLY,
             extra_args=self.vllm_xargs,
+            skip_clone=True,  # Created fresh per request, safe to skip clone
         )
 
     @model_validator(mode="before")
@@ -2409,6 +2388,7 @@ class TranslationRequest(OpenAIBaseModel):
             output_kind=RequestOutputKind.DELTA
             if self.stream
             else RequestOutputKind.FINAL_ONLY,
+            skip_clone=True,  # Created fresh per request, safe to skip clone
         )
 
     @model_validator(mode="before")

@@ -10,6 +10,11 @@ from ....utils import large_gpu_mark
 from ...registry import HF_EXAMPLE_MODELS
 from ...utils import check_logprobs_close
 
+# Models that require embedding scaling for prompt_embeds test
+EMBED_SCALING_MODELS = {
+    "openbmb/MiniCPM4.1-8B",
+}
+
 # This list contains the model that are using AITER kernel.
 # Skip model that are not using AITER tests.
 # When more AITER kernels are added, this list will not be
@@ -64,8 +69,8 @@ AITER_MODEL_LIST = [
             marks=[pytest.mark.core_model, pytest.mark.cpu_model],
         ),
         pytest.param(
-            "openbmb/MiniCPM3-4B",
-            marks=[pytest.mark.core_model, large_gpu_mark(min_gb=32)],
+            "openbmb/MiniCPM4.1-8B",  # minicpm
+            marks=[pytest.mark.core_model, large_gpu_mark(min_gb=48)],
         ),
         pytest.param(
             "facebook/opt-125m",  # opt
@@ -135,16 +140,20 @@ def test_models(
 
         prompt_embeds: list[torch.Tensor] | None = [] if use_prompt_embeds else None
 
-        prompt_token_ids = []
         for prompt in example_prompts:
             token_ids = hf_model.tokenizer(prompt, return_tensors="pt").input_ids.to(
                 hf_model.model.device
             )
-            prompt_token_ids.append(token_ids)
             if prompt_embeds is not None:
-                prompt_embeds.append(
-                    hf_model.model.get_input_embeddings()(token_ids).squeeze(0)
-                )
+                embed = hf_model.model.get_input_embeddings()(token_ids)
+
+                # MiniCPM models apply scale_emb to embeddings internally.
+                # vLLM expects pre-scaled embeddings when using inputs_embeds.
+                if model in EMBED_SCALING_MODELS:
+                    config = hf_model.model.config
+                    embed = embed * config.scale_emb
+
+                prompt_embeds.append(embed.squeeze(0))
 
     with vllm_runner(
         model,
