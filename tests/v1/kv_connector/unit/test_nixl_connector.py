@@ -59,7 +59,7 @@ from vllm.v1.request import RequestStatus
 from vllm.v1.worker.kv_connector_model_runner_mixin import KVConnectorModelRunnerMixin
 from vllm.v1.worker.utils import AttentionGroup
 
-from .utils import create_request, create_scheduler, create_vllm_config
+from .utils import create_request, create_scheduler, create_vllm_config, make_kv_cache_config
 
 
 @pytest.fixture(scope="module", autouse=True)
@@ -263,7 +263,7 @@ def test_basic_interface():
     req_meta = kv_connector_metadata.reqs_to_recv[request_id]
 
     for block_id, block in zip(
-        req_meta.local_block_ids,
+        req_meta.local_block_ids[0],
         scheduler.kv_cache_manager.coordinator.single_type_managers[0].req_to_blocks[
             request_id
         ],
@@ -327,7 +327,9 @@ def test_kv_transfer_handshake(dist_init):
 
         # Prefill connector will register KV cache to populate proper handshake
         # metadata.
-        prefill_connector = NixlConnector(vllm_config, KVConnectorRole.WORKER)
+        prefill_connector = NixlConnector(
+            vllm_config, KVConnectorRole.WORKER, make_kv_cache_config(block_size=16)
+        )
         kv_cache_shape = FlashAttentionBackend.get_kv_cache_shape(
             num_blocks=2, block_size=16, num_kv_heads=4, head_size=64
         )
@@ -367,13 +369,15 @@ def test_kv_transfer_handshake(dist_init):
             do_remote_decode=True,
         )
         request.status = RequestStatus.FINISHED_LENGTH_CAPPED
-        delay, kv_connector_metadata = scheduler.get_kv_connector().request_finished(
-            request, [0, 1, 2]
+        delay, kv_connector_metadata = scheduler.get_kv_connector().request_finished_all_groups(
+            request, ([0, 1, 2],)
         )
         assert delay
 
         # Decode connector will be able to create handshake with the prefill connector.
-        decode_connector = NixlConnector(vllm_config, KVConnectorRole.WORKER)
+        decode_connector = NixlConnector(
+            vllm_config, KVConnectorRole.WORKER, make_kv_cache_config(block_size=16)
+        )
         decode_connector.register_kv_caches(kv_caches)
 
         # Here we are testing the retrieval of NIXLAgentMetadata.
@@ -406,7 +410,8 @@ class FakeNixlConnectorWorker(NixlConnectorWorker):
     def __init__(
         self, *args, hand_shake_latency: float = 1.8, kv_cache_layout="HND", **kwargs
     ):
-        super().__init__(*args, **kwargs)
+        kv_cache_config = make_kv_cache_config(block_size=16)
+        super().__init__(*args, kv_cache_config=kv_cache_config, **kwargs)
         self._hand_shake_latency = hand_shake_latency
         self.kv_cache_layout = kv_cache_layout
         # Mock register_kv_caches attribute needed for tests that do not call it.
@@ -507,7 +512,9 @@ class TestNixlHandshake:
         request_id = "req_id"
 
         # Test worker role in decode server.
-        connector = NixlConnector(vllm_config, KVConnectorRole.WORKER)
+        connector = NixlConnector(
+            vllm_config, KVConnectorRole.WORKER, make_kv_cache_config(block_size=16)
+        )
         connector.connector_worker = FakeNixlConnectorWorker(
             vllm_config, connector.engine_id, hand_shake_latency=0
         )
@@ -528,13 +535,15 @@ class TestNixlHandshake:
                 num_xfers -= 1
                 metadata.add_new_req_to_recv(
                     request_id=request_id,
-                    local_block_ids=[num_xfers + 1, num_xfers + 2, num_xfers + 3],
+                    local_block_ids=([num_xfers + 1, num_xfers + 2, num_xfers + 3],),
                     kv_transfer_params={
-                        "remote_block_ids": [
-                            num_xfers + 4,
-                            num_xfers + 5,
-                            num_xfers + 6,
-                        ],
+                        "remote_block_ids": (
+                            [
+                                num_xfers + 4,
+                                num_xfers + 5,
+                                num_xfers + 6,
+                            ],
+                        ),
                         "remote_engine_id": FakeNixlConnectorWorker.REMOTE_ENGINE_ID,
                         "remote_request_id": f"prefill-{request_id}",
                         "remote_host": "localhost",
@@ -594,16 +603,18 @@ class TestNixlHandshake:
         vllm_config.parallel_config.tensor_parallel_size = decode_tp_size
 
         # Test worker role in decode server.
-        connector = NixlConnector(vllm_config, KVConnectorRole.WORKER)
+        connector = NixlConnector(
+            vllm_config, KVConnectorRole.WORKER, make_kv_cache_config(block_size=16)
+        )
         connector.connector_worker = FakeNixlConnectorWorker(
             vllm_config, connector.engine_id
         )
         metadata = NixlConnectorMetadata()
         metadata.add_new_req_to_recv(
             request_id="id",
-            local_block_ids=[1, 2, 3],
+            local_block_ids=([1, 2, 3],),
             kv_transfer_params={
-                "remote_block_ids": [4, 5, 6],
+                "remote_block_ids": ([4, 5, 6],),
                 "remote_engine_id": FakeNixlConnectorWorker.REMOTE_ENGINE_ID,
                 "remote_request_id": "prefill-id",
                 "remote_host": "localhost",
@@ -652,7 +663,9 @@ class TestNixlHandshake:
         local_tp_size = 1
         vllm_config.parallel_config.tensor_parallel_size = local_tp_size
 
-        connector = NixlConnector(vllm_config, KVConnectorRole.WORKER)
+        connector = NixlConnector(
+            vllm_config, KVConnectorRole.WORKER, make_kv_cache_config(block_size=16)
+        )
         connector.connector_worker = FakeNixlConnectorWorker(
             vllm_config, connector.engine_id, hand_shake_latency=0
         )
@@ -717,8 +730,12 @@ class TestNixlHandshake:
         p_tp_size = 2
 
         # Build two separate connectors/workers to emulate P TP=2 ranks.
-        conn_p0 = NixlConnector(vllm_config, KVConnectorRole.WORKER)
-        conn_p1 = NixlConnector(vllm_config, KVConnectorRole.WORKER)
+        conn_p0 = NixlConnector(
+            vllm_config, KVConnectorRole.WORKER, make_kv_cache_config(block_size=16)
+        )
+        conn_p1 = NixlConnector(
+            vllm_config, KVConnectorRole.WORKER, make_kv_cache_config(block_size=16)
+        )
         conn_p0.connector_worker = FakeNixlConnectorWorker(
             vllm_config, conn_p0.engine_id, hand_shake_latency=0
         )
@@ -815,7 +832,9 @@ class TestNixlHandshake:
         vllm_config = create_vllm_config()
 
         # Test worker role in decode server.
-        connector = NixlConnector(vllm_config, KVConnectorRole.WORKER)
+        connector = NixlConnector(
+            vllm_config, KVConnectorRole.WORKER, make_kv_cache_config(block_size=16)
+        )
         connector.connector_worker = FakeNixlConnectorWorker(
             vllm_config, connector.engine_id
         )
@@ -827,9 +846,9 @@ class TestNixlHandshake:
         for i in range(total_reqs):
             metadata.add_new_req_to_recv(
                 request_id=f"id_{i}",
-                local_block_ids=[1, 2, 3],
+                local_block_ids=([1, 2, 3],),
                 kv_transfer_params={
-                    "remote_block_ids": [4, 5, 6],
+                    "remote_block_ids": ([4, 5, 6],),
                     "remote_engine_id": FakeNixlConnectorWorker.REMOTE_ENGINE_ID,
                     "remote_request_id": f"prefill-id-{i}",
                     "remote_host": "localhost",
@@ -884,7 +903,9 @@ class TestNixlHandshake:
             return_value=2,
         ):
             # Initialize connector and worker (with fake NIXL wrapper)
-            connector = NixlConnector(vllm_config, KVConnectorRole.WORKER)
+            connector = NixlConnector(
+                vllm_config, KVConnectorRole.WORKER, make_kv_cache_config(block_size=16)
+            )
             connector.connector_worker = FakeNixlConnectorWorker(
                 vllm_config, connector.engine_id, hand_shake_latency=0
             )
@@ -934,7 +955,9 @@ class TestNixlHandshake:
             return_value=2,
         ):
             # Initialize connector and worker (with fake NIXL wrapper)
-            connector = NixlConnector(vllm_config, KVConnectorRole.WORKER)
+            connector = NixlConnector(
+                vllm_config, KVConnectorRole.WORKER, make_kv_cache_config(block_size=16)
+            )
             connector.connector_worker = FakeNixlConnectorWorker(
                 vllm_config,
                 connector.engine_id,
@@ -979,7 +1002,9 @@ def test_kv_connector_stats(default_vllm_config, dist_init):
     vllm_config = create_vllm_config()
 
     # Test worker role in decode server.
-    connector = NixlConnector(vllm_config, KVConnectorRole.WORKER)
+    connector = NixlConnector(
+        vllm_config, KVConnectorRole.WORKER, make_kv_cache_config(block_size=16)
+    )
     connector.connector_worker = FakeNixlConnectorWorker(
         vllm_config, connector.engine_id, hand_shake_latency=0
     )
@@ -993,9 +1018,9 @@ def test_kv_connector_stats(default_vllm_config, dist_init):
     metadata = NixlConnectorMetadata()
     metadata.add_new_req_to_recv(
         request_id=request_id,
-        local_block_ids=[1, 2, 3],
+        local_block_ids=([1, 2, 3],),
         kv_transfer_params={
-            "remote_block_ids": [4, 5, 6],
+            "remote_block_ids": ([4, 5, 6],),
             "remote_engine_id": FakeNixlConnectorWorker.REMOTE_ENGINE_ID,
             "remote_request_id": f"prefill-{request_id}",
             "remote_host": "localhost",
@@ -1448,7 +1473,9 @@ def test_register_kv_caches(
         mock_get_attn_backend.return_value = backend_cls
 
         # Create connector
-        connector = NixlConnector(vllm_config, KVConnectorRole.WORKER)
+        connector = NixlConnector(
+            vllm_config, KVConnectorRole.WORKER, make_kv_cache_config(block_size=16)
+        )
         connector.connector_worker = FakeNixlConnectorWorker(
             vllm_config, connector.engine_id, hand_shake_latency=0
         )
@@ -1676,7 +1703,9 @@ def test_kv_buffer_to_nixl_memory_types(
         ),
     ):  # noqa: E501
         # Create connector and replace its worker with a fake one for isolation
-        connector = NixlConnector(vllm_config, KVConnectorRole.WORKER)
+        connector = NixlConnector(
+            vllm_config, KVConnectorRole.WORKER, make_kv_cache_config(block_size=16)
+        )
 
         # Verify get_reg_descs was called with the correct memory_type
         assert connector.connector_worker.kv_buffer_device == kv_buffer_device
@@ -1692,9 +1721,9 @@ def test_shutdown_cleans_up_resources(default_vllm_config, dist_init):
     vllm_config = create_vllm_config()
 
     scheduler = NixlConnectorScheduler(
-        vllm_config, vllm_config.kv_transfer_config.engine_id
+        vllm_config, vllm_config.kv_transfer_config.engine_id, make_kv_cache_config(block_size=16)
     )
-    worker = NixlConnectorWorker(vllm_config, vllm_config.kv_transfer_config.engine_id)
+    worker = NixlConnectorWorker(vllm_config, vllm_config.kv_transfer_config.engine_id, make_kv_cache_config(block_size=16))
     nixl_wrapper = worker.nixl_wrapper
 
     with (
@@ -1756,7 +1785,9 @@ def test_aborted_request_removed_from_worker_in_batch(default_vllm_config, dist_
 
     scheduler = create_scheduler(vllm_config)
     # KVConnector Worker in P
-    connector = NixlConnector(vllm_config, KVConnectorRole.WORKER)
+    connector = NixlConnector(
+        vllm_config, KVConnectorRole.WORKER, make_kv_cache_config(block_size=16)
+    )
     connector.connector_worker = FakeNixlConnectorWorker(
         vllm_config, connector.engine_id, hand_shake_latency=0
     )
@@ -2007,7 +2038,9 @@ def test_handshake_failure_returns_finished(default_vllm_config, dist_init):
     """Test that handshake failures mark blocks invalid and return via get_finished."""
     vllm_config = create_vllm_config()
 
-    connector = NixlConnector(vllm_config, KVConnectorRole.WORKER)
+    connector = NixlConnector(
+        vllm_config, KVConnectorRole.WORKER, make_kv_cache_config(block_size=16)
+    )
     connector.connector_worker = FakeNixlConnectorWorker(
         vllm_config, connector.engine_id, hand_shake_latency=0.1
     )
@@ -2017,9 +2050,9 @@ def test_handshake_failure_returns_finished(default_vllm_config, dist_init):
     metadata = NixlConnectorMetadata()
     metadata.add_new_req_to_recv(
         request_id=request_id,
-        local_block_ids=[1, 2, 3],
+        local_block_ids=([1, 2, 3],),
         kv_transfer_params={
-            "remote_block_ids": [4, 5, 6],
+            "remote_block_ids": ([4, 5, 6],),
             "remote_engine_id": FakeNixlConnectorWorker.REMOTE_ENGINE_ID,
             "remote_request_id": f"prefill-{request_id}",
             "remote_host": "localhost",
@@ -2058,7 +2091,9 @@ def test_transfer_setup_failure_returns_finished(default_vllm_config, dist_init)
     and return via get_finished."""
     vllm_config = create_vllm_config()
 
-    connector = NixlConnector(vllm_config, KVConnectorRole.WORKER)
+    connector = NixlConnector(
+        vllm_config, KVConnectorRole.WORKER, make_kv_cache_config(block_size=16)
+    )
     connector.connector_worker = FakeNixlConnectorWorker(
         vllm_config, connector.engine_id, hand_shake_latency=0
     )
@@ -2068,9 +2103,9 @@ def test_transfer_setup_failure_returns_finished(default_vllm_config, dist_init)
     metadata = NixlConnectorMetadata()
     metadata.add_new_req_to_recv(
         request_id=request_id,
-        local_block_ids=[7, 8, 9],
+        local_block_ids=([7, 8, 9],),
         kv_transfer_params={
-            "remote_block_ids": [10, 11, 12],
+            "remote_block_ids": ([10, 11, 12],),
             "remote_engine_id": FakeNixlConnectorWorker.REMOTE_ENGINE_ID,
             "remote_request_id": f"prefill-{request_id}",
             "remote_host": "localhost",
@@ -2154,7 +2189,9 @@ def test_compatibility_hash_validation(
             "enforce_handshake_compat": enforce_handshake_compat
         },
     )
-    decode_connector = NixlConnector(local_vllm_config, KVConnectorRole.WORKER)
+    decode_connector = NixlConnector(
+        local_vllm_config, KVConnectorRole.WORKER, make_kv_cache_config(block_size=16)
+    )
     decode_worker = decode_connector.connector_worker
     kv_cache_shape = decode_worker.attn_backend.get_kv_cache_shape(
         num_blocks=2, block_size=16, num_kv_heads=4, head_size=64
@@ -2267,7 +2304,9 @@ def test_handshake_decode_errors(default_vllm_config, dist_init, error_scenario)
         model="facebook/opt-125m",
         block_size=16,
     )
-    decode_connector = NixlConnector(local_vllm_config, KVConnectorRole.WORKER)
+    decode_connector = NixlConnector(
+        local_vllm_config, KVConnectorRole.WORKER, make_kv_cache_config(block_size=16)
+    )
     decode_worker = decode_connector.connector_worker
 
     backend = get_current_attn_backend(local_vllm_config)
