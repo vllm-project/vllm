@@ -437,6 +437,7 @@ _MULTIMODAL_MODELS = {
         "NemotronParseForConditionalGeneration",
     ),
     "WhisperForConditionalGeneration": ("whisper", "WhisperForConditionalGeneration"),  # noqa: E501
+    "OpenPanguVLForConditionalGeneration": ("openpangu_vl", "OpenPanguVLForConditionalGeneration"),  # noqa: E501
 }
 
 _SPECULATIVE_DECODING_MODELS = {

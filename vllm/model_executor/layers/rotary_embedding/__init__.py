@@ -19,6 +19,7 @@ from .ntk_scaling_rope import NTKScalingRotaryEmbedding
 from .phi3_long_rope_scaled_rope import Phi3LongRoPEScaledRotaryEmbedding
 from .xdrope import XDRotaryEmbedding
 from .yarn_scaling_rope import YaRNScalingRotaryEmbedding
+from .openpangu_rope import MRotaryEmbeddingInterleaved
 
 _ROPE_DICT: dict[tuple, RotaryEmbedding] = {}
 
@@ -283,6 +284,19 @@ def get_rope(
             long_factor,
             **extra_kwargs,
         )
+    elif scaling_type == "openpangu":
+        mrope_interleaved=rope_scaling.get("mrope_interleaved", False)
+        if "mrope_section" in rope_scaling and mrope_interleaved:
+            rotary_emb = MRotaryEmbeddingInterleaved(
+                head_size,
+                rotary_dim,
+                max_position,
+                base,
+                is_neox_style,
+                dtype,
+                mrope_section=rope_scaling["mrope_section"],
+                mrope_interleaved=mrope_interleaved,
+            )
     else:
         raise ValueError(f"Unknown RoPE scaling type {scaling_type}")
     _ROPE_DICT[key] = rotary_emb
