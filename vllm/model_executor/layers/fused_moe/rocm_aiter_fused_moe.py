@@ -16,7 +16,6 @@ from vllm.model_executor.layers.fused_moe.config import (
 from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceNoOP,
 )
-from vllm.platforms import current_platform
 
 
 class QuantMethod(IntEnum):
@@ -281,7 +280,7 @@ class AiterExperts(mk.FusedMoEPermuteExpertsUnpermute):
 
     @staticmethod
     def _supports_current_device() -> bool:
-        return current_platform.is_rocm()
+        return rocm_aiter_ops.IS_AITER_FOUND
 
     @staticmethod
     def _supports_no_act_and_mul() -> bool:
@@ -290,9 +289,9 @@ class AiterExperts(mk.FusedMoEPermuteExpertsUnpermute):
     @staticmethod
     def _supports_quant_scheme(quant_scheme: FusedMoEQuantScheme) -> bool:
         return (
-            quant_scheme.is_fp8_w8a8
-            # or quant_scheme.is_mxfp4_w4a4
-            or quant_scheme.is_unquantized
+            quant_scheme.is_unquantized
+            or quant_scheme.is_fp8_w8a8
+            or quant_scheme.is_mxfp4_w4a4
         )
 
     @staticmethod
