@@ -9,7 +9,6 @@ from transformers import RobertaConfig
 
 from vllm.config import ModelConfig, VllmConfig
 from vllm.model_executor.layers.pooler import DispatchPooler
-from vllm.model_executor.layers.pooler.seqwise import CLSPool
 from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmbedding
 from vllm.model_executor.models.bert import (
     TOKEN_TYPE_SHIFT,
@@ -86,7 +85,7 @@ class RobertaClassificationHead(nn.Module):
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # CLSPool has already been applied in `pooling`
+        # Token extraction has already been applied in `pooler.pooling`
         x = self.dense(x)
         x = torch.tanh(x)
         x = self.out_proj(x)
@@ -194,7 +193,6 @@ class RobertaForSequenceClassification(nn.Module, SupportsCrossEncoding):
 
         self.pooler = DispatchPooler.for_seq_cls(
             pooler_config,
-            pooling=CLSPool(),
             classifier=self.classifier,
         )
 
