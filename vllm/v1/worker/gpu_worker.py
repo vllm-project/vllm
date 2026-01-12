@@ -929,6 +929,18 @@ class Worker(WorkerBase):
             tensorizer_config=tensorizer_config,
         )
 
+    def save_serverless_llm_state(
+        self,
+        path: str,
+        pattern: str | None = None,
+        max_size: int | None = None,
+    ) -> None:
+        self.model_runner.save_serverless_llm_state(
+            path,
+            pattern=pattern,
+            max_size=max_size,
+        )
+        
     def shutdown(self) -> None:
         if runner := getattr(self, "model_runner", None):
             runner.ensure_kv_transfer_shutdown()
