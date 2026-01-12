@@ -25,9 +25,9 @@ from vllm.model_executor.model_loader.weight_utils import (
     maybe_remap_kv_scale_name,
 )
 from vllm.model_executor.models.llama import (
+    LlamaAttention,
     LlamaDecoderLayer,
     LlamaForCausalLM,
-    LlamaAttention,
     LlamaMLP,
 )
 from vllm.multimodal.inputs import NestedTensors
