@@ -7,7 +7,10 @@ from packaging import version
 
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization import QuantizationConfig
-from vllm.model_executor.layers.quantization.utils import replace_parameter
+from vllm.model_executor.layers.quantization.utils import (
+    is_compute_capability_supported,
+    replace_parameter,
+)
 from vllm.model_executor.layers.quantization.utils.bitblas_utils import (
     BITBLAS_OPTIMIZE_FEATURES,
     BITBLAS_SUPPORTED_GROUP_SIZES,
@@ -19,7 +22,6 @@ from vllm.model_executor.layers.quantization.utils.bitblas_utils import (
     unpack_gptq_qweight,
     unpack_gptq_qzeros,
 )
-from vllm.platforms import current_platform
 
 from .MPLinearKernel import MPLinearKernel, MPLinearLayerConfig
 
@@ -112,16 +114,12 @@ class BitBLASLinearKernel(MPLinearKernel):
     def is_supported(
         cls, compute_capability: int | None = None
     ) -> tuple[bool, str | None]:
-        if compute_capability is None:
-            _cc = current_platform.get_device_capability()
-            if _cc is not None:
-                compute_capability = _cc.major * 10 + _cc.minor
+        res, err = is_compute_capability_supported(
+            min_capability=70, compute_capability=compute_capability
+        )
 
-        if compute_capability is not None and compute_capability < 70:
-            return (
-                False,
-                f"requires capability >= 70, got {compute_capability}",
-            )
+        if not res:
+            return res, err
 
         is_bitblas_installed = True
         try:

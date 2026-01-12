@@ -6,8 +6,10 @@ from typing import Final
 
 import torch
 
+from vllm.model_executor.layers.quantization.utils import (
+    is_compute_capability_supported,
+)
 from vllm.model_executor.parameter import BasevLLMParameter, permute_param_layout_
-from vllm.platforms import current_platform
 from vllm.scalar_type import scalar_types
 
 from .MPLinearKernel import MPLinearKernel, MPLinearLayerConfig
@@ -26,18 +28,9 @@ class ConchLinearKernel(MPLinearKernel):
     def is_supported(
         cls, compute_capability: int | None = None
     ) -> tuple[bool, str | None]:
-        if compute_capability is None:
-            _cc = current_platform.get_device_capability()
-            if _cc is not None:
-                compute_capability = _cc.major * 10 + _cc.minor
-
-        if compute_capability is not None and compute_capability < 80:
-            return (
-                False,
-                f"requires capability >= 80, got {compute_capability}",
-            )
-
-        return True, None
+        return is_compute_capability_supported(
+            min_capability=80, compute_capability=compute_capability
+        )
 
     @classmethod
     def can_implement(cls, c: MPLinearLayerConfig) -> tuple[bool, str | None]:

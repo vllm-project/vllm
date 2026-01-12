@@ -6,6 +6,9 @@ import torch
 
 from vllm import _custom_ops as ops
 from vllm.model_executor.layers.quantization.input_quant_fp8 import QuantFP8
+from vllm.model_executor.layers.quantization.utils import (
+    is_compute_capability_supported,
+)
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     GroupShape,
     convert_bf16_scales_to_fp8,
@@ -31,18 +34,9 @@ class CutlassW4A8LinearKernel(MPLinearKernel):
         if not current_platform.is_cuda():
             return False, "requires CUDA"
 
-        if compute_capability is None:
-            _cc = current_platform.get_device_capability()
-            if _cc is not None:
-                compute_capability = _cc.major * 10 + _cc.minor
-
-        if compute_capability is not None and compute_capability != 90:
-            return (
-                False,
-                f"requires capability == 90, got {compute_capability}",
-            )
-
-        return True, None
+        return is_compute_capability_supported(
+            min_capability=90, compute_capability=compute_capability, max_capability=90
+        )
 
     @classmethod
     def can_implement(cls, c: MPLinearLayerConfig) -> tuple[bool, str | None]:
