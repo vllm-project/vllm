@@ -43,7 +43,6 @@ from vllm.model_executor.models.deepseek_mtp import (
 from vllm.model_executor.models.utils import maybe_prefix
 from vllm.sequence import IntermediateTensors
 
-from .interfaces import SupportsPP
 from .openpangu import OpenPanguDecoderLayer
 
 
@@ -92,7 +91,7 @@ class OpenPanguMultiTokenPredictor(DeepSeekMultiTokenPredictor):
 
 
 @support_torch_compile
-class OpenPanguMTP(nn.Module, SupportsPP):
+class OpenPanguMTP(nn.Module):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
         self.config = vllm_config.model_config.hf_config

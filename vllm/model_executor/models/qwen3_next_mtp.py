@@ -27,7 +27,6 @@ from vllm.model_executor.models.qwen3_next import (
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.configs import Qwen3NextConfig
 
-from .interfaces import SupportsPP
 from .utils import (
     AutoWeightsLoader,
     is_pp_missing_parameter,
@@ -221,7 +220,7 @@ class Qwen3NextMultiTokenPredictor(nn.Module):
 
 
 @support_torch_compile
-class Qwen3NextMTP(nn.Module, SupportsPP, QwenNextMixtureOfExperts):
+class Qwen3NextMTP(nn.Module, QwenNextMixtureOfExperts):
     packed_modules_mapping = {
         "qkv_proj": [
             "q_proj",
@@ -253,9 +252,6 @@ class Qwen3NextMTP(nn.Module, SupportsPP, QwenNextMixtureOfExperts):
             prefix=maybe_prefix(prefix, "lm_head"),
         )
         self.logits_processor = LogitsProcessor(config.vocab_size)
-        self.make_empty_intermediate_tensors = (
-            self.model.make_empty_intermediate_tensors
-        )
         self.set_moe_parameters()
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
