@@ -208,9 +208,10 @@ def get_open_ports_list(count: int = 5) -> list[int]:
     """
     Finds `count` open ports.
 
-    If user specifies port through VLLM_DP_MASTER_PORT or VLLM_PORT,
-    start port search for that value.
-    Otherwise, try any random port numbers.
+    - If environment specifies VLLM_PORT:
+      try to find ports in [VLLM_PORT, VLLM_PORT + max_tries).
+    - If environment specifies VLLM_DP_MASTER_PORT,
+      try to find ports *not* in [VLLM_DP_MASTER_PORT, VLLM_DP_MASTER_PORT + max_tries).
 
     Raises OSError if less than `count` open ports have been found.
     """
