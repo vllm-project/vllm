@@ -234,9 +234,7 @@ class Scheduler(SchedulerInterface):
                 "(dcp_world_size > 1 or pcp_world_size > 1)"
             )
 
-            self.routed_experts_reader = RoutedExpertsReader.create(
-                enable=self.vllm_config.model_config.enable_return_routed_experts
-            )
+            self.routed_experts_reader = RoutedExpertsReader.create()
 
             assert len(kv_cache_config.kv_cache_groups) > 0, (
                 "enable_return_routed_experts requires at least one kv cache group"

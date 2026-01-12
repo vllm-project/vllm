@@ -5677,9 +5677,7 @@ class GPUModelRunner(
             "Initializing routed experts capturer, enable_return_routed_experts: %s",
             self.model_config.enable_return_routed_experts,
         )
-        routed_experts_capturer = RoutedExpertsCapturer.create(
-            self.model_config.enable_return_routed_experts
-        )
+        routed_experts_capturer = RoutedExpertsCapturer.create()
         block_size = self.cache_config.block_size
         self.max_num_kv_tokens = (
             self.kv_cache_config.num_blocks // len(self.kv_cache_config.kv_cache_groups)
