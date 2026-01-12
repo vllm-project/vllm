@@ -1439,7 +1439,7 @@ def test_register_kv_caches(default_vllm_config, dist_init, attn_backend):
         patch(f"{nixl_module}.NixlWrapper") as mock_nixl_wrapper,
         patch(f"{nixl_module}.threading.Event"),
         patch(f"{nixl_module}.threading.Thread") as mock_thread,
-        patch(f"{nixl_module}.get_attn_backend") as mock_get_attn_backend,
+        patch(f"{nixl_module}.get_current_attn_backend") as mock_get_attn_backend,
     ):
         # Ensure get_attn_backend returns the correct value due to
         # _cached_get_attn_backend returning the backend from previous

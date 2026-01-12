@@ -24,6 +24,7 @@ from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.utils import (
     EngineId,
     TpKVTopology,
+    get_current_attn_backend,
     kv_postprocess_blksize_and_layout_on_receive,
     kv_postprocess_blksize_on_receive,
     kv_postprocess_layout_on_receive,
@@ -53,7 +54,6 @@ from vllm.platforms import current_platform
 from vllm.utils.network_utils import make_zmq_path, make_zmq_socket
 from vllm.v1.attention.backend import AttentionMetadata
 from vllm.v1.attention.backends.utils import get_kv_cache_layout
-from vllm.v1.attention.selector import get_attn_backend
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.worker.block_table import BlockTable
 
@@ -957,13 +957,10 @@ class NixlConnectorWorker:
         self.block_window_per_layer: list[int | None] = []
         self.use_mla = self.model_config.use_mla
 
-        backend = get_attn_backend(
-            self.model_config.get_head_size(),
-            self.model_config.dtype,
-            self.cache_config.cache_dtype,
-            self.block_size,
-            use_mla=self.use_mla,
-        )
+        # Get the attention backend from the first layer
+        # NOTE (NickLucche) models with multiple backends are not supported yet
+        backend = get_current_attn_backend(vllm_config)
+
         self.backend_name = backend.get_name()
         self.kv_cache_layout = get_kv_cache_layout()
         self.host_buffer_kv_cache_layout = self.kv_cache_layout
