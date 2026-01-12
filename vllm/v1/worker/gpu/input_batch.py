@@ -126,6 +126,7 @@ class InputBatch:
         positions = input_buffers.positions[:num_tokens].zero_()
         input_buffers.mrope_positions.zero_()
         mrope_positions = input_buffers.mrope_positions[:, :num_tokens]
+
         # attn_metadata = defaultdict(lambda: None)
         logits_indices = query_start_loc[1:] - 1
         cu_num_logits = torch.arange(num_reqs + 1, device=device, dtype=torch.int32)
