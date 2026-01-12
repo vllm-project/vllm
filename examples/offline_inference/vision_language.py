@@ -771,6 +771,8 @@ def run_internvl(questions: list[str], modality: str) -> ModelRequestData:
 
 # Kanana-V
 def run_kanana_v(questions: list[str], modality: str) -> ModelRequestData:
+    assert modality == "image"
+
     model_name = "kakaocorp/kanana-1.5-v-3b-instruct"
 
     engine_args = EngineArgs(
