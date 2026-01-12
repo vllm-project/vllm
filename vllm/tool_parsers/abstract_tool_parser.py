@@ -80,21 +80,23 @@ class ToolParser:
         if not request.tools:
             return request
 
-        # Try structural tags first, only for "required" mode.
-        # TODO(mgoin): Add support for "auto" mode. It should work with structural tags
-        # but it seems there are side effects with the current implementation.
-        if request.tool_choice == "required" and self.supports_structural_tag():
+        # Try structural tags first
+        # TODO(mgoin): Add support for "auto" tool_choice. It should work with
+        # structural tags but it seems there are side effects.
+        if (
+            isinstance(request, ChatCompletionRequest)
+            and request.tool_choice == "required"
+            and self.supports_structural_tag()
+        ):
             import json
 
             structural_tag_config = build_structural_tag_config(
                 tools=request.tools,
                 get_structure_info=self.get_structure_info,
             )
-            if isinstance(request, ChatCompletionRequest):
-                request.structured_outputs = StructuredOutputsParams()
-                request.structured_outputs.structural_tag = json.dumps(
-                    structural_tag_config
-                )
+            request.structured_outputs = StructuredOutputsParams(
+                structural_tag=json.dumps(structural_tag_config)
+            )
             return request
 
         # Fallback to full JSON schema constraint
