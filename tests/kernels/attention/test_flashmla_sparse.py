@@ -5,7 +5,7 @@ import torch
 
 
 def test_sparse_flashmla_metadata_smoke():
-    import vllm.attention.ops.flashmla as fm
+    import vllm.v1.attention.ops.flashmla as fm
 
     ok, reason = fm.is_flashmla_sparse_supported()
     if not ok:
@@ -34,7 +34,7 @@ def test_sparse_flashmla_metadata_smoke():
 
 
 def test_sparse_flashmla_decode_smoke():
-    import vllm.attention.ops.flashmla as fm
+    import vllm.v1.attention.ops.flashmla as fm
 
     ok, reason = fm.is_flashmla_sparse_supported()
     if not ok:
@@ -97,7 +97,7 @@ def test_sparse_flashmla_decode_smoke():
 
 
 def test_sparse_flashmla_prefill_smoke():
-    import vllm.attention.ops.flashmla as fm
+    import vllm.v1.attention.ops.flashmla as fm
 
     ok, reason = fm.is_flashmla_sparse_supported()
     if not ok:
