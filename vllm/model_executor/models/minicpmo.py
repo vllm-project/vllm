@@ -65,6 +65,7 @@ from vllm.utils.tensor_schema import TensorSchema, TensorShape
 from .minicpmv import (
     _MAX_FRAMES_PER_VIDEO,
     MiniCPMV2_6,
+    MiniCPMV4_5,
     MiniCPMVDummyInputsBuilder,
     MiniCPMVMultiModalDataParser,
     MiniCPMVMultiModalProcessor,
@@ -192,7 +193,9 @@ class MiniCPMOProcessingInfo(MiniCPMVProcessingInfo):
         )
 
     def get_default_audio_pool_step(self) -> int:
-        return 2
+        hf_config = self.get_hf_config()
+        # MiniCPM-o 4.5 uses pool_step=5, older versions use 2
+        return getattr(hf_config, "audio_pool_step", 2)
 
     def get_default_audio_sampling_rate(self) -> int:
         return 16000
@@ -522,12 +525,9 @@ class MiniCPMWhisperEncoder(WhisperEncoder):
         )
 
 
-@MULTIMODAL_REGISTRY.register_processor(
-    MiniCPMOMultiModalProcessor,
-    info=MiniCPMOProcessingInfo,
-    dummy_inputs=MiniCPMODummyInputsBuilder,
-)
-class MiniCPMO(MiniCPMV2_6):
+class MiniCPMOBaseModel:
+    """Base mixin class for MiniCPM-O models with audio support."""
+
     packed_modules_mapping = {
         "qkv_proj": [
             "q_proj",
@@ -550,12 +550,6 @@ class MiniCPMO(MiniCPMV2_6):
             return "(<audio>./</audio>)"
 
         raise ValueError("Only image, video or audio modality is supported")
-
-    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
-        super().__init__(vllm_config=vllm_config, prefix=prefix)
-        self.apm = self.init_audio_module(
-            vllm_config=vllm_config, prefix=maybe_prefix(prefix, "apm")
-        )
 
     def init_audio_module(self, *, vllm_config: VllmConfig, prefix: str = ""):
         # Do not use parameters temporarily
@@ -766,3 +760,95 @@ class MiniCPMO(MiniCPMV2_6):
                 multimodal_embeddings += tuple(audio_embeddings)
 
         return multimodal_embeddings
+
+
+class MiniCPMO2_6(MiniCPMOBaseModel, MiniCPMV2_6):
+    """MiniCPM-O model based on MiniCPMV 2.6 (Qwen2 backbone)."""
+
+    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
+        # Skip MiniCPMV2_6.__init__ version assertion, call MiniCPMVBaseModel directly
+        from .minicpmv import MiniCPMVBaseModel
+        MiniCPMVBaseModel.__init__(self, vllm_config=vllm_config, prefix=prefix)
+        # Override version for MiniCPM-O 2.6
+        self.version = (2, 6)
+        self.apm = self.init_audio_module(
+            vllm_config=vllm_config, prefix=maybe_prefix(prefix, "apm")
+        )
+
+
+class MiniCPMO4_5(MiniCPMOBaseModel, MiniCPMV4_5):
+    """MiniCPM-O 4.5 model based on MiniCPMV 4.5 (Qwen3 backbone)."""
+
+    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
+        # Skip MiniCPMV4_5.__init__ version assertion, call MiniCPMVBaseModel directly
+        from .minicpmv import MiniCPMVBaseModel
+        MiniCPMVBaseModel.__init__(self, vllm_config=vllm_config, prefix=prefix)
+        # Override version for MiniCPM-O 4.5
+        self.version = (4, 5)
+        self.apm = self.init_audio_module(
+            vllm_config=vllm_config, prefix=maybe_prefix(prefix, "apm")
+        )
+
+
+_MINICPMO_SUPPORT_VERSION = {
+    (2, 6): MiniCPMO2_6,
+    (4, 5): MiniCPMO4_5,
+}
+
+
+@MULTIMODAL_REGISTRY.register_processor(
+    MiniCPMOMultiModalProcessor,
+    info=MiniCPMOProcessingInfo,
+    dummy_inputs=MiniCPMODummyInputsBuilder,
+)
+class MiniCPMO(MiniCPMOBaseModel, MiniCPMV2_6):
+    """
+    MiniCPM-O model with audio support.
+    Different versions use different LLM backbones:
+    - Version 2.6: Uses Qwen2
+    - Version 4.5: Uses Qwen3
+    """
+
+    def __new__(cls, *, vllm_config: VllmConfig, prefix: str = ""):
+        config = vllm_config.model_config.hf_config
+
+        # Determine version from config
+        if hasattr(config, "version"):
+            version = str(config.version).split(".")
+            version = tuple([int(x) for x in version])
+        else:
+            # Auto-detect version based on config features:
+            # - MiniCPM-o 4.5 (Qwen3 backbone): has head_dim attribute, 
+            #   hidden_size=4096, num_hidden_layers=36
+            # - MiniCPM-o 2.6 (Qwen2 backbone): no head_dim, different arch
+            has_head_dim = hasattr(config, "head_dim")
+            is_qwen3_like = (
+                has_head_dim
+                and getattr(config, "hidden_size", 0) == 4096
+                and getattr(config, "num_hidden_layers", 0) == 36
+            )
+            if is_qwen3_like:
+                version = (4, 5)
+            else:
+                # Default to 2.6 for backward compatibility
+                version = (2, 6)
+
+        # Dispatch class based on version
+        instance_cls = _MINICPMO_SUPPORT_VERSION.get(version)
+        if instance_cls is None:
+            supported_versions = ", ".join(
+                [f"{v[0]}.{v[1]}" for v in sorted(_MINICPMO_SUPPORT_VERSION.keys())]
+            )
+            raise ValueError(
+                f"Currently, MiniCPMO only supports versions "
+                f"{supported_versions}. Got version: {version}"
+            )
+
+        return instance_cls(vllm_config=vllm_config, prefix=prefix)
+
+    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
+        # This __init__ won't be called due to __new__ returning a different class
+        super().__init__(vllm_config=vllm_config, prefix=prefix)
+        self.apm = self.init_audio_module(
+            vllm_config=vllm_config, prefix=maybe_prefix(prefix, "apm")
+        )
