@@ -32,7 +32,6 @@ from .deepseek_v2 import (
     DeepseekV2MoE,
     get_spec_layer_idx_from_weight_name,
 )
-from .interfaces import SupportsPP
 from .utils import maybe_prefix
 
 logger = init_logger(__name__)
@@ -181,7 +180,7 @@ class DeepSeekMultiTokenPredictor(nn.Module):
 
 
 @support_torch_compile
-class DeepSeekMTP(nn.Module, SupportsPP, DeepseekV2MixtureOfExperts):
+class DeepSeekMTP(nn.Module, DeepseekV2MixtureOfExperts):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
         self.config = vllm_config.model_config.hf_config
