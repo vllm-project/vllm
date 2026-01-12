@@ -391,7 +391,12 @@ __global__ void concat_and_cache_ds_mla_kernel(
   }
 
   // Compute the scale for the tile
+#if defined(__gfx942__)
+  float tile_scale = max_abs / 224.0f;
+#else
   float tile_scale = max_abs / 448.f;
+#endif
+
   tile_scale = fmaxf(tile_scale, FLT_MIN);
 
   // The first lane of each half-warp writes the scale to kv_cache
