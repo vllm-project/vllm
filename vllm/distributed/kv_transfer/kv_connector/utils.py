@@ -148,11 +148,14 @@ class KVOutputAggregator:
                         ) in connectors_worker_kv_cache_events.items():
                             if connector_worker_kv_cache_events is None:
                                 continue
-                            combined_connector_kv_cache_events = (
-                                combined_kv_cache_events.get_connector_events(
-                                    connector_name
+                            try:
+                                combined_connector_kv_cache_events = (
+                                    combined_kv_cache_events.get_connector_events(
+                                        connector_name
+                                    )
                                 )
-                            )
+                            except KeyError:
+                                continue
                             worker_kv_cache_events = (
                                 connector_worker_kv_cache_events.get_all_events()
                             )
