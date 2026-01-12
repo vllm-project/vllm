@@ -868,9 +868,8 @@ class CutlassExpertsW4A8Fp8(mk.FusedMoEPermuteExpertsUnpermute):
 
     @staticmethod
     def _supports_current_device() -> bool:
-        return current_platform.is_cuda() and current_platform.has_device_capability(
-            (9, 0)
-        )
+        p = current_platform
+        return p.is_cuda() and p.has_device_capability((9, 0))
 
     @staticmethod
     def _supports_no_act_and_mul() -> bool:
@@ -878,10 +877,7 @@ class CutlassExpertsW4A8Fp8(mk.FusedMoEPermuteExpertsUnpermute):
 
     @staticmethod
     def _supports_quant_scheme(quant_scheme: FusedMoEQuantScheme) -> bool:
-        return True
-        # quant_scheme.is_fp8_w8a8
-        # # or quant_scheme.is_mxfp4_w4a4
-        # or quant_scheme.is_unquantized
+        return quant_scheme.is_int4_w4a8 and quant_scheme.per_token_quant
 
     @staticmethod
     def _supports_activation(activation: str) -> bool:

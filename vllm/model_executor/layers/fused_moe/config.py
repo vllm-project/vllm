@@ -181,6 +181,13 @@ class FusedMoEQuantScheme:
     def is_mxfp4_w4a16(self) -> bool:
         return self.weight_dtype == "mxfp4" and self.act_dtype in UNQUANTIZED_DTYPES
 
+    @property
+    def is_int4_w4a8(self) -> bool:
+        return (
+            self.weight_dtype == "int4"
+            and self.act_dtype == current_platform.fp8_dtype()
+        )
+
 
 @dataclass
 class FusedMoEQuantDesc:
