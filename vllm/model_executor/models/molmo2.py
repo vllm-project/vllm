@@ -1848,7 +1848,7 @@ class Molmo2ProcessingInfo(BaseProcessingInfo):
         return Molmo2ProcessorWrapper(processor, hf_config)
 
     def get_supported_mm_limits(self) -> Mapping[str, int | None]:
-        return {"image": None, "video": None}
+        return {"image": None, "video": 1}
 
     def get_num_image_tokens(
         self,
