@@ -52,7 +52,7 @@ from vllm.model_executor.layers.activation import _ACTIVATION_REGISTRY
 from vllm.model_executor.layers.attention.mm_encoder_attention import (
     MMEncoderAttention,
 )
-from vllm.model_executor.layers.conv import Conv2dLayer, Conv3dLayer
+from vllm.model_executor.layers.conv import Conv3dLayer
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
     QKVParallelLinear,
@@ -334,15 +334,15 @@ class Qwen3OmniMoeAudioEncoder(nn.Module):
         )
 
         # Convolutional layers for mel-spectrogram processing
-        self.conv2d1 = Conv2dLayer(1, config.downsample_hidden_size, 3, 2, padding=1)
-        self.conv2d2 = Conv2dLayer(
+        self.conv2d1 = nn.Conv2d(1, config.downsample_hidden_size, 3, 2, padding=1)
+        self.conv2d2 = nn.Conv2d(
             config.downsample_hidden_size,
             config.downsample_hidden_size,
             3,
             2,
             padding=1,
         )
-        self.conv2d3 = Conv2dLayer(
+        self.conv2d3 = nn.Conv2d(
             config.downsample_hidden_size,
             config.downsample_hidden_size,
             3,
@@ -436,25 +436,31 @@ class Qwen3OmniMoeAudioEncoder(nn.Module):
 
         # Compute feature lengths after CNN
         feature_lens_after_cnn = self._get_cnn_output_lengths(chunk_lengths)
-        padded_mask_after_cnn = nn.utils.rnn.pad_sequence(
-            [
-                torch.ones(length, dtype=torch.bool, device=padded_feature.device)
-                for length in feature_lens_after_cnn
-            ],
-            batch_first=True,
+        # Vectorized mask creation: avoid creating many small tensors
+        max_len_after_cnn = feature_lens_after_cnn.max().item()
+        indices = torch.arange(max_len_after_cnn, device=padded_feature.device)
+        padded_mask_after_cnn = indices.unsqueeze(0) < feature_lens_after_cnn.unsqueeze(
+            1
         )
 
         # Add channel dimension for conv2d
         padded_feature = padded_feature.unsqueeze(1)
 
-        # Apply convolutional layers in chunks to avoid OOM
-        padded_embeds = []
-        for chunk in padded_feature.split(self.conv_chunksize, dim=0):
-            padded_embed = F.gelu(self.conv2d1(chunk))
+        # Apply convolutional layers (chunk if needed to avoid OOM)
+        if padded_feature.size(0) <= self.conv_chunksize:
+            # Fast path: no chunking needed
+            padded_embed = F.gelu(self.conv2d1(padded_feature))
             padded_embed = F.gelu(self.conv2d2(padded_embed))
             padded_embed = F.gelu(self.conv2d3(padded_embed))
-            padded_embeds.append(padded_embed)
-        padded_embed = torch.cat(padded_embeds, dim=0)
+        else:
+            # Chunked processing to avoid OOM
+            padded_embeds = []
+            for chunk in padded_feature.split(self.conv_chunksize, dim=0):
+                padded_embed = F.gelu(self.conv2d1(chunk))
+                padded_embed = F.gelu(self.conv2d2(padded_embed))
+                padded_embed = F.gelu(self.conv2d3(padded_embed))
+                padded_embeds.append(padded_embed)
+            padded_embed = torch.cat(padded_embeds, dim=0)
 
         # (batch, channels, freq, time) -> (batch, time, channels*freq)
         b, c, f, t = padded_embed.size()
@@ -478,11 +484,13 @@ class Qwen3OmniMoeAudioEncoder(nn.Module):
         window_aftercnn = padded_mask_after_cnn.shape[-1] * (
             self.n_window_infer // (self.n_window * 2)
         )
-        for cnn_len in aftercnn_lens:
-            cu_chunk_lens += [window_aftercnn] * (cnn_len // window_aftercnn)
+        # Use tolist() for efficient batch conversion from tensor to Python
+        for cnn_len in aftercnn_lens.tolist():
+            num_full_chunks = cnn_len // window_aftercnn
             remainder = cnn_len % window_aftercnn
-            if remainder != 0:
-                cu_chunk_lens += [remainder]
+            cu_chunk_lens.extend([window_aftercnn] * num_full_chunks)
+            if remainder:
+                cu_chunk_lens.append(remainder)
         cu_seqlens = torch.tensor(cu_chunk_lens, device=aftercnn_lens.device).cumsum(
             -1, dtype=torch.int32
         )
