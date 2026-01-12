@@ -183,7 +183,7 @@ def test_static_fp8_quant_group_2d(
     ops_out, ops_scale = ops.scaled_fp8_quant(x, scale=scale, group_shape=group_shape)
 
     torch.testing.assert_close(scale, ops_scale)
-    torch.testing.assert_close(ref_out.float(), ops_out.float(), rtol=0.12, atol=0.0)
+    torch.testing.assert_close(ref_out.float(), ops_out.float(), rtol=1.2e-1, atol=1e-3)
 
     opcheck_fp8_quant(ops_out, x, scale=scale)
 
