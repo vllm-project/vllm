@@ -280,7 +280,8 @@ class ModelConfig:
     available.\n
     - "vllm" will use the vLLM model implementation.\n
     - "transformers" will use the Transformers model implementation.\n
-    - "terratorch" will use the TerraTorch model implementation.
+    - "terratorch" will use the TerraTorch model implementation.\n
+    - "atom" will use the atom model implementation for AMD users.
     """
     override_attention_dtype: str | None = None
     """Override dtype for attention"""
@@ -673,10 +674,10 @@ class ModelConfig:
             )
         return self
 
-    def _get_transformers_backend_cls(self) -> str:
-        """Determine which Transformers modeling backend class will be used if
-        `model_impl` is set to `transformers` or `auto`."""
-        cls = "Transformers"
+    def _get_model_impl_backend_cls(self, cls_prefix: str = "Transformers") -> str:
+        """Determine which modeling backend class of the model implementation will
+        be used if `model_impl` is set to `transformers`, `auto` or other backends."""
+        cls = cls_prefix
         # If 'hf_config != hf_text_config' it's a nested config, i.e. multimodal
         cls += "MultiModal" if self.hf_config != self.hf_text_config else ""
         cls += "MoE" if self.is_moe else ""
@@ -703,7 +704,7 @@ class ModelConfig:
     def using_transformers_backend(self) -> bool:
         """Check if the model is using the Transformers modeling backend class."""
         used_cls = self._model_info.architecture
-        transformers_backend_cls = self._get_transformers_backend_cls()
+        transformers_backend_cls = self._get_model_impl_backend_cls()
         return used_cls == transformers_backend_cls
 
     @property

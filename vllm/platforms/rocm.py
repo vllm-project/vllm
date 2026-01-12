@@ -206,6 +206,11 @@ class RocmPlatform(Platform):
     ) -> str:
         from vllm._aiter_ops import rocm_aiter_ops
 
+        # choose custom backend if selected
+        if selected_backend == AttentionBackendEnum.CUSTOM:
+            logger.info("Using CUSTOM backend.")
+            return AttentionBackendEnum.CUSTOM.get_path()
+
         block_size = attn_selector_config.block_size
         kv_cache_dtype = attn_selector_config.kv_cache_dtype
 

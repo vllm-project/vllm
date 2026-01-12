@@ -520,6 +520,12 @@ _TRANSFORMERS_BACKEND_MODELS = {
     ),
 }
 
+_ATOM_BACKEND_MODELS = {
+    # Text generation models
+    "ATOMForCausalLM": ("atom", "ATOMForCausalLM"),
+    "ATOMMoEForCausalLM": ("atom", "ATOMMoEForCausalLM"),
+}
+
 _VLLM_MODELS = {
     **_TEXT_GENERATION_MODELS,
     **_EMBEDDING_MODELS,
@@ -528,6 +534,7 @@ _VLLM_MODELS = {
     **_SPECULATIVE_DECODING_MODELS,
     **_TRANSFORMERS_SUPPORTED_MODELS,
     **_TRANSFORMERS_BACKEND_MODELS,
+    **_ATOM_BACKEND_MODELS,
 }
 
 # This variable is used as the args for subprocess.run(). We
@@ -863,7 +870,16 @@ class _ModelRegistry:
         if model_arch not in self.models:
             return None
 
-        return _try_inspect_model_cls(model_arch, self.models[model_arch])
+        model = self.models[model_arch]
+        return _try_inspect_model_cls(model_arch, model)
+
+    def _try_resolve_atom(
+        self,
+        architecture: str,
+        model_config: ModelConfig,
+    ) -> str | None:
+        cls_name = model_config._get_model_impl_backend_cls(model_impl="ATOM")
+        return cls_name
 
     def _try_resolve_transformers(
         self,
@@ -931,7 +947,7 @@ class _ModelRegistry:
                 "is not compatible with vLLM."
             )
 
-        return model_config._get_transformers_backend_cls()
+        return model_config._get_model_impl_backend_cls()
 
     def _normalize_arch(
         self,
@@ -979,6 +995,10 @@ class _ModelRegistry:
         elif model_config.model_impl == "terratorch":
             model_info = self._try_inspect_model_cls("Terratorch")
             return (model_info, "Terratorch")
+        elif model_config.model_impl == "atom":
+            arch = self._try_resolve_atom(architectures[0], model_config)
+            model_info = self._try_inspect_model_cls(arch)
+            return (model_info, arch)
 
         # Fallback to transformers impl (after resolving convert_type)
         if (
@@ -1033,6 +1053,12 @@ class _ModelRegistry:
             model_cls = self._try_load_model_cls(arch)
             if model_cls is not None:
                 return (model_cls, arch)
+        elif model_config.model_impl == "atom":
+            arch = self._try_resolve_atom(architectures[0], model_config)
+            if arch is not None:
+                model_cls = self._try_load_model_cls(arch)
+                if model_cls is not None:
+                    return (model_cls, arch)
 
         # Fallback to transformers impl (after resolving convert_type)
         if (

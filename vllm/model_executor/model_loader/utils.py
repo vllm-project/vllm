@@ -178,7 +178,7 @@ def _get_model_architecture(model_config: ModelConfig) -> tuple[type[nn.Module],
         model_config=model_config,
     )
 
-    if arch == model_config._get_transformers_backend_cls():
+    if arch == model_config._get_model_impl_backend_cls():
         assert model_config.model_impl != "vllm"
         if model_config.model_impl == "auto":
             logger.warning_once(
