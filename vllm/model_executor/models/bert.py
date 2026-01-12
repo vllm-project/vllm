@@ -100,17 +100,20 @@ class BertPooler(SequencePooler):
 
         config: BertConfig = model_config.hf_config
 
-        self.dense = nn.Linear(config.hidden_size, config.hidden_size)
-        self.activation = nn.Tanh()
+        dense = nn.Linear(config.hidden_size, config.hidden_size)
+        activation = nn.Tanh()
 
         super().__init__(
             pooling=get_seq_pooling_method(pooler_config.seq_pooling_type),
             head=EmbeddingPoolerHead(
-                projector=self.dense,
+                projector=dense,
                 head_dtype=model_config.head_dtype,
-                activation=self.activation,
+                activation=activation,
             ),
         )
+
+        self.dense = dense
+        self.activation = activation
 
 
 class BertEncoder(nn.Module):
