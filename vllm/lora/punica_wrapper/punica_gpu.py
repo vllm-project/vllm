@@ -292,6 +292,7 @@ class PunicaWrapperGPU(PunicaWrapperBase):
             buffer.unsqueeze(dim=0),
             *self.prompt_mapping_meta.meta_args(x.size(0)),
             scale,
+            specialize_active_lora=self.lora_config.specialize_active_lora,
         )
 
         lora_expand(
@@ -300,6 +301,7 @@ class PunicaWrapperGPU(PunicaWrapperBase):
             y,
             *self.prompt_mapping_meta.meta_args(buffer.size(0)),
             add_inputs=True,
+            specialize_active_lora=self.lora_config.specialize_active_lora,
         )
         y = y.view_as(y_org)
 
