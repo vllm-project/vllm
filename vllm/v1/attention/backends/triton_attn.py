@@ -60,7 +60,10 @@ class TritonAttentionMetadata:
     seq_lens: torch.Tensor
     block_table: torch.Tensor
     slot_mapping: torch.Tensor
-
+    BLOCK_M: int
+    BLOCK_Q: int
+    num_q_blocks: int
+    block_q_seq_boundaries_tensor: torch.Tensor
     seq_threshold_3D: int
     num_par_softmax_segments: int
     softmax_segm_output: torch.Tensor
@@ -132,6 +135,12 @@ class TritonAttentionMetadataBuilder(AttentionMetadataBuilder[TritonAttentionMet
         )
         self.num_heads_kv = model_config.get_num_kv_heads(vllm_config.parallel_config)
         self.headdim = model_config.get_head_size()
+
+        self.block_q_seq_boundaries_tensor = torch.empty(
+            self.vllm_config.scheduler_config.max_num_seqs + 1,
+            dtype=torch.int32,
+            device=device,
+        )
 
         # Check if CUDA Graphs are enabled for decode
         self.decode_cudagraph_enabled = (
@@ -212,6 +221,33 @@ class TritonAttentionMetadataBuilder(AttentionMetadataBuilder[TritonAttentionMet
         block_table_tensor = common_attn_metadata.block_table_tensor
         slot_mapping = common_attn_metadata.slot_mapping
 
+        num_queries_per_kv = self.num_heads_q // self.num_heads_kv
+        BLOCK_M = (
+            16 if num_queries_per_kv <= 16 else next_power_of_2(num_queries_per_kv)
+        )
+        BLOCK_Q = BLOCK_M // num_queries_per_kv
+
+        if max_seq_len > 1:
+            self.block_q_seq_boundaries_tensor[0] = 0
+            self.block_q_seq_boundaries_tensor[1 : query_start_loc.numel()].copy_(
+                query_start_loc[1:]
+            )
+            self.block_q_seq_boundaries_tensor[1 : query_start_loc.numel()].sub_(
+                query_start_loc[:-1]
+            )
+            self.block_q_seq_boundaries_tensor[1 : query_start_loc.numel()].add_(
+                BLOCK_Q - 1
+            )
+            self.block_q_seq_boundaries_tensor[
+                1 : query_start_loc.numel()
+            ].floor_divide_(BLOCK_Q)
+            self.block_q_seq_boundaries_tensor[: query_start_loc.numel()].cumsum_(dim=0)
+            self.num_q_blocks = self.block_q_seq_boundaries_tensor[
+                query_start_loc.numel() - 1
+            ]
+        else:
+            self.num_q_blocks = len(seq_lens)
+
         use_cascade = common_prefix_len > 0
 
         if use_cascade:
@@ -243,6 +279,10 @@ class TritonAttentionMetadataBuilder(AttentionMetadataBuilder[TritonAttentionMet
             prefix_kv_lens=prefix_kv_lens,
             suffix_kv_lens=suffix_kv_lens,
             prefix_scheduler_metadata=prefix_scheduler_metadata,
+            BLOCK_M=BLOCK_M,
+            BLOCK_Q=BLOCK_Q,
+            num_q_blocks=self.num_q_blocks,
+            block_q_seq_boundaries_tensor=self.block_q_seq_boundaries_tensor,
             seq_threshold_3D=self.seq_threshold_3D,
             num_par_softmax_segments=self.num_par_softmax_segments,
             softmax_segm_output=self.softmax_segm_output,
@@ -494,6 +534,11 @@ class TritonAttentionImpl(AttentionImpl):
         max_seqlen_k = attn_metadata.max_seq_len
         block_table = attn_metadata.block_table
 
+        BLOCK_M = attn_metadata.BLOCK_M
+        BLOCK_Q = attn_metadata.BLOCK_Q
+        num_q_blocks = attn_metadata.num_q_blocks
+        block_q_seq_boundaries_tensor = attn_metadata.block_q_seq_boundaries_tensor
+
         seq_threshold_3D = attn_metadata.seq_threshold_3D
         num_par_softmax_segments = attn_metadata.num_par_softmax_segments
         softmax_segm_output = attn_metadata.softmax_segm_output
@@ -521,6 +566,10 @@ class TritonAttentionImpl(AttentionImpl):
             q_descale=None,  # Not supported
             k_descale=layer._k_scale.expand(descale_shape),
             v_descale=layer._v_scale.expand(descale_shape),
+            BLOCK_M=BLOCK_M,
+            BLOCK_Q=BLOCK_Q,
+            num_q_blocks=num_q_blocks,
+            block_q_seq_boundaries_tensor=block_q_seq_boundaries_tensor,
             seq_threshold_3D=seq_threshold_3D,
             num_par_softmax_segments=num_par_softmax_segments,
             softmax_segm_output=softmax_segm_output,
