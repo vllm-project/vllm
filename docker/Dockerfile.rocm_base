@@ -316,9 +316,7 @@ RUN cd /opt/rixl && mkdir -p /app/install && \
 #     && git checkout ${FA_BRANCH} \
 #     && git submodule update --init \
 #     && if [ "$USE_SCCACHE" = "1" ]; then \
-#            export CMAKE_C_COMPILER_LAUNCHER=sccache \
-#            && export CMAKE_CXX_COMPILER_LAUNCHER=sccache \
-#            && export CMAKE_HIP_COMPILER_LAUNCHER=sccache \
+#            export HIP_CLANG_PATH=/opt/sccache-wrappers \
 #            && sccache --show-stats; \
 #        fi \
 #     && GPU_ARCHS=$(echo ${PYTORCH_ROCM_ARCH} | sed -e 's/;gfx1[0-9]\{3\}//g') python3 setup.py bdist_wheel --dist-dir=dist \
@@ -342,7 +340,7 @@ RUN cd aiter \
     && pip install -r requirements.txt
 RUN pip install pyyaml && cd aiter \
     && if [ "$USE_SCCACHE" = "1" ]; then \
-           export HIP_CLANG_PATH=/opt/sccache-wrappers; \
+           export HIP_CLANG_PATH=/opt/sccache-wrappers \
            && sccache --show-stats; \
        fi \
     && PREBUILD_KERNELS=1 GPU_ARCHS=${AITER_ROCM_ARCH} python3 setup.py bdist_wheel --dist-dir=dist \
