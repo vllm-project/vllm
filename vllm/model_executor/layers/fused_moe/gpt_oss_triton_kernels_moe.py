@@ -245,8 +245,6 @@ def make_routing_data(
 
 class BaseOAITritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
     def __init__(self, quant_config: FusedMoEQuantConfig):
-        # TODO (varun) : Enable activation quantization
-        assert quant_config.use_mxfp4_w4a16, "Supports only mxfp4_w4a16"
         super().__init__(quant_config)
 
     @staticmethod
@@ -324,6 +322,11 @@ class BaseOAITritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
 
 
 class OAITritonExperts(BaseOAITritonExperts):
+    def __init__(self, quant_config: FusedMoEQuantConfig):
+        # TODO (varun) : Enable activation quantization
+        assert quant_config.use_mxfp4_w4a16, "Supports only mxfp4_w4a16"
+        super().__init__(quant_config)
+
     @staticmethod
     def activation_format() -> mk.FusedMoEActivationFormat:
         return mk.FusedMoEActivationFormat.Standard
