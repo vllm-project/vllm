@@ -4,6 +4,8 @@
 import inspect
 import os
 import pickle
+from collections.abc import Callable, Sequence
+from typing import Any, Literal
 from unittest.mock import patch
 
 import torch
@@ -25,7 +27,7 @@ assert isinstance(SerializableCallable, type)
 logger = init_logger(__name__)
 
 
-class VllmSerializableFunction(SerializableCallable):
+class VllmSerializableFunction(SerializableCallable):  # type: ignore[misc]
     """
     A wrapper around a compiled function by vllm. It will forward the tensor
     inputs to the compiled function and return the result.
@@ -37,12 +39,20 @@ class VllmSerializableFunction(SerializableCallable):
     serializing the Dynamo fx graph plus example inputs.
     """
 
-    def __init__(self, graph_module, example_inputs, prefix, optimized_call):
+    def __init__(
+        self,
+        graph_module: torch.fx.GraphModule,
+        example_inputs: Sequence[Any],
+        prefix: str,
+        optimized_call: Callable[..., Any],
+        is_encoder: bool = False,
+    ) -> None:
         assert isinstance(graph_module, torch.fx.GraphModule)
         self.graph_module = graph_module
         self.example_inputs = example_inputs
         self.prefix = prefix
         self.optimized_call = optimized_call
+        self.is_encoder = is_encoder
         self.shape_env = None
         sym_input = next(
             (i for i in self.example_inputs if isinstance(i, torch.SymInt)), None
@@ -50,7 +60,7 @@ class VllmSerializableFunction(SerializableCallable):
         if sym_input is not None:
             self.shape_env = sym_input.node.shape_env
 
-    def __call__(self, *args, **kwargs):
+    def __call__(self, *args: Any, **kwargs: Any) -> Any:
         return self.optimized_call(*args, **kwargs)
 
     @classmethod
@@ -70,7 +80,9 @@ class VllmSerializableFunction(SerializableCallable):
 
         graph_reducer_override = GraphPickler.reducer_override
 
-        def _graph_reducer_override(self, obj):
+        def _graph_reducer_override(
+            self: GraphPickler, obj: Any
+        ) -> tuple[Callable[..., Any], tuple[Any, ...]] | Any:
             if (
                 inspect.isclass(obj)
                 and issubclass(obj, sympy.Function)
@@ -104,10 +116,14 @@ class VllmSerializableFunction(SerializableCallable):
         state = pickle.loads(data)
         fake_mode = FakeTensorMode(shape_env=ShapeEnv())
         state["graph_module"] = GraphPickler.loads(state["graph_module"], fake_mode)
+        state["graph_module"].recompile()
         state["example_inputs"] = GraphPickler.loads(state["example_inputs"], fake_mode)
-        vllm_backend = VllmBackend(get_current_vllm_config(), state["prefix"])
+        is_encoder = state.get("is_encoder", False)
+        vllm_backend = VllmBackend(
+            get_current_vllm_config(), state["prefix"], is_encoder
+        )
 
-        def optimized_call(*example_inputs):
+        def optimized_call(*example_inputs: Any) -> Any:
             """
             On the first run of the optimized call, we rerun the compiler
             backend which should result in a cache hit. After the backend
@@ -129,7 +145,7 @@ class VllmSerializableFunction(SerializableCallable):
         return fn
 
     @property
-    def co_name(self):
+    def co_name(self) -> Literal["VllmSerializableFunction"]:
         """
         Used for depyf debugging.
         """

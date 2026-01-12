@@ -48,7 +48,6 @@ from transformers.models.qwen3_vl.video_processing_qwen3_vl import (
 )
 from transformers.video_utils import VideoMetadata
 
-from vllm.attention.backends.registry import AttentionBackendEnum
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import MultiModalConfig, VllmConfig
 from vllm.config.multimodal import BaseDummyOptions, VideoDummyOptions
@@ -92,6 +91,7 @@ from vllm.multimodal.processing import (
 from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from vllm.sequence import IntermediateTensors
 from vllm.utils.collection_utils import is_list_of
+from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 from .interfaces import (
     MultiModalEmbeddings,
@@ -713,17 +713,13 @@ class Qwen3VLProcessingInfo(Qwen2VLProcessingInfo):
         mm_counts: Mapping[str, int],
     ) -> int:
         target_width, target_height = self.get_image_size_with_most_features()
-        video_soft_tokens = self.get_num_video_tokens(
+        num_video_soft_tokens = self.get_num_video_tokens(
             image_width=target_width,
             image_height=target_height,
             num_frames=self.get_num_frames_with_most_features(seq_len, mm_counts),
             image_processor=None,
         )
-
-        # NOTE: By default in Qwen3-VL, one video token is converted to
-        # "<{timestamp} seconds>" (on average 9.5 tokens) + vision_start_token + video_token + vision_end_token # noqa: E501
-        formatted_video_soft_tokens = video_soft_tokens * 12.5
-        return int(formatted_video_soft_tokens)
+        return num_video_soft_tokens
 
     def _calculate_timestamps(
         self, indices: list[int] | torch.Tensor, video_fps: float, merge_size: int
@@ -1244,6 +1240,7 @@ class Qwen3VLForConditionalGeneration(
             "gate_proj",
             "up_proj",
         ],
+        "qkv": ["qkv"],  # For vision tower's already-packed QKV
     }
 
     supports_encoder_tp_data = True
@@ -2091,6 +2088,33 @@ class Qwen3VLForConditionalGeneration(
         """
         return MultiModelKeys.from_string_field(
             language_model="language_model",
-            connector="visual.merger",
+            connector=["visual.merger", "visual.deepstack_merger_list"],
             tower_model="visual.",
         )
+
+    def get_num_mm_encoder_tokens(
+        self,
+        num_image_tokens: int,
+    ) -> int:
+        hf_config = self.config
+        vision_config = hf_config.vision_config
+        merge_size = vision_config.spatial_merge_size
+
+        return num_image_tokens * merge_size**2
+
+    def get_num_mm_connector_tokens(
+        self,
+        num_vision_tokens: int,
+    ) -> int:
+        hf_config = self.config
+        vision_config = hf_config.vision_config
+        merge_size = vision_config.spatial_merge_size
+        return num_vision_tokens // merge_size**2
+
+    @classmethod
+    def get_language_model_spec(cls) -> tuple[nn.Module | None, str | None]:
+        """
+        Return the language model spec:
+        (language model class, language model attr)
+        """
+        return Qwen3LLMForCausalLM, "language_model"

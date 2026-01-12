@@ -343,6 +343,29 @@ class VllmConfig:
         # i.e., batch_size <= self.compilation_config.max_cudagraph_capture_size
         return self.compilation_config.bs_to_padded_graph_size[batch_size]
 
+    @property
+    def needs_dp_coordinator(self) -> bool:
+        """
+        Determine if the DPCoordinator process is needed.
+
+        The DPCoordinator is needed in two cases:
+        1. For MoE models with DP > 1: to handle wave coordination
+           (even in external LB mode, since wave coordination runs in the coordinator)
+        2. For non-MoE models in internal/hybrid LB mode: to collect and publish
+           queue stats for load balancing across DP ranks
+
+        Returns:
+            True if DPCoordinator process is needed, False otherwise.
+        """
+
+        # For non-MoE models, only need coordinator in internal/hybrid LB mode
+        # (for stats collection).
+        return self.parallel_config.data_parallel_size > 1 and (
+            self.model_config is None
+            or self.model_config.is_moe
+            or not self.parallel_config.data_parallel_external_lb
+        )
+
     def enable_trace_function_call_for_thread(self) -> None:
         """
         Set up function tracing for the current thread,
@@ -421,6 +444,7 @@ class VllmConfig:
 
         model_config = copy.deepcopy(self.model_config)
         model_config.hf_config = hf_config
+        model_config.model_arch_config = model_config.get_model_arch_config()
 
         return replace(self, model_config=model_config)
 
@@ -522,6 +546,8 @@ class VllmConfig:
             self.model_config.verify_with_parallel_config(self.parallel_config)
             self.model_config.verify_dual_chunk_attention_config(self.load_config)
 
+            self.parallel_config.is_moe_model = self.model_config.is_moe
+
         self.cache_config.verify_with_parallel_config(self.parallel_config)
 
         if self.lora_config is not None:
@@ -552,15 +578,12 @@ class VllmConfig:
                 if self.speculative_config.method not in get_args(EagleModelTypes):
                     raise ValueError(
                         "Currently, async scheduling is only supported "
-                        "with EAGLE/MTP kind of speculative decoding"
+                        "with EAGLE/MTP kind of speculative decoding."
                     )
                 if self.speculative_config.disable_padded_drafter_batch:
                     raise ValueError(
-                        "async scheduling for EAGLE/MTP kind of speculative "
-                        "decoding is enabled, but disable_padded_drafter_batch=True "
-                        "disable_padded_drafter_batch=True is not supported for "
-                        "this situation now. please set "
-                        "disable_padded_drafter_batch=Fasle"
+                        "Async scheduling is not compatible with "
+                        "disable_padded_drafter_batch=True."
                     )
             if not executor_supports_async_sched:
                 raise ValueError(
@@ -570,22 +593,41 @@ class VllmConfig:
                 )
         elif self.scheduler_config.async_scheduling is None:
             # Enable async scheduling unless there is an incompatible option.
-            # NOTE: we won't reach here until async scheduling is enabled by default.
-            if (
-                self.parallel_config.pipeline_parallel_size > 1
-                or self.speculative_config is not None
+            if self.parallel_config.pipeline_parallel_size > 1:
+                logger.warning_once(
+                    "Async scheduling is not yet supported with "
+                    "pipeline_parallel_size > 1 and will be disabled.",
+                    scope="local",
+                )
+                self.scheduler_config.async_scheduling = False
+            elif (
+                self.speculative_config is not None
+                and self.speculative_config.method not in get_args(EagleModelTypes)
             ):
-                logger.warning(
-                    "Async scheduling is not yet supported with speculative decoding "
-                    " or pipeline_parallel_size > 1 and will be disabled."
+                logger.warning_once(
+                    "Async scheduling not supported with %s-based "
+                    "speculative decoding and will be disabled.",
+                    self.speculative_config.method,
+                    scope="local",
+                )
+                self.scheduler_config.async_scheduling = False
+            elif (
+                self.speculative_config is not None
+                and self.speculative_config.disable_padded_drafter_batch
+            ):
+                logger.warning_once(
+                    "Async scheduling is not compatible with "
+                    "disable_padded_drafter_batch=True and will be disabled.",
+                    scope="local",
                 )
                 self.scheduler_config.async_scheduling = False
             elif not executor_supports_async_sched:
-                logger.warning(
+                logger.warning_once(
                     "Async scheduling will be disabled because it is not supported "
                     "with the `%s` distributed executor backend (only `mp`, `uni`, and "
                     "`external_launcher` are supported).",
                     executor_backend,
+                    scope="local",
                 )
                 self.scheduler_config.async_scheduling = False
             else:
@@ -595,10 +637,15 @@ class VllmConfig:
             self.scheduler_config.async_scheduling
             and not self.parallel_config.disable_nccl_for_dp_synchronization
         ):
-            logger.info(
+            logger.info_once(
                 "Disabling NCCL for DP synchronization when using async scheduling."
             )
             self.parallel_config.disable_nccl_for_dp_synchronization = True
+
+        logger.info_once(
+            "Asynchronous scheduling is %s.",
+            "enabled" if self.scheduler_config.async_scheduling else "disabled",
+        )
 
         from vllm.platforms import current_platform
 
@@ -811,9 +858,14 @@ class VllmConfig:
             )
 
         # Do this after all the updates to compilation_config.mode
+        effective_dp_size = (
+            self.parallel_config.data_parallel_size
+            if self.model_config is None or self.model_config.is_moe
+            else 1
+        )
         self.compilation_config.set_splitting_ops_for_v1(
             all2all_backend=self.parallel_config.all2all_backend,
-            data_parallel_size=self.parallel_config.data_parallel_size,
+            data_parallel_size=effective_dp_size,
         )
 
         if self.compilation_config.pass_config.enable_sp:
@@ -870,9 +922,12 @@ class VllmConfig:
                     f"cudagraph_mode={self.compilation_config.cudagraph_mode}"
                 )
 
-        if self.parallel_config.enable_dbo:
+        if self.parallel_config.use_ubatching:
             a2a_backend = self.parallel_config.all2all_backend
-            assert a2a_backend in ["deepep_low_latency", "deepep_high_throughput"], (
+            assert a2a_backend in [
+                "deepep_low_latency",
+                "deepep_high_throughput",
+            ], (
                 "Microbatching currently only supports the deepep_low_latency and "
                 f"deepep_high_throughput all2all backend. {a2a_backend} is not "
                 "supported. To fix use --all2all-backend=deepep_low_latency or "
@@ -887,17 +942,48 @@ class VllmConfig:
         if not self.instance_id:
             self.instance_id = random_uuid()[:5]
 
-        if not self.scheduler_config.disable_hybrid_kv_cache_manager:
-            # logger should only print warning message for hybrid models. As we
-            # can't know whether the model is hybrid or not now, so we don't log
-            # warning message here and will log it later.
-            if not current_platform.support_hybrid_kv_cache():
-                # Hybrid KV cache manager is not supported on non-GPU platforms.
-                self.scheduler_config.disable_hybrid_kv_cache_manager = True
+        # Hybrid KV cache manager (HMA) runtime rules:
+        # - Explicit enable (--no-disable-kv-cache-manager): error if runtime
+        #   disables it
+        # - No preference: auto-disable for unsupported features (e.g. kv connector)
+        # - Explicit disable (--disable-kv-cache-manager): always respect it
+        need_disable_hybrid_kv_cache_manager = False
+        # logger should only print warning message for hybrid models. As we
+        # can't know whether the model is hybrid or not now, so we don't log
+        # warning message here and will log it later.
+        if not current_platform.support_hybrid_kv_cache():
+            # Hybrid KV cache manager is not supported on non-GPU platforms.
+            need_disable_hybrid_kv_cache_manager = True
+        if self.kv_events_config is not None:
+            # Hybrid KV cache manager is not compatible with KV events.
+            need_disable_hybrid_kv_cache_manager = True
+        if (
+            self.model_config is not None
+            and self.model_config.attention_chunk_size is not None
+        ):
+            if (
+                self.speculative_config is not None
+                and self.speculative_config.use_eagle()
+            ):
+                # Hybrid KV cache manager is not yet supported with chunked
+                # local attention + eagle.
+                need_disable_hybrid_kv_cache_manager = True
+            elif not envs.VLLM_ALLOW_CHUNKED_LOCAL_ATTN_WITH_HYBRID_KV_CACHE:
+                logger.warning(
+                    "There is a latency regression when using chunked local"
+                    " attention with the hybrid KV cache manager. Disabling"
+                    " it, by default. To enable it, set the environment "
+                    "VLLM_ALLOW_CHUNKED_LOCAL_ATTN_WITH_HYBRID_KV_CACHE=1."
+                )
+                # Hybrid KV cache manager is not yet supported with chunked
+                # local attention.
+                need_disable_hybrid_kv_cache_manager = True
+
+        if self.scheduler_config.disable_hybrid_kv_cache_manager is None:
+            # Default to disable HMA, but only if the user didn't express a preference.
             if self.kv_transfer_config is not None:
-                # NOTE(Kuntai): turn HMA off for connector for now.
-                # TODO(Kuntai): have a more elegent solution to check and
-                # turn off HMA for connector that does not support HMA.
+                # NOTE(Kuntai): turn HMA off for connector unless specifically enabled.
+                need_disable_hybrid_kv_cache_manager = True
                 logger.warning(
                     "Turning off hybrid kv cache manager because "
                     "`--kv-transfer-config` is set. This will reduce the "
@@ -905,33 +991,26 @@ class VllmConfig:
                     "or Mamba attention. If you are a developer of kv connector"
                     ", please consider supporting hybrid kv cache manager for "
                     "your connector by making sure your connector is a subclass"
-                    " of `SupportsHMA` defined in kv_connector/v1/base.py."
+                    " of `SupportsHMA` defined in kv_connector/v1/base.py and"
+                    " use --no-disable-hybrid-kv-cache-manager to start vLLM."
                 )
-                self.scheduler_config.disable_hybrid_kv_cache_manager = True
-            if self.kv_events_config is not None:
-                # Hybrid KV cache manager is not compatible with KV events.
-                self.scheduler_config.disable_hybrid_kv_cache_manager = True
-            if (
-                self.model_config is not None
-                and self.model_config.attention_chunk_size is not None
-            ):
-                if (
-                    self.speculative_config is not None
-                    and self.speculative_config.use_eagle()
-                ):
-                    # Hybrid KV cache manager is not yet supported with chunked
-                    # local attention + eagle.
-                    self.scheduler_config.disable_hybrid_kv_cache_manager = True
-                elif not envs.VLLM_ALLOW_CHUNKED_LOCAL_ATTN_WITH_HYBRID_KV_CACHE:
-                    logger.warning(
-                        "There is a latency regression when using chunked local"
-                        " attention with the hybrid KV cache manager. Disabling"
-                        " it, by default. To enable it, set the environment "
-                        "VLLM_ALLOW_CHUNKED_LOCAL_ATTN_WITH_HYBRID_KV_CACHE=1."
-                    )
-                    # Hybrid KV cache manager is not yet supported with chunked
-                    # local attention.
-                    self.scheduler_config.disable_hybrid_kv_cache_manager = True
+            self.scheduler_config.disable_hybrid_kv_cache_manager = (
+                need_disable_hybrid_kv_cache_manager
+            )
+        elif (
+            self.scheduler_config.disable_hybrid_kv_cache_manager is False
+            and need_disable_hybrid_kv_cache_manager
+        ):
+            raise ValueError(
+                "Hybrid KV cache manager was explicitly enabled but is not "
+                "supported in this configuration. Consider omitting the "
+                "--no-disable-hybrid-kv-cache-manager flag to let vLLM decide"
+                " automatically."
+            )
+
+        if self.scheduler_config.disable_hybrid_kv_cache_manager is None:
+            # Default to enable HMA if not explicitly disabled by user or logic above.
+            self.scheduler_config.disable_hybrid_kv_cache_manager = False
 
         if self.compilation_config.debug_dump_path:
             self.compilation_config.debug_dump_path = (
@@ -1190,12 +1269,6 @@ class VllmConfig:
             computed_compile_ranges_split_points
         )
 
-    def recalculate_max_model_len(self, max_model_len: int):
-        # Can only be called in try_verify_and_update_config
-        model_config = self.model_config
-        max_model_len = model_config.get_and_verify_max_len(max_model_len)
-        self.model_config.max_model_len = max_model_len
-
     def try_verify_and_update_config(self):
         if self.model_config is None:
             return
@@ -1254,13 +1327,8 @@ class VllmConfig:
         if self.compilation_config.debug_dump_path is None:
             return None
         tp_rank = self.parallel_config.rank
-        dp_rank = self.parallel_config.data_parallel_rank
-        data_parallel_size = self.parallel_config.data_parallel_size
-        append_path = (
-            f"rank_{tp_rank}"
-            if data_parallel_size == 1
-            else f"rank_{tp_rank}_dp_{dp_rank}"
-        )
+        dp_rank = self.parallel_config.data_parallel_index
+        append_path = f"rank_{tp_rank}_dp_{dp_rank}"
         path = self.compilation_config.debug_dump_path / append_path
         return path
 
@@ -1333,6 +1401,11 @@ def set_current_vllm_config(
 
     num_models_seen = compilation_counter.num_models_seen
     try:
+        # Clear the compilation config cache when context changes.
+        # This is needed since the old config may have been accessed
+        # and cached before the new config is set.
+        get_cached_compilation_config.cache_clear()
+
         _current_vllm_config = vllm_config
         _current_prefix = prefix
         yield
@@ -1373,11 +1446,18 @@ def get_cached_compilation_config():
 
 def get_current_vllm_config() -> VllmConfig:
     if _current_vllm_config is None:
-        # in ci, usually when we test custom ops/modules directly,
-        # we don't set the vllm config. In that case, we set a default
-        # config.
-        logger.warning("Current vLLM config is not set.")
-        return VllmConfig()
+        raise AssertionError(
+            "Current vLLM config is not set. This typically means "
+            "get_current_vllm_config() was called outside of a "
+            "set_current_vllm_config() context, or a CustomOp was instantiated "
+            "at module import time or model forward time when config is not set. "
+            "For tests that directly test custom ops/modules, use the "
+            "'default_vllm_config' pytest fixture from tests/conftest.py."
+        )
+    return _current_vllm_config
+
+
+def get_current_vllm_config_or_none() -> VllmConfig | None:
     return _current_vllm_config
 
 

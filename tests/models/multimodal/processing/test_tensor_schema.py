@@ -138,25 +138,25 @@ def create_batched_mm_kwargs(
     )
 
 
-# TODO(Isotr0py): Don't initalize model during test
+# TODO(Isotr0py): Don't initialize model during test
 @contextmanager
 def initialize_dummy_model(
     model_cls: type[nn.Module],
     model_config: ModelConfig,
 ):
     temp_file = tempfile.mkstemp()[1]
-    init_distributed_environment(
-        world_size=1,
-        rank=0,
-        distributed_init_method=f"file://{temp_file}",
-        local_rank=0,
-        backend="nccl",
-    )
-    initialize_model_parallel(tensor_model_parallel_size=1)
-
     current_device = torch.get_default_device()
     vllm_config = VllmConfig(model_config=model_config)
     with set_current_vllm_config(vllm_config=vllm_config):
+        init_distributed_environment(
+            world_size=1,
+            rank=0,
+            distributed_init_method=f"file://{temp_file}",
+            local_rank=0,
+            backend="nccl",
+        )
+        initialize_model_parallel(tensor_model_parallel_size=1)
+
         with set_default_torch_dtype(model_config.dtype):
             torch.set_default_device(current_platform.device_type)
             model = model_cls(vllm_config=vllm_config)
@@ -172,7 +172,11 @@ def initialize_dummy_model(
 def test_model_tensor_schema(model_id: str):
     model_info = HF_EXAMPLE_MODELS.find_hf_info(model_id)
     model_info.check_available_online(on_fail="skip")
-    model_info.check_transformers_version(on_fail="skip")
+    model_info.check_transformers_version(
+        on_fail="skip",
+        check_max_version=False,
+        check_version_reason="vllm",
+    )
 
     model_arch = next(
         arch for arch, info in HF_EXAMPLE_MODELS.hf_models.items() if info == model_info

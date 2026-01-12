@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 import huggingface_hub
-from typing_extensions import TypeVar, assert_never, deprecated
+from typing_extensions import TypeVar, assert_never
 
 import vllm.envs as envs
 from vllm.logger import init_logger
@@ -31,6 +31,7 @@ logger = init_logger(__name__)
 
 _VLLM_TOKENIZERS = {
     "deepseek_v32": ("deepseek_v32", "DeepseekV32Tokenizer"),
+    "grok2": ("grok2", "Grok2Tokenizer"),
     "hf": ("hf", "CachedHfTokenizer"),
     "mistral": ("mistral", "MistralTokenizer"),
 }
@@ -151,6 +152,17 @@ def resolve_tokenizer_args(
         if len(files_list) > 0:
             tokenizer_mode = "mistral"
 
+    # Try to use Grok2 tiktoken tokenizer if possible
+    if tokenizer_mode == "auto":
+        allow_patterns = ["tokenizer.tok.json"]
+        files_list = list_filtered_repo_files(
+            model_name_or_path=str(tokenizer_name),
+            allow_patterns=allow_patterns,
+            revision=revision,
+        )
+        if len(files_list) > 0:
+            tokenizer_mode = "grok2"
+
     # Fallback to HF tokenizer
     if tokenizer_mode == "auto":
         tokenizer_mode = "hf"
@@ -224,10 +236,3 @@ def cached_tokenizer_from_config(model_config: "ModelConfig", **kwargs):
         trust_remote_code=model_config.trust_remote_code,
         **kwargs,
     )
-
-
-@deprecated(
-    "Renamed to `cached_tokenizer_from_config`. The old name will be removed in v0.14."
-)
-def init_tokenizer_from_config(model_config: "ModelConfig"):
-    return cached_tokenizer_from_config(model_config)

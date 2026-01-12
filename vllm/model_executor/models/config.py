@@ -4,16 +4,16 @@ from copy import deepcopy
 from math import lcm
 from typing import TYPE_CHECKING
 
-from vllm.attention.backends.registry import AttentionBackendEnum
 from vllm.logger import init_logger
 from vllm.model_executor.models import ModelRegistry
 from vllm.platforms import current_platform
 from vllm.utils.math_utils import cdiv, round_up
 from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
+from vllm.v1.attention.backends.registry import AttentionBackendEnum
 from vllm.v1.kv_cache_interface import FullAttentionSpec, MambaSpec, MLAAttentionSpec
 
 if TYPE_CHECKING:
-    from vllm.config import VllmConfig
+    from vllm.config import ModelConfig, VllmConfig
 
 logger = init_logger(__name__)
 
@@ -21,20 +21,24 @@ logger = init_logger(__name__)
 class VerifyAndUpdateConfig:
     @staticmethod
     def verify_and_update_config(vllm_config: "VllmConfig") -> None:
-        raise NotImplementedError
+        return
 
-
-class Gemma3TextModelConfig:
     @staticmethod
-    def verify_and_update_config(vllm_config: "VllmConfig") -> None:
-        hf_config = vllm_config.model_config.hf_config
+    def verify_and_update_model_config(model_config: "ModelConfig") -> None:
+        return
+
+
+class Gemma3TextModelConfig(VerifyAndUpdateConfig):
+    @staticmethod
+    def verify_and_update_model_config(model_config: "ModelConfig") -> None:
+        hf_config = model_config.hf_config
         hf_config.is_causal = not hf_config.use_bidirectional_attention
 
 
 class GteNewModelConfig(VerifyAndUpdateConfig):
     @staticmethod
-    def verify_and_update_config(vllm_config: "VllmConfig") -> None:
-        config = vllm_config.model_config.hf_config
+    def verify_and_update_model_config(model_config: "ModelConfig") -> None:
+        config = model_config.hf_config
 
         assert config.__class__.__name__ == "NewConfig"
         assert config.hidden_act == "gelu"
@@ -53,16 +57,15 @@ class GteNewModelConfig(VerifyAndUpdateConfig):
 
 class JambaForSequenceClassificationConfig(VerifyAndUpdateConfig):
     @staticmethod
-    def verify_and_update_config(vllm_config: "VllmConfig") -> None:
-        pooler_config = vllm_config.model_config.pooler_config
+    def verify_and_update_model_config(model_config: "ModelConfig") -> None:
+        pooler_config = model_config.pooler_config
         if pooler_config.use_activation is None:
             pooler_config.use_activation = False
 
 
 class JinaRobertaModelConfig(VerifyAndUpdateConfig):
     @staticmethod
-    def verify_and_update_config(vllm_config: "VllmConfig") -> None:
-        model_config = vllm_config.model_config
+    def verify_and_update_model_config(model_config: "ModelConfig") -> None:
         config = model_config.hf_config
 
         if config.position_embedding_type == "rotary":
@@ -88,10 +91,31 @@ class JinaRobertaModelConfig(VerifyAndUpdateConfig):
             }
 
 
+class LlamaBidirectionalConfig(VerifyAndUpdateConfig):
+    @staticmethod
+    def verify_and_update_model_config(model_config: "ModelConfig") -> None:
+        from vllm.config.pooler import SequencePoolingType
+
+        hf_config = model_config.hf_config
+        hf_config.is_causal = False
+
+        pooling_type_map: dict[str, SequencePoolingType] = {
+            "avg": "MEAN",
+            "cls": "CLS",
+            "last": "LAST",
+        }
+
+        pooling_type = pooling_type_map.get(hf_config.pooling, None)
+        if pooling_type is None:
+            raise ValueError(f"pool_type {hf_config.pooling!r} not supported")
+
+        model_config.pooler_config.seq_pooling_type = pooling_type
+
+
 class NomicBertModelConfig(VerifyAndUpdateConfig):
     @staticmethod
-    def verify_and_update_config(vllm_config: "VllmConfig") -> None:
-        config = vllm_config.model_config.hf_config
+    def verify_and_update_model_config(model_config: "ModelConfig") -> None:
+        config = model_config.hf_config
 
         assert config.__class__.__name__ == "NomicBertConfig"
         assert config.activation_function in ["swiglu", "gelu"]
@@ -114,6 +138,10 @@ class NomicBertModelConfig(VerifyAndUpdateConfig):
         config.intermediate_size = config.n_inner
         config.hidden_size = config.n_embd
         config.num_hidden_layers = config.n_layer
+        model_config.model_arch_config.hidden_size = config.hidden_size
+        model_config.model_arch_config.total_num_hidden_layers = (
+            config.num_hidden_layers
+        )
 
         head_dim = config.hidden_size // config.num_attention_heads
         max_trained_positions = getattr(config, "max_trained_positions", 2048)
@@ -130,42 +158,43 @@ class NomicBertModelConfig(VerifyAndUpdateConfig):
         # The context extension uses vllm style rope_theta and rope_parameters.
         # See #17785 #18755
         if (
-            not vllm_config.model_config.hf_overrides
-            and vllm_config.model_config.original_max_model_len is None
+            not model_config.hf_overrides
+            and model_config.original_max_model_len is None
         ):
             # Default
             # Reset max_model_len to max_trained_positions.
             # nomic-embed-text-v2-moe the length is set to 512
             # by sentence_bert_config.json.
-            max_model_len_before = vllm_config.model_config.max_model_len
-            max_model_len = min(
-                vllm_config.model_config.max_model_len, max_trained_positions
+            max_model_len_before = model_config.max_model_len
+            max_model_len = min(model_config.max_model_len, max_trained_positions)
+
+            model_config.max_model_len = model_config.get_and_verify_max_len(
+                max_model_len
             )
 
-            vllm_config.recalculate_max_model_len(max_model_len)
-            logger.warning(
-                "Nomic context extension is disabled. "
-                "Changing max_model_len from %s to %s. "
-                "To enable context extension, see: "
-                "https://github.com/vllm-project/vllm/tree/main/examples/offline_inference/context_extension.html",
-                max_model_len_before,
-                vllm_config.model_config.max_model_len,
-            )
+            if model_config.max_model_len != max_model_len_before:
+                logger.warning(
+                    "Nomic context extension is disabled. "
+                    "Changing max_model_len from %s to %s. "
+                    "To enable context extension, see: "
+                    "https://github.com/vllm-project/vllm/tree/main/examples/offline_inference/context_extension.html",
+                    max_model_len_before,
+                    model_config.max_model_len,
+                )
         else:
             # We need to re-verify max_model_len to avoid lengths
             # greater than position_embedding.
-            model_config = vllm_config.model_config
             hf_text_config = model_config.hf_text_config
 
             if isinstance(model_config.hf_overrides, dict):
                 # hf_overrides_kw
                 max_model_len = model_config.hf_overrides.get(
-                    "max_model_len", vllm_config.model_config.max_model_len
+                    "max_model_len", model_config.max_model_len
                 )
             else:
                 # hf_overrides_fn
                 # This might be overridden by sentence_bert_config.json.
-                max_model_len = vllm_config.model_config.max_model_len
+                max_model_len = model_config.max_model_len
 
             # reset hf_text_config for recalculate_max_model_len.
             if hasattr(hf_text_config, "max_model_len"):
@@ -173,19 +202,27 @@ class NomicBertModelConfig(VerifyAndUpdateConfig):
             hf_text_config.max_position_embeddings = max_trained_positions
             hf_text_config.rope_parameters = config.rotary_kwargs["rope_parameters"]
 
+            # Update the cached derived_max_model_len to enforce the limit
+            model_config.model_arch_config.derived_max_model_len_and_key = (
+                float(max_trained_positions),
+                "max_position_embeddings",
+            )
+
             # The priority of sentence_bert_config.json is higher
             # than max_position_embeddings
             encoder_config = deepcopy(model_config.encoder_config)
             encoder_config.pop("max_seq_length", None)
             model_config.encoder_config = encoder_config
 
-            vllm_config.recalculate_max_model_len(max_model_len)
+            model_config.max_model_len = model_config.get_and_verify_max_len(
+                max_model_len
+            )
 
 
 class Qwen2ForProcessRewardModelConfig(VerifyAndUpdateConfig):
     @staticmethod
-    def verify_and_update_config(vllm_config: "VllmConfig") -> None:
-        pooler_config = vllm_config.model_config.pooler_config
+    def verify_and_update_model_config(model_config: "ModelConfig") -> None:
+        pooler_config = model_config.pooler_config
 
         if pooler_config.step_tag_id is None:
             pooler_config.step_tag_id = 151651
@@ -193,8 +230,8 @@ class Qwen2ForProcessRewardModelConfig(VerifyAndUpdateConfig):
 
 class Qwen2ForRewardModelConfig(VerifyAndUpdateConfig):
     @staticmethod
-    def verify_and_update_config(vllm_config: "VllmConfig") -> None:
-        pooler_config = vllm_config.model_config.pooler_config
+    def verify_and_update_model_config(model_config: "ModelConfig") -> None:
+        pooler_config = model_config.pooler_config
 
         if pooler_config.softmax is None:
             pooler_config.softmax = False
@@ -202,8 +239,8 @@ class Qwen2ForRewardModelConfig(VerifyAndUpdateConfig):
 
 class Qwen3ForSequenceClassificationConfig(VerifyAndUpdateConfig):
     @staticmethod
-    def verify_and_update_config(vllm_config: "VllmConfig") -> None:
-        config = vllm_config.model_config.hf_config
+    def verify_and_update_model_config(model_config: "ModelConfig") -> None:
+        config = model_config.hf_config
 
         is_original_qwen3_reranker = getattr(
             config, "is_original_qwen3_reranker", False
@@ -215,25 +252,31 @@ class Qwen3ForSequenceClassificationConfig(VerifyAndUpdateConfig):
         tokens = getattr(config, "classifier_from_token", None)
         assert tokens is not None and len(tokens) == 2, (
             "Try loading the original Qwen3 Reranker?, see: "
-            "https://github.com/vllm-project/vllm/tree/main/examples/offline_inference/offline_reranker.py"
+            "https://github.com/vllm-project/vllm/tree/main/examples/pooling/score/qwen3_reranker_offline.py"
         )
-        vllm_config.model_config.hf_config.method = "from_2_way_softmax"
+        text_config = config.get_text_config()
+        text_config.method = "from_2_way_softmax"
+        text_config.classifier_from_token = tokens
+
+
+class Qwen3VLForSequenceClassificationConfig(Qwen3ForSequenceClassificationConfig):
+    pass
 
 
 class JinaVLForSequenceClassificationConfig(VerifyAndUpdateConfig):
     @staticmethod
-    def verify_and_update_config(vllm_config: "VllmConfig") -> None:
-        config = vllm_config.model_config.hf_config
+    def verify_and_update_model_config(model_config: "ModelConfig") -> None:
+        config = model_config.hf_config
         config.num_labels = 1
-        pooler_config = vllm_config.model_config.pooler_config
+        pooler_config = model_config.pooler_config
         if pooler_config.logit_bias is None:
             pooler_config.logit_bias = 2.65
 
 
 class SnowflakeGteNewModelConfig(VerifyAndUpdateConfig):
     @staticmethod
-    def verify_and_update_config(vllm_config: "VllmConfig") -> None:
-        config = vllm_config.model_config.hf_config
+    def verify_and_update_model_config(model_config: "ModelConfig") -> None:
+        config = model_config.hf_config
 
         assert config.__class__.__name__ == "GteConfig"
         assert config.hidden_act == "gelu"
@@ -307,12 +350,6 @@ class MambaModelConfig(VerifyAndUpdateConfig):
 
         if cache_config.mamba_block_size is None:
             cache_config.mamba_block_size = model_config.max_model_len
-
-        # TODO(tdoublep): remove once cascade attention is supported
-        logger.info(
-            "Disabling cascade attention since it is not supported for hybrid models."
-        )
-        model_config.disable_cascade_attn = True
 
 
 class HybridAttentionMambaModelConfig(VerifyAndUpdateConfig):
@@ -407,7 +444,7 @@ class HybridAttentionMambaModelConfig(VerifyAndUpdateConfig):
             # of attention tokens that would fit mamba_page_size:
             # e.g. for mamba page size = 788kB
             #          attn_1_token = 2kB -> fits ~394 tokens
-            #      then round up to a mulitple of 256 -> 512 tokens
+            #      then round up to a multiple of 256 -> 512 tokens
             # End result:
             #  attn_block_size = 512
             #  mamba_block_size = 512 (aligned to a multiple of chunk_size)
@@ -515,10 +552,13 @@ MODELS_CONFIG_MAP: dict[str, type[VerifyAndUpdateConfig]] = {
     "GteNewModel": GteNewModelConfig,
     "GteNewForSequenceClassification": GteNewModelConfig,
     "Gemma3TextModel": Gemma3TextModelConfig,
+    "LlamaBidirectionalForSequenceClassification": LlamaBidirectionalConfig,
+    "LlamaBidirectionalModel": LlamaBidirectionalConfig,
     "NomicBertModel": NomicBertModelConfig,
     "Qwen2ForProcessRewardModel": Qwen2ForProcessRewardModelConfig,
     "Qwen2ForRewardModel": Qwen2ForRewardModelConfig,
     "Qwen3ForSequenceClassification": Qwen3ForSequenceClassificationConfig,
+    "Qwen3VLForSequenceClassification": Qwen3VLForSequenceClassificationConfig,
     "XLMRobertaModel": JinaRobertaModelConfig,
     "JinaVLForRanking": JinaVLForSequenceClassificationConfig,
     "JambaForSequenceClassification": JambaForSequenceClassificationConfig,

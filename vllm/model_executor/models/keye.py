@@ -16,13 +16,13 @@ from transformers.feature_extraction_utils import BatchFeature
 from transformers.modeling_outputs import BaseModelOutput, BaseModelOutputWithPooling
 from transformers.utils import torch_int
 
-from vllm.attention.layers.mm_encoder_attention import (
-    MMEncoderAttention,
-)
 from vllm.config import MultiModalConfig, VllmConfig
 from vllm.config.multimodal import BaseDummyOptions
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.logger import init_logger
+from vllm.model_executor.layers.attention.mm_encoder_attention import (
+    MMEncoderAttention,
+)
 from vllm.model_executor.layers.conv import Conv2dLayer
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
@@ -30,6 +30,9 @@ from vllm.model_executor.layers.linear import (
     RowParallelLinear,
 )
 from vllm.model_executor.layers.quantization import QuantizationConfig
+from vllm.model_executor.layers.rotary_embedding.common import (
+    ApplyRotaryEmb,
+)
 from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader,
     maybe_remap_kv_scale_name,
@@ -59,7 +62,6 @@ from vllm.multimodal.processing import (
     PromptUpdate,
 )
 from vllm.multimodal.profiling import BaseDummyInputsBuilder
-from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
@@ -337,24 +339,14 @@ def apply_rotary_pos_emb_flashatt(
     k: torch.Tensor,
     cos: torch.Tensor,
     sin: torch.Tensor,
+    apply_rotary_emb: ApplyRotaryEmb,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     cos = cos.chunk(2, dim=-1)[0].contiguous()
     sin = sin.chunk(2, dim=-1)[0].contiguous()
 
-    if current_platform.is_cuda():
-        from vllm.vllm_flash_attn.layers.rotary import apply_rotary_emb
-    elif current_platform.is_rocm():
-        from flash_attn.ops.triton.rotary import apply_rotary as apply_rotary_emb
-    else:
-        # For other platforms, use PyTorch fallback
-        from vllm.model_executor.layers.rotary_embedding.common import (
-            apply_rotary_emb_torch,
-        )
+    q_embed = apply_rotary_emb(q, cos, sin)
+    k_embed = apply_rotary_emb(k, cos, sin)
 
-        apply_rotary_emb = partial(apply_rotary_emb_torch, is_neox_style=True)
-
-    q_embed = apply_rotary_emb(q.float(), cos.float(), sin.float()).type_as(q)
-    k_embed = apply_rotary_emb(k.float(), cos.float(), sin.float()).type_as(k)
     return q_embed, k_embed
 
 
@@ -408,9 +400,15 @@ class KeyeSiglipAttention(nn.Module):
         self.attn = MMEncoderAttention(
             num_heads=self.num_heads,
             head_size=self.head_dim,
+            scale=self.scale,
             num_kv_heads=self.num_kv_heads,
             prefix=f"{prefix}.attn",
             multimodal_config=multimodal_config,
+        )
+
+        self.apply_rotary_emb = ApplyRotaryEmb(
+            enforce_enable=True,
+            enable_fp32_compute=True,
         )
 
     def forward(
@@ -451,7 +449,7 @@ class KeyeSiglipAttention(nn.Module):
                 self.num_kv_heads,
                 self.head_dim,
             )
-            q, k = apply_rotary_pos_emb_flashatt(q, k, cos, sin)
+            q, k = apply_rotary_pos_emb_flashatt(q, k, cos, sin, self.apply_rotary_emb)
             v = v.view(
                 *v.shape[:-1],
                 self.num_kv_heads,
@@ -515,6 +513,7 @@ class KeyeSiglipEncoderLayer(nn.Module):
         self.mlp = SiglipMLP(
             config,
             quant_config=quant_config,
+            multimodal_config=multimodal_config,
             prefix=f"{prefix}.mlp",
         )
 
