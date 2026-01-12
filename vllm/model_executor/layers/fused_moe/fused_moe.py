@@ -2524,6 +2524,11 @@ class TritonWNA16Experts(TritonExperts):
     ):
         super().__init__(quant_config)
 
+    @staticmethod
+    def _supports_quant_scheme(quant_scheme: FusedMoEQuantScheme) -> bool:
+        # TODO
+        return True
+
     def apply(
         self,
         output: torch.Tensor,
