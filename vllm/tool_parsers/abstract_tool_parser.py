@@ -75,17 +75,15 @@ class ToolParser:
 
     def adjust_request(self, request: ChatCompletionRequest) -> ChatCompletionRequest:
         """
-        Adjust the request to add structured output constraints for tool calling,
-        either using structural tags or full JSON schema.
+        Adjust the request to add structured output constraints for tool calling.
         """
         if not request.tools:
             return request
 
-        # Try structural tags first
-        if self.supports_structural_tag() and request.tool_choice in (
-            "auto",
-            "required",
-        ):
+        # Try structural tags first, only for "required" mode.
+        # TODO(mgoin): Add support for "auto" mode. It should work with structural tags
+        # but it seems there are side effects with the current implementation.
+        if request.tool_choice == "required" and self.supports_structural_tag():
             import json
 
             structural_tag_config = build_structural_tag_config(
