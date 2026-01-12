@@ -534,6 +534,8 @@ class MsgpackDecoder:
         Works for CUDA and CPU.
         """
 
+        assert self.tensor_queue is not None, "Tensor queue is not set"
+
         # Create lookup key from handle
         lookup_key = (handle.request_id, handle.tensor_id)
 
