@@ -6,9 +6,8 @@ import torch
 
 from vllm.triton_utils import tl, triton
 from vllm.utils.math_utils import cdiv
-from vllm.utils.platform_utils import is_uva_available
-from vllm.utils.torch_utils import get_cuda_view_from_cpu_tensor
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID
+from vllm.v1.worker.gpu.buffer_utils import StagedWriteTensor, UvaBackedTensor
 
 
 class BlockTables:
@@ -26,19 +25,16 @@ class BlockTables:
         self.max_model_len = max_model_len
         self.device = device
 
-        if not is_uva_available():
-            raise RuntimeError("UVA is not available")
-
         self.num_kv_cache_groups = len(self.block_sizes)
         # num_kv_cache_groups x [max_num_reqs, max_num_blocks]
-        self.block_tables: list[UvaBuffer] = []
+        self.block_tables: list[StagedWriteTensor] = []
         for i in range(self.num_kv_cache_groups):
             block_size = self.block_sizes[i]
             max_num_blocks = cdiv(self.max_model_len, block_size)
-            block_table = UvaBuffer(
-                self.max_num_reqs,
-                max_num_blocks,
+            block_table = StagedWriteTensor(
+                (self.max_num_reqs, max_num_blocks),
                 dtype=torch.int32,
+                device=device,
             )
             self.block_tables.append(block_table)
         self.block_table_ptrs = self._make_ptr_tensor(
@@ -53,9 +49,8 @@ class BlockTables:
         self.block_sizes_tensor = torch.tensor(
             self.block_sizes, dtype=torch.int32, device=self.device
         )
-        self.num_blocks = UvaBuffer(
-            self.num_kv_cache_groups,
-            self.max_num_reqs,
+        self.num_blocks = UvaBackedTensor(
+            (self.num_kv_cache_groups, self.max_num_reqs),
             dtype=torch.int32,
         )
 
@@ -75,13 +70,11 @@ class BlockTables:
 
     def _make_ptr_tensor(self, x: Iterable[torch.Tensor]) -> torch.Tensor:
         # NOTE(woosuk): Use uint64 instead of int64 to cover all possible addresses.
-        ptrs_tensor_cpu = torch.tensor(
+        return torch.tensor(
             [t.data_ptr() for t in x],
             dtype=torch.uint64,
-            device="cpu",
-            pin_memory=True,
+            device=self.device,
         )
-        return ptrs_tensor_cpu.to(self.device, non_blocking=True)
 
     def append_block_ids(
         self,
@@ -90,19 +83,17 @@ class BlockTables:
         overwrite: bool,
     ) -> None:
         for i in range(self.num_kv_cache_groups):
-            block_ids = new_block_ids[i]
-            num_new_blocks = len(block_ids)
-            if num_new_blocks == 0:
-                continue
-
-            # TODO(woosuk): Too many Numpy invocations. Optimize this.
             start = self.num_blocks.np[i, req_index] if not overwrite else 0
-            end = start + num_new_blocks
-            if num_new_blocks == 1:
-                self.block_tables[i].np[req_index, start] = block_ids[0]
-            else:
-                self.block_tables[i].np[req_index, start:end] = block_ids
-            self.num_blocks.np[i, req_index] = end
+            block_ids = new_block_ids[i]
+            self.block_tables[i].stage_write(req_index, start, block_ids)
+            self.num_blocks.np[i, req_index] = start + len(block_ids)
+
+    def apply_staged_writes(self) -> None:
+        # TODO(woosuk): This can be inefficient since it launches one kernel per
+        # block table. Implement a kernel to handle all block tables at once.
+        for block_table in self.block_tables:
+            block_table.apply_write()
+        self.num_blocks.copy_to_uva()
 
     def gather_block_tables(
         self,
@@ -229,10 +220,3 @@ def _load_ptr(ptr_to_ptr, elem_dtype):
     ptr = tl.load(ptr_to_ptr)
     ptr = tl.cast(ptr, tl.pointer_type(elem_dtype))
     return tl.multiple_of(ptr, 16)
-
-
-class UvaBuffer:
-    def __init__(self, *size, dtype: torch.dtype):
-        self.cpu = torch.zeros(*size, dtype=dtype, device="cpu", pin_memory=True)
-        self.np = self.cpu.numpy()
-        self.gpu = get_cuda_view_from_cpu_tensor(self.cpu)
