@@ -1136,6 +1136,18 @@ class FusedMoE(CustomOp):
         if not is_alpha_moe_enabled():
             return
 
+        # Check conditions that match _valid_alpha_moe runtime validation.
+        # This prevents interleaving weights when Alpha MoE will be rejected
+        # at runtime, which would cause fallback paths to use corrupted data.
+        if self.activation not in ("silu", "swiglu"):
+            return
+
+        if self.apply_router_weight_on_input:
+            return
+
+        if self._expert_map is not None:
+            return
+
         # Only interleave w13 (combined w1 and w3), not w2
         if shard_id == "w2":
             return

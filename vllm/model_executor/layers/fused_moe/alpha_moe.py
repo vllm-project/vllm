@@ -322,8 +322,9 @@ def _valid_alpha_moe(
     if hidden_states.dtype not in (torch.bfloat16, torch.float16, torch.float32):
         return False
 
-    # Check that weights are FP8
-    return w1.dtype in (torch.float8_e4m3fn, torch.float8_e4m3fnuz)
+    # Check that both weights are FP8
+    fp8_dtypes = (torch.float8_e4m3fn, torch.float8_e4m3fnuz)
+    return w1.dtype in fp8_dtypes and w2.dtype in fp8_dtypes
 
 
 __all__ = [

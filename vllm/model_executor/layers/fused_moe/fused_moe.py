@@ -1909,7 +1909,7 @@ def fused_experts(
         hidden_states,
         w1,
         w2,
-        use_fp8_w8a8,
+        quant_config.use_fp8_w8a8,
         activation,
         apply_router_weight_on_input,
         expert_map,
