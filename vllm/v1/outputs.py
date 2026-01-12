@@ -3,6 +3,7 @@
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
+from enum import Enum, auto
 from typing import TYPE_CHECKING, NamedTuple, TypeAlias
 
 import numpy as np
@@ -146,6 +147,24 @@ class ECConnectorOutput:
     finished_recving: set[str] | None = None
 
 
+class RunnerEvent(Enum):
+    preprocess = auto()
+    forward = auto()
+    postprocess = auto()
+    sample = auto()
+    draft = auto()
+    bookkeep = auto()
+    eplb = auto()
+    construct_model_runner_output = auto()
+    construct_async_model_runner_output = auto()
+    set_async_sampled_token_ids = auto()
+
+
+@dataclass
+class RunnerStats:
+    timings: dict[RunnerEvent, list[float]]
+
+
 # ModelRunnerOutput is serialized and sent to the scheduler process.
 # This is expensive for torch.Tensor so prefer to use list instead.
 @dataclass
@@ -186,6 +205,8 @@ class ModelRunnerOutput:
 
     # information related to cudagraph execution
     cudagraph_stats: CUDAGraphStat | None = None
+
+    runner_stats: RunnerStats | None = None
 
 
 # ModelRunnerOutput wrapper for async scheduling.

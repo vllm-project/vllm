@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import logging
+import math
 import time
 from abc import ABC, abstractmethod
 from collections.abc import Callable
@@ -27,6 +28,7 @@ from vllm.v1.metrics.stats import (
     MultiModalCacheStats,
     SchedulerStats,
 )
+from vllm.v1.outputs import RunnerEvent
 from vllm.v1.spec_decode.metrics import SpecDecodingLogging, SpecDecodingProm
 
 logger = init_logger(__name__)
@@ -999,6 +1001,25 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
                 ],
             )
 
+        #
+        # Runner event timings
+        #
+        histogram_runner_timings_base = self._histogram_cls(
+            name="vllm:runner_timings",
+            documentation="Time (s) taken for various runner-side event.",
+            # range: 10us - 20s
+            buckets=build_1_2_5_buckets(max_value=20, min_value=0.00001),
+            labelnames=labelnames + ["event"],
+        )
+        self.histogram_runner_timings: dict[RunnerEvent, dict[int, Histogram]] = {}
+        for event in RunnerEvent:
+            self.histogram_runner_timings[event] = {
+                idx: histogram_runner_timings_base.labels(
+                    model_name, str(idx), str(event.name)
+                )
+                for idx in engine_indexes
+            }
+
     def log_metrics_info(self, type: str, config_obj: SupportsMetricsInfo):
         metrics_info = config_obj.metrics_info()
         metrics_info["engine"] = ""
@@ -1092,6 +1113,15 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
                     self.labelname_max_lora: self.max_lora,
                 }
                 self.gauge_lora_info.labels(**lora_info_labels).set_to_current_time()
+            if scheduler_stats.runner_stats is not None:
+                for (
+                    runner_event,
+                    durations,
+                ) in scheduler_stats.runner_stats.timings.items():
+                    for duration in durations:
+                        self.histogram_runner_timings[runner_event][engine_idx].observe(
+                            duration
+                        )
 
         if mm_cache_stats is not None:
             self.counter_mm_cache_queries[engine_idx].inc(mm_cache_stats.queries)
@@ -1199,31 +1229,35 @@ def make_per_engine(
     return {idx: metric.labels(model_name, str(idx)) for idx in engine_idxs}
 
 
-def build_buckets(mantissa_lst: list[int], max_value: int) -> list[int]:
+def build_buckets(
+    mantissa_lst: list[int], max_value: float, min_value: float = 1
+) -> list[int]:
     """
     Builds a list of buckets with increasing powers of 10 multiplied by
     mantissa values until the value exceeds the specified maximum.
-
     """
-    exponent = 0
+    assert 0 <= min_value <= max_value, f"{min_value=} {max_value=}"
+    exponent = math.floor(math.log10(min_value))
     buckets: list[int] = []
     while True:
-        for m in mantissa_lst:
+        for m in sorted(mantissa_lst):
             value = m * 10**exponent
-            if value <= max_value:
+            if min_value <= value <= max_value:
                 buckets.append(value)
-            else:
+            if value > max_value:
                 return buckets
         exponent += 1
 
 
-def build_1_2_5_buckets(max_value: int) -> list[int]:
+def build_1_2_5_buckets(max_value: float, min_value: float = 1) -> list[int]:
     """
     Example:
     >>> build_1_2_5_buckets(100)
     [1, 2, 5, 10, 20, 50, 100]
+    >>> build_1_2_5_buckets(100, 0.15)
+    [0.2, 0.5, 1, 2, 5, 10, 20, 50, 100]
     """
-    return build_buckets([1, 2, 5], max_value)
+    return build_buckets([1, 2, 5], max_value, min_value)
 
 
 class StatLoggerManager:
