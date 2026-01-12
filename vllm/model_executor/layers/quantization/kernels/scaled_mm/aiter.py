@@ -13,7 +13,6 @@ from .ScaledMMLinearKernel import Int8ScaledMMLinearLayerConfig
 
 
 class AiterScaledMMLinearKernel(CutlassScaledMMLinearKernel):
-
     @classmethod
     def is_supported(
         cls, compute_capability: int | None = None
