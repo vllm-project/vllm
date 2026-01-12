@@ -65,7 +65,7 @@ def is_supported_config_trtllm(
     """
     return (
         _supports_current_device()
-        and (not moe_config.is_act_and_mul or _supports_no_act_and_mul())
+        and (moe_config.is_act_and_mul or _supports_no_act_and_mul())
         and _supports_activation(moe_config.activation)
         and _supports_quant_scheme(moe_quant_scheme)
         and _supports_moe_parallel_config(moe_config.moe_parallel_config)
