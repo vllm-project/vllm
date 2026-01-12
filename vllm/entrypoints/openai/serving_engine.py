@@ -253,7 +253,7 @@ class OpenAIServing:
             apply_mistral_chat_template, executor=self._tokenizer_executor
         )
 
-        self._async_tokenizer_pool: dict[TokenizerLike, AsyncMicrobatchTokenizer] = {}
+        self._async_tokenizer_pool = models.async_tokenizer_pool
         self.log_error_stack = log_error_stack
 
         self.input_processor = self.models.input_processor
