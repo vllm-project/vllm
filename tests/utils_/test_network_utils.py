@@ -39,8 +39,10 @@ def test_get_open_port_list(vllm_port_env: str, monkeypatch: pytest.MonkeyPatch)
         port_list = get_open_ports_list(5)
         assert len(port_list) == 5
         for port in port_list:
-            if vllm_port_env != "":
+            if vllm_port_env == "VLLM_PORT":
                 assert vllm_port <= port < vllm_port + 10
+            elif vllm_port_env == "VLLM_DP_MASTER_PORT":
+                assert not (vllm_port <= port < vllm_port + 10)
             with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
                 s.bind(("localhost", port))
 

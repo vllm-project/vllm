@@ -148,20 +148,44 @@ def get_open_zmq_inproc_path() -> str:
     return f"inproc://{uuid4()}"
 
 
-def _get_open_ports(ports_to_try: Iterable[int] = (0,), max_count: int = 1) -> set[int]:
+def _get_open_ports(
+    count: int = 1,
+    search_list: Iterable[int] | None = None,
+    excluded_ports: set[int] | None = None,
+    max_tries: int | None = None,
+) -> set[int]:
     """
-    Find a maximum of `max_count` open ports from the `ports_to_try` list.
-    `ports_to_try` can contain zeros, meaning any available port
-    returned by the os.
+    Find a maximum of `count` open ports.
+    `search_list` can provide a list of ports we can search through.
+    If set to `None` try random ports.
+    `excluded_ports` can provide a list of disallowed port.
+    If set to `None`, all ports are considered to be valid.
+    `max_tries` can provide the maximum number of tries.
+    If set to `None`, use `count`.
 
-    Note: asking for port "0" lets the OS chose a random open port, see
-    https://man7.org/linux/man-pages/man7/ip.7.html
-
-    Try to open a port either with IPv4 or IPv6.
+    Notes:
+    - asking for port "0" lets the OS chose a random open port, see
+       https://man7.org/linux/man-pages/man7/ip.7.html
+    - this function tries both to open a port either with both IPv4 or IPv6.
     """
+    if max_tries is None:
+        max_tries = count
+
+    if search_list is None:
+        search_list = (0 for _ in range(max_tries))
+
+    if excluded_ports is None:
+        excluded_ports = set()
+
     open_ports: set[int] = set()
-    for port in ports_to_try:
+    current_tries = 0
+
+    for port in search_list:
         for family in (socket.AF_INET, socket.AF_INET6):
+            if current_tries > max_tries:
+                return open_ports
+            current_tries += 1
+
             try:
                 with socket.socket(family, socket.SOCK_STREAM) as s:
                     s.bind(("", port))
@@ -169,9 +193,12 @@ def _get_open_ports(ports_to_try: Iterable[int] = (0,), max_count: int = 1) -> s
             except OSError:
                 continue
 
-            open_ports.add(port)
-            if len(open_ports) >= max_count:
+            if port not in excluded_ports:
+                open_ports.add(port)
+
+            if len(open_ports) >= count:
                 return open_ports
+
             break
 
     return open_ports
@@ -187,31 +214,34 @@ def get_open_ports_list(count: int = 5) -> list[int]:
 
     Raises OSError if less than `count` open ports have been found.
     """
-    starting_port = 0
-    if "VLLM_DP_MASTER_PORT" in os.environ:
-        starting_port = envs.VLLM_DP_MASTER_PORT
-    elif "VLLM_PORT" in os.environ:
-        assert envs.VLLM_PORT is not None
-        starting_port = envs.VLLM_PORT
-
     # give ourselves some room for failure / already taken ports
-    candidate_ports = max(2 * count, 10)
+    max_tries = max(2 * count, 10)
 
-    ports_to_try: Iterable
-    if starting_port != 0:
-        ports_to_try = range(starting_port, starting_port + candidate_ports)
-    else:
-        # "0" meaning let the os choose a random available port
-        ports_to_try = (0 for _ in range(candidate_ports))
+    excluded_ports = None
+    if "VLLM_DP_MASTER_PORT" in os.environ:
+        assert envs.VLLM_DP_MASTER_PORT is not None
+        excluded_ports = set(
+            range(envs.VLLM_DP_MASTER_PORT, envs.VLLM_DP_MASTER_PORT + max_tries)
+        )
 
-    open_ports = _get_open_ports(ports_to_try, count)
+    search_list = None
+    if "VLLM_PORT" in os.environ:
+        assert envs.VLLM_PORT is not None
+        search_list = range(envs.VLLM_PORT, envs.VLLM_PORT + max_tries)
+
+    open_ports = _get_open_ports(
+        count,
+        search_list=search_list,
+        excluded_ports=excluded_ports,
+        max_tries=max_tries,
+    )
     if len(open_ports) != count:
-        if starting_port == 0:
-            err = f"Could not get {count} random ports after {candidate_ports} tries."
+        if search_list is None:
+            err = f"Could not get {count} open random ports after {max_tries} tries."
         else:
             err = (
-                f"Could not get {count} ports in the range "
-                f"[{starting_port}, {starting_port + candidate_ports})"
+                f"Could not get {count} open ports from the list "
+                f"{search_list} after {max_tries} tries."
             )
         raise OSError(err)
 
