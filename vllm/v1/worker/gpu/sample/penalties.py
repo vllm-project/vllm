@@ -10,11 +10,11 @@ from vllm.v1.worker.gpu.sample.metadata import SamplingMetadata
 def _penalties_and_temperature_kernel(
     logits_ptr,
     logits_stride,
+    idx_mapping_ptr,
     repetition_penalty_ptr,
     frequency_penalty_ptr,
     presence_penalty_ptr,
     temperature_ptr,
-    idx_mapping_ptr,
     prompt_bin_mask_ptr,
     prompt_bin_mask_stride,
     output_bin_counts_ptr,
@@ -23,10 +23,11 @@ def _penalties_and_temperature_kernel(
     BLOCK_SIZE: tl.constexpr,
 ):
     batch_idx = tl.program_id(0)
-    rep_penalty = tl.load(repetition_penalty_ptr + batch_idx)
-    freq_penalty = tl.load(frequency_penalty_ptr + batch_idx)
-    pres_penalty = tl.load(presence_penalty_ptr + batch_idx)
-    temperature = tl.load(temperature_ptr + batch_idx)
+    req_state_idx = tl.load(idx_mapping_ptr + batch_idx)
+    rep_penalty = tl.load(repetition_penalty_ptr + req_state_idx)
+    freq_penalty = tl.load(frequency_penalty_ptr + req_state_idx)
+    pres_penalty = tl.load(presence_penalty_ptr + req_state_idx)
+    temperature = tl.load(temperature_ptr + req_state_idx)
     temperature = tl.where(temperature == 0.0, 1.0, temperature)
 
     use_rep_penalty = rep_penalty != 1.0
@@ -45,7 +46,6 @@ def _penalties_and_temperature_kernel(
     logits = logits.to(tl.float32)
 
     if use_penalty:
-        req_state_idx = tl.load(idx_mapping_ptr + batch_idx)
         output_bin_counts = tl.load(
             output_bin_counts_ptr + req_state_idx * output_bin_counts_stride + block,
             mask=mask,
@@ -92,11 +92,11 @@ def apply_penalties_and_temperature(
     _penalties_and_temperature_kernel[(num_reqs, num_blocks)](
         logits,
         logits.stride(0),
+        sampling_metadata.idx_mapping,
         sampling_metadata.repetition_penalty,
         sampling_metadata.frequency_penalty,
         sampling_metadata.presence_penalty,
         sampling_metadata.temperature,
-        sampling_metadata.idx_mapping,
         sampling_metadata.prompt_bin_mask,
         sampling_metadata.prompt_bin_mask.stride(0),
         sampling_metadata.output_bin_counts,
