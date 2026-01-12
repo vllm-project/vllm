@@ -43,6 +43,7 @@ from vllm.model_executor.layers.quantization.compressed_tensors.schemes import (
     CompressedTensorsW4A8Fp8,
     CompressedTensorsW4A8Int,
     CompressedTensorsW4A16Fp4,
+    CompressedTensorsW4A16Mxfp4,
     CompressedTensorsW4A16Sparse24,
     CompressedTensorsW8A8Fp8,
     CompressedTensorsW8A8Int8,
@@ -116,16 +117,37 @@ class CompressedTensorsConfig(QuantizationConfig):
         return "compressed-tensors"
 
     def apply_vllm_mapper(self, hf_to_vllm_mapper: "WeightsMapper"):
-        self.target_scheme_map = hf_to_vllm_mapper.apply_dict(self.target_scheme_map)
-        self.ignore = hf_to_vllm_mapper.apply_list(self.ignore)
-        self.sparsity_scheme_map = hf_to_vllm_mapper.apply_dict(
-            self.sparsity_scheme_map
-        )
-        self.sparsity_ignore_list = hf_to_vllm_mapper.apply_list(
-            self.sparsity_ignore_list
-        )
+        """
+        Transform layer paths in config targets to match vLLM's naming.
+
+        The WeightsMapper is designed for weight paths, but some backends
+        (e.g. transformers) use broad prefix mappings like "" -> "model."
+        which would incorrectly transform non-path targets.
+
+        compressed-tensors targets can be:
+        - Layer paths: "layers.0.self_attn.q_proj" -> transformed
+        - Module class names: "Linear" -> preserved (no ".")
+        - Regex patterns: "re:.*proj" -> preserved (starts with "re:")
+        """
+
+        def _map_target(target: str) -> str | None:
+            is_layer_path = "." in target and not target.startswith("re:")
+            if is_layer_path:
+                return hf_to_vllm_mapper._map_name(target)
+            return target
+
+        def _apply_dict(d: dict) -> dict:
+            return {k: v for t, v in d.items() if (k := _map_target(t)) is not None}
+
+        def _apply_list(lst: list) -> list:
+            return [t for x in lst if (t := _map_target(x)) is not None]
+
+        self.target_scheme_map = _apply_dict(self.target_scheme_map)
+        self.ignore = _apply_list(self.ignore)
+        self.sparsity_scheme_map = _apply_dict(self.sparsity_scheme_map)
+        self.sparsity_ignore_list = _apply_list(self.sparsity_ignore_list)
         if self.kv_cache_scheme is not None:
-            self.kv_cache_scheme = hf_to_vllm_mapper.apply_dict(self.kv_cache_scheme)
+            self.kv_cache_scheme = _apply_dict(self.kv_cache_scheme)
 
     def get_quant_method(
         self,
@@ -256,7 +278,7 @@ class CompressedTensorsConfig(QuantizationConfig):
                     if format is not None
                     else is_activation_quantization_format(quant_format)
                 )
-                # TODO(czhu): w4a8fp8 is in packed-quantized format
+                # w4a8fp8 is in packed-quantized format
                 # but needs input activation quantization
                 input_activations = quant_config.get("input_activations")
                 if act_quant_format or input_activations:
@@ -310,25 +332,17 @@ class CompressedTensorsConfig(QuantizationConfig):
             return False
 
     @staticmethod
-    def _is_fp4a4_nvfp4(weight_quant: QuantizationArgs, input_quant: QuantizationArgs):
-        if weight_quant is None or input_quant is None:
+    def _is_nvfp4_format(quant_args: QuantizationArgs):
+        if quant_args is None:
             return False
-
         is_tensor_group_quant = (
-            weight_quant.strategy == QuantizationStrategy.TENSOR_GROUP.value
-            and input_quant.strategy == QuantizationStrategy.TENSOR_GROUP.value
+            quant_args.strategy == QuantizationStrategy.TENSOR_GROUP.value
         )
-        is_symmetric = weight_quant.symmetric and input_quant.symmetric
+        is_symmetric = quant_args.symmetric
 
-        is_group_size_16 = (
-            weight_quant.group_size == 16 and input_quant.group_size == 16
-        )
-        is_float_type = (
-            weight_quant.type == QuantizationType.FLOAT
-            and input_quant.type == QuantizationType.FLOAT
-        )
-        is_4_bits = weight_quant.num_bits == 4 and input_quant.num_bits == 4
-
+        is_group_size_16 = quant_args.group_size == 16
+        is_float_type = quant_args.type == QuantizationType.FLOAT
+        is_4_bits = quant_args.num_bits == 4
         return (
             is_tensor_group_quant
             and is_float_type
@@ -338,23 +352,21 @@ class CompressedTensorsConfig(QuantizationConfig):
         )
 
     @staticmethod
-    def _is_fp4a16_nvfp4(weight_quant: QuantizationArgs, input_quant: QuantizationArgs):
-        is_weight_only = weight_quant is not None and input_quant is None
-        is_tensor_group_quant = (
-            weight_quant.strategy == QuantizationStrategy.TENSOR_GROUP.value
-        )
-        is_symmetric = weight_quant.symmetric
+    def _is_mxfp4(quant_args: QuantizationArgs) -> bool:
+        if quant_args is None:
+            return False
 
-        is_group_size_16 = weight_quant.group_size == 16
-        is_float_type = weight_quant.type == QuantizationType.FLOAT
-        is_4_bits = weight_quant.num_bits == 4
+        is_group_quant = quant_args.strategy == QuantizationStrategy.GROUP.value
+        is_symmetric = quant_args.symmetric
+        is_group_size_32 = quant_args.group_size == 32
+        is_float_type = quant_args.type == QuantizationType.FLOAT
+        is_4_bits = quant_args.num_bits == 4
 
         return (
-            is_weight_only
-            and is_tensor_group_quant
+            is_group_quant
             and is_float_type
             and is_4_bits
-            and is_group_size_16
+            and is_group_size_32
             and is_symmetric
         )
 
@@ -555,8 +567,11 @@ class CompressedTensorsConfig(QuantizationConfig):
         format = format if format is not None else self.quant_format
 
         # Detect If Mixed Precision
-        if self._is_fp4a16_nvfp4(weight_quant, input_quant):
+        if self._is_nvfp4_format(weight_quant) and input_quant is None:
             return CompressedTensorsW4A16Fp4()
+
+        if self._is_mxfp4(weight_quant):
+            return CompressedTensorsW4A16Mxfp4()
 
         if self._is_fp8_w4a8_sm90(weight_quant, input_quant):
             return CompressedTensorsW4A8Fp8(
@@ -593,7 +608,9 @@ class CompressedTensorsConfig(QuantizationConfig):
 
         act_quant_format = is_activation_quantization_format(format)
         if act_quant_format:
-            if self._is_fp4a4_nvfp4(weight_quant, input_quant):
+            if self._is_nvfp4_format(weight_quant) and self._is_nvfp4_format(
+                input_quant
+            ):
                 if cutlass_fp4_supported() or envs.VLLM_USE_NVFP4_CT_EMULATIONS:
                     return CompressedTensorsW4A4Fp4()
                 else:

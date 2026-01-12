@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from collections.abc import Callable, Iterable, Mapping, MutableSequence, Set
+from collections.abc import Callable, Iterable, Mapping, MutableSequence
 from typing import (
     TYPE_CHECKING,
     ClassVar,
@@ -53,6 +53,22 @@ The output embeddings must be one of the following formats:
 """
 
 
+def _require_is_multimodal(is_multimodal: Tensor | None) -> Tensor:
+    """
+    A helper function to be used in the context of
+    [vllm.model_executor.models.interfaces.SupportsMultiModal.embed_input_ids][]
+    to provide a better error message.
+    """
+    if is_multimodal is None:
+        raise ValueError(
+            "`embed_input_ids` now requires `is_multimodal` arg, "
+            "please update your model runner according to "
+            "https://github.com/vllm-project/vllm/pull/16229."
+        )
+
+    return is_multimodal
+
+
 @runtime_checkable
 class SupportsMultiModal(Protocol):
     """The interface required for all multi-modal models."""
@@ -78,15 +94,10 @@ class SupportsMultiModal(Protocol):
     `multimodal_config.mm_encoder_tp_mode="data"`.
     """
 
-    merge_by_field_config: ClassVar[bool | None] = None
+    requires_raw_input_tokens: ClassVar[bool] = False
     """
-    [DEPRECATED] A flag that indicates which implementation of
-    `vllm.multimodal.utils.group_mm_kwargs_by_modality` to use.
-    """
-
-    multimodal_cpu_fields: ClassVar[Set[str] | None] = None
-    """
-    [DEPRECATED] A set indicating CPU-only multimodal fields.
+    A flag that indicates this model processes input id tokens
+    in their raw form and not input embeddings.
     """
 
     _processor_factory: ClassVar[_ProcessorFactories]
@@ -111,13 +122,7 @@ class SupportsMultiModal(Protocol):
             the appearances of their corresponding multimodal data item in the
             input prompt.
         """
-        if hasattr(self, "get_multimodal_embeddings"):
-            logger.warning_once(
-                "`get_multimodal_embeddings` for vLLM models is deprecated and will be "
-                "removed in v0.13.0 or v1.0.0, whichever is earlier. Please rename "
-                "this method to `embed_multimodal`."
-            )
-            return self.get_multimodal_embeddings(**kwargs)
+        ...
 
     def get_language_model(self) -> VllmModel:
         """
@@ -130,6 +135,32 @@ class SupportsMultiModal(Protocol):
             torch.nn.Module: The core language model component.
         """
         ...
+
+    def get_num_mm_encoder_tokens(self, num_image_tokens: int) -> int:
+        """
+        Implement this function to enable LoRA support
+        for the tower module of the multi-modal model.
+        Given the number of image tokens, output the number of
+        multi-modal encoder tokens.
+        """
+        ...
+
+    def get_num_mm_connector_tokens(self, num_vision_tokens: int) -> int:
+        """
+        Implement this function to enable LoRA support
+        for the connector module of the multi-modal model.
+        Given the number of vision tokens, output the number of
+        multi-modal connector tokens.
+        """
+        ...
+
+    @classmethod
+    def get_language_model_spec(cls) -> tuple[nn.Module | None, str | None]:
+        """
+        Return the language model spec:
+        (language model class, language model attr)
+        """
+        return None, None
 
     @overload
     def embed_input_ids(self, input_ids: Tensor) -> Tensor: ...
@@ -196,17 +227,10 @@ class SupportsMultiModal(Protocol):
         if multimodal_embeddings is None or len(multimodal_embeddings) == 0:
             return inputs_embeds
 
-        if is_multimodal is None:
-            raise ValueError(
-                "`embed_input_ids` now requires `is_multimodal` arg, "
-                "please update your model runner according to "
-                "https://github.com/vllm-project/vllm/pull/16229."
-            )
-
         return _merge_multimodal_embeddings(
             inputs_embeds=inputs_embeds,
             multimodal_embeddings=multimodal_embeddings,
-            is_multimodal=is_multimodal,
+            is_multimodal=_require_is_multimodal(is_multimodal),
         )
 
 
@@ -260,43 +284,23 @@ def supports_multimodal(model: object) -> TypeIs[SupportsMultiModal]: ...
 def supports_multimodal(
     model: type[object] | object,
 ) -> TypeIs[type[SupportsMultiModal]] | TypeIs[SupportsMultiModal]:
-    res = getattr(model, "supports_multimodal", False)
-
-    if res:
-        # We can remove this starting from v0.14
-        merge_by_field_config = getattr(model, "merge_by_field_config", None)
-        if merge_by_field_config is False:
-            raise ValueError(
-                "`merge_by_field_config=False` is no longer effective, "
-                "please update your model to consider the new batching logic "
-                "in `group_mm_kwargs_by_modality` (refer to "
-                "https://github.com/vllm-project/vllm/issues/26149), "
-                "and then remove the override from your model."
-            )
-        if merge_by_field_config is True:
-            logger.warning_once(
-                "`merge_by_field_config=True` is redundant, "
-                "please remove the override from your model."
-            )
-
-        multimodal_cpu_fields = getattr(model, "multimodal_cpu_fields", None)
-        if multimodal_cpu_fields is not None:
-            raise ValueError(
-                "`multimodal_cpu_fields` is no longer effective, "
-                "please set `keep_on_cpu=True` in `MultiModalFieldConfig` "
-                "(refer to https://github.com/vllm-project/vllm/pull/30181), "
-                "and then remove the override from your model."
-            )
-
-    return res
+    return getattr(model, "supports_multimodal", False)
 
 
 def supports_multimodal_raw_input_only(model: type[object] | object) -> bool:
     return getattr(model, "supports_multimodal_raw_input_only", False)
 
 
+def requires_raw_input_tokens(model: type[object] | object) -> bool:
+    return getattr(model, "requires_raw_input_tokens", False)
+
+
 def supports_multimodal_encoder_tp_data(model: type[object] | object) -> bool:
     return getattr(model, "supports_encoder_tp_data", False)
+
+
+def supports_mm_encoder_only(model: type[object] | object) -> bool:
+    return getattr(model, "is_mm_encoder_only_model", False)
 
 
 @overload

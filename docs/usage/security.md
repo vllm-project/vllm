@@ -10,7 +10,7 @@ All communications between nodes in a multi-node vLLM deployment are **insecure 
 
 ### Configuration Options for Inter-Node Communications
 
-The following options control inter-node communications in vLLM:
+The following options control internode communications in vLLM:
 
 #### 1. **Environment Variables:**
 
@@ -28,7 +28,7 @@ The following options control inter-node communications in vLLM:
 
 ### Notes on PyTorch Distributed
 
-vLLM uses PyTorch's distributed features for some inter-node communication. For
+vLLM uses PyTorch's distributed features for some internode communication. For
 detailed information about PyTorch Distributed security considerations, please
 refer to the [PyTorch Security
 Guide](https://github.com/pytorch/pytorch/security/policy#using-distributed-features).

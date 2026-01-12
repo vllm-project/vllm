@@ -7,6 +7,7 @@ import torch
 
 import vllm.envs as envs
 from tests.kernels.quantization.nvfp4_utils import quant_nvfp4_tensor
+from vllm._aiter_ops import IS_AITER_FOUND
 from vllm._custom_ops import cutlass_scaled_fp4_mm, scaled_fp4_quant
 from vllm.compilation.activation_quant_fusion import (
     FUSED_OPS,
@@ -24,6 +25,7 @@ from vllm.config import (
     set_current_vllm_config,
 )
 from vllm.model_executor.layers.activation import SiluAndMul
+from vllm.model_executor.layers.quantization.utils.fp8_utils import W8A8BlockFp8LinearOp
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     GroupShape,
     kFp8StaticTensorSym,
@@ -126,6 +128,39 @@ class TestSiluMulNvfp4QuantModel(torch.nn.Module):
         return [FUSED_OPS[kNvfp4Quant]]
 
 
+class TestSiluMulGroupFp8QuantModel(torch.nn.Module):
+    def __init__(self, hidden_size: int, **kwargs):
+        super().__init__()
+        self.silu_and_mul = SiluAndMul()
+        self.w8a8_block_fp8_linear = W8A8BlockFp8LinearOp(
+            weight_group_shape=GroupShape(128, 128),
+            act_quant_group_shape=GroupShape(1, 128),
+            cutlass_block_fp8_supported=False,
+            use_aiter_and_is_supported=True,
+        )
+        self.w = torch.rand(hidden_size, hidden_size).to(dtype=FP8_DTYPE).t()
+
+        scale_hidden_size = (hidden_size + 128 - 1) // 128
+        self.wscale = torch.rand(
+            (scale_hidden_size, scale_hidden_size), dtype=torch.float32
+        )
+
+        self.enable_silu_mul_custom_op = self.silu_and_mul.enabled()
+
+    def forward(self, x):
+        y = self.silu_and_mul(x)
+        x2 = self.w8a8_block_fp8_linear.apply(y, self.w, self.wscale)
+        return x2
+
+    def ops_in_model_before(self):
+        return [
+            SILU_MUL_OP if self.enable_silu_mul_custom_op else torch.ops.aten.mul,
+        ]
+
+    def ops_in_model_after(self):
+        return [torch.ops.vllm.rocm_aiter_act_mul_and_fp8_group_quant]
+
+
 @pytest.mark.parametrize("num_tokens", [32, 64])
 @pytest.mark.parametrize("hidden_size", [128, 256])
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
@@ -133,7 +168,10 @@ class TestSiluMulNvfp4QuantModel(torch.nn.Module):
 @pytest.mark.parametrize(
     "model_class, enable_quant_fp8_custom_op, cuda_force_torch",
     list(itertools.product([TestSiluMulFp8QuantModel], [True, False], [True, False]))
-    + [(TestSiluMulNvfp4QuantModel, False, False)],
+    + [
+        (TestSiluMulNvfp4QuantModel, False, False),
+        (TestSiluMulGroupFp8QuantModel, False, False),
+    ],
 )
 # cuda_force_torch used to test torch code path on platforms that
 # cutlass_fp8_supported() == True.
@@ -144,13 +182,19 @@ def test_fusion_silu_and_mul_quant(
     num_tokens: int,
     hidden_size: int,
     dtype: torch.dtype,
-    model_class: type[TestSiluMulFp8QuantModel | TestSiluMulNvfp4QuantModel],
+    model_class: type[
+        TestSiluMulFp8QuantModel
+        | TestSiluMulNvfp4QuantModel
+        | TestSiluMulGroupFp8QuantModel
+    ],
     enable_silu_mul_custom_op: bool,
     enable_quant_fp8_custom_op: bool,
     cuda_force_torch: bool,
 ):
     if model_class is TestSiluMulNvfp4QuantModel and not is_nvfp4_supported():
         pytest.skip("NVFP4 is not supported on this GPU.")
+    if model_class is TestSiluMulGroupFp8QuantModel and not IS_AITER_FOUND:
+        pytest.skip("AITER is not supported on this GPU.")
 
     torch.set_default_device("cuda")
     torch.set_default_dtype(dtype)
@@ -173,9 +217,15 @@ def test_fusion_silu_and_mul_quant(
     )
 
     with set_current_vllm_config(config):
-        fusion_pass = ActivationQuantFusionPass(config)
+        fusion_passes = [ActivationQuantFusionPass(config)]
+        if IS_AITER_FOUND:
+            from vllm.compilation.rocm_aiter_fusion import (
+                RocmAiterSiluMulFp8GroupQuantFusionPass,
+            )
 
-        passes = [NoOpEliminationPass(config), fusion_pass, PostCleanupPass(config)]
+            fusion_passes += [RocmAiterSiluMulFp8GroupQuantFusionPass(config)]
+
+        passes = [NoOpEliminationPass(config), *fusion_passes, PostCleanupPass(config)]
         backend = TestBackend(*passes)
         model = model_class(
             hidden_size=hidden_size, cuda_force_torch=cuda_force_torch, x=x
@@ -194,12 +244,14 @@ def test_fusion_silu_and_mul_quant(
             atol, rtol = 1e-3, 1e-3
         elif model_class == TestSiluMulNvfp4QuantModel:
             atol, rtol = 1e-1, 1e-1
+        elif model_class == TestSiluMulGroupFp8QuantModel:
+            atol, rtol = 5e-2, 5e-2
 
         torch.testing.assert_close(
             result[0].to(dtype=dtype), result2[0].to(dtype=dtype), atol=atol, rtol=rtol
         )
 
-        assert fusion_pass.matched_count == 1
+        assert sum([p.matched_count for p in fusion_passes]) == 1
 
         # In pre-nodes, quant op should be present and fused kernels should not
         backend.check_before_ops(model.ops_in_model_before())

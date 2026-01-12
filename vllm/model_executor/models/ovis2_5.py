@@ -10,8 +10,7 @@ import torch
 import torch.nn as nn
 from transformers import BaseImageProcessor, BatchFeature, PretrainedConfig
 
-from vllm.attention.backends.registry import AttentionBackendEnum
-from vllm.config import VllmConfig
+from vllm.config import MultiModalConfig, VllmConfig
 from vllm.config.multimodal import BaseDummyOptions
 from vllm.model_executor.layers.linear import ReplicatedLinear
 from vllm.model_executor.layers.quantization import QuantizationConfig
@@ -104,18 +103,16 @@ class VisualTokenizer(torch.nn.Module):
         config: PretrainedConfig,
         visual_vocab_size: int,
         quant_config: QuantizationConfig | None = None,
+        multimodal_config: MultiModalConfig | None = None,
         prefix: str = "",
-        use_data_parallel: bool = False,
-        attn_backend_override: AttentionBackendEnum | None = None,
     ):
         super().__init__()
         self.config = config
         self.vit = self._init_backbone(
             config=config,
             quant_config=quant_config,
+            multimodal_config=multimodal_config,
             prefix=f"{prefix}.vit",
-            use_data_parallel=use_data_parallel,
-            attn_backend_override=attn_backend_override,
         )
         # reserved tokens for INDICATOR_IDS
         head_dim = visual_vocab_size - len(INDICATOR_IDS)
@@ -133,18 +130,16 @@ class VisualTokenizer(torch.nn.Module):
         self,
         config: PretrainedConfig,
         quant_config: QuantizationConfig | None = None,
+        multimodal_config: QuantizationConfig | None = None,
         prefix: str = "",
-        use_data_parallel: bool = False,
-        attn_backend_override: AttentionBackendEnum | None = None,
     ):
         model_type = config.model_type
         if model_type == "siglip2_navit":
             return Siglip2NavitModel(
                 config=config,
                 quant_config=quant_config,
+                multimodal_config=multimodal_config,
                 prefix=prefix,
-                use_data_parallel=use_data_parallel,
-                attn_backend_override=attn_backend_override,
             )
         raise ValueError(f"Unsupported visual tokenizer model_type: {model_type}")
 
@@ -468,17 +463,12 @@ class Ovis2_5(nn.Module, SupportsMultiModal, SupportsPP):
             prefix=maybe_prefix(prefix, "llm"),
         )
 
-        attn_backend_override = (
-            multimodal_config.mm_encoder_attn_backend
-            if multimodal_config is not None
-            else None
-        )
         self.visual_tokenizer = VisualTokenizer(
             config=config.vit_config,
             visual_vocab_size=config.visual_vocab_size,
+            multimodal_config=multimodal_config,
             quant_config=quant_config,
             prefix=f"{prefix}.visual_tokenizer",
-            attn_backend_override=attn_backend_override,
         )
 
         self.vte = VisualEmbedding(config.visual_vocab_size, config.hidden_size)

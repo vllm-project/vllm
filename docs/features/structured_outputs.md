@@ -61,7 +61,7 @@ Now let´s see an example for each of the cases, starting with the `choice`, as 
     print(completion.choices[0].message.content)
     ```
 
-The next example shows how to use the `regex`. The idea is to generate an email address, given a simple regex template:
+The next example shows how to use the `regex`. The supported regex syntax depends on the structured output backend. For example, `xgrammar`, `guidance`, and `outlines` use Rust-style regex, while `lm-format-enforcer` uses Python's `re` module. The idea is to generate an email address, given a simple regex template:
 
 ??? code
 

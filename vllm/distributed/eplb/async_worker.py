@@ -89,7 +89,7 @@ async def transfer_run_periodically(
                         (
                             model_state.is_unchanged,
                             model_state.is_received_locally,
-                            model_state.experts_recv_loc,
+                            model_state.recv_metadata,
                         ) = await transfer_layer(
                             old_global_expert_indices=model_state.physical_to_logical_map,
                             new_global_expert_indices=model_state.new_physical_to_logical_map,

@@ -31,13 +31,14 @@ import torch
 from torch import nn
 from transformers import LlamaConfig
 
-from vllm.attention.backends.abstract import AttentionType
 from vllm.attention.layer import Attention
-from vllm.attention.layers.encoder_only_attention import EncoderOnlyAttention
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.activation import SiluAndMul
+from vllm.model_executor.layers.attention.encoder_only_attention import (
+    EncoderOnlyAttention,
+)
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
     MergedColumnParallelLinear,
@@ -56,8 +57,15 @@ from vllm.model_executor.model_loader.weight_utils import (
     maybe_remap_kv_scale_name,
 )
 from vllm.sequence import IntermediateTensors
+from vllm.v1.attention.backend import AttentionType
 
-from .interfaces import SupportsEagle, SupportsEagle3, SupportsLoRA, SupportsPP
+from .adapters import as_embedding_model, as_seq_cls_model
+from .interfaces import (
+    SupportsEagle,
+    SupportsEagle3,
+    SupportsLoRA,
+    SupportsPP,
+)
 from .utils import (
     AutoWeightsLoader,
     PPMissingLayer,
@@ -195,8 +203,8 @@ class LlamaAttention(nn.Module):
                 # This is a target model, use layer_idx directly
                 effective_layer_idx = layer_idx
             assert effective_layer_idx < len(layer_types), (
-                f"effective_layer_idx: {effective_layer_idx} \
-                is out of bounds for layer_types: {layer_types}"
+                f"effective_layer_idx: {effective_layer_idx} "
+                f"is out of bounds for layer_types: {layer_types}"
             )
 
             is_sliding = layer_types[effective_layer_idx] == "sliding_attention"
@@ -259,7 +267,6 @@ class LlamaAttention(nn.Module):
 
         self.rotary_emb = get_rope(
             self.head_dim,
-            rotary_dim=self.head_dim,
             max_position=self.max_position_embeddings,
             rope_parameters=getattr(config, "rope_parameters", None),
             is_neox_style=is_neox_style,
@@ -362,7 +369,11 @@ def llama_model_invariants(
         torch._check(positions.size()[0] == input_ids.size()[0])
 
 
-@support_torch_compile(shape_invariants=llama_model_invariants)
+@support_torch_compile(
+    # TODO[#32068]: Investigate recompilation
+    # mark_unbacked_dims={"input_ids": 0},
+    shape_invariants=llama_model_invariants
+)
 class LlamaModel(nn.Module):
     def __init__(
         self,
@@ -699,3 +710,15 @@ class LlamaForCausalLM(
                 name = name.replace(item, mapping[item])
 
         return name, loaded_weight
+
+
+class LlamaBidirectionalForSequenceClassification(as_seq_cls_model(LlamaForCausalLM)):
+    # This class sets the correct attention type and pooling type
+    # through LlamaBidirectionalConfig.
+    pass
+
+
+class LlamaBidirectionalModel(as_embedding_model(LlamaForCausalLM)):
+    # This class sets the correct attention type and pooling type
+    # through LlamaBidirectionalConfig.
+    pass

@@ -49,7 +49,10 @@ def _create_vllm_config(
         mock_config.lora_config = None
     # Mimic the behavior of VllmConfig.__post_init__()
     if compilation_config.mode == CompilationMode.VLLM_COMPILE:
-        compilation_config.set_splitting_ops_for_v1()
+        compilation_config.set_splitting_ops_for_v1(
+            all2all_backend=mock_config.parallel_config.all2all_backend,
+            data_parallel_size=mock_config.parallel_config.data_parallel_size,
+        )
 
     # mimic VllmConfig.__post_init__
     if compilation_config.cudagraph_capture_sizes:
@@ -161,10 +164,10 @@ class TestCudagraphDispatcher:
         assert rt_mode == CUDAGraphMode.NONE
         assert key == BatchDescriptor(num_tokens=15)
 
-        # 4. Cascade attention should have a fall back mode
+        # 4. disable_full should have a fall back mode (e.g., cascade attention)
         desc_full_exact = BatchDescriptor(num_tokens=8, uniform=False)
         rt_mode, key = dispatcher.dispatch(
-            num_tokens=8, uniform_decode=False, has_lora=False, use_cascade_attn=True
+            num_tokens=8, uniform_decode=False, has_lora=False, disable_full=True
         )
         if "PIECEWISE" in cudagraph_mode_str:  # string contains check
             assert rt_mode == CUDAGraphMode.PIECEWISE

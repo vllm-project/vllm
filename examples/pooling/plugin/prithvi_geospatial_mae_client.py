@@ -16,7 +16,7 @@ import requests
 # - start vllm in serving mode with the below args
 #   --model='christian-pinto/Prithvi-EO-2.0-300M-TL-VLLM'
 #   --model-impl terratorch
-#   --task embed --trust-remote-code
+#   --trust-remote-code
 #   --skip-tokenizer-init --enforce-eager
 #   --io-processor-plugin terratorch_segmentation
 #   --enable-mm-embeds

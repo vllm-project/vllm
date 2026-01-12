@@ -92,7 +92,6 @@ class GPTNeoXAttention(nn.Module):
         max_position_embeddings = getattr(config, "max_position_embeddings", 8192)
         self.rotary_emb = get_rope(
             self.head_size,
-            rotary_dim=self.head_size,
             max_position=max_position_embeddings,
             rope_parameters=config.rope_parameters,
         )
@@ -167,7 +166,7 @@ class GPTNeoXLayer(nn.Module):
         self.attention = GPTNeoXAttention(
             config, cache_config, quant_config, prefix=f"{prefix}.attention"
         )
-        self.mlp = GPTNeoXMLP(config, quant_config)
+        self.mlp = GPTNeoXMLP(config, quant_config, prefix=f"{prefix}.mlp")
 
     def forward(
         self,

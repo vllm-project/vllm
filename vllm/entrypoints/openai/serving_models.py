@@ -119,7 +119,7 @@ class OpenAIServingModels:
         lora_cards = [
             ModelCard(
                 id=lora.lora_name,
-                root=lora.local_path,
+                root=lora.path,
                 parent=lora.base_model_name
                 if lora.base_model_name
                 else self.base_model_paths[0].name,

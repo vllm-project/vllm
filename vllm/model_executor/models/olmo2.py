@@ -146,7 +146,6 @@ class Olmo2Attention(nn.Module):
             rope_parameters = {"rope_type": "default", "rope_theta": rope_theta}
         self.rotary_emb = get_rope(
             self.head_dim,
-            rotary_dim=self.head_dim,
             max_position=self.max_position_embeddings,
             rope_parameters=rope_parameters,
         )

@@ -83,7 +83,7 @@ def test_compressed_tensors_w8a8_static_setup(vllm_runner, model_args):
         current_platform.is_rocm()
         and model_path not in ROCM_TRITON_SCALED_MM_SUPPORTED_INT8_MODEL
     ):
-        pytest.skip(f"Skip model {model_path} as it is not support on ROCm.")
+        pytest.skip(f"Skip model {model_path} as it is not supported on ROCm.")
 
     with vllm_runner(model_path, enforce_eager=True) as llm:
 
@@ -161,7 +161,7 @@ def test_compressed_tensors_w8a8_logprobs(
         current_platform.is_rocm()
         and model_path not in ROCM_TRITON_SCALED_MM_SUPPORTED_INT8_MODEL
     ):
-        pytest.skip(f"Skip model {model_path} as it is not support on ROCm.")
+        pytest.skip(f"Skip model {model_path} as it is not supported on ROCm.")
 
     if use_aiter:
         if model_path not in ROCM_AITER_SUPPORTED_INT8_MODEL:
@@ -231,7 +231,7 @@ def test_compressed_tensors_w8a8_dynamic_per_token(
         current_platform.is_rocm()
         and model_path not in ROCM_TRITON_SCALED_MM_SUPPORTED_INT8_MODEL
     ):
-        pytest.skip(f"Skip model {model_path} as it is not support on ROCm.")
+        pytest.skip(f"Skip model {model_path} as it is not supported on ROCm.")
 
     if use_aiter:
         if model_path not in ROCM_AITER_SUPPORTED_INT8_MODEL:
@@ -644,6 +644,9 @@ def test_compressed_tensors_2of4_sparse_compressed(vllm_runner, args_2of4):
         assert output
 
 
+@pytest.mark.skipif(
+    not current_platform.is_cuda(), reason="This test is skipped on non-CUDA platform."
+)
 @pytest.mark.parametrize(
     "args",
     [
@@ -762,7 +765,10 @@ def test_compressed_tensors_fp8_block_enabled(vllm_runner):
 
             input_quant_op = qkv_proj.scheme.w8a8_block_fp8_linear.input_quant_op
             assert isinstance(input_quant_op, QuantFP8)
-            assert input_quant_op._forward_method == input_quant_op.forward_cuda
+            assert input_quant_op._forward_method in (
+                input_quant_op.forward_cuda,
+                input_quant_op.forward_hip,
+            )
 
         llm.apply_model(check_model)
 

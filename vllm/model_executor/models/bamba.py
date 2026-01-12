@@ -178,14 +178,11 @@ class BambaAttentionDecoderLayer(nn.Module):
         self.scaling = self.head_dim**-0.5
         self.max_position_embeddings = max_position_embeddings
 
-        if hasattr(config, "attn_rotary_emb"):
-            rotary_dim = config.attn_rotary_emb  # for backward compatibility
-        else:
-            rotary_dim = self.head_dim  # default
+        rotary_dim = getattr(config, "attn_rotary_emb", self.head_dim)
+        config.rope_parameters["partial_rotary_factor"] = rotary_dim / self.head_dim
 
         self.rotary_emb = get_rope(
             head_size=self.head_dim,
-            rotary_dim=rotary_dim,
             max_position=max_position_embeddings,
             rope_parameters=config.rope_parameters,
             is_neox_style=True,

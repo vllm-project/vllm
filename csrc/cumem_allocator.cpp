@@ -108,6 +108,16 @@ void create_and_map(unsigned long long device, ssize_t size, CUdeviceptr d_mem,
   prop.allocFlags.compressionType = CU_MEM_ALLOCATION_COMP_NONE;
 
 #ifndef USE_ROCM
+  int flag = 0;
+  CUDA_CHECK(cuDeviceGetAttribute(
+      &flag, CU_DEVICE_ATTRIBUTE_GPU_DIRECT_RDMA_WITH_CUDA_VMM_SUPPORTED,
+      device));
+  if (flag) {  // support GPUDirect RDMA if possible
+    prop.allocFlags.gpuDirectRDMACapable = 1;
+  }
+#endif
+
+#ifndef USE_ROCM
   // Allocate memory using cuMemCreate
   CUDA_CHECK(cuMemCreate(p_memHandle, size, &prop, 0));
   if (error_code != 0) {
