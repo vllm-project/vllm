@@ -655,7 +655,6 @@ class OutputProcessor:
                 )
                 if stop_string:
                     finish_reason = FinishReason.STOP
-                    engine_core_output.finish_reason = finish_reason
                     stop_reason = stop_string
 
                 # 3) Compute sample and prompt logprobs for request,
@@ -695,6 +694,7 @@ class OutputProcessor:
                         # If req not finished in EngineCore, but Detokenizer
                         # detected stop string, abort needed in EngineCore.
                         reqs_to_abort.append(req_id)
+                        engine_core_output.finish_reason = finish_reason
 
                     # Track per-request stats
                     self._update_stats_from_finished(
