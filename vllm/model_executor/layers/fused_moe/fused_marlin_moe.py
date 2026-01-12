@@ -566,15 +566,13 @@ class MarlinExpertsBase(mk.FusedMoEPermuteExpertsUnpermute):
 
     @staticmethod
     def _supports_quant_scheme(quant_scheme: FusedMoEQuantScheme) -> bool:
-        # TODO(rob): check if we support the Fp8 activation
-        return True
-        # return (
-        #     quant_scheme.use_fp8_w8a16
-        #     or quant_config.use_int8_w8a16
-        #     or quant_config.use_int4_w4a16
-        #     or quant_config.use_nvfp4_w4a16
-        #     or quant_config.use_mxfp4_w4a16
-        # )
+        return quant_scheme.weight_dtype in [
+            current_platform.fp8_dtype(),
+            torch.int8,
+            "int4",
+            "nvfp4",
+            "mxfp4",
+        ]
 
     @staticmethod
     def _supports_activation(activation: str) -> bool:
