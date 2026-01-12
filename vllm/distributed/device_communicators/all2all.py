@@ -29,6 +29,7 @@ if has_flashinfer_moe_a2a():
     from flashinfer.comm.mnnvl import MnnvlConfig  # type: ignore[import-not-found]
     from flashinfer.comm.trtllm_moe_alltoall import (
         MoeAlltoAll,  # type: ignore[import-not-found]
+        moe_a2a_get_workspace_size_per_rank,
     )
 
 logger = init_logger(__name__)
@@ -579,13 +580,26 @@ class FlashInferMoeA2AManager(All2AllManagerBase):
         dp_config = MnnvlConfig(
             comm_backend=CustomCommunicator(get_dp_group().cpu_group),
         )
+        total_dispatch_payload_size_per_token = (
+                hidden_size // 2  # nvfp4 hidden states
+                + hidden_size // 16  # fp8 scaling factors
+                + top_k * 4  # int32 topks ids
+                + top_k * 4  # float32 topk weights
+        )
+        combine_payload_size_per_token = hidden_size * 2  # bf16 hidden states
+        self.workspace_size = moe_a2a_get_workspace_size_per_rank(
+            ep_size=world_size,
+            max_num_tokens=max_num_tokens,
+            total_dispatch_payload_size_per_token=total_dispatch_payload_size_per_token,
+            combine_payload_size_per_token=combine_payload_size_per_token,
+        )
 
         self.moe_alltoall = MoeAlltoAll(
             mapping=self.mapping,
             max_num_tokens=max_num_tokens,
             top_k=top_k,
             num_experts=num_experts,
-            hidden_size=hidden_size,
+            workspace_size_per_rank=self.workspace_size,
             mnnvl_config=dp_config,
         )
 
@@ -622,7 +636,7 @@ class FlashInferMoeA2AManager(All2AllManagerBase):
             self.initialize(
                 world_size=self.world_size,
                 rank=self.rank,
-                gpus_per_node=torch.cuda.device_count,
+                gpus_per_node=torch.cuda.device_count(),
                 max_num_tokens=max_num_tokens,
                 top_k=top_k,
                 num_experts=num_experts,

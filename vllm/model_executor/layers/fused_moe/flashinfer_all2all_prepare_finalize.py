@@ -440,8 +440,9 @@ class FlashInferMoeA2APrepareAndFinalize(FlashInferMoEPrepareAndFinalize):
         top_k: int,
         num_experts: int,
         hidden_size: int,
+        use_linear_scale_layout: bool = False,
     ):
-        super().__init__(use_dp=False)
+        super().__init__(use_dp=False, use_linear_scale_layout=use_linear_scale_layout)
         self.max_num_tokens = max_num_tokens
         self.top_k = top_k
         self.num_experts = num_experts
@@ -490,6 +491,9 @@ class FlashInferMoeA2APrepareAndFinalize(FlashInferMoEPrepareAndFinalize):
         payloads.append(a1q)
         if a1q_scale is not None:
             payloads.append(a1q_scale)
+            expert_id_payload_index = 2
+        else:
+            expert_id_payload_index = 1
         payloads.append(topk_ids)
         payloads.append(topk_weights)
 
@@ -497,6 +501,8 @@ class FlashInferMoeA2APrepareAndFinalize(FlashInferMoEPrepareAndFinalize):
             token_selected_experts=topk_ids,
             input_payloads=payloads,
             runtime_max_tokens_per_rank=self.runtime_max_tokens_per_rank,
+            # invalid_token_expert_id=-1,
+            # expert_id_payload_index=expert_id_payload_index,
         )
         if a1q_scale is not None:
             a1q_recv, a1q_scale_recv, topk_ids_recv, topk_weights_recv = recv_payloads
@@ -507,6 +513,7 @@ class FlashInferMoeA2APrepareAndFinalize(FlashInferMoEPrepareAndFinalize):
             a1q_recv, topk_ids_recv, topk_weights_recv = recv_payloads
             a1q_scale_recv = None
         a1q_recv = a1q_recv.view(-1, a1q_recv.shape[-1])
+        a1q_scale_recv = a1q_scale_recv.view(-1, a1q_recv.shape[-1] // 8)
         topk_ids_recv = topk_ids_recv.view(-1, topk_ids_recv.shape[-1])
         topk_weights_recv = topk_weights_recv.view(-1, topk_weights_recv.shape[-1])
 
@@ -533,7 +540,6 @@ class FlashInferMoeA2APrepareAndFinalize(FlashInferMoEPrepareAndFinalize):
             payload=fused_expert_output,
             runtime_max_tokens_per_rank=self.runtime_max_tokens_per_rank,
         )
-
         output.copy_(combined_output)
 
 
