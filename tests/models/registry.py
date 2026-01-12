@@ -250,6 +250,9 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
         "LGAI-EXAONE/EXAONE-3.0-7.8B-Instruct", trust_remote_code=True
     ),
     "Exaone4ForCausalLM": _HfExamplesInfo("LGAI-EXAONE/EXAONE-4.0-32B"),
+    "ExaoneMoEForCausalLM": _HfExamplesInfo(
+        "LGAI-EXAONE/K-EXAONE-236B-A23B", min_transformers_version="5.0.0"
+    ),
     "Fairseq2LlamaForCausalLM": _HfExamplesInfo("mgleize/fairseq2-dummy-Llama-3.2-1B"),
     "FalconForCausalLM": _HfExamplesInfo("tiiuae/falcon-7b"),
     "FalconH1ForCausalLM": _HfExamplesInfo("tiiuae/Falcon-H1-0.5B-Base"),
@@ -1004,6 +1007,11 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
         "baidu/ERNIE-4.5-21B-A3B-PT",
         trust_remote_code=True,
         speculative_model="baidu/ERNIE-4.5-21B-A3B-PT",
+    ),
+    "ExaoneMoeMTP": _HfExamplesInfo(
+        "LGAI-EXAONE/K-EXAONE-236B-A23B",
+        speculative_model="LGAI-EXAONE/K-EXAONE-236B-A23B",
+        min_transformers_version="5.0.0",
     ),
     "Glm4MoeMTPModel": _HfExamplesInfo(
         "zai-org/GLM-4.5",
