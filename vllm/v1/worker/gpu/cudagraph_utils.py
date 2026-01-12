@@ -25,10 +25,12 @@ class CudaGraphManager:
     def __init__(
         self,
         vllm_config: VllmConfig,
+        uses_mrope: bool,
         device: torch.device,
     ):
         self.vllm_config = vllm_config
         self.scheduler_config = vllm_config.scheduler_config
+        self.uses_mrope = uses_mrope
         self.device = device
 
         self.max_model_len = vllm_config.model_config.max_model_len
@@ -79,7 +81,10 @@ class CudaGraphManager:
     ) -> None:
         num_reqs = min(num_tokens, self.max_num_reqs)
         input_ids = input_buffers.input_ids[:num_tokens]
-        positions = input_buffers.positions[:num_tokens]
+        if not self.uses_mrope:
+            positions = input_buffers.positions[:num_tokens]
+        else:
+            positions = input_buffers.mrope_positions[:, :num_tokens]
         attn_metadata = prepare_inputs_to_capture(
             num_reqs,
             num_tokens,
