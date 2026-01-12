@@ -58,8 +58,7 @@ class ToolParser:
     def get_structure_info(self, tool_name: str) -> StructureInfo | None:
         """
         Return StructureInfo for constrained tool call generation.
-
-        Override this method in subclasses to enable structural tag support.
+        Override this method to enable structural tag support.
 
         Args:
             tool_name: Name of the tool to generate structure info for
