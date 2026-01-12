@@ -940,7 +940,7 @@ class Worker(WorkerBase):
             pattern=pattern,
             max_size=max_size,
         )
-        
+
     def shutdown(self) -> None:
         if runner := getattr(self, "model_runner", None):
             runner.ensure_kv_transfer_shutdown()
