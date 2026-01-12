@@ -261,7 +261,7 @@ The new format of `--lora-modules` is mainly to support the display of parent mo
             "created": 1715644056,
             "owned_by": "vllm",
             "root": "jeeejeee/llama32-3b-text2sql-spider",
-            "parent": meta-llama/Llama-3.2-3B-Instruct,
+            "parent": "meta-llama/Llama-3.2-3B-Instruct",
             "permission": [
                 {
                 ....
