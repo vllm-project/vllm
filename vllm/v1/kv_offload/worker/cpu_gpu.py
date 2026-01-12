@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections import deque
+from dataclasses import dataclass
 
 import numpy as np
 import torch
@@ -14,9 +15,20 @@ from vllm.v1.kv_offload.worker.worker import (
     OffloadingHandler,
     TransferResult,
     TransferSpec,
+    TransferType,
 )
 
 logger = init_logger(__name__)
+
+
+@dataclass
+class Transfer:
+    job_id: int
+    stream: torch.cuda.Stream
+    start_event: torch.Event
+    end_event: torch.Event
+    num_blocks: int
+    transfer_type: TransferType
 
 
 def expand_block_ids(
@@ -96,10 +108,10 @@ class SingleDirectionOffloadingHandler(OffloadingHandler):
         assert len(src_tensors) > 0
         self.gpu_to_cpu: bool = self.src_tensors[0].is_cuda
 
-        # job_id -> event
-        self._transfer_events: dict[int, torch.Event] = {}
+        # job_id -> (start_event, end_event)
+        self._transfer_events: dict[int, tuple[torch.Event, torch.Event]] = {}
         # queue of transfers (job_id, stream, event)
-        self._transfers: deque[tuple[int, torch.cuda.Stream, torch.Event]] = deque()
+        self._transfers: deque[Transfer] = deque()
         # list of CUDA streams available for re-use
         self._stream_pool: list[torch.cuda.Stream] = []
         # list of CUDA events available for re-use
@@ -132,16 +144,27 @@ class SingleDirectionOffloadingHandler(OffloadingHandler):
         src_to_dst_tensor = torch.from_numpy(src_to_dst)
 
         stream = self._stream_pool.pop() if self._stream_pool else torch.cuda.Stream()
-        event = self._event_pool.pop() if self._event_pool else torch.Event()
+        start_event = (
+            self._event_pool.pop()
+            if self._event_pool
+            else torch.Event(enable_timing=True)
+        )
+        end_event = (
+            self._event_pool.pop()
+            if self._event_pool
+            else torch.Event(enable_timing=True)
+        )
 
         if self.gpu_to_cpu:
             # wait for model computation to finish before offloading
             stream.wait_stream(torch.cuda.current_stream())
         if self._transfers:
-            _, _, last_event = self._transfers[-1]
+            last_transfer: Transfer = self._transfers[-1]
+            last_event = last_transfer.end_event
             # assure job will start only after the previous one completes
             stream.wait_event(last_event)
         with torch.cuda.stream(stream):
+            start_event.record(stream)
             for src_tensor, dst_tensor, kv_dim in zip(
                 self.src_tensors, self.dst_tensors, self.kv_dim_before_num_blocks
             ):
@@ -152,29 +175,54 @@ class SingleDirectionOffloadingHandler(OffloadingHandler):
                     ops.swap_blocks(src_value_cache, dst_value_cache, src_to_dst_tensor)
                 else:
                     ops.swap_blocks(src_tensor, dst_tensor, src_to_dst_tensor)
-            event.record(stream)
+            end_event.record(stream)
 
-        self._transfer_events[job_id] = event
-        self._transfers.append((job_id, stream, event))
+        self._transfer_events[job_id] = (start_event, end_event)
+        transfer_type: TransferType = (
+            transfer_spec[0].medium(),
+            transfer_spec[1].medium(),
+        )
+        self._transfers.append(
+            Transfer(
+                job_id,
+                stream,
+                start_event,
+                end_event,
+                src_sub_block_count,
+                transfer_type,
+            )
+        )
 
         # success
         return True
 
     def get_finished(self) -> list[TransferResult]:
         results: list[TransferResult] = []
-        while self._transfers and self._transfers[0][2].query():
-            job_id, stream, event = self._transfers.popleft()
-            results.append((job_id, True))
-            self._stream_pool.append(stream)
-            self._event_pool.append(event)
-            del self._transfer_events[job_id]
+        while self._transfers and self._transfers[0].end_event.query():
+            transfer = self._transfers.popleft()
+            transfer_time = transfer.start_event.elapsed_time(transfer.end_event)
+            result = TransferResult(
+                transfer.job_id,
+                True,
+                transfer.num_blocks,
+                transfer_time,
+                transfer.transfer_type,
+            )
+
+            results.append(result)
+            self._stream_pool.append(transfer.stream)
+            self._event_pool.append(transfer.end_event)
+            self._event_pool.append(transfer.start_event)
+            del self._transfer_events[transfer.job_id]
         return results
 
     def wait(self, job_ids: set[int]):
         for job_id in job_ids:
-            event = self._transfer_events.get(job_id)
-            if event is not None:
-                event.synchronize()
+            events = self._transfer_events.get(job_id)
+            if events:
+                start_event, end_event = events
+                start_event.synchronize()
+                end_event.synchronize()
 
 
 class CpuGpuOffloadingHandlers:

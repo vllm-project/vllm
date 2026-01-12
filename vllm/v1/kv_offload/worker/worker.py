@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 
@@ -11,8 +10,6 @@ from vllm.v1.kv_offload.abstract import LoadStoreSpec
 TransferSpec = tuple[LoadStoreSpec, LoadStoreSpec]
 # transfers are forwarded to workers by (src_medium, dst_medium)
 TransferType = tuple[str, str]
-# transfer result (job_id, success)
-TransferResult = tuple[int, bool]
 
 logger = init_logger(__name__)
 
@@ -21,6 +18,15 @@ logger = init_logger(__name__)
 class TransferStats:
     num_blocks: int
     time: float  # Can be start_time or duration
+    transfer_type: TransferType
+
+
+@dataclass
+class TransferResult:
+    job_id: int
+    success: bool
+    transfer_size: int
+    transfer_time: float
     transfer_type: TransferType
 
 
@@ -62,15 +68,6 @@ class OffloadingHandler(ABC):
         """
         pass
 
-    @abstractmethod
-    def wait(self, job_ids: set[int]) -> None:
-        """
-        Wait for jobs to finish (blocking).
-
-        Args:
-            job_ids: The set of job IDs to wait for.
-        """
-
 
 class OffloadingWorker:
     """
@@ -93,7 +90,7 @@ class OffloadingWorker:
     def __init__(self):
         self.handlers: set[OffloadingHandler] = set()
         self.transfer_type_to_handler: dict[TransferType, OffloadingHandler] = {}
-        # _transfer_stats: job_id -> num_blocks, time, transfer type
+        # _transfer_stats: job_id -> TransferStats
         self._transfer_stats: dict[int, TransferStats] = {}
 
     def register_handler(
@@ -131,7 +128,6 @@ class OffloadingWorker:
         transfer_type = (src.medium(), dst.medium())
         handler = self.transfer_type_to_handler.get(transfer_type)
         assert handler is not None
-        start_time = time.perf_counter()
         try:
             success = handler.transfer_async(job_id, spec)
         except Exception as e:
@@ -148,10 +144,6 @@ class OffloadingWorker:
             logger.warning("Failed to submit %r transfer %d", transfer_type, job_id)
         else:
             logger.debug("Submitted %r transfer %d: %r", transfer_type, job_id, spec)
-        num_blocks = src.num_blocks
-        self._transfer_stats[job_id] = TransferStats(
-            num_blocks, start_time, transfer_type
-        )
         return success
 
     def get_finished(self) -> list[TransferResult]:
@@ -159,15 +151,18 @@ class OffloadingWorker:
         Get transfers finished since last call.
 
         Returns:
-            A list of (job_id, success) of transfers.
+            A list of TransferResults
         """
         finished = []
-        finish_time = time.perf_counter()
         for handler in self.handlers:
             finished.extend(handler.get_finished())
-        for job_id, success in finished:
-            start_time = self._transfer_stats[job_id].time
-            self._transfer_stats[job_id].time = finish_time - start_time
+        for transfer_result in finished:
+            transfer_stats = TransferStats(
+                transfer_result.transfer_size,
+                transfer_result.transfer_time,
+                transfer_result.transfer_type,
+            )
+            self._transfer_stats[transfer_result.job_id] = transfer_stats
         return finished
 
     def get_stats(self, job_id: int) -> tuple[int, float, TransferType]:
@@ -176,12 +171,3 @@ class OffloadingWorker:
         transfer_time = stats.time
         transfer_type = stats.transfer_type
         return num_blocks, transfer_time, transfer_type
-    def wait(self, job_ids: set[int]) -> None:
-        """
-        Wait for jobs to finish (blocking).
-
-        Args:
-            job_ids: The set of job IDs to wait for.
-        """
-        for handler in self.handlers:
-            handler.wait(job_ids)
