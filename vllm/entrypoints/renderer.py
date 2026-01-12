@@ -12,7 +12,7 @@ import torch
 from pydantic import Field
 
 from vllm.config import ModelConfig
-from vllm.entrypoints.openai.protocol import VLLMValidationError
+from vllm.exceptions import VLLMValidationError
 from vllm.inputs.data import EmbedsPrompt, TextPrompt, TokensPrompt
 from vllm.inputs.parse import get_prompt_components, parse_raw_prompts
 from vllm.tokenizers import TokenizerLike
@@ -44,11 +44,8 @@ class RenderConfig:
     def verify_truncate_prompt_tokens(self, model_config: ModelConfig) -> int | None:
         """Validate and normalize `truncate_prompt_tokens` parameter."""
         truncate_prompt_tokens = self.truncate_prompt_tokens
-        if truncate_prompt_tokens is None:
-            return None
-
-        if truncate_prompt_tokens == 0:
-            return 0
+        if truncate_prompt_tokens is None or truncate_prompt_tokens == 0:
+            return truncate_prompt_tokens
 
         if truncate_prompt_tokens < 0:
             truncate_prompt_tokens = model_config.max_model_len

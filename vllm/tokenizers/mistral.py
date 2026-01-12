@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any, cast, overload
 
 from mistral_common.protocol.instruct.request import (
     ChatCompletionRequest as MistralChatCompletionRequest,
@@ -440,6 +440,15 @@ class MistralTokenizer(TokenizerLike):
         return self.transformers_tokenizer.batch_decode(
             ids, skip_special_tokens=skip_special_tokens
         )
+
+    @overload
+    def convert_tokens_to_ids(self, tokens: str) -> int: ...
+
+    @overload
+    def convert_tokens_to_ids(self, tokens: list[str]) -> list[int]: ...
+
+    def convert_tokens_to_ids(self, tokens: str | list[str]) -> int | list[int]:
+        return self.transformers_tokenizer.convert_tokens_to_ids(tokens)
 
     def convert_tokens_to_string(self, tokens: list[str]) -> str:
         to_decode_special_tokens = {SpecialTokens.tool_calls}

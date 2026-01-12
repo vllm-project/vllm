@@ -10,22 +10,30 @@ import zmq
 from lmcache.integration.vllm.utils import mla_enabled
 from lmcache.utils import init_logger as lmcache_init_logger
 
-from vllm.attention.backends.abstract import AttentionMetadata
 from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorBase_V1,
     KVConnectorMetadata,
     KVConnectorRole,
 )
-from vllm.distributed.kv_transfer.kv_connector.v1.lmcache_integration import (
-    LMCacheMPSchedulerAdapter,
-    LMCacheMPWorkerAdapter,
-    LoadStoreOp,
-)
+from vllm.v1.attention.backend import AttentionMetadata
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.outputs import KVConnectorOutput
 from vllm.v1.request import RequestStatus
 from vllm.v1.utils import ConstantList
+
+try:
+    from lmcache.integration.vllm.vllm_multi_process_adapter import (
+        LMCacheMPSchedulerAdapter,
+        LMCacheMPWorkerAdapter,
+        LoadStoreOp,
+    )
+except ImportError:
+    from vllm.distributed.kv_transfer.kv_connector.v1.lmcache_integration import (
+        LMCacheMPSchedulerAdapter,
+        LMCacheMPWorkerAdapter,
+        LoadStoreOp,
+    )
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
@@ -702,7 +710,7 @@ class LMCacheMPConnector(KVConnectorBase_V1):
                 else LMCacheMPRequestState.READY
             )
             # Clean up lookup future in scheduler adapter
-            self.scheduler_adapter._cleanup_lookup_result(request.request_id)
+            self.scheduler_adapter.cleanup_lookup_result(request.request_id)
 
     def build_connector_meta(
         self, scheduler_output: SchedulerOutput

@@ -97,6 +97,14 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     uv pip install --system hf_transfer
 ENV HF_HUB_ENABLE_HF_TRANSFER=1
 
+# install audio decode package `torchcodec` from source (required due to 
+# ROCm and torch version mismatch) for tests with datasets package
+COPY tools/install_torchcodec_rocm.sh /tmp/install_torchcodec.sh
+RUN bash /tmp/install_torchcodec.sh \
+    && rm /tmp/install_torchcodec.sh \
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/*
+
 # Copy in the v1 package (for python-only install test group)
 COPY --from=export_vllm /vllm_v1 /usr/local/lib/python${PYTHON_VERSION}/dist-packages/vllm/v1
 

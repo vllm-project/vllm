@@ -7,8 +7,6 @@ from dataclasses import dataclass
 import pytest
 import torch
 
-from vllm.attention.backends.abstract import AttentionImpl
-from vllm.attention.backends.registry import AttentionBackendEnum
 from vllm.config import (
     CacheConfig,
     CompilationConfig,
@@ -20,10 +18,12 @@ from vllm.config import (
     VllmConfig,
 )
 from vllm.config.model import ModelDType
-from vllm.v1.attention.backends.utils import (
+from vllm.v1.attention.backend import (
+    AttentionImpl,
     AttentionMetadataBuilder,
     CommonAttentionMetadata,
 )
+from vllm.v1.attention.backends.registry import AttentionBackendEnum
 from vllm.v1.kv_cache_interface import FullAttentionSpec
 
 
