@@ -244,12 +244,15 @@ def make_routing_data(
 
 
 class BaseOAITritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
+    def __init__(self, quant_config: FusedMoEQuantConfig):
+        # TODO (varun) : Enable activation quantization
+        assert quant_config.use_mxfp4_w4a16, "Supports only mxfp4_w4a16"
+        super().__init__(quant_config)
+
     @staticmethod
     def _supports_current_device() -> bool:
-        if current_platform.is_cuda():
-            return current_platform.has_device_capability(9, 0)
-        else:
-            return current_platform.is_cuda_alike()
+        p = current_platform
+        return (p.is_cuda() and p.has_device_capability((9, 0))) or p.is_rocm()
 
     @staticmethod
     def _supports_no_act_and_mul() -> bool:
@@ -321,11 +324,6 @@ class BaseOAITritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
 
 
 class OAITritonExperts(BaseOAITritonExperts):
-    def __init__(self, quant_config: FusedMoEQuantConfig):
-        # TODO (varun) : Enable activation quantization
-        assert quant_config.use_mxfp4_w4a16, "Supports only mxfp4_w4a16"
-        super().__init__(quant_config)
-
     @staticmethod
     def activation_format() -> mk.FusedMoEActivationFormat:
         return mk.FusedMoEActivationFormat.Standard
@@ -412,6 +410,7 @@ class UnfusedOAITritonExperts(BaseOAITritonExperts):
         # TODO (varun) : Enable activation quantization
         assert quant_config.use_mxfp4_w4a16, "Supports only mxfp4_w4a16"
         super().__init__(quant_config)
+        self.quant_config = quant_config
 
     @staticmethod
     def activation_format() -> mk.FusedMoEActivationFormat:
