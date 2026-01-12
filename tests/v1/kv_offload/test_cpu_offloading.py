@@ -161,7 +161,7 @@ def test_cpu_offloading(cpu_block_size: int, attn_backend: str) -> None:
         kv_connector="OffloadingConnector",
         kv_role="kv_both",
         kv_connector_extra_config={
-            "num_cpu_blocks": 1000,
+            "cpu_bytes_to_use": 500 << 20,
             "block_size": cpu_block_size,
         },
     )
