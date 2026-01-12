@@ -112,9 +112,6 @@ def construct_input_messages(
     else:
         input_messages = construct_chat_messages_with_tool_call(request_input)
         messages.extend(input_messages)
-
-    # TODO: validate that messages can only have the last one in progress
-
     return messages
 
 
