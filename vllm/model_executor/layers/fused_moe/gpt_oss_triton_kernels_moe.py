@@ -208,7 +208,7 @@ def triton_kernel_fused_experts(
 
     if isinstance(quant_config._w2.scale, torch.nn.Parameter):
         w2_scale = quant_config._w2.scale.detach()
-        w2_scale = w1_scale.to(dtype=torch.float32, device=w2_scale.device).contiguous()
+        w2_scale = w2_scale.to(dtype=torch.float32, device=w2_scale.device).contiguous()
         w2_precision = PrecisionConfig(weight_scale=w2_scale)
     elif isinstance(quant_config._w2.scale, PrecisionConfig):
         w2_precision = quant_config.w2_precision
