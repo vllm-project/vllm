@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from typing import Any
 
-import numpy as np
 import torch
 import torch.nn as nn
 
@@ -12,7 +11,6 @@ from vllm.forward_context import set_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.model_loader import get_model
 from vllm.triton_utils import tl, triton
-from vllm.utils.platform_utils import is_pin_memory_available
 from vllm.v1.attention.backends.utils import AttentionMetadataBuilder
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.worker.gpu.attn_utils import build_attn_metadata
@@ -46,7 +44,6 @@ class EagleSpeculator:
         self.hidden_size = self.draft_model_config.get_hidden_size()
         self.inputs_embeds_size = self.draft_model_config.get_inputs_embeds_size()
         self.vocab_size = self.draft_model_config.get_vocab_size()
-        self.pin_memory = is_pin_memory_available()
         self.dtype = vllm_config.model_config.dtype
 
         self.input_buffers = InputBuffers(
@@ -56,12 +53,16 @@ class EagleSpeculator:
             vocab_size=self.vocab_size,
             dtype=self.dtype,
             device=device,
-            pin_memory=self.pin_memory,
         )
         self.hidden_states = torch.zeros(
             self.max_num_tokens,
             self.hidden_size,
             dtype=self.dtype,
+            device=device,
+        )
+        self.idx_mapping = torch.zeros(
+            self.max_num_reqs,
+            dtype=torch.int32,
             device=device,
         )
         self.temperature = torch.zeros(
@@ -140,7 +141,7 @@ class EagleSpeculator:
         num_tokens_across_dp: torch.Tensor | None,
     ) -> None:
         pos = self.input_buffers.positions[:num_reqs]
-        query_start_loc = self.input_buffers.query_start_loc.gpu[: num_reqs + 1]
+        query_start_loc = self.input_buffers.query_start_loc[: num_reqs + 1]
         for step in range(1, self.num_speculative_steps):
             # Run the eagle model.
             last_hidden_states, hidden_states = self.run_model(
@@ -152,8 +153,9 @@ class EagleSpeculator:
             # used for draft and target sampling.
             draft_tokens = gumbel_sample(
                 logits,
-                self.temperature[:num_reqs],
-                self.seeds[:num_reqs],
+                self.idx_mapping[:num_reqs],
+                self.temperature,
+                self.seeds,
                 pos + 1,
                 apply_temperature=True,
             )
@@ -237,23 +239,27 @@ class EagleSpeculator:
         logits = self.model.compute_logits(sample_hidden_states)
 
         num_reqs = input_batch.num_reqs
-        cu_num_logits = input_batch.cu_num_logits[:num_reqs]
         # NOTE(woosuk): For draft sampling, we only consider the temperature
         # and ignore the other sampling parameters such as top_k and top_p,
         # for simplicity and performance.
         # While this may slightly degrade the acceptance rate, it does not
         # affect the output distribution after rejection sampling.
-        temperature = self.temperature[:num_reqs]
-        seeds = self.seeds[:num_reqs]
-        pos = self.input_buffers.positions[:num_reqs]
+        idx_mapping = self.idx_mapping[:num_reqs]
+        idx_mapping.copy_(input_batch.idx_mapping)
+        self.temperature.copy_(sampling_metadata.temperature)
+        self.seeds.copy_(sampling_metadata.seeds)
         # Gather the values and copy them to the pre-allocated buffers.
-        torch.gather(sampling_metadata.temperature, 0, cu_num_logits, out=temperature)
-        torch.gather(sampling_metadata.seeds, 0, cu_num_logits, out=seeds)
+        pos = self.input_buffers.positions[:num_reqs]
         torch.gather(input_batch.positions, 0, last_token_indices, out=pos)
         # NOTE(woosuk): We must add 1 to the positions to match the Gumbel noise
         # used for draft and target sampling.
         draft_tokens = gumbel_sample(
-            logits, temperature, seeds, pos + 1, apply_temperature=True
+            logits,
+            idx_mapping,
+            self.temperature,
+            self.seeds,
+            pos + 1,
+            apply_temperature=True,
         )
         if self.num_speculative_steps == 1:
             # Early exit.
@@ -273,11 +279,8 @@ class EagleSpeculator:
             self.max_model_len,
             self.max_num_reqs,
         )
-        query_start_loc = self.input_buffers.query_start_loc
-        query_start_loc_gpu = query_start_loc.gpu[: num_reqs + 1]
-        slot_mappings = self.block_tables.compute_slot_mappings(
-            query_start_loc_gpu, pos
-        )
+        query_start_loc = self.input_buffers.query_start_loc[: num_reqs + 1]
+        slot_mappings = self.block_tables.compute_slot_mappings(query_start_loc, pos)
 
         cudagraph_size = self.cudagraph_manager.get_cudagraph_size(num_reqs)
         if cudagraph_size is not None:
@@ -286,8 +289,9 @@ class EagleSpeculator:
             return self.draft_tokens[:num_reqs]
 
         # Run eager mode.
-        query_start_loc.np[: num_reqs + 1] = np.arange(num_reqs + 1)
-        query_start_loc_cpu = query_start_loc.cpu[: num_reqs + 1]
+        query_start_loc_cpu = torch.arange(
+            num_reqs + 1, dtype=torch.int32, device="cpu"
+        )
         block_tables = [x[:num_reqs] for x in self.block_tables.input_block_tables]
 
         # FIXME(woosuk): This is UNSAFE!!
@@ -295,7 +299,7 @@ class EagleSpeculator:
             attn_metadata_builders=self.attn_metadata_builders,
             num_reqs=num_reqs,
             num_tokens=num_reqs,
-            query_start_loc_gpu=query_start_loc_gpu,
+            query_start_loc_gpu=query_start_loc,
             query_start_loc_cpu=query_start_loc_cpu,
             seq_lens=self.input_buffers.seq_lens[:num_reqs],
             max_seq_len=self.max_model_len,
@@ -484,7 +488,7 @@ def prepare_eagle_decode(
         input_buffers.positions,
         input_hidden_states,
         input_hidden_states.stride(0),
-        input_buffers.query_start_loc.gpu,
+        input_buffers.query_start_loc,
         input_buffers.seq_lens,
         hidden_size,
         max_model_len,
