@@ -120,7 +120,7 @@ class ServerlessLLMLoader(BaseModelLoader):
         pass
 
     def load_weights(self, model, model_config):
-        pass
+        raise NotImplementedError("ServerlessLLMLoader does not support in-place weight reloading.")
 
     @staticmethod
     def save_model(
