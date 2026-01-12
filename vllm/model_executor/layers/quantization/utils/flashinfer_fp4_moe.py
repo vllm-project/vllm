@@ -268,6 +268,11 @@ def _quantize_input_fp4_with_linear_scales(
     Returns:
         Tuple of (quantized_fp4_tensor, linear_scale_tensor)
     """
+    logger.info_once(
+        "Using vLLM NVFP4 quantize path (scaled_fp4_quant + "
+        "convert_swizzled_to_linear)."
+    )
+
     # Normalize a1_gscale to a scalar tensor on the correct device
     if not isinstance(a1_gscale, torch.Tensor):
         a1_gscale = torch.tensor(a1_gscale, device=x.device, dtype=torch.float32)
