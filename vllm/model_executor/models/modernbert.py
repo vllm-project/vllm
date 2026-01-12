@@ -297,18 +297,24 @@ class ModernBertPooler(SequencePooler):
             head=nn.Identity(),
         )
 
+        head_dtype = model_config.head_dtype
         self.dense = nn.Linear(
-            config.hidden_size, config.hidden_size, config.classifier_bias
+            config.hidden_size,
+            config.hidden_size,
+            config.classifier_bias,
+            dtype=head_dtype,
         )
         self.act = nn.GELU()
         self.norm = nn.LayerNorm(
-            config.hidden_size, eps=config.norm_eps, bias=config.norm_bias
+            config.hidden_size,
+            eps=config.norm_eps,
+            bias=config.norm_bias,
         )
 
         # Use lambdas so that weights are not registered under `self.head`
         self.head = EmbeddingPoolerHead(
             projector=lambda x: self.dense(x),
-            head_dtype=self.dense.weight.dtype,
+            head_dtype=head_dtype,
             activation=LambdaPoolerActivation(lambda x: self.norm(self.act(x))),
         )
 
