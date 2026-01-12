@@ -98,6 +98,8 @@ class LogitBiasState:
                 )
             self.num_stop_token_ids.np[req_idx] = num_stop_token_ids
             self.stop_token_ids.stage_write(req_idx, 0, stop_token_ids)
+        else:
+            self.num_stop_token_ids.np[req_idx] = 0
 
     def apply_staged_writes(self) -> None:
         self.num_allowed_token_ids.copy_to_uva()
