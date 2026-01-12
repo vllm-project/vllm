@@ -98,7 +98,7 @@ class ServerlessLLMLoader(BaseModelLoader):
         # ServerlessLLM Store requires a global model path as the model ID
         storage_path = os.getenv("SLLM_STORAGE_PATH")
         if storage_path is None:
-            raise ValueError("Please set the SLLM_STORAGE_PATH environment variable.")
+            raise ValueError("Please set the SLLM_STORAGE_PATH environment variable. This path should point to the root of the ServerlessLLM storage.")
         model_path = remove_prefix(local_model_path, storage_path)
 
         device_id = torch.cuda.current_device()
@@ -155,7 +155,7 @@ class ServerlessLLMLoader(BaseModelLoader):
         pass
 
     def load_weights(self, model, model_config):
-        pass
+        raise NotImplementedError("ServerlessLLMLoader does not support in-place weight reloading.")
 
     @staticmethod
     def save_model(
