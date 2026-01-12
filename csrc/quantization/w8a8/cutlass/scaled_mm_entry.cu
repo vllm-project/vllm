@@ -277,7 +277,7 @@ void cutlass_moe_mm(
 #endif
   TORCH_CHECK_NOT_IMPLEMENTED(
       false,
-      "No compiled cutlass_scaled_mm for CUDA device capability: ", version_num,
+      "No compiled cutlass_moe_mm for CUDA device capability: ", version_num,
       ". Required capability: 90 or 100");
 }
 
