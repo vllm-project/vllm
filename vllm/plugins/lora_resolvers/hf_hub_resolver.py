@@ -86,7 +86,8 @@ class HfHubResolver(FilesystemResolver):
             # Resolves to the root of the directory
             adapter_dir = "."
         else:
-            adapter_dir = lora_name[repo_len + 1 :]
+            # It's a subpath; removing trailing slashes if there are any
+            adapter_dir = lora_name[repo_len + 1 :].rstrip("/")
 
         # Only download if the directory actually contains an adapter
         is_adapter = adapter_dir in self.adapter_dirs[maybe_repo]
