@@ -57,11 +57,10 @@ LoRA adapted models can also be served with the Open-AI compatible vLLM server. 
 ```bash
 vllm serve meta-llama/Llama-3.2-3B-Instruct \
     --enable-lora \
-    --lora-modules sql-lora=$HOME/.cache/huggingface/hub/models--jeeejeee--llama32-3b-text2sql-spider/snapshots/1e3fef0ffed915a4fde79c9876c1bc1184fbc59b/
+    --lora-modules sql-lora=jeeejeee/llama32-3b-text2sql-spider
 ```
 
-!!! note
-    The commit ID `1e3fef0ffed915a4fde79c9876c1bc1184fbc59b` may change over time. Please check the latest commit ID in your environment to ensure you are using the correct one.
+
 
 The server entrypoint accepts all other LoRA configuration parameters (`max_loras`, `max_lora_rank`, `max_cpu_loras`,
 etc.), which will apply to all forthcoming requests. Upon querying the `/models` endpoint, we should see our LoRA along
@@ -218,14 +217,14 @@ Alternatively, follow these example steps to implement your own plugin:
 In the previous version, users would provide LoRA modules via the following format, either as a key-value pair or in JSON format. For example:
 
 ```bash
---lora-modules  sql-lora=$HOME/.cache/huggingface/hub/models--jeeejeee--llama32-3b-text2sql-spider/snapshots/1e3fef0ffed915a4fde79c9876c1bc1184fbc59b/
+--lora-modules  sql-lora=jeeejeee/llama32-3b-text2sql-spider
 ```
 
 This would only include the `name` and `path` for each LoRA module, but did not provide a way to specify a `base_model_name`.
 Now, you can specify a base_model_name alongside the name and path using JSON format. For example:
 
 ```bash
---lora-modules '{"name": "sql-lora", "path": "/path/to/lora", "base_model_name": "meta-llama/Llama-3.2-3B-Instruct"}'
+--lora-modules '{"name": "sql-lora", "path": "jeeejeee/llama32-3b-text2sql-spider", "base_model_name": "meta-llama/Llama-3.2-3B-Instruct"}'
 ```
 
 To provide the backward compatibility support, you can still use the old key-value format (name=path), but the `base_model_name` will remain unspecified in that case.
@@ -246,11 +245,11 @@ The new format of `--lora-modules` is mainly to support the display of parent mo
         "object": "list",
         "data": [
             {
-            "id": "meta-llama/Llama-3.2-3B-Instruct-hf",
+            "id": "meta-llama/Llama-3.2-3B-Instruct",
             "object": "model",
             "created": 1715644056,
             "owned_by": "vllm",
-            "root": "~/.cache/huggingface/hub/models--meta-llama--Llama-3.2-3B-Instruct/snapshots/0cb88a4f764b7a12671c53f0838cd831a0843b95",
+            "root": "meta-llama/Llama-3.2-3B-Instruct",
             "parent": null,
             "permission": [
                 {
@@ -263,8 +262,8 @@ The new format of `--lora-modules` is mainly to support the display of parent mo
             "object": "model",
             "created": 1715644056,
             "owned_by": "vllm",
-            "root": "~/.cache/huggingface/hub/models--jeeejeee--llama32-3b-text2sql-spider/snapshots/1e3fef0ffed915a4fde79c9876c1bc1184fbc59b/",
-            "parent": meta-llama/Llama-3.2-3B-Instruct-hf,
+            "root": "jeeejeee/llama32-3b-text2sql-spider",
+            "parent": meta-llama/Llama-3.2-3B-Instruct,
             "permission": [
                 {
                 ....
