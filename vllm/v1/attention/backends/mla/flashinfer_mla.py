@@ -17,11 +17,12 @@ from vllm.model_executor.layers.attention.mla_attention import (
 )
 from vllm.platforms.interface import DeviceCapability
 from vllm.v1.attention.backend import (
+    AttentionCGSupport,
     AttentionLayer,
     AttentionType,
     MultipleOf,
 )
-from vllm.v1.attention.backends.utils import AttentionCGSupport, KVCacheLayoutType
+from vllm.v1.attention.backends.utils import KVCacheLayoutType
 
 logger = init_logger(__name__)
 

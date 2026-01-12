@@ -16,8 +16,7 @@ from vllm.model_executor.layers.attention.mla_attention import (
     MLACommonMetadataBuilder,
     QueryLenSupport,
 )
-from vllm.v1.attention.backend import AttentionLayer, MultipleOf
-from vllm.v1.attention.backends.utils import AttentionCGSupport
+from vllm.v1.attention.backend import AttentionCGSupport, AttentionLayer, MultipleOf
 from vllm.v1.kv_cache_interface import AttentionSpec
 
 

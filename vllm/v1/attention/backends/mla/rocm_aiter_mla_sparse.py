@@ -17,16 +17,14 @@ from vllm.model_executor.layers.attention.mla_attention import (
 )
 from vllm.v1.attention.backend import (
     AttentionBackend,
+    AttentionCGSupport,
     AttentionLayer,
     AttentionMetadata,
+    AttentionMetadataBuilder,
+    CommonAttentionMetadata,
 )
 from vllm.v1.attention.backends.mla.flashmla_sparse import (
     triton_convert_req_index_to_global_index,
-)
-from vllm.v1.attention.backends.utils import (
-    AttentionCGSupport,
-    AttentionMetadataBuilder,
-    CommonAttentionMetadata,
 )
 from vllm.v1.kv_cache_interface import AttentionSpec
 
