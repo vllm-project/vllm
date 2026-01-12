@@ -64,6 +64,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 )
 from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader,
+    maybe_remap_kv_scale_name,
     sharded_weight_loader,
 )
 from vllm.model_executor.models.qwen2_moe import Qwen2MoeMLP as Qwen3NextMLP
@@ -1064,6 +1065,12 @@ class Qwen3NextModel(nn.Module):
 
             if name.startswith("mtp."):
                 continue
+
+            # Remapping the name of FP8 kv-scale.
+            if name.endswith("scale"):
+                name = maybe_remap_kv_scale_name(name, params_dict)
+                if name is None:
+                    continue
 
             for param_name, weight_name, shard_id in stacked_params_mapping:
                 if weight_name not in name:
