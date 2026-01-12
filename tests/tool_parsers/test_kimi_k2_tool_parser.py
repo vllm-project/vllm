@@ -923,3 +923,190 @@ def test_streaming_multiple_tool_calls_not_leaked(kimi_k2_tool_parser):
 
     # Legitimate content preserved
     assert "compare" in full_content.lower() or len(all_content) > 0
+
+
+def test_extract_tool_calls_openai_style_id(kimi_k2_tool_parser):
+    """
+    Test that OpenAI-style tool call IDs (e.g., call_xxxx) are correctly parsed.
+
+    When the model generates OpenAI-style IDs, the function name is typically
+    embedded in the arguments JSON as {"name": "function_name"} rather than
+    being part of the ID itself.
+    """
+    # OpenAI-style format with function name in arguments
+    model_output = """I'll list the files for you. <|tool_calls_section_begin|><|tool_call_begin|>call_4491ebf2664c44db87fb7a828126eb67<|tool_call_argument_begin|>{"name":"list_files"}<|tool_call_end|><|tool_calls_section_end|>"""
+
+    extracted = kimi_k2_tool_parser.extract_tool_calls(model_output, request=None)
+
+    assert extracted.tools_called
+    assert len(extracted.tool_calls) == 1
+    assert extracted.tool_calls[0].function.name == "list_files"
+    assert extracted.tool_calls[0].id == "call_4491ebf2664c44db87fb7a828126eb67"
+    # Arguments should be empty since "name" was extracted
+    assert extracted.tool_calls[0].function.arguments == "{}"
+    assert extracted.content == "I'll list the files for you. "
+
+
+def test_extract_tool_calls_openai_style_with_args(kimi_k2_tool_parser):
+    """
+    Test OpenAI-style tool call with function name AND actual arguments.
+    """
+    model_output = """Let me check. <|tool_calls_section_begin|><|tool_call_begin|>call_abc123<|tool_call_argument_begin|>{"name":"get_weather","city":"Tokyo","units":"celsius"}<|tool_call_end|><|tool_calls_section_end|>"""
+
+    extracted = kimi_k2_tool_parser.extract_tool_calls(model_output, request=None)
+
+    assert extracted.tools_called
+    assert len(extracted.tool_calls) == 1
+    assert extracted.tool_calls[0].function.name == "get_weather"
+    assert extracted.tool_calls[0].id == "call_abc123"
+    # Arguments should contain the non-name fields
+    args = json.loads(extracted.tool_calls[0].function.arguments)
+    assert args == {"city": "Tokyo", "units": "celsius"}
+    assert extracted.content == "Let me check. "
+
+
+def test_extract_tool_calls_mixed_formats(kimi_k2_tool_parser):
+    """
+    Test that both Kimi K2 native format and OpenAI-style format can be
+    extracted from the same response (though unlikely in practice).
+    """
+    # First tool: native format, Second tool: OpenAI-style
+    model_output = """Mixed test. <|tool_calls_section_begin|><|tool_call_begin|>functions.get_weather:0<|tool_call_argument_begin|>{"city": "Beijing"}<|tool_call_end|><|tool_call_begin|>call_xyz789<|tool_call_argument_begin|>{"name":"list_files"}<|tool_call_end|><|tool_calls_section_end|>"""
+
+    extracted = kimi_k2_tool_parser.extract_tool_calls(model_output, request=None)
+
+    assert extracted.tools_called
+    assert len(extracted.tool_calls) == 2
+
+    # First tool: Kimi K2 native format
+    assert extracted.tool_calls[0].function.name == "get_weather"
+    assert extracted.tool_calls[0].id == "functions.get_weather:0"
+    assert json.loads(extracted.tool_calls[0].function.arguments) == {"city": "Beijing"}
+
+    # Second tool: OpenAI-style format
+    assert extracted.tool_calls[1].function.name == "list_files"
+    assert extracted.tool_calls[1].id == "call_xyz789"
+
+
+def test_streaming_openai_style_tool_call(kimi_k2_tool_parser):
+    """
+    Test streaming extraction of OpenAI-style tool call IDs.
+
+    This verifies that when the model generates OpenAI-style IDs (call_xxxx)
+    with function name in the arguments JSON, the streaming parser:
+    1. Does not leak markers into content
+    2. Does not leak tool call data (ID, function name, args) into content
+
+    Note: This follows the same pattern as test_streaming_tool_call_markers_not_leaked
+    which focuses on leak prevention rather than tool call emission, since streaming
+    behavior varies based on delta structure.
+    """
+    kimi_k2_tool_parser.reset_streaming_state()
+
+    section_begin_id = kimi_k2_tool_parser.vocab.get("<|tool_calls_section_begin|>")
+    section_end_id = kimi_k2_tool_parser.vocab.get("<|tool_calls_section_end|>")
+    tool_begin_id = kimi_k2_tool_parser.vocab.get("<|tool_call_begin|>")
+    tool_end_id = kimi_k2_tool_parser.vocab.get("<|tool_call_end|>")
+
+    # OpenAI-style tool call with function name in arguments
+    # Note: spaces around markers to match tokenization patterns in other tests
+    tool_chunk = (
+        "<|tool_call_begin|> call_abc123def456 "
+        '<|tool_call_argument_begin|> {"name":"list_files","path":"/home"} '
+        "<|tool_call_end|>"
+    )
+
+    deltas = [
+        ("I'll list the files. ", [1, 2, 3]),
+        ("<|tool_calls_section_begin|>", [section_begin_id]),
+        (tool_chunk, [tool_begin_id, 10, 11, 12, 13, tool_end_id]),
+        ("<|tool_calls_section_end|>", [section_end_id]),
+        (" Here are the results.", [20, 21]),
+    ]
+
+    results = run_streaming_sequence(kimi_k2_tool_parser, deltas)
+
+    # Collect all content
+    all_content = []
+    for res in results:
+        if res and res.content:
+            all_content.append(res.content)
+
+    # CRITICAL: Verify content doesn't contain markers or tool call data
+    full_content = "".join(all_content)
+
+    # Check no markers leaked
+    forbidden_markers = [
+        "<|tool_call_begin|>",
+        "<|tool_call_end|>",
+        "<|tool_call_argument_begin|>",
+        "<|tool_calls_section_begin|>",
+        "<|tool_calls_section_end|>",
+    ]
+    for marker in forbidden_markers:
+        assert marker not in full_content, (
+            f"MARKER LEAK DETECTED: '{marker}' found in content: {repr(full_content)}"
+        )
+
+    # Check no tool call content leaked (OpenAI-style ID and function data)
+    assert "call_abc123" not in full_content, (
+        f"TOOL ID LEAKED: 'call_abc123' found in content: {repr(full_content)}"
+    )
+    assert "list_files" not in full_content, (
+        f"FUNCTION NAME LEAKED: 'list_files' found in content: {repr(full_content)}"
+    )
+    assert "/home" not in full_content, (
+        f"FUNCTION ARGS LEAKED: '/home' found in content: {repr(full_content)}"
+    )
+
+    # Verify legitimate content was preserved
+    assert "I'll list the files." in full_content or len(all_content) > 0
+
+
+def test_extract_tool_calls_openai_style_string_arguments(kimi_k2_tool_parser):
+    """
+    Test that OpenAI-style tool calls with pre-encoded string arguments
+    are not double-encoded.
+
+    When the model outputs {"name": "func", "arguments": "{\"key\": \"value\"}"},
+    the "arguments" value is already a JSON string and should not be re-encoded.
+    """
+    # Arguments is already a JSON string (pre-encoded)
+    model_output = (
+        "I will help. <|tool_calls_section_begin|><|tool_call_begin|>"
+        "call_test123<|tool_call_argument_begin|>"
+        '{"name":"get_weather","arguments":"{\\"city\\": \\"Tokyo\\"}"}'
+        "<|tool_call_end|><|tool_calls_section_end|>"
+    )
+
+    extracted = kimi_k2_tool_parser.extract_tool_calls(model_output, request=None)  # type: ignore[arg-type]
+
+    assert extracted.tools_called
+    assert len(extracted.tool_calls) == 1
+    assert extracted.tool_calls[0].id == "call_test123"
+    assert extracted.tool_calls[0].function.name == "get_weather"
+    # Should be the original string, not double-encoded
+    assert extracted.tool_calls[0].function.arguments == '{"city": "Tokyo"}'
+    # Not double-encoded like: '"{\\\"city\\\": \\\"Tokyo\\\"}"'
+
+
+def test_extract_tool_calls_singular_section_variant(kimi_k2_tool_parser):
+    """
+    Test that the singular section variant <|tool_call_section_begin|> is
+    correctly handled and doesn't leak into the content.
+    """
+    # Use singular variant (note: tool_call_section vs tool_calls_section)
+    model_output = (
+        "Here's the result. <|tool_call_section_begin|><|tool_call_begin|>"
+        "functions.test:0<|tool_call_argument_begin|>{}"
+        "<|tool_call_end|><|tool_call_section_end|>"
+    )
+
+    extracted = kimi_k2_tool_parser.extract_tool_calls(model_output, request=None)  # type: ignore[arg-type]
+
+    assert extracted.tools_called
+    assert len(extracted.tool_calls) == 1
+    assert extracted.tool_calls[0].function.name == "test"
+    # Content should not include the section marker
+    assert extracted.content == "Here's the result. "
+    assert "<|tool_call_section_begin|>" not in (extracted.content or "")

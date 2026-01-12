@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 # code modified from deepseekv3_tool_parser.py
 
+import json
 from collections.abc import Sequence
 
 import regex as re
@@ -59,16 +60,27 @@ class KimiK2ToolParser(ToolParser):
         self.tool_call_start_token: str = "<|tool_call_begin|>"
         self.tool_call_end_token: str = "<|tool_call_end|>"
 
+        # Pattern matches both native format (name:digit) and OpenAI-style (call_xxx)
+        self.tool_call_id_pattern = r"(?:[^<\s]+:\d+|call_[a-zA-Z0-9]+)"
+
         self.tool_call_regex = re.compile(
-            r"<\|tool_call_begin\|>\s*(?P<tool_call_id>[^<]+:\d+)\s*<\|tool_call_argument_begin\|>\s*(?P<function_arguments>(?:(?!<\|tool_call_begin\|>).)*?)\s*<\|tool_call_end\|>",
+            r"<\|tool_call_begin\|>\s*(?P<tool_call_id>"
+            + self.tool_call_id_pattern
+            + r")\s*<\|tool_call_argument_begin\|>\s*"
+            r"(?P<function_arguments>(?:(?!<\|tool_call_begin\|>).)*?)"
+            r"\s*<\|tool_call_end\|>",
             re.DOTALL,
         )
 
         self.stream_tool_call_portion_regex = re.compile(
-            r"(?P<tool_call_id>.+:\d+)\s*<\|tool_call_argument_begin\|>\s*(?P<function_arguments>.*)"
+            r"(?P<tool_call_id>"
+            + self.tool_call_id_pattern
+            + r")\s*<\|tool_call_argument_begin\|>\s*(?P<function_arguments>.*)"
         )
 
-        self.stream_tool_call_name_regex = re.compile(r"(?P<tool_call_id>.+:\d+)\s*")
+        self.stream_tool_call_name_regex = re.compile(
+            r"(?P<tool_call_id>" + self.tool_call_id_pattern + r")\s*"
+        )
 
         if not self.model_tokenizer:
             raise ValueError(
@@ -101,6 +113,22 @@ class KimiK2ToolParser(ToolParser):
                 "Kimi-K2 Tool parser could not locate tool call start/end "
                 "tokens in the tokenizer!"
             )
+
+    def _extract_function_name_and_args(
+        self, function_id: str, function_args: str
+    ) -> tuple[str, str]:
+        """Extract function name and clean args for OpenAI-style IDs."""
+        if function_id.startswith("call_"):
+            try:
+                args_obj = json.loads(function_args)
+                if isinstance(args_obj, dict) and "name" in args_obj:
+                    name = args_obj["name"]
+                    remaining = {k: v for k, v in args_obj.items() if k != "name"}
+                    return name, json.dumps(remaining) if remaining else "{}"
+            except (json.JSONDecodeError, TypeError):
+                pass
+            return function_id, function_args
+        return function_id.split(":")[0].split(".")[-1], function_args
 
     def _check_and_strip_markers(self, text: str) -> tuple[str, bool, bool]:
         """
@@ -170,14 +198,15 @@ class KimiK2ToolParser(ToolParser):
                 tool_calls = []
                 for match in function_call_tuples:
                     function_id, function_args = match
-                    # function_id: functions.get_weather:0 or get_weather:0
-                    function_name = function_id.split(":")[0].split(".")[-1]
+                    function_name, cleaned_args = self._extract_function_name_and_args(
+                        function_id, function_args.strip()
+                    )
                     tool_calls.append(
                         ToolCall(
                             id=function_id,
                             type="function",
                             function=FunctionCall(
-                                name=function_name, arguments=function_args
+                                name=function_name, arguments=cleaned_args
                             ),
                         )
                     )
@@ -445,7 +474,13 @@ class KimiK2ToolParser(ToolParser):
                 )
                 if current_tool_call_matches:
                     tool_id, tool_args = current_tool_call_matches.groups()
-                    tool_name = tool_id.split(":")[0].split(".")[-1]
+                    # Extract function name (handles OpenAI-style call_xxx IDs)
+                    tool_name, _ = self._extract_function_name_and_args(
+                        tool_id, tool_args or ""
+                    )
+                    # Store raw args for streaming - cleaning happens in non-streaming
+                    # path. Streaming clients accumulate deltas and parse the final
+                    # JSON, so extra fields are safely ignored.
                     current_tool_call["id"] = tool_id
                     current_tool_call["name"] = tool_name
                     current_tool_call["arguments"] = tool_args
@@ -455,10 +490,12 @@ class KimiK2ToolParser(ToolParser):
                     )
                     if current_tool_call_name_matches:
                         (tool_id_str,) = current_tool_call_name_matches.groups()
-                        tool_name = tool_id_str.split(":")[0].split(".")[-1]
                         current_tool_call["id"] = tool_id_str
-                        current_tool_call["name"] = tool_name
                         current_tool_call["arguments"] = ""
+                        # For OpenAI-style IDs, wait for args to extract name
+                        if not tool_id_str.startswith("call_"):
+                            tool_name = tool_id_str.split(":")[0].split(".")[-1]
+                            current_tool_call["name"] = tool_name
                     else:
                         logger.debug("Not enough token")
                         return None
