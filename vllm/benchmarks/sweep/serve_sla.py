@@ -241,12 +241,13 @@ def solve_sla(
 
         sla_data.extend(iter_data)
 
-        history[val] = margin = _compute_margin(sla_comb, iter_data)
-
+        margin = _compute_margin(sla_comb, iter_data)
         if margin <= 0:
             print(f"SLA criteria are met. ({margin=:.2f})")
         else:
             print(f"SLA criteria are not met. ({margin=:.2f})")
+
+        history[val] = margin
 
     return sla_data, history
 
