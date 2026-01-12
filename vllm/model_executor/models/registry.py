@@ -67,6 +67,7 @@ from .interfaces_base import (
 logger = init_logger(__name__)
 
 _TEXT_GENERATION_MODELS = {
+    "Qwen3TPMoeForCausalLM": ("qwen3_tp_moe", "Qwen3TPMoeForCausalLM"),
     # [Decoder-only]
     "AfmoeForCausalLM": ("afmoe", "AfmoeForCausalLM"),
     "ApertusForCausalLM": ("apertus", "ApertusForCausalLM"),
