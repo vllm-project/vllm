@@ -172,7 +172,7 @@ class LLM:
             The available overrides depend on the model that is being run.
             For example, for Phi-3-Vision: `{"num_crops": 4}`.
         pooler_config: Initialize non-default pooling config for the pooling
-            model. e.g. `PoolerConfig(pooling_type="mean", normalize=False)`.
+            model. e.g. `PoolerConfig(seq_pooling_type="MEAN", normalize=False)`.
         compilation_config: Either an integer or a dictionary. If it is an
             integer, it is used as the mode of compilation optimization. If it
             is a dictionary, it can specify the full compilation configuration.
@@ -347,6 +347,9 @@ class LLM:
         self.model_config = self.llm_engine.model_config
         self.input_processor = self.llm_engine.input_processor
         self.io_processor = self.llm_engine.io_processor
+
+        # Cache for __repr__ to avoid repeated collective_rpc calls
+        self._cached_repr: str | None = None
 
     def get_tokenizer(self) -> TokenizerLike:
         return self.llm_engine.get_tokenizer()
@@ -642,7 +645,10 @@ class LLM:
         # following the huggingface transformers implementation
         # at https://github.com/huggingface/transformers/blob/e15687fffe5c9d20598a19aeab721ae0a7580f8a/src/transformers/generation/beam_search.py#L534 # noqa
         beam_search_params = SamplingParams(
-            logprobs=2 * beam_width, max_tokens=1, temperature=temperature
+            logprobs=2 * beam_width,
+            max_tokens=1,
+            temperature=temperature,
+            skip_clone=True,  # Internal beam search, safe to skip clone
         )
         instances: list[BeamSearchInstance] = []
 
@@ -1280,6 +1286,7 @@ class LLM:
         pooling_params: PoolingParams | None = None,
         lora_request: list[LoRARequest] | LoRARequest | None = None,
         tokenization_kwargs: dict[str, Any] | None = None,
+        score_template: str | None = None,
     ) -> list[ScoringRequestOutput]:
         model_config = self.model_config
 
@@ -1313,6 +1320,7 @@ class LLM:
                 data_2=d,
                 tokenizer=tokenizer,
                 tokenization_kwargs=tokenization_kwargs,
+                score_template=score_template,
             )
 
             if token_type_ids := engine_prompt.pop("token_type_ids", None):
@@ -1347,6 +1355,7 @@ class LLM:
         use_tqdm: bool | Callable[..., tqdm] = True,
         pooling_params: PoolingParams | None = None,
         lora_request: list[LoRARequest] | LoRARequest | None = None,
+        chat_template: str | None = None,
     ) -> list[ScoringRequestOutput]:
         """Generate similarity scores for all pairs `<text,text_pair>` or
           `<multi-modal data, multi-modal data pair>`.
@@ -1379,6 +1388,8 @@ class LLM:
             lora_request: LoRA request to use for generation, if any.
             pooling_params: The pooling parameters for pooling. If None, we
                 use the default pooling parameters.
+            chat_template: The chat template to use for the scoring. If None, we
+                use the model's default chat template.
         Returns:
             A list of `ScoringRequestOutput` objects containing the
             generated scores in the same order as the input prompts.
@@ -1405,6 +1416,11 @@ class LLM:
             and getattr(model_config.hf_config, "num_labels", 0) != 1
         ):
             raise ValueError("Score API is only enabled for num_labels == 1.")
+
+        if not model_config.is_cross_encoder and chat_template is not None:
+            raise ValueError(
+                "chat_template is only supported for cross-encoder models."
+            )
 
         # the tokenizer for models such as
         # "cross-encoder/ms-marco-MiniLM-L-6-v2" doesn't support passing
@@ -1475,6 +1491,7 @@ class LLM:
                 use_tqdm,
                 pooling_params,
                 lora_request,
+                score_template=chat_template,
             )
         else:
             return self._embedding_score(
@@ -1610,7 +1627,7 @@ class LLM:
                 added_request_ids.append(request_id)
         except Exception as e:
             if added_request_ids:
-                self.llm_engine.abort_request(added_request_ids)
+                self.llm_engine.abort_request(added_request_ids, internal=True)
             raise e
 
     def _validate_mm_data_and_uuids(
@@ -1720,7 +1737,7 @@ class LLM:
             priority=priority,
             prompt_text=prompt_text,
         )
-        return request_id
+        return engine_request.request_id
 
     def _run_engine(
         self, *, use_tqdm: bool | Callable[..., tqdm] = True
@@ -1772,3 +1789,16 @@ class LLM:
         # This is necessary because some requests may be finished earlier than
         # its previous requests.
         return sorted(outputs, key=lambda x: int(x.request_id))
+
+    def __repr__(self) -> str:
+        """Return a transformers-style hierarchical view of the model."""
+        # Cache the result to avoid repeated collective_rpc calls
+        if self._cached_repr is None:
+            results = self.llm_engine.collective_rpc("get_model_inspection")
+            # In distributed settings, we get results from all workers
+            # Just return the first one (they should all be the same)
+            if results:
+                self._cached_repr = results[0]
+            else:
+                self._cached_repr = f"LLM(model={self.model_config.model!r})"
+        return self._cached_repr

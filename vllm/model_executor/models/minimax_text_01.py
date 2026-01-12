@@ -14,7 +14,6 @@ import torch
 from torch import nn
 from transformers import MiniMaxConfig
 
-from vllm.attention.backends.abstract import AttentionMetadata
 from vllm.attention.layer import Attention
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, ModelConfig, VllmConfig
@@ -48,6 +47,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.utils import maybe_prefix
 from vllm.sequence import IntermediateTensors
+from vllm.v1.attention.backend import AttentionMetadata
 
 from .interfaces import HasInnerState, IsHybrid
 from .utils import PPMissingLayer, is_pp_missing_parameter, make_layers
@@ -332,7 +332,8 @@ class MiniMaxText01DecoderLayer(nn.Module):
             )
         else:
             raise ValueError(
-                f"Unsupported attention type: {self.config.attention_type}"
+                f"Unsupported attention_type {self.config.attention_type}: "
+                f"should be 0 (linear) or 1 (full)."
             )
 
         if expert_num == 1:
