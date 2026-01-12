@@ -18,6 +18,7 @@ from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig,
     QuantizeMethodBase,
 )
+from vllm.model_executor.model_loader.reload_utils import record_metadata_for_reloading
 from vllm.model_executor.models.interfaces import SupportsQuant
 from vllm.utils.platform_utils import is_pin_memory_available
 
@@ -74,28 +75,17 @@ def initialize_model(
         kwargs["lora_config"] = vllm_config.lora_config
     if "scheduler_config" in all_params:
         kwargs["scheduler_config"] = vllm_config.scheduler_config
+
     with set_current_vllm_config(vllm_config, check_compile=True, prefix=prefix):
-        return model_class(**kwargs)
+        model = model_class(**kwargs)
+        record_metadata_for_reloading(model)
+
+    return model
 
 
 def process_weights_after_loading(
     model: nn.Module, model_config: ModelConfig, target_device: torch.device
 ) -> None:
-    if getattr(model, "process_weights_after_loading_already_called", False):
-        # In case `process_weights_after_loading` is called multiple times
-        # we'll skip it at later times
-        logger.debug_once(
-            "process_weights_after_loading already called for model %s", model
-        )
-        return
-
-    # to avoid circular dependency
-    from vllm.model_executor.model_loader.online_quantization import (
-        maybe_save_metadata_and_attributes_for_weight_reloading,
-    )
-
-    maybe_save_metadata_and_attributes_for_weight_reloading(model, model_config)
-
     for _, module in model.named_modules():
         quant_method = getattr(module, "quant_method", None)
         if isinstance(quant_method, QuantizeMethodBase):
