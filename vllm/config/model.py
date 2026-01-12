@@ -882,6 +882,7 @@ class ModelConfig:
                 "gptq_bitblas",
                 "awq_marlin",
                 "ipex",
+                "inc",
                 "moe_wna16",
                 "modelopt",
                 "modelopt_fp4",

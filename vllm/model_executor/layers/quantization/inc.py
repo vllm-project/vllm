@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from fractions import Fraction
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Optional
 
 import regex as re
 import torch
@@ -452,3 +452,13 @@ class INCConfig(QuantizationConfig):
             return self.apply_gptq_quant_layer(layer, prefix)
         if "awq" in self.packing_format or "awq" in self.backend:
             return self.apply_awq_quant_layer(layer, prefix)
+
+    @classmethod
+    def override_quantization_method(
+        cls, hf_quant_cfg, user_quant
+    ) -> Optional["QuantizationMethods"]:
+        """Override the `auto-round` method to `inc`."""
+        is_auto_round_format = hf_quant_cfg.get("quant_method", None) == "auto-round"
+        if is_auto_round_format:
+            return cls.get_name()
+        return None

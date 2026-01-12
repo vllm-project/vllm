@@ -32,7 +32,6 @@ QuantizationMethods = Literal[
     "quark",
     "moe_wna16",
     "torchao",
-    "auto-round",
     "rtn",
     "inc",
     "mxfp4",
@@ -53,7 +52,6 @@ DEPRECATED_QUANTIZATION_METHODS = [
     "hqq",
     "experts_int8",
     "ipex",
-    "auto-round",
     "rtn",
     "petit_nvfp4",
 ]
