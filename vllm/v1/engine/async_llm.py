@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import asyncio
-import contextlib
 import os
 import socket
 import time
@@ -55,18 +54,13 @@ logger = init_logger(__name__)
 class StreamingInput:
     """Input data for a streaming generation request.
 
-    This is used with generate_streaming() to support multi-turn streaming
-    sessions where additional inputs can be sent via generator.asend().
+    This is used with generate() to support multi-turn streaming sessions
+    where inputs are provided via an async generator.
     """
 
     prompt: EngineCoreRequest | PromptType
     sampling_params: SamplingParams
     resumable: bool = True
-    lora_request: LoRARequest | None = None
-    tokenization_kwargs: dict[str, Any] | None = None
-    trace_headers: Mapping[str, str] | None = None
-    priority: int = 0
-    data_parallel_rank: int | None = None
 
 
 class AsyncLLM(EngineClient):
@@ -407,6 +401,55 @@ class AsyncLLM(EngineClient):
         if self.log_requests:
             logger.info("Added request %s.", request.request_id)
 
+    async def _add_streaming_request(
+        self,
+        request_id: str,
+        input_stream: AsyncGenerator[StreamingInput, None],
+        streaming_done: asyncio.Event,
+    ) -> RequestOutputCollector:
+        """Handle async generator input stream for streaming sessions."""
+
+        first_input = await input_stream.__anext__()
+
+        if (
+            self.vllm_config.cache_config.kv_sharing_fast_prefill
+            and first_input.sampling_params.prompt_logprobs
+        ):
+            raise ValueError(
+                "--kv-sharing-fast-prefill produces incorrect logprobs for "
+                "prompt tokens, please disable it when the requests need "
+                "prompt logprobs"
+            )
+
+        queue = await self.add_request(
+            request_id,
+            first_input.prompt,
+            first_input.sampling_params,
+            resumable=first_input.resumable,
+        )
+
+        if first_input.resumable:
+            # Start background task to process remaining inputs
+            async def process_remaining():
+                try:
+                    async for streaming_input in input_stream:
+                        await self.add_request(
+                            request_id,
+                            streaming_input.prompt,
+                            streaming_input.sampling_params,
+                            resumable=streaming_input.resumable,
+                        )
+                        if not streaming_input.resumable:
+                            break
+                finally:
+                    streaming_done.set()
+
+            asyncio.create_task(process_remaining())
+        else:
+            streaming_done.set()
+
+        return queue
+
     # TODO: we should support multiple prompts in one call, as you
     # can do with LLM.generate. So that for multi-prompt completion
     # requests we don't need to send multiple messages to core proc,
@@ -414,8 +457,8 @@ class AsyncLLM(EngineClient):
     # re-multiplexed in the API server anyhow.
     async def generate(
         self,
-        prompt: EngineCoreRequest | PromptType,
-        sampling_params: SamplingParams,
+        prompt: EngineCoreRequest | PromptType | AsyncGenerator[StreamingInput, None],
+        sampling_params: SamplingParams | None,
         request_id: str,
         *,
         prompt_text: str | None = None,
@@ -424,7 +467,6 @@ class AsyncLLM(EngineClient):
         trace_headers: Mapping[str, str] | None = None,
         priority: int = 0,
         data_parallel_rank: int | None = None,
-        resumable: bool = False,
     ) -> AsyncGenerator[RequestOutput, None]:
         """
         Main function called by the API server to kick off a request
@@ -439,62 +481,62 @@ class AsyncLLM(EngineClient):
 
         The caller of generate() iterates the returned AsyncGenerator,
         returning the RequestOutput back to the caller.
+
+        For streaming sessions with an async generator input, pass an
+        AsyncGenerator[StreamingInput, None] as prompt. In this case,
+        sampling_params can be None as each StreamingInput has its own params.
         """
 
         q: RequestOutputCollector | None = None
+        streaming_done: asyncio.Event | None = None
         try:
-            q = await self.add_request(
-                request_id,
-                prompt,
-                sampling_params,
-                lora_request=lora_request,
-                tokenization_kwargs=tokenization_kwargs,
-                trace_headers=trace_headers,
-                priority=priority,
-                data_parallel_rank=data_parallel_rank,
-                prompt_text=prompt_text,
-                resumable=resumable,
-            )
+            if isinstance(prompt, AsyncGenerator):
+                streaming_done = asyncio.Event()
+                q = await self._add_streaming_request(
+                    request_id, prompt, streaming_done
+                )
+            else:
+                if sampling_params is None:
+                    raise ValueError(
+                        "sampling_params is required when prompt is not an "
+                        "AsyncGenerator[StreamingInput, None]"
+                    )
+                q = await self.add_request(
+                    request_id,
+                    prompt,
+                    sampling_params,
+                    lora_request=lora_request,
+                    tokenization_kwargs=tokenization_kwargs,
+                    trace_headers=trace_headers,
+                    priority=priority,
+                    data_parallel_rank=data_parallel_rank,
+                    prompt_text=prompt_text,
+                )
 
             # The output_handler task pushes items into the queue.
             # This task pulls from the queue and yields to caller.
-            finished = False
-            while not finished:
+            while True:
                 # Note: drain queue without await if possible (avoids
                 # task switching under load which helps performance).
                 out = q.get_nowait() or await q.get()
 
                 # Note: both OutputProcessor and EngineCore handle their
                 # own request cleanup based on finished.
-                finished = out.finished
                 assert isinstance(out, RequestOutput)
                 yield out
+
+                if out.finished and (streaming_done is None or streaming_done.is_set()):
+                    break
 
         # If the request is disconnected by the client, generate()
         # is cancelled or the generator is garbage collected. So,
         # we abort the request if we end up here.
-        except asyncio.CancelledError:
+        except (asyncio.CancelledError, GeneratorExit):
             if q is not None:
                 await self.abort(q.request_id, internal=True)
             if self.log_requests:
                 logger.info("Request %s aborted.", request_id)
             raise
-
-        except GeneratorExit:
-            if resumable:
-                if self.log_requests:
-                    logger.info(
-                        "Request %s generator completed, session remains alive.",
-                        request_id,
-                    )
-                # For streaming sessions, generator completion is normal
-                return
-            else:
-                if q is not None:
-                    await self.abort(q.request_id, internal=True)
-                if self.log_requests:
-                    logger.info("Request %s aborted.", request_id)
-                raise
 
         # Engine is dead. Do not abort since we shut down.
         except EngineDeadError:
@@ -523,301 +565,6 @@ class AsyncLLM(EngineClient):
                     )
                 logger.info("Request %s failed due to %s.", request_id, s)
             raise EngineGenerateError() from e
-
-    async def generate_streaming(
-        self,
-        initial_input: StreamingInput,
-        request_id: str,
-    ) -> AsyncGenerator[RequestOutput, StreamingInput | None]:
-        """
-        Generate with multi-turn streaming support via asend().
-
-        Enables streaming sessions where additional inputs can be sent while
-        receiving outputs. Send inputs with generator.asend(StreamingInput(...)).
-        Set resumable=False on the final input to close the session.
-
-        Args:
-            initial_input: First StreamingInput with prompt and params.
-            request_id: Unique identifier for this streaming session.
-
-        Yields:
-            RequestOutput objects as generation progresses.
-        """
-
-        if (
-            self.vllm_config.cache_config.kv_sharing_fast_prefill
-            and initial_input.sampling_params.prompt_logprobs
-        ):
-            raise ValueError(
-                "--kv-sharing-fast-prefill produces incorrect logprobs for "
-                "prompt tokens, please disable it when the requests need "
-                "prompt logprobs"
-            )
-
-        q: RequestOutputCollector | None = None
-        pending_input: StreamingInput | None = initial_input
-        session_closed = False
-
-        try:
-            # Start output handler if needed.
-            self._run_output_handler()
-
-            # Wait until generation is resumed if the engine is paused.
-            async with self._pause_cond:
-                await self._pause_cond.wait_for(lambda: not self._paused)
-
-            while True:
-                if pending_input is not None:
-                    tokenization_kwargs = pending_input.tokenization_kwargs
-                    if tokenization_kwargs is None:
-                        tokenization_kwargs = {}
-                        truncate_prompt_tokens = (
-                            pending_input.sampling_params.truncate_prompt_tokens
-                        )
-                        _validate_truncation_size(
-                            self.model_config.max_model_len,
-                            truncate_prompt_tokens,
-                            tokenization_kwargs,
-                        )
-
-                    q = await self.add_request(
-                        request_id,
-                        pending_input.prompt,
-                        pending_input.sampling_params,
-                        lora_request=pending_input.lora_request,
-                        tokenization_kwargs=tokenization_kwargs,
-                        trace_headers=pending_input.trace_headers,
-                        priority=pending_input.priority,
-                        data_parallel_rank=pending_input.data_parallel_rank,
-                        resumable=pending_input.resumable,
-                    )
-
-                    is_final_segment = not pending_input.resumable
-                    pending_input = None
-
-                # Yield outputs until this segment finishes
-                assert q is not None
-                while True:
-                    out = q.get_nowait() or await q.get()
-                    assert isinstance(out, RequestOutput)
-
-                    # Yield and receive potential next input
-                    next_input = yield out
-
-                    if next_input is not None:
-                        pending_input = next_input
-
-                    if out.finished:
-                        break
-
-                if is_final_segment:
-                    session_closed = True
-                    break
-
-                # If no pending input, wait for one
-                if pending_input is None:
-                    pending_input = yield  # type: ignore[misc]
-
-        except asyncio.CancelledError:
-            if q is not None:
-                await self.abort(q.request_id, internal=True)
-            if self.log_requests:
-                logger.info("Streaming request %s aborted.", request_id)
-            raise
-
-        except GeneratorExit:
-            if not session_closed and q is not None:
-                await self.abort(q.request_id, internal=True)
-            if self.log_requests:
-                logger.info("Streaming request %s generator closed.", request_id)
-            return
-
-        except EngineDeadError:
-            if self.log_requests:
-                logger.info("Streaming request %s failed (engine dead).", request_id)
-            raise
-
-        except ValueError:
-            if self.log_requests:
-                logger.info("Streaming request %s failed (bad request).", request_id)
-            raise
-
-        except Exception as e:
-            if q is not None:
-                await self.abort(q.request_id, internal=True)
-            if self.log_requests:
-                logger.info("Streaming request %s failed.", request_id)
-            raise EngineGenerateError() from e
-
-    async def generate_from_stream(
-        self,
-        input_stream: AsyncGenerator[StreamingInput, None],
-        request_id: str,
-    ) -> AsyncGenerator[RequestOutput, None]:
-        """
-        Generate from an async stream of inputs.
-
-        Inputs and outputs are independent streams that can be processed
-        concurrently in separate async tasks. The final input in the stream
-        should have resumable=False to close the session.
-
-        Args:
-            input_stream: Async generator yielding StreamingInput objects.
-            request_id: Unique identifier for this streaming session.
-
-        Yields:
-            RequestOutput objects as generation progresses.
-        """
-
-        q: RequestOutputCollector | None = None
-        input_task: asyncio.Task | None = None
-        # Use an event to signal when session is closed (thread-safe)
-        session_closed_event = asyncio.Event()
-
-        async def process_inputs():
-            """Background task to consume inputs from the stream."""
-            async for streaming_input in input_stream:
-                tokenization_kwargs = streaming_input.tokenization_kwargs
-                if tokenization_kwargs is None:
-                    tokenization_kwargs = {}
-                    truncate_prompt_tokens = (
-                        streaming_input.sampling_params.truncate_prompt_tokens
-                    )
-                    _validate_truncation_size(
-                        self.model_config.max_model_len,
-                        truncate_prompt_tokens,
-                        tokenization_kwargs,
-                    )
-
-                await self.add_request(
-                    request_id,
-                    streaming_input.prompt,
-                    streaming_input.sampling_params,
-                    lora_request=streaming_input.lora_request,
-                    tokenization_kwargs=tokenization_kwargs,
-                    trace_headers=streaming_input.trace_headers,
-                    priority=streaming_input.priority,
-                    data_parallel_rank=streaming_input.data_parallel_rank,
-                    resumable=streaming_input.resumable,
-                )
-
-                if not streaming_input.resumable:
-                    session_closed_event.set()
-                    break
-
-        try:
-            # Start output handler if needed.
-            self._run_output_handler()
-
-            # Wait until generation is resumed if the engine is paused.
-            async with self._pause_cond:
-                await self._pause_cond.wait_for(lambda: not self._paused)
-
-            # Get first input to initialize the queue
-            first_input = await input_stream.__anext__()
-
-            if (
-                self.vllm_config.cache_config.kv_sharing_fast_prefill
-                and first_input.sampling_params.prompt_logprobs
-            ):
-                raise ValueError(
-                    "--kv-sharing-fast-prefill produces incorrect logprobs for "
-                    "prompt tokens, please disable it when the requests need "
-                    "prompt logprobs"
-                )
-
-            tokenization_kwargs = first_input.tokenization_kwargs
-            if tokenization_kwargs is None:
-                tokenization_kwargs = {}
-                truncate_prompt_tokens = (
-                    first_input.sampling_params.truncate_prompt_tokens
-                )
-                _validate_truncation_size(
-                    self.model_config.max_model_len,
-                    truncate_prompt_tokens,
-                    tokenization_kwargs,
-                )
-
-            q = await self.add_request(
-                request_id,
-                first_input.prompt,
-                first_input.sampling_params,
-                lora_request=first_input.lora_request,
-                tokenization_kwargs=tokenization_kwargs,
-                trace_headers=first_input.trace_headers,
-                priority=first_input.priority,
-                data_parallel_rank=first_input.data_parallel_rank,
-                resumable=first_input.resumable,
-            )
-
-            if not first_input.resumable:
-                session_closed_event.set()
-
-            # Start background task to process remaining inputs
-            if not session_closed_event.is_set():
-                input_task = asyncio.create_task(process_inputs())
-
-            # Yield outputs as they arrive
-            while True:
-                if input_task is not None and input_task.done():
-                    exc = input_task.exception()
-                    if exc is not None:
-                        raise exc
-
-                out = q.get_nowait() or await q.get()
-                assert isinstance(out, RequestOutput)
-                yield out
-
-                # Exit when output is finished AND session is closed
-                if out.finished and session_closed_event.is_set():
-                    break
-
-        except asyncio.CancelledError:
-            if input_task is not None:
-                input_task.cancel()
-            if q is not None:
-                await self.abort(q.request_id, internal=True)
-            if self.log_requests:
-                logger.info("Streaming request %s aborted.", request_id)
-            raise
-
-        except GeneratorExit:
-            if input_task is not None:
-                input_task.cancel()
-            if not session_closed_event.is_set() and q is not None:
-                await self.abort(q.request_id, internal=True)
-            if self.log_requests:
-                logger.info("Streaming request %s generator closed.", request_id)
-            return
-
-        except EngineDeadError:
-            if input_task is not None:
-                input_task.cancel()
-            if self.log_requests:
-                logger.info("Streaming request %s failed (engine dead).", request_id)
-            raise
-
-        except ValueError:
-            if input_task is not None:
-                input_task.cancel()
-            if self.log_requests:
-                logger.info("Streaming request %s failed (bad request).", request_id)
-            raise
-
-        except Exception as e:
-            if input_task is not None:
-                input_task.cancel()
-            if q is not None:
-                await self.abort(q.request_id, internal=True)
-            if self.log_requests:
-                logger.info("Streaming request %s failed.", request_id)
-            raise EngineGenerateError() from e
-
-        finally:
-            if input_task is not None and not input_task.done():
-                input_task.cancel()
-                with contextlib.suppress(asyncio.CancelledError):
-                    await input_task
 
     def _run_output_handler(self):
         """Background loop: pulls from EngineCore and pushes to AsyncStreams."""
