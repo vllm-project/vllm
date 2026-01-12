@@ -864,16 +864,16 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_LORA_RESOLVER_CACHE_DIR": lambda: os.getenv(
         "VLLM_LORA_RESOLVER_CACHE_DIR", None
     ),
-    # Enables torch CUDA profiling if set to 1.
-    # Deprecated, see profiler_config.
-    "VLLM_TORCH_CUDA_PROFILE": lambda: os.getenv("VLLM_TORCH_CUDA_PROFILE"),
-    # A remote HF repo containing one or more LoRA adapters, which
+    # A remote HF repo(s) containing one or more LoRA adapters, which
     # may be downloaded and leveraged as needed. Only works if plugins
     # are enabled and VLLM_ALLOW_RUNTIME_LORA_UPDATING is enabled.
     # Values should be comma separated.
     "VLLM_LORA_RESOLVER_HF_REPO_LIST": lambda: os.getenv(
         "VLLM_LORA_RESOLVER_HF_REPO_LIST", None
     ),
+    # Enables torch CUDA profiling if set to 1.
+    # Deprecated, see profiler_config.
+    "VLLM_TORCH_CUDA_PROFILE": lambda: os.getenv("VLLM_TORCH_CUDA_PROFILE"),
     # Enables torch profiler if set.
     # Deprecated, see profiler_config.
     "VLLM_TORCH_PROFILER_DIR": lambda: os.getenv("VLLM_TORCH_PROFILER_DIR"),
