@@ -138,12 +138,12 @@ class ClassifierPoolerHead(SequencePoolerHead):
         if self.activation is not None:
             flags = [p.use_activation for p in pooling_params]
             if len(set(flags)) == 1:
-                scores = self.activation(pooled_data) if flags[0] else pooled_data
+                pooled_data = self.activation(pooled_data) if flags[0] else pooled_data
             else:
-                scores = [
+                pooled_data = [
                     self.activation(vecs) if f else vecs
                     for vecs, f in zip(pooled_data, flags)
                 ]
 
-        # scores shape: [batchsize, num_labels]
-        return scores
+        # pooled_data shape: [batchsize, num_labels]
+        return pooled_data
