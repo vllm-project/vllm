@@ -996,14 +996,6 @@ class EngineArgs:
             "--video-pruning-rate", **multimodal_kwargs["video_pruning_rate"]
         )
         multimodal_group.add_argument(
-            "--maximum-concurrent-videos",
-            type=int,
-            default=None,
-            help="Maximum number of videos that can be preprocessed concurrently. "
-            "This limits VRAM usage from video decoding. The count is spread "
-            "evenly over API server processes.",
-        )
-        multimodal_group.add_argument(
             "--enable-multimodal-tensor-ipc",
             "--disable-multimodal-tensor-ipc",
             action=argparse.BooleanOptionalAction,
