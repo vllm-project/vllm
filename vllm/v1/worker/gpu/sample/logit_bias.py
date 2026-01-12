@@ -97,7 +97,7 @@ class LogitBiasState:
                     f"The max size is {MAX_NUM_STOP_TOKEN_IDS}."
                 )
             self.num_stop_token_ids.np[req_idx] = num_stop_token_ids
-            self.stop_token_ids.apply_write(req_idx, 0, stop_token_ids)
+            self.stop_token_ids.stage_write(req_idx, 0, stop_token_ids)
 
     def apply_staged_writes(self) -> None:
         self.num_allowed_token_ids.copy_to_uva()
@@ -133,17 +133,17 @@ class LogitBiasState:
             idx_mapping,
             self.num_allowed_token_ids,
             self.allowed_token_ids,
-            self.allowed_token_ids.stride(0),
+            self.allowed_token_ids.gpu.stride(0),
             self.num_logit_bias,
             self.logit_bias_token_ids,
-            self.logit_bias_token_ids.stride(0),
+            self.logit_bias_token_ids.gpu.stride(0),
             self.logit_bias,
-            self.logit_bias.stride(0),
+            self.logit_bias.gpu.stride(0),
             pos,
             self.min_lens,
             self.num_stop_token_ids,
             self.stop_token_ids,
-            self.stop_token_ids.stride(0),
+            self.stop_token_ids.gpu.stride(0),
             BLOCK_SIZE=BLOCK_SIZE,
             LOGITS_BLOCK_SIZE=LOGITS_BLOCK_SIZE,
         )
