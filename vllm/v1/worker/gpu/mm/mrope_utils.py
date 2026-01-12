@@ -108,6 +108,7 @@ def _prepare_mrope_positions_kernel(
             mask = block < query_len
             pos = num_computed + block
             if is_prefill:
+                # Read from pre-computed M-RoPE positions.
                 pos = tl.load(
                     prefill_mrope_positions_ptr
                     + req_state_idx * prefill_mrope_positions_stride0
@@ -116,6 +117,7 @@ def _prepare_mrope_positions_kernel(
                     mask=mask,
                 )
             else:
+                # Apply M-RoPE delta.
                 pos += mrope_delta
             tl.store(
                 mrope_positions_ptr + i * mrope_positions_stride + query_start + block,
