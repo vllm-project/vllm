@@ -3,9 +3,9 @@
 import torch
 import torch.nn.functional as F
 from torch import nn
-from torch.nn.parameter import Parameter
 
 from .base import RotaryEmbedding
+from .common import rotate_neox
 
 
 class FourierRotaryEmbedding(RotaryEmbedding):
@@ -17,6 +17,7 @@ class FourierRotaryEmbedding(RotaryEmbedding):
         base: float,
         is_neox_style: bool,
         dtype: torch.dtype,
+        init_cache: bool,
         # extra parameters for FoPE
         num_key_value_heads: int,
         num_inv_freq: int,
@@ -30,10 +31,21 @@ class FourierRotaryEmbedding(RotaryEmbedding):
         self.fope_init_factor = fope_init_factor
 
         super().__init__(
-            head_size, rotary_dim, max_position_embeddings, base, is_neox_style, dtype
+            head_size,
+            rotary_dim,
+            max_position_embeddings,
+            base,
+            is_neox_style,
+            dtype,
+            init_cache,
         )
 
-        # setup parameters
+        # setup buffers and parameters
+        self.inv_freq: torch.Tensor
+        self.register_buffer(
+            "inv_freq", self._compute_inv_freq(self.base), persistent=False
+        )
+
         self.input_dim = self.inv_freq.shape[-1]
         self.output_dim = self.inv_freq.shape[-1]
         self.cos_coef = nn.Parameter(
@@ -44,8 +56,13 @@ class FourierRotaryEmbedding(RotaryEmbedding):
             torch.empty(num_key_value_heads, self.input_dim, self.output_dim),
             requires_grad=False,
         )
-        self.cos_coef.weight_loader = self.fope_coef_weight_loader
-        self.sin_coef.weight_loader = self.fope_coef_weight_loader
+
+        self.cos_sin_cache: torch.Tensor
+        cache = self._compute_cos_sin_cache().to(dtype)
+        self.register_buffer("cos_sin_cache", cache, persistent=False)
+
+        # update cache in the first forward, where sin/cos_coef weights are ready
+        self.update_cache = True
 
     def _compute_inv_freq(self, base: float) -> torch.Tensor:
         """Compute the inverse frequency."""
@@ -58,122 +75,104 @@ class FourierRotaryEmbedding(RotaryEmbedding):
 
         inv_freq_idx_selected = torch.ones_like(inv_freq, dtype=torch.bool)
         if self.num_inv_freq is not None:
-            num_inv_freq = self.num_inv_freq
-            inv_freq_idx_selected[num_inv_freq:] = False
+            inv_freq_idx_selected[self.num_inv_freq :] = False
         else:
             inv_freq_idx_selected = inv_freq > (
                 2.0 * torch.pi / self.max_position_embeddings
             )
-            num_inv_freq = inv_freq_idx_selected.sum().item()
 
         inv_freq = inv_freq[inv_freq_idx_selected]
-
         return inv_freq
 
     def _compute_cos_sin_cache(self) -> torch.Tensor:
         """Compute the cos and sin cache."""
-        self.inv_freq = self._compute_inv_freq(self.base)
-        # TODO: zhouxinyu, implement FoPE cos/sin cache computation
-        return torch.zeros(1)
+        device = self.inv_freq.device
+        t = torch.arange(self.max_position_embeddings, dtype=torch.float, device=device)
 
-    def apply_rotary_emb(self):
-        """Customized apply_rotary_emb function for FoPE."""
-        pass
+        freqs = torch.einsum("j,i -> ji", t, self.inv_freq)
+        if self.fope_sep_head:
+            pos_cos = freqs.cos().unsqueeze(0).expand(self.num_key_value_heads, -1, -1)
+            pos_sin = freqs.sin().unsqueeze(0).expand(self.num_key_value_heads, -1, -1)
+        else:
+            pos_cos = freqs.cos()
+            pos_sin = freqs.sin()
 
-    def get_step_eye(self, _param):
-        import math
+        if self.fope_sep_head:
+            sin = torch.einsum("htD, hDd -> thd", pos_sin, self.sin_coef.float())
+            cos = torch.einsum("htD, hDd -> thd", pos_cos, self.cos_coef.float())
+        else:
+            sin = torch.einsum("tD, Dd -> td", pos_sin, self.sin_coef.float())
+            cos = torch.einsum("tD, Dd -> td", pos_cos, self.cos_coef.float())
 
-        _step_eye = torch.zeros_like(_param)
-
-        step = math.ceil(self.input_dim / self.output_dim)
-        for i in range(self.output_dim):
-            if i * step < self.input_dim:
-                _step_eye[..., i * step, i] = 1.0
-
-        return _step_eye
-
-    def forward_native(self, x: torch.Tensor, positions: torch.Tensor):
-        # expand x, positions to additional batch size dim
-        if x.dim() == 2:
-            # (seq_len, hidden_size) -> (bsz, seq_len, hidden_size)
-            x = x.unsqueeze(0)
-        if positions.dim() == 1:
-            # (seq_len) -> (bsz, seq_len)
-            positions = positions.unsqueeze(0)
-
-        # Core RoPE block
-        inv_freq_expanded = (
-            self.inv_freq[None, :, None].float().expand(positions.shape[0], -1, 1)
-        )  # (40) -> (1, 40, 1) -> (bsz, 40, 1)
-        position_ids_expanded = positions[
-            :, None, :
-        ].float()  # (bsz, seq_len) -> (bsz, 1, seq_len)
-        # Force float32 (see https://github.com/huggingface/transformers/pull/29285)
-        device_type = x.device.type
-        batch_size, seq_len, hidden_size = x.shape
-        with torch.autocast(device_type=device_type, enabled=False):
-            freqs = (
-                inv_freq_expanded.float() @ position_ids_expanded.float()
-            ).transpose(1, 2)
-            if self.fope_sep_head:
-                pos_cos = (
-                    freqs.cos()
-                    .unsqueeze(1)
-                    .expand(batch_size, self.num_key_value_heads, seq_len, -1)
-                )
-                pos_sin = (
-                    freqs.sin()
-                    .unsqueeze(1)
-                    .expand(batch_size, self.num_key_value_heads, seq_len, -1)
-                )
-            else:
-                pos_cos = freqs.cos()
-                pos_sin = freqs.sin()
-
-            if self.fope_sep_head:
-                # (1, 1, 8192, 40) x (1, 40, 40) -> (1, 8192, 1, 40)
-                sin = torch.einsum("bhtD, hDd -> bthd", pos_sin, self.sin_coef.float())
-                cos = torch.einsum("bhtD, hDd -> bthd", pos_cos, self.cos_coef.float())
-            else:
-                sin = torch.einsum("btD, Dd -> btd", pos_sin, self.sin_coef.float())
-                cos = torch.einsum("btD, Dd -> btd", pos_cos, self.cos_coef.float())
-
-            sin = F.pad(
-                input=sin,
-                pad=(0, self.head_size // 2 - sin.size(-1)),
-                mode="constant",
-                value=1,
-            )
-            cos = F.pad(
-                input=cos,
-                pad=(0, self.head_size // 2 - cos.size(-1)),
-                mode="constant",
-                value=1,
-            )
-
-            sin = torch.cat((sin, sin), dim=-1)
-            cos = torch.cat((cos, cos), dim=-1)
-
-        return cos.to(dtype=x.dtype), sin.to(dtype=x.dtype)
-
-    def forward_cuda(self, x: torch.Tensor, positions: torch.Tensor):
-        # TODO, zhouxinyu, implement FoPE cuda forward computation
-        return self.forward_native(x, positions)
-
-    def fope_coef_weight_loader(self, param: Parameter, loaded_weight: torch.Tensor):
-        from vllm.distributed import (
-            get_tensor_model_parallel_rank,
-            get_tensor_model_parallel_world_size,
+        sin = F.pad(
+            input=sin,
+            pad=(0, self.head_size // 2 - sin.size(-1)),
+            mode="constant",
+            value=1,
+        )
+        cos = F.pad(
+            input=cos,
+            pad=(0, self.head_size // 2 - cos.size(-1)),
+            mode="constant",
+            value=1,
         )
 
-        world_size = get_tensor_model_parallel_world_size()
-        rank = get_tensor_model_parallel_rank()
-        num_key_value_heads = loaded_weight.size(0)
+        sin = torch.cat((sin, sin), dim=-1)
+        cos = torch.cat((cos, cos), dim=-1)
 
-        if num_key_value_heads < world_size:
-            n_replicate = world_size // num_key_value_heads
-            world_size = num_key_value_heads
-            rank = rank // n_replicate
+        # cache: (max_position_embeddings, num_kv_heads, kv_size * 2)
+        cache = torch.cat((cos, sin), dim=-1)
+        return cache
 
-        loaded_weight = loaded_weight.chunk(world_size, dim=0)[rank]
-        param.copy_(loaded_weight)
+    def forward_native(
+        self,
+        positions: torch.Tensor,
+        query: torch.Tensor,
+        key: torch.Tensor | None = None,
+        offsets: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        # update cos/sin cache in the first forward
+        if self.update_cache:
+            cache = self._compute_cos_sin_cache().to(self.dtype)
+            self.cos_sin_cache.copy_(cache)
+            self.update_cache = False
+
+        positions = positions.flatten()
+        cos_sin = self.cos_sin_cache.index_select(0, positions)
+        cos, sin = cos_sin.chunk(2, dim=-1)
+
+        # apply rotary embedding
+        # query: (seq_len, num_heads, head_size)
+        # key: (seq_len, num_kv_heads, head_size)
+        query = query.unflatten(-1, (-1, self.head_size))
+        assert key is not None, "Key tensor is required for FoPE."
+        key = key.unflatten(-1, (-1, self.head_size))
+
+        assert query.dim() == key.dim() == 3, (
+            "Expected query key (seq_len, heads, head_dim)"
+        )
+        assert cos.dim() <= 3 and sin.dim() <= 3
+
+        need_reshape = False
+        if cos.dim() == 3:
+            # for fope
+            need_reshape = True
+            query_shape = query.shape
+            key_shape = key.shape
+            cos = cos.flatten(0, 1)
+            sin = sin.flatten(0, 1)
+            seq_len = cos.size(0)
+            query = query.view(seq_len, -1, query.size(-1))
+            key = key.view(seq_len, -1, key.size(-1))
+
+        # native implementation of apply rope for neox style
+        cos = cos.unsqueeze(1)
+        sin = sin.unsqueeze(1)
+        query = (query * cos) + (rotate_neox(query) * sin)
+        key = (key * cos) + (rotate_neox(key) * sin)
+
+        if need_reshape:
+            query = query.view(query_shape)
+            key = key.view(key_shape)
+
+        return query, key

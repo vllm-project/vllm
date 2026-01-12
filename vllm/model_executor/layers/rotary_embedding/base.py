@@ -22,6 +22,7 @@ class RotaryEmbeddingBase(CustomOp):
         base: float,
         is_neox_style: bool,
         dtype: torch.dtype,
+        init_cache: bool = True,
     ) -> None:
         super().__init__()
         self.head_size = head_size
@@ -43,11 +44,12 @@ class RotaryEmbeddingBase(CustomOp):
         if not hasattr(self, "use_flashinfer"):
             self.use_flashinfer = False
 
-        cache = self._compute_cos_sin_cache()
-        if not self.use_flashinfer:
-            cache = cache.to(dtype)
-        self.cos_sin_cache: torch.Tensor
-        self.register_buffer("cos_sin_cache", cache, persistent=False)
+        if init_cache:
+            cache = self._compute_cos_sin_cache()
+            if not self.use_flashinfer:
+                cache = cache.to(dtype)
+            self.cos_sin_cache: torch.Tensor
+            self.register_buffer("cos_sin_cache", cache, persistent=False)
         self.is_rocm_triton_rotary_embed_enabled = (
             rocm_aiter_ops.is_triton_rotary_embed_enabled()
         )
@@ -105,9 +107,16 @@ class RotaryEmbedding(RotaryEmbeddingBase):
         base: float,
         is_neox_style: bool,
         dtype: torch.dtype,
+        init_cache: bool = True,
     ) -> None:
         super().__init__(
-            head_size, rotary_dim, max_position_embeddings, base, is_neox_style, dtype
+            head_size,
+            rotary_dim,
+            max_position_embeddings,
+            base,
+            is_neox_style,
+            dtype,
+            init_cache,
         )
 
     @staticmethod

@@ -114,6 +114,7 @@ def get_rope(
                     "fope_init_factor",
                 )
             }
+            extra_kwargs["init_cache"] = False
             rotary_emb = FourierRotaryEmbedding(
                 head_size,
                 rotary_dim,
