@@ -26,7 +26,7 @@ from vllm.multimodal.inputs import (
     MultiModalFieldConfig,
     MultiModalKwargsItems,
 )
-from vllm.multimodal.parse import ImageSize, MultiModalDataItems, MultiModalDataParser
+from vllm.multimodal.parse import ImageSize, MultiModalDataItems
 from vllm.multimodal.processing import (
     BaseMultiModalProcessor,
     BaseProcessingInfo,
@@ -38,7 +38,7 @@ from vllm.sequence import IntermediateTensors
 from vllm.utils.import_utils import resolve_obj_by_qualname
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
-from .interfaces import MultiModalEmbeddings, SupportsMultiModal
+from .interfaces import MultiModalEmbeddings, SupportsMultiModal, SupportsPP
 from .qwen2_vl import Qwen2VisionTransformer
 from .utils import AutoWeightsLoader, init_vllm_registered_model, maybe_prefix
 
@@ -249,9 +249,13 @@ class DynamicCAbstractor(nn.Module):
     ) -> torch.Tensor:
         h, w = input_size
         x = rearrange(x, "1 h w d -> 1 d h w", h=h, w=w)
-        x = self.net[0](x)
-        x = self.net[1](x)
-        x = self.net[2](x)
+        if self.config.depth:
+            x = self.net[0](x)
+            x = self.net[1](x)
+            x = self.net[2](x)
+        else:
+            # When depth=0, self.net is a single PatchMerge module
+            x = self.net(x)
         x = rearrange(x, "1 d h w -> (h w) d")
         x = self.readout(x)
         return x
@@ -364,16 +368,13 @@ class CustomQwen2VLVE(Qwen2VisionTransformer):
 class KananaVProcessingInfo(BaseProcessingInfo):
     """Processing info for Kanana-V, declaring supported modalities and limits."""
 
-    def __init__(self, ctx) -> None:
-        super().__init__(ctx)
-
     def get_supported_mm_limits(self) -> Mapping[str, int | None]:
         return {"image": None}
 
     def get_image_size_with_most_features(self) -> ImageSize:
         max_image_size, _ = self._get_vision_info(
-            image_width=9999999,
-            image_height=9999999,
+            image_width=9999,
+            image_height=9999,
             num_frames=1,
         )
         return max_image_size
@@ -453,7 +454,7 @@ class KananaVDummyInputsBuilder(BaseDummyInputsBuilder[KananaVProcessingInfo]):
         num_images = mm_counts.get("image", 0)
         return {
             "image": self._get_dummy_images(
-                width=4096, height=2160, num_images=num_images
+                width=9999, height=9999, num_images=num_images
             ),
         }
 
@@ -461,8 +462,9 @@ class KananaVDummyInputsBuilder(BaseDummyInputsBuilder[KananaVProcessingInfo]):
 class KananaVMultiModalProcessor(BaseMultiModalProcessor[KananaVProcessingInfo]):
     """vLLM multimodal processor for Kanana-V (text + image)."""
 
-    def _get_data_parser(self) -> MultiModalDataParser:
-        return MultiModalDataParser()
+    @property
+    def media_token_id(self) -> int:
+        return self.info.get_hf_config().text_config.eos_token_id + 1
 
     def _call_hf_processor(
         self,
@@ -503,9 +505,8 @@ class KananaVMultiModalProcessor(BaseMultiModalProcessor[KananaVProcessingInfo])
             image_meta=image_meta if image_inputs is not None else None,
         )
         input_ids = text_tokens["input_ids"]
-        media_token_id = self.info.get_hf_config().text_config.eos_token_id + 1
         # Replace placeholder token ids (-1) with media_token_id.
-        input_ids = torch.where(input_ids == -1, media_token_id, input_ids)
+        input_ids = torch.where(input_ids == -1, self.media_token_id, input_ids)
 
         combined_outputs = dict(
             # Add batch dimension to input_ids.
@@ -519,10 +520,8 @@ class KananaVMultiModalProcessor(BaseMultiModalProcessor[KananaVProcessingInfo])
             if image_inputs is not None
             else None,
             pixel_sizes=torch.tensor(pixel_sizes) if image_inputs is not None else None,
-            tensor_type="pt",
-            tokenization_kwargs=tok_kwargs,
         )
-        return BatchFeature(combined_outputs)
+        return BatchFeature(combined_outputs, tensor_type="pt")
 
     def _get_prompt_updates(
         self,
@@ -530,23 +529,19 @@ class KananaVMultiModalProcessor(BaseMultiModalProcessor[KananaVProcessingInfo])
         hf_processor_mm_kwargs: Mapping[str, object],
         out_mm_kwargs: MultiModalKwargsItems,
     ) -> Sequence[PromptUpdate]:
-        media_token_id = self.info.get_hf_config().text_config.eos_token_id + 1
-        separator_token_id = 198
-
         def get_replacement(idx: int) -> Sequence[int]:
             out_item = out_mm_kwargs["image"][idx]
             image_token_thw = out_item["image_token_thw"].data.cpu().numpy()
 
             media_tokens = self.info.get_tokenizer().repeat_image_tokens(
                 image_token_thw,
-                with_row_separator=True,
-                add_global_local_separator=True,
+                with_row_separator=False,
+                add_global_local_separator=False,
             )
 
             # Sanitize media tokens.
             media_tokens = [
-                media_token_id if token == -1 or token == separator_token_id else token
-                for token in media_tokens
+                self.media_token_id if token == -1 else token for token in media_tokens
             ]
             return media_tokens
 
@@ -576,7 +571,7 @@ class KananaVMultiModalProcessor(BaseMultiModalProcessor[KananaVProcessingInfo])
     info=KananaVProcessingInfo,
     dummy_inputs=KananaVDummyInputsBuilder,
 )
-class KananaVForConditionalGeneration(nn.Module, SupportsMultiModal):
+class KananaVForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP):
     @classmethod
     def get_placeholder_str(cls, modality: str, i: int) -> str | None:
         if modality.startswith("image"):
@@ -600,9 +595,9 @@ class KananaVForConditionalGeneration(nn.Module, SupportsMultiModal):
             prefix=maybe_prefix(prefix, "model"),
             architectures=["LlamaForCausalLM"],
         )
-
-        self.media_token_id = config.text_config.eos_token_id + 1
-        self.separator_token_id = 198
+        self.make_empty_intermediate_tensors = (
+            self.language_model.make_empty_intermediate_tensors
+        )
 
     def _parse_and_validate_image_input(
         self, **kwargs: object
@@ -612,6 +607,11 @@ class KananaVForConditionalGeneration(nn.Module, SupportsMultiModal):
 
         if pixel_values is None:
             return None
+
+        if vision_grid_thw is None:
+            raise ValueError(
+                "vision_grid_thw is required when pixel_values is provided"
+            )
 
         # Normalize pixel_values to 2D tensor (num_patches, channels*patch*patch)
         if isinstance(pixel_values, torch.Tensor):
@@ -655,27 +655,17 @@ class KananaVForConditionalGeneration(nn.Module, SupportsMultiModal):
         batch_size = vision_grid_thw.size(0)
         multi_modal_embeddings: tuple[torch.Tensor, ...] = ()
         sample_index = 0
-        sep_embed = self._embed_text_input_ids(
-            torch.tensor([self.separator_token_id]).to(visual_embeds.device),
-            self.language_model.embed_input_ids,
-            is_multimodal=None,
-            handle_oov_mm_token=False,
-        )[0]
-        sep_embed = torch.unsqueeze(torch.unsqueeze(sep_embed, 0), 1)
         for i in range(batch_size):
             t, h, w = (
                 vision_grid_thw[i][0],
                 vision_grid_thw[i][1] // merge_size,
                 vision_grid_thw[i][2] // merge_size,
             )
-            visual_embed = visual_embeds[sample_index : sample_index + t * h * w].view(
-                t, h, w, -1
-            )
-            sep_embeds = sep_embed.expand(t, h, 1, -1)
-            multi_modal_embeddings += (
-                torch.cat([sep_embeds, visual_embed], dim=2).view(t * h * (w + 1), -1),
-            )
-            sample_index += t * h * w
+            num_tokens = t * h * w
+            visual_embed = visual_embeds[sample_index : sample_index + num_tokens]
+            multi_modal_embeddings += (visual_embed,)
+            sample_index += num_tokens
+
         return multi_modal_embeddings
 
     def _get_visual_feature_at(
@@ -751,8 +741,6 @@ class KananaVForConditionalGeneration(nn.Module, SupportsMultiModal):
         **kwargs,
     ):
         inputs_embeds = kwargs.get("inputs_embeds")
-        if inputs_embeds is None:
-            raise ValueError("inputs_embeds is None")
 
         outputs = self.language_model(
             input_ids=input_ids,
