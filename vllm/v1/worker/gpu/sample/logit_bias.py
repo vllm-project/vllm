@@ -88,7 +88,7 @@ class LogitBiasState:
         min_tokens = sampling_params.min_tokens
         min_len = prompt_len + min_tokens
         self.min_lens.np[req_idx] = min_len
-        stop_token_ids = sampling_params.stop_token_ids
+        stop_token_ids = sampling_params.all_stop_token_ids
         if stop_token_ids:
             num_stop_token_ids = len(stop_token_ids)
             if num_stop_token_ids > MAX_NUM_STOP_TOKEN_IDS:
