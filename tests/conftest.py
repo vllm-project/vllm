@@ -189,6 +189,17 @@ def dist_init():
     cleanup_dist_env_and_memory()
 
 
+@pytest.fixture
+def default_vllm_config():
+    """Set a default VllmConfig for tests that directly test CustomOps or pathways
+    that use get_current_vllm_config() outside of a full engine context.
+    """
+    from vllm.config import VllmConfig, set_current_vllm_config
+
+    with set_current_vllm_config(VllmConfig()):
+        yield
+
+
 @pytest.fixture()
 def should_do_global_cleanup_after_test(request) -> bool:
     """Allow subdirectories to skip global cleanup by overriding this fixture.
@@ -685,6 +696,7 @@ class HfRunner:
         images: PromptImageInput | None = None,
         audios: PromptAudioInput | None = None,
         videos: PromptVideoInput | None = None,
+        use_cache: bool = True,
         **kwargs: Any,
     ) -> list[TokensTextLogprobs]:
         all_inputs = self.get_inputs(
@@ -698,7 +710,7 @@ class HfRunner:
         for inputs in all_inputs:
             output: "GenerateOutput" = self.model.generate(
                 **self.wrap_device(inputs),
-                use_cache=True,
+                use_cache=use_cache,
                 do_sample=False,
                 max_new_tokens=max_tokens,
                 output_hidden_states=True,
