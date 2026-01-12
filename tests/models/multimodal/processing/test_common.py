@@ -102,6 +102,7 @@ def glmasr_patch_mm_data(mm_data: MultiModalDataDict) -> MultiModalDataDict:
 # incorrect token ids. So we need use `add_special_tokens=False` here
 # to leave bos_token to be added by the processor.
 _ADD_SPECIAL_TOKENS_OVERRIDES = {
+    "nemotron_parse": False,
     "ovis": False,
     "ovis2_5": False,
     "paligemma": False,
@@ -403,6 +404,11 @@ def test_processing_correctness(
         pytest.skip("Fix later")
     if model_id == "jinaai/jina-reranker-m0":
         pytest.skip("Fix later")
+    if model_id in {"Qwen/Qwen-VL", "Qwen/Qwen-VL-Chat"}:
+        pytest.skip(
+            "Qwen-VL tokenizer requires downloading a font file from "
+            "servers that often refuse connections in CI"
+        )
 
     _test_processing_correctness(
         model_id,
