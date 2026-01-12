@@ -147,7 +147,9 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         self.sampler = Sampler(logprobs_mode=self.model_config.logprobs_mode)
 
         # CUDA graphs.
-        self.cudagraph_manager = CudaGraphManager(self.vllm_config, self.device)
+        self.cudagraph_manager = CudaGraphManager(
+            self.vllm_config, self.uses_mrope, self.device
+        )
         # Structured outputs worker.
         self.structured_outputs_worker = StructuredOutputsWorker(
             max_num_logits=self.max_num_reqs * (self.num_speculative_steps + 1),
@@ -283,6 +285,10 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         dp_size = self.parallel_config.data_parallel_size
         num_tokens_across_dp = make_num_tokens_across_dp(dp_size, num_tokens)
         num_sampled_tokens = np.ones(input_batch.num_reqs, dtype=np.int32)
+        if not self.uses_mrope:
+            positions = input_batch.positions
+        else:
+            positions = input_batch.mrope_positions
         with (
             self.maybe_dummy_run_with_lora(
                 self.lora_config,
@@ -298,7 +304,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         ):
             hidden_states = self.model(
                 input_ids=input_batch.input_ids,
-                positions=input_batch.positions,
+                positions=positions,
             )
             sample_hidden_states = hidden_states[input_batch.logits_indices]
         return hidden_states, sample_hidden_states
@@ -929,6 +935,10 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         else:
             # Run PyTorch model in eager mode.
             # TODO(woosuk): Support piecewise CUDA graph.
+            if not self.uses_mrope:
+                positions = input_batch.positions
+            else:
+                positions = input_batch.mrope_positions
             with set_forward_context(
                 input_batch.attn_metadata,
                 self.vllm_config,
@@ -938,7 +948,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             ):
                 hidden_states = self.model(
                     input_ids=input_batch.input_ids,
-                    positions=input_batch.positions,
+                    positions=positions,
                 )
 
         self.execute_model_state = hidden_states, input_batch, sampling_metadata
