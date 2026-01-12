@@ -5001,7 +5001,6 @@ class GPUModelRunner(
             # Second capture measures per-graph overhead
             per_graph = 0
             if count > 1 and len(batch_sizes) > 1:
-                # Find a different size to measure per-graph overhead
                 second_size = None
                 for size in reversed(batch_sizes):
                     if size < largest_size:
@@ -5129,26 +5128,16 @@ class GPUModelRunner(
 
             full_graph_memory = 0
 
-            if cudagraph_mode.mixed_mode() != CUDAGraphMode.NONE:
-                cudagraph_runtime_mode = cudagraph_mode.mixed_mode()
-                # make sure we capture the largest batch size first
+            if cudagraph_mode.mixed_mode() == CUDAGraphMode.PIECEWISE:
                 compilation_cases = list(
                     product(reversed(self.cudagraph_batch_sizes), lora_cases)
                 )
                 self._capture_cudagraphs(
                     compilation_cases,
-                    cudagraph_runtime_mode=cudagraph_runtime_mode,
+                    cudagraph_runtime_mode=CUDAGraphMode.PIECEWISE,
                     uniform_decode=False,
                 )
-                # Track FULL graph memory from mixed mode
-                if cudagraph_runtime_mode == CUDAGraphMode.FULL:
-                    torch.cuda.synchronize()
-                    full_graph_memory = (
-                        start_free_gpu_memory - torch.cuda.mem_get_info()[0]
-                    )
 
-            # Capture full cudagraph for uniform decode batches if we
-            # don't already have full mixed prefill-decode cudagraphs.
             if (
                 cudagraph_mode.decode_mode() == CUDAGraphMode.FULL
                 and cudagraph_mode.separate_routine()
