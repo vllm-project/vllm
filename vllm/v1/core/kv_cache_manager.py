@@ -84,7 +84,7 @@ class KVCacheBlocks:
         assert len(self.blocks) == 1, "Only one group is supported"
         return [block.block_id for block in self.blocks[0] if block.block_hash is None]
 
-    def get_unhashed_block_ids_all_groups(self) -> list[int]:
+    def get_unhashed_block_ids_all_groups(self) -> list[list[int]]:
         """Get block_ids of unhashed blocks from KVCacheBlocks instance."""
         # Skip padding blocks.
         return [[block.block_id for block in group if block.block_hash is None and not block.is_null] for group in self.blocks]
