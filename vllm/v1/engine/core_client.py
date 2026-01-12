@@ -496,7 +496,7 @@ class MPClient(EngineCoreClient):
 
             # Serialization setup with tensor queues for multimodal tensor IPC.
             # Get IPC config from multimodal_config, falling back to env var
-            multimodal_tensor_ipc = True  # Default
+            multimodal_tensor_ipc = False  # Default
             if vllm_config.model_config.multimodal_config is not None:
                 mm_ipc = (
                     vllm_config.model_config.multimodal_config.multimodal_tensor_ipc
