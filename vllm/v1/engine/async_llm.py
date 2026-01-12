@@ -519,15 +519,16 @@ class AsyncLLM(EngineClient):
                         )
                         # NOTE: RequestOutputs are pushed to their queues.
                         assert not processed_outputs.request_outputs
+
+                        # Allow other asyncio tasks to run between chunks
+                        if end < num_outputs:
+                            await asyncio.sleep(0)
+
                         # 3) Abort any reqs that finished due to stop strings.
                         if processed_outputs.reqs_to_abort:
                             await engine_core.abort_requests_async(
                                 processed_outputs.reqs_to_abort
                             )
-
-                        # Allow other asyncio tasks to run between chunks
-                        if end < num_outputs:
-                            await asyncio.sleep(0)
 
                     output_processor.update_scheduler_stats(outputs.scheduler_stats)
 
