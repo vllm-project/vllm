@@ -13,9 +13,6 @@ from .ScaledMMLinearKernel import Int8ScaledMMLinearLayerConfig
 
 
 class AiterScaledMMLinearKernel(CutlassScaledMMLinearKernel):
-    @classmethod
-    def get_min_capability(cls) -> int:
-        return 90
 
     @classmethod
     def is_supported(
@@ -23,6 +20,9 @@ class AiterScaledMMLinearKernel(CutlassScaledMMLinearKernel):
     ) -> tuple[bool, str | None]:
         if not current_platform.is_rocm():
             return False, "Requires ROCm."
+
+        if compute_capability is not None and compute_capability < 90:
+            return False, "requires compute capability 90 and above."
 
         try:
             import aiter  # noqa: F401 # deliberately attempt to import aiter

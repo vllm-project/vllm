@@ -76,7 +76,7 @@ class PerTensorTorchScaledMMLinearKernel(TorchScaledMMLinearKernel):
         if type(output) is tuple and len(output) == 2:
             output = output[0]
 
-        return torch.narrow(output, 0, 0, output_shape[0]).view(*output_shape)
+        return torch.narrow(output, 0, 0, A.shape[0]).view(*output_shape)
 
 
 class RowWiseTorchScaledMMLinearKernel(TorchScaledMMLinearKernel):

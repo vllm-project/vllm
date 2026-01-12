@@ -36,8 +36,8 @@ class TritonScaledMMLinearKernel(CutlassScaledMMLinearKernel):
         return True, None
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
-        w_q, w_s_name, i_s, _, _ = self._get_layer_params(layer)
-        w_q_name, _, i_s_name, i_zp_name, azp_adj_name = self.layer_param_names
+        w_q, _, i_s, _, _ = self._get_layer_params(layer)
+        w_q_name, w_s_name, i_s_name, i_zp_name, azp_adj_name = self.layer_param_names
 
         replace_parameter(
             layer,
