@@ -284,6 +284,7 @@ class KVCacheManager:
 
         Returns:
             A list of new allocated blocks.
+            None if the allocation fails.
         """
         # When loading KV data asynchronously, we may have zero new tokens to
         # compute while still allocating slots for externally computed tokens.
