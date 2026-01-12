@@ -22,11 +22,9 @@ from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.exaone_moe import ExaoneMoeDecoderLayer
 from vllm.sequence import IntermediateTensors
 
-from .interfaces import SupportsPP
 from .utils import (
     AutoWeightsLoader,
     is_pp_missing_parameter,
-    make_empty_intermediate_tensors_factory,
     maybe_prefix,
 )
 
@@ -72,7 +70,7 @@ class ExaoneMoeMultiTokenPredictor(nn.Module):
             quant_config=quant_config,
             prefix=f"{prefix}.fc",
         )
-        self.layers = torch.nn.ModuleList(
+        self.layers = nn.ModuleList(
             ExaoneMoeDecoderLayer(
                 vllm_config.model_config.hf_config,
                 quant_config=quant_config,
@@ -80,10 +78,6 @@ class ExaoneMoeMultiTokenPredictor(nn.Module):
                 mtp_layer=True,
             )
             for idx in range(self.num_mtp_layers)
-        )
-
-        self.make_empty_intermediate_tensors = make_empty_intermediate_tensors_factory(
-            ["hidden_states", "residual"], config.hidden_size
         )
 
         self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
@@ -145,13 +139,6 @@ class ExaoneMoeMultiTokenPredictor(nn.Module):
 
         # Params for weights, fp8 weight scales, fp8 activation scales
         # (param_name, weight_name, expert_id, shard_id)
-        """
-        expert_params_mapping = FusedMoE.make_expert_params_mapping(
-            ckpt_gate_proj_name="gate_proj",
-            ckpt_down_proj_name="down_proj",
-            ckpt_up_proj_name="up_proj",
-            num_experts=self.config.num_experts)
-        """
         params_dict = dict(self.named_parameters())
         loaded_params: set[str] = set()
         for name, loaded_weight in weights:
@@ -193,7 +180,7 @@ class ExaoneMoeMultiTokenPredictor(nn.Module):
 
 
 @support_torch_compile
-class ExaoneMoeMTP(nn.Module, SupportsPP):
+class ExaoneMoeMTP(nn.Module):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         config = vllm_config.model_config.hf_config
         self.vllm_config = vllm_config
@@ -221,9 +208,6 @@ class ExaoneMoeMTP(nn.Module, SupportsPP):
             self.lm_head.weight = self.model.embed_tokens.weight
         self.logits_processor = LogitsProcessor(
             self.unpadded_vocab_size, config.vocab_size
-        )
-        self.make_empty_intermediate_tensors = (
-            self.model.make_empty_intermediate_tensors
         )
 
     def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
