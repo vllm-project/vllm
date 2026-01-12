@@ -7,9 +7,9 @@ from dataclasses import dataclass, field
 import torch
 from typing_extensions import deprecated
 
-from vllm.attention.layer import Attention
 from vllm.config import CacheConfig, ModelConfig, SchedulerConfig, VllmConfig
 from vllm.logger import init_logger
+from vllm.model_executor.layers.attention.attention import Attention
 from vllm.model_executor.models.interfaces import MultiModalEmbeddings
 from vllm.model_executor.models.utils import extract_layer_index
 from vllm.multimodal.cache import processor_only_cache_from_config

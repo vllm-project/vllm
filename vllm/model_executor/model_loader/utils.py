@@ -11,9 +11,10 @@ import torch
 from torch import nn
 from typing_extensions import assert_never
 
-from vllm.attention.layer import Attention, MLAAttention
 from vllm.config import ModelConfig, VllmConfig, set_current_vllm_config
 from vllm.logger import init_logger
+from vllm.model_executor.layers.attention.attention import Attention
+from vllm.model_executor.layers.attention.mla_attention import MLAAttention
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig,
     QuantizeMethodBase,

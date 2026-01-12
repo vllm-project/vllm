@@ -27,11 +27,11 @@ from torch import nn
 from transformers import AutoModel
 from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS
 
-from vllm.attention.layer import Attention
 from vllm.config.utils import getattr_iter
 from vllm.distributed import get_pp_group, get_tp_group
 from vllm.distributed.utils import get_pp_indices
 from vllm.logger import init_logger
+from vllm.model_executor.layers.attention.attention import Attention
 from vllm.model_executor.layers.attention.encoder_only_attention import (
     EncoderOnlyAttention,
 )
