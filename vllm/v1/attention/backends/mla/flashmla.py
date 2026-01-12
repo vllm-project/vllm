@@ -13,7 +13,12 @@ from vllm.model_executor.layers.batch_invariant import (
     vllm_is_batch_invariant,
 )
 from vllm.platforms.interface import DeviceCapability
-from vllm.v1.attention.backend import AttentionLayer, AttentionType, MultipleOf
+from vllm.v1.attention.backend import (
+    AttentionCGSupport,
+    AttentionLayer,
+    AttentionType,
+    MultipleOf,
+)
 from vllm.v1.attention.backends.mla.common import (
     MLACommonBackend,
     MLACommonDecodeMetadata,
@@ -23,7 +28,6 @@ from vllm.v1.attention.backends.mla.common import (
     QueryLenSupport,
 )
 from vllm.v1.attention.backends.utils import (
-    AttentionCGSupport,
     reshape_attn_output_for_spec_decode,
     reshape_query_for_spec_decode,
 )
