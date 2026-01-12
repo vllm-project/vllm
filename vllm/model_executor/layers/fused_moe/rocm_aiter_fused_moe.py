@@ -9,7 +9,9 @@ import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.model_executor.layers.fused_moe.config import (
     FUSED_MOE_UNQUANTIZED_CONFIG,
+    FusedMoEParallelConfig,
     FusedMoEQuantConfig,
+    FusedMoEQuantScheme,
 )
 from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceNoOP,
@@ -273,32 +275,32 @@ class AiterExperts(mk.FusedMoEPermuteExpertsUnpermute):
     def __init__(self, quant_config):
         super().__init__(quant_config)
 
-    @property
-    def activation_formats(
-        self,
-    ) -> tuple[mk.FusedMoEActivationFormat, mk.FusedMoEActivationFormat]:
-        return (
-            mk.FusedMoEActivationFormat.Standard,
-            mk.FusedMoEActivationFormat.Standard,
-        )
+    @staticmethod
+    def activation_format() -> mk.FusedMoEActivationFormat:
+        return mk.FusedMoEActivationFormat.Standard
 
-    def supports_current_device(self) -> bool:
+    @staticmethod
+    def _supports_current_device() -> bool:
         return current_platform.is_rocm()
 
-    def supports_no_act_and_mul(self) -> bool:
+    @staticmethod
+    def _supports_no_act_and_mul() -> bool:
         return False
 
-    def supports_quant_config(self, quant_config: FusedMoEQuantConfig) -> bool:
+    @staticmethod
+    def _supports_quant_scheme(quant_scheme: FusedMoEQuantScheme) -> bool:
         return (
-            quant_config.use_fp8_w8a8
-            or quant_config.use_mxfp4_w4a4
-            or False  # TODO: how to represent unquantizes?
+            quant_scheme.is_fp8_w8a8
+            # or quant_scheme.is_mxfp4_w4a4
+            or quant_scheme.is_unquantized
         )
 
-    def supports_act_fn(self, activation: str) -> bool:
+    @staticmethod
+    def _supports_activation(activation: str) -> bool:
         return activation in ["silu", "gelu"]
 
-    def supports_ep(self) -> bool:
+    @staticmethod
+    def _supports_parallel_config(moe_parallel_config: FusedMoEParallelConfig) -> bool:
         return True
 
     def supports_expert_map(self):

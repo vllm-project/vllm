@@ -45,7 +45,6 @@ from vllm.model_executor.layers.fused_moe.oracle.fp8 import (
     Fp8MoeBackend,
     convert_to_fp8_moe_kernel_format,
     make_fp8_moe_kernel,
-    select_fp8_moe_backend,
 )
 from vllm.model_executor.layers.fused_moe.oracle.nvfp4 import (
     FLASHINFER_NVFP4_MOE_BACKENDS,
@@ -579,13 +578,14 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
                 "For FP8 Fused MoE layer, we require either per tensor or "
                 "channelwise, dynamic per token quantization."
             )
-        self.fp8_backend = select_fp8_moe_backend(
-            block_quant=self.block_quant,
-            tp_size=moe.tp_size,
-            with_lora_support=moe.is_lora_enabled,
-            # TODO(rob): enable selecting this externally.
-            allow_vllm_cutlass=True,
-        )
+        # self.fp8_backend = select_fp8_moe_backend(
+        #     block_quant=self.block_quant,
+        #     tp_size=moe.tp_size,
+        #     with_lora_support=moe.is_lora_enabled,
+        #     # TODO(rob): enable selecting this externally.
+        #     allow_vllm_cutlass=True,
+        # )
+        self.fp8_backend = Fp8MoeBackend.FLASHINFER_CUTLASS
         if self.fp8_backend != Fp8MoeBackend.MARLIN:
             per_act_token = self.input_quant.strategy == QuantizationStrategy.TOKEN
             per_channel_quant = (

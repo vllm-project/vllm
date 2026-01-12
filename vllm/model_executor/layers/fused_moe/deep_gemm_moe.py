@@ -3,11 +3,12 @@
 
 import torch
 
-from vllm.platforms import current_platform
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.config import (
+    FusedMoEParallelConfig,
     FusedMoEQuantConfig,
+    FusedMoEQuantScheme,
     fp8_w8a8_moe_quant_config,
 )
 from vllm.model_executor.layers.fused_moe.deep_gemm_utils import (
@@ -27,6 +28,7 @@ from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     per_token_group_quant_fp8_packed_for_deepgemm,
     silu_mul_per_token_group_quant_fp8_colmajor,
 )
+from vllm.platforms import current_platform
 from vllm.utils.deep_gemm import (
     DeepGemmQuantScaleFMT,
     get_mk_alignment_for_contiguous_layout,
@@ -117,36 +119,34 @@ class DeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
         assert not quant_config.per_act_token_quant
         assert not quant_config.per_out_ch_quant
 
-    @property
-    def activation_formats(
-        self,
-    ) -> tuple[mk.FusedMoEActivationFormat, mk.FusedMoEActivationFormat]:
-        return (
-            mk.FusedMoEActivationFormat.Standard,
-            mk.FusedMoEActivationFormat.Standard,
+    @staticmethod
+    def activation_format() -> mk.FusedMoEActivationFormat:
+        return mk.FusedMoEActivationFormat.Standard
+
+    @staticmethod
+    def _supports_current_device() -> bool:
+        return current_platform.is_cuda() and current_platform.has_device_capability(
+            9, 0
         )
 
-    def supports_current_device(self) -> bool:
-        return (
-            current_platform.is_cuda() and
-            current_platform.has_device_capability(9,0)
-        )
-    
-    def supports_no_act_and_mul(self) -> bool:
+    @staticmethod
+    def _supports_no_act_and_mul() -> bool:
         return False
 
-    def supports_quant_config(self, quant_config: FusedMoEQuantConfig) -> bool:
+    @staticmethod
+    def _supports_quant_scheme(quant_scheme: FusedMoEQuantScheme) -> bool:
         return (
-            quant_config.use_fp8_w8a8 and
-            quant_config.is_block_quantized() and
-            quant_config.block_shape[0] == 128 and
-            quant_config.block_shape[1] == 128
+            quant_scheme.is_fp8_w8a8
+            and quant_scheme.per_block_quant
+            and quant_scheme.block_size == [128, 128]
         )
 
-    def supports_act_fn(self, activation: str) -> bool:
+    @staticmethod
+    def _supports_activation(activation: str) -> bool:
         return activation in ["silu"]
 
-    def supports_ep(self) -> bool:
+    @staticmethod
+    def _supports_parallel_config(moe_parallel_config: FusedMoEParallelConfig) -> bool:
         return True
 
     def supports_chunking(self) -> bool:

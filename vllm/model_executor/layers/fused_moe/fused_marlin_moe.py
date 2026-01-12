@@ -8,7 +8,11 @@ import torch
 
 import vllm._custom_ops as ops
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
-from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
+from vllm.model_executor.layers.fused_moe.config import (
+    FusedMoEParallelConfig,
+    FusedMoEQuantConfig,
+    FusedMoEQuantScheme,
+)
 from vllm.model_executor.layers.fused_moe.moe_align_block_size import (
     batched_moe_align_block_size,
     moe_align_block_size,
@@ -551,26 +555,34 @@ class MarlinExpertsBase(mk.FusedMoEPermuteExpertsUnpermute):
         self.is_k_full = is_k_full
         super().__init__(quant_config)
 
-    def supports_current_device(self) -> bool:
-        return current_platform.is_cuda() and current_platform.has_device_capability(8,0)
-
-    def supports_no_act_and_mul(self) -> bool:
-        return False
-
-    def supports_quant_config(self, quant_config: FusedMoEQuantConfig) -> bool:
-        # TODO(rob): check if we support the Fp8 activation
-        return (
-            quant_config.use_fp8_w8a16 or
-            quant_config.use_int8_w8a16 or
-            quant_config.use_int4_w4a16 or
-            quant_config.use_nvfp4_w4a16 or
-            quant_config.use_mxfp4_w4a16
+    @staticmethod
+    def _supports_current_device() -> bool:
+        return current_platform.is_cuda() and current_platform.has_device_capability(
+            8, 0
         )
 
-    def supports_act_fn(self, activation: str) -> bool:
+    @staticmethod
+    def _supports_no_act_and_mul() -> bool:
+        return False
+
+    @staticmethod
+    def _supports_quant_scheme(quant_scheme: FusedMoEQuantScheme) -> bool:
+        # TODO(rob): check if we support the Fp8 activation
+        return True
+        # return (
+        #     quant_scheme.use_fp8_w8a16
+        #     or quant_config.use_int8_w8a16
+        #     or quant_config.use_int4_w4a16
+        #     or quant_config.use_nvfp4_w4a16
+        #     or quant_config.use_mxfp4_w4a16
+        # )
+
+    @staticmethod
+    def _supports_activation(activation: str) -> bool:
         return activation in ["silu", "swigluoai"]
 
-    def supports_ep(self) -> bool:
+    @staticmethod
+    def _supports_parallel_config(moe_parallel_config: FusedMoEParallelConfig) -> bool:
         return True
 
     @property
@@ -641,14 +653,9 @@ class MarlinExperts(MarlinExpertsBase):
     def finalize_weight_and_reduce_impl(self) -> mk.TopKWeightAndReduce:
         return TopKWeightAndReduceNoOP()
 
-    @property
-    def activation_formats(
-        self,
-    ) -> tuple[mk.FusedMoEActivationFormat, mk.FusedMoEActivationFormat]:
-        return (
-            mk.FusedMoEActivationFormat.Standard,
-            mk.FusedMoEActivationFormat.Standard,
-        )
+    @staticmethod
+    def activation_format() -> mk.FusedMoEActivationFormat:
+        return mk.FusedMoEActivationFormat.Standard
 
     def supports_chunking(self) -> bool:
         return True
@@ -769,14 +776,9 @@ class BatchedMarlinExperts(MarlinExpertsBase):
     def finalize_weight_and_reduce_impl(self) -> mk.TopKWeightAndReduce:
         return TopKWeightAndReduceDelegate()
 
-    @property
-    def activation_formats(
-        self,
-    ) -> tuple[mk.FusedMoEActivationFormat, mk.FusedMoEActivationFormat]:
-        return (
-            mk.FusedMoEActivationFormat.BatchedExperts,
-            mk.FusedMoEActivationFormat.BatchedExperts,
-        )
+    @staticmethod
+    def activation_format() -> mk.FusedMoEActivationFormat:
+        return mk.FusedMoEActivationFormat.BatchedExperts
 
     def supports_chunking(self) -> bool:
         return False

@@ -166,7 +166,7 @@ We suggest picking an already existing `FusedMoEPrepareAndFinalize` implementati
 
 FusedMoEPermuteExpertsUnpermute performs the core of the FusedMoE operations. The various functions exposed by the abstract class and their significance is as follows,
 
-`FusedMoEPermuteExpertsUnpermute::activation_formats()`: Return the supported Input and Output activation formats. i.e. Contiguous / Batched format.
+`FusedMoEPermuteExpertsUnpermute::activation_format()`: Return the supported activation formats. i.e. Standard / Batched (MaskedGEMM) format.
 
 `FusedMoEPermuteExpertsUnpermute::supports_chunking()`: Return True if the implementation supports chunking. Typically
 implementations that input `FusedMoEActivationFormat.Standard` support chunking and `FusedMoEActivationFormat.BatchedExperts` do not.

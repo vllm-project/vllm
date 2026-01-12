@@ -28,7 +28,6 @@ from vllm.model_executor.layers.fused_moe.oracle.fp8 import (
     convert_to_fp8_moe_kernel_format,
     make_fp8_moe_kernel,
     make_fp8_moe_quant_config,
-    select_fp8_moe_backend,
 )
 from vllm.model_executor.layers.fused_moe.oracle.nvfp4 import (
     FLASHINFER_NVFP4_MOE_BACKENDS,
@@ -729,11 +728,12 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
         super().__init__(moe_config)
         self.quant_config = quant_config
         assert self.quant_config.is_checkpoint_fp8_serialized
-        self.fp8_backend = select_fp8_moe_backend(
-            block_quant=False,
-            tp_size=moe_config.moe_parallel_config.tp_size,
-            with_lora_support=self.moe.is_lora_enabled,
-        )
+        # self.fp8_backend = select_fp8_moe_backend(
+        #     block_quant=False,
+        #     tp_size=moe_config.moe_parallel_config.tp_size,
+        #     with_lora_support=self.moe.is_lora_enabled,
+        # )
+        self.fp8_backend = Fp8MoeBackend.FLASHINFER_CUTLASS
         self.kernel: mk.FusedMoEModularKernel | None = None
 
     def maybe_make_prepare_finalize(

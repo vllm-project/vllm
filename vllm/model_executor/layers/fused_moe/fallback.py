@@ -20,15 +20,6 @@ class FallbackExperts(mk.FusedMoEPermuteExpertsUnpermute, ABC):
         self.fallback_experts = fallback_experts
         self.experts = experts
 
-    @property
-    def activation_formats(
-        self,
-    ) -> tuple[mk.FusedMoEActivationFormat, mk.FusedMoEActivationFormat]:
-        assert (
-            self.fallback_experts.activation_formats == self.experts.activation_formats
-        )
-        return self.fallback_experts.activation_formats
-
     def supports_chunking(self) -> bool:
         assert (
             self.experts.supports_chunking()

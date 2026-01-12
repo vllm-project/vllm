@@ -13,8 +13,10 @@ import vllm.envs as envs
 from vllm.forward_context import get_forward_context, is_forward_context_available
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.config import (
+    FusedMoEConfig,
     FusedMoEParallelConfig,
     FusedMoEQuantConfig,
+    FusedMoEQuantScheme,
 )
 from vllm.model_executor.layers.fused_moe.utils import (
     _resize_cache,
@@ -380,11 +382,9 @@ class FusedMoEPermuteExpertsUnpermute(ABC):
         """
         self.quant_config = quant_config
 
-    @property
+    @staticmethod
     @abstractmethod
-    def activation_formats(
-        self,
-    ) -> tuple[FusedMoEActivationFormat, FusedMoEActivationFormat]:
+    def activation_format() -> FusedMoEActivationFormat:
         """
         A property which is a tuple of the input and output activation formats
         for the 'apply' method.
@@ -433,21 +433,40 @@ class FusedMoEPermuteExpertsUnpermute(ABC):
         topk = topk_ids.size(1)
 
         return E, M, N, K, topk
-    
+
     #
     # Various helpers for registering support for various features.
+    # Used by the oracle to select a particular kernel for a deployment.
     #
 
+    @staticmethod
+    def is_supported_config(
+        cls: type["FusedMoEPermuteExpertsUnpermute"],
+        moe_config: FusedMoEConfig,
+        moe_quant_scheme: FusedMoEQuantScheme,
+        activation_format: FusedMoEActivationFormat,
+    ) -> bool:
+        return (
+            (cls._supports_current_device())
+            and (not moe_config.is_act_and_mul or cls._supports_no_act_and_mul())
+            and cls._supports_activation(moe_config.activation)
+            and cls._supports_quant_scheme(moe_quant_scheme)
+            and cls._supports_parallel_config(moe_config.moe_parallel_config)
+            and (activation_format == cls.activation_format())
+        )
+
     @abstractmethod
-    def supports_current_device(self) -> bool:
+    @staticmethod
+    def _supports_current_device() -> bool:
         """
         Whether the kernel supports the current device type
         (compute cability and current platform).
         """
         raise NotImplementedError
-    
+
     @abstractmethod
-    def supports_no_act_and_mul(self) -> bool:
+    @staticmethod
+    def _supports_no_act_and_mul() -> bool:
         """
         Whether the kernel supports act_and_mul=False, i.e.
         non-gated MoE models like Nemotron-Nano.
@@ -455,18 +474,21 @@ class FusedMoEPermuteExpertsUnpermute(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    def supports_quant_config(self, quant_config: FusedMoEQuantConfig) -> bool:
+    @staticmethod
+    def _supports_quant_scheme(quant_scheme: FusedMoEQuantScheme) -> bool:
         raise NotImplementedError
 
     @abstractmethod
-    def supports_act_fn(self, activation: str) -> bool:
+    @staticmethod
+    def _supports_activation(activation: str) -> bool:
         """
         Whether the kernel supports a particular act function.
         """
         raise NotImplementedError
 
     @abstractmethod
-    def supports_ep(self) -> bool:
+    @staticmethod
+    def _supports_parallel_config(moe_parallel_config: FusedMoEParallelConfig) -> bool:
         """
         Whether the kernel supports deployment in expert parallel.
         """
@@ -739,12 +761,12 @@ class FusedMoEModularKernel(torch.nn.Module):
 
         self._post_init_setup()
         assert (
-            prepare_finalize.activation_format == fused_experts.activation_formats[0]
+            prepare_finalize.activation_format == fused_experts.activation_format()
         ), (
             f"{prepare_finalize.__class__.__name__}."
             f"{prepare_finalize.activation_format} == "
             f"{fused_experts.__class__.__name__}."
-            f"{fused_experts.activation_formats[0]}"
+            f"{fused_experts.activation_format()}"
         )
 
     def _post_init_setup(self):

@@ -3,7 +3,12 @@
 
 import torch
 
-from vllm.model_executor.layers.fused_moe.config import RoutingMethodType
+from vllm.model_executor.layers.fused_moe.config import (
+    FusedMoEConfig,
+    FusedMoEParallelConfig,
+    FusedMoEQuantScheme,
+    RoutingMethodType,
+)
 from vllm.model_executor.layers.fused_moe.utils import moe_kernel_quantize_input
 from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
     calculate_tile_tokens_dim,
@@ -11,7 +16,59 @@ from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     per_token_group_quant_fp8,
 )
+from vllm.platforms import current_platform
 from vllm.utils.torch_utils import direct_register_custom_op
+
+#
+# Methods used by the oracle for kernel selection.
+#
+
+
+def _supports_current_device() -> bool:
+    """Supports only Blackwell-family GPUs."""
+    return current_platform.is_cuda() and current_platform.is_device_capability_family(
+        10
+    )
+
+
+def _supports_no_act_and_mul() -> bool:
+    """Does not support non-gated MoE (i.e. Nanotron-Mini)."""
+    return False
+
+
+def _supports_quant_scheme(quant_scheme: FusedMoEQuantScheme) -> bool:
+    """Supports Fp8 per-tensor, Fp8 block, and Nvfp4 quantization."""
+    return (
+        (quant_scheme.is_fp8_w8a8 and quant_scheme.per_tensor_quant)
+        or (quant_scheme.is_fp8_w8a8 and quant_scheme.block_size == [128, 128])
+        or (quant_scheme.is_nvfp4_w4a4)
+    )
+
+
+def _supports_activation(activation: str) -> bool:
+    """Supports silu activation only."""
+    return activation in ["silu"]
+
+
+def _supports_moe_parallel_config(moe_parallel_config: FusedMoEParallelConfig) -> bool:
+    """Supports EP."""
+    return True
+
+
+def is_supported_config_trtllm(
+    moe_config: FusedMoEConfig,
+    moe_quant_scheme: FusedMoEQuantScheme,
+) -> bool:
+    """
+    This method mirrors mk.FusedMoEPermuteExpertsUnpermute.is_supported_config
+    """
+    return (
+        _supports_current_device()
+        and (not moe_config.is_act_and_mul or _supports_no_act_and_mul())
+        and _supports_activation(moe_config.activation)
+        and _supports_quant_scheme(moe_quant_scheme)
+        and _supports_moe_parallel_config(moe_config.moe_parallel_config)
+    )
 
 
 def flashinfer_fused_moe_blockscale_fp8(

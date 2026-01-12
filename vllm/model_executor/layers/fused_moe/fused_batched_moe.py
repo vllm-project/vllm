@@ -4,9 +4,12 @@
 
 import torch
 
-from vllm.platforms import current_platform
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
-from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
+from vllm.model_executor.layers.fused_moe.config import (
+    FusedMoEParallelConfig,
+    FusedMoEQuantConfig,
+    FusedMoEQuantScheme,
+)
 from vllm.model_executor.layers.fused_moe.fused_moe import try_get_optimal_moe_config
 from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceDelegate,
@@ -18,7 +21,7 @@ from vllm.model_executor.layers.fused_moe.utils import (
     normalize_batched_scales_shape,
     normalize_scales_shape,
 )
-from vllm.model_executor.layers.quantization.utils.quant_utils import group_broadcast
+from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 
 
@@ -714,38 +717,38 @@ class BatchedTritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
         self.max_num_tokens = max_num_tokens
         self.num_dispatchers = num_dispatchers
 
-    @property
-    def activation_formats(
-        self,
-    ) -> tuple[mk.FusedMoEActivationFormat, mk.FusedMoEActivationFormat]:
-        return (
-            mk.FusedMoEActivationFormat.BatchedExperts,
-            mk.FusedMoEActivationFormat.BatchedExperts,
-        )
-    
-    def supports_current_device(self) -> bool:
+    @staticmethod
+    def activation_format() -> mk.FusedMoEActivationFormat:
+        return mk.FusedMoEActivationFormat.BatchedExperts
+
+    @staticmethod
+    def _supports_current_device() -> bool:
         return current_platform.is_cuda_alike()
 
-    def supports_no_act_and_mul(self) -> bool:
+    @staticmethod
+    def _supports_no_act_and_mul() -> bool:
         return False
 
-    def supports_quant_config(self, quant_config: FusedMoEQuantConfig) -> bool:
+    @staticmethod
+    def _supports_quant_scheme(quant_scheme: FusedMoEQuantScheme) -> bool:
         # Supports unquantized and fp8.
         # TODO(rob): allow int4 (for kimi --- no, we have marlinexperts for this.
-        if not (
-            quant_config.use_fp8_w8a8 or 
-            quant_config.quant_dtype == None # TODO: how to express unquantized?
-        ):
-            return False
-        
-        if quant_config.use_fp8_w8a8:
-            return (current_platform.is_rocm or 
-                    current_platform.has_device_capability(9,0))
+        if quant_scheme.is_unquantized:
+            return True
 
-    def supports_act_fn(self, activation: str) -> bool:
+        if quant_scheme.is_fp8_w8a8:
+            return current_platform.is_rocm() or current_platform.has_device_capability(
+                (9, 0)
+            )
+
+        return False
+
+    @staticmethod
+    def _supports_activation(activation: str) -> bool:
         return activation in ["silu", "gelu", "swigluoai"]
 
-    def supports_ep(self) -> bool:
+    @staticmethod
+    def _supports_parallel_config(moe_parallel_config: FusedMoEParallelConfig) -> bool:
         return True
 
     def supports_chunking(self) -> bool:

@@ -9,7 +9,11 @@ import torch
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm import _custom_ops as ops
 from vllm.logger import init_logger
-from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
+from vllm.model_executor.layers.fused_moe.config import (
+    FusedMoEParallelConfig,
+    FusedMoEQuantConfig,
+    FusedMoEQuantScheme,
+)
 from vllm.model_executor.layers.fused_moe.moe_permute_unpermute import (
     moe_permute,
     moe_unpermute,
@@ -22,6 +26,7 @@ from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceNoOP,
 )
 from vllm.model_executor.layers.fused_moe.utils import _resize_cache
+from vllm.platforms import current_platform
 from vllm.scalar_type import scalar_types
 
 logger = init_logger(__name__)
@@ -259,6 +264,33 @@ class CutlassExpertsFp8Base(mk.FusedMoEPermuteExpertsUnpermute):
         self.c_strides1 = c_strides1
         self.c_strides2 = ab_strides1_c_strides2
 
+    @staticmethod
+    def _supports_current_device() -> bool:
+        return current_platform.is_cuda() and current_platform.has_device_capability(
+            9, 0
+        )
+
+    @staticmethod
+    def _supports_no_act_and_mul() -> bool:
+        return False
+
+    @staticmethod
+    def _supports_quant_scheme(quant_scheme: FusedMoEQuantScheme) -> bool:
+        if not current_platform.has_device_capability((9, 0)):
+            return False
+
+        return quant_scheme.is_fp8_w8a8 and (
+            quant_scheme.per_tensor_quant or quant_scheme.per_token_quant
+        )
+
+    @staticmethod
+    def _supports_activation(activation: str) -> bool:
+        return activation in ["silu"]
+
+    @staticmethod
+    def _supports_parallel_config(moe_parallel_config: FusedMoEParallelConfig) -> bool:
+        return True
+
     def finalize_weight_and_reduce_impl(self) -> mk.TopKWeightAndReduce:
         # Let PrepareAndFinalize::finalize() decide the impl.
         return TopKWeightAndReduceDelegate()
@@ -291,7 +323,7 @@ class CutlassExpertsFp8Base(mk.FusedMoEPermuteExpertsUnpermute):
         activation_callable = lambda o, i: self.activation(activation, o, i)
 
         use_batched_format = (
-            self.activation_formats[0] == mk.FusedMoEActivationFormat.BatchedExperts
+            self.activation_format() == mk.FusedMoEActivationFormat.BatchedExperts
         )
 
         in_dtype = hidden_states.dtype
@@ -324,14 +356,9 @@ class CutlassExpertsFp8Base(mk.FusedMoEPermuteExpertsUnpermute):
 
 
 class CutlassExpertsFp8(CutlassExpertsFp8Base):
-    @property
-    def activation_formats(
-        self,
-    ) -> tuple[mk.FusedMoEActivationFormat, mk.FusedMoEActivationFormat]:
-        return (
-            mk.FusedMoEActivationFormat.Standard,
-            mk.FusedMoEActivationFormat.Standard,
-        )
+    @staticmethod
+    def activation_format() -> mk.FusedMoEActivationFormat:
+        return mk.FusedMoEActivationFormat.Standard
 
     def supports_chunking(self) -> bool:
         return True
@@ -375,14 +402,9 @@ class CutlassBatchedExpertsFp8(CutlassExpertsFp8Base):
         self.max_experts_per_worker = max_experts_per_worker
         self.num_dispatchers = num_dispatchers
 
-    @property
-    def activation_formats(
-        self,
-    ) -> tuple[mk.FusedMoEActivationFormat, mk.FusedMoEActivationFormat]:
-        return (
-            mk.FusedMoEActivationFormat.BatchedExperts,
-            mk.FusedMoEActivationFormat.BatchedExperts,
-        )
+    @staticmethod
+    def activation_format() -> mk.FusedMoEActivationFormat:
+        return mk.FusedMoEActivationFormat.BatchedExperts
 
     def supports_chunking(self) -> bool:
         return False
@@ -592,27 +614,14 @@ class CutlassExpertsFp4(mk.FusedMoEPermuteExpertsUnpermute):
         max_experts_per_worker: int,
         out_dtype: torch.dtype,
         quant_config: FusedMoEQuantConfig,
-        use_batched_format: bool = False,
     ):
         super().__init__(quant_config)
         self.max_experts_per_worker = max_experts_per_worker
         self.out_dtype = out_dtype
-        self.use_batched_format = use_batched_format
 
-    @property
-    def activation_formats(
-        self,
-    ) -> tuple[mk.FusedMoEActivationFormat, mk.FusedMoEActivationFormat]:
-        if self.use_batched_format:
-            return (
-                mk.FusedMoEActivationFormat.BatchedExperts,
-                mk.FusedMoEActivationFormat.BatchedExperts,
-            )
-        else:
-            return (
-                mk.FusedMoEActivationFormat.Standard,
-                mk.FusedMoEActivationFormat.Standard,
-            )
+    @staticmethod
+    def activation_format() -> mk.FusedMoEActivationFormat:
+        return mk.FusedMoEActivationFormat.Standard
 
     def supports_expert_map(self) -> bool:
         return False
@@ -636,17 +645,9 @@ class CutlassExpertsFp4(mk.FusedMoEPermuteExpertsUnpermute):
         local_num_experts: int,
         expert_tokens_meta: mk.ExpertTokensMetadata | None,
     ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...]]:
-        workspace1: tuple[int, ...] = ()
-        workspace2: tuple[int, ...] = ()
-        output: tuple[int, ...] = ()
-        if self.use_batched_format:
-            workspace1 = (self.max_experts_per_worker, M, max(N, K))
-            workspace2 = (self.max_experts_per_worker, M, (N // 2))
-            output = (self.max_experts_per_worker, M, K)
-        else:
-            workspace1 = (M * topk, max(2 * N, K))
-            workspace2 = (M * topk, N)
-            output = (M, K)
+        workspace1 = (M * topk, max(2 * N, K))
+        workspace2 = (M * topk, N)
+        output = (M, K)
         return (workspace1, workspace2, output)
 
     def apply(
@@ -865,14 +866,34 @@ class CutlassExpertsW4A8Fp8(mk.FusedMoEPermuteExpertsUnpermute):
         self.s_strides2 = s_strides2
         self.group_size = group_size
 
-    @property
-    def activation_formats(
-        self,
-    ) -> tuple[mk.FusedMoEActivationFormat, mk.FusedMoEActivationFormat]:
-        return (
-            mk.FusedMoEActivationFormat.Standard,
-            mk.FusedMoEActivationFormat.Standard,
+    @staticmethod
+    def activation_format() -> mk.FusedMoEActivationFormat:
+        return mk.FusedMoEActivationFormat.Standard
+
+    @staticmethod
+    def _supports_current_device() -> bool:
+        return current_platform.is_cuda() and current_platform.has_device_capability(
+            (9, 0)
         )
+
+    @staticmethod
+    def _supports_no_act_and_mul() -> bool:
+        return False
+
+    @staticmethod
+    def _supports_quant_scheme(quant_scheme: FusedMoEQuantScheme) -> bool:
+        return True
+        # quant_scheme.is_fp8_w8a8
+        # # or quant_scheme.is_mxfp4_w4a4
+        # or quant_scheme.is_unquantized
+
+    @staticmethod
+    def _supports_activation(activation: str) -> bool:
+        return activation in ["silu", "gelu"]
+
+    @staticmethod
+    def _supports_parallel_config(moe_parallel_config: FusedMoEParallelConfig) -> bool:
+        return True
 
     def supports_chunking(self) -> bool:
         return True
@@ -927,7 +948,7 @@ class CutlassExpertsW4A8Fp8(mk.FusedMoEPermuteExpertsUnpermute):
         activation_callable = lambda o, i: self.activation(activation, o, i)
 
         use_batched_format = (
-            self.activation_formats[0] == mk.FusedMoEActivationFormat.BatchedExperts
+            self.activation_format() == mk.FusedMoEActivationFormat.BatchedExperts
         )
         assert not use_batched_format, "batched format not supported"
 

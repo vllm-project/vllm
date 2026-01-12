@@ -5,7 +5,11 @@
 import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
-from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
+from vllm.model_executor.layers.fused_moe.config import (
+    FusedMoEParallelConfig,
+    FusedMoEQuantConfig,
+    FusedMoEQuantScheme,
+)
 from vllm.model_executor.layers.fused_moe.cutlass_moe import CutlassExpertsFp8
 from vllm.model_executor.layers.fused_moe.fallback import FallbackExperts
 from vllm.model_executor.layers.fused_moe.fused_moe import TritonExperts
@@ -29,6 +33,30 @@ class TritonOrCutlassExperts(FallbackExperts):
             experts=CutlassExpertsFp8(e, n, k, out_dtype, quant_config, device),
             fallback_experts=TritonExperts(quant_config),
         )
+
+    @staticmethod
+    def activation_format() -> mk.FusedMoEActivationFormat:
+        return CutlassExpertsFp8.activation_format()
+
+    @staticmethod
+    def _supports_current_device() -> bool:
+        return CutlassExpertsFp8._supports_current_device()
+
+    @staticmethod
+    def _supports_no_act_and_mul() -> bool:
+        return CutlassExpertsFp8._supports_no_act_and_mul()
+
+    @staticmethod
+    def _supports_quant_scheme(quant_scheme: FusedMoEQuantScheme) -> bool:
+        return CutlassExpertsFp8._supports_quant_scheme(quant_scheme)
+
+    @staticmethod
+    def _supports_activation(activation: str) -> bool:
+        return CutlassExpertsFp8._supports_activation(activation)
+
+    @staticmethod
+    def _supports_parallel_config(moe_parallel_config: FusedMoEParallelConfig) -> bool:
+        return CutlassExpertsFp8._supports_parallel_config(moe_parallel_config)
 
     def workspace_shapes(
         self,

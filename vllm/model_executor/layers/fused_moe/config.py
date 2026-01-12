@@ -121,6 +121,52 @@ class RoutingMethodType(IntEnum):
     Unspecified = 6.0
 
 
+UNQUANTIZED_DTYPES = [torch.bfloat16, torch.float16, torch.float32]
+
+
+@dataclass
+class FusedMoEQuantScheme:
+    weight_dtype: torch.dtype | str | None
+    act_dtype: torch.dtype | str | None
+    per_token_quant: bool
+    per_tensor_quant: bool
+    block_size: tuple[int, int] | None
+
+    def __post_init__(self):
+        if self.per_tensor_quant:
+            assert not self.per_token_quant
+            assert not self.per_block_quant
+        elif self.per_token_quant:
+            assert not self.per_tensor_quant
+            assert not self.per_block_quant
+        elif self.per_block_quant:
+            assert not self.per_tensor_quant
+            assert not self.per_token_quant
+            assert self.block_size is not None
+        assert self.per_block_quant or self.per_token_quant or self.per_tensor_quant
+        if self.is_unquantized:
+            assert self.act_dtype in UNQUANTIZED_DTYPES
+
+    @property
+    def per_block_quant(self) -> bool:
+        return self.block_size is not None
+
+    @property
+    def is_unquantized(self) -> bool:
+        return self.weight_dtype in UNQUANTIZED_DTYPES
+
+    @property
+    def is_fp8_w8a8(self) -> bool:
+        return (
+            self.weight_dtype == current_platform.fp8_dtype()
+            and self.act_dtype == current_platform.fp8_dtype()
+        )
+
+    @property
+    def is_nvfp4_w4a4(self) -> bool:
+        return self.weight_dtype == "nvfp4" and self.act_dtype == "nvfp4"
+
+
 @dataclass
 class FusedMoEQuantDesc:
     """
@@ -1043,6 +1089,8 @@ class FusedMoEConfig:
     is_act_and_mul: bool = True
 
     is_lora_enabled: bool = False
+
+    activation: str = "silu"
 
     def __post_init__(self):
         if self.dp_size > 1:

@@ -27,6 +27,7 @@ from vllm.model_executor.layers.fused_moe import (
 )
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEQuantConfig,
+    FusedMoEQuantScheme,
     RoutingMethodType,
 )
 from vllm.model_executor.layers.fused_moe.fused_moe_router import FusedMoERouter
@@ -633,34 +634,25 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         self.weight_scale_name = (
             "weight_scale_inv" if self.block_quant else "weight_scale"
         )
-        self.fp8_backend = select_fp8_moe_backend(
-            block_quant=self.block_quant,
-            tp_size=layer.moe_parallel_config.tp_size,
-            with_lora_support=self.moe.is_lora_enabled,
+
+        quant_scheme = FusedMoEQuantScheme(
+            weight_dtype=current_platform.fp8_dtype(),
+            act_dtype=current_platform.fp8_dtype(),
+            per_tensor_quant=not self.block_quant,
+            per_token_quant=False,
+            block_size=(
+                (self.weight_block_size[0], self.weight_block_size[1])
+                if self.weight_block_size is not None
+                else None
+            ),
         )
 
-        if self.fp8_backend == Fp8MoeBackend.FLASHINFER_CUTLASS:
-            if self.block_quant and self.weight_block_size != [128, 128]:
-                raise NotImplementedError(
-                    "FlashInfer CUTLASS FP8 MoE backend only supports block "
-                    "size [128, 128]."
-                )
-            if layer.activation != "silu":
-                raise NotImplementedError(
-                    "FlashInfer CUTLASS FP8 MoE backend only supports SiLU "
-                    "activation function, but got {layer.activation}."
-                )
-        dynamic_per_token = (
-            not self.block_quant and self.quant_config.activation_scheme != "static"
+        self.fp8_backend, self.experts_cls = select_fp8_moe_backend(
+            config=layer.moe_config,
+            quant_scheme=quant_scheme,
+            # TODO(rob): select prepare_finalize here.
+            activation_format=mk.FusedMoEActivationFormat.Standard,
         )
-        if dynamic_per_token and self.fp8_backend in [
-            Fp8MoeBackend.FLASHINFER_TRTLLM,
-            Fp8MoeBackend.FLASHINFER_CUTLASS,
-        ]:
-            raise NotImplementedError(
-                "FlashInfer FP8 MoE backend does not support dynamic per token "
-                "activation quantization."
-            )
 
         self.kernel: mk.FusedMoEModularKernel | None = None
 

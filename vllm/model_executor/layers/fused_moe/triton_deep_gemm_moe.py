@@ -4,7 +4,11 @@
 import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
-from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
+from vllm.model_executor.layers.fused_moe.config import (
+    FusedMoEParallelConfig,
+    FusedMoEQuantConfig,
+    FusedMoEQuantScheme,
+)
 from vllm.model_executor.layers.fused_moe.deep_gemm_moe import (
     DeepGemmExperts,
     _valid_deep_gemm,
@@ -25,6 +29,31 @@ class TritonOrDeepGemmExperts(FallbackExperts):
             experts=DeepGemmExperts(quant_config),
             fallback_experts=TritonExperts(quant_config),
         )
+
+    @staticmethod
+    def activation_format() -> mk.FusedMoEActivationFormat:
+        assert DeepGemmExperts.activation_format() == TritonExperts.activation_format()
+        return DeepGemmExperts.activation_format()
+
+    @staticmethod
+    def _supports_current_device() -> bool:
+        return DeepGemmExperts._supports_current_device()
+
+    @staticmethod
+    def _supports_no_act_and_mul() -> bool:
+        return DeepGemmExperts._supports_no_act_and_mul()
+
+    @staticmethod
+    def _supports_quant_scheme(quant_scheme: FusedMoEQuantScheme) -> bool:
+        return DeepGemmExperts._supports_quant_scheme(quant_scheme)
+
+    @staticmethod
+    def _supports_activation(activation: str) -> bool:
+        return DeepGemmExperts._supports_activation(activation)
+
+    @staticmethod
+    def _supports_parallel_config(moe_parallel_config: FusedMoEParallelConfig) -> bool:
+        return DeepGemmExperts._supports_parallel_config(moe_parallel_config)
 
     def workspace_shapes(
         self,

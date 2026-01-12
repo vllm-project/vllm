@@ -3,49 +3,23 @@
 
 import torch
 
-from vllm.platforms import current_platform
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.logger import init_logger
-from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
-from vllm.model_executor.layers.fused_moe.flashinfer_cutlass_prepare_finalize import (  # noqa: E501
-    create_flashinfer_prepare_finalize,
+from vllm.model_executor.layers.fused_moe.config import (
+    FusedMoEParallelConfig,
+    FusedMoEQuantConfig,
+    FusedMoEQuantScheme,
 )
 from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceNoOP,
 )
+from vllm.platforms import current_platform
 from vllm.utils.flashinfer import (
     flashinfer_cutlass_fused_moe,
     has_flashinfer_cutlass_fused_moe,
 )
 
 logger = init_logger(__name__)
-
-
-def is_valid_flashinfer_cutlass_fused_moe(
-    hidden_states: torch.Tensor, w1: torch.Tensor, w2: torch.Tensor
-) -> bool:
-    """
-    Check if the given problem size is supported by the FlashInfer CUTLASS MoE
-    kernel.
-    """
-    if not has_flashinfer_cutlass_fused_moe():
-        logger.debug_once(
-            "FlashInferExperts disabled: flashinfer_cutlass_fused_moe not available."
-        )
-        return False
-    # Data type checks
-    if (
-        w1.dtype != torch.uint8
-        or w2.dtype != torch.uint8
-        or hidden_states.dtype not in [torch.float32, torch.float16, torch.bfloat16]
-    ):
-        logger.debug_once(
-            "FlashInferExperts disabled: w1/w2 must be torch.uint8 "
-            f"(got w1={w1.dtype}, w2={w2.dtype}), hidden_states must be "
-            f"float32, float16, or bfloat16 (got {hidden_states.dtype})."
-        )
-        return False
-    return True
 
 
 class FlashInferExperts(mk.FusedMoEPermuteExpertsUnpermute):
@@ -75,52 +49,51 @@ class FlashInferExperts(mk.FusedMoEPermuteExpertsUnpermute):
         # - pass per-block weight scales to the kernel
         # - skip input activation quantization (kernel applies scaling)
         self.use_deepseek_fp8_block_scale = use_deepseek_fp8_block_scale
-    
-    def supports_current_device(self) -> bool:
+
+    @staticmethod
+    def _supports_current_device() -> bool:
         return (
-            current_platform.is_cuda() and
-            current_platform.has_device_capability(9,0)
+            current_platform.is_cuda()
+            and current_platform.has_device_capability((9, 0))
+            and has_flashinfer_cutlass_fused_moe()
         )
-    
-    def supports_no_act_and_mul(self) -> bool:
+
+    @staticmethod
+    def _supports_no_act_and_mul() -> bool:
         return False
 
-    def supports_quant_config(self, quant_config: FusedMoEQuantConfig) -> bool:
-        # Supports unquantized, fp8, and nvfp4.
-        if not (
-            quant_config.use_nvfp4_w4a4 or
-            quant_config.use_fp8_w8a8 or 
-            quant_config.quant_dtype == None # TODO: how to express unquantized?
-        ):
-            return False
-        
-        # For FP8, only support static per tensor or DeepGEMM SwapAB for hopper.
-        if quant_config.use_fp8_w8a8:
-            if quant_config.is_per_tensor:
-                return True
-            elif quant_config.is_per_act_token:
-                return False
-            elif quant_config.is_block_quantized:
-                if (current_platform.is_cuda and current_platform.is_device_capability(9,0) and quant_config.block_shape[0] == 128 and quant_config.block_shape[1] == 128):
-                    return True
-            return False
-        
-        return True
+    @staticmethod
+    def _supports_quant_scheme(quant_scheme: FusedMoEQuantScheme) -> bool:
+        # Supports:
+        # * unquantized
+        # * fp8 per-tensor on 9.0+
+        # * fp8 block on 9.0
+        # * nvfp4 on 10.0+
+        return (
+            (quant_scheme.is_unquantized)
+            or (quant_scheme.is_fp8_w8a8 and quant_scheme.per_tensor_quant)
+            or (
+                quant_scheme.is_fp8_w8a8
+                and quant_scheme.block_size == [128, 128]
+                and current_platform.is_device_capability((9, 0))
+            )
+            or (
+                quant_scheme.is_nvfp4_w4a4
+                and current_platform.has_device_capability((10, 0))
+            )
+        )
 
-    def supports_act_fn(self, activation: str) -> bool:
+    @staticmethod
+    def _supports_activation(activation: str) -> bool:
         return activation in ["silu", "relu2_no_mul"]
 
-    def supports_ep(self) -> bool:
+    @staticmethod
+    def _supports_parallel_config(moe_parallel_config: FusedMoEParallelConfig) -> bool:
         return True
 
-    @property
-    def activation_formats(
-        self,
-    ) -> tuple[mk.FusedMoEActivationFormat, mk.FusedMoEActivationFormat]:
-        return (
-            mk.FusedMoEActivationFormat.Standard,
-            mk.FusedMoEActivationFormat.Standard,
-        )
+    @staticmethod
+    def activation_format() -> mk.FusedMoEActivationFormat:
+        return mk.FusedMoEActivationFormat.Standard
 
     def supports_expert_map(self) -> bool:
         return False
