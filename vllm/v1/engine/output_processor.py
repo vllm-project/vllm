@@ -496,7 +496,9 @@ class OutputProcessor:
         req_state = self.request_states[request.request_id]
         if req_state.prompt and prompt:
             req_state.prompt += prompt
-        if req_state.prompt_token_ids is not None and request.prompt_token_ids:
+        if request.prompt_token_ids:
+            if req_state.prompt_token_ids is None:
+                req_state.prompt_token_ids = []
             req_state.prompt_token_ids.extend(request.prompt_token_ids)
         if req_state.prompt_embeds is not None and request.prompt_embeds is not None:
             req_state.prompt_embeds = torch.cat(

@@ -1547,12 +1547,13 @@ class Scheduler(SchedulerInterface):
         existing = self.requests.get(request.request_id)
         if existing is not None and existing.streaming_queue is not None:
             existing.streaming_queue.append(StreamingUpdate.from_request(request))
+            if self.log_stats:
+                existing.record_event(EngineCoreEventType.QUEUED)
         else:
             self.waiting.add_request(request)
             self.requests[request.request_id] = request
-
-        if self.log_stats:
-            request.record_event(EngineCoreEventType.QUEUED)
+            if self.log_stats:
+                request.record_event(EngineCoreEventType.QUEUED)
 
     def finish_requests(
         self, request_ids: str | Iterable[str], finished_status: RequestStatus
