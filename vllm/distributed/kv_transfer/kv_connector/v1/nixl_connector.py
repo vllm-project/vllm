@@ -68,6 +68,7 @@ if TYPE_CHECKING:
 
 TransferHandle = int
 ReqId = str
+BlockIds = list[int] | tuple[list[int], ...]
 
 #
 # NIXL Connector Version
@@ -237,7 +238,8 @@ def compute_nixl_compatibility_hash(
 
 @dataclass
 class RemoteMeta:
-    block_ids: tuple[list[int], ...]
+    # Non-HMA | HMA blocks
+    block_ids: BlockIds
     host: str
     port: int
     engine_id: str
@@ -246,9 +248,9 @@ class RemoteMeta:
 
 @dataclass
 class ReqMeta:
-    local_block_ids: tuple[list[int], ...]
+    local_block_ids: BlockIds
     # To be used when logical block size does not match the kernel block size
-    local_physical_block_ids: tuple[list[int], ...]
+    local_physical_block_ids: BlockIds
     tp_size: int
     remote: RemoteMeta | None = None
 
@@ -263,7 +265,7 @@ class NixlConnectorMetadata(KVConnectorMetadata):
 
     def _add_new_req(
         self,
-        local_block_ids: list[int],
+        local_block_ids: BlockIds,
         kv_transfer_params: dict[str, Any],
     ) -> ReqMeta:
         return ReqMeta(
@@ -276,7 +278,7 @@ class NixlConnectorMetadata(KVConnectorMetadata):
     def add_new_req_to_save(
         self,
         request_id: ReqId,
-        local_block_ids: tuple[list[int], ...],
+        local_block_ids: BlockIds,
         kv_transfer_params: dict[str, Any],
     ):
         self.reqs_to_save[request_id] = self._add_new_req(
@@ -286,7 +288,7 @@ class NixlConnectorMetadata(KVConnectorMetadata):
     def add_new_req_to_recv(
         self,
         request_id: ReqId,
-        local_block_ids: list[int],
+        local_block_ids: BlockIds,
         kv_transfer_params: dict[str, Any],
     ):
         req = self._add_new_req(local_block_ids, kv_transfer_params)
@@ -326,7 +328,7 @@ class NixlConnector(KVConnectorBase_V1, SupportsHMA):
         self,
         vllm_config: VllmConfig,
         role: KVConnectorRole,
-        kv_cache_config: "KVCacheConfig | None" = None,
+        kv_cache_config: KVCacheConfig,
     ):
         super().__init__(vllm_config, role, kv_cache_config)
         print("NixlConnector init", kv_cache_config.kv_cache_groups, "\n", flush=True)
@@ -342,7 +344,7 @@ class NixlConnector(KVConnectorBase_V1, SupportsHMA):
             self.connector_worker: NixlConnectorWorker | None = None
         elif role == KVConnectorRole.WORKER:
             self.connector_scheduler = None
-            self.connector_worker = NixlConnectorWorker(vllm_config, self.engine_id)
+            self.connector_worker = NixlConnectorWorker(vllm_config, self.engine_id, kv_cache_config)
 
     ############################################################
     # Class Methods
@@ -398,6 +400,7 @@ class NixlConnector(KVConnectorBase_V1, SupportsHMA):
         request: "Request",
         block_ids: list[int],
     ) -> tuple[bool, dict[str, Any] | None]:
+        # Hybrid memory allocator (HMA) disabled
         assert self.connector_scheduler is not None
         return self.connector_scheduler.request_finished(request, block_ids)
     
@@ -406,10 +409,12 @@ class NixlConnector(KVConnectorBase_V1, SupportsHMA):
         request: "Request",
         block_ids: tuple[list[int], ...],
     ) -> tuple[bool, dict[str, Any] | None]:
+        # Hybrid memory allocator (HMA) enabled
         print(
             f"request_finished_all_groups: {request.request_id}, {block_ids}",
             flush=True,
         )
+        assert self.connector_scheduler is not None
         return self.connector_scheduler.request_finished(request, block_ids)
 
 
@@ -531,7 +536,7 @@ class NixlConnector(KVConnectorBase_V1, SupportsHMA):
 class NixlConnectorScheduler:
     """Implementation of Scheduler side methods"""
 
-    def __init__(self, vllm_config: VllmConfig, engine_id: str, kv_cache_config: Optional["KVCacheConfig"] = None):
+    def __init__(self, vllm_config: VllmConfig, engine_id: str, kv_cache_config: KVCacheConfig):
         self.vllm_config = vllm_config
         self.block_size = vllm_config.cache_config.block_size
         self.engine_id: EngineId = engine_id
@@ -548,6 +553,7 @@ class NixlConnectorScheduler:
             self.use_host_buffer = (
                 vllm_config.kv_transfer_config.kv_buffer_device == "cpu"
             )
+        self._is_hma_enabled = not vllm_config.scheduler_config.disable_hybrid_kv_cache_manager
 
         logger.info("Initializing NIXL Scheduler %s", engine_id)
 
@@ -568,8 +574,8 @@ class NixlConnectorScheduler:
         # remote prefill or aborted.
         self._reqs_not_processed: set[ReqId] = set()
 
-        # Gather Sliding Window sizes for each kv cache group (if any) 
-        # in number of blocks per SW group.
+        # Gather Sliding Window sizes for each kv cache group (if any) in number of 
+        # blocks per KV cache group. This is used to clip the local attention window.
         sw_sizes_tokens = [group.kv_cache_spec.sliding_window if isinstance(group.kv_cache_spec, SlidingWindowSpec) else 0 for group in kv_cache_config.kv_cache_groups]
         self.sw_sizes = [n_tokens // self.block_size for n_tokens in sw_sizes_tokens]
         print(f"sw_sizes: {self.sw_sizes}\n", flush=True)
@@ -581,7 +587,7 @@ class NixlConnectorScheduler:
             self._nixl_handshake_listener_t = None
 
     
-    def get_sw_clippped_blocks(self, block_ids: tuple[list[int], ...]) -> tuple[list[int], ...]:
+    def get_sw_clippped_blocks(self, block_ids: BlockIds) -> BlockIds:
         """
         Clip the number of blocks to the sliding window size for each kv cache group 
         that employs SWA. 
@@ -589,6 +595,9 @@ class NixlConnectorScheduler:
         the entire sequence length, and successively cleans up blocks that are outside
         the window prior to the `request_finished_all_groups` hook.
         """
+        if len(block_ids) == 0 or not self._is_hma_enabled:
+            # No blocks to clip eg Full prefix cache hit
+            return block_ids
         # NOTE (NickLucche) This logic is currently handled at the connector level 
         # because offloading connectors might want to receive the whole sequence even
         # for SWA groups. We will abstract this logic once the interface is more stable
@@ -745,7 +754,6 @@ class NixlConnectorScheduler:
                     # a full prefix cache hit on the D worker. We need to call
                     # send_notif in _read_blocks to free the memory on the P.
 
-                    # TODO sync with Chen on prefix cache + HMA
                     local_block_ids = (
                         blocks.get_unhashed_block_ids_all_groups()
                         if num_external_tokens > 0
@@ -756,7 +764,8 @@ class NixlConnectorScheduler:
                         f"update_state_after_alloc local_block_ids unhashed: {local_block_ids}\n",
                         flush=True,
                     )
-                    # Get unhashed blocks to pull from remote.
+                    # Get unhashed blocks to pull from remote. Mind that a full prefix
+                    # cache hit is indicated with an empty list.
                     self._reqs_need_recv[request.request_id] = (
                         request,
                         local_block_ids,
@@ -834,7 +843,7 @@ class NixlConnectorScheduler:
     def request_finished(
         self,
         request: "Request",
-        block_ids: list[int] | tuple[list[int], ...],
+        block_ids: BlockIds,
     ) -> tuple[bool, dict[str, Any] | None]:
         """
         Once a request is finished, determine whether request blocks
@@ -877,8 +886,7 @@ class NixlConnectorScheduler:
         # TODO: check whether block_ids actually ever be 0. If not we could
         # remove the conditional below
         print(f"request_finished block_ids: {block_ids}\n\n", flush=True)
-        if isinstance(block_ids, tuple):
-            # FIXME just use kvcache_config to figure out if hma is on
+        if self._is_hma_enabled:
             delay_free_blocks = any(len(group) > 0 for group in block_ids)
         else:
             delay_free_blocks = len(block_ids) > 0
@@ -916,7 +924,7 @@ class NixlConnectorScheduler:
 class NixlConnectorWorker:
     """Implementation of Worker side methods"""
 
-    def __init__(self, vllm_config: VllmConfig, engine_id: str):
+    def __init__(self, vllm_config: VllmConfig, engine_id: str, kv_cache_config: KVCacheConfig):
         if NixlWrapper is None:
             logger.error("NIXL is not available")
             raise RuntimeError("NIXL is not available")
@@ -934,6 +942,8 @@ class NixlConnectorWorker:
         self.nixl_backends = vllm_config.kv_transfer_config.get_from_extra_config(
             "backends", ["UCX"]
         )
+        self._is_hma_enabled = not vllm_config.scheduler_config.disable_hybrid_kv_cache_manager
+        self.kv_cache_config = kv_cache_config
 
         # Agent.
         non_ucx_backends = [b for b in self.nixl_backends if b != "UCX"]
@@ -1790,6 +1800,10 @@ class NixlConnectorWorker:
         # Num kv_heads > tp_size and P TP > D TP case, not supported
         assert not (tp_ratio < 0 and self.kv_topo.is_kv_replicated(remote_engine_id))
 
+        if self._is_hma_enabled:
+            assert block_size_ratio == 1, "HMA does not support different"
+            " remote block size yet"
+
         kv_cache_layout = (
             self.kv_cache_layout
             if not self.use_host_buffer
@@ -2253,8 +2267,8 @@ class NixlConnectorWorker:
 
     def _read_blocks(
         self,
-        local_block_ids: list[int],
-        remote_block_ids: list[int],
+        local_block_ids: BlockIds,
+        remote_block_ids: BlockIds,
         dst_engine_id: str,
         request_id: str,
         remote_request_id: str,
@@ -2301,8 +2315,8 @@ class NixlConnectorWorker:
 
         # Full prefix cache hit: do not need to read remote blocks,
         # just notify P worker that we have the blocks we need.
-        num_local_blocks = len(local_block_ids)
-        if num_local_blocks == 0:
+        if len(local_block_ids) == 0:
+            # A full prefix cache hit is indicated with an empty list.
             agent_name = self._remote_agents[dst_engine_id][remote_rank]
             try:
                 self.nixl_wrapper.send_notif(agent_name, notif_msg=notif_id)
@@ -2321,10 +2335,13 @@ class NixlConnectorWorker:
             return
 
         # Partial prefix cache hit: just read uncomputed blocks.
-        num_remote_blocks = len(remote_block_ids)
-        assert num_local_blocks <= num_remote_blocks
-        if num_local_blocks < num_remote_blocks:
-            remote_block_ids = remote_block_ids[-num_local_blocks:]
+        assert len(remote_block_ids) == len(local_block_ids) == len(self.kv_cache_config.kv_cache_groups)
+        for i, remote_group in enumerate(remote_block_ids):
+            num_remote_blocks = len(remote_group)
+            num_local_blocks = len(local_block_ids[i])
+            assert num_local_blocks <= num_remote_blocks
+            if num_local_blocks < num_remote_blocks:
+                remote_block_ids[i] = remote_group[-num_local_blocks:]
 
         # NOTE (nicolo) With homogeneous TP, each TP worker loads KV from
         # corresponding rank. With heterogeneous TP, fixing D>P, the D tp
@@ -2399,7 +2416,7 @@ class NixlConnectorWorker:
     def _get_block_descs_ids(
         self,
         engine_id: str,
-        block_ids: tuple[list[int], ...],
+        block_ids: BlockIds,
         block_size_ratio: float | None = None,
     ) -> np.ndarray:
         """
@@ -2422,6 +2439,11 @@ class NixlConnectorWorker:
         # Compute the desc ids for each block.
         region_ids = region_ids[:, None]
         block_ids = np.concatenate(block_ids)[None, :]
+        if self._is_hma_enabled:
+            block_ids = np.concatenate(block_ids)[None, :]
+        else:
+            # FIXME check if this can be folded to equivalent concat
+            block_ids = np.array(block_ids)[None, :]
         descs_ids = region_ids * num_blocks + block_ids
         print(
             "get_block_descs_ids num output", len(descs_ids.flatten()), "\n", flush=True
