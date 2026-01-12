@@ -109,12 +109,12 @@ class BertPooler(SequencePooler):
         self.dense = nn.Linear(config.hidden_size, config.hidden_size)
         self.act_fn = nn.Tanh()
 
+        # Use lambdas so that weights are not registered under `self.head`
         self.head = EmbeddingPoolerHead(
-            projector=self.dense,
-            head_dtype=model_config.head_dtype,
+            projector=lambda x: self.dense(x),
+            head_dtype=self.dense.weight.dtype,
             activation=LambdaPoolerActivation(self.act_fn),
         )
-        self.head._parameters.clear()  # Avoid weight loading mismatch
 
 
 class BertEncoder(nn.Module):

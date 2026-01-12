@@ -10,8 +10,9 @@ from vllm.pooling_params import PoolingParams
 
 _T = TypeVar("_T", bound=torch.Tensor | list[torch.Tensor])
 
-ActivationFn = Callable[[_T], _T]
+ProjectorFn = Callable[[torch.Tensor], torch.Tensor]
 ClassifierFn = Callable[[torch.Tensor], torch.Tensor]
+ActivationFn = Callable[[_T], _T]
 
 
 @dataclass(frozen=True)
@@ -28,4 +29,4 @@ class PoolingParamsUpdate:
         params.requires_token_ids = self.requires_token_ids
 
 
-__all__ = ["ActivationFn", "ClassifierFn", "PoolingParamsUpdate"]
+__all__ = ["ActivationFn", "ClassifierFn", "ProjectorFn", "PoolingParamsUpdate"]

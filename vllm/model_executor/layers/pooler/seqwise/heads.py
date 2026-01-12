@@ -7,7 +7,7 @@ from typing import TypeAlias
 import torch
 import torch.nn as nn
 
-from vllm.model_executor.layers.pooler import ActivationFn, ClassifierFn
+from vllm.model_executor.layers.pooler import ActivationFn, ClassifierFn, ProjectorFn
 from vllm.tasks import PoolingTask
 from vllm.v1.pool.metadata import PoolingMetadata
 
@@ -33,8 +33,8 @@ class SequencePoolerHead(nn.Module, ABC):
 class EmbeddingPoolerHead(SequencePoolerHead):
     def __init__(
         self,
-        projector: nn.Module | None = None,
-        head_dtype: str | None = None,
+        projector: ProjectorFn | None = None,
+        head_dtype: torch.dtype | str | None = None,
         activation: ActivationFn | None = None,
     ) -> None:
         super().__init__()
@@ -102,7 +102,7 @@ class ClassifierPoolerHead(SequencePoolerHead):
         self,
         classifier: ClassifierFn | None = None,
         logit_bias: float | None = None,
-        head_dtype: str | None = None,
+        head_dtype: torch.dtype | str | None = None,
         activation: ActivationFn | None = None,
     ) -> None:
         super().__init__()
