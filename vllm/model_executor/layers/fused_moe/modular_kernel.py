@@ -448,7 +448,7 @@ class FusedMoEPermuteExpertsUnpermute(ABC):
     ) -> bool:
         return (
             (cls._supports_current_device())
-            and (not moe_config.is_act_and_mul or cls._supports_no_act_and_mul())
+            and (moe_config.is_act_and_mul or cls._supports_no_act_and_mul())
             and cls._supports_activation(moe_config.activation)
             and cls._supports_quant_scheme(moe_quant_scheme)
             and cls._supports_parallel_config(moe_config.moe_parallel_config)

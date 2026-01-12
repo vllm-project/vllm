@@ -266,9 +266,7 @@ class CutlassExpertsFp8Base(mk.FusedMoEPermuteExpertsUnpermute):
 
     @staticmethod
     def _supports_current_device() -> bool:
-        return current_platform.is_cuda() and current_platform.has_device_capability(
-            9, 0
-        )
+        return current_platform.has_device_capability((9, 0))
 
     @staticmethod
     def _supports_no_act_and_mul() -> bool:
