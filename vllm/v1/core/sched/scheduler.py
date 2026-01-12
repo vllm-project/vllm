@@ -228,7 +228,7 @@ class Scheduler(SchedulerInterface):
         if self.log_stats and vllm_config.observability_config.enable_mfu_metrics:
             self.perf_metrics = ModelMetrics(vllm_config)
 
-        if self.model_config.enable_return_routed_experts:
+        if self.vllm_config.model_config.enable_return_routed_experts:
             assert self.dcp_world_size == 1 and self.pcp_world_size == 1, (
                 "enable_return_routed_experts does not support context parallelism "
                 "(dcp_world_size > 1 or pcp_world_size > 1)"
