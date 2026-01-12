@@ -605,6 +605,7 @@ class VllmConfig:
             elif (
                 self.speculative_config is not None
                 and self.speculative_config.method not in get_args(EagleModelTypes)
+                and self.speculative_config.method not in get_args(NgramGPUTypes)
             ):
                 logger.warning_once(
                     "Async scheduling not supported with %s-based "
