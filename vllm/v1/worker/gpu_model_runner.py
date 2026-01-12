@@ -29,6 +29,7 @@ from vllm.config import (
     CUDAGraphMode,
     VllmConfig,
     get_layers_from_vllm_config,
+    set_current_vllm_config,
     update_config,
 )
 from vllm.distributed.ec_transfer import get_ec_transfer, has_ec_transfer
@@ -4940,7 +4941,8 @@ class GPUModelRunner(
         # NOTE: This must be called BEFORE _get_cudagraph_profiling_info()
         # because initialize_kv_cache() may update cudagraph_mode based on
         # attention backend constraints via _check_and_update_cudagraph_mode().
-        self._init_minimal_kv_cache_for_profiling()
+        with set_current_vllm_config(self.vllm_config):
+            self._init_minimal_kv_cache_for_profiling()
 
         saved_num_cudagraph_captured = compilation_counter.num_cudagraph_captured
 
