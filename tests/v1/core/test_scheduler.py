@@ -3349,3 +3349,28 @@ def test_ec_connector_allocate_encoder_tokens_with_external_load(use_kv_connecto
 # ==============================================================================
 # EPD (Encoder-Prefill-Decode) Encoder-cache-specific tests end
 # ==============================================================================
+
+
+def test_prepend_skipped_requests_order():
+    scheduler = create_scheduler(max_num_seqs=1, use_kv_connector=True)
+    requests = create_requests(num_requests=4)
+    for request in requests:
+        scheduler.add_request(request)
+
+    # 4 requests waiting, capture their order
+    expected_waiting_reqs = list(scheduler.waiting)
+
+    # simulate first 2 waiting requests are waiting for remote KVs
+    for req in expected_waiting_reqs[:2]:
+        req.status = RequestStatus.WAITING_FOR_REMOTE_KVS
+
+    # schedule step
+    # expect the first 2 waiting to be skipped, the third running,
+    # and the fourth waiting
+    scheduler.schedule()
+
+    # pop the third request which is expected to be running
+    expected_waiting_reqs.pop(2)
+
+    # verify waiting order is preserved
+    assert list(scheduler.waiting) == expected_waiting_reqs
