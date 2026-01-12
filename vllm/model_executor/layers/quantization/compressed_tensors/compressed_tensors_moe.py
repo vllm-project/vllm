@@ -115,7 +115,7 @@ class CompressedTensorsMoEMethod(FusedMoEMethodBase):
         quant_config: "CompressedTensorsConfig",  # type: ignore # noqa E501
         layer: torch.nn.Module,
         layer_name: str,
-    ) -> "CompressedTensorsMoEMethod":
+    ) -> FusedMoEMethodBase:
         # FusedMoE was made by combining multiple Linears so need to
         # make sure quantization config for Linear can target it
         quant_config._add_fused_moe_to_target_scheme_map()

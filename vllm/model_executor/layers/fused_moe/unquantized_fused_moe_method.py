@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from collections.abc import Callable
 
 import torch
 import torch.nn.functional as F
@@ -236,7 +237,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase):
                     )
                     assert packed_w2_weight.size() == layer.w2_weight.size()
                     layer.w2_weight.copy_(packed_w2_weight)
-                    self.cpu_fused_moe = cpu_fused_moe.SGLFusedMOE(layer)
+                    self.cpu_fused_moe: Callable = cpu_fused_moe.SGLFusedMOE(layer)
                 else:
                     self.cpu_fused_moe = cpu_fused_moe.CPUFusedMOE(layer)
             else:
