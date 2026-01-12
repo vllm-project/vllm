@@ -4,7 +4,9 @@
 import inspect
 import os
 import pickle
+from collections.abc import Callable, Sequence
 from pathlib import Path
+from typing import Any, Literal
 from unittest.mock import patch
 
 import torch

@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from typing import Any, Literal, get_args
+from typing import Literal, get_args
 
 from pydantic.dataclasses import dataclass
 

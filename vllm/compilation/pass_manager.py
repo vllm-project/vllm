@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import functools
 from collections.abc import Callable
-from typing import Any, ParamSpec, TypeVar
+from typing import ParamSpec, TypeVar
 
 from torch import fx as fx
 
@@ -159,5 +159,4 @@ class PostGradPassManager(CustomGraphPass):  # type: ignore[misc]
         # Include the compile range in the uuid to ensure that inductor
         # recompiles the graph for the new dynamic compile range.
         state["compile_range"] = str(get_pass_context().compile_range)
-        state["passes"] = passes
         return InductorPass.hash_dict(state)
