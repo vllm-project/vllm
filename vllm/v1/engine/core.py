@@ -922,6 +922,7 @@ class EngineCoreProc(EngineCore):
         signal.signal(signal.SIGTERM, signal_handler)
         signal.signal(signal.SIGINT, signal_handler)
 
+        engine_core: EngineCoreProc | None = None
         try:
             vllm_config: VllmConfig = kwargs["vllm_config"]
             parallel_config: ParallelConfig = vllm_config.parallel_config
@@ -968,6 +969,7 @@ class EngineCoreProc(EngineCore):
                 parallel_config.data_parallel_rank = 0
                 engine_core = EngineCoreProc(*args, engine_index=dp_rank, **kwargs)
 
+            assert engine_core is not None
             engine_core.run_busy_loop()
 
         except SystemExit:

@@ -742,6 +742,15 @@ class WorkerProc:
 
         try:
             reader.close()
+
+            # Initialize tracer
+            rank = kwargs.get("rank", 0)
+            maybe_init_worker_tracer(
+                instrumenting_module_name="vllm.worker",
+                process_kind="worker",
+                process_name=f"Worker_{rank}",
+            )
+
             worker = WorkerProc(*args, **kwargs)
             assert worker.worker_response_mq is not None
 
@@ -889,12 +898,6 @@ class WorkerProc:
             process_name += f"_EP{ep_rank}"
         set_process_title(name=process_name)
         decorate_logs(process_name)
-
-        maybe_init_worker_tracer(
-            instrumenting_module_name="vllm.worker",
-            process_kind="worker",
-            process_name=process_name,
-        )
 
 
 def set_multiprocessing_worker_envs():

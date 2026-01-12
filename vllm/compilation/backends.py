@@ -732,12 +732,12 @@ class VllmBackend:
     def _run_inductor_compilation(
         self,
         submod_names_to_compile: list[str],
-        example_inputs,
+        fake_inputs,
     ) -> None:
-        """Run the Inductor compilation phase."""
+        """Run the Inductor compilation phase with fake/symbolic inputs."""
         PiecewiseCompileInterpreter(
             self.split_gm, submod_names_to_compile, self.vllm_config, self
-        ).run(*example_inputs)
+        ).run(*fake_inputs)
 
     def configure_post_pass(self) -> None:
         self.pass_manager.configure(self.vllm_config)
@@ -998,7 +998,7 @@ class VllmBackend:
 
         # propagate the split graph to the piecewise backend,
         # compile submodules with symbolic shapes
-        self._run_inductor_compilation(submod_names_to_compile, example_inputs)
+        self._run_inductor_compilation(submod_names_to_compile, fake_args)
 
         from torch._guards import detect_fake_mode
 

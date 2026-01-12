@@ -52,6 +52,7 @@ except ImportError:
     Tracer = Any  # type: ignore
     inject = None  # type: ignore
     Resource = None  # type: ignore
+    SpanKind = Any  # type: ignore
 
 
 def is_otel_available() -> bool:
@@ -99,8 +100,7 @@ def get_span_exporter(endpoint):
     elif protocol == "http/protobuf":
         exporter = OTLPHttpExporter(endpoint=endpoint)
     else:
-        logger.error("Unsupported OTLP protocol '%s'", protocol)
-        return None
+        raise ValueError(f"Unsupported OTLP protocol '{protocol}' is configured")
     return exporter
 
 
