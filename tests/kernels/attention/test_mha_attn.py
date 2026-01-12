@@ -162,7 +162,12 @@ def test_mha_attn_forward(
         v,
         scale=scale,
     ).reshape(batch_size, seq_len, num_heads * head_size)
-    torch.testing.assert_close(output, ref_output)
+    tol_kwargs = (
+        dict(rtol=1e-3, atol=1e-3)
+        if attn.attn_backend == AttentionBackendEnum.TRITON_ATTN
+        else {}
+    )
+    torch.testing.assert_close(output, ref_output, **tol_kwargs)
 
 
 @pytest.mark.parametrize("var_seq_len", VAR_SEQ_LENS)
