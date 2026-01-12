@@ -15,6 +15,7 @@ NON_LORA_SUBPATH = "ibm-granite/granite-3.3-8b-rag-agent-lib/README.md"
 LIB_DOWNLOAD_DIR = os.path.join(
     HF_HUB_CACHE, "models--ibm-granite--granite-3.3-8b-rag-agent-lib"
 )
+INVALID_REPO_NAME = "thisrepodoesnotexist"
 
 # Repo with only one LoRA in the root dir
 LORA_REPO_MODEL_NAME = "meta-llama/Llama-2-7b-hf"
@@ -61,7 +62,7 @@ async def test_hf_resolver_with_multiple_repos():
 
 @pytest.mark.asyncio
 async def test_missing_adapter():
-    hf_resolver = HfHubResolver(LORA_LIB)
+    hf_resolver = HfHubResolver([LORA_LIB])
     assert hf_resolver is not None
 
     missing_lora_request = await hf_resolver.resolve_lora(LORA_LIB_MODEL_NAME, "foobar")
@@ -70,10 +71,22 @@ async def test_missing_adapter():
 
 @pytest.mark.asyncio
 async def test_nonlora_adapter():
-    hf_resolver = HfHubResolver(LORA_LIB)
+    hf_resolver = HfHubResolver([LORA_LIB])
     assert hf_resolver is not None
 
     readme_request = await hf_resolver.resolve_lora(
         LORA_LIB_MODEL_NAME, NON_LORA_SUBPATH
     )
     assert readme_request is None
+
+
+@pytest.mark.asyncio
+async def test_invalid_repo():
+    hf_resolver = HfHubResolver([LORA_LIB])
+    assert hf_resolver is not None
+
+    invalid_repo_req = await hf_resolver.resolve_lora(
+        INVALID_REPO_NAME,
+        f"{INVALID_REPO_NAME}/foo",
+    )
+    assert invalid_repo_req is None
