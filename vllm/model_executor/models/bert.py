@@ -113,6 +113,7 @@ class BertPooler(SequencePooler):
             head_dtype=model_config.head_dtype,
             activation=self.activation,
         )
+        self.head._parameters.clear()  # Avoid weight loading mismatch
 
 
 class BertEncoder(nn.Module):

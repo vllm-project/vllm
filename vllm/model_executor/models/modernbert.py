@@ -309,6 +309,7 @@ class ModernBertPooler(SequencePooler):
             head_dtype=model_config.head_dtype,
             activation=lambda x: self.norm(self.act(x)),
         )
+        self.head._parameters.clear()  # Avoid weight loading mismatch
 
 
 @default_pooling_type(seq_pooling_type="CLS")
