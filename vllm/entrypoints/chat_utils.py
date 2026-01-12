@@ -592,7 +592,6 @@ def _resolve_chat_template_content_format(
 
 @lru_cache
 def _log_chat_template_content_format(
-    chat_template: str | None,
     given_format: ChatTemplateContentFormatOption,
     detected_format: ChatTemplateContentFormatOption,
 ):
@@ -633,7 +632,6 @@ def resolve_chat_template_content_format(
     )
 
     _log_chat_template_content_format(
-        chat_template,
         given_format=given_format,
         detected_format=detected_format,
     )
