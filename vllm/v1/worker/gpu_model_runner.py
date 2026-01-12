@@ -3310,16 +3310,18 @@ class GPUModelRunner(
                 if not isinstance(spec.kv_cache_spec, EncoderOnlyAttentionSpec)
             )
 
-            pad_attn = has_separate_kv_update or cudagraph_mode == CUDAGraphMode.FULL
+            pad_attn = cudagraph_mode == CUDAGraphMode.FULL
 
             use_spec_decode = len(scheduler_output.scheduled_spec_decode_tokens) > 0
             ubatch_slices_attn = ubatch_slices_padded if pad_attn else ubatch_slices
 
             slot_mappings = self._get_slot_mappings(
                 num_tokens_padded=num_tokens_padded
-                if pad_attn
+                if pad_attn or has_separate_kv_update
                 else num_tokens_unpadded,
-                num_reqs_padded=num_reqs_padded if pad_attn else num_reqs,
+                num_reqs_padded=(
+                    num_reqs_padded if pad_attn or has_separate_kv_update else num_reqs
+                ),
                 num_tokens_unpadded=num_tokens_unpadded,
             )
 
