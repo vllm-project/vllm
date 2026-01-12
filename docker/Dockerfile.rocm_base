@@ -89,18 +89,6 @@ RUN cd /opt/rocm/share/amd_smi \
     && pip wheel . --wheel-dir=dist
 RUN mkdir -p /app/install && cp /opt/rocm/share/amd_smi/dist/*.whl /app/install
 
-FROM base AS build_mori
-ARG MORI_BRANCH
-ARG MORI_REPO
-RUN --mount=type=bind,from=build_pytorch,src=/app/install/,target=/install \
-    pip install /install/*.whl
-RUN git clone ${MORI_REPO}
-RUN cd mori \
-    && git checkout ${MORI_BRANCH} \
-    && git submodule update --init --recursive \
-    && python3 setup.py bdist_wheel --dist-dir=dist && ls /app/mori/dist/*.whl
-RUN mkdir -p /app/install && cp /app/mori/dist/*.whl /app/install
-
 
 ###
 ### Pytorch build
@@ -132,6 +120,22 @@ RUN cd audio && git checkout ${PYTORCH_AUDIO_BRANCH} \
 RUN mkdir -p /app/install && cp /app/pytorch/dist/*.whl /app/install \
     && cp /app/vision/dist/*.whl /app/install \
     && cp /app/audio/dist/*.whl /app/install
+
+
+###
+### MORI Build
+###
+FROM base AS build_mori
+ARG MORI_BRANCH
+ARG MORI_REPO
+RUN --mount=type=bind,from=build_pytorch,src=/app/install/,target=/install \
+    pip install /install/*.whl
+RUN git clone ${MORI_REPO}
+RUN cd mori \
+    && git checkout ${MORI_BRANCH} \
+    && git submodule update --init --recursive \
+    && python3 setup.py bdist_wheel --dist-dir=dist && ls /app/mori/dist/*.whl
+RUN mkdir -p /app/install && cp /app/mori/dist/*.whl /app/install
 
 
 ###
@@ -296,6 +300,8 @@ ARG ETCD_BRANCH
 ARG ETCD_REPO
 ARG UCX_BRANCH
 ARG UCX_REPO
+ARG MORI_BRANCH
+ARG MORI_REPO
 RUN echo "BASE_IMAGE: ${BASE_IMAGE}" > /app/versions.txt \
     && echo "TRITON_BRANCH: ${TRITON_BRANCH}" >> /app/versions.txt \
     && echo "TRITON_REPO: ${TRITON_REPO}" >> /app/versions.txt \
@@ -314,4 +320,6 @@ RUN echo "BASE_IMAGE: ${BASE_IMAGE}" > /app/versions.txt \
     && echo "ETCD_BRANCH: ${ETCD_BRANCH}" >> /app/versions.txt \
     && echo "ETCD_REPO: ${ETCD_REPO}" >> /app/versions.txt \
     && echo "UCX_BRANCH: ${UCX_BRANCH}" >> /app/versions.txt \
-    && echo "UCX_REPO: ${UCX_REPO}" >> /app/versions.txt
+    && echo "UCX_REPO: ${UCX_REPO}" >> /app/versions.txt \
+    && echo "MORI_BRANCH: ${MORI_BRANCH}" >> /app/versions.txt \
+    && echo "MORI_REPO: ${MORI_REPO}" >> /app/versions.txt
