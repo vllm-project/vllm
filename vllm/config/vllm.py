@@ -516,12 +516,8 @@ class VllmConfig:
 
         if kv_offloading_backend == "native":
             self.kv_transfer_config.kv_connector = "OffloadingConnector"
-            kv_bytes_per_rank = kv_offloading_size * (1 << 30) / num_kv_ranks
-
-            # NOTE(ApostaC): the actual calculation for num_cpu_blocks should be
-            # done after the model's KV cache is initialized
             self.kv_transfer_config.kv_connector_extra_config.update(
-                {"kv_bytes_per_rank": kv_bytes_per_rank, "num_cpu_blocks": 0}
+                {"cpu_bytes_to_use": kv_offloading_size * (1 << 30)}
             )
         elif kv_offloading_backend == "lmcache":
             self.kv_transfer_config.kv_connector = "LMCacheConnectorV1"
@@ -1352,6 +1348,7 @@ class VllmConfig:
             f"disable_custom_all_reduce={self.parallel_config.disable_custom_all_reduce}, "  # noqa
             f"quantization={self.model_config.quantization}, "
             f"enforce_eager={self.model_config.enforce_eager}, "
+            f"enable_return_routed_experts={self.model_config.enable_return_routed_experts}, "  # noqa
             f"kv_cache_dtype={self.cache_config.cache_dtype}, "
             f"device_config={self.device_config.device}, "
             f"structured_outputs_config={self.structured_outputs_config!r}, "
