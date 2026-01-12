@@ -227,6 +227,7 @@ RUN git clone ${ETCD_REPO} && \
     if [ "$USE_SCCACHE" = "1" ]; then \
         cmake .. -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
             -DCMAKE_C_COMPILER_LAUNCHER=sccache \
+            -DCMAKE_HIP_COMPILER_LAUNCHER=sccache \
             -DCMAKE_CXX_COMPILER_LAUNCHER=sccache; \
     else \
         cmake .. -DCMAKE_POLICY_VERSION_MINIMUM=3.5; \
@@ -366,8 +367,8 @@ RUN --mount=type=bind,from=build_amdsmi,src=/app/install/,target=/install \
     cp /install/*.whl /app/debs
 RUN --mount=type=bind,from=build_pytorch,src=/app/install/,target=/install \
     cp /install/*.whl /app/debs
-# RUN --mount=type=bind,from=build_aiter,src=/app/install/,target=/install \
-#     cp /install/*.whl /app/debs
+RUN --mount=type=bind,from=build_aiter,src=/app/install/,target=/install \
+    cp /install/*.whl /app/debs
 
 # Full debs stage - includes RIXL (used by Docker releases)
 FROM base AS debs
@@ -380,8 +381,8 @@ RUN --mount=type=bind,from=build_amdsmi,src=/app/install/,target=/install \
     cp /install/*.whl /app/debs
 RUN --mount=type=bind,from=build_pytorch,src=/app/install/,target=/install \
     cp /install/*.whl /app/debs
-# RUN --mount=type=bind,from=build_aiter,src=/app/install/,target=/install \
-#     cp /install/*.whl /app/debs
+RUN --mount=type=bind,from=build_aiter,src=/app/install/,target=/install \
+    cp /install/*.whl /app/debs
 RUN --mount=type=bind,from=build_rixl,src=/app/install/,target=/install \
     cp /install/*.whl /app/debs
 
