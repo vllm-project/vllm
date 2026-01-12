@@ -621,6 +621,7 @@ steps:
   source_file_dependencies:
   - csrc/attention/
   - vllm/v1/attention
+  - vllm/model_executor/layers/attention
   - tests/kernels/attention
   commands:
     - pytest -v -s kernels/attention --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
