@@ -28,6 +28,8 @@ NUM_BLOCKS = [32768, 2048]
 # 8: use 3D kernel for decode
 SEQ_THRESHOLD_3D_VALUES = [0, 8]
 
+SPLIT_LAUNCH_VALUES = [False, True]
+
 
 def ref_paged_attn(
     query: torch.Tensor,
@@ -88,7 +90,12 @@ def ref_paged_attn(
 
 
 @pytest.mark.parametrize(
-    "seq_lens", [[(1, 1328), (5, 18), (129, 463)], [(1, 523), (1, 37), (1, 2011)]]
+    "seq_lens",
+    [
+        [(1, 1328), (5, 18), (129, 463)],  # mixed batch
+        [(1, 523), (1, 37), (1, 2011)],  # decode-only batch
+        [(5, 18), (129, 463)],  # prefill-only batch
+    ],
 )
 @pytest.mark.parametrize("num_heads", NUM_HEADS)
 @pytest.mark.parametrize("head_size", HEAD_SIZES)
@@ -99,6 +106,7 @@ def ref_paged_attn(
 @pytest.mark.parametrize("num_blocks", NUM_BLOCKS)
 @pytest.mark.parametrize("q_dtype", QDTYPES)
 @pytest.mark.parametrize("seq_threshold_3D", SEQ_THRESHOLD_3D_VALUES)
+@pytest.mark.parametrize("split_launch", SPLIT_LAUNCH_VALUES)
 @torch.inference_mode()
 def test_triton_unified_attn(
     seq_lens: list[tuple[int, int]],
@@ -111,6 +119,7 @@ def test_triton_unified_attn(
     num_blocks: int,
     q_dtype: torch.dtype | None,
     seq_threshold_3D: int,
+    split_launch: bool,
 ) -> None:
     torch.set_default_device("cuda")
 
@@ -160,6 +169,8 @@ def test_triton_unified_attn(
         k_descale = torch.rand(scale_shape, dtype=torch.float32)
         v_descale = torch.rand(scale_shape, dtype=torch.float32)
 
+    num_decodes = num_seqs if max_query_len == 1 else query_lens.count(1)
+    num_prefills = num_seqs - num_decodes
     num_par_softmax_segments = 16
     head_size_padded = next_power_of_2(head_size)
     softmax_segm_output = torch.empty(
@@ -192,7 +203,10 @@ def test_triton_unified_attn(
         q_descale=q_descale,
         k_descale=k_descale,
         v_descale=v_descale,
+        num_prefills=num_prefills,
+        num_decodes=num_decodes,
         seq_threshold_3D=seq_threshold_3D,
+        split_launch=split_launch,
         num_par_softmax_segments=num_par_softmax_segments,
         softmax_segm_output=softmax_segm_output,
         softmax_segm_max=softmax_segm_max,
