@@ -26,7 +26,18 @@ from .inductor_pass import enable_fake_mode
 from .matcher_utils import MatcherQuantFP8, MatcherSiluAndMul
 from .vllm_inductor_pass import VllmInductorPass, VllmPatternMatcherPass
 
+# Import Helion CustomOp
+# Helion may not be available in all environments
+try:
+    from vllm.compilation.helion.silu_mul_fp8 import SiluMulFp8Helion
+
+    HELION_IMPORT_AVAILABLE = True
+except ImportError:
+    HELION_IMPORT_AVAILABLE = False
+    SiluMulFp8Helion = None  # type: ignore[assignment,misc]
+
 logger = init_logger(__name__)
+
 
 FP8_DTYPE = current_platform.fp8_dtype()
 FP4_DTYPE = torch.uint8
@@ -86,7 +97,24 @@ class SiluMulFp8StaticQuantPattern(ActivationQuantPattern):
         super().__init__(kFp8StaticTensorSym)
         self.quant_matcher = MatcherQuantFP8(kFp8StaticTensorSym)
 
-    def register(self, pm_pass: PatternMatcherPass):
+        # Defer Helion custom op creation until register() is called with model_config
+        self.helion_custom_op = None
+
+    def register(self, pm_pass: PatternMatcherPass, vllm_config: VllmConfig = None):
+        # Create Helion custom op instance if available and model_config is provided
+        if (
+            HELION_IMPORT_AVAILABLE
+            and vllm_config is not None
+            and vllm_config.model_config is not None
+        ):
+            try:
+                self.helion_custom_op = SiluMulFp8Helion(
+                    model_config=vllm_config.model_config
+                )
+            except Exception:
+                # If Helion custom op creation fails, continue without it
+                self.helion_custom_op = None
+
         def pattern(
             input: torch.Tensor,
             scale: torch.Tensor,
@@ -99,15 +127,20 @@ class SiluMulFp8StaticQuantPattern(ActivationQuantPattern):
             input: torch.Tensor,
             scale: torch.Tensor,
         ):
-            d = input.shape[-1] // 2
-            output_shape = input.shape[:-1] + (d,)
-            result = torch.empty(
-                output_shape, device=input.device, dtype=self.quant_dtype
-            )
-            at = auto_functionalized(
-                self.FUSED_OP, result=result, input=input, scale=scale
-            )
-            return at[1]
+            # Check if Helion custom op is available and enabled
+            if self.helion_custom_op is not None and self.helion_custom_op.enabled():
+                # Call the configured operation directly (already configured during register())
+                return self.helion_custom_op.forward_helion(input, scale)
+            else:
+                d = input.shape[-1] // 2
+                output_shape = input.shape[:-1] + (d,)
+                result = torch.empty(
+                    output_shape, device=input.device, dtype=self.quant_dtype
+                )
+                at = auto_functionalized(
+                    self.FUSED_OP, result=result, input=input, scale=scale
+                )
+                return at[1]
 
         inputs = [
             *self.silu_and_mul_matcher.inputs(),  # input
@@ -186,8 +219,9 @@ class ActivationQuantFusionPass(VllmPatternMatcherPass):
             pass_name="activation_quant_fusion_pass"
         )
 
+        # SiluMul+FP8 fusion automatically uses Helion if available
         pattern_silu_mul_fp8 = SiluMulFp8StaticQuantPattern()
-        pattern_silu_mul_fp8.register(self.patterns)
+        pattern_silu_mul_fp8.register(self.patterns, config)
 
         if silu_and_mul_nvfp4_quant_supported:
             pattern_silu_mul_nvfp4 = SiluMulNvfp4QuantPattern()
