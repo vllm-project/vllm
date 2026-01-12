@@ -14,6 +14,7 @@ from vllm.config.compilation import CUDAGraphMode
 from vllm.forward_context import set_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.model_loader import get_model_loader
+from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.utils.mem_utils import DeviceMemoryProfiler, format_gib
 from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
 from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
@@ -47,6 +48,7 @@ from vllm.v1.worker.gpu.input_batch import (
     prepare_pos_seq_lens,
     prepare_prefill_inputs,
 )
+from vllm.v1.worker.gpu.mm.mrope_utils import MRopeState
 from vllm.v1.worker.gpu.sample.logprob import compute_prompt_logprobs
 from vllm.v1.worker.gpu.sample.metadata import SamplingMetadata
 from vllm.v1.worker.gpu.sample.output import SamplerOutput
@@ -93,6 +95,19 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         self.max_num_tokens = self.scheduler_config.max_num_batched_tokens
         self.max_num_reqs = self.scheduler_config.max_num_seqs
         self.inputs_embeds_size = self.model_config.get_inputs_embeds_size()
+
+        # Multimodal
+        self.mm_registry = MULTIMODAL_REGISTRY
+        self.supports_mm_inputs = self.mm_registry.supports_multimodal_inputs(
+            self.model_config
+        )
+        self.uses_mrope = self.model_config.uses_mrope
+        if self.uses_mrope:
+            self.mrope_states = MRopeState(
+                max_num_reqs=self.max_num_reqs,
+                max_model_len=self.max_model_len,
+                device=self.device,
+            )
 
         self.use_async_scheduling = self.scheduler_config.async_scheduling
         self.output_copy_stream = torch.cuda.Stream(self.device)
@@ -393,8 +408,17 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 sampling_params=new_req_data.sampling_params,
                 lora_request=new_req_data.lora_request,
             )
-
             req_index = self.req_states.req_id_to_index[req_id]
+
+            # Pre-compute M-RoPE positions for prefill.
+            if self.uses_mrope:
+                self.mrope_states.init_prefill_mrope_positions(
+                    req_index,
+                    self.model,  # type: ignore
+                    new_req_data.prefill_token_ids,
+                    mm_features=[],  # TODO
+                )
+
             self.block_tables.append_block_ids(
                 req_index, new_req_data.block_ids, overwrite=True
             )
@@ -411,6 +435,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
         self.req_states.apply_staged_writes()
         self.block_tables.apply_staged_writes()
+        if self.uses_mrope:
+            self.mrope_states.apply_staged_writes()
 
     def prepare_inputs(
         self,
@@ -511,6 +537,16 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         )
         seq_lens = self.input_buffers.seq_lens[:num_reqs]
 
+        # Prepare M-RoPE positions.
+        if self.uses_mrope:
+            self.mrope_states.prepare_mrope_positions(
+                idx_mapping,
+                query_start_loc,
+                self.req_states.prefill_len.gpu,
+                self.req_states.num_computed_tokens.gpu,
+                self.input_buffers.mrope_positions,
+            )
+
         # Some input token ids are directly read from the last sampled tokens
         # and draft tokens. Also, get the logits indices to sample tokens from.
         logits_indices = combine_sampled_and_draft_tokens(
@@ -546,6 +582,9 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
         input_ids = self.input_buffers.input_ids[:num_tokens_after_padding]
         positions = self.input_buffers.positions[:num_tokens_after_padding]
+        mrope_positions = self.input_buffers.mrope_positions[
+            :, :num_tokens_after_padding
+        ]
         return InputBatch(
             req_ids=req_ids,
             num_reqs=num_reqs,
@@ -561,6 +600,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             seq_lens=seq_lens,
             input_ids=input_ids,
             positions=positions,
+            mrope_positions=mrope_positions,
             attn_metadata=attn_metadata,
             logits_indices=logits_indices,
             cu_num_logits=cu_num_logits,
