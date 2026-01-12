@@ -8,7 +8,6 @@ from typing import (
     Any,
     Literal,
     Protocol,
-    TypeVar,
     get_args,
 )
 
@@ -33,8 +32,8 @@ from vllm.v1.attention.backend import (
     AttentionBackend,
     AttentionImpl,
     AttentionMetadata,
-    AttentionMetadataBuilder,
     CommonAttentionMetadata,
+    subclass_attention_backend,
 )
 from vllm.v1.worker.ubatch_utils import UBatchSlice
 
@@ -546,33 +545,6 @@ def make_kv_sharing_fast_prefill_common_attn_metadata(
         _num_computed_tokens_cpu=common_attn_metadata._num_computed_tokens_cpu,
     )
     return common_attn_metadata
-
-
-M = TypeVar("M")
-
-
-def subclass_attention_backend(
-    name_prefix: str,
-    attention_backend_cls: type[AttentionBackend],
-    builder_cls: type[AttentionMetadataBuilder[M]],
-) -> type[AttentionBackend]:
-    """
-    Return a new subclass where `get_builder_cls` returns `builder_cls`.
-    """
-    name: str = name_prefix + attention_backend_cls.__name__  # type: ignore
-
-    return type(
-        name, (attention_backend_cls,), {"get_builder_cls": lambda: builder_cls}
-    )
-
-
-def subclass_attention_backend_with_overrides(
-    name_prefix: str,
-    attention_backend_cls: type[AttentionBackend],
-    overrides: dict[str, Any],
-) -> type[AttentionBackend]:
-    name: str = name_prefix + attention_backend_cls.__name__  # type: ignore
-    return type(name, (attention_backend_cls,), overrides)
 
 
 def split_decodes_prefills_and_extends(
