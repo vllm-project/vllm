@@ -31,8 +31,6 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from packaging.version import Version
-from transformers import PretrainedConfig
-from transformers import __version__ as TRANSFORMERS_VERSION
 from transformers.feature_extraction_utils import BatchFeature
 from transformers.models.qwen3_omni_moe.configuration_qwen3_omni_moe import (
     Qwen3OmniMoeAudioEncoderConfig,
@@ -44,15 +42,17 @@ from transformers.models.qwen3_omni_moe.processing_qwen3_omni_moe import (
 )
 from transformers.models.whisper import WhisperFeatureExtractor
 
+from transformers import PretrainedConfig
+from transformers import __version__ as TRANSFORMERS_VERSION
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import MultiModalConfig, VllmConfig
 from vllm.distributed import get_pp_group
 from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import _ACTIVATION_REGISTRY
-from vllm.model_executor.layers.conv import Conv3dLayer
 from vllm.model_executor.layers.attention.mm_encoder_attention import (
     MMEncoderAttention,
 )
+from vllm.model_executor.layers.conv import Conv2dLayer, Conv3dLayer
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
     QKVParallelLinear,
@@ -142,11 +142,15 @@ class SinusoidsPositionEmbedding(nn.Module):
         inv_timescales = torch.exp(
             -log_timescale_increment * torch.arange(channels // 2).float()
         )
-        scaled_time = torch.arange(length)[:, np.newaxis] * inv_timescales[np.newaxis, :]
+        scaled_time = (
+            torch.arange(length)[:, np.newaxis] * inv_timescales[np.newaxis, :]
+        )
         positional_embedding = torch.cat(
             [torch.sin(scaled_time), torch.cos(scaled_time)], dim=1
         )
-        self.register_buffer("positional_embedding", positional_embedding, persistent=False)
+        self.register_buffer(
+            "positional_embedding", positional_embedding, persistent=False
+        )
 
     def forward(self, seqlen: int) -> torch.Tensor:
         return self.positional_embedding[:seqlen, :]
@@ -215,9 +219,7 @@ class Qwen3OmniMoeAudioAttention(nn.Module):
         qkv, _ = self.qkv(hidden_states)
 
         # Reshape to (1, seq_len, num_heads, head_dim)
-        q, k, v = qkv.split(
-            [self.embed_dim, self.embed_dim, self.embed_dim], dim=-1
-        )
+        q, k, v = qkv.split([self.embed_dim, self.embed_dim, self.embed_dim], dim=-1)
         q = q.view(1, seq_length, self.num_heads, self.head_dim)
         k = k.view(1, seq_length, self.num_heads, self.head_dim)
         v = v.view(1, seq_length, self.num_heads, self.head_dim)
@@ -300,7 +302,9 @@ class Qwen3OmniMoeAudioEncoderLayer(nn.Module):
         # Clamp for numerical stability with fp16
         if hidden_states.dtype == torch.float16:
             clamp_value = torch.finfo(hidden_states.dtype).max - 1000
-            hidden_states = torch.clamp(hidden_states, min=-clamp_value, max=clamp_value)
+            hidden_states = torch.clamp(
+                hidden_states, min=-clamp_value, max=clamp_value
+            )
 
         return hidden_states
 
@@ -330,16 +334,22 @@ class Qwen3OmniMoeAudioEncoder(nn.Module):
         )
 
         # Convolutional layers for mel-spectrogram processing
-        self.conv2d1 = nn.Conv2d(1, config.downsample_hidden_size, 3, 2, padding=1)
-        self.conv2d2 = nn.Conv2d(
-            config.downsample_hidden_size, config.downsample_hidden_size, 3, 2, padding=1
+        self.conv2d1 = Conv2dLayer(1, config.downsample_hidden_size, 3, 2, padding=1)
+        self.conv2d2 = Conv2dLayer(
+            config.downsample_hidden_size,
+            config.downsample_hidden_size,
+            3,
+            2,
+            padding=1,
         )
-        self.conv2d3 = nn.Conv2d(
-            config.downsample_hidden_size, config.downsample_hidden_size, 3, 2, padding=1
+        self.conv2d3 = Conv2dLayer(
+            config.downsample_hidden_size,
+            config.downsample_hidden_size,
+            3,
+            2,
+            padding=1,
         )
 
-        # Compute the output dim after conv layers
-        # This is: downsample_hidden_size * ((((num_mel_bins + 1) // 2 + 1) // 2 + 1) // 2)
         conv_out_dim = config.downsample_hidden_size * (
             (((config.num_mel_bins + 1) // 2 + 1) // 2 + 1) // 2
         )
@@ -403,7 +413,8 @@ class Qwen3OmniMoeAudioEncoder(nn.Module):
             aftercnn_lens: Output length after CNN processing
 
         Returns:
-            BaseModelOutput with last_hidden_state of shape (total_output_len, output_dim)
+            BaseModelOutput with last_hidden_state of shape
+            (total_output_len, output_dim)
         """
         # Compute chunk information
         chunk_num = torch.ceil(feature_lens / (self.n_window * 2)).long()
@@ -445,7 +456,7 @@ class Qwen3OmniMoeAudioEncoder(nn.Module):
             padded_embeds.append(padded_embed)
         padded_embed = torch.cat(padded_embeds, dim=0)
 
-        # Reshape and project: (batch, channels, freq, time) -> (batch, time, channels*freq)
+        # (batch, channels, freq, time) -> (batch, time, channels*freq)
         b, c, f, t = padded_embed.size()
         padded_embed = self.conv_out(
             padded_embed.permute(0, 3, 1, 2).contiguous().view(b, t, c * f)
@@ -472,9 +483,9 @@ class Qwen3OmniMoeAudioEncoder(nn.Module):
             remainder = cnn_len % window_aftercnn
             if remainder != 0:
                 cu_chunk_lens += [remainder]
-        cu_seqlens = torch.tensor(
-            cu_chunk_lens, device=aftercnn_lens.device
-        ).cumsum(-1, dtype=torch.int32)
+        cu_seqlens = torch.tensor(cu_chunk_lens, device=aftercnn_lens.device).cumsum(
+            -1, dtype=torch.int32
+        )
 
         max_seqlen = (cu_seqlens[1:] - cu_seqlens[:-1]).max()
 
@@ -492,17 +503,10 @@ class Qwen3OmniMoeAudioEncoder(nn.Module):
         hidden_states = self.act(hidden_states)
         hidden_states = self.proj2(hidden_states)
 
-        # Return in a format compatible with transformers BaseModelOutput
-        from collections import namedtuple
-
-        BaseModelOutput = namedtuple("BaseModelOutput", ["last_hidden_state"])
-        return BaseModelOutput(last_hidden_state=hidden_states)
+        return hidden_states
 
     def _get_cnn_output_lengths(self, input_lengths: torch.Tensor) -> torch.Tensor:
         """Compute output lengths after the three conv2d layers."""
-        # Each conv2d with kernel=3, stride=2, padding=1 roughly halves the length
-        # Formula: floor((L + 2*padding - kernel) / stride + 1)
-        # With padding=1, kernel=3, stride=2: floor((L + 2 - 3) / 2 + 1) = floor((L-1)/2 + 1)
         lengths = input_lengths
         for _ in range(3):
             lengths = (lengths - 1) // 2 + 1
@@ -532,7 +536,9 @@ class Qwen3OmniMoeAudioEncoder(nn.Module):
             else:
                 param = params_dict.get(name)
                 if param is not None:
-                    weight_loader = getattr(param, "weight_loader", default_weight_loader)
+                    weight_loader = getattr(
+                        param, "weight_loader", default_weight_loader
+                    )
                     weight_loader(param, loaded_weight)
             loaded_params.add(name)
         return loaded_params
@@ -561,7 +567,7 @@ class Qwen3_VisionPatchEmbed(nn.Module):
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        L, C = x.shape
+        L, _ = x.shape
         x = x.view(L, -1, self.temporal_patch_size, self.patch_size, self.patch_size)
         x = self.proj(x).view(L, self.hidden_size)
         return x
@@ -1559,12 +1565,11 @@ class Qwen3OmniMoeConditionalGenerationMixin(Qwen2_5OmniConditionalGenerationMix
 
         audio_output_lengths = _get_feat_extract_output_lengths(audio_feature_lengths)
 
-        audio_outputs = self.audio_tower(
+        audio_features = self.audio_tower(
             input_features.to(self.audio_tower.dtype),
             feature_lens=audio_feature_lengths,
             aftercnn_lens=audio_output_lengths,
         )
-        audio_features = audio_outputs.last_hidden_state
         return audio_features.split(audio_output_lengths.tolist())
 
 
