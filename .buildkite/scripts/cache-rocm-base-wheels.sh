@@ -23,7 +23,7 @@
 
 set -euo pipefail
 
-BUCKET="${S3_BUCKET:-vllm-wheels-dev}"
+BUCKET="${S3_BUCKET:-vllm-wheels}"
 DOCKERFILE="docker/Dockerfile.rocm_base"
 CACHE_PREFIX="rocm/cache"
 

@@ -378,7 +378,7 @@ steps:
       - "artifacts/rocm-base-wheels/*.whl"
     env:
       DOCKER_BUILDKIT: "1"
-      S3_BUCKET: "vllm-wheels-dev"
+      S3_BUCKET: "vllm-wheels"
 
   # ROCm Job 2: Build vLLM ROCm Wheel
   - label: ":python: Build vLLM ROCm Wheel"
@@ -484,7 +484,7 @@ steps:
       - "artifacts/rocm-vllm-wheel/*.whl"
     env:
       DOCKER_BUILDKIT: "1"
-      S3_BUCKET: "vllm-wheels-dev"
+      S3_BUCKET: "vllm-wheels"
 
   # ROCm Job 3: Upload Wheels to S3
   - label: ":s3: Upload ROCm Wheels to S3"
@@ -531,7 +531,7 @@ steps:
         bash .buildkite/scripts/upload-rocm-wheels.sh
     env:
       DOCKER_BUILDKIT: "1"
-      S3_BUCKET: "vllm-wheels-dev"
+      S3_BUCKET: "vllm-wheels"
 
   # ROCm Job 4: Annotate ROCm Wheel Release
   - label: ":memo: Annotate ROCm wheel release"
@@ -544,4 +544,4 @@ steps:
     commands:
       - "bash .buildkite/scripts/annotate-rocm-release.sh"
     env:
-      S3_BUCKET: "vllm-wheels-dev"
+      S3_BUCKET: "vllm-wheels"
