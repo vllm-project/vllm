@@ -490,6 +490,9 @@ class ResponsesRequest(OpenAIBaseModel):
         Function calls provided as dicts are converted to ResponseFunctionToolCall
         objects before validation, while invalid structures are left for Pydantic
         to reject with appropriate error messages.
+
+        Also normalizes input items by stripping None values that some clients
+        include for optional fields with different serialization configurations.
         """
 
         input_data = data.get("input")
@@ -509,18 +512,34 @@ class ResponsesRequest(OpenAIBaseModel):
 
         processed_input = []
         for item in input_data:
-            if isinstance(item, dict) and item.get("type") == "function_call":
+            # Normalize to dict: handle both plain dicts and Pydantic models
+            if not isinstance(item, dict):
                 try:
-                    processed_input.append(ResponseFunctionToolCall(**item))
+                    item_dict = item.model_dump(exclude_none=True)
+                except AttributeError:
+                    # Not a Pydantic model, append as-is
+                    processed_input.append(item)
+                    continue
+            else:
+                # Strip None values that may come from clients
+                # with different serialization configs
+                item_dict = {k: v for k, v in item.items() if v is not None}
+
+            item_type = item_dict.get("type")
+
+            # Handle function_call special case
+            if item_type == "function_call":
+                try:
+                    processed_input.append(ResponseFunctionToolCall(**item_dict))
                 except ValidationError:
                     # Let Pydantic handle validation for malformed function calls
                     logger.debug(
                         "Failed to parse function_call to ResponseFunctionToolCall, "
                         "leaving for Pydantic validation"
                     )
-                    processed_input.append(item)
+                    processed_input.append(item_dict)
             else:
-                processed_input.append(item)
+                processed_input.append(item_dict)
 
         data["input"] = processed_input
         return data
