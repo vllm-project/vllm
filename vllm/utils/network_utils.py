@@ -182,7 +182,7 @@ def _get_open_ports(
 
     for port in search_list:
         for family in (socket.AF_INET, socket.AF_INET6):
-            if current_tries > max_tries:
+            if current_tries >= max_tries:
                 return open_ports
             current_tries += 1
 
