@@ -734,7 +734,7 @@ class OutputProcessor:
     def do_tracing(
         self,
         req_state: RequestState,
-        engine_core_output: EngineCoreOutput = None,
+        engine_core_output: EngineCoreOutput | None = None,
         iteration_stats: IterationStats | None = None,
         error: BaseException | None = None,
     ) -> None:
