@@ -44,8 +44,7 @@ class FlashInferCuteDSLExperts(mk.FusedMoEPermuteExpertsUnpermute):
     @staticmethod
     def _supports_current_device() -> bool:
         return (
-            current_platform.is_cuda()
-            and current_platform.has_device_capability(10, 0)
+            current_platform.has_device_capability((10, 0))
             and has_flashinfer_cutedsl_grouped_gemm_nt_masked()
         )
 
