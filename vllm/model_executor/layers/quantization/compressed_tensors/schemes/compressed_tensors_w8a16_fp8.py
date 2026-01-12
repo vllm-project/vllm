@@ -36,6 +36,8 @@ class CompressedTensorsW8A16Fp8(CompressedTensorsScheme):
 
     @classmethod
     def get_min_capability(cls) -> int:
+        if current_platform.is_xpu():
+            return True
         # ampere and up
         return 80
 
