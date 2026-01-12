@@ -89,18 +89,21 @@ RUN if [ "$USE_SCCACHE" = "1" ]; then \
         && sccache --version; \
     fi
 
-# Wrap ROCm clang/clang++ with sccache for HIP compilation caching
-# This replaces the binaries with wrapper scripts that invoke sccache
+# Setup sccache for HIP compilation via HIP_CLANG_PATH
+# This creates wrapper scripts in a separate directory and points HIP to use them
+# This avoids modifying the original ROCm binaries which can break detection
 RUN if [ "$USE_SCCACHE" = "1" ]; then \
-        echo "Wrapping ROCm clang/clang++ with sccache..." \
-        && mv /opt/rocm/lib/llvm/bin/clang++ /opt/rocm/lib/llvm/bin/clang++.real \
-        && printf '#!/bin/bash\nexec sccache /opt/rocm/lib/llvm/bin/clang++.real "$@"\n' > /opt/rocm/lib/llvm/bin/clang++ \
-        && chmod +x /opt/rocm/lib/llvm/bin/clang++ \
-        && mv /opt/rocm/lib/llvm/bin/clang /opt/rocm/lib/llvm/bin/clang.real \
-        && printf '#!/bin/bash\nexec sccache /opt/rocm/lib/llvm/bin/clang.real "$@"\n' > /opt/rocm/lib/llvm/bin/clang \
-        && chmod +x /opt/rocm/lib/llvm/bin/clang \
-        && echo "sccache wrappers installed for clang and clang++"; \
+        echo "Setting up sccache wrappers for HIP compilation..." \
+        && mkdir -p /opt/sccache-wrappers \
+        && printf '#!/bin/bash\nexec sccache /opt/rocm/lib/llvm/bin/clang++ "$@"\n' > /opt/sccache-wrappers/clang++ \
+        && chmod +x /opt/sccache-wrappers/clang++ \
+        && printf '#!/bin/bash\nexec sccache /opt/rocm/lib/llvm/bin/clang "$@"\n' > /opt/sccache-wrappers/clang \
+        && chmod +x /opt/sccache-wrappers/clang \
+        && echo "HIP_CLANG_PATH=/opt/sccache-wrappers" >> /etc/environment \
+        && echo "sccache wrappers created in /opt/sccache-wrappers"; \
     fi
+ARG USE_SCCACHE
+ENV HIP_CLANG_PATH=${USE_SCCACHE:+/opt/sccache-wrappers}
 
 # Set sccache environment variables (will be empty if USE_SCCACHE is not set)
 ENV SCCACHE_BUCKET=${SCCACHE_BUCKET_NAME}
