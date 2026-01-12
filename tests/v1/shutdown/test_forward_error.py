@@ -4,7 +4,6 @@
 
 import asyncio
 import inspect
-import os
 
 import pytest
 
@@ -16,7 +15,6 @@ from tests.v1.shutdown.utils import (
 from vllm import LLM, AsyncEngineArgs, SamplingParams
 from vllm.distributed import get_tensor_model_parallel_rank
 from vllm.model_executor.models.llama import LlamaForCausalLM
-from vllm.platforms import current_platform
 from vllm.utils.torch_utils import cuda_device_count_stateless
 from vllm.v1.engine.async_llm import AsyncLLM
 from vllm.v1.engine.exceptions import EngineDeadError
@@ -42,25 +40,14 @@ def evil_forward(self, *args, **kwargs):
 
 
 @pytest.fixture
-def rocm_evil_forward(monkeypatch, tmp_path):
-    """Create sitecustomize.py so spawned subprocesses call evil_forward."""
-    if not current_platform.is_rocm():
-        return
-    sc = tmp_path / "sitecustomize.py"
-    sc.write_text(
-        "\n".join(
-            [
-                "from vllm.distributed import get_tensor_model_parallel_rank",
-                "from vllm.model_executor.models.llama import LlamaForCausalLM",
-                inspect.getsource(evil_forward),
-                "LlamaForCausalLM.forward = evil_forward",
-            ]
-        )
-    )
-    monkeypatch.setenv(
-        "PYTHONPATH",
-        os.pathsep.join(filter(None, [str(tmp_path), os.getenv("PYTHONPATH")])),
-    )
+def rocm_evil_forward(rocm_sitecustomize_factory):
+    lines = [
+        "from vllm.distributed import get_tensor_model_parallel_rank",
+        "from vllm.model_executor.models.llama import LlamaForCausalLM",
+        inspect.getsource(evil_forward),
+        f"LlamaForCausalLM.forward = {evil_forward.__name__}",
+    ]
+    rocm_sitecustomize_factory(lines)
 
 
 @pytest.mark.asyncio
