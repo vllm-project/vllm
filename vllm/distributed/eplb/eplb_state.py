@@ -651,12 +651,8 @@ class EplbState:
                             eplb_model_state.model.num_moe_layers,
                         )
 
-        if (
-            self.is_async
-            and self.expert_rearrangement_step
-            >= self.expert_rearrangement_step_interval
-        ):
-            if any(
+        if self.expert_rearrangement_step >= self.expert_rearrangement_step_interval:
+            if self.is_async and any(
                 eplb_model_state.rebalanced
                 for eplb_model_state in self.model_states.values()
             ):
