@@ -217,10 +217,11 @@ class WorkerWrapperBase:
         """
         if self.rpc_rank in rank_mapping:
             self.rpc_rank = rank_mapping[self.rpc_rank]
-            # Currently, only the Ray executor initiates adjust_rank;
-            # in this case, global_rank is identical to rpc_rank,
-            # so global_rank is updated synchronously as well.
-            self.global_rank = self.rpc_rank
+            if self.global_rank == self.rpc_rank:
+                # Currently, only the Ray executor initiates adjust_rank;
+                # in this case, global_rank is identical to rpc_rank,
+                # so global_rank is updated synchronously as well.
+                self.global_rank = self.rpc_rank
 
     def update_environment_variables(
         self,
