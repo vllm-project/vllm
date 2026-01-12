@@ -217,12 +217,12 @@ from vllm.v1.attention.backend import (
     AttentionBackend,
     AttentionLayer,
     AttentionMetadata,
+    AttentionMetadataBuilder,
+    CommonAttentionMetadata,
     MLAAttentionImpl,
 )
 from vllm.v1.attention.backends.fa_utils import get_flash_attn_version
 from vllm.v1.attention.backends.utils import (
-    AttentionMetadataBuilder,
-    CommonAttentionMetadata,
     get_dcp_local_seq_lens,
     get_per_layer_parameters,
     infer_global_hyperparameters,
