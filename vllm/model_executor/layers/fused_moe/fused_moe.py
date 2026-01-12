@@ -2165,8 +2165,9 @@ def fused_experts_impl(
                 ).to(curr_hidden_states.dtype)
                 input_quant_dtype = None
                 a1_scale = None
-            else:
-                raise NotImplementedError(f"Unsupported ocp_mx_scheme={ocp_mx_scheme}")
+            # else: For other schemes (e.g., w_mxfp4_a_mxfp6_e3m2, w_mxfp6_e3m2_a_mxfp6_e3m2),
+            # weights are already dequantized above, and moe_kernel_quantize_input
+            # will handle activation quantization below.
 
         qcurr_hidden_states, a1q_scale = moe_kernel_quantize_input(
             A=curr_hidden_states,
@@ -2250,8 +2251,9 @@ def fused_experts_impl(
                 ).to(intermediate_cache2.dtype)
                 input_quant_dtype = None
                 a2_scale = None
-            else:
-                raise NotImplementedError(f"Unsupported ocp_mx_scheme={ocp_mx_scheme}")
+            # else: For other schemes (e.g., w_mxfp4_a_mxfp6_e3m2, w_mxfp6_e3m2_a_mxfp6_e3m2),
+            # weights are already dequantized above, and moe_kernel_quantize_input
+            # will handle activation quantization below.
 
         qintermediate_cache2, a2q_scale = moe_kernel_quantize_input(
             A=intermediate_cache2,

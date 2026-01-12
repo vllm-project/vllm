@@ -643,6 +643,8 @@ class GptOssModel(nn.Module):
                         name = fused_name
                         break
                 else:
+                    if name not in params_dict:
+                        continue
                     param = params_dict[name]
                     weight_loader = getattr(
                         param, "weight_loader", default_weight_loader
@@ -795,15 +797,14 @@ class GptOssModel(nn.Module):
 
         if quant_method in ["mxfp4", "quark"]:
             return self._load_weights(
-                ep_rank_end,
                 ep_rank_start,
+                ep_rank_end,
                 heads_per_rank,
                 head_start,
                 weights,
                 stacked_params_mapping,
             )
         else:
-            # TODO (xuebwang-amd): do we really need the else-branch?
             return self._load_weights_other(
                 ep_rank_end,
                 ep_rank_start,
