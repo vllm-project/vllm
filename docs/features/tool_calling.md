@@ -400,7 +400,7 @@ Flags: `--tool-call-parser functiongemma --chat-template examples/tool_chat_temp
 
 Supported models:
 
-* `Qwen/Qwen3-480B-A35B-Instruct`
+* `Qwen/Qwen3-Coder-480B-A35B-Instruct`
 * `Qwen/Qwen3-Coder-30B-A3B-Instruct`
 
 Flags: `--tool-call-parser qwen3_xml`
