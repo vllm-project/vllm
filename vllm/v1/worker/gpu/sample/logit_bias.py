@@ -79,8 +79,8 @@ class LogitBiasState:
                     f"The max size is {MAX_NUM_LOGIT_BIAS_TOKENS}."
                 )
             self.num_logit_bias.np[req_idx] = num_logit_bias
-            self.logit_bias_token_ids.stage_write(req_idx, 0, list(logit_bias.keys()))
-            self.logit_bias.stage_write(req_idx, 0, list(logit_bias.values()))
+            self.logit_bias_token_ids.stage_write(req_idx, 0, logit_bias.keys())
+            self.logit_bias.stage_write(req_idx, 0, logit_bias.values())
         else:
             self.num_logit_bias.np[req_idx] = 0
 

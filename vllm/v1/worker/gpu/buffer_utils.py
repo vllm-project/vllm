@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from collections.abc import Sequence
+from collections.abc import Iterable, Sequence
 
 import numpy as np
 import torch
@@ -129,7 +129,12 @@ class StagedWriteTensor:
             self.num_rows, dtype=torch.int32, max_concurrency=max_concurrency
         )
 
-    def stage_write(self, index: int, start: int, x: list[int] | list[float]) -> None:
+    def stage_write(
+        self,
+        index: int,
+        start: int,
+        x: Iterable[int] | Iterable[float],
+    ) -> None:
         assert index >= 0
         assert start >= 0
         if not x:
