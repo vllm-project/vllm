@@ -138,6 +138,29 @@ class ConversationContext(ABC):
         raise NotImplementedError("Should not be called.")
 
 
+class ToolSessionMixin:
+    """Mixin providing tool session management for conversation contexts.
+
+    This mixin provides the _get_tool_session method that raises a descriptive
+    error when a tool session is not initialized. Classes using this mixin
+    must have a _tool_sessions dict attribute.
+    """
+
+    _tool_sessions: dict
+
+    def _get_tool_session(self, tool_name: str):
+        """Get a tool session, raising a descriptive error if not available."""
+        if tool_name not in self._tool_sessions:
+            available_tool_sessions = list(self._tool_sessions.keys())
+            raise KeyError(
+                f"Tool '{tool_name}' session not initialized. "
+                f"Available sessions: {available_tool_sessions}. "
+                f"Ensure '--tool-server' is configured and "
+                f"the MCP tool server is running."
+            )
+        return self._tool_sessions[tool_name]
+
+
 def _create_json_parse_error_messages(
     last_msg: Message, e: json.JSONDecodeError
 ) -> list[Message]:
@@ -253,7 +276,7 @@ class SimpleContext(ConversationContext):
         raise NotImplementedError("Should not be called.")
 
 
-class ParsableContext(ConversationContext):
+class ParsableContext(ConversationContext, ToolSessionMixin):
     def __init__(
         self,
         *,
@@ -447,12 +470,16 @@ class ParsableContext(ConversationContext):
         last_msg.id = f"{MCP_PREFIX}{random_uuid()}"
         self.parser.response_messages[-1] = last_msg
         if last_msg.name == "code_interpreter":
-            return await self.call_python_tool(self._tool_sessions["python"], last_msg)
+            return await self.call_python_tool(
+                self._get_tool_session("python"), last_msg
+            )
         elif last_msg.name == "web_search_preview":
-            return await self.call_search_tool(self._tool_sessions["browser"], last_msg)
+            return await self.call_search_tool(
+                self._get_tool_session("browser"), last_msg
+            )
         elif last_msg.name.startswith("container"):
             return await self.call_container_tool(
-                self._tool_sessions["container"], last_msg
+                self._get_tool_session("container"), last_msg
             )
         return []
 
@@ -500,7 +527,7 @@ class ParsableContext(ConversationContext):
         )
 
 
-class HarmonyContext(ConversationContext):
+class HarmonyContext(ConversationContext, ToolSessionMixin):
     def __init__(
         self,
         messages: list,
@@ -667,15 +694,15 @@ class HarmonyContext(ConversationContext):
         if recipient is not None:
             if recipient.startswith("browser."):
                 return await self.call_search_tool(
-                    self._tool_sessions["browser"], last_msg
+                    self._get_tool_session("browser"), last_msg
                 )
             elif recipient.startswith("python"):
                 return await self.call_python_tool(
-                    self._tool_sessions["python"], last_msg
+                    self._get_tool_session("python"), last_msg
                 )
             elif recipient.startswith("container."):
                 return await self.call_container_tool(
-                    self._tool_sessions["container"], last_msg
+                    self._get_tool_session("container"), last_msg
                 )
         raise ValueError("No tool call found")
 

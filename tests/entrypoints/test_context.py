@@ -9,6 +9,7 @@ from openai_harmony import Author, Message, Role, StreamState, TextContent
 from vllm.entrypoints.context import (
     HarmonyContext,
     StreamingHarmonyContext,
+    ToolSessionMixin,
     TurnMetrics,
 )
 from vllm.outputs import CompletionOutput, RequestOutput
@@ -597,3 +598,52 @@ def test_turn_metrics_copy_and_reset():
     assert copied_metrics.output_tokens == 20
     assert copied_metrics.cached_input_tokens == 5
     assert copied_metrics.tool_output_tokens == 3
+
+
+def test_get_tool_session_raises_descriptive_error():
+    """Test that ToolSessionMixin._get_tool_session raises a descriptive
+    KeyError when tool session is not initialized."""
+    context = HarmonyContext(messages=[], available_tools=[])
+
+    # Attempt to get a tool session that was never initialized
+    with pytest.raises(KeyError) as exc_info:
+        context._get_tool_session("container")
+
+    # Verify the error message is descriptive
+    error_message = str(exc_info.value)
+    assert "container" in error_message
+    assert "session not initialized" in error_message
+    assert "Available sessions" in error_message
+    assert "--tool-server" in error_message
+
+
+def test_get_tool_session_shows_available_sessions():
+    """Test that ToolSessionMixin._get_tool_session shows available sessions
+    in error message."""
+    context = HarmonyContext(messages=[], available_tools=["browser", "python"])
+
+    # Manually add a tool session to simulate partial initialization
+    context._tool_sessions["browser"] = MagicMock()
+
+    # Attempt to get a tool session that wasn't initialized
+    with pytest.raises(KeyError) as exc_info:
+        context._get_tool_session("container")
+
+    # Verify the error shows the available session
+    error_message = str(exc_info.value)
+    assert "container" in error_message
+    assert "browser" in error_message
+
+
+def test_get_tool_session_returns_session_when_available():
+    """Test that ToolSessionMixin._get_tool_session returns the session when
+    it exists."""
+    context = HarmonyContext(messages=[], available_tools=["browser"])
+
+    # Manually add a tool session
+    mock_session = MagicMock()
+    context._tool_sessions["browser"] = mock_session
+
+    # Should return the session without raising
+    result = context._get_tool_session("browser")
+    assert result is mock_session
