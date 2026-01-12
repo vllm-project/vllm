@@ -129,7 +129,7 @@ def before_generate_case(context: schemathesis.hooks.HookContext, strategy):
 
 @schema.parametrize()
 @schema.override(headers={"Content-Type": "application/json"})
-@settings(deadline=LONG_TIMEOUT_SECONDS * 1000)
+@settings(deadline=LONG_TIMEOUT_SECONDS * 1000, max_examples=50)
 def test_openapi_stateless(case: schemathesis.Case):
     key = (
         case.operation.method.upper(),

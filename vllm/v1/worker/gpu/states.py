@@ -8,10 +8,8 @@ import torch
 from vllm.lora.request import LoRARequest
 from vllm.sampling_params import SamplingParams
 from vllm.utils.math_utils import cdiv
-from vllm.utils.platform_utils import is_uva_available
-from vllm.utils.torch_utils import get_cuda_view_from_cpu_tensor
 from vllm.v1.outputs import LogprobsTensors
-from vllm.v1.utils import CpuGpuBuffer
+from vllm.v1.worker.gpu.buffer_utils import StagedWriteTensor, UvaBackedTensor
 from vllm.v1.worker.gpu.sample.metadata import SamplingMetadata
 from vllm.v1.worker.gpu.sample.penalties import bincount
 
@@ -29,7 +27,6 @@ class RequestState:
         num_speculative_steps: int,
         vocab_size: int,
         device: torch.device,
-        pin_memory: bool,
     ):
         self.max_num_reqs = max_num_reqs
         self.max_model_len = max_model_len
@@ -37,7 +34,6 @@ class RequestState:
         self.num_speculative_steps = num_speculative_steps
         self.vocab_size = vocab_size
         self.device = device
-        self.pin_memory = pin_memory
 
         self.req_id_to_index: dict[str, int] = {}
         self.index_to_req_id: dict[int, str] = {}
@@ -47,16 +43,18 @@ class RequestState:
         self.prompt_len = np.zeros(self.max_num_reqs, dtype=np.int32)
         # NOTE(woosuk): This tensor can be extremely large (e.g., several GBs)
         # depending on the configured max_num_reqs and max_model_len.
-        self.prefill_token_ids = UvaBuffer(
-            self.max_num_reqs, self.max_model_len, dtype=torch.int32
+        # To save GPU memory, we use UVA instead of GPU for this tensor.
+        self.prefill_token_ids = StagedWriteTensor(
+            (self.max_num_reqs, self.max_model_len),
+            dtype=torch.int32,
+            device=device,
+            uva_instead_of_gpu=True,
         )
-        # NOTE(woosuk): We don't use UVA for prefill_len because its GPU view
-        # can be used outside of update_states and prepare_inputs.
-        # Without async barrier, using UVA can cause race conditions.
-        self.prefill_len = self._make_buffer(self.max_num_reqs, dtype=torch.int32)
+        self.prefill_len = UvaBackedTensor(self.max_num_reqs, dtype=torch.int32)
+
         # Number of computed tokens.
         self.num_computed_prefill_tokens = np.zeros(self.max_num_reqs, dtype=np.int32)
-        self.num_computed_tokens = torch.zeros(
+        self.num_computed_tokens = StagedWriteTensor(
             self.max_num_reqs, dtype=torch.int32, device=device
         )
 
@@ -84,14 +82,16 @@ class RequestState:
         self.lora_ids.fill(NO_LORA_ID)
 
         # Sampling parameters.
-        self.temperature = self._make_param(self.max_num_reqs, torch.float32)
-        self.top_p = self._make_param(self.max_num_reqs, torch.float32)
-        self.top_k = self._make_param(self.max_num_reqs, torch.int32)
-        self.min_p = self._make_param(self.max_num_reqs, torch.float32)
-        self.repetition_penalty = self._make_param(self.max_num_reqs, torch.float32)
-        self.frequency_penalty = self._make_param(self.max_num_reqs, torch.float32)
-        self.presence_penalty = self._make_param(self.max_num_reqs, torch.float32)
-        self.seeds = self._make_param(self.max_num_reqs, torch.int64)
+        self.temperature = UvaBackedTensor(self.max_num_reqs, dtype=torch.float32)
+        self.top_p = UvaBackedTensor(self.max_num_reqs, dtype=torch.float32)
+        self.top_k = UvaBackedTensor(self.max_num_reqs, dtype=torch.int32)
+        self.min_p = UvaBackedTensor(self.max_num_reqs, dtype=torch.float32)
+        self.repetition_penalty = UvaBackedTensor(
+            self.max_num_reqs, dtype=torch.float32
+        )
+        self.frequency_penalty = UvaBackedTensor(self.max_num_reqs, dtype=torch.float32)
+        self.presence_penalty = UvaBackedTensor(self.max_num_reqs, dtype=torch.float32)
+        self.seeds = UvaBackedTensor(self.max_num_reqs, dtype=torch.int64)
 
         self.num_logprobs = np.empty(self.max_num_reqs, dtype=np.int32)
         # -1 means no logprobs are requested.
@@ -111,13 +111,7 @@ class RequestState:
             self.max_num_reqs, self.vocab_size, dtype=torch.int32, device=self.device
         )
 
-    def _make_param(self, size: int, dtype: torch.dtype) -> "Param":
-        return Param(size, dtype=dtype, device=self.device, pin_memory=self.pin_memory)
-
-    def _make_buffer(self, size: int, dtype: torch.dtype) -> CpuGpuBuffer:
-        return CpuGpuBuffer(
-            size, dtype=dtype, device=self.device, pin_memory=self.pin_memory
-        )
+        self._penalties_reqs: list[int] = []
 
     @property
     def num_reqs(self) -> int:
@@ -144,12 +138,9 @@ class RequestState:
             f"prefill_len {prefill_len} < prompt_len {prompt_len}"
         )
         self.prefill_len.np[req_idx] = prefill_len
-        self.prefill_token_ids.np[req_idx, :prefill_len] = prefill_token_ids
-
+        self.prefill_token_ids.stage_write(req_idx, 0, prefill_token_ids)
         self.num_computed_prefill_tokens[req_idx] = num_computed_tokens
-        # FIXME(woosuk): This triggers a GPU operation whenever adding a new request.
-        # Optimize this.
-        self.num_computed_tokens[req_idx] = num_computed_tokens
+        self.num_computed_tokens.stage_write_elem(req_idx, num_computed_tokens)
 
         if lora_request is not None:
             self.lora_ids[req_idx] = lora_request.lora_int_id
@@ -169,13 +160,7 @@ class RequestState:
         self.presence_penalty.np[req_idx] = sampling_params.presence_penalty
 
         if use_penalty(sampling_params):
-            bincount(
-                self.prefill_token_ids.gpu[req_idx],
-                prefill_len,
-                prompt_len,
-                self.prompt_bin_mask[req_idx],
-                self.output_bin_counts[req_idx],
-            )
+            self._penalties_reqs.append(req_idx)
 
         if sampling_params.seed is not None:
             seed = sampling_params.seed
@@ -193,6 +178,22 @@ class RequestState:
         needs_prompt_logprobs = sampling_params.prompt_logprobs is not None
         self.needs_prompt_logprobs[req_idx] = needs_prompt_logprobs
 
+    def apply_staged_writes(self) -> None:
+        self.prefill_len.copy_to_uva()
+        self.prefill_token_ids.apply_write()
+        self.num_computed_tokens.apply_write()
+
+        # TODO(woosuk): Optimize this.
+        for req_idx in self._penalties_reqs:
+            bincount(
+                self.prefill_token_ids.gpu[req_idx],
+                int(self.prefill_len.np[req_idx]),
+                int(self.prompt_len[req_idx]),
+                self.prompt_bin_mask[req_idx],
+                self.output_bin_counts[req_idx],
+            )
+        self._penalties_reqs.clear()
+
     def remove_request(self, req_id: str) -> None:
         self.extra_data.pop(req_id, None)
         req_idx = self.req_id_to_index.pop(req_id, None)
@@ -208,30 +209,25 @@ class RequestState:
         idx_mapping_np: np.ndarray,
         pos: torch.Tensor,
     ) -> SamplingMetadata:
-        temperature = self.temperature.np[idx_mapping_np]
-        temperature = self.temperature.copy_np_to_gpu(temperature)
+        temperature = self.temperature.copy_to_uva()
 
         top_p = self.top_p.np[idx_mapping_np]
         no_top_p = np.all(top_p == 1.0)
-        top_p = self.top_p.copy_np_to_gpu(top_p) if not no_top_p else None
+        top_p = self.top_p.copy_to_uva()[idx_mapping] if not no_top_p else None
 
         top_k = self.top_k.np[idx_mapping_np]
         no_top_k = np.all(top_k == self.vocab_size)
-        top_k = self.top_k.copy_np_to_gpu(top_k) if not no_top_k else None
+        top_k = self.top_k.copy_to_uva()[idx_mapping] if not no_top_k else None
 
         min_p = self.min_p.np[idx_mapping_np]
         no_min_p = np.all(min_p == 0.0)
-        min_p = self.min_p.copy_np_to_gpu(min_p) if not no_min_p else None
+        min_p = self.min_p.copy_to_uva() if not no_min_p else None
 
-        rep_penalty = self.repetition_penalty.np[idx_mapping_np]
-        rep_penalty = self.repetition_penalty.copy_np_to_gpu(rep_penalty)
-        freq_penalty = self.frequency_penalty.np[idx_mapping_np]
-        freq_penalty = self.frequency_penalty.copy_np_to_gpu(freq_penalty)
-        pres_penalty = self.presence_penalty.np[idx_mapping_np]
-        pres_penalty = self.presence_penalty.copy_np_to_gpu(pres_penalty)
+        rep_penalty = self.repetition_penalty.copy_to_uva()
+        freq_penalty = self.frequency_penalty.copy_to_uva()
+        pres_penalty = self.presence_penalty.copy_to_uva()
 
-        seeds = self.seeds.np[idx_mapping_np]
-        seeds = self.seeds.copy_np_to_gpu(seeds)
+        seeds = self.seeds.copy_to_uva()
 
         num_logprobs = self.num_logprobs[idx_mapping_np]
         max_num_logprobs: int | None = int(np.max(num_logprobs))
@@ -239,6 +235,7 @@ class RequestState:
             max_num_logprobs = None
 
         return SamplingMetadata(
+            idx_mapping=idx_mapping,
             temperature=temperature,
             top_p=top_p,
             top_k=top_k,
@@ -246,12 +243,11 @@ class RequestState:
             repetition_penalty=rep_penalty,
             frequency_penalty=freq_penalty,
             presence_penalty=pres_penalty,
+            prompt_bin_mask=self.prompt_bin_mask,
+            output_bin_counts=self.output_bin_counts,
             seeds=seeds,
             pos=pos,
             max_num_logprobs=max_num_logprobs,
-            idx_mapping=idx_mapping,
-            prompt_bin_mask=self.prompt_bin_mask,
-            output_bin_counts=self.output_bin_counts,
         )
 
     def make_lora_inputs(
@@ -272,40 +268,10 @@ class RequestState:
         return prompt_lora_mapping, token_lora_mapping, active_lora_requests
 
 
-class Param:
-    def __init__(
-        self,
-        size: int,
-        dtype: torch.dtype,
-        device: torch.device,
-        pin_memory: bool,
-    ):
-        self.buffer = CpuGpuBuffer(
-            size,
-            dtype=dtype,
-            device=device,
-            pin_memory=pin_memory,
-        )
-        self.np = np.zeros_like(self.buffer.np)
-
-    def copy_np_to_gpu(self, x: np.ndarray) -> torch.Tensor:
-        n = x.shape[0]
-        self.buffer.np[:n] = x
-        return self.buffer.copy_to_gpu(n)
-
-
 @dataclass
 class ExtraData:
     lora_request: LoRARequest | None
     in_progress_prompt_logprobs: list[LogprobsTensors] = field(default_factory=list)
-
-
-class UvaBuffer:
-    def __init__(self, *size: int | torch.SymInt, dtype: torch.dtype):
-        assert is_uva_available()
-        self.cpu = torch.zeros(*size, dtype=dtype, device="cpu", pin_memory=True)
-        self.np = self.cpu.numpy()
-        self.gpu = get_cuda_view_from_cpu_tensor(self.cpu)
 
 
 def use_penalty(sampling_params: SamplingParams) -> bool:
