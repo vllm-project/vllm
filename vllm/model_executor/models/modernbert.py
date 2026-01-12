@@ -15,6 +15,7 @@ from vllm.model_executor.layers.attention.encoder_only_attention import (
 )
 from vllm.model_executor.layers.linear import QKVParallelLinear, RowParallelLinear
 from vllm.model_executor.layers.pooler import DispatchPooler
+from vllm.model_executor.layers.pooler.activations import LambdaPoolerActivation
 from vllm.model_executor.layers.pooler.seqwise import (
     EmbeddingPoolerHead,
     SequencePooler,
@@ -307,18 +308,9 @@ class ModernBertPooler(SequencePooler):
         self.head = EmbeddingPoolerHead(
             projector=self.dense,
             head_dtype=model_config.head_dtype,
-            activation=self.activation,
+            activation=LambdaPoolerActivation(lambda x: self.norm(self.act(x))),
         )
         self.head._parameters.clear()  # Avoid weight loading mismatch
-
-    def activation_chunk(self, x: torch.Tensor):
-        return self.norm(self.act(x))
-
-    def activation(self, x: list[torch.Tensor] | torch.Tensor):
-        if isinstance(x, list):
-            return [self.activation_chunk(e) for e in x]
-
-        return self.activation_chunk(x)
 
 
 @default_pooling_type(seq_pooling_type="CLS")
