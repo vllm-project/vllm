@@ -483,7 +483,7 @@ For `verbose_json` response format:
       ]
     }
     ```
-Currently “verbose_json” response format doesn’t support compression_ratio, no_speech_prob.
+Currently “verbose_json” response format doesn’t support no_speech_prob.
 
 #### Extra Parameters
 

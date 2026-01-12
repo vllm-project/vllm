@@ -330,8 +330,7 @@ class OpenAISpeechToText(OpenAIServing):
         If the tokens do not include timestamp information,
         the segments may not be generated correctly.
 
-        Note: Fields like compression_ratio,
-        and no_speech_prob are not supported
+        Note: No_speech_prob field is not supported
         in this implementation and will be None. See docs for details.
         """
         BASE_OFFSET = 0.02
