@@ -399,10 +399,28 @@ RUN echo 'tzdata tzdata/Areas select America' | debconf-set-selections \
         curl \
         sudo \
         python3-pip \
-        ffmpeg \
         libsm6 \
         libxext6 \
         libgl1 \
+        gnupg \
+    && mkdir -p /etc/apt/keyrings \
+    && curl -fsSL https://ftp-master.debian.org/keys/archive-key-11.asc | gpg --dearmor -o /etc/apt/keyrings/debian-bullseye.gpg \
+    && curl -fsSL https://ftp-master.debian.org/keys/archive-key-11-security.asc | gpg --dearmor -o /etc/apt/keyrings/debian-bullseye-security.gpg \
+    && echo "deb [signed-by=/etc/apt/keyrings/debian-bullseye.gpg] http://deb.debian.org/debian bullseye main" > /etc/apt/sources.list.d/debian-bullseye.list \
+    && echo "deb [signed-by=/etc/apt/keyrings/debian-bullseye-security.gpg] http://deb.debian.org/debian-security bullseye-security main" >> /etc/apt/sources.list.d/debian-bullseye.list \
+    && apt-get update -y \
+    && apt-get install -y --no-install-recommends \
+        ffmpeg=7:4.3.9-0+deb11u1 \
+        libavcodec58=7:4.3.9-0+deb11u1 \
+        libavdevice58=7:4.3.9-0+deb11u1 \
+        libavfilter7=7:4.3.9-0+deb11u1 \
+        libavformat58=7:4.3.9-0+deb11u1 \
+        libavresample4=7:4.3.9-0+deb11u1 \
+        libavutil56=7:4.3.9-0+deb11u1 \
+        libpostproc55=7:4.3.9-0+deb11u1 \
+        libswresample3=7:4.3.9-0+deb11u1 \
+        libswscale5=7:4.3.9-0+deb11u1 \
+        libchromaprint1=1.5.0-2 \
     && if [ ! -z ${DEADSNAKES_MIRROR_URL} ] ; then \
         if [ ! -z "${DEADSNAKES_GPGKEY_URL}" ] ; then \
             mkdir -p -m 0755 /etc/apt/keyrings ; \
@@ -422,6 +440,9 @@ RUN echo 'tzdata tzdata/Areas select America' | debconf-set-selections \
         python${PYTHON_VERSION}-dev \
         python${PYTHON_VERSION}-venv \
         libibverbs-dev \
+    && rm -f /etc/apt/sources.list.d/debian-bullseye.list \
+    && rm -f /etc/apt/keyrings/debian-bullseye.gpg \
+    && rm -f /etc/apt/keyrings/debian-bullseye-security.gpg \
     && rm -rf /var/lib/apt/lists/* \
     && update-alternatives --install /usr/bin/python3 python3 /usr/bin/python${PYTHON_VERSION} 1 \
     && update-alternatives --set python3 /usr/bin/python${PYTHON_VERSION} \
