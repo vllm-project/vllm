@@ -565,8 +565,6 @@ def fused_moe_kernel(
     # Cast once at the end to the desired compute/output dtype.
     accumulator = accumulator.to(compute_type)
 
-    accumulator = accumulator.to(compute_type)
-
     # -----------------------------------------------------------
     # Write back the block of the output
     offs_cn = pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
