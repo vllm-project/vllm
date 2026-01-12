@@ -863,9 +863,10 @@ You can pass multi-modal inputs to scoring models by passing `content` including
         print("Scoring output:", response_json["data"][0]["score"])
         print("Scoring output:", response_json["data"][1]["score"])
         ```
-Full example: 
+Full example:
+
 - [examples/pooling/score/vision_score_api_online.py](../../examples/pooling/score/vision_score_api_online.py)
-- [examples/pooling/score/vision_rerank_api_online.py](../../examples/pooling/score/vision_rerank_api_online.py)
+- examples/pooling/score/vision_rerank_api_online.py](../../examples/pooling/score/vision_rerank_api_online.py)
 
 #### Extra parameters
 

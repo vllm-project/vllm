@@ -22,10 +22,6 @@ import json
 
 import requests
 
-base_url = "http://127.0.0.1:8000"
-models_url = base_url + "/v1/models"
-rerank_url = base_url + "/rerank"
-
 headers = {"accept": "application/json", "Content-Type": "application/json"}
 
 query = "A woman playing with her dog on a beach at sunset."
@@ -56,6 +52,10 @@ def parse_args():
 
 
 def main(args):
+    base_url = f"http://{args.host}:{args.port}"
+    models_url = base_url + "/v1/models"
+    rerank_url = base_url + "/score"
+
     response = requests.get(models_url, headers=headers)
     model = response.json()["data"][0]["id"]
 
