@@ -338,19 +338,33 @@ class QuarkW8A8Fp8MoEMethod(QuarkMoEMethod):
             assert layer.w13_weight_scale is not None
             shard_size = layer.intermediate_size_per_partition
             max_w13_scales = layer.w13_weight_scale.max(dim=1).values
-            for expert_id in range(layer.local_num_experts):
-                start = 0
-                for shard_id in range(2):
+
+            # For gpt_oss, w1 and w3 are fused into a single tensor with 4x size
+            # and only one scale. Process the entire weight tensor as one shard.
+            if self.model_type == "gpt_oss":
+                for expert_id in range(layer.local_num_experts):
+                    # Process all 4*intermediate_size_per_partition rows at once
                     dq_weight = per_tensor_dequantize(
-                        layer.w13_weight[expert_id][start : start + shard_size, :],
-                        layer.w13_weight_scale[expert_id][shard_id],
+                        layer.w13_weight[expert_id],
+                        layer.w13_weight_scale[expert_id][0],
                     )
-                    layer.w13_weight[expert_id][start : start + shard_size, :], _ = (
-                        ops.scaled_fp8_quant(dq_weight, max_w13_scales[expert_id])
+                    layer.w13_weight[expert_id], _ = ops.scaled_fp8_quant(
+                        dq_weight, max_w13_scales[expert_id]
                     )
-                    start += shard_size
-                    if self.model_type == "gpt_oss":
-                        break
+            else:
+                # For non-gpt_oss, process w1 and w3 shards separately
+                for expert_id in range(layer.local_num_experts):
+                    start = 0
+                    for shard_id in range(2):
+                        dq_weight = per_tensor_dequantize(
+                            layer.w13_weight[expert_id][start : start + shard_size, :],
+                            layer.w13_weight_scale[expert_id][shard_id],
+                        )
+                        (
+                            layer.w13_weight[expert_id][start : start + shard_size, :],
+                            _,
+                        ) = ops.scaled_fp8_quant(dq_weight, max_w13_scales[expert_id])
+                        start += shard_size
 
             layer.w13_weight_scale = torch.nn.Parameter(
                 max_w13_scales, requires_grad=False

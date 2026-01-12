@@ -194,7 +194,7 @@ def triton_kernel_fused_experts(
 
     from triton_kernels.matmul_ogs import PrecisionConfig
 
-    if isinstance(quant_config._w1.scale, torch.nn.Parameter):
+    if isinstance(quant_config._w1.scale, torch.Tensor):
         w1_scale = quant_config._w1.scale.detach()
         w1_scale = w1_scale.to(dtype=torch.float32, device=w1_scale.device).contiguous()
         w1_precision = PrecisionConfig(weight_scale=w1_scale)
@@ -203,10 +203,10 @@ def triton_kernel_fused_experts(
     else:
         raise TypeError(
             "quant_config._w1.scale is expected to be in type of "
-            "either 'torch.nn.Parameter' or 'PrecisionConfig'."
+            "either 'torch.Tensor' or 'PrecisionConfig'."
         )
 
-    if isinstance(quant_config._w2.scale, torch.nn.Parameter):
+    if isinstance(quant_config._w2.scale, torch.Tensor):
         w2_scale = quant_config._w2.scale.detach()
         w2_scale = w2_scale.to(dtype=torch.float32, device=w2_scale.device).contiguous()
         w2_precision = PrecisionConfig(weight_scale=w2_scale)
@@ -215,7 +215,7 @@ def triton_kernel_fused_experts(
     else:
         raise TypeError(
             "quant_config._w2.scale is expected to be in type of "
-            "either 'torch.nn.Parameter' or 'PrecisionConfig'."
+            "either 'torch.Tensor' or 'PrecisionConfig'."
         )
 
     matmul_ogs(

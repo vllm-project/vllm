@@ -408,7 +408,10 @@ class GptOssModel(nn.Module):
                 continue
 
             # mapping to convert individual experts input_scale into fused_moe.
-            elif all(key in name for key in ["input_scale", "mlp.experts"]):
+            elif (
+                all(key in name for key in ["input_scale", "mlp.experts"])
+                and expert_id is not None
+            ):
                 assert loaded_weight.numel() == 1
                 expert_data = params_dict[fused_name].data[expert_id]
                 expert_data.copy_(loaded_weight)
@@ -614,7 +617,7 @@ class GptOssModel(nn.Module):
                 for mapping in expert_params_mapping:
                     # Anyway, this is an expert weight and should not be
                     # attempted to load as other weights later
-                    param_name, weight_name, expert_id, shard_id = mapping
+                    param_name, weight_name, mapping_expert_id, shard_id = mapping
                     weight_name = (
                         weight_name[:-1] if weight_name.endswith(".") else weight_name
                     )
@@ -632,12 +635,17 @@ class GptOssModel(nn.Module):
                     weight_loader = typing.cast(
                         Callable[..., bool], param.weight_loader
                     )
+                    # Use checkpoint's expert_id for quark format (when expert_id
+                    # is extracted from weight name), otherwise use mapping's expert_id
+                    actual_expert_id = (
+                        expert_id if expert_id is not None else mapping_expert_id
+                    )
                     success = weight_loader(
                         param,
                         loaded_weight,
                         fused_name,
                         shard_id=shard_id,
-                        expert_id=expert_id,
+                        expert_id=actual_expert_id,
                         return_success=True,
                     )
                     if success:
