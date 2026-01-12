@@ -5,7 +5,7 @@ from collections.abc import Set
 import numpy as np
 import torch
 
-from vllm.config import ModelConfig, PoolerConfig, VllmConfig
+from vllm.config import ModelConfig, VllmConfig
 from vllm.logger import init_logger
 from vllm.model_executor.layers.pooler import (
     DispatchPooler,
@@ -13,8 +13,8 @@ from vllm.model_executor.layers.pooler import (
 )
 from vllm.model_executor.layers.pooler.activations import PoolerNormalize
 from vllm.model_executor.layers.pooler.seqwise import (
+    EmbeddingPoolerHead,
     SequencePooler,
-    SequencePoolerHeadOutput,
     SequencePoolingMethod,
     SequencePoolingMethodOutput,
     get_seq_pooling_method,
@@ -178,24 +178,21 @@ class GritLMMeanPool(SequencePoolingMethod):
 
 
 class GritLMPooler(SequencePooler):
-    def __init__(self, model_config: ModelConfig, pooler_config: PoolerConfig):
+    def __init__(self, model_config: ModelConfig):
+        pooler_config = model_config.pooler_config
+        assert pooler_config is not None
+
         super().__init__(
             pooling=(
                 GritLMMeanPool(model_config)
                 if pooler_config.seq_pooling_type == "MEAN"
                 else get_seq_pooling_method(pooler_config.seq_pooling_type)
             ),
-            head=self.head,
+            head=EmbeddingPoolerHead(
+                head_dtype=model_config.head_dtype,
+                activation=PoolerNormalize(),
+            ),
         )
-
-        self.activation = PoolerNormalize()
-
-    def head(
-        self,
-        pooled_data: SequencePoolingMethodOutput,
-        pooling_metadata: PoolingMetadata,
-    ) -> SequencePoolerHeadOutput:
-        return self.activation(pooled_data)
 
 
 @default_pooling_type(seq_pooling_type="MEAN")
@@ -240,6 +237,6 @@ class GritLM(LlamaForCausalLM):
             self.pooler = DispatchPooler(
                 {
                     "token_embed": pooler_for_token_embed(pooler_config),
-                    "embed": GritLMPooler(vllm_config.model_config, pooler_config),
+                    "embed": GritLMPooler(vllm_config.model_config),
                 }
             )

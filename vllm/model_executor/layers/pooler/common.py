@@ -2,12 +2,17 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections.abc import Callable
 from dataclasses import dataclass
+from typing import TypeVar
 
 import torch
 
 from vllm.pooling_params import PoolingParams
 
+_T = TypeVar("_T", bound=torch.Tensor | list[torch.Tensor])
+
+ProjectorFn = Callable[[torch.Tensor], torch.Tensor]
 ClassifierFn = Callable[[torch.Tensor], torch.Tensor]
+ActivationFn = Callable[[_T], _T]
 
 
 @dataclass(frozen=True)
@@ -24,4 +29,4 @@ class PoolingParamsUpdate:
         params.requires_token_ids = self.requires_token_ids
 
 
-__all__ = ["ClassifierFn", "PoolingParamsUpdate"]
+__all__ = ["ActivationFn", "ClassifierFn", "ProjectorFn", "PoolingParamsUpdate"]
