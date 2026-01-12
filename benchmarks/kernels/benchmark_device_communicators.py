@@ -293,7 +293,7 @@ class CommunicatorBenchmark:
                     graph = torch.cuda.CUDAGraph()
                     graph_pool = torch.cuda.graph_pool_handle()
                     set_graph_pool_id(graph_pool)
-                    with torch.cuda.graph(graph, pool=graph_pool):
+                    with torch.cuda.graph(graph, pool=graph_pool, stream=stream):
                         for _ in range(CUDA_GRAPH_CAPTURE_CYCLES):
                             allreduce_fn(graph_input)
 

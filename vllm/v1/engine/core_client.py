@@ -20,6 +20,7 @@ import zmq
 import zmq.asyncio
 
 from vllm.config import VllmConfig
+from vllm.envs import VLLM_ENGINE_READY_TIMEOUT_S
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.tasks import SupportedTask
@@ -501,7 +502,7 @@ class MPClient(EngineCoreClient):
 
             parallel_config = vllm_config.parallel_config
             dp_size = parallel_config.data_parallel_size
-            dp_rank = parallel_config.data_parallel_rank
+            dp_rank = parallel_config.data_parallel_index
             dp_local_size = parallel_config.data_parallel_size_local
             offline_mode = parallel_config.data_parallel_rank_local is not None
             # Client manages local+remote EngineCores in pure internal LB case.
@@ -528,9 +529,11 @@ class MPClient(EngineCoreClient):
             identities = set(self.core_engines)
             sync_input_socket = zmq.Socket.shadow(self.input_socket)
             while identities:
-                if not sync_input_socket.poll(timeout=600_000):
+                if not sync_input_socket.poll(
+                    timeout=VLLM_ENGINE_READY_TIMEOUT_S * 1000  # convert to ms
+                ):
                     raise TimeoutError(
-                        "Timed out waiting for engines to send"
+                        "Timed out waiting for engines to send "
                         "initial message on input socket."
                     )
                 identity, _ = sync_input_socket.recv_multipart()
@@ -1340,7 +1343,9 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
         # Wait for ready messages from new engines on the input socket
         sync_input_socket = zmq.Socket.shadow(self.input_socket)
         while new_engine_identities:
-            if not sync_input_socket.poll(timeout=600_000):
+            if not sync_input_socket.poll(
+                timeout=VLLM_ENGINE_READY_TIMEOUT_S * 1000  # convert to ms
+            ):
                 raise TimeoutError(
                     "Timed out waiting for new engines to send initial "
                     "message on input socket."

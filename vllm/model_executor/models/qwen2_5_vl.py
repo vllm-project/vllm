@@ -34,15 +34,13 @@ import einops
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from transformers import BatchFeature
+from transformers import BatchFeature, Qwen2ForCausalLM
 from transformers.models.qwen2_5_vl import Qwen2_5_VLProcessor
 from transformers.models.qwen2_5_vl.configuration_qwen2_5_vl import (
     Qwen2_5_VLConfig,
     Qwen2_5_VLVisionConfig,
 )
 
-from vllm.attention.backends.registry import AttentionBackendEnum
-from vllm.attention.layers.mm_encoder_attention import MMEncoderAttention
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import MultiModalConfig, VllmConfig
 from vllm.distributed import parallel_state
@@ -50,6 +48,7 @@ from vllm.distributed import utils as dist_utils
 from vllm.forward_context import set_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import get_act_and_mul_fn
+from vllm.model_executor.layers.attention.mm_encoder_attention import MMEncoderAttention
 from vllm.model_executor.layers.conv import Conv3dLayer
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
@@ -83,6 +82,7 @@ from vllm.multimodal.processing import PromptReplacement, PromptUpdate
 from vllm.sequence import IntermediateTensors
 from vllm.utils.platform_utils import is_pin_memory_available
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
+from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 from .interfaces import (
     MultiModalEmbeddings,
@@ -352,6 +352,7 @@ class Qwen2_5_VisionAttention(nn.Module):
         self.attn = MMEncoderAttention(
             num_heads=self.num_attention_heads_per_partition,
             head_size=self.hidden_size_per_attention_head,
+            scale=self.hidden_size_per_attention_head**-0.5,
             multimodal_config=multimodal_config,
         )
 
@@ -1026,6 +1027,7 @@ class Qwen2_5_VLForConditionalGeneration(
     packed_modules_mapping = {
         "qkv_proj": ["q_proj", "k_proj", "v_proj"],
         "gate_up_proj": ["gate_proj", "up_proj"],
+        "qkv": ["qkv"],  # For vision tower's already-packed QKV
     }
 
     # To ensure correct weight loading and mapping.
@@ -1567,3 +1569,30 @@ class Qwen2_5_VLForConditionalGeneration(
             connector="visual.merger.",
             tower_model="visual.",
         )
+
+    def get_num_mm_encoder_tokens(
+        self,
+        num_image_tokens: int,
+    ) -> int:
+        hf_config = self.config
+        vision_config = hf_config.vision_config
+        merge_size = vision_config.spatial_merge_size
+
+        return num_image_tokens * merge_size**2
+
+    def get_num_mm_connector_tokens(
+        self,
+        num_vision_tokens: int,
+    ) -> int:
+        hf_config = self.config
+        vision_config = hf_config.vision_config
+        merge_size = vision_config.spatial_merge_size
+        return num_vision_tokens // merge_size**2
+
+    @classmethod
+    def get_language_model_spec(cls) -> tuple[nn.Module | None, str | None]:
+        """
+        Return the language model spec:
+        (language model class, language model attr)
+        """
+        return Qwen2ForCausalLM, "language_model"

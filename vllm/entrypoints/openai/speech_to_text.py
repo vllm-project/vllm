@@ -31,6 +31,7 @@ from vllm.entrypoints.openai.protocol import (
     TranslationSegment,
     TranslationStreamResponse,
     UsageInfo,
+    VLLMValidationError,
 )
 from vllm.entrypoints.openai.serving_engine import OpenAIServing, SpeechToTextRequest
 from vllm.entrypoints.openai.serving_models import OpenAIServingModels
@@ -220,6 +221,7 @@ class OpenAISpeechToText(OpenAIServing):
             dummy_params = SamplingParams(
                 max_tokens=1,
                 temperature=0.0,
+                skip_clone=True,  # Internal warmup, safe to skip clone
             )
 
             # Process the dummy input through the input processor
@@ -261,7 +263,11 @@ class OpenAISpeechToText(OpenAIServing):
         )
 
         if len(audio_data) / 1024**2 > self.max_audio_filesize_mb:
-            raise ValueError("Maximum file size exceeded.")
+            raise VLLMValidationError(
+                "Maximum file size exceeded",
+                parameter="audio_filesize_mb",
+                value=len(audio_data) / 1024**2,
+            )
 
         with io.BytesIO(audio_data) as bytes_:
             # NOTE resample to model SR here for efficiency. This is also a
@@ -289,12 +295,18 @@ class OpenAISpeechToText(OpenAIServing):
             )
             if request.response_format == "verbose_json":
                 if not isinstance(prompt, dict):
-                    raise ValueError(f"Expected prompt to be a dict,got {type(prompt)}")
+                    raise VLLMValidationError(
+                        "Expected prompt to be a dict",
+                        parameter="prompt",
+                        value=type(prompt).__name__,
+                    )
                 prompt_dict = cast(dict, prompt)
                 decoder_prompt = prompt.get("decoder_prompt")
                 if not isinstance(decoder_prompt, str):
-                    raise ValueError(
-                        f"Expected decoder_prompt to bestr, got {type(decoder_prompt)}"
+                    raise VLLMValidationError(
+                        "Expected decoder_prompt to be str",
+                        parameter="decoder_prompt",
+                        value=type(decoder_prompt).__name__,
                     )
                 prompt_dict["decoder_prompt"] = decoder_prompt.replace(
                     "<|notimestamps|>", "<|0.00|>"
@@ -424,7 +436,7 @@ class OpenAISpeechToText(OpenAIServing):
 
         except ValueError as e:
             logger.exception("Error in preprocessing prompt inputs")
-            return self.create_error_response(str(e))
+            return self.create_error_response(e)
 
         list_result_generator: list[AsyncGenerator[RequestOutput, None]] | None = None
         try:
@@ -462,8 +474,7 @@ class OpenAISpeechToText(OpenAIServing):
                 for i, prompt in enumerate(prompts)
             ]
         except ValueError as e:
-            # TODO: Use a vllm-specific Validation Error
-            return self.create_error_response(str(e))
+            return self.create_error_response(e)
 
         if request.stream:
             return stream_generator_method(
@@ -480,7 +491,15 @@ class OpenAISpeechToText(OpenAIServing):
             }
             segment_class: type[SpeechToTextSegment] = segments_types[self.task_type]
             text = ""
+            chunk_size_in_s = self.asr_config.max_audio_clip_s
+            if chunk_size_in_s is None:
+                assert len(list_result_generator) == 1, (
+                    "`max_audio_clip_s` is set to None, audio cannot be chunked"
+                )
             for idx, result_generator in enumerate(list_result_generator):
+                start_time = (
+                    float(idx * chunk_size_in_s) if chunk_size_in_s is not None else 0.0
+                )
                 async for op in result_generator:
                     if request.response_format == "verbose_json":
                         assert op.outputs[0].logprobs
@@ -489,7 +508,7 @@ class OpenAISpeechToText(OpenAIServing):
                                 tokens=tuple(op.outputs[0].token_ids),
                                 segment_class=segment_class,
                                 request=request,
-                                start_time=idx * self.asr_config.max_audio_clip_s,
+                                start_time=start_time,
                                 log_probs=op.outputs[0].logprobs,
                             )
                         )
@@ -539,8 +558,7 @@ class OpenAISpeechToText(OpenAIServing):
         except asyncio.CancelledError:
             return self.create_error_response("Client disconnected")
         except ValueError as e:
-            # TODO: Use a vllm-specific Validation Error
-            return self.create_error_response(str(e))
+            return self.create_error_response(e)
 
     async def _speech_to_text_stream_generator(
         self,
@@ -650,9 +668,8 @@ class OpenAISpeechToText(OpenAIServing):
             )
 
         except Exception as e:
-            # TODO: Use a vllm-specific Validation Error
             logger.exception("Error in %s stream generator.", self.task_type)
-            data = self.create_streaming_error_response(str(e))
+            data = self.create_streaming_error_response(e)
             yield f"data: {data}\n\n"
         # Send the final done message after all response.n are finished
         yield "data: [DONE]\n\n"
@@ -660,6 +677,10 @@ class OpenAISpeechToText(OpenAIServing):
     def _split_audio(
         self, audio_data: np.ndarray, sample_rate: int
     ) -> list[np.ndarray]:
+        assert self.asr_config.max_audio_clip_s is not None, (
+            f"{self.asr_config.max_audio_clip_s=} cannot be None to"
+            " split audio into chunks."
+        )
         chunk_size = sample_rate * self.asr_config.max_audio_clip_s
         overlap_size = sample_rate * self.asr_config.overlap_chunk_second
         chunks = []
