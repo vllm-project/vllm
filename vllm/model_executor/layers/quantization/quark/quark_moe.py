@@ -672,6 +672,13 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
             self.input_dtype, self.weight_dtype
         )
 
+        if self.ocp_mx_scheme is None:
+            raise ValueError(
+                f"Unsupported OCP MX dtype combination for MoE: "
+                f"input_dtype={self.input_dtype}, weight_dtype={self.weight_dtype}. "
+                f"Please check that the combination is supported in OCP_MX_Scheme."
+            )
+
         self.mxfp4_backend: Mxfp4Backend | None = None
         if self.ocp_mx_scheme == "w_mxfp4":
             self.mxfp4_backend = get_mxfp4_backend(moe.is_lora_enabled)

@@ -25,8 +25,10 @@ class OCP_MX_Scheme(str, Enum):
     w_mxfp4_a_mxfp6_e3m2 = "w_mxfp4_a_mxfp6_e3m2"
     w_mxfp4_a_mxfp6_e2m3 = "w_mxfp4_a_mxfp6_e2m3"
     w_mxfp4_a_fp8 = "w_mxfp4_a_fp8"
+    w_mxfp6_e3m2 = "w_mxfp6_e3m2"
     w_mxfp6_e3m2_a_mxfp6_e3m2 = "w_mxfp6_e3m2_a_mxfp6_e3m2"
     w_mxfp6_e3m2_a_fp8 = "w_mxfp6_e3m2_a_fp8"
+    w_mxfp6_e2m3 = "w_mxfp6_e2m3"
     w_mxfp6_e2m3_a_mxfp6_e2m3 = "w_mxfp6_e2m3_a_mxfp6_e2m3"
     w_mxfp6_e2m3_a_fp8 = "w_mxfp6_e2m3_a_fp8"
 
@@ -36,6 +38,10 @@ class OCP_MX_Scheme(str, Enum):
             return None
         elif input_dtype is None and weight_dtype == "mxfp4":
             return cls.w_mxfp4
+        elif input_dtype is None and weight_dtype == "mxfp6_e3m2":
+            return cls.w_mxfp6_e3m2
+        elif input_dtype is None and weight_dtype == "mxfp6_e2m3":
+            return cls.w_mxfp6_e2m3
         elif input_dtype == "mxfp4" and weight_dtype == "mxfp4":
             return cls.w_mxfp4_a_mxfp4
         elif input_dtype == "mxfp6_e3m2" and weight_dtype == "mxfp4":
