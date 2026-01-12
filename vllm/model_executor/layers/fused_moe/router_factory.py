@@ -52,8 +52,8 @@ def create_fused_moe_router(
     The selection logic follows this priority order:
     1. RoutingSimulatorRouter - if VLLM_MOE_ROUTING_SIMULATION_STRATEGY env var is set
     2. GroupedTopKRouter - if use_grouped_topk is True
-    3. FusedTopKBiasRouter - if e_score_correction_bias is not None
-    4. CustomRoutingRouter - if custom_routing_function is not None
+    3. CustomRoutingRouter - if custom_routing_function is not None
+    4. FusedTopKBiasRouter - if e_score_correction_bias is not None
     5. FusedTopKRouter - default fallback
 
     Common arguments:
