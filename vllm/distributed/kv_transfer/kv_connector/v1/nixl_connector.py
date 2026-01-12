@@ -223,6 +223,7 @@ class RemoteMeta:
     port: int
     engine_id: str
     request_id: str
+    block_expiry_time: float | None = None  # Expiry time for blocks (perf_counter)
 
 
 @dataclass
@@ -232,7 +233,6 @@ class ReqMeta:
     local_physical_block_ids: list[int]
     tp_size: int
     remote: RemoteMeta | None = None
-    block_expiry_time: float | None = None  # Expiry time for blocks (perf_counter)
 
 
 class NixlConnectorMetadata(KVConnectorMetadata):
@@ -243,17 +243,15 @@ class NixlConnectorMetadata(KVConnectorMetadata):
         self.reqs_in_batch: set[ReqId] = set()
         self.reqs_not_processed: set[ReqId] = set()
 
+    @staticmethod
     def _add_new_req(
-        self,
-        local_block_ids: list[int],
-        kv_transfer_params: dict[str, Any],
+        local_block_ids: list[int], kv_transfer_params: dict[str, Any]
     ) -> ReqMeta:
         return ReqMeta(
             local_block_ids=local_block_ids,
             local_physical_block_ids=local_block_ids,
             # P workers don't need to receive tp_size from proxy here.
             tp_size=kv_transfer_params.get("tp_size", 1),
-            block_expiry_time=kv_transfer_params.get("block_expiry_time"),
         )
 
     def add_new_req_to_save(
@@ -279,6 +277,7 @@ class NixlConnectorMetadata(KVConnectorMetadata):
             request_id=kv_transfer_params["remote_request_id"],
             host=kv_transfer_params["remote_host"],
             port=kv_transfer_params["remote_port"],
+            block_expiry_time=kv_transfer_params.get("block_expiry_time"),
         )
         self.reqs_to_recv[request_id] = req
 
@@ -616,14 +615,11 @@ class NixlConnectorScheduler:
         )
 
         if params is not None and params.get("do_remote_prefill"):
+            block_expiry_time = params.get("block_expiry_time")
+            prefill_timestamp = params.get("prefill_timestamp")
             # Check if blocks have expired before allocating
-            if (
-                params.get("block_expiry_time") is not None
-                and params.get("prefill_timestamp") is not None
-            ):
+            if block_expiry_time is not None and prefill_timestamp is not None:
                 current_time = time.perf_counter()
-                prefill_timestamp = params["prefill_timestamp"]
-                block_expiry_time = params["block_expiry_time"]
 
                 # Calculate time difference: local - remote
                 time_diff = current_time - prefill_timestamp
@@ -643,7 +639,7 @@ class NixlConnectorScheduler:
                         current_time,
                         buffer_time,
                     )
-                    # Mark as not doing remote prefill anymore
+                    # Mark as not doing remote prefill anymore.
                     params["do_remote_prefill"] = False
                     return 0, False
 
@@ -2098,14 +2094,14 @@ class NixlConnectorWorker:
         assert meta.remote is not None
 
         # Check if blocks have expired before attempting to retrieve them
-        if meta.block_expiry_time is not None:
+        if meta.remote.block_expiry_time is not None:
             # Get time difference for this remote engine
             time_diff = self._time_diffs.get(meta.remote.engine_id, 0.0)
             # Convert remote expiry time to local time
             # block_expiry_time is in prefill's perf_counter time
             # time_diff = local_time - remote_time at handshake
             # So: local_expiry = remote_expiry + time_diff
-            local_expiry_time = meta.block_expiry_time + time_diff
+            local_expiry_time = meta.remote.block_expiry_time + time_diff
             # Subtract buffer time (10 seconds) for safety
             buffer_time = 10.0
             local_expiry_time -= buffer_time
