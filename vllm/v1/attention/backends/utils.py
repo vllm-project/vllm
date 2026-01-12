@@ -29,16 +29,16 @@ if TYPE_CHECKING:
     from vllm.v1.worker.gpu_input_batch import InputBatch
 
 import vllm.envs as envs
-from vllm.attention.backends.abstract import (
-    AttentionBackend,
-    AttentionImpl,
-    AttentionMetadata,
-)
 from vllm.distributed.kv_transfer.kv_connector.utils import (
     get_kv_connector_cache_layout,
 )
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
+from vllm.v1.attention.backend import (
+    AttentionBackend,
+    AttentionImpl,
+    AttentionMetadata,
+)
 from vllm.v1.kv_cache_interface import AttentionSpec
 from vllm.v1.worker.ubatch_utils import UBatchSlice
 
@@ -96,7 +96,7 @@ class CommonAttentionMetadata:
     dcp_local_seq_lens_cpu: torch.Tensor | None = None
     """Sequence lengths of the local rank in decode context parallelism world"""
 
-    # WARNING: Deprecated fields. Will be removed in a future release (v0.14.0)
+    # WARNING: Deprecated fields. Will be removed in a future release (v0.15.0)
     _seq_lens_cpu: torch.Tensor | None = None
     _num_computed_tokens_cpu: torch.Tensor | None = None
 
@@ -107,7 +107,7 @@ class CommonAttentionMetadata:
         """
     Prefer using device seq_lens directly to avoid implicit H<>D sync.
     If a CPU copy is needed, use `seq_lens.cpu()` instead.
-    Will be removed in a future release (v0.14.0)
+    Will be removed in a future release (v0.15.0)
     """
     )
     def seq_lens_cpu(self) -> torch.Tensor:
@@ -121,7 +121,7 @@ class CommonAttentionMetadata:
     Prefer using device seq_lens directly to avoid implicit H<>D sync which breaks full
     async scheduling. If a CPU copy is needed, it can be derived from 
     query_start_loc_cpu and seq_lens.
-    Will be removed in a future release (v0.14.0)
+    Will be removed in a future release (v0.15.0)
     """
     )
     def num_computed_tokens_cpu(self) -> torch.Tensor:
@@ -469,6 +469,7 @@ def get_kv_cache_layout():
     # Format specified by the code.
     global _KV_CACHE_LAYOUT_OVERRIDE
 
+    cache_layout: Literal["NHD", "HND"] | None = None
     if _KV_CACHE_LAYOUT_OVERRIDE is not None:
         cache_layout = _KV_CACHE_LAYOUT_OVERRIDE
         logger.info_once(
@@ -524,7 +525,11 @@ def get_per_layer_parameters(
     to use during `plan`.
     """
 
-    layers = get_layers_from_vllm_config(vllm_config, AttentionLayerBase, layer_names)
+    layers = get_layers_from_vllm_config(
+        vllm_config,
+        AttentionLayerBase,  # type: ignore[type-abstract]
+        layer_names,
+    )
     per_layer_params: dict[str, PerLayerParameters] = {}
 
     for key, layer in layers.items():
@@ -1125,7 +1130,7 @@ class KVSharingFastPrefillMetadata(Protocol):
 
 def create_fast_prefill_custom_backend(
     prefix: str,
-    underlying_attn_backend: AttentionBackend,
+    underlying_attn_backend: type[AttentionBackend],
 ) -> type[AttentionBackend]:
     underlying_builder = underlying_attn_backend.get_builder_cls()
 

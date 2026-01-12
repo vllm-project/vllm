@@ -721,13 +721,34 @@ def init_test_distributed_environment(
     distributed_init_port: str,
     local_rank: int = -1,
 ) -> None:
-    distributed_init_method = f"tcp://localhost:{distributed_init_port}"
-    init_distributed_environment(
-        world_size=pp_size * tp_size,
-        rank=rank,
-        distributed_init_method=distributed_init_method,
-        local_rank=local_rank,
+    # Note: This function is often called from Ray worker processes, so we
+    # can't rely on pytest fixtures to set the config. We check if the config
+    # is already set and only create a default one if needed.
+    from vllm.config import (
+        VllmConfig,
+        get_current_vllm_config_or_none,
+        set_current_vllm_config,
     )
+
+    distributed_init_method = f"tcp://localhost:{distributed_init_port}"
+
+    if get_current_vllm_config_or_none() is not None:
+        # Config already set, use it directly
+        init_distributed_environment(
+            world_size=pp_size * tp_size,
+            rank=rank,
+            distributed_init_method=distributed_init_method,
+            local_rank=local_rank,
+        )
+    else:
+        # No config set, create a default one for the test
+        with set_current_vllm_config(VllmConfig()):
+            init_distributed_environment(
+                world_size=pp_size * tp_size,
+                rank=rank,
+                distributed_init_method=distributed_init_method,
+                local_rank=local_rank,
+            )
     ensure_model_parallel_initialized(tp_size, pp_size)
 
 

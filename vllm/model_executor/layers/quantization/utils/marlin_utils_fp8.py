@@ -8,6 +8,7 @@ import vllm._custom_ops as ops
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.utils.marlin_utils import (
     USE_FP32_REDUCE_DEFAULT,
+    get_marlin_input_dtype,
     marlin_make_workspace_new,
     marlin_permute_bias,
     marlin_permute_scales,
@@ -197,26 +198,28 @@ def prepare_fp8_layer_for_marlin(
         replace_parameter(layer, "bias", bias)
 
 
-def prepare_moe_fp8_layer_for_marlin(
+def prepare_fp8_moe_layer_for_marlin(
     layer: torch.nn.Module,
     w13_weight: torch.Tensor,
     w2_weight: torch.Tensor,
     w13_weight_scale: torch.Tensor,
     w2_weight_scale: torch.Tensor,
-    input_dtype: torch.dtype | None = None,
-) -> tuple[
-    torch.Tensor,  # workspace
-    torch.Tensor,  # w13_weight
-    torch.Tensor,  # w2_weight
-    torch.Tensor,  # w13_weight_scale
-    torch.Tensor,  # w2_weight_scale
-]:
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """
+    Shuffle weights and scales into marlin format.
+
+    Note that this function has the side effect of adding a `workspace`
+    attribute to the layer. This `workspace` does not need to be
+    registered as a Parameter as it is not used during weight reloading.
+    """
+
     logger.warning_once(
         "Your GPU does not have native support for FP8 computation but "
         "FP8 quantization is being used. Weight-only FP8 compression will "
         "be used leveraging the Marlin kernel. This may degrade "
         "performance for compute-heavy workloads."
     )
+    input_dtype = get_marlin_input_dtype()
     if input_dtype is not None and input_dtype.itemsize == 1:
         raise NotImplementedError("Marlin W8A8 is not supported.")
 
@@ -227,7 +230,9 @@ def prepare_moe_fp8_layer_for_marlin(
 
     # WORKSPACE
     device = layer.w13_weight.device
-    workspace = marlin_make_workspace_new(device, 4)
+    # NOTE(rob): we do not need to register the workspace as a param
+    # because it is not used as part of the weight reloading process.
+    layer.workspace = marlin_make_workspace_new(device, 4)
     perm = torch.empty(0, dtype=torch.int, device=device)
 
     # WEIGHT
@@ -310,13 +315,7 @@ def prepare_moe_fp8_layer_for_marlin(
     w13_weight_scale = permute_scales(w13_weight_scale, "w13")
     w2_weight_scale = permute_scales(w2_weight_scale, "w2")
 
-    return (
-        workspace,
-        w13_weight,
-        w2_weight,
-        w13_weight_scale,
-        w2_weight_scale,
-    )
+    return w13_weight, w2_weight, w13_weight_scale, w2_weight_scale
 
 
 def pack_fp8_to_int32(

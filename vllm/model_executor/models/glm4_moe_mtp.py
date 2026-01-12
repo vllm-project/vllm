@@ -47,7 +47,6 @@ from .glm4_moe import (
     Glm4MoeDecoderLayer,
     get_spec_layer_idx_from_weight_name,
 )
-from .interfaces import SupportsPP
 from .utils import maybe_prefix
 
 
@@ -106,7 +105,7 @@ class Glm4MoeMultiTokenPredictorLayer(nn.Module):
     ) -> torch.Tensor:
         assert inputs_embeds is not None
         # masking inputs at position 0, as not needed by MTP
-        inputs_embeds[positions == 0] = 0
+        inputs_embeds = torch.where(positions.unsqueeze(-1) == 0, 0, inputs_embeds)
         inputs_embeds = self.enorm(inputs_embeds)
         previous_hidden_states = self.hnorm(previous_hidden_states)
 
@@ -184,7 +183,7 @@ class Glm4MoeMultiTokenPredictor(nn.Module):
         return logits
 
 
-class Glm4MoeMTP(nn.Module, SupportsPP, Glm4MixtureOfExperts):
+class Glm4MoeMTP(nn.Module, Glm4MixtureOfExperts):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
         self.config = vllm_config.model_config.hf_config
@@ -248,6 +247,7 @@ class Glm4MoeMTP(nn.Module, SupportsPP, Glm4MixtureOfExperts):
         # Params for weights, fp8 weight scales, fp8 activation scales
         # (param_name, weight_name, expert_id, shard_id)
         expert_params_mapping = FusedMoE.make_expert_params_mapping(
+            self,
             ckpt_gate_proj_name="gate_proj",
             ckpt_down_proj_name="down_proj",
             ckpt_up_proj_name="up_proj",
@@ -308,6 +308,12 @@ class Glm4MoeMTP(nn.Module, SupportsPP, Glm4MixtureOfExperts):
                 else:
                     # Skip loading extra bias for GPTQ models.
                     if name.endswith(".bias") and name not in params_dict:
+                        continue
+                    # Some checkpoints include weight scale tensors for the
+                    # LM head even when the quantized head isn't built. Skip
+                    # them if the model does not expose a matching parameter
+                    # to avoid KeyError during load.
+                    if name.endswith(".weight_scale") and name not in params_dict:
                         continue
 
                     # According to DeepSeek-V3 Technical Report, MTP modules
