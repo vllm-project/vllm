@@ -431,10 +431,13 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
         }
 
         self.spec_decoding_prom = self._spec_decoding_cls(
-            vllm_config.speculative_config, labelnames, per_engine_labelvalues
+            vllm_config.speculative_config,
+            labelnames,
+            per_engine_labelvalues,
+            backend=self.backend,
         )
         self.kv_connector_prom = self._kv_connector_cls(
-            vllm_config, labelnames, per_engine_labelvalues
+            vllm_config, labelnames, per_engine_labelvalues, backend=self.backend
         )
         self.perf_metrics_prom = self._perf_metrics_cls(
             vllm_config, labelnames, per_engine_labelvalues
