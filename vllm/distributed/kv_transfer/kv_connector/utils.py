@@ -300,6 +300,17 @@ def yield_req_data(
         (req_id in cached_reqs.resumed_req_ids for req_id in cached_reqs.req_ids),
     )
 
+def get_blocks_in_fa_kv_group(block_ids: tuple[list[int], ...]) -> tuple[list[int], ...]:
+    """
+    Get blocks in the full attention KV group, which we assume to be the largest group.
+    Note that when HMA is disabled or the model is not hybrid, 
+    a single group is present here.
+    """
+    if not block_ids:
+        # Full prefix cache hit case
+        return []
+    argmax_i = max(range(len(block_ids)), key=lambda x: len(block_ids[x]))
+    return block_ids[argmax_i]
 
 @dataclass
 class TpKVTopology:
