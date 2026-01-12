@@ -227,7 +227,7 @@ class TritonAttentionMetadataBuilder(AttentionMetadataBuilder[TritonAttentionMet
         )
         BLOCK_Q = BLOCK_M // num_queries_per_kv
 
-        if max_seq_len > 1:
+        if max_query_len > 1:
             self.block_q_seq_boundaries_tensor[0] = 0
             self.block_q_seq_boundaries_tensor[1 : query_start_loc.numel()].copy_(
                 query_start_loc[1:]
