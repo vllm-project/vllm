@@ -8,6 +8,7 @@ import torch
 import torch.nn as nn
 from transformers import LlamaConfig
 
+from vllm.attention.backends.abstract import AttentionType
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.logger import init_logger
