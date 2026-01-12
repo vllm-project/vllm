@@ -12,10 +12,10 @@ from tests.v1.attention.utils import (
     try_backend_includes_kv_cache,
     try_get_attention_backend,
 )
-from vllm.attention.backends.registry import AttentionBackendEnum
-from vllm.attention.utils.fa_utils import is_flash_attn_varlen_func_available
 from vllm.config import ParallelConfig, SpeculativeConfig
-from vllm.v1.attention.backends.utils import CommonAttentionMetadata
+from vllm.v1.attention.backend import CommonAttentionMetadata
+from vllm.v1.attention.backends.fa_utils import is_flash_attn_varlen_func_available
+from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 if not is_flash_attn_varlen_func_available():
     pytest.skip(

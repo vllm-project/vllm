@@ -8,13 +8,6 @@ import torch
 import torch.nn as nn
 
 import vllm.envs as envs
-from vllm.attention.backends.abstract import (
-    AttentionBackend,
-    AttentionType,
-    MLAAttentionImpl,
-)
-from vllm.attention.backends.registry import AttentionBackendEnum
-from vllm.attention.selector import get_attn_backend
 from vllm.attention.utils.kv_sharing_utils import validate_kv_sharing_target
 from vllm.attention.utils.kv_transfer_utils import maybe_transfer_kv_layer
 from vllm.config import CacheConfig, get_current_vllm_config
@@ -37,6 +30,13 @@ from vllm.utils.torch_utils import (
     direct_register_custom_op,
     kv_cache_dtype_str_to_dtype,
 )
+from vllm.v1.attention.backend import (
+    AttentionBackend,
+    AttentionType,
+    MLAAttentionImpl,
+)
+from vllm.v1.attention.backends.registry import AttentionBackendEnum
+from vllm.v1.attention.selector import get_attn_backend
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheSpec,

@@ -39,6 +39,7 @@ from vllm.v1.attention.backends.mamba1_attn import Mamba1AttentionMetadata
 
 
 # Adapted from transformers.models.mamba.modeling_mamba.MambaMixer
+# --8<-- [start:mamba_mixer]
 @CustomOp.register("mamba_mixer")
 class MambaMixer(MambaBase, CustomOp):
     """
@@ -50,6 +51,8 @@ class MambaMixer(MambaBase, CustomOp):
     invariant S4, and is why Mamba is called
     **selective** state spaces)
     """
+
+    # --8<-- [end:mamba_mixer]
 
     def __init__(
         self,
