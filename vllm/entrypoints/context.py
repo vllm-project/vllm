@@ -2,11 +2,13 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import asyncio
 import contextlib
+import copy
 import json
 import logging
 from abc import ABC, abstractmethod
 from collections.abc import Callable
 from contextlib import AsyncExitStack
+from dataclasses import replace
 from typing import TYPE_CHECKING, Union
 
 from openai.types.responses.response_function_tool_call_output_item import (
@@ -19,7 +21,8 @@ from vllm import envs
 from vllm.entrypoints.chat_utils import (
     ChatTemplateContentFormatOption,
 )
-from vllm.entrypoints.harmony_utils import (
+from vllm.entrypoints.constants import MCP_PREFIX
+from vllm.entrypoints.openai.parser.harmony_utils import (
     get_encoding,
     get_streamable_parser_for_assistant,
     render_for_completion,
@@ -33,14 +36,13 @@ from vllm.entrypoints.openai.protocol import (
     ResponseRawMessageAndToken,
     ResponsesRequest,
 )
-from vllm.entrypoints.openai.tool_parsers.abstract_tool_parser import ToolParser
 from vllm.entrypoints.responses_utils import construct_tool_dicts
 from vllm.entrypoints.tool import Tool
 from vllm.entrypoints.tool_server import ToolServer
 from vllm.outputs import RequestOutput
 from vllm.reasoning.abs_reasoning_parsers import ReasoningParser
-from vllm.tokenizers.protocol import TokenizerLike
-from vllm.transformers_utils.tokenizer import AnyTokenizer
+from vllm.tokenizers import TokenizerLike
+from vllm.tool_parsers.abstract_tool_parser import ToolParser
 from vllm.utils import random_uuid
 
 if TYPE_CHECKING:
@@ -73,24 +75,24 @@ class TurnMetrics:
 
     def __init__(
         self,
-        input_tokens=0,
-        output_tokens=0,
-        cached_input_tokens=0,
-        tool_output_tokens=0,
-    ):
+        input_tokens: int = 0,
+        output_tokens: int = 0,
+        cached_input_tokens: int = 0,
+        tool_output_tokens: int = 0,
+    ) -> None:
         self.input_tokens = input_tokens
         self.output_tokens = output_tokens
         self.cached_input_tokens = cached_input_tokens
         self.tool_output_tokens = tool_output_tokens
 
-    def reset(self):
+    def reset(self) -> None:
         """Reset counters for a new turn."""
         self.input_tokens = 0
         self.output_tokens = 0
         self.cached_input_tokens = 0
         self.tool_output_tokens = 0
 
-    def copy(self):
+    def copy(self) -> "TurnMetrics":
         """Create a copy of this turn's token counts."""
         return TurnMetrics(
             self.input_tokens,
@@ -163,6 +165,12 @@ class SimpleContext(ConversationContext):
 
     def __init__(self):
         self.last_output = None
+
+        # Accumulated final output for streaming mode
+        self._accumulated_text: str = ""
+        self._accumulated_token_ids: list[int] = []
+        self._accumulated_logprobs: list = []
+
         self.num_prompt_tokens = 0
         self.num_output_tokens = 0
         self.num_cached_tokens = 0
@@ -182,6 +190,13 @@ class SimpleContext(ConversationContext):
         self.num_cached_tokens = output.num_cached_tokens or 0
         self.num_output_tokens += len(output.outputs[0].token_ids or [])
 
+        # Accumulate text, token_ids, and logprobs for streaming mode
+        delta_output = output.outputs[0]
+        self._accumulated_text += delta_output.text
+        self._accumulated_token_ids.extend(delta_output.token_ids)
+        if delta_output.logprobs is not None:
+            self._accumulated_logprobs.extend(delta_output.logprobs)
+
         if len(self.input_messages) == 0:
             output_prompt = output.prompt or ""
             output_prompt_token_ids = output.prompt_token_ids or []
@@ -193,10 +208,25 @@ class SimpleContext(ConversationContext):
             )
         self.output_messages.append(
             ResponseRawMessageAndToken(
-                message=output.outputs[0].text,
-                tokens=output.outputs[0].token_ids,
+                message=delta_output.text,
+                tokens=delta_output.token_ids,
             )
         )
+
+    @property
+    def final_output(self) -> RequestOutput | None:
+        """Return the final output, with complete text/token_ids/logprobs."""
+        if self.last_output is not None and self.last_output.outputs:
+            assert isinstance(self.last_output, RequestOutput)
+            final_output = copy.copy(self.last_output)
+            # copy inner item to avoid modify last_output
+            final_output.outputs = [replace(item) for item in self.last_output.outputs]
+            final_output.outputs[0].text = self._accumulated_text
+            final_output.outputs[0].token_ids = tuple(self._accumulated_token_ids)
+            if self._accumulated_logprobs:
+                final_output.outputs[0].logprobs = self._accumulated_logprobs
+            return final_output
+        return self.last_output
 
     def append_tool_output(self, output) -> None:
         raise NotImplementedError("Should not be called.")
@@ -228,8 +258,8 @@ class ParsableContext(ConversationContext):
         self,
         *,
         response_messages: list[ResponseInputOutputItem],
-        tokenizer: AnyTokenizer,
-        reasoning_parser_cls: Callable[[AnyTokenizer], ReasoningParser] | None,
+        tokenizer: TokenizerLike,
+        reasoning_parser_cls: Callable[[TokenizerLike], ReasoningParser] | None,
         request: ResponsesRequest,
         available_tools: list[str] | None,
         tool_parser_cls: Callable[[TokenizerLike], ToolParser] | None,
@@ -266,11 +296,39 @@ class ParsableContext(ConversationContext):
         self.chat_template = chat_template
         self.chat_template_content_format = chat_template_content_format
 
+        self.input_messages: list[ResponseRawMessageAndToken] = []
+        self.output_messages: list[ResponseRawMessageAndToken] = []
+
     def append_output(self, output: RequestOutput) -> None:
         self.num_prompt_tokens = len(output.prompt_token_ids or [])
         self.num_cached_tokens = output.num_cached_tokens or 0
         self.num_output_tokens += len(output.outputs[0].token_ids or [])
         self.parser.process(output.outputs[0])
+
+        # only store if enable_response_messages is True, save memory
+        if self.request.enable_response_messages:
+            output_prompt = output.prompt or ""
+            output_prompt_token_ids = output.prompt_token_ids or []
+            if len(self.input_messages) == 0:
+                self.input_messages.append(
+                    ResponseRawMessageAndToken(
+                        message=output_prompt,
+                        tokens=output_prompt_token_ids,
+                    )
+                )
+            else:
+                self.output_messages.append(
+                    ResponseRawMessageAndToken(
+                        message=output_prompt,
+                        tokens=output_prompt_token_ids,
+                    )
+                )
+            self.output_messages.append(
+                ResponseRawMessageAndToken(
+                    message=output.outputs[0].text,
+                    tokens=output.outputs[0].token_ids,
+                )
+            )
 
     def append_tool_output(self, output: list[ResponseInputOutputItem]) -> None:
         self.parser.response_messages.extend(output)
@@ -278,12 +336,14 @@ class ParsableContext(ConversationContext):
     def need_builtin_tool_call(self) -> bool:
         """Return true if the last message is a MCP tool call"""
         last_message = self.parser.response_messages[-1]
-        # TODO: figure out which tools are MCP tools
-        if (  # noqa: SIM103
-            last_message.type == "function_call"
-            and last_message.name in ("code_interpreter", "python")
-        ):
-            return True
+        # TODO(qandrew): figure out which tools are MCP tools
+        if last_message.type == "function_call":  # noqa: SIM102
+            if last_message.name in (
+                "code_interpreter",
+                "python",
+                "web_search_preview",
+            ) or last_message.name.startswith("container"):
+                return True
 
         return False
 
@@ -301,6 +361,75 @@ class ParsableContext(ConversationContext):
         result_str = result.content[0].text
 
         message = ResponseFunctionToolCallOutputItem(
+            id=f"mcpo_{random_uuid()}",
+            type="function_call_output",
+            call_id=f"call_{random_uuid()}",
+            output=result_str,
+            status="completed",
+        )
+
+        return [message]
+
+    async def call_search_tool(
+        self, tool_session: Union["ClientSession", Tool], last_msg: FunctionCall
+    ) -> list[ResponseInputOutputItem]:
+        self.called_tools.add("browser")
+        if isinstance(tool_session, Tool):
+            return await tool_session.get_result_parsable_context(self)
+        if envs.VLLM_TOOL_JSON_ERROR_AUTOMATIC_RETRY:
+            try:
+                args = json.loads(last_msg.arguments)
+            except json.JSONDecodeError as e:
+                return _create_json_parse_error_messages(last_msg, e)
+        else:
+            args = json.loads(last_msg.arguments)
+        result = await tool_session.call_tool("search", args)
+        result_str = result.content[0].text
+
+        message = ResponseFunctionToolCallOutputItem(
+            id=f"fco_{random_uuid()}",
+            type="function_call_output",
+            call_id=f"call_{random_uuid()}",
+            output=result_str,
+            status="completed",
+        )
+
+        return [message]
+
+    async def call_container_tool(
+        self, tool_session: Union["ClientSession", Tool], last_msg: Message
+    ) -> list[Message]:
+        """
+        Call container tool. Expect this to be run in a stateful docker
+        with command line terminal.
+        The official container tool would at least
+        expect the following format:
+        - for tool name: exec
+            - args:
+                {
+                    "cmd":List[str] "command to execute",
+                    "workdir":optional[str] "current working directory",
+                    "env":optional[object/dict] "environment variables",
+                    "session_name":optional[str] "session name",
+                    "timeout":optional[int] "timeout in seconds",
+                    "user":optional[str] "user name",
+                }
+        """
+        self.called_tools.add("container")
+        if isinstance(tool_session, Tool):
+            return await tool_session.get_result_parsable_context(self)
+        # tool_name = last_msg.recipient.split(".")[1].split(" ")[0]
+        if envs.VLLM_TOOL_JSON_ERROR_AUTOMATIC_RETRY:
+            try:
+                args = json.loads(last_msg.arguments)
+            except json.JSONDecodeError as e:
+                return _create_json_parse_error_messages(last_msg, e)
+        else:
+            args = json.loads(last_msg.arguments)
+        result = await tool_session.call_tool("exec", args)
+        result_str = result.content[0].text
+
+        message = ResponseFunctionToolCallOutputItem(
             id=f"fco_{random_uuid()}",
             type="function_call_output",
             call_id=f"call_{random_uuid()}",
@@ -314,8 +443,17 @@ class ParsableContext(ConversationContext):
         if not self.parser.response_messages:
             return []
         last_msg = self.parser.response_messages[-1]
+        # change this to a mcp_ function call
+        last_msg.id = f"{MCP_PREFIX}{random_uuid()}"
+        self.parser.response_messages[-1] = last_msg
         if last_msg.name == "code_interpreter":
             return await self.call_python_tool(self._tool_sessions["python"], last_msg)
+        elif last_msg.name == "web_search_preview":
+            return await self.call_search_tool(self._tool_sessions["browser"], last_msg)
+        elif last_msg.name.startswith("container"):
+            return await self.call_container_tool(
+                self._tool_sessions["container"], last_msg
+            )
         return []
 
     def render_for_completion(self):
@@ -686,6 +824,7 @@ class StreamingHarmonyContext(HarmonyContext):
         self.encoding = get_encoding()
         self.last_tok = None
         self.first_tok_of_message = True
+        self.last_content_delta = None
 
     @property
     def messages(self) -> list:
@@ -694,6 +833,7 @@ class StreamingHarmonyContext(HarmonyContext):
     def append_output(self, output: RequestOutput) -> None:
         # append_output is called for each output token in streaming case,
         # so we only want to add the prompt tokens once for each message.
+        self.last_content_delta = None
         if self.first_tok_of_message:
             self._update_prefill_token_usage(output)
         # Reset self.first_tok_of_message if needed:
@@ -701,8 +841,12 @@ class StreamingHarmonyContext(HarmonyContext):
         # (finished=True), then the next token processed will mark the
         # beginning of a new message
         self.first_tok_of_message = output.finished
+        last_delta_text = ""
         for tok in output.outputs[0].token_ids:
             self.parser.process(tok)
+            last_delta_text += self.parser.last_content_delta or ""
+        if last_delta_text:
+            self.last_content_delta = last_delta_text
         self._update_decode_token_usage(output)
 
         # For streaming, update previous turn when message is complete

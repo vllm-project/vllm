@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from abc import abstractmethod
-from collections.abc import Callable
 
 import torch
 
@@ -10,6 +9,9 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
     FusedMoEQuantConfig,
+)
+from vllm.model_executor.layers.fused_moe.fused_moe_router import (
+    FusedMoERouter,
 )
 from vllm.model_executor.layers.fused_moe.modular_kernel import (
     FusedMoEPermuteExpertsUnpermute,
@@ -72,6 +74,18 @@ class FusedMoEMethodBase(QuantizeMethodBase):
             "implementation based on the prepare_finalize"
         )
 
+    def prepare_dp_allgather_tensor(
+        self,
+        layer: "FusedMoE",  # type: ignore[name-defined] # noqa: F821
+        hidden_states: torch.Tensor,
+        router_logits: torch.Tensor,
+    ) -> tuple[torch.Tensor, list[torch.Tensor]]:
+        """Hook to prepare tensors and extra tensors for DP allgather + EP dispatch."""
+        raise NotImplementedError(
+            "Method 'prepare_dp_allgather_tensor' is not implemented in "
+            f"{self.__class__.__name__}."
+        )
+
     @abstractmethod
     def get_fused_moe_quant_config(
         self, layer: torch.nn.Module
@@ -98,24 +112,8 @@ class FusedMoEMethodBase(QuantizeMethodBase):
     def apply(
         self,
         layer: "FusedMoE",  # type: ignore[name-defined] # noqa: F821
+        router: FusedMoERouter,
         x: torch.Tensor,
         router_logits: torch.Tensor,
-        top_k: int,
-        renormalize: bool,
-        use_grouped_topk: bool = False,
-        topk_group: int | None = None,
-        num_expert_group: int | None = None,
-        global_num_experts: int = -1,
-        expert_map: torch.Tensor | None = None,
-        custom_routing_function: Callable | None = None,
-        scoring_func: str = "softmax",
-        routed_scaling_factor: float = 1.0,
-        e_score_correction_bias: torch.Tensor | None = None,
-        apply_router_weight_on_input: bool = False,
-        activation: str = "silu",
-        enable_eplb: bool = False,
-        expert_load_view: torch.Tensor | None = None,
-        logical_to_physical_map: torch.Tensor | None = None,
-        logical_replica_count: torch.Tensor | None = None,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         raise NotImplementedError

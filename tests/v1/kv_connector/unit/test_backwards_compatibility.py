@@ -14,12 +14,12 @@ from unittest.mock import patch
 
 import pytest
 
-from vllm.attention.backends.abstract import AttentionMetadata
 from vllm.distributed.kv_transfer.kv_connector.factory import KVConnectorFactory
 from vllm.distributed.kv_transfer.kv_connector.v1 import (
     KVConnectorBase_V1,
     KVConnectorRole,
 )
+from vllm.v1.attention.backend import AttentionMetadata
 from vllm.v1.core.sched.output import SchedulerOutput
 
 from .utils import create_scheduler, create_vllm_config
@@ -218,12 +218,12 @@ def test_internal_connector_uses_new_signature():
     Test that internal connectors (registered in factory) always use the new
     signature and get kv_cache_config.
     """
-    from vllm.distributed.kv_transfer.kv_connector.v1.shared_storage_connector import (
-        SharedStorageConnector,
+    from vllm.distributed.kv_transfer.kv_connector.v1.example_connector import (
+        ExampleConnector,
     )
 
     vllm_config = create_vllm_config()
-    vllm_config.kv_transfer_config.kv_connector = "SharedStorageConnector"
+    vllm_config.kv_transfer_config.kv_connector = "ExampleConnector"
 
     scheduler = create_scheduler(vllm_config)
     kv_cache_config = scheduler.kv_cache_config
@@ -233,7 +233,7 @@ def test_internal_connector_uses_new_signature():
     )
 
     assert connector is not None
-    assert isinstance(connector, SharedStorageConnector)
+    assert isinstance(connector, ExampleConnector)
     assert connector._kv_cache_config is not None
     assert connector._kv_cache_config == kv_cache_config
 

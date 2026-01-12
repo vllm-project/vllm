@@ -269,10 +269,11 @@ class MsgpackEncoder:
         name = MMF_CLASS_TO_FACTORY.get(field.__class__)
         if not name:
             raise TypeError(f"Unsupported field type: {field.__class__}")
+
         # We just need to copy all of the field values in order
         # which will be then used to reconstruct the field.
-        field_values = (getattr(field, f.name) for f in dataclasses.fields(field))
-        return name, *field_values
+        factory_kw = {f.name: getattr(field, f.name) for f in dataclasses.fields(field)}
+        return name, factory_kw
 
 
 class MsgpackDecoder:
@@ -392,15 +393,15 @@ class MsgpackDecoder:
             obj["data"] = self._decode_nested_tensors(obj["data"])
 
         # Reconstruct the field processor using MultiModalFieldConfig
-        factory_meth_name, *field_args = obj["field"]
+        factory_meth_name, factory_kw = obj["field"]
         factory_meth = getattr(MultiModalFieldConfig, factory_meth_name)
 
         # Special case: decode the union "slices" field of
         # MultiModalFlatField
         if factory_meth_name == "flat":
-            field_args[0] = self._decode_nested_slices(field_args[0])
+            factory_kw["slices"] = self._decode_nested_slices(factory_kw["slices"])
 
-        obj["field"] = factory_meth(None, *field_args).field
+        obj["field"] = factory_meth("", **factory_kw).field
         return MultiModalFieldElem(**obj)
 
     def _decode_nested_tensors(self, obj: Any) -> NestedTensors:

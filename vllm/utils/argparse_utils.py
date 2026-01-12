@@ -244,13 +244,6 @@ class FlexibleArgumentParser(ArgumentParser):
                 else:
                     key = pattern.sub(repl, arg, count=1)
                     processed_args.append(key)
-            elif arg.startswith("-O."):
-                # Provide clear error for deprecated -O.* syntax
-                raise ValueError(
-                    f"The -O.* syntax is no longer supported. "
-                    f"Please use -cc.* instead. "
-                    f"For example, replace '{arg}' with '{arg.replace('-O', '-cc', 1)}'"
-                )
             elif arg.startswith("-O") and arg != "-O":
                 # allow -O flag to be used without space, e.g. -O3 or -Odecode
                 # also handle -O=<optimization_level> here
@@ -406,8 +399,7 @@ class FlexibleArgumentParser(ArgumentParser):
         index = args.index("--config")
         if index == len(args) - 1:
             raise ValueError(
-                "No config file specified! \
-                             Please check your command-line arguments."
+                "No config file specified! Please check your command-line arguments."
             )
 
         file_path = args[index + 1]
