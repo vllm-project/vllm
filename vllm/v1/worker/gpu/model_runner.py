@@ -14,7 +14,6 @@ from vllm.config.compilation import CUDAGraphMode
 from vllm.forward_context import set_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.model_loader import get_model_loader
-from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.utils.mem_utils import DeviceMemoryProfiler, format_gib
 from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
 from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
@@ -97,10 +96,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         self.inputs_embeds_size = self.model_config.get_inputs_embeds_size()
 
         # Multimodal
-        self.mm_registry = MULTIMODAL_REGISTRY
-        self.supports_mm_inputs = self.mm_registry.supports_multimodal_inputs(
-            self.model_config
-        )
         self.uses_mrope = self.model_config.uses_mrope
         if self.uses_mrope:
             self.mrope_states = MRopeState(
