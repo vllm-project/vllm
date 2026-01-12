@@ -165,6 +165,8 @@ def _compute_margin(
     sla_comb: SLASweepItem,
     iter_data: list[dict[str, object]],
 ):
+    assert iter_data, "Summary should not be empty"
+
     iter_data_mean = {
         k: sum(float(run_data[k]) for run_data in iter_data) / len(iter_data)  # type: ignore
         for k in sla_comb
@@ -204,9 +206,9 @@ def solve_sla(
 
     # NOTE: We don't use equality here to be more robust against noisy results
     while history.get_max_passing() + 1 < history.get_min_failing():
-        if len(history) == 0:
+        if len(history) == 0 or max(history) < sla_max_value:
             val = sla_max_value
-        elif len(history) == 1:
+        elif len(history) == 1 or min(history) > sla_min_value:
             val = sla_min_value
         else:
             spl = PchipInterpolator(*history.get_xy(), extrapolate=False)

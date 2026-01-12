@@ -292,6 +292,7 @@ def test_solve_reuse_history(tmp_path):
         10: True,
         11: True,
         # Items from this run
+        40: False,
         30: True,
         31: False,
     }
