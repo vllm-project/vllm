@@ -19,7 +19,7 @@ from vllm.model_executor.layers.fused_moe import (
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEQuantConfig,
     fp8_w8a8_moe_quant_config,
-    mxfp4_fp8_moe_quant_config,
+    mxfp4_w4a8_moe_quant_config,
     mxfp4_w4a16_moe_quant_config,
     ocp_mx_moe_quant_config,
 )
@@ -945,7 +945,7 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
                 w2_bias=layer.w2_bias,
             )
         elif self.ocp_mx_scheme == "w_mxfp4_a_fp8":
-            return mxfp4_fp8_moe_quant_config(
+            return mxfp4_w4a8_moe_quant_config(
                 w1_scale=layer.w13_weight_scale,
                 w2_scale=layer.w2_weight_scale,
                 a1_scale=layer.w13_input_scale,

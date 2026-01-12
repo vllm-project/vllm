@@ -640,7 +640,7 @@ def mxfp4_mxfp8_moe_quant_config(
     )
 
 
-def mxfp4_fp8_moe_quant_config(
+def mxfp4_w4a8_moe_quant_config(
     w1_scale: Union[torch.Tensor, "PrecisionConfig"],
     w2_scale: Union[torch.Tensor, "PrecisionConfig"],
     a1_scale: torch.Tensor | None = None,
