@@ -952,7 +952,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
 
             attn_metadata.cascade_wrapper = self._get_cascade_wrapper()
             attn_metadata.cascade_wrapper.plan(
-                qo_indpt_arr=[shared_qo_indptr_cpu, qo_indptr_cpu],
+                qo_indptr_arr=[shared_qo_indptr_cpu, qo_indptr_cpu],
                 paged_kv_indptr_arr=[shared_kv_page_indptr_cpu, paged_kv_indptr_cpu],
                 paged_kv_indices_arr=[shared_kv_page_indices_cpu, paged_kv_indices],
                 paged_kv_last_page_len=[
