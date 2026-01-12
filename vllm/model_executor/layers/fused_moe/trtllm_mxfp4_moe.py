@@ -39,9 +39,7 @@ class TrtllmMxFp4Experts(mk.FusedMoEPermuteExpertsUnpermute):
 
     @staticmethod
     def _supports_current_device() -> bool:
-        return current_platform.is_cuda() and current_platform.has_device_capability(
-            10, 0
-        )
+        return current_platform.has_device_capability((10, 0))
 
     @staticmethod
     def _supports_no_act_and_mul() -> bool:
@@ -49,11 +47,7 @@ class TrtllmMxFp4Experts(mk.FusedMoEPermuteExpertsUnpermute):
 
     @staticmethod
     def _supports_quant_scheme(quant_scheme: FusedMoEQuantScheme) -> bool:
-        return (
-            True
-            # quant_scheme.is_mxfp4_w4a16 or
-            # quant_scheme.is_mxfp4_w4a8
-        )
+        return quant_scheme.is_mxfp4_w4a16 or quant_scheme.is_mxfp4_w4a8
 
     @staticmethod
     def _supports_activation(activation: str) -> bool:

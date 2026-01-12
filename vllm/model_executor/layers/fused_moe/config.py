@@ -132,6 +132,14 @@ class FusedMoEQuantScheme:
     per_tensor_quant: bool
     block_size: tuple[int, int] | None
 
+    @property
+    def per_block_quant(self) -> bool:
+        return self.block_size is not None
+
+    @property
+    def is_unquantized(self) -> bool:
+        return self.weight_dtype in UNQUANTIZED_DTYPES
+
     def __post_init__(self):
         if self.per_tensor_quant:
             assert not self.per_token_quant
@@ -148,14 +156,6 @@ class FusedMoEQuantScheme:
             assert self.act_dtype in UNQUANTIZED_DTYPES
 
     @property
-    def per_block_quant(self) -> bool:
-        return self.block_size is not None
-
-    @property
-    def is_unquantized(self) -> bool:
-        return self.weight_dtype in UNQUANTIZED_DTYPES
-
-    @property
     def is_fp8_w8a8(self) -> bool:
         return (
             self.weight_dtype == current_platform.fp8_dtype()
@@ -169,6 +169,17 @@ class FusedMoEQuantScheme:
     @property
     def is_mxfp4_w4a4(self) -> bool:
         return self.weight_dtype == "mxfp4" and self.act_dtype == "mxfp4"
+
+    @property
+    def is_mxfp4_w4a8(self) -> bool:
+        return (
+            self.weight_dtype == "mxfp4"
+            and self.act_dtype == current_platform.fp8_dtype()
+        )
+
+    @property
+    def is_mxfp4_w4a16(self) -> bool:
+        return self.weight_dtype == "mxfp4" and self.act_dtype in UNQUANTIZED_DTYPES
 
 
 @dataclass
