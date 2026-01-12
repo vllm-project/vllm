@@ -121,10 +121,6 @@ VLM_TEST_SETTINGS = {
         ),
         auto_cls=AutoModelForImageTextToText,
         vllm_output_post_proc=model_utils.paligemma_vllm_to_hf_output,
-        dtype="bfloat16",
-        marks=[
-            pytest.mark.skip(reason="vLLM does not support PrefixLM attention mask")
-        ],
     ),
     "qwen2_5_vl": VLMTestInfo(
         models=["Qwen/Qwen2.5-VL-3B-Instruct"],
@@ -530,7 +526,10 @@ VLM_TEST_SETTINGS = {
         auto_cls=AutoModelForImageTextToText,
     ),
     "isaac": VLMTestInfo(
-        models=["PerceptronAI/Isaac-0.1"],
+        models=[
+            "PerceptronAI/Isaac-0.1",
+            "PerceptronAI/Isaac-0.2-2B-Preview",
+        ],
         test_type=(VLMTestType.IMAGE, VLMTestType.MULTI_IMAGE),
         prompt_formatter=lambda img_prompt: (
             f"<|im_start|>User\n{img_prompt}<|im_end|>\n<|im_start|>assistant\n"

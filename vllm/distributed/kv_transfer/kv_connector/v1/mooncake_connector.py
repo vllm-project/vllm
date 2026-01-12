@@ -16,8 +16,6 @@ import zmq
 import zmq.asyncio
 
 from vllm import envs
-from vllm.attention.backends.abstract import AttentionMetadata
-from vllm.attention.selector import get_attn_backend
 from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.utils import TpKVTopology
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
@@ -33,7 +31,9 @@ from vllm.distributed.parallel_state import (
 from vllm.forward_context import ForwardContext
 from vllm.logger import init_logger
 from vllm.utils.network_utils import get_ip, make_zmq_path, make_zmq_socket
+from vllm.v1.attention.backend import AttentionMetadata
 from vllm.v1.attention.backends.utils import get_kv_cache_layout
+from vllm.v1.attention.selector import get_attn_backend
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.request import RequestStatus
 
@@ -499,7 +499,6 @@ class MooncakeConnectorWorker:
             total_num_kv_heads=self.model_config.get_total_num_kv_heads(),
             attn_backend=backend,
         )
-        self._use_pallas = self.kv_topo._use_pallas
 
         self.zmq_ctx = zmq.Context()
         self.async_zmq_ctx = zmq.asyncio.Context()

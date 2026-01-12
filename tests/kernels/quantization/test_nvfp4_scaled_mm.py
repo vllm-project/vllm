@@ -6,6 +6,7 @@ from nvfp4_utils import FLOAT4_E2M1_MAX, FLOAT8_E4M3_MAX, dequantize_nvfp4_to_dt
 
 from vllm import _custom_ops as ops
 from vllm.platforms import current_platform
+from vllm.utils.torch_utils import set_random_seed
 
 if not current_platform.has_device_capability(100):
     pytest.skip(
@@ -59,7 +60,7 @@ def test_nvfp4_gemm(
     seed: int,
     device: str,
 ) -> None:
-    current_platform.seed_everything(seed)
+    set_random_seed(seed)
     m, n, packed_k = shape
     k = packed_k * 2
     block_size = 16
