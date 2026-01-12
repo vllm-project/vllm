@@ -627,6 +627,14 @@ class InputBatch:
                 self.allowed_token_ids_mask_cpu_tensor[i1],
             )
 
+        (
+            self.logits_processing_needs_token_ids[i1],
+            self.logits_processing_needs_token_ids[i2],
+        ) = (
+            self.logits_processing_needs_token_ids[i2],
+            self.logits_processing_needs_token_ids[i1],
+        )
+
     def condense(self) -> None:
         """Slide non-empty requests down into lower, empty indices.
 
@@ -748,6 +756,10 @@ class InputBatch:
             bad_words_token_ids = self.bad_words_token_ids.pop(last_req_index, None)
             if bad_words_token_ids is not None:
                 self.bad_words_token_ids[empty_index] = bad_words_token_ids
+
+            self.logits_processing_needs_token_ids[empty_index] = (
+                self.logits_processing_needs_token_ids[last_req_index]
+            )
 
             # Decrement last_req_index since it is now empty.
             last_req_index -= 1
