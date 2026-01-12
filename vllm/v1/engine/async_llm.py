@@ -506,8 +506,6 @@ class AsyncLLM(EngineClient):
                         IterationStats() if (log_stats and num_outputs) else None
                     )
 
-                    reqs_to_abort: list[str] = []
-
                     # Split outputs into chunks of at most
                     # VLLM_V1_OUTPUT_PROC_CHUNK_SIZE, so that we don't block the
                     # event loop for too long.
@@ -521,16 +519,15 @@ class AsyncLLM(EngineClient):
                         )
                         # NOTE: RequestOutputs are pushed to their queues.
                         assert not processed_outputs.request_outputs
+                        # 3) Abort any reqs that finished due to stop strings.
                         if processed_outputs.reqs_to_abort:
-                            reqs_to_abort.extend(processed_outputs.reqs_to_abort)
+                            await engine_core.abort_requests_async(
+                                processed_outputs.reqs_to_abort
+                            )
 
                         # Allow other asyncio tasks to run between chunks
                         if end < num_outputs:
                             await asyncio.sleep(0)
-
-                    # 3) Abort any reqs that finished due to stop strings.
-                    if reqs_to_abort:
-                        await engine_core.abort_requests_async(reqs_to_abort)
 
                     output_processor.update_scheduler_stats(outputs.scheduler_stats)
 
