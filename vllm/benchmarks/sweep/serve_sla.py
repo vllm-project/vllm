@@ -206,9 +206,9 @@ def solve_sla(
 
     # NOTE: We don't use equality here to be more robust against noisy results
     while history.get_max_passing() + 1 < history.get_min_failing():
-        if len(history) == 0 or max(history) < sla_max_value:
+        if max(history, default=sla_min_value) < sla_max_value:
             val = sla_max_value
-        elif len(history) == 1 or min(history) > sla_min_value:
+        elif min(history, default=sla_max_value) > sla_min_value:
             val = sla_min_value
         else:
             spl = PchipInterpolator(*history.get_xy(), extrapolate=False)
