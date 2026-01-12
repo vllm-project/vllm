@@ -17,7 +17,7 @@ MODELS = [
         "BAAI/bge-base-en",
         architecture="BertModel",
         mteb_score=0.779336792,
-        pooling_type="CLS",
+        seq_pooling_type="CLS",
         attn_type="encoder_only",
         is_prefix_caching_supported=False,
         is_chunked_prefill_supported=False,
@@ -54,7 +54,7 @@ MODELS = [
         "BAAI/bge-m3",
         architecture="XLMRobertaModel",
         mteb_score=0.787343078,
-        pooling_type="CLS",
+        seq_pooling_type="CLS",
         attn_type="encoder_only",
         is_prefix_caching_supported=False,
         is_chunked_prefill_supported=False,
@@ -65,8 +65,7 @@ MODELS = [
         "BAAI/bge-code-v1",
         architecture="Qwen2Model",
         mteb_score=0.75724465,
-        dtype="float32",
-        pooling_type="LAST",
+        seq_pooling_type="LAST",
         attn_type="decoder",
         is_prefix_caching_supported=True,
         is_chunked_prefill_supported=True,
@@ -80,7 +79,7 @@ RERANK_MODELS = [
         "BAAI/bge-reranker-base",
         architecture="XLMRobertaForSequenceClassification",
         mteb_score=0.32398,
-        pooling_type="CLS",
+        seq_pooling_type="CLS",
         attn_type="encoder_only",
         is_prefix_caching_supported=False,
         is_chunked_prefill_supported=False,
@@ -112,7 +111,5 @@ def test_embed_models_correctness(
 
 
 @pytest.mark.parametrize("model_info", RERANK_MODELS)
-def test_rerank_models_mteb(
-    hf_runner, vllm_runner, model_info: RerankModelInfo
-) -> None:
-    mteb_test_rerank_models(hf_runner, vllm_runner, model_info)
+def test_rerank_models_mteb(vllm_runner, model_info: RerankModelInfo) -> None:
+    mteb_test_rerank_models(vllm_runner, model_info)

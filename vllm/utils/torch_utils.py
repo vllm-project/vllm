@@ -3,6 +3,7 @@
 import contextlib
 import importlib.metadata
 import os
+import random
 import threading
 from collections.abc import Callable, Collection
 from functools import lru_cache
@@ -61,6 +62,36 @@ MODELOPT_TO_VLLM_KV_CACHE_DTYPE_MAP = {
 }
 
 T = TypeVar("T")
+
+
+def is_strictly_contiguous(t: torch.Tensor) -> bool:
+    """
+    Check if tensor is contiguous AND has no degenerate strides.
+
+    A degenerate stride occurs when a dimension has size 1 but the stride
+    doesn't match the canonical contiguous layout. This can cause issues
+    in some CUDA kernels that rely on stride values for memory access.
+
+    For a C-contiguous tensor of shape (d0, d1, ..., dn), the expected
+    strides are: stride[i] = product(shape[i+1:]) for all i, with stride[-1]=1.
+
+    Example with torch.Size([16, 1, 8, 32]):
+        - Canonical strides: (256, 256, 32, 1)
+        - Degenerate strides: (256, 1, 32, 1)  # dim=1 has size=1, allowing
+                                                  # non-canonical stride in dim=0
+    """
+    if not t.is_contiguous():
+        return False
+
+    # Check that strides match canonical contiguous layout
+    shape = t.shape
+    strides = t.stride()
+    expected_stride = 1
+    for i in range(len(shape) - 1, -1, -1):
+        if strides[i] != expected_stride:
+            return False
+        expected_stride *= shape[i]
+    return True
 
 
 @contextlib.contextmanager
@@ -218,9 +249,28 @@ def get_kv_cache_quant_algo_string(quant_cfg: dict[str, Any]) -> str | None:
     if quant_method.startswith("modelopt"):
         quantization_inner = quant_cfg.get("quantization", quant_cfg)
         # Check if quant config is specified and use kv cache quant algo
-        kv_algo = quantization_inner.get("kv_cache_quant_algo") or quant_cfg.get(
-            "kv_cache_quant_algo"
+        kv_algo = (
+            quantization_inner.get("kv_cache_scheme")
+            or quant_cfg.get("kv_cache_scheme")
+            or quantization_inner.get("kv_cache_quant_algo")
+            or quant_cfg.get("kv_cache_quant_algo")
         )
+        if isinstance(kv_algo, dict):
+            if (
+                kv_algo.get("dynamic") is False
+                and kv_algo.get("num_bits") == 8
+                and kv_algo.get("type") == "float"
+            ):
+                kv_algo = "fp8"
+            else:
+                # Unknown/unsupported format - return "auto" as safe fallback
+                logger.warning(
+                    "WARNING: Unknown kv_cache_quant_algo '%s' in model "
+                    "config. Supported values: %s. Falling back to 'auto'.",
+                    f"{kv_algo}",
+                    list(MODELOPT_TO_VLLM_KV_CACHE_DTYPE_MAP.keys()),
+                )
+                return "auto"
         if isinstance(kv_algo, str):
             kv_algo_lower = kv_algo.lower()
 
@@ -278,6 +328,13 @@ def kv_cache_dtype_str_to_dtype(
     return STR_DTYPE_TO_TORCH_DTYPE[kv_cache_dtype]
 
 
+def set_random_seed(seed: int | None) -> None:
+    if seed is not None:
+        random.seed(seed)
+        np.random.seed(seed)
+        torch.manual_seed(seed)
+
+
 def create_kv_caches_with_random_flash(
     num_blocks: int,
     block_size: int,
@@ -290,9 +347,7 @@ def create_kv_caches_with_random_flash(
     device: str | None = "cuda",
     cache_layout: str | None = "NHD",
 ) -> tuple[list[torch.Tensor], list[torch.Tensor]]:
-    from vllm.platforms import current_platform
-
-    current_platform.seed_everything(seed)
+    set_random_seed(seed)
 
     dtype = get_kv_cache_torch_dtype(cache_dtype, model_dtype)
     generic_kv_cache_shape = (num_blocks, 2, block_size, num_heads, head_size)
@@ -335,9 +390,8 @@ def create_kv_caches_with_random(
         raise ValueError(
             f"Does not support key cache of type fp8 with head_size {head_size}"
         )
-    from vllm.platforms import current_platform
 
-    current_platform.seed_everything(seed)
+    set_random_seed(seed)
 
     dtype = get_kv_cache_torch_dtype(cache_dtype, model_dtype)
 
@@ -465,9 +519,13 @@ def current_stream() -> torch.cuda.Stream:
         # when this function is called before any stream is set,
         # we return the default stream.
         # On ROCm using the default 0 stream in combination with RCCL
-        # is hurting performance. Therefore creating a dedicated stream
-        # per process
-        if current_platform.is_rocm():
+        # is hurting performance.
+        # On CUDA, we capture and replay cudagraph on the same stream,
+        # so we need to avoid using the default stream as well. The default
+        # stream cannot be used for cudagraph capture, see
+        # https://github.com/pytorch/pytorch/blob/42ad9edfb754743fdae3276ade43de000beb4f60/aten/src/ATen/cuda/CUDAGraph.cpp#L77
+        # for more details. Therefore, we create a dedicated stream per process.
+        if current_platform.is_rocm() or current_platform.is_cuda():
             # torch.cuda.set_stream here is the alias of _pathed_set_stream
             torch.cuda.set_stream(torch.cuda.Stream())
         elif current_platform.is_cpu():
