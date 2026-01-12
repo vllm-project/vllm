@@ -4808,16 +4808,10 @@ class GPUModelRunner(
         piecewise_largest = None
         piecewise_count = 0
 
-        # Mixed mode graphs
-        mixed_mode = cudagraph_mode.mixed_mode()
-        if mixed_mode == CUDAGraphMode.FULL:
-            full_largest = self.cudagraph_batch_sizes[-1]
-            full_count += len(self.cudagraph_batch_sizes) * lora_cases
-        elif mixed_mode == CUDAGraphMode.PIECEWISE:
+        if cudagraph_mode.mixed_mode() == CUDAGraphMode.PIECEWISE:
             piecewise_largest = self.cudagraph_batch_sizes[-1]
             piecewise_count += len(self.cudagraph_batch_sizes) * lora_cases
 
-        # Decode mode graphs (only if separate routine)
         if cudagraph_mode.separate_routine():
             decode_mode = cudagraph_mode.decode_mode()
             decode_batch_sizes = self._get_decode_cudagraph_batch_sizes()
@@ -5006,21 +5000,23 @@ class GPUModelRunner(
             )
             # Second capture measures per-graph overhead
             per_graph = 0
-            if count > 1:
-                second_size = largest_size
+            if count > 1 and len(batch_sizes) > 1:
+                # Find a different size to measure per-graph overhead
+                second_size = None
                 for size in reversed(batch_sizes):
                     if size < largest_size:
                         second_size = size
                         break
-                torch.cuda.synchronize()
-                before = self._warmup_and_capture(
-                    second_size,
-                    cudagraph_runtime_mode=cudagraph_runtime_mode,
-                    uniform_decode=uniform_decode,
-                    num_warmups=0,
-                )
-                torch.cuda.synchronize()
-                per_graph = before - torch.cuda.mem_get_info()[0]
+                if second_size is not None:
+                    torch.cuda.synchronize()
+                    before = self._warmup_and_capture(
+                        second_size,
+                        cudagraph_runtime_mode=cudagraph_runtime_mode,
+                        uniform_decode=uniform_decode,
+                        num_warmups=0,
+                    )
+                    torch.cuda.synchronize()
+                    per_graph = before - torch.cuda.mem_get_info()[0]
             return first_capture_memory, per_graph
 
         set_cudagraph_capturing_enabled(True)
