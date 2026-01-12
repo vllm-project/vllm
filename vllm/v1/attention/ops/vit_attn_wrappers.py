@@ -118,7 +118,7 @@ def triton_attn_wrapper(
     scale: float | None = None,
     cu_seqlens: torch.Tensor | None = None,
     max_seqlen: torch.Tensor | None = None,
-):
+) -> torch.Tensor:
     from vllm.v1.attention.ops.triton_prefill_attention import context_attention_fwd
 
     q_len = q.size(1)
@@ -129,11 +129,12 @@ def triton_attn_wrapper(
     max_seqlen = q_len if max_seqlen is None else max_seqlen.item()
 
     q, k, v = (einops.rearrange(x, "b s ... -> (b s) ...") for x in [q, k, v])
-    output = context_attention_fwd(
+    output = torch.empty_like(q)
+    context_attention_fwd(
         q,
         k,
         v,
-        torch.empty_like(q),
+        output,
         b_start_loc=cu_seqlens[:-1],
         b_seq_len=cu_seqlens[1:] - cu_seqlens[:-1],
         max_input_len=max_seqlen,
