@@ -747,6 +747,10 @@ class SyncMPClient(MPClient):
         self.ensure_alive()
         self.free_pending_messages()
 
+        # Set target engine index for tensor routing
+        engine_index = int.from_bytes(self.core_engine, "little")
+        self.encoder.set_target_engine(engine_index)
+
         # Set request context if this is an ADD request with a request_id
         if request_type == EngineCoreRequestType.ADD and hasattr(request, "request_id"):
             self.encoder.set_request_context(request.request_id)
