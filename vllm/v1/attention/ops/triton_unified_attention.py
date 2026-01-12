@@ -954,7 +954,8 @@ def unified_attention(
         or num_prefills is None
         or num_decodes is None
     ):
-        seq_threshold_3D = 128 // num_kv_heads
+        MIN_LAUNCH_GRID_SIZE_2D = 128
+        seq_threshold_3D = MIN_LAUNCH_GRID_SIZE_2D // num_kv_heads
         split_launch = False
         seq_lens_q = torch.diff(cu_seqlens_q)
         num_prefills = (seq_lens_q > 1).sum().item()
@@ -1087,7 +1088,7 @@ def unified_attention(
             or softmax_segm_output is None
             or softmax_segm_max is None
             or softmax_segm_expsum is None
-            or num_seqs > seq_threshold_3D
+            or num_decodes > seq_threshold_3D
         ):
             kernel_unified_attention_2d[
                 (
