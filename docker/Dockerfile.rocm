@@ -62,6 +62,11 @@ ENV SCCACHE_REGION=${SCCACHE_REGION_NAME}
 ENV SCCACHE_S3_NO_CREDENTIALS=${SCCACHE_S3_NO_CREDENTIALS}
 ENV SCCACHE_IDLE_TIMEOUT=0
 
+# Clear HIP_CLANG_PATH to prevent double-wrapping with sccache
+# Base image may have sccache wrappers configured, but setup.py auto-detects
+# sccache and adds CMAKE_HIP_COMPILER_LAUNCHER, causing double-wrapping
+ENV HIP_CLANG_PATH=""
+
 ARG COMMON_WORKDIR
 WORKDIR ${COMMON_WORKDIR}
 
