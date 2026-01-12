@@ -630,6 +630,12 @@ class VllmConfig:
                     scope="local",
                 )
                 self.scheduler_config.async_scheduling = False
+            elif self.model_config.enable_return_routed_experts:
+                logger.warning(
+                    "Async scheduling will be disabled because it is not supported "
+                    "with enable_return_routed_experts=True."
+                )
+                self.scheduler_config.async_scheduling = False
             else:
                 self.scheduler_config.async_scheduling = True
 

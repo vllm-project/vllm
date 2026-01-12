@@ -3118,11 +3118,12 @@ class GPUModelRunner(
                 "after execute_model() returns None."
             )
 
-        capturer = RoutedExpertsCapturer.get_instance()
-        if capturer is not None:
-            capturer.clear_buffer()  # noqa
-        else:
-            logger.error("RoutedExpertsCapturer not initialized.")
+        if self.vllm_config.model_config.enable_return_routed_experts:
+            capturer = RoutedExpertsCapturer.get_instance()
+            if capturer is not None:
+                capturer.clear_buffer()  # noqa
+            else:
+                logger.error("RoutedExpertsCapturer not initialized.")
 
         if scheduler_output.preempted_req_ids and has_kv_transfer_group():
             get_kv_transfer_group().handle_preemptions(
@@ -5668,7 +5669,8 @@ class GPUModelRunner(
                 kv_transfer_group.register_kv_caches(kv_caches)
             kv_transfer_group.set_host_xfer_buffer_ops(copy_kv_blocks)
 
-        self.init_routed_experts_capturer()
+        if self.model_config.enable_return_routed_experts:
+            self.init_routed_experts_capturer()
 
     def init_routed_experts_capturer(self):
         logger.info(
@@ -5684,13 +5686,11 @@ class GPUModelRunner(
             + 1
         ) * block_size
 
-        self.instance_id = self.vllm_config.instance_id
-
         routed_experts_capturer.init_buffer(
             max_num_batched_tokens=self.scheduler_config.max_num_batched_tokens,
             max_num_kv_tokens=self.max_num_kv_tokens,
             model_config=self.model_config,
-            instance_id=self.instance_id,
+            instance_id=self.vllm_config.instance_id,
             enable_shared_memory=get_tensor_model_parallel_rank() == 0,
         )
 

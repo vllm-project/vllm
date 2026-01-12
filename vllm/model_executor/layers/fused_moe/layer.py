@@ -1660,12 +1660,13 @@ class FusedMoE(CustomOp):
 
         assert topk_ids.dtype == indices_type or indices_type is None
 
-        capturer = RoutedExpertsCapturer.get_instance()
-        if capturer is not None:
-            capturer.capture(  # noqa
-                layer_id=self.layer_id,
-                topk_ids=topk_ids,
-            )
+        if self.model_config.enable_return_routed_experts:
+            capturer = RoutedExpertsCapturer.get_instance()
+            if capturer is not None:
+                capturer.capture(  # noqa
+                    layer_id=self.layer_id,
+                    topk_ids=topk_ids,
+                )
 
         return topk_weights, topk_ids
 

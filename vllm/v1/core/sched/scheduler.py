@@ -228,21 +228,28 @@ class Scheduler(SchedulerInterface):
         if self.log_stats and vllm_config.observability_config.enable_mfu_metrics:
             self.perf_metrics = ModelMetrics(vllm_config)
 
-        self.max_num_kv_tokens = (
-            kv_cache_config.num_blocks // len(kv_cache_config.kv_cache_groups) + 1
-        ) * self.block_size
+        if self.model_config.enable_return_routed_experts:
+            assert self.dcp_world_size == 1 and self.pcp_world_size == 1, (
+                "enable_return_routed_experts does not support context parallelism "
+                "(dcp_world_size > 1 or pcp_world_size > 1)"
+            )
 
-        self.routed_experts_reader = RoutedExpertsReader.create(
-            enable=self.vllm_config.model_config.enable_return_routed_experts
-        )
+            self.routed_experts_reader = RoutedExpertsReader.create(
+                enable=self.vllm_config.model_config.enable_return_routed_experts
+            )
 
-        self.instance_id = self.vllm_config.instance_id
+            assert len(kv_cache_config.kv_cache_groups) > 0, (
+                "enable_return_routed_experts requires at least one kv cache group"
+            )
+            self.max_num_kv_tokens = (
+                kv_cache_config.num_blocks // len(kv_cache_config.kv_cache_groups) + 1
+            ) * self.block_size
 
-        self.routed_experts_reader.attach_buffer(
-            max_num_kv_tokens=self.max_num_kv_tokens,
-            model_config=self.vllm_config.model_config,
-            instance_id=self.instance_id,
-        )
+            self.routed_experts_reader.attach_buffer(
+                max_num_kv_tokens=self.max_num_kv_tokens,
+                model_config=self.vllm_config.model_config,
+                instance_id=self.vllm_config.instance_id,
+            )
 
     def schedule(self) -> SchedulerOutput:
         # NOTE(woosuk) on the scheduling algorithm:
