@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-import math
 from collections.abc import Callable
 
 import torch
@@ -25,7 +24,6 @@ from vllm.model_executor.parameter import (
     PerTensorScaleParameter,
 )
 from vllm.utils.flashinfer import (
-    flashinfer_quant_nvfp4_8x4_sf_layout,
     flashinfer_scaled_fp4_mm,
     has_flashinfer,
 )
@@ -191,14 +189,10 @@ class CompressedTensorsW4A4Fp4(CompressedTensorsScheme):
         output_dtype = x.dtype
         output_shape = [*x.shape[:-1], layer.weight_packed.shape[0]]
 
-        if self.backend == "flashinfer-trtllm" and math.prod(x.shape[:-1]) <= 32:
-            x_fp4, x_blockscale = flashinfer_quant_nvfp4_8x4_sf_layout(
-                x, layer.input_global_scale
-            )
-            x_blockscale = x_blockscale.view(torch.float8_e4m3fn)
-        else:
-            # quantize BF16 or FP16 to (FP4 and interleaved block scale)
-            x_fp4, x_blockscale = scaled_fp4_quant(x, layer.input_global_scale)
+        # quantize BF16 or FP16 to (FP4 and interleaved block scale)
+        x_fp4, x_blockscale = scaled_fp4_quant(
+            x, layer.input_global_scale, self.backend
+        )
 
         mm_args = (
             x_fp4,

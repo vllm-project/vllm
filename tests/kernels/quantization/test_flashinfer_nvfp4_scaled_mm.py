@@ -12,7 +12,6 @@ from nvfp4_utils import (
 from vllm import _custom_ops as ops
 from vllm.platforms import current_platform
 from vllm.utils.flashinfer import (
-    flashinfer_quant_nvfp4_8x4_sf_layout,
     flashinfer_scaled_fp4_mm,
 )
 from vllm.utils.torch_utils import set_random_seed
@@ -32,7 +31,7 @@ SHAPES = [
     (128, 256, 128),
     (1, 128, 128),
 ]
-PAD_SHAPES = [(150, 128, 64), (128, 128, 96)]
+PAD_SHAPES = [(150, 128, 64), (128, 128, 96), (2, 128, 64), (3, 128, 96)]
 SHAPES.extend(PAD_SHAPES)
 
 SEEDS = [42]
@@ -104,18 +103,12 @@ def test_flashinfer_nvfp4_gemm(
     ).to(torch.float32)
     alpha = 1.0 / (a_global_scale * b_global_scale)
 
-    if backend == "trtllm" and m <= 32:
-        a_fp4, a_scale_interleaved = flashinfer_quant_nvfp4_8x4_sf_layout(
-            a_dtype, a_global_scale
-        )
-        is_sf_128x4_layout = False
-    else:
-        # ops.scaled_fp4_quant returns swizzled scales, while weights
-        # from checkpoints are in linear scales.
-        # So instead of needing to swizzle for cutlass as in modelopt.py,
-        # we need to unswizzle for trtllm here.
-        a_fp4, a_scale_interleaved = ops.scaled_fp4_quant(a_dtype, a_global_scale)
-        is_sf_128x4_layout = True
+    # ops.scaled_fp4_quant returns swizzled scales, while weights
+    # from checkpoints are in linear scales.
+    # So instead of needing to swizzle for cutlass as in modelopt.py,
+    # we need to unswizzle for trtllm here.
+    a_fp4, a_scale_interleaved = ops.scaled_fp4_quant(a_dtype, a_global_scale, backend)
+    is_sf_128x4_layout = not (backend == "trtllm" and m <= 32)
 
     b_fp4, b_scale_interleaved = ops.scaled_fp4_quant(b_dtype, b_global_scale)
 

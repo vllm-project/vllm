@@ -93,7 +93,6 @@ from vllm.model_executor.parameter import (
 )
 from vllm.model_executor.utils import replace_parameter
 from vllm.utils.flashinfer import (
-    flashinfer_quant_nvfp4_8x4_sf_layout,
     flashinfer_scaled_fp4_mm,
     has_flashinfer,
 )
@@ -1291,14 +1290,8 @@ class ModelOptNvFp4LinearMethod(LinearMethodBase):
         output_dtype = x.dtype
         output_shape = [x.shape[0], layer.weight.shape[0]]
 
-        if self.backend == "flashinfer-trtllm" and x.shape[0] <= 32:
-            x_fp4, x_blockscale = flashinfer_quant_nvfp4_8x4_sf_layout(
-                x, layer.input_scale_inv
-            )
-            x_blockscale = x_blockscale.view(torch.float8_e4m3fn)
-        else:
-            # quantize BF16 or FP16 to (FP4 and interleaved block scale)
-            x_fp4, x_blockscale = scaled_fp4_quant(x, layer.input_scale_inv)
+        # quantize BF16 or FP16 to (FP4 and interleaved block scale)
+        x_fp4, x_blockscale = scaled_fp4_quant(x, layer.input_scale_inv, self.backend)
 
         # validate dtypes of quantized input, input block scale,
         # weight and weight_blockscale

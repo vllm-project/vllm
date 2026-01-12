@@ -491,11 +491,16 @@ if has_flashinfer():
     def flashinfer_nvfp4_quantize_fake(
         a: torch.Tensor, a_global_sf: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        padded_rows = ((a.shape[0] + 7) // 8) * 8
-        return torch.empty(
-            a.shape[0], a.shape[1] // 2, dtype=torch.uint8, device=a.device
-        ), torch.empty(
-            padded_rows, a.shape[1] // 16, dtype=torch.uint8, device=a.device
+        m, n = a.shape
+
+        round_up = lambda x, y: (x + y - 1) // y * y
+
+        rounded_m = round_up(m, 8)
+        scale_n = n // 16
+        rounded_n = round_up(scale_n, 4)
+
+        return torch.empty(m, n // 2, dtype=torch.uint8, device=a.device), torch.empty(
+            rounded_m, rounded_n, dtype=torch.uint8, device=a.device
         )
 
 
