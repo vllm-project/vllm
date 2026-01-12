@@ -997,7 +997,6 @@ class EngineArgs:
         )
         multimodal_group.add_argument(
             "--enable-multimodal-tensor-ipc",
-            "--disable-multimodal-tensor-ipc",
             action=argparse.BooleanOptionalAction,
             default=None,
             help="Enable IPC (inter-process communication) for multimodal tensors. "
