@@ -731,17 +731,13 @@ class BatchedTritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
 
     @staticmethod
     def _supports_quant_scheme(quant_scheme: FusedMoEQuantScheme) -> bool:
-        # Supports unquantized and fp8.
-        # TODO(rob): allow int4 (for kimi --- no, we have marlinexperts for this.
-        if quant_scheme.is_unquantized:
-            return True
-
-        if quant_scheme.is_fp8_w8a8:
-            return current_platform.is_rocm() or current_platform.has_device_capability(
-                (9, 0)
-            )
-
-        return False
+        p = current_platform
+        device_supports_fp8 = p.is_rocm() or (
+            p.is_cuda() and p.has_device_capability((9, 0))
+        )
+        return quant_scheme.is_unquantized or (
+            quant_scheme.is_fp8_w8a8 and device_supports_fp8
+        )
 
     @staticmethod
     def _supports_activation(activation: str) -> bool:
