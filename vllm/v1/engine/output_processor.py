@@ -655,6 +655,7 @@ class OutputProcessor:
                 )
                 if stop_string:
                     finish_reason = FinishReason.STOP
+                    engine_core_output.finish_reason = finish_reason
                     stop_reason = stop_string
 
                 # 3) Compute sample and prompt logprobs for request,
