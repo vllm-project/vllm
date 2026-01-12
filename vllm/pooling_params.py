@@ -140,7 +140,7 @@ class PoolingParams(
         self, pooler_config: "PoolerConfig", valid_parameters: list[str]
     ):
         step_pooling_parameters = ["step_tag_id", "returned_token_ids"]
-        if pooler_config.pooling_type != "STEP":
+        if pooler_config.tok_pooling_type != "STEP":
             invalid_parameters = []
             for k in step_pooling_parameters:
                 if getattr(self, k, None) is not None:

@@ -25,6 +25,9 @@ The class provides the following primitives:
 
     Worker-side: runs in each worker, loads/saves KV cache to/from
     the Connector based on the metadata.
+        handle_preemptions() - called if there are preempted requests,
+            before their blocks are overwritten
+
         start_load_kv() - starts loading all KVs (maybe async)
         wait_for_layer_load() - blocks until layer i load is done
 
@@ -259,6 +262,13 @@ class KVConnectorBase_V1(ABC):
         """
         Set the xPU-specific ops for copying KV between host and device.
         Needed when host buffer is used for kv transfer (e.g., in NixlConnector)
+        """
+        return
+
+    def handle_preemptions(self, preempted_req_ids: set[str]):
+        """
+        Handle preempted requests BEFORE their blocks are overwritten.
+        Needed for connectors which use async saves (e.g., OffloadingConnector)
         """
         return
 
