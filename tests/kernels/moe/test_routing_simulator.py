@@ -19,7 +19,7 @@ from vllm.distributed import (
     init_distributed_environment,
     initialize_model_parallel,
 )
-from vllm.model_executor.layers.fused_moe.routing_simulator import (
+from vllm.model_executor.layers.fused_moe.routing_simulator_router import (
     DistributionBasedRouting,
     RoutingSimulator,
 )

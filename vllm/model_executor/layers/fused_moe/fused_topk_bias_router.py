@@ -5,9 +5,33 @@ from collections.abc import Callable
 import torch
 
 from vllm.distributed.eplb.eplb_state import EplbLayerState
+from vllm.model_executor.layers.batch_invariant import (
+    vllm_is_batch_invariant,
+)
 from vllm.model_executor.layers.fused_moe.base_router import BaseRouter
 from vllm.model_executor.layers.fused_moe.config import RoutingMethodType
-from vllm.model_executor.layers.fused_moe.fused_moe import fused_topk_bias
+
+
+def fused_topk_bias(
+    hidden_states: torch.Tensor,
+    gating_output: torch.Tensor,
+    e_score_correction_bias: torch.Tensor,
+    topk: int,
+    renormalize: bool,
+):
+    n_routed_experts = gating_output.shape[-1]
+    scores = gating_output.softmax(dim=-1)
+    scores_for_choice = scores.view(
+        -1, n_routed_experts
+    ) + e_score_correction_bias.unsqueeze(0)
+
+    # For batch invariance, use sorted=True to ensure deterministic expert selection
+    use_sorted = vllm_is_batch_invariant()
+    topk_indices = torch.topk(scores_for_choice, k=topk, dim=-1, sorted=use_sorted)[1]
+    topk_weights = scores.gather(1, topk_indices)
+    if renormalize:
+        topk_weights = topk_weights / topk_weights.sum(dim=-1, keepdim=True)
+    return topk_weights.to(torch.float32), topk_indices.to(torch.int32)
 
 
 class FusedTopKBiasRouter(BaseRouter):

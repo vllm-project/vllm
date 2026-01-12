@@ -4,10 +4,69 @@ from collections.abc import Callable
 
 import torch
 
+import vllm._custom_ops as ops
+from vllm._aiter_ops import rocm_aiter_ops
 from vllm.distributed.eplb.eplb_state import EplbLayerState
 from vllm.model_executor.layers.fused_moe.base_router import BaseRouter
 from vllm.model_executor.layers.fused_moe.config import RoutingMethodType
-from vllm.model_executor.layers.fused_moe.fused_moe import fused_topk
+
+
+def vllm_topk_softmax(
+    topk_weights: torch.Tensor,
+    topk_indices: torch.Tensor,
+    token_expert_indices: torch.Tensor,
+    gating_output: torch.Tensor,
+    renormalize: bool,
+) -> tuple[torch.Tensor, ...]:
+    ops.topk_softmax(
+        topk_weights,
+        topk_indices,
+        token_expert_indices,
+        gating_output,
+        renormalize,
+    )
+
+    return topk_weights, topk_indices
+
+
+def dispatch_topk_func(
+    use_rocm_aiter: bool = False,
+) -> Callable[..., tuple[torch.Tensor, ...]]:
+    if use_rocm_aiter:
+        return rocm_aiter_ops.topk_softmax
+    return vllm_topk_softmax
+
+
+def fused_topk(
+    hidden_states: torch.Tensor,
+    gating_output: torch.Tensor,
+    topk: int,
+    renormalize: bool,
+    indices_type: torch.dtype | None = None,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    assert hidden_states.size(0) == gating_output.size(0), "Number of tokens mismatch"
+
+    M, _ = hidden_states.size()
+
+    topk_weights = torch.empty(
+        M, topk, dtype=torch.float32, device=hidden_states.device
+    )
+    topk_ids = torch.empty(
+        M,
+        topk,
+        dtype=torch.int32 if indices_type is None else indices_type,
+        device=hidden_states.device,
+    )
+    token_expert_indices = torch.empty(
+        M, topk, dtype=torch.int32, device=hidden_states.device
+    )
+
+    topk_func = dispatch_topk_func(use_rocm_aiter=rocm_aiter_ops.is_fused_moe_enabled())
+    topk_weights, topk_ids = topk_func(
+        topk_weights, topk_ids, token_expert_indices, gating_output, renormalize
+    )
+
+    return topk_weights, topk_ids, token_expert_indices
 
 
 class FusedTopKRouter(BaseRouter):
