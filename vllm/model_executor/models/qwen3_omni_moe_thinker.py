@@ -165,6 +165,12 @@ class Qwen3OmniMoeAudioAttention(nn.Module):
         self.num_heads = config.encoder_attention_heads
         self.head_dim = self.embed_dim // self.num_heads
 
+        # Account for tensor parallelism
+        from vllm.distributed import get_tensor_model_parallel_world_size
+
+        tp_size = get_tensor_model_parallel_world_size()
+        self.num_local_heads = self.num_heads // tp_size
+
         if (self.head_dim * self.num_heads) != self.embed_dim:
             raise ValueError(
                 f"embed_dim must be divisible by num_heads (got `embed_dim`: "
@@ -190,7 +196,7 @@ class Qwen3OmniMoeAudioAttention(nn.Module):
         )
 
         self.attn = MMEncoderAttention(
-            num_heads=self.num_heads,
+            num_heads=self.num_local_heads,
             head_size=self.head_dim,
             scale=self.scaling,
             multimodal_config=multimodal_config,
@@ -214,10 +220,10 @@ class Qwen3OmniMoeAudioAttention(nn.Module):
         qkv, _ = self.qkv(hidden_states)
 
         # Reshape to (1, seq_len, num_heads, head_dim)
-        q, k, v = qkv.split([self.embed_dim, self.embed_dim, self.embed_dim], dim=-1)
-        q = q.view(1, seq_length, self.num_heads, self.head_dim)
-        k = k.view(1, seq_length, self.num_heads, self.head_dim)
-        v = v.view(1, seq_length, self.num_heads, self.head_dim)
+        q, k, v = qkv.chunk(3, dim=-1)
+        q = q.view(1, seq_length, -1, self.head_dim)
+        k = k.view(1, seq_length, -1, self.head_dim)
+        v = v.view(1, seq_length, -1, self.head_dim)
 
         # Apply attention
         attn_output = self.attn(
