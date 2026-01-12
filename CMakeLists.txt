@@ -95,7 +95,7 @@ if(DEFINED ENV{TORCH_CUDA_ARCH_LIST})
   string(REPLACE "," ";" _vllm_archs "$ENV{TORCH_CUDA_ARCH_LIST}")
   string(REPLACE " " ";" _vllm_archs "${_vllm_archs}")
   foreach(_tok ${_vllm_archs})
-    string(TOUPPER _tok_up "${_tok}")
+    string(TOUPPER "${_tok}" _tok_up)
     if(_tok_up MATCHES "\\+PTX$")
       message(STATUS
         "TORCH_CUDA_ARCH_LIST contains '+PTX'; PTX entries are ignored by vLLM "
