@@ -652,6 +652,7 @@ class TestMultiConnectorPreferCrossLayerBlocks:
         ]
         assert mc.prefer_cross_layer_blocks is False
 
+
 # Mock KVConnectorKVEvents implementation for testing
 class MockKVConnectorKVEvents(KVConnectorKVEvents):
     """Mock implementation of KVConnectorKVEvents for testing."""
