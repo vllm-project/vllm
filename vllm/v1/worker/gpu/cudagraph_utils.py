@@ -228,10 +228,13 @@ def prepare_inputs_to_capture(
     kv_cache_config: KVCacheConfig,
 ) -> dict[str, Any]:
     num_tokens_per_req = num_tokens // num_reqs
-    query_start_loc = input_buffers.query_start_loc
-    query_start_loc.np[: num_reqs + 1] = np.arange(num_reqs + 1) * num_tokens_per_req
-    query_start_loc.np[num_reqs:] = num_tokens
-    query_start_loc.copy_to_gpu()
+
+    query_start_loc_np = np.arange(num_reqs + 1, dtype=np.int32) * num_tokens_per_req
+    query_start_loc_np[-1] = num_tokens
+    query_start_loc_cpu = torch.from_numpy(query_start_loc_np)
+    input_buffers.query_start_loc[: num_reqs + 1] = query_start_loc_cpu
+    input_buffers.query_start_loc[num_reqs + 1 :] = num_tokens
+    query_start_loc = input_buffers.query_start_loc[: num_reqs + 1]
 
     # HACK(woosuk): For faster warmup, we set seq_lens (GPU) to num_tokens
     # rather than max_model_len.
@@ -245,8 +248,8 @@ def prepare_inputs_to_capture(
         attn_metadata_builders=attn_metadata_builders,
         num_reqs=num_reqs,
         num_tokens=num_tokens,
-        query_start_loc_gpu=query_start_loc.gpu[: num_reqs + 1],
-        query_start_loc_cpu=query_start_loc.cpu[: num_reqs + 1],
+        query_start_loc_gpu=query_start_loc,
+        query_start_loc_cpu=query_start_loc_cpu,
         seq_lens=input_buffers.seq_lens,
         max_seq_len=max_model_len,
         block_tables=input_block_tables,
