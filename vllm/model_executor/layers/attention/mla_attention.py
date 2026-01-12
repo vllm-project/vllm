@@ -11,6 +11,15 @@ from vllm.config import CacheConfig, get_current_vllm_config
 from vllm.config.vllm import VllmConfig
 from vllm.forward_context import ForwardContext, get_forward_context
 from vllm.logger import init_logger
+from vllm.model_executor.layers.attention.attention import (
+    _init_kv_cache_quant,
+    get_attention_context,
+    set_default_quant_scales,
+    should_load_quant_weights,
+)
+from vllm.model_executor.layers.attention.kv_transfer_utils import (
+    maybe_transfer_kv_layer,
+)
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.layers.batch_invariant import vllm_is_batch_invariant
 from vllm.model_executor.layers.linear import (
@@ -19,6 +28,7 @@ from vllm.model_executor.layers.linear import (
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import (
+    direct_register_custom_op,
     kv_cache_dtype_str_to_dtype,
 )
 from vllm.v1.attention.backend import (
