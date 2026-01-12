@@ -37,7 +37,7 @@ def test_get_open_port_list(vllm_port_env: str, monkeypatch: pytest.MonkeyPatch)
             vllm_port = 5678
             m.setenv(vllm_port_env, str(vllm_port))
         port_list = get_open_ports_list(5)
-        assert 1 <= len(port_list) <= 5
+        assert len(port_list) == 5
         for port in port_list:
             if vllm_port_env != "":
                 assert vllm_port <= port < vllm_port + 10
