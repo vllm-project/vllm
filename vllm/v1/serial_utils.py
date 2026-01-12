@@ -511,6 +511,23 @@ class MsgpackDecoder:
         return arr.reshape(shape)
 
     def _decode_tensor(self, arr: Any) -> torch.Tensor:
+        # Check if this is a TensorIpcHandle (sent via IPC queue)
+        # This can happen when IPC is enabled for non-multimodal tensor fields
+        if isinstance(arr, TensorIpcHandle):
+            return self._decode_ipc_queue_tensor(arr)
+        # Check if this is a dict that represents a TensorIpcHandle
+        # (msgspec serializes dataclasses as dicts without type info)
+        if (
+            isinstance(arr, dict)
+            and "tensor_id" in arr
+            and "shape" in arr
+            and "dtype" in arr
+            and "device" in arr
+        ):
+            # Convert dict to TensorIpcHandle and decode it
+            handle = TensorIpcHandle(**arr)
+            return self._decode_ipc_queue_tensor(handle)
+
         # Standard tensor decoding
         dtype, shape, data = arr
         is_aux = isinstance(data, int)
