@@ -1676,12 +1676,13 @@ class Scheduler(SchedulerInterface):
             num_computed_tokens = len(block_ids) * self.block_size
             # Handle the case where num request tokens less than one block.
             num_computed_tokens = min(num_computed_tokens, request.num_tokens)
-            if num_computed_tokens == request.num_tokens:
-                num_computed_tokens -= 1
             # This will cache the blocks iff caching is enabled.
             self.kv_cache_manager.cache_blocks(request, num_computed_tokens)
 
             # Update the request state for scheduling.
+            if num_computed_tokens == request.num_tokens:
+                # need to recompute last token in order to sample the next token
+                num_computed_tokens -= 1
             request.num_computed_tokens = num_computed_tokens
 
         # Return that we are ready.
