@@ -310,6 +310,11 @@ class EagleProposer:
             num_tokens_across_dp[self.dp_rank] = num_input_tokens
 
         # copy inputs to buffer for cudagraph
+        if self.uses_mrope:
+            target_positions = target_positions[:3]
+        elif target_positions.ndim > 1:
+            target_positions = target_positions[0]
+
         self._set_positions(num_tokens, target_positions)
         self.hidden_states[:num_tokens] = target_hidden_states
 
@@ -1040,8 +1045,16 @@ class EagleProposer:
             if self.get_model_name(target_model) in [
                 "Qwen2_5_VLForConditionalGeneration",
                 "Qwen3VLForConditionalGeneration",
+                "Qwen3VLMoeForConditionalGeneration",
+                "HunYuanVLForConditionalGeneration",
             ]:
                 self.model.config.image_token_index = target_model.config.image_token_id
+            elif self.get_model_name(target_model) in [
+                "Qwen2AudioForConditionalGeneration",
+            ]:
+                self.model.config.image_token_index = (
+                    target_model.config.audio_token_index
+                )
             elif self.get_model_name(target_model) == "PixtralForConditionalGeneration":
                 self.model.config.image_token_index = (
                     target_model.config.vision_config.image_token_id

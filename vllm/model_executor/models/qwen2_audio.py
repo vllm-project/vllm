@@ -64,7 +64,12 @@ from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from vllm.sequence import IntermediateTensors
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
-from .interfaces import MultiModalEmbeddings, SupportsMultiModal, SupportsPP
+from .interfaces import (
+    MultiModalEmbeddings,
+    SupportsEagle3,
+    SupportsMultiModal,
+    SupportsPP,
+)
 from .utils import AutoWeightsLoader, init_vllm_registered_model, maybe_prefix
 
 
@@ -319,7 +324,9 @@ class Qwen2AudioMultiModalProcessor(BaseMultiModalProcessor[Qwen2AudioProcessing
     info=Qwen2AudioProcessingInfo,
     dummy_inputs=Qwen2AudioDummyInputsBuilder,
 )
-class Qwen2AudioForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP):
+class Qwen2AudioForConditionalGeneration(
+    nn.Module, SupportsMultiModal, SupportsPP, SupportsEagle3
+):
     @classmethod
     def get_placeholder_str(cls, modality: str, i: int) -> str | None:
         if modality.startswith("audio"):
@@ -476,3 +483,10 @@ class Qwen2AudioForConditionalGeneration(nn.Module, SupportsMultiModal, Supports
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         loader = AutoWeightsLoader(self)
         return loader.load_weights(weights)
+
+    def set_aux_hidden_state_layers(self, layers: tuple[int, ...]) -> None:
+        self.language_model.model.aux_hidden_state_layers = layers
+
+    def get_eagle3_aux_hidden_state_layers(self) -> tuple[int, ...]:
+        num_layers = len(self.language_model.model.layers)
+        return (2, num_layers // 2, num_layers - 3)
