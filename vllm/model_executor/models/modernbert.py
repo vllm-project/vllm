@@ -1,33 +1,31 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from collections.abc import Iterable, Set
+from collections.abc import Iterable
 
 import torch
 from torch import nn
 from transformers import ModernBertConfig
 from transformers.activations import ACT2FN
 
-from vllm.attention.layers.encoder_only_attention import EncoderOnlyAttention
 from vllm.compilation.decorators import support_torch_compile
-from vllm.config import VllmConfig
+from vllm.config import PoolerConfig, VllmConfig
 from vllm.distributed import get_tensor_model_parallel_world_size
-from vllm.model_executor.layers.linear import QKVParallelLinear, RowParallelLinear
-from vllm.model_executor.layers.pooler import (
-    ClassifierPooler,
-    DispatchPooler,
-    Pooler,
-    PoolingMethod,
-    PoolingParamsUpdate,
-    PoolingType,
-    TokenPoolerHeadOutput,
-    TokenPoolingMethodOutput,
+from vllm.model_executor.layers.attention.encoder_only_attention import (
+    EncoderOnlyAttention,
 )
+from vllm.model_executor.layers.linear import QKVParallelLinear, RowParallelLinear
+from vllm.model_executor.layers.pooler import DispatchPooler
+from vllm.model_executor.layers.pooler.seqwise import (
+    SequencePooler,
+    SequencePoolerHeadOutput,
+    SequencePoolingMethodOutput,
+    get_seq_pooling_method,
+)
+from vllm.model_executor.layers.pooler.tokwise import pooler_for_token_classify
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmbedding
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.sequence import IntermediateTensors
-from vllm.tasks import PoolingTask
-from vllm.v1.outputs import TokenPoolerOutput
 from vllm.v1.pool.metadata import PoolingMetadata
 
 from .interfaces import SupportsCrossEncoding
@@ -223,7 +221,7 @@ class ModernBertEncoderLayer(nn.Module):
 
 
 @support_torch_compile
-@default_pooling_type("CLS")
+@default_pooling_type(seq_pooling_type="CLS")
 class ModernBertModel(nn.Module):
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_prefix={"layers.": "encoder_layer.layers."}
@@ -283,12 +281,18 @@ class ModernBertModel(nn.Module):
         return norm_outputs
 
 
-class ModernBertPooler(Pooler):
-    def __init__(self, config: ModernBertConfig):
-        super().__init__()
+class ModernBertPooler(SequencePooler):
+    def __init__(self, config: ModernBertConfig, pooler_config: PoolerConfig):
+        hf_pooling_type = config.classifier_pooling.upper()
+        # vllm_pooling_type = pooler_config.seq_pooling_type
+        # Currently we don't have a way to see if the user set the pooling type
+        # explicitly or not, so we always use the HF pooling type for now.
 
-        pooling_type = PoolingType[config.classifier_pooling.upper()]
-        self.pooling = PoolingMethod.from_pooling_type(pooling_type)
+        super().__init__(
+            pooling=get_seq_pooling_method(hf_pooling_type),
+            head=self.head,
+        )
+
         self.dense = nn.Linear(
             config.hidden_size, config.hidden_size, config.classifier_bias
         )
@@ -297,40 +301,27 @@ class ModernBertPooler(Pooler):
             config.hidden_size, eps=config.norm_eps, bias=config.norm_bias
         )
 
-    def get_supported_tasks(self) -> Set[PoolingTask]:
-        return self.pooling.get_supported_tasks()
-
-    def get_pooling_updates(self, task: PoolingTask) -> PoolingParamsUpdate:
-        return self.pooling.get_pooling_updates(task)
-
     def head(
         self,
-        pooled_data: TokenPoolingMethodOutput,
+        pooled_data: SequencePoolingMethodOutput,
         pooling_metadata: PoolingMetadata,
-    ) -> TokenPoolerHeadOutput:
+    ) -> SequencePoolerHeadOutput:
         if isinstance(pooled_data, list):
             pooled_data = torch.stack(pooled_data)
 
         pooled_data = pooled_data.to(self.dense.weight.dtype)
         return self.norm(self.act(self.dense(pooled_data)))
 
-    def forward(
-        self,
-        hidden_states: torch.Tensor,
-        pooling_metadata: PoolingMetadata,
-    ) -> TokenPoolerOutput:
-        pooled_data = self.pooling(hidden_states, pooling_metadata)
-        pooled_data = self.head(pooled_data, pooling_metadata)
-        return pooled_data
 
-
-@default_pooling_type("CLS")
+@default_pooling_type(seq_pooling_type="CLS")
 class ModernBertForSequenceClassification(nn.Module, SupportsCrossEncoding):
     is_pooling_model = True
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
+
         config = vllm_config.model_config.hf_config
+
         self.config = config
         self.model = ModernBertModel(
             vllm_config=vllm_config, prefix=maybe_prefix(prefix, "modernbert")
@@ -340,23 +331,16 @@ class ModernBertForSequenceClassification(nn.Module, SupportsCrossEncoding):
             config.num_labels,
             dtype=vllm_config.model_config.head_dtype,
         )
-        self.pooling = ModernBertPooler(config)
 
         pooler_config = vllm_config.model_config.pooler_config
         assert pooler_config is not None
 
-        self.pooler = DispatchPooler(
-            {
-                "token_classify": Pooler.for_token_classify(
-                    pooler_config, classifier=self.classifier
-                ),
-                "classify": ClassifierPooler(
-                    pooling=self.pooling, classifier=self.classifier, act_fn="classify"
-                ),
-                "score": ClassifierPooler(
-                    pooling=self.pooling, classifier=self.classifier, act_fn="score"
-                ),
-            }
+        self.pooling = ModernBertPooler(config, pooler_config)
+
+        self.pooler = DispatchPooler.for_seq_cls(
+            pooler_config,
+            pooling=self.pooling,
+            classifier=self.classifier,
         )
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
@@ -419,7 +403,7 @@ class ModernBertPredictionHead(nn.Module):
 
 
 @attn_type("encoder_only")
-@default_pooling_type("ALL")
+@default_pooling_type(tok_pooling_type="ALL")
 class ModernBertForTokenClassification(nn.Module):
     is_pooling_model = True
 
@@ -439,13 +423,7 @@ class ModernBertForTokenClassification(nn.Module):
         pooler_config = vllm_config.model_config.pooler_config
         assert pooler_config is not None
 
-        self.pooler = DispatchPooler(
-            {
-                "token_classify": Pooler.for_token_classify(
-                    pooler_config=pooler_config
-                ),
-            }
-        )
+        self.pooler = pooler_for_token_classify(pooler_config)
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.model.embed_input_ids(input_ids)

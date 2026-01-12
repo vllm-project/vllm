@@ -9,24 +9,24 @@ from typing import ClassVar
 import numpy as np
 import torch
 
-from vllm.attention.backends.abstract import (
+from vllm.attention.layer import Attention
+from vllm.v1.attention.backend import (
     AttentionBackend,
     AttentionImpl,
     AttentionType,
     MultipleOf,
     is_quantized_kv_cache,
 )
-from vllm.attention.layer import Attention
-from vllm.attention.ops.common import cp_lse_ag_out_rs
-from vllm.attention.ops.merge_attn_states import merge_attn_states
-from vllm.attention.utils.fa_utils import (
+from vllm.v1.attention.backends.fa_utils import (
     flash_attn_supports_fp8,
     get_flash_attn_version,
     is_flash_attn_varlen_func_available,
 )
+from vllm.v1.attention.ops.common import cp_lse_ag_out_rs
+from vllm.v1.attention.ops.merge_attn_states import merge_attn_states
 
 if is_flash_attn_varlen_func_available():
-    from vllm.attention.utils.fa_utils import (
+    from vllm.v1.attention.backends.fa_utils import (
         flash_attn_supports_sinks,
         flash_attn_varlen_func,
         get_scheduler_metadata,
