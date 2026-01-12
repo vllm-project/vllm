@@ -573,6 +573,7 @@ class TritonAttentionImpl(AttentionImpl):
             b_seq_len=seq_lens,
             max_input_len=max_query_len,
             is_causal=False,  # Encoder attention is bidirectional
+            softmax_scale=self.scale,
             sliding_window_q=self.sliding_window[0],
             sliding_window_k=self.sliding_window[1],
         )
