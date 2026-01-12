@@ -217,6 +217,7 @@ def parse_response_input(
         content = response_msg["content"]
         assert len(content) == 1
         msg = Message.from_role_and_content(Role.ASSISTANT, content[0]["text"])
+        msg = msg.with_channel("analysis")
     elif response_msg["type"] == "function_call":
         msg = Message.from_role_and_content(Role.ASSISTANT, response_msg["arguments"])
         msg = msg.with_channel("commentary")
@@ -437,8 +438,17 @@ def parse_input_to_harmony_message(chat_msg) -> list[Message]:
     else:
         # TODO: Support refusal.
         contents = [TextContent(text=c.get("text", "")) for c in content]
-    msg = Message.from_role_and_contents(role, contents)
-    return [msg]
+
+    # Match pattern from parse_chat_input_to_harmony_message:
+    # Only create assistant messages if they have non-empty content
+    if role == "assistant" and contents and contents[0].text:
+        msg = Message.from_role_and_contents(role, contents)
+        msg = msg.with_channel("final")
+        return [msg]
+    elif role != "assistant":
+        msg = Message.from_role_and_contents(role, contents)
+        return [msg]
+    return []
 
 
 def construct_harmony_previous_input_messages(

@@ -15,6 +15,7 @@ from vllm.entrypoints.openai.parser.harmony_utils import (
     parse_chat_output,
     parse_input_to_harmony_message,
     parse_output_message,
+    parse_response_input,
 )
 
 
@@ -1199,3 +1200,105 @@ def test_parse_remaining_state_analysis_channel() -> None:
     assert len(builtin_items) == 1
     assert not isinstance(builtin_items[0], McpCall)
     assert builtin_items[0].type == "reasoning"
+
+
+class TestChannelAssignment:
+    """Tests for proper channel assignment in message parsing.
+
+    These tests verify that messages have the correct channel assigned,
+    which is required for parse_output_message to work correctly.
+    Without proper channel assignment, parse_output_message raises
+    ValueError: Unknown channel: None.
+    """
+
+    def test_parse_response_input_reasoning_has_analysis_channel(self):
+        """Test that reasoning items from Responses API get 'analysis' channel.
+
+        This is critical for multi-turn conversations where reasoning items
+        from previous responses are passed back as input.
+        Without this, parse_output_message fails with 'Unknown channel: None'.
+        """
+        response_msg = {
+            "type": "reasoning",
+            "content": [{"text": "I am thinking about this problem."}],
+        }
+
+        msg = parse_response_input(response_msg, prev_responses=[])
+
+        assert msg.author.role == Role.ASSISTANT
+        assert msg.channel == "analysis"
+        assert msg.content[0].text == "I am thinking about this problem."
+
+    def test_parse_input_to_harmony_message_assistant_has_final_channel(self):
+        """Test that assistant messages get 'final' channel.
+
+        This ensures assistant messages without tool calls are properly
+        marked with the 'final' channel for round-trip compatibility.
+        """
+        chat_msg = {
+            "role": "assistant",
+            "content": "Here is my response to your question.",
+        }
+
+        messages = parse_input_to_harmony_message(chat_msg)
+
+        assert len(messages) == 1
+        assert messages[0].author.role == Role.ASSISTANT
+        assert messages[0].channel == "final"
+        assert messages[0].content[0].text == "Here is my response to your question."
+
+    def test_parse_input_to_harmony_message_user_no_channel(self):
+        """Test that user messages don't get a channel assigned.
+
+        User messages should not have a channel - only assistant messages
+        need channel assignment for Harmony format compatibility.
+        """
+        chat_msg = {
+            "role": "user",
+            "content": "What is the weather?",
+        }
+
+        messages = parse_input_to_harmony_message(chat_msg)
+
+        assert len(messages) == 1
+        assert messages[0].author.role == Role.USER
+        assert messages[0].channel is None
+
+    def test_parse_input_to_harmony_message_empty_assistant_skipped(self):
+        """Test that empty assistant messages are not created.
+
+        This matches the behavior in parse_chat_input_to_harmony_message
+        where empty assistant content is skipped to prevent empty messages
+        from being processed downstream.
+        """
+        chat_msg = {
+            "role": "assistant",
+            "content": "",
+        }
+
+        messages = parse_input_to_harmony_message(chat_msg)
+
+        assert len(messages) == 0
+
+    def test_reasoning_message_can_be_parsed_as_output(self):
+        """Integration test: reasoning item round-trip through parse functions.
+
+        This test verifies the complete flow:
+        1. Parse a reasoning input item
+        2. Pass the result through parse_output_message
+        3. Should produce valid reasoning output without errors
+        """
+        response_msg = {
+            "type": "reasoning",
+            "content": [{"text": "Let me analyze this step by step."}],
+        }
+
+        # Parse the input
+        msg = parse_response_input(response_msg, prev_responses=[])
+
+        # Should be able to parse as output without ValueError
+        output_items = parse_output_message(msg)
+
+        assert len(output_items) == 1
+        assert isinstance(output_items[0], ResponseReasoningItem)
+        assert output_items[0].content[0].text == "Let me analyze this step by step."
