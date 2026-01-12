@@ -10,11 +10,11 @@ from typing import TYPE_CHECKING, Any, Literal, cast
 
 import torch
 
-from vllm.attention.backends.abstract import AttentionBackend
 from vllm.config import VllmConfig, get_current_vllm_config, get_layers_from_vllm_config
 from vllm.distributed.kv_transfer.kv_connector.factory import KVConnectorFactory
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
+from vllm.v1.attention.backend import AttentionBackend
 from vllm.v1.outputs import KVConnectorOutput, ModelRunnerOutput
 
 if TYPE_CHECKING:
@@ -447,7 +447,7 @@ def get_current_attn_backend(vllm_config: VllmConfig):
             "No layers found in the vLLM config. "
             "Falling back to default attention backend."
         )
-        from vllm.attention.selector import get_attn_backend
+        from vllm.v1.attention.selector import get_attn_backend
 
         backend = get_attn_backend(
             head_size=vllm_config.model_config.get_head_size(),
