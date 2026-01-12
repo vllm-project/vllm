@@ -92,6 +92,8 @@ RUN if [ "$USE_SCCACHE" = "1" ]; then \
 # Setup sccache for HIP compilation via HIP_CLANG_PATH
 # This creates wrapper scripts in a separate directory and points HIP to use them
 # This avoids modifying the original ROCm binaries which can break detection
+# NOTE: HIP_CLANG_PATH is NOT set as ENV to avoid affecting downstream images (Dockerfile.rocm)
+# Instead, each build stage should export HIP_CLANG_PATH=/opt/sccache-wrappers if USE_SCCACHE=1
 RUN if [ "$USE_SCCACHE" = "1" ]; then \
         echo "Setting up sccache wrappers for HIP compilation..." \
         && mkdir -p /opt/sccache-wrappers \
@@ -99,11 +101,8 @@ RUN if [ "$USE_SCCACHE" = "1" ]; then \
         && chmod +x /opt/sccache-wrappers/clang++ \
         && printf '#!/bin/bash\nexec sccache /opt/rocm/lib/llvm/bin/clang "$@"\n' > /opt/sccache-wrappers/clang \
         && chmod +x /opt/sccache-wrappers/clang \
-        && echo "HIP_CLANG_PATH=/opt/sccache-wrappers" >> /etc/environment \
         && echo "sccache wrappers created in /opt/sccache-wrappers"; \
     fi
-ARG USE_SCCACHE
-ENV HIP_CLANG_PATH=${USE_SCCACHE:+/opt/sccache-wrappers}
 
 # Set sccache environment variables (will be empty if USE_SCCACHE is not set)
 ENV SCCACHE_BUCKET=${SCCACHE_BUCKET_NAME}
@@ -154,9 +153,7 @@ RUN cd pytorch && git checkout ${PYTORCH_BRANCH} \
     && pip install -r requirements.txt && git submodule update --init --recursive \
     && python3 tools/amd_build/build_amd.py \
     && if [ "$USE_SCCACHE" = "1" ]; then \
-           export CMAKE_C_COMPILER_LAUNCHER=sccache \
-           && export CMAKE_CXX_COMPILER_LAUNCHER=sccache \
-           && export CMAKE_HIP_COMPILER_LAUNCHER=sccache \
+           export HIP_CLANG_PATH=/opt/sccache-wrappers \
            && sccache --show-stats; \
        fi \
     && CMAKE_PREFIX_PATH=$(python3 -c 'import sys; print(sys.prefix)') python3 setup.py bdist_wheel --dist-dir=dist \
@@ -165,9 +162,7 @@ RUN cd pytorch && git checkout ${PYTORCH_BRANCH} \
 RUN git clone ${PYTORCH_VISION_REPO} vision
 RUN cd vision && git checkout ${PYTORCH_VISION_BRANCH} \
     && if [ "$USE_SCCACHE" = "1" ]; then \
-           export CMAKE_C_COMPILER_LAUNCHER=sccache \
-           && export CMAKE_CXX_COMPILER_LAUNCHER=sccache \
-           && export CMAKE_HIP_COMPILER_LAUNCHER=sccache; \
+           export HIP_CLANG_PATH=/opt/sccache-wrappers; \
        fi \
     && python3 setup.py bdist_wheel --dist-dir=dist \
     && if [ "$USE_SCCACHE" = "1" ]; then sccache --show-stats; fi \
@@ -177,9 +172,7 @@ RUN cd audio && git checkout ${PYTORCH_AUDIO_BRANCH} \
     && git submodule update --init --recursive \
     && pip install -r requirements.txt \
     && if [ "$USE_SCCACHE" = "1" ]; then \
-           export CMAKE_C_COMPILER_LAUNCHER=sccache \
-           && export CMAKE_CXX_COMPILER_LAUNCHER=sccache \
-           && export CMAKE_HIP_COMPILER_LAUNCHER=sccache; \
+           export HIP_CLANG_PATH=/opt/sccache-wrappers; \
        fi \
     && python3 setup.py bdist_wheel --dist-dir=dist \
     && if [ "$USE_SCCACHE" = "1" ]; then sccache --show-stats; fi \
@@ -332,31 +325,29 @@ RUN cd /opt/rixl && mkdir -p /app/install && \
 # RUN mkdir -p /app/install && cp /app/flash-attention/dist/*.whl /app/install
 
 
-# ###
-# ### AITER Build
-# ###
-# FROM base AS build_aiter
-# ARG AITER_BRANCH
-# ARG AITER_REPO
-# ARG USE_SCCACHE
-# RUN --mount=type=bind,from=build_pytorch,src=/app/install/,target=/install \
-#     pip install /install/*.whl
-# RUN git clone --recursive ${AITER_REPO}
-# RUN cd aiter \
-#     && git checkout ${AITER_BRANCH} \
-#     && git submodule update --init --recursive \
-#     && pip install -r requirements.txt
-# RUN pip install pyyaml && cd aiter \
-#     && if [ "$USE_SCCACHE" = "1" ]; then \
-#            export CMAKE_C_COMPILER_LAUNCHER=sccache \
-#            && export CMAKE_CXX_COMPILER_LAUNCHER=sccache \
-#            && export CMAKE_HIP_COMPILER_LAUNCHER=sccache \
-#            && sccache --show-stats; \
-#        fi \
-#     && PREBUILD_KERNELS=1 GPU_ARCHS=${AITER_ROCM_ARCH} python3 setup.py bdist_wheel --dist-dir=dist \
-#     && if [ "$USE_SCCACHE" = "1" ]; then sccache --show-stats; fi \
-#     && ls /app/aiter/dist/*.whl
-# RUN mkdir -p /app/install && cp /app/aiter/dist/*.whl /app/install
+###
+### AITER Build
+###
+FROM base AS build_aiter
+ARG AITER_BRANCH
+ARG AITER_REPO
+ARG USE_SCCACHE
+RUN --mount=type=bind,from=build_pytorch,src=/app/install/,target=/install \
+    pip install /install/*.whl
+RUN git clone --recursive ${AITER_REPO}
+RUN cd aiter \
+    && git checkout ${AITER_BRANCH} \
+    && git submodule update --init --recursive \
+    && pip install -r requirements.txt
+RUN pip install pyyaml && cd aiter \
+    && if [ "$USE_SCCACHE" = "1" ]; then \
+           export HIP_CLANG_PATH=/opt/sccache-wrappers; \
+           && sccache --show-stats; \
+       fi \
+    && PREBUILD_KERNELS=1 GPU_ARCHS=${AITER_ROCM_ARCH} python3 setup.py bdist_wheel --dist-dir=dist \
+    && if [ "$USE_SCCACHE" = "1" ]; then sccache --show-stats; fi \
+    && ls /app/aiter/dist/*.whl
+RUN mkdir -p /app/install && cp /app/aiter/dist/*.whl /app/install
 
 
 ###
