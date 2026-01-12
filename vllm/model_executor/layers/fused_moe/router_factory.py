@@ -44,6 +44,7 @@ def create_fused_moe_router(
     # eplb parameters
     enable_eplb: bool = False,
     eplb_state: EplbLayerState = EMPTY_EPLB_STATE,
+    capture: Callable[[torch.tensor], None] | None = None,
 ) -> FusedMoERouter:
     """
     Factory function to create the appropriate FusedMoERouter subclass based on
@@ -87,13 +88,15 @@ def create_fused_moe_router(
 
     routing_strategy = envs.VLLM_MOE_ROUTING_SIMULATION_STRATEGY
     if routing_strategy != "":
-        return RoutingSimulatorRouter(
+        router = RoutingSimulatorRouter(
             top_k=top_k,
             global_num_experts=global_num_experts,
             eplb_state=eplb_state,
             enable_eplb=enable_eplb,
             indices_type_getter=indices_type_getter,
         )
+        router.capture = capture
+        return router
 
     if use_grouped_topk:
         if num_expert_group is None or topk_group is None:
@@ -101,7 +104,7 @@ def create_fused_moe_router(
                 "num_expert_group and topk_group must be provided when "
                 "use_grouped_topk is True"
             )
-        return GroupedTopKRouter(
+        router = GroupedTopKRouter(
             top_k=top_k,
             global_num_experts=global_num_experts,
             eplb_state=eplb_state,
@@ -116,9 +119,11 @@ def create_fused_moe_router(
             indices_type_getter=indices_type_getter,
             routing_method_type=routing_method_type,
         )
+        router.capture = capture
+        return router
 
     if custom_routing_function is not None:
-        return CustomRoutingRouter(
+        router = CustomRoutingRouter(
             top_k=top_k,
             global_num_experts=global_num_experts,
             eplb_state=eplb_state,
@@ -127,6 +132,8 @@ def create_fused_moe_router(
             enable_eplb=enable_eplb,
             indices_type_getter=indices_type_getter,
         )
+        router.capture = capture
+        return router
 
     if scoring_func != "softmax":
         raise ValueError(
@@ -134,7 +141,7 @@ def create_fused_moe_router(
         )
 
     if e_score_correction_bias is not None:
-        return FusedTopKBiasRouter(
+        router = FusedTopKBiasRouter(
             top_k=top_k,
             global_num_experts=global_num_experts,
             eplb_state=eplb_state,
@@ -144,8 +151,10 @@ def create_fused_moe_router(
             enable_eplb=enable_eplb,
             indices_type_getter=indices_type_getter,
         )
+        router.capture = capture
+        return router
 
-    return FusedTopKRouter(
+    router = FusedTopKRouter(
         top_k=top_k,
         global_num_experts=global_num_experts,
         eplb_state=eplb_state,
@@ -153,3 +162,5 @@ def create_fused_moe_router(
         enable_eplb=enable_eplb,
         indices_type_getter=indices_type_getter,
     )
+    router.capture = capture
+    return router

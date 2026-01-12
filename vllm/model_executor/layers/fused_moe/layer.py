@@ -40,14 +40,14 @@ from vllm.model_executor.layers.fused_moe.fused_moe_modular_method import (
 from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (
     init_aiter_topK_meta_data,
 )
+from vllm.model_executor.layers.fused_moe.routed_experts_capturer import (
+    RoutedExpertsCapturer,
+)
 from vllm.model_executor.layers.fused_moe.router_factory import (
     create_fused_moe_router,
 )
 from vllm.model_executor.layers.fused_moe.unquantized_fused_moe_method import (
     UnquantizedFusedMoEMethod,
-)
-from vllm.model_executor.layers.fused_moe.routed_experts_capturer import (
-    RoutedExpertsCapturer,
 )
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig,
@@ -450,6 +450,17 @@ class FusedMoE(CustomOp):
                 "EPLB is only supported for FP8 quantization for now."
             )
 
+        # TODO(bnell): in next PR move capture back to layer
+        if (
+            self.vllm_config.model_config is not None
+            and self.vllm_config.model_config.enable_return_routed_experts
+        ):
+            # In dummy runs, the capturer is not initialized.
+            capturer = RoutedExpertsCapturer.get_instance()
+            capture = lambda topk_ids: capturer.capture(self.layer_id, topk_ids)
+        else:
+            capture = None
+
         self.router = create_fused_moe_router(
             top_k=top_k,
             global_num_experts=self.global_num_experts,
@@ -466,6 +477,7 @@ class FusedMoE(CustomOp):
             enable_eplb=enable_eplb,
             indices_type_getter=lambda: self.quant_method.topk_indices_dtype,
             routing_method_type=routing_method_type,
+            capture=capture,
         )
 
         # Determine expert maps
