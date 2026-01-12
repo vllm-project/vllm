@@ -323,10 +323,12 @@ class OAITritonExperts(BaseOAITritonExperts):
         global_num_experts: int,
         local_num_experts: int,
         expert_tokens_meta: mk.ExpertTokensMetadata | None,
+        activation: str,
     ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...]]:
         # workspace are allocated inside the kernel
+        activation_out_dim = self.adjust_N_for_activation(N, activation)
         workspace1 = (0, 0)
-        workspace2 = (M * topk, N // 2)
+        workspace2 = (M * topk, activation_out_dim)
         output = (M, K)
         return (workspace1, workspace2, output)
 
@@ -415,9 +417,11 @@ class UnfusedOAITritonExperts(BaseOAITritonExperts):
         global_num_experts: int,
         local_num_experts: int,
         expert_tokens_meta: mk.ExpertTokensMetadata | None,
+        activation: str,
     ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...]]:
         # workspace are allocated inside the kernel
-        workspace1 = (M * topk, N // 2)
+        activation_out_dim = self.adjust_N_for_activation(N, activation)
+        workspace1 = (M * topk, activation_out_dim)
         workspace2 = (M * topk, max(N, K))
         output = (M, K)
         return (workspace1, workspace2, output)
@@ -443,8 +447,10 @@ class UnfusedOAITritonExperts(BaseOAITritonExperts):
         expert_tokens_meta: mk.ExpertTokensMetadata | None,
         apply_router_weight_on_input: bool,
     ):
-        if self.quant_config is None:
-            self.quant_config = FUSED_MOE_UNQUANTIZED_CONFIG
+        # Use local variable to help mypy narrow the type after None check
+        quant_config = self.quant_config
+        if quant_config is None:
+            quant_config = FUSED_MOE_UNQUANTIZED_CONFIG
 
         if expert_map is not None:
             topk_ids = expert_map[topk_ids]
@@ -462,12 +468,10 @@ class UnfusedOAITritonExperts(BaseOAITritonExperts):
         # type check, uint8 means mxfp4
         assert hidden_states.dtype == torch.bfloat16
         assert (
-            self.quant_config.w1_bias is None
-            or self.quant_config.w1_bias.dtype == torch.float32
+            quant_config.w1_bias is None or quant_config.w1_bias.dtype == torch.float32
         )
         assert (
-            self.quant_config.w2_bias is None
-            or self.quant_config.w2_bias.dtype == torch.float32
+            quant_config.w2_bias is None or quant_config.w2_bias.dtype == torch.float32
         )
 
         # Shape check, only check non-mxfp4
@@ -485,17 +489,18 @@ class UnfusedOAITritonExperts(BaseOAITritonExperts):
         # Note that the output tensor might be in workspace13
         intermediate_cache1 = _resize_cache(workspace2, (batch_dim, M * topk, N))
         intermediate_cache3 = _resize_cache(workspace2, (batch_dim, M * topk, K))
-        intermediate_cache2 = _resize_cache(workspace13, (M * topk, N // 2))
+        activation_out_dim = self.adjust_N_for_activation(N, activation)
+        intermediate_cache2 = _resize_cache(workspace13, (M * topk, activation_out_dim))
 
         gammas = routing_data.gate_scal if routing_data else None
 
         matmul_ogs(
             hidden_states,
             w1,
-            self.quant_config.w1_bias,
+            quant_config.w1_bias,
             routing_data,
             gather_indx=gather_indx,
-            precision_config=self.quant_config.w1_precision,
+            precision_config=quant_config.w1_precision,
             gammas=gammas if apply_router_weight_on_input else None,
             fused_activation=None,
             y=intermediate_cache1,
@@ -515,10 +520,10 @@ class UnfusedOAITritonExperts(BaseOAITritonExperts):
         matmul_ogs(
             intermediate_cache2[gather_indx.src_indx],
             w2,
-            self.quant_config.w2_bias,
+            quant_config.w2_bias,
             routing_data,
             scatter_indx=scatter_indx,
-            precision_config=self.quant_config.w2_precision,
+            precision_config=quant_config.w2_precision,
             gammas=None if apply_router_weight_on_input else gammas,
             y=intermediate_cache3,
         )

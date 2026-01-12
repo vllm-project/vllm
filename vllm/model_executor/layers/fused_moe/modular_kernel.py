@@ -18,6 +18,7 @@ from vllm.model_executor.layers.fused_moe.config import (
 )
 from vllm.model_executor.layers.fused_moe.utils import (
     _resize_cache,
+    apply_moe_activation,
     count_expert_num_tokens,
     disable_inplace,
 )
@@ -542,6 +543,7 @@ class FusedMoEPermuteExpertsUnpermute(ABC):
         global_num_experts: int,
         local_num_experts: int,
         expert_tokens_meta: ExpertTokensMetadata | None,
+        activation: str,
     ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...]]:
         """
         Compute the shapes for the temporary and final outputs of the two gemms
@@ -572,19 +574,31 @@ class FusedMoEPermuteExpertsUnpermute(ABC):
         """
         raise NotImplementedError
 
+    @staticmethod
+    def adjust_N_for_activation(N: int, activation: str) -> int:
+        """
+        Calculate the output dimension for the activation function.
+
+        For *_no_mul activations (e.g. relu2_no_mul),
+        there's no gate/up split, so output size equals input size (N).
+
+        For regular gated activations (e.g., silu, gelu, swigluoai),
+        output size is N // 2 due to gate × activation(up) multiplication.
+
+        Args:
+            N: The intermediate size (width of w1/w3 weights).
+            activation: The activation function name.
+
+        Returns:
+            The output dimension after activation.
+        """
+        is_no_mul = activation.endswith("_no_mul")
+        return N if is_no_mul else N // 2
+
     def activation(
         self, activation: str, output: torch.Tensor, input: torch.Tensor
     ) -> None:
-        assert output.size(-1) * 2 == input.size(-1)
-        if activation == "silu":
-            torch.ops._C.silu_and_mul(output, input)
-        elif activation == "gelu":
-            torch.ops._C.gelu_and_mul(output, input)
-        elif activation == "swigluoai":
-            # alpha = 1.702, limit = 7.0
-            torch.ops._C.swigluoai_and_mul(output, input)
-        else:
-            raise ValueError(f"Unsupported FusedMoe activation: {activation}")
+        apply_moe_activation(activation, output, input)
 
     def enable_chunking(self):
         return (
@@ -761,6 +775,7 @@ class FusedMoEModularKernel(torch.nn.Module):
         global_num_experts: int,
         local_num_experts: int,
         expert_tokens_meta: ExpertTokensMetadata | None,
+        activation: str,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
         Allocate temporary and output buffers for the fused experts op.
@@ -796,6 +811,7 @@ class FusedMoEModularKernel(torch.nn.Module):
                     # amount of workspace. Mark it None, so we allocate for
                     # the worst-case scenario.
                     expert_tokens_meta=None,
+                    activation=activation,
                 )
             )
 
@@ -814,6 +830,7 @@ class FusedMoEModularKernel(torch.nn.Module):
             global_num_experts,
             local_num_experts,
             expert_tokens_meta,
+            activation,
         )
 
         # Get final output shape based on the full M size.
@@ -825,6 +842,7 @@ class FusedMoEModularKernel(torch.nn.Module):
             global_num_experts,
             local_num_experts,
             expert_tokens_meta,
+            activation,
         )
 
         # We can reuse the memory between cache1 and cache3 because by the
@@ -1043,6 +1061,7 @@ class FusedMoEModularKernel(torch.nn.Module):
                 global_num_experts,
                 local_num_experts,
                 expert_tokens_meta,
+                activation,
             )
 
         for chunk_idx in range(num_chunks):
