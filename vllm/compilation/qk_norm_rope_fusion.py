@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from collections.abc import Callable
+from typing import ParamSpec
 
 import torch
 import torch._inductor.pattern_matcher as pm
@@ -22,6 +23,8 @@ from .vllm_inductor_pass import VllmInductorPass, VllmPatternMatcherPass
 logger = init_logger(__name__)
 
 FUSED_QK_ROPE_OP = torch.ops._C.fused_qk_norm_rope.default
+
+P = ParamSpec("P")
 
 
 class QkNormRopePattern:
@@ -72,7 +75,7 @@ class QkNormRopePattern:
             use_flashinfer=self.rope_flashinfer,
         )
 
-    def get_inputs(self):
+    def get_inputs(self) -> list[torch.Tensor]:
         # Sample inputs to help pattern tracing
         T = 5
         qkv = empty_bf16(T, self.q_size + 2 * self.kv_size)
@@ -92,8 +95,11 @@ class QkNormRopePattern:
         ]
 
     @staticmethod
-    def wrap_trace_fn(trace_fn, *process_fx_fns: Callable[[fx.GraphModule], None]):
-        def wrapped(*args, **kwargs):
+    def wrap_trace_fn(
+        trace_fn: Callable[P, fx.GraphModule],
+        *process_fx_fns: Callable[[fx.GraphModule], None],
+    ) -> Callable[P, fx.GraphModule]:
+        def wrapped(*args: P.args, **kwargs: P.kwargs) -> fx.GraphModule:
             gm = trace_fn(*args, **kwargs)
             for process_fx in process_fx_fns:
                 process_fx(gm)
@@ -103,19 +109,19 @@ class QkNormRopePattern:
         return wrapped
 
     @staticmethod
-    def fx_view_to_reshape(gm: torch.fx.GraphModule):
+    def fx_view_to_reshape(gm: torch.fx.GraphModule) -> None:
         from torch._inductor.fx_passes.post_grad import view_to_reshape
 
         view_to_reshape(gm)
 
-    def register(self, pm_pass: PatternMatcherPass):
+    def register(self, pm_pass: PatternMatcherPass) -> None:
         def pattern(
             qkv: torch.Tensor,
             positions: torch.Tensor,
             q_weight: torch.Tensor,
             k_weight: torch.Tensor,
             cos_sin_cache: torch.Tensor,
-        ):
+        ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
             # split qkv -> q,k,v
             q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
 
@@ -143,7 +149,7 @@ class QkNormRopePattern:
             q_weight: torch.Tensor,
             k_weight: torch.Tensor,
             cos_sin_cache: torch.Tensor,
-        ):
+        ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
             # Run fused qk_norm_rope op
             result = auto_functionalized(
                 FUSED_QK_ROPE_OP,
@@ -162,7 +168,7 @@ class QkNormRopePattern:
             result_qkv = result[1]
 
             # Split back to q,k,v and return
-            return result_qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
+            return result_qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)  # type: ignore[no-any-return]
 
         # NOTE: use fx_view_to_reshape to unify view/reshape to simplify
         # pattern and increase matching opportunities
@@ -182,7 +188,7 @@ class QKNormRoPEFusionPass(VllmPatternMatcherPass):
     """Fuse Q/K RMSNorm + RoPE into fused_qk_norm_rope when the custom op exists."""
 
     @enable_fake_mode
-    def __init__(self, config: VllmConfig):
+    def __init__(self, config: VllmConfig) -> None:
         super().__init__(config)
         self.patterns: PatternMatcherPass = PatternMatcherPass(
             pass_name="qk_norm_rope_fusion_pass"
@@ -234,5 +240,5 @@ class QKNormRoPEFusionPass(VllmPatternMatcherPass):
         self.matched_count = self.patterns.apply(graph)
         logger.debug("Fused QK Norm+RoPE on %s sites", self.matched_count)
 
-    def uuid(self):
+    def uuid(self) -> str:
         return VllmInductorPass.hash_source(self, QkNormRopePattern)
