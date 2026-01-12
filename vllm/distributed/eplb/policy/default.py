@@ -204,9 +204,8 @@ class DefaultEplbPolicy(AbstractEplbPolicy):
         logcnt = mlogcnt.view(num_layers, -1).gather(-1, log2mlog)
         return pphy2log, pphy_replicas_idx, logcnt
 
-    @classmethod
     def preserve_intragpu_slots(
-        cls,
+        self,
         phy2log: torch.Tensor,
         phy_replicas_idx: torch.Tensor,
         num_ranks: int,
@@ -354,7 +353,7 @@ class DefaultEplbPolicy(AbstractEplbPolicy):
         # Helps to avoid unnecessary weight copying when experts move
         # within the same GPU.
         if old_global_expert_indices is not None:
-            phy2log, phy_replicas_idx = cls.preserve_intragpu_slots(
+            phy2log, phy_replicas_idx = self.preserve_intragpu_slots(
                 phy2log, phy_replicas_idx, num_ranks, old_global_expert_indices
             )
         num_redundant_experts = num_replicas - num_logical_experts
