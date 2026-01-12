@@ -68,7 +68,9 @@ def _get_sla_run_path(iter_path: Path, run_number: int | None):
 def _iter_sla_val_paths(base_path: Path, sla_variable: str):
     for iter_path in base_path.glob(f"{sla_variable}=*"):
         sla_value = int(iter_path.name.removeprefix(f"{sla_variable}="))
-        yield sla_value, iter_path / "summary.json"
+        summary_path = iter_path / "summary.json"
+        if summary_path.exists():
+            yield sla_value, summary_path
 
 
 def _sla_needs_server(
