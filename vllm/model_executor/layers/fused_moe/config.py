@@ -130,6 +130,7 @@ class FusedMoEQuantScheme:
     act_dtype: torch.dtype | str | None
     per_token_quant: bool
     per_tensor_quant: bool
+    static_input_quant: bool
     block_size: tuple[int, int] | None
 
     @property
@@ -147,9 +148,11 @@ class FusedMoEQuantScheme:
         elif self.per_token_quant:
             assert not self.per_tensor_quant
             assert not self.per_block_quant
+            assert not self.static_input_quant
         elif self.per_block_quant:
             assert not self.per_tensor_quant
             assert not self.per_token_quant
+            assert not self.static_input_quant
             assert self.block_size is not None
         assert self.per_block_quant or self.per_token_quant or self.per_tensor_quant
         if self.is_unquantized:

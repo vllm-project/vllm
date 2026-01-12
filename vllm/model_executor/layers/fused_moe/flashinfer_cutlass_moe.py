@@ -66,21 +66,20 @@ class FlashInferExperts(mk.FusedMoEPermuteExpertsUnpermute):
     def _supports_quant_scheme(quant_scheme: FusedMoEQuantScheme) -> bool:
         # Supports:
         # * unquantized
-        # * fp8 per-tensor on 9.0+
+        # * fp8 static per-tensor on 9.0+
         # * fp8 block on 9.0
         # * nvfp4 on 10.0+
+        s = quant_scheme
+        p = current_platform
         return (
-            (quant_scheme.is_unquantized)
-            or (quant_scheme.is_fp8_w8a8 and quant_scheme.per_tensor_quant)
+            (s.is_unquantized)
+            or (s.is_fp8_w8a8 and s.per_tensor_quant and s.static_input_quant)
             or (
-                quant_scheme.is_fp8_w8a8
-                and quant_scheme.block_size == [128, 128]
-                and current_platform.is_device_capability((9, 0))
+                s.is_fp8_w8a8
+                and s.block_size == [128, 128]
+                and p.is_device_capability((9, 0))
             )
-            or (
-                quant_scheme.is_nvfp4_w4a4
-                and current_platform.has_device_capability((10, 0))
-            )
+            or (s.is_nvfp4_w4a4 and p.has_device_capability((10, 0)))
         )
 
     @staticmethod

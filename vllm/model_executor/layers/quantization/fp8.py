@@ -645,6 +645,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                 if self.weight_block_size is not None
                 else None
             ),
+            static_input_quant=(self.quant_config.activation_scheme == "static"),
         )
 
         self.fp8_backend, self.experts_cls = select_fp8_moe_backend(

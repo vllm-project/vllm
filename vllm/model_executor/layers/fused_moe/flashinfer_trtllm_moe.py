@@ -38,10 +38,11 @@ def _supports_no_act_and_mul() -> bool:
 
 def _supports_quant_scheme(quant_scheme: FusedMoEQuantScheme) -> bool:
     """Supports Fp8 per-tensor, Fp8 block, and Nvfp4 quantization."""
+    s = quant_scheme
     return (
-        (quant_scheme.is_fp8_w8a8 and quant_scheme.per_tensor_quant)
-        or (quant_scheme.is_fp8_w8a8 and quant_scheme.block_size == [128, 128])
-        or (quant_scheme.is_nvfp4_w4a4)
+        (s.is_fp8_w8a8 and s.per_tensor_quant and s.static_input_quant)
+        or (s.is_fp8_w8a8 and s.block_size == [128, 128])
+        or (s.is_nvfp4_w4a4)
     )
 
 
