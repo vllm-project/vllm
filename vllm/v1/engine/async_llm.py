@@ -586,9 +586,9 @@ class AsyncLLM(EngineClient):
         # If the request is disconnected by the client, generate()
         # is cancelled or the generator is garbage collected. So,
         # we abort the request if we end up here.
-        except (asyncio.CancelledError, GeneratorExit):
+        except (asyncio.CancelledError, GeneratorExit) as e:
             if q is not None:
-                await self.abort(q.request_id, internal=True)
+                await self.abort(q.request_id, internal=True, error=e)
             if self.log_requests:
                 logger.info("Request %s aborted.", request_id)
             raise
@@ -616,7 +616,7 @@ class AsyncLLM(EngineClient):
         # Unexpected error in the generate() task (possibly recoverable).
         except Exception as e:
             if q is not None:
-                await self.abort(q.request_id, internal=True)
+                await self.abort(q.request_id, internal=True, error=e)
             if self.log_requests:
                 try:
                     s = f"{e.__class__.__name__}: {e}"
@@ -701,14 +701,19 @@ class AsyncLLM(EngineClient):
         self.output_handler = asyncio.create_task(output_handler())
 
     async def abort(
-        self, request_id: str | Iterable[str], internal: bool = False
+        self,
+        request_id: str | Iterable[str],
+        internal: bool = False,
+        error: BaseException | None = None,
     ) -> None:
         """Abort RequestId in OutputProcessor and EngineCore."""
 
         request_ids = (
             (request_id,) if isinstance(request_id, str) else as_list(request_id)
         )
-        all_request_ids = self.output_processor.abort_requests(request_ids, internal)
+        all_request_ids = self.output_processor.abort_requests(
+            request_ids, internal, error
+        )
         await self.engine_core.abort_requests_async(all_request_ids)
 
         if self.log_requests:
@@ -818,9 +823,9 @@ class AsyncLLM(EngineClient):
 
         # If the request is disconnected by the client, generate()
         # is cancelled. So, we abort the request if we end up here.
-        except asyncio.CancelledError:
+        except asyncio.CancelledError as e:
             if q is not None:
-                await self.abort(q.request_id, internal=True)
+                await self.abort(q.request_id, internal=True, error=e)
             if self.log_requests:
                 logger.info("Request %s aborted.", request_id)
             raise
@@ -840,7 +845,7 @@ class AsyncLLM(EngineClient):
         # Unexpected error in the generate() task (possibly recoverable).
         except Exception as e:
             if q is not None:
-                await self.abort(q.request_id, internal=True)
+                await self.abort(q.request_id, internal=True, error=e)
             if self.log_requests:
                 logger.info("Request %s failed.", request_id)
             raise EngineGenerateError() from e
