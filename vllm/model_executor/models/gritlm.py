@@ -178,9 +178,8 @@ class GritLMMeanPool(SequencePoolingMethod):
 
 
 class GritLMPooler(SequencePooler):
-    def __init__(self, vllm_config: VllmConfig):
-        model_config = vllm_config.model_config
-        pooler_config = vllm_config.pooler_config
+    def __init__(self, model_config: ModelConfig):
+        pooler_config = model_config.pooler_config
         assert pooler_config is not None
 
         super().__init__(
@@ -238,6 +237,6 @@ class GritLM(LlamaForCausalLM):
             self.pooler = DispatchPooler(
                 {
                     "token_embed": pooler_for_token_embed(pooler_config),
-                    "embed": GritLMPooler(vllm_config),
+                    "embed": GritLMPooler(vllm_config.model_config),
                 }
             )

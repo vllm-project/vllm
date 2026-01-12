@@ -8,7 +8,7 @@ from torch import nn
 from transformers import BertConfig
 
 from vllm.compilation.decorators import support_torch_compile
-from vllm.config import CacheConfig, PoolerConfig, VllmConfig
+from vllm.config import CacheConfig, ModelConfig, PoolerConfig, VllmConfig
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.attention.encoder_only_attention import (
@@ -93,9 +93,8 @@ class BertEmbedding(nn.Module):
 
 
 class BertPooler(SequencePooler):
-    def __init__(self, vllm_config: VllmConfig):
-        model_config = vllm_config.model_config
-        pooler_config = vllm_config.pooler_config
+    def __init__(self, model_config: ModelConfig):
+        pooler_config = model_config.pooler_config
         assert pooler_config is not None
 
         config: BertConfig = model_config.hf_config
@@ -449,7 +448,7 @@ class BertPoolingModel(BertModel):
             embedding_class=embedding_class,
         )
 
-        self.pooler = BertPooler(vllm_config)
+        self.pooler = BertPooler(vllm_config.model_config)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         other_weights, loaded_stacked_params = self._load_weights(weights)

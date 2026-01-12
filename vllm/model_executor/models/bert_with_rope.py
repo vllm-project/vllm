@@ -465,7 +465,10 @@ class BertWithRope(nn.Module, SupportsQuant):
             prefix=f"{prefix}.encoder",
         )
 
-        self.pooler = BertPooler(vllm_config) if add_pooling_layer else None
+        if add_pooling_layer:
+            self.pooler = BertPooler(vllm_config.model_config)
+        else:
+            self.pooler = None
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embeddings(input_ids)

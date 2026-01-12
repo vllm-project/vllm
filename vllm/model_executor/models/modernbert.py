@@ -8,7 +8,7 @@ from transformers import ModernBertConfig
 from transformers.activations import ACT2FN
 
 from vllm.compilation.decorators import support_torch_compile
-from vllm.config import VllmConfig
+from vllm.config import ModelConfig, VllmConfig
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.attention.encoder_only_attention import (
     EncoderOnlyAttention,
@@ -280,9 +280,8 @@ class ModernBertModel(nn.Module):
 
 
 class ModernBertPooler(SequencePooler):
-    def __init__(self, vllm_config: VllmConfig):
-        model_config = vllm_config.model_config
-        pooler_config = vllm_config.pooler_config
+    def __init__(self, model_config: ModelConfig):
+        pooler_config = model_config.pooler_config
         assert pooler_config is not None
 
         config: ModernBertConfig = model_config.hf_config
@@ -335,7 +334,7 @@ class ModernBertForSequenceClassification(nn.Module, SupportsCrossEncoding):
         pooler_config = vllm_config.model_config.pooler_config
         assert pooler_config is not None
 
-        self.pooling = ModernBertPooler(vllm_config)
+        self.pooling = ModernBertPooler(vllm_config.model_config)
 
         self.pooler = DispatchPooler.for_seq_cls(
             pooler_config,
