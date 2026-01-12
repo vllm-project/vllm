@@ -327,7 +327,10 @@ class Worker(WorkerBase):
             # Profile CUDA graph memory if graphs will be captured.
             first_capture_memory = 0
             graph_memory = 0
-            if not self.model_config.enforce_eager:
+            if (
+                not self.model_config.enforce_eager
+                and envs.VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS
+            ):
                 first_capture_memory, graph_memory = (
                     self.model_runner.profile_cudagraph_memory()
                 )
