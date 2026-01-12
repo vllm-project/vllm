@@ -4808,7 +4808,11 @@ class GPUModelRunner(
         piecewise_largest = None
         piecewise_count = 0
 
-        if cudagraph_mode.mixed_mode() == CUDAGraphMode.PIECEWISE:
+        mixed_mode = cudagraph_mode.mixed_mode()
+        if mixed_mode == CUDAGraphMode.FULL:
+            full_largest = self.cudagraph_batch_sizes[-1]
+            full_count += len(self.cudagraph_batch_sizes) * lora_cases
+        elif mixed_mode == CUDAGraphMode.PIECEWISE:
             piecewise_largest = self.cudagraph_batch_sizes[-1]
             piecewise_count += len(self.cudagraph_batch_sizes) * lora_cases
 
@@ -5025,12 +5029,19 @@ class GPUModelRunner(
             piecewise_per_graph = 0
 
             if full_largest is not None:
+                cudagraph_mode = self.compilation_config.cudagraph_mode
+                if cudagraph_mode.separate_routine():
+                    uniform_decode = True
+                    batch_sizes = self._get_decode_cudagraph_batch_sizes()
+                else:
+                    uniform_decode = False
+                    batch_sizes = self.cudagraph_batch_sizes
                 full_first_capture_memory, full_per_graph = profile_graph_mode(
                     largest_size=full_largest,
                     count=full_count,
                     cudagraph_runtime_mode=CUDAGraphMode.FULL,
-                    uniform_decode=True,
-                    batch_sizes=self._get_decode_cudagraph_batch_sizes(),
+                    uniform_decode=uniform_decode,
+                    batch_sizes=batch_sizes,
                     measure_first_capture=True,
                     profile_seq_lens=min(
                         self.max_model_len,
@@ -5128,15 +5139,21 @@ class GPUModelRunner(
 
             full_graph_memory = 0
 
-            if cudagraph_mode.mixed_mode() == CUDAGraphMode.PIECEWISE:
+            mixed_mode = cudagraph_mode.mixed_mode()
+            if mixed_mode != CUDAGraphMode.NONE:
                 compilation_cases = list(
                     product(reversed(self.cudagraph_batch_sizes), lora_cases)
                 )
                 self._capture_cudagraphs(
                     compilation_cases,
-                    cudagraph_runtime_mode=CUDAGraphMode.PIECEWISE,
+                    cudagraph_runtime_mode=mixed_mode,
                     uniform_decode=False,
                 )
+                if mixed_mode == CUDAGraphMode.FULL:
+                    torch.cuda.synchronize()
+                    full_graph_memory = (
+                        start_free_gpu_memory - torch.cuda.mem_get_info()[0]
+                    )
 
             if (
                 cudagraph_mode.decode_mode() == CUDAGraphMode.FULL
