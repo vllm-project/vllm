@@ -21,7 +21,8 @@ from PIL import Image
 openai_api_key = "EMPTY"
 openai_api_base = "http://localhost:8000/v1"
 
-image_url = "https://vllm-public-assets.s3.us-west-2.amazonaws.com/vision_model_images/2560px-Gfp-wisconsin-madison-the-nature-boardwalk.jpg"
+image_url = "https://vllm-public-assets.s3.us-west-2.amazonaws.com/multimodal_asset/cat_snow.jpg"
+text = "A cat standing in the snow."
 
 
 def create_chat_embeddings(
@@ -30,6 +31,8 @@ def create_chat_embeddings(
     messages: list[ChatCompletionMessageParam],
     model: str,
     encoding_format: Literal["base64", "float"] | NotGiven = NOT_GIVEN,
+    continue_final_message: bool = False,
+    add_special_tokens: bool = False,
 ) -> CreateEmbeddingResponse:
     """
     Convenience function for accessing vLLM's Chat Embeddings API,
@@ -38,8 +41,19 @@ def create_chat_embeddings(
     return client.post(
         "/embeddings",
         cast_to=CreateEmbeddingResponse,
-        body={"messages": messages, "model": model, "encoding_format": encoding_format},
+        body={
+            "messages": messages,
+            "model": model,
+            "encoding_format": encoding_format,
+            "continue_final_message": continue_final_message,
+            "add_special_tokens": add_special_tokens,
+        },
     )
+
+
+def print_embeddings(embeds):
+    embeds_trimmed = (str(embeds[:4])[:-1] + ", ...]") if len(embeds) > 4 else embeds
+    print(f"Embeddings: {embeds_trimmed} (size={len(embeds)})")
 
 
 def run_clip(client: OpenAI, model: str):
@@ -145,6 +159,113 @@ def run_dse_qwen2_vl(client: OpenAI, model: str):
     print("Text embedding output:", response.data[0].embedding)
 
 
+def run_qwen3_vl(client: OpenAI, model: str):
+    """
+    Start the server using:
+
+    vllm serve Qwen/Qwen3-VL-Embedding-2B \
+        --runner pooling \
+        --max-model-len 8192
+    """
+
+    default_instruction = "Represent the user's input."
+
+    print("Text embedding output:")
+    response = create_chat_embeddings(
+        client,
+        messages=[
+            {
+                "role": "system",
+                "content": [
+                    {"type": "text", "text": default_instruction},
+                ],
+            },
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": text},
+                ],
+            },
+            {
+                "role": "assistant",
+                "content": [
+                    {"type": "text", "text": ""},
+                ],
+            },
+        ],
+        model=model,
+        encoding_format="float",
+        continue_final_message=True,
+        add_special_tokens=True,
+    )
+    print_embeddings(response.data[0].embedding)
+
+    print("Image embedding output:")
+    response = create_chat_embeddings(
+        client,
+        messages=[
+            {
+                "role": "system",
+                "content": [
+                    {"type": "text", "text": default_instruction},
+                ],
+            },
+            {
+                "role": "user",
+                "content": [
+                    {"type": "image_url", "image_url": {"url": image_url}},
+                    {"type": "text", "text": ""},
+                ],
+            },
+            {
+                "role": "assistant",
+                "content": [
+                    {"type": "text", "text": ""},
+                ],
+            },
+        ],
+        model=model,
+        encoding_format="float",
+        continue_final_message=True,
+        add_special_tokens=True,
+    )
+    print_embeddings(response.data[0].embedding)
+
+    print("Image+Text embedding output:")
+    response = create_chat_embeddings(
+        client,
+        messages=[
+            {
+                "role": "system",
+                "content": [
+                    {"type": "text", "text": default_instruction},
+                ],
+            },
+            {
+                "role": "user",
+                "content": [
+                    {"type": "image_url", "image_url": {"url": image_url}},
+                    {
+                        "type": "text",
+                        "text": f"{text}",
+                    },
+                ],
+            },
+            {
+                "role": "assistant",
+                "content": [
+                    {"type": "text", "text": ""},
+                ],
+            },
+        ],
+        model=model,
+        encoding_format="float",
+        continue_final_message=True,
+        add_special_tokens=True,
+    )
+    print_embeddings(response.data[0].embedding)
+
+
 def run_siglip(client: OpenAI, model: str):
     """
     Start the server using:
@@ -213,7 +334,8 @@ def run_vlm2vec(client: OpenAI, model: str):
         encoding_format="float",
     )
 
-    print("Image embedding output:", response.data[0].embedding)
+    print("Image embedding output:")
+    print_embeddings(response.data[0].embedding)
 
     response = create_chat_embeddings(
         client,
@@ -233,7 +355,8 @@ def run_vlm2vec(client: OpenAI, model: str):
         encoding_format="float",
     )
 
-    print("Image+Text embedding output:", response.data[0].embedding)
+    print("Image+Text embedding output:")
+    print_embeddings(response.data[0].embedding)
 
     response = create_chat_embeddings(
         client,
@@ -249,11 +372,13 @@ def run_vlm2vec(client: OpenAI, model: str):
         encoding_format="float",
     )
 
-    print("Text embedding output:", response.data[0].embedding)
+    print("Text embedding output:")
+    print_embeddings(response.data[0].embedding)
 
 
 model_example_map = {
     "clip": run_clip,
+    "qwen3_vl": run_qwen3_vl,
     "dse_qwen2_vl": run_dse_qwen2_vl,
     "siglip": run_siglip,
     "vlm2vec": run_vlm2vec,
