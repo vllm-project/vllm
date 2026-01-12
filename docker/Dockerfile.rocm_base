@@ -118,19 +118,11 @@ ENV SCCACHE_IDLE_TIMEOUT=0
 FROM base AS build_triton
 ARG TRITON_BRANCH
 ARG TRITON_REPO
-ARG USE_SCCACHE
 RUN git clone ${TRITON_REPO}
 RUN cd triton \
     && git checkout ${TRITON_BRANCH} \
     && if [ ! -f setup.py ]; then cd python; fi \
-    && if [ "$USE_SCCACHE" = "1" ]; then \
-           export CMAKE_C_COMPILER_LAUNCHER=sccache \
-           && export CMAKE_CXX_COMPILER_LAUNCHER=sccache \
-           && export CMAKE_HIP_COMPILER_LAUNCHER=sccache \
-           && sccache --show-stats; \
-       fi \
     && python3 setup.py bdist_wheel --dist-dir=dist \
-    && if [ "$USE_SCCACHE" = "1" ]; then sccache --show-stats; fi \
     && mkdir -p /app/install && cp dist/*.whl /app/install
 RUN if [ -d triton/python/triton_kernels ]; then pip install build && cd triton/python/triton_kernels \
     && python3 -m build --wheel && cp dist/*.whl /app/install; fi
