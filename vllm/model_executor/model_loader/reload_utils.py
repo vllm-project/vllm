@@ -40,8 +40,8 @@ def record_metadata_for_reloading(model: torch.nn.Module):
             meta = param.to(device=torch.device("meta"))
 
             for attr_name in RESTORE_ATTRS:
-                if hasattr(module, attr_name):
-                    setattr(meta, attr_name, getattr(module, attr_name))
+                if hasattr(param, attr_name):
+                    setattr(meta, attr_name, getattr(param, attr_name))
 
             module.restore_metadata[name] = meta
 
@@ -55,7 +55,7 @@ def layerwise_restore_and_process(layer: torch.nn.Module):
 
     # restore layer onto meta device
     if hasattr(layer, "restore_metadata"):
-        for name in layer.original_parameters.keys():
+        for name in original_parameters.keys():
             delattr(layer, name)
 
         for name, tensor in layer.restore_metadata.items():
@@ -92,7 +92,7 @@ def layerwise_restore_and_process(layer: torch.nn.Module):
                 assert get_module_tensors(layer).keys() == original_parameters.keys()
                 for name in original_parameters.keys():
                     original_parameters[name].copy_(layer[name])
-                    layer[name] = original_parameters[name]
+                    setattr(layer, name, original_parameters[name])
 
         param.weight_loader = restore_and_process_loader
 
@@ -121,9 +121,11 @@ def materialize_meta_tensor(tensor: torch.Tensor) -> torch.Tensor:
         size=tuple(tensor.size()),
         stride=tuple(tensor.stride()),
         dtype=tensor.dtype,
-        requires_grad=False,  # set below to match input
+        requires_grad=False,
     )
 
 
 def get_module_tensors(module: torch.nn.Module) -> dict[str, torch.Tensor]:
-    return module._parameters.copy().update(module._buffers)
+    tensors = module._parameters.copy()
+    tensors.update(module._buffers)
+    return tensors
