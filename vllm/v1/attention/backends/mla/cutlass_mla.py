@@ -11,6 +11,7 @@ from vllm.config.cache import CacheDType
 from vllm.logger import init_logger
 from vllm.platforms.interface import DeviceCapability
 from vllm.v1.attention.backend import (
+    AttentionCGSupport,
     AttentionLayer,
     AttentionType,
     MultipleOf,
@@ -22,7 +23,6 @@ from vllm.v1.attention.backends.mla.common import (
     MLACommonMetadata,
     MLACommonMetadataBuilder,
 )
-from vllm.v1.attention.backends.utils import AttentionCGSupport
 
 logger = init_logger(__name__)
 
