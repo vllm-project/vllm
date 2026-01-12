@@ -138,9 +138,7 @@ class KVOutputAggregator:
                         type(kv_cache_events),
                     )
 
-                    if kv_cache_events is not None and isinstance(
-                        kv_cache_events, MultiConnectorKVEvents
-                    ):
+                    if isinstance(kv_cache_events, MultiConnectorKVEvents):
                         connectors_worker_kv_cache_events = (
                             kv_cache_events.get_all_connector_events()
                         )
@@ -162,10 +160,7 @@ class KVOutputAggregator:
                                 worker_kv_cache_events
                             )
                             combined_connector_kv_cache_events.increment_workers(1)
-                            combined_kv_cache_events.add_connector_events(
-                                connector_name, combined_connector_kv_cache_events
-                            )
-                    elif kv_cache_events is not None:
+                    else:
                         worker_kv_cache_events = kv_cache_events.get_all_events()
                         combined_kv_cache_events.add_events(worker_kv_cache_events)
                         combined_kv_cache_events.increment_workers(1)
