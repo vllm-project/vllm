@@ -870,7 +870,7 @@ steps:
 - label: Language Models Tests (Extra Standard) %N
   timeout_in_minutes: 45
   mirror_hardwares: [amdexperimental]
-  agent_pool: mi325_2
+  agent_pool: mi325_8
   # grade: Blocking
   torch_nightly: true
   source_file_dependencies:
