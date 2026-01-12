@@ -22,6 +22,10 @@ from vllm.sampling_params import (
     StructuredOutputsParams,
 )
 from vllm.tokenizers import TokenizerLike
+from vllm.tool_parsers.structural_tag_utils import (
+    StructureInfo,
+    build_structural_tag_config,
+)
 from vllm.tool_parsers.utils import get_json_schema_from_tools
 from vllm.utils.collection_utils import is_list_of
 from vllm.utils.import_utils import import_from_path
@@ -51,16 +55,67 @@ class ToolParser:
         # whereas all tokenizers have .get_vocab()
         return self.model_tokenizer.get_vocab()
 
+    def get_structure_info(self, tool_name: str) -> StructureInfo | None:
+        """
+        Return StructureInfo for constrained tool call generation.
+
+        Override this method in subclasses to enable structural tag support.
+
+        Args:
+            tool_name: Name of the tool to generate structure info for
+
+        Returns:
+            StructureInfo with trigger, begin, end patterns, or None if
+            this parser does not support structural tags.
+        """
+        return None
+
+    def supports_structural_tag(self) -> bool:
+        """Return True if this parser supports structural tag constraints."""
+        return self.get_structure_info("test") is not None
+
     def adjust_request(self, request: ChatCompletionRequest) -> ChatCompletionRequest:
         """
-        Static method that used to adjust the request parameters.
+        Adjust the request to add structured output constraints for tool calling.
+
+        This method sets up either:
+        1. Structural tags (preferred) - Constrains only the JSON arguments region
+           while allowing the model to use its native tool call format
+        2. Full JSON schema (fallback) - Constrains the entire output to JSON
+
+        Structural tags are preferred because they:
+        - Allow the model to generate native tool tokens (e.g., <tool_call>)
+        - Enable reasoning/thinking before tool calls
+        - Only constrain the arguments portion to the schema
         """
         if not request.tools:
             return request
+
+        # Try structural tags first
+        if self.supports_structural_tag() and request.tool_choice in (
+            "auto",
+            "required",
+        ):
+            import json
+
+            structural_tag_config = build_structural_tag_config(
+                tools=request.tools,
+                get_structure_info=self.get_structure_info,
+            )
+            if isinstance(request, ChatCompletionRequest):
+                request.structured_outputs = StructuredOutputsParams()
+                request.structured_outputs.structural_tag = json.dumps(
+                    structural_tag_config
+                )
+            return request
+
+        # Fallback to full JSON schema constraint
+        # This is used when:
+        # - Parser doesn't support structural tags
+        # - tool_choice is a specific named function
         json_schema_from_tool = get_json_schema_from_tools(
             tool_choice=request.tool_choice, tools=request.tools
         )
-        # Set structured output params for tool calling
         if json_schema_from_tool is not None:
             if isinstance(request, ChatCompletionRequest):
                 request.structured_outputs = StructuredOutputsParams()

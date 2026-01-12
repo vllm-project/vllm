@@ -24,6 +24,7 @@ from vllm.tokenizers.mistral import MistralTokenizer
 from vllm.tool_parsers.abstract_tool_parser import (
     ToolParser,
 )
+from vllm.tool_parsers.structural_tag_utils import StructureInfo
 
 logger = init_logger(__name__)
 
@@ -76,6 +77,13 @@ class Hermes2ProToolParser(ToolParser):
         ]
 
         self.buffered_delta_text = ""
+
+    def get_structure_info(self, tool_name: str) -> StructureInfo:
+        return StructureInfo(
+            trigger=self.tool_call_start_token,
+            begin=f'{self.tool_call_start_token}{{"name": "{tool_name}", "arguments": ',  # noqa: E501
+            end=f"}}{self.tool_call_end_token}",
+        )
 
     # Very simple idea: when encountering tokens like <, tool, _call, >,
     # <, /, tool, _call, >, store them in a buffer.
