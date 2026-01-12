@@ -281,6 +281,47 @@ class MsgpackEncoder:
         # backing buffers that we've stashed in `aux_buffers`.
         return obj.dtype.str, obj.shape, data
 
+    def _encode_ipc_queue_tensor(self, obj: torch.Tensor) -> TensorIpcHandle:
+        """Send tensor via torch.multiprocessing.Queue for zero-copy IPC.
+
+        This works for both CUDA and CPU tensors.
+        """
+        # Generate unique tensor ID (without request ID embedded)
+        tensor_id = f"{id(self)}_{self._tensor_id_counter}"
+        self._tensor_id_counter += 1
+
+        # Move tensor to shared memory for IPC
+        # This is required for proper inter-process communication
+        if not obj.is_shared():
+            obj = obj.share_memory_()
+
+        target_queue = self.tensor_queues[self.target_engine_index]
+        ipc_data = TensorIpcData(
+            request_id=self._current_request_id,
+            tensor_id=tensor_id,
+            tensor=obj,
+        )
+        # Use a timeout to avoid blocking indefinitely
+        target_queue.put(ipc_data, timeout=10.0)
+
+        logger.debug(
+            "Sent tensor %s for request %s (shape=%s, device=%s) to engine %d "
+            "via IPC queue (shared memory)",
+            tensor_id,
+            self._current_request_id,
+            obj.shape,
+            obj.device,
+            self.target_engine_index,
+        )
+
+        return TensorIpcHandle(
+            request_id=self._current_request_id,
+            tensor_id=tensor_id,
+            shape=list(obj.shape),
+            dtype=str(obj.dtype).removeprefix("torch."),
+            device=str(obj.device),
+        )
+
     def _encode_tensor(
         self, obj: torch.Tensor
     ) -> tuple[str, tuple[int, ...], int | memoryview] | dict[str, Any]:
@@ -294,44 +335,8 @@ class MsgpackEncoder:
             and self.tensor_queues is not None
             and self.target_engine_index is not None
         ):
-            # Send tensor via torch.multiprocessing.Queue for zero-copy IPC
-            # This works for both CUDA and CPU tensors
-            # Generate unique tensor ID (without request ID embedded)
-            tensor_id = f"{id(self)}_{self._tensor_id_counter}"
-            self._tensor_id_counter += 1
-
             try:
-                # Move tensor to shared memory for IPC
-                # This is required for proper inter-process communication
-                if not obj.is_shared():
-                    obj = obj.share_memory_()
-
-                target_queue = self.tensor_queues[self.target_engine_index]
-                ipc_data = TensorIpcData(
-                    request_id=self._current_request_id,
-                    tensor_id=tensor_id,
-                    tensor=obj,
-                )
-                # Use a timeout to avoid blocking indefinitely
-                target_queue.put(ipc_data, timeout=10.0)
-
-                logger.debug(
-                    "Sent tensor %s for request %s (shape=%s, device=%s) to engine %d "
-                    "via IPC queue (shared memory)",
-                    tensor_id,
-                    self._current_request_id,
-                    obj.shape,
-                    obj.device,
-                    self.target_engine_index,
-                )
-
-                return TensorIpcHandle(
-                    request_id=self._current_request_id,
-                    tensor_id=tensor_id,
-                    shape=list(obj.shape),
-                    dtype=str(obj.dtype).removeprefix("torch."),
-                    device=str(obj.device),
-                )
+                return self._encode_ipc_queue_tensor(obj)
             except Exception as e:
                 logger.warning(
                     "Failed to send tensor via IPC queue: %s. "
