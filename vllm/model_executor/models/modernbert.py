@@ -290,26 +290,25 @@ class ModernBertPooler(SequencePooler):
         # Currently we don't have a way to see if the user set the pooling type
         # explicitly or not, so we always use the HF pooling type for now.
 
-        dense = nn.Linear(
+        super().__init__(
+            pooling=get_seq_pooling_method(hf_pooling_type),
+            # We set this dummy to avoid adding parameters to nn.Module too early
+            head=nn.Identity(),
+        )
+
+        self.dense = nn.Linear(
             config.hidden_size, config.hidden_size, config.classifier_bias
         )
-        act = nn.GELU()
-        norm = nn.LayerNorm(
+        self.act = nn.GELU()
+        self.norm = nn.LayerNorm(
             config.hidden_size, eps=config.norm_eps, bias=config.norm_bias
         )
 
-        super().__init__(
-            pooling=get_seq_pooling_method(hf_pooling_type),
-            head=EmbeddingPoolerHead(
-                projector=dense,
-                head_dtype=model_config.head_dtype,
-                activation=lambda x: norm(act(x)),
-            ),
+        self.head = EmbeddingPoolerHead(
+            projector=self.dense,
+            head_dtype=model_config.head_dtype,
+            activation=lambda x: self.norm(self.act(x)),
         )
-
-        self.dense = dense
-        self.act = act
-        self.norm = norm
 
 
 @default_pooling_type(seq_pooling_type="CLS")
