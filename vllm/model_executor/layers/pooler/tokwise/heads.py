@@ -66,7 +66,8 @@ class TokenEmbeddingPoolerHead(TokenPoolerHead):
         if pooled_data is None:
             return None
 
-        pooled_data = pooled_data.to(self.head_dtype)
+        if self.head_dtype is not None:
+            pooled_data = pooled_data.to(self.head_dtype)
         # pooled_data shape: [n_tokens, hidden_dimension]
 
         # Apply ST projector
@@ -112,7 +113,8 @@ class TokenClassifierPoolerHead(TokenPoolerHead):
         if pooled_data is None:
             return None
 
-        pooled_data = pooled_data.to(self.head_dtype)
+        if self.head_dtype is not None:
+            pooled_data = pooled_data.to(self.head_dtype)
         # hidden_states shape: [n_token, hidden_size]
 
         if self.classifier is not None:

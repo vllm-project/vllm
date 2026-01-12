@@ -58,7 +58,8 @@ class EmbeddingPoolerHead(SequencePoolerHead):
             pooled_data = torch.stack(pooled_data)
         # pooled_data shape: [batchsize, hidden_dimension]
 
-        pooled_data = pooled_data.to(self.head_dtype)
+        if self.head_dtype is not None:
+            pooled_data = pooled_data.to(self.head_dtype)
 
         # Apply ST projector
         if self.projector is not None:
@@ -126,7 +127,8 @@ class ClassifierPoolerHead(SequencePoolerHead):
             pooled_data = torch.stack(pooled_data)
         # pooled_data shape: [batchsize, hidden_size]
 
-        pooled_data = pooled_data.to(self.head_dtype)
+        if self.head_dtype is not None:
+            pooled_data = pooled_data.to(self.head_dtype)
 
         if self.classifier is not None:
             pooled_data = self.classifier(pooled_data)
