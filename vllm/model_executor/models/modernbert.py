@@ -307,9 +307,18 @@ class ModernBertPooler(SequencePooler):
         self.head = EmbeddingPoolerHead(
             projector=self.dense,
             head_dtype=model_config.head_dtype,
-            activation=lambda x: self.norm(self.act(x)),
+            activation=self.activation,
         )
         self.head._parameters.clear()  # Avoid weight loading mismatch
+
+    def activation_chunk(self, x: torch.Tensor):
+        return self.norm(self.act(x))
+
+    def activation(self, x: list[torch.Tensor] | torch.Tensor):
+        if isinstance(x, list):
+            return [self.activation_chunk(e) for e in x]
+
+        return self.activation_chunk(x)
 
 
 @default_pooling_type(seq_pooling_type="CLS")
