@@ -451,15 +451,15 @@ class FusedMoE(CustomOp):
             )
 
         # TODO(bnell): in next PR move capture back to layer
+        capture: Callable[[torch.Tensor], None] | None = None
         if (
             self.vllm_config.model_config is not None
             and self.vllm_config.model_config.enable_return_routed_experts
         ):
             # In dummy runs, the capturer is not initialized.
             capturer = RoutedExpertsCapturer.get_instance()
-            capture = lambda topk_ids: capturer.capture(self.layer_id, topk_ids)
-        else:
-            capture = None
+            if capturer is not None:
+                capture = lambda topk_ids: capturer.capture(self.layer_id, topk_ids)
 
         self.router = create_fused_moe_router(
             top_k=top_k,
