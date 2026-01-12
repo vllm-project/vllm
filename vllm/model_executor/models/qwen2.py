@@ -31,7 +31,7 @@ from typing import Any
 
 import torch
 from torch import nn
-from transformers import Qwen2Config
+from transformers import PretrainedConfig, Qwen3Config
 
 from vllm.attention.backends.abstract import AttentionType
 from vllm.attention.layer import Attention
@@ -124,6 +124,8 @@ class Qwen2Attention(nn.Module):
         dual_chunk_attention_config: dict[str, Any] | None = None,
         qk_norm: bool = False,
         rms_norm_eps: float = 1e-6,
+        head_dim: int = None,
+        qkv_bias: bool = True,
     ) -> None:
         super().__init__()
         self.hidden_size = hidden_size
@@ -141,7 +143,7 @@ class Qwen2Attention(nn.Module):
             # the KV heads across multiple tensor parallel GPUs.
             assert tp_size % self.total_num_kv_heads == 0
         self.num_kv_heads = max(1, self.total_num_kv_heads // tp_size)
-        self.head_dim = hidden_size // self.total_num_heads
+        self.head_dim = head_dim or (hidden_size // self.total_num_heads)
         self.q_size = self.num_heads * self.head_dim
         self.kv_size = self.num_kv_heads * self.head_dim
         self.scaling = self.head_dim**-0.5
@@ -153,7 +155,7 @@ class Qwen2Attention(nn.Module):
             self.head_dim,
             self.total_num_heads,
             self.total_num_kv_heads,
-            bias=True,
+            bias=qkv_bias,
             quant_config=quant_config,
             prefix=f"{prefix}.qkv_proj",
         )
@@ -210,17 +212,20 @@ class Qwen2Attention(nn.Module):
         if self.qk_norm:
             # Reshape to apply per-head normalization
             # q shape: (total_tokens, q_size) -> (total_tokens, num_heads, head_dim)
-            total_tokens = q.shape[0]
-            q = q.view(total_tokens, self.num_heads, self.head_dim)
-            k = k.view(total_tokens, self.num_kv_heads, self.head_dim)
+            q_by_head = q.view(
+                *q.shape[:-1], q.shape[-1] // self.head_dim, self.head_dim
+            )
+            k_by_head = k.view(
+                *k.shape[:-1], k.shape[-1] // self.head_dim, self.head_dim
+            )
 
             # Apply normalization
             q = self.q_norm(q)
             k = self.k_norm(k)
 
             # Reshape back
-            q = q.view(total_tokens, self.q_size)
-            k = k.view(total_tokens, self.kv_size)
+            q = q_by_head.view(q.shape)
+            k = k_by_head.view(k.shape)
 
         q, k = self.rotary_emb(positions, q, k)
         attn_output = self.attn(q, k, v)
@@ -231,7 +236,7 @@ class Qwen2Attention(nn.Module):
 class Qwen2DecoderLayer(nn.Module):
     def __init__(
         self,
-        config: Qwen2Config,
+        config: PretrainedConfig,
         cache_config: CacheConfig | None = None,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
@@ -251,9 +256,14 @@ class Qwen2DecoderLayer(nn.Module):
             attn_type = AttentionType.DECODER
         else:
             attn_type = AttentionType.ENCODER_ONLY
-
+        head_dim = getattr(config, "head_dim", None)
         # Check if QK normalization is enabled (used in BAGEL and some other models)
-        qk_norm = getattr(config, "qk_norm", False)
+        if isinstance(config, Qwen3Config):
+            qk_norm = True
+            qkv_bias = getattr(config, "attention_bias", False)
+        else:
+            qk_norm = getattr(config, "qk_norm", False)
+            qkv_bias = True
 
         self.self_attn = Qwen2Attention(
             hidden_size=self.hidden_size,
@@ -268,6 +278,8 @@ class Qwen2DecoderLayer(nn.Module):
             dual_chunk_attention_config=dual_chunk_attention_config,
             qk_norm=qk_norm,
             rms_norm_eps=config.rms_norm_eps,
+            qkv_bias=qkv_bias,
+            head_dim=head_dim,
         )
         self.mlp = Qwen2MLP(
             hidden_size=self.hidden_size,
