@@ -49,9 +49,6 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.batch_invariant import (
     vllm_is_batch_invariant,
 )
-from vllm.model_executor.layers.quantization.utils.quant_utils import (
-    QuantKey,
-)
 from vllm.platforms.interface import DeviceCapability
 from vllm.utils.math_utils import cdiv, round_up
 from vllm.v1.attention.backend import (
@@ -556,9 +553,6 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
 class FlashAttentionImpl(AttentionImpl):
     can_return_lse_for_decode: bool = True
 
-    def fused_output_quant_supported(self, quant_key: QuantKey):
-        return self.vllm_flash_attn_version == 3 and quant_key == kFp8StaticTensorSym
-
     def __init__(
         self,
         num_heads: int,
@@ -622,8 +616,39 @@ class FlashAttentionImpl(AttentionImpl):
                 "Sinks must have the same number of heads as the number of "
                 "heads in the layer"
             )
-
         self.supports_quant_query_input = True
+
+<<<<<<< HEAD
+        self.supports_quant_query_input = True
+=======
+    def fused_output_quant_supported(self, quant_key: QuantKey) -> bool:
+        """
+        Check if fused output quantization is supported.
+
+        For FlashAttention, we support fused output FP8 quantization on:
+        - FlashAttention 3
+        - Hopper GPUs (sm90+)
+        - FP8 static tensor quantization
+
+        This fusion avoids a separate quantization pass after attention.
+        """
+        from vllm.platforms import current_platform
+
+        # Only FA3 supports fused output quant
+        if self.vllm_flash_attn_version != 3:
+            return False
+
+        # Only Hopper (sm90+) supports this feature
+        device_capability = current_platform.get_device_capability()
+        if device_capability is None or device_capability.major < 9:
+            return False
+
+        # Only FP8 static tensor quantization is supported
+        return quant_key == kFp8StaticTensorSym
+
+    def supports_quant_query_input(self) -> bool:
+        return True
+>>>>>>> 8c9f9b267 (Lint fixes)
         self.supports_per_head_quant_scales = (
             self.vllm_flash_attn_version >= 3
             if self.vllm_flash_attn_version is not None
@@ -885,7 +910,8 @@ class FlashAttentionImpl(AttentionImpl):
             "FlashAttention version not detected."
         )
 
-        # TODO(sachinkumarsingh092): Implement fused output quantization for DCP attention.
+        # TODO(sachinkumarsingh092): Implement fused output quantization for
+        # DCP attention.
         # DCP attention merges context and query outputs, so output_scale
         # would need to be applied during the merge step or to both intermediate
         # outputs. For now, DCP attention does not support fused output quant.
@@ -893,7 +919,7 @@ class FlashAttentionImpl(AttentionImpl):
             raise NotImplementedError(
                 "Fused output quantization is not yet supported for DCP attention"
             )
-        
+
         cu_seqlens_q = attn_metadata.query_start_loc
         max_seqlen_q = attn_metadata.max_query_len
         block_table = attn_metadata.block_table
@@ -1147,8 +1173,9 @@ def cascade_attention(
     assert sliding_window == (-1, -1), (
         "Cascade attention does not support sliding window."
     )
-    
-    # TODO(sachinkumarsingh092): Implement fused output quantization for cascade attention.
+
+    # TODO(sachinkumarsingh092): Implement fused output quantization for
+    # cascade attention.
     # Cascade attention merges prefix and suffix outputs, so output_scale
     # would need to be applied during the merge step or to both intermediate
     # outputs. For now, cascade attention does not support fused output quant.
