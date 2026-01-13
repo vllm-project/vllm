@@ -330,8 +330,7 @@ class BatchedDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
         # end up sending their tokens. This needs to be fixed.
         num_dispatchers = self.num_dispatchers
         num_experts = local_num_experts
-        # max_num_tokens = M if self.max_num_tokens is None else self.max_num_tokens
-        max_num_tokens = self.max_num_tokens
+        max_num_tokens = M if self.max_num_tokens is None else self.max_num_tokens
         activation_out_dim = self.adjust_N_for_activation(N, activation)
         workspace13 = (num_experts, max_num_tokens * num_dispatchers, max(K, N))
         workspace2 = (num_experts, max_num_tokens * num_dispatchers, activation_out_dim)
