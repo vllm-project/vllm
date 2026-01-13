@@ -87,7 +87,14 @@ class KVCacheBlocks:
     def get_unhashed_block_ids_all_groups(self) -> list[list[int]]:
         """Get block_ids of unhashed blocks from KVCacheBlocks instance."""
         # Skip padding blocks.
-        return [[block.block_id for block in group if block.block_hash is None and not block.is_null] for group in self.blocks]
+        return [
+            [
+                block.block_id
+                for block in group
+                if block.block_hash is None and not block.is_null
+            ]
+            for group in self.blocks
+        ]
 
     def new_empty(self) -> "KVCacheBlocks":
         """
