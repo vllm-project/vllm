@@ -3100,19 +3100,6 @@ class GPUModelRunner(
                 pyt_hooks.register_hooks(self.model, self.model.__class__.__name__)
                 self.layerwise_nvtx_hooks_registered = True
 
-    def _has_separate_kv_update(self) -> bool:
-        """
-        Check if any attention backend has KV cache update separate from forward.
-
-        Returns True if at least one non-encoder-only attention backend
-        has forward_includes_kv_cache=False.
-        """
-        return not all(
-            all(g.backend.forward_includes_kv_cache for g in self.attn_groups[id])
-            for id, spec in enumerate(self.kv_cache_config.kv_cache_groups)
-            if not isinstance(spec.kv_cache_spec, EncoderOnlyAttentionSpec)
-        )
-
     def _get_slot_mappings(
         self,
         num_tokens_padded: int,
@@ -3316,7 +3303,11 @@ class GPUModelRunner(
                 ubatch_slices_padded,
             )
 
-            has_separate_kv_update = self._has_separate_kv_update()
+            has_separate_kv_update = not all(
+                all(g.backend.forward_includes_kv_cache for g in self.attn_groups[id])
+                for id, spec in enumerate(self.kv_cache_config.kv_cache_groups)
+                if not isinstance(spec.kv_cache_spec, EncoderOnlyAttentionSpec)
+            )
             pad_attn = cudagraph_mode == CUDAGraphMode.FULL
             use_spec_decode = len(scheduler_output.scheduled_spec_decode_tokens) > 0
             ubatch_slices_attn = ubatch_slices_padded if pad_attn else ubatch_slices
@@ -5004,22 +4995,17 @@ class GPUModelRunner(
                 )
             )
 
-            # Force attention for all cudagraph modes when the backend forward
-            # op doesn't include KV cache update. This is required
-            # for KV cache update to be captured correctly in cases where
-            # the KV cache update and attention are two separate custom ops.
-            # Keep in mind that when we use `FULL` cudagraph mode, we capture
-            # all attention regardless of the `force_attention_*` variables.
-            force_attention_dummy = self._has_separate_kv_update()
-            force_attention_warmup = cudagraph_runtime_mode == CUDAGraphMode.FULL
-
             for _ in range(self.compilation_config.cudagraph_num_of_warmups):
                 # Use CUDAGraphRuntimeStyle.NONE (default) for warmup.
-                # This is independent from how we want to warm up the attention.
+                # But be careful, warm up with `NONE`is orthogonal to
+                # if we want to warm up attention or not. This is
+                # different from the case where `FULL` implies capture
+                # attention while `PIECEWISE` implies no attention.
+                force_attention = cudagraph_runtime_mode == CUDAGraphMode.FULL
                 self._dummy_run(
                     num_tokens,
                     cudagraph_runtime_mode=CUDAGraphMode.NONE,
-                    force_attention=force_attention_warmup,
+                    force_attention=force_attention,
                     uniform_decode=uniform_decode,
                     allow_microbatching=allow_microbatching,
                     skip_eplb=True,
@@ -5029,7 +5015,6 @@ class GPUModelRunner(
             self._dummy_run(
                 num_tokens,
                 cudagraph_runtime_mode=cudagraph_runtime_mode,
-                force_attention=force_attention_dummy,
                 uniform_decode=uniform_decode,
                 allow_microbatching=allow_microbatching,
                 skip_eplb=True,
