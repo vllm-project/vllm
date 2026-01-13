@@ -844,7 +844,7 @@ def unified_kv_cache_update(
                 layer_slot_mapping,
             )
 
-    return torch.empty(0, device=key.device, dtype=key.dtype)
+    return torch.empty(0, device=kv_cache.device, dtype=kv_cache.dtype)
 
 
 def unified_kv_cache_update_fake(
