@@ -62,8 +62,7 @@ RMS_ADD_OP = torch.ops._C.fused_add_rms_norm.default
 # Kernel and group_shape combinations: (kernel, group_shape)
 # CUDA kernels
 CUDA_KERNEL_GROUPSHAPE_COMBINATIONS = [
-    # FlashInferFP8ScaledMMLinearKernel supports both per-tensor and per-token
-    (FlashInferFP8ScaledMMLinearKernel, GroupShape.PER_TOKEN),
+    # FlashInferFP8ScaledMMLinearKernel supports both per-tensor only
     (FlashInferFP8ScaledMMLinearKernel, GroupShape.PER_TENSOR),
     # CutlassFP8ScaledMMLinearKernel supports both per-tensor and per-token
     (CutlassFP8ScaledMMLinearKernel, GroupShape.PER_TOKEN),
@@ -79,8 +78,7 @@ CUDA_KERNEL_GROUPSHAPE_COMBINATIONS = [
 
 # ROCm kernels
 ROCM_KERNEL_GROUPSHAPE_COMBINATIONS = [
-    # ROCmFP8ScaledMMLinearKernel supports both per-tensor and per-token
-    (ROCmFP8ScaledMMLinearKernel, GroupShape.PER_TOKEN),
+    # ROCmFP8ScaledMMLinearKernel supports per-tensor only
     (ROCmFP8ScaledMMLinearKernel, GroupShape.PER_TENSOR),
     # RowWiseTorchFP8ScaledMMLinearKernel only supports per-token
     (RowWiseTorchFP8ScaledMMLinearKernel, GroupShape.PER_TOKEN),
@@ -100,8 +98,7 @@ KERNEL_GROUPSHAPE_COMBINATIONS = (
 # For Aiter tests we toggle use_aiter_quant_op
 AITER_KERNEL_GROUPSHAPE_COMBINATIONS = [
     # Per-token with ROCmFP8ScaledMMLinearKernel
-    (ROCmFP8ScaledMMLinearKernel, GroupShape.PER_TOKEN, True),
-    (ROCmFP8ScaledMMLinearKernel, GroupShape.PER_TOKEN, False),
+    (ROCmFP8ScaledMMLinearKernel, GroupShape.PER_TENSOR, False),
     # Per-token with RowWiseTorchFP8ScaledMMLinearKernel
     (RowWiseTorchFP8ScaledMMLinearKernel, GroupShape.PER_TOKEN, True),
     (RowWiseTorchFP8ScaledMMLinearKernel, GroupShape.PER_TOKEN, False),
