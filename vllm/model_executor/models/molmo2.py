@@ -1674,6 +1674,10 @@ class Molmo2ProcessorWrapper:
             **kwargs,
         )
 
+        # revert insert bos token
+        if outputs["input_ids"][0, 0] == self.vocab[self.bos_token]:
+            outputs["input_ids"] = outputs["input_ids"][:, 1:]
+
         if images is None:
             images = []
         if not isinstance(images, list):
@@ -2151,20 +2155,6 @@ class Molmo2DummyInputsBuilder(BaseDummyInputsBuilder[Molmo2ProcessingInfo]):
 
 
 class Molmo2MultiModalProcessor(BaseMultiModalProcessor[Molmo2ProcessingInfo]):
-    def _apply_hf_processor_tokens_only(
-        self,
-        prompt_tokens: list[int],
-    ) -> list[int]:
-        processor = self.info.get_hf_processor()
-        tokenizer = processor.processor.tokenizer
-        bos_token_id = tokenizer.bos_token_id or tokenizer.eos_token_id
-
-        if prompt_tokens[0] != bos_token_id:
-            # Prepend the bos token to the prompt tokens
-            prompt_tokens = [bos_token_id] + prompt_tokens
-
-        return prompt_tokens
-
     def _get_data_parser(self) -> MultiModalDataParser:
         return MultiModalDataParser(video_needs_metadata=True)
 
@@ -2177,11 +2167,6 @@ class Molmo2MultiModalProcessor(BaseMultiModalProcessor[Molmo2ProcessingInfo]):
     ) -> BatchFeature:
         mm_data = dict(mm_data)
         processor = self.info.get_hf_processor(**mm_kwargs)
-
-        if mm_data.get("images") and mm_data.get("videos"):
-            raise ValueError(
-                "Molmo2 does not support simultaneous images + videos inputs."
-            )
 
         if videos := mm_data.pop("videos", []):
             pixel_values_videos_lst = []
