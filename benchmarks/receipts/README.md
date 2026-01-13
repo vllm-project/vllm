@@ -3,7 +3,8 @@
 
 # Receipts harness (benchmark runner + telemetry)
 
-### Goal
+## Goal
+
 Performance discussions die when results cannot be forwarded and re-checked.
 This harness turns an arbitrary benchmark command into a **receipt**:
 
@@ -15,7 +16,8 @@ This harness turns an arbitrary benchmark command into a **receipt**:
 
 This does **not** claim a specific vLLM bottleneck. It provides the measurement object.
 
-### Run
+## Run
+
 From repo root:
 
 ```bash
@@ -29,20 +31,19 @@ This writes:
 - `receipts.json.stdout.log`
 - `receipts.json.stderr.log`
 
-### Summarize
+## Summarize
 
 ```bash
 python -m benchmarks.receipts.summarize_receipt receipts.json
 ```
 
-### Compare two receipts (before/after)
+## Compare two receipts (before/after)
 
 ```bash
 python -m benchmarks.receipts.compare_receipts before.json after.json
 ```
 
-### Notes
+## Notes
 
 - If GPU telemetry is unavailable, telemetry fields will be `null` and the receipt still records command + duration.
 - This is intentionally lightweight: stdlib-only, NVML optional.
-
