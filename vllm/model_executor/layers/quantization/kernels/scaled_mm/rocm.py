@@ -70,7 +70,7 @@ if current_platform.is_rocm():
     )
 
 
-class ROCmScaledMMLinearKernel(FP8ScaledMMLinearKernel):
+class ROCmFP8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
     @classmethod
     def is_supported(
         cls, compute_capability: int | None = None

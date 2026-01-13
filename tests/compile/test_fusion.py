@@ -25,15 +25,15 @@ from vllm.model_executor.layers.quantization.kernels.scaled_mm.cutlass import (
     CutlassFP8ScaledMMLinearKernel,
 )
 from vllm.model_executor.layers.quantization.kernels.scaled_mm.flashinfer import (
-    FlashInferScaledMMLinearKernel,
+    FlashInferFP8ScaledMMLinearKernel,
 )
 from vllm.model_executor.layers.quantization.kernels.scaled_mm.pytorch import (
-    ChannelWiseTorchScaledMMLinearKernel,
-    PerTensorTorchScaledMMLinearKernel,
-    RowWiseTorchScaledMMLinearKernel,
+    ChannelWiseTorchFP8ScaledMMLinearKernel,
+    PerTensorTorchFP8ScaledMMLinearKernel,
+    RowWiseTorchFP8ScaledMMLinearKernel,
 )
 from vllm.model_executor.layers.quantization.kernels.scaled_mm.rocm import (
-    ROCmScaledMMLinearKernel,
+    ROCmFP8ScaledMMLinearKernel,
 )
 from vllm.model_executor.layers.quantization.kernels.scaled_mm.ScaledMMLinearKernel import (  # noqa: E501
     FP8ScaledMMLinearKernel,
@@ -62,16 +62,16 @@ RMS_ADD_OP = torch.ops._C.fused_add_rms_norm.default
 # Kernel and group_shape combinations: (kernel, group_shape)
 # CUDA kernels
 CUDA_KERNEL_GROUPSHAPE_COMBINATIONS = [
-    # FlashInferScaledMMLinearKernel supports both per-tensor and per-token
-    (FlashInferScaledMMLinearKernel, GroupShape.PER_TOKEN),
-    (FlashInferScaledMMLinearKernel, GroupShape.PER_TENSOR),
+    # FlashInferFP8ScaledMMLinearKernel supports both per-tensor and per-token
+    (FlashInferFP8ScaledMMLinearKernel, GroupShape.PER_TOKEN),
+    (FlashInferFP8ScaledMMLinearKernel, GroupShape.PER_TENSOR),
     # CutlassFP8ScaledMMLinearKernel supports both per-tensor and per-token
     (CutlassFP8ScaledMMLinearKernel, GroupShape.PER_TOKEN),
     (CutlassFP8ScaledMMLinearKernel, GroupShape.PER_TENSOR),
-    # PerTensorTorchScaledMMLinearKernel only supports per-tensor
-    (PerTensorTorchScaledMMLinearKernel, GroupShape.PER_TENSOR),
-    # ChannelWiseTorchScaledMMLinearKernel only supports per-token
-    (ChannelWiseTorchScaledMMLinearKernel, GroupShape.PER_TOKEN),
+    # PerTensorTorchFP8ScaledMMLinearKernel only supports per-tensor
+    (PerTensorTorchFP8ScaledMMLinearKernel, GroupShape.PER_TENSOR),
+    # ChannelWiseTorchFP8ScaledMMLinearKernel only supports per-token
+    (ChannelWiseTorchFP8ScaledMMLinearKernel, GroupShape.PER_TOKEN),
     # Blockwise group shapes (no kernel abstraction)
     (None, GroupShape(1, 128)),
     (None, GroupShape(1, 64)),
@@ -79,13 +79,13 @@ CUDA_KERNEL_GROUPSHAPE_COMBINATIONS = [
 
 # ROCm kernels
 ROCM_KERNEL_GROUPSHAPE_COMBINATIONS = [
-    # ROCmScaledMMLinearKernel supports both per-tensor and per-token
-    (ROCmScaledMMLinearKernel, GroupShape.PER_TOKEN),
-    (ROCmScaledMMLinearKernel, GroupShape.PER_TENSOR),
-    # RowWiseTorchScaledMMLinearKernel only supports per-token
-    (RowWiseTorchScaledMMLinearKernel, GroupShape.PER_TOKEN),
-    # ChannelWiseTorchScaledMMLinearKernel only supports per-token
-    (ChannelWiseTorchScaledMMLinearKernel, GroupShape.PER_TOKEN),
+    # ROCmFP8ScaledMMLinearKernel supports both per-tensor and per-token
+    (ROCmFP8ScaledMMLinearKernel, GroupShape.PER_TOKEN),
+    (ROCmFP8ScaledMMLinearKernel, GroupShape.PER_TENSOR),
+    # RowWiseTorchFP8ScaledMMLinearKernel only supports per-token
+    (RowWiseTorchFP8ScaledMMLinearKernel, GroupShape.PER_TOKEN),
+    # ChannelWiseTorchFP8ScaledMMLinearKernel only supports per-token
+    (ChannelWiseTorchFP8ScaledMMLinearKernel, GroupShape.PER_TOKEN),
     # Blockwise group shapes (no kernel abstraction)
     (None, GroupShape(1, 128)),
     (None, GroupShape(1, 64)),
@@ -99,15 +99,15 @@ KERNEL_GROUPSHAPE_COMBINATIONS = (
 
 # For Aiter tests we toggle use_aiter_quant_op
 AITER_KERNEL_GROUPSHAPE_COMBINATIONS = [
-    # Per-token with ROCmScaledMMLinearKernel
-    (ROCmScaledMMLinearKernel, GroupShape.PER_TOKEN, True),
-    (ROCmScaledMMLinearKernel, GroupShape.PER_TOKEN, False),
-    # Per-token with RowWiseTorchScaledMMLinearKernel
-    (RowWiseTorchScaledMMLinearKernel, GroupShape.PER_TOKEN, True),
-    (RowWiseTorchScaledMMLinearKernel, GroupShape.PER_TOKEN, False),
-    # Per-token with ChannelWiseTorchScaledMMLinearKernel
-    (ChannelWiseTorchScaledMMLinearKernel, GroupShape.PER_TOKEN, True),
-    (ChannelWiseTorchScaledMMLinearKernel, GroupShape.PER_TOKEN, False),
+    # Per-token with ROCmFP8ScaledMMLinearKernel
+    (ROCmFP8ScaledMMLinearKernel, GroupShape.PER_TOKEN, True),
+    (ROCmFP8ScaledMMLinearKernel, GroupShape.PER_TOKEN, False),
+    # Per-token with RowWiseTorchFP8ScaledMMLinearKernel
+    (RowWiseTorchFP8ScaledMMLinearKernel, GroupShape.PER_TOKEN, True),
+    (RowWiseTorchFP8ScaledMMLinearKernel, GroupShape.PER_TOKEN, False),
+    # Per-token with ChannelWiseTorchFP8ScaledMMLinearKernel
+    (ChannelWiseTorchFP8ScaledMMLinearKernel, GroupShape.PER_TOKEN, True),
+    (ChannelWiseTorchFP8ScaledMMLinearKernel, GroupShape.PER_TOKEN, False),
     # Blockwise (no kernel abstraction)
     (None, GroupShape(1, 128), True),
 ]

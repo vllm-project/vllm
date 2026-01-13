@@ -8,11 +8,11 @@ from vllm import _custom_ops as ops
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.platforms import current_platform
 
-from .cutlass import CutlassScaledMMLinearKernel
+from .cutlass import CutlassInt8ScaledMMLinearKernel
 from .ScaledMMLinearKernel import Int8ScaledMMLinearLayerConfig
 
 
-class AiterScaledMMLinearKernel(CutlassScaledMMLinearKernel):
+class AiterInt8ScaledMMLinearKernel(CutlassInt8ScaledMMLinearKernel):
     @classmethod
     def is_supported(
         cls, compute_capability: int | None = None
@@ -50,13 +50,13 @@ class AiterScaledMMLinearKernel(CutlassScaledMMLinearKernel):
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """
-        `AiterScaledMMLinearKernel` implements a fused version of
+        `AiterInt8ScaledMMLinearKernel` implements a fused version of
             `output = torch.mm((scale_a * a), (scale_b * b)).to(out_dtype)`
         where scale_a * a and scale_b * b are implemented using numpy-style
         broadcasting.
         Currently only support per-tensor-per-tensor GEMM
         and per-token-per-channel GEMM through AITER
-        w8a8 scaled gemm. `AiterScaledMMLinearKernel` also does not support
+        w8a8 scaled gemm. `AiterInt8ScaledMMLinearKernel` also does not support
         ATIER block scaled GEMM and mix-precision GEMM.
         """
         w_q, w_s, i_s, i_zp, azp_adj = self._get_layer_params(layer)
@@ -66,12 +66,12 @@ class AiterScaledMMLinearKernel(CutlassScaledMMLinearKernel):
         # * static, i_s is scalar and x_s is i_s.
         symmetric = azp_adj is None
         assert symmetric, (
-            "AiterScaledMMLinearKernel only supports symmetric quantization."
+            "AiterInt8ScaledMMLinearKernel only supports symmetric quantization."
         )
         x_q, x_s, x_zp = ops.scaled_int8_quant(x, i_s, i_zp, symmetric=symmetric)
 
         assert x_zp is None, (
-            "AiterScaledMMLinearKernel only supports symmetric quantization."
+            "AiterInt8ScaledMMLinearKernel only supports symmetric quantization."
         )
         out_dtype = x.dtype
 
@@ -98,12 +98,12 @@ class AiterScaledMMLinearKernel(CutlassScaledMMLinearKernel):
         ), (
             "Currently only support per-tensor-per-tensor GEMM "
             + " and per-token-per-channel GEMM through AITER"
-            " w8a8 scaled gemm. `AiterScaledMMLinearKernel` "
+            " w8a8 scaled gemm. `AiterInt8ScaledMMLinearKernel` "
             + "does not support AITER block scaled GEMM."
         )
 
         # gemm_a8w8_CK(a, b, scale_a, scale_b, bias) expects
         # a to be [M, K]
         # b to be [N, K]
-        # CutlassScaledMMLinearKernel prepare weight `w_q` in [K, N] format
+        # CutlassInt8ScaledMMLinearKernel prepare weight `w_q` in [K, N] format
         return rocm_aiter_ops.gemm_a8w8(x_q, w_q.t(), x_s, w_s, bias, out_dtype)

@@ -14,13 +14,13 @@ from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
 )
 from vllm.platforms import current_platform
 
-from .cutlass import CutlassScaledMMLinearKernel
+from .cutlass import CutlassInt8ScaledMMLinearKernel
 from .ScaledMMLinearKernel import (
     Int8ScaledMMLinearLayerConfig,
 )
 
 
-class TritonScaledMMLinearKernel(CutlassScaledMMLinearKernel):
+class TritonInt8ScaledMMLinearKernel(CutlassInt8ScaledMMLinearKernel):
     @classmethod
     def is_supported(
         cls, compute_capability: int | None = None

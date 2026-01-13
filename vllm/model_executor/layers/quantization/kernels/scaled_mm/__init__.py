@@ -8,25 +8,25 @@ import torch
 
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.kernels.scaled_mm.aiter import (
-    AiterScaledMMLinearKernel,
+    AiterInt8ScaledMMLinearKernel,
 )
 from vllm.model_executor.layers.quantization.kernels.scaled_mm.cpu import (
-    CPUScaledMMLinearKernel,
+    CPUInt8ScaledMMLinearKernel,
 )
 from vllm.model_executor.layers.quantization.kernels.scaled_mm.cutlass import (
     CutlassFP8ScaledMMLinearKernel,
-    CutlassScaledMMLinearKernel,
+    CutlassInt8ScaledMMLinearKernel,
 )
 from vllm.model_executor.layers.quantization.kernels.scaled_mm.flashinfer import (
-    FlashInferScaledMMLinearKernel,
+    FlashInferFP8ScaledMMLinearKernel,
 )
 from vllm.model_executor.layers.quantization.kernels.scaled_mm.pytorch import (
-    ChannelWiseTorchScaledMMLinearKernel,
-    PerTensorTorchScaledMMLinearKernel,
-    RowWiseTorchScaledMMLinearKernel,
+    ChannelWiseTorchFP8ScaledMMLinearKernel,
+    PerTensorTorchFP8ScaledMMLinearKernel,
+    RowWiseTorchFP8ScaledMMLinearKernel,
 )
 from vllm.model_executor.layers.quantization.kernels.scaled_mm.rocm import (
-    ROCmScaledMMLinearKernel,
+    ROCmFP8ScaledMMLinearKernel,
 )
 from vllm.model_executor.layers.quantization.kernels.scaled_mm.ScaledMMLinearKernel import (  # noqa: E501
     FP8ScaledMMLinearKernel,
@@ -37,7 +37,7 @@ from vllm.model_executor.layers.quantization.kernels.scaled_mm.ScaledMMLinearKer
     ScaledMMLinearLayerConfig,
 )
 from vllm.model_executor.layers.quantization.kernels.scaled_mm.triton import (
-    TritonScaledMMLinearKernel,
+    TritonInt8ScaledMMLinearKernel,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import QuantKey
 from vllm.platforms import PlatformEnum, current_platform
@@ -46,28 +46,31 @@ logger = init_logger(__name__)
 
 # in priority/performance order (when available)
 _POSSIBLE_INT8_KERNELS: dict[PlatformEnum, list[type[Int8ScaledMMLinearKernel]]] = {
-    PlatformEnum.CPU: [CPUScaledMMLinearKernel],
-    PlatformEnum.CUDA: [CutlassScaledMMLinearKernel, TritonScaledMMLinearKernel],
-    PlatformEnum.ROCM: [AiterScaledMMLinearKernel, TritonScaledMMLinearKernel],
+    PlatformEnum.CPU: [CPUInt8ScaledMMLinearKernel],
+    PlatformEnum.CUDA: [
+        CutlassInt8ScaledMMLinearKernel,
+        TritonInt8ScaledMMLinearKernel,
+    ],
+    PlatformEnum.ROCM: [AiterInt8ScaledMMLinearKernel, TritonInt8ScaledMMLinearKernel],
 }
 
 # in priority/performance order (when available)
 _POSSIBLE_FP8_KERNELS: dict[PlatformEnum, list[type[FP8ScaledMMLinearKernel]]] = {
     PlatformEnum.CUDA: [
-        FlashInferScaledMMLinearKernel,
+        FlashInferFP8ScaledMMLinearKernel,
         CutlassFP8ScaledMMLinearKernel,
-        PerTensorTorchScaledMMLinearKernel,
-        ChannelWiseTorchScaledMMLinearKernel,
+        PerTensorTorchFP8ScaledMMLinearKernel,
+        ChannelWiseTorchFP8ScaledMMLinearKernel,
     ],
     PlatformEnum.ROCM: [
-        ROCmScaledMMLinearKernel,
-        PerTensorTorchScaledMMLinearKernel,
-        RowWiseTorchScaledMMLinearKernel,
-        ChannelWiseTorchScaledMMLinearKernel,
+        ROCmFP8ScaledMMLinearKernel,
+        PerTensorTorchFP8ScaledMMLinearKernel,
+        RowWiseTorchFP8ScaledMMLinearKernel,
+        ChannelWiseTorchFP8ScaledMMLinearKernel,
     ],
     PlatformEnum.CPU: [
-        PerTensorTorchScaledMMLinearKernel,
-        ChannelWiseTorchScaledMMLinearKernel,
+        PerTensorTorchFP8ScaledMMLinearKernel,
+        ChannelWiseTorchFP8ScaledMMLinearKernel,
     ],
 }
 

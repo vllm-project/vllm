@@ -13,7 +13,7 @@ from .ScaledMMLinearKernel import (
 )
 
 
-class FlashInferScaledMMLinearKernel(FP8ScaledMMLinearKernel):
+class FlashInferFP8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
     @classmethod
     def is_supported(
         cls, compute_capability: int | None = None

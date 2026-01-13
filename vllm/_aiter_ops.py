@@ -372,7 +372,7 @@ def _rocm_aiter_gemm_a8w8_impl(
     # gemm_a8w8_CK(a, b, scale_a, scale_b, bias) expects
     # a to be [M, K]
     # b to be [N, K]
-    # CutlassScaledMMLinearKernel prepare weight `w_q` in [K, N] format
+    # CutlassInt8ScaledMMLinearKernel prepare weight `w_q` in [K, N] format
     return gemm_a8w8_CK(A, B, As, Bs, bias, output_dtype)
 
 

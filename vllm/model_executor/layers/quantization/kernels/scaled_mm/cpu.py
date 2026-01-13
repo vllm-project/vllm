@@ -20,7 +20,7 @@ from .ScaledMMLinearKernel import (
 )
 
 
-class CPUScaledMMLinearKernel(Int8ScaledMMLinearKernel):
+class CPUInt8ScaledMMLinearKernel(Int8ScaledMMLinearKernel):
     @classmethod
     def is_supported(
         cls, compute_capability: int | None = None

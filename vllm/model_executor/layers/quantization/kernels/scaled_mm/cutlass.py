@@ -19,7 +19,7 @@ from .ScaledMMLinearKernel import (
 )
 
 
-class CutlassScaledMMLinearKernel(Int8ScaledMMLinearKernel):
+class CutlassInt8ScaledMMLinearKernel(Int8ScaledMMLinearKernel):
     @classmethod
     def is_supported(
         cls, compute_capability: int | None = None

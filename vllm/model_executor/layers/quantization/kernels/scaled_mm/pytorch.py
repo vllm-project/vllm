@@ -14,7 +14,7 @@ from .ScaledMMLinearKernel import (
 )
 
 
-class TorchScaledMMLinearKernel(FP8ScaledMMLinearKernel):
+class TorchFP8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
     """
     Base class for FP8 linear kernels using Torch.
     Each subclass represents a kernel variant for
@@ -44,7 +44,7 @@ class TorchScaledMMLinearKernel(FP8ScaledMMLinearKernel):
         return 17 if pad_output else 0
 
 
-class PerTensorTorchScaledMMLinearKernel(TorchScaledMMLinearKernel):
+class PerTensorTorchFP8ScaledMMLinearKernel(TorchFP8ScaledMMLinearKernel):
     @classmethod
     def can_implement(cls, c: FP8ScaledMMLinearLayerConfig) -> tuple[bool, str | None]:
         per_tensor_activation_scales = (
@@ -78,7 +78,7 @@ class PerTensorTorchScaledMMLinearKernel(TorchScaledMMLinearKernel):
         return torch.narrow(output, 0, 0, output_shape[0]).view(*output_shape)
 
 
-class RowWiseTorchScaledMMLinearKernel(TorchScaledMMLinearKernel):
+class RowWiseTorchFP8ScaledMMLinearKernel(TorchFP8ScaledMMLinearKernel):
     @classmethod
     def is_supported(
         cls, compute_capability: int | None = None
@@ -148,7 +148,7 @@ class RowWiseTorchScaledMMLinearKernel(TorchScaledMMLinearKernel):
         return torch.narrow(output, 0, 0, output_shape[0]).view(*output_shape)
 
 
-class ChannelWiseTorchScaledMMLinearKernel(TorchScaledMMLinearKernel):
+class ChannelWiseTorchFP8ScaledMMLinearKernel(TorchFP8ScaledMMLinearKernel):
     @classmethod
     def can_implement(cls, c: FP8ScaledMMLinearLayerConfig) -> tuple[bool, str | None]:
         per_tensor_activation_scales = (

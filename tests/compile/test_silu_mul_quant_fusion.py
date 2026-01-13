@@ -29,13 +29,13 @@ from vllm.model_executor.layers.quantization.kernels.scaled_mm.cutlass import (
     CutlassFP8ScaledMMLinearKernel,
 )
 from vllm.model_executor.layers.quantization.kernels.scaled_mm.flashinfer import (
-    FlashInferScaledMMLinearKernel,
+    FlashInferFP8ScaledMMLinearKernel,
 )
 from vllm.model_executor.layers.quantization.kernels.scaled_mm.pytorch import (
-    PerTensorTorchScaledMMLinearKernel,
+    PerTensorTorchFP8ScaledMMLinearKernel,
 )
 from vllm.model_executor.layers.quantization.kernels.scaled_mm.rocm import (
-    ROCmScaledMMLinearKernel,
+    ROCmFP8ScaledMMLinearKernel,
 )
 from vllm.model_executor.layers.quantization.kernels.scaled_mm.ScaledMMLinearKernel import (  # noqa: E501
     FP8ScaledMMLinearKernel,
@@ -174,11 +174,11 @@ class TestSiluMulGroupFp8QuantModel(torch.nn.Module):
         return [torch.ops.vllm.rocm_aiter_act_mul_and_fp8_group_quant]
 
 
-ROCM_KERNELS = [ROCmScaledMMLinearKernel, PerTensorTorchScaledMMLinearKernel]
+ROCM_KERNELS = [ROCmFP8ScaledMMLinearKernel, PerTensorTorchFP8ScaledMMLinearKernel]
 CUDA_KERNELS = [
-    FlashInferScaledMMLinearKernel,
+    FlashInferFP8ScaledMMLinearKernel,
     CutlassFP8ScaledMMLinearKernel,
-    PerTensorTorchScaledMMLinearKernel,
+    PerTensorTorchFP8ScaledMMLinearKernel,
 ]
 TEST_KERNELS = ROCM_KERNELS if current_platform.is_rocm() else CUDA_KERNELS
 
