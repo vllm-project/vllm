@@ -272,6 +272,7 @@ def maybe_roundup_hidden_size(
             get_mxfp4_backend,
         )
 
+        original_hidden_size = hidden_size
         current_mxfp4_backend = get_mxfp4_backend(is_lora_enabled)
         if (
             current_mxfp4_backend == Mxfp4Backend.SM90_FI_MXFP4_BF16
@@ -284,7 +285,7 @@ def maybe_roundup_hidden_size(
             or current_mxfp4_backend == Mxfp4Backend.SM100_FI_MXFP4_BF16
         ):
             hidden_size = round_up(hidden_size, 256)
-        return hidden_size, True
+        return hidden_size, hidden_size != original_hidden_size
 
     return hidden_size, False
 
