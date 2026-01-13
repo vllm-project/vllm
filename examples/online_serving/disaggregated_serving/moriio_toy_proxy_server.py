@@ -10,7 +10,7 @@ import uuid
 
 import aiohttp
 import msgpack
-import re
+import regex as re
 import zmq
 from quart import Quart, make_response, request
 
