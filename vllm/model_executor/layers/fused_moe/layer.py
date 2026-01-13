@@ -547,6 +547,19 @@ class FusedMoE(CustomOp):
         self.intermediate_size_per_partition = intermediate_size // self.tp_size
         self.reduce_results = reduce_results
         self.renormalize = renormalize
+
+        # TODO(bnell): these attributes are only used by cpu/xpu/mxfp4
+        self.use_grouped_topk = use_grouped_topk
+        if self.use_grouped_topk:
+            assert num_expert_group is not None and topk_group is not None
+        self.num_expert_group = num_expert_group
+        self.topk_group = topk_group
+        self.custom_routing_function = custom_routing_function
+        self.scoring_func = scoring_func
+        self.routed_scaling_factor = routed_scaling_factor
+        self.e_score_correction_bias = e_score_correction_bias
+        # TODO(bnell): end attributes
+
         self.apply_router_weight_on_input = apply_router_weight_on_input
         self.activation = activation
 
