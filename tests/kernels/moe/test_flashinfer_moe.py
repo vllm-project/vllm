@@ -84,12 +84,12 @@ def test_flashinfer_fp4_moe_no_graph(
         score = torch.randn((m, e), device="cuda", dtype=dtype)
         topk_weights, topk_ids, _ = fused_topk(a, score, topk, renormalize=False)
 
+        assert is_valid_flashinfer_cutlass_fused_moe(a, w1_q, w2_q)
+
         flashinfer_experts = FusedMoEModularKernel(
             create_flashinfer_prepare_finalize(use_dp=False, use_nvfp4=True),
             FlashInferExperts(out_dtype=dtype, quant_config=quant_config),
         )
-
-        assert is_valid_flashinfer_cutlass_fused_moe(a, w1_q, w2_q)
 
         fi_activation = {"silu_and_mul": "silu", "relu2": "relu2_no_mul"}[activation]
 
