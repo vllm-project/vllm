@@ -2350,11 +2350,10 @@ class GPUModelRunner(
         req_start_idx = 0
         should_sync_mrope_positions = False
         should_sync_xdrope_positions = False
-        mm_embeds_ranges = []
 
         for req_id in self.input_batch.req_ids:
             mm_embeds_req: list[torch.Tensor] = []
-
+            mm_embeds_ranges: list[tuple[int, int]] = []
             num_scheduled_tokens = scheduler_output.num_scheduled_tokens[req_id]
             req_state = self.requests[req_id]
             num_computed_tokens = req_state.num_computed_tokens + shift_computed_tokens
@@ -2410,16 +2409,28 @@ class GPUModelRunner(
                         req_start_pos + start_idx : req_start_pos + end_idx
                     ].logical_or_(is_embed)
 
-                mm_embeds_range = pos_info.extract_embeds_range(start_idx, end_idx)
-                split_size_or_sections = []
-                for mm_range in mm_embeds_range:
-                    range_len = mm_range[1] - mm_range[0] + 1
-                    split_size_or_sections.append(range_len)
-                    mm_embeds_ranges.append(mm_range)
-                assert sum(split_size_or_sections) == len(mm_embeds_item)
-                mm_embeds_req.extend(
-                    list(torch.split(mm_embeds_item, split_size_or_sections, dim=0))
-                )
+                if is_embed is not None:
+                    split_size_or_sections: list[int] = []
+                    mask_i = is_embed.int()
+                    starts = torch.nonzero(
+                        torch.diff(mask_i, prepend=mask_i.new_zeros(1)) == 1
+                    ).flatten()
+                    ends = torch.nonzero(
+                        torch.diff(mask_i, append=mask_i.new_zeros(1)) == -1
+                    ).flatten()
+                    mm_embeds_range = torch.stack((starts, ends), dim=1) + start_pos
+                    mm_embeds_range = [tuple(x) for x in mm_embeds_range.tolist()]
+                    for mm_range in mm_embeds_range:
+                        range_len = mm_range[1] - mm_range[0] + 1
+                        split_size_or_sections.append(range_len)
+                        mm_embeds_ranges.append(mm_range)
+                    assert sum(split_size_or_sections) == len(mm_embeds_item)
+                    mm_embeds_req.extend(
+                        list(torch.split(mm_embeds_item, split_size_or_sections, dim=0))
+                    )
+                else:
+                    mm_embeds_req.append([mm_embeds_item, (start_idx, end_idx)])
+
             mm_embeds_req = [
                 x
                 for x, _ in sorted(

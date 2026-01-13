@@ -203,9 +203,7 @@ class PlaceholderRange:
 
         return embeds_start_idx, embeds_end_idx
 
-    def extract_embeds_range(
-        self, start_idx: int | None = None, end_idx: int | None = None
-    ) -> list[tuple[int, int]]:
+    def extract_embeds_range(self) -> list[tuple[int, int]]:
         """Extract the start and end indices of the embedded region in prompt.
 
         For example, given `PlaceholderRange(offset=2, length=5)` and
@@ -219,10 +217,8 @@ class PlaceholderRange:
         """
         if self.is_embed is None:
             return [(self.offset, self.offset + self.length - 1)]
-        if start_idx is not None and end_idx is not None:
-            mask_i = self.is_embed[start_idx:end_idx].int()
-        else:
-            mask_i = self.is_embed.int()
+
+        mask_i = self.is_embed.int()
         starts = torch.nonzero(
             torch.diff(mask_i, prepend=mask_i.new_zeros(1)) == 1
         ).flatten()
