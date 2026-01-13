@@ -137,6 +137,7 @@ PR_DATA=$(mktemp)
 trap "rm -f $PR_DATA" EXIT
 
 if ! gh pr list --state merged --search "milestone:${MILESTONE}" \
+    --limit 1000 \
     --json number,title,mergeCommit,mergedAt \
     --jq 'sort_by(.mergedAt) | .[] | "\(.mergeCommit.oid)\t\(.number)\t\(.title)"' > "$PR_DATA" 2>/dev/null; then
     log_error "Failed to fetch PRs from milestone '${MILESTONE}'"
