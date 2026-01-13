@@ -1065,8 +1065,8 @@ class CompressedTensorsKVCacheMethod(BaseKVCacheMethod):
                 # We reduce by taking the max scale in each attention head group.
                 if kind == "q":
                     reduction_factor = (
-                        self.quant_config.total_num_heads
-                        // self.quant_config.total_num_kv_heads
+                        self.quant_config.total_num_heads  # type: ignore[attr-defined]
+                        // self.quant_config.total_num_kv_heads  # type: ignore[attr-defined]
                     )
                     loaded_weight = torch.amax(
                         loaded_weight.view(-1, reduction_factor), dim=1
@@ -1075,7 +1075,7 @@ class CompressedTensorsKVCacheMethod(BaseKVCacheMethod):
                 tp_rank = get_tensor_model_parallel_rank()
                 tp_size = get_tensor_model_parallel_world_size()
 
-                if layer.num_kv_heads * tp_size == self.quant_config.total_num_kv_heads:
+                if layer.num_kv_heads * tp_size == self.quant_config.total_num_kv_heads:  # type: ignore[attr-defined]
                     # heads evenly distributed
                     loaded_weight = loaded_weight[
                         tp_rank * layer.num_kv_heads : (tp_rank + 1)
@@ -1084,7 +1084,7 @@ class CompressedTensorsKVCacheMethod(BaseKVCacheMethod):
                 else:
                     # heads replicated to match TP size
                     assert layer.num_kv_heads == 1
-                    replicas = tp_size // self.quant_config.total_num_kv_heads
+                    replicas = tp_size // self.quant_config.total_num_kv_heads  # type: ignore[attr-defined]
                     shard_rank = tp_rank // replicas
                     loaded_weight = loaded_weight[shard_rank : shard_rank + 1]
 
