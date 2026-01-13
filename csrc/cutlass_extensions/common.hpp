@@ -31,6 +31,35 @@ int32_t get_sm_version_num();
  * __CUDA_ARCH__ is not defined in host code, so this lets us smuggle the ifdef
  * into code that will be executed on the device where it is defined.
  */
+
+template <typename Kernel>
+struct enable_sm75_to_sm80 : Kernel {
+  template <typename... Args>
+  CUTLASS_DEVICE static void invoke(Args&&... args) {
+#if defined __CUDA_ARCH__
+  #if __CUDA_ARCH__ >= 750 && __CUDA_ARCH__ < 800
+    Kernel::invoke(std::forward<Args>(args)...);
+  #else
+    TORCH_CHECK(false, "This kernel only supports sm >= 75.");
+  #endif
+#endif
+  }
+};
+
+template <typename Kernel>
+struct enable_sm89_to_sm90 : Kernel {
+  template <typename... Args>
+  CUTLASS_DEVICE static void invoke(Args&&... args) {
+#if defined __CUDA_ARCH__
+  #if __CUDA_ARCH__ >= 890 && __CUDA_ARCH__ < 900
+    Kernel::invoke(std::forward<Args>(args)...);
+  #else
+    TORCH_CHECK(false, "This kernel only supports sm >= 89.");
+  #endif
+#endif
+  }
+};
+
 template <typename Kernel>
 struct enable_sm90_or_later : Kernel {
   template <typename... Args>
@@ -39,7 +68,7 @@ struct enable_sm90_or_later : Kernel {
   #if __CUDA_ARCH__ >= 900
     Kernel::operator()(std::forward<Args>(args)...);
   #else
-    #warning "This kernel only supports sm >= 90. Ignoring..."
+    TORCH_CHECK(false, "This kernel only supports sm >= 90.");
   #endif
 #endif
   }
@@ -53,7 +82,7 @@ struct enable_sm90_only : Kernel {
   #if __CUDA_ARCH__ == 900
     Kernel::operator()(std::forward<Args>(args)...);
   #else
-    #warning "This kernel only supports sm90. Ignoring..."
+    TORCH_CHECK(false, "This kernel only supports sm90.");
   #endif
 #endif
   }
@@ -67,7 +96,7 @@ struct enable_sm100f_only : Kernel {
   #if __CUDA_ARCH__ == 1000 || __CUDA_ARCH__ == 1030
     Kernel::operator()(std::forward<Args>(args)...);
   #else
-    #warning "This kernel only supports sm100f. Ignoring..."
+    TORCH_CHECK(false, "This kernel only supports sm100f.");
   #endif
 #endif
   }
@@ -81,7 +110,7 @@ struct enable_sm100a_only : Kernel {
   #if __CUDA_ARCH__ == 1000
     Kernel::operator()(std::forward<Args>(args)...);
   #else
-    #warning "This kernel only supports sm100a. Ignoring..."
+    TORCH_CHECK(false, "This kernel only supports sm100a.");
   #endif
 #endif
   }
@@ -95,7 +124,7 @@ struct enable_sm120_only : Kernel {
   #if __CUDA_ARCH__ == 1200
     Kernel::operator()(std::forward<Args>(args)...);
   #else
-    #warning "This kernel only supports sm120. Ignoring..."
+    TORCH_CHECK(false, "This kernel only supports sm120.");
   #endif
 #endif
   }

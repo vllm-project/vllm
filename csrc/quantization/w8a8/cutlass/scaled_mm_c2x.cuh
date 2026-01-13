@@ -36,41 +36,6 @@ using namespace cute;
 */
 
 namespace vllm {
-
-// Wrappers for the GEMM kernel that is used to guard against compilation on
-// architectures that will never use the kernel. The purpose of this is to
-// reduce the size of the compiled binary.
-// __CUDA_ARCH__ is not defined in host code, so this lets us smuggle the ifdef
-// into code that will be executed on the device where it is defined.
-template <typename Kernel>
-struct enable_sm75_to_sm80 : Kernel {
-  template <typename... Args>
-  CUTLASS_DEVICE static void invoke(Args&&... args) {
-#if defined __CUDA_ARCH__ && __CUDA_ARCH__ >= 750 && __CUDA_ARCH__ < 800
-    Kernel::invoke(std::forward<Args>(args)...);
-#endif
-  }
-};
-
-template <typename Kernel>
-struct enable_sm80_to_sm89 : Kernel {
-  template <typename... Args>
-  CUTLASS_DEVICE static void invoke(Args&&... args) {
-#if defined __CUDA_ARCH__ && __CUDA_ARCH__ >= 800 && __CUDA_ARCH__ < 890
-    Kernel::invoke(std::forward<Args>(args)...);
-#endif
-  }
-};
-
-template <typename Kernel>
-struct enable_sm89_to_sm90 : Kernel {
-  template <typename... Args>
-  CUTLASS_DEVICE static void invoke(Args&&... args) {
-#if defined __CUDA_ARCH__ && __CUDA_ARCH__ >= 890 && __CUDA_ARCH__ < 900
-    Kernel::invoke(std::forward<Args>(args)...);
-#endif
-  }
-};
 template <typename Arch, template <typename> typename ArchGuard,
           typename ElementAB_, typename ElementD_,
           template <typename, typename> typename Epilogue_, typename TileShape,
