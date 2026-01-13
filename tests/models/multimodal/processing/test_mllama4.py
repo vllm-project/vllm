@@ -59,10 +59,9 @@ def test_profiling(model_id: str, max_model_len: int):
         total_num_patches.item() + num_tiles.item() + 3
     )  # image start, image, image end
 
-    assert total_num_patches == {
-        modality: sum(item.get_num_embeds for item in placeholders)
-        for modality, placeholders in mm_inputs["mm_placeholders"].items()
-    }
+    assert total_num_patches == sum(
+        item.get_num_embeds for item in mm_inputs["mm_placeholders"]["image"]
+    )
     assert total_tokens == sum(
         placeholder.length
         for placeholder in decoder_dummy_data.multi_modal_placeholders["image"]
