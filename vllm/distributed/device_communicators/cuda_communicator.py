@@ -71,6 +71,18 @@ class CudaCommunicator(DeviceCommunicatorBase):
                 device=self.device,
             )
 
+            if (
+                self.symm_mem_comm is not None
+                and not self.symm_mem_comm.disabled
+                and current_platform.has_device_capability(100)
+            ):
+                use_custom_allreduce = False
+                logger.info_once(
+                    "Symmetric-memory allreduce is available on SM100; "
+                    "disabling vLLM custom allreduce for this communicator.",
+                    scope="local",
+                )
+
         if use_custom_allreduce and self.world_size > 1:
             # Initialize a custom fast all-reduce implementation.
             self.ca_comm = CustomAllreduce(
@@ -143,6 +155,12 @@ class CudaCommunicator(DeviceCommunicatorBase):
             out = qr_comm.quick_all_reduce(input_)
             assert out is not None
             return out
+        # prefer torch symmetric-memory allreduce when available (CUDA only).
+        symm_mem_comm = self.symm_mem_comm
+        if symm_mem_comm is not None and symm_mem_comm.should_use_symm_mem(input_):
+            out = symm_mem_comm.all_reduce(input_)
+            assert out is not None
+            return out
         ca_comm = self.ca_comm
         if (
             ca_comm is not None
@@ -150,11 +168,6 @@ class CudaCommunicator(DeviceCommunicatorBase):
             and ca_comm.should_custom_ar(input_)
         ):
             out = ca_comm.custom_all_reduce(input_)
-            assert out is not None
-            return out
-        symm_mem_comm = self.symm_mem_comm
-        if symm_mem_comm is not None and symm_mem_comm.should_use_symm_mem(input_):
-            out = symm_mem_comm.all_reduce(input_)
             assert out is not None
             return out
         pynccl_comm = self.pynccl_comm
