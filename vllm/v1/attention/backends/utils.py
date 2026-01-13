@@ -858,9 +858,19 @@ def create_fast_prefill_custom_backend(
             common_attn_metadata: CommonAttentionMetadata,
             fast_build: bool = False,
         ) -> AttentionMetadata:
-            new_common_attn_metadata = (
-                make_kv_sharing_fast_prefill_common_attn_metadata(common_attn_metadata)
-            )
+            # This is for initial metadata build of backends that
+            # split KV cache and attention op
+            if (
+                not underlying_attn_backend.forward_includes_kv_cache
+                and common_attn_metadata.logits_indices_padded is None
+            ):
+                new_common_attn_metadata = common_attn_metadata
+            else:
+                new_common_attn_metadata = (
+                    make_kv_sharing_fast_prefill_common_attn_metadata(
+                        common_attn_metadata
+                    )
+                )
             metadata = super().build(
                 common_prefix_len, new_common_attn_metadata, fast_build
             )
