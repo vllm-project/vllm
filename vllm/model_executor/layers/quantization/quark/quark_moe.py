@@ -264,7 +264,7 @@ class QuarkW8A8Fp8MoEMethod(QuarkMoEMethod):
             w13_bias = torch.nn.Parameter(
                 torch.zeros(
                     num_experts,
-                    2 * intermediate_size_per_partition,
+                    w13_size_coefficient * intermediate_size_per_partition,
                     dtype=torch.float32,
                 ),
                 requires_grad=False,

@@ -1232,7 +1232,7 @@ class FusedMoE(CustomOp):
                         dim2 = loaded_weight.shape[1]
                         expert_data.data[:dim1, :dim2].copy_(loaded_weight)
                 return True if return_success else None
-            return False
+            return False if return_success else None
 
         quant_method_name = self.quant_method.__class__.__name__
         global_expert_id = expert_id

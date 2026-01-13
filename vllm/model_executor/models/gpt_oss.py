@@ -339,12 +339,21 @@ class GptOssModel(nn.Module):
         loaded_params: set[str] = set()
 
         use_ep = self.parallel_config.enable_expert_parallel
-        if use_ep:
-            pass
         num_experts = self.config.num_local_experts
 
-        tp_rank = get_tensor_model_parallel_rank()
-        tp_size = get_tensor_model_parallel_world_size()
+        # In MoE, we need to flatten the tensor parallel size across the data
+        # parallel size when EP is disabled.
+        if use_ep:
+            tp_rank = get_tensor_model_parallel_rank()
+            tp_size = get_tensor_model_parallel_world_size()
+        else:
+            tp_size, tp_rank = FusedMoEParallelConfig.flatten_tp_across_dp_and_pcp(
+                tp_size=get_tensor_model_parallel_world_size(),
+                dp_size=get_dp_group().world_size,
+                dp_rank=get_dp_group().rank_in_group,
+                pcp_size=get_pcp_group().world_size,
+                pcp_rank=get_pcp_group().rank_in_group,
+            )
 
         intermediate_size = self.config.intermediate_size
         per_rank_intermediate_size = cdiv(intermediate_size, tp_size)
@@ -353,6 +362,10 @@ class GptOssModel(nn.Module):
         tp_rank_end = min((tp_rank + 1) * per_rank_intermediate_size, intermediate_size)
         expert_params_mapping = self.get_expert_mapping()
         for name, loaded_weight in weights:
+            # Skip layers on other devices.
+            if is_pp_missing_parameter(name, self):
+                continue
+
             layer_id, expert_id, fused_name = None, None, None
             moe_quant_method = None
             if "experts" in name:
@@ -599,9 +612,6 @@ class GptOssModel(nn.Module):
                     continue
                 name = name.replace(weight_name, param_name)
 
-                if is_pp_missing_parameter(name, self):
-                    continue
-
                 if name.endswith("scale"):
                     # Remapping the name of FP8 kv-scale.
                     name = maybe_remap_kv_scale_name(name, params_dict)
@@ -624,9 +634,6 @@ class GptOssModel(nn.Module):
                     )
 
                     if weight_name not in name:
-                        continue
-
-                    if is_pp_missing_parameter(fused_name, self):
                         continue
 
                     param = params_dict[fused_name]
@@ -681,13 +688,17 @@ class GptOssModel(nn.Module):
 
         # In MoE, we need to flatten the tensor parallel size across the data
         # parallel size when EP is disabled.
-        tp_size, tp_rank = FusedMoEParallelConfig.flatten_tp_across_dp_and_pcp(
-            tp_size=get_tensor_model_parallel_world_size(),
-            dp_size=get_dp_group().world_size,
-            dp_rank=get_dp_group().rank_in_group,
-            pcp_size=get_pcp_group().world_size,
-            pcp_rank=get_pcp_group().rank_in_group,
-        )
+        if use_ep:
+            tp_rank = get_tensor_model_parallel_rank()
+            tp_size = get_tensor_model_parallel_world_size()
+        else:
+            tp_size, tp_rank = FusedMoEParallelConfig.flatten_tp_across_dp_and_pcp(
+                tp_size=get_tensor_model_parallel_world_size(),
+                dp_size=get_dp_group().world_size,
+                dp_rank=get_dp_group().rank_in_group,
+                pcp_size=get_pcp_group().world_size,
+                pcp_rank=get_pcp_group().rank_in_group,
+            )
 
         intermediate_size = self.config.intermediate_size
         per_rank_intermediate_size = cdiv(intermediate_size, tp_size)
