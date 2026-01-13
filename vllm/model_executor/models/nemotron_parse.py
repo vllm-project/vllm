@@ -623,6 +623,10 @@ class NemotronParseProcessingInfo(BaseProcessingInfo):
         image_tokens = self.get_num_image_tokens()
         return {"image": image_tokens}
 
+    @property
+    def skip_prompt_length_check(self) -> bool:
+        return True  # Because the encoder prompt is padded
+
 
 class NemotronParseDummyInputsBuilder(
     BaseDummyInputsBuilder[NemotronParseProcessingInfo]
@@ -656,10 +660,6 @@ class NemotronParseMultiModalProcessor(
         mm_data: MultiModalDataDict,
     ) -> str | list[int]:
         return [0]
-
-    @property
-    def pad_dummy_encoder_prompt(self) -> bool:
-        return True
 
     def _call_hf_processor(
         self,

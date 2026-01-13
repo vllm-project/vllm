@@ -1396,6 +1396,10 @@ class BaseProcessingInfo:
         """
         return self.ctx.get_hf_processor(**kwargs)
 
+    @property
+    def skip_prompt_length_check(self) -> bool:
+        return False
+
     @abstractmethod
     def get_supported_mm_limits(self) -> Mapping[str, int | None]:
         """
@@ -1520,6 +1524,10 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
     @property
     def allowed_mm_limits(self):
         return self._allowed_mm_limits
+
+    @property
+    def skip_prompt_length_check(self) -> bool:
+        return False
 
     def __call__(
         self,
@@ -2402,10 +2410,6 @@ class EncDecMultiModalProcessor(BaseMultiModalProcessor[_I]):
         this prompt during profiling and generation.
         """
         raise NotImplementedError
-
-    @property
-    def pad_dummy_encoder_prompt(self) -> bool:
-        return False
 
     def create_decoder_prompt(
         self,

@@ -697,6 +697,10 @@ class WhisperProcessingInfo(BaseProcessingInfo):
     def get_num_audio_tokens(self) -> int:
         return self.get_hf_config().max_source_positions
 
+    @property
+    def skip_prompt_length_check(self) -> bool:
+        return True  # Because the encoder prompt is padded
+
 
 class WhisperDummyInputsBuilder(BaseDummyInputsBuilder[WhisperProcessingInfo]):
     def get_dummy_text(self, mm_counts: Mapping[str, int]) -> str:
@@ -732,10 +736,6 @@ class WhisperMultiModalProcessor(EncDecMultiModalProcessor[WhisperProcessingInfo
             target_sr=feature_extractor.sampling_rate,
             target_channels=self.info.get_target_channels(),
         )
-
-    @property
-    def pad_dummy_encoder_prompt(self) -> bool:
-        return True
 
     def create_encoder_prompt(
         self,

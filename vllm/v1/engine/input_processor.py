@@ -17,7 +17,7 @@ from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
 from vllm.multimodal.cache import processor_cache_from_config
 from vllm.multimodal.inputs import MultiModalFeatureSpec, MultiModalUUIDDict
 from vllm.multimodal.parse import MultiModalDataParser
-from vllm.multimodal.processing import EncDecMultiModalProcessor, set_request_id
+from vllm.multimodal.processing import set_request_id
 from vllm.multimodal.utils import argsort_mm_positions
 from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import _SAMPLING_EPS, SamplingParams
@@ -655,17 +655,18 @@ class InputProcessor:
 
         max_prompt_len = self.model_config.max_model_len
         if prompt_len > max_prompt_len:
-            if prompt_type == "encoder" and model_config.is_multimodal_model:
+            if model_config.is_multimodal_model:
                 mm_registry = self.input_preprocessor.mm_registry
-                mm_processor = mm_registry.create_processor(
+                model_cls = mm_registry._get_model_cls(model_config)
+                factories = model_cls._processor_factory
+                ctx = mm_registry._create_processing_ctx(
                     model_config,
-                    self.vllm_config.observability_config,
                     tokenizer=tokenizer,
                 )
-                assert isinstance(mm_processor, EncDecMultiModalProcessor)
+                mm_info = factories.info(ctx)
 
-                if mm_processor.pad_dummy_encoder_prompt:
-                    return  # Skip encoder length check for Whisper
+                if mm_info.skip_prompt_length_check:
+                    return
 
             if model_config.is_multimodal_model:
                 suggestion = (
