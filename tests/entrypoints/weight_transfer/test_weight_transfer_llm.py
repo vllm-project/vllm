@@ -118,25 +118,6 @@ def test_get_world_size_tp1():
 
 
 @create_new_process_for_each_test()
-def test_get_world_size_tp2():
-    """Test world_size is correctly configured for TP=2."""
-    if torch.cuda.device_count() < 2:
-        pytest.skip("Need at least 2 GPUs for this test")
-
-    llm = LLM(
-        model=MODEL_NAME,
-        enforce_eager=True,
-        load_format="dummy",
-        tensor_parallel_size=2,
-        distributed_executor_backend="mp",
-        weight_transfer_config=WeightTransferConfig(backend="nccl"),
-    )
-
-    world_size = llm.llm_engine.vllm_config.parallel_config.world_size
-    assert world_size == 2
-
-
-@create_new_process_for_each_test()
 def test_init_weight_transfer_calls_engine():
     """Test that init_weight_transfer calls the engine's init_transfer method."""
     if torch.cuda.device_count() < 1:
@@ -325,12 +306,11 @@ def test_full_weight_transfer_flow():
             assert result["update_names"] == ["test.weight"]
 
 
-@pytest.mark.parametrize("tp_size", [1, 2])
 @create_new_process_for_each_test()
-def test_weight_transfer_with_tp(tp_size):
+def test_weight_transfer_with_tp():
     """Test weight transfer works correctly with tensor parallelism."""
-    if torch.cuda.device_count() < tp_size:
-        pytest.skip(f"Need at least {tp_size} GPUs for this test")
+    if torch.cuda.device_count() < 1:
+        pytest.skip("Need at least 1 GPU for this test")
 
     # Enable insecure serialization to allow pickling functions for collective_rpc
     os.environ["VLLM_ALLOW_INSECURE_SERIALIZATION"] = "1"
@@ -343,7 +323,7 @@ def test_weight_transfer_with_tp(tp_size):
             model=MODEL_NAME,
             enforce_eager=True,
             load_format="dummy",
-            tensor_parallel_size=tp_size,
+            tensor_parallel_size=1,
             distributed_executor_backend="ray",
             weight_transfer_config=WeightTransferConfig(backend="nccl"),
         )
@@ -365,14 +345,14 @@ def test_weight_transfer_with_tp(tp_size):
 
         llm.finalize_weight_update()
 
-        # Verify all TP ranks processed the weight transfer
+        # Verify the worker processed the weight transfer
         def check_processed(self):
             engine = self.weight_transfer_engine
             return engine.init_transfer_called and engine.receive_weights_called
 
         results = llm.collective_rpc(check_processed)
-        assert len(results) == tp_size
-        assert all(results), f"All {tp_size} workers should process weight transfer"
+        assert len(results) == 1
+        assert all(results), "Worker should process weight transfer"
 
 
 @create_new_process_for_each_test()

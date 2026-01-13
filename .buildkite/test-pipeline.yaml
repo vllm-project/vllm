@@ -1094,6 +1094,8 @@ steps:
   - pytest -v -s distributed/test_shm_broadcast.py
   - pytest -v -s distributed/test_shm_buffer.py
   - pytest -v -s distributed/test_shm_storage.py
+  - pytest -v -s distributed/test_packed_tensor.py
+  - pytest -v -s distributed/test_weight_transfer.py
 
 - label: 2 Node Tests (4 GPUs in total) # 16min
   timeout_in_minutes: 30
