@@ -1525,10 +1525,6 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
     def allowed_mm_limits(self):
         return self._allowed_mm_limits
 
-    @property
-    def skip_prompt_length_check(self) -> bool:
-        return False
-
     def __call__(
         self,
         prompt: str,
