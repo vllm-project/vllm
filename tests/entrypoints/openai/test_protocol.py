@@ -4,7 +4,10 @@ from openai_harmony import (
     Message,
 )
 
-from vllm.entrypoints.openai.protocol import serialize_message, serialize_messages
+from vllm.entrypoints.openai.engine.protocol import (
+    serialize_message,
+    serialize_messages,
+)
 
 
 def test_serialize_message() -> None:

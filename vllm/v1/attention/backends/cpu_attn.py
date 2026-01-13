@@ -13,12 +13,12 @@ from vllm.v1.attention.backend import (
     AttentionBackend,
     AttentionImpl,
     AttentionLayer,
+    AttentionMetadataBuilder,
     AttentionType,
+    CommonAttentionMetadata,
     is_quantized_kv_cache,
 )
 from vllm.v1.attention.backends.utils import (
-    AttentionMetadataBuilder,
-    CommonAttentionMetadata,
     split_decodes_and_prefills,
 )
 from vllm.v1.kv_cache_interface import AttentionSpec, CrossAttentionSpec

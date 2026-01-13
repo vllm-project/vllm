@@ -143,6 +143,7 @@ class DeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
         global_num_experts: int,
         local_num_experts: int,
         expert_tokens_meta: mk.ExpertTokensMetadata | None,
+        activation: str,
     ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...]]:
         assert self.block_shape is not None
         block_m = self.block_shape[0]
@@ -151,7 +152,8 @@ class DeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
         )
         assert M_sum % block_m == 0
 
-        workspace1 = (M_sum, max(N // 2, K))
+        activation_out_dim = self.adjust_N_for_activation(N, activation)
+        workspace1 = (M_sum, max(activation_out_dim, K))
         workspace2 = (M_sum, max(N, K))
         output = (M, K)
         return (workspace1, workspace2, output)
@@ -163,11 +165,13 @@ class DeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
         block_k = self.block_shape[1]
         scale_fmt = DeepGemmQuantScaleFMT.from_oracle()
 
+        M_sum, N = input.size()
+        activation_out_dim = self.adjust_N_for_activation(N, activation)
+
         # 1. DeepGemm UE8M0: use packed per-token-group quant
         if scale_fmt == DeepGemmQuantScaleFMT.UE8M0:
-            M_sum, N = input.size()
             act_out = torch.empty(
-                (M_sum, N // 2), dtype=input.dtype, device=input.device
+                (M_sum, activation_out_dim), dtype=input.dtype, device=input.device
             )
             self.activation(activation, act_out, input)
             a2q, a2q_scale = per_token_group_quant_fp8_packed_for_deepgemm(
@@ -187,8 +191,9 @@ class DeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
             )
 
         # 3. fallback path for non-SiLU activations in non‑UE8M0 cases.
-        M_sum, N = input.size()
-        act_out = torch.empty((M_sum, N // 2), dtype=input.dtype, device=input.device)
+        act_out = torch.empty(
+            (M_sum, activation_out_dim), dtype=input.dtype, device=input.device
+        )
         self.activation(activation, act_out, input)
         return per_token_group_quant_fp8(
             act_out, block_k, column_major_scales=True, out_q=output
@@ -254,8 +259,9 @@ class DeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
             (a1q, a1q_scale), (w1, self.w1_scale), mm1_out, expert_ids
         )
 
+        activation_out_dim = self.adjust_N_for_activation(N, activation)
         quant_out = _resize_cache(
-            workspace13.view(dtype=torch.float8_e4m3fn), (M_sum, N // 2)
+            workspace13.view(dtype=torch.float8_e4m3fn), (M_sum, activation_out_dim)
         )
         a2q, a2q_scale = self._act_mul_quant(
             input=mm1_out.view(-1, N), output=quant_out, activation=activation

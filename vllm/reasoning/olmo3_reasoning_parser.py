@@ -10,9 +10,10 @@ import regex as re
 
 if TYPE_CHECKING:
     from vllm.tokenizers import TokenizerLike
-
-from vllm.entrypoints.openai.protocol import (
+from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionRequest,
+)
+from vllm.entrypoints.openai.engine.protocol import (
     DeltaMessage,
     ResponsesRequest,
 )

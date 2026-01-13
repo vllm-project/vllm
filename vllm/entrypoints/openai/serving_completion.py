@@ -12,7 +12,7 @@ from fastapi import Request
 
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.logger import RequestLogger
-from vllm.entrypoints.openai.protocol import (
+from vllm.entrypoints.openai.engine.protocol import (
     CompletionLogProbs,
     CompletionRequest,
     CompletionResponse,
@@ -25,7 +25,7 @@ from vllm.entrypoints.openai.protocol import (
     UsageInfo,
     VLLMValidationError,
 )
-from vllm.entrypoints.openai.serving_engine import (
+from vllm.entrypoints.openai.engine.serving import (
     GenerationError,
     OpenAIServing,
     clamp_prompt_logprobs,

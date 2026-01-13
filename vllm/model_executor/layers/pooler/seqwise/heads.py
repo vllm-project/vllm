@@ -7,14 +7,7 @@ from typing import TypeAlias
 import torch
 import torch.nn as nn
 
-from vllm.config import get_current_vllm_config
-from vllm.model_executor.layers.pooler import ClassifierFn
-from vllm.model_executor.layers.pooler.activations import (
-    PoolerActivation,
-    PoolerNormalize,
-    resolve_classifier_act_fn,
-)
-from vllm.model_executor.models.adapters import _load_st_projector
+from vllm.model_executor.layers.pooler import ActivationFn, ClassifierFn, ProjectorFn
 from vllm.tasks import PoolingTask
 from vllm.v1.pool.metadata import PoolingMetadata
 
@@ -38,17 +31,17 @@ class SequencePoolerHead(nn.Module, ABC):
 
 
 class EmbeddingPoolerHead(SequencePoolerHead):
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        projector: ProjectorFn | None = None,
+        head_dtype: torch.dtype | str | None = None,
+        activation: ActivationFn | None = None,
+    ) -> None:
         super().__init__()
 
-        # Load ST projector if available
-        vllm_config = get_current_vllm_config()
-        model_config = vllm_config.model_config
-
-        self.projector = _load_st_projector(model_config)
-        self.head_dtype = model_config.head_dtype
-
-        self.activation = PoolerNormalize()
+        self.projector = projector
+        self.head_dtype = head_dtype
+        self.activation = activation
 
     def get_supported_tasks(self) -> Set[PoolingTask]:
         return {"embed"}
@@ -65,7 +58,8 @@ class EmbeddingPoolerHead(SequencePoolerHead):
             pooled_data = torch.stack(pooled_data)
         # pooled_data shape: [batchsize, hidden_dimension]
 
-        pooled_data = pooled_data.to(self.head_dtype)
+        if self.head_dtype is not None:
+            pooled_data = pooled_data.to(self.head_dtype)
 
         # Apply ST projector
         if self.projector is not None:
@@ -88,15 +82,16 @@ class EmbeddingPoolerHead(SequencePoolerHead):
                 ]
 
         # for normalize
-        flags = [p.normalize for p in pooling_params]
-        if len(set(flags)) == 1:
-            if flags[0]:
-                pooled_data = self.activation(pooled_data)
-        else:
-            pooled_data = [
-                self.activation(vecs) if f else vecs
-                for vecs, f in zip(pooled_data, flags)
-            ]
+        if self.activation is not None:
+            flags = [p.use_activation for p in pooling_params]
+            if len(set(flags)) == 1:
+                if flags[0]:
+                    pooled_data = self.activation(pooled_data)
+            else:
+                pooled_data = [
+                    self.activation(vecs) if f else vecs
+                    for vecs, f in zip(pooled_data, flags)
+                ]
 
         # pooled_data shape: [batchsize, embedding_dimension]
         return pooled_data
@@ -106,20 +101,16 @@ class ClassifierPoolerHead(SequencePoolerHead):
     def __init__(
         self,
         classifier: ClassifierFn | None = None,
-        act_fn: PoolerActivation | str | None = None,
+        logit_bias: float | None = None,
+        head_dtype: torch.dtype | str | None = None,
+        activation: ActivationFn | None = None,
     ) -> None:
         super().__init__()
 
-        vllm_config = get_current_vllm_config()
-        model_config = vllm_config.model_config
-
         self.classifier = classifier
-        self.logit_bias: float | None = model_config.pooler_config.logit_bias
-        self.head_dtype = model_config.head_dtype
-
-        self.act_fn = resolve_classifier_act_fn(
-            model_config, static_num_labels=True, act_fn=act_fn
-        )
+        self.logit_bias = logit_bias
+        self.head_dtype = head_dtype
+        self.activation = activation
 
     def get_supported_tasks(self) -> Set[PoolingTask]:
         return {"classify", "score"}
@@ -136,7 +127,8 @@ class ClassifierPoolerHead(SequencePoolerHead):
             pooled_data = torch.stack(pooled_data)
         # pooled_data shape: [batchsize, hidden_size]
 
-        pooled_data = pooled_data.to(self.head_dtype)
+        if self.head_dtype is not None:
+            pooled_data = pooled_data.to(self.head_dtype)
 
         if self.classifier is not None:
             pooled_data = self.classifier(pooled_data)
@@ -145,13 +137,15 @@ class ClassifierPoolerHead(SequencePoolerHead):
         if self.logit_bias is not None:
             pooled_data -= self.logit_bias
 
-        flags = [p.use_activation for p in pooling_params]
-        if len(set(flags)) == 1:
-            scores = self.act_fn(pooled_data) if flags[0] else pooled_data
-        else:
-            scores = [
-                self.act_fn(vecs) if f else vecs for vecs, f in zip(pooled_data, flags)
-            ]
+        if self.activation is not None:
+            flags = [p.use_activation for p in pooling_params]
+            if len(set(flags)) == 1:
+                pooled_data = self.activation(pooled_data) if flags[0] else pooled_data
+            else:
+                pooled_data = [
+                    self.activation(vecs) if f else vecs
+                    for vecs, f in zip(pooled_data, flags)
+                ]
 
-        # scores shape: [batchsize, num_labels]
-        return scores
+        # pooled_data shape: [batchsize, num_labels]
+        return pooled_data

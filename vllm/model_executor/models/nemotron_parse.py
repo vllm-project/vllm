@@ -605,6 +605,10 @@ class NemotronParseProcessingInfo(BaseProcessingInfo):
             **kwargs,
         )
 
+    @property
+    def skip_prompt_length_check(self) -> bool:
+        return True  # Because the encoder prompt is padded
+
     def get_supported_mm_limits(self) -> Mapping[str, int | None]:
         return {"image": 1}
 
@@ -656,10 +660,6 @@ class NemotronParseMultiModalProcessor(
         mm_data: MultiModalDataDict,
     ) -> str | list[int]:
         return [0]
-
-    @property
-    def pad_dummy_encoder_prompt(self) -> bool:
-        return True
 
     def _call_hf_processor(
         self,

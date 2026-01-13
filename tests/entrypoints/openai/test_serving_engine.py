@@ -8,7 +8,7 @@ from unittest.mock import Mock
 import pytest
 
 from vllm.config import ModelConfig
-from vllm.entrypoints.openai.serving_engine import OpenAIServing
+from vllm.entrypoints.openai.engine.serving import OpenAIServing
 from vllm.entrypoints.openai.serving_models import OpenAIServingModels
 from vllm.tokenizers.mistral import MistralTokenizer
 
