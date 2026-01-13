@@ -26,6 +26,8 @@ from typing import Any
 
 from .energy_sampling import EnergySampler, integrate_energy_j
 
+MAX_EMBED_JSON_SIZE_BYTES = 2_000_000
+
 
 def _best_effort_git_head(repo_root: Path) -> str | None:
     try:
@@ -45,8 +47,15 @@ def _best_effort_git_head(repo_root: Path) -> str | None:
 
 
 def _repo_root_from_here() -> Path:
-    # benchmarks/receipts/run_receipt.py -> repo root is 3 parents up
-    return Path(__file__).resolve().parents[3]
+    current_path = Path(__file__).resolve()
+    for parent in current_path.parents:
+        # Prefer .git when available (developer checkout).
+        if (parent / ".git").is_dir():
+            return parent
+        # Fallback for environments where .git isn't present (e.g., sdist).
+        if (parent / "pyproject.toml").is_file() and (parent / "vllm").is_dir():
+            return parent
+    raise RuntimeError("Could not find repository root from benchmarks/receipts")
 
 
 def _write_text(path: Path, text: str) -> None:
@@ -200,7 +209,7 @@ def main() -> int:
 
             attach_info["sha256"] = hashlib.sha256(raw).hexdigest()
             # Embed only if reasonably small.
-            if len(raw) <= 2_000_000:
+            if len(raw) <= MAX_EMBED_JSON_SIZE_BYTES:
                 attach_info["json"] = json.loads(raw.decode("utf-8"))
             else:
                 attach_info["json"] = None

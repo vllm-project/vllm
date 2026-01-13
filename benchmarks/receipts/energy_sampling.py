@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import contextlib
 import subprocess
+import sys
 import threading
 import time
 from dataclasses import dataclass
@@ -133,6 +134,11 @@ class EnergySampler:
             return
         self._stop.set()
         self._thread.join(timeout=5.0)
+        if self._thread.is_alive():
+            print(
+                "Warning: EnergySampler thread did not terminate within 5 seconds.",
+                file=sys.stderr,
+            )
         self._thread = None
 
     def _run(self) -> None:
@@ -146,11 +152,11 @@ class EnergySampler:
             h = pynvml.nvmlDeviceGetHandleByIndex(self.gpu_id)
             self.backend = "nvml"
 
-            with contextlib.suppress(Exception):
+            with contextlib.suppress(pynvml.NVMLError):
                 self.metadata["power_limit_w"] = (
                     float(pynvml.nvmlDeviceGetPowerManagementLimit(h)) / 1000.0
                 )
-            with contextlib.suppress(Exception):
+            with contextlib.suppress(pynvml.NVMLError):
                 self.metadata["name"] = str(pynvml.nvmlDeviceGetName(h))
 
             while not self._stop.is_set():

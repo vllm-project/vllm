@@ -35,7 +35,14 @@ def main() -> int:
         return 2
 
     p = Path(sys.argv[1])
-    data = json.loads(p.read_text(encoding="utf-8"))
+    try:
+        data = json.loads(p.read_text(encoding="utf-8"))
+    except FileNotFoundError as e:
+        print(f"Error: Receipt file not found: {e}", file=sys.stderr)
+        return 1
+    except json.JSONDecodeError as e:
+        print(f"Error: Invalid JSON format in receipt file: {e}", file=sys.stderr)
+        return 1
 
     duration_s = _g(data, "duration_s")
     rc = _g(data, "result", "returncode")

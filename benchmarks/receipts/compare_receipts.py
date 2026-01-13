@@ -25,7 +25,7 @@ def _g(d: dict[str, Any], *keys: str) -> Any:
 
 
 def _ratio(a: float | None, b: float | None) -> float | None:
-    if a is None or b is None or b == 0:
+    if a is None or b is None or abs(float(b)) < 1e-9:
         return None
     return float(a) / float(b)
 
@@ -45,8 +45,15 @@ def main() -> int:
         )
         return 2
 
-    a = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
-    b = json.loads(Path(sys.argv[2]).read_text(encoding="utf-8"))
+    try:
+        a = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+        b = json.loads(Path(sys.argv[2]).read_text(encoding="utf-8"))
+    except FileNotFoundError as e:
+        print(f"Error: Input file not found: {e}", file=sys.stderr)
+        return 1
+    except json.JSONDecodeError as e:
+        print(f"Error: Invalid JSON format in input file: {e}", file=sys.stderr)
+        return 1
 
     dur_a = _g(a, "duration_s")
     dur_b = _g(b, "duration_s")
