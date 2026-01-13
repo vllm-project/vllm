@@ -104,11 +104,13 @@ RUN if [ "$USE_SCCACHE" = "1" ]; then \
         && echo "sccache wrappers created in /opt/sccache-wrappers"; \
     fi
 
-# Set sccache environment variables (will be empty if USE_SCCACHE is not set)
-ENV SCCACHE_BUCKET=${SCCACHE_BUCKET_NAME}
-ENV SCCACHE_REGION=${SCCACHE_REGION_NAME}
-ENV SCCACHE_S3_NO_CREDENTIALS=${SCCACHE_S3_NO_CREDENTIALS}
-ENV SCCACHE_IDLE_TIMEOUT=0
+# Set sccache environment variables only when USE_SCCACHE=1
+# This prevents S3 config from leaking into images when sccache is not used
+ARG USE_SCCACHE
+ENV SCCACHE_BUCKET=${USE_SCCACHE:+${SCCACHE_BUCKET_NAME}}
+ENV SCCACHE_REGION=${USE_SCCACHE:+${SCCACHE_REGION_NAME}}
+ENV SCCACHE_S3_NO_CREDENTIALS=${USE_SCCACHE:+${SCCACHE_S3_NO_CREDENTIALS}}
+ENV SCCACHE_IDLE_TIMEOUT=${USE_SCCACHE:+0}
 
 
 ###
