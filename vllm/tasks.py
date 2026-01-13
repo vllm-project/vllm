@@ -3,11 +3,11 @@
 from typing import Literal, get_args
 
 GenerationTask = Literal["generate", "transcription"]
-GENERATION_TASKS = get_args(GenerationTask)
+GENERATION_TASKS: tuple[GenerationTask, ...] = get_args(GenerationTask)
 
 PoolingTask = Literal[
     "embed", "classify", "score", "token_embed", "token_classify", "plugin"
 ]
-POOLING_TASKS = get_args(PoolingTask)
+POOLING_TASKS: tuple[PoolingTask, ...] = get_args(PoolingTask)
 
 SupportedTask = Literal[GenerationTask, PoolingTask]

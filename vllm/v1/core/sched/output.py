@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from dataclasses import dataclass
+from functools import cached_property
 from typing import TYPE_CHECKING
 
 from vllm._bc_linter import bc_linter_include
@@ -90,10 +91,14 @@ class NewRequestData:
         prompt_embeds_shape = (
             self.prompt_embeds.shape if self.prompt_embeds is not None else None
         )
+        prefill_token_ids_len = (
+            len(self.prefill_token_ids) if self.prefill_token_ids is not None else None
+        )
         return (
             f"NewRequestData("
             f"req_id={self.req_id},"
             f"prompt_token_ids_len={prompt_token_ids_len},"
+            f"prefill_token_ids_len={prefill_token_ids_len},"
             f"mm_features={self.mm_features},"
             f"sampling_params={self.sampling_params},"
             f"block_ids={self.block_ids},"
@@ -122,9 +127,44 @@ class CachedRequestData:
     num_computed_tokens: list[int]
     num_output_tokens: list[int]
 
+    # Version of dataclass repr with token IDs obfuscated.
+    def anon_repr(self) -> str:
+        new_token_ids_lens = [len(toks) for toks in self.new_token_ids]
+        all_token_ids_lens = {
+            req_id: len(toks) for req_id, toks in self.all_token_ids.items()
+        }
+        return (
+            f"CachedRequestData("
+            f"req_ids={self.req_ids},"
+            f"resumed_req_ids={self.resumed_req_ids},"
+            f"new_token_ids_lens={new_token_ids_lens},"
+            f"all_token_ids_lens={all_token_ids_lens},"
+            f"new_block_ids={self.new_block_ids},"
+            f"num_computed_tokens={self.num_computed_tokens},"
+            f"num_output_tokens={self.num_output_tokens}"
+            f")"
+        )
+
+    def __repr__(self) -> str:
+        return self.anon_repr()
+
     @property
     def num_reqs(self) -> int:
         return len(self.req_ids)
+
+    @cached_property
+    def _req_id_to_num_output_tokens(self) -> dict[str, int]:
+        """Cache mapping of req_id to num_output_tokens for O(1) lookup.
+
+        This cached property is safe because CachedRequestData instances
+        are created fresh each scheduling iteration and not mutated during
+        computation of iteration details.
+        """
+        return dict(zip(self.req_ids, self.num_output_tokens))
+
+    def is_context_phase(self, req_id: str) -> bool:
+        num_output_tokens = self._req_id_to_num_output_tokens.get(req_id)
+        return num_output_tokens is not None and num_output_tokens == 0
 
     @classmethod
     def make_empty(cls) -> "CachedRequestData":
