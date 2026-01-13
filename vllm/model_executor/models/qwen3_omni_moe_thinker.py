@@ -31,6 +31,9 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from packaging.version import Version
+
+from transformers import PretrainedConfig
+from transformers import __version__ as TRANSFORMERS_VERSION
 from transformers.feature_extraction_utils import BatchFeature
 from transformers.models.qwen3_omni_moe.configuration_qwen3_omni_moe import (
     Qwen3OmniMoeAudioEncoderConfig,
@@ -42,8 +45,6 @@ from transformers.models.qwen3_omni_moe.processing_qwen3_omni_moe import (
 )
 from transformers.models.whisper import WhisperFeatureExtractor
 
-from transformers import PretrainedConfig
-from transformers import __version__ as TRANSFORMERS_VERSION
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import MultiModalConfig, VllmConfig
 from vllm.distributed import get_pp_group
