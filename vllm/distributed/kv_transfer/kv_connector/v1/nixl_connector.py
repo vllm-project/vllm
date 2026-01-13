@@ -1679,9 +1679,6 @@ class NixlConnectorWorker:
         )
         # Num kv_heads > tp_size and P TP > D TP case, not supported
         assert not (tp_ratio < 0 and self.kv_topo.is_kv_replicated(remote_engine_id))
-        assert not self.kv_topo._use_pallas or tp_ratio == 1, (
-            "TPU (pallas_v1) DOES NOT support heterogeneous TP yet."
-        )
 
         kv_cache_layout = (
             self.kv_cache_layout
