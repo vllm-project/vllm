@@ -7,6 +7,7 @@ import logging
 
 import pytest
 import regex as re
+from vllm.attention.backends.registry import AttentionBackendEnum
 
 from tests.compile.fusion_test_utils import (
     CUSTOM_OPS_FP8,
@@ -19,7 +20,6 @@ from tests.compile.fusion_test_utils import (
     is_blackwell,
     run_model,
 )
-from vllm.attention.backends.registry import AttentionBackendEnum
 from vllm.config import CompilationConfig, CompilationMode, CUDAGraphMode, PassConfig
 from vllm.platforms import current_platform
 from vllm.utils.flashinfer import has_flashinfer

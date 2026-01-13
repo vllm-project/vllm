@@ -48,9 +48,9 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import Fp8LinearOp
 from vllm.platforms import current_platform
 from vllm.utils.flashinfer import has_flashinfer
+from vllm.utils.torch_utils import is_torch_equal_or_newer
 from vllm.v1.attention.backend import AttentionMetadata
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
-from vllm.utils.torch_utils import is_torch_equal_or_newer
 from vllm.v1.kv_cache_interface import AttentionSpec
 
 FP8_DTYPE = current_platform.fp8_dtype()
