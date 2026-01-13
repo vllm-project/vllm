@@ -51,6 +51,16 @@ void cutlass_moe_mm_sm100(
     bool per_act_token, bool per_out_ch);
 #endif
 
+#if defined ENABLE_CUTLASS_MOE_SM120 && ENABLE_CUTLASS_MOE_SM120
+void cutlass_moe_mm_sm120(
+    torch::Tensor& out_tensors, torch::Tensor const& a_tensors,
+    torch::Tensor const& b_tensors, torch::Tensor const& a_scales,
+    torch::Tensor const& b_scales, torch::Tensor const& expert_offsets,
+    torch::Tensor const& problem_sizes, torch::Tensor const& a_strides,
+    torch::Tensor const& b_strides, torch::Tensor const& c_strides,
+    bool per_act_token, bool per_out_ch);
+#endif
+
 #if defined ENABLE_SCALED_MM_SM120 && ENABLE_SCALED_MM_SM120
 void cutlass_scaled_mm_sm120(torch::Tensor& c, torch::Tensor const& a,
                              torch::Tensor const& b,
@@ -259,6 +269,14 @@ void cutlass_moe_mm(
     torch::Tensor const& b_strides, torch::Tensor const& c_strides,
     bool per_act_token, bool per_out_ch) {
   int32_t version_num = get_sm_version_num();
+#if defined ENABLE_CUTLASS_MOE_SM120 && ENABLE_CUTLASS_MOE_SM120
+  if (version_num >= 120 && version_num < 130) {
+    cutlass_moe_mm_sm120(out_tensors, a_tensors, b_tensors, a_scales, b_scales,
+                         expert_offsets, problem_sizes, a_strides, b_strides,
+                         c_strides, per_act_token, per_out_ch);
+    return;
+  }
+#endif
 #if defined ENABLE_CUTLASS_MOE_SM100 && ENABLE_CUTLASS_MOE_SM100
   if (version_num >= 100 && version_num < 110) {
     cutlass_moe_mm_sm100(out_tensors, a_tensors, b_tensors, a_scales, b_scales,
@@ -278,7 +296,7 @@ void cutlass_moe_mm(
   TORCH_CHECK_NOT_IMPLEMENTED(
       false,
       "No compiled cutlass_scaled_mm for CUDA device capability: ", version_num,
-      ". Required capability: 90 or 100");
+      ". Required capability: 90, 100, or 120");
 }
 
 void get_cutlass_moe_mm_data(
