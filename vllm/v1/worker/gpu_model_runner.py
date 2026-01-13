@@ -1629,8 +1629,11 @@ class GPUModelRunner(
             return blk_table_tensor
 
         assert slot_mappings is not None
+        block_table_gid_0 = _get_block_table(0)
+        slot_mapping_gid_0 = slot_mappings[0]
+
         if self.model_config.enable_return_routed_experts:
-            self.slot_mapping = slot_mappings[0][:num_tokens].cpu().numpy()
+            self.slot_mapping = slot_mapping_gid_0[:num_tokens].cpu().numpy()
 
         cm_base = CommonAttentionMetadata(
             query_start_loc=self.query_start_loc.gpu[: num_reqs_padded + 1],
@@ -1644,9 +1647,9 @@ class GPUModelRunner(
             num_actual_tokens=num_tokens_padded,
             max_query_len=max_query_len,
             max_seq_len=max_seq_len,
-            slot_mapping=slot_mappings[0],
+            slot_mapping=slot_mapping_gid_0,
             causal=True,
-            block_table_tensor=_get_block_table(0),
+            block_table_tensor=block_table_gid_0,
         )
 
         if self.dcp_world_size > 1:
