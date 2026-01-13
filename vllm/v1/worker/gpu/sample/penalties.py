@@ -75,8 +75,8 @@ class PenaltiesState:
             self.repetition_penalty.gpu,
             self.frequency_penalty.gpu,
             self.presence_penalty.gpu,
-            self.prompt_bin_mask.gpu,
-            self.output_bin_counts.gpu,
+            self.prompt_bin_mask,
+            self.output_bin_counts,
         )
 
 
