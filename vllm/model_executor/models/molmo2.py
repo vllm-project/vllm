@@ -2155,6 +2155,20 @@ class Molmo2DummyInputsBuilder(BaseDummyInputsBuilder[Molmo2ProcessingInfo]):
 
 
 class Molmo2MultiModalProcessor(BaseMultiModalProcessor[Molmo2ProcessingInfo]):
+    def _apply_hf_processor_tokens_only(
+        self,
+        prompt_tokens: list[int],
+    ) -> list[int]:
+        processor = self.info.get_hf_processor()
+        tokenizer = processor.processor.tokenizer
+        bos_token_id = tokenizer.bos_token_id or tokenizer.eos_token_id
+
+        if len(prompt_tokens) > 0 and prompt_tokens[0] != bos_token_id:
+            # Prepend the bos token to the prompt tokens
+            prompt_tokens = [bos_token_id] + prompt_tokens
+
+        return prompt_tokens
+
     def _get_data_parser(self) -> MultiModalDataParser:
         return MultiModalDataParser(video_needs_metadata=True)
 
@@ -2245,6 +2259,17 @@ class Molmo2MultiModalProcessor(BaseMultiModalProcessor[Molmo2ProcessingInfo]):
             mm_kwargs=mm_kwargs,
             tok_kwargs=tok_kwargs,
         )
+
+        bos_token_id = processor.vocab[processor.bos_token]
+        input_ids = processed_outputs["input_ids"]
+        # add bos token back to prompt start
+        if input_ids.numel() > 0 and input_ids[0, 0] != bos_token_id:
+            bos_token_id_tensor = torch.tensor(
+                [[bos_token_id]], device=input_ids.device, dtype=input_ids.dtype
+            )
+            processed_outputs["input_ids"] = torch.concat(
+                [bos_token_id_tensor, input_ids], dim=1
+            )
         combined_outputs = dict(
             processed_outputs,
             **video_outputs,
