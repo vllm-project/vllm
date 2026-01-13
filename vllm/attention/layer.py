@@ -376,20 +376,32 @@ class Attention(nn.Module, AttentionLayerBase):
             if value is not None:
                 value = value.view(-1, self.num_kv_heads, self.head_size_v)
             if self.use_direct_call:
+                kv_cache_update_out = None
                 if not self.attn_backend.forward_includes_kv_cache:
-                    output = unified_kv_cache_update(
-                        key, value, output, self.layer_name
+                    kv_cache_update_out = unified_kv_cache_update(
+                        key, value, self.layer_name
                     )
                 unified_attention_with_output(
-                    query, key, value, output, self.layer_name
+                    query,
+                    key,
+                    value,
+                    output,
+                    self.layer_name,
+                    kv_cache_update_out=kv_cache_update_out,
                 )
             else:
+                kv_cache_update_out = None
                 if not self.attn_backend.forward_includes_kv_cache:
-                    output = torch.ops.vllm.unified_kv_cache_update(
-                        key, value, output, self.layer_name
+                    kv_cache_update_out = torch.ops.vllm.unified_kv_cache_update(
+                        key, value, self.layer_name
                     )
                 torch.ops.vllm.unified_attention_with_output(
-                    query, key, value, output, self.layer_name
+                    query,
+                    key,
+                    value,
+                    output,
+                    self.layer_name,
+                    kv_cache_update_out=kv_cache_update_out,
                 )
             return output.view(-1, hidden_size)
         else:
@@ -794,7 +806,6 @@ direct_register_custom_op(
 def unified_kv_cache_update(
     key: torch.Tensor,
     value: torch.Tensor,
-    output: torch.Tensor,
     layer_name: str,
 ) -> torch.Tensor:
     forward_context = get_forward_context()
@@ -805,30 +816,26 @@ def unified_kv_cache_update(
     if isinstance(slot_mapping, dict):
         slot_mapping = slot_mapping.get(layer_name)
 
-    if slot_mapping is None:
-        # No slot_mapping available (e.g., profiling run)
-        return output
-
-    assert hasattr(attn_layer.impl, "do_kv_cache_update"), (
-        f"{attn_layer.impl.__class__.__name__} does not support kv cache update"
-    )
-    attn_layer.impl.do_kv_cache_update(
-        attn_layer,
-        key,
-        value,
-        kv_cache,
-        slot_mapping,
-    )
-    return output
+    if slot_mapping is not None:
+        assert hasattr(attn_layer.impl, "do_kv_cache_update"), (
+            f"{attn_layer.impl.__class__.__name__} does not support kv cache update"
+        )
+        attn_layer.impl.do_kv_cache_update(
+            attn_layer,
+            key,
+            value,
+            kv_cache,
+            slot_mapping,
+        )
+    return torch.empty(0, device=key.device, dtype=key.dtype)
 
 
 def unified_kv_cache_update_fake(
     key: torch.Tensor,
     value: torch.Tensor,
-    output: torch.Tensor,
     layer_name: str,
 ) -> torch.Tensor:
-    return output
+    return torch.empty(0, device=key.device, dtype=key.dtype)
 
 
 direct_register_custom_op(
@@ -848,7 +855,12 @@ def unified_attention_with_output(
     layer_name: str,
     output_scale: torch.Tensor | None = None,
     output_block_scale: torch.Tensor | None = None,
+    kv_cache_update_out: torch.Tensor | None = None,
 ) -> None:
+    # kv_cache_update_out is not used but accepting it creates a data dependency
+    # that ensures torch.compile preserves ordering between KV cache update and
+    # attention forward.
+    del kv_cache_update_out
     attn_metadata, self, kv_cache = get_attention_context(layer_name)
 
     self.impl.forward(
@@ -872,6 +884,7 @@ def unified_attention_with_output_fake(
     layer_name: str,
     output_scale: torch.Tensor | None = None,
     output_block_scale: torch.Tensor | None = None,
+    kv_cache_update_out: torch.Tensor | None = None,
 ) -> None:
     return
 
