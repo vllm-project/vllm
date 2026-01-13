@@ -7,8 +7,8 @@ from typing import Any, Literal, TypeAlias
 from pydantic import ConfigDict, Field, field_validator, model_validator
 from pydantic.dataclasses import dataclass
 
-from vllm.attention.backends.registry import AttentionBackendEnum
 from vllm.config.utils import CompileFactors, config, normalize_value
+from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 
 @dataclass

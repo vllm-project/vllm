@@ -298,7 +298,10 @@ def get_compile_factors(config: ConfigT, ignored_factors: set[str]) -> CompileFa
     - Uses .compile_factors() for nested dataclasses that support it
     - Errors on non-normalizable values.
     """
-    field_names = {f.name for f in fields(config)}
+    # dataclasses.fields() skips InitVar entries; __dataclass_fields__ keeps
+    # them. Include both so ignored_factors can safely name InitVars.
+    dataclass_fields = getattr(config, "__dataclass_fields__", {})
+    field_names = {f.name for f in fields(config)} | set(dataclass_fields)
     unknown_ignored = ignored_factors - field_names
     if unknown_ignored:
         raise ValueError(

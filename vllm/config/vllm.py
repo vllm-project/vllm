@@ -255,11 +255,7 @@ class VllmConfig:
         from vllm import __version__
 
         def _compile(config_obj: SupportsCompileFactors | None) -> CompileFactors:
-            if config_obj is None:
-                return {"__none__": True}
-
-            factors = config_obj.compile_factors()
-            return factors if factors else {"__empty__": True}
+            return {} if config_obj is None else config_obj.compile_factors()
 
         factors: dict[str, Any] = {
             "version": __version__,
@@ -290,7 +286,7 @@ class VllmConfig:
                     "additional_config must be a dict or SupportsCompileFactors"
                 )
         else:
-            factors["additional"] = {"__none__": True}
+            factors["additional"] = {}
 
         return factors
 

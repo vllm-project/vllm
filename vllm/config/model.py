@@ -352,15 +352,6 @@ class ModelConfig:
             "io_processor_plugin",
             "pooler_config",
             "multimodal_config",
-            "limit_mm_per_prompt",
-            "media_io_kwargs",
-            "mm_processor_kwargs",
-            "mm_processor_cache_gb",
-            "mm_processor_cache_type",
-            "mm_shm_cache_max_object_size_mb",
-            "mm_encoder_tp_mode",
-            "interleave_mm_strings",
-            "skip_mm_profiling",
         }
 
         factors = get_compile_factors(self, ignored_factors)

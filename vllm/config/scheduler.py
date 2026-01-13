@@ -191,10 +191,10 @@ class SchedulerConfig:
         # Only surface scheduler knobs that influence compiled shapes. Legacy
         # scheduler hashing fed a list of factors (currently just
         # max_num_batched_tokens) into safe_hash. The compile cache now hashes
-        # the entire config factors via JSON, so returning the factor list keeps
-        # the data payload unchanged (the outer dict from VllmConfig supplies
-        # the key) and avoids a shape change that would perturb the cache key.
-        return [self.max_num_batched_tokens]
+        # the nested factors dict via JSON, so we expose a dict payload to
+        # satisfy the CompileFactors protocol while keeping the factor content
+        # minimal to avoid unnecessary cache key churn.
+        return {"max_num_batched_tokens": self.max_num_batched_tokens}
 
     @field_validator("scheduler_cls", "async_scheduling", mode="wrap")
     @classmethod
