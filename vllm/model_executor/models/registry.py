@@ -891,6 +891,7 @@ class _ModelRegistry:
                         module,
                         model_config.model,
                         revision=model_config.revision,
+                        trust_remote_code=model_config.trust_remote_code,
                         warn_on_fail=False,
                     )
 
@@ -903,6 +904,7 @@ class _ModelRegistry:
                         module,
                         model_config.model,
                         revision=model_config.revision,
+                        trust_remote_code=model_config.trust_remote_code,
                         warn_on_fail=True,
                     )
                     if model_module is not None:
