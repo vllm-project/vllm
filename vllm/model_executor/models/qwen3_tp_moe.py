@@ -217,7 +217,12 @@ class Qwen3TPMoeSparseMoeBlock(nn.Module):
             [nn.Linear(config.hidden_size, 1) for _ in range(self.n_task_experts)]
         ) if self.task_expert_merge_method == 'gating' else None
 
-    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        task_ids: torch.Tensor | None = None,
+        is_decode: torch.Tensor | None = None,
+    ) -> torch.Tensor:
         assert hidden_states.dim() <= 2, (
             "Qwen3MoeSparseMoeBlock only supports 1D or 2D inputs"
         )
@@ -234,11 +239,37 @@ class Qwen3TPMoeSparseMoeBlock(nn.Module):
             hidden_states=hidden_states, router_logits=router_logits
         )
 
-        # Add task experts' outputs
-        if self.task_expert_merge_method == 'gating':
-            task_expert_outputs = self.task_experts[0](hidden_states)
-            gate_scores = torch.sigmoid(self.task_expert_gates[0](hidden_states))
-            final_hidden_states = final_hidden_states + gate_scores * task_expert_outputs
+        # Add task experts' outputs only for decode tokens with valid task_id
+        if self.task_expert_merge_method == 'gating' and task_ids is not None and is_decode is not None:
+            # Create mask for tokens that should use task experts:
+            # - must be decode token (is_decode = True)
+            # - must have valid task_id (>= 0)
+            valid_task_mask = is_decode & (task_ids >= 0)
+
+            if valid_task_mask.any():
+                # Get unique task_ids that need processing
+                unique_task_ids = torch.unique(task_ids[valid_task_mask])
+
+                for tid in unique_task_ids:
+                    tid_int = tid.item()
+                    if tid_int < 0 or tid_int >= self.n_task_experts:
+                        continue
+
+                    # Find tokens for this task_id that are decode tokens
+                    token_mask = valid_task_mask & (task_ids == tid_int)
+
+                    if token_mask.any():
+                        # Get hidden states for these tokens
+                        selected_hidden = hidden_states[token_mask]
+
+                        # Apply the corresponding task expert
+                        task_expert_output = self.task_experts[tid_int](selected_hidden)
+                        gate_scores = torch.sigmoid(self.task_expert_gates[tid_int](selected_hidden))
+
+                        # Add gated task expert output to final hidden states
+                        final_hidden_states[token_mask] = (
+                            final_hidden_states[token_mask] + gate_scores * task_expert_output
+                        )
 
         if self.is_sequence_parallel:
             final_hidden_states = tensor_model_parallel_all_gather(
@@ -410,6 +441,8 @@ class Qwen3TPMoeDecoderLayer(nn.Module):
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
         residual: torch.Tensor | None,
+        task_ids: torch.Tensor | None = None,
+        is_decode: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         # Self Attention
         if residual is None:
@@ -424,7 +457,11 @@ class Qwen3TPMoeDecoderLayer(nn.Module):
 
         # Fully Connected
         hidden_states, residual = self.post_attention_layernorm(hidden_states, residual)
-        hidden_states = self.mlp(hidden_states)
+        # Pass task_ids and is_decode to MLP if it's a MoE block
+        if isinstance(self.mlp, Qwen3TPMoeSparseMoeBlock):
+            hidden_states = self.mlp(hidden_states, task_ids=task_ids, is_decode=is_decode)
+        else:
+            hidden_states = self.mlp(hidden_states)
         return hidden_states, residual
 
 
@@ -470,6 +507,8 @@ class Qwen3TPMoeModel(nn.Module):
         positions: torch.Tensor,
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,
+        task_ids: torch.Tensor | None = None,
+        is_decode: torch.Tensor | None = None,
     ) -> torch.Tensor | IntermediateTensors | tuple[torch.Tensor, list[torch.Tensor]]:
         if get_pp_group().is_first_rank:
             if inputs_embeds is not None:
@@ -493,7 +532,10 @@ class Qwen3TPMoeModel(nn.Module):
                     hidden_states + residual if residual is not None else hidden_states
                 )
                 aux_hidden_states.append(aux_hidden_state)
-            hidden_states, residual = layer(positions, hidden_states, residual)
+            hidden_states, residual = layer(
+                positions, hidden_states, residual,
+                task_ids=task_ids, is_decode=is_decode
+            )
 
         if not get_pp_group().is_last_rank:
             return IntermediateTensors(
@@ -785,9 +827,13 @@ class Qwen3TPMoeForCausalLM(
         positions: torch.Tensor,
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,
+        task_ids: torch.Tensor | None = None,
+        is_decode: torch.Tensor | None = None,
+        **kwargs,
     ) -> torch.Tensor | IntermediateTensors:
         hidden_states = self.model(
-            input_ids, positions, intermediate_tensors, inputs_embeds
+            input_ids, positions, intermediate_tensors, inputs_embeds,
+            task_ids=task_ids, is_decode=is_decode
         )
         return hidden_states
 

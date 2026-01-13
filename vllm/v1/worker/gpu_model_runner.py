@@ -559,6 +559,10 @@ class GPUModelRunner(
             self.max_num_reqs, dtype=torch.int64
         )
 
+        # Task expert routing: per-token task_id and is_decode flag
+        self.task_ids = self._make_buffer(self.max_num_tokens, dtype=torch.int32)
+        self.is_decode = self._make_buffer(self.max_num_tokens, dtype=torch.bool)
+
         # Only relevant for multimodal models
         if self.supports_mm_inputs:
             # Double buffer to avoid race condition: previous iteration's async
@@ -1379,6 +1383,26 @@ class GPUModelRunner(
             out=positions_np,
         )
 
+        # Build per-token task_ids from per-request task_id
+        # E.g., task_id_cpu = [1, 2, -1] with num_scheduled_tokens = [2, 5, 3]
+        # -> task_ids = [1, 1, 2, 2, 2, 2, 2, -1, -1, -1]
+        # -1 means task_id not set for that request
+        task_ids_np = self.task_ids.np[:total_num_scheduled_tokens]
+        np.take(
+            self.input_batch.task_id_cpu,
+            req_indices,
+            out=task_ids_np,
+        )
+
+        # Build per-token is_decode flag
+        # A token is decode if its position >= num_prompt_tokens for that request
+        is_decode_np = self.is_decode.np[:total_num_scheduled_tokens]
+        np.greater_equal(
+            positions_np,
+            self.input_batch.num_prompt_tokens[req_indices],
+            out=is_decode_np,
+        )
+
         # Calculate M-RoPE positions.
         # Only relevant for models using M-RoPE (e.g, Qwen2-VL)
         if self.uses_mrope:
@@ -1505,6 +1529,10 @@ class GPUModelRunner(
         else:
             # Common case (1D positions)
             self.positions.copy_to_gpu(total_num_scheduled_tokens)
+
+        # Copy task expert routing tensors to GPU
+        self.task_ids.copy_to_gpu(total_num_scheduled_tokens)
+        self.is_decode.copy_to_gpu(total_num_scheduled_tokens)
 
         use_spec_decode = len(scheduler_output.scheduled_spec_decode_tokens) > 0
         if not use_spec_decode:
@@ -2707,6 +2735,21 @@ class GPUModelRunner(
             # ever have a single encoder input.
             encoder_outputs = self._execute_mm_encoder(scheduler_output)
             model_kwargs.update({"encoder_outputs": encoder_outputs})
+
+        # Add per-token task_ids and is_decode for task-expert routing
+        # Only add if any request has task_id set (i.e., not all are -1)
+        num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
+        task_ids_np = self.task_ids.np[:num_scheduled_tokens]
+        if np.any(task_ids_np >= 0):
+            model_kwargs.update({
+                "task_ids": self.task_ids.gpu[:num_input_tokens],
+                "is_decode": self.is_decode.gpu[:num_input_tokens],
+            })
+        else:
+            model_kwargs.update({
+                "task_ids": None,
+                "is_decode": None,
+            })
 
         return (
             input_ids,
