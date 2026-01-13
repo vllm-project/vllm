@@ -44,10 +44,14 @@ def test_get_open_port_list(
     monkeypatch: pytest.MonkeyPatch,
 ):
     with monkeypatch.context() as m:
-        if vllm_port is not None:
+        if vllm_port is None:
+            m.delenv("VLLM_PORT", raising=False)
+        else:
             m.setenv("VLLM_PORT", str(vllm_port))
 
-        if vllm_dp_master_port is not None:
+        if vllm_dp_master_port is None:
+            m.delenv("VLLM_DP_MASTER_PORT", raising=False)
+        else:
             m.setenv("VLLM_DP_MASTER_PORT", str(vllm_dp_master_port))
 
         port_list = get_open_ports_list(5)
