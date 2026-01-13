@@ -17,10 +17,16 @@ class SamplingStates:
         self.vocab_size = vocab_size
 
         self.temperature = UvaBackedTensor(max_num_reqs, dtype=torch.float32)
-        self.top_p = UvaBackedTensor(max_num_reqs, dtype=torch.float32)
         self.top_k = UvaBackedTensor(max_num_reqs, dtype=torch.int32)
+        self.top_p = UvaBackedTensor(max_num_reqs, dtype=torch.float32)
         self.min_p = UvaBackedTensor(max_num_reqs, dtype=torch.float32)
         self.seeds = UvaBackedTensor(max_num_reqs, dtype=torch.int64)
+
+        # Initialize top_k and top_p manually because 0 is an invalid value for them.
+        self.top_k.np.fill(self.vocab_size)
+        self.top_k.copy_to_uva()
+        self.top_p.np.fill(1.0)
+        self.top_p.copy_to_uva()
 
         self.num_logprobs = np.empty(self.max_num_reqs, dtype=np.int32)
         # -1 means no logprobs are requested.
@@ -59,7 +65,7 @@ class SamplingStates:
         return np.any(self.min_p.np[idx_mapping_np] != 0.0)
 
     def do_top_k(self, idx_mapping_np: np.ndarray) -> bool:
-        return np.any(self.top_k.np[idx_mapping_np] < self.vocab_size)
+        return np.any(self.top_k.np[idx_mapping_np] != self.vocab_size)
 
     def do_top_p(self, idx_mapping_np: np.ndarray) -> bool:
         return np.any(self.top_p.np[idx_mapping_np] != 1.0)
