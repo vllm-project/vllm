@@ -5,13 +5,13 @@ from typing import Literal, get_args
 
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.base_config import QuantizationConfig
+from vllm.platforms import current_platform
 
 logger = init_logger(__name__)
 
 QuantizationMethods = Literal[
     "awq",
     "deepspeedfp",
-    "tpu_int8",
     "fp8",
     "ptpc_fp8",
     "fbgemm_fp8",
@@ -41,6 +41,23 @@ QuantizationMethods = Literal[
     "cpu_awq",
 ]
 QUANTIZATION_METHODS: list[str] = list(get_args(QuantizationMethods))
+
+DEPRECATED_QUANTIZATION_METHODS = [
+    "deepspeedfp",
+    "tpu_int8",
+    "ptpc_fp8",
+    "fbgemm_fp8",
+    "fp_quant",
+    "bitblas",
+    "gptq_marlin_24",
+    "gptq_bitblas",
+    "hqq",
+    "experts_int8",
+    "ipex",
+    "auto-round",
+    "rtn",
+    "petit_nvfp4",
+]
 
 # The customized quantization methods which will be added to this dict.
 _CUSTOMIZED_METHOD_TO_QUANT_CONFIG = {}
@@ -82,6 +99,9 @@ def register_quantization_config(quantization: str):
             )
         else:
             QUANTIZATION_METHODS.append(quantization)
+            # Automatically assume the custom quantization config is supported
+            if sq := current_platform.supported_quantization:
+                sq.append(quantization)
 
         if not issubclass(quant_config_cls, QuantizationConfig):
             raise ValueError(
@@ -129,12 +149,10 @@ def get_quantization_config(quantization: str) -> type[QuantizationConfig]:
     from .ptpc_fp8 import PTPCFp8Config
     from .rtn import RTNConfig
     from .torchao import TorchAOConfig
-    from .tpu_int8 import Int8TpuConfig
 
     method_to_config: dict[str, type[QuantizationConfig]] = {
         "awq": AWQConfig,
         "deepspeedfp": DeepSpeedFPConfig,
-        "tpu_int8": Int8TpuConfig,
         "fp8": Fp8Config,
         "fbgemm_fp8": FBGEMMFp8Config,
         "fp_quant": FPQuantConfig,

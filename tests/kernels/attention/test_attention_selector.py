@@ -6,13 +6,13 @@ from unittest.mock import patch
 import pytest
 import torch
 
-from vllm.attention.backends.registry import AttentionBackendEnum
-from vllm.attention.selector import _cached_get_attn_backend, get_attn_backend
 from vllm.config import AttentionConfig, VllmConfig, set_current_vllm_config
 from vllm.platforms import current_platform
 from vllm.platforms.cpu import CpuPlatform
 from vllm.platforms.cuda import CudaPlatform
 from vllm.platforms.rocm import RocmPlatform
+from vllm.v1.attention.backends.registry import AttentionBackendEnum
+from vllm.v1.attention.selector import _cached_get_attn_backend, get_attn_backend
 
 
 @pytest.fixture(autouse=True)
@@ -182,7 +182,7 @@ def test_backend_selection(
                         expected = name
                         assert backend.get_name() == expected
                     elif name == "FLASH_ATTN_MLA":
-                        from vllm.attention.utils.fa_utils import (
+                        from vllm.v1.attention.backends.fa_utils import (
                             flash_attn_supports_mla,
                         )
 

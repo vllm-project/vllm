@@ -13,6 +13,7 @@ import partial_json_parser
 import regex as re
 from fastapi import Request
 from openai_harmony import Message as OpenAIMessage
+from partial_json_parser.core.options import Allow
 
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.chat_utils import (
@@ -76,6 +77,7 @@ from vllm.tokenizers.mistral import (
 )
 from vllm.tool_parsers import ToolParser
 from vllm.tool_parsers.mistral_tool_parser import MistralToolCall
+from vllm.tool_parsers.utils import partial_json_loads
 from vllm.utils.collection_utils import as_list
 from vllm.v1.sample.logits_processor import validate_logits_processors_parameters
 
@@ -101,7 +103,7 @@ class OpenAIServingChat(OpenAIServing):
         enable_prompt_tokens_details: bool = False,
         enable_force_include_usage: bool = False,
         enable_log_outputs: bool = False,
-        exclude_log_deltas: bool = False,
+        enable_log_deltas: bool = True,
         log_error_stack: bool = False,
         default_chat_template_kwargs: dict[str, Any] | None = None,
     ) -> None:
@@ -119,7 +121,7 @@ class OpenAIServingChat(OpenAIServing):
         self.trust_request_chat_template = trust_request_chat_template
         self.default_chat_template_kwargs = default_chat_template_kwargs or {}
         self.enable_log_outputs = enable_log_outputs
-        self.exclude_log_deltas = exclude_log_deltas
+        self.enable_log_deltas = enable_log_deltas
 
         # set up logits processors
         self.logits_processors = self.model_config.logits_processors
@@ -304,6 +306,10 @@ class OpenAIServingChat(OpenAIServing):
                 )
                 if error_check_ret is not None:
                     return error_check_ret
+
+                chat_template_kwargs = request.chat_template_kwargs or {}
+                chat_template_kwargs.update(reasoning_effort=request.reasoning_effort)
+
                 conversation, engine_prompts = await self._preprocess_chat(
                     request,
                     tokenizer,
@@ -314,7 +320,7 @@ class OpenAIServingChat(OpenAIServing):
                     continue_final_message=request.continue_final_message,
                     tool_dicts=tool_dicts,
                     documents=request.documents,
-                    chat_template_kwargs=request.chat_template_kwargs,
+                    chat_template_kwargs=chat_template_kwargs,
                     default_chat_template_kwargs=self.default_chat_template_kwargs,
                     tool_parser=tool_parser,
                     add_special_tokens=request.add_special_tokens,
@@ -511,8 +517,12 @@ class OpenAIServingChat(OpenAIServing):
             # if the current text is empty, we cannot parse it
             return None, function_name_returned
         try:
-            obj = partial_json_parser.loads(current_text)
-        except partial_json_parser.core.exceptions.MalformedJSON:
+            flags = Allow.ALL
+            obj, _ = partial_json_loads(current_text, flags)
+        except (
+            partial_json_parser.core.exceptions.MalformedJSON,
+            json.JSONDecodeError,
+        ):
             logger.debug("not enough tokens to parse into JSON yet")
             obj = None
 
@@ -1137,7 +1147,7 @@ class OpenAIServingChat(OpenAIServing):
                                 if tc.function and tc.function.arguments
                             )
 
-                        if delta_content and not self.exclude_log_deltas:
+                        if delta_content and self.enable_log_deltas:
                             self.request_logger.log_outputs(
                                 request_id=request_id,
                                 outputs=delta_content,

@@ -11,6 +11,8 @@ ARG FA_BRANCH="0e60e394"
 ARG FA_REPO="https://github.com/Dao-AILab/flash-attention.git"
 ARG AITER_BRANCH="6af8b687"
 ARG AITER_REPO="https://github.com/ROCm/aiter.git"
+ARG MORI_BRANCH="2d02c6a9"
+ARG MORI_REPO="https://github.com/ROCm/mori.git"
 
 #TODO: When patch has been upstreamed, switch to the main repo/branch
 # ARG RIXL_BRANCH="<TODO>"
@@ -31,6 +33,7 @@ ENV LD_LIBRARY_PATH=/opt/rocm/lib:/usr/local/lib:
 ARG PYTORCH_ROCM_ARCH=gfx90a;gfx942;gfx950;gfx1100;gfx1101;gfx1200;gfx1201;gfx1150;gfx1151
 ENV PYTORCH_ROCM_ARCH=${PYTORCH_ROCM_ARCH}
 ENV AITER_ROCM_ARCH=gfx942;gfx950
+ENV MORI_GPU_ARCHS=gfx942;gfx950
 
 # Required for RCCL in ROCm7.1
 ENV HSA_NO_SCRATCH_RECLAIM=1
@@ -44,7 +47,7 @@ ENV DEBIAN_FRONTEND=noninteractive
 
 # Install Python and other dependencies
 RUN apt-get update -y \
-    && apt-get install -y software-properties-common git curl sudo vim less libgfortran5 \
+    && apt-get install -y software-properties-common git curl sudo vim less libgfortran5 libopenmpi-dev libpci-dev \
     && for i in 1 2 3; do \
         add-apt-repository -y ppa:deadsnakes/ppa && break || \
         { echo "Attempt $i failed, retrying in 5s..."; sleep 5; }; \
@@ -117,6 +120,22 @@ RUN cd audio && git checkout ${PYTORCH_AUDIO_BRANCH} \
 RUN mkdir -p /app/install && cp /app/pytorch/dist/*.whl /app/install \
     && cp /app/vision/dist/*.whl /app/install \
     && cp /app/audio/dist/*.whl /app/install
+
+
+###
+### MORI Build
+###
+FROM base AS build_mori
+ARG MORI_BRANCH
+ARG MORI_REPO
+RUN --mount=type=bind,from=build_pytorch,src=/app/install/,target=/install \
+    pip install /install/*.whl
+RUN git clone ${MORI_REPO}
+RUN cd mori \
+    && git checkout ${MORI_BRANCH} \
+    && git submodule update --init --recursive \
+    && python3 setup.py bdist_wheel --dist-dir=dist && ls /app/mori/dist/*.whl
+RUN mkdir -p /app/install && cp /app/mori/dist/*.whl /app/install
 
 
 ###
@@ -253,6 +272,8 @@ RUN --mount=type=bind,from=build_pytorch,src=/app/install/,target=/install \
     cp /install/*.whl /app/debs
 RUN --mount=type=bind,from=build_aiter,src=/app/install/,target=/install \
     cp /install/*.whl /app/debs
+RUN --mount=type=bind,from=build_mori,src=/app/install/,target=/install \
+    cp /install/*.whl /app/debs
 RUN --mount=type=bind,from=build_rixl,src=/app/install/,target=/install \
     cp /install/*.whl /app/debs
 
@@ -279,6 +300,8 @@ ARG ETCD_BRANCH
 ARG ETCD_REPO
 ARG UCX_BRANCH
 ARG UCX_REPO
+ARG MORI_BRANCH
+ARG MORI_REPO
 RUN echo "BASE_IMAGE: ${BASE_IMAGE}" > /app/versions.txt \
     && echo "TRITON_BRANCH: ${TRITON_BRANCH}" >> /app/versions.txt \
     && echo "TRITON_REPO: ${TRITON_REPO}" >> /app/versions.txt \
@@ -297,4 +320,6 @@ RUN echo "BASE_IMAGE: ${BASE_IMAGE}" > /app/versions.txt \
     && echo "ETCD_BRANCH: ${ETCD_BRANCH}" >> /app/versions.txt \
     && echo "ETCD_REPO: ${ETCD_REPO}" >> /app/versions.txt \
     && echo "UCX_BRANCH: ${UCX_BRANCH}" >> /app/versions.txt \
-    && echo "UCX_REPO: ${UCX_REPO}" >> /app/versions.txt
+    && echo "UCX_REPO: ${UCX_REPO}" >> /app/versions.txt \
+    && echo "MORI_BRANCH: ${MORI_BRANCH}" >> /app/versions.txt \
+    && echo "MORI_REPO: ${MORI_REPO}" >> /app/versions.txt
