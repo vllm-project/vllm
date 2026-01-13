@@ -1291,7 +1291,7 @@ class ModelOptNvFp4LinearMethod(LinearMethodBase):
         output_shape = [x.shape[0], layer.weight.shape[0]]
 
         # quantize BF16 or FP16 to (FP4 and interleaved block scale)
-        x_fp4, x_blockscale = scaled_fp4_quant(x, layer.input_scale_inv)
+        x_fp4, x_blockscale = scaled_fp4_quant(x, layer.input_scale_inv, self.backend)
 
         # validate dtypes of quantized input, input block scale,
         # weight and weight_blockscale
