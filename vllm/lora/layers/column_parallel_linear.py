@@ -155,10 +155,19 @@ class ColumnParallelLinearWithLoRA(BaseLinearLayerWithLoRA):
         packed_modules_list: list,
         model_config: PretrainedConfig | None = None,
     ) -> bool:
-        return type(source_layer) is ColumnParallelLinear or (
-            type(source_layer) is MergedColumnParallelLinear
-            and len(packed_modules_list) == 1
-        )
+        if type(source_layer) is ColumnParallelLinear:
+            return True
+        if type(source_layer) is MergedColumnParallelLinear:
+            if len(packed_modules_list) != 1:
+                return False
+            # Exclude layers with 3+ output sizes - those are handled by
+            # MergedColumnParallelLinearVariableSliceWithLoRA since this
+            # class's slice_lora_b assumes exactly 2 slices.
+            return not (
+                hasattr(source_layer, "output_sizes")
+                and len(source_layer.output_sizes) >= 3
+            )
+        return False
 
 
 class MergedColumnParallelLinearWithLoRA(ColumnParallelLinearWithLoRA):
