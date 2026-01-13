@@ -102,7 +102,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
         self.sonic_moe_enabled = (
             sonic_supported
             and sonic_requested
-            and current_platform.has_device_capability(90)
+            and current_platform.is_device_capability(90)
             and self.moe.is_act_and_mul
             and not self.moe.has_bias
             and not self.moe.moe_parallel_config.use_ep

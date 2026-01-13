@@ -52,7 +52,7 @@ def _is_hopper_gpu() -> bool:
     if not current_platform.is_cuda():
         return False
     # Hopper is SM90 (compute capability 9.0)
-    return current_platform.has_device_capability(90)
+    return current_platform.is_device_capability(90)
 
 
 def is_sonic_moe_supported() -> bool:
@@ -184,6 +184,7 @@ class SonicMoeExperts(mk.FusedMoEPermuteExpertsUnpermute):
         global_num_experts: int,
         local_num_experts: int,
         expert_tokens_meta: mk.ExpertTokensMetadata | None,
+        activation: str,
     ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...]]:
         workspace1 = (M * topk, max(N, K))
         workspace2 = (M * topk, N // 2)

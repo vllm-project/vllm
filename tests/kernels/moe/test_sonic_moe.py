@@ -32,7 +32,7 @@ def test_is_hopper_gpu():
     assert isinstance(result, bool)
 
     if current_platform.is_cuda():
-        expected = current_platform.has_device_capability(90)
+        expected = current_platform.is_device_capability(90)
         assert result == expected
 
 
