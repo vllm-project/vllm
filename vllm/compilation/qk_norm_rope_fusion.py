@@ -11,7 +11,7 @@ from torch._inductor.pattern_matcher import PatternMatcherPass
 
 from vllm.config import VllmConfig, get_layers_from_vllm_config
 from vllm.logger import init_logger
-from vllm.model_executor.layers.attention.attention import Attention
+from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.rotary_embedding import RotaryEmbedding
 
 from .fusion import empty_bf16, empty_fp32, empty_i64

@@ -42,7 +42,7 @@ from vllm.v1.kv_cache_interface import (
 )
 
 if TYPE_CHECKING:
-    from vllm.model_executor.layers.attention.mla_attention import MLAAttention
+    from vllm.model_executor.layers.attention import MLAAttention
 
 logger = init_logger(__name__)
 

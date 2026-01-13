@@ -32,7 +32,7 @@ from vllm.distributed import get_ep_group, get_tensor_model_parallel_world_size
 from vllm.distributed.communication_op import tensor_model_parallel_all_gather
 from vllm.distributed.parallel_state import get_pp_group
 from vllm.model_executor.layers.activation import ReLUSquaredActivation
-from vllm.model_executor.layers.attention.attention import Attention
+from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.fused_moe import FusedMoE, SharedFusedMoE
 from vllm.model_executor.layers.fused_moe.utils import activation_without_mul
 from vllm.model_executor.layers.layernorm import RMSNorm

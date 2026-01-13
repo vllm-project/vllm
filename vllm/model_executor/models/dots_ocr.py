@@ -16,7 +16,7 @@ from vllm.distributed.parallel_state import (
     get_tensor_model_parallel_world_size,
 )
 from vllm.model_executor.layers.activation import SiluAndMul
-from vllm.model_executor.layers.attention.mm_encoder_attention import (
+from vllm.model_executor.layers.attention import (
     MMEncoderAttention,
 )
 from vllm.model_executor.layers.conv import Conv2dLayer

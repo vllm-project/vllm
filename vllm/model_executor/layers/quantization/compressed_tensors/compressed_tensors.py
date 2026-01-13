@@ -19,7 +19,7 @@ from compressed_tensors.transform import TransformConfig
 
 import vllm.envs as envs
 from vllm.logger import init_logger
-from vllm.model_executor.layers.attention.attention import Attention
+from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.layers.linear import (
     LinearBase,

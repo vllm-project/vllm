@@ -48,8 +48,7 @@ from vllm.forward_context import (
 )
 from vllm.logger import init_logger
 from vllm.lora.layers import LoRAMapping, LoRAMappingType
-from vllm.model_executor.layers.attention.attention import Attention
-from vllm.model_executor.layers.attention.mla_attention import MLAAttention
+from vllm.model_executor.layers.attention import Attention, MLAAttention
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.layers.rotary_embedding import (
     MRotaryEmbedding,

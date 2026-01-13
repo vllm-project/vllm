@@ -18,7 +18,7 @@ from vllm.distributed import (
     get_tensor_model_parallel_world_size,
     tensor_model_parallel_all_gather,
 )
-from vllm.model_executor.layers.attention.attention import Attention
+from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.layers.fused_moe.config import FusedMoEParallelConfig
 from vllm.model_executor.layers.layernorm import RMSNorm

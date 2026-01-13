@@ -11,7 +11,7 @@ from vllm.config import CacheConfig, get_current_vllm_config
 from vllm.config.vllm import VllmConfig
 from vllm.forward_context import ForwardContext, get_forward_context
 from vllm.logger import init_logger
-from vllm.model_executor.layers.attention.attention import (
+from vllm.model_executor.layers.attention import (
     _init_kv_cache_quant,
     get_attention_context,
     set_default_quant_scales,

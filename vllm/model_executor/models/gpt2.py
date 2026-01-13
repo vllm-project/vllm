@@ -34,7 +34,7 @@ from vllm.distributed.parallel_state import (
     get_tensor_model_parallel_world_size,
 )
 from vllm.model_executor.layers.activation import get_act_fn
-from vllm.model_executor.layers.attention.attention import Attention
+from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
     QKVParallelLinear,

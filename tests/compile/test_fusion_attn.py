@@ -26,7 +26,7 @@ from vllm.config import (
     set_current_vllm_config,
 )
 from vllm.forward_context import get_forward_context, set_forward_context
-from vllm.model_executor.layers.attention.attention import Attention
+from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
     kFp8StaticTensorSym,

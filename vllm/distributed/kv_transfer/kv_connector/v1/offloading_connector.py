@@ -18,7 +18,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1 import (
 from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorMetadata
 from vllm.forward_context import ForwardContext
 from vllm.logger import init_logger
-from vllm.model_executor.layers.attention.attention import Attention
+from vllm.model_executor.layers.attention import Attention
 from vllm.v1.attention.backend import AttentionBackend, AttentionMetadata
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks
 from vllm.v1.core.kv_cache_utils import BlockHash

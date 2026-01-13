@@ -39,7 +39,7 @@ from vllm.distributed import (
     tensor_model_parallel_all_reduce,
 )
 from vllm.model_executor.layers.activation import get_act_fn
-from vllm.model_executor.layers.attention.attention import Attention
+from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
     QKVParallelLinear,

@@ -31,7 +31,7 @@ from vllm.model_executor.layers.activation import (
     GeluAndMul,
     GeluAndMulSparse,
 )
-from vllm.model_executor.layers.attention.attention import Attention
+from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,

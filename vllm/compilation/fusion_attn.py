@@ -12,7 +12,7 @@ from torch._inductor.pattern_matcher import PatternMatcherPass
 
 from vllm.config import VllmConfig, get_layers_from_vllm_config
 from vllm.logger import init_logger
-from vllm.model_executor.layers.attention.attention import Attention
+from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
     kNvfp4Quant,

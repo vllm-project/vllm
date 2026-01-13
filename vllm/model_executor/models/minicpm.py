@@ -42,7 +42,7 @@ from vllm.distributed import (
     tensor_model_parallel_all_reduce,
 )
 from vllm.model_executor.layers.activation import FatreluAndMul, SiluAndMul
-from vllm.model_executor.layers.attention.attention import Attention
+from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.fused_moe import fused_experts, fused_topk
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (

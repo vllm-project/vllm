@@ -16,7 +16,7 @@ from vllm.distributed.parallel_state import get_pp_group
 from vllm.forward_context import ForwardContext, get_forward_context
 from vllm.model_executor.custom_op import CustomOp
 from vllm.model_executor.layers.activation import SiluAndMul
-from vllm.model_executor.layers.attention.attention import Attention
+from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,

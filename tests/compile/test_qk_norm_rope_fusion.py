@@ -20,7 +20,7 @@ from vllm.config import (
     VllmConfig,
     set_current_vllm_config,
 )
-from vllm.model_executor.layers.attention.attention import Attention
+from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.rotary_embedding import RotaryEmbedding
 from vllm.platforms import current_platform

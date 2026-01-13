@@ -10,7 +10,7 @@ import torch.nn.functional as F
 from torch import nn
 
 from vllm.config import CacheConfig, VllmConfig
-from vllm.model_executor.layers.attention.attention import Attention
+from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.v1.attention.backend import (
     AttentionBackend,

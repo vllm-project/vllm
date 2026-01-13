@@ -28,8 +28,7 @@ from vllm.distributed import (
     tensor_model_parallel_all_gather,
 )
 from vllm.model_executor.layers.activation import MulAndSilu, QuickGELU, SiluAndMul
-from vllm.model_executor.layers.attention.attention import Attention
-from vllm.model_executor.layers.attention.mm_encoder_attention import MMEncoderAttention
+from vllm.model_executor.layers.attention import Attention, MMEncoderAttention
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,

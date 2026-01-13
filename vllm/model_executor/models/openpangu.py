@@ -40,8 +40,8 @@ from vllm.distributed import (
     tensor_model_parallel_all_gather,
 )
 from vllm.model_executor.layers.activation import SiluAndMul
-from vllm.model_executor.layers.attention.attention import Attention
-from vllm.model_executor.layers.attention.static_sink_attention import (
+from vllm.model_executor.layers.attention import (
+    Attention,
     StaticSinkAttention,
 )
 from vllm.model_executor.layers.fused_moe import SharedFusedMoE

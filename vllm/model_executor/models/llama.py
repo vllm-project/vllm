@@ -35,8 +35,8 @@ from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.activation import SiluAndMul
-from vllm.model_executor.layers.attention.attention import Attention
-from vllm.model_executor.layers.attention.encoder_only_attention import (
+from vllm.model_executor.layers.attention import (
+    Attention,
     EncoderOnlyAttention,
 )
 from vllm.model_executor.layers.layernorm import RMSNorm
