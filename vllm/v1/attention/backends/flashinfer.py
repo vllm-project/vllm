@@ -1040,12 +1040,10 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                         BatchPrefillWithPagedKVCacheWrapper,
                     )
                     prefill_wrapper.plan(
-                        qo_indptr=qo_indptr_cpu,
-                        paged_kv_indptr=paged_kv_indptr_cpu,
+                        qo_indptr=qo_indptr_prefill_cpu,
+                        paged_kv_indptr=paged_kv_indptr_prefill_cpu,
                         paged_kv_indices=paged_kv_indices,
-                        paged_kv_last_page_len=paged_kv_last_page_len_cpu[
-                            prefill_start:
-                        ],
+                        paged_kv_last_page_len=paged_kv_last_page_len_prefill_cpu,
                         num_qo_heads=self.num_qo_heads,
                         num_kv_heads=self.num_kv_heads,
                         head_dim_qk=self.head_dim,
@@ -1056,7 +1054,6 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                         logits_soft_cap=self.logits_soft_cap,
                         q_data_type=self.q_data_type,
                         kv_data_type=self.kv_cache_dtype,
-                        o_data_type=self.model_config.dtype,
                         fixed_split_size=self.prefill_fixed_split_size,
                         disable_split_kv=self.disable_split_kv,
                     )
