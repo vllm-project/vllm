@@ -205,7 +205,7 @@ class Qwen3OmniMoeAudioAttention(nn.Module):
         self,
         hidden_states: torch.Tensor,
         cu_seqlens: torch.Tensor,
-        max_seqlen: int | None,
+        max_seqlen: torch.Tensor | None,
     ) -> torch.Tensor:
         seq_length, _ = hidden_states.size()
         qkv, _ = self.qkv(hidden_states)
