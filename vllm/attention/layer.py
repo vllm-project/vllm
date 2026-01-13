@@ -377,13 +377,15 @@ class Attention(nn.Module, AttentionLayerBase):
                 value = value.view(-1, self.num_kv_heads, self.head_size_v)
             if self.use_direct_call:
                 if not self.attn_backend.forward_includes_kv_cache:
-                    unified_kv_cache_update(key, value, output, self.layer_name)
+                    output = unified_kv_cache_update(
+                        key, value, output, self.layer_name
+                    )
                 unified_attention_with_output(
                     query, key, value, output, self.layer_name
                 )
             else:
                 if not self.attn_backend.forward_includes_kv_cache:
-                    torch.ops.vllm.unified_kv_cache_update(
+                    output = torch.ops.vllm.unified_kv_cache_update(
                         key, value, output, self.layer_name
                     )
                 torch.ops.vllm.unified_attention_with_output(
@@ -794,7 +796,7 @@ def unified_kv_cache_update(
     value: torch.Tensor,
     output: torch.Tensor,
     layer_name: str,
-) -> None:
+) -> torch.Tensor:
     attn_metadata, self, kv_cache = get_attention_context(layer_name)
     assert hasattr(self.impl, "do_kv_cache_update"), (
         f"{self.impl.__class__.__name__} does not support kv cache update"
@@ -806,6 +808,7 @@ def unified_kv_cache_update(
         kv_cache,
         attn_metadata,
     )
+    return output
 
 
 def unified_kv_cache_update_fake(
@@ -813,15 +816,15 @@ def unified_kv_cache_update_fake(
     value: torch.Tensor,
     output: torch.Tensor,
     layer_name: str,
-) -> None:
-    return
+) -> torch.Tensor:
+    return output
 
 
 direct_register_custom_op(
     op_name="unified_kv_cache_update",
     op_func=unified_kv_cache_update,
     fake_impl=unified_kv_cache_update_fake,
-    mutates_args=["output"],  # fake dependency to make sure op is not optimized out
+    mutates_args=[],
 )
 
 
