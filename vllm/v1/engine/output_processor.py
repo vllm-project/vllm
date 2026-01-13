@@ -127,6 +127,9 @@ class RequestState:
         self.prompt = prompt
         self.prompt_token_ids = prompt_token_ids
         self.prompt_embeds = prompt_embeds
+        self.prompt_len = length_from_prompt_token_ids_or_embeds(
+            self.prompt_token_ids, self.prompt_embeds
+        )
         self.logprobs_processor = logprobs_processor
         self.detokenizer = detokenizer
         self.max_tokens_param = max_tokens_param
@@ -142,12 +145,6 @@ class RequestState:
         # Stream Interval
         self.stream_interval = stream_interval
         self.sent_tokens_offset = 0  # Offset of sent tokens
-
-    @property
-    def prompt_len(self) -> int:
-        return length_from_prompt_token_ids_or_embeds(
-            self.prompt_token_ids, self.prompt_embeds
-        )
 
     @classmethod
     def from_new_request(
@@ -506,6 +503,9 @@ class OutputProcessor:
             )
         elif request.prompt_embeds is not None:
             req_state.prompt_embeds = request.prompt_embeds
+        req_state.prompt_len = length_from_prompt_token_ids_or_embeds(
+            req_state.prompt_token_ids, req_state.prompt_embeds
+        )
         if req_state.stats is not None:
             req_state.stats.arrival_time = request.arrival_time
         req_state.is_prefilling = True
