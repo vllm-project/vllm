@@ -5004,12 +5004,32 @@ class GPUModelRunner(
             attention_backend_list, kv_cache_config.kv_cache_groups
         )
 
+        parallel_config = self.vllm_config.parallel_config
+        pcp_size = parallel_config.prefill_context_parallel_size
+        dcp_size = parallel_config.decode_context_parallel_size
+        interleave_size = parallel_config.cp_kv_cache_interleave_size
+
         # Check if attention backend supports PCP & DCP and related features.
         # For DCP we want the clearer, later error in initialize_kv_cache to fire,
         # so mask DCP here while still running PCP-related assertions.
         if self.dcp_world_size > 1:
-            parallel_config = self.vllm_config.parallel_config
-            original_dcp_size = parallel_config.decode_context_parallel_size
+            if (
+                pcp_size == 1
+                and dcp_size > 1
+                and self.vllm_config.speculative_config is not None
+                and interleave_size > 1
+            ):
+                layer_type = cast(type[Any], AttentionLayerBase)
+                layers = get_layers_from_vllm_config(self.vllm_config, layer_type)
+                for layer in layers.values():
+                    layer_impl = getattr(layer, "impl", None)
+                    if layer_impl is None:
+                        continue
+                    assert layer_impl.supports_mtp_with_cp_non_trivial_interleave_size, (
+                        "MTP with cp_kv_cache_interleave_size > 1 is not "
+                        f"supported in {layer_impl.__class__.__name__}."
+                    )
+            original_dcp_size = dcp_size
             try:
                 parallel_config.decode_context_parallel_size = 1
                 check_attention_cp_compatibility(self.vllm_config)
