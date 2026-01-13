@@ -19,6 +19,10 @@ class PenaltiesState:
         self.frequency_penalty = UvaBackedTensor(max_num_reqs, dtype=torch.float32)
         self.presence_penalty = UvaBackedTensor(max_num_reqs, dtype=torch.float32)
 
+        # Initialize repetition penalty manually because 0 is an invalid value for it.
+        self.repetition_penalty.np.fill(1.0)
+        self.repetition_penalty.copy_to_uva()
+
         # Statistics for penalties.
         self.prompt_bin_mask = torch.zeros(
             self.max_num_reqs,
