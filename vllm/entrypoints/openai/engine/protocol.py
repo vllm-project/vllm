@@ -1247,16 +1247,6 @@ StreamingResponsesResponse: TypeAlias = (
 )
 
 
-class LoadLoRAAdapterRequest(BaseModel):
-    lora_name: str
-    lora_path: str
-
-
-class UnloadLoRAAdapterRequest(BaseModel):
-    lora_name: str
-    lora_int_id: int | None = Field(default=None)
-
-
 ## Protocols for Audio
 AudioResponseFormat: TypeAlias = Literal["json", "text", "srt", "verbose_json", "vtt"]
 
