@@ -223,70 +223,42 @@ class BaseDummyInputsBuilder(ABC, Generic[_I]):
         video = np.full((num_frames, width, height, 3), 255, dtype=np.uint8)
         return [video] * num_videos
 
-
-class MultiModalProfiler(Generic[_I]):
-    """
-    Contains code for running memory profiling for multi-modal models.
-    """
-
-    def __init__(
+    def get_dummy_mm_inputs(
         self,
         processor: BaseMultiModalProcessor[_I],
-    ) -> None:
-        super().__init__()
-
-        self.processor = processor
-
-    @property
-    def processing_info(self) -> BaseProcessingInfo:
-        return self.processor.info
-
-    @property
-    def dummy_inputs(self) -> BaseDummyInputsBuilder[_I]:
-        return self.processor.dummy_inputs
-
-    def get_mm_limits(self) -> Mapping[str, int]:
-        return self.processor.allowed_mm_limits
-
-    def _get_dummy_mm_inputs(
-        self,
         seq_len: int,
         mm_counts: Mapping[str, int] | None = None,
         mm_options: Mapping[str, BaseDummyOptions] | None = None,
     ) -> MultiModalInputs:
         if mm_counts is None:
-            mm_counts = self.get_mm_limits()
+            mm_counts = processor.allowed_mm_limits
 
-        factory = self.dummy_inputs
-        processor_inputs = factory.get_dummy_processor_inputs(
-            seq_len, mm_counts, mm_options
+        processor_inputs = self.get_dummy_processor_inputs(
+            seq_len,
+            mm_counts=mm_counts,
+            mm_options=mm_options,
         )
 
-        return self.processor.apply(
+        return processor.apply(
             prompt=processor_inputs.prompt,
             mm_data=processor_inputs.mm_data,
             hf_processor_mm_kwargs=processor_inputs.hf_processor_mm_kwargs,
             tokenization_kwargs=processor_inputs.tokenization_kwargs,
         )
 
-    def _get_mm_num_tokens(
-        self,
-        mm_inputs: MultiModalInputs,
-    ) -> Mapping[str, int]:
-        placeholders_by_modality = mm_inputs["mm_placeholders"]
-
-        return {
-            modality: sum(item.get_num_embeds for item in placeholders)
-            for modality, placeholders in placeholders_by_modality.items()
-        }
-
     def get_decoder_dummy_data(
         self,
+        processor: BaseMultiModalProcessor[_I],
         seq_len: int,
         mm_counts: Mapping[str, int] | None = None,
         mm_options: Mapping[str, BaseDummyOptions] | None = None,
     ) -> DummyDecoderData:
-        mm_inputs = self._get_dummy_mm_inputs(seq_len, mm_counts, mm_options)
+        mm_inputs = self.get_dummy_mm_inputs(
+            processor,
+            seq_len,
+            mm_counts=mm_counts,
+            mm_options=mm_options,
+        )
 
         prompt_token_ids = mm_inputs["prompt_token_ids"]
         total_len = len(prompt_token_ids)
@@ -299,29 +271,3 @@ class MultiModalProfiler(Generic[_I]):
             multi_modal_data=mm_inputs["mm_kwargs"].require_data(),
             multi_modal_placeholders=mm_inputs["mm_placeholders"],
         )
-
-    def get_mm_max_tokens(
-        self,
-        seq_len: int,
-        mm_counts: Mapping[str, int] | None = None,
-    ) -> Mapping[str, int]:
-        """
-        Returns the maximum number of embeddings per item of each modality, excluding
-        any break/text tokens in-between multimodal embeddings/encoder outputs.
-        """
-        if mm_counts is None:
-            mm_counts = self.get_mm_limits()
-
-        max_tokens_per_item = self.processing_info.get_mm_max_tokens_per_item(
-            seq_len=seq_len,
-            mm_counts=mm_counts,
-        )
-        if max_tokens_per_item is not None:
-            return {
-                modality: max_tokens
-                for modality, max_tokens in max_tokens_per_item.items()
-                if mm_counts.get(modality, 0) > 0
-            }
-
-        mm_inputs = self._get_dummy_mm_inputs(seq_len, mm_counts)
-        return self._get_mm_num_tokens(mm_inputs)
