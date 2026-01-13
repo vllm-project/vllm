@@ -26,6 +26,7 @@ from vllm.v1.outputs import (
 from vllm.v1.worker.gpu.async_utils import AsyncOutput
 from vllm.v1.worker.gpu.attn_utils import (
     build_attn_metadata,
+    build_slot_mappings_by_layer,
     get_kv_cache_spec,
     init_attn_backend,
     init_kv_cache,
@@ -284,6 +285,15 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             positions = input_batch.positions
         else:
             positions = input_batch.mrope_positions
+
+        if skip_attn:
+            slot_mappings_by_layer: dict[str, torch.Tensor] = {}
+        else:
+            slot_mappings = self.block_tables.get_dummy_slot_mappings(num_tokens)
+            slot_mappings_by_layer = build_slot_mappings_by_layer(
+                slot_mappings, self.kv_cache_config
+            )
+
         with (
             self.maybe_dummy_run_with_lora(
                 self.lora_config,
@@ -295,6 +305,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 self.vllm_config,
                 num_tokens=num_tokens,
                 num_tokens_across_dp=num_tokens_across_dp,
+                slot_mapping=slot_mappings_by_layer,
             ),
         ):
             hidden_states = self.model(
@@ -934,12 +945,20 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 positions = input_batch.positions
             else:
                 positions = input_batch.mrope_positions
+            slot_mappings = self.block_tables.compute_slot_mappings(
+                input_batch.query_start_loc,
+                input_batch.positions[: input_batch.num_tokens],
+            )
+            slot_mappings_by_layer = build_slot_mappings_by_layer(
+                slot_mappings, self.kv_cache_config
+            )
             with set_forward_context(
                 input_batch.attn_metadata,
                 self.vllm_config,
                 num_tokens=input_batch.num_tokens_after_padding,
                 cudagraph_runtime_mode=cudagraph_mode,
                 num_tokens_across_dp=num_tokens_across_dp,
+                slot_mapping=slot_mappings_by_layer,
             ):
                 hidden_states = self.model(
                     input_ids=input_batch.input_ids,

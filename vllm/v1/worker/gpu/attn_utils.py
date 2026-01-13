@@ -139,6 +139,18 @@ def init_kv_cache(
     bind_kv_cache(kv_caches, forward_context, runner_kv_caches)
 
 
+def build_slot_mappings_by_layer(
+    slot_mappings: torch.Tensor,
+    kv_cache_config: KVCacheConfig,
+) -> dict[str, torch.Tensor]:
+    slot_mappings_by_layer: dict[str, torch.Tensor] = {}
+    for i, kv_cache_group in enumerate(kv_cache_config.kv_cache_groups):
+        slot_mapping = slot_mappings[i]
+        for layer_name in kv_cache_group.layer_names:
+            slot_mappings_by_layer[layer_name] = slot_mapping
+    return slot_mappings_by_layer
+
+
 def build_attn_metadata(
     attn_metadata_builders: list[AttentionMetadataBuilder],
     num_reqs: int,
