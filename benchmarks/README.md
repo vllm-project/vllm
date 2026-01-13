@@ -18,3 +18,8 @@ For full CLI reference see:
 - <https://docs.vllm.ai/en/latest/cli/bench/latency.html>
 - <https://docs.vllm.ai/en/latest/cli/bench/serve.html>
 - <https://docs.vllm.ai/en/latest/cli/bench/throughput.html>
+
+## Receipts harness (forwardable benchmark artifacts)
+
+If you need a forwardable “receipt” (command + duration + optional GPU telemetry + logs),
+see `benchmarks/receipts/README.md`.
