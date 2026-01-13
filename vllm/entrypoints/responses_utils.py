@@ -28,6 +28,53 @@ from vllm.entrypoints.openai.engine.protocol import (
 )
 
 
+def should_continue_final_message(
+    request_input: str | list[ResponseInputOutputItem],
+) -> bool:
+    """
+    Determine if the last input message is a partial assistant message
+    that should be continued rather than starting a new generation.
+
+    This enables partial message completion similar to Anthropic's Messages API,
+    where users can provide an incomplete assistant message and have the model
+    continue from where it left off.
+
+    A message is considered partial if:
+    1. It's a ResponseOutputMessage or ResponseReasoningItem
+    2. Its status is "in_progress" or "incomplete"
+
+    Args:
+        request_input: The input to the Responses API request
+
+    Returns:
+        True if the final message should be continued, False otherwise
+    """
+    if isinstance(request_input, str):
+        # Simple string input is always a user message
+        return False
+
+    if not request_input:
+        return False
+
+    last_item = request_input[-1]
+
+    # Check if the last item is a partial assistant message
+    if isinstance(last_item, ResponseOutputMessage):
+        return last_item.status in ("in_progress", "incomplete")
+
+    # Check if the last item is a partial reasoning item
+    if isinstance(last_item, ResponseReasoningItem):
+        return last_item.status in ("in_progress", "incomplete")
+
+    if isinstance(last_item, dict):
+        # only support partial completion for messages for now
+        if last_item.get("type", "message") not in ("message", "reasoning"):
+            return False
+        return last_item.get("status") in ("in_progress", "incomplete")
+
+    return False
+
+
 def construct_input_messages(
     *,
     request_instructions: str | None = None,
