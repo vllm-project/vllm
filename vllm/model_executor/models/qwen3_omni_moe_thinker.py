@@ -31,9 +31,6 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from packaging.version import Version
-
-from transformers import PretrainedConfig
-from transformers import __version__ as TRANSFORMERS_VERSION
 from transformers.feature_extraction_utils import BatchFeature
 from transformers.models.qwen3_omni_moe.configuration_qwen3_omni_moe import (
     Qwen3OmniMoeAudioEncoderConfig,
@@ -44,6 +41,11 @@ from transformers.models.qwen3_omni_moe.processing_qwen3_omni_moe import (
     Qwen3OmniMoeProcessor,
 )
 from transformers.models.whisper import WhisperFeatureExtractor
+
+# isort: off
+from transformers import PretrainedConfig
+from transformers import __version__ as TRANSFORMERS_VERSION
+# isort: on
 
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import MultiModalConfig, VllmConfig
@@ -415,8 +417,7 @@ class Qwen3OmniMoeAudioEncoder(nn.Module):
             aftercnn_lens: Output length after CNN processing
 
         Returns:
-            BaseModelOutput with last_hidden_state of shape
-            (total_output_len, output_dim)
+            hidden_states of shape (total_output_len, output_dim)
         """
         # Compute chunk information
         chunk_num = torch.ceil(feature_lens / (self.n_window * 2)).long()
