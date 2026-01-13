@@ -52,6 +52,7 @@ def _fused_moe_lora_kernel(
     c_ptr,
     topk_weights_ptr,
     sorted_token_ids_ptr,
+    sorted_token_ids_div_ptr,  # NEW: optional pre-divided token ids (same shape/stride as sorted_token_ids_ptr)
     expert_ids_ptr,
     num_tokens_post_padded_ptr,
     # Matrix dimensions
@@ -62,10 +63,7 @@ def _fused_moe_lora_kernel(
     num_experts,
     lora_ids,
     adapter_enabled,
-    # The stride variables represent how much to increase the ptr by when
-    # moving by 1 element in a particular dimension. E.g. `stride_am` is
-    # how much to increase `a_ptr` by to get the element one row down
-    # (A has M rows).
+    # Strides
     stride_am,
     stride_ak,
     stride_bl,
@@ -83,6 +81,9 @@ def _fused_moe_lora_kernel(
     num_slice_c: tl.constexpr,
     top_k: tl.constexpr,
     MUL_ROUTED_WEIGHT: tl.constexpr,
+    SORTED_TOKENS_PRE_DIVIDED: tl.constexpr,  # NEW
+    EVEN_K: tl.constexpr,                     # NEW
+    EVEN_N: tl.constexpr,                     # NEW
     BLOCK_SIZE_M: tl.constexpr,
     BLOCK_SIZE_N: tl.constexpr,
     BLOCK_SIZE_K: tl.constexpr,
@@ -95,103 +96,216 @@ def _fused_moe_lora_kernel(
     pid = tl.program_id(axis=0)
     slice_id = tl.program_id(axis=1)
     lora_idx = tl.program_id(axis=2)
-    lora_id = tl.load(lora_ids + lora_idx)
 
+    lora_id = tl.load(lora_ids + lora_idx).to(tl.int32)
     if lora_id == -1:
-        # Early exit for the no-lora case.
         return
-    moe_enabled = tl.load(adapter_enabled + lora_id)
+    moe_enabled = tl.load(adapter_enabled + lora_id).to(tl.int32)
     if moe_enabled == 0:
-        # Early exit for the no moe lora case.
         return
-    max_loras = tl.num_programs(axis=2)
+
+    # Mostly int32 for cheap control/index math
+    max_loras = tl.num_programs(axis=2).to(tl.int32)
     grid_k = tl.cdiv(K, BLOCK_SIZE_K * SPLIT_K)
 
-    # calculate pid_m,pid_n
-    pid_sk = pid % SPLIT_K
-    pid_m_n = pid // SPLIT_K
+    pid_sk = (pid % SPLIT_K).to(tl.int32)
+    pid_m_n = (pid // SPLIT_K).to(tl.int32)
     num_pid_m = tl.cdiv(EM, BLOCK_SIZE_M)
     num_pid_n = tl.cdiv(N, BLOCK_SIZE_N)
 
     num_pid_in_group = GROUP_SIZE_M * num_pid_n
-    group_id = pid_m_n // num_pid_in_group
+    group_id = (pid_m_n // num_pid_in_group).to(tl.int32)
     first_pid_m = group_id * GROUP_SIZE_M
-    group_size_m = min(num_pid_m - first_pid_m, GROUP_SIZE_M)
+    group_size_m = tl.minimum(num_pid_m - first_pid_m, GROUP_SIZE_M)
     pid_m = first_pid_m + ((pid_m_n % num_pid_in_group) % group_size_m)
     pid_n = (pid_m_n % num_pid_in_group) // group_size_m
 
-    num_tokens_post_padded = tl.load(num_tokens_post_padded_ptr + lora_id)
+    num_tokens_post_padded = tl.load(num_tokens_post_padded_ptr + lora_id).to(tl.int32)
     if pid_m * BLOCK_SIZE_M >= num_tokens_post_padded:
         return
-    # get the expert_id to process curr shard
-    ind = lora_id * stride_el + pid_m
-    expert_id = tl.load(expert_ids_ptr + ind, ind < max_loras * stride_el, -1)
+
+    # ---------------------------
+    # int64 ONLY for "base" (scalar) offsets to avoid overflow
+    # ---------------------------
+    lora_id_i64 = lora_id.to(tl.int64)
+    max_loras_i64 = max_loras.to(tl.int64)
+
+    stride_el_i64 = tl.full((), stride_el, tl.int64)
+    stride_tl_i64 = tl.full((), stride_tl, tl.int64)
+
+    base_expert = expert_ids_ptr + lora_id_i64 * stride_el_i64
+    # pid_m is scalar int32 -> safe to add as scalar index
+    expert_id = tl.load(
+        base_expert + pid_m,
+        mask=pid_m.to(tl.int64) < stride_el_i64,  # row-bound mask (safe even if EM not padded)
+        other=-1,
+    ).to(tl.int32)
     if expert_id == -1:
         return
-    # get a_ptr,b_ptr,c_ptr
+
+    # base pointers for A/B/C slices
     cur_a_ptr = a_ptr + (slice_id % num_slice_a) * slice_a_size
     cur_b_ptr = tl.load(b_ptr + slice_id).to(tl.pointer_type(c_ptr.dtype.element_ty))
     cur_c_ptr = c_ptr + (slice_id % num_slice_c) * slice_c_size
 
-    offs_bn = (pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N).to(tl.int64)) % N
-    offs_k = pid_sk * BLOCK_SIZE_K + tl.arange(0, BLOCK_SIZE_K)
+    # N dimension (remove %N, use mask)
+    offs_bn = (pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)).to(tl.int32)
+    if EVEN_N:
+        mask_n = None
+    else:
+        mask_n = offs_bn < N
 
-    offs_token_id = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M).to(tl.int64)
-    token_ind = stride_tl * lora_id + offs_token_id
+    # K dimension
+    offs_k = (pid_sk * BLOCK_SIZE_K + tl.arange(0, BLOCK_SIZE_K)).to(tl.int32)
+    offs_k_i64 = offs_k.to(tl.int64)
+
+    # Token ids within the row
+    offs_token_id = (pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)).to(tl.int32)
+
+    # Load offs_token (flattened token index into topk_weights, and also used to derive token row)
+    base_sorted = sorted_token_ids_ptr + lora_id_i64 * stride_tl_i64
+    token_id_mask = offs_token_id < EM  # IMPORTANT: prevents cross-row OOB if EM not padded to BLOCK_SIZE_M
+
     offs_token = tl.load(
-        sorted_token_ids_ptr + token_ind, token_ind < max_loras * stride_tl, 0
-    )
-    token_mask = offs_token < num_valid_tokens
+        base_sorted + offs_token_id,
+        mask=token_id_mask,
+        other=0,
+    ).to(tl.int32)
 
-    # get a_ptrs,b_ptrs
-    a_ptrs = cur_a_ptr + (
-        offs_token[:, None] // top_k * stride_am + offs_k[None, :] * stride_ak
+    # token_mask must include token_id_mask, otherwise masked loads become token 0
+    token_mask = token_id_mask & (offs_token < num_valid_tokens)
+
+    # Optional: pre-divided token ids (offs_token_div = offs_token // top_k)
+    if SORTED_TOKENS_PRE_DIVIDED:
+        base_sorted_div = sorted_token_ids_div_ptr + lora_id_i64 * stride_tl_i64
+        offs_token_div = tl.load(
+            base_sorted_div + offs_token_id,
+            mask=token_id_mask,
+            other=0,
+        ).to(tl.int32)
+    else:
+        if top_k == 1:
+            offs_token_div = offs_token
+        else:
+            offs_token_div = (offs_token // top_k).to(tl.int32)
+
+    # ---------------------------
+    # Build A/B pointers (base int64, vector offsets stay int32 where possible)
+    # ---------------------------
+    stride_am_i64 = tl.full((), stride_am, tl.int64)
+    stride_ak_i64 = tl.full((), stride_ak, tl.int64)
+
+    a_ptrs = (
+        cur_a_ptr
+        + offs_token_div.to(tl.int64)[:, None] * stride_am_i64
+        + offs_k_i64[None, :] * stride_ak_i64
     )
 
-    b_ptrs = (
+    stride_bl_i64 = tl.full((), stride_bl, tl.int64)
+    stride_be_i64 = tl.full((), stride_be, tl.int64)
+    stride_bk_i64 = tl.full((), stride_bk, tl.int64)
+    stride_bn_i64 = tl.full((), stride_bn, tl.int64)
+
+    # b_base is scalar int64; k/n offsets applied as vector
+    b_base = (
         cur_b_ptr
-        + lora_id * stride_bl
-        + expert_id * stride_be
-        + offs_k[:, None] * stride_bk
-        + offs_bn[None, :] * stride_bn
+        + lora_id_i64 * stride_bl_i64
+        + expert_id.to(tl.int64) * stride_be_i64
+    )
+    b_ptrs = (
+        b_base
+        + offs_k_i64[:, None] * stride_bk_i64
+        + offs_bn.to(tl.int64)[None, :] * stride_bn_i64
     )
 
     if USE_GDC and IS_PRIMARY:
-        # GDC launch dependents hints the runtime system to launch dependent kernels.
         tl.extra.cuda.gdc_launch_dependents()
 
-    # accumulator
     accumulator = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.float32)
 
     if USE_GDC and not IS_PRIMARY:
         tl.extra.cuda.gdc_wait()
 
-    for k in range(0, grid_k):
-        k_remaining = K - k * (BLOCK_SIZE_K * SPLIT_K)
-        # GDC wait waits for ALL programs in the prior kernel to complete
-        # before continuing.
-        # pre-fetch lora weight
-        b = tl.load(b_ptrs, mask=offs_k[:, None] < k_remaining, other=0.0)
-        if USE_GDC and not IS_PRIMARY:
-            tl.extra.cuda.gdc_wait()
-        a = tl.load(
-            a_ptrs,
-            mask=token_mask[:, None] & (offs_k[None, :] < k_remaining),
-            other=0.0,
-        )
-        accumulator += tl.dot(a, b)
-        # Advance the ptrs to the next K block.
-        a_ptrs += BLOCK_SIZE_K * SPLIT_K * stride_ak
-        b_ptrs += BLOCK_SIZE_K * SPLIT_K * stride_bk
+    # Precompute advances (scalar int64)
+    advance_a = (BLOCK_SIZE_K * SPLIT_K) * stride_ak_i64
+    advance_b = (BLOCK_SIZE_K * SPLIT_K) * stride_bk_i64
+
+    # ---------------------------
+    # EVEN_K / EVEN_N fast paths remove k_remaining + masks
+    # ---------------------------
+    if EVEN_K:
+        # No k_remaining; K fully covered by grid_k
+        if EVEN_N:
+            # Fully unmasked B load (except token_mask for A)
+            for _ in range(0, grid_k):
+                b = tl.load(b_ptrs)  # no mask
+                if USE_GDC and not IS_PRIMARY:
+                    tl.extra.cuda.gdc_wait()
+                a = tl.load(a_ptrs, mask=token_mask[:, None], other=0.0)
+                accumulator += tl.dot(a, b)
+                a_ptrs += advance_a
+                b_ptrs += advance_b
+        else:
+            for _ in range(0, grid_k):
+                b = tl.load(b_ptrs, mask=mask_n[None, :], other=0.0)
+                if USE_GDC and not IS_PRIMARY:
+                    tl.extra.cuda.gdc_wait()
+                a = tl.load(a_ptrs, mask=token_mask[:, None], other=0.0)
+                accumulator += tl.dot(a, b)
+                a_ptrs += advance_a
+                b_ptrs += advance_b
+    else:
+        # Tail K needs masking
+        if EVEN_N:
+            for k in range(0, grid_k):
+                k_remaining = K - k * (BLOCK_SIZE_K * SPLIT_K)
+                b = tl.load(b_ptrs, mask=(offs_k[:, None] < k_remaining), other=0.0)
+                if USE_GDC and not IS_PRIMARY:
+                    tl.extra.cuda.gdc_wait()
+                a = tl.load(a_ptrs, mask=token_mask[:, None] & (offs_k[None, :] < k_remaining), other=0.0)
+                accumulator += tl.dot(a, b)
+                a_ptrs += advance_a
+                b_ptrs += advance_b
+        else:
+            for k in range(0, grid_k):
+                k_remaining = K - k * (BLOCK_SIZE_K * SPLIT_K)
+                b = tl.load(
+                    b_ptrs,
+                    mask=(offs_k[:, None] < k_remaining) & mask_n[None, :],
+                    other=0.0,
+                )
+                if USE_GDC and not IS_PRIMARY:
+                    tl.extra.cuda.gdc_wait()
+                a = tl.load(
+                    a_ptrs,
+                    mask=token_mask[:, None] & (offs_k[None, :] < k_remaining),
+                    other=0.0,
+                )
+                accumulator += tl.dot(a, b)
+                a_ptrs += advance_a
+                b_ptrs += advance_b
 
     if MUL_ROUTED_WEIGHT:
-        moe_weight = tl.load(topk_weights_ptr + offs_token, mask=token_mask, other=0)
+        moe_weight = tl.load(topk_weights_ptr + offs_token, mask=token_mask, other=0).to(tl.float32)
         accumulator = accumulator * moe_weight[:, None]
+
     accumulator = accumulator.to(c_ptr.dtype.element_ty)
-    # Write back the block of the output
-    offs_cn = pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
-    c_ptrs = cur_c_ptr + stride_cm * offs_token[:, None] + stride_cn * offs_cn[None, :]
-    c_mask = token_mask[:, None] & (offs_cn[None, :] < N)
+
+    # Store C
+    offs_cn = (pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)).to(tl.int32)
+    stride_cm_i64 = tl.full((), stride_cm, tl.int64)
+    stride_cn_i64 = tl.full((), stride_cn, tl.int64)
+
+    c_ptrs = (
+        cur_c_ptr
+        + stride_cm_i64 * offs_token.to(tl.int64)[:, None]
+        + stride_cn_i64 * offs_cn.to(tl.int64)[None, :]
+    )
+
+    if EVEN_N:
+        c_mask = token_mask[:, None]
+    else:
+        c_mask = token_mask[:, None] & (offs_cn[None, :] < N)
 
     if SPLIT_K == 1:
         tl.store(c_ptrs, accumulator, mask=c_mask)
@@ -232,6 +346,8 @@ def _fused_moe_lora_shrink(
     split_k: int,
     mul_routed_weight: bool = False,
     use_gdc: bool = False,
+    # NEW: optional pre-divided token ids (same shape as sorted_token_ids, stores offs_token//top_k_num)
+    sorted_token_ids_div: torch.Tensor | None = None,
 ) -> None:
     w1_lora_a_stacked = lora_a_stacked[0]
     shrink_config = {
@@ -243,7 +359,7 @@ def _fused_moe_lora_shrink(
         "num_stages": num_stages,
         "SPLIT_K": split_k,
         "USE_GDC": use_gdc,
-        "launch_pdl": use_gdc,  # triton kernel metadata
+        "launch_pdl": use_gdc,
     }
 
     b_ptr = _get_ptr(lora_a_stacked, device)
@@ -255,12 +371,22 @@ def _fused_moe_lora_shrink(
         len(lora_a_stacked),
         lora_a_stacked[0].shape[0],
     )
+
+    # EVEN flags
+    even_k = (K % (block_size_k * split_k) == 0)
+    even_n = (N % block_size_n == 0)
+
+    # optional pointer for pre-divided
+    div_ptr = sorted_token_ids_div if sorted_token_ids_div is not None else sorted_token_ids
+    pre_div = sorted_token_ids_div is not None
+
     _fused_moe_lora_kernel[grid](
         qcurr_hidden_states,
         b_ptr,
         a_intermediate_cache1,
         topk_weights,
         sorted_token_ids,
+        div_ptr,                 # NEW
         expert_ids,
         num_tokens_post_padded,
         N,
@@ -286,6 +412,9 @@ def _fused_moe_lora_shrink(
         num_slice_c=num_slices,
         top_k=1 if mul_routed_weight else top_k_num,
         MUL_ROUTED_WEIGHT=False,
+        SORTED_TOKENS_PRE_DIVIDED=pre_div,  # NEW
+        EVEN_K=even_k,                      # NEW
+        EVEN_N=even_n,                      # NEW
         IS_PRIMARY=True,
         **shrink_config,
     )
@@ -327,6 +456,8 @@ def _fused_moe_lora_expand(
     mul_routed_weight: bool = False,
     offset: int = 0,
     use_gdc: bool = False,
+    # NEW: optional pre-divided token ids (offs_token//1 is itself in expand, but keep for API symmetry)
+    sorted_token_ids_div: torch.Tensor | None = None,
 ) -> None:
     b_ptr = _get_ptr(lora_b_stacked, device)
     K = max_lora_rank
@@ -334,9 +465,7 @@ def _fused_moe_lora_expand(
 
     w1_lora_b_stacked = lora_b_stacked[0]
 
-    a_intermediate_cache1 = a_intermediate_cache1.view(
-        -1, a_intermediate_cache1.shape[3]
-    )
+    a_intermediate_cache1 = a_intermediate_cache1.view(-1, a_intermediate_cache1.shape[3])
 
     expand_config = {
         "BLOCK_SIZE_M": block_size_m,
@@ -355,12 +484,20 @@ def _fused_moe_lora_expand(
         len(lora_b_stacked),
         lora_b_stacked[0].shape[0],
     )
+
+    even_k = (K % (block_size_k * split_k) == 0)
+    even_n = (N % block_size_n == 0)
+
+    div_ptr = sorted_token_ids_div if sorted_token_ids_div is not None else sorted_token_ids
+    pre_div = sorted_token_ids_div is not None
+
     _fused_moe_lora_kernel[grid](
         a_intermediate_cache1,
         b_ptr,
         b_intermediate_cache1,
         topk_weights,
         sorted_token_ids,
+        div_ptr,                 # NEW
         expert_ids,
         num_tokens_post_padded,
         N,
@@ -386,9 +523,14 @@ def _fused_moe_lora_expand(
         num_slice_c=num_slices,
         top_k=1,
         MUL_ROUTED_WEIGHT=mul_routed_weight,
+        SORTED_TOKENS_PRE_DIVIDED=pre_div,  # NEW
+        EVEN_K=even_k,                      # NEW
+        EVEN_N=even_n,                      # NEW
         IS_PRIMARY=False,
         **expand_config,
     )
+
+    # keep existing semantics
     for i in range(num_slices):
         output[:, :, i * N + offset : (i + 1) * N + offset] += b_intermediate_cache1[i]
 
@@ -428,6 +570,9 @@ def _fused_moe_lora(
     mul_routed_weight: bool = False,
     fully_sharded: bool = False,
     offset: int = 0,
+    # NEW: optional pre-divided token ids for the shrink path
+    # (same shape as sorted_token_ids; entries are sorted_token_ids // top_k_num)
+    sorted_token_ids_div: torch.Tensor | None = None,
 ) -> None:
     assert len(lora_a_stacked) == len(lora_b_stacked) > 0
     assert (
@@ -455,6 +600,7 @@ def _fused_moe_lora(
     num_tokens = M * top_k_num
     w1_output_dim_size = w1_lora_b_stacked.shape[2]
 
+    # NOTE: keep your existing workspace / zeroing strategy outside this snippet.
     a_intermediate_cache1 = torch.zeros(
         (num_slices, M, top_k_num, max_lora_rank),
         dtype=output.dtype,
@@ -496,19 +642,14 @@ def _fused_moe_lora(
         shrink_split_k,
         mul_routed_weight,
         use_gdc=use_gdc,
+        sorted_token_ids_div=sorted_token_ids_div,  # NEW
     )
 
     if fully_sharded:
         if max_lora_rank == w1_lora_b_stacked.shape[-1]:
-            a_intermediate_cache1 = tensor_model_parallel_all_reduce(
-                a_intermediate_cache1
-            )
+            a_intermediate_cache1 = tensor_model_parallel_all_reduce(a_intermediate_cache1)
         else:
-            a_intermediate_cache1 = tensor_model_parallel_all_gather(
-                a_intermediate_cache1
-            )
-
-            # reset max_lora_rank to the full rank after allgather
+            a_intermediate_cache1 = tensor_model_parallel_all_gather(a_intermediate_cache1)
             max_lora_rank = a_intermediate_cache1.shape[-1]
 
     _fused_moe_lora_expand(
@@ -544,6 +685,8 @@ def _fused_moe_lora(
         mul_routed_weight,
         offset,
         use_gdc=use_gdc,
+        # The top_k of expand is fixed at 1, so prediv has no practical benefit here; it's sufficient to maintain interface consistency.
+        sorted_token_ids_div=None,
     )
 
 
