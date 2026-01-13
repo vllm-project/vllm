@@ -7,10 +7,7 @@ from vllm.platforms import current_platform
 logger = init_logger(__name__)
 
 if current_platform.is_cuda():
-    from vllm import _custom_ops
-
-    ops = _custom_ops
-    reshape_and_cache_flash = ops.reshape_and_cache_flash
+    from vllm._custom_ops import reshape_and_cache_flash
     from vllm.vllm_flash_attn import (  # type: ignore[attr-defined]
         flash_attn_varlen_func,
         get_scheduler_metadata,
@@ -19,10 +16,9 @@ if current_platform.is_cuda():
 elif current_platform.is_xpu():
     from vllm._ipex_ops import ipex_ops
 
-    ops = ipex_ops
-    reshape_and_cache_flash = ops.reshape_and_cache_flash
-    flash_attn_varlen_func = ops.flash_attn_varlen_func
-    get_scheduler_metadata = ops.get_scheduler_metadata
+    reshape_and_cache_flash = ipex_ops.reshape_and_cache_flash
+    flash_attn_varlen_func = ipex_ops.flash_attn_varlen_func
+    get_scheduler_metadata = ipex_ops.get_scheduler_metadata
 
 elif current_platform.is_rocm():
     try:
@@ -71,7 +67,7 @@ def get_flash_attn_version(requires_alibi: bool = False) -> int | None:
         # 3. fallback for unsupported combinations
         if device_capability.major == 10 and fa_version == 3:
             logger.warning_once(
-                "Cannot use FA version 3 on Blackwell platform "
+                "Cannot use FA version 3 on Blackwell platform, "
                 "defaulting to FA version 2."
             )
             fa_version = 2

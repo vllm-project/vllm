@@ -7,13 +7,9 @@ import torch
 from vllm.platforms import current_platform
 
 if current_platform.is_cuda_alike():
-    from vllm import _custom_ops
-
-    ops = _custom_ops
+    from vllm import _custom_ops as ops
 elif current_platform.is_xpu():
-    from vllm._ipex_ops import ipex_ops
-
-    ops = ipex_ops
+    from vllm._ipex_ops import ipex_ops as ops  # type: ignore[no-redef]
 
 
 class PagedAttention:

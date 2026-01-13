@@ -16,8 +16,7 @@ from vllm.multimodal.cache import processor_only_cache_from_config
 from vllm.multimodal.registry import MultiModalRegistry
 from vllm.platforms import current_platform
 from vllm.utils.mem_utils import MemorySnapshot, format_gib
-from vllm.v1.attention.backend import AttentionBackend
-from vllm.v1.attention.backends.utils import AttentionMetadataBuilder
+from vllm.v1.attention.backend import AttentionBackend, AttentionMetadataBuilder
 from vllm.v1.core.encoder_cache_manager import compute_mm_encoder_budget
 from vllm.v1.kv_cache_interface import KVCacheGroupSpec, KVCacheSpec
 

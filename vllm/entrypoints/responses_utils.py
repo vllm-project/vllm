@@ -22,7 +22,7 @@ from openai.types.responses.tool import Tool
 
 from vllm import envs
 from vllm.entrypoints.constants import MCP_PREFIX
-from vllm.entrypoints.openai.protocol import (
+from vllm.entrypoints.openai.engine.protocol import (
     ChatCompletionMessageParam,
     ResponseInputOutputItem,
 )

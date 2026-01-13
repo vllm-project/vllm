@@ -402,7 +402,7 @@ class InternLM2ForCausalLM(nn.Module, SupportsPP, SupportsLoRA):
         return loaded_params
 
 
-@default_pooling_type("ALL")
+@default_pooling_type(tok_pooling_type="ALL")
 class InternLM2ForRewardModel(InternLM2ForCausalLM):
     is_pooling_model = True
 
