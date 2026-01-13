@@ -511,6 +511,41 @@ The following extra parameters are supported:
     --8<-- "vllm/entrypoints/openai/protocol.py:transcription-extra-params"
     ```
 
+#### vLLM Extensions
+
+The following parameters are vLLM-specific extensions not present in the OpenAI Whisper API:
+
+- `logprobs` (int): Return log probabilities for generated tokens. When set, the response will include a `logprobs` array matching OpenAI's format (from `openai.types.audio.transcription.Logprob`). Each entry contains:
+    - `token`: The token string
+    - `bytes`: UTF-8 byte encoding of the token
+    - `logprob`: Log probability of the token
+
+**Example usage:**
+
+??? code
+
+    ```python
+    from openai import OpenAI
+
+    client = OpenAI(
+        base_url="http://localhost:8000/v1",
+        api_key="token-abc123",
+    )
+
+    with open("audio.mp3", "rb") as audio_file:
+        transcription = client.audio.transcriptions.create(
+            model="openai/whisper-large-v3-turbo",
+            file=audio_file,
+            language="en",
+            extra_body={"logprobs": 5},
+        )
+
+    # Access logprobs from response (OpenAI-compatible format)
+    if transcription.logprobs:
+        for lp in transcription.logprobs:
+            print(f"{lp['token']}: {lp['logprob']:.4f}")
+    ```
+
 ### Translations API
 
 Our Translation API is compatible with [OpenAI's Translations API](https://platform.openai.com/docs/api-reference/audio/createTranslation);

@@ -1593,6 +1593,7 @@ class ChatCompletionStreamResponse(OpenAIBaseModel):
 
 class TranscriptionResponseStreamChoice(OpenAIBaseModel):
     delta: DeltaMessage
+    logprobs: "list[TranscriptionLogprob] | None" = None
     finish_reason: str | None = None
     stop_reason: int | str | None = None
 
@@ -2103,6 +2104,12 @@ class TranscriptionRequest(OpenAIBaseModel):
 
     max_completion_tokens: int | None = None
     """The maximum number of tokens to generate."""
+
+    logprobs: int | None = None
+    """Include the log probabilities on the `logprobs` most likely output tokens,
+    as well as the chosen tokens. If set to a positive integer, the response will
+    include the log probabilities of the output tokens.
+    """
     # --8<-- [end:transcription-sampling-params]
 
     # Default sampling parameters for transcription requests.
@@ -2156,6 +2163,7 @@ class TranscriptionRequest(OpenAIBaseModel):
             frequency_penalty=self.frequency_penalty,
             repetition_penalty=repetition_penalty,
             presence_penalty=self.presence_penalty,
+            logprobs=self.logprobs,
             output_kind=RequestOutputKind.DELTA
             if self.stream
             else RequestOutputKind.FINAL_ONLY,
@@ -2194,10 +2202,28 @@ class TranscriptionUsageAudio(OpenAIBaseModel):
     seconds: int
 
 
+class TranscriptionLogprob(OpenAIBaseModel):
+    """Log probability information for a single transcription token.
+
+    Matches OpenAI's Logprob type from openai.types.audio.transcription.
+    """
+
+    token: str | None = None
+    """The token in the transcription."""
+
+    bytes: list[int] | None = None
+    """The bytes of the token."""
+
+    logprob: float | None = None
+    """The log probability of the token."""
+
+
 class TranscriptionResponse(OpenAIBaseModel):
     text: str
     """The transcribed text."""
     usage: TranscriptionUsageAudio
+    logprobs: list[TranscriptionLogprob] | None = None
+    """The log probabilities of the tokens in the transcription."""
 
 
 class TranscriptionWord(OpenAIBaseModel):
@@ -2268,6 +2294,9 @@ class TranscriptionResponseVerbose(OpenAIBaseModel):
 
     words: list[TranscriptionWord] | None = None
     """Extracted words and their corresponding timestamps."""
+
+    logprobs: list[TranscriptionLogprob] | None = None
+    """The log probabilities of the tokens in the transcription."""
 
 
 TranscriptionResponseVariant: TypeAlias = (
