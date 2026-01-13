@@ -1378,6 +1378,7 @@ class OpenAIServing:
                 sub_request_id,
                 lora_request=lora_request,
                 priority=priority,
+                tier=tier,
                 prompt_text=prompt_text,
                 tokenization_kwargs=tokenization_kwargs,
                 **kwargs,

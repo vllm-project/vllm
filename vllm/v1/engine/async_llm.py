@@ -33,7 +33,14 @@ from vllm.utils.async_utils import cancel_task_threadsafe
 from vllm.utils.collection_utils import as_list
 from vllm.v1.engine import EngineCoreRequest
 from vllm.v1.engine.core_client import EngineCoreClient
-from vllm.v1.engine.exceptions import EngineDeadError, EngineGenerateError
+from vllm.v1.engine.exceptions import (
+    EngineDeadError,
+    EngineGenerateError,
+    MaxPendingTokensError,
+    MaxTierPendingTokensError,
+    QueueOverflowError,
+    TooManyRequestsError,
+)
 from vllm.v1.engine.input_processor import InputProcessor
 from vllm.v1.engine.output_processor import OutputProcessor, RequestOutputCollector
 from vllm.v1.engine.parallel_sampling import ParentRequest
@@ -91,6 +98,7 @@ class AsyncLLM(EngineClient):
 
         self.model_config = vllm_config.model_config
         self.vllm_config = vllm_config
+        self.scheduler_config = vllm_config.scheduler_config
         self.observability_config = vllm_config.observability_config
         self.log_requests = log_requests
 
@@ -241,6 +249,93 @@ class AsyncLLM(EngineClient):
             stat_loggers=stat_loggers,
         )
 
+    def get_num_unfinished_requests(self) -> int:
+        return self.output_processor.get_num_unfinished_requests()
+
+    def get_num_pending_context_tokens(self) -> int:
+        return self.output_processor.get_num_pending_context_tokens()
+
+    def _validate_max_num_reqs_scheduling(
+        self,
+        request_id: str,
+        sampling_params: SamplingParams,
+        tier: float,
+    ) -> None:
+        max_allowed_requests = self.scheduler_config.max_num_reqs
+        if max_allowed_requests is None:
+            return
+
+        current_num_requests = self.get_num_unfinished_requests()
+        if current_num_requests / max_allowed_requests > tier:
+            logger.info(
+                "Too many requests - dropping request.",
+                request_id=request_id,
+                current_num_requests=current_num_requests,
+                max_allowed_requests=max_allowed_requests,
+                tier=tier,
+            )
+            raise TooManyRequestsError()
+
+        proposed_num_requests = current_num_requests + sampling_params.n
+        if proposed_num_requests > max_allowed_requests:
+            logger.warning(
+                "The request queue is full.",
+                request_id=request_id,
+                n=sampling_params.n,
+                current_num_requests=current_num_requests,
+                max_allowed_requests=max_allowed_requests,
+            )
+            raise QueueOverflowError()
+
+    def _validate_max_pending_context_tokens_scheduling(
+        self,
+        request_id: str,
+        tier: float,
+    ) -> None:
+        max_pending_tokens = self.scheduler_config.max_pending_context_tokens
+        if max_pending_tokens is None:
+            return
+        """
+        Notes on implementation:
+        1. We only check for current pending tokens in queue and do not check
+        if the current request's context tokens would go above the limit. This
+        is to ensure that large requests can still be scheduled if very low
+        requests are in flight.
+
+        2. `get_num_pending_context_tokens` currently does not take chunked
+        prefill into account. To take chunked prefill into account, we need to
+        share this extra information (how many prefill tokens have been
+        processed) from EngineCore to OutputProcessor.
+        """
+        current_pending_tokens = self.get_num_pending_context_tokens()
+        if current_pending_tokens > max_pending_tokens:
+            logger.warning(
+                "Context tokens in request queue is full.",
+                request_id=request_id,
+                current_pending_tokens=current_pending_tokens,
+                max_pending_tokens=max_pending_tokens,
+            )
+            raise MaxPendingTokensError()
+
+        if current_pending_tokens / max_pending_tokens > tier:
+            logger.info(
+                "Too many pending context tokens - dropping request.",
+                request_id=request_id,
+                current_pending_tokens=current_pending_tokens,
+                max_pending_tokens=max_pending_tokens,
+                tier=tier,
+            )
+            raise MaxTierPendingTokensError()
+
+    def _validate_request_scheduling(
+        self,
+        request_id: str,
+        sampling_params: SamplingParams,
+        tier: float,
+    ) -> None:
+        self._validate_max_num_reqs_scheduling(request_id, sampling_params, tier)
+        self._validate_max_pending_context_tokens_scheduling(request_id, tier)
+
     def __del__(self):
         self.shutdown()
 
@@ -269,6 +364,7 @@ class AsyncLLM(EngineClient):
         tokenization_kwargs: dict[str, Any] | None = None,
         trace_headers: Mapping[str, str] | None = None,
         priority: int = 0,
+        tier: float = 1,
         data_parallel_rank: int | None = None,
         prompt_text: str | None = None,
     ) -> RequestOutputCollector:
@@ -276,6 +372,9 @@ class AsyncLLM(EngineClient):
 
         if self.errored:
             raise EngineDeadError()
+
+        # Checks if request can be scheduled.
+        self._validate_request_scheduling(request_id, params, tier)
 
         is_pooling = isinstance(params, PoolingParams)
 
@@ -397,6 +496,7 @@ class AsyncLLM(EngineClient):
         tokenization_kwargs: dict[str, Any] | None = None,
         trace_headers: Mapping[str, str] | None = None,
         priority: int = 0,
+        tier: float = 1,
         data_parallel_rank: int | None = None,
     ) -> AsyncGenerator[RequestOutput, None]:
         """
@@ -424,6 +524,7 @@ class AsyncLLM(EngineClient):
                 tokenization_kwargs=tokenization_kwargs,
                 trace_headers=trace_headers,
                 priority=priority,
+                tier=tier,
                 data_parallel_rank=data_parallel_rank,
                 prompt_text=prompt_text,
             )
@@ -621,6 +722,7 @@ class AsyncLLM(EngineClient):
         lora_request: LoRARequest | None = None,
         trace_headers: Mapping[str, str] | None = None,
         priority: int = 0,
+        tier: float = 1,
         truncate_prompt_tokens: int | None = None,
         tokenization_kwargs: dict[str, Any] | None = None,
     ) -> AsyncGenerator[PoolingRequestOutput, None]:
@@ -660,6 +762,7 @@ class AsyncLLM(EngineClient):
                 tokenization_kwargs=tokenization_kwargs,
                 trace_headers=trace_headers,
                 priority=priority,
+                tier=tier,
             )
 
             # The output_handler task pushes items into the queue.
