@@ -313,7 +313,8 @@ def get_compile_factors(config: ConfigT, ignored_factors: set[str]) -> CompileFa
         value = getattr(config, factor, None)
         # Nested configs expose factors via compile_factors; unwrap first.
         if isinstance(value, SupportsCompileFactors):
-            value = value.compile_factors()
+            factors[factor] = value.compile_factors()
+            continue
         try:
             factors[factor] = normalize_value(value)
         except TypeError as e:
