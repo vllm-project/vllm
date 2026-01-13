@@ -309,12 +309,13 @@ class ModernBertPooler(SequencePooler):
             config.hidden_size,
             eps=config.norm_eps,
             bias=config.norm_bias,
+            dtype=head_dtype,
         )
 
         # Use lambdas so that weights are not registered under `self.head`
         self.head = EmbeddingPoolerHead(
-            projector=lambda x: self.dense(x),
             head_dtype=head_dtype,
+            projector=lambda x: self.dense(x),
             activation=LambdaPoolerActivation(lambda x: self.norm(self.act(x))),
         )
 
