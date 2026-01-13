@@ -8,6 +8,9 @@ import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm import envs
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.logger import init_logger
+from vllm.model_executor.layers.fused_moe.prepare_finalize import (
+    MoEPrepareAndFinalizeNoEP,
+)
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
     FusedMoEQuantConfig,
@@ -145,7 +148,7 @@ def select_fp8_moe_backend(
             "does not support the deployment configuration."
         )
 
-    # NOTE(rob): the kernels are selected in the following order.
+    # NOTE: the kernels are selected in the following order.
     AVAILABLE_BACKENDS = [
         Fp8MoeBackend.AITER,
         Fp8MoeBackend.FLASHINFER_TRTLLM,
@@ -348,98 +351,25 @@ def make_fp8_moe_quant_config(
 
 
 def make_fp8_moe_kernel(
-    layer: torch.nn.Module,
     moe_quant_config: FusedMoEQuantConfig,
     moe_config: FusedMoEConfig,
     fp8_backend: Fp8MoeBackend,
+    experts_cls: type[mk.FusedMoEPermuteExpertsUnpermute],
 ) -> tuple[mk.FusedMoEModularKernel, bool]:
-    # Delayed import is required since the oracle is imported
-    # by CPU backends which cannot import all of these experts.
-    # TODO: update the experts to make this not happen.
-    from vllm.model_executor.layers.fused_moe.prepare_finalize import (
-        MoEPrepareAndFinalizeNoEP,
+    assert (experts_cls.activation_format() == 
+            mk.FusedMoEActivationFormat.Standard)
+    defer_input_quant = experts_cls.should_pf_defer_input_quant(
+        moe_quant_config,
     )
 
-    # NOTE(rob): this is a WIP refactor. We are first migrating
-    # all of the kernels in the TP case to use mk. Once this is
-    # done, then we will initialzie the TP case and DP/EP case
-    # via the same code path (i.e. via maybe_init_modular_kernel).
-    # NOTE(rob): in progress migrating all into this format.
-    use_inplace = True
-    if fp8_backend == Fp8MoeBackend.FLASHINFER_CUTLASS:
-        from vllm.model_executor.layers.fused_moe.flashinfer_cutlass_moe import (
-            FlashInferExperts,
-        )
+    kernel = mk.FusedMoEModularKernel(
+        MoEPrepareAndFinalizeNoEP(defer_input_quant=defer_input_quant),
+        experts_cls.make_standard_experts(
+            moe_config=moe_config,
+            quant_config=moe_quant_config,
+        ),
+    )
 
-        kernel = mk.FusedMoEModularKernel(
-            MoEPrepareAndFinalizeNoEP(
-                defer_input_quant=moe_quant_config.is_block_quantized
-            ),
-            FlashInferExperts(
-                out_dtype=layer.orig_dtype,
-                quant_config=moe_quant_config,
-                ep_rank=moe_config.ep_rank,
-                ep_size=moe_config.ep_size,
-                tp_rank=moe_config.tp_rank,
-                tp_size=moe_config.tp_size,
-                use_dp=(moe_config.dp_size > 1),
-                use_deepseek_fp8_block_scale=moe_quant_config.is_block_quantized,
-            ),
-        )
-        use_inplace = False
-
-    elif fp8_backend == Fp8MoeBackend.AITER:
-        from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (
-            AiterExperts,
-        )
-
-        kernel = mk.FusedMoEModularKernel(
-            # TODO: make defer_input_quant an attr of the AiterExperts
-            MoEPrepareAndFinalizeNoEP(defer_input_quant=True),
-            AiterExperts(quant_config=moe_quant_config),
-        )
-    elif fp8_backend == Fp8MoeBackend.MARLIN:
-        from vllm.model_executor.layers.fused_moe.fused_marlin_moe import (
-            MarlinExperts,
-        )
-
-        kernel = mk.FusedMoEModularKernel(
-            MoEPrepareAndFinalizeNoEP(),
-            MarlinExperts(quant_config=moe_quant_config),
-        )
-    elif fp8_backend == Fp8MoeBackend.VLLM_CUTLASS:
-        from vllm.model_executor.layers.fused_moe.triton_cutlass_moe import (
-            TritonOrCutlassExperts,
-        )
-
-        kernel = mk.FusedMoEModularKernel(
-            MoEPrepareAndFinalizeNoEP(),
-            TritonOrCutlassExperts(
-                out_dtype=moe_config.in_dtype,
-                e=layer.local_num_experts,
-                n=layer.intermediate_size_per_partition,
-                k=layer.hidden_size,
-                device=layer.w13_weight.device,
-                quant_config=moe_quant_config,
-            ),
-        )
-    elif fp8_backend == Fp8MoeBackend.DEEPGEMM:
-        from vllm.model_executor.layers.fused_moe import (
-            TritonOrDeepGemmExperts,
-        )
-
-        kernel = mk.FusedMoEModularKernel(
-            MoEPrepareAndFinalizeNoEP(),
-            TritonOrDeepGemmExperts(quant_config=moe_quant_config),
-        )
-    else:
-        from vllm.model_executor.layers.fused_moe.fused_moe import (
-            TritonExperts,
-        )
-
-        assert fp8_backend == Fp8MoeBackend.TRITON
-        kernel = mk.FusedMoEModularKernel(
-            MoEPrepareAndFinalizeNoEP(),
-            TritonExperts(quant_config=moe_quant_config),
-        )
-    return kernel, use_inplace
+    # TODO(rob): update inplace logic
+    inplace = fp8_backend != Fp8MoeBackend.FLASHINFER_CUTLASS
+    return kernel, inplace

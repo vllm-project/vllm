@@ -952,6 +952,10 @@ class FusedMoEParallelConfig:
     @property
     def use_deepep_ll_kernels(self):
         return self.use_all2all_kernels and self.all2all_backend == "deepep_low_latency"
+    
+    @property
+    def use_fi_all2all_kernels(self):
+        return self.use_all2all_kernels and self.all2all_backend == "flashinfer_all2allv"
 
     @staticmethod
     def flatten_tp_across_dp_and_pcp(
@@ -1097,6 +1101,7 @@ class FusedMoEConfig:
     num_experts: int
     experts_per_token: int
     hidden_dim: int
+    intermediate_size_per_partition: int
 
     num_local_experts: int
     moe_parallel_config: FusedMoEParallelConfig
@@ -1115,7 +1120,8 @@ class FusedMoEConfig:
 
     is_lora_enabled: bool = False
 
-    activation: str = "silu"
+    activation: str
+    device: torch.dtype
 
     def __post_init__(self):
         if self.dp_size > 1:

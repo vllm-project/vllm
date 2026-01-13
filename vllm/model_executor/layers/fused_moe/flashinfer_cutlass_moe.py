@@ -25,30 +25,33 @@ logger = init_logger(__name__)
 class FlashInferExperts(mk.FusedMoEPermuteExpertsUnpermute):
     def __init__(
         self,
-        out_dtype: torch.dtype,
+        moe_config: mk.FusedMoEConfig,
         quant_config: FusedMoEQuantConfig,
-        ep_rank: int = 0,
-        ep_size: int = 1,
-        tp_rank: int = 0,
-        tp_size: int = 1,
-        use_dp: bool = False,
-        use_deepseek_fp8_block_scale: bool = False,
     ):
-        super().__init__(quant_config)
+        super().__init__(moe_config, quant_config)
         assert quant_config.quant_dtype in ("nvfp4", torch.float8_e4m3fn, None), (
             "Only nvfp4, fp8, bfloat16 and"
             " float16 quantization are currently supported."
         )
-        self.ep_rank = ep_rank
-        self.ep_size = ep_size
-        self.tp_rank = tp_rank
-        self.tp_size = tp_size
-        self.out_dtype = out_dtype
-        self.use_dp = use_dp
+        self.ep_rank = moe_config.moe_parallel_config.ep_rank
+        self.ep_size = moe_config.moe_parallel_config.ep_size
+        self.tp_rank = moe_config.moe_parallel_config.tp_rank
+        self.tp_size = moe_config.moe_parallel_config.tp_size
+        self.out_dtype = moe_config.in_dtype
+        self.use_dp = moe_config.moe_parallel_config.dp_size > 1
         # Enables DeepSeek-style FP8 block-scale path:
         # - pass per-block weight scales to the kernel
         # - skip input activation quantization (kernel applies scaling)
-        self.use_deepseek_fp8_block_scale = use_deepseek_fp8_block_scale
+        self.use_deepseek_fp8_block_scale = quant_config.is_block_quantized
+    
+    @staticmethod
+    def should_pf_defer_input_quant(quant_config):
+        """
+        FlashInfer CUTLASS Block FP8 path handles input quantization.
+        """
+        if quant_config.is_block_quantized:
+            return True
+        return False
 
     @staticmethod
     def _supports_current_device() -> bool:

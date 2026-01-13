@@ -13,6 +13,7 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEParallelConfig,
     FusedMoEQuantConfig,
     FusedMoEQuantScheme,
+    FusedMoEConfig,
 )
 from vllm.model_executor.layers.fused_moe.moe_permute_unpermute import (
     moe_permute,
@@ -244,24 +245,21 @@ def run_cutlass_moe_fp8(
 class CutlassExpertsFp8Base(mk.FusedMoEPermuteExpertsUnpermute):
     def __init__(
         self,
-        e: int,
-        n: int,
-        k: int,
-        out_dtype: torch.dtype | None,
+        moe_config: FusedMoEConfig,
         quant_config: FusedMoEQuantConfig,
         device: torch.dtype,
     ):
         assert quant_config.use_fp8_w8a8
         super().__init__(quant_config)
-
-        # E: num_experts
-        # N: intermediate size per partition
-        # K: hidden dim
+    
+        e = moe_config.num_local_experts
+        n = moe_config.intermediate_size_per_partition
+        k = moe_config.hidden_dim
         ab_strides1_c_strides2 = torch.full((e,), k, device=device, dtype=torch.int64)
         ab_strides2 = torch.full((e,), n, device=device, dtype=torch.int64)
         c_strides1 = torch.full((e,), 2 * n, device=device, dtype=torch.int64)
 
-        self.out_dtype = out_dtype
+        self.out_dtype = moe_config.in_dtype
         self.ab_strides1 = ab_strides1_c_strides2
         self.ab_strides2 = ab_strides2
         self.c_strides1 = c_strides1

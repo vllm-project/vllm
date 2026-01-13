@@ -375,12 +375,79 @@ class FusedMoEPermuteExpertsUnpermute(ABC):
 
     def __init__(
         self,
+        moe_config: FusedMoEConfig,
         quant_config: FusedMoEQuantConfig,
     ):
         """
+        moe_config: MoE layer configuration.
         quant_config: Quantization parameters for this experts instance.
         """
+        self.moe_config = moe_config
         self.quant_config = quant_config
+        self._max_num_tokens: int | None = None
+        self._max_dispatchers: int | None = None
+
+    @staticmethod
+    def should_pf_defer_input_quant(quant_config: FusedMoEQuantConfig) -> bool:
+        """
+        Whether or not the PrepareFinalize should defer input quantization
+        in the prepare step. If True, then the Experts kernel will 
+        execute the input quantization itself.
+
+        Sample subclasses that override are AITER and FlashInfer CUTLASS.
+        """
+        return False
+    
+    def _init_batched_experts_addl_params(
+        self,
+        max_num_tokens: int,
+        max_dispatchers: int,
+    ):
+        """
+        Initialize any additional parameters needed for batched experts.
+        """
+        self._max_num_tokens = max_num_tokens
+        self._max_dispatchers = max_dispatchers
+    
+    @property
+    def max_num_tokens(self) -> int:
+        if self._max_num_tokens is None:
+            raise AttributeError("max_num_tokens only valid for BatchedExperts")
+        return self._max_num_tokens
+
+    @property
+    def max_dispatchers(self) -> int:
+        if self._max_dispatchers is None:
+            raise AttributeError("max_dispatchers only valid for BatchedExperts")
+        return self._max_dispatchers
+    
+    @classmethod
+    def make_standard_experts(
+        cls,
+        moe_config: FusedMoEConfig,
+        quant_config: FusedMoEQuantConfig,
+    ) -> "FusedMoEPermuteExpertsUnpermute":
+        """
+        Factory method to create an instance of this class.
+        """
+        assert cls.activation_format() == FusedMoEActivationFormat.Standard
+        return cls(moe_config, quant_config)
+    
+    @classmethod
+    def make_batched_experts(
+        cls,
+        moe_config: FusedMoEConfig,
+        quant_config: FusedMoEQuantConfig,
+        max_num_tokens: int,
+        max_dispatchers: int,
+    ) -> "FusedMoEPermuteExpertsUnpermute":
+        """
+        Factory method to create an instance of this class.
+        """
+        assert cls.activation_format() == FusedMoEActivationFormat.BatchedExperts
+        instance = cls(moe_config, quant_config)
+        instance._init_batched_experts_addl_params(max_num_tokens, max_dispatchers)
+        return instance
 
     @staticmethod
     @abstractmethod

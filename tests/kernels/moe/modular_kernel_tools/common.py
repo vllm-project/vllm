@@ -574,11 +574,13 @@ def make_modular_kernel(
         num_experts=config.E,
         experts_per_token=config.topk,
         hidden_dim=config.K,
+        intermediate_size_per_partition=config.N,
         num_local_experts=config.num_local_experts,
         moe_parallel_config=moe_parallel_config,
         in_dtype=config.dtype,
         max_num_tokens=next_power_of_2(config.M),
         activation="silu",
+        device=vllm_config.device_config.device,
     )
 
     # make modular kernel

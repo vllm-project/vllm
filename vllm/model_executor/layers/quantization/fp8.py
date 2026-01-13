@@ -635,6 +635,9 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             "weight_scale_inv" if self.block_quant else "weight_scale"
         )
 
+        # Create quant scheme, will be used later to select the quant scales.
+        # NOTE(rob): we should update QuantConfig to just be the think ts
+        # holds the scales. Should change the name.
         quant_scheme = FusedMoEQuantScheme(
             weight_dtype=current_platform.fp8_dtype(),
             act_dtype=current_platform.fp8_dtype(),
@@ -649,10 +652,16 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         )
 
         self.fp8_backend, self.experts_cls = select_fp8_moe_backend(
-            config=layer.moe_config,
+            config=self.moe,
             quant_scheme=quant_scheme,
-            # TODO(rob): select prepare_finalize here.
-            activation_format=mk.FusedMoEActivationFormat.Standard,
+            # NOTE(rob): this is a hack until we unify the DP/EP
+            # and TP/TEP cases.
+            activation_format=(
+                mk.FusedMoEActivationFormat.BatchedExperts if (
+                    self.moe.use_deepep_ll_kernels or
+                    self.moe.use_pplx_kernels
+                ) else mk.FusedMoEActivationFormat.Standard 
+            ),
         )
 
         self.kernel: mk.FusedMoEModularKernel | None = None
@@ -817,6 +826,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                 moe_quant_config=self.moe_quant_config,
                 moe_config=self.moe,
                 fp8_backend=self.fp8_backend,
+                experts_cls=self.experts_cls,
             )
 
     def process_weights_after_loading(self, layer: Module) -> None:
@@ -891,19 +901,27 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         prepare_finalize: FusedMoEPrepareAndFinalize,
         layer: torch.nn.Module,
     ) -> FusedMoEPermuteExpertsUnpermute:
-        from vllm.model_executor.layers.fused_moe import (
-            BatchedDeepGemmExperts,
-            BatchedTritonExperts,
-            TritonExperts,
-            TritonOrDeepGemmExperts,
-        )
 
+        # TODO(rob): this is probably fine?
         if self.fp8_backend in [Fp8MoeBackend.MARLIN, Fp8MoeBackend.AITER]:
             raise NotImplementedError(
                 "Marlin and ROCm AITER are not supported with all2all yet."
             )
 
+        # TODO(rob): is it really possible to get here?
+        if self.moe.is_lora_enabled:
+            from vllm.model_executor.layers.fused_moe import (
+                TritonExperts,
+            )
+            return TritonExperts(quant_config=self.moe_quant_config)
+
         assert self.moe_quant_config is not None
+        if self.experts_cls.activation_format() != prepare_finalize.activation_format:
+            raise ValueError(
+                f"FoundMismatch between prepare/finalize activation format "
+                f"{prepare_finalize.activation_format} and experts "
+                f"activation format {self.experts_cls.activation_format()}."
+            )
 
         if (
             prepare_finalize.activation_format
@@ -911,53 +929,33 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         ):
             max_num_tokens_per_rank = prepare_finalize.max_num_tokens_per_rank()
             assert max_num_tokens_per_rank is not None
-
-            experts_impl = (
-                BatchedDeepGemmExperts
-                if self.fp8_backend == Fp8MoeBackend.DEEPGEMM
-                else BatchedTritonExperts
-            )
+        
             logger.debug(
                 "%s(%s): max_tokens_per_rank=%s, block_size=%s, per_act_token=%s",
-                experts_impl.__name__,
+                self.experts_cls.__name__,
                 self.__class__.__name__,
                 max_num_tokens_per_rank,
                 self.weight_block_size,
                 False,
             )
-            return experts_impl(
+            return self.experts_cls.make_batched_experts(
+                moe_config=self.moe,
+                quant_config=self.moe_quant_config,
                 max_num_tokens=max_num_tokens_per_rank,
-                num_dispatchers=prepare_finalize.num_dispatchers(),
+                num_dispatchers=prepare_finalize.num_dispatchers(), 
+            )
+        else:
+            logger.debug(
+                "%s(%s): block_size=%s, per_act_token=%s",
+                self.experts_cls.__name__,
+                self.__class__.__name__,
+                self.weight_block_size,
+                False,
+            )
+            return self.experts_cls.make_standard_experts(
+                moe_config=self.moe,
                 quant_config=self.moe_quant_config,
             )
-        elif self.moe.is_lora_enabled:
-            return TritonExperts(quant_config=self.moe_quant_config)
-        elif self.fp8_backend == Fp8MoeBackend.FLASHINFER_CUTLASS:
-            # Select GEMM experts with block-scale when weights are block-quantized
-            experts = select_cutlass_fp8_gemm_impl(
-                self.moe,
-                self.moe_quant_config,
-                use_deepseek_fp8_block_scale=self.block_quant,
-            )
-            logger.debug_once("Using %s", experts.__class__.__name__)
-            return experts
-        elif self.fp8_backend == Fp8MoeBackend.DEEPGEMM:
-            logger.debug(
-                "TritonOrDeepGemmExperts(%s): block_size=%s, per_act_token=%s",
-                self.__class__.__name__,
-                self.weight_block_size,
-                False,
-            )
-            return TritonOrDeepGemmExperts(self.moe_quant_config)
-        else:
-            assert self.fp8_backend == Fp8MoeBackend.TRITON
-            logger.debug(
-                "TritonExperts(%s): block_size=%s, per_act_token=%s",
-                self.__class__.__name__,
-                self.weight_block_size,
-                False,
-            )
-            return TritonExperts(self.moe_quant_config)
 
     def get_fused_moe_quant_config(
         self, layer: torch.nn.Module

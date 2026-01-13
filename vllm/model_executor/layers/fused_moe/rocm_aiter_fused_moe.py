@@ -277,6 +277,13 @@ class AiterExperts(mk.FusedMoEPermuteExpertsUnpermute):
     @staticmethod
     def activation_format() -> mk.FusedMoEActivationFormat:
         return mk.FusedMoEActivationFormat.Standard
+    
+    @staticmethod
+    def should_pf_defer_input_quant(quant_config):
+        """
+        AITER Fused MoE kernels handle input quantization.
+        """
+        return True
 
     @staticmethod
     def _supports_current_device() -> bool:
