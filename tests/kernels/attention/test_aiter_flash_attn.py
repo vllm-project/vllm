@@ -6,9 +6,9 @@ import pytest
 import torch
 
 import vllm.v1.attention.backends.rocm_aiter_fa  # noqa: F401
-from vllm.attention.utils.fa_utils import is_flash_attn_varlen_func_available
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import set_random_seed
+from vllm.v1.attention.backends.fa_utils import is_flash_attn_varlen_func_available
 
 NUM_HEADS = [(4, 4), (8, 2)]
 HEAD_SIZES = [128, 256]
