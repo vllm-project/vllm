@@ -36,9 +36,6 @@ KIMIV_VT_INFER_MAX_PATCH_NUM = 16328
 logger = init_logger(__name__)
 
 
-
-
-
 def _apply_rope_input_validation(x, freqs_cis):
     assert x.ndim == freqs_cis.ndim + 1, (x.shape, freqs_cis.shape)
     assert x.shape[:-2] == freqs_cis.shape[:-1], (x.shape, freqs_cis.shape)
@@ -464,7 +461,6 @@ class MoonViTEncoderLayer(nn.Module):
         hidden_states = residual + hidden_states
 
         return hidden_states
-
 
 
 class MoonViT3dEncoder(nn.Module):
