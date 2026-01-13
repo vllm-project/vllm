@@ -506,6 +506,7 @@ class FlashInferMoeA2APrepareAndFinalize(FlashInferMoEPrepareAndFinalize):
         )
         if a1q_scale is not None:
             a1q_recv, a1q_scale_recv, topk_ids_recv, topk_weights_recv = recv_payloads
+            a1q_scale_recv = a1q_scale_recv.view(-1, a1q_scale_recv.shape[-1])
             # Apply scale interleaving only for CUTLASS (not TRT-LLM)
             if quant_config.quant_dtype == "nvfp4" and not self.use_linear_scale_layout:
                 a1q_scale_recv = nvfp4_block_scale_interleave(a1q_scale_recv)
@@ -513,7 +514,7 @@ class FlashInferMoeA2APrepareAndFinalize(FlashInferMoEPrepareAndFinalize):
             a1q_recv, topk_ids_recv, topk_weights_recv = recv_payloads
             a1q_scale_recv = None
         a1q_recv = a1q_recv.view(-1, a1q_recv.shape[-1])
-        a1q_scale_recv = a1q_scale_recv.view(-1, a1q_recv.shape[-1] // 8)
+        a1q_scale_recv = a1q_scale_recv.view(-1, a1q_scale_recv.shape[-1] // 8)
         topk_ids_recv = topk_ids_recv.view(-1, topk_ids_recv.shape[-1])
         topk_weights_recv = topk_weights_recv.view(-1, topk_weights_recv.shape[-1])
 

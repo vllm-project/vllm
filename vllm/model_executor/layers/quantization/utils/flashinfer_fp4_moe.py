@@ -347,6 +347,7 @@ class FlashInferTRTLLMFP4Experts(mk.FusedMoEPermuteExpertsUnpermute):
         global_num_experts: int,
         local_num_experts: int,
         expert_tokens_meta: mk.ExpertTokensMetadata | None,
+        activation: str,
     ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...]]:
         # FI TRT-LLM kernel handles workspace internally, so we just need output
         workspace1 = (0,)  # No external workspace needed
