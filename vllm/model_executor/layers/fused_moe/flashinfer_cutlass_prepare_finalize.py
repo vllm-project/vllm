@@ -356,19 +356,17 @@ def create_flashinfer_prepare_finalize(
     use_deepseek_fp8_block_scale: bool = False,
 ) -> FlashInferCutlassMoEPrepareAndFinalize | MoEPrepareAndFinalizeNoEP:
     """Factory function to create the appropriate FlashInfer implementation."""
-    # TODO(rob): migrate non-DP cases to MoEPrepareAndFinalizeNoEP
-    # once we complete the FP8 refactor.
-    if use_nvfp4:
-        if enable_alltoallv:
-            return FlashInferAllToAllMoEPrepareAndFinalize(use_dp)
-        else:
-            return FlashInferAllGatherMoEPrepareAndFinalize(use_dp)
 
     # NOTE(rob): CUTLASS FP8 block quant executes the input
     # quantzation and grouped gemm in a single kernel.
     if use_dp:
-        return MoEPrepareAndFinalizeNaiveEP(
-            defer_input_quant=use_deepseek_fp8_block_scale
-        )
+        if enable_alltoallv:
+            assert use_nvfp4
+            return FlashInferAllToAllMoEPrepareAndFinalize(use_dp)
+        defer_input_quant = use_deepseek_fp8_block_scale or use_nvfp4
+        return MoEPrepareAndFinalizeNaiveEP(defer_input_quant=defer_input_quant)
     else:
-        return MoEPrepareAndFinalizeNoEP(defer_input_quant=use_deepseek_fp8_block_scale)
+        # CUTLASS FP8 BLOCK and CUTLASS NVFP4 apply input quantization
+        # in a single call with the MoE experts kernel.
+        defer_input_quant = use_deepseek_fp8_block_scale or use_nvfp4
+        return MoEPrepareAndFinalizeNoEP(defer_input_quant=defer_input_quant)
