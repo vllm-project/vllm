@@ -82,7 +82,7 @@ class TestExtractHarmonyStreamingDelta:
         assert tools_streamed is False
 
     @pytest.mark.parametrize("channel", ["commentary", "analysis"])
-    @patch("vllm.entrypoints.openai.serving_chat_stream_harmony.make_tool_call_id")
+    @patch("vllm.entrypoints.openai.chat_completion.stream_harmony.make_tool_call_id")
     def test_new_tool_call(self, mock_make_tool_call_id, channel):
         """Test new tool call creation when recipient changes."""
         mock_make_tool_call_id.return_value = "call_test123"
