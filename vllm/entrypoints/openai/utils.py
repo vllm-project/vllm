@@ -5,7 +5,7 @@ from typing import TypeVar
 from fastapi import Request
 from fastapi.exceptions import RequestValidationError
 
-from vllm.entrypoints.openai.engine.protocol import (
+from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionRequest,
     ChatCompletionResponseChoice,
     ChatCompletionResponseStreamChoice,

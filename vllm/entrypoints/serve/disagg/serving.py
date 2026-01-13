@@ -11,10 +11,12 @@ from fastapi import Request
 
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.logger import RequestLogger
-from vllm.entrypoints.openai.engine.protocol import (
+from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionLogProb,
     ChatCompletionLogProbs,
     ChatCompletionLogProbsContent,
+)
+from vllm.entrypoints.openai.engine.protocol import (
     ErrorResponse,
     PromptTokenUsageInfo,
     RequestResponseMetadata,

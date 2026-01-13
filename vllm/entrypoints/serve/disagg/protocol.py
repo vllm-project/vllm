@@ -4,8 +4,8 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
+from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionLogProbs
 from vllm.entrypoints.openai.engine.protocol import (
-    ChatCompletionLogProbs,
     Logprob,
     SamplingParams,
     StreamOptions,

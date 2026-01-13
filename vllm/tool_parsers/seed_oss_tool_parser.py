@@ -11,8 +11,10 @@ from typing import Any
 
 import regex as re
 
-from vllm.entrypoints.openai.engine.protocol import (
+from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionRequest,
+)
+from vllm.entrypoints.openai.engine.protocol import (
     ChatCompletionToolsParam,
     DeltaFunctionCall,
     DeltaMessage,
