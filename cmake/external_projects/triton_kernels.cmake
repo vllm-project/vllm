@@ -1,6 +1,6 @@
 # Install OpenAI triton_kernels from https://github.com/triton-lang/triton/tree/main/python/triton_kernels
 
-set(DEFAULT_TRITON_KERNELS_TAG "v3.5.0")
+set(DEFAULT_TRITON_KERNELS_TAG "v3.5.1")
 
 # Set TRITON_KERNELS_SRC_DIR for use with local development with vLLM. We expect TRITON_KERNELS_SRC_DIR to
 # be directly set to the triton_kernels python directory. 
