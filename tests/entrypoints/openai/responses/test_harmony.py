@@ -12,7 +12,7 @@ from openai_harmony import (
     Message,
 )
 
-from ...utils import RemoteOpenAIServer
+from ....utils import RemoteOpenAIServer
 
 MODEL_NAME = "openai/gpt-oss-20b"
 
@@ -925,7 +925,7 @@ async def test_mcp_code_interpreter_streaming(client: OpenAI, model_name: str, s
         }
     ]
     input_text = (
-        "Calculate 15 * 32 using python. "
+        "Calculate 123 * 456 using python. "
         "The python interpreter is not stateful and you must print to see the output."
     )
 
