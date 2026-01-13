@@ -304,7 +304,7 @@ class MoRIIOWriter:
             self.worker.moriio_wrapper.waiting_for_transfer_complete()
 
             remote_port = task.remote_notify_port + get_port_offset(
-                request_info.decode_dp_rank, self.worker.tp_rank
+                request_info.decode_dp_rank, self.worker.tp_rank, self.worker.tp_size
             )
             # Consider using RDMA immediate data in decode side
             # to eliminate the need for this notification.
