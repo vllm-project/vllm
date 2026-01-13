@@ -1855,3 +1855,179 @@ def test_auto_fit_max_model_len_not_triggered():
         vllm_config, [kv_cache_specs], [mem_per_block_per_layer * 2 * 32]
     )
     assert vllm_config.model_config.max_model_len == 16
+
+
+def test_get_kv_cache_config_multiple_sliding_windows():
+    """Test KV cache config with multiple different sliding window sizes."""
+    model_config = ModelConfig(max_model_len=16)
+    vllm_config = VllmConfig(model_config=model_config)
+
+    mem_per_block_per_layer = 16 * 2 * 64 * 4 * 2
+
+    kv_cache_specs = {
+        "layer_1": new_kv_cache_spec(),
+        "layer_2": new_kv_cache_spec(),
+        "layer_3": new_sliding_window_spec(sliding_window=32),
+        "layer_4": new_sliding_window_spec(sliding_window=32),
+        "layer_5": new_sliding_window_spec(sliding_window=64),
+        "layer_6": new_sliding_window_spec(sliding_window=64),
+    }
+    kv_cache_config = get_kv_cache_configs(
+        vllm_config, [kv_cache_specs], [mem_per_block_per_layer * 2 * 32]
+    )[0]
+
+    assert kv_cache_config == KVCacheConfig(
+        num_blocks=32,
+        kv_cache_tensors=[
+            KVCacheTensor(
+                size=mem_per_block_per_layer * 32,
+                shared_by=["layer_1", "layer_3", "layer_5"],
+            ),
+            KVCacheTensor(
+                size=mem_per_block_per_layer * 32,
+                shared_by=["layer_2", "layer_4", "layer_6"],
+            ),
+        ],
+        kv_cache_groups=[
+            KVCacheGroupSpec(["layer_1", "layer_2"], new_kv_cache_spec()),
+            KVCacheGroupSpec(
+                ["layer_3", "layer_4"], new_sliding_window_spec(sliding_window=32)
+            ),
+            KVCacheGroupSpec(
+                ["layer_5", "layer_6"], new_sliding_window_spec(sliding_window=64)
+            ),
+        ],
+    )
+
+    kv_cache_specs = {
+        "layer_1": new_sliding_window_spec(sliding_window=32),
+        "layer_2": new_sliding_window_spec(sliding_window=32),
+        "layer_3": new_sliding_window_spec(sliding_window=32),
+        "layer_4": new_sliding_window_spec(sliding_window=64),
+        "layer_5": new_sliding_window_spec(sliding_window=64),
+        "layer_6": new_sliding_window_spec(sliding_window=64),
+        "layer_7": new_sliding_window_spec(sliding_window=128),
+        "layer_8": new_sliding_window_spec(sliding_window=128),
+        "layer_9": new_sliding_window_spec(sliding_window=128),
+    }
+    kv_cache_config = get_kv_cache_configs(
+        vllm_config, [kv_cache_specs], [mem_per_block_per_layer * 3 * 32]
+    )[0]
+
+    assert kv_cache_config == KVCacheConfig(
+        num_blocks=32,
+        kv_cache_tensors=[
+            KVCacheTensor(
+                size=mem_per_block_per_layer * 32,
+                shared_by=["layer_1", "layer_4", "layer_7"],
+            ),
+            KVCacheTensor(
+                size=mem_per_block_per_layer * 32,
+                shared_by=["layer_2", "layer_5", "layer_8"],
+            ),
+            KVCacheTensor(
+                size=mem_per_block_per_layer * 32,
+                shared_by=["layer_3", "layer_6", "layer_9"],
+            ),
+        ],
+        kv_cache_groups=[
+            KVCacheGroupSpec(
+                ["layer_1", "layer_2", "layer_3"],
+                new_sliding_window_spec(sliding_window=32),
+            ),
+            KVCacheGroupSpec(
+                ["layer_4", "layer_5", "layer_6"],
+                new_sliding_window_spec(sliding_window=64),
+            ),
+            KVCacheGroupSpec(
+                ["layer_7", "layer_8", "layer_9"],
+                new_sliding_window_spec(sliding_window=128),
+            ),
+        ],
+    )
+
+    kv_cache_specs = {
+        "layer_1": new_kv_cache_spec(),
+        "layer_2": new_kv_cache_spec(),
+        "layer_3": new_sliding_window_spec(sliding_window=32),
+        "layer_4": new_sliding_window_spec(sliding_window=32),
+        "layer_5": new_sliding_window_spec(sliding_window=32),
+        "layer_6": new_sliding_window_spec(sliding_window=64),
+        "layer_7": new_sliding_window_spec(sliding_window=64),
+        "layer_8": new_sliding_window_spec(sliding_window=64),
+        "layer_9": new_sliding_window_spec(sliding_window=64),
+    }
+    kv_cache_config = get_kv_cache_configs(
+        vllm_config, [kv_cache_specs], [mem_per_block_per_layer * 2 * 32]
+    )[0]
+
+    assert kv_cache_config == KVCacheConfig(
+        num_blocks=32,
+        kv_cache_tensors=[
+            KVCacheTensor(
+                size=mem_per_block_per_layer * 32,
+                shared_by=["layer_1", "layer_3", "layer_4", "layer_6", "layer_7"],
+            ),
+            KVCacheTensor(
+                size=mem_per_block_per_layer * 32,
+                shared_by=["layer_2", "layer_5", "layer_8", "layer_9"],
+            ),
+        ],
+        kv_cache_groups=[
+            KVCacheGroupSpec(["layer_1", "layer_2"], new_kv_cache_spec()),
+            KVCacheGroupSpec(
+                ["layer_3", "layer_5"],
+                new_sliding_window_spec(sliding_window=32),
+            ),
+            KVCacheGroupSpec(
+                ["layer_4"],
+                new_sliding_window_spec(sliding_window=32),
+            ),
+            KVCacheGroupSpec(
+                ["layer_6", "layer_8"],
+                new_sliding_window_spec(sliding_window=64),
+            ),
+            KVCacheGroupSpec(
+                ["layer_7", "layer_9"],
+                new_sliding_window_spec(sliding_window=64),
+            ),
+        ],
+    )
+
+    kv_cache_specs = {}
+    for i in range(1, 7):
+        kv_cache_specs[f"layer_{i}"] = new_sliding_window_spec(sliding_window=32)
+    for i in range(7, 13):
+        kv_cache_specs[f"layer_{i}"] = new_sliding_window_spec(sliding_window=64)
+    for i in range(13, 18):
+        kv_cache_specs[f"layer_{i}"] = new_sliding_window_spec(sliding_window=128)
+    for i in range(18, 23):
+        kv_cache_specs[f"layer_{i}"] = new_sliding_window_spec(sliding_window=256)
+
+    kv_cache_config = get_kv_cache_configs(
+        vllm_config, [kv_cache_specs], [mem_per_block_per_layer * 6 * 32]
+    )[0]
+
+    assert kv_cache_config.num_blocks == 32
+    assert len(kv_cache_config.kv_cache_tensors) == 6
+    assert len(kv_cache_config.kv_cache_groups) == 4
+
+    assert kv_cache_config.kv_cache_tensors[0].shared_by == [
+        "layer_1",
+        "layer_7",
+        "layer_13",
+        "layer_18",
+    ]
+    assert kv_cache_config.kv_cache_tensors[5].shared_by == ["layer_6", "layer_12"]
+
+
+def test_find_optimal_padding_group_size():
+    from vllm.v1.core.kv_cache_utils import _find_optimal_padding_group_size
+
+    assert _find_optimal_padding_group_size([3, 3, 3]) == 3
+    assert _find_optimal_padding_group_size([3, 7]) == 3
+    assert _find_optimal_padding_group_size([6, 6, 5, 5]) == 6
+    assert _find_optimal_padding_group_size([2, 4]) == 2
+    assert _find_optimal_padding_group_size([2, 3, 4]) == 2
+    assert _find_optimal_padding_group_size([1, 5]) == 1
+    assert _find_optimal_padding_group_size([4, 6, 9]) == 2

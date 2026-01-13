@@ -1030,26 +1030,17 @@ def _get_kv_cache_groups_uniform_page_size(
     # is the minimum number of layers among all attention types. Need a better
     # strategy if we want to support more complex patterns (e.g., 20 full + 30
     # sw, where the group size should be 10).
-    min_num_layers = min([len(layers) for layers in same_type_layers.values()])
-    group_size = min_num_layers
-    max_num_layers = max([len(layers) for layers in same_type_layers.values()])
-    if max_num_layers < min_num_layers * 1.25:
-        # If the number of layers is not much larger than the minimum number of layers,
-        # use the maximum number of layers as the group size to avoid too many padding
-        # layers. A typical example is gpt-oss-20b + eagle, with 12 sw + 13 full. We
-        # pad it to (13 sw, 13 full) instead of (12 sw, 24 full). 1.25 is just a
-        # magic number to avoid too many padding layers.
-        group_size = max_num_layers
+    layer_counts = [len(layers) for layers in same_type_layers.values()]
+    group_size = _find_optimal_padding_group_size(layer_counts)
+
+    # Split each attention type into groups and apply interleaved assignment.
     grouped_layers = []
-    for layers in same_type_layers.values():
-        num_padding_layers = group_size - len(layers) % group_size
-        if num_padding_layers != group_size:
-            logger.warning(
-                "Add %d padding layers, may waste at most %.2f%% KV cache memory",  # noqa
-                num_padding_layers,
-                num_padding_layers / len(layers) * 100,
-            )
-        num_groups = cdiv(len(layers), group_size)
+    total_padding = 0
+
+    for layer_spec, layers in same_type_layers.items():
+        num_groups_for_type = cdiv(len(layers), group_size)
+        padding_for_type = num_groups_for_type * group_size - len(layers)
+        total_padding += padding_for_type
         # In PP case, say if we have
         # - stage 0: full.0, sw.0, sw.1
         # - stage 1: full.1, sw.2, sw.3
@@ -1061,9 +1052,85 @@ def _get_kv_cache_groups_uniform_page_size(
         # the same and will cause memory waste.
         # To avoid this, we assign layers[i::num_groups] to the i-th group
         # instead of layers[i * group_size: (i + 1) * group_size]
-        for i in range(num_groups):
-            grouped_layers.append(layers[i::num_groups])
+        for i in range(num_groups_for_type):
+            grouped_layers.append(layers[i::num_groups_for_type])
+
+    if total_padding > 0:
+        logger.warning(
+            "Add %d padding layers, may waste at most %.2f%% KV cache memory",
+            total_padding,
+            total_padding / len(kv_cache_spec) * 100,
+        )
+
     return create_kv_cache_group_specs(kv_cache_spec, grouped_layers)
+
+
+def _find_optimal_padding_group_size(layer_counts: list[int]) -> int:
+    """
+    Find the optimal group_size that minimizes total padding across all
+    attention types.
+
+    The algorithm:
+    1. Collect all divisors of each layer count as candidates. If group_size
+       is a divisor of a layer count, that type needs no padding.
+    2. For each candidate, compute total padding = sum of (ceil(count/size) *
+       size - count) for all types.
+    3. Select the candidate with minimum padding. If tied, prefer larger size
+       (fewer groups = simpler management).
+
+    Args:
+        layer_counts: List of layer counts for each attention type.
+                      E.g., [6, 6, 5, 5] for attention with 4 types
+                      where each one has different sildiing window size.
+
+    Returns:
+        The optimal group_size.
+
+    Example:
+        layer_counts = [6, 6, 5, 5], total = 22 layers
+
+        Candidates (divisors): {1, 2, 3, 5, 6}
+
+        Evaluation:
+        - size=1: need 6+6+5+5=22, padding=0, groups=22
+        - size=2: need 6+6+6+6=24, padding=2, groups=12
+        - size=3: need 6+6+6+6=24, padding=2, groups=8
+        - size=5: need 10+10+5+5=30, padding=8, groups=6
+        - size=6: need 6+6+6+6=24, padding=2, groups=4   <- optimal
+    """
+    min_count = min(layer_counts)
+    total_layers = sum(layer_counts)
+    # Collect all divisors of each layer count as candidates.
+    # If size is a divisor of count, then count % size == 0, no padding needed.
+    candidates = set()
+    for count in layer_counts:
+        # Find all divisors of count using the sqrt optimization:
+        # if i divides count, then count/i also divides count.
+        for i in range(1, int(count**0.5) + 1):
+            if count % i == 0:
+                candidates.add(i)
+                candidates.add(count // i)
+        candidates.add(count)
+    # Exclude group_size=1 unless min_count is 1.
+    # group_size=1 is an extreme case that creates one group per layer,
+    # which would increases the number of groups and degrades
+    # prefix caching lookup performance due to more block tables to search.
+    if min_count > 1:
+        candidates.discard(1)
+    # Evaluate each candidate and find the one with minimum padding.
+    best_size = min_count
+    best_waste = float("inf")
+
+    for size in candidates:
+        # Calculate total slots needed: ceil(count/size) * size for each type
+        total_needed = sum(cdiv(c, size) * size for c in layer_counts)
+        waste = total_needed - total_layers
+        # if tied, prefer larger size (fewer groups)
+        if waste < best_waste or (waste == best_waste and size > best_size):
+            best_waste = waste
+            best_size = size
+
+    return best_size
 
 
 def get_kv_cache_config_from_groups(
