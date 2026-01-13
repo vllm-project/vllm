@@ -1211,23 +1211,29 @@ class OpenAIServingChat(OpenAIServing):
                                     delta_message.tool_calls[0].function.arguments
                                 )
 
-                            # get the expected call based on partial JSON
-                            # parsing which "autocompletes" the JSON
-                            expected_call = json.dumps(
-                                tool_parser.prev_tool_call_arr[index].get(
-                                    "arguments", {}
-                                ),
-                                ensure_ascii=False,
-                            )
-
-                            # get what we've streamed so far for arguments
-                            # for the current tool
+                            # GLM 4 parsers with MTP on won't work properly if
+                            # falling back to the original autocomplete logic.
                             actual_call = tool_parser.streamed_args_for_tool[index]
-                            if latest_delta_len > 0:
-                                actual_call = actual_call[:-latest_delta_len]
+                            remaining_call = ""
+                            if "Glm4" not in type(tool_parser).__name__:
+                                expected_call = json.dumps(
+                                    tool_parser.prev_tool_call_arr[index].get(
+                                        "arguments", {}
+                                    ),
+                                    ensure_ascii=False,
+                                )
+                                if latest_delta_len > 0:
+                                    actual_call = actual_call[:-latest_delta_len]
+                                # check to see if there's anything left
+                                remaining_call = expected_call.replace(
+                                    actual_call, "", 1
+                                )
+                            else:
+                                # Parser doesn't need autocomplete - just send
+                                # the remaining portion of what was streamed
+                                if latest_delta_len > 0:
+                                    remaining_call = actual_call[-latest_delta_len:]
 
-                            # check to see if there's anything left to stream
-                            remaining_call = expected_call.replace(actual_call, "", 1)
                             # set that as a delta message
                             delta_message = self._create_remaining_args_delta(
                                 delta_message, remaining_call, index
