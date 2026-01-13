@@ -525,9 +525,10 @@ class AsyncLLM(EngineClient):
                             await asyncio.sleep(0)
 
                         # 3) Abort any reqs that finished due to stop strings.
-                        await engine_core.abort_requests_async(
-                            processed_outputs.reqs_to_abort
-                        )
+                        if processed_outputs.reqs_to_abort:
+                            await engine_core.abort_requests_async(
+                                processed_outputs.reqs_to_abort
+                            )
 
                     output_processor.update_scheduler_stats(outputs.scheduler_stats)
 
