@@ -171,6 +171,3 @@ class CutlassFP8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
             A, B, out_dtype=out_dtype, scale_a=As, scale_b=Bs, bias=bias
         )
         return output.view(*output_shape)
-
-    def get_ouput_padding(self) -> int | None:
-        return None

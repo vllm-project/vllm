@@ -101,7 +101,7 @@ class FP8ScaledMMLinearKernel(
         self.quant_fp8 = QuantFP8(
             static=act_scale_descriptor.static,
             group_shape=act_scale_descriptor.group_shape,
-            num_token_padding=self.get_ouput_padding(),
+            num_token_padding=self.get_output_padding(),
         )
         self.fp8_dtype = current_platform.fp8_dtype()
         super().__init__(c, layer_param_names)
@@ -124,7 +124,6 @@ class FP8ScaledMMLinearKernel(
         x: torch.Tensor,
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        quant_fp8 = self.quant_fp8
         fp8_dtype = self.fp8_dtype
         maybe_out_dtype = self.config.out_dtype
         w, w_s, x_s, x_s_ub = self._get_layer_params(layer)
@@ -141,7 +140,7 @@ class FP8ScaledMMLinearKernel(
         # TODO(luka) remove this path if not used anymore
         x_2d_q = x_2d
         if x.dtype != fp8_dtype:
-            x_2d_q, x_s = quant_fp8(
+            x_2d_q, x_s = self.quant_fp8(
                 x_2d,
                 x_s,
                 x_s_ub,
@@ -170,9 +169,8 @@ class FP8ScaledMMLinearKernel(
     ) -> torch.Tensor:
         raise NotImplementedError
 
-    @abstractmethod
-    def get_ouput_padding(self) -> int | None:
-        raise NotImplementedError
+    def get_output_padding(self) -> int:
+        return 0
 
 
 class Int8ScaledMMLinearKernel(

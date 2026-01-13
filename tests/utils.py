@@ -1398,6 +1398,8 @@ class TestFP8Layer(torch.nn.Module):
         return self.kernel.apply_weights(self, y, bias)
 
 
+# TODO: Drop TestBlockFP8Layer in favour of a unified TestFP8Layer
+# after refactoring  W8A8BlockFp8LinearOp.
 class TestBlockFP8Layer:
     """
     Test helper for blockwise FP8 linear operations. Creates random weights

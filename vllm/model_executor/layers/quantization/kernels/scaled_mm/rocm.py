@@ -115,6 +115,3 @@ class ROCmScaledMMLinearKernel(FP8ScaledMMLinearKernel):
             A, B, out_dtype, As, Bs, bias
         )
         return torch.narrow(output, 0, 0, A.shape[0]).view(*output_shape)
-
-    def get_ouput_padding(self) -> int | None:
-        return None

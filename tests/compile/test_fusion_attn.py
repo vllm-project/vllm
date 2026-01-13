@@ -173,16 +173,6 @@ class TestAttentionFp8StaticQuantPatternModel(AttentionQuantPatternModel):
         super().__init__(*args, **kwargs)
 
         hidden_size = self.num_qo_heads * self.head_size
-        self.w = kwargs.get(
-            "w",
-            {
-                "weight": torch.randn(hidden_size, hidden_size)
-                .to(dtype=FP8_DTYPE, device=self.device)
-                .t(),
-                "wscale": torch.tensor([1.0], dtype=torch.float32, device=self.device),
-                "scale": torch.tensor([1.0], dtype=torch.float32, device=self.device),
-            },
-        )
         self.fp8_linear = TestFP8Layer(
             weight_shape=(hidden_size, hidden_size),
             activation_quant_key=self.quant_key,

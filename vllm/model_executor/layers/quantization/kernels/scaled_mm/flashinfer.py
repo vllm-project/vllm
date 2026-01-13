@@ -55,6 +55,3 @@ class FlashInferScaledMMLinearKernel(FP8ScaledMMLinearKernel):
         return flashinfer_scaled_fp8_mm(
             A, B, out_dtype=out_dtype, scale_a=As, scale_b=Bs, bias=bias
         )
-
-    def get_ouput_padding(self) -> int | None:
-        return None

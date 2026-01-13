@@ -78,6 +78,7 @@ _KernelConfigT = TypeVar("_KernelConfigT", bound=ScaledMMLinearLayerConfig)
 def is_supported_and_can_implement_kernel(
     kernel: type[_KernelT], config: _KernelConfigT, compute_capability: int | None
 ) -> tuple[bool, str]:
+    # TODO: Fetch `VLLM_DISABLED_KERNELS` from vllm.envs instead.
     if kernel.__name__ in os.environ.get("VLLM_DISABLED_KERNELS", "").split(","):
         return False, f" {kernel.__name__} is disabled by environment variable"
 

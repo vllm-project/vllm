@@ -33,7 +33,7 @@ class TorchScaledMMLinearKernel(FP8ScaledMMLinearKernel):
 
         return True, None
 
-    def get_ouput_padding(self) -> int | None:
+    def get_output_padding(self) -> int:
         # Note: we pad the input because torch._scaled_mm is more performant
         # for matrices with batch dimension > 16.
         # This could change in the future.
@@ -41,8 +41,7 @@ class TorchScaledMMLinearKernel(FP8ScaledMMLinearKernel):
         # as it breaks with dynamic shapes.
         vllm_config = get_current_vllm_config().compilation_config
         pad_output = vllm_config.mode < CompilationMode.VLLM_COMPILE
-        output_padding = 17 if pad_output else None
-        return output_padding
+        return 17 if pad_output else 0
 
 
 class PerTensorTorchScaledMMLinearKernel(TorchScaledMMLinearKernel):
