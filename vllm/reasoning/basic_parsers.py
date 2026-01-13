@@ -43,6 +43,11 @@ class BaseThinkingReasoningParser(ReasoningParser):
         """The token that ends reasoning content."""
         raise NotImplementedError
 
+    @property
+    def end_token_ids(self) -> list[int] | None:
+        """The token IDs that end reasoning content."""
+        return [self.end_token_id]
+
     def __init__(self, tokenizer: TokenizerLike, *args, **kwargs):
         super().__init__(tokenizer, *args, **kwargs)
 

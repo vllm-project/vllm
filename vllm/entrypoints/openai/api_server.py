@@ -1089,6 +1089,7 @@ async def init_app_state(
             tool_parser=args.tool_call_parser,
             reasoning_parser=args.structured_outputs_config.reasoning_parser,
             enable_prompt_tokens_details=args.enable_prompt_tokens_details,
+            enable_completion_tokens_details=args.enable_completion_tokens_details,
             enable_force_include_usage=args.enable_force_include_usage,
             enable_log_outputs=args.enable_log_outputs,
             enable_log_deltas=args.enable_log_deltas,

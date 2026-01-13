@@ -46,6 +46,12 @@ class ReasoningParser:
         # whereas all tokenizers have .get_vocab()
         return self.model_tokenizer.get_vocab()
 
+    @property
+    @cached_property
+    def end_token_ids(self) -> list[int] | None:
+        """The token IDs that end reasoning content."""
+        return None
+
     @abstractmethod
     def is_reasoning_end(self, input_ids: list[int]) -> bool:
         """
