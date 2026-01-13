@@ -49,6 +49,9 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.batch_invariant import (
     vllm_is_batch_invariant,
 )
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    QuantKey,
+)
 from vllm.platforms.interface import DeviceCapability
 from vllm.utils.math_utils import cdiv, round_up
 from vllm.v1.attention.backend import (
@@ -621,6 +624,11 @@ class FlashAttentionImpl(AttentionImpl):
             )
 
         self.supports_quant_query_input = True
+        self.supports_per_head_quant_scales = (
+            self.vllm_flash_attn_version >= 3
+            if self.vllm_flash_attn_version is not None
+            else False
+        )
 
         vllm_config = get_current_vllm_config_or_none()
         dcp_a2a = (
@@ -629,6 +637,30 @@ class FlashAttentionImpl(AttentionImpl):
             and vllm_config.parallel_config.dcp_comm_backend == "a2a"
         )
         self.dcp_combine = dcp_a2a_lse_reduce if dcp_a2a else cp_lse_ag_out_rs
+
+    def fused_output_quant_supported(self, quant_key: QuantKey) -> bool:
+        """
+        Check if fused output quantization is supported.
+
+        For FlashAttention, we support fused output FP8 quantization on:
+        - FlashAttention 3
+        - Hopper GPUs (sm90+)
+        - FP8 static tensor quantization
+
+        This fusion avoids a separate quantization pass after attention.
+        """
+        from vllm.platforms import current_platform
+
+        # Only FA3 supports fused output quant
+        if self.vllm_flash_attn_version != 3:
+            return False
+
+        # Only Hopper (sm90+) supports this feature
+        if not current_platform.has_device_capability(90):
+            return False
+
+        # Only FP8 static tensor quantization is supported
+        return quant_key == kFp8StaticTensorSym
 
     def forward(
         self,
@@ -662,9 +694,11 @@ class FlashAttentionImpl(AttentionImpl):
             "FlashAttention version not detected."
         )
 
-        if output_scale is not None or output_block_scale is not None:
+        # Block scale quantization is not yet supported
+        if output_block_scale is not None:
             raise NotImplementedError(
-                "fused output quantization is not yet supported for FlashAttentionImpl"
+                "fused block_scale output quantization is not yet supported "
+                "for FlashAttentionImpl"
             )
 
         if attn_metadata is None:
@@ -695,6 +729,7 @@ class FlashAttentionImpl(AttentionImpl):
                 output[:num_actual_tokens],
                 attn_metadata,
                 layer,
+                output_scale=output_scale,
             )
 
         # For decoder and cross-attention, use KV cache as before
@@ -734,6 +769,7 @@ class FlashAttentionImpl(AttentionImpl):
                     q_descale=q_descale,
                     k_descale=k_descale,
                     v_descale=v_descale,
+                    output_scale=output_scale,
                 )
                 return output
             else:
@@ -764,6 +800,7 @@ class FlashAttentionImpl(AttentionImpl):
                     v_descale=v_descale,
                     num_splits=attn_metadata.max_num_splits,
                     s_aux=self.sinks,
+                    o_scale=output_scale,
                 )
                 return output
 
@@ -793,6 +830,7 @@ class FlashAttentionImpl(AttentionImpl):
             k_descale=layer._k_scale,
             v_descale=layer._v_scale,
             s_aux=self.sinks,
+            output_scale=output_scale,
         )
         return output
 
@@ -841,11 +879,21 @@ class FlashAttentionImpl(AttentionImpl):
         q_descale: torch.Tensor | None = None,
         k_descale: torch.Tensor | None = None,
         v_descale: torch.Tensor | None = None,
+        output_scale: torch.Tensor | None = None,
     ) -> torch.Tensor:
         assert self.vllm_flash_attn_version is not None, (
             "FlashAttention version not detected."
         )
 
+        # TODO(sachinkumarsingh092): Implement fused output quantization for DCP attention.
+        # DCP attention merges context and query outputs, so output_scale
+        # would need to be applied during the merge step or to both intermediate
+        # outputs. For now, DCP attention does not support fused output quant.
+        if output_scale is not None:
+            raise NotImplementedError(
+                "Fused output quantization is not yet supported for DCP attention"
+            )
+        
         cu_seqlens_q = attn_metadata.query_start_loc
         max_seqlen_q = attn_metadata.max_query_len
         block_table = attn_metadata.block_table
@@ -926,6 +974,7 @@ class FlashAttentionImpl(AttentionImpl):
         output: torch.Tensor,
         attn_metadata: FlashAttentionMetadata,
         layer: torch.nn.Module,
+        output_scale: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """Forward pass for encoder attention without KV cache.
 
@@ -936,6 +985,7 @@ class FlashAttentionImpl(AttentionImpl):
             output: shape = [num_encoder_tokens, num_heads, head_size]
             attn_metadata: Encoder attention metadata
             layer: The attention layer
+            output_scale: Optional scale for fused FP8 output quantization
         """
         assert self.vllm_flash_attn_version is not None, (
             "FlashAttention version not detected."
@@ -981,6 +1031,7 @@ class FlashAttentionImpl(AttentionImpl):
             k_descale=layer._k_scale.expand(descale_shape),
             v_descale=layer._v_scale.expand(descale_shape),
             num_splits=1 if self.batch_invariant_enabled else 0,
+            o_scale=output_scale,
         )
 
         return output
@@ -1089,12 +1140,22 @@ def cascade_attention(
     k_descale: torch.Tensor | None = None,
     v_descale: torch.Tensor | None = None,
     s_aux: torch.Tensor | None = None,
+    output_scale: torch.Tensor | None = None,
 ) -> torch.Tensor:
     assert alibi_slopes is None, "Cascade attention does not support ALiBi."
     # TODO: Support sliding window.
     assert sliding_window == (-1, -1), (
         "Cascade attention does not support sliding window."
     )
+    
+    # TODO(sachinkumarsingh092): Implement fused output quantization for cascade attention.
+    # Cascade attention merges prefix and suffix outputs, so output_scale
+    # would need to be applied during the merge step or to both intermediate
+    # outputs. For now, cascade attention does not support fused output quant.
+    if output_scale is not None:
+        raise NotImplementedError(
+            "Fused output quantization is not yet supported for cascade attention"
+        )
 
     num_tokens = query.shape[0]
     block_size = key_cache.shape[-3]
