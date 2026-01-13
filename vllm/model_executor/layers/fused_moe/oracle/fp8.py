@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from enum import Enum
+from typing import TYPE_CHECKING
 
 import torch
 
@@ -18,9 +19,6 @@ from vllm.model_executor.layers.fused_moe.config import (
 from vllm.model_executor.layers.fused_moe.flashinfer_trtllm_moe import (
     is_supported_config_trtllm,
 )
-from vllm.model_executor.layers.fused_moe.prepare_finalize import (
-    MoEPrepareAndFinalizeNoEP,
-)
 from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
     FlashinferMoeBackend,
     get_flashinfer_moe_backend,
@@ -33,6 +31,9 @@ from vllm.model_executor.layers.quantization.utils.fp8_utils import (
 from vllm.model_executor.layers.quantization.utils.marlin_utils_fp8 import (
     prepare_fp8_moe_layer_for_marlin,
 )
+
+if TYPE_CHECKING:
+    from vllm.model_executor.layers.fused_moe.fused_moe import FusedMoE
 
 logger = init_logger(__name__)
 
@@ -351,24 +352,44 @@ def make_fp8_moe_quant_config(
 
 
 def make_fp8_moe_kernel(
+    layer: "FusedMoE",
     moe_quant_config: FusedMoEQuantConfig,
     moe_config: FusedMoEConfig,
     fp8_backend: Fp8MoeBackend,
+    prepare_finalize: mk.FusedMoEPrepareAndFinalize,
     experts_cls: type[mk.FusedMoEPermuteExpertsUnpermute],
 ) -> tuple[mk.FusedMoEModularKernel, bool]:
-    assert experts_cls.activation_format() == mk.FusedMoEActivationFormat.Standard
-    defer_input_quant = experts_cls.should_pf_defer_input_quant(
-        moe_quant_config,
-    )
-
-    kernel = mk.FusedMoEModularKernel(
-        MoEPrepareAndFinalizeNoEP(defer_input_quant=defer_input_quant),
-        experts_cls.make_standard_experts(
+    # Create Experts.
+    if prepare_finalize.activation_format == mk.FusedMoEActivationFormat.Standard:
+        experts = experts_cls.make_standard_experts(
             moe_config=moe_config,
             quant_config=moe_quant_config,
+        )
+    else:
+        max_num_tokens_per_rank = prepare_finalize.max_num_tokens_per_rank()
+        assert max_num_tokens_per_rank is not None
+        experts = experts_cls.make_batched_experts(
+            moe_config=moe_config,
+            quant_config=moe_quant_config,
+            max_num_tokens=max_num_tokens_per_rank,
+            num_dispatchers=prepare_finalize.num_dispatchers(),
+        )
+
+    # NOTE(rob): we only want the ModularKernel to control the SharedExpert
+    # if we are using all2all (for SBO). Need to make a change somewhere
+    # else to prevent double running the Shared Expert.
+    # This needs to be refactored.
+    kernel = mk.FusedMoEModularKernel(
+        prepare_finalize,
+        experts,
+        shared_experts=(
+            getattr(layer, "shared_expert", None)
+            if moe_config.moe_parallel_config.use_all2all_kernels
+            else None
         ),
+        moe_parallel_config=moe_config.moe_parallel_config,
     )
 
-    # TODO(rob): update inplace logic
+    # TODO(rob): update inplace logic to be part of the kernel.
     inplace = fp8_backend != Fp8MoeBackend.FLASHINFER_CUTLASS
     return kernel, inplace

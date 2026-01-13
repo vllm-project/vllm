@@ -954,7 +954,7 @@ class FusedMoEParallelConfig:
         return self.use_all2all_kernels and self.all2all_backend == "deepep_low_latency"
 
     @property
-    def use_fi_all2all_kernels(self):
+    def use_fi_all2allv_kernels(self):
         return (
             self.use_all2all_kernels and self.all2all_backend == "flashinfer_all2allv"
         )
@@ -1187,6 +1187,10 @@ class FusedMoEConfig:
     @property
     def use_deepep_ll_kernels(self):
         return self.moe_parallel_config.use_deepep_ll_kernels
+
+    @property
+    def use_fi_all2allv_kernels(self):
+        return self.moe_parallel_config.use_fi_all2allv_kernels
 
     @property
     def use_naive_kernels(self):

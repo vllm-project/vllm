@@ -688,6 +688,10 @@ class FusedMoE(CustomOp):
     # This is called after all weight loading and post-processing, so it
     # should be safe to swap out the quant_method.
     def maybe_init_modular_kernel(self) -> None:
+        if getattr(self.quant_config, "_SUPPORTS_MK_INTERALLY", False):
+            logger.info("SKIPPING MK INIT --> done by quant integration internally.")
+            return
+
         self.ensure_moe_quant_config_init()
         # routing_tables only needed for round-robin expert placement with
         # DeepEP all2all backend.
@@ -1922,8 +1926,10 @@ class FusedMoE(CustomOp):
                 hidden_states, router_logits, has_separate_shared_experts
             )
 
-        do_naive_dispatch_combine: bool = self.dp_size > 1 and not isinstance(
-            self.quant_method, FusedMoEModularMethod
+        # TODO(rob): remove this once we migrate to internal use of MK.
+        do_naive_dispatch_combine: bool = self.dp_size > 1 and not (
+            isinstance(self.quant_method, FusedMoEModularMethod)
+            or getattr(self.quant_method, "_SUPPORTS_MK_INTERALLY", False)
         )
 
         ctx = get_forward_context()

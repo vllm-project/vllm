@@ -19,7 +19,6 @@ from vllm.model_executor.layers.batch_invariant import (
 )
 from vllm.model_executor.layers.fused_moe import (
     FusedMoE,
-    FusedMoEActivationFormat,
     FusedMoEMethodBase,
     FusedMoEPermuteExpertsUnpermute,
     FusedMoEPrepareAndFinalize,
@@ -52,7 +51,6 @@ from vllm.model_executor.layers.quantization.base_config import (
 from vllm.model_executor.layers.quantization.kv_cache import BaseKVCacheMethod
 from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
     apply_fi_trtllm_fp8_per_tensor_moe,
-    build_flashinfer_fp8_cutlass_moe_prepare_finalize,
 )
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     W8A8BlockFp8LinearOp,
@@ -613,6 +611,8 @@ class Fp8LinearMethod(LinearMethodBase):
 
 
 class Fp8MoEMethod(FusedMoEMethodBase):
+    _SUPPORTS_MK_INTERALLY = True
+
     """MoE method for FP8.
     Supports loading FP8 checkpoints with static weight scale and
     dynamic/static activation scale.
@@ -650,18 +650,22 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             static_input_quant=(self.quant_config.activation_scheme == "static"),
         )
 
+        # Select Fp8 MoE backend.
+        use_batched = (
+            self.moe.moe_parallel_config.use_deepep_ll_kernels
+            or self.moe.moe_parallel_config.use_pplx_kernels
+        )
         self.fp8_backend, self.experts_cls = select_fp8_moe_backend(
             config=self.moe,
             quant_scheme=quant_scheme,
-            # NOTE(rob): this is a hack until we unify the DP/EP
-            # and TP/TEP cases.
             activation_format=(
                 mk.FusedMoEActivationFormat.BatchedExperts
-                if (self.moe.use_deepep_ll_kernels or self.moe.use_pplx_kernels)
+                if use_batched
                 else mk.FusedMoEActivationFormat.Standard
             ),
         )
 
+        # Delay creation of the kernel until after process-weights.
         self.kernel: mk.FusedMoEModularKernel | None = None
 
     def create_weights(
@@ -821,9 +825,11 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         if self.moe_quant_config:
             assert self.experts_cls is not None
             self.kernel, self.use_inplace = make_fp8_moe_kernel(
+                layer=layer,
                 moe_quant_config=self.moe_quant_config,
                 moe_config=self.moe,
                 fp8_backend=self.fp8_backend,
+                prepare_finalize=self.prepare_finalize,
                 experts_cls=self.experts_cls,
             )
 
@@ -879,37 +885,16 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         self,
         routing_tables: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
     ) -> mk.FusedMoEPrepareAndFinalize | None:
-        if self.fp8_backend in [
-            Fp8MoeBackend.AITER,
-            Fp8MoeBackend.MARLIN,
-            Fp8MoeBackend.FLASHINFER_TRTLLM,
-        ]:
-            return None
-        elif self.fp8_backend == Fp8MoeBackend.FLASHINFER_CUTLASS:
-            # TODO(rob): we can remove this.
-            prepare_finalize = build_flashinfer_fp8_cutlass_moe_prepare_finalize(
-                self.moe,
-                use_deepseek_fp8_block_scale=self.block_quant,
-            )
-            logger.debug_once("%s", prepare_finalize.__class__.__name__)
-            return prepare_finalize
-        return super().maybe_make_prepare_finalize(routing_tables)
+        raise ValueError(
+            "Fp8FusedMoE uses the new modular kernel initialization logic. "
+            "This function should not be called."
+        )
 
     def select_gemm_impl(
         self,
         prepare_finalize: FusedMoEPrepareAndFinalize,
         layer: torch.nn.Module,
     ) -> FusedMoEPermuteExpertsUnpermute:
-        # TODO(rob): this is probably fine?
-        if self.fp8_backend in [Fp8MoeBackend.MARLIN, Fp8MoeBackend.AITER]:
-            raise NotImplementedError(
-                "Marlin and ROCm AITER are not supported with all2all yet."
-            )
-
-        if self.experts_cls is None:
-            raise NotImplementedError
-        assert self.experts_cls is not None
-
         # TODO(rob): look into whether we can just not do this for LoRA.
         if self.moe.is_lora_enabled:
             from vllm.model_executor.layers.fused_moe import (
@@ -918,47 +903,10 @@ class Fp8MoEMethod(FusedMoEMethodBase):
 
             return TritonExperts(quant_config=self.moe_quant_config)
 
-        assert self.moe_quant_config is not None
-        if self.experts_cls.activation_format() != prepare_finalize.activation_format:
-            raise ValueError(
-                f"FoundMismatch between prepare/finalize activation format "
-                f"{prepare_finalize.activation_format} and experts "
-                f"activation format {self.experts_cls.activation_format()}."
-            )
-
-        if (
-            prepare_finalize.activation_format
-            == FusedMoEActivationFormat.BatchedExperts
-        ):
-            max_num_tokens_per_rank = prepare_finalize.max_num_tokens_per_rank()
-            assert max_num_tokens_per_rank is not None
-
-            logger.debug(
-                "%s(%s): max_tokens_per_rank=%s, block_size=%s, per_act_token=%s",
-                self.experts_cls.__name__,
-                self.__class__.__name__,
-                max_num_tokens_per_rank,
-                self.weight_block_size,
-                False,
-            )
-            return self.experts_cls.make_batched_experts(
-                moe_config=self.moe,
-                quant_config=self.moe_quant_config,
-                max_num_tokens=max_num_tokens_per_rank,
-                num_dispatchers=prepare_finalize.num_dispatchers(),
-            )
-        else:
-            logger.debug(
-                "%s(%s): block_size=%s, per_act_token=%s",
-                self.experts_cls.__name__,
-                self.__class__.__name__,
-                self.weight_block_size,
-                False,
-            )
-            return self.experts_cls.make_standard_experts(
-                moe_config=self.moe,
-                quant_config=self.moe_quant_config,
-            )
+        raise ValueError(
+            "Fp8FusedMoE uses the new modular kernel initialization logic. "
+            "This function should not be called."
+        )
 
     def get_fused_moe_quant_config(
         self, layer: torch.nn.Module

@@ -16,7 +16,9 @@ class FallbackExperts(mk.FusedMoEPermuteExpertsUnpermute, ABC):
         experts: mk.FusedMoEPermuteExpertsUnpermute,
         fallback_experts: mk.FusedMoEPermuteExpertsUnpermute,
     ):
-        super().__init__(experts.quant_config)
+        super().__init__(
+            moe_config=experts.moe_config, quant_config=experts.quant_config
+        )
         self.fallback_experts = fallback_experts
         self.experts = experts
 
