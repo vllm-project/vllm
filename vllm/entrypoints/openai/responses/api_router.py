@@ -24,7 +24,6 @@ from vllm.logger import init_logger
 logger = init_logger(__name__)
 
 router = APIRouter()
-ENDPOINT_LOAD_METRICS_FORMAT_HEADER_LABEL = "endpoint-load-metrics-format"
 
 
 def responses(request: Request) -> OpenAIServingResponses | None:
