@@ -22,6 +22,7 @@ from vllm.attention.layer import Attention
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, ModelConfig, SpeechToTextConfig, VllmConfig
 from vllm.config.multimodal import BaseDummyOptions
+from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.inputs.data import PromptType
 from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import get_act_fn
