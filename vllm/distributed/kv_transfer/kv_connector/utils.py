@@ -14,7 +14,6 @@ from vllm.config import get_current_vllm_config
 from vllm.distributed.kv_transfer.kv_connector.factory import KVConnectorFactory
 from vllm.logger import init_logger
 from vllm.v1.attention.backend import AttentionBackend
-from vllm.v1.attention.backends.registry import AttentionBackendEnum
 from vllm.v1.outputs import KVConnectorOutput, ModelRunnerOutput
 
 if TYPE_CHECKING:
@@ -330,9 +329,6 @@ class TpKVTopology:
             len(kv_cache_shape) == 5 and kv_cache_shape[0] == 1
         )
 
-        attn_backend = AttentionBackendEnum[self.attn_backend.get_name()]
-        self._use_pallas = attn_backend == AttentionBackendEnum.PALLAS
-
         test_shape = self.attn_backend.get_kv_cache_shape(
             num_blocks=1234, block_size=16, num_kv_heads=8, head_size=256
         )
@@ -352,10 +348,7 @@ class TpKVTopology:
     def split_k_and_v(self) -> bool:
         # Whether to register regions for K and V separately (when present).
         return not (
-            self._cross_layers_blocks
-            or self.is_mla
-            or self._use_pallas
-            or self.is_kv_layout_blocks_first
+            self._cross_layers_blocks or self.is_mla or self.is_kv_layout_blocks_first
         )
 
     @property
@@ -365,10 +358,6 @@ class TpKVTopology:
     @property
     def block_size(self) -> int:
         return self.remote_block_size[self.engine_id]
-
-    @property
-    def use_pallas(self) -> bool:
-        return self._use_pallas
 
     @property
     def cross_layers_blocks(self) -> bool:
