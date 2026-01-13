@@ -158,6 +158,7 @@ class LLM:
         enforce_eager: Whether to enforce eager execution. If True, we will
             disable CUDA graph and always execute the model in eager mode.
             If False, we will use CUDA graph and eager execution in hybrid.
+        enable_return_routed_experts: Whether to return routed experts.
         disable_custom_all_reduce: See
             [ParallelConfig][vllm.config.ParallelConfig].
         hf_token: The token to use as HTTP bearer authorization for remote files
@@ -172,7 +173,7 @@ class LLM:
             The available overrides depend on the model that is being run.
             For example, for Phi-3-Vision: `{"num_crops": 4}`.
         pooler_config: Initialize non-default pooling config for the pooling
-            model. e.g. `PoolerConfig(pooling_type="mean", normalize=False)`.
+            model. e.g. `PoolerConfig(seq_pooling_type="MEAN", normalize=False)`.
         compilation_config: Either an integer or a dictionary. If it is an
             integer, it is used as the mode of compilation optimization. If it
             is a dictionary, it can specify the full compilation configuration.
@@ -209,6 +210,7 @@ class LLM:
         swap_space: float = 4,
         cpu_offload_gb: float = 0,
         enforce_eager: bool = False,
+        enable_return_routed_experts: bool = False,
         disable_custom_all_reduce: bool = False,
         hf_token: bool | str | None = None,
         hf_overrides: HfOverrides | None = None,
@@ -317,6 +319,7 @@ class LLM:
             swap_space=swap_space,
             cpu_offload_gb=cpu_offload_gb,
             enforce_eager=enforce_eager,
+            enable_return_routed_experts=enable_return_routed_experts,
             disable_custom_all_reduce=disable_custom_all_reduce,
             hf_token=hf_token,
             hf_overrides=hf_overrides,

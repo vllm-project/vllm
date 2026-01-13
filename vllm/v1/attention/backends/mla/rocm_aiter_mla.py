@@ -8,7 +8,7 @@ import torch
 
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.config import VllmConfig
-from vllm.v1.attention.backend import AttentionLayer, MultipleOf
+from vllm.v1.attention.backend import AttentionCGSupport, AttentionLayer, MultipleOf
 from vllm.v1.attention.backends.mla.common import (
     MLACommonBackend,
     MLACommonDecodeMetadata,
@@ -17,7 +17,6 @@ from vllm.v1.attention.backends.mla.common import (
     MLACommonMetadataBuilder,
     QueryLenSupport,
 )
-from vllm.v1.attention.backends.utils import AttentionCGSupport
 from vllm.v1.kv_cache_interface import AttentionSpec
 
 
