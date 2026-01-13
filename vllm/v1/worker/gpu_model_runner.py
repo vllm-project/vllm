@@ -2350,6 +2350,7 @@ class GPUModelRunner(
         req_start_idx = 0
         should_sync_mrope_positions = False
         should_sync_xdrope_positions = False
+        mm_embeds_ranges = []
 
         for req_id in self.input_batch.req_ids:
             mm_embeds_req: list[torch.Tensor] = []
@@ -2400,10 +2401,31 @@ class GPUModelRunner(
                     mm_embeds_item = encoder_output[start_idx:end_idx]
 
                 req_start_pos = req_start_idx + start_pos - num_computed_tokens
-                is_mm_embed[req_start_pos + start_idx : req_start_pos + end_idx] = (
-                    True if is_embed is None else is_embed
+                if is_embed is None:
+                    is_mm_embed[req_start_pos + start_idx : req_start_pos + end_idx] = (
+                        True
+                    )
+                else:
+                    is_mm_embed[
+                        req_start_pos + start_idx : req_start_pos + end_idx
+                    ].logical_or_(is_embed)
+
+                mm_embeds_range = pos_info.extract_embeds_range(start_idx, end_idx)
+                split_size_or_sections = []
+                for mm_range in mm_embeds_range:
+                    range_len = mm_range[1] - mm_range[0] + 1
+                    split_size_or_sections.append(range_len)
+                    mm_embeds_ranges.append(mm_range)
+                assert sum(split_size_or_sections) == len(mm_embeds_item)
+                mm_embeds_req.extend(
+                    list(torch.split(mm_embeds_item, split_size_or_sections, dim=0))
                 )
-                mm_embeds_req.append(mm_embeds_item)
+            mm_embeds_req = [
+                x
+                for x, _ in sorted(
+                    zip(mm_embeds_req, mm_embeds_ranges), key=lambda t: t[1][0]
+                )
+            ]
 
             if self.is_multimodal_pruning_enabled and self.uses_mrope:
                 assert req_state.mrope_positions is not None
