@@ -20,7 +20,9 @@ from .phi3_long_rope_scaled_rope import Phi3LongRoPEScaledRotaryEmbedding
 from .xdrope import XDRotaryEmbedding
 from .yarn_scaling_rope import YaRNScalingRotaryEmbedding
 
-_ROPE_DICT: dict[tuple, RotaryEmbedding] = {}
+_ROPE_DICT: dict[tuple[Any, ...], RotaryEmbedding] = {}
+
+__all__ = ["RotaryEmbedding"]
 
 
 def get_rope(
