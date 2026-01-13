@@ -8,7 +8,7 @@ from unittest.mock import Mock
 
 import pytest
 
-from vllm.entrypoints.openai.protocol import (
+from vllm.entrypoints.openai.engine.protocol import (
     StructuredOutputsParams,
 )
 from vllm.entrypoints.tool_server import ToolServer
