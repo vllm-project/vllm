@@ -1420,7 +1420,7 @@ class rocm_aiter_ops:
             X,
             W,
             w_scale,
-            Y,
+            y=Y,
             transpose_bm=transpose_bm,
             prequant=prequant,
             y_scale=y_scale,
