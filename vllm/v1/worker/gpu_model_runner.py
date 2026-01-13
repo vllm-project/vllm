@@ -5025,7 +5025,9 @@ class GPUModelRunner(
                     layer_impl = getattr(layer, "impl", None)
                     if layer_impl is None:
                         continue
-                    assert layer_impl.supports_mtp_with_cp_non_trivial_interleave_size, (
+                    assert (
+                        layer_impl.supports_mtp_with_cp_non_trivial_interleave_size
+                    ), (
                         "MTP with cp_kv_cache_interleave_size > 1 is not "
                         f"supported in {layer_impl.__class__.__name__}."
                     )
