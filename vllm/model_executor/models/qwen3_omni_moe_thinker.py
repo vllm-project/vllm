@@ -309,7 +309,6 @@ class Qwen3OmniMoeAudioEncoder(nn.Module):
         embed_dim = config.d_model
         self.num_mel_bins = config.num_mel_bins
         self.max_source_positions = config.max_source_positions
-        self.embed_scale = np.sqrt(embed_dim) if config.scale_embedding else 1.0
         self.n_window = config.n_window
         self.n_window_infer = config.n_window_infer
         self.conv_chunksize = config.conv_chunksize
