@@ -51,12 +51,24 @@ class ToolParser:
         # whereas all tokenizers have .get_vocab()
         return self.model_tokenizer.get_vocab()
 
+    def prepare_structured_tags(
+        self,
+        request: ChatCompletionRequest,
+    ) -> ChatCompletionRequest | None:
+        """
+        Instance method that can be used to prepare any structured tags
+        needed for tool parsing.
+        """
+        return None
+
     def adjust_request(self, request: ChatCompletionRequest) -> ChatCompletionRequest:
         """
         Static method that used to adjust the request parameters.
         """
         if not request.tools:
             return request
+        if req := self.prepare_structured_tags(request):
+            return req
         json_schema_from_tool = get_json_schema_from_tools(
             tool_choice=request.tool_choice, tools=request.tools
         )

@@ -113,6 +113,8 @@ class XgrammarBackend(StructuredOutputBackend):
             ctx = self.compiler.compile_regex(grammar_spec)
         elif request_type == StructuredOutputOptions.STRUCTURAL_TAG:
             s_tag = json.loads(grammar_spec)
+            print("1*1" * 20)
+            print(s_tag)
             if "structures" in s_tag:
                 # Falling back to deprecated method of compiling structural tag
                 tags = [
@@ -360,7 +362,8 @@ def validate_xgrammar_grammar(sampling_params: SamplingParams) -> None:
     if so_params.structural_tag:
         try:
             s_tag = json.loads(so_params.structural_tag)
-
+            print("*" * 20)
+            print(s_tag)
             # Using the deprecated method of compiling structural tag
             if "structures" in s_tag:
                 tags = [
