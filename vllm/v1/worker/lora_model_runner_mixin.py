@@ -168,10 +168,10 @@ class LoRAModelRunnerMixin:
                 effective_num_loras = 0
             elif num_active_loras > 0:
                 # Specific number of active LoRAs requested
-                effective_num_loras = min(num_active_loras, max_loras)
+                effective_num_loras = min(num_active_loras, max_loras + 1)
             else:
                 # Default: use all max_loras
-                effective_num_loras = max_loras
+                effective_num_loras = max_loras + 1
 
             # Make prompt lora mapping
             # Assign LoRA IDs cyclically to simulate a worst-case scenario.
