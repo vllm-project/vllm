@@ -18,7 +18,6 @@ from .processing import (
 from .profiling import (
     BaseDummyInputsBuilder,
     DummyDecoderData,
-    DummyEncoderData,
     MultiModalProfiler,
 )
 
@@ -313,43 +312,6 @@ class MultiModalRegistry:
             raise AssertionError(
                 f"Expected at least {seq_len} dummy tokens for profiling, "
                 f"but found {len(token_ids)} tokens instead."
-            )
-
-        return dummy_data
-
-    def get_encoder_dummy_data(
-        self,
-        model_config: "ModelConfig",
-        seq_len: int,
-        mm_counts: Mapping[str, int] | None = None,
-        *,
-        cache: BaseMultiModalProcessorCache | None = None,
-        observability_config: ObservabilityConfig | None = None,
-    ) -> DummyEncoderData:
-        """
-        Create dummy data for profiling the memory usage of a model.
-
-        The model is identified by `model_config`.
-        """
-        processor = self.create_processor(
-            model_config, observability_config, cache=cache
-        )
-        profiler: MultiModalProfiler = MultiModalProfiler(processor)
-
-        # Extract configurable options from multimodal config.
-        # Only include modalities that use advanced option types so legacy
-        # count-only behavior remains unchanged.
-        mm_options = self._extract_mm_options(model_config)
-
-        dummy_data = profiler.get_encoder_dummy_data(seq_len, mm_counts, mm_options)
-
-        # Having more tokens is over-conservative but otherwise fine
-        token_ids = dummy_data.prompt_token_ids
-        if len(token_ids) < seq_len:
-            logger.warning_once(
-                "Expected at least %d dummy encoder tokens for profiling, but found %d tokens instead.",  # noqa: E501
-                seq_len,
-                len(token_ids),
             )
 
         return dummy_data

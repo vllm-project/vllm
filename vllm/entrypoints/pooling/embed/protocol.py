@@ -75,7 +75,7 @@ class EmbeddingCompletionRequest(OpenAIBaseModel):
         return PoolingParams(
             truncate_prompt_tokens=self.truncate_prompt_tokens,
             dimensions=self.dimensions,
-            normalize=self.normalize,
+            use_activation=self.normalize,
         )
 
 
@@ -189,7 +189,7 @@ class EmbeddingChatRequest(OpenAIBaseModel):
         return PoolingParams(
             truncate_prompt_tokens=self.truncate_prompt_tokens,
             dimensions=self.dimensions,
-            normalize=self.normalize,
+            use_activation=self.normalize,
         )
 
 
