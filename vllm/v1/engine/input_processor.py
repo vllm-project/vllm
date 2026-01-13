@@ -370,6 +370,10 @@ class InputProcessor:
             # Remember that this backend was set automatically
             params.structured_outputs._backend_was_auto = True
 
+        # Run post-init validation. This is also important to ensure subsequent
+        # roundtrip serialization/deserialization won't fail.
+        params.structured_outputs.__post_init__()
+
     def _maybe_build_mm_uuids(
         self,
         request_id: str,
