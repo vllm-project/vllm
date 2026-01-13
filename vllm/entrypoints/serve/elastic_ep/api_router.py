@@ -13,9 +13,9 @@ from vllm.entrypoints.openai.engine.protocol import (
     ErrorResponse,
 )
 from vllm.entrypoints.openai.utils import validate_json_request
-from vllm.entrypoints.serve.elastic_ep.middleware import (
-    get_scaling_elastic_ep,
-    set_scaling_elastic_ep,
+from vllm.entrypoints.serve.middleware import (
+    is_server_unavailable,
+    set_server_unavailable,
 )
 from vllm.logger import init_logger
 
@@ -65,7 +65,7 @@ async def scale_elastic_ep(raw_request: Request):
         )
 
     # Set scaling flag to prevent new requests
-    set_scaling_elastic_ep(True)
+    set_server_unavailable(True)
     client = engine_client(raw_request)
     try:
         await client.scale_elastic_ep(new_data_parallel_size, drain_timeout)
@@ -84,12 +84,12 @@ async def scale_elastic_ep(raw_request: Request):
         logger.error("Scale failed: %s", e)
         raise HTTPException(status_code=500, detail="Scale failed") from e
     finally:
-        set_scaling_elastic_ep(False)
+        set_server_unavailable(False)
 
 
 @router.post("/is_scaling_elastic_ep")
 async def is_scaling_elastic_ep(raw_request: Request):
-    return JSONResponse({"is_scaling_elastic_ep": get_scaling_elastic_ep()})
+    return JSONResponse({"is_scaling_elastic_ep": is_server_unavailable()})
 
 
 def attach_router(app: FastAPI):
