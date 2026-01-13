@@ -576,6 +576,14 @@ def isaac_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
     # ----------------------------
     isaac_model = hf_model.model.model
 
+    # [ROCm] Disable Flash/MemEfficient SDP on ROCm to avoid HF Transformers
+    # accuracy issues: https://github.com/vllm-project/vllm/issues/30167
+    # TODO: Remove once ROCm SDP accuracy issues are resolved on HuggingFace
+    # ----------------------------
+    from ...conftest import patch_hf_vision_attn_for_rocm
+
+    patch_hf_vision_attn_for_rocm(hf_model.model)
+
     def patched_forward(
         self,
         input_ids=None,
