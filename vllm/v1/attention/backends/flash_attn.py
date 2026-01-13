@@ -747,12 +747,8 @@ class FlashAttentionImpl(AttentionImpl):
         key: torch.Tensor,
         value: torch.Tensor,
         kv_cache: torch.Tensor,
-        attn_metadata: FlashAttentionMetadata,
+        slot_mapping: torch.Tensor,
     ) -> None:
-        if attn_metadata is None:
-            # Profiling run.
-            return
-
         if self.attn_type in (AttentionType.ENCODER_ONLY, AttentionType.ENCODER):
             # For encoder attention,
             # we use direct Q, K, V tensors without caching
@@ -782,7 +778,7 @@ class FlashAttentionImpl(AttentionImpl):
             value,
             key_cache,
             value_cache,
-            attn_metadata.slot_mapping,
+            slot_mapping,
             self.kv_cache_dtype,
             layer._k_scale,
             layer._v_scale,

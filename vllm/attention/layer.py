@@ -797,16 +797,27 @@ def unified_kv_cache_update(
     output: torch.Tensor,
     layer_name: str,
 ) -> torch.Tensor:
-    attn_metadata, self, kv_cache = get_attention_context(layer_name)
-    assert hasattr(self.impl, "do_kv_cache_update"), (
-        f"{self.impl.__class__.__name__} does not support kv cache update"
+    forward_context = get_forward_context()
+    attn_layer = forward_context.no_compile_layers[layer_name]
+    kv_cache = attn_layer.kv_cache[forward_context.virtual_engine]
+
+    slot_mapping = forward_context.slot_mapping
+    if isinstance(slot_mapping, dict):
+        slot_mapping = slot_mapping.get(layer_name)
+
+    if slot_mapping is None:
+        # No slot_mapping available (e.g., profiling run)
+        return output
+
+    assert hasattr(attn_layer.impl, "do_kv_cache_update"), (
+        f"{attn_layer.impl.__class__.__name__} does not support kv cache update"
     )
-    self.impl.do_kv_cache_update(
-        self,
+    attn_layer.impl.do_kv_cache_update(
+        attn_layer,
         key,
         value,
         kv_cache,
-        attn_metadata,
+        slot_mapping,
     )
     return output
 
