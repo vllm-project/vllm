@@ -49,7 +49,7 @@ from transformers import __version__ as TRANSFORMERS_VERSION
 
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import MultiModalConfig, VllmConfig
-from vllm.distributed import get_pp_group
+from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
 from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import _ACTIVATION_REGISTRY
 from vllm.model_executor.layers.attention.mm_encoder_attention import (
@@ -167,10 +167,6 @@ class Qwen3OmniMoeAudioAttention(nn.Module):
         self.embed_dim = config.d_model
         self.num_heads = config.encoder_attention_heads
         self.head_dim = self.embed_dim // self.num_heads
-
-        # Account for tensor parallelism
-        from vllm.distributed import get_tensor_model_parallel_world_size
-
         tp_size = get_tensor_model_parallel_world_size()
         self.num_local_heads = self.num_heads // tp_size
 
@@ -209,26 +205,15 @@ class Qwen3OmniMoeAudioAttention(nn.Module):
         self,
         hidden_states: torch.Tensor,
         cu_seqlens: torch.Tensor,
-        max_seqlen: torch.Tensor,
+        max_seqlen: int | None,
     ) -> torch.Tensor:
-        """
-        Args:
-            hidden_states: Input tensor of shape (seq_len, hidden_size)
-            cu_seqlens: Cumulative sequence lengths
-            max_seqlen: Maximum sequence length in the batch
-        """
         seq_length, _ = hidden_states.size()
-
-        # Project Q, K, V
         qkv, _ = self.qkv(hidden_states)
-
-        # Reshape to (1, seq_len, num_heads, head_dim)
         q, k, v = qkv.chunk(3, dim=-1)
         q = q.view(1, seq_length, -1, self.head_dim)
         k = k.view(1, seq_length, -1, self.head_dim)
         v = v.view(1, seq_length, -1, self.head_dim)
 
-        # Apply attention
         attn_output = self.attn(
             query=q,
             key=k,
@@ -237,10 +222,7 @@ class Qwen3OmniMoeAudioAttention(nn.Module):
             max_seqlen=max_seqlen,
         )
 
-        # Reshape output: (1, seq_len, num_heads, head_dim) -> (seq_len, hidden_size)
         attn_output = attn_output.view(seq_length, -1)
-
-        # Output projection
         output, _ = self.out_proj(attn_output)
         return output
 
@@ -279,7 +261,7 @@ class Qwen3OmniMoeAudioEncoderLayer(nn.Module):
         self,
         hidden_states: torch.Tensor,
         cu_seqlens: torch.Tensor,
-        max_seqlen: torch.Tensor,
+        max_seqlen: torch.Tensor | None,
     ) -> torch.Tensor:
         """
         Args:
@@ -383,18 +365,21 @@ class Qwen3OmniMoeAudioEncoder(nn.Module):
             if multimodal_config is not None
             else None
         )
-        from vllm.model_executor.models.vision import get_vit_attn_backend
-        from vllm.v1.attention.backends.registry import AttentionBackendEnum
-
         self.attn_backend = get_vit_attn_backend(
             head_size=config.d_model // config.encoder_attention_heads,
             dtype=torch.get_default_dtype(),
             attn_backend_override=attn_backend_override,
         )
-        self.is_flash_attn_backend = self.attn_backend in {
+
+    def compute_attn_mask_seqlen(self, cu_seqlens: torch.Tensor) -> torch.Tensor | None:
+        """Compute max_seqlen only for flash attention backends."""
+        max_seqlen = None
+        if self.attn_backend in {
             AttentionBackendEnum.FLASH_ATTN,
             AttentionBackendEnum.ROCM_AITER_FA,
-        }
+        }:
+            max_seqlen = (cu_seqlens[1:] - cu_seqlens[:-1]).max()
+        return max_seqlen
 
     @property
     def dtype(self) -> torch.dtype:
@@ -489,7 +474,7 @@ class Qwen3OmniMoeAudioEncoder(nn.Module):
             -1, dtype=torch.int32
         )
 
-        max_seqlen = (cu_seqlens[1:] - cu_seqlens[:-1]).max()
+        max_seqlen = self.compute_attn_mask_seqlen(cu_seqlens)
 
         # Apply transformer layers
         for encoder_layer in self.layers:
@@ -649,7 +634,7 @@ class Qwen3_VisionBlock(nn.Module):
         cu_seqlens: torch.Tensor,
         rotary_pos_emb_cos: torch.Tensor,
         rotary_pos_emb_sin: torch.Tensor,
-        max_seqlen: torch.Tensor,  # Only used for Flash Attention
+        max_seqlen: torch.Tensor | None,  # Only used for Flash Attention
     ) -> torch.Tensor:
         x = x + self.attn(
             self.norm1(x),
