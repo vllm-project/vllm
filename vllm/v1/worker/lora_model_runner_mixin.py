@@ -162,23 +162,47 @@ class LoRAModelRunnerMixin:
             num_reqs = len(num_scheduled_tokens)
             max_loras = lora_config.max_loras
 
-            # Determine how many distinct LoRAs to use
+            # Determine how many distinct LoRAs to use and whether to include
+            # no-LoRA tokens (-1 entries).
+            # When num_active_loras > max_loras (e.g., max_loras + 1), we need
+            # to include -1 entries to simulate batches with both LoRA and
+            # no-LoRA tokens. This ensures prepare_tensors computes the correct
+            # num_active_loras that matches the cudagraph capture key.
+            include_no_lora = False
             if not activate_lora:
                 # No LoRA active
                 effective_num_loras = 0
+            elif num_active_loras > max_loras:
+                # num_active_loras > max_loras means we want max_loras adapters
+                # PLUS no-LoRA tokens (-1). This is the max_loras + 1 case.
+                effective_num_loras = max_loras
+                include_no_lora = True
             elif num_active_loras > 0:
                 # Specific number of active LoRAs requested
-                effective_num_loras = min(num_active_loras, max_loras + 1)
+                effective_num_loras = min(num_active_loras, max_loras)
             else:
                 # Default: use all max_loras
-                effective_num_loras = max_loras + 1
+                effective_num_loras = max_loras
 
             # Make prompt lora mapping
             # Assign LoRA IDs cyclically to simulate a worst-case scenario.
             if effective_num_loras > 0:
-                prompt_lora_mapping = (
-                    np.arange(num_reqs, dtype=np.int32) % effective_num_loras
-                ) + 1
+                if include_no_lora:
+                    # Include -1 (no-LoRA) entries by cycling through
+                    # -1, 1, 2, ..., effective_num_loras
+                    # This ensures prepare_tensors sees both LoRA and no-LoRA
+                    # tokens, computing num_active_loras = effective_num_loras+1
+                    cycle_values = np.array(
+                        [-1] + list(range(1, effective_num_loras + 1)),
+                        dtype=np.int32,
+                    )
+                    prompt_lora_mapping = cycle_values[
+                        np.arange(num_reqs, dtype=np.int32) % len(cycle_values)
+                    ]
+                else:
+                    prompt_lora_mapping = (
+                        np.arange(num_reqs, dtype=np.int32) % effective_num_loras
+                    ) + 1
             else:
                 prompt_lora_mapping = np.zeros(num_reqs, dtype=np.int32)
 
