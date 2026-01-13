@@ -7,7 +7,6 @@ import json
 import time
 from typing import Annotated, Any, ClassVar, Literal
 
-import regex as re
 import torch
 from openai.types.chat.chat_completion_audio import (
     ChatCompletionAudio as OpenAIChatCompletionAudio,
