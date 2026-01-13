@@ -55,7 +55,7 @@ for BACK in "${BACKENDS[@]}"; do
     --max-model-len 2048 \
     --no-async-scheduling \
     --gpu-memory-utilization 0.9 \
-    --port $PORT & \
+    --port $PORT &
   SERVER_PID=$!
   wait_for_server $PORT
 
