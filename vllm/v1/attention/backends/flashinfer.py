@@ -1598,8 +1598,7 @@ def fast_plan_decode(
     """
     # Warm up with the original plan if it is first call, and always run the
     # original plan if we run for dynamic shape. For fixed shape (cudagraph),
-    # this warm up is to generate the _cachedcccccbvgvjlrvjgejhbkkiklfkbkvtkdvhhvbtbnhgnk
-    # _module for the decode wrapper.
+    # this warm up is to generate the _cached_module for the decode wrapper.
     if not self.is_cuda_graph_enabled or getattr(self, "vllm_first_call", True):
         self.plan(
             indptr=indptr_cpu,
