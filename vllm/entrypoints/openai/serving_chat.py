@@ -304,6 +304,10 @@ class OpenAIServingChat(OpenAIServing):
                 )
                 if error_check_ret is not None:
                     return error_check_ret
+
+                chat_template_kwargs = request.chat_template_kwargs or {}
+                chat_template_kwargs.update(reasoning_effort=request.reasoning_effort)
+
                 conversation, engine_prompts = await self._preprocess_chat(
                     request,
                     tokenizer,
@@ -314,11 +318,10 @@ class OpenAIServingChat(OpenAIServing):
                     continue_final_message=request.continue_final_message,
                     tool_dicts=tool_dicts,
                     documents=request.documents,
-                    chat_template_kwargs=request.chat_template_kwargs,
+                    chat_template_kwargs=chat_template_kwargs,
                     default_chat_template_kwargs=self.default_chat_template_kwargs,
                     tool_parser=tool_parser,
                     add_special_tokens=request.add_special_tokens,
-                    reasoning_effort=request.reasoning_effort,
                 )
             else:
                 # For GPT-OSS.
