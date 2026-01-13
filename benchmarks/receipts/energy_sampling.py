@@ -73,10 +73,15 @@ def integrate_energy_j(samples: list[EnergySample], duration_s: float) -> float 
 
 
 def _run_cmd(cmd: list[str], timeout_s: float) -> tuple[int, str, str]:
-    r = subprocess.run(
-        cmd, capture_output=True, text=True, timeout=timeout_s, check=False
-    )
-    return r.returncode, (r.stdout or "").strip(), (r.stderr or "").strip()
+    try:
+        r = subprocess.run(
+            cmd, capture_output=True, text=True, timeout=timeout_s, check=False
+        )
+        return r.returncode, (r.stdout or "").strip(), (r.stderr or "").strip()
+    except subprocess.TimeoutExpired:
+        return 124, "", f"timeout after {timeout_s:.1f}s"
+    except FileNotFoundError as e:
+        return 127, "", str(e)
 
 
 def _nvidia_smi_sample(gpu_id: int) -> EnergySample | None:

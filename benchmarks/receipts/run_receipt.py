@@ -119,11 +119,14 @@ def main() -> int:
     )
     args = ap.parse_args()
 
-    if not args.cmd or args.cmd[0] != "--":
+    if not args.cmd or args.cmd[0] != "--" or len(args.cmd) < 2:
         print("error: command must be provided after --", file=sys.stderr)
         return 2
 
     cmd = args.cmd[1:]
+    if not cmd or cmd[0] == "--":
+        print("error: command must be provided after --", file=sys.stderr)
+        return 2
     out = Path(args.out)
     out.parent.mkdir(parents=True, exist_ok=True)
 
@@ -150,16 +153,20 @@ def main() -> int:
         if sampler is not None:
             sampler.start()
         try:
-            p = subprocess.run(
-                cmd,
-                cwd=str(repo_root),
-                env=env,
-                stdout=out_f,
-                stderr=err_f,
-                text=True,
-                check=False,
-            )
-            rc = int(p.returncode)
+            try:
+                p = subprocess.run(
+                    cmd,
+                    cwd=str(repo_root),
+                    env=env,
+                    stdout=out_f,
+                    stderr=err_f,
+                    text=True,
+                    check=False,
+                )
+                rc = int(p.returncode)
+            except FileNotFoundError as e:
+                print(f"error: command not found: {cmd[0]} ({e})", file=sys.stderr)
+                rc = 127
         finally:
             if sampler is not None:
                 sampler.stop()
