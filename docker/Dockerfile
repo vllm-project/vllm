@@ -403,9 +403,10 @@ RUN echo 'tzdata tzdata/Areas select America' | debconf-set-selections \
         libxext6 \
         libgl1 \
         gnupg \
+    && apt-get install -y --no-install-recommends debian-archive-keyring \
     && mkdir -p /etc/apt/keyrings \
-    && curl -fsSL https://ftp-master.debian.org/keys/archive-key-11.asc | gpg --dearmor -o /etc/apt/keyrings/debian-bullseye.gpg \
-    && curl -fsSL https://ftp-master.debian.org/keys/archive-key-11-security.asc | gpg --dearmor -o /etc/apt/keyrings/debian-bullseye-security.gpg \
+    && cp /usr/share/keyrings/debian-archive-keyring.gpg /etc/apt/keyrings/debian-bullseye.gpg \
+    && cp /usr/share/keyrings/debian-archive-keyring.gpg /etc/apt/keyrings/debian-bullseye-security.gpg \
     && echo "deb [signed-by=/etc/apt/keyrings/debian-bullseye.gpg] http://deb.debian.org/debian bullseye main" > /etc/apt/sources.list.d/debian-bullseye.list \
     && echo "deb [signed-by=/etc/apt/keyrings/debian-bullseye-security.gpg] http://deb.debian.org/debian-security bullseye-security main" >> /etc/apt/sources.list.d/debian-bullseye.list \
     && apt-get update -y \
