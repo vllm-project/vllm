@@ -36,7 +36,7 @@ from vllm.model_executor.layers.quantization.utils.marlin_utils_fp8 import (
 )
 
 if TYPE_CHECKING:
-    from vllm.model_executor.layers.fused_moe.fused_moe import FusedMoE
+    from vllm.model_executor.layers.fused_moe.layer import FusedMoE
 
 logger = init_logger(__name__)
 
@@ -143,13 +143,18 @@ def select_fp8_moe_backend(
         activation_format: mk.FusedMoEActivationFormat,
     ) -> tuple[Fp8MoeBackend, type[mk.FusedMoEPermuteExpertsUnpermute]]:
         k_cls = backend_2_kernel_cls(backend)
-        if k_cls.is_supported_config(k_cls, config, scheme, activation_format):
+        supported, reason = k_cls.is_supported_config(
+            k_cls, config, scheme, activation_format
+        )
+        if supported:
             logger.info_once(_make_log_backend(backend))
             return backend, k_cls
 
+        assert reason is not None
         raise ValueError(
             f"Requested FP8 MoE backend `{backend.value}` "
-            "does not support the deployment configuration."
+            "does not support the deployment configuration since "
+            f"{reason}."
         )
 
     # NOTE: the kernels are selected in the following order.
@@ -370,7 +375,7 @@ def make_fp8_moe_kernel(
         moe=moe_config,
         quant_config=moe_quant_config,
         routing_tables=None,  # TODO: init routing tables here?
-        defer_input_quant=experts_cls.should_pf_defer_input_quant(),
+        defer_input_quant=experts_cls.should_pf_defer_input_quant(moe_quant_config),
         allow_new_interface=True,
     )
 

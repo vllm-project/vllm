@@ -45,7 +45,7 @@ class FlashInferExperts(mk.FusedMoEPermuteExpertsUnpermute):
         self.use_deepseek_fp8_block_scale = quant_config.is_block_quantized
 
     @staticmethod
-    def should_pf_defer_input_quant(quant_config):
+    def should_pf_defer_input_quant(quant_config: FusedMoEQuantConfig) -> bool:
         """
         FlashInfer CUTLASS Block FP8 path handles input quantization.
         """
@@ -77,7 +77,7 @@ class FlashInferExperts(mk.FusedMoEPermuteExpertsUnpermute):
             or (s.is_fp8_w8a8 and s.per_tensor_quant and s.static_input_quant)
             or (
                 s.is_fp8_w8a8
-                and s.block_size == [128, 128]
+                and s.block_size == (128, 128)
                 and p.is_device_capability((9, 0))
             )
             or (s.is_nvfp4_w4a4 and p.has_device_capability((10, 0)))

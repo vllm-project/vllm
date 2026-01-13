@@ -41,7 +41,7 @@ def _supports_quant_scheme(quant_scheme: FusedMoEQuantScheme) -> bool:
     s = quant_scheme
     return (
         (s.is_fp8_w8a8 and s.per_tensor_quant and s.static_input_quant)
-        or (s.is_fp8_w8a8 and s.block_size == [128, 128])
+        or (s.is_fp8_w8a8 and s.block_size == (128, 128))
         or (s.is_nvfp4_w4a4)
     )
 

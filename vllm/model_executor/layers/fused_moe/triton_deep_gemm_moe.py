@@ -5,6 +5,7 @@ import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.model_executor.layers.fused_moe.config import (
+    FusedMoEConfig,
     FusedMoEParallelConfig,
     FusedMoEQuantConfig,
     FusedMoEQuantScheme,
@@ -24,10 +25,10 @@ from vllm.utils.deep_gemm import (
 class TritonOrDeepGemmExperts(FallbackExperts):
     """DeepGemm with fallback to Triton for low latency shapes."""
 
-    def __init__(self, quant_config: FusedMoEQuantConfig):
+    def __init__(self, moe_config: FusedMoEConfig, quant_config: FusedMoEQuantConfig):
         super().__init__(
-            experts=DeepGemmExperts(quant_config),
-            fallback_experts=TritonExperts(quant_config),
+            experts=DeepGemmExperts(moe_config, quant_config),
+            fallback_experts=TritonExperts(moe_config, quant_config),
         )
 
     @staticmethod

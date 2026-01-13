@@ -19,9 +19,6 @@ from vllm.model_executor.layers.fused_moe.moe_permute_unpermute import (
     moe_permute,
     moe_unpermute,
 )
-from vllm.model_executor.layers.fused_moe.prepare_finalize import (
-    MoEPrepareAndFinalizeNoEP,
-)
 from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceDelegate,
     TopKWeightAndReduceNoOP,
@@ -410,7 +407,7 @@ class CutlassBatchedExpertsFp8(CutlassExpertsFp8Base):
         expert_tokens_meta: mk.ExpertTokensMetadata | None,
         activation: str,
     ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...]]:
-        num_dp = self.max_dispatchers
+        num_dp = self.num_dispatchers
         assert num_dp is not None
         experts_per_worker = self.moe_config.num_local_experts
         activation_out_dim = self.adjust_N_for_activation(N, activation)
@@ -640,7 +637,8 @@ class CutlassExpertsFp4(mk.FusedMoEPermuteExpertsUnpermute):
         workspace1: tuple[int, ...] = ()
         workspace2: tuple[int, ...] = ()
         output: tuple[int, ...] = ()
-        if self.use_batched_format:
+        if False:
+            # if self.use_batched_format:
             workspace1 = (self.max_experts_per_worker, M, max(N, K))
             workspace2 = (self.max_experts_per_worker, M, activation_out_dim)
             output = (self.max_experts_per_worker, M, K)
@@ -1060,36 +1058,36 @@ def cutlass_moe_w4a8_fp8(
     Returns:
     - torch.Tensor: The bf16 output tensor after applying the MoE layer.
     """
-    assert quant_config is not None
+    # assert quant_config is not None
 
-    num_experts = global_num_experts if global_num_experts != -1 else w1_q.size(0)
+    # num_experts = global_num_experts if global_num_experts != -1 else w1_q.size(0)
 
-    fn = mk.FusedMoEModularKernel(
-        MoEPrepareAndFinalizeNoEP(),
-        CutlassExpertsW4A8Fp8(
-            out_dtype=a.dtype,
-            a_strides1=a_strides1,
-            a_strides2=a_strides2,
-            b_strides1=b_strides1,
-            b_strides2=b_strides2,
-            c_strides1=c_strides1,
-            c_strides2=c_strides2,
-            s_strides1=s_strides1,
-            s_strides2=s_strides2,
-            # TODO:
-            quant_config=quant_config,
-            group_size=group_size,
-        ),
-    )
+    # fn = mk.FusedMoEModularKernel(
+    #     MoEPrepareAndFinalizeNoEP(),
+    #     CutlassExpertsW4A8Fp8(
+    #         out_dtype=a.dtype,
+    #         a_strides1=a_strides1,
+    #         a_strides2=a_strides2,
+    #         b_strides1=b_strides1,
+    #         b_strides2=b_strides2,
+    #         c_strides1=c_strides1,
+    #         c_strides2=c_strides2,
+    #         s_strides1=s_strides1,
+    #         s_strides2=s_strides2,
+    #         # TODO:
+    #         quant_config=quant_config,
+    #         group_size=group_size,
+    #     ),
+    # )
 
-    return fn(
-        a,
-        w1_q,
-        w2_q,
-        topk_weights,
-        topk_ids,
-        activation=activation,
-        global_num_experts=num_experts,
-        expert_map=expert_map,
-        apply_router_weight_on_input=apply_router_weight_on_input,
-    )
+    # return fn(
+    #     a,
+    #     w1_q,
+    #     w2_q,
+    #     topk_weights,
+    #     topk_ids,
+    #     activation=activation,
+    #     global_num_experts=num_experts,
+    #     expert_map=expert_map,
+    #     apply_router_weight_on_input=apply_router_weight_on_input,
+    # )

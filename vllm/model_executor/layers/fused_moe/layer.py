@@ -689,7 +689,7 @@ class FusedMoE(CustomOp):
     # should be safe to swap out the quant_method.
     def maybe_init_modular_kernel(self) -> None:
         if self.quant_method.supports_mk_interally:
-            logger.info("SKIPPING MK INIT --> done by quant integration internally.")
+            logger.info_once("DEBUG: SKIPPING MK INIT: Handled Internally!!!!")
             return
 
         self.ensure_moe_quant_config_init()

@@ -21,6 +21,7 @@ from vllm.model_executor.layers.batch_invariant import (
 )
 from vllm.model_executor.layers.fused_moe.config import (
     FUSED_MOE_UNQUANTIZED_CONFIG,
+    FusedMoEConfig,
     FusedMoEParallelConfig,
     FusedMoEQuantConfig,
     FusedMoEQuantScheme,
@@ -2301,9 +2302,10 @@ def fused_experts_impl(
 class TritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
     def __init__(
         self,
+        moe_config: FusedMoEConfig,
         quant_config: FusedMoEQuantConfig,
     ):
-        super().__init__(quant_config)
+        super().__init__(moe_config, quant_config)
 
     @staticmethod
     def activation_format() -> mk.FusedMoEActivationFormat:
@@ -2512,12 +2514,6 @@ class TritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
 
 
 class TritonWNA16Experts(TritonExperts):
-    def __init__(
-        self,
-        quant_config: FusedMoEQuantConfig,
-    ):
-        super().__init__(quant_config)
-
     @staticmethod
     def _supports_quant_scheme(quant_scheme: FusedMoEQuantScheme) -> bool:
         # TODO
@@ -2660,10 +2656,12 @@ class TritonWNA16Experts(TritonExperts):
 
 
 def modular_triton_fused_moe(
-    quant_config: FusedMoEQuantConfig, shared_experts: torch.nn.Module | None = None
+    moe_config: FusedMoEConfig,
+    quant_config: FusedMoEQuantConfig,
+    shared_experts: torch.nn.Module | None = None,
 ) -> mk.FusedMoEModularKernel:
     return mk.FusedMoEModularKernel(
         MoEPrepareAndFinalizeNoEP(),
-        TritonExperts(quant_config),
+        TritonExperts(moe_config, quant_config),
         shared_experts,
     )

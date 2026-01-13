@@ -670,6 +670,12 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         self.kernel: mk.FusedMoEModularKernel | None = None
 
     @property
+    def topk_indices_dtype(self) -> torch.dtype | None:
+        if self.kernel is not None:
+            return self.kernel.prepare_finalize.topk_indices_dtype()
+        return None
+
+    @property
     def supports_mk_interally(self) -> bool:
         return True
 

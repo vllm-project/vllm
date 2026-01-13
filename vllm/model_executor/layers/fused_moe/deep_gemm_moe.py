@@ -6,18 +6,15 @@ import torch
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.config import (
+    FusedMoEConfig,
     FusedMoEParallelConfig,
     FusedMoEQuantConfig,
     FusedMoEQuantScheme,
-    fp8_w8a8_moe_quant_config,
 )
 from vllm.model_executor.layers.fused_moe.deep_gemm_utils import (
     compute_aligned_M,
     deepgemm_moe_permute,
     deepgemm_unpermute_and_reduce,
-)
-from vllm.model_executor.layers.fused_moe.prepare_finalize import (
-    MoEPrepareAndFinalizeNoEP,
 )
 from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceNoOP,
@@ -112,8 +109,8 @@ def _valid_deep_gemm(
 
 
 class DeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
-    def __init__(self, quant_config: FusedMoEQuantConfig):
-        super().__init__(quant_config)
+    def __init__(self, moe_config: FusedMoEConfig, quant_config: FusedMoEQuantConfig):
+        super().__init__(moe_config=moe_config, quant_config=quant_config)
         assert quant_config.block_shape == get_mk_alignment_for_contiguous_layout()
         assert quant_config.quant_dtype == torch.float8_e4m3fn
         assert not quant_config.per_act_token_quant
@@ -133,11 +130,7 @@ class DeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
 
     @staticmethod
     def _supports_quant_scheme(quant_scheme: FusedMoEQuantScheme) -> bool:
-        return (
-            quant_scheme.is_fp8_w8a8
-            and quant_scheme.per_block_quant
-            and quant_scheme.block_size == [128, 128]
-        )
+        return quant_scheme.is_fp8_w8a8 and quant_scheme.block_size == (128, 128)
 
     @staticmethod
     def _supports_activation(activation: str) -> bool:
@@ -360,27 +353,27 @@ def deep_gemm_moe_fp8(
     Returns:
     - torch.Tensor: The bfloat16 output tensor after applying the MoE layer.
     """
-    quant_config = fp8_w8a8_moe_quant_config(
-        w1_scale=w1_scale,
-        w2_scale=w2_scale,
-        a1_scale=a1_scale,
-        a2_scale=a2_scale,
-        block_shape=get_mk_alignment_for_contiguous_layout(),
-    )
+    # quant_config = fp8_w8a8_moe_quant_config(
+    #     w1_scale=w1_scale,
+    #     w2_scale=w2_scale,
+    #     a1_scale=a1_scale,
+    #     a2_scale=a2_scale,
+    #     block_shape=get_mk_alignment_for_contiguous_layout(),
+    # )
 
-    fn = mk.FusedMoEModularKernel(
-        MoEPrepareAndFinalizeNoEP(),
-        DeepGemmExperts(quant_config),
-    )
-    return fn(
-        hidden_states,
-        w1,
-        w2,
-        topk_weights,
-        topk_ids,
-        inplace=inplace,
-        activation=activation,
-        global_num_experts=global_num_experts,
-        expert_map=expert_map,
-        apply_router_weight_on_input=apply_router_weight_on_input,
-    )
+    # fn = mk.FusedMoEModularKernel(
+    #     MoEPrepareAndFinalizeNoEP(),
+    #     DeepGemmExperts(quant_config),
+    # )
+    # return fn(
+    #     hidden_states,
+    #     w1,
+    #     w2,
+    #     topk_weights,
+    #     topk_ids,
+    #     inplace=inplace,
+    #     activation=activation,
+    #     global_num_experts=global_num_experts,
+    #     expert_map=expert_map,
+    #     apply_router_weight_on_input=apply_router_weight_on_input,
+    # )

@@ -8,6 +8,7 @@ import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.forward_context import get_forward_context, is_forward_context_available
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.config import (
+    FusedMoEConfig,
     FusedMoEParallelConfig,
     FusedMoEQuantConfig,
     FusedMoEQuantScheme,
@@ -258,8 +259,7 @@ def persistent_masked_m_silu_mul_quant(
 class BatchedDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
     def __init__(
         self,
-        max_num_tokens: int,
-        num_dispatchers: int,
+        moe_config: FusedMoEConfig,
         quant_config: FusedMoEQuantConfig,
     ):
         """
@@ -267,11 +267,9 @@ class BatchedDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
         num_dispatchers: The number of DP dispatchers.
         quant_config: Quantization configuration
         """
-        super().__init__(quant_config)
+        super().__init__(moe_config, quant_config)
         assert self.block_shape == get_mk_alignment_for_contiguous_layout()
         assert self.quant_config.use_fp8_w8a8
-        self.max_num_tokens = max_num_tokens
-        self.num_dispatchers = num_dispatchers
 
     @staticmethod
     def activation_format() -> mk.FusedMoEActivationFormat:
@@ -287,7 +285,7 @@ class BatchedDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
 
     @staticmethod
     def _supports_quant_scheme(quant_scheme: FusedMoEQuantScheme) -> bool:
-        return quant_scheme.is_fp8_w8a8 and quant_scheme.block_size == [128, 128]
+        return quant_scheme.is_fp8_w8a8 and quant_scheme.block_size == (128, 128)
 
     @staticmethod
     def _supports_activation(activation: str) -> bool:
@@ -332,7 +330,8 @@ class BatchedDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
         # end up sending their tokens. This needs to be fixed.
         num_dispatchers = self.num_dispatchers
         num_experts = local_num_experts
-        max_num_tokens = M if self.max_num_tokens is None else self.max_num_tokens
+        # max_num_tokens = M if self.max_num_tokens is None else self.max_num_tokens
+        max_num_tokens = self.max_num_tokens
         activation_out_dim = self.adjust_N_for_activation(N, activation)
         workspace13 = (num_experts, max_num_tokens * num_dispatchers, max(K, N))
         workspace2 = (num_experts, max_num_tokens * num_dispatchers, activation_out_dim)

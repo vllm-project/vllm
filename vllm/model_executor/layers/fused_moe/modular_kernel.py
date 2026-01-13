@@ -386,7 +386,7 @@ class FusedMoEPermuteExpertsUnpermute(ABC):
         self.moe_config = moe_config
         self.quant_config = quant_config
         self._max_num_tokens: int | None = None
-        self._max_dispatchers: int | None = None
+        self._num_dispatchers: int | None = None
 
     @staticmethod
     def should_pf_defer_input_quant(quant_config: FusedMoEQuantConfig) -> bool:
@@ -402,13 +402,13 @@ class FusedMoEPermuteExpertsUnpermute(ABC):
     def _init_batched_experts_addl_params(
         self,
         max_num_tokens: int,
-        max_dispatchers: int,
+        num_dispatchers: int,
     ):
         """
         Initialize any additional parameters needed for batched experts.
         """
         self._max_num_tokens = max_num_tokens
-        self._max_dispatchers = max_dispatchers
+        self._num_dispatchers = num_dispatchers
 
     @property
     def max_num_tokens(self) -> int:
@@ -417,10 +417,10 @@ class FusedMoEPermuteExpertsUnpermute(ABC):
         return self._max_num_tokens
 
     @property
-    def max_dispatchers(self) -> int:
-        if self._max_dispatchers is None:
-            raise AttributeError("max_dispatchers only valid for BatchedExperts")
-        return self._max_dispatchers
+    def num_dispatchers(self) -> int:
+        if self._num_dispatchers is None:
+            raise AttributeError("num_dispatchers only valid for BatchedExperts")
+        return self._num_dispatchers
 
     @classmethod
     def make_standard_experts(
@@ -440,14 +440,14 @@ class FusedMoEPermuteExpertsUnpermute(ABC):
         moe_config: FusedMoEConfig,
         quant_config: FusedMoEQuantConfig,
         max_num_tokens: int,
-        max_dispatchers: int,
+        num_dispatchers: int,
     ) -> "FusedMoEPermuteExpertsUnpermute":
         """
         Factory method to create an instance of this class.
         """
         assert cls.activation_format() == FusedMoEActivationFormat.BatchedExperts
         instance = cls(moe_config, quant_config)
-        instance._init_batched_experts_addl_params(max_num_tokens, max_dispatchers)
+        instance._init_batched_experts_addl_params(max_num_tokens, num_dispatchers)
         return instance
 
     @staticmethod
@@ -513,18 +513,26 @@ class FusedMoEPermuteExpertsUnpermute(ABC):
         moe_config: FusedMoEConfig,
         moe_quant_scheme: FusedMoEQuantScheme,
         activation_format: FusedMoEActivationFormat,
-    ) -> bool:
-        return (
-            (cls._supports_current_device())
-            and (moe_config.is_act_and_mul or cls._supports_no_act_and_mul())
-            and cls._supports_activation(moe_config.activation)
-            and cls._supports_quant_scheme(moe_quant_scheme)
-            and cls._supports_parallel_config(moe_config.moe_parallel_config)
-            and (activation_format == cls.activation_format())
-        )
+    ) -> tuple[bool, str | None]:
+        def _make_reason(reason: str) -> str:
+            return f"kernel does not support {reason}"
 
-    @abstractmethod
+        if not cls._supports_current_device():
+            return False, _make_reason("current device")
+        elif not (moe_config.is_act_and_mul or cls._supports_no_act_and_mul()):
+            return False, _make_reason("no act_and_mul MLP layer")
+        elif not cls._supports_activation(moe_config.activation):
+            return False, _make_reason(f"{moe_config.activation} activation")
+        elif not cls._supports_quant_scheme(moe_quant_scheme):
+            return False, _make_reason("quantization scheme")
+        elif not cls._supports_parallel_config(moe_config.moe_parallel_config):
+            return False, _make_reason("parallel config")
+        elif activation_format != cls.activation_format():
+            return False, _make_reason(f"{activation_format.value} activation format")
+        return True, None
+
     @staticmethod
+    @abstractmethod
     def _supports_current_device() -> bool:
         """
         Whether the kernel supports the current device type
@@ -532,8 +540,8 @@ class FusedMoEPermuteExpertsUnpermute(ABC):
         """
         raise NotImplementedError
 
-    @abstractmethod
     @staticmethod
+    @abstractmethod
     def _supports_no_act_and_mul() -> bool:
         """
         Whether the kernel supports act_and_mul=False, i.e.
@@ -541,21 +549,21 @@ class FusedMoEPermuteExpertsUnpermute(ABC):
         """
         raise NotImplementedError
 
-    @abstractmethod
     @staticmethod
+    @abstractmethod
     def _supports_quant_scheme(quant_scheme: FusedMoEQuantScheme) -> bool:
         raise NotImplementedError
 
-    @abstractmethod
     @staticmethod
+    @abstractmethod
     def _supports_activation(activation: str) -> bool:
         """
         Whether the kernel supports a particular act function.
         """
         raise NotImplementedError
 
-    @abstractmethod
     @staticmethod
+    @abstractmethod
     def _supports_parallel_config(moe_parallel_config: FusedMoEParallelConfig) -> bool:
         """
         Whether the kernel supports deployment in expert parallel.

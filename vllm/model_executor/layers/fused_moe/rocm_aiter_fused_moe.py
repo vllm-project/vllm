@@ -276,7 +276,7 @@ class AiterExperts(mk.FusedMoEPermuteExpertsUnpermute):
         return mk.FusedMoEActivationFormat.Standard
 
     @staticmethod
-    def should_pf_defer_input_quant(quant_config):
+    def should_pf_defer_input_quant(quant_config: FusedMoEQuantConfig) -> bool:
         """
         AITER Fused MoE kernels handle input quantization.
         """
