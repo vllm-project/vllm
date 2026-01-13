@@ -365,7 +365,7 @@ class MiniMaxText01LinearAttention(nn.Module, MambaBase):
 
         decode_only = getattr(attn_metadata, "num_prefills", 0) == 0
         if attn_metadata is None:
-            hidden = torch.empty(
+            hidden = torch.zeros(
                 (q.shape[0], q.shape[1] * q.shape[2]), device=q.device, dtype=q.dtype
             )
         else:
