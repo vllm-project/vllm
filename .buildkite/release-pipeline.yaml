@@ -218,6 +218,7 @@ steps:
   # ROCm Input Step - Collect build configuration (manual trigger only)
   - input: "ROCm Release Build Configuration"
     key: input-rocm-config
+    depends_on: ~
     if: build.source == "ui"
     fields:
       - text: "Python Version"
