@@ -3,9 +3,8 @@
 
 
 from http import HTTPStatus
-from http.client import HTTPException
 
-from fastapi import APIRouter, Depends, FastAPI, Request
+from fastapi import APIRouter, Depends, FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from vllm.entrypoints.openai.chat_completion.protocol import (
