@@ -8,9 +8,9 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionResponse,
     ChatCompletionResponseChoice,
     ChatCompletionStreamResponse,
+    ChatMessage,
 )
 from vllm.entrypoints.openai.engine.protocol import (
-    ChatMessage,
     UsageInfo,
 )
 
