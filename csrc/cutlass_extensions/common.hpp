@@ -37,6 +37,8 @@ struct enable_sm90_or_later : Kernel {
   CUTLASS_DEVICE void operator()(Args&&... args) {
 #if defined __CUDA_ARCH__ && __CUDA_ARCH__ >= 900
     Kernel::operator()(std::forward<Args>(args)...);
+#else
+  #warning "This kernel only supported on sm >= 90. Ignoring..."
 #endif
   }
 };
@@ -47,16 +49,34 @@ struct enable_sm90_only : Kernel {
   CUTLASS_DEVICE void operator()(Args&&... args) {
 #if defined __CUDA_ARCH__ && __CUDA_ARCH__ == 900
     Kernel::operator()(std::forward<Args>(args)...);
+#else
+  #warning "This kernel only supported on sm90. Ignoring..."
 #endif
   }
 };
 
 template <typename Kernel>
-struct enable_sm100_only : Kernel {
+struct enable_sm100f_only : Kernel {
+  template <typename... Args>
+  CUTLASS_DEVICE void operator()(Args&&... args) {
+#if defined __CUDA_ARCH__
+  #if __CUDA_ARCH__ == 1000 || __CUDA_ARCH__ == 1030
+    Kernel::operator()(std::forward<Args>(args)...);
+  #else
+    #warning "This kernel only supported on sm100f. Ignoring..."
+  #endif
+#endif
+  }
+};
+
+template <typename Kernel>
+struct enable_sm100a_only : Kernel {
   template <typename... Args>
   CUTLASS_DEVICE void operator()(Args&&... args) {
 #if defined __CUDA_ARCH__ && __CUDA_ARCH__ == 1000
     Kernel::operator()(std::forward<Args>(args)...);
+#else
+  #warning "This kernel only supported on sm100a. Ignoring..."
 #endif
   }
 };
@@ -67,6 +87,8 @@ struct enable_sm120_only : Kernel {
   CUTLASS_DEVICE void operator()(Args&&... args) {
 #if defined __CUDA_ARCH__ && __CUDA_ARCH__ == 1200
     Kernel::operator()(std::forward<Args>(args)...);
+#else
+  #warning "This kernel only supported on sm120. Ignoring..."
 #endif
   }
 };
