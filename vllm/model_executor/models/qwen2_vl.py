@@ -27,7 +27,7 @@
 
 import math
 from collections.abc import Callable, Iterable, Mapping, Sequence
-from functools import partial
+from functools import lru_cache, partial
 from typing import Annotated, Any, Literal, TypeAlias
 
 import numpy as np
@@ -921,6 +921,7 @@ class Qwen2VLProcessingInfo(BaseProcessingInfo):
         )
         return num_video_tokens
 
+    @lru_cache(maxsize=128)  # noqa: B019
     def get_image_size_with_most_features(self) -> ImageSize:
         # NOTE: Simply processing a huge size with _get_vision_info might not give a
         # size that maximizes the number of featrues, i.e., the number of (merged)
