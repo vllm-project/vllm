@@ -253,7 +253,7 @@ def _fused_moe_lora_shrink(
         * triton.cdiv(EM, META["BLOCK_SIZE_M"])
         * triton.cdiv(N, META["BLOCK_SIZE_N"]),
         len(lora_a_stacked),
-        lora_a_stacked[0].shape[0],
+        lora_a_stacked[0].shape[0] + 1,
     )
     _fused_moe_lora_kernel[grid](
         qcurr_hidden_states,
@@ -353,7 +353,7 @@ def _fused_moe_lora_expand(
     grid = lambda META: (
         triton.cdiv(EM, META["BLOCK_SIZE_M"]) * triton.cdiv(N, META["BLOCK_SIZE_N"]),
         len(lora_b_stacked),
-        lora_b_stacked[0].shape[0],
+        lora_b_stacked[0].shape[0] + 1,
     )
     _fused_moe_lora_kernel[grid](
         a_intermediate_cache1,
