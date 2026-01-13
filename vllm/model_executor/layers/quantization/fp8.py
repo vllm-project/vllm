@@ -648,7 +648,10 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             static_input_quant=(self.quant_config.activation_scheme == "static"),
         )
 
-        # Select Fp8 MoE backend.
+        # Select Fp8 MoE backend
+        # NOTE(rob): this is kind of a hack. We need to peak into
+        # the prepare-finalize selection to determine if we are using
+        # the batched or standard expert format.
         use_batched = (
             self.moe.moe_parallel_config.use_deepep_ll_kernels
             or self.moe.moe_parallel_config.use_pplx_kernels
