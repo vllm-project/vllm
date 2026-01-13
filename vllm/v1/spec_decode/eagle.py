@@ -131,12 +131,12 @@ class EagleProposer:
             # 1D-RoPE.
             # See page 5 of https://arxiv.org/abs/2409.12191
             self.mrope_positions = torch.zeros(
-                (3, self.max_num_tokens + 1), dtype=torch.int64, device=device
+                (3, 2 * (self.max_num_tokens + 1)), dtype=torch.int64, device=device
             )
         else:
             # RoPE need (max_num_tokens,)
             self.positions = torch.zeros(
-                self.max_num_tokens, dtype=torch.int64, device=device
+                2 * self.max_num_tokens, dtype=torch.int64, device=device
             )
         self.hidden_states = torch.zeros(
             (self.max_num_tokens, self.hidden_size), dtype=self.dtype, device=device
@@ -324,16 +324,38 @@ class EagleProposer:
         self._set_positions(num_kv_tokens, position_ids)
         self.input_ids[:num_query_tokens] = MASK_TOKEN_ID
         self.input_ids[:1] = next_token_ids
-        input_ids = self.input_ids[:num_query_tokens]
         self.hidden_states[:num_context_tokens] = target_hidden_states
+
+        # Determine CUDA graph usage and padding
+        num_query_tokens_dp_padded, num_tokens_across_dp = self._pad_batch_across_dp(
+            num_tokens_unpadded=num_query_tokens, num_tokens_padded=num_query_tokens
+        )
+
+        if (
+            self.use_cuda_graph
+            and num_query_tokens_dp_padded
+            <= self.compilation_config.max_cudagraph_capture_size
+        ):
+            num_input_tokens = self.vllm_config.pad_for_cudagraph(
+                num_query_tokens_dp_padded
+            )
+            cudagraph_runtime_mode = CUDAGraphMode.PIECEWISE
+        else:
+            num_input_tokens = num_query_tokens_dp_padded
+            cudagraph_runtime_mode = CUDAGraphMode.NONE
+
+        if num_tokens_across_dp is not None:
+            num_tokens_across_dp[self.dp_rank] = num_input_tokens
+
+        input_ids = self.input_ids[:num_input_tokens]
         hidden_states = self.hidden_states[:num_context_tokens]
 
         with set_forward_context(
             per_layer_attn_metadata,
             self.vllm_config,
-            num_tokens=num_query_tokens,
-            num_tokens_across_dp=num_query_tokens,
-            cudagraph_runtime_mode=CUDAGraphMode.NONE,
+            num_tokens=num_input_tokens,
+            num_tokens_across_dp=num_tokens_across_dp,
+            cudagraph_runtime_mode=cudagraph_runtime_mode,
         ):
             ret_hidden_states = self.model(
                 input_ids=input_ids,
@@ -341,7 +363,10 @@ class EagleProposer:
                 hidden_states=hidden_states,
                 inputs_embeds=None,
             )
-        logits = self.model.compute_logits(ret_hidden_states)[1:]
+        # Only take the valid (non-padded) hidden states before computing logits
+        # Skip the first token (sampled token) and take the rest (mask tokens)
+        valid_hidden_states = ret_hidden_states[1:num_query_tokens]
+        logits = self.model.compute_logits(valid_hidden_states)
         draft_token_ids = logits.argmax(dim=-1)
         return draft_token_ids.view(1, self.num_speculative_tokens)
 
@@ -1287,14 +1312,18 @@ class EagleProposer:
     ) -> None:
         # Determine if CUDA graphs should be used for this run.
         cudagraphs_enabled = use_cudagraphs and self.use_cuda_graph
-
-        return
+        cudagraph_mode = (
+            CUDAGraphMode.PIECEWISE if cudagraphs_enabled else CUDAGraphMode.NONE
+        )
 
         # FIXME: when using tree-based specdec, adjust number of forward-passes
         # according to the depth of the tree.
-        for fwd_idx in range(
+        num_iters_to_capture = (
             self.num_speculative_tokens if not is_graph_capturing else 1
-        ):
+        )
+        if self.method == "dflash":
+            num_iters_to_capture = 1
+        for fwd_idx in range(num_iters_to_capture):
             if fwd_idx <= 1:
                 num_tokens_dp_padded, num_tokens_across_dp = self._pad_batch_across_dp(
                     num_tokens_unpadded=num_tokens, num_tokens_padded=num_tokens
@@ -1317,9 +1346,7 @@ class EagleProposer:
                 self.vllm_config,
                 num_tokens=num_input_tokens,
                 num_tokens_across_dp=num_tokens_across_dp,
-                cudagraph_runtime_mode=CUDAGraphMode.PIECEWISE
-                if cudagraphs_enabled
-                else CUDAGraphMode.NONE,
+                cudagraph_runtime_mode=cudagraph_mode,
             ):
                 if self.supports_mm_inputs:
                     input_ids = None
@@ -1328,9 +1355,14 @@ class EagleProposer:
                     input_ids = self.input_ids[:num_input_tokens]
                     inputs_embeds = None
 
+                positions = (
+                    self._get_positions(num_input_tokens)
+                    if self.method != "dflash"
+                    else self._get_positions(2 * num_input_tokens)
+                )
                 self.model(
                     input_ids=input_ids,
-                    positions=self._get_positions(num_input_tokens),
+                    positions=positions,
                     hidden_states=self.hidden_states[:num_input_tokens],
                     inputs_embeds=inputs_embeds,
                 )
