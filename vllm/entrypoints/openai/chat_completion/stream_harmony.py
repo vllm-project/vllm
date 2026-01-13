@@ -10,7 +10,7 @@ harmony parser state during streaming chat completions.
 from openai_harmony import StreamableParser
 
 from vllm.entrypoints.chat_utils import make_tool_call_id
-from vllm.entrypoints.openai.protocol import (
+from vllm.entrypoints.openai.engine.protocol import (
     DeltaFunctionCall,
     DeltaMessage,
     DeltaToolCall,

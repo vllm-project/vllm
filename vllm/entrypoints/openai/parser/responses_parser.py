@@ -16,7 +16,10 @@ from openai.types.responses.response_reasoning_item import (
 )
 
 from vllm.entrypoints.constants import MCP_PREFIX
-from vllm.entrypoints.openai.protocol import ResponseInputOutputItem, ResponsesRequest
+from vllm.entrypoints.openai.engine.protocol import (
+    ResponseInputOutputItem,
+    ResponsesRequest,
+)
 from vllm.outputs import CompletionOutput
 from vllm.reasoning.abs_reasoning_parsers import ReasoningParser
 from vllm.tokenizers import TokenizerLike
