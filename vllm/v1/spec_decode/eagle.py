@@ -254,7 +254,7 @@ class EagleProposer:
             last_token_indices = common_attn_metadata.query_start_loc[1:] - 1
 
         # Convert M-RoPE positions to 1D if draft model is text-only
-        if not self.uses_mrope and target_positions.dim() == 2:
+        if not self.uses_mrope and self.vllm_config.model_config.uses_mrope:
             # For text inputs, all M-RoPE dimensions are identical
             target_positions = target_positions[0]
 

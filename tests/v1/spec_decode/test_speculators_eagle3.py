@@ -20,6 +20,10 @@ from vllm.platforms import current_platform
             id="qwen3-eagle3-speculator",
         ),
         pytest.param(
+            "nm-testing/Speculator-Qwen3-30B-MOE-VL-Eagle3",
+            id="qwen3-30b-moe-vl-eagle3-speculator",
+        ),
+        pytest.param(
             "nm-testing/Speculator-Qwen3-8B-Eagle3-converted-071-quantized-w4a16",
             id="qwen3-eagle3-speculator-w4a16-verifier",
             marks=pytest.mark.skipif(
