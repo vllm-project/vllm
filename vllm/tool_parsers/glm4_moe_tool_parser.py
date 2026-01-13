@@ -10,9 +10,9 @@ import regex as re
 
 from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionRequest,
+    ChatCompletionToolsParam,
 )
 from vllm.entrypoints.openai.engine.protocol import (
-    ChatCompletionToolsParam,
     DeltaFunctionCall,
     DeltaMessage,
     DeltaToolCall,
