@@ -813,20 +813,37 @@ def unified_kv_cache_update(
     kv_cache = attn_layer.kv_cache[forward_context.virtual_engine]
 
     slot_mapping = forward_context.slot_mapping
-    if isinstance(slot_mapping, dict):
-        slot_mapping = slot_mapping.get(layer_name)
+    if isinstance(slot_mapping, list):
+        ubatch_slices = forward_context.ubatch_slices
+        for i, slot_mapping_dict in enumerate(slot_mapping):
+            layer_slot_mapping = slot_mapping_dict.get(layer_name)
+            if layer_slot_mapping is not None:
+                assert hasattr(attn_layer.impl, "do_kv_cache_update"), (
+                    f"{attn_layer.impl.__class__.__name__} does not support "
+                    "kv cache update"
+                )
+                token_slice = ubatch_slices[i].token_slice
+                attn_layer.impl.do_kv_cache_update(
+                    attn_layer,
+                    key[token_slice],
+                    value[token_slice],
+                    kv_cache,
+                    layer_slot_mapping,
+                )
+    elif isinstance(slot_mapping, dict):
+        layer_slot_mapping = slot_mapping.get(layer_name)
+        if layer_slot_mapping is not None:
+            assert hasattr(attn_layer.impl, "do_kv_cache_update"), (
+                f"{attn_layer.impl.__class__.__name__} does not support kv cache update"
+            )
+            attn_layer.impl.do_kv_cache_update(
+                attn_layer,
+                key,
+                value,
+                kv_cache,
+                layer_slot_mapping,
+            )
 
-    if slot_mapping is not None:
-        assert hasattr(attn_layer.impl, "do_kv_cache_update"), (
-            f"{attn_layer.impl.__class__.__name__} does not support kv cache update"
-        )
-        attn_layer.impl.do_kv_cache_update(
-            attn_layer,
-            key,
-            value,
-            kv_cache,
-            slot_mapping,
-        )
     return torch.empty(0, device=key.device, dtype=key.dtype)
 
 
