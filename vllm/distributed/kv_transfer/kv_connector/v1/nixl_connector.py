@@ -20,8 +20,8 @@ import torch
 import zmq
 
 from vllm import envs
-from vllm.attention.backends.abstract import AttentionBackend
-from vllm.attention.selector import get_attn_backend
+from vllm.attention.v1.backends.abstract import AttentionBackend
+from vllm.attention.v1.selector import get_attn_backend
 from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.utils import (
     EngineId,
