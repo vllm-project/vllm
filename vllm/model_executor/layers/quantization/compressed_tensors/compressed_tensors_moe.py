@@ -1166,12 +1166,14 @@ class CompressedTensorsW8A8Int8MoEMethod(CompressedTensorsMoEMethod):
         **extra_weight_attrs,
     ):
         params_dtype = torch.int8
+        is_act_and_mul = layer.moe_config.is_act_and_mul
+        w13_mult = 2 if is_act_and_mul else 1
 
         # WEIGHTS
         w13_weight = torch.nn.Parameter(
             torch.empty(
                 num_experts,
-                2 * intermediate_size_per_partition,
+                w13_mult * intermediate_size_per_partition,
                 hidden_size,
                 dtype=params_dtype,
             ),
@@ -1196,7 +1198,10 @@ class CompressedTensorsW8A8Int8MoEMethod(CompressedTensorsMoEMethod):
         assert self.weight_quant.strategy == QuantizationStrategy.CHANNEL
         w13_weight_scale = torch.nn.Parameter(
             torch.ones(
-                num_experts, 2 * intermediate_size_per_partition, 1, dtype=torch.float32
+                num_experts,
+                w13_mult * intermediate_size_per_partition,
+                1,
+                dtype=torch.float32,
             ),
             requires_grad=False,
         )

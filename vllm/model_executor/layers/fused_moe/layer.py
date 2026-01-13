@@ -621,6 +621,9 @@ class FusedMoE(CustomOp):
 
         if not self.moe_config.is_act_and_mul:
             # Avoid circular import
+            from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors_moe import (  # noqa: E501
+                CompressedTensorsW8A8Int8MoEMethod,
+            )
             from vllm.model_executor.layers.quantization.modelopt import (
                 ModelOptFp8MoEMethod,
                 ModelOptNvFp4FusedMoE,
@@ -632,11 +635,13 @@ class FusedMoE(CustomOp):
                     UnquantizedFusedMoEMethod,
                     ModelOptFp8MoEMethod,
                     ModelOptNvFp4FusedMoE,
+                    CompressedTensorsW8A8Int8MoEMethod,
                 ),
             ):
                 raise NotImplementedError(
                     "is_act_and_mul=False is supported only for unquantized "
-                    ", ModelOpt FP8, and ModelOpt NvFp4 checkpoints"
+                    ", ModelOpt FP8, ModelOpt NvFp4, "
+                    "and CompressedTensors W8A8 checkpoints"
                 )
             if not current_platform.is_cuda():
                 raise NotImplementedError(
