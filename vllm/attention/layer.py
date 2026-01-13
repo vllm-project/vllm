@@ -851,12 +851,6 @@ def unified_attention_with_output(
 ) -> None:
     attn_metadata, self, kv_cache = get_attention_context(layer_name)
 
-    if attn_metadata is None:
-        # No attention metadata available (e.g., warmup run with split KV update).
-        # KV cache update already happened via unified_kv_cache_update.
-        # Skip attention computation.
-        return
-
     self.impl.forward(
         self,
         query,
