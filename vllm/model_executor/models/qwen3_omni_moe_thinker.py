@@ -410,15 +410,6 @@ class Qwen3OmniMoeAudioEncoder(nn.Module):
         feature_lens: torch.Tensor,
         aftercnn_lens: torch.Tensor,
     ):
-        """
-        Args:
-            input_features: Mel spectrogram of shape (num_mel_bins, total_seq_len)
-            feature_lens: Length of each audio sample
-            aftercnn_lens: Output length after CNN processing
-
-        Returns:
-            hidden_states of shape (total_output_len, output_dim)
-        """
         # Compute chunk information
         chunk_num = torch.ceil(feature_lens / (self.n_window * 2)).long()
 
