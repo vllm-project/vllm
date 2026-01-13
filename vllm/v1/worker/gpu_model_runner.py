@@ -2429,7 +2429,8 @@ class GPUModelRunner(
                         list(torch.split(mm_embeds_item, split_size_or_sections, dim=0))
                     )
                 else:
-                    mm_embeds_req.append([mm_embeds_item, (start_idx, end_idx)])
+                    mm_embeds_ranges.append((start_idx, end_idx))
+                    mm_embeds_req.append([mm_embeds_item])
 
             mm_embeds_req = [
                 x
