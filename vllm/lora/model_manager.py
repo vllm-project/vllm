@@ -421,6 +421,22 @@ class LoRAModelManager:
         )
         self.modules[module_name] = module
 
+    @staticmethod
+    def _pad_lora_pairs_to_triplets(
+        loras: list[LoRALayerWeights | None],
+    ) -> list[LoRALayerWeights | None]:
+        """Pad LoRA weight pairs to triplets for non-gated MoE.
+
+        For non-gated MoE, each expert has 2 entries (w1, w2) that need to be
+        padded to triplets (w1, w2, None) to match pack_moe expectations.
+        """
+        assert len(loras) % 2 == 0, "Expected pairs of LoRA weights for non-gated MoE."
+        padded: list[LoRALayerWeights | None] = []
+        for i in range(0, len(loras), 2):
+            padded.extend(loras[i : i + 2])
+            padded.append(None)
+        return padded
+
     def create_dummy_lora(
         self,
         lora_id: int,
@@ -509,19 +525,8 @@ class LoRAModelManager:
                 if module.__class__.__name__ == "FusedMoEWithLoRA":
                     # For non-gated MoE, pad subloras to 3 elements per expert
                     # to match pack_moe expectations (w1, w2, None for w3)
-                    if (
-                        self._is_non_gated_moe
-                        and len(subloras) > 0
-                        and len(subloras) % 3 != 0
-                    ):
-                        assert len(subloras) % 2 == 0, (
-                            "Expected pairs of LoRA weights for non-gated MoE."
-                        )
-                        padded_subloras: list[LoRALayerWeights | None] = []
-                        for i in range(0, len(subloras), 2):
-                            padded_subloras.extend(subloras[i : i + 2])
-                            padded_subloras.append(None)
-                        subloras = padded_subloras
+                    if self._is_non_gated_moe and len(subloras) > 0:
+                        subloras = self._pad_lora_pairs_to_triplets(subloras)
                     lora = PackedLoRALayerWeights.pack_moe(
                         subloras, module_name, is_non_gated_moe=self._is_non_gated_moe
                     )
@@ -592,19 +597,10 @@ class LoRAModelManager:
                 if lora_model.check_lora_name(module_name):
                     module_name = replaced_module_name
             if module_name.endswith(".experts"):
-                if (
-                    self._is_non_gated_moe
-                    and len(replacement_loras) > 0
-                    and len(replacement_loras) % 3 != 0
-                ):
-                    assert len(replacement_loras) % 2 == 0, (
-                        "Expected pairs of LoRAs weights for non-gated MoE."
+                if self._is_non_gated_moe and len(replacement_loras) > 0:
+                    replacement_loras = self._pad_lora_pairs_to_triplets(
+                        replacement_loras
                     )
-                    padded_loras: list[LoRALayerWeights | None] = []
-                    for i in range(0, len(replacement_loras), 2):
-                        padded_loras.extend(replacement_loras[i : i + 2])
-                        padded_loras.append(None)
-                    replacement_loras = padded_loras
                 lora_model.loras[module_name] = PackedLoRALayerWeights.pack_moe(
                     replacement_loras,
                     module_name,
