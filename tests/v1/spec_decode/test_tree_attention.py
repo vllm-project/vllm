@@ -27,7 +27,6 @@ class MockAttentionLayer(torch.nn.Module):
     _q_scale = torch.tensor(1.0, dtype=torch.float32, device="cuda")
     _k_scale = torch.tensor(1.0, dtype=torch.float32, device="cuda")
     _v_scale = torch.tensor(1.0, dtype=torch.float32, device="cuda")
-    _q_scale_for_fa = torch.tensor(1.0, dtype=torch.float32, device="cuda")
 
     def __init__(self):
         super().__init__()

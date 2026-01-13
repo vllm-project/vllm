@@ -35,7 +35,7 @@ def opcheck_fp8_quant(
 ):
     if scale is not None:
         opcheck(
-            torch.ops._C.static_scaled_fp8_quant,
+            torch.ops._C.static_scaled_fp8_quant, 
             (output, input, scale, group_shape),
         )
     elif use_per_token_if_dynamic:
@@ -128,8 +128,11 @@ def test_static_fp8_quant(
 
     if per_channel:
         scale = torch.rand(hidden_size, dtype=torch.float32, device="cuda")
+        # Per-channel requires explicit group_shape for 1D scale
+        group_shape = (-1, 1)
     else:
         scale = torch.rand(1, dtype=torch.float32, device="cuda")
+        group_shape = None  # Per-tensor doesn't need group_shape
 
     # Ensure scale is not zero
     scale = scale + 0.01
@@ -154,14 +157,14 @@ def test_static_fp8_quant(
         .to(FP8_DTYPE)
     )
 
-    ops_out, ops_scale = ops.scaled_fp8_quant(x, scale=scale)
+    ops_out, ops_scale = ops.scaled_fp8_quant(x, scale=scale, group_shape=group_shape)
 
     torch.testing.assert_close(scale, ops_scale)
     torch.testing.assert_close(
         ref_out.to(dtype=torch.float32), ops_out.to(dtype=torch.float32)
     )
 
-    opcheck_fp8_quant(ops_out, x, scale=scale)
+    opcheck_fp8_quant(ops_out, x, scale=scale, group_shape=group_shape)
 
 
 # Regression test for a case with large activations where an int32 index cannot

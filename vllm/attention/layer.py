@@ -96,13 +96,6 @@ def _init_kv_cache_quant(
     quant_method = (
         quant_config.get_quant_method(layer, prefix=prefix) if quant_config else None
     )
-    # The default k/v_scale is set to 1.0. This is ignored
-    # when kv-cache is not fp8, and should be used with
-    # kv-cache in fp8_e5m2. For kv-cache in fp8_e4m3, we
-    # expect the pre-quantized k/v_scale to be loaded along
-    # with the model weights.
-    layer.kv_cache_dtype = kv_cache_dtype
-    layer.calculate_kv_scales = calculate_kv_scales
 
     # Note [Register q/k/v/prob scales in state dict]
     # When calling model.to(device), only parameters/buffers in state dict are
@@ -324,14 +317,15 @@ class Attention(nn.Module, AttentionLayerBase):
 
         # for attn backends supporting query quantization
         self.query_quant = None
-        is_per_channel = hasattr(self, "q_scale") and self.q_scale.numel() > 1
         if self.impl.supports_quant_query_input and self.kv_cache_dtype.startswith(
             "fp8"
         ):
+            is_per_head = hasattr(self, "q_scale") and self.q_scale.numel() == self.num_kv_heads
+            block_size = self.head_size * self.num_heads // self.num_kv_heads
             self.query_quant = QuantFP8(
                 static=True,
-                group_shape=GroupShape.PER_CHANNEL
-                if is_per_channel
+                group_shape=GroupShape(-1, block_size)
+                if is_per_head
                 else GroupShape.PER_TENSOR,
             )
 
