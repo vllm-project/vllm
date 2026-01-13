@@ -6,7 +6,6 @@
 import time
 from typing import Any, Literal, TypeAlias
 
-import torch
 from openai.types.responses import (
     ResponseCodeInterpreterCallCodeDeltaEvent,
     ResponseCodeInterpreterCallCodeDoneEvent,

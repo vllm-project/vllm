@@ -11,55 +11,14 @@ from typing import Annotated, Any, ClassVar, Literal, TypeAlias
 import regex as re
 import torch
 from fastapi import HTTPException, UploadFile
-from openai.types.responses import (
-    ResponseCodeInterpreterCallCodeDeltaEvent,
-    ResponseCodeInterpreterCallCodeDoneEvent,
-    ResponseCodeInterpreterCallCompletedEvent,
-    ResponseCodeInterpreterCallInProgressEvent,
-    ResponseCodeInterpreterCallInterpretingEvent,
-    ResponseContentPartAddedEvent,
-    ResponseContentPartDoneEvent,
-    ResponseFunctionToolCall,
-    ResponseInputItemParam,
-    ResponseMcpCallArgumentsDeltaEvent,
-    ResponseMcpCallArgumentsDoneEvent,
-    ResponseMcpCallCompletedEvent,
-    ResponseMcpCallInProgressEvent,
-    ResponseOutputItem,
-    ResponseOutputItemAddedEvent,
-    ResponseOutputItemDoneEvent,
-    ResponsePrompt,
-    ResponseReasoningTextDeltaEvent,
-    ResponseReasoningTextDoneEvent,
-    ResponseStatus,
-    ResponseWebSearchCallCompletedEvent,
-    ResponseWebSearchCallInProgressEvent,
-    ResponseWebSearchCallSearchingEvent,
-)
-from openai.types.responses import (
-    ResponseCompletedEvent as OpenAIResponseCompletedEvent,
-)
-from openai.types.responses import ResponseCreatedEvent as OpenAIResponseCreatedEvent
-from openai.types.responses import (
-    ResponseInProgressEvent as OpenAIResponseInProgressEvent,
-)
-from openai.types.responses.response import IncompleteDetails, ToolChoice
-from openai.types.responses.response_reasoning_item import (
-    Content as ResponseReasoningTextContent,
-)
-from openai.types.responses.tool import Tool
-from openai.types.shared import Metadata, Reasoning
-from openai_harmony import Message as OpenAIHarmonyMessage
 from pydantic import (
     BaseModel,
     ConfigDict,
     Field,
-    ValidationError,
-    field_serializer,
     model_validator,
 )
 
-from vllm.entrypoints.chat_utils import ChatCompletionMessageParam, make_tool_call_id
+from vllm.entrypoints.chat_utils import make_tool_call_id
 from vllm.exceptions import VLLMValidationError
 from vllm.logger import init_logger
 from vllm.logprobs import Logprob
