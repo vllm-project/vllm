@@ -37,29 +37,37 @@ class EnvFactory:
         return self.parse_fn(value)
 
 
-def env_factory(default_value: T, parse_fn: Callable[[str], T]) -> EnvFactory:
+def env_factory(default_value: T, parse_fn: Callable[[str], T]) -> T:
     """Convenience function to create an EnvFactory.
 
     This is a more readable alias for creating EnvFactory instances.
 
+    Note: At runtime, this returns an EnvFactory object, but the return type
+    is T for type checking purposes so that variable declarations type-check
+    correctly (e.g., VLLM_LOGGING_LEVEL: str = env_factory(...)).
+
     Example:
         VLLM_LOGGING_LEVEL: str = env_factory("INFO", lambda x: x.upper())
     """
-    return EnvFactory(default_value, parse_fn)
+    return EnvFactory(default_value, parse_fn)  # type: ignore[return-value]
 
 
-def env_default_factory(factory_fn: Callable[[], T]) -> Callable[[], T]:
+def env_default_factory(factory_fn: Callable[[], T]) -> T:
     """Create a lazy-initialized default value.
 
     This is used when the default value needs to be computed at runtime
     rather than at module import time.
 
+    Note: At runtime, this returns the callable itself, but the return type
+    is T for type checking purposes so that variable declarations type-check
+    correctly (e.g., VLLM_CACHE_ROOT: str = env_default_factory(...)).
+
     Example:
-        VLLM_CACHE_ROOT: Path = env_default_factory(
+        VLLM_CACHE_ROOT: str = env_default_factory(
             lambda: parse_path(os.getenv("XDG_CACHE_HOME", "~/.cache")) / "vllm"
         )
     """
-    return factory_fn
+    return factory_fn  # type: ignore[return-value]
 
 
 def parse_path(value: str) -> Path:
@@ -101,7 +109,8 @@ def unwrap_optional(type_hint: Any) -> Any:
     origin = get_origin(type_hint)
 
     # Handle Union types (including Optional which is Union[T, None])
-    if origin is Union:
+    # Also handle Python 3.10+ union syntax (int | None creates types.UnionType)
+    if origin is Union or (origin is not None and str(origin) == "<class 'types.UnionType'>"):
         args = get_args(type_hint)
         # Filter out NoneType
         non_none_args = [arg for arg in args if arg is not type(None)]
