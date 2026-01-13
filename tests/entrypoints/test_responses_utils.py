@@ -275,6 +275,15 @@ class TestShouldContinueFinalMessage:
         )
         assert should_continue_final_message([reasoning_item]) is True
 
+        reasoning_item = {
+            "id": "reasoning_123",
+            "summary": [],
+            "type": "reasoning",
+            "content": [],
+            "status": "incomplete",
+        }
+        assert should_continue_final_message([reasoning_item]) is True
+
     def test_completed_reasoning_returns_false(self):
         """Completed reasoning should not be continued."""
         reasoning_item = ResponseReasoningItem(
@@ -354,10 +363,20 @@ class TestShouldContinueFinalMessage:
             id="fc_123",
             call_id="call_123",
             type="function_call",
-            status="completed",
+            status="in_progress",
             name="get_weather",
             arguments='{"location": "NYC"}',
         )
+        assert should_continue_final_message([tool_call]) is False
+
+        tool_call = {
+            "id": "msg_123",
+            "call_id": "call_123",
+            "type": "function_call",
+            "status": "in_progress",
+            "name": "get_weather",
+            "arguments": '{"location": "NYC"}',
+        }
         assert should_continue_final_message([tool_call]) is False
 
     # Tests for dict inputs (e.g., from curl requests)
