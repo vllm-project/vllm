@@ -3100,6 +3100,19 @@ class GPUModelRunner(
                 pyt_hooks.register_hooks(self.model, self.model.__class__.__name__)
                 self.layerwise_nvtx_hooks_registered = True
 
+    def _has_separate_kv_update(self) -> bool:
+        """
+        Check if any attention backend has KV cache update separate from forward.
+
+        Returns True if at least one non-encoder-only attention backend
+        has forward_includes_kv_cache=False.
+        """
+        return not all(
+            all(g.backend.forward_includes_kv_cache for g in self.attn_groups[id])
+            for id, spec in enumerate(self.kv_cache_config.kv_cache_groups)
+            if not isinstance(spec.kv_cache_spec, EncoderOnlyAttentionSpec)
+        )
+
     def _get_slot_mappings(
         self,
         num_tokens_padded: int,
@@ -3303,14 +3316,8 @@ class GPUModelRunner(
                 ubatch_slices_padded,
             )
 
-            has_separate_kv_update = not all(
-                all(g.backend.forward_includes_kv_cache for g in self.attn_groups[id])
-                for id, spec in enumerate(self.kv_cache_config.kv_cache_groups)
-                if not isinstance(spec.kv_cache_spec, EncoderOnlyAttentionSpec)
-            )
-
+            has_separate_kv_update = self._has_separate_kv_update()
             pad_attn = cudagraph_mode == CUDAGraphMode.FULL
-
             use_spec_decode = len(scheduler_output.scheduled_spec_decode_tokens) > 0
             ubatch_slices_attn = ubatch_slices_padded if pad_attn else ubatch_slices
 
@@ -5003,12 +5010,7 @@ class GPUModelRunner(
             # the KV cache update and attention are two separate custom ops.
             # Keep in mind that when we use `FULL` cudagraph mode, we capture
             # all attention regardless of the `force_attention_*` variables.
-            has_separate_kv_update = not all(
-                all(g.backend.forward_includes_kv_cache for g in self.attn_groups[id])
-                for id, spec in enumerate(self.kv_cache_config.kv_cache_groups)
-                if not isinstance(spec.kv_cache_spec, EncoderOnlyAttentionSpec)
-            )
-            force_attention_dummy = has_separate_kv_update
+            force_attention_dummy = self._has_separate_kv_update()
             force_attention_warmup = cudagraph_runtime_mode == CUDAGraphMode.FULL
 
             for _ in range(self.compilation_config.cudagraph_num_of_warmups):
