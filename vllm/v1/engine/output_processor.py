@@ -493,6 +493,8 @@ class OutputProcessor:
         req_state = self.request_states[request.request_id]
         if req_state.prompt and prompt:
             req_state.prompt += prompt
+        elif prompt:
+            req_state.prompt = prompt
         if request.prompt_token_ids:
             if req_state.prompt_token_ids is None:
                 req_state.prompt_token_ids = []
