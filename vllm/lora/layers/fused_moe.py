@@ -19,9 +19,6 @@ from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.layers.fused_moe.config import (
     _get_config_dtype_str,
 )
-from vllm.model_executor.layers.fused_moe.flashinfer_cutlass_moe import (
-    FlashInferExperts,
-)
 from vllm.model_executor.layers.fused_moe.fused_marlin_moe import (
     MarlinExperts,
 )
@@ -147,8 +144,7 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
             )
         else:
             assert isinstance(
-                m_fused_moe_fn.fused_experts,
-                (MarlinExperts, TritonExperts, FlashInferExperts),
+                m_fused_moe_fn.fused_experts, (MarlinExperts, TritonExperts)
             )
 
         def fwd_decorator(layer, func):
