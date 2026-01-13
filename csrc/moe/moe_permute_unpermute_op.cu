@@ -68,7 +68,7 @@ void moe_permute(
   }
   // expert sort topk expert id and scan expert id get expert_first_token_offset
   sortAndScanExpert(
-      get_ptr<int>(topk_ids_for_sort), get_ptr<int>(token_expert_indices),
+      get_ptr<const int>(topk_ids_for_sort), get_ptr<int>(token_expert_indices),
       get_ptr<int>(permuted_experts_id), get_ptr<int>(sorted_row_idx),
       get_ptr<int64_t>(expert_first_token_offset), n_token, n_expert,
       n_local_expert, topk, sorter, get_ptr<int>(sort_workspace), stream);
