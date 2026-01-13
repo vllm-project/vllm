@@ -819,8 +819,8 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         # Setup modular kernel for TP case.
         self.moe_quant_config = self.get_fused_moe_quant_config(layer)
         if self.moe_quant_config:
+            assert self.experts_cls is not None
             self.kernel, self.use_inplace = make_fp8_moe_kernel(
-                layer=layer,
                 moe_quant_config=self.moe_quant_config,
                 moe_config=self.moe,
                 fp8_backend=self.fp8_backend,
@@ -904,6 +904,10 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             raise NotImplementedError(
                 "Marlin and ROCm AITER are not supported with all2all yet."
             )
+
+        if self.experts_cls is None:
+            raise NotImplementedError
+        assert self.experts_cls is not None
 
         # TODO(rob): look into whether we can just not do this for LoRA.
         if self.moe.is_lora_enabled:

@@ -819,7 +819,6 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
         self.moe_quant_config = self.get_fused_moe_quant_config(layer)
         if self.moe_quant_config:
             self.kernel, self.use_inplace = make_fp8_moe_kernel(
-                layer=layer,
                 moe_quant_config=self.moe_quant_config,
                 moe_config=self.moe,
                 fp8_backend=self.fp8_backend,
@@ -856,15 +855,11 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
                 == FusedMoEActivationFormat.BatchedExperts
             ):
                 logger.debug("CutlassBatchedExpertsFp8(%s)", self.__class__.__name__)
-                experts = CutlassBatchedExpertsFp8(
-                    max_experts_per_worker=self.moe.num_local_experts,
-                    num_dispatchers=num_dispatchers,
-                    out_dtype=self.moe.in_dtype,
-                    e=layer.local_num_experts,
-                    n=layer.intermediate_size_per_partition,
-                    k=layer.hidden_size,
-                    device=layer.w13_weight.device,
+                experts = CutlassBatchedExpertsFp8.make_batched_experts(
+                    moe_config=self.moe,
                     quant_config=self.moe_quant_config,
+                    max_num_tokens=prepare_finalize.max_num_tokens_per_rank(),
+                    num_dispatchers=num_dispatchers,
                 )
             else:
                 logger.debug("CutlassExpertsFp8(%s)", self.__class__.__name__)

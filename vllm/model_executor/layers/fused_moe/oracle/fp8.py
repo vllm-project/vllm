@@ -8,9 +8,6 @@ import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm import envs
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.logger import init_logger
-from vllm.model_executor.layers.fused_moe.prepare_finalize import (
-    MoEPrepareAndFinalizeNoEP,
-)
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
     FusedMoEQuantConfig,
@@ -20,6 +17,9 @@ from vllm.model_executor.layers.fused_moe.config import (
 )
 from vllm.model_executor.layers.fused_moe.flashinfer_trtllm_moe import (
     is_supported_config_trtllm,
+)
+from vllm.model_executor.layers.fused_moe.prepare_finalize import (
+    MoEPrepareAndFinalizeNoEP,
 )
 from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
     FlashinferMoeBackend,
@@ -356,8 +356,7 @@ def make_fp8_moe_kernel(
     fp8_backend: Fp8MoeBackend,
     experts_cls: type[mk.FusedMoEPermuteExpertsUnpermute],
 ) -> tuple[mk.FusedMoEModularKernel, bool]:
-    assert (experts_cls.activation_format() == 
-            mk.FusedMoEActivationFormat.Standard)
+    assert experts_cls.activation_format() == mk.FusedMoEActivationFormat.Standard
     defer_input_quant = experts_cls.should_pf_defer_input_quant(
         moe_quant_config,
     )

@@ -93,7 +93,6 @@ def test_cutlass_fp4_moe_no_graph(
             MoEPrepareAndFinalizeNoEP(defer_input_quant=True),
             CutlassExpertsFp4(
                 out_dtype=dtype,
-                max_experts_per_worker=e,
                 quant_config=quant_config,
             ),
         )

@@ -43,15 +43,13 @@ class FlashInferExperts(mk.FusedMoEPermuteExpertsUnpermute):
         # - pass per-block weight scales to the kernel
         # - skip input activation quantization (kernel applies scaling)
         self.use_deepseek_fp8_block_scale = quant_config.is_block_quantized
-    
+
     @staticmethod
     def should_pf_defer_input_quant(quant_config):
         """
         FlashInfer CUTLASS Block FP8 path handles input quantization.
         """
-        if quant_config.is_block_quantized:
-            return True
-        return False
+        return quant_config.is_block_quantized
 
     @staticmethod
     def _supports_current_device() -> bool:

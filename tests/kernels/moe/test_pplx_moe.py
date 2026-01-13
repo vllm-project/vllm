@@ -716,9 +716,9 @@ def _pplx_moe(
         else:
             chunked_shared_output = None
 
-        chunked_torch_output = chunk_by_rank(
-            torch_output, pgi.rank, pgi.world_size
-        ).to(pplx_output.device)
+        chunked_torch_output = chunk_by_rank(torch_output, pgi.rank, pgi.world_size).to(
+            pplx_output.device
+        )
 
         torch.testing.assert_close(
             pplx_output, chunked_torch_output, atol=3e-2, rtol=3e-2

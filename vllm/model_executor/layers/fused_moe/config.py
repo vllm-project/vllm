@@ -952,10 +952,12 @@ class FusedMoEParallelConfig:
     @property
     def use_deepep_ll_kernels(self):
         return self.use_all2all_kernels and self.all2all_backend == "deepep_low_latency"
-    
+
     @property
     def use_fi_all2all_kernels(self):
-        return self.use_all2all_kernels and self.all2all_backend == "flashinfer_all2allv"
+        return (
+            self.use_all2all_kernels and self.all2all_backend == "flashinfer_all2allv"
+        )
 
     @staticmethod
     def flatten_tp_across_dp_and_pcp(
@@ -1102,8 +1104,9 @@ class FusedMoEConfig:
     experts_per_token: int
     hidden_dim: int
     intermediate_size_per_partition: int
-
     num_local_experts: int
+    activation: str
+    device: torch.dtype
     moe_parallel_config: FusedMoEParallelConfig
 
     # The activation type.
@@ -1119,9 +1122,6 @@ class FusedMoEConfig:
     is_act_and_mul: bool = True
 
     is_lora_enabled: bool = False
-
-    activation: str
-    device: torch.dtype
 
     def __post_init__(self):
         if self.dp_size > 1:

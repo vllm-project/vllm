@@ -248,14 +248,8 @@ def make_nvfp4_moe_kernel(
         return mk.FusedMoEModularKernel(
             MoEPrepareAndFinalizeNoEP(defer_input_quant=True),
             FlashInferExperts(
-                out_dtype=moe_config.in_dtype,
+                moe_config=moe_config,
                 quant_config=quant_config,
-                ep_rank=moe_config.ep_rank,
-                ep_size=moe_config.ep_size,
-                tp_rank=moe_config.tp_rank,
-                tp_size=moe_config.tp_size,
-                use_dp=False,
-                use_deepseek_fp8_block_scale=False,
             ),
         )
 
@@ -263,9 +257,7 @@ def make_nvfp4_moe_kernel(
         return mk.FusedMoEModularKernel(
             MoEPrepareAndFinalizeNoEP(defer_input_quant=True),
             CutlassExpertsFp4(
-                out_dtype=moe_config.in_dtype,
-                # TODO(rob): see what impact this has on expert map?
-                max_experts_per_worker=moe_config.num_experts,
+                moe_config=moe_config,
                 quant_config=quant_config,
             ),
         )

@@ -10,10 +10,10 @@ import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm import _custom_ops as ops
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.config import (
+    FusedMoEConfig,
     FusedMoEParallelConfig,
     FusedMoEQuantConfig,
     FusedMoEQuantScheme,
-    FusedMoEConfig,
 )
 from vllm.model_executor.layers.fused_moe.moe_permute_unpermute import (
     moe_permute,
@@ -247,14 +247,14 @@ class CutlassExpertsFp8Base(mk.FusedMoEPermuteExpertsUnpermute):
         self,
         moe_config: FusedMoEConfig,
         quant_config: FusedMoEQuantConfig,
-        device: torch.dtype,
     ):
         assert quant_config.use_fp8_w8a8
-        super().__init__(quant_config)
-    
+        super().__init__(moe_config=moe_config, quant_config=quant_config)
+
         e = moe_config.num_local_experts
         n = moe_config.intermediate_size_per_partition
         k = moe_config.hidden_dim
+        device = moe_config.device
         ab_strides1_c_strides2 = torch.full((e,), k, device=device, dtype=torch.int64)
         ab_strides2 = torch.full((e,), n, device=device, dtype=torch.int64)
         c_strides1 = torch.full((e,), 2 * n, device=device, dtype=torch.int64)
@@ -384,18 +384,6 @@ class CutlassExpertsFp8(CutlassExpertsFp8Base):
 
 
 class CutlassBatchedExpertsFp8(CutlassExpertsFp8Base):
-    def __init__(
-        self,
-        max_experts_per_worker: int,
-        num_dispatchers: int,
-        *args,
-        **kwargs,
-    ):
-        super().__init__(*args, **kwargs)
-        assert max_experts_per_worker > 0
-        self.max_experts_per_worker = max_experts_per_worker
-        self.num_dispatchers = num_dispatchers
-
     @staticmethod
     def activation_format() -> mk.FusedMoEActivationFormat:
         return mk.FusedMoEActivationFormat.BatchedExperts
@@ -419,11 +407,12 @@ class CutlassBatchedExpertsFp8(CutlassExpertsFp8Base):
         local_num_experts: int,
         expert_tokens_meta: mk.ExpertTokensMetadata | None,
     ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...]]:
-        num_dp = self.num_dispatchers
+        num_dp = self.max_dispatchers
         assert num_dp is not None
-        workspace1 = (self.max_experts_per_worker, M * num_dp, max(N, K))
-        workspace2 = (self.max_experts_per_worker, M * num_dp, max(N // 2, K))
-        output = (self.max_experts_per_worker, M, K)
+        experts_per_worker = self.moe_config.num_local_experts
+        workspace1 = (experts_per_worker, M * num_dp, max(N, K))
+        workspace2 = (experts_per_worker, M * num_dp, max(N // 2, K))
+        output = (experts_per_worker, M, K)
         return (workspace1, workspace2, output)
 
 
@@ -605,13 +594,12 @@ def run_cutlass_moe_fp4(
 class CutlassExpertsFp4(mk.FusedMoEPermuteExpertsUnpermute):
     def __init__(
         self,
-        max_experts_per_worker: int,
-        out_dtype: torch.dtype,
+        moe_config: FusedMoEConfig,
         quant_config: FusedMoEQuantConfig,
     ):
-        super().__init__(quant_config)
-        self.max_experts_per_worker = max_experts_per_worker
-        self.out_dtype = out_dtype
+        super().__init__(moe_config=moe_config, quant_config=quant_config)
+        self.max_experts_per_worker = moe_config.num_local_experts
+        self.out_dtype = moe_config.in_dtype
 
     @staticmethod
     def activation_format() -> mk.FusedMoEActivationFormat:
@@ -845,11 +833,12 @@ class CutlassExpertsW4A8Fp8(mk.FusedMoEPermuteExpertsUnpermute):
         c_strides2: torch.Tensor,
         s_strides1: torch.Tensor,
         s_strides2: torch.Tensor,
+        moe_config: FusedMoEConfig,
         quant_config: FusedMoEQuantConfig,
         group_size: int,
     ):
-        super().__init__(quant_config)
-        self.out_dtype = out_dtype
+        super().__init__(moe_config=moe_config, quant_config=quant_config)
+        self.out_dtype = moe_config.in_dtype
         self.a_strides1 = a_strides1
         self.a_strides2 = a_strides2
         self.b_strides1 = b_strides1
@@ -1067,6 +1056,7 @@ def cutlass_moe_w4a8_fp8(
             c_strides2=c_strides2,
             s_strides1=s_strides1,
             s_strides2=s_strides2,
+            # TODO:
             quant_config=quant_config,
             group_size=group_size,
         ),

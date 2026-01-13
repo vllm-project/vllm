@@ -391,13 +391,13 @@ class FusedMoEPermuteExpertsUnpermute(ABC):
     def should_pf_defer_input_quant(quant_config: FusedMoEQuantConfig) -> bool:
         """
         Whether or not the PrepareFinalize should defer input quantization
-        in the prepare step. If True, then the Experts kernel will 
+        in the prepare step. If True, then the Experts kernel will
         execute the input quantization itself.
 
         Sample subclasses that override are AITER and FlashInfer CUTLASS.
         """
         return False
-    
+
     def _init_batched_experts_addl_params(
         self,
         max_num_tokens: int,
@@ -408,7 +408,7 @@ class FusedMoEPermuteExpertsUnpermute(ABC):
         """
         self._max_num_tokens = max_num_tokens
         self._max_dispatchers = max_dispatchers
-    
+
     @property
     def max_num_tokens(self) -> int:
         if self._max_num_tokens is None:
@@ -420,7 +420,7 @@ class FusedMoEPermuteExpertsUnpermute(ABC):
         if self._max_dispatchers is None:
             raise AttributeError("max_dispatchers only valid for BatchedExperts")
         return self._max_dispatchers
-    
+
     @classmethod
     def make_standard_experts(
         cls,
@@ -432,7 +432,7 @@ class FusedMoEPermuteExpertsUnpermute(ABC):
         """
         assert cls.activation_format() == FusedMoEActivationFormat.Standard
         return cls(moe_config, quant_config)
-    
+
     @classmethod
     def make_batched_experts(
         cls,

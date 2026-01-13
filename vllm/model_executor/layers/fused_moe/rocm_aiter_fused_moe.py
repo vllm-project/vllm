@@ -271,13 +271,10 @@ def rocm_aiter_fused_experts(
 
 
 class AiterExperts(mk.FusedMoEPermuteExpertsUnpermute):
-    def __init__(self, quant_config):
-        super().__init__(quant_config)
-
     @staticmethod
     def activation_format() -> mk.FusedMoEActivationFormat:
         return mk.FusedMoEActivationFormat.Standard
-    
+
     @staticmethod
     def should_pf_defer_input_quant(quant_config):
         """
