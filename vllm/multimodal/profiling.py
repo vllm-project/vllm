@@ -3,7 +3,7 @@
 from abc import ABC, abstractmethod
 from collections.abc import Mapping
 from dataclasses import dataclass, field
-from typing import Generic, NamedTuple, TypeVar, cast
+from typing import Generic, NamedTuple, TypeVar
 
 import numpy as np
 import numpy.typing as npt
@@ -19,7 +19,6 @@ from vllm.logger import init_logger
 
 from .inputs import (
     MultiModalDataDict,
-    MultiModalEncDecInputs,
     MultiModalInputs,
     MultiModalKwargsItems,
     MultiModalPlaceholderDict,
@@ -27,7 +26,6 @@ from .inputs import (
 from .processing import (
     BaseMultiModalProcessor,
     BaseProcessingInfo,
-    EncDecMultiModalProcessor,
 )
 
 logger = init_logger(__name__)
@@ -281,28 +279,6 @@ class MultiModalProfiler(Generic[_I]):
             modality: sum(item.get_num_embeds for item in placeholders)
             for modality, placeholders in placeholders_by_modality.items()
         }
-
-    def get_encoder_dummy_data(
-        self,
-        seq_len: int,
-        mm_counts: Mapping[str, int] | None = None,
-        mm_options: Mapping[str, BaseDummyOptions] | None = None,
-    ) -> DummyEncoderData:
-        mm_inputs = self._get_dummy_mm_inputs(seq_len, mm_counts, mm_options)
-        mm_inputs = cast(MultiModalEncDecInputs, mm_inputs)
-
-        # For encoder-decoder models, use encoder prompt token ids instead of
-        # decoder prompt to construct dummy seq_data for encoder profiling.
-        encoder_prompt_token_ids = mm_inputs["encoder_prompt_token_ids"]
-
-        total_len = len(encoder_prompt_token_ids)
-
-        processor = cast(EncDecMultiModalProcessor, self.processor)
-        if processor.pad_dummy_encoder_prompt:
-            num_tokens_to_pad = max(total_len, seq_len) - total_len
-            encoder_prompt_token_ids.extend([0] * num_tokens_to_pad)
-
-        return DummyEncoderData(encoder_prompt_token_ids)
 
     def get_decoder_dummy_data(
         self,
