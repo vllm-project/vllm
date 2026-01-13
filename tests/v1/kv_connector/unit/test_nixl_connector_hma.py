@@ -51,8 +51,8 @@ def test_sw_sizes(mock_platform, hma_enabled, expected_sw_sizes):
         kv_cache_config=kv_cache_config,
     )
     # in number of blocks
-    assert scheduler.sw_sizes == expected_sw_sizes, (
-        f"Expected sw_sizes={expected_sw_sizes}, got {scheduler.sw_sizes}"
+    assert scheduler.blocks_per_sw == expected_sw_sizes, (
+        f"Expected sw_sizes={expected_sw_sizes}, got {scheduler.blocks_per_sw}"
     )
 
 

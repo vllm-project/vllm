@@ -20,10 +20,13 @@ from vllm.v1.outputs import KVConnectorOutput, ModelRunnerOutput
 
 if TYPE_CHECKING:
     from vllm.distributed.kv_transfer.kv_connector.base import KVConnectorBase
+    from vllm.v1.kv_cache_interface import KVCacheConfig
 
 logger = init_logger(__name__)
 
 EngineId = str
+# block ids as returned by the hybrid KV cache manager. list[list[int]] are allow
+# mutability and are for connector internal use only.
 BlockIds = tuple[list[int], ...] | list[list[int]]
 
 
@@ -302,19 +305,57 @@ def yield_req_data(
     )
 
 
+def get_full_attention_group_idx(
+    kv_cache_config: "KVCacheConfig",
+) -> int:
+    """
+    Get the index of the full attention KV cache group from KVCacheConfig.
+
+    Args:
+        kv_cache_config: The KV cache configuration
+
+    Returns:
+        The index of the full attention group
+
+    Raises:
+        AssertionError: If no full attention group is found
+    """
+    from vllm.v1.kv_cache_interface import FullAttentionSpec
+
+    fa_group_idx = next(
+        (
+            i
+            for i, group in enumerate(kv_cache_config.kv_cache_groups)
+            if isinstance(group.kv_cache_spec, FullAttentionSpec)
+        ),
+        None,
+    )
+    assert fa_group_idx is not None, (
+        "No full attention KV cache group found in kv_cache_config"
+    )
+    return fa_group_idx
+
+
 def get_blocks_in_fa_kv_group(
     block_ids: BlockIds,
+    kv_cache_config: "KVCacheConfig",
 ) -> list[int]:
     """
-    Get blocks in the full attention KV group, which we assume to be the largest group.
-    Note that when HMA is disabled or the model is not hybrid,
-    a single group is present here.
+    Get blocks in the full attention KV group using KVCacheConfig to determine
+    the correct group index.
+
+    Args:
+        block_ids: Block IDs organized by KV cache group
+        kv_cache_config: The KV cache configuration used to identify the FA group
+
+    Returns:
+        The block IDs for the full attention KV cache group
     """
     if not block_ids:
         # Full prefix cache hit case
         return []
-    argmax_i = max(range(len(block_ids)), key=lambda x: len(block_ids[x]))
-    return block_ids[argmax_i]
+    fa_group_idx = get_full_attention_group_idx(kv_cache_config)
+    return block_ids[fa_group_idx]
 
 
 @dataclass
