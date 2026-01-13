@@ -117,6 +117,11 @@ _IGNORE_MM_KEYS = {
     "ultravox": {"audio_features"},
 }
 
+_MODELS_NOT_SUPPORT_SIMULTANEOUS_MM = [
+    # Molmo2 does not support simultaneous images + videos inputs
+    "molmo2",
+]
+
 MM_DATA_PATCHES = {
     # Ernie4.5-VL, GLM4.1V and Qwen3-VL requires video metadata
     "ernie4_5_moe_vl": qwen3_vl_patch_mm_data,
@@ -250,6 +255,7 @@ def _test_processing_correctness(
     )
 
     model_cls = MULTIMODAL_REGISTRY._get_model_cls(model_config)
+    model_type = model_config.hf_config.model_type
     factories = model_cls._processor_factory
     ctx = InputProcessingContext(
         model_config,
@@ -315,13 +321,23 @@ def _test_processing_correctness(
                 elif len(mm_data[k]) == 1:
                     mm_data[k] = mm_data[k][0]
 
-        _test_processing_correctness_one(
-            model_config,
-            mm_data,
-            baseline_processor,
-            cached_processor,
-            batch_idx,
-        )
+        if model_type in _MODELS_NOT_SUPPORT_SIMULTANEOUS_MM:
+            for k, v in mm_data.items():
+                _test_processing_correctness_one(
+                    model_config,
+                    {k: v},
+                    baseline_processor,
+                    cached_processor,
+                    batch_idx,
+                )
+        else:
+            _test_processing_correctness_one(
+                model_config,
+                mm_data,
+                baseline_processor,
+                cached_processor,
+                batch_idx,
+            )
 
 
 def _test_processing_correctness_one(

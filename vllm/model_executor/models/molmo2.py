@@ -2178,6 +2178,11 @@ class Molmo2MultiModalProcessor(BaseMultiModalProcessor[Molmo2ProcessingInfo]):
         mm_data = dict(mm_data)
         processor = self.info.get_hf_processor(**mm_kwargs)
 
+        if mm_data.get("images") and mm_data.get("videos"):
+            raise ValueError(
+                "Molmo2 does not support simultaneous images + videos inputs."
+            )
+
         if videos := mm_data.pop("videos", []):
             pixel_values_videos_lst = []
             video_token_pooling_lst = []
