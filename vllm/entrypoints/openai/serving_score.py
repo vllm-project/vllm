@@ -186,7 +186,10 @@ class OpenAIServingScores(OpenAIServing):
             # TODO: Use a vllm-specific Validation Error
             return self.create_error_response(str(e))
 
-        result_generator = merge_async_iterators(*generators)
+        result_generator = merge_async_iterators(
+            *generators,
+            is_cancelled=raw_request.is_disconnected if raw_request else None,
+        )
 
         num_prompts = len(engine_prompts)
 

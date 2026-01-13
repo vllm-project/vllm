@@ -1,6 +1,7 @@
 import asyncio
 import os
 import socket
+from functools import partial
 from typing import AsyncIterator, Tuple
 
 import pytest
@@ -25,7 +26,10 @@ async def test_merge_async_iterators():
             print(f"iterator {idx} cancelled")
 
     iterators = [mock_async_iterator(i) for i in range(3)]
-    merged_iterator = merge_async_iterators(*iterators)
+    merged_iterator = merge_async_iterators(*iterators,
+                                            is_cancelled=partial(asyncio.sleep,
+                                                                 0,
+                                                                 result=False))
 
     async def stream_output(generator: AsyncIterator[Tuple[int, str]]):
         async for idx, output in generator:
