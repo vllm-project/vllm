@@ -5004,8 +5004,19 @@ class GPUModelRunner(
             attention_backend_list, kv_cache_config.kv_cache_groups
         )
 
-        # Check if attention backend supports PCP&DCP and related features.
-        check_attention_cp_compatibility(self.vllm_config)
+        # Check if attention backend supports PCP & DCP and related features.
+        # For DCP we want the clearer, later error in initialize_kv_cache to fire,
+        # so mask DCP here while still running PCP-related assertions.
+        if self.dcp_world_size > 1:
+            parallel_config = self.vllm_config.parallel_config
+            original_dcp_size = parallel_config.decode_context_parallel_size
+            try:
+                parallel_config.decode_context_parallel_size = 1
+                check_attention_cp_compatibility(self.vllm_config)
+            finally:
+                parallel_config.decode_context_parallel_size = original_dcp_size
+        else:
+            check_attention_cp_compatibility(self.vllm_config)
 
         for i, attn_backend_map in enumerate(attention_backend_maps):
             self.attn_groups.append(create_attn_groups(attn_backend_map, i))
