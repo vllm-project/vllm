@@ -40,11 +40,15 @@ from openai import OpenAI
 from rlhf_utils import stateless_init_process_group
 from transformers import AutoModelForCausalLM
 
-from vllm.distributed.weight_transfer.nccl_engine import NCCLInitInfo, NCCLUpdateInfo
+from vllm.distributed.weight_transfer.nccl_engine import (
+    NCCLInitInfo,
+    NCCLUpdateInfo,
+    NCCLWeightTransferEngine,
+)
 from vllm.utils.network_utils import get_ip, get_open_port
 
 BASE_URL = "http://localhost:8000"
-MODEL_NAME = "Qwen/Qwen3-30B-A3B-Thinking-2507"
+MODEL_NAME = "facebook/opt-125m"
 
 
 def generate_completions(client: OpenAI, model: str, prompts: list[str]) -> list[str]:
@@ -89,6 +93,7 @@ def update_weights(
     names: list[str],
     dtype_names: list[str],
     shapes: list[list[int]],
+    packed: bool = False,
 ) -> None:
     """Update weights via HTTP endpoint."""
     url = f"{base_url}/update_weights"
@@ -98,6 +103,7 @@ def update_weights(
                 names=names,
                 dtype_names=dtype_names,
                 shapes=shapes,
+                packed=packed,
             )
         )
     }
@@ -125,6 +131,7 @@ def main():
     inference_world_size = get_world_size(BASE_URL)
     world_size = inference_world_size + 1  # +1 for the trainer
     device = f"cuda:{inference_world_size}"
+    torch.cuda.set_device(device)
 
     # Load the training model
     print(f"Loading training model: {MODEL_NAME}")
@@ -198,16 +205,20 @@ def main():
 
     # Start the update_weights call in a separate thread since it will block
     # waiting for NCCL broadcasts
+    # packed=True enables efficient batched tensor broadcasting
     update_thread = threading.Thread(
         target=update_weights,
-        args=(BASE_URL, names, dtype_names, shapes),
+        args=(BASE_URL, names, dtype_names, shapes, True),  # packed=True
     )
     update_thread.start()
 
     # Broadcast all weights from trainer to vLLM workers
     print("Broadcasting weights via NCCL...")
-    for name, p in train_model.named_parameters():
-        model_update_group.broadcast(p, src=0, stream=torch.cuda.current_stream())
+    NCCLWeightTransferEngine.trainer_broadcast_weights(
+        iterator=train_model.named_parameters(),
+        group=model_update_group,
+        packed=True,
+    )
 
     # Wait for update_weights to complete
     update_thread.join()

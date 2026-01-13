@@ -2,9 +2,9 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """NCCL-based weight transfer engine."""
 
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import torch
 
@@ -37,6 +37,10 @@ class NCCLUpdateInfo(BackendUpdateInfo):
     names: list[str]
     dtype_names: list[str]
     shapes: list[list[int]]
+    packed: bool = False
+    """Whether to use packed tensor broadcasting for efficiency.
+    When True, multiple tensors are batched together before broadcasting
+    to reduce NCCL communication overhead."""
 
     def __post_init__(self):
         """Validate that all lists have the same length."""
@@ -119,37 +123,107 @@ class NCCLWeightTransferEngine(WeightTransferEngine[NCCLInitInfo, NCCLUpdateInfo
         """
         Receive weights from trainer via NCCL broadcast and load them incrementally.
 
+        If update_info.packed is True, uses packed tensor broadcasting for
+        efficient transfer of multiple weights in batches. Otherwise, uses simple
+        one-by-one broadcasting.
+
         Args:
-            update_info: NCCL update info containing parameter names, dtypes, and shapes
+            update_info: NCCL update info containing parameter names, dtypes, shapes,
+                        and packed flag
             load_weights: Callable that loads weights into the model. Called
-                         incrementally for each weight to avoid OOM.
+                         incrementally for each batch of weights to avoid OOM.
         """
         if self.model_update_group is None:
             raise RuntimeError(
                 "NCCL weight transfer not initialized. Call init_transfer() first."
             )
 
-        for name, dtype_name, shape in zip(
-            update_info.names, update_info.dtype_names, update_info.shapes
-        ):
-            # Get the torch dtype
-            dtype = getattr(torch, dtype_name)
-
-            # Allocate buffer for receiving weight
-            weight = torch.empty(shape, dtype=dtype, device="cuda")
-
-            # Broadcast from rank 0 (trainer)
-            self.model_update_group.broadcast(
-                weight, src=0, stream=torch.cuda.current_stream()
+        if update_info.packed:
+            # Use packed tensor broadcasting for efficiency
+            from vllm.distributed.weight_transfer.packed_tensor import (
+                packed_broadcast_consumer,
             )
 
-            # Load weight immediately to avoid accumulating all weights in memory
-            load_weights([(name, weight)])
+            # Build iterator of (name, (shape, dtype)) from update_info
+            def state_dict_info_iterator():
+                for name, dtype_name, shape in zip(
+                    update_info.names, update_info.dtype_names, update_info.shapes
+                ):
+                    dtype = getattr(torch, dtype_name)
+                    yield (name, (shape, dtype))
 
-            # Clean up the weight tensor
-            del weight
+            packed_broadcast_consumer(
+                iterator=state_dict_info_iterator(),
+                group=self.model_update_group,
+                src=0,
+                post_unpack_func=load_weights,
+            )
+        else:
+            # Use simple one-by-one broadcasting
+            for name, dtype_name, shape in zip(
+                update_info.names, update_info.dtype_names, update_info.shapes
+            ):
+                dtype = getattr(torch, dtype_name)
+                weight = torch.empty(shape, dtype=dtype, device="cuda")
+                self.model_update_group.broadcast(
+                    weight, src=0, stream=torch.cuda.current_stream()
+                )
+                load_weights([(name, weight)])
+                del weight
 
     def shutdown(self) -> None:
         if self.model_update_group is not None:
             # Clean up the communicator by removing the reference
             self.model_update_group = None
+
+    @staticmethod
+    def trainer_broadcast_weights(
+        iterator: Iterator[tuple[str, torch.Tensor]],
+        group: Any,
+        src: int = 0,
+        post_iter_func: Callable[[tuple[str, torch.Tensor]], torch.Tensor]
+        | None = None,
+        packed: bool = False,
+    ) -> None:
+        """Broadcast weights from trainer to vLLM workers.
+
+        Args:
+            iterator: Iterator of model parameters. Returns (name, tensor) tuples
+            group: Process group (PyNcclCommunicator)
+            src: Source rank (default 0, trainer is typically rank 0)
+            post_iter_func: Optional function to apply to each (name, tensor) pair
+                           before broadcasting. If None, extracts just the tensor.
+            packed: Whether to use packed tensor broadcasting for efficiency.
+                   When True, multiple tensors are batched together before
+                   broadcasting to reduce NCCL communication overhead.
+
+        Example:
+            >>> from vllm.distributed.weight_transfer.nccl_engine import (
+            ...     NCCLWeightTransferEngine,
+            ... )
+            >>> param_iter = ((n, p) for n, p in model.named_parameters())
+            >>> NCCLWeightTransferEngine.trainer_broadcast_weights(
+            ...     param_iter, group, packed=True
+            ... )
+        """
+        if post_iter_func is None:
+            # Default: extract just the tensor from (name, tensor) tuple
+            post_iter_func = lambda x: x[1]
+
+        if packed:
+            # Use packed tensor broadcasting for efficiency
+            from vllm.distributed.weight_transfer.packed_tensor import (
+                packed_broadcast_producer,
+            )
+
+            packed_broadcast_producer(
+                iterator=iterator,
+                group=group,
+                src=src,
+                post_iter_func=post_iter_func,
+            )
+        else:
+            # Use simple one-by-one broadcasting
+            for item in iterator:
+                tensor = post_iter_func(item)
+                group.broadcast(tensor, src=src, stream=torch.cuda.current_stream())

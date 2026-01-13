@@ -41,10 +41,15 @@ from vllm.distributed.weight_transfer.base import (
     WeightTransferInitRequest,
     WeightUpdateRequest,
 )
-from vllm.distributed.weight_transfer.nccl_engine import NCCLInitInfo, NCCLUpdateInfo
+from vllm.distributed.weight_transfer.nccl_engine import (
+    NCCLInitInfo,
+    NCCLUpdateInfo,
+    NCCLWeightTransferEngine,
+)
 from vllm.utils.network_utils import get_ip, get_open_port
 
 MODEL_NAME = "Qwen/Qwen3-30B-A3B-Thinking-2507"
+# MODEL_NAME = "facebook/opt-125m"
 
 
 class MyLLM(LLM):
@@ -57,6 +62,7 @@ class MyLLM(LLM):
         super().__init__(*args, **kwargs)
 
 
+torch.cuda.set_device("cuda:0")
 # Load the OPT-125M model onto GPU 0 for the training workload.
 train_model = AutoModelForCausalLM.from_pretrained(MODEL_NAME, dtype=torch.bfloat16)
 train_model.to("cuda:0")
@@ -96,7 +102,7 @@ llm = ray.remote(
     data_parallel_size=1,
     distributed_executor_backend="ray",
     weight_transfer_config=WeightTransferConfig(backend="nccl"),
-    enable_expert_parallel=True,
+    # enable_expert_parallel=True,
 )
 
 # Generate text from the prompts.
@@ -159,6 +165,7 @@ for name, p in train_model.named_parameters():
     shapes.append(p.shape)
 
 # Issue update_weights call with NCCL-specific update info
+# packed=True enables efficient batched tensor broadcasting
 handle = llm.update_weights.remote(
     WeightUpdateRequest(
         update_info=asdict(
@@ -166,14 +173,18 @@ handle = llm.update_weights.remote(
                 names=names,
                 dtype_names=dtype_names,
                 shapes=shapes,
+                packed=True,
             )
         )
     )
 )
 
-# Broadcast all weights from trainer
-for name, p in train_model.named_parameters():
-    model_update_group.broadcast(p, src=0, stream=torch.cuda.current_stream())
+# Broadcast all weights from trainer using the weight transfer API
+NCCLWeightTransferEngine.trainer_broadcast_weights(
+    iterator=train_model.named_parameters(),
+    group=model_update_group,
+    packed=True,
+)
 
 ray.get(handle)
 
