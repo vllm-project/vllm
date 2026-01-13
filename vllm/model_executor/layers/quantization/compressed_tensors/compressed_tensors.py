@@ -2,8 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from contextlib import suppress
-from typing import TYPE_CHECKING, Any, Literal, Optional, cast
 from functools import partial
+from typing import TYPE_CHECKING, Any, Literal, Optional, cast
 
 import torch
 from compressed_tensors.config import (
@@ -20,6 +20,10 @@ from compressed_tensors.transform import TransformConfig
 
 import vllm.envs as envs
 from vllm.attention.layer import Attention
+from vllm.distributed import (
+    get_tensor_model_parallel_rank,
+    get_tensor_model_parallel_world_size,
+)
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.layers.linear import (
@@ -65,10 +69,6 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     cutlass_fp4_supported,
 )
 from vllm.platforms import current_platform
-from vllm.distributed import (
-    get_tensor_model_parallel_rank,
-    get_tensor_model_parallel_world_size,
-)
 
 if TYPE_CHECKING:
     from vllm.model_executor.models.utils import WeightsMapper
@@ -242,8 +242,8 @@ class CompressedTensorsConfig(QuantizationConfig):
             config=config,
             transform_config=config.get("transform_config"),
             kv_cache_scheme=config.get("kv_cache_scheme"),
-            total_num_heads=config.get("total_num_heads", None),
-            total_num_kv_heads=config.get("total_num_kv_heads", None),
+            total_num_heads=config.get("total_num_heads"),
+            total_num_kv_heads=config.get("total_num_kv_heads"),
         )
 
     @classmethod
@@ -1063,8 +1063,11 @@ class CompressedTensorsKVCacheMethod(BaseKVCacheMethod):
 
                 # FlashAttn expects [num_kv_heads] instead of [num_heads] for q_scale.
                 # We reduce by taking the max scale in each attention head group.
-                if kind == "q": 
-                    reduction_factor = self.quant_config.total_num_heads // self.quant_config.total_num_kv_heads
+                if kind == "q":
+                    reduction_factor = (
+                        self.quant_config.total_num_heads
+                        // self.quant_config.total_num_kv_heads
+                    )
                     loaded_weight = torch.amax(
                         loaded_weight.view(-1, reduction_factor), dim=1
                     )
@@ -1074,7 +1077,10 @@ class CompressedTensorsKVCacheMethod(BaseKVCacheMethod):
 
                 if layer.num_kv_heads * tp_size == self.quant_config.total_num_kv_heads:
                     # heads evenly distributed
-                    loaded_weight = loaded_weight[tp_rank * layer.num_kv_heads : (tp_rank + 1) * layer.num_kv_heads]
+                    loaded_weight = loaded_weight[
+                        tp_rank * layer.num_kv_heads : (tp_rank + 1)
+                        * layer.num_kv_heads
+                    ]
                 else:
                     # heads replicated to match TP size
                     assert layer.num_kv_heads == 1
@@ -1084,13 +1090,25 @@ class CompressedTensorsKVCacheMethod(BaseKVCacheMethod):
 
                 param.data.copy_(loaded_weight.to(dtype=param.dtype))
 
-            layer.q_scale.weight_loader = partial(_tp_aware_loader, kind="q", param_type="scale")
-            layer.k_scale.weight_loader = partial(_tp_aware_loader, kind="k", param_type="scale")
-            layer.v_scale.weight_loader = partial(_tp_aware_loader, kind="v", param_type="scale")
+            layer.q_scale.weight_loader = partial(
+                _tp_aware_loader, kind="q", param_type="scale"
+            )
+            layer.k_scale.weight_loader = partial(
+                _tp_aware_loader, kind="k", param_type="scale"
+            )
+            layer.v_scale.weight_loader = partial(
+                _tp_aware_loader, kind="v", param_type="scale"
+            )
 
-            layer.q_zero_point.weight_loader = partial(_tp_aware_loader, kind="q", param_type="zero_point")
-            layer.k_zero_point.weight_loader = partial(_tp_aware_loader, kind="k", param_type="zero_point")
-            layer.v_zero_point.weight_loader = partial(_tp_aware_loader, kind="v", param_type="zero_point")
+            layer.q_zero_point.weight_loader = partial(
+                _tp_aware_loader, kind="q", param_type="zero_point"
+            )
+            layer.k_zero_point.weight_loader = partial(
+                _tp_aware_loader, kind="k", param_type="zero_point"
+            )
+            layer.v_zero_point.weight_loader = partial(
+                _tp_aware_loader, kind="v", param_type="zero_point"
+            )
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         """

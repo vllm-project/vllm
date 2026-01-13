@@ -247,7 +247,10 @@ def get_quant_config(
         hf_quant_config = getattr(model_config.hf_config, "compression_config", None)
 
     # Pipe information about heads to enable TP-aware loading of attn_head scales
-    if hf_quant_config is not None and hf_quant_config.get("quant_method") == "compressed-tensors":
+    if (
+        hf_quant_config is not None
+        and hf_quant_config.get("quant_method") == "compressed-tensors"
+    ):
         if hf_text_config is not None:
             n_heads = getattr(hf_text_config, "num_attention_heads", None)
             n_kv_heads = getattr(hf_text_config, "num_key_value_heads", None)
@@ -256,7 +259,9 @@ def get_quant_config(
             n_kv_heads = getattr(model_config.hf_config, "num_key_value_heads", None)
 
         hf_quant_config["total_num_heads"] = n_heads
-        hf_quant_config["total_num_kv_heads"] = n_kv_heads if n_kv_heads is not None else n_heads
+        hf_quant_config["total_num_kv_heads"] = (
+            n_kv_heads if n_kv_heads is not None else n_heads
+        )
 
     if hf_quant_config is not None:
         return quant_cls.from_config(hf_quant_config)

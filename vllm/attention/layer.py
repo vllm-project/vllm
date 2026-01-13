@@ -320,7 +320,9 @@ class Attention(nn.Module, AttentionLayerBase):
         if self.impl.supports_quant_query_input and self.kv_cache_dtype.startswith(
             "fp8"
         ):
-            is_per_head = hasattr(self, "q_scale") and self.q_scale.numel() == self.num_kv_heads
+            is_per_head = (
+                hasattr(self, "q_scale") and self.q_scale.numel() == self.num_kv_heads
+            )
             block_size = self.head_size * self.num_heads // self.num_kv_heads
             self.query_quant = QuantFP8(
                 static=True,
