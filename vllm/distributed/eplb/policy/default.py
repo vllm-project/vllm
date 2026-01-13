@@ -164,7 +164,7 @@ class DefaultEplbPolicy(AbstractEplbPolicy):
         tokens_per_mlog = np.take_along_axis(weight, mlog2log, axis=1).reshape(
             -1, num_logical_experts // num_nodes
         )
-        phy2mlog, phyrank, mlogcnt = self.replicate_experts(
+        phy2mlog, replicas_idx, mlogcnt = self.replicate_experts(
             tokens_per_mlog, num_physical_experts // num_nodes
         )
 
