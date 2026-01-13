@@ -580,9 +580,19 @@ def isaac_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
     # accuracy issues: https://github.com/vllm-project/vllm/issues/30167
     # TODO: Remove once ROCm SDP accuracy issues are resolved on HuggingFace
     # ----------------------------
+    import warnings
+
     from ...conftest import patch_hf_vision_attn_for_rocm
 
-    patch_hf_vision_attn_for_rocm(hf_model.model)
+    try:
+        patch_hf_vision_attn_for_rocm(hf_model.model)
+    except AttributeError as e:
+        warnings.warn(
+            f"Skipping ROCm vision attention patch for Isaac model: {e}. "
+            "This may be expected for models without vision_config in "
+            "attention layers.",
+            stacklevel=2,
+        )
 
     def patched_forward(
         self,
