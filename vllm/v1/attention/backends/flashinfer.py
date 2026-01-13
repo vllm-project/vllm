@@ -13,7 +13,7 @@ from flashinfer import (
     BatchPrefillWithRaggedKVCacheWrapper,
     MultiLevelCascadeAttentionWrapper,
 )
-from flashinfer.decode import _get_range_buf, trtllm_batch_decode_with_kv_cache
+from flashinfer.decode import fast_decode_plan, trtllm_batch_decode_with_kv_cache
 from flashinfer.prefill import trtllm_batch_context_with_kv_cache
 from flashinfer.utils import FP4Tensor
 from typing_extensions import override
@@ -1094,7 +1094,6 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                     indptr_cpu=self.paged_kv_indptr.cpu[: num_input_tokens + 1],
                     indices=paged_kv_indices,
                     last_page_len_cpu=self.paged_kv_last_page_len.cpu[:num_input_tokens],
-                    seq_lens_cpu=seq_lens_cpu[:num_input_tokens],
                     num_qo_heads=self.num_qo_heads * self.dcp_world_size,
                     num_kv_heads=self.num_kv_heads,
                     head_dim=self.head_dim,
@@ -1566,7 +1565,6 @@ def fast_plan_decode(
     indptr_cpu: torch.Tensor,
     indices: torch.Tensor,
     last_page_len_cpu: torch.Tensor,
-    seq_lens_cpu: torch.Tensor,
     num_qo_heads: int,
     num_kv_heads: int,
     head_dim: int,
@@ -1600,7 +1598,8 @@ def fast_plan_decode(
     """
     # Warm up with the original plan if it is first call, and always run the
     # original plan if we run for dynamic shape. For fixed shape (cudagraph),
-    # this warm up is to generate the _cached_module for the decode wrapper.
+    # this warm up is to generate the _cachedcccccbvgvjlrvjgejhbkkiklfkbkvtkdvhhvbtbnhgnk
+    # _module for the decode wrapper.
     if not self.is_cuda_graph_enabled or getattr(self, "vllm_first_call", True):
         self.plan(
             indptr=indptr_cpu,
@@ -1621,8 +1620,8 @@ def fast_plan_decode(
             rope_scale=rope_scale,
             rope_theta=rope_theta,
             non_blocking=non_blocking,
-            block_tables=None,  # block_tables
-            seq_lens=None,  # seq_lens
+            block_tables=None,
+            seq_lens=None,
             fixed_split_size=fixed_split_size,
             disable_split_kv=disable_split_kv,
         )
@@ -1631,83 +1630,28 @@ def fast_plan_decode(
 
     assert self.is_cuda_graph_enabled, "Should be cudagraph only here"
 
-    batch_size = len(last_page_len_cpu)
-    if logits_soft_cap is None:
-        logits_soft_cap = 0.0
-
-    # Handle data types consistently
-    if data_type is not None:
-        if q_data_type is None:
-            q_data_type = data_type
-        if kv_data_type is None:
-            kv_data_type = data_type
-    elif q_data_type is None:
-        q_data_type = "float16"
-
-    if kv_data_type is None:
-        kv_data_type = q_data_type
-    q_data_type = (
-        getattr(torch, q_data_type) if isinstance(q_data_type, str) else q_data_type
+    fast_decode_plan(
+        self,
+        indptr=indptr_cpu,
+        indices=indices,
+        last_page_len=last_page_len_cpu,
+        num_qo_heads=num_qo_heads,
+        num_kv_heads=num_kv_heads,
+        head_dim=head_dim,
+        page_size=page_size,
+        pos_encoding_mode=pos_encoding_mode,
+        window_left=window_left,
+        logits_soft_cap=logits_soft_cap,
+        q_data_type=q_data_type,
+        kv_data_type=kv_data_type,
+        data_type=data_type,
+        sm_scale=sm_scale,
+        rope_scale=rope_scale,
+        rope_theta=rope_theta,
+        non_blocking=non_blocking,
+        fixed_split_size=fixed_split_size,
+        disable_split_kv=disable_split_kv,
     )
-    kv_data_type = (
-        getattr(torch, kv_data_type) if isinstance(kv_data_type, str) else kv_data_type
-    )
-
-    if batch_size != self._fixed_batch_size:
-        raise ValueError(
-            "The batch size should be fixed in cudagraph mode, the runtime "
-            "batch size {} mismatches the batch size set during "
-            "initialization {}".format(batch_size, self._fixed_batch_size)
-        )
-    if len(indices) > len(self._paged_kv_indices_buf):
-        raise ValueError(
-            "The size of indices should be less than or equal to the allocated buffer"
-        )
-
-    # host-to-device copy for the indptr buffer
-    self._paged_kv_indptr_buf.copy_(indptr_cpu, non_blocking=True)
-    # host-to-device copy for the last_page_len buffer
-    self._paged_kv_last_page_len_buf.copy_(last_page_len_cpu, non_blocking=True)
-
-    qo_indptr_host = _get_range_buf(batch_size + 1, "cpu")
-
-    try:
-        # Make sure we pass exactly 16 arguments for tensor core version
-        args = [
-            self._float_workspace_buffer,
-            self._int_workspace_buffer,
-            self._pin_memory_int_workspace_buffer,
-            qo_indptr_host,
-            indptr_cpu,
-            seq_lens_cpu,
-            batch_size,  # total_num_rows
-            batch_size,
-            num_qo_heads,
-            num_kv_heads,
-            page_size,
-            self.is_cuda_graph_enabled,
-            head_dim,
-            head_dim,
-            False,  # causal
-            window_left,
-        ]
-        if self._backend == "fa2":
-            args.append(fixed_split_size)
-            args.append(disable_split_kv)
-            args.append(0)  # num_colocated_ctas
-        self._plan_info = self._cached_module.plan(
-            *args,
-        )
-
-    except Exception as e:
-        raise RuntimeError(f"Error in tensor core plan: {e}") from e
-
-    self._pos_encoding_mode = pos_encoding_mode
-    self._window_left = window_left
-    self._logits_soft_cap = logits_soft_cap
-    self._sm_scale = sm_scale
-    self._rope_scale = rope_scale
-    self._rope_theta = rope_theta
 
 
 @triton.jit
