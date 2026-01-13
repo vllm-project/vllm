@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: Apache-2.0
+-u# SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """
 # MLA Common Components
@@ -191,7 +191,7 @@ import functools
 from abc import abstractmethod
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import TYPE_CHECKING, ClassVar, Generic, TypeVar, cast
+from typing import TYPE_CHECKING, Any, ClassVar, Generic, TypeVar, cast
 
 if TYPE_CHECKING:
     from flashinfer import BatchPrefillWithRaggedKVCacheWrapper
@@ -1169,6 +1169,7 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
         common_prefix_len: int,
         common_attn_metadata: CommonAttentionMetadata,
         fast_build: bool = False,
+        **kwargs: Any,
     ) -> M:
         num_reqs = common_attn_metadata.num_reqs
         num_tokens = common_attn_metadata.num_actual_tokens

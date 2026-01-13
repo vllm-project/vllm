@@ -5,7 +5,7 @@
 import math
 from dataclasses import dataclass
 from functools import cached_property
-from typing import ClassVar
+from typing import Any, ClassVar
 
 import torch
 import torch._dynamo.decorators
@@ -693,6 +693,7 @@ class FlexAttentionMetadataBuilder(AttentionMetadataBuilder[FlexAttentionMetadat
         common_prefix_len: int,
         common_attn_metadata: CommonAttentionMetadata,
         fast_build: bool = False,
+        **kwargs: Any,
     ) -> FlexAttentionMetadata:
         num_reqs = common_attn_metadata.num_reqs
         num_actual_tokens = common_attn_metadata.num_actual_tokens

@@ -4,7 +4,7 @@
 
 import ast
 from dataclasses import dataclass
-from typing import ClassVar, Optional
+from typing import Any, ClassVar, Optional
 
 import torch
 
@@ -177,6 +177,7 @@ class TreeAttentionMetadataBuilder(AttentionMetadataBuilder[TreeAttentionMetadat
         common_prefix_len: int,
         common_attn_metadata: CommonAttentionMetadata,
         fast_build: bool = False,
+        **kwargs: Any,
     ) -> TreeAttentionMetadata:
         decode_threshold = self.tree_attn_bias.shape[0]
         num_decodes, num_prefills, num_decode_tokens, num_prefill_tokens = (

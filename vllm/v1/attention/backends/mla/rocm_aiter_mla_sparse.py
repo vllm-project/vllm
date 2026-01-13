@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, ClassVar, Optional
+from typing import TYPE_CHECKING, Any, ClassVar, Optional
 
 import numpy as np
 import torch
@@ -198,6 +198,7 @@ class ROCMAiterMLASparseMetadataBuilder(
         common_prefix_len: int,
         common_attn_metadata: CommonAttentionMetadata,
         fast_build: bool = False,
+        **kwargs: Any,
     ) -> ROCMAiterMLASparseMetadata:
         num_tokens = common_attn_metadata.num_actual_tokens
         starts = np.asarray(common_attn_metadata.query_start_loc_cpu, dtype=np.int32)

@@ -3,7 +3,7 @@
 """Attention layer with AiterFlashAttention."""
 
 from dataclasses import dataclass
-from typing import ClassVar
+from typing import Any, ClassVar
 
 import torch
 
@@ -461,6 +461,7 @@ class AiterFlashAttentionMetadataBuilder(
         common_prefix_len: int,
         common_attn_metadata: CommonAttentionMetadata,
         fast_build: bool = False,
+        **kwargs: Any,
     ) -> "AiterFlashAttentionMetadata":
         split_ret = split_decodes_prefills_and_extends(
             common_attn_metadata,

@@ -3,7 +3,7 @@
 """High-Performance Triton-only Attention layer."""
 
 from dataclasses import dataclass
-from typing import ClassVar
+from typing import Any, ClassVar
 
 import torch
 
@@ -202,6 +202,7 @@ class TritonAttentionMetadataBuilder(AttentionMetadataBuilder[TritonAttentionMet
         common_prefix_len: int,
         common_attn_metadata: CommonAttentionMetadata,
         fast_build: bool = False,
+        **kwargs: Any,
     ) -> TritonAttentionMetadata:
         num_actual_tokens = common_attn_metadata.num_actual_tokens
         max_query_len = common_attn_metadata.max_query_len
