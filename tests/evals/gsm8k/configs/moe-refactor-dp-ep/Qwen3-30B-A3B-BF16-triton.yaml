@@ -1,4 +1,4 @@
-model_name: "Qwen/Qwen3-Coder-30B-A3B"
+model_name: "Qwen/Qwen3-30B-A3B"
 accuracy_threshold: 0.88
 num_questions: 1319
 num_fewshot: 5
