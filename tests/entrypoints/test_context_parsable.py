@@ -4,9 +4,9 @@
 from unittest.mock import MagicMock, patch
 
 import pytest
-from vllm.entrypoints.openai.protocol import ResponsesRequest
 
 from vllm.entrypoints.context import ParsableContext, TurnMetrics
+from vllm.entrypoints.openai.engine.protocol import ResponsesRequest
 from vllm.outputs import CompletionOutput, RequestOutput
 
 
