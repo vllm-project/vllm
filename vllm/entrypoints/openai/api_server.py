@@ -64,7 +64,7 @@ from vllm.entrypoints.openai.serving_models import (
     BaseModelPath,
     OpenAIServingModels,
 )
-from vllm.entrypoints.openai.serving_responses import OpenAIServingResponses
+from vllm.entrypoints.openai.responses.serving import OpenAIServingResponses
 from vllm.entrypoints.openai.serving_transcription import (
     OpenAIServingTranscription,
     OpenAIServingTranslation,
