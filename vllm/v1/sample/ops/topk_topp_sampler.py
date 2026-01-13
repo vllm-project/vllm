@@ -255,6 +255,14 @@ def apply_top_k_top_p(
         # Avoid sorting vocab for top-k only case.
         return apply_top_k_only(logits, k)
 
+    if p is not None and k is not None:
+        # Use optimized path only when max_k is small enough to benefit.
+        # When k = vocab_size for any row, fall back to the general path.
+        vocab_size = logits.shape[1]
+        max_k = int(k.max().item())
+        if max_k < vocab_size:
+            return apply_top_k_and_top_p(logits, k, p)
+
     logits_sort, logits_idx = logits.sort(dim=-1, descending=False)
 
     if k is not None:
@@ -276,6 +284,58 @@ def apply_top_k_top_p(
 
     # Re-sort the probabilities.
     logits = logits_sort.scatter(dim=-1, index=logits_idx, src=logits_sort)
+    return logits
+
+
+def apply_top_k_and_top_p(
+    logits: torch.Tensor,
+    k: torch.Tensor,
+    p: torch.Tensor,
+) -> torch.Tensor:
+    """Apply top-k and top-p masks to the logits.
+
+    This optimized version uses topk to extract only the top-k elements,
+    then sorts only those elements. This is much faster than sorting the
+    entire vocabulary for large vocab sizes.
+
+    The logits tensor is updated in-place.
+
+    Note: This function assumes max(k) < vocab_size. The caller should
+    fall back to the general path when any row has k = vocab_size.
+    """
+    # Get the maximum k value to determine how many elements to extract.
+    max_k = int(k.max().item())
+
+    # Use topk to get the top values and indices. This is faster than sorting.
+    topk_result = logits.topk(max_k, dim=1, sorted=False)
+    topk_values = topk_result.values  # [B, max_k]
+    topk_indices = topk_result.indices  # [B, max_k]
+
+    # Sort the top-k values in ascending order.
+    sorted_values, sort_indices = topk_values.sort(dim=-1, descending=False)
+
+    # Apply per-row top-k mask.
+    num_to_mask = max_k - k.to(torch.long)  # [B]
+    positions = torch.arange(max_k, device=logits.device)  # [max_k]
+    top_k_mask = positions.unsqueeze(0) < num_to_mask.unsqueeze(1)  # [B, max_k]
+    sorted_values.masked_fill_(top_k_mask, -float("inf"))
+
+    # Apply top-p on the sorted values.
+    probs_sort = sorted_values.softmax(dim=-1)
+    probs_sum = torch.cumsum(probs_sort, dim=-1, out=probs_sort)
+    top_p_mask = probs_sum <= 1 - p.unsqueeze(dim=1)
+    # Keep at least one token.
+    top_p_mask[:, -1] = False
+    sorted_values.masked_fill_(top_p_mask, -float("inf"))
+
+    # Unsort back to the original topk order using scatter.
+    topk_values.scatter_(1, sort_indices, sorted_values)
+
+    # Scatter the masked values back to the original logits positions.
+    # First set all logits to -inf, then scatter the top-k values.
+    logits.fill_(-float("inf"))
+    logits.scatter_(1, topk_indices, topk_values)
+
     return logits
 
 

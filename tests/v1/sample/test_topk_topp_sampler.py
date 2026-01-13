@@ -5,7 +5,10 @@ import torch
 from torch import Generator
 
 from vllm.platforms import current_platform
-from vllm.v1.sample.ops.topk_topp_sampler import apply_top_k_top_p
+from vllm.v1.sample.ops.topk_topp_sampler import (
+    apply_top_k_and_top_p,
+    apply_top_k_top_p,
+)
 
 DEVICE = current_platform.device_type
 
@@ -114,4 +117,68 @@ def test_flashinfer_sampler():
     # Compare the results
     assert torch.allclose(python_probs, flashinfer_probs, atol=2e-2), (
         "FlashInfer and Python sampling implementations do not match!"
+    )
+
+
+def test_apply_top_k_and_top_p_correctness():
+    """
+    Test that apply_top_k_and_top_p correctly masks logits.
+    Verifies that:
+    1. Only the top-k values remain (others are -inf)
+    2. Top-p filtering further reduces candidates
+    3. At least one token is always kept
+    """
+    torch.set_default_device(DEVICE)
+
+    # Small example for manual verification.
+    logits = torch.tensor([[1.0, 2.0, 3.0, 4.0, 5.0]])  # [1, 5]
+    k = torch.tensor([3])  # Keep top 3.
+    p = torch.tensor([0.9])  # Keep top 90% probability mass.
+
+    result = apply_top_k_and_top_p(logits.clone(), k=k, p=p)
+
+    # Top-3 values are 5.0, 4.0, 3.0 (indices 4, 3, 2).
+    # After top-k mask, indices 0, 1 should be -inf.
+    assert result[0, 0] == float("-inf"), "Index 0 should be masked by top-k"
+    assert result[0, 1] == float("-inf"), "Index 1 should be masked by top-k"
+
+    # Top-p with p=0.9 masks value 3.0 (its cumsum prob 0.09 <= 1-p=0.1).
+    assert result[0, 2] == float("-inf"), (
+        "Index 2 (value 3.0) should be masked by top-p"
+    )
+
+    # Values 4.0 and 5.0 should be preserved.
+    assert result[0, 3] == 4.0, "Index 3 (value 4.0) should be preserved"
+    assert result[0, 4] == 5.0, "Index 4 (value 5.0) should be preserved"
+
+    # Verify exactly 2 tokens remain.
+    num_valid = (result != float("-inf")).sum().item()
+    assert num_valid == 2, f"Expected 2 valid tokens, got {num_valid}"
+
+
+def test_apply_top_k_and_top_p_equivalence():
+    """
+    Test that apply_top_k_and_top_p matches the general sorting path.
+    """
+    torch.set_default_device(DEVICE)
+    generator = Generator(device=DEVICE).manual_seed(42)
+
+    batch_size = 256
+    vocab_size = 8 * 1024
+
+    logits = torch.rand((batch_size, vocab_size), generator=generator)
+    k = torch.randint(1, 500, (batch_size,), generator=generator)
+    p = torch.rand((batch_size,), generator=generator) * 0.5 + 0.5
+
+    # Optimized path: all k < vocab_size triggers apply_top_k_and_top_p.
+    result = apply_top_k_top_p(logits.clone(), k=k, p=p)
+
+    # General path: set k[0]=vocab_size to force full-sort fallback.
+    k_general = k.clone()
+    k_general[0] = vocab_size
+    expected = apply_top_k_top_p(logits.clone(), k=k_general, p=p)
+
+    # Compare rows 1+ (row 0 has different k values).
+    assert torch.equal(result[1:], expected[1:]), (
+        "Optimized and general paths don't match!"
     )
