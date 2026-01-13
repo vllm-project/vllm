@@ -12,7 +12,7 @@ from collections import defaultdict
 from collections.abc import Iterator
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, ClassVar, Optional
+from typing import TYPE_CHECKING, Any, Optional
 
 import msgspec
 import numpy as np
@@ -20,7 +20,7 @@ import torch
 import zmq
 
 from vllm import envs
-from vllm.attention.backends.abstract import AttentionBackend, AttentionMetadata
+from vllm.attention.backends.abstract import AttentionBackend
 from vllm.attention.selector import get_attn_backend
 from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.utils import (
@@ -55,7 +55,6 @@ from vllm.platforms import current_platform
 from vllm.utils.network_utils import make_zmq_path, make_zmq_socket
 from vllm.v1.attention.backend import AttentionMetadata
 from vllm.v1.attention.backends.utils import get_kv_cache_layout
-from vllm.v1.attention.selector import get_attn_backend
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.worker.block_table import BlockTable
 
@@ -1005,7 +1004,7 @@ class NixlConnectorWorker:
             remote_block_size=self._block_size,  # shared state
             is_mla=self.use_mla,
             total_num_kv_heads=self.model_config.get_total_num_kv_heads(),
-            attn_backend=backend,
+            attn_backend=self.attn_backend,
         )
         self._physical_blocks_per_logical_kv_block = 1
 
@@ -1810,53 +1809,8 @@ class NixlConnectorWorker:
               block size to large block size and convert from HND to NHD
 
         """
-        assert self.kv_topo is not None
-        split_k_and_v = self.kv_topo.split_k_and_v
-        inv_order = [0, 2, 1, 3]
-        sample_cache = list(self.device_kv_caches.values())[0][0]
-        target_shape = list(sample_cache.shape)
-        target_shape[0] = -1
-        src_shape = tuple(target_shape[i] for i in inv_order)
-        indices = torch.tensor(block_ids, device=sample_cache.device)
-
-        for _, cache_or_caches in self.device_kv_caches.items():
-            cache_list = cache_or_caches if split_k_and_v else [cache_or_caches]
-            for cache in cache_list:
-                blocks_to_update = cache.index_select(0, indices)
-                permuted_blocks = blocks_to_update.reshape(src_shape).permute(
-                    *inv_order
-                )
-                cache.index_copy_(0, indices, permuted_blocks)
-
-    def blocksize_post_process(self, block_ids_per_ratio: dict[int, list[list[int]]]):
-        def _process_local_gt_remote(blocks_to_update, block_size_ratio):
-            n_kv_heads, block_size, head_size = blocks_to_update.shape[1:]
-            remote_block_size = block_size // block_size_ratio
-            n_blocks = block_size_ratio
-            # actual permute is to convert
-            # for local blocksize > remote blocksize
-            # ex: local blocksize = 16 tokens, remote blocksize = 4 tokens
-            # local block[0] = remote block[0, 1, 2, 3]
-            # remote is |h0-b0|h1-b0|h2-b0|h3-b0|h0-b1|h1-b1|h2-b1|h3-b1|...
-            # local is  |h0-b0..................|h1-b0..................|...
-            # permute is to:
-            # 1. view => view remote as n_blocks * remote_shape(H,remoteN,D)
-            # 2. permute => (H, nblocks, remoteN, D)
-            # 3. flatten => (H, localN, D)
-            permuted_blocks = (
-                blocks_to_update.reshape(
-                    -1, n_blocks, n_kv_heads, remote_block_size, head_size
-                )
-                .permute(0, 2, 1, 3, 4)
-                .flatten(2, 3)
-            )
-            return permuted_blocks
-
-        assert self.kv_topo is not None
-
         if len(self.device_kv_caches) == 0:
             return
-
         assert block_size_ratio >= 1, "Only nP < nD supported currently."
         if self.enable_permute_local_kv and block_size_ratio > 1:
             logger.debug(
@@ -1877,17 +1831,14 @@ class NixlConnectorWorker:
                 block_size_ratio,
             )
 
+        assert self.kv_topo is not None
         split_k_and_v = self.kv_topo.split_k_and_v
 
         for block_ids in block_ids_list:
             indices = torch.tensor(block_ids, device=self.device_type, dtype=torch.long)
 
             for _, cache_or_caches in self.device_kv_caches.items():
-                cache_list = (
-                    cache_or_caches
-                    if self.kv_topo.split_k_and_v
-                    else [cache_or_caches]
-                )
+                cache_list = cache_or_caches if split_k_and_v else [cache_or_caches]
                 for cache in cache_list:
                     if self.enable_permute_local_kv and block_size_ratio > 1:
                         kv_postprocess_blksize_and_layout_on_receive(
