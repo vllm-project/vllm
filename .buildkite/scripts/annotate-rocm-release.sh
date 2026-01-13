@@ -35,12 +35,15 @@ buildkite-agent annotate --style 'success' --context 'rocm-release-workflow' << 
 
 **Install from this build (by commit):**
 \`\`\`bash
-pip install vllm --extra-index-url ${S3_URL}/${ROCM_PATH}/
+uv pip install vllm --extra-index-url ${S3_URL}/${ROCM_PATH}/{rocm_variant}/
+
+# Example:
+uv pip install vllm --extra-index-url ${S3_URL}/${ROCM_PATH}/rocm700/
 \`\`\`
 
 **Install from nightly (if published):**
 \`\`\`bash
-pip install vllm --extra-index-url ${S3_URL}/rocm/nightly/
+uv pip install vllm --extra-index-url ${S3_URL}/rocm/nightly/
 \`\`\`
 
 ### :floppy_disk: Download Wheels Directly
