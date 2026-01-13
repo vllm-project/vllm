@@ -75,6 +75,11 @@ def set_default_quant_scales(layer: nn.Module, register_buffer: bool = False) ->
     layer._v_scale_float = 1.0
     layer._prob_scale_float = 1.0
 
+    # Initialize q/k/v range constants used by calc_kv_scales
+    layer.q_range = torch.tensor(envs.Q_SCALE_CONSTANT, dtype=torch.float32)
+    layer.k_range = torch.tensor(envs.K_SCALE_CONSTANT, dtype=torch.float32)
+    layer.v_range = torch.tensor(envs.V_SCALE_CONSTANT, dtype=torch.float32)
+
 
 def _init_kv_cache_quant(
     layer: nn.Module,
