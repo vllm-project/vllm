@@ -173,6 +173,14 @@ with `--enable-request-id-headers`.
     print(completion._request_id)
     ```
 
+## Offline API Documentation
+
+The FastAPI `/docs` endpoint requires an internet connection by default. To enable offline access in air-gapped environments, use the `--enable-offline-docs` flag:
+
+```bash
+vllm serve NousResearch/Meta-Llama-3-8B-Instruct --enable-offline-docs
+```
+
 ## API Reference
 
 ### Completions API
@@ -866,7 +874,7 @@ You can pass multi-modal inputs to scoring models by passing `content` including
 Full example:
 
 - [examples/pooling/score/vision_score_api_online.py](../../examples/pooling/score/vision_score_api_online.py)
-- examples/pooling/score/vision_rerank_api_online.py](../../examples/pooling/score/vision_rerank_api_online.py)
+- [examples/pooling/score/vision_rerank_api_online.py](../../examples/pooling/score/vision_rerank_api_online.py)
 
 #### Extra parameters
 

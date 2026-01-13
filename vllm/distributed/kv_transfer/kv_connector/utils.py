@@ -6,13 +6,14 @@ KV cache helper for store.
 
 from collections.abc import Iterator
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Any, Literal, cast
 
 import torch
 
-from vllm.config import get_current_vllm_config
+from vllm.config import VllmConfig, get_current_vllm_config, get_layers_from_vllm_config
 from vllm.distributed.kv_transfer.kv_connector.factory import KVConnectorFactory
 from vllm.logger import init_logger
+from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.v1.attention.backend import AttentionBackend
 from vllm.v1.outputs import KVConnectorOutput, ModelRunnerOutput
 
@@ -433,3 +434,26 @@ class TpKVTopology:
     ) -> list[int]:
         remote_tp_size = self.remote_tp_size[remote_engine_id]
         return self.get_target_remote_ranks(remote_tp_size)
+
+
+def get_current_attn_backend(vllm_config: VllmConfig):
+    layer_type = cast(type[Any], AttentionLayerBase)
+    layers = get_layers_from_vllm_config(vllm_config, layer_type, None)
+    if layers:
+        backend = next(iter(layers.values())).get_attn_backend()
+    else:
+        # Fallback for tests, when static_forward_context is empty.
+        logger.debug(
+            "No layers found in the vLLM config. "
+            "Falling back to default attention backend."
+        )
+        from vllm.v1.attention.selector import get_attn_backend
+
+        backend = get_attn_backend(
+            head_size=vllm_config.model_config.get_head_size(),
+            dtype=vllm_config.model_config.dtype,
+            kv_cache_dtype=vllm_config.cache_config.cache_dtype,
+            block_size=vllm_config.cache_config.block_size,
+            use_mla=vllm_config.model_config.use_mla,
+        )
+    return backend
