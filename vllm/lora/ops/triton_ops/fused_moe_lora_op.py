@@ -750,6 +750,7 @@ def _fused_moe_lora_shrink_fake(
     split_k: int,
     mul_routed_weight: bool = False,
     use_gdc: bool = False,
+    sorted_token_ids_div: torch.Tensor | None = None,
 ) -> None:
     return
 
@@ -784,6 +785,7 @@ def _fused_moe_lora_expand_fake(
     split_k: int,
     mul_routed_weight: bool = False,
     use_gdc: bool = False,
+    sorted_token_ids_div: torch.Tensor | None = None,
 ) -> None:
     return
 
