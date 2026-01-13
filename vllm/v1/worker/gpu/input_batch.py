@@ -31,6 +31,19 @@ class InputBuffers:
         )
         self.seq_lens = torch.zeros(max_num_reqs, dtype=torch.int32, device=device)
 
+        # NOTE: `mrope_positions` is implemented with one additional dummy
+        # position on purpose to make it non-contiguous so that it can work
+        # with torch compile.
+        # See detailed explanation in https://github.com/vllm-project/vllm/pull/12128#discussion_r1926431923
+        # NOTE: When M-RoPE is enabled, position ids are 3D regardless of
+        # the modality of inputs. For text-only inputs, each dimension has
+        # identical position IDs, making M-RoPE functionally equivalent to
+        # 1D-RoPE.
+        # See page 5 of https://arxiv.org/abs/2409.12191
+        self.mrope_positions = torch.zeros(
+            (3, max_num_tokens + 1), dtype=torch.int64, device=device
+        )
+
 
 @dataclass
 class InputBatch:
@@ -62,6 +75,8 @@ class InputBatch:
     input_ids: torch.Tensor
     # [num_tokens_after_padding]
     positions: torch.Tensor
+    # [3, num_tokens_after_padding]
+    mrope_positions: torch.Tensor
 
     # layer_name -> Metadata
     attn_metadata: dict[str, Any]
@@ -107,8 +122,11 @@ class InputBatch:
         input_buffers.query_start_loc[num_reqs + 1 :] = num_tokens
         query_start_loc = input_buffers.query_start_loc[: num_reqs + 1]
 
-        input_ids = input_buffers.input_ids[:num_tokens]
-        positions = input_buffers.positions[:num_tokens]
+        input_ids = input_buffers.input_ids[:num_tokens].zero_()
+        positions = input_buffers.positions[:num_tokens].zero_()
+        input_buffers.mrope_positions.zero_()
+        mrope_positions = input_buffers.mrope_positions[:, :num_tokens]
+
         # attn_metadata = defaultdict(lambda: None)
         logits_indices = query_start_loc[1:] - 1
         cu_num_logits = torch.arange(num_reqs + 1, device=device, dtype=torch.int32)
@@ -128,6 +146,7 @@ class InputBatch:
             seq_lens=seq_lens,
             input_ids=input_ids,
             positions=positions,
+            mrope_positions=mrope_positions,
             attn_metadata=None,  # type: ignore
             logits_indices=logits_indices,
             cu_num_logits=cu_num_logits,
