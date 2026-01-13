@@ -30,5 +30,6 @@ class DummyPlatform(Platform):
         use_mla,
         has_sink,
         use_sparse,
+        use_mm_prefix,
     ):
         return "vllm_add_dummy_platform.dummy_attention_backend.DummyAttentionBackend"  # noqa E501

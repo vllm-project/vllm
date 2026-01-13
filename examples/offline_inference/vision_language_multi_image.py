@@ -76,7 +76,7 @@ def load_aria(question: str, image_urls: list[str]) -> ModelRequestData:
 
 
 def load_aya_vision(question: str, image_urls: list[str]) -> ModelRequestData:
-    model_name = "CohereForAI/aya-vision-8b"
+    model_name = "CohereLabs/aya-vision-8b"
 
     engine_args = EngineArgs(
         model=model_name,
@@ -305,6 +305,28 @@ def load_h2ovl(question: str, image_urls: list[str]) -> ModelRequestData:
         engine_args=engine_args,
         prompt=prompt,
         stop_token_ids=stop_token_ids,
+        image_data=[fetch_image(url) for url in image_urls],
+    )
+
+
+# HunyuanOCR
+def load_hunyuan_vl(question: str, image_urls: list[str]) -> ModelRequestData:
+    model_name = "tencent/HunyuanOCR"
+
+    engine_args = EngineArgs(
+        model=model_name,
+        max_model_len=8192,
+        limit_mm_per_prompt={"image": len(image_urls)},
+    )
+
+    placeholder = (
+        "<｜hy_place▁holder▁no▁100｜><｜hy_place▁holder▁no▁102｜><｜hy_place▁holder▁no▁101｜>"  # noqa: E501
+    ) * len(image_urls)
+    prompt = f"<｜hy_begin▁of▁sentence｜>{placeholder}{question}<｜hy_User｜>"
+
+    return ModelRequestData(
+        engine_args=engine_args,
+        prompt=prompt,
         image_data=[fetch_image(url) for url in image_urls],
     )
 
@@ -910,40 +932,6 @@ def load_phi4mm(question: str, image_urls: list[str]) -> ModelRequestData:
     )
 
 
-def load_phi4_multimodal(question: str, image_urls: list[str]) -> ModelRequestData:
-    """
-    Phi-4-multimodal-instruct supports both image and audio inputs. Here, we
-    show how to process multi images inputs.
-    """
-
-    model_path = snapshot_download(
-        "microsoft/Phi-4-multimodal-instruct", revision="refs/pr/70"
-    )
-    # Since the vision-lora and speech-lora co-exist with the base model,
-    # we have to manually specify the path of the lora weights.
-    vision_lora_path = os.path.join(model_path, "vision-lora")
-    engine_args = EngineArgs(
-        model=model_path,
-        max_model_len=4096,
-        max_num_seqs=2,
-        limit_mm_per_prompt={"image": len(image_urls)},
-        enable_lora=True,
-        max_lora_rank=320,
-        # Note - mm_processor_kwargs can also be passed to generate/chat calls
-        mm_processor_kwargs={"dynamic_hd": 4},
-    )
-
-    placeholders = "<|image|>" * len(image_urls)
-    prompt = f"<|user|>{placeholders}{question}<|end|><|assistant|>"
-
-    return ModelRequestData(
-        engine_args=engine_args,
-        prompt=prompt,
-        image_data=[fetch_image(url) for url in image_urls],
-        lora_requests=[LoRARequest("vision", 1, vision_lora_path)],
-    )
-
-
 def load_qwen_vl_chat(question: str, image_urls: list[str]) -> ModelRequestData:
     model_name = "Qwen/Qwen-VL-Chat"
     engine_args = EngineArgs(
@@ -1222,7 +1210,10 @@ def load_tarsier2(question: str, image_urls: list[str]) -> ModelRequestData:
         trust_remote_code=True,
         max_model_len=32768,
         limit_mm_per_prompt={"image": len(image_urls)},
-        hf_overrides={"architectures": ["Tarsier2ForConditionalGeneration"]},
+        hf_overrides={
+            "architectures": ["Tarsier2ForConditionalGeneration"],
+            "model_type": "tarsier2",
+        },
     )
 
     prompt = (
@@ -1319,6 +1310,7 @@ model_example_map = {
     "deepseek_ocr": load_deepseek_ocr,
     "gemma3": load_gemma3,
     "h2ovl_chat": load_h2ovl,
+    "hunyuan_vl": load_hunyuan_vl,
     "hyperclovax_seed_vision": load_hyperclovax_seed_vision,
     "idefics3": load_idefics3,
     "interns1": load_interns1,
@@ -1337,7 +1329,6 @@ model_example_map = {
     "paddleocr_vl": load_paddleocr_vl,
     "phi3_v": load_phi3v,
     "phi4_mm": load_phi4mm,
-    "phi4_multimodal": load_phi4_multimodal,
     "pixtral_hf": load_pixtral_hf,
     "qwen_vl_chat": load_qwen_vl_chat,
     "qwen2_vl": load_qwen2_vl,
@@ -1352,10 +1343,18 @@ model_example_map = {
 }
 
 
-def run_generate(model, question: str, image_urls: list[str], seed: int | None):
+def run_generate(
+    model,
+    question: str,
+    image_urls: list[str],
+    seed: int,
+    tensor_parallel_size: int | None,
+):
     req_data = model_example_map[model](question, image_urls)
 
-    engine_args = asdict(req_data.engine_args) | {"seed": args.seed}
+    engine_args = asdict(req_data.engine_args) | {"seed": seed}
+    if tensor_parallel_size is not None:
+        engine_args["tensor_parallel_size"] = tensor_parallel_size
     llm = LLM(**engine_args)
 
     sampling_params = SamplingParams(
@@ -1378,7 +1377,13 @@ def run_generate(model, question: str, image_urls: list[str], seed: int | None):
         print("-" * 50)
 
 
-def run_chat(model: str, question: str, image_urls: list[str], seed: int | None):
+def run_chat(
+    model: str,
+    question: str,
+    image_urls: list[str],
+    seed: int,
+    tensor_parallel_size: int | None,
+):
     req_data = model_example_map[model](question, image_urls)
 
     # Disable other modalities to save memory
@@ -1388,6 +1393,8 @@ def run_chat(model: str, question: str, image_urls: list[str], seed: int | None)
     )
 
     engine_args = asdict(req_data.engine_args) | {"seed": seed}
+    if tensor_parallel_size is not None:
+        engine_args["tensor_parallel_size"] = tensor_parallel_size
     llm = LLM(**engine_args)
 
     sampling_params = (
@@ -1452,7 +1459,7 @@ def parse_args():
     parser.add_argument(
         "--seed",
         type=int,
-        default=None,
+        default=0,
         help="Set the seed when initializing `vllm.LLM`.",
     )
     parser.add_argument(
@@ -1463,6 +1470,13 @@ def parse_args():
         default=2,
         help="Number of images to use for the demo.",
     )
+    parser.add_argument(
+        "--tensor-parallel-size",
+        "-tp",
+        type=int,
+        default=None,
+        help="Tensor parallel size to override the model's default setting. ",
+    )
     return parser.parse_args()
 
 
@@ -1470,13 +1484,20 @@ def main(args: Namespace):
     model = args.model_type
     method = args.method
     seed = args.seed
+    tensor_parallel_size = args.tensor_parallel_size
+
+    if tensor_parallel_size is not None and tensor_parallel_size < 1:
+        raise ValueError(
+            f"tensor_parallel_size must be a positive integer, "
+            f"got {tensor_parallel_size}"
+        )
 
     image_urls = IMAGE_URLS[: args.num_images]
 
     if method == "generate":
-        run_generate(model, QUESTION, image_urls, seed)
+        run_generate(model, QUESTION, image_urls, seed, tensor_parallel_size)
     elif method == "chat":
-        run_chat(model, QUESTION, image_urls, seed)
+        run_chat(model, QUESTION, image_urls, seed, tensor_parallel_size)
     else:
         raise ValueError(f"Invalid method: {method}")
 

@@ -1,10 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Implementation of SiglipVisionModel intended to be only used
-within a vision language model."""
 
-import math
-from collections.abc import Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from functools import cached_property
 from typing import Annotated, Literal
 
@@ -18,19 +15,21 @@ from transformers import (
     SiglipVisionConfig,
 )
 
-from vllm.attention.layer import MultiHeadAttention
-from vllm.attention.layers.encoder_only_attention import EncoderOnlyAttention
 from vllm.config import VllmConfig
-from vllm.config.multimodal import BaseDummyOptions
+from vllm.config.multimodal import BaseDummyOptions, MultiModalConfig
 from vllm.distributed import divide, get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.activation import get_act_fn
+from vllm.model_executor.layers.attention.encoder_only_attention import (
+    EncoderOnlyAttention,
+)
+from vllm.model_executor.layers.attention.mm_encoder_attention import MMEncoderAttention
 from vllm.model_executor.layers.conv import Conv2dLayer
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
     QKVParallelLinear,
     RowParallelLinear,
 )
-from vllm.model_executor.layers.pooler import DispatchPooler, Pooler
+from vllm.model_executor.layers.pooler import DispatchPooler
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmbedding
 from vllm.model_executor.model_loader.weight_utils import (
@@ -130,7 +129,7 @@ class SiglipProcessingInfo(BaseProcessingInfo):
                 image_width=image_width,
                 image_height=image_height,
             ),
-            _get_vision_feature_select_strategy(pooler_config.pooling_type),
+            _get_vision_feature_select_strategy(pooler_config.seq_pooling_type),
         )
 
     def get_image_size_with_most_features(self) -> ImageSize:
@@ -278,7 +277,7 @@ class SiglipEncoderInfo(VisionEncoderInfo[SiglipVisionConfig]):
         return image_size // patch_size
 
 
-# Adapted from https://github.com/huggingface/transformers/blob/v4.43.3/src/transformers/models/siglip/modeling_siglip.py#L249 # noqa
+# Adapted from https://github.com/huggingface/transformers/blob/v4.57.3/src/transformers/models/siglip/modeling_siglip.py#L216
 class SiglipVisionEmbeddings(nn.Module):
     def __init__(self, config: SiglipVisionConfig):
         super().__init__()
@@ -297,9 +296,7 @@ class SiglipVisionEmbeddings(nn.Module):
 
         self.num_patches = (self.image_size // self.patch_size) ** 2
         self.num_positions = self.num_patches
-        self.position_embedding = VocabParallelEmbedding(
-            self.num_positions, self.embed_dim
-        )
+        self.position_embedding = nn.Embedding(self.num_positions, self.embed_dim)
         self.register_buffer(
             "position_ids",
             torch.arange(self.num_positions, dtype=torch.int64).expand((1, -1)),
@@ -309,50 +306,30 @@ class SiglipVisionEmbeddings(nn.Module):
     def interpolate_pos_encoding(
         self, embeddings: torch.Tensor, height: int, width: int
     ) -> torch.Tensor:
-        """
-        This method is an adapted method for SigLIP (due to SigLIP not having
-        class embedding unlike other ViTs) that allows the model to interpolate
-        the pre-trained position encodings such that it can be usable on higher
-        resolution images.
-
-        Source:
-        https://github.com/facebookresearch/dino/blob/de9ee3df6cf39fac952ab558447af1fa1365362a/vision_transformer.py#L174
-        """
-        position_embeddings = self.position_embedding.weight.unsqueeze(0)
         num_patches = embeddings.shape[1]
-        num_positions = position_embeddings.shape[1]
+        num_positions = self.position_embedding.weight.shape[1]
         if num_patches == num_positions and height == width:
-            return position_embeddings
+            return self.position_embedding(self.position_ids)
+
+        patch_pos_embed = self.position_embedding.weight.unsqueeze(0)
 
         dim = embeddings.shape[-1]
-        height = height // self.patch_size
-        width = width // self.patch_size
-        # we add a small number to avoid floating point error
-        # in the interpolation
-        # see discussion at https://github.com/facebookresearch/dino/issues/8
-        height, width = height + 0.1, width + 0.1
 
-        patch_pos_embed = position_embeddings.reshape(
-            1, int(math.sqrt(num_positions)), int(math.sqrt(num_positions)), dim
+        new_height = height // self.patch_size
+        new_width = width // self.patch_size
+
+        sqrt_num_positions = int(num_positions**0.5)
+        patch_pos_embed = patch_pos_embed.reshape(
+            1, sqrt_num_positions, sqrt_num_positions, dim
         )
         patch_pos_embed = patch_pos_embed.permute(0, 3, 1, 2)
+
         patch_pos_embed = nn.functional.interpolate(
             patch_pos_embed,
-            scale_factor=(
-                height / math.sqrt(num_positions),
-                width / math.sqrt(num_positions),
-            ),
+            size=(new_height, new_width),
             mode="bicubic",
             align_corners=False,
         )
-        if (
-            int(height) != patch_pos_embed.shape[-2]
-            or int(width) != patch_pos_embed.shape[-1]
-        ):
-            raise ValueError(
-                "Width or height does not match with "
-                "the interpolated position embeddings"
-            )
 
         patch_pos_embed = patch_pos_embed.permute(0, 2, 3, 1).view(1, -1, dim)
         return patch_pos_embed
@@ -379,9 +356,10 @@ class SiglipAttention(nn.Module):
         self,
         config: SiglipVisionConfig | SiglipTextConfig,
         quant_config: QuantizationConfig | None = None,
+        multimodal_config: MultiModalConfig | None = None,
         *,
         prefix: str = "",
-        attn_cls: type[EncoderOnlyAttention] | type[MultiHeadAttention],
+        attn_cls: type[EncoderOnlyAttention] | type[MMEncoderAttention],
     ) -> None:
         super().__init__()
 
@@ -391,19 +369,25 @@ class SiglipAttention(nn.Module):
         self.head_dim = self.embed_dim // self.num_heads
         if self.head_dim * self.num_heads != self.embed_dim:
             raise ValueError(
-                f"embed_dim must be divisible by num_heads (got "
-                "`embed_dim`: {self.embed_dim} and `num_heads`:"
-                f" {self.num_heads})."
+                f"embed_dim must be divisible by num_heads "
+                f"(got `embed_dim`: {self.embed_dim} and "
+                f"`num_heads`: {self.num_heads})."
             )
 
         self.scale = self.head_dim**-0.5
-        self.dropout = config.attention_dropout
+
+        use_data_parallel = (
+            multimodal_config.mm_encoder_tp_mode == "data"
+            if multimodal_config
+            else False
+        )
         self.qkv_proj = QKVParallelLinear(
             hidden_size=self.embed_dim,
             head_size=self.head_dim,
             total_num_heads=self.num_heads,
             quant_config=quant_config,
             prefix=f"{prefix}.qkv_proj",
+            disable_tp=use_data_parallel,
         )
 
         self.out_proj = RowParallelLinear(
@@ -411,17 +395,29 @@ class SiglipAttention(nn.Module):
             output_size=self.embed_dim,
             quant_config=quant_config,
             prefix=f"{prefix}.out_proj",
+            disable_tp=use_data_parallel,
         )
 
-        self.tp_size = get_tensor_model_parallel_world_size()
+        self.tp_size = (
+            1 if use_data_parallel else get_tensor_model_parallel_world_size()
+        )
         self.num_heads_per_partition = divide(self.num_heads, self.tp_size)
 
-        self.attn = attn_cls(
-            self.num_heads_per_partition,
-            self.head_dim,
-            self.scale,
-            prefix=f"{prefix}.attn",
-        )
+        if attn_cls == MMEncoderAttention:
+            self.attn = attn_cls(
+                self.num_heads_per_partition,
+                self.head_dim,
+                self.scale,
+                prefix=f"{prefix}.attn",
+                multimodal_config=multimodal_config,
+            )
+        else:
+            self.attn = attn_cls(
+                self.num_heads_per_partition,
+                self.head_dim,
+                self.scale,
+                prefix=f"{prefix}.attn",
+            )
 
     def forward(
         self,
@@ -441,12 +437,19 @@ class SiglipMLP(nn.Module):
         self,
         config: SiglipVisionConfig | SiglipTextConfig,
         quant_config: QuantizationConfig | None = None,
+        multimodal_config: MultiModalConfig | None = None,
         prefix: str = "",
     ) -> None:
         super().__init__()
 
         self.config = config
+        use_data_parallel = (
+            multimodal_config.mm_encoder_tp_mode == "data"
+            if multimodal_config
+            else False
+        )
         self.activation_fn = get_act_fn(config.hidden_act)
+
         # Special handling for BNB and torchao quantization
         if quant_config and quant_config.get_name() in ["bitsandbytes", "torchao"]:
             quantizable = True
@@ -456,17 +459,20 @@ class SiglipMLP(nn.Module):
             quantizable = (
                 config.hidden_size % 64 == 0 and config.intermediate_size % 64 == 0
             )
+
         self.fc1 = ColumnParallelLinear(
             config.hidden_size,
             config.intermediate_size,
             quant_config=quant_config if quantizable else None,
             prefix=f"{prefix}.fc1",
+            disable_tp=use_data_parallel,
         )
         self.fc2 = RowParallelLinear(
             config.intermediate_size,
             config.hidden_size,
             quant_config=quant_config if quantizable else None,
             prefix=f"{prefix}.fc2",
+            disable_tp=use_data_parallel,
         )
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
@@ -481,9 +487,10 @@ class SiglipEncoderLayer(nn.Module):
         self,
         config: SiglipVisionConfig | SiglipTextConfig,
         quant_config: QuantizationConfig | None = None,
+        multimodal_config: MultiModalConfig | None = None,
         *,
         prefix: str = "",
-        attn_cls: type[EncoderOnlyAttention] | type[MultiHeadAttention],
+        attn_cls: type[EncoderOnlyAttention] | type[MMEncoderAttention],
     ) -> None:
         super().__init__()
 
@@ -492,6 +499,7 @@ class SiglipEncoderLayer(nn.Module):
         self.self_attn = SiglipAttention(
             config,
             quant_config=quant_config,
+            multimodal_config=multimodal_config,
             prefix=f"{prefix}.self_attn",
             attn_cls=attn_cls,
         )
@@ -499,6 +507,7 @@ class SiglipEncoderLayer(nn.Module):
         self.mlp = SiglipMLP(
             config,
             quant_config=quant_config,
+            multimodal_config=multimodal_config,
             prefix=f"{prefix}.mlp",
         )
         self.layer_norm2 = nn.LayerNorm(self.embed_dim, eps=config.layer_norm_eps)
@@ -526,10 +535,11 @@ class SiglipEncoder(nn.Module):
         self,
         config: SiglipVisionConfig | SiglipTextConfig,
         quant_config: QuantizationConfig | None = None,
+        multimodal_config: MultiModalConfig | None = None,
         num_hidden_layers_override: int | None = None,
         *,
         prefix: str = "",
-        attn_cls: type[EncoderOnlyAttention] | type[MultiHeadAttention],
+        attn_cls: type[EncoderOnlyAttention] | type[MMEncoderAttention],
     ) -> None:
         super().__init__()
 
@@ -545,6 +555,7 @@ class SiglipEncoder(nn.Module):
                 SiglipEncoderLayer(
                     config,
                     quant_config=quant_config,
+                    multimodal_config=multimodal_config,
                     prefix=f"{prefix}.layers.{layer_idx}",
                     attn_cls=attn_cls,
                 )
@@ -649,6 +660,7 @@ class SiglipMultiheadAttentionPoolingHead(nn.Module):
         self,
         config: SiglipVisionConfig,
         quant_config: QuantizationConfig | None = None,
+        multimodal_config: MultiModalConfig | None = None,
         prefix: str = "",
     ) -> None:
         super().__init__()
@@ -660,7 +672,10 @@ class SiglipMultiheadAttentionPoolingHead(nn.Module):
         )
         self.layernorm = nn.LayerNorm(config.hidden_size, eps=config.layer_norm_eps)
         self.mlp = SiglipMLP(
-            config=config, quant_config=quant_config, prefix=f"{prefix}.mlp"
+            config=config,
+            quant_config=quant_config,
+            multimodal_config=multimodal_config,
+            prefix=f"{prefix}.mlp",
         )
 
     def forward(self, hidden_state: torch.Tensor) -> torch.Tensor:
@@ -685,6 +700,7 @@ class SiglipVisionTransformer(nn.Module):
         self,
         config: SiglipVisionConfig,
         quant_config: QuantizationConfig | None = None,
+        multimodal_config: MultiModalConfig | None = None,
         *,
         num_hidden_layers_override: int | None = None,
         require_post_norm: bool | None = None,
@@ -700,9 +716,10 @@ class SiglipVisionTransformer(nn.Module):
         self.encoder = SiglipEncoder(
             config,
             quant_config=quant_config,
+            multimodal_config=multimodal_config,
             num_hidden_layers_override=num_hidden_layers_override,
             prefix=f"{prefix}.encoder",
-            attn_cls=MultiHeadAttention,
+            attn_cls=MMEncoderAttention,
         )
 
         num_hidden_layers = config.num_hidden_layers
@@ -728,6 +745,7 @@ class SiglipVisionTransformer(nn.Module):
             self.head = SiglipMultiheadAttentionPoolingHead(
                 config=config,
                 quant_config=quant_config,
+                multimodal_config=multimodal_config,
                 prefix=f"{prefix}.head",
             )
 
@@ -814,13 +832,11 @@ class SiglipVisionTransformer(nn.Module):
 
 
 class SiglipVisionModel(nn.Module):
-    config_class = SiglipVisionConfig
-    main_input_name = "pixel_values"
-
     def __init__(
         self,
         config: SiglipVisionConfig,
         quant_config: QuantizationConfig | None = None,
+        multimodal_config: MultiModalConfig | None = None,
         *,
         num_hidden_layers_override: int | None = None,
         require_post_norm: bool | None = None,
@@ -831,7 +847,8 @@ class SiglipVisionModel(nn.Module):
         self.quant_config = quant_config
         self.vision_model = SiglipVisionTransformer(
             config,
-            quant_config,
+            quant_config=quant_config,
+            multimodal_config=multimodal_config,
             num_hidden_layers_override=num_hidden_layers_override,
             require_post_norm=require_post_norm,
             prefix=f"{prefix}.vision_model",
@@ -976,11 +993,12 @@ class SiglipTextEmbeddings(nn.Module):
 
         position_embeddings = self.position_embedding(position_ids)
         embeddings = inputs_embeds + position_embeddings
+
         return embeddings
 
 
 # Assume EOS token corresponds to CLS token in text model
-@default_pooling_type("CLS")
+@default_pooling_type(seq_pooling_type="CLS")
 @MULTIMODAL_REGISTRY.register_processor(
     SiglipMultiModalProcessor,
     info=SiglipProcessingInfo,
@@ -990,7 +1008,6 @@ class SiglipEmbeddingModel(nn.Module, SupportsMultiModal, SupportsQuant):
     is_pooling_model = True
 
     packed_modules_mapping = {"qkv_proj": ["q_proj", "k_proj", "v_proj"]}
-    merge_by_field_config = True
 
     @classmethod
     def get_placeholder_str(cls, modality: str, i: int) -> str | None:
@@ -1025,6 +1042,7 @@ class SiglipEmbeddingModel(nn.Module, SupportsMultiModal, SupportsQuant):
         self.vision_model = SiglipVisionTransformer(
             vision_config,
             quant_config=quant_config,
+            multimodal_config=multimodal_config,
             prefix=maybe_prefix(prefix, "vision_model"),
         )
 
@@ -1034,12 +1052,7 @@ class SiglipEmbeddingModel(nn.Module, SupportsMultiModal, SupportsQuant):
         assert pooler_config is not None
         self.pooler_config = pooler_config
 
-        self.pooler = DispatchPooler(
-            {
-                "token_embed": Pooler.for_token_embed(pooler_config),
-                "embed": Pooler.for_embed(pooler_config),
-            }
-        )
+        self.pooler = DispatchPooler.for_embedding(pooler_config)
 
         self._is_text_input = True
 
@@ -1112,7 +1125,7 @@ class SiglipEmbeddingModel(nn.Module, SupportsMultiModal, SupportsQuant):
     ) -> torch.Tensor:
         if feature_select_strategy is None:
             feature_select_strategy = _get_vision_feature_select_strategy(
-                self.pooler_config.pooling_type
+                self.pooler_config.seq_pooling_type
             )
 
         pooled_output = self.vision_model(
@@ -1144,6 +1157,41 @@ class SiglipEmbeddingModel(nn.Module, SupportsMultiModal, SupportsQuant):
 
     def get_language_model(self) -> torch.nn.Module:
         return self.text_model
+
+    def _embed_text_input_ids(
+        self,
+        input_ids: torch.Tensor,
+        embed_input_ids: Callable[[torch.Tensor], torch.Tensor],
+        *,
+        is_multimodal: torch.Tensor | None,
+        handle_oov_mm_token: bool,
+    ) -> torch.Tensor:
+        inputs_embeds = super()._embed_text_input_ids(
+            input_ids,
+            embed_input_ids,
+            is_multimodal=is_multimodal,
+            handle_oov_mm_token=handle_oov_mm_token,
+        )
+
+        # NOTE: inputs_embeds in model runner has size text_config.projection_size
+        # (instead of text_config.hidden_size) to accommodate image embeddings
+        inputs_embeds_size = self.text_projection_size
+        if inputs_embeds.shape[1] < inputs_embeds_size:
+            inputs_embeds = torch.cat(
+                [
+                    inputs_embeds,
+                    inputs_embeds.new_empty(
+                        inputs_embeds.shape[0],
+                        inputs_embeds_size - inputs_embeds.shape[1],
+                    ),
+                ],
+                dim=1,
+            )
+        elif inputs_embeds.shape[1] > inputs_embeds_size:
+            # No need to handle this case for now
+            raise NotImplementedError
+
+        return inputs_embeds
 
     def embed_input_ids(
         self,
@@ -1189,6 +1237,15 @@ class SiglipEmbeddingModel(nn.Module, SupportsMultiModal, SupportsQuant):
         # Multimodal inputs (image embeddings)
         if not self._is_text_input:
             return inputs_embeds
+
+        # NOTE: inputs_embeds in model runner has size text_config.projection_size
+        # (instead of text_config.hidden_size) to accommodate image embeddings
+        hidden_size = self.text_embed_dim
+        if inputs_embeds.shape[1] > hidden_size:
+            inputs_embeds = inputs_embeds[:, :hidden_size]
+        elif inputs_embeds.shape[1] < hidden_size:
+            # No need to handle this case for now
+            raise NotImplementedError
 
         return self.get_text_features(input_ids, positions, inputs_embeds)
 

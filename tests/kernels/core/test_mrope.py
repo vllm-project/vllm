@@ -10,6 +10,7 @@ from transformers import __version__ as TRANSFORMERS_VERSION
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.platforms import current_platform
 from vllm.transformers_utils.config import get_config
+from vllm.utils.torch_utils import set_random_seed
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -24,7 +25,7 @@ def generate_test_data(
     device: torch.device,
 ):
     """Generate test data for given configuration."""
-    current_platform.seed_everything(42)
+    set_random_seed(42)
     # Create 2D positions (3, num_tokens) for multimodal case
     positions = torch.randint(
         0, max_position_embeddings // 4, (3, num_tokens), device=device
@@ -89,6 +90,7 @@ num_tokens_list = [11, 8192]
 @pytest.mark.parametrize("dtype", [torch.bfloat16])
 @pytest.mark.parametrize("num_tokens", num_tokens_list)
 def test_mrope(
+    default_vllm_config,
     model_name: str,
     model_info: MRoPETestInfo,
     tp_size: int,
@@ -113,12 +115,9 @@ def test_mrope(
     is_neox_style = True
 
     max_position = config.max_position_embeddings
-    partial_rotary_factor = getattr(config, "partial_rotary_factor", 1.0)
-    rotary_dim = int(head_dim * partial_rotary_factor)
 
     mrope_helper_class = get_rope(
         head_size=head_dim,
-        rotary_dim=rotary_dim,
         max_position=max_position,
         is_neox_style=is_neox_style,
         rope_parameters=config.rope_parameters,
@@ -161,6 +160,7 @@ def test_mrope(
 @pytest.mark.parametrize("dtype", [torch.bfloat16])
 @pytest.mark.parametrize("num_tokens", num_tokens_list)
 def test_mrope_torch_compile_tracing(
+    default_vllm_config,
     model_name: str,
     model_info: MRoPETestInfo,
     tp_size: int,
@@ -184,12 +184,9 @@ def test_mrope_torch_compile_tracing(
     )
     is_neox_style = True
     max_position = config.max_position_embeddings
-    partial_rotary_factor = getattr(config, "partial_rotary_factor", 1.0)
-    rotary_dim = int(head_dim * partial_rotary_factor)
 
     mrope_helper_class = get_rope(
         head_size=head_dim,
-        rotary_dim=rotary_dim,
         max_position=max_position,
         is_neox_style=is_neox_style,
         rope_parameters=config.rope_parameters,

@@ -32,7 +32,7 @@ def sample_data(num_experts, max_loras, num_tokens, topk_num):
 
 @pytest.mark.parametrize("num_tokens", [100, 200, 1024, 4096])  # 81920
 @pytest.mark.parametrize("topk_num", [6])
-@pytest.mark.parametrize("num_experts", [64, 128])
+@pytest.mark.parametrize("num_experts", [64, 128, 256, 512])
 @pytest.mark.parametrize("max_loras", [2, 32])
 @pytest.mark.parametrize("block_size", [16])
 def test_moe_lora_align_block_size(

@@ -63,7 +63,10 @@ def test_models(
     num_logprobs: int,
 ) -> None:
     with vllm_runner(
-        model_pair.model_marlin, dtype=dtype, quantization="gptq_marlin_24"
+        model_pair.model_marlin,
+        dtype=dtype,
+        quantization="gptq_marlin_24",
+        allow_deprecated_quantization=True,
     ) as marlin_24_model:
         marlin_24_outputs = marlin_24_model.generate_greedy_logprobs(
             example_prompts, max_tokens, num_logprobs

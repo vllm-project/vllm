@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from typing import Any
+
 from openai.types.chat import (
     ChatCompletionAssistantMessageParam,
     ChatCompletionMessageToolCallParam,
@@ -9,18 +11,120 @@ from openai.types.chat import (
 from openai.types.chat.chat_completion_message_tool_call_param import (
     Function as FunctionCallTool,
 )
-from openai.types.responses import ResponseFunctionToolCall
+from openai.types.responses import ResponseFunctionToolCall, ResponseOutputItem
+from openai.types.responses.response import ToolChoice
+from openai.types.responses.response_function_tool_call_output_item import (
+    ResponseFunctionToolCallOutputItem,
+)
+from openai.types.responses.response_output_message import ResponseOutputMessage
 from openai.types.responses.response_reasoning_item import ResponseReasoningItem
 from openai.types.responses.tool import Tool
 
 from vllm import envs
+from vllm.entrypoints.constants import MCP_PREFIX
 from vllm.entrypoints.openai.protocol import (
     ChatCompletionMessageParam,
     ResponseInputOutputItem,
 )
 
 
-def construct_chat_message_with_tool_call(
+def construct_input_messages(
+    *,
+    request_instructions: str | None = None,
+    request_input: str | list[ResponseInputOutputItem],
+    prev_msg: list[ChatCompletionMessageParam] | None = None,
+    prev_response_output: list[ResponseOutputItem] | None = None,
+):
+    messages: list[ChatCompletionMessageParam] = []
+    if request_instructions:
+        messages.append(
+            {
+                "role": "system",
+                "content": request_instructions,
+            }
+        )
+
+    # Prepend the conversation history.
+    if prev_msg is not None:
+        # Add the previous messages.
+        messages.extend(prev_msg)
+    if prev_response_output is not None:
+        # Add the previous output.
+        for output_item in prev_response_output:
+            # NOTE: We skip the reasoning output.
+            if isinstance(output_item, ResponseOutputMessage):
+                for content in output_item.content:
+                    messages.append(
+                        {
+                            "role": "assistant",
+                            "content": content.text,
+                        }
+                    )
+
+    # Append the new input.
+    # Responses API supports simple text inputs without chat format.
+    if isinstance(request_input, str):
+        messages.append({"role": "user", "content": request_input})
+    else:
+        input_messages = construct_chat_messages_with_tool_call(request_input)
+        messages.extend(input_messages)
+    return messages
+
+
+def _maybe_combine_reasoning_and_tool_call(
+    item: ResponseInputOutputItem, messages: list[ChatCompletionMessageParam]
+) -> ChatCompletionMessageParam | None:
+    """Many models treat MCP calls and reasoning as a single message.
+    This function checks if the last message is a reasoning message and
+    the current message is a tool call"""
+    if not (
+        isinstance(item, ResponseFunctionToolCall)
+        and item.id
+        and item.id.startswith(MCP_PREFIX)
+    ):
+        return None
+    if len(messages) == 0:
+        return None
+    last_message = messages[-1]
+    if not (
+        last_message.get("role") == "assistant"
+        and last_message.get("reasoning") is not None
+    ):
+        return None
+
+    last_message["tool_calls"] = [
+        ChatCompletionMessageToolCallParam(
+            id=item.call_id,
+            function=FunctionCallTool(
+                name=item.name,
+                arguments=item.arguments,
+            ),
+            type="function",
+        )
+    ]
+    return last_message
+
+
+def construct_chat_messages_with_tool_call(
+    input_messages: list[ResponseInputOutputItem],
+) -> list[ChatCompletionMessageParam]:
+    """This function wraps _construct_single_message_from_response_item
+    Because some chatMessages come from multiple response items
+    for example a reasoning item and a MCP tool call are two response items
+    but are one chat message
+    """
+    messages: list[ChatCompletionMessageParam] = []
+    for item in input_messages:
+        maybe_combined_message = _maybe_combine_reasoning_and_tool_call(item, messages)
+        if maybe_combined_message is not None:
+            messages[-1] = maybe_combined_message
+        else:
+            messages.append(_construct_single_message_from_response_item(item))
+
+    return messages
+
+
+def _construct_single_message_from_response_item(
     item: ResponseInputOutputItem,
 ) -> ChatCompletionMessageParam:
     if isinstance(item, ResponseFunctionToolCall):
@@ -50,7 +154,18 @@ def construct_chat_message_with_tool_call(
             "role": "assistant",
             "reasoning": reasoning_content,
         }
-    elif item.get("type") == "function_call_output":
+    elif isinstance(item, ResponseOutputMessage):
+        return {
+            "role": "assistant",
+            "content": item.content[0].text,
+        }
+    elif isinstance(item, ResponseFunctionToolCallOutputItem):
+        return ChatCompletionToolMessageParam(
+            role="tool",
+            content=item.output,
+            tool_call_id=item.call_id,
+        )
+    elif isinstance(item, dict) and item.get("type") == "function_call_output":
         # Append the function call output as a tool message.
         return ChatCompletionToolMessageParam(
             role="tool",
@@ -88,3 +203,16 @@ def convert_tool_responses_to_completions_format(tool: dict) -> dict:
         "type": "function",
         "function": tool,
     }
+
+
+def construct_tool_dicts(
+    tools: list[Tool], tool_choice: ToolChoice
+) -> list[dict[str, Any]] | None:
+    if tools is None or (tool_choice == "none"):
+        tool_dicts = None
+    else:
+        tool_dicts = [
+            convert_tool_responses_to_completions_format(tool.model_dump())
+            for tool in tools
+        ]
+    return tool_dicts

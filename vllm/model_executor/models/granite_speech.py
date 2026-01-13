@@ -59,8 +59,8 @@ from vllm.multimodal.processing import (
 )
 from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from vllm.sequence import IntermediateTensors
-from vllm.transformers_utils.processor import cached_get_processor
-from vllm.transformers_utils.tokenizer import cached_get_tokenizer
+from vllm.tokenizers import cached_tokenizer_from_config
+from vllm.transformers_utils.processor import cached_processor_from_config
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
 from .blip2 import Blip2QFormerModel
@@ -348,7 +348,9 @@ class GraniteSpeechConformerAttention(nn.Module):
 
         if self.context_size <= 0 or self.context_size > self.max_pos_emb:
             raise ValueError(
-                "Context size is either less than 0 or exceeds the max_pos_emb"
+                f"Context size should be > 0 and "
+                f"<= max_pos_emb ({self.max_pos_emb}), "
+                f"got {self.context_size}."
             )
 
     def forward(
@@ -564,7 +566,6 @@ class GraniteSpeechForConditionalGeneration(
     SupportsLoRA,
     SupportsTranscription,
 ):
-    merge_by_field_config = True
     supported_languages = ISO639_1_SUPPORTED_LANGS
 
     packed_modules_mapping = {
@@ -671,7 +672,13 @@ class GraniteSpeechForConditionalGeneration(
 
         else:
             # Otherwise we have a list of tensors, which are almost certainly
-            # differing in their respective numbers of audio features;
+            # differing in their respective numbers of audio features; when
+            # passed as a batch, we expect a list of 2D var len input features
+            # so unsqueeze them.
+            input_features = [
+                feat.unsqueeze(dim=0) for feat in input_features if feat.ndim == 2
+            ]
+
             # stack them into a 3D tensor of size [bsz, most_num_features, 160].
             input_features = self._pad_and_stack_input_features(
                 input_features,
@@ -723,13 +730,12 @@ class GraniteSpeechForConditionalGeneration(
 
         Args:
             input_features: list[torch.Tensor]
-                Input features to be coerced into a tensor.
+                3D Input features to be coerced into a tensor.
         Returns:
             torch.Tensor: Tensor of shape [bsz, num_features, 160], where
             num_features is the max number of features of any entry in the
             batch.
         """
-        # Input features are of shape [bsz, num_features, 160]
         feat_lens = [feats.shape[1] for feats in input_features]
         padding = [max(feat_lens) - length for length in feat_lens]
         # TODO (Alex) - Validate that it's okay to zero pad like this;
@@ -862,7 +868,7 @@ class GraniteSpeechForConditionalGeneration(
         else:
             raise ValueError(f"Unsupported task type {task_type}")
 
-        tokenizer = cached_get_tokenizer(model_config.model)
+        tokenizer = cached_tokenizer_from_config(model_config)
         chat = [dict(role="user", content=user_prompt)]
         prompt = tokenizer.apply_chat_template(
             chat,
@@ -886,7 +892,7 @@ class GraniteSpeechForConditionalGeneration(
         model_config: ModelConfig,
     ) -> int | None:
         """Get the number of audio tokens for an audio duration in sec."""
-        processor = cached_get_processor(model_config.model)
+        processor = cached_processor_from_config(model_config)
         hop_length = processor.audio_processor.melspec_kwargs["hop_length"]
         proj_win_size = processor.audio_processor.projector_window_size
         ds_rate = processor.audio_processor.projector_downsample_rate

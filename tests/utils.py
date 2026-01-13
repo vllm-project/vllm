@@ -44,7 +44,7 @@ from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.entrypoints.cli.serve import ServeSubcommand
 from vllm.model_executor.model_loader import get_model_loader
 from vllm.platforms import current_platform
-from vllm.transformers_utils.tokenizer import get_tokenizer
+from vllm.tokenizers import get_tokenizer
 from vllm.utils.argparse_utils import FlexibleArgumentParser
 from vllm.utils.mem_constants import GB_bytes
 from vllm.utils.network_utils import get_open_port
@@ -106,6 +106,7 @@ class RemoteOpenAIServer:
             env.update(env_dict)
         serve_cmd = ["vllm", "serve", model, *vllm_serve_args]
         print(f"Launching RemoteOpenAIServer with: {' '.join(serve_cmd)}")
+        print(f"Environment variables: {env}")
         self.proc: subprocess.Popen = subprocess.Popen(
             serve_cmd,
             env=env,
@@ -119,7 +120,7 @@ class RemoteOpenAIServer:
         vllm_serve_args: list[str],
         *,
         env_dict: dict[str, str] | None = None,
-        seed: int | None = 0,
+        seed: int = 0,
         auto_port: bool = True,
         max_wait_seconds: float | None = None,
         override_hf_configs: dict[str, Any] | None = None,
@@ -283,7 +284,7 @@ class RemoteOpenAIServerCustom(RemoteOpenAIServer):
         child_process_fxn: Callable[[dict[str, str] | None, str, list[str]], None],
         *,
         env_dict: dict[str, str] | None = None,
-        seed: int | None = 0,
+        seed: int = 0,
         auto_port: bool = True,
         max_wait_seconds: float | None = None,
     ) -> None:
@@ -720,13 +721,34 @@ def init_test_distributed_environment(
     distributed_init_port: str,
     local_rank: int = -1,
 ) -> None:
-    distributed_init_method = f"tcp://localhost:{distributed_init_port}"
-    init_distributed_environment(
-        world_size=pp_size * tp_size,
-        rank=rank,
-        distributed_init_method=distributed_init_method,
-        local_rank=local_rank,
+    # Note: This function is often called from Ray worker processes, so we
+    # can't rely on pytest fixtures to set the config. We check if the config
+    # is already set and only create a default one if needed.
+    from vllm.config import (
+        VllmConfig,
+        get_current_vllm_config_or_none,
+        set_current_vllm_config,
     )
+
+    distributed_init_method = f"tcp://localhost:{distributed_init_port}"
+
+    if get_current_vllm_config_or_none() is not None:
+        # Config already set, use it directly
+        init_distributed_environment(
+            world_size=pp_size * tp_size,
+            rank=rank,
+            distributed_init_method=distributed_init_method,
+            local_rank=local_rank,
+        )
+    else:
+        # No config set, create a default one for the test
+        with set_current_vllm_config(VllmConfig()):
+            init_distributed_environment(
+                world_size=pp_size * tp_size,
+                rank=rank,
+                distributed_init_method=distributed_init_method,
+                local_rank=local_rank,
+            )
     ensure_model_parallel_initialized(tp_size, pp_size)
 
 
@@ -1075,6 +1097,13 @@ def large_gpu_mark(min_gb: int) -> pytest.MarkDecorator:
     )
 
 
+requires_fp8 = pytest.mark.skipif(
+    not current_platform.supports_fp8(),
+    reason="FP8 is not supported on this GPU (requires Hopper or "
+    "Ada architecture, compute capability 8.9+)",
+)
+
+
 def large_gpu_test(*, min_gb: int):
     """
     Decorate a test to be skipped if no GPU is available or it does not have
@@ -1218,9 +1247,9 @@ def get_attn_backend_list_based_on_platform() -> list[str]:
         try:
             import aiter  # noqa: F401
 
-            attn_backend_list.append("FLASH_ATTN")
+            attn_backend_list.append("ROCM_AITER_FA")
         except Exception:
-            print("Skip FLASH_ATTN on ROCm as aiter is not installed")
+            print("Skip ROCM_AITER_FA on ROCm as aiter is not installed")
 
         return attn_backend_list
     elif current_platform.is_xpu():

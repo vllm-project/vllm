@@ -3,21 +3,23 @@
 """
 Test:
 
-* Tests for MultiHeadAttention layer
+* Tests for MMEncoderAttention layer
 """
 
+import itertools
 from unittest.mock import patch
 
 import pytest
 import torch
 
-from vllm.attention.backends.registry import AttentionBackendEnum
-from vllm.attention.layer import MultiHeadAttention
-from vllm.attention.selector import _cached_get_attn_backend
+from vllm.model_executor.layers.attention.mm_encoder_attention import MMEncoderAttention
 from vllm.platforms import current_platform
 from vllm.platforms.cpu import CpuPlatform
 from vllm.platforms.cuda import CudaPlatform
 from vllm.platforms.rocm import RocmPlatform
+from vllm.utils.torch_utils import set_random_seed
+from vllm.v1.attention.backends.registry import AttentionBackendEnum
+from vllm.v1.attention.selector import _cached_get_attn_backend
 
 
 @pytest.fixture(autouse=True)
@@ -26,8 +28,15 @@ def clear_cache():
     _cached_get_attn_backend.cache_clear()
 
 
-@pytest.mark.parametrize("device", ["cpu", "hip", "cuda"])
-def test_mha_attn_platform(device: str):
+devices = ["cpu"]
+if current_platform.is_cuda():
+    devices.append("cuda")
+if current_platform.is_rocm():
+    devices.append("hip")
+
+
+@pytest.mark.parametrize("device", devices)
+def test_mha_attn_platform(default_vllm_config, device: str):
     """
     Test the attention selector between different platform and device.
     """
@@ -35,35 +44,31 @@ def test_mha_attn_platform(device: str):
 
     if device == "cpu":
         with (
-            patch("vllm.attention.layer.current_platform", CpuPlatform()),
             patch("vllm.model_executor.models.vision.current_platform", CpuPlatform()),
         ):
-            attn = MultiHeadAttention(16, 64, scale=1)
+            attn = MMEncoderAttention(16, 64, scale=1)
             assert attn.attn_backend == AttentionBackendEnum.TORCH_SDPA
     elif device == "hip":
         with (
-            patch("vllm.attention.layer.current_platform", RocmPlatform()),
             patch("vllm.model_executor.models.vision.current_platform", RocmPlatform()),
         ):
-            attn = MultiHeadAttention(16, 64, scale=1)
-            assert attn.attn_backend == AttentionBackendEnum.TORCH_SDPA
+            attn = MMEncoderAttention(16, 64, scale=1)
+            assert attn.attn_backend == AttentionBackendEnum.FLASH_ATTN
     else:
         # Test CUDA with head_size=64 (divisible by 32)
         # - should use vLLM's FlashAttention
         with (
-            patch("vllm.attention.layer.current_platform", CudaPlatform()),
             patch("vllm.model_executor.models.vision.current_platform", CudaPlatform()),
         ):
-            attn = MultiHeadAttention(16, 64, scale=1)
+            attn = MMEncoderAttention(16, 64, scale=1)
             assert attn.attn_backend == AttentionBackendEnum.FLASH_ATTN
 
         # Test CUDA with head_size=72 (not divisible by 32)
         # - should use vLLM's FlashAttention
         with (
-            patch("vllm.attention.layer.current_platform", CudaPlatform()),
             patch("vllm.model_executor.models.vision.current_platform", CudaPlatform()),
         ):
-            attn = MultiHeadAttention(16, 72, scale=1)
+            attn = MMEncoderAttention(16, 72, scale=1)
             assert attn.attn_backend == AttentionBackendEnum.FLASH_ATTN
 
 
@@ -87,6 +92,10 @@ def ref_attention(
 
 BATCH_SIZES = [1, 16]
 SEQ_LENS = [1]
+VAR_SEQ_LENS = [
+    [2, 2],
+    [2, 3, 4],
+]
 NUM_HEADS = [1, 16]
 NUM_KV_HEADS = [1]
 HEAD_SIZES = [64, 80]
@@ -107,6 +116,7 @@ CUDA_DEVICES = ["cuda"]
 @pytest.mark.parametrize("dtype", DTYPES)
 @pytest.mark.parametrize("device", CUDA_DEVICES)
 def test_mha_attn_forward(
+    default_vllm_config,
     batch_size: int,
     seq_len: int,
     num_heads: int,
@@ -115,7 +125,7 @@ def test_mha_attn_forward(
     dtype: torch.dtype,
     device: str,
 ):
-    current_platform.seed_everything(0)
+    set_random_seed(0)
     torch.set_default_device(device)
     torch.set_default_dtype(dtype)
 
@@ -123,7 +133,7 @@ def test_mha_attn_forward(
     k = torch.randn(batch_size, seq_len, num_kv_heads * head_size)
     v = torch.randn(batch_size, seq_len, num_kv_heads * head_size)
     scale = 1.0 / head_size**0.5
-    attn = MultiHeadAttention(
+    attn = MMEncoderAttention(
         num_heads, head_size, scale=scale, num_kv_heads=num_kv_heads
     )
     output = attn(q, k, v)
@@ -144,3 +154,59 @@ def test_mha_attn_forward(
         scale=scale,
     ).reshape(batch_size, seq_len, num_heads * head_size)
     torch.testing.assert_close(output, ref_output)
+
+
+@pytest.mark.parametrize("var_seq_len", VAR_SEQ_LENS)
+@pytest.mark.parametrize("num_heads", NUM_HEADS)
+@pytest.mark.parametrize("num_kv_heads", NUM_KV_HEADS)
+@pytest.mark.parametrize("head_size", HEAD_SIZES)
+@pytest.mark.parametrize("dtype", DTYPES)
+@pytest.mark.parametrize("device", CUDA_DEVICES)
+def test_mha_attn_varlen_forward(
+    default_vllm_config,
+    var_seq_len: list[int],
+    num_heads: int,
+    num_kv_heads: int,
+    head_size: int,
+    dtype: torch.dtype,
+    device: str,
+):
+    set_random_seed(0)
+    torch.set_default_device(device)
+    torch.set_default_dtype(dtype)
+
+    q = torch.randn(1, sum(var_seq_len), num_heads, head_size)
+    k = torch.randn(1, sum(var_seq_len), num_kv_heads, head_size)
+    v = torch.randn(1, sum(var_seq_len), num_kv_heads, head_size)
+    cu_seqlens = torch.tensor(
+        [0] + list(itertools.accumulate(var_seq_len)), dtype=torch.int32
+    )
+    scale = 1.0 / head_size**0.5
+    attn = MMEncoderAttention(
+        num_heads, head_size, scale=scale, num_kv_heads=num_kv_heads
+    )
+    output = attn(
+        q, k, v, cu_seqlens=cu_seqlens, max_seqlen=torch.tensor(max(var_seq_len))
+    )
+
+    assert num_heads % num_kv_heads == 0
+    num_queries_per_kv = num_heads // num_kv_heads
+    if num_queries_per_kv > 1:
+        k = torch.repeat_interleave(k, num_queries_per_kv, dim=2)
+        v = torch.repeat_interleave(v, num_queries_per_kv, dim=2)
+
+    ref_output = []
+    for q_i, k_i, v_i in zip(
+        torch.split(q, var_seq_len, dim=1),
+        torch.split(k, var_seq_len, dim=1),
+        torch.split(v, var_seq_len, dim=1),
+    ):
+        output_i = ref_attention(
+            q_i,
+            k_i,
+            v_i,
+            scale=scale,
+        )
+        ref_output.append(output_i)
+    ref_output = torch.cat(ref_output, dim=1)
+    torch.testing.assert_close(output, ref_output, atol=1e-2, rtol=1e-2)

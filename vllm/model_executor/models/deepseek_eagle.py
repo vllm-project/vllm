@@ -23,11 +23,8 @@ from vllm.model_executor.models.deepseek_v2 import (
     DeepseekV2DecoderLayer,
     DeepseekV3ForCausalLM,
 )
-from vllm.utils import init_logger
 
 from .utils import AutoWeightsLoader, maybe_prefix, process_eagle_weight
-
-logger = init_logger(__name__)
 
 
 @support_torch_compile
@@ -109,6 +106,7 @@ class DeepseekV2Model(nn.Module):
         # Params for weights, fp8 weight scales, fp8 activation scales
         # (param_name, weight_name, expert_id, shard_id)
         expert_params_mapping = FusedMoE.make_expert_params_mapping(
+            self,
             ckpt_gate_proj_name="gate_proj",
             ckpt_down_proj_name="down_proj",
             ckpt_up_proj_name="up_proj",

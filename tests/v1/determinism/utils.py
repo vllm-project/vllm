@@ -6,18 +6,24 @@ import random
 import pytest
 import torch
 
-from vllm.attention.utils.fa_utils import flash_attn_supports_mla
 from vllm.platforms import current_platform
+from vllm.utils.flashinfer import has_flashinfer
+from vllm.v1.attention.backends.fa_utils import flash_attn_supports_mla
 
 skip_unsupported = pytest.mark.skipif(
-    not (current_platform.is_cuda() and current_platform.has_device_capability(90)),
-    reason="Requires CUDA and >= Hopper (SM90)",
+    not (current_platform.is_cuda() and current_platform.has_device_capability(80)),
+    # Supports testing on Ampere and Ada Lovelace devices.
+    # Note: For devices with SM < 90, batch invariance does not support CUDA Graphs.
+    reason="Requires CUDA and >= Ampere (SM80)",
 )
 
 BACKENDS: list[str] = [
     "FLASH_ATTN",
-    "FLASHINFER",
+    "TRITON_MLA",
 ]
+
+if has_flashinfer():
+    BACKENDS.append("FLASHINFER")
 
 if flash_attn_supports_mla():
     BACKENDS.append("FLASH_ATTN_MLA")
@@ -93,3 +99,7 @@ def _extract_step_logprobs(request_output):
             return t, inner.token_ids
 
     return None, None
+
+
+def is_device_capability_below_90() -> bool:
+    return not current_platform.has_device_capability(90)

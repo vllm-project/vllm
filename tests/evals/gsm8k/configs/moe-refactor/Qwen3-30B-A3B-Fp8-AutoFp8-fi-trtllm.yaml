@@ -1,0 +1,10 @@
+model_name: "Qwen/Qwen3-Coder-30B-A3B-Instruct-FP8"
+accuracy_threshold: 0.88
+num_questions: 1319
+num_fewshot: 5
+server_args: "--enforce-eager --max-model-len 8192 --tensor-parallel-size 2"
+env:
+  VLLM_USE_DEEP_GEMM: "0"
+  VLLM_USE_DEEP_GEMM_MOE: "0"
+  VLLM_USE_FLASHINFER_MOE_FP8: "1"
+  VLLM_FLASHINFER_MOE_BACKEND: "latency"
