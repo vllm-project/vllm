@@ -593,10 +593,7 @@ class OutputProcessor:
                     request_outputs.append(request_output)
 
             # Free completed requests.
-            if (
-                engine_core_output.finish_reason is not None
-                and not engine_core_output.resumable
-            ):
+            if finish_reason is not None and not engine_core_output.resumable:
                 self.request_states.pop(req_id)
 
                 internal_ids = self.external_req_ids[req_state.external_req_id]
