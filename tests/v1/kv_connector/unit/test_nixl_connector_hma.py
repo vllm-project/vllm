@@ -40,8 +40,9 @@ def test_sw_sizes(mock_platform, hma_enabled, expected_sw_sizes):
 
     block_size = 16
     vllm_config = create_vllm_config(block_size=block_size)
+    # SW 2048 tokens=>128 blocks
     kv_cache_config = make_kv_cache_config(
-        block_size=block_size, hma_enabled=hma_enabled
+        block_size=block_size, hma_enabled=hma_enabled, sw_size=2048
     )
 
     scheduler = NixlConnectorScheduler(
@@ -49,7 +50,7 @@ def test_sw_sizes(mock_platform, hma_enabled, expected_sw_sizes):
         engine_id="test-engine",
         kv_cache_config=kv_cache_config,
     )
-
+    # in number of blocks
     assert scheduler.sw_sizes == expected_sw_sizes, (
         f"Expected sw_sizes={expected_sw_sizes}, got {scheduler.sw_sizes}"
     )
