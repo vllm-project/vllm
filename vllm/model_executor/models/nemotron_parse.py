@@ -605,6 +605,10 @@ class NemotronParseProcessingInfo(BaseProcessingInfo):
             **kwargs,
         )
 
+    @property
+    def skip_prompt_length_check(self) -> bool:
+        return True  # Because the encoder prompt is padded
+
     def get_supported_mm_limits(self) -> Mapping[str, int | None]:
         return {"image": 1}
 
@@ -622,10 +626,6 @@ class NemotronParseProcessingInfo(BaseProcessingInfo):
     ) -> Mapping[str, int] | None:
         image_tokens = self.get_num_image_tokens()
         return {"image": image_tokens}
-
-    @property
-    def skip_prompt_length_check(self) -> bool:
-        return True  # Because the encoder prompt is padded
 
 
 class NemotronParseDummyInputsBuilder(

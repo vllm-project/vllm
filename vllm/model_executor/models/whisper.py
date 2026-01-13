@@ -681,6 +681,10 @@ class WhisperProcessingInfo(BaseProcessingInfo):
     def get_hf_config(self) -> WhisperConfig:
         return self.ctx.get_hf_config(WhisperConfig)
 
+    @property
+    def skip_prompt_length_check(self) -> bool:
+        return True  # Because the encoder prompt is padded
+
     def get_supported_mm_limits(self) -> Mapping[str, int | None]:
         return {"audio": 1}
 
@@ -696,10 +700,6 @@ class WhisperProcessingInfo(BaseProcessingInfo):
 
     def get_num_audio_tokens(self) -> int:
         return self.get_hf_config().max_source_positions
-
-    @property
-    def skip_prompt_length_check(self) -> bool:
-        return True  # Because the encoder prompt is padded
 
 
 class WhisperDummyInputsBuilder(BaseDummyInputsBuilder[WhisperProcessingInfo]):
