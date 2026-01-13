@@ -406,7 +406,7 @@ class AsyncLLM(EngineClient):
         request_id: str,
         input_stream: AsyncGenerator[StreamingInput, None],
         streaming_done: asyncio.Event,
-    ) -> tuple[RequestOutputCollector, asyncio.Task | None]:
+    ) -> tuple[RequestOutputCollector, asyncio.Task | None, list[int]]:
         """Handle async generator input stream for streaming sessions."""
 
         first_input = await input_stream.__anext__()
@@ -428,11 +428,17 @@ class AsyncLLM(EngineClient):
             resumable=first_input.resumable,
         )
 
+        # Track pending outputs: [count]. Use list for mutability in closure.
+        # Starts at 1 for first_input. Background task increments for each
+        # additional input. Main loop decrements when finished=True received.
+        pending_outputs = [1]
+
         if first_input.resumable:
             # Start background task to process remaining inputs
             async def process_remaining():
                 try:
                     async for streaming_input in input_stream:
+                        pending_outputs[0] += 1
                         await self.add_request(
                             request_id,
                             streaming_input.prompt,
@@ -449,7 +455,7 @@ class AsyncLLM(EngineClient):
             streaming_done.set()
             input_task = None
 
-        return queue, input_task
+        return queue, input_task, pending_outputs
 
     # TODO: we should support multiple prompts in one call, as you
     # can do with LLM.generate. So that for multi-prompt completion
@@ -491,10 +497,11 @@ class AsyncLLM(EngineClient):
         q: RequestOutputCollector | None = None
         streaming_done: asyncio.Event | None = None
         input_task: asyncio.Task | None = None
+        pending_outputs: list[int] | None = None
         try:
             if isinstance(prompt, AsyncGenerator):
                 streaming_done = asyncio.Event()
-                q, input_task = await self._add_streaming_request(
+                q, input_task, pending_outputs = await self._add_streaming_request(
                     request_id, prompt, streaming_done
                 )
             else:
@@ -534,8 +541,12 @@ class AsyncLLM(EngineClient):
                 assert isinstance(out, RequestOutput)
                 yield out
 
-                if out.finished and (streaming_done is None or streaming_done.is_set()):
-                    break
+                if out.finished:
+                    if pending_outputs is not None:
+                        pending_outputs[0] -= 1
+                    # Exit when no more pending outputs
+                    if pending_outputs is None or pending_outputs[0] == 0:
+                        break
 
         # If the request is disconnected by the client, generate()
         # is cancelled or the generator is garbage collected. So,

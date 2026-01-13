@@ -135,16 +135,20 @@ async def test_generate_with_async_generator(mock_async_llm_streaming):
     request_id = "test"
     sampling_params = SamplingParams(max_tokens=10)
 
-    segment = 0
-    # Use a single shared queue to simulate real behavior where
-    # streaming session outputs go to the same queue
+    segment_count = 0
     shared_queue = RequestOutputCollector(RequestOutputKind.FINAL_ONLY, request_id)
 
     async def mock_add_request(*args, **kwargs):
-        nonlocal segment
-        # Add output to shared queue for each segment
-        shared_queue.put(make_output(request_id, finished=True))
-        segment += 1
+        nonlocal segment_count
+        segment_count += 1
+        current_segment = segment_count
+
+        # Stagger outputs to prevent aggregation in RequestOutputCollector
+        async def produce_output():
+            await asyncio.sleep(current_segment * 0.05)
+            shared_queue.put(make_output(request_id, finished=True))
+
+        asyncio.create_task(produce_output())
         return shared_queue
 
     mock_async_llm_streaming.add_request = mock_add_request
@@ -164,4 +168,4 @@ async def test_generate_with_async_generator(mock_async_llm_streaming):
         outputs.append(output)
 
     assert len(outputs) == 2
-    assert segment == 2
+    assert segment_count == 2
