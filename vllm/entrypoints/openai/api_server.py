@@ -692,8 +692,10 @@ class XRequestIdMiddleware:
 def _extract_content_from_chunk(chunk_data: dict) -> str:
     """Extract content from a streaming response chunk."""
     try:
-        from vllm.entrypoints.openai.engine.protocol import (
+        from vllm.entrypoints.openai.chat_completion.protocol import (
             ChatCompletionStreamResponse,
+        )
+        from vllm.entrypoints.openai.engine.protocol import (
             CompletionStreamResponse,
         )
 

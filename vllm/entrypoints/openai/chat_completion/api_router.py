@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 
-from email.mime import base
 from http import HTTPStatus
 from http.client import HTTPException
 
@@ -51,7 +50,8 @@ async def create_chat_completion(request: ChatCompletionRequest, raw_request: Re
     )
     handler = chat(raw_request)
     if handler is None:
-        return base(raw_request).create_error_response(
+        base_server = raw_request.app.state.openai_serving_tokenization
+        return base_server(raw_request).create_error_response(
             message="The model does not support Chat Completions API"
         )
     try:

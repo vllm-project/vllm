@@ -72,18 +72,6 @@ from vllm.entrypoints.context import (
     StreamingHarmonyContext,
 )
 from vllm.entrypoints.logger import RequestLogger
-from vllm.entrypoints.openai.parser.harmony_utils import (
-    construct_harmony_previous_input_messages,
-    get_developer_message,
-    get_stop_tokens_for_assistant_actions,
-    get_system_message,
-    get_user_message,
-    has_custom_tools,
-    parse_output_message,
-    parse_remaining_state,
-    parse_response_input,
-    render_for_completion,
-)
 from vllm.entrypoints.openai.engine.protocol import (
     DeltaMessage,
     ErrorResponse,
@@ -105,6 +93,18 @@ from vllm.entrypoints.openai.engine.protocol import (
 from vllm.entrypoints.openai.engine.serving import (
     GenerationError,
     OpenAIServing,
+)
+from vllm.entrypoints.openai.parser.harmony_utils import (
+    construct_harmony_previous_input_messages,
+    get_developer_message,
+    get_stop_tokens_for_assistant_actions,
+    get_system_message,
+    get_user_message,
+    has_custom_tools,
+    parse_output_message,
+    parse_remaining_state,
+    parse_response_input,
+    render_for_completion,
 )
 from vllm.entrypoints.openai.serving_models import OpenAIServingModels
 from vllm.entrypoints.responses_utils import (
