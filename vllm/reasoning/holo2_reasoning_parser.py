@@ -3,7 +3,10 @@
 
 from collections.abc import Sequence
 
-from vllm.entrypoints.openai.protocol import ChatCompletionRequest, DeltaMessage
+from vllm.entrypoints.openai.chat_completion.protocol import (
+    ChatCompletionRequest,
+)
+from vllm.entrypoints.openai.engine.protocol import DeltaMessage
 from vllm.logger import init_logger
 from vllm.reasoning import (
     ReasoningParser,
@@ -46,9 +49,10 @@ class Holo2ReasoningParser(ReasoningParser):
         # all requests in the structured output manager. So it is important that without
         # user specified chat template args, the default thinking is True.
 
-        enable_thinking = bool(chat_kwargs.get("thinking", True))
-
-        if enable_thinking:
+        thinking = bool(chat_kwargs.get("thinking", True))
+        enable_thinking = bool(chat_kwargs.get("enable_thinking", True))
+        thinking = thinking and enable_thinking
+        if thinking:
             self._parser = DeepSeekR1ReasoningParser(tokenizer, *args, **kwargs)
         else:
             self._parser = IdentityReasoningParser(tokenizer, *args, **kwargs)

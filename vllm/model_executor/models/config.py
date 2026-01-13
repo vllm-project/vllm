@@ -4,12 +4,12 @@ from copy import deepcopy
 from math import lcm
 from typing import TYPE_CHECKING
 
-from vllm.attention.backends.registry import AttentionBackendEnum
 from vllm.logger import init_logger
 from vllm.model_executor.models import ModelRegistry
 from vllm.platforms import current_platform
 from vllm.utils.math_utils import cdiv, round_up
 from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
+from vllm.v1.attention.backends.registry import AttentionBackendEnum
 from vllm.v1.kv_cache_interface import FullAttentionSpec, MambaSpec, MLAAttentionSpec
 
 if TYPE_CHECKING:
@@ -94,12 +94,12 @@ class JinaRobertaModelConfig(VerifyAndUpdateConfig):
 class LlamaBidirectionalConfig(VerifyAndUpdateConfig):
     @staticmethod
     def verify_and_update_model_config(model_config: "ModelConfig") -> None:
-        from vllm.config.pooler import PoolingTypeStr
+        from vllm.config.pooler import SequencePoolingType
 
         hf_config = model_config.hf_config
         hf_config.is_causal = False
 
-        pooling_type_map: dict[str, PoolingTypeStr] = {
+        pooling_type_map: dict[str, SequencePoolingType] = {
             "avg": "MEAN",
             "cls": "CLS",
             "last": "LAST",
@@ -107,8 +107,9 @@ class LlamaBidirectionalConfig(VerifyAndUpdateConfig):
 
         pooling_type = pooling_type_map.get(hf_config.pooling, None)
         if pooling_type is None:
-            raise ValueError(f"pool_type {hf_config.pooling} not supported")
-        model_config.pooler_config.pooling_type = pooling_type
+            raise ValueError(f"pool_type {hf_config.pooling!r} not supported")
+
+        model_config.pooler_config.seq_pooling_type = pooling_type
 
 
 class NomicBertModelConfig(VerifyAndUpdateConfig):
@@ -253,7 +254,13 @@ class Qwen3ForSequenceClassificationConfig(VerifyAndUpdateConfig):
             "Try loading the original Qwen3 Reranker?, see: "
             "https://github.com/vllm-project/vllm/tree/main/examples/pooling/score/qwen3_reranker_offline.py"
         )
-        model_config.hf_config.method = "from_2_way_softmax"
+        text_config = config.get_text_config()
+        text_config.method = "from_2_way_softmax"
+        text_config.classifier_from_token = tokens
+
+
+class Qwen3VLForSequenceClassificationConfig(Qwen3ForSequenceClassificationConfig):
+    pass
 
 
 class JinaVLForSequenceClassificationConfig(VerifyAndUpdateConfig):
@@ -551,6 +558,7 @@ MODELS_CONFIG_MAP: dict[str, type[VerifyAndUpdateConfig]] = {
     "Qwen2ForProcessRewardModel": Qwen2ForProcessRewardModelConfig,
     "Qwen2ForRewardModel": Qwen2ForRewardModelConfig,
     "Qwen3ForSequenceClassification": Qwen3ForSequenceClassificationConfig,
+    "Qwen3VLForSequenceClassification": Qwen3VLForSequenceClassificationConfig,
     "XLMRobertaModel": JinaRobertaModelConfig,
     "JinaVLForRanking": JinaVLForSequenceClassificationConfig,
     "JambaForSequenceClassification": JambaForSequenceClassificationConfig,
