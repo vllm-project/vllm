@@ -318,6 +318,9 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         idx_mapping = torch.arange(num_reqs, dtype=torch.int32, device=self.device)
         idx_mapping_np = np.arange(num_reqs, dtype=np.int32)
         pos = torch.zeros(num_reqs, dtype=torch.int64, device=self.device)
+        # NOTE(woosuk): During the initial memory profiling, the sampler may skip
+        # top_k, top_p, and logprobs, using less GPU memory than what is possible
+        # during actual execution.
         self.sampler(logits, idx_mapping, idx_mapping_np, pos)
 
     @torch.inference_mode()
