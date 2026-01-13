@@ -40,7 +40,7 @@ struct enable_sm75_to_sm80 : Kernel {
   #if __CUDA_ARCH__ >= 750 && __CUDA_ARCH__ < 800
     Kernel::invoke(std::forward<Args>(args)...);
   #else
-    TORCH_CHECK(false, "This kernel only supports sm >= 75.");
+    TORCH_CHECK(false, "This kernel only supports sm[75, 80).");
   #endif
 #endif
   }
@@ -54,7 +54,7 @@ struct enable_sm80_to_sm89 : Kernel {
   #if __CUDA_ARCH__ >= 800 && __CUDA_ARCH__ < 890
     Kernel::invoke(std::forward<Args>(args)...);
   #else
-    TORCH_CHECK(false, "This kernel only supports sm >= 80.");
+    TORCH_CHECK(false, "This kernel only supports sm[80, 89).");
   #endif
 #endif
   }
@@ -68,7 +68,7 @@ struct enable_sm89_to_sm90 : Kernel {
   #if __CUDA_ARCH__ >= 890 && __CUDA_ARCH__ < 900
     Kernel::invoke(std::forward<Args>(args)...);
   #else
-    TORCH_CHECK(false, "This kernel only supports sm >= 89.");
+    TORCH_CHECK(false, "This kernel only supports sm[89, 90).");
   #endif
 #endif
   }
