@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING, Any
 import pytest
 from mistral_common.multimodal import download_image
 from mistral_common.protocol.instruct.chunk import ImageURLChunk
-from miChatCompletionRequeststral_common.protocol.instruct.request import 
+from mistral_common.protocol.instruct.request import ChatCompletionRequest
 from mistral_common.tokens.tokenizers.mistral import MistralTokenizer
 from mistral_common.tokens.tokenizers.multimodal import image_from_chunk
 from transformers import AutoProcessor
