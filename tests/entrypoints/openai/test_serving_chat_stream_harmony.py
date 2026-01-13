@@ -9,7 +9,7 @@ from unittest.mock import patch
 
 import pytest
 
-from vllm.entrypoints.openai.serving_chat_stream_harmony import (
+from vllm.entrypoints.openai.chat_completion.stream_harmony import (
     extract_harmony_streaming_delta,
 )
 

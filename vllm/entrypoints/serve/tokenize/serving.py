@@ -9,7 +9,7 @@ from fastapi import Request
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.chat_utils import ChatTemplateContentFormatOption
 from vllm.entrypoints.logger import RequestLogger
-from vllm.entrypoints.openai.protocol import (
+from vllm.entrypoints.openai.engine.protocol import (
     DetokenizeRequest,
     DetokenizeResponse,
     ErrorResponse,
@@ -18,7 +18,7 @@ from vllm.entrypoints.openai.protocol import (
     TokenizeResponse,
     TokenizerInfoResponse,
 )
-from vllm.entrypoints.openai.serving_engine import OpenAIServing
+from vllm.entrypoints.openai.engine.serving import OpenAIServing
 from vllm.entrypoints.openai.serving_models import OpenAIServingModels
 from vllm.entrypoints.renderer import RenderConfig
 from vllm.inputs import TokensPrompt

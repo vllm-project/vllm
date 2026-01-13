@@ -5,7 +5,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from vllm.entrypoints.openai.protocol import ChatCompletionRequest
+from vllm.entrypoints.openai.engine.protocol import ChatCompletionRequest
 from vllm.tool_parsers.functiongemma_tool_parser import FunctionGemmaToolParser
 
 

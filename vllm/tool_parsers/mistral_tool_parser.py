@@ -12,7 +12,7 @@ import ijson
 import regex as re
 from pydantic import Field
 
-from vllm.entrypoints.openai.protocol import (
+from vllm.entrypoints.openai.engine.protocol import (
     ChatCompletionRequest,
     DeltaFunctionCall,
     DeltaMessage,

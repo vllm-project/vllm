@@ -6,7 +6,7 @@ from collections.abc import Sequence
 
 import regex as re
 
-from vllm.entrypoints.openai.protocol import (
+from vllm.entrypoints.openai.engine.protocol import (
     ChatCompletionRequest,
     DeltaFunctionCall,
     DeltaMessage,

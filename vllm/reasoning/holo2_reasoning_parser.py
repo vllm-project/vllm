@@ -3,7 +3,7 @@
 
 from collections.abc import Sequence
 
-from vllm.entrypoints.openai.protocol import ChatCompletionRequest, DeltaMessage
+from vllm.entrypoints.openai.engine.protocol import ChatCompletionRequest, DeltaMessage
 from vllm.logger import init_logger
 from vllm.reasoning import (
     ReasoningParser,

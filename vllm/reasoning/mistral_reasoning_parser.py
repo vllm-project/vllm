@@ -3,7 +3,7 @@
 
 from functools import cached_property
 
-from vllm.entrypoints.openai.protocol import (
+from vllm.entrypoints.openai.engine.protocol import (
     ChatCompletionRequest,
     ResponsesRequest,
 )

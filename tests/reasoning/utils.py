@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 
-from vllm.entrypoints.openai.protocol import ChatCompletionRequest, DeltaMessage
+from vllm.entrypoints.openai.engine.protocol import ChatCompletionRequest, DeltaMessage
 from vllm.reasoning import ReasoningParser
 from vllm.tokenizers.mistral import MistralTokenizer
 

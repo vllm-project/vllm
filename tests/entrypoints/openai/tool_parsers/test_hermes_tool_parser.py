@@ -5,7 +5,7 @@ import json
 
 import pytest
 
-from vllm.entrypoints.openai.protocol import ChatCompletionRequest
+from vllm.entrypoints.openai.engine.protocol import ChatCompletionRequest
 from vllm.tokenizers import TokenizerLike
 from vllm.tool_parsers.hermes_tool_parser import Hermes2ProToolParser
 

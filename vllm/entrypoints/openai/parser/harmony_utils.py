@@ -43,7 +43,7 @@ from openai_harmony import Message as OpenAIHarmonyMessage
 from openai_harmony import Role as OpenAIHarmonyRole
 
 from vllm import envs
-from vllm.entrypoints.openai.protocol import (
+from vllm.entrypoints.openai.engine.protocol import (
     ChatCompletionToolsParam,
     ResponseInputOutputItem,
     ResponsesRequest,

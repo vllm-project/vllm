@@ -84,7 +84,7 @@ from vllm.entrypoints.openai.parser.harmony_utils import (
     parse_response_input,
     render_for_completion,
 )
-from vllm.entrypoints.openai.protocol import (
+from vllm.entrypoints.openai.engine.protocol import (
     DeltaMessage,
     ErrorResponse,
     InputTokensDetails,
@@ -102,7 +102,7 @@ from vllm.entrypoints.openai.protocol import (
     StreamingResponsesResponse,
     VLLMValidationError,
 )
-from vllm.entrypoints.openai.serving_engine import (
+from vllm.entrypoints.openai.engine.serving import (
     GenerationError,
     OpenAIServing,
 )

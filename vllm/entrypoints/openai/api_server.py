@@ -44,7 +44,7 @@ from vllm.entrypoints.launcher import serve_http
 from vllm.entrypoints.logger import RequestLogger
 from vllm.entrypoints.openai.cli_args import make_arg_parser, validate_parsed_serve_args
 from vllm.entrypoints.openai.orca_metrics import metrics_header
-from vllm.entrypoints.openai.protocol import (
+from vllm.entrypoints.openai.engine.protocol import (
     ChatCompletionRequest,
     ChatCompletionResponse,
     CompletionRequest,
@@ -59,9 +59,9 @@ from vllm.entrypoints.openai.protocol import (
     TranslationRequest,
     TranslationResponseVariant,
 )
-from vllm.entrypoints.openai.serving_chat import OpenAIServingChat
+from vllm.entrypoints.openai.chat_completion.serving import OpenAIServingChat
 from vllm.entrypoints.openai.serving_completion import OpenAIServingCompletion
-from vllm.entrypoints.openai.serving_engine import OpenAIServing
+from vllm.entrypoints.openai.engine.serving import OpenAIServing
 from vllm.entrypoints.openai.serving_models import (
     BaseModelPath,
     OpenAIServingModels,
@@ -735,7 +735,7 @@ class XRequestIdMiddleware:
 def _extract_content_from_chunk(chunk_data: dict) -> str:
     """Extract content from a streaming response chunk."""
     try:
-        from vllm.entrypoints.openai.protocol import (
+        from vllm.entrypoints.openai.engine.protocol import (
             ChatCompletionStreamResponse,
             CompletionStreamResponse,
         )

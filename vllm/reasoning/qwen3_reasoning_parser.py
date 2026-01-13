@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 
-from vllm.entrypoints.openai.protocol import ChatCompletionRequest, ResponsesRequest
+from vllm.entrypoints.openai.engine.protocol import ChatCompletionRequest, ResponsesRequest
 from vllm.reasoning.basic_parsers import BaseThinkingReasoningParser
 
 

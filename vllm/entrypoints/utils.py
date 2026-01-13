@@ -23,7 +23,7 @@ from vllm.entrypoints.chat_utils import (
     resolve_mistral_chat_template,
 )
 from vllm.entrypoints.openai.cli_args import make_arg_parser
-from vllm.entrypoints.openai.protocol import (
+from vllm.entrypoints.openai.engine.protocol import (
     ChatCompletionRequest,
     CompletionRequest,
     StreamOptions,

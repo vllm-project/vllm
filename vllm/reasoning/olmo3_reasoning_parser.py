@@ -11,7 +11,7 @@ import regex as re
 if TYPE_CHECKING:
     from vllm.tokenizers import TokenizerLike
 
-from vllm.entrypoints.openai.protocol import (
+from vllm.entrypoints.openai.engine.protocol import (
     ChatCompletionRequest,
     DeltaMessage,
     ResponsesRequest,

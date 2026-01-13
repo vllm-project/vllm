@@ -6,7 +6,7 @@ from collections.abc import Generator
 
 import pytest
 
-from vllm.entrypoints.openai.protocol import (
+from vllm.entrypoints.openai.engine.protocol import (
     ChatCompletionRequest,
     DeltaMessage,
     FunctionCall,

@@ -3,7 +3,7 @@
 
 from collections.abc import Iterable
 
-from vllm.entrypoints.openai.protocol import (
+from vllm.entrypoints.openai.engine.protocol import (
     ChatCompletionRequest,
     DeltaMessage,
     ExtractedToolCallInformation,

@@ -6,7 +6,7 @@ from collections.abc import Sequence
 import regex as re
 from transformers import PreTrainedTokenizerBase
 
-from vllm.entrypoints.openai.protocol import ChatCompletionRequest, DeltaMessage
+from vllm.entrypoints.openai.engine.protocol import ChatCompletionRequest, DeltaMessage
 from vllm.logger import init_logger
 from vllm.reasoning import ReasoningParser
 

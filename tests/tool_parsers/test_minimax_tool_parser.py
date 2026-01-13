@@ -7,7 +7,7 @@ from typing import Any
 
 import pytest
 
-from vllm.entrypoints.openai.protocol import (
+from vllm.entrypoints.openai.engine.protocol import (
     ChatCompletionToolsParam,
     FunctionCall,
     ToolCall,

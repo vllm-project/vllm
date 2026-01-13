@@ -30,7 +30,7 @@ from vllm.entrypoints.openai.parser.harmony_utils import (
 from vllm.entrypoints.openai.parser.responses_parser import (
     get_responses_parser_for_simple_context,
 )
-from vllm.entrypoints.openai.protocol import (
+from vllm.entrypoints.openai.engine.protocol import (
     FunctionCall,
     ResponseInputOutputItem,
     ResponseRawMessageAndToken,

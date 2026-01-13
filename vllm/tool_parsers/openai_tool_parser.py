@@ -5,7 +5,7 @@ from collections.abc import Sequence
 from typing import TYPE_CHECKING
 
 from vllm.entrypoints.openai.parser.harmony_utils import parse_output_into_messages
-from vllm.entrypoints.openai.protocol import (
+from vllm.entrypoints.openai.engine.protocol import (
     ChatCompletionRequest,
     DeltaMessage,
     ExtractedToolCallInformation,
