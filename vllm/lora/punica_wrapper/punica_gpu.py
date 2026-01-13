@@ -48,8 +48,20 @@ class PunicaWrapperGPU(PunicaWrapperBase):
         self.lora_config = kwargs["lora_config"]
         self.max_loras = self.lora_config.max_loras
 
+        # Compute captured LoRA counts for cudagraph specialization.
+        # This must match the logic in CudagraphDispatcher._get_lora_cases().
+        captured_lora_counts: list[int] = []
+        if self.lora_config.specialize_active_lora:
+            for n in range(1, self.max_loras + 2):
+                # Powers of 2 or max_loras + 1
+                if (n & (n - 1)) == 0 or n == self.max_loras + 1:
+                    captured_lora_counts.append(n)
+
         self.token_mapping_meta = LoRAKernelMeta.make(
-            self.max_loras, max_num_batched_tokens, device=device
+            self.max_loras,
+            max_num_batched_tokens,
+            device=device,
+            captured_lora_counts=captured_lora_counts,
         )
 
         # When speculative decoding is enabled, max_num_samples is
@@ -57,7 +69,10 @@ class PunicaWrapperGPU(PunicaWrapperBase):
         # This line can be optimized by replacing max_num_batched_tokens
         # to  max_batches * (num_speculative_decoding_tokens + 1).
         self.prompt_mapping_meta = LoRAKernelMeta.make(
-            self.max_loras, max_num_batched_tokens, device=device
+            self.max_loras,
+            max_num_batched_tokens,
+            device=device,
+            captured_lora_counts=captured_lora_counts,
         )
 
     def update_metadata(

@@ -117,12 +117,13 @@ class CudagraphDispatcher:
         cases: list[tuple[bool, int]] = [(False, 0)]
 
         if self.specialize_lora_count:
-            for n in range(1, lora_config.max_loras + 1):
-                # if n is power of 2 or n == lora_config.max_loras, adding it to cases
-                if (n & (n - 1)) == 0 or n == lora_config.max_loras:
+            for n in range(1, lora_config.max_loras + 2):
+                # if n is power of 2 or n == lora_config.max_loras + 1
+                if (n & (n - 1)) == 0 or n == lora_config.max_loras + 1:
                     cases.append((True, n))
         else:
-            cases.append((True, lora_config.max_loras))
+            # Use max_loras + 1 to account for the -1 (no-lora) case in lora_ids
+            cases.append((True, lora_config.max_loras + 1))
 
         return cases
 
@@ -269,15 +270,20 @@ class CudagraphDispatcher:
             return CUDAGraphMode.NONE, BatchDescriptor(num_tokens)
 
         effective_num_active_loras = num_active_loras
-        if self.specialize_lora_count and has_lora and num_active_loras > 0:
-            # Find the smallest captured `num_active_loras` that is >= the current
-            # `num_active_loras`. This is because we only capture graphs for
-            # a subset of possible `num_active_loras` values (powers of 2).
-            import bisect
+        if has_lora and num_active_loras > 0:
+            if self.specialize_lora_count:
+                # Find the smallest captured `num_active_loras` that is >= the current
+                # `num_active_loras`. This is because we only capture graphs for
+                # a subset of possible `num_active_loras` values (powers of 2).
+                import bisect
 
-            idx = bisect.bisect_left(self.captured_lora_counts, num_active_loras)
-            if idx < len(self.captured_lora_counts):
-                effective_num_active_loras = self.captured_lora_counts[idx]
+                idx = bisect.bisect_left(self.captured_lora_counts, num_active_loras)
+                if idx < len(self.captured_lora_counts):
+                    effective_num_active_loras = self.captured_lora_counts[idx]
+            else:
+                # When not specializing, graphs are captured only with max_loras + 1,
+                # so we must use max_loras + 1 for dispatch to find a matching graph.
+                effective_num_active_loras = self.vllm_config.lora_config.max_loras + 1
 
         batch_desc = self._create_padded_batch_descriptor(
             num_tokens, uniform_decode, has_lora, effective_num_active_loras
