@@ -79,7 +79,7 @@ class TokenEmbeddingPoolerHead(TokenPoolerHead):
         pooled_data = pooled_data[..., : pooling_param.dimensions]
 
         # for normalize
-        if self.activation is not None and pooling_param.normalize:
+        if self.activation is not None and pooling_param.use_activation:
             pooled_data = self.activation(pooled_data)
 
         # pooled_data shape: [n_tokens, embedding_dimension]
