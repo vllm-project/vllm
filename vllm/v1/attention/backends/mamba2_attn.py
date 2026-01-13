@@ -5,15 +5,12 @@ from dataclasses import dataclass, replace
 
 import torch
 
-from vllm.attention.backends.abstract import AttentionBackend
 from vllm.config import VllmConfig
 from vllm.utils.math_utils import cdiv
+from vllm.v1.attention.backend import AttentionBackend, CommonAttentionMetadata
 from vllm.v1.attention.backends.mamba_attn import (
     BaseMambaAttentionMetadata,
     BaseMambaAttentionMetadataBuilder,
-)
-from vllm.v1.attention.backends.utils import (
-    CommonAttentionMetadata,
 )
 from vllm.v1.kv_cache_interface import AttentionSpec
 
