@@ -295,7 +295,7 @@ class ResponsesParser:
         content_text = self.accumulated_content
 
         # 4. Create ResponseOutputMessage if there's content
-        if content_text:
+        if content_text and content_text.strip() != "":  # ignore empty string
             output_items.append(
                 ResponseOutputMessage(
                     type="message",
