@@ -419,7 +419,7 @@ class ParsableContext(ConversationContext):
         if output.finished:
             self.parser.response_messages.extend(self.parser.final_output)
             self.parser.reset()
-        
+
         # only store if enable_response_messages is True, save memory
         if self.request.enable_response_messages:
             output_prompt = output.prompt or ""
