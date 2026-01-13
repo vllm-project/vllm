@@ -14,7 +14,7 @@ import socket
 import tempfile
 import uuid
 from argparse import Namespace
-from collections.abc import AsyncGenerator, AsyncIterator, Awaitable
+from collections.abc import AsyncIterator, Awaitable
 from contextlib import asynccontextmanager
 from http import HTTPStatus
 from typing import Annotated, Any
@@ -49,7 +49,6 @@ from vllm.entrypoints.openai.engine.protocol import (
     CompletionResponse,
     ErrorInfo,
     ErrorResponse,
-    StreamingResponsesResponse,
     TranscriptionRequest,
     TranscriptionResponseVariant,
     TranslationRequest,
@@ -307,19 +306,6 @@ async def show_available_models(raw_request: Request):
 async def show_version():
     ver = {"version": VLLM_VERSION}
     return JSONResponse(content=ver)
-
-
-async def _convert_stream_to_sse_events(
-    generator: AsyncGenerator[StreamingResponsesResponse, None],
-) -> AsyncGenerator[str, None]:
-    """Convert the generator to a stream of events in SSE format"""
-    async for event in generator:
-        event_type = getattr(event, "type", "unknown")
-        # https://developer.mozilla.org/en-US/docs/Web/API/Server-sent_events/Using_server-sent_events#event_stream_format
-        event_data = (
-            f"event: {event_type}\ndata: {event.model_dump_json(indent=None)}\n\n"
-        )
-        yield event_data
 
 
 @router.post(
@@ -749,6 +735,12 @@ def build_app(args: Namespace) -> FastAPI:
     )
 
     register_chat_api_router(app)
+
+    from vllm.entrypoints.openai.responses.api_router import (
+        attach_router as register_responses_api_router,
+    )
+
+    register_responses_api_router(app)
     from vllm.entrypoints.sagemaker.routes import register_sagemaker_routes
 
     register_sagemaker_routes(router)

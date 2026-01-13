@@ -7,7 +7,7 @@ import json
 import pytest
 from openai.types.responses import ResponseFunctionToolCall
 
-from vllm.entrypoints.openai.engine.protocol import ResponsesRequest
+from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
 
 
 def test_function_call_dict_converted_to_object():

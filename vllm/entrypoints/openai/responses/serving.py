@@ -75,19 +75,7 @@ from vllm.entrypoints.logger import RequestLogger
 from vllm.entrypoints.openai.engine.protocol import (
     DeltaMessage,
     ErrorResponse,
-    InputTokensDetails,
-    OutputTokensDetails,
     RequestResponseMetadata,
-    ResponseCompletedEvent,
-    ResponseCreatedEvent,
-    ResponseInProgressEvent,
-    ResponseInputOutputMessage,
-    ResponseReasoningPartAddedEvent,
-    ResponseReasoningPartDoneEvent,
-    ResponsesRequest,
-    ResponsesResponse,
-    ResponseUsage,
-    StreamingResponsesResponse,
     VLLMValidationError,
 )
 from vllm.entrypoints.openai.engine.serving import (
@@ -105,6 +93,20 @@ from vllm.entrypoints.openai.parser.harmony_utils import (
     parse_remaining_state,
     parse_response_input,
     render_for_completion,
+)
+from vllm.entrypoints.openai.responses.protocol import (
+    InputTokensDetails,
+    OutputTokensDetails,
+    ResponseCompletedEvent,
+    ResponseCreatedEvent,
+    ResponseInProgressEvent,
+    ResponseInputOutputMessage,
+    ResponseReasoningPartAddedEvent,
+    ResponseReasoningPartDoneEvent,
+    ResponsesRequest,
+    ResponsesResponse,
+    ResponseUsage,
+    StreamingResponsesResponse,
 )
 from vllm.entrypoints.openai.serving_models import OpenAIServingModels
 from vllm.entrypoints.responses_utils import (

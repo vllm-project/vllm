@@ -2,17 +2,21 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 
+from collections.abc import AsyncGenerator
 from http import HTTPStatus
 
 from fastapi import APIRouter, Depends, FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
-
 from vllm.entrypoints.openai.engine.protocol import ErrorResponse
-from vllm.entrypoints.openai.orca_metrics import metrics_header
+from vllm.entrypoints.openai.responses.protocol import (
+    ResponsesRequest,
+    ResponsesResponse,
+    StreamingResponsesResponse,
+)
+from vllm.entrypoints.openai.responses.serving import OpenAIServingResponses
 from vllm.entrypoints.openai.utils import validate_json_request
 from vllm.entrypoints.utils import (
-    load_aware_call,
     with_cancellation,
 )
 from vllm.logger import init_logger
@@ -25,6 +29,19 @@ ENDPOINT_LOAD_METRICS_FORMAT_HEADER_LABEL = "endpoint-load-metrics-format"
 
 def responses(request: Request) -> OpenAIServingResponses | None:
     return request.app.state.openai_serving_responses
+
+
+async def _convert_stream_to_sse_events(
+    generator: AsyncGenerator[StreamingResponsesResponse, None],
+) -> AsyncGenerator[str, None]:
+    """Convert the generator to a stream of events in SSE format"""
+    async for event in generator:
+        event_type = getattr(event, "type", "unknown")
+        # https://developer.mozilla.org/en-US/docs/Web/API/Server-sent_events/Using_server-sent_events#event_stream_format
+        event_data = (
+            f"event: {event_type}\ndata: {event.model_dump_json(indent=None)}\n\n"
+        )
+        yield event_data
 
 
 @router.post(
@@ -41,7 +58,8 @@ def responses(request: Request) -> OpenAIServingResponses | None:
 async def create_responses(request: ResponsesRequest, raw_request: Request):
     handler = responses(raw_request)
     if handler is None:
-        return base(raw_request).create_error_response(
+        base_server = raw_request.app.state.openai_serving_tokenization
+        return base_server.create_error_response(
             message="The model does not support Responses API"
         )
     try:
@@ -72,7 +90,8 @@ async def retrieve_responses(
 ):
     handler = responses(raw_request)
     if handler is None:
-        return base(raw_request).create_error_response(
+        base_server = raw_request.app.state.openai_serving_tokenization
+        return base_server.create_error_response(
             message="The model does not support Responses API"
         )
 
@@ -102,7 +121,8 @@ async def retrieve_responses(
 async def cancel_responses(response_id: str, raw_request: Request):
     handler = responses(raw_request)
     if handler is None:
-        return base(raw_request).create_error_response(
+        base_server = raw_request.app.state.openai_serving_tokenization
+        return base_server.create_error_response(
             message="The model does not support Responses API"
         )
 
