@@ -9,7 +9,6 @@ from collections.abc import Callable
 from typing import Any
 
 import torch
-import torch.nn.functional as F
 
 import vllm.envs as envs
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
@@ -45,7 +44,7 @@ from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
 )
 from vllm.model_executor.layers.fused_moe.utils import (
     _resize_cache,
-    activation_without_mul,
+    apply_moe_activation,
     disable_inplace,
     moe_kernel_quantize_input,
 )
@@ -534,26 +533,38 @@ def fused_moe_kernel(
         a_ptrs += BLOCK_SIZE_K * stride_ak
         b_ptrs += BLOCK_SIZE_K * stride_bk
 
-    # Router weight multiplication MUST happen in float32 before precision
-    # conversion for numerical stability (especially critical on ROCm).
-    if MUL_ROUTED_WEIGHT:
-        moe_weight = tl.load(topk_weights_ptr + offs_token, mask=token_mask, other=0)
-        accumulator = accumulator * moe_weight[:, None]
-
+    # Dequantization for supported quantization schemes:
+    #   - int8_w8a16
+    #   - fp8_w8a8
+    #   - int8_w8a8
+    # Accumulator and scalings are in float32 to preserve numerical accuracy.
     if use_int8_w8a16:
-        accumulator = (accumulator * b_scale).to(compute_type)
-    elif use_fp8_w8a8 or use_int8_w8a8:
-        if group_k > 0 and group_n > 0:
-            accumulator = accumulator.to(compute_type)
-        else:
-            accumulator = (accumulator * a_scale * b_scale).to(compute_type)
-    else:
-        accumulator = accumulator.to(compute_type)
+        accumulator = accumulator * b_scale
+    elif (use_fp8_w8a8 or use_int8_w8a8) and not (group_k > 0 and group_n > 0):
+        accumulator = accumulator * a_scale * b_scale
 
-    # Bias is added AFTER dequantization since bias is typically stored in
-    # the output dtype and should not be scaled by quantization factors.
+    # Bias addition:
+    # Bias must be applied after dequantization:
+    #   - Since bias is typically not quantized
+    #   - Bias should not be scaled by quantization factors
     if HAS_BIAS:
-        accumulator = accumulator + bias[None, :]
+        accumulator += bias[None, :]
+
+    # Router (MoE) weight multiplication:
+    # This multiplication MUST be performed in float32 before any precision
+    # conversion to ensure numerical stability, which is especially critical
+    # on ROCm platforms.
+    if MUL_ROUTED_WEIGHT:
+        moe_weight = tl.load(
+            topk_weights_ptr + offs_token,
+            mask=token_mask,
+            other=0,
+        )
+        accumulator *= moe_weight[:, None]
+
+    # Final precision conversion:
+    # Cast once at the end to the desired compute/output dtype.
+    accumulator = accumulator.to(compute_type)
 
     # -----------------------------------------------------------
     # Write back the block of the output
@@ -1962,11 +1973,6 @@ def fused_experts(
         )
 
 
-SILU_NO_MUL: str = activation_without_mul("silu")
-GELU_NO_MUL: str = activation_without_mul("gelu")
-RELU2_NO_MUL: str = activation_without_mul("relu2")
-
-
 def _get_config_quant_dtype(
     use_fp8_w8a8: bool,
     use_int8_w8a8: bool,
@@ -2099,8 +2105,13 @@ def fused_experts_impl(
     intermediate_cache3 = cache13[: M * top_k_num * K].view(M, top_k_num, K)
 
     # This needs separate memory since it's used concurrently with cache1
+    activation_out_dim = mk.FusedMoEPermuteExpertsUnpermute.adjust_N_for_activation(
+        N, activation
+    )
     intermediate_cache2 = torch.empty(
-        (M * top_k_num, N // 2), device=hidden_states.device, dtype=hidden_states.dtype
+        (M * top_k_num, activation_out_dim),
+        device=hidden_states.device,
+        dtype=hidden_states.dtype,
     )
 
     if hidden_states.dtype == torch.bfloat16:
@@ -2240,29 +2251,9 @@ def fused_experts_impl(
             B_bias=w1_bias,
         )
 
-        # Activation function with multiplication
-        if activation == "silu":
-            torch.ops._C.silu_and_mul(
-                intermediate_cache2, intermediate_cache1.view(-1, N)
-            )
-        elif activation == "gelu":
-            torch.ops._C.gelu_and_mul(
-                intermediate_cache2, intermediate_cache1.view(-1, N)
-            )
-        elif activation == "swigluoai":
-            # alpha = 1.702, limit = 7.0
-            torch.ops._C.swigluoai_and_mul(
-                intermediate_cache2, intermediate_cache1.view(-1, N)
-            )
-        # Activation function without multiplication
-        elif activation == SILU_NO_MUL:
-            intermediate_cache2 = F.silu(intermediate_cache1.view(-1, N))
-        elif activation == GELU_NO_MUL:
-            intermediate_cache2 = F.gelu(intermediate_cache1.view(-1, N))
-        elif activation == RELU2_NO_MUL:
-            intermediate_cache2 = torch.square(F.relu(intermediate_cache1.view(-1, N)))
-        else:
-            raise ValueError(f"Unsupported FusedMoe activation: {activation}.")
+        apply_moe_activation(
+            activation, intermediate_cache2, intermediate_cache1.view(-1, N)
+        )
 
         qintermediate_cache2, a2q_scale = moe_kernel_quantize_input(
             A=intermediate_cache2,
@@ -2365,8 +2356,10 @@ class TritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
         global_num_experts: int,
         local_num_experts: int,
         expert_tokens_meta: mk.ExpertTokensMetadata | None,
+        activation: str,
     ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...]]:
-        workspace1 = (M, topk, max(N // 2, K))
+        activation_out_dim = self.adjust_N_for_activation(N, activation)
+        workspace1 = (M, topk, max(activation_out_dim, K))
         workspace2 = (M, topk, max(N, K))
         output = (M, K)
         return (workspace1, workspace2, output)
@@ -2441,8 +2434,9 @@ class TritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
 
         # Note that the output tensor might be in workspace1
         intermediate_cache1 = _resize_cache(workspace2, (num_tokens, top_k_num, N))
+        cache2_dim = self.adjust_N_for_activation(N, activation)
         intermediate_cache2 = _resize_cache(
-            workspace13, (num_tokens * top_k_num, N // 2)
+            workspace13, (num_tokens * top_k_num, cache2_dim)
         )
         intermediate_cache3 = _resize_cache(workspace2, (num_tokens, top_k_num, K))
 
@@ -2599,8 +2593,9 @@ class TritonWNA16Experts(TritonExperts):
 
         # Note that the output tensor might be in workspace1
         intermediate_cache1 = _resize_cache(workspace2, (num_tokens, top_k_num, N))
+        activation_out_dim = self.adjust_N_for_activation(N, activation)
         intermediate_cache2 = _resize_cache(
-            workspace13, (num_tokens * top_k_num, N // 2)
+            workspace13, (num_tokens * top_k_num, activation_out_dim)
         )
         intermediate_cache3 = _resize_cache(workspace2, (num_tokens, top_k_num, K))
 

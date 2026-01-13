@@ -1005,22 +1005,24 @@ class GroupCoordinator:
     def dispatch(
         self,
         hidden_states: torch.Tensor,
-        router_logits: torch.Tensor,
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
         is_sequence_parallel: bool = False,
         extra_tensors: list[torch.Tensor] | None = None,
     ) -> (
-        tuple[torch.Tensor, torch.Tensor]
-        | tuple[torch.Tensor, torch.Tensor, list[torch.Tensor]]
+        tuple[torch.Tensor, torch.Tensor, torch.Tensor]
+        | tuple[torch.Tensor, torch.Tensor, torch.Tensor, list[torch.Tensor]]
     ):
         if self.device_communicator is not None:
             return self.device_communicator.dispatch(  # type: ignore[call-arg]
                 hidden_states,
-                router_logits,
+                topk_weights,
+                topk_ids,
                 is_sequence_parallel,
                 extra_tensors,
             )
         else:
-            return hidden_states, router_logits
+            return hidden_states, topk_weights, topk_ids
 
     def combine(
         self, hidden_states, is_sequence_parallel: bool = False
@@ -1529,22 +1531,22 @@ def patch_tensor_parallel_group(tp_group: GroupCoordinator):
         _TP = old_tp_group
 
 
-def get_tensor_model_parallel_world_size():
+def get_tensor_model_parallel_world_size() -> int:
     """Return world size for the tensor model parallel group."""
     return get_tp_group().world_size
 
 
-def get_tensor_model_parallel_rank():
+def get_tensor_model_parallel_rank() -> int:
     """Return my rank for the tensor model parallel group."""
     return get_tp_group().rank_in_group
 
 
-def get_decode_context_model_parallel_world_size():
+def get_decode_context_model_parallel_world_size() -> int:
     """Return world size for the decode context model parallel group."""
     return get_dcp_group().world_size
 
 
-def get_decode_context_model_parallel_rank():
+def get_decode_context_model_parallel_rank() -> int:
     """Return my rank for the decode context model parallel group."""
     return get_dcp_group().rank_in_group
 

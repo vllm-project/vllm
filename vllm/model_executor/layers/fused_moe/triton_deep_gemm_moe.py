@@ -64,6 +64,7 @@ class TritonOrDeepGemmExperts(FallbackExperts):
         global_num_experts: int,
         local_num_experts: int,
         expert_tokens_meta: mk.ExpertTokensMetadata | None,
+        activation: str,
     ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...]]:
         # Note: the deep gemm workspaces are strictly larger than the triton
         # workspaces so we can be pessimistic here and allocate for DeepGemm
@@ -77,6 +78,7 @@ class TritonOrDeepGemmExperts(FallbackExperts):
                 global_num_experts,
                 local_num_experts,
                 expert_tokens_meta,
+                activation,
             )
         else:
             return self.fallback_experts.workspace_shapes(
@@ -87,6 +89,7 @@ class TritonOrDeepGemmExperts(FallbackExperts):
                 global_num_experts,
                 local_num_experts,
                 expert_tokens_meta,
+                activation,
             )
 
     def _select_experts_impl(

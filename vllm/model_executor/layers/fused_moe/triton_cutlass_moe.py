@@ -67,6 +67,7 @@ class TritonOrCutlassExperts(FallbackExperts):
         global_num_experts: int,
         local_num_experts: int,
         expert_tokens_meta: mk.ExpertTokensMetadata | None,
+        activation: str,
     ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...]]:
         # Small batch fallback for sm100.
         if self.is_sm100 and M <= 8:
@@ -78,6 +79,7 @@ class TritonOrCutlassExperts(FallbackExperts):
                 global_num_experts,
                 local_num_experts,
                 expert_tokens_meta,
+                activation,
             )
         else:
             return self.experts.workspace_shapes(
@@ -88,6 +90,7 @@ class TritonOrCutlassExperts(FallbackExperts):
                 global_num_experts,
                 local_num_experts,
                 expert_tokens_meta,
+                activation,
             )
 
     def _select_experts_impl(
