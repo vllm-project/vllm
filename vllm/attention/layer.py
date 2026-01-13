@@ -823,10 +823,12 @@ def unified_kv_cache_update(
                     "kv cache update"
                 )
                 token_slice = ubatch_slices[i].token_slice
+                key_slice = key[token_slice] if key is not None else None
+                value_slice = value[token_slice] if value is not None else None
                 attn_layer.impl.do_kv_cache_update(
                     attn_layer,
-                    key[token_slice],
-                    value[token_slice],
+                    key_slice,
+                    value_slice,
                     kv_cache,
                     layer_slot_mapping,
                 )
