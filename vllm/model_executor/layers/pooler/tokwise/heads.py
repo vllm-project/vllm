@@ -44,14 +44,14 @@ class TokenPoolerHead(nn.Module, ABC):
 class TokenEmbeddingPoolerHead(TokenPoolerHead):
     def __init__(
         self,
-        projector: ProjectorFn | None = None,
         head_dtype: torch.dtype | str | None = None,
+        projector: ProjectorFn | None = None,
         activation: ActivationFn | None = None,
     ) -> None:
         super().__init__()
 
-        self.projector = projector
         self.head_dtype = head_dtype
+        self.projector = projector
         self.activation = activation
 
     def get_supported_tasks(self) -> Set[PoolingTask]:
