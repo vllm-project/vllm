@@ -1302,7 +1302,6 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
             self._run_prefill_context_chunk = self._run_prefill_context_chunk_fi
             self._run_prefill_new_tokens = self._run_prefill_new_tokens_fi
             self._pad_v = False
-            # FlashInfer prefill supports FP8 with scale parameters on Blackwell
             self._supports_fp8_prefill_attn = True
         elif use_trtllm_ragged_deepseek_prefill():
             logger.debug_once("Using TRT-LLM ragged DeepSeek prefill for MLA")
@@ -1312,12 +1311,17 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
             self._run_prefill_new_tokens = self._run_prefill_new_tokens_trtllm_ragged
             self._pad_v = False
             self._supports_fp8_prefill_attn = False
+            if self.kv_cache_dtype.startswith("fp8"):
+                logger.warning_once(
+                    "TRT-LLM ragged prefill does not support FP8 prefill "
+                    "attention. FP8 KV cache is enabled but prefill will use "
+                    "FP16/BF16 precision for attention computation."
+                )
         elif use_cudnn_prefill():
             logger.debug_once("Using CUDNN prefill for MLA")
             self._run_prefill_context_chunk = self._run_prefill_context_chunk_cudnn
             self._run_prefill_new_tokens = self._run_prefill_new_tokens_cudnn
             self._pad_v = False
-            # cuDNN prefill supports FP8 with scale parameters on Blackwell
             self._supports_fp8_prefill_attn = True
         else:  # Use FlashAttention
             logger.debug_once("Using FlashAttention prefill for MLA")
@@ -1456,7 +1460,6 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
         # FlashInfer expects per-head scales with shape [num_heads]
         run_kwargs: dict = {}
         if q_descale is not None:
-            # descale has shape (num_prefills, num_heads), take first row
             run_kwargs["scale_q"] = 1.0 / q_descale[0]
         if k_descale is not None:
             run_kwargs["scale_k"] = 1.0 / k_descale[0]
@@ -1493,7 +1496,6 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
         # cuDNN expects scales with shape (1, 1, 1, 1)
         cudnn_kwargs: dict = {}
         if q_descale is not None:
-            # descale has shape (num_prefills, num_heads), take [0, 0] element
             cudnn_kwargs["q_scale"] = (1.0 / q_descale[0, 0]).view(1, 1, 1, 1)
         if k_descale is not None:
             cudnn_kwargs["k_scale"] = (1.0 / k_descale[0, 0]).view(1, 1, 1, 1)
@@ -1566,7 +1568,6 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
         # FlashInfer expects per-head scales with shape [num_heads]
         run_kwargs: dict = {}
         if q_descale is not None:
-            # descale has shape (num_prefills, num_heads), take first row
             run_kwargs["scale_q"] = 1.0 / q_descale[0]
         if k_descale is not None:
             run_kwargs["scale_k"] = 1.0 / k_descale[0]
@@ -1604,7 +1605,6 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
         # cuDNN expects scales with shape (1, 1, 1, 1)
         cudnn_kwargs: dict = {}
         if q_descale is not None:
-            # descale has shape (num_prefills, num_heads), take [0, 0] element
             cudnn_kwargs["q_scale"] = (1.0 / q_descale[0, 0]).view(1, 1, 1, 1)
         if k_descale is not None:
             cudnn_kwargs["k_scale"] = (1.0 / k_descale[0, 0]).view(1, 1, 1, 1)
@@ -1641,9 +1641,8 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
         k_descale=None,
         v_descale=None,
     ):
-        """TRT-LLM ragged attention for new tokens (causal).
-        Descale parameters are ignored - TRT-LLM does not use them.
-        """
+        """TRT-LLM ragged attention for new tokens (causal)."""
+        del q_descale, k_descale, v_descale  # unused
         from flashinfer.prefill import trtllm_ragged_attention_deepseek
 
         assert prefill.query_seq_lens is not None
@@ -1685,9 +1684,8 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
         k_descale=None,
         v_descale=None,
     ):
-        """TRT-LLM ragged attention for context chunks (non-causal).
-        Descale parameters are ignored - TRT-LLM does not use them.
-        """
+        """TRT-LLM ragged attention for context chunks (non-causal)."""
+        del q_descale, k_descale, v_descale  # unused
         from flashinfer.prefill import trtllm_ragged_attention_deepseek
 
         assert prefill.chunked_context is not None
@@ -2030,7 +2028,6 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
         attn_metadata: MLACommonMetadata,
         k_scale: torch.Tensor,
         output: torch.Tensor,
-        layer: AttentionLayer,
     ) -> None:
         # TODO (zyongye): Prefill function here
         assert attn_metadata.prefill is not None
@@ -2051,6 +2048,7 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
         )
 
         if use_fp8_attn:
+            logger.debug_once("Using FP8 prefill attention")
             fp8_dtype = torch.float8_e4m3fn
             num_prefills = attn_metadata.num_prefills
 
@@ -2214,7 +2212,6 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
                 attn_metadata,
                 layer._k_scale,
                 output=output[num_decode_tokens:],
-                layer=layer,
             )
 
         if has_decode:
