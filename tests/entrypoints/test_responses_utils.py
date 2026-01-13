@@ -425,6 +425,7 @@ class TestShouldContinueFinalMessage:
         }
         assert should_continue_final_message([dict_item]) is False
 
+
 class TestMaybeCombineReasoningAndToolCall:
     """Tests for _maybe_combine_reasoning_and_tool_call function."""
 
