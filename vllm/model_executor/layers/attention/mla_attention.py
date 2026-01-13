@@ -222,7 +222,10 @@ from vllm.v1.attention.backend import (
     CommonAttentionMetadata,
     MLAAttentionImpl,
 )
-from vllm.v1.attention.backends.fa_utils import get_flash_attn_version
+from vllm.v1.attention.backends.fa_utils import (
+    flash_attn_supports_fp8,
+    get_flash_attn_version,
+)
 from vllm.v1.attention.backends.utils import (
     get_dcp_local_seq_lens,
     get_per_layer_parameters,
@@ -1299,6 +1302,8 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
             self._run_prefill_context_chunk = self._run_prefill_context_chunk_fi
             self._run_prefill_new_tokens = self._run_prefill_new_tokens_fi
             self._pad_v = False
+            # FlashInfer prefill supports FP8 with scale parameters on Blackwell
+            self._supports_fp8_prefill_attn = True
         elif use_trtllm_ragged_deepseek_prefill():
             logger.debug_once("Using TRT-LLM ragged DeepSeek prefill for MLA")
             self._run_prefill_context_chunk = (
@@ -1306,11 +1311,14 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
             )
             self._run_prefill_new_tokens = self._run_prefill_new_tokens_trtllm_ragged
             self._pad_v = False
+            self._supports_fp8_prefill_attn = False
         elif use_cudnn_prefill():
             logger.debug_once("Using CUDNN prefill for MLA")
             self._run_prefill_context_chunk = self._run_prefill_context_chunk_cudnn
             self._run_prefill_new_tokens = self._run_prefill_new_tokens_cudnn
             self._pad_v = False
+            # cuDNN prefill supports FP8 with scale parameters on Blackwell
+            self._supports_fp8_prefill_attn = True
         else:  # Use FlashAttention
             logger.debug_once("Using FlashAttention prefill for MLA")
             self._run_prefill_context_chunk = self._run_prefill_context_chunk_fa
@@ -1338,6 +1346,11 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
                 and device_capability[0] == 9
             )
 
+            # FP8 prefill attention support (FA3 on Hopper)
+            self._supports_fp8_prefill_attn = (
+                flash_attn_supports_fp8() and self.vllm_flash_attn_version == 3
+            )
+
         self.dcp_world_size: int = -1
 
         self.chunked_prefill_workspace_size = (
@@ -1350,7 +1363,16 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
         )
 
     def _flash_attn_varlen_diff_headdims(
-        self, q, k, v, return_softmax_lse=False, softmax_scale=None, **kwargs
+        self,
+        q,
+        k,
+        v,
+        return_softmax_lse=False,
+        softmax_scale=None,
+        q_descale=None,
+        k_descale=None,
+        v_descale=None,
+        **kwargs,
     ):
         maybe_padded_v = v
         if self._pad_v:
@@ -1372,6 +1394,9 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
             k=k,
             v=maybe_padded_v,
             softmax_scale=softmax_scale,
+            q_descale=q_descale,
+            k_descale=k_descale,
+            v_descale=v_descale,
             **kwargs,
         )
 
@@ -1387,7 +1412,15 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
         return attn_out
 
     def _run_prefill_new_tokens_fa(
-        self, prefill: MLACommonPrefillMetadata, q, k, v, return_softmax_lse
+        self,
+        prefill: MLACommonPrefillMetadata,
+        q,
+        k,
+        v,
+        return_softmax_lse,
+        q_descale=None,
+        k_descale=None,
+        v_descale=None,
     ):
         return self._flash_attn_varlen_diff_headdims(
             q=q,
@@ -1400,19 +1433,42 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
             softmax_scale=self.scale,
             causal=True,
             return_softmax_lse=return_softmax_lse,
+            q_descale=q_descale,
+            k_descale=k_descale,
+            v_descale=v_descale,
         )
 
     def _run_prefill_new_tokens_fi(
-        self, prefill: MLACommonPrefillMetadata, q, k, v, return_softmax_lse
+        self,
+        prefill: MLACommonPrefillMetadata,
+        q,
+        k,
+        v,
+        return_softmax_lse,
+        q_descale=None,
+        k_descale=None,
+        v_descale=None,
     ):
         assert isinstance(prefill, FlashInferPrefillMetadata)
         assert prefill.prefill_main is not None
+
+        # Convert descales to scales for FlashInfer (scale = 1/descale)
+        # FlashInfer expects per-head scales with shape [num_heads]
+        run_kwargs: dict = {}
+        if q_descale is not None:
+            # descale has shape (num_prefills, num_heads), take first row
+            run_kwargs["scale_q"] = 1.0 / q_descale[0]
+        if k_descale is not None:
+            run_kwargs["scale_k"] = 1.0 / k_descale[0]
+        if v_descale is not None:
+            run_kwargs["scale_v"] = 1.0 / v_descale[0]
 
         ret = prefill.prefill_main.run(
             q=q,
             k=k,
             v=v,
             return_lse=return_softmax_lse,
+            **run_kwargs,
         )
 
         if isinstance(ret, tuple):
@@ -1420,10 +1476,30 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
         return ret
 
     def _run_prefill_new_tokens_cudnn(
-        self, prefill: MLACommonPrefillMetadata, q, k, v, return_softmax_lse
+        self,
+        prefill: MLACommonPrefillMetadata,
+        q,
+        k,
+        v,
+        return_softmax_lse,
+        q_descale=None,
+        k_descale=None,
+        v_descale=None,
     ):
         assert isinstance(prefill, CudnnPrefillMetadata)
         assert prefill.query_seq_lens is not None
+
+        # Convert descales to scales for cuDNN (scale = 1/descale)
+        # cuDNN expects scales with shape (1, 1, 1, 1)
+        cudnn_kwargs: dict = {}
+        if q_descale is not None:
+            # descale has shape (num_prefills, num_heads), take [0, 0] element
+            cudnn_kwargs["q_scale"] = (1.0 / q_descale[0, 0]).view(1, 1, 1, 1)
+        if k_descale is not None:
+            cudnn_kwargs["k_scale"] = (1.0 / k_descale[0, 0]).view(1, 1, 1, 1)
+        if v_descale is not None:
+            cudnn_kwargs["v_scale"] = (1.0 / v_descale[0, 0]).view(1, 1, 1, 1)
+
         output, lse = cudnn_batch_prefill_with_kv_cache(
             q=q,
             k_cache=k,
@@ -1439,13 +1515,22 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
             return_lse=True,
             # Indicates actual_seq_lens are on GPU or CPU.
             is_cuda_graph_compatible=True,
+            **cudnn_kwargs,
         )
         if return_softmax_lse:
             return output, lse
         return output
 
     def _run_prefill_context_chunk_fa(
-        self, prefill: MLACommonPrefillMetadata, chunk_idx: int, q, k, v
+        self,
+        prefill: MLACommonPrefillMetadata,
+        chunk_idx: int,
+        q,
+        k,
+        v,
+        q_descale=None,
+        k_descale=None,
+        v_descale=None,
     ):
         assert prefill.chunked_context is not None
         return self._flash_attn_varlen_diff_headdims(
@@ -1459,30 +1544,73 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
             softmax_scale=self.scale,
             causal=False,  # Context is unmasked
             return_softmax_lse=True,
+            q_descale=q_descale,
+            k_descale=k_descale,
+            v_descale=v_descale,
         )
 
     def _run_prefill_context_chunk_fi(
-        self, prefill: MLACommonPrefillMetadata, chunk_idx: int, q, k, v
+        self,
+        prefill: MLACommonPrefillMetadata,
+        chunk_idx: int,
+        q,
+        k,
+        v,
+        q_descale=None,
+        k_descale=None,
+        v_descale=None,
     ):
         assert isinstance(prefill, FlashInferPrefillMetadata)
+
+        # Convert descales to scales for FlashInfer (scale = 1/descale)
+        # FlashInfer expects per-head scales with shape [num_heads]
+        run_kwargs: dict = {}
+        if q_descale is not None:
+            # descale has shape (num_prefills, num_heads), take first row
+            run_kwargs["scale_q"] = 1.0 / q_descale[0]
+        if k_descale is not None:
+            run_kwargs["scale_k"] = 1.0 / k_descale[0]
+        if v_descale is not None:
+            run_kwargs["scale_v"] = 1.0 / v_descale[0]
 
         attn_out, lse = prefill.prefill_chunks[chunk_idx].run(
             q=q,
             k=k,
             v=v,
             return_lse=True,
+            **run_kwargs,
         )
 
         # Convert from (q_len, num_heads) to (num_heads, q_len)
         return attn_out, lse.transpose(0, 1).contiguous()
 
     def _run_prefill_context_chunk_cudnn(
-        self, prefill: MLACommonPrefillMetadata, chunk_idx: int, q, k, v
+        self,
+        prefill: MLACommonPrefillMetadata,
+        chunk_idx: int,
+        q,
+        k,
+        v,
+        q_descale=None,
+        k_descale=None,
+        v_descale=None,
     ):
         assert isinstance(prefill, CudnnPrefillMetadata)
         assert prefill.chunked_context is not None
         assert prefill.chunked_context.seq_lens[chunk_idx] is not None
         assert prefill.query_seq_lens is not None
+
+        # Convert descales to scales for cuDNN (scale = 1/descale)
+        # cuDNN expects scales with shape (1, 1, 1, 1)
+        cudnn_kwargs: dict = {}
+        if q_descale is not None:
+            # descale has shape (num_prefills, num_heads), take [0, 0] element
+            cudnn_kwargs["q_scale"] = (1.0 / q_descale[0, 0]).view(1, 1, 1, 1)
+        if k_descale is not None:
+            cudnn_kwargs["k_scale"] = (1.0 / k_descale[0, 0]).view(1, 1, 1, 1)
+        if v_descale is not None:
+            cudnn_kwargs["v_scale"] = (1.0 / v_descale[0, 0]).view(1, 1, 1, 1)
+
         return cudnn_batch_prefill_with_kv_cache(
             q=q,
             k_cache=k,
@@ -1499,12 +1627,23 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
             return_lse=True,
             # Indicates actual_seq_lens are on GPU or CPU.
             is_cuda_graph_compatible=True,
+            **cudnn_kwargs,
         )
 
     def _run_prefill_new_tokens_trtllm_ragged(
-        self, prefill: MLACommonPrefillMetadata, q, k, v, return_softmax_lse
+        self,
+        prefill: MLACommonPrefillMetadata,
+        q,
+        k,
+        v,
+        return_softmax_lse,
+        q_descale=None,
+        k_descale=None,
+        v_descale=None,
     ):
-        """TRT-LLM ragged attention for new tokens (causal)."""
+        """TRT-LLM ragged attention for new tokens (causal).
+        Descale parameters are ignored - TRT-LLM does not use them.
+        """
         from flashinfer.prefill import trtllm_ragged_attention_deepseek
 
         assert prefill.query_seq_lens is not None
@@ -1536,9 +1675,19 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
         return ret
 
     def _run_prefill_context_chunk_trtllm_ragged(
-        self, prefill: MLACommonPrefillMetadata, chunk_idx: int, q, k, v
+        self,
+        prefill: MLACommonPrefillMetadata,
+        chunk_idx: int,
+        q,
+        k,
+        v,
+        q_descale=None,
+        k_descale=None,
+        v_descale=None,
     ):
-        """TRT-LLM ragged attention for context chunks (non-causal)."""
+        """TRT-LLM ragged attention for context chunks (non-causal).
+        Descale parameters are ignored - TRT-LLM does not use them.
+        """
         from flashinfer.prefill import trtllm_ragged_attention_deepseek
 
         assert prefill.chunked_context is not None
@@ -1685,10 +1834,18 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
         kv_c_and_k_pe_cache: torch.Tensor,
         attn_metadata: MLACommonMetadata,
         k_scale: torch.Tensor,
+        q_descale: torch.Tensor | None = None,
     ):
         assert attn_metadata.prefill is not None
         prefill_metadata = attn_metadata.prefill
         assert prefill_metadata.chunked_context is not None
+
+        # Check if we should use FP8 attention for context chunks
+        use_fp8_attn = (
+            self._supports_fp8_prefill_attn
+            and self.kv_cache_dtype.startswith("fp8")
+            and q_descale is not None
+        )
 
         output = None
         iters = len(prefill_metadata.chunked_context.seq_tot)
@@ -1717,12 +1874,28 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
 
             k = self._concat_k_nope_k_pe(k_nope, k_pe)
 
+            # FP8 quantization for context K/V (Q is already in FP8 from caller)
+            k_descale_ctx = v_descale_ctx = None
+            if use_fp8_attn:
+                fp8_dtype = torch.float8_e4m3fn
+                num_prefills = attn_metadata.num_prefills
+
+                k, k_descale_ctx = dynamic_per_batched_tensor_quant(k, fp8_dtype)
+                v, v_descale_ctx = dynamic_per_batched_tensor_quant(v, fp8_dtype)
+
+                # Expand descales to required shape (num_prefills, num_heads)
+                k_descale_ctx = k_descale_ctx.expand(num_prefills, self.num_heads)
+                v_descale_ctx = v_descale_ctx.expand(num_prefills, self.num_heads)
+
             attn_output, attn_softmax_lse = self._run_prefill_context_chunk(
                 prefill=prefill_metadata,
                 chunk_idx=i,
                 q=q,
                 k=k,
                 v=v,
+                q_descale=q_descale,
+                k_descale=k_descale_ctx,
+                v_descale=v_descale_ctx,
             )
 
             if output is None:
@@ -1857,6 +2030,7 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
         attn_metadata: MLACommonMetadata,
         k_scale: torch.Tensor,
         output: torch.Tensor,
+        layer: AttentionLayer,
     ) -> None:
         # TODO (zyongye): Prefill function here
         assert attn_metadata.prefill is not None
@@ -1870,17 +2044,40 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
 
         k = self._concat_k_nope_k_pe(k_nope, k_pe)
 
+        # FP8 quantization for prefill attention (FA3 on Hopper)
+        q_descale = k_descale = v_descale = None
+        use_fp8_attn = (
+            self._supports_fp8_prefill_attn and self.kv_cache_dtype.startswith("fp8")
+        )
+
+        if use_fp8_attn:
+            fp8_dtype = torch.float8_e4m3fn
+            num_prefills = attn_metadata.num_prefills
+
+            q, q_descale = dynamic_per_batched_tensor_quant(q, fp8_dtype)
+            k, k_descale = dynamic_per_batched_tensor_quant(k, fp8_dtype)
+            v, v_descale = dynamic_per_batched_tensor_quant(v, fp8_dtype)
+
+            # Expand descales to required shape (num_prefills, num_heads)
+            q_descale = q_descale.expand(num_prefills, self.num_heads)
+            k_descale = k_descale.expand(num_prefills, self.num_heads)
+            v_descale = v_descale.expand(num_prefills, self.num_heads)
+
         output_prefill = self._run_prefill_new_tokens(
             prefill=attn_metadata.prefill,
             q=q,
             k=k,
             v=v,
             return_softmax_lse=has_context,
+            q_descale=q_descale,
+            k_descale=k_descale,
+            v_descale=v_descale,
         )
 
         if has_context:
             suffix_output, suffix_lse = output_prefill
             if self.dcp_world_size > 1:
+                # DCP does not support FP8 KV cache yet
                 context_output, context_lse = (
                     self._context_parallel_compute_prefill_context(
                         q,
@@ -1892,7 +2089,11 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
                 )
             else:
                 context_output, context_lse = self._compute_prefill_context(
-                    q, kv_c_and_k_pe_cache, attn_metadata, k_scale
+                    q,
+                    kv_c_and_k_pe_cache,
+                    attn_metadata,
+                    k_scale,
+                    q_descale=q_descale,
                 )
 
             # unpad if necessary
@@ -2013,6 +2214,7 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
                 attn_metadata,
                 layer._k_scale,
                 output=output[num_decode_tokens:],
+                layer=layer,
             )
 
         if has_decode:
