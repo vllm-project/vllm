@@ -3152,21 +3152,17 @@ class GPUModelRunner(
 
             return slot_mapping
 
-        cache_ids = list(
-            set([id for id, _ in enumerate(self.kv_cache_config.kv_cache_groups)])
-        )
         slot_mappings_by_gid = {
-            cache_id: _get_slot_mapping(cache_id) for cache_id in cache_ids
+            gid: _get_slot_mapping(gid)
+            for gid, _ in enumerate(self.kv_cache_config.kv_cache_groups)
         }
 
-        # Transform from gid-keyed to layer_name-keyed
         slot_mappings_by_layer: dict[str, torch.Tensor] = {}
         for gid, kv_cache_group in enumerate(self.kv_cache_config.kv_cache_groups):
             slot_mapping = slot_mappings_by_gid[gid]
             for layer_name in kv_cache_group.layer_names:
                 slot_mappings_by_layer[layer_name] = slot_mapping
 
-        # Handle ubatch slicing for DBO
         if ubatch_slices is not None:
             result: list[dict[str, torch.Tensor]] = []
             for ubatch in ubatch_slices:

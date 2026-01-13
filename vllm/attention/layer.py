@@ -394,7 +394,7 @@ class Attention(nn.Module, AttentionLayerBase):
             return output.view(-1, hidden_size)
         else:
             assert self.attn_backend.forward_includes_kv_cache, (
-                "Attention backend does not support kv cache"
+                "Split KV cache update not supported when output tensor not provided."
             )
             if self.use_direct_call:
                 return unified_attention(query, key, value, self.layer_name)
