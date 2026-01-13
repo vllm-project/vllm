@@ -813,7 +813,8 @@ class ChatCompletionRequest(OpenAIBaseModel):
                 )
                 s_tag_obj = structural_tag.model_dump(by_alias=True)
                 self.structured_outputs.structural_tag = json.dumps(s_tag_obj)
-
+        print("Structured outputs params:")
+        print(self.structured_outputs)
         extra_args: dict[str, Any] = self.vllm_xargs if self.vllm_xargs else {}
         if self.kv_transfer_params:
             # Pass in kv_transfer_params via extra_args

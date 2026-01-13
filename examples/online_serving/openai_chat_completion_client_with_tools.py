@@ -56,6 +56,18 @@ tools = [
                 "required": ["city", "state", "unit"],
             },
         },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_weather_forecast",
+            "description": "Get the weather forecast for a given location",
+            "parameters": {
+                "type": "object",
+                "properties": properties,
+                "required": ["city", "state", "unit"],
+            },
+        },
     }
 ]
 
@@ -65,7 +77,8 @@ messages = [
     {
         "role": "user",
         "content": (
-            "Can you tell me what the temperate will be in Dallas, in fahrenheit?"
+            "Can you tell me what the temperate will be in Dallas, in fahrenheit? "
+            "Also, can you provide a weather forecast for the next few days?"
         ),
     },
 ]
@@ -141,54 +154,54 @@ def main():
 
     print("-" * 70)
     print("Chat completion results:")
-    print(chat_completion)
+    print(chat_completion.choices[0].message.content)
     print("-" * 70)
 
-    # Stream tool calls
-    chunks = handle_tool_calls_stream(client, messages, model, tools)
-    print("-" * 70)
+    # # Stream tool calls
+    # chunks = handle_tool_calls_stream(client, messages, model, tools)
+    # print("-" * 70)
 
-    # Handle arguments from streamed tool calls
-    arguments = handle_tool_calls_arguments(chunks)
+    # # Handle arguments from streamed tool calls
+    # arguments = handle_tool_calls_arguments(chunks)
 
-    if len(arguments):
-        print(f"streamed tool call arguments: {arguments[-1]}\n")
+    # if len(arguments):
+    #     print(f"streamed tool call arguments: {arguments[-1]}\n")
 
-    print("-" * 70)
+    # print("-" * 70)
 
     # Add tool call results to the conversation
-    messages.append(
-        {
-            "role": "assistant",
-            "tool_calls": chat_completion.choices[0].message.tool_calls,
-            "reasoning": chat_completion.choices[0].message.reasoning,
-        }
-    )
+    # messages.append(
+    #     {
+    #         "role": "assistant",
+    #         "tool_calls": chat_completion.choices[0].message.tool_calls,
+    #         "reasoning": chat_completion.choices[0].message.reasoning,
+    #     }
+    # )
 
-    # Now, simulate a tool call
-    available_tools = {"get_current_weather": get_current_weather}
+    # # Now, simulate a tool call
+    # available_tools = {"get_current_weather": get_current_weather}
 
-    completion_tool_calls = chat_completion.choices[0].message.tool_calls
-    for call in completion_tool_calls:
-        tool_to_call = available_tools[call.function.name]
-        args = json.loads(call.function.arguments)
-        result = tool_to_call(**args)
-        print("tool_to_call result: ", result)
-        messages.append(
-            {
-                "role": "tool",
-                "content": result,
-                "tool_call_id": call.id,
-                "name": call.function.name,
-            }
-        )
+    # completion_tool_calls = chat_completion.choices[0].message.tool_calls
+    # for call in completion_tool_calls:
+    #     tool_to_call = available_tools[call.function.name]
+    #     args = json.loads(call.function.arguments)
+    #     result = tool_to_call(**args)
+    #     print("tool_to_call result: ", result)
+    #     messages.append(
+    #         {
+    #             "role": "tool",
+    #             "content": result,
+    #             "tool_call_id": call.id,
+    #             "name": call.function.name,
+    #         }
+    #     )
 
-    chat_completion_2 = client.chat.completions.create(
-        messages=messages, model=model, tools=tools, stream=False
-    )
-    print("Chat completion2 results:")
-    print(chat_completion_2)
-    print("-" * 70)
+    # chat_completion_2 = client.chat.completions.create(
+    #     messages=messages, model=model, tools=tools, stream=False
+    # )
+    # print("Chat completion2 results:")
+    # print(chat_completion_2)
+    # print("-" * 70)
 
 
 if __name__ == "__main__":

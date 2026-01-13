@@ -15,6 +15,7 @@ from vllm.entrypoints.openai.protocol import (
     DeltaToolCall,
     ExtractedToolCallInformation,
     FunctionCall,
+    StructuralTagResponseFormat,
     ToolCall,
 )
 from vllm.logger import init_logger
@@ -24,6 +25,33 @@ from vllm.tool_parsers.abstract_tool_parser import (
 )
 
 logger = init_logger(__name__)
+MINIMAX_M2_TOOL_CALLING_SCHEMA = {
+    "type": "structural_tag",
+    "format": {
+        "type": "triggered_tags",
+        "triggers": ["<minimax:tool_call>"],
+        "tags": [
+            {
+                "begin": "<minimax:tool_call>",
+                "content": {
+                    "type": "tags_with_separator",
+                    "separator": "\n",
+                    "tags": [
+                        # {
+                        #     "type": "tag",
+                        #     "begin": '<invoke name="get_current_weather">',
+                        #     "end": "</invoke>",
+                        #     "content": {"type": "any_text"},
+                        # },
+                    ],
+                    "at_least_one": True,
+                    "stop_after_first": False,
+                },
+                "end": "</minimax:tool_call>",
+            }
+        ],
+    },
+}
 
 
 class MinimaxM2ToolParser(ToolParser):
@@ -359,6 +387,9 @@ class MinimaxM2ToolParser(ToolParser):
         request: ChatCompletionRequest,
     ) -> ExtractedToolCallInformation:
         """Extract tool calls from complete model output (non-streaming)."""
+        return ExtractedToolCallInformation(
+            tools_called=False, tool_calls=[], content=model_output
+        )
         # Quick check
         if self.tool_call_start_token not in model_output:
             return ExtractedToolCallInformation(
@@ -774,3 +805,52 @@ class MinimaxM2ToolParser(ToolParser):
                         )
 
         return None
+
+    def prepare_structured_tags(
+        self, request: ChatCompletionRequest
+    ) -> ChatCompletionRequest | None:
+        """Prepare structured tags for MiniMax M2 tool calls."""
+        if not request.tools or len(request.tools) == 0:
+            return None
+
+        # Set the structured tags for tool calls
+        structured_tags = MINIMAX_M2_TOOL_CALLING_SCHEMA.copy()
+        for tool in request.tools:
+            if hasattr(tool, "function") and hasattr(tool.function, "name"):
+                func_tag = {
+                    "type": "tag",
+                    "begin": f'<invoke name="{tool.function.name}">',
+                    "end": "</invoke>",
+                    "content": {
+                        "type": "tags_with_separator",
+                        "separator": "\n",
+                        "tags": [],
+                        "at_least_one": False,
+                        "stop_after_first": False,
+                    },
+                }
+                # Add parameters
+                if (
+                    hasattr(tool.function, "parameters")
+                    and isinstance(tool.function.parameters, dict)
+                    and "properties" in tool.function.parameters
+                ):
+                    for param_name in tool.function.parameters["properties"]:
+                        param_tag = {
+                            "type": "tag",
+                            "begin": f'<parameter name="{param_name}">',
+                            "end": "</parameter>",
+                            # "content": {
+                            #     "type": "const_string",
+                            #     "value": "...",
+                            # },  # debug
+                            "content": {"type": "any_text"},
+                        }
+                        func_tag["content"]["tags"].append(param_tag)
+
+                structured_tags["format"]["tags"][0]["content"]["tags"].append(func_tag)
+        request.response_format = StructuralTagResponseFormat(
+            type="structural_tag", format=structured_tags["format"]
+        )
+        print(structured_tags)
+        return request
