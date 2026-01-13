@@ -3,9 +3,8 @@
 
 # Adapted from
 # https://github.com/lm-sys/FastChat/blob/168ccc29d3f7edc50823016105c024fe2282732a/fastchat/protocol/openai_api_protocol.py
-import json
 import time
-from typing import Annotated, Any, ClassVar, Literal, TypeAlias
+from typing import Any, Literal, TypeAlias
 
 import torch
 from openai.types.responses import (
@@ -40,12 +39,21 @@ from openai.types.responses import ResponseCreatedEvent as OpenAIResponseCreated
 from openai.types.responses import (
     ResponseInProgressEvent as OpenAIResponseInProgressEvent,
 )
+from openai.types.responses.tool import Tool
+from openai_harmony import Message as OpenAIHarmonyMessage
+
+# Backward compatibility for OpenAI client versions
+try:  # For older openai versions (< 1.100.0)
+    from openai.types.responses import ResponseTextConfig
+except ImportError:  # For newer openai versions (>= 1.100.0)
+    from openai.types.responses import ResponseFormatTextConfig as ResponseTextConfig
+
+from openai.types.responses.response import IncompleteDetails, ToolChoice
 from openai.types.responses.response_reasoning_item import (
     Content as ResponseReasoningTextContent,
 )
+from openai.types.shared import Metadata, Reasoning
 from pydantic import (
-    BaseModel,
-    ConfigDict,
     Field,
     ValidationError,
     field_serializer,
@@ -54,24 +62,11 @@ from pydantic import (
 
 from vllm.entrypoints.chat_utils import ChatCompletionMessageParam
 from vllm.entrypoints.openai.engine.protocol import (
-    AnyResponseFormat,
-    DeltaMessage,
-    FunctionCall,
-    FunctionDefinition,
-    LegacyStructuralTagResponseFormat,
-    LogitsProcessors,
     OpenAIBaseModel,
-    StreamOptions,
-    StructuralTagResponseFormat,
-    ToolCall,
-    UsageInfo,
-    get_logits_processors,
 )
 from vllm.exceptions import VLLMValidationError
 from vllm.logger import init_logger
-from vllm.logprobs import Logprob
 from vllm.sampling_params import (
-    BeamSearchParams,
     RequestOutputKind,
     SamplingParams,
     StructuredOutputsParams,
@@ -79,9 +74,6 @@ from vllm.sampling_params import (
 from vllm.utils import random_uuid
 
 logger = init_logger(__name__)
-
-
-_LONG_INFO = torch.iinfo(torch.long)
 
 
 class InputTokensDetails(OpenAIBaseModel):
@@ -137,203 +129,6 @@ class ResponseRawMessageAndToken(OpenAIBaseModel):
 ResponseInputOutputMessage: TypeAlias = (
     list[ChatCompletionMessageParam] | list[ResponseRawMessageAndToken]
 )
-
-
-class ResponsesResponse(OpenAIBaseModel):
-    id: str = Field(default_factory=lambda: f"resp_{random_uuid()}")
-    created_at: int = Field(default_factory=lambda: int(time.time()))
-    # error: Optional[ResponseError] = None
-    incomplete_details: IncompleteDetails | None = None
-    instructions: str | None = None
-    metadata: Metadata | None = None
-    model: str
-    object: Literal["response"] = "response"
-    output: list[ResponseOutputItem]
-    parallel_tool_calls: bool
-    temperature: float
-    tool_choice: ToolChoice
-    tools: list[Tool]
-    top_p: float
-    background: bool
-    max_output_tokens: int
-    max_tool_calls: int | None = None
-    previous_response_id: str | None = None
-    prompt: ResponsePrompt | None = None
-    reasoning: Reasoning | None = None
-    service_tier: Literal["auto", "default", "flex", "scale", "priority"]
-    status: ResponseStatus
-    text: ResponseTextConfig | None = None
-    top_logprobs: int | None = None
-    truncation: Literal["auto", "disabled"]
-    usage: ResponseUsage | None = None
-    user: str | None = None
-
-    # --8<-- [start:responses-response-extra-params]
-    # These are populated when enable_response_messages is set to True
-    # NOTE: custom serialization is needed
-    # see serialize_input_messages and serialize_output_messages
-    input_messages: ResponseInputOutputMessage | None = Field(
-        default=None,
-        description=(
-            "If enable_response_messages, we can show raw token input to model."
-        ),
-    )
-    output_messages: ResponseInputOutputMessage | None = Field(
-        default=None,
-        description=(
-            "If enable_response_messages, we can show raw token output of model."
-        ),
-    )
-    # --8<-- [end:responses-response-extra-params]
-
-    # NOTE: openAI harmony doesn't serialize TextContent properly,
-    # TODO: this fixes for TextContent, but need to verify for tools etc
-    # https://github.com/openai/harmony/issues/78
-    @field_serializer("output_messages", when_used="json")
-    def serialize_output_messages(self, msgs, _info):
-        return serialize_messages(msgs)
-
-    # NOTE: openAI harmony doesn't serialize TextContent properly, this fixes it
-    # https://github.com/openai/harmony/issues/78
-    @field_serializer("input_messages", when_used="json")
-    def serialize_input_messages(self, msgs, _info):
-        return serialize_messages(msgs)
-
-    @classmethod
-    def from_request(
-        cls,
-        request: ResponsesRequest,
-        sampling_params: SamplingParams,
-        model_name: str,
-        created_time: int,
-        output: list[ResponseOutputItem],
-        status: ResponseStatus,
-        usage: ResponseUsage | None = None,
-        input_messages: ResponseInputOutputMessage | None = None,
-        output_messages: ResponseInputOutputMessage | None = None,
-    ) -> "ResponsesResponse":
-        incomplete_details: IncompleteDetails | None = None
-        if status == "incomplete":
-            incomplete_details = IncompleteDetails(reason="max_output_tokens")
-        # TODO: implement the other reason for incomplete_details,
-        # which is content_filter
-        # incomplete_details = IncompleteDetails(reason='content_filter')
-        return cls(
-            id=request.request_id,
-            created_at=created_time,
-            incomplete_details=incomplete_details,
-            instructions=request.instructions,
-            metadata=request.metadata,
-            model=model_name,
-            output=output,
-            input_messages=input_messages,
-            output_messages=output_messages,
-            parallel_tool_calls=request.parallel_tool_calls,
-            temperature=sampling_params.temperature,
-            tool_choice=request.tool_choice,
-            tools=request.tools,
-            top_p=sampling_params.top_p,
-            background=request.background,
-            max_output_tokens=sampling_params.max_tokens,
-            max_tool_calls=request.max_tool_calls,
-            previous_response_id=request.previous_response_id,
-            prompt=request.prompt,
-            reasoning=request.reasoning,
-            service_tier=request.service_tier,
-            status=status,
-            text=request.text,
-            top_logprobs=sampling_params.logprobs,
-            truncation=request.truncation,
-            user=request.user,
-            usage=usage,
-        )
-
-
-# TODO: this code can be removed once
-# https://github.com/openai/openai-python/issues/2634 has been resolved
-class ResponseReasoningPartDoneEvent(OpenAIBaseModel):
-    content_index: int
-    """The index of the content part that is done."""
-
-    item_id: str
-    """The ID of the output item that the content part was added to."""
-
-    output_index: int
-    """The index of the output item that the content part was added to."""
-
-    part: ResponseReasoningTextContent
-    """The content part that is done."""
-
-    sequence_number: int
-    """The sequence number of this event."""
-
-    type: Literal["response.reasoning_part.done"]
-    """The type of the event. Always `response.reasoning_part.done`."""
-
-
-# TODO: this code can be removed once
-# https://github.com/openai/openai-python/issues/2634 has been resolved
-class ResponseReasoningPartAddedEvent(OpenAIBaseModel):
-    content_index: int
-    """The index of the content part that is done."""
-
-    item_id: str
-    """The ID of the output item that the content part was added to."""
-
-    output_index: int
-    """The index of the output item that the content part was added to."""
-
-    part: ResponseReasoningTextContent
-    """The content part that is done."""
-
-    sequence_number: int
-    """The sequence number of this event."""
-
-    type: Literal["response.reasoning_part.added"]
-    """The type of the event. Always `response.reasoning_part.added`."""
-
-
-# vLLM Streaming Events
-# Note: we override the response type with the vLLM ResponsesResponse type
-class ResponseCompletedEvent(OpenAIResponseCompletedEvent):
-    response: ResponsesResponse  # type: ignore[override]
-
-
-class ResponseCreatedEvent(OpenAIResponseCreatedEvent):
-    response: ResponsesResponse  # type: ignore[override]
-
-
-class ResponseInProgressEvent(OpenAIResponseInProgressEvent):
-    response: ResponsesResponse  # type: ignore[override]
-
-
-StreamingResponsesResponse: TypeAlias = (
-    ResponseCreatedEvent
-    | ResponseInProgressEvent
-    | ResponseCompletedEvent
-    | ResponseOutputItemAddedEvent
-    | ResponseOutputItemDoneEvent
-    | ResponseContentPartAddedEvent
-    | ResponseContentPartDoneEvent
-    | ResponseReasoningTextDeltaEvent
-    | ResponseReasoningTextDoneEvent
-    | ResponseReasoningPartAddedEvent
-    | ResponseReasoningPartDoneEvent
-    | ResponseCodeInterpreterCallInProgressEvent
-    | ResponseCodeInterpreterCallCodeDeltaEvent
-    | ResponseWebSearchCallInProgressEvent
-    | ResponseWebSearchCallSearchingEvent
-    | ResponseWebSearchCallCompletedEvent
-    | ResponseCodeInterpreterCallCodeDoneEvent
-    | ResponseCodeInterpreterCallInterpretingEvent
-    | ResponseCodeInterpreterCallCompletedEvent
-    | ResponseMcpCallArgumentsDeltaEvent
-    | ResponseMcpCallArgumentsDoneEvent
-    | ResponseMcpCallInProgressEvent
-    | ResponseMcpCallCompletedEvent
-)
-
-
 ResponseInputOutputItem: TypeAlias = ResponseInputItemParam | ResponseOutputItem
 
 
@@ -563,3 +358,198 @@ class ResponsesRequest(OpenAIBaseModel):
 
         data["input"] = processed_input
         return data
+
+
+class ResponsesResponse(OpenAIBaseModel):
+    id: str = Field(default_factory=lambda: f"resp_{random_uuid()}")
+    created_at: int = Field(default_factory=lambda: int(time.time()))
+    # error: Optional[ResponseError] = None
+    incomplete_details: IncompleteDetails | None = None
+    instructions: str | None = None
+    metadata: Metadata | None = None
+    model: str
+    object: Literal["response"] = "response"
+    output: list[ResponseOutputItem]
+    parallel_tool_calls: bool
+    temperature: float
+    tool_choice: ToolChoice
+    tools: list[Tool]
+    top_p: float
+    background: bool
+    max_output_tokens: int
+    max_tool_calls: int | None = None
+    previous_response_id: str | None = None
+    prompt: ResponsePrompt | None = None
+    reasoning: Reasoning | None = None
+    service_tier: Literal["auto", "default", "flex", "scale", "priority"]
+    status: ResponseStatus
+    text: ResponseTextConfig | None = None
+    top_logprobs: int | None = None
+    truncation: Literal["auto", "disabled"]
+    usage: ResponseUsage | None = None
+    user: str | None = None
+
+    # --8<-- [start:responses-response-extra-params]
+    # These are populated when enable_response_messages is set to True
+    # NOTE: custom serialization is needed
+    # see serialize_input_messages and serialize_output_messages
+    input_messages: ResponseInputOutputMessage | None = Field(
+        default=None,
+        description=(
+            "If enable_response_messages, we can show raw token input to model."
+        ),
+    )
+    output_messages: ResponseInputOutputMessage | None = Field(
+        default=None,
+        description=(
+            "If enable_response_messages, we can show raw token output of model."
+        ),
+    )
+    # --8<-- [end:responses-response-extra-params]
+
+    # NOTE: openAI harmony doesn't serialize TextContent properly,
+    # TODO: this fixes for TextContent, but need to verify for tools etc
+    # https://github.com/openai/harmony/issues/78
+    @field_serializer("output_messages", when_used="json")
+    def serialize_output_messages(self, msgs, _info):
+        return serialize_messages(msgs)
+
+    # NOTE: openAI harmony doesn't serialize TextContent properly, this fixes it
+    # https://github.com/openai/harmony/issues/78
+    @field_serializer("input_messages", when_used="json")
+    def serialize_input_messages(self, msgs, _info):
+        return serialize_messages(msgs)
+
+    @classmethod
+    def from_request(
+        cls,
+        request: ResponsesRequest,
+        sampling_params: SamplingParams,
+        model_name: str,
+        created_time: int,
+        output: list[ResponseOutputItem],
+        status: ResponseStatus,
+        usage: ResponseUsage | None = None,
+        input_messages: ResponseInputOutputMessage | None = None,
+        output_messages: ResponseInputOutputMessage | None = None,
+    ) -> "ResponsesResponse":
+        incomplete_details: IncompleteDetails | None = None
+        if status == "incomplete":
+            incomplete_details = IncompleteDetails(reason="max_output_tokens")
+        # TODO: implement the other reason for incomplete_details,
+        # which is content_filter
+        # incomplete_details = IncompleteDetails(reason='content_filter')
+        return cls(
+            id=request.request_id,
+            created_at=created_time,
+            incomplete_details=incomplete_details,
+            instructions=request.instructions,
+            metadata=request.metadata,
+            model=model_name,
+            output=output,
+            input_messages=input_messages,
+            output_messages=output_messages,
+            parallel_tool_calls=request.parallel_tool_calls,
+            temperature=sampling_params.temperature,
+            tool_choice=request.tool_choice,
+            tools=request.tools,
+            top_p=sampling_params.top_p,
+            background=request.background,
+            max_output_tokens=sampling_params.max_tokens,
+            max_tool_calls=request.max_tool_calls,
+            previous_response_id=request.previous_response_id,
+            prompt=request.prompt,
+            reasoning=request.reasoning,
+            service_tier=request.service_tier,
+            status=status,
+            text=request.text,
+            top_logprobs=sampling_params.logprobs,
+            truncation=request.truncation,
+            user=request.user,
+            usage=usage,
+        )
+
+
+# TODO: this code can be removed once
+# https://github.com/openai/openai-python/issues/2634 has been resolved
+class ResponseReasoningPartDoneEvent(OpenAIBaseModel):
+    content_index: int
+    """The index of the content part that is done."""
+
+    item_id: str
+    """The ID of the output item that the content part was added to."""
+
+    output_index: int
+    """The index of the output item that the content part was added to."""
+
+    part: ResponseReasoningTextContent
+    """The content part that is done."""
+
+    sequence_number: int
+    """The sequence number of this event."""
+
+    type: Literal["response.reasoning_part.done"]
+    """The type of the event. Always `response.reasoning_part.done`."""
+
+
+# TODO: this code can be removed once
+# https://github.com/openai/openai-python/issues/2634 has been resolved
+class ResponseReasoningPartAddedEvent(OpenAIBaseModel):
+    content_index: int
+    """The index of the content part that is done."""
+
+    item_id: str
+    """The ID of the output item that the content part was added to."""
+
+    output_index: int
+    """The index of the output item that the content part was added to."""
+
+    part: ResponseReasoningTextContent
+    """The content part that is done."""
+
+    sequence_number: int
+    """The sequence number of this event."""
+
+    type: Literal["response.reasoning_part.added"]
+    """The type of the event. Always `response.reasoning_part.added`."""
+
+
+# vLLM Streaming Events
+# Note: we override the response type with the vLLM ResponsesResponse type
+class ResponseCompletedEvent(OpenAIResponseCompletedEvent):
+    response: ResponsesResponse  # type: ignore[override]
+
+
+class ResponseCreatedEvent(OpenAIResponseCreatedEvent):
+    response: ResponsesResponse  # type: ignore[override]
+
+
+class ResponseInProgressEvent(OpenAIResponseInProgressEvent):
+    response: ResponsesResponse  # type: ignore[override]
+
+
+StreamingResponsesResponse: TypeAlias = (
+    ResponseCreatedEvent
+    | ResponseInProgressEvent
+    | ResponseCompletedEvent
+    | ResponseOutputItemAddedEvent
+    | ResponseOutputItemDoneEvent
+    | ResponseContentPartAddedEvent
+    | ResponseContentPartDoneEvent
+    | ResponseReasoningTextDeltaEvent
+    | ResponseReasoningTextDoneEvent
+    | ResponseReasoningPartAddedEvent
+    | ResponseReasoningPartDoneEvent
+    | ResponseCodeInterpreterCallInProgressEvent
+    | ResponseCodeInterpreterCallCodeDeltaEvent
+    | ResponseWebSearchCallInProgressEvent
+    | ResponseWebSearchCallSearchingEvent
+    | ResponseWebSearchCallCompletedEvent
+    | ResponseCodeInterpreterCallCodeDoneEvent
+    | ResponseCodeInterpreterCallInterpretingEvent
+    | ResponseCodeInterpreterCallCompletedEvent
+    | ResponseMcpCallArgumentsDeltaEvent
+    | ResponseMcpCallArgumentsDoneEvent
+    | ResponseMcpCallInProgressEvent
+    | ResponseMcpCallCompletedEvent
+)

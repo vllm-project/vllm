@@ -49,8 +49,6 @@ from vllm.entrypoints.openai.engine.protocol import (
     CompletionResponse,
     ErrorInfo,
     ErrorResponse,
-    ResponsesRequest,
-    ResponsesResponse,
     StreamingResponsesResponse,
     TranscriptionRequest,
     TranscriptionResponseVariant,
@@ -59,12 +57,12 @@ from vllm.entrypoints.openai.engine.protocol import (
 )
 from vllm.entrypoints.openai.engine.serving import OpenAIServing
 from vllm.entrypoints.openai.orca_metrics import metrics_header
+from vllm.entrypoints.openai.responses.serving import OpenAIServingResponses
 from vllm.entrypoints.openai.serving_completion import OpenAIServingCompletion
 from vllm.entrypoints.openai.serving_models import (
     BaseModelPath,
     OpenAIServingModels,
 )
-from vllm.entrypoints.openai.responses.serving import OpenAIServingResponses
 from vllm.entrypoints.openai.serving_transcription import (
     OpenAIServingTranscription,
     OpenAIServingTranslation,

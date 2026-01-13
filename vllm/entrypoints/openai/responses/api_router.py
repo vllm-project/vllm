@@ -7,11 +7,7 @@ from http import HTTPStatus
 from fastapi import APIRouter, Depends, FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
-from vllm.entrypoints.openai.chat_completion.protocol import (
-    ChatCompletionRequest,
-    ChatCompletionResponse,
-)
-from vllm.entrypoints.openai.chat_completion.serving import OpenAIServingChat
+
 from vllm.entrypoints.openai.engine.protocol import ErrorResponse
 from vllm.entrypoints.openai.orca_metrics import metrics_header
 from vllm.entrypoints.openai.utils import validate_json_request
