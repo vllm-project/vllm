@@ -1919,12 +1919,14 @@ class FailingNixlWrapper(FakeNixlWrapper):
         ("transfer_exception", {"fail_transfer_exception": True}, True),
     ],
 )
+@pytest.mark.parametrize("enable_hma", [False])
 def test_transfer_failure_logging(
     default_vllm_config,
     dist_init,
     failure_type,
     wrapper_config,
     needs_get_finished,
+    enable_hma,
 ):
     """Test that transfer failures are logged with structured context.
 
@@ -1941,7 +1943,11 @@ def test_transfer_failure_logging(
 
     vllm_config = create_vllm_config()
 
-    connector = NixlConnector(vllm_config, KVConnectorRole.WORKER)
+    connector = NixlConnector(
+        vllm_config,
+        KVConnectorRole.WORKER,
+        make_kv_cache_config(block_size=16, hma_enabled=enable_hma),
+    )
     connector.connector_worker = FakeNixlConnectorWorker(
         vllm_config, connector.engine_id, hand_shake_latency=0.0
     )
@@ -1954,8 +1960,16 @@ def test_transfer_failure_logging(
 
     # For notification_failed, we need empty local blocks
     # (full cache hit path to trigger send_notif)
-    local_blocks = [] if failure_type == "notification_failed" else [10, 11, 12]
-    remote_blocks = [20, 21, 22]
+    if enable_hma:
+        # HMA enabled: multiple groups (FA + SW)
+        local_blocks = (
+            () if failure_type == "notification_failed" else ([10, 11, 12], [13, 14])
+        )
+        remote_blocks = [[20, 21, 22], [23, 24]]
+    else:
+        # HMA disabled: single group
+        local_blocks = () if failure_type == "notification_failed" else ([10, 11, 12],)
+        remote_blocks = [[20, 21, 22]]
 
     metadata = NixlConnectorMetadata()
     metadata.add_new_req_to_recv(

@@ -36,6 +36,7 @@ from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheConfig,
     KVCacheGroupSpec,
+    SlidingWindowSpec,
 )
 from vllm.v1.outputs import KVConnectorOutput, ModelRunnerOutput
 from vllm.v1.request import Request
@@ -410,3 +411,35 @@ KVConnectorFactory.register_connector(
 KVConnectorFactory.register_connector(
     "MockKVConnector", __name__, MockKVConnector.__name__
 )
+
+
+def make_kv_cache_config(
+    block_size: int, hma_enabled: bool = False, sw_size: int = 128
+) -> KVCacheConfig:
+    kv_cache_groups = [
+        KVCacheGroupSpec(
+            ["layer0", "layer2"],
+            FullAttentionSpec(
+                block_size=block_size,
+                num_kv_heads=4,
+                head_size=16,
+                dtype=torch.float16,
+            ),
+        )
+    ]
+    if hma_enabled:
+        kv_cache_groups.append(
+            KVCacheGroupSpec(
+                ["layer1", "layer3"],
+                SlidingWindowSpec(
+                    block_size=block_size,
+                    num_kv_heads=4,
+                    head_size=16,
+                    dtype=torch.float16,
+                    sliding_window=sw_size,
+                ),
+            )
+        )
+    return KVCacheConfig(
+        num_blocks=100, kv_cache_tensors=[], kv_cache_groups=kv_cache_groups
+    )

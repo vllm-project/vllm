@@ -27,8 +27,8 @@ from vllm.distributed.kv_transfer.kv_connector.utils import (
     BlockIds,
     EngineId,
     TpKVTopology,
-    get_current_attn_backend,
     get_blocks_in_fa_kv_group,
+    get_current_attn_backend,
     kv_postprocess_blksize_and_layout_on_receive,
     kv_postprocess_blksize_on_receive,
     kv_postprocess_layout_on_receive,
@@ -1280,9 +1280,15 @@ class NixlConnectorWorker:
                     "remote_request_id": meta.remote.request_id,
                     "remote_host": meta.remote.host,
                     "remote_port": meta.remote.port,
-                    "num_local_blocks": len(meta.local_block_ids),
-                    "num_remote_blocks": len(meta.remote.block_ids),
-                    "local_block_ids_sample": meta.local_block_ids[:10],
+                    "num_local_blocks": sum(
+                        len(group) for group in meta.local_block_ids
+                    ),
+                    "num_remote_blocks": sum(
+                        len(group) for group in meta.remote.block_ids
+                    ),
+                    "local_block_ids_sample": meta.local_block_ids[0][:10]
+                    if meta.local_block_ids
+                    else [],
                 }
             )
 
