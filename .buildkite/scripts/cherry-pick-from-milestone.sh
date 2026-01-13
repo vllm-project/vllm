@@ -136,9 +136,16 @@ log_info "Fetching merged PRs from milestone '${MILESTONE}'..."
 PR_DATA=$(mktemp)
 trap "rm -f $PR_DATA" EXIT
 
-gh pr list --state merged --search "milestone:${MILESTONE}" \
+if ! gh pr list --state merged --search "milestone:${MILESTONE}" \
     --json number,title,mergeCommit,mergedAt \
-    --jq 'sort_by(.mergedAt) | .[] | "\(.mergeCommit.oid)\t\(.number)\t\(.title)"' > "$PR_DATA"
+    --jq 'sort_by(.mergedAt) | .[] | "\(.mergeCommit.oid)\t\(.number)\t\(.title)"' > "$PR_DATA" 2>/dev/null; then
+    log_error "Failed to fetch PRs from milestone '${MILESTONE}'"
+    log_error "This could be due to:"
+    log_error "  - Milestone does not exist"
+    log_error "  - Network/authentication issues"
+    log_error "  - Invalid milestone name format"
+    exit 1
+fi
 
 if [[ ! -s "$PR_DATA" ]]; then
     log_warn "No merged PRs found for milestone '${MILESTONE}'"
