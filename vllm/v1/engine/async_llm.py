@@ -406,7 +406,7 @@ class AsyncLLM(EngineClient):
         request_id: str,
         input_stream: AsyncGenerator[StreamingInput, None],
         streaming_done: asyncio.Event,
-    ) -> RequestOutputCollector:
+    ) -> tuple[RequestOutputCollector, asyncio.Task | None]:
         """Handle async generator input stream for streaming sessions."""
 
         first_input = await input_stream.__anext__()
@@ -444,11 +444,12 @@ class AsyncLLM(EngineClient):
                 finally:
                     streaming_done.set()
 
-            asyncio.create_task(process_remaining())
+            input_task = asyncio.create_task(process_remaining())
         else:
             streaming_done.set()
+            input_task = None
 
-        return queue
+        return queue, input_task
 
     # TODO: we should support multiple prompts in one call, as you
     # can do with LLM.generate. So that for multi-prompt completion
@@ -489,10 +490,11 @@ class AsyncLLM(EngineClient):
 
         q: RequestOutputCollector | None = None
         streaming_done: asyncio.Event | None = None
+        input_task: asyncio.Task | None = None
         try:
             if isinstance(prompt, AsyncGenerator):
                 streaming_done = asyncio.Event()
-                q = await self._add_streaming_request(
+                q, input_task = await self._add_streaming_request(
                     request_id, prompt, streaming_done
                 )
             else:
@@ -516,6 +518,13 @@ class AsyncLLM(EngineClient):
             # The output_handler task pushes items into the queue.
             # This task pulls from the queue and yields to caller.
             while True:
+                if (
+                    input_task is not None
+                    and input_task.done()
+                    and (exc := input_task.exception())
+                ):
+                    raise exc
+
                 # Note: drain queue without await if possible (avoids
                 # task switching under load which helps performance).
                 out = q.get_nowait() or await q.get()
@@ -532,6 +541,8 @@ class AsyncLLM(EngineClient):
         # is cancelled or the generator is garbage collected. So,
         # we abort the request if we end up here.
         except (asyncio.CancelledError, GeneratorExit):
+            if input_task is not None:
+                input_task.cancel()
             if q is not None:
                 await self.abort(q.request_id, internal=True)
             if self.log_requests:
@@ -540,18 +551,24 @@ class AsyncLLM(EngineClient):
 
         # Engine is dead. Do not abort since we shut down.
         except EngineDeadError:
+            if input_task is not None:
+                input_task.cancel()
             if self.log_requests:
                 logger.info("Request %s failed (engine dead).", request_id)
             raise
 
         # Request validation error.
         except ValueError as e:
+            if input_task is not None:
+                input_task.cancel()
             if self.log_requests:
                 logger.info("Request %s failed (bad request): %s.", request_id, e)
             raise
 
         # Unexpected error in the generate() task (possibly recoverable).
         except Exception as e:
+            if input_task is not None:
+                input_task.cancel()
             if q is not None:
                 await self.abort(q.request_id, internal=True)
             if self.log_requests:
