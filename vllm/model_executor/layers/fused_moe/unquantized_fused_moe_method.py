@@ -312,9 +312,9 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         if (
             layer.enable_eplb is not False
-            or layer.expert_load_view is not None
-            or layer.logical_to_physical_map is not None
-            or layer.logical_replica_count is not None
+            or layer.eplb_state.expert_load_view is not None
+            or layer.eplb_state.logical_to_physical_map is not None
+            or layer.eplb_state.logical_replica_count is not None
         ):
             raise NotImplementedError("Expert load balancing is not supported for CPU.")
 
@@ -346,9 +346,9 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         if (
             layer.enable_eplb is not False
-            or layer.expert_load_view is not None
-            or layer.logical_to_physical_map is not None
-            or layer.logical_replica_count is not None
+            or layer.eplb_state.expert_load_view is not None
+            or layer.eplb_state.logical_to_physical_map is not None
+            or layer.eplb_state.logical_replica_count is not None
         ):
             raise NotImplementedError("Expert load balancing is not supported for XPU.")
         return layer.ipex_fusion(

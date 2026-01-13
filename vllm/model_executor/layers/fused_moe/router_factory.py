@@ -88,7 +88,7 @@ def create_fused_moe_router(
 
     routing_strategy = envs.VLLM_MOE_ROUTING_SIMULATION_STRATEGY
     if routing_strategy != "":
-        router = RoutingSimulatorRouter(
+        router: FusedMoERouter = RoutingSimulatorRouter(
             top_k=top_k,
             global_num_experts=global_num_experts,
             eplb_state=eplb_state,

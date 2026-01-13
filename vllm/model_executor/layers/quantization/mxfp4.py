@@ -936,9 +936,9 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
             layer.apply_router_weight_on_input,
             layer.scoring_func,
             layer.activation,
-            layer.expert_load_view,
-            layer.logical_to_physical_map,
-            layer.logical_replica_count,
+            layer.eplb_state.expert_load_view,
+            layer.eplb_state.logical_to_physical_map,
+            layer.eplb_state.logical_replica_count,
         ), "MXFP4 are not supported with this configuration."
 
         if (
