@@ -20,6 +20,7 @@ from typing import (
 )
 
 import numpy as np
+from PIL.Image import Image
 from typing_extensions import NotRequired, TypeVar
 
 from vllm.utils.collection_utils import full_groupby, is_list_of
@@ -29,7 +30,6 @@ from vllm.utils.jsontree import json_map_leaves
 if TYPE_CHECKING:
     import torch
     import torch.types
-    from PIL.Image import Image
     from transformers.feature_extraction_utils import BatchFeature
 
     from .base import MediaWithBytes
@@ -37,7 +37,6 @@ if TYPE_CHECKING:
 
 else:
     torch = LazyLoader("torch", globals(), "torch")
-    from PIL.Image import Image
 
 _T = TypeVar("_T")
 

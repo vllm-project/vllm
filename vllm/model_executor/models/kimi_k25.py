@@ -16,7 +16,6 @@ from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Annotated, Any, Literal
 
-import PIL
 import torch
 from torch import nn
 from transformers import BatchFeature
@@ -25,7 +24,7 @@ from transformers.processing_utils import ProcessorMixin
 from vllm.config import VllmConfig
 from vllm.distributed import get_pp_group
 from vllm.logger import init_logger
-from vllm.model_executor.layers.fused_moe import FusedMoE
+from vllm.model_executor.layers.fused_moe import SharedFusedMoE
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 from vllm.model_executor.model_loader.weight_utils import (
@@ -181,17 +180,8 @@ class KimiK25DummyInputsBuilder(BaseDummyInputsBuilder[KimiK25ProcessingInfo]):
         num_media = mm_counts.get("vision_chunk", 0)
         return [self.media_token_id] * num_media
 
-    def get_dummy_image(
-        self, height: int, width: int, num_images: int
-    ) -> list[PIL.Image.Image]:
-        images = []
-        for _ in range(num_images):
-            pil_image = PIL.Image.new("RGB", (width, height))
-            images.append(pil_image)
-        return images
-
     def get_dummy_mm_items(self):
-        dummy_videos = self.get_dummy_image(
+        dummy_videos = self._get_dummy_images(
             height=MaxImageTokenMeta.height,
             width=MaxImageTokenMeta.width,
             num_images=self.frame_per_chunk,
@@ -206,7 +196,7 @@ class KimiK25DummyInputsBuilder(BaseDummyInputsBuilder[KimiK25ProcessingInfo]):
 
         image_dummy_item = VisionChunkImage(
             type="image",
-            image=self.get_dummy_image(
+            image=self._get_dummy_images(
                 height=MaxImageTokenMeta.height,
                 width=MaxImageTokenMeta.width,
                 num_images=1,
@@ -454,6 +444,20 @@ class KimiK25ForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP)
         logits = self.logits_processor(self.lm_head, hidden_states, **kwargs)
         return logits
 
+    def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:
+        # Params for weights, fp8 weight scales, fp8 activation scales
+        # (param_name, weight_name, expert_id, shard_id)
+        config = self.config.text_config
+        if not getattr(config, "n_routed_experts", None):
+            return []
+        return SharedFusedMoE.make_expert_params_mapping(
+            ckpt_gate_proj_name="gate_proj",
+            ckpt_down_proj_name="down_proj",
+            ckpt_up_proj_name="up_proj",
+            num_experts=config.n_routed_experts,
+            num_redundant_experts=0,
+        )
+
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
         config = self.config.text_config
         _KEYS_TO_MODIFY_MAPPING = {
@@ -475,15 +479,7 @@ class KimiK25ForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP)
                 (".fused_qkv_a_proj", ".q_a_proj", 0),
                 (".fused_qkv_a_proj", ".kv_a_proj_with_mqa", 1),
             ]
-        if getattr(config, "n_routed_experts", None):
-            expert_params_mapping = FusedMoE.make_expert_params_mapping(
-                ckpt_gate_proj_name="gate_proj",
-                ckpt_down_proj_name="down_proj",
-                ckpt_up_proj_name="up_proj",
-                num_experts=config.n_routed_experts,
-            )
-        else:
-            expert_params_mapping = []
+        expert_params_mapping = self.get_expert_mapping()
 
         params_dict = dict(self.named_parameters())
 
