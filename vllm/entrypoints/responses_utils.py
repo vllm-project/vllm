@@ -67,8 +67,7 @@ def should_continue_final_message(
         return last_item.status in ("in_progress", "incomplete")
 
     if isinstance(last_item, dict):
-        # only partial completion for messages
-        # import fbvscode; fbvscode.set_trace()
+        # only support partial completion for messages for now
         if last_item.get("type", "message") not in ("message", "reasoning"):
             return False
         return last_item.get("status") in ("in_progress", "incomplete")
