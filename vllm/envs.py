@@ -1440,11 +1440,13 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # - "flashinfer-cudnn": use flashinfer cudnn GEMM backend
     # - "flashinfer-trtllm": use flashinfer trtllm GEMM backend
     # - "flashinfer-cutlass": use flashinfer cutlass GEMM backend
+    # - "marlin": use marlin GEMM backend (for GPUs without native FP4 support)
     # - <none>: automatically pick an available backend
     "VLLM_NVFP4_GEMM_BACKEND": env_with_choices(
         "VLLM_NVFP4_GEMM_BACKEND",
         None,
-        ["flashinfer-cudnn", "flashinfer-trtllm", "flashinfer-cutlass", "cutlass"],
+        ["flashinfer-cudnn", "flashinfer-trtllm", "flashinfer-cutlass", "cutlass",
+         "marlin"],
     ),
     # Controls garbage collection during CUDA graph capture.
     # If set to 0 (default), enables GC freezing to speed up capture time.

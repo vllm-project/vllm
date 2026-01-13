@@ -83,13 +83,13 @@ def _fused_marlin_moe(
     assert hidden_states.ndim == 2
     M, K = hidden_states.size()
     N = marlin_moe_intermediate_size(w1, w2)
-
+    num_shards = 1 if "no_mul" in activation else 2
     if workspace is None:
         workspace = marlin_make_workspace_new(hidden_states.device, 4)
 
     if intermediate_cache13 is None:
         intermediate_cache13 = torch.empty(
-            (M * num_topk * max(2 * N, K),),
+            (M * num_topk * max(num_shards * N, K),),
             device=hidden_states.device,
             dtype=hidden_states.dtype,
         )
@@ -101,7 +101,9 @@ def _fused_marlin_moe(
             dtype=hidden_states.dtype,
         )
 
-    intermediate_cache1 = _resize_cache(intermediate_cache13, (M * num_topk, 2 * N))
+    intermediate_cache1 = _resize_cache(
+        intermediate_cache13, (M * num_topk, num_shards * N)
+    )
 
     intermediate_cache3 = _resize_cache(intermediate_cache13, (M * num_topk, K))
 
@@ -137,17 +139,25 @@ def _fused_marlin_moe(
         mul_topk_weights=apply_router_weight_on_input,
         b_q_type=quant_type,
         size_m=M,
-        size_n=2 * N,
+        size_n=num_shards * N,
         size_k=K,
         is_k_full=is_k_full,
         use_atomic_add=False,
         use_fp32_reduce=True,
         is_zp_float=False,
     )
+    if activation == "relu2_no_mul":
+        # Apply relu in-place to cache1, then square into cache2
+        # This avoids an extra copy and intermediate tensor allocation
 
-    activation_func(
-        activation, intermediate_cache2, intermediate_cache1.view(-1, 2 * N)
-    )
+        intermediate_cache1.relu_()
+        torch.square(intermediate_cache1, out=intermediate_cache2)
+    else:
+        activation_func(
+            activation,
+            intermediate_cache2,
+            intermediate_cache1.view(-1, num_shards * N),
+        )
 
     if output is None:
         output = intermediate_cache3

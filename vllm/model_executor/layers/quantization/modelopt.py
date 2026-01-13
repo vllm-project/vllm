@@ -1132,6 +1132,9 @@ class ModelOptNvFp4LinearMethod(LinearMethodBase):
         elif envs.VLLM_NVFP4_GEMM_BACKEND == "cutlass":
             self.backend = "cutlass"
             assert cutlass_fp4_supported(), f"Cutlass is required for {self.backend}"
+        elif envs.VLLM_NVFP4_GEMM_BACKEND == "marlin":
+            self.backend = "marlin"
+            assert is_fp4_marlin_supported(), f"Marlin is required for {self.backend}"
 
         if self.backend == "none":
             raise ValueError(
@@ -1339,11 +1342,12 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
         # TODO: move this type of check into the oracle.
         if (
             not self.moe.is_act_and_mul
-            and not self.nvfp4_backend == NvFp4MoeBackend.FLASHINFER_CUTLASS
+            and self.nvfp4_backend
+            not in [NvFp4MoeBackend.FLASHINFER_CUTLASS, NvFp4MoeBackend.MARLIN]
         ):
             raise NotImplementedError(
                 "Non-gated activations are only supported by FlashInfer "
-                "CUTLASS NvFP4 MoE backend."
+                "CUTLASS and Marlin NvFP4 MoE backends."
             )
 
         self.use_global_sf = is_global_sf_supported_for_nvfp4_backend(
