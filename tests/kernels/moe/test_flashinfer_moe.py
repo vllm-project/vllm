@@ -14,6 +14,7 @@ from vllm import _custom_ops as ops
 from vllm.config import ParallelConfig, VllmConfig, set_current_vllm_config
 from vllm.model_executor.layers.fused_moe.flashinfer_cutlass_moe import (
     FlashInferExperts,
+    is_valid_flashinfer_cutlass_fused_moe,
 )
 from vllm.model_executor.layers.fused_moe.flashinfer_cutlass_prepare_finalize import (
     create_flashinfer_prepare_finalize,
@@ -87,6 +88,8 @@ def test_flashinfer_fp4_moe_no_graph(
             create_flashinfer_prepare_finalize(use_dp=False, use_nvfp4=True),
             FlashInferExperts(out_dtype=dtype, quant_config=quant_config),
         )
+
+        assert is_valid_flashinfer_cutlass_fused_moe(a, w1_q, w2_q)
 
         fi_activation = {"silu_and_mul": "silu", "relu2": "relu2_no_mul"}[activation]
 
