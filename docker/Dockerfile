@@ -273,6 +273,7 @@ RUN mkdir -p /tmp/deepgemm/dist && touch /tmp/deepgemm/dist/.deepgemm_skipped
 COPY tools/ep_kernels/install_python_libraries.sh /tmp/install_python_libraries.sh
 ARG PPLX_COMMIT_HASH
 ARG DEEPEP_COMMIT_HASH
+ARG NVSHMEM_VER
 RUN --mount=type=cache,target=/root/.cache/uv \
     mkdir -p /tmp/ep_kernels_workspace/dist && \
     export TORCH_CUDA_ARCH_LIST='9.0a 10.0a' && \
@@ -280,7 +281,8 @@ RUN --mount=type=cache,target=/root/.cache/uv \
         --workspace /tmp/ep_kernels_workspace \
         --mode wheel \
         ${PPLX_COMMIT_HASH:+--pplx-ref "$PPLX_COMMIT_HASH"} \
-        ${DEEPEP_COMMIT_HASH:+--deepep-ref "$DEEPEP_COMMIT_HASH"} && \
+        ${DEEPEP_COMMIT_HASH:+--deepep-ref "$DEEPEP_COMMIT_HASH"} \
+        ${NVSHMEM_VER:+--nvshmem-ver "$NVSHMEM_VER"} && \
     find /tmp/ep_kernels_workspace/nvshmem -name '*.a' -delete
 #################### EXTENSIONS BUILD IMAGE ####################
 
@@ -615,6 +617,7 @@ RUN mv vllm src/vllm
 FROM vllm-base AS vllm-openai-base
 ARG TARGETPLATFORM
 ARG INSTALL_KV_CONNECTORS=false
+ARG CUDA_VERSION
 
 ARG PIP_INDEX_URL UV_INDEX_URL
 ARG PIP_EXTRA_INDEX_URL UV_EXTRA_INDEX_URL
@@ -624,10 +627,30 @@ ARG PIP_EXTRA_INDEX_URL UV_EXTRA_INDEX_URL
 ENV UV_HTTP_TIMEOUT=500
 
 # install kv_connectors if requested
+ARG torch_cuda_arch_list='7.0 7.5 8.0 8.9 9.0 10.0 12.0'
+ENV TORCH_CUDA_ARCH_LIST=${torch_cuda_arch_list}
 RUN --mount=type=cache,target=/root/.cache/uv \
     --mount=type=bind,source=requirements/kv_connectors.txt,target=/tmp/kv_connectors.txt,ro \
+    CUDA_MAJOR="${CUDA_VERSION%%.*}"; \
+    CUDA_VERSION_DASH=$(echo $CUDA_VERSION | cut -d. -f1,2 | tr '.' '-'); \
+    CUDA_HOME=/usr/local/cuda; \
+    # lmcache requires explicit specifying CUDA_HOME
+    BUILD_PKGS="libcusparse-dev-${CUDA_VERSION_DASH} \
+                libcublas-dev-${CUDA_VERSION_DASH} \
+                libcusolver-dev-${CUDA_VERSION_DASH}"; \
     if [ "$INSTALL_KV_CONNECTORS" = "true" ]; then \
-        uv pip install --system -r /tmp/kv_connectors.txt || true; \
+        if [ "$CUDA_MAJOR" -ge 13 ]; then \
+            uv pip install --system nixl-cu13; \
+        fi; \
+        uv pip install --system -r /tmp/kv_connectors.txt --no-build || ( \
+            # if the above fails, install from source
+            apt-get update -y && \
+            apt-get install -y --no-install-recommends ${BUILD_PKGS} && \
+            uv pip install --system -r /tmp/kv_connectors.txt --no-build-isolation && \
+            apt-get purge -y ${BUILD_PKGS} && \
+            # clean up -dev packages, keep runtime libraries
+            rm -rf /var/lib/apt/lists/* \
+        ); \
     fi
 
 ENV VLLM_USAGE_SOURCE production-docker-image

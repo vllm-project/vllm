@@ -22,7 +22,7 @@ from openai.types.responses.tool import Tool
 
 from vllm import envs
 from vllm.entrypoints.constants import MCP_PREFIX
-from vllm.entrypoints.openai.protocol import (
+from vllm.entrypoints.openai.engine.protocol import (
     ChatCompletionMessageParam,
     ResponseInputOutputItem,
 )
@@ -78,7 +78,9 @@ def _maybe_combine_reasoning_and_tool_call(
     This function checks if the last message is a reasoning message and
     the current message is a tool call"""
     if not (
-        isinstance(item, ResponseFunctionToolCall) and item.id.startswith(MCP_PREFIX)
+        isinstance(item, ResponseFunctionToolCall)
+        and item.id
+        and item.id.startswith(MCP_PREFIX)
     ):
         return None
     if len(messages) == 0:
