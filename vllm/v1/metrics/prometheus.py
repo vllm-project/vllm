@@ -4,11 +4,48 @@
 import os
 import tempfile
 
-from prometheus_client import REGISTRY, CollectorRegistry, multiprocess
+from prometheus_client import REGISTRY, CollectorRegistry, Gauge, multiprocess
 
 from vllm.logger import init_logger
 
 logger = init_logger(__name__)
+
+# server draining gauge - set to 1 when server is shutting down gracefully
+_server_draining_gauge: Gauge | None = None
+
+
+def get_server_draining_gauge(model_name: str = "unknown") -> Gauge:
+    """Get or create the server draining gauge metric.
+
+    This metric indicates when a server is in graceful shutdown mode,
+    allowing load balancers (like llm-d EPP) to stop routing new requests.
+    """
+    global _server_draining_gauge
+    if _server_draining_gauge is None:
+        _server_draining_gauge = Gauge(
+            name="vllm:server_draining",
+            documentation=(
+                "Server draining state. 1 means the server is shutting down "
+                "gracefully and should not receive new requests."
+            ),
+            labelnames=["model_name"],
+            multiprocess_mode="livemax",
+        )
+        # initialize to 0 (not draining)
+        _server_draining_gauge.labels(model_name=model_name).set(0)
+    return _server_draining_gauge
+
+
+def set_server_draining(model_name: str = "unknown", draining: bool = True):
+    """Set the server draining state.
+
+    Args:
+        model_name: The model name label for the metric
+        draining: True if server is draining, False otherwise
+    """
+    gauge = get_server_draining_gauge(model_name)
+    gauge.labels(model_name=model_name).set(1 if draining else 0)
+
 
 # Global temporary directory for prometheus multiprocessing
 _prometheus_multiproc_dir: tempfile.TemporaryDirectory | None = None

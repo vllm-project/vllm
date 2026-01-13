@@ -806,6 +806,10 @@ class AsyncLLM(EngineClient):
         async with self._pause_cond:
             return self._paused
 
+    def get_num_unfinished_requests(self) -> int:
+        """Return the number of in-flight requests."""
+        return self.output_processor.get_num_unfinished_requests()
+
     async def encode(
         self,
         prompt: PromptType | DictPrompt | TokPrompt,

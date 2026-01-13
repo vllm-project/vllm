@@ -37,9 +37,7 @@ from vllm.entrypoints.openai.server_utils import (
     validation_exception_handler,
 )
 from vllm.entrypoints.sagemaker.api_router import sagemaker_standards_bootstrap
-from vllm.entrypoints.serve.elastic_ep.middleware import (
-    ScalingMiddleware,
-)
+from vllm.entrypoints.serve.middleware import ServiceUnavailableMiddleware
 from vllm.entrypoints.serve.tokenize.serving import OpenAIServingTokenization
 from vllm.entrypoints.utils import (
     cli_env_setup,
@@ -56,6 +54,7 @@ from vllm.usage.usage_lib import UsageContext
 from vllm.utils.argparse_utils import FlexibleArgumentParser
 from vllm.utils.network_utils import is_valid_ipv6_address
 from vllm.utils.system_utils import decorate_logs, set_ulimit
+from vllm.v1.metrics.prometheus import get_server_draining_gauge
 from vllm.version import __version__ as VLLM_VERSION
 
 prometheus_multiproc_dir: tempfile.TemporaryDirectory
@@ -247,8 +246,8 @@ def build_app(
 
         app.add_middleware(XRequestIdMiddleware)
 
-    # Add scaling middleware to check for scaling state
-    app.add_middleware(ScalingMiddleware)
+    # returns 503 when server is draining or otherwise unavailable
+    app.add_middleware(ServiceUnavailableMiddleware)
 
     if envs.VLLM_DEBUG_LOG_API_SERVER_RESPONSE:
         logger.warning(

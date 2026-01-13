@@ -190,6 +190,11 @@ class EngineClient(ABC):
         """Return whether the engine is currently paused."""
         ...
 
+    @abstractmethod
+    def get_num_unfinished_requests(self) -> int:
+        """Return the number of in-flight requests."""
+        ...
+
     async def scale_elastic_ep(
         self, new_data_parallel_size: int, drain_timeout: int = 300
     ) -> None:

@@ -4,6 +4,7 @@
 import asyncio
 import signal
 import socket
+import time
 from http import HTTPStatus
 from typing import Any
 
@@ -16,10 +17,12 @@ from vllm.entrypoints.constants import (
     H11_MAX_HEADER_COUNT_DEFAULT,
     H11_MAX_INCOMPLETE_EVENT_SIZE_DEFAULT,
 )
+from vllm.entrypoints.serve.middleware import set_server_unavailable
 from vllm.entrypoints.ssl import SSLCertRefresher
 from vllm.logger import init_logger
 from vllm.utils.network_utils import find_process_using_port
 from vllm.v1.engine.exceptions import EngineDeadError, EngineGenerateError
+from vllm.v1.metrics.prometheus import set_server_draining
 
 logger = init_logger(__name__)
 
@@ -93,6 +96,59 @@ async def serve_http(
         )
     )
 
+    async def graceful_drain() -> None:
+        """Perform graceful drain before shutdown."""
+        args = getattr(app.state, "args", None)
+        engine_client: EngineClient = app.state.engine_client
+
+        enable_graceful = getattr(args, "enable_graceful_shutdown", False)
+        drain_timeout = getattr(args, "drain_timeout", 120)
+
+        if not enable_graceful:
+            return
+
+        model_name = engine_client.model_config.served_model_name
+        inflight_count = engine_client.get_num_unfinished_requests()
+        logger.info(
+            "Graceful shutdown: starting drain (timeout=%ds), in-flight requests: %d",
+            drain_timeout,
+            inflight_count,
+        )
+
+        # reject new requests at the HTTP layer
+        set_server_unavailable(True)
+
+        # expose draining state via prometheus for external load balancers
+        set_server_draining(model_name, draining=True)
+
+        start_time = time.monotonic()
+        try:
+            # pause generation and wait for in-flight requests
+            await asyncio.wait_for(
+                engine_client.pause_generation(
+                    wait_for_inflight_requests=True,
+                    clear_cache=False,
+                ),
+                timeout=drain_timeout,
+            )
+            elapsed = time.monotonic() - start_time
+            logger.info(
+                "Graceful shutdown: drain complete, drained %d requests in %.1fs",
+                inflight_count,
+                elapsed,
+            )
+        except asyncio.TimeoutError:
+            elapsed = time.monotonic() - start_time
+            remaining = engine_client.get_num_unfinished_requests()
+            logger.warning(
+                "Graceful shutdown: drain timed out after %.1fs, "
+                "%d requests remaining, proceeding with shutdown",
+                elapsed,
+                remaining,
+            )
+        except Exception as e:
+            logger.warning("Graceful shutdown: drain failed: %s", e)
+
     def signal_handler() -> None:
         # prevents the uvicorn signal handler to exit early
         server_task.cancel()
@@ -100,11 +156,24 @@ async def serve_http(
         if ssl_cert_refresher:
             ssl_cert_refresher.stop()
 
+    async def graceful_signal_handler() -> None:
+        """Async wrapper for graceful shutdown."""
+        await graceful_drain()
+        signal_handler()
+
+    def on_signal() -> None:
+        """Signal callback that spawns the graceful shutdown task."""
+        args = getattr(app.state, "args", None)
+        if getattr(args, "enable_graceful_shutdown", False):
+            loop.create_task(graceful_signal_handler())
+        else:
+            signal_handler()
+
     async def dummy_shutdown() -> None:
         pass
 
-    loop.add_signal_handler(signal.SIGINT, signal_handler)
-    loop.add_signal_handler(signal.SIGTERM, signal_handler)
+    loop.add_signal_handler(signal.SIGINT, on_signal)
+    loop.add_signal_handler(signal.SIGTERM, on_signal)
 
     try:
         await server_task

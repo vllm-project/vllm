@@ -6,26 +6,26 @@ from collections.abc import Awaitable
 from fastapi.responses import JSONResponse
 from starlette.types import ASGIApp, Receive, Scope, Send
 
-# Global variable to track scaling state
-_scaling_elastic_ep = False
+# Global variable to track server unavailability (scaling, draining, etc.)
+_server_unavailable = False
 
 
-def get_scaling_elastic_ep():
-    return _scaling_elastic_ep
+def is_server_unavailable() -> bool:
+    return _server_unavailable
 
 
-def set_scaling_elastic_ep(value):
-    global _scaling_elastic_ep
-    _scaling_elastic_ep = value
+def set_server_unavailable(value: bool) -> None:
+    global _server_unavailable
+    _server_unavailable = value
 
 
 class ScalingMiddleware:
     """
-    Middleware that checks if the model is currently scaling and
-    returns a 503 Service Unavailable response if it is.
+    Middleware that checks if the server is currently unavailable
+    (e.g., scaling or draining) and returns a 503 Service Unavailable.
 
     This middleware applies to all HTTP requests and prevents
-    processing when the model is in a scaling state.
+    processing when the server is unavailable.
     """
 
     def __init__(self, app: ASGIApp) -> None:
@@ -35,13 +35,9 @@ class ScalingMiddleware:
         if scope["type"] != "http":
             return self.app(scope, receive, send)
 
-        # Check global scaling state
-        if get_scaling_elastic_ep():
-            # Return 503 Service Unavailable response
+        if is_server_unavailable():
             response = JSONResponse(
-                content={
-                    "error": "The model is currently scaling. Please try again later."
-                },
+                content={"error": "Server is unavailable. Please try again later."},
                 status_code=503,
             )
             return response(scope, receive, send)

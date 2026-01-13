@@ -1239,6 +1239,21 @@ class EngineArgs:
             help="Log aggregate rather than per-engine statistics "
             "when using data parallelism.",
         )
+
+        parser.add_argument(
+            "--enable-graceful-shutdown",
+            action="store_true",
+            default=False,
+            help="Enable graceful shutdown with request draining on SIGTERM.",
+        )
+        parser.add_argument(
+            "--drain-timeout",
+            type=int,
+            default=120,
+            help="Seconds to wait for in-flight requests to complete "
+            "during graceful shutdown (default: 120).",
+        )
+
         return parser
 
     @classmethod
