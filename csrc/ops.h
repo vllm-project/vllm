@@ -1,8 +1,9 @@
 #pragma once
 
 #include <optional>
-#include <torch/library.h>
 #include <tuple>
+#include <torch/library.h>
+#include <torch/torch.h>
 
 #include "core/scalar_type.hpp"
 

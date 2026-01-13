@@ -1,4 +1,3 @@
-#include "cache.h"
 #include "cuda_utils.h"
 #include "ops.h"
 #include "core/registration.h"
@@ -412,103 +411,6 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "CUBLAS_M_THRESHOLD, bool has_zp, bool n32k16_reorder) -> Tensor");
   //  conditionally compiled so impl in source file
 #endif
-}
-
-TORCH_LIBRARY_EXPAND(CONCAT(TORCH_EXTENSION_NAME, _cache_ops), cache_ops) {
-  // Cache ops
-  // Swap in (out) the cache blocks from src to dst.
-  cache_ops.def(
-      "swap_blocks(Tensor src, Tensor! dst,"
-      "            int block_size_in_bytes, Tensor block_mapping) -> ()");
-  cache_ops.impl("swap_blocks", torch::kCUDA, &swap_blocks);
-
-  // Reshape the key and value tensors and cache them.
-  cache_ops.def(
-      "reshape_and_cache(Tensor key, Tensor value,"
-      "                  Tensor! key_cache, Tensor! value_cache,"
-      "                  Tensor slot_mapping,"
-      "                  str kv_cache_dtype,"
-      "                  Tensor k_scale, Tensor v_scale) -> ()");
-  cache_ops.impl("reshape_and_cache", torch::kCUDA, &reshape_and_cache);
-
-  // Reshape the key and value tensors and cache them.
-  cache_ops.def(
-      "reshape_and_cache_flash(Tensor key, Tensor value,"
-      "                        Tensor! key_cache,"
-      "                        Tensor! value_cache,"
-      "                        Tensor slot_mapping,"
-      "                        str kv_cache_dtype,"
-      "                        Tensor k_scale, Tensor v_scale) -> ()");
-  cache_ops.impl("reshape_and_cache_flash", torch::kCUDA,
-                 &reshape_and_cache_flash);
-
-  // Concat kv_c and k_pe and cache them.
-  cache_ops.def(
-      "concat_and_cache_mla(Tensor kv_c, Tensor k_pe,"
-      "                     Tensor! kv_cache,"
-      "                     Tensor slot_mapping,"
-      "                     str kv_cache_dtype,"
-      "                     Tensor scale) -> ()");
-  cache_ops.impl("concat_and_cache_mla", torch::kCUDA, &concat_and_cache_mla);
-
-  // Rotate Q and K, then write to kv cache for MLA
-  cache_ops.def(
-      "concat_and_cache_mla_rope_fused("
-      "                     Tensor positions,"
-      "                     Tensor! q_pe,"
-      "                     Tensor! k_pe,"
-      "                     Tensor kv_c,"
-      "                     Tensor cos_sin_cache,"
-      "                     bool is_neox,"
-      "                     Tensor slot_mapping,"
-      "                     Tensor! kv_cache,"
-      "                     str kv_cache_dtype,"
-      "                     Tensor kv_cache_scale) -> ()");
-  cache_ops.impl("concat_and_cache_mla_rope_fused", torch::kCUDA,
-                 &concat_and_cache_mla_rope_fused);
-
-  // Convert the key and value cache to fp8 data type.
-  cache_ops.def(
-      "convert_fp8(Tensor! dst_cache, Tensor src_cache, float scale, "
-      "str kv_cache_dtype) -> ()");
-  cache_ops.impl("convert_fp8", torch::kCUDA, &convert_fp8);
-
-  // Gather cache blocks from src_cache to dst, dequantizing from
-  // src_cache's dtype to dst's dtype if necessary.
-  cache_ops.def(
-      "gather_and_maybe_dequant_cache(Tensor src_cache, Tensor! dst, "
-      "                               Tensor block_table, Tensor cu_seq_lens, "
-      "                               Tensor token_to_seq, "
-      "                               int num_tokens, "
-      "                               str kv_cache_dtype, "
-      "                               Tensor scale, Tensor? seq_starts) -> ()");
-  cache_ops.impl("gather_and_maybe_dequant_cache", torch::kCUDA,
-                 &gather_and_maybe_dequant_cache);
-
-  cache_ops.def(
-      "cp_gather_cache(Tensor src_cache, Tensor! dst, Tensor block_table, "
-      "Tensor cu_seq_lens, int batch_size, Tensor? seq_starts) -> ()");
-  cache_ops.impl("cp_gather_cache", torch::kCUDA, &cp_gather_cache);
-
-  cache_ops.def(
-      "cp_gather_and_upconvert_fp8_kv_cache(Tensor src_cache, Tensor! dst, "
-      "Tensor block_table, Tensor seq_lens, Tensor workspace_starts, int "
-      "batch_size) -> ()");
-  cache_ops.impl("cp_gather_and_upconvert_fp8_kv_cache", torch::kCUDA,
-                 &cp_gather_and_upconvert_fp8_kv_cache);
-
-  cache_ops.def(
-      "indexer_k_quant_and_cache(Tensor k, Tensor! kv_cache, Tensor "
-      "slot_mapping, "
-      "int quant_block_size, str kv_cache_dtype) -> ()");
-  cache_ops.impl("indexer_k_quant_and_cache", torch::kCUDA,
-                 &indexer_k_quant_and_cache);
-
-  cache_ops.def(
-      "cp_gather_indexer_k_quant_cache(Tensor kv_cache, Tensor! dst_k, Tensor! "
-      "dst_scale, Tensor block_table, Tensor cu_seq_lens) -> ()");
-  cache_ops.impl("cp_gather_indexer_k_quant_cache", torch::kCUDA,
-                 &cp_gather_indexer_k_quant_cache);
 }
 
 TORCH_LIBRARY_EXPAND(CONCAT(TORCH_EXTENSION_NAME, _cuda_utils), cuda_utils) {

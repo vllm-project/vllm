@@ -13,3 +13,8 @@ inline cudaStream_t get_current_cuda_stream(int32_t device_index) {
       aoti_torch_get_current_cuda_stream(device_index, &stream_ptr));
   return reinterpret_cast<cudaStream_t>(stream_ptr);
 }
+
+// Stable ABI equivalent of TORCH_CHECK_EQ - checks that two values are equal.
+// Automatically generates an error message showing both values if they differ.
+#define STD_TORCH_CHECK_EQ(a, b) \
+  STD_TORCH_CHECK((a) == (b), #a " (", (a), ") != " #b " (", (b), ")")

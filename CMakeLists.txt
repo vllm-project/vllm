@@ -281,8 +281,6 @@ endif()
 
 set(VLLM_EXT_SRC
   "csrc/mamba/mamba_ssm/selective_scan_fwd.cu"
-  "csrc/cache_kernels.cu"
-  "csrc/cache_kernels_fused.cu"
   "csrc/quantization/gptq/q_gemm.cu"
   "csrc/quantization/gguf/gguf_kernel.cu"
   "csrc/cuda_utils_kernels.cu"
@@ -929,6 +927,8 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
   #
   set(VLLM_STABLE_EXT_SRC
     "csrc/stable/activation_kernels.cu"
+    "csrc/stable/cache_kernels.cu"
+    "csrc/stable/cache_kernels_fused.cu"
     "csrc/stable/cuda_view.cu"
     "csrc/stable/fused_qknorm_rope_kernel.cu"
     "csrc/stable/layernorm_kernels.cu"
