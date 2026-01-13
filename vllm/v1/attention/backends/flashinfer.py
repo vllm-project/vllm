@@ -961,7 +961,10 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                 qo_indptr_arr=[shared_qo_indptr_cpu, qo_indptr_cpu],
                 paged_kv_indptr_arr=[shared_kv_page_indptr_cpu, paged_kv_indptr_cpu],
                 paged_kv_indices_arr=[shared_kv_page_indices_cpu, paged_kv_indices],
-                paged_kv_last_page_len=[shared_kv_last_page_len_cpu, paged_kv_last_page_len_cpu],
+                paged_kv_last_page_len=[
+                    shared_kv_last_page_len_cpu,
+                    paged_kv_last_page_len_cpu,
+                ],
                 num_qo_heads=self.num_qo_heads,
                 num_kv_heads=self.num_kv_heads,
                 head_dim=self.head_dim,
@@ -1043,10 +1046,10 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                         BatchPrefillWithPagedKVCacheWrapper,
                     )
                     prefill_wrapper.plan(
-                        qo_indptr=qo_indptr_cpu,
-                        paged_kv_indptr=paged_kv_indptr_cpu,
+                        qo_indptr=qo_indptr_prefill_cpu,
+                        paged_kv_indptr=paged_kv_indptr_prefill_cpu,
                         paged_kv_indices=paged_kv_indices,
-                        paged_kv_last_page_len=paged_kv_last_page_len_cpu[prefill_start:],
+                        paged_kv_last_page_len=paged_kv_last_page_len_prefill_cpu,
                         num_qo_heads=self.num_qo_heads,
                         num_kv_heads=self.num_kv_heads,
                         head_dim_qk=self.head_dim,
@@ -1057,7 +1060,6 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                         logits_soft_cap=self.logits_soft_cap,
                         q_data_type=self.q_data_type,
                         kv_data_type=self.kv_cache_dtype,
-                        o_data_type=self.model_config.dtype,
                         fixed_split_size=self.prefill_fixed_split_size,
                         disable_split_kv=self.disable_split_kv,
                     )
@@ -1093,7 +1095,9 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                     decode_wrapper,
                     indptr_cpu=self.paged_kv_indptr.cpu[: num_input_tokens + 1],
                     indices=paged_kv_indices,
-                    last_page_len_cpu=self.paged_kv_last_page_len.cpu[:num_input_tokens],
+                    last_page_len_cpu=self.paged_kv_last_page_len.cpu[
+                        :num_input_tokens
+                    ],
                     num_qo_heads=self.num_qo_heads * self.dcp_world_size,
                     num_kv_heads=self.num_kv_heads,
                     head_dim=self.head_dim,
