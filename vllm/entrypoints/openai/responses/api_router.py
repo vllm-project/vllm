@@ -1,0 +1,128 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
+
+from http import HTTPStatus
+
+from fastapi import APIRouter, Depends, FastAPI, HTTPException, Request
+from fastapi.responses import JSONResponse, StreamingResponse
+
+from vllm.entrypoints.openai.chat_completion.protocol import (
+    ChatCompletionRequest,
+    ChatCompletionResponse,
+)
+from vllm.entrypoints.openai.chat_completion.serving import OpenAIServingChat
+from vllm.entrypoints.openai.engine.protocol import ErrorResponse
+from vllm.entrypoints.openai.orca_metrics import metrics_header
+from vllm.entrypoints.openai.utils import validate_json_request
+from vllm.entrypoints.utils import (
+    load_aware_call,
+    with_cancellation,
+)
+from vllm.logger import init_logger
+
+logger = init_logger(__name__)
+
+router = APIRouter()
+ENDPOINT_LOAD_METRICS_FORMAT_HEADER_LABEL = "endpoint-load-metrics-format"
+
+
+def responses(request: Request) -> OpenAIServingResponses | None:
+    return request.app.state.openai_serving_responses
+
+
+@router.post(
+    "/v1/responses",
+    dependencies=[Depends(validate_json_request)],
+    responses={
+        HTTPStatus.OK.value: {"content": {"text/event-stream": {}}},
+        HTTPStatus.BAD_REQUEST.value: {"model": ErrorResponse},
+        HTTPStatus.NOT_FOUND.value: {"model": ErrorResponse},
+        HTTPStatus.INTERNAL_SERVER_ERROR.value: {"model": ErrorResponse},
+    },
+)
+@with_cancellation
+async def create_responses(request: ResponsesRequest, raw_request: Request):
+    handler = responses(raw_request)
+    if handler is None:
+        return base(raw_request).create_error_response(
+            message="The model does not support Responses API"
+        )
+    try:
+        generator = await handler.create_responses(request, raw_request)
+    except Exception as e:
+        raise HTTPException(
+            status_code=HTTPStatus.INTERNAL_SERVER_ERROR.value, detail=str(e)
+        ) from e
+
+    if isinstance(generator, ErrorResponse):
+        return JSONResponse(
+            content=generator.model_dump(), status_code=generator.error.code
+        )
+    elif isinstance(generator, ResponsesResponse):
+        return JSONResponse(content=generator.model_dump())
+
+    return StreamingResponse(
+        content=_convert_stream_to_sse_events(generator), media_type="text/event-stream"
+    )
+
+
+@router.get("/v1/responses/{response_id}")
+async def retrieve_responses(
+    response_id: str,
+    raw_request: Request,
+    starting_after: int | None = None,
+    stream: bool | None = False,
+):
+    handler = responses(raw_request)
+    if handler is None:
+        return base(raw_request).create_error_response(
+            message="The model does not support Responses API"
+        )
+
+    try:
+        response = await handler.retrieve_responses(
+            response_id,
+            starting_after=starting_after,
+            stream=stream,
+        )
+    except Exception as e:
+        raise HTTPException(
+            status_code=HTTPStatus.INTERNAL_SERVER_ERROR.value, detail=str(e)
+        ) from e
+
+    if isinstance(response, ErrorResponse):
+        return JSONResponse(
+            content=response.model_dump(), status_code=response.error.code
+        )
+    elif isinstance(response, ResponsesResponse):
+        return JSONResponse(content=response.model_dump())
+    return StreamingResponse(
+        content=_convert_stream_to_sse_events(response), media_type="text/event-stream"
+    )
+
+
+@router.post("/v1/responses/{response_id}/cancel")
+async def cancel_responses(response_id: str, raw_request: Request):
+    handler = responses(raw_request)
+    if handler is None:
+        return base(raw_request).create_error_response(
+            message="The model does not support Responses API"
+        )
+
+    try:
+        response = await handler.cancel_responses(response_id)
+    except Exception as e:
+        raise HTTPException(
+            status_code=HTTPStatus.INTERNAL_SERVER_ERROR.value, detail=str(e)
+        ) from e
+
+    if isinstance(response, ErrorResponse):
+        return JSONResponse(
+            content=response.model_dump(), status_code=response.error.code
+        )
+    return JSONResponse(content=response.model_dump())
+
+
+def attach_router(app: FastAPI):
+    app.include_router(router)
