@@ -18,8 +18,6 @@ from .processing import (
 from .profiling import (
     BaseDummyInputsBuilder,
     DummyDecoderData,
-    DummyEncoderData,
-    MultiModalProfiler,
 )
 
 if TYPE_CHECKING:
@@ -161,17 +159,37 @@ class MultiModalRegistry:
         processor = self.create_processor(
             model_config, observability_config, cache=cache
         )
-        profiler: MultiModalProfiler = MultiModalProfiler(processor)
 
         seq_len = model_config.max_model_len
-        profiler_limits = (
-            profiler.get_mm_limits() if profiler_limits is None else profiler_limits
+        if profiler_limits is None:
+            profiler_limits = processor.allowed_mm_limits
+
+        mm_counts = {
+            modality: 1 for modality, limit in profiler_limits.items() if limit > 0
+        }
+
+        max_tokens_per_item = processor.info.get_mm_max_tokens_per_item(
+            seq_len=seq_len,
+            mm_counts=mm_counts,
+        )
+        if max_tokens_per_item is not None:
+            return {
+                modality: max_tokens
+                for modality, max_tokens in max_tokens_per_item.items()
+                if mm_counts.get(modality, 0) > 0
+            }
+
+        mm_inputs = processor.dummy_inputs.get_dummy_mm_inputs(
+            processor,
+            seq_len,
+            mm_counts=mm_counts,
+            mm_options=self._extract_mm_options(model_config),
         )
 
-        return profiler.get_mm_max_tokens(
-            seq_len,
-            {modality: 1 for modality, limit in profiler_limits.items() if limit > 0},
-        )
+        return {
+            modality: sum(item.get_num_embeds for item in placeholders)
+            for modality, placeholders in mm_inputs["mm_placeholders"].items()
+        }
 
     def get_mm_limits_per_prompt(
         self,
@@ -190,8 +208,7 @@ class MultiModalRegistry:
         processor = self.create_processor(
             model_config, observability_config, cache=cache
         )
-        profiler: MultiModalProfiler = MultiModalProfiler(processor)
-        return profiler.get_mm_limits()
+        return processor.allowed_mm_limits
 
     def register_processor(
         self,
@@ -298,14 +315,12 @@ class MultiModalRegistry:
         processor = self.create_processor(
             model_config, observability_config, cache=cache
         )
-        profiler: MultiModalProfiler = MultiModalProfiler(processor)
-
-        # Extract configurable options from multimodal config.
-        # Only include modalities that use advanced option types so legacy
-        # count-only behavior remains unchanged.
-        mm_options = self._extract_mm_options(model_config)
-
-        dummy_data = profiler.get_decoder_dummy_data(seq_len, mm_counts, mm_options)
+        dummy_data = processor.dummy_inputs.get_decoder_dummy_data(
+            processor,
+            seq_len,
+            mm_counts=mm_counts,
+            mm_options=self._extract_mm_options(model_config),
+        )
 
         # Having more tokens is over-conservative but otherwise fine
         token_ids = dummy_data.prompt_token_ids
@@ -313,43 +328,6 @@ class MultiModalRegistry:
             raise AssertionError(
                 f"Expected at least {seq_len} dummy tokens for profiling, "
                 f"but found {len(token_ids)} tokens instead."
-            )
-
-        return dummy_data
-
-    def get_encoder_dummy_data(
-        self,
-        model_config: "ModelConfig",
-        seq_len: int,
-        mm_counts: Mapping[str, int] | None = None,
-        *,
-        cache: BaseMultiModalProcessorCache | None = None,
-        observability_config: ObservabilityConfig | None = None,
-    ) -> DummyEncoderData:
-        """
-        Create dummy data for profiling the memory usage of a model.
-
-        The model is identified by `model_config`.
-        """
-        processor = self.create_processor(
-            model_config, observability_config, cache=cache
-        )
-        profiler: MultiModalProfiler = MultiModalProfiler(processor)
-
-        # Extract configurable options from multimodal config.
-        # Only include modalities that use advanced option types so legacy
-        # count-only behavior remains unchanged.
-        mm_options = self._extract_mm_options(model_config)
-
-        dummy_data = profiler.get_encoder_dummy_data(seq_len, mm_counts, mm_options)
-
-        # Having more tokens is over-conservative but otherwise fine
-        token_ids = dummy_data.prompt_token_ids
-        if len(token_ids) < seq_len:
-            logger.warning_once(
-                "Expected at least %d dummy encoder tokens for profiling, but found %d tokens instead.",  # noqa: E501
-                seq_len,
-                len(token_ids),
             )
 
         return dummy_data
