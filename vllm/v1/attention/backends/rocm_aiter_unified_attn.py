@@ -5,12 +5,12 @@
 import torch
 
 from vllm import _custom_ops as ops
-from vllm.attention.backends.abstract import AttentionType
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
     kFp8StaticTensorSym,
 )
+from vllm.v1.attention.backend import AttentionType
 from vllm.v1.attention.backends.flash_attn import FlashAttentionMetadata
 from vllm.v1.attention.backends.rocm_attn import (
     RocmAttentionBackend,

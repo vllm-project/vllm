@@ -26,7 +26,6 @@ from transformers import (
     TensorType,
 )
 
-from vllm.attention.backends.abstract import AttentionType
 from vllm.config import CacheConfig, VllmConfig
 from vllm.config.lora import LoRAConfig
 from vllm.config.multimodal import BaseDummyOptions
@@ -63,6 +62,7 @@ from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from vllm.transformers_utils.configs.radio import RadioConfig
 from vllm.transformers_utils.tokenizer import AnyTokenizer
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
+from vllm.v1.attention.backend import AttentionType
 
 logger = init_logger(__name__)
 DEFAULT_FINAL_IMAGE_SIZE = (2048, 1648)

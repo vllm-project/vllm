@@ -37,9 +37,12 @@ if TYPE_CHECKING:
     from vllm.config import VllmConfig
 
 
+# --8<-- [start:transformers_fused_moe]
 @CustomOp.register("transformers_fused_moe")
 class TransformersFusedMoE(FusedMoE):
     """Custom FusedMoE for the Transformers modeling backend."""
+
+    # --8<-- [end:transformers_fused_moe]
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
