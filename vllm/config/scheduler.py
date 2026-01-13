@@ -188,12 +188,13 @@ class SchedulerConfig:
         excluding anything before input ids/embeddings and after
         the final hidden states.
         """
-        # Only surface scheduler knobs that influence compiled shapes.
-        return {
-            "max_num_batched_tokens": self.max_num_batched_tokens,
-            "max_num_seqs": self.max_num_seqs,
-            "max_num_partial_prefills": self.max_num_partial_prefills,
-        }
+        # Only surface scheduler knobs that influence compiled shapes. Legacy
+        # scheduler hashing fed a list of factors (currently just
+        # max_num_batched_tokens) into safe_hash. The compile cache now hashes
+        # the entire config factors via JSON, so returning the factor list keeps
+        # the data payload unchanged (the outer dict from VllmConfig supplies
+        # the key) and avoids a shape change that would perturb the cache key.
+        return [self.max_num_batched_tokens]
 
     @field_validator("scheduler_cls", "async_scheduling", mode="wrap")
     @classmethod

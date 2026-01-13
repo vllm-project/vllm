@@ -256,8 +256,10 @@ class VllmConfig:
 
         def _compile(config_obj: SupportsCompileFactors | None) -> CompileFactors:
             if config_obj is None:
-                return {}
-            return config_obj.compile_factors()
+                return {"__none__": True}
+
+            factors = config_obj.compile_factors()
+            return factors if factors else {"__empty__": True}
 
         factors: dict[str, Any] = {
             "version": __version__,
@@ -267,6 +269,7 @@ class VllmConfig:
             "scheduler": _compile(self.scheduler_config),
             "device": _compile(self.device_config),
             "load": _compile(self.load_config),
+            "attention": _compile(self.attention_config),
             "speculative": _compile(self.speculative_config),
             "structured_outputs": _compile(self.structured_outputs_config),
             "observability": _compile(self.observability_config),
@@ -287,7 +290,7 @@ class VllmConfig:
                     "additional_config must be a dict or SupportsCompileFactors"
                 )
         else:
-            factors["additional"] = {}
+            factors["additional"] = {"__none__": True}
 
         return factors
 
