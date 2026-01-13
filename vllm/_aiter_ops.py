@@ -735,6 +735,79 @@ def _rocm_aiter_rmsnorm_fp8_group_quant_fake(
     )
 
 
+def _rocm_aiter_fused_rms_fp8_per_tensor_static_quant_impl(
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    epsilon: float,
+    scale: torch.Tensor,
+    dtype_quant: torch.dtype,
+) -> torch.Tensor:
+    from aiter.ops.triton.fused_fp8_quant import fused_rms_fp8_per_tensor_static_quant
+
+    results = fused_rms_fp8_per_tensor_static_quant(
+        x,
+        weight,
+        epsilon,
+        scale,
+        None,
+        None,
+        epsilon,
+        dtype_quant,
+        None,
+    )
+    return results[0]
+
+
+def _rocm_aiter_fused_add_rms_fp8_per_tensor_static_quant_impl(
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    epsilon: float,
+    scale: torch.Tensor,
+    dtype_quant: torch.dtype,
+    residual: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    from aiter.ops.triton.fused_fp8_quant import fused_rms_fp8_per_tensor_static_quant
+
+    results = fused_rms_fp8_per_tensor_static_quant(
+        x,
+        weight,
+        epsilon,
+        scale,
+        None,
+        None,
+        epsilon,
+        dtype_quant,
+        residual,
+    )
+    return (results[0], results[3])
+
+
+def _rocm_aiter_fused_rms_fp8_per_tensor_static_quant_fake(
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    epsilon: float,
+    scale: torch.Tensor,
+    dtype_quant: torch.dtype,
+) -> torch.Tensor:
+    shape = (x.shape[0], x.shape[1])
+    return torch.empty(shape, dtype=dtype_quant, device=x.device)
+
+
+def _rocm_aiter_fused_add_rms_fp8_per_tensor_static_quant_fake(
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    epsilon: float,
+    scale: torch.Tensor,
+    dtype_quant: torch.dtype,
+    residual: torch.tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    shape = (x.shape[0], x.shape[1])
+    return (
+        torch.empty(shape, dtype=dtype_quant, device=x.device),
+        torch.empty(shape, dtype=dtype_quant, device=x.device),
+    )
+
+
 def _rocm_aiter_group_fp8_quant_impl(
     x: torch.Tensor,
     group_size: int,
@@ -1188,6 +1261,18 @@ class rocm_aiter_ops:
             )
 
             direct_register_custom_op(
+                op_name="rocm_aiter_fused_rms_fp8_per_tensor_static_quant",
+                op_func=_rocm_aiter_fused_rms_fp8_per_tensor_static_quant_impl,
+                fake_impl=_rocm_aiter_fused_rms_fp8_per_tensor_static_quant_fake,
+            )
+
+            direct_register_custom_op(
+                op_name="rocm_aiter_fused_add_rms_fp8_per_tensor_static_quant",
+                op_func=_rocm_aiter_fused_add_rms_fp8_per_tensor_static_quant_impl,
+                fake_impl=_rocm_aiter_fused_add_rms_fp8_per_tensor_static_quant_fake,
+            )
+
+            direct_register_custom_op(
                 op_name="rocm_aiter_rmsnorm_with_add_fp8_group_quant",
                 op_func=_rocm_aiter_rmsnorm_with_add_fp8_group_quant_impl,
                 fake_impl=_rocm_aiter_rmsnorm_with_add_fp8_group_quant_fake,
@@ -1264,6 +1349,16 @@ class rocm_aiter_ops:
     @staticmethod
     def get_rmsnorm_group_fused_quant_op() -> OpOverload:
         return torch.ops.vllm.rocm_aiter_rmsnorm_fp8_group_quant.default
+
+    @staticmethod
+    def get_fused_rms_fp8_per_tensor_static_quant() -> OpOverload:
+        return torch.ops.vllm.rocm_aiter_fused_rms_fp8_per_tensor_static_quant.default
+
+    @staticmethod
+    def get_fused_add_rms_fp8_per_tensor_static_quant() -> OpOverload:
+        return (
+            torch.ops.vllm.rocm_aiter_fused_add_rms_fp8_per_tensor_static_quant.default
+        )
 
     @staticmethod
     def get_rmsnorm_group_add_fused_quant_op() -> OpOverload:
