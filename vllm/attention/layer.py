@@ -8,13 +8,6 @@ import torch
 import torch.nn as nn
 
 import vllm.envs as envs
-from vllm.attention.backends.abstract import (
-    AttentionBackend,
-    AttentionType,
-    MLAAttentionImpl,
-)
-from vllm.attention.backends.registry import AttentionBackendEnum
-from vllm.attention.selector import get_attn_backend
 from vllm.attention.utils.kv_sharing_utils import validate_kv_sharing_target
 from vllm.attention.utils.kv_transfer_utils import maybe_transfer_kv_layer
 from vllm.config import CacheConfig, get_current_vllm_config
@@ -37,6 +30,13 @@ from vllm.utils.torch_utils import (
     direct_register_custom_op,
     kv_cache_dtype_str_to_dtype,
 )
+from vllm.v1.attention.backend import (
+    AttentionBackend,
+    AttentionType,
+    MLAAttentionImpl,
+)
+from vllm.v1.attention.backends.registry import AttentionBackendEnum
+from vllm.v1.attention.selector import get_attn_backend
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheSpec,
@@ -170,6 +170,7 @@ class Attention(nn.Module, AttentionLayerBase):
         attn_type: str = AttentionType.DECODER,
         kv_sharing_target_layer_name: str | None = None,
         attn_backend: type[AttentionBackend] | None = None,
+        head_size_v: int | None = None,
         **extra_impl_args,
     ) -> None:
         """
@@ -217,6 +218,7 @@ class Attention(nn.Module, AttentionLayerBase):
 
         self.num_heads = num_heads
         self.head_size = head_size
+        self.head_size_v = self.head_size if head_size_v is None else head_size_v
         self.num_kv_heads = num_kv_heads
         self.sliding_window = sliding_window
         self.has_sink = extra_impl_args.get("sinks") is not None
@@ -274,8 +276,7 @@ class Attention(nn.Module, AttentionLayerBase):
             kv_sharing_target_layer_name,
             **extra_impl_args,
         )
-        backend_name = self.attn_backend.get_name()
-        self.backend = AttentionBackendEnum.__members__.get(backend_name)
+        self.backend = AttentionBackendEnum[self.attn_backend.get_name()]
         self.dtype = dtype
 
         # For cuda-alike (CUDA and ROCM) and cpu platforms, we control how
@@ -355,6 +356,13 @@ class Attention(nn.Module, AttentionLayerBase):
                 query, _ = self.query_quant(query, self._q_scale)
 
         if self.use_output:
+            if output_shape is None:
+                # Handle both 2D [num_tokens, hidden] and
+                # 3D [num_tokens, heads, head_dim] query
+                num_tokens = query.shape[0]
+                output_shape = torch.Size(
+                    (num_tokens, self.num_heads * self.head_size_v)
+                )
             output_shape = output_shape if output_shape is not None else query.shape
             output = torch.empty(output_shape, dtype=output_dtype, device=query.device)
             hidden_size = output_shape[-1]
@@ -362,11 +370,11 @@ class Attention(nn.Module, AttentionLayerBase):
             # NOTE(woosuk): We do this outside the custom op to minimize the
             # CPU overheads from the non-CUDA-graph regions.
             query = query.view(-1, self.num_heads, self.head_size)
-            output = output.view(-1, self.num_heads, self.head_size)
+            output = output.view(-1, self.num_heads, self.head_size_v)
             if key is not None:
                 key = key.view(-1, self.num_kv_heads, self.head_size)
             if value is not None:
-                value = value.view(-1, self.num_kv_heads, self.head_size)
+                value = value.view(-1, self.num_kv_heads, self.head_size_v)
             if self.use_direct_call:
                 forward_context: ForwardContext = get_forward_context()
                 attn_metadata = forward_context.attn_metadata
@@ -452,6 +460,7 @@ class Attention(nn.Module, AttentionLayerBase):
                 block_size=block_size,
                 num_kv_heads=self.num_kv_heads,
                 head_size=self.head_size,
+                head_size_v=self.head_size_v,
                 dtype=self.kv_cache_torch_dtype,
             )
 
@@ -794,6 +803,7 @@ def unified_attention_with_output(
     output_block_scale: torch.Tensor | None = None,
 ) -> None:
     attn_metadata, self, kv_cache = get_attention_context(layer_name)
+
     self.impl.forward(
         self,
         query,
