@@ -983,6 +983,9 @@ class FusedMoE(CustomOp):
         loaded_weight: torch.Tensor,
         expert_id: int | None,
     ):
+        assert expert_id is not None, (
+            "expert_id must not be None for per-tensor weight scale loading"
+        )
         param_data = param.data
         # for per tensor weight quantization
         if shard_id in ("w1", "w3"):
@@ -1122,6 +1125,9 @@ class FusedMoE(CustomOp):
         loaded_weight: torch.Tensor,
         expert_id: int | None,
     ):
+        assert expert_id is not None, (
+            "expert_id must not be None for single value loading"
+        )
         param_data = param.data
 
         # Input scales can be loaded directly and should be equal.

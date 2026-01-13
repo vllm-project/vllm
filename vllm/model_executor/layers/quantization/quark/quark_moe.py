@@ -221,11 +221,11 @@ class QuarkW8A8Fp8MoEMethod(QuarkMoEMethod):
                 )
             else:
                 # For gpt_oss, the w1(gate) & w3(up) are fused as one.
-                # Therefore, only one weight scale for each expert.
+                # For per-channel quantization, each output channel needs its own scale.
                 w13_weight_scale = torch.nn.Parameter(
                     torch.ones(
                         num_experts,
-                        intermediate_size_per_partition,
+                        4 * intermediate_size_per_partition,
                         dtype=torch.float32,
                     ),
                     requires_grad=False,
