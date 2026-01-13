@@ -213,20 +213,18 @@ class Qwen2Attention(nn.Module):
         if self.qk_norm:
             # Reshape to apply per-head normalization
             # q shape: (total_tokens, q_size) -> (total_tokens, num_heads, head_dim)
-            q_by_head = q.view(
-                *q.shape[:-1], q.shape[-1] // self.head_dim, self.head_dim
-            )
-            k_by_head = k.view(
-                *k.shape[:-1], k.shape[-1] // self.head_dim, self.head_dim
-            )
+            q_shape = q.shape
+            k_shape = k.shape
+            q = q.view(*q.shape[:-1], q.shape[-1] // self.head_dim, self.head_dim)
+            k = k.view(*k.shape[:-1], k.shape[-1] // self.head_dim, self.head_dim)
 
             # Apply normalization
             q = self.q_norm(q)
             k = self.k_norm(k)
 
             # Reshape back
-            q = q_by_head.view(q.shape)
-            k = k_by_head.view(k.shape)
+            q = q.view(q_shape)
+            k = k.view(k_shape)
 
         q, k = self.rotary_emb(positions, q, k)
         attn_output = self.attn(q, k, v)
