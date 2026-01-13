@@ -1667,15 +1667,15 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
         # If kv_b_proj_weight is unquantized, quantize it to mxfp4 if supported
         if self.is_aiter_triton_fp4_bmm_enabled:
             from vllm.model_executor.layers.quantization.quark.utils import (
-                quark_quntize_weight_to_mxfp4,
+                quark_quantize_weight_to_mxfp4,
             )
 
-            self.W_K, self.W_K_scale = quark_quntize_weight_to_mxfp4(W_UK)
+            self.W_K, self.W_K_scale = quark_quantize_weight_to_mxfp4(W_UK)
             # Convert from (L, N, P) to (N, L, P)
             self.W_K = self.W_K.transpose(0, 1)
             self.W_K_scale = self.W_K_scale.transpose(0, 1)
 
-            self.W_V, self.W_V_scale = quark_quntize_weight_to_mxfp4(
+            self.W_V, self.W_V_scale = quark_quantize_weight_to_mxfp4(
                 W_UV.permute(1, 2, 0)
             )
         elif self.is_aiter_triton_fp8_bmm_enabled:
@@ -2113,7 +2113,6 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
                     decode_q_nope,
                     self.W_K,
                     self.W_K_scale,
-                    y=decode_ql_nope,
                     transpose_bm=True,
                     prequant=True,
                     y_scale=layer._q_scale if fp8_attention else None,

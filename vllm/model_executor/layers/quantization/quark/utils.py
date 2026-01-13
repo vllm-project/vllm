@@ -107,7 +107,7 @@ def _is_equal_or_regex_match(
 
 
 # utility for tensor dims > 2 cases
-def quark_quntize_weight_to_mxfp4(w: torch.Tensor):
+def quark_quantize_weight_to_mxfp4(w: torch.Tensor):
     assert w.dtype == torch.bfloat16, (
         "Quark dynamic quantization is supported only for fp16 weights and only to MXF4"
     )
