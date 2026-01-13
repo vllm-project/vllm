@@ -360,6 +360,7 @@ def validate_xgrammar_grammar(sampling_params: SamplingParams) -> None:
     if so_params.structural_tag:
         try:
             s_tag = json.loads(so_params.structural_tag)
+
             # Using the deprecated method of compiling structural tag
             if "structures" in s_tag:
                 tags = [
