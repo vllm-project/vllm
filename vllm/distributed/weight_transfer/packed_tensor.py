@@ -4,27 +4,11 @@
 
 import math
 from collections.abc import Callable, Iterator
-from functools import lru_cache
 from typing import Any
 
 import torch
 
-# Configuration constants (can be overridden via environment variables later)
-REFIT_BUFFER_MEMORY_RATIO = 0.02
-REFIT_NUM_BUFFERS = 2
-REFIT_MAX_BUFFER_SIZE = 5 * 1024**3  # 5GB max
-
-
-@lru_cache(maxsize=1)
-def get_target_packed_tensor_size() -> int:
-    """Calculate target packed tensor size based on GPU memory."""
-    device = torch.device("cuda")
-    props = torch.cuda.get_device_properties(device)
-    total_memory_bytes = props.total_memory
-    target_size = min(
-        int(total_memory_bytes * REFIT_BUFFER_MEMORY_RATIO), REFIT_MAX_BUFFER_SIZE
-    )
-    return target_size
+from vllm import envs
 
 
 def packed_broadcast_producer(
@@ -43,8 +27,8 @@ def packed_broadcast_producer(
                        packing, should return a tensor
 
     """
-    target_packed_tensor_size = get_target_packed_tensor_size()
-    num_buffers = REFIT_NUM_BUFFERS
+    target_packed_tensor_size = envs.VLLM_PACKED_TENSOR_BUFFER_SIZE
+    num_buffers = envs.VLLM_PACKED_TENSOR_NUM_BUFFERS
 
     streams = [torch.cuda.Stream() for _ in range(num_buffers)]
     buffer_idx = 0
@@ -133,8 +117,8 @@ def packed_broadcast_consumer(
 
         return unpacked_list
 
-    target_packed_tensor_size = get_target_packed_tensor_size()
-    num_buffers = REFIT_NUM_BUFFERS
+    target_packed_tensor_size = envs.VLLM_PACKED_TENSOR_BUFFER_SIZE
+    num_buffers = envs.VLLM_PACKED_TENSOR_NUM_BUFFERS
 
     streams = [torch.cuda.Stream() for _ in range(num_buffers)]
     buffer_idx = 0

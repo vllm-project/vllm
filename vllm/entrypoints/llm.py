@@ -1825,10 +1825,10 @@ class LLM:
             request: Weight update request with backend-specific update info
         """
 
-        if hasattr(request, "update_info"):
+        if isinstance(request, WeightUpdateRequest):
             update_info_dict = request.update_info
         else:
-            raise TypeError(f"Invalid `WeightUpdateRequest` format: {type(request)}")
+            raise TypeError(f"Expected WeightUpdateRequest, got {type(request)}")
 
         self.llm_engine.collective_rpc(
             "update_weights", kwargs={"update_info": update_info_dict}

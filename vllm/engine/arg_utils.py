@@ -595,9 +595,9 @@ class EngineArgs:
             self.attention_config = AttentionConfig(**self.attention_config)
         if isinstance(self.eplb_config, dict):
             self.eplb_config = EPLBConfig(**self.eplb_config)
-        if isinstance(self.weight_transfer_config, dict):
+        if self.weight_transfer_backend is not None:
             self.weight_transfer_config = WeightTransferConfig(
-                **self.weight_transfer_config
+                backend=self.weight_transfer_backend
             )
         # Setup plugins
         from vllm.plugins import load_general_plugins

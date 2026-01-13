@@ -246,6 +246,8 @@ if TYPE_CHECKING:
     VLLM_COMPILE_CACHE_SAVE_FORMAT: Literal["binary", "unpacked"] = "binary"
     VLLM_USE_V2_MODEL_RUNNER: bool = False
     VLLM_DEBUG_MFU_METRICS: bool = False
+    VLLM_PACKED_TENSOR_NUM_BUFFERS: int = 2
+    VLLM_PACKED_TENSOR_BUFFER_SIZE: int = 1024 * 1024 * 1024  # 1GB
 
 
 def get_default_cache_root():
@@ -1574,6 +1576,14 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Debug logging for --enable-mfu-metrics
     "VLLM_DEBUG_MFU_METRICS": lambda: bool(
         int(os.getenv("VLLM_DEBUG_MFU_METRICS", "0"))
+    ),
+    # Number of buffers for packed tensor weight transfer in NCCLWeightTransferEngine
+    "VLLM_PACKED_TENSOR_NUM_BUFFERS": lambda: int(
+        os.getenv("VLLM_PACKED_TENSOR_NUM_BUFFERS", "2")
+    ),
+    # Size in bytes for each packed tensor buffer (default 1GB)
+    "VLLM_PACKED_TENSOR_BUFFER_SIZE": lambda: int(
+        os.getenv("VLLM_PACKED_TENSOR_BUFFER_SIZE", str(1024 * 1024 * 1024))
     ),
 }
 
