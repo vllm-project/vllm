@@ -24,6 +24,10 @@ from vllm.model_executor.layers.fused_moe.runner.shared_experts import (
     SharedExperts,
     SharedExpertsOrder,
 )
+from vllm.model_executor.layers.fused_moe.runner.shared_experts import (
+    SharedExperts,
+    SharedExpertsOrder,
+)
 from vllm.model_executor.layers.fused_moe.utils import (
     _resize_cache,
     disable_inplace,
@@ -995,7 +999,7 @@ class FusedMoEKernelModularImpl:
         self,
         prepare_finalize: FusedMoEPrepareAndFinalizeModular,
         fused_experts: FusedMoEExpertsModular,
-        shared_experts: SharedExperts | None,
+        shared_experts: SharedExperts | None = None,
         inplace: bool = False,
     ):
         self.prepare_finalize = prepare_finalize
