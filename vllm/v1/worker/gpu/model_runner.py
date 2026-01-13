@@ -600,7 +600,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         # Sample tokens and compute logprobs (if needed).
         sampler_output = self.sampler(
             logits,
-            input_batch.idx_mapping,
+            input_batch.expanded_idx_mapping,
             input_batch.idx_mapping_np,
             sample_pos,
         )
