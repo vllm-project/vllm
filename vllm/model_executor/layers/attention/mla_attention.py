@@ -775,6 +775,8 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
             "Make sure all cudagraph capture sizes <= max_num_seq."
         )
 
+        assert m.max_query_len <= self.reorder_batch_threshold  # decode only
+
         return self.build(0, m)
 
     def build(
