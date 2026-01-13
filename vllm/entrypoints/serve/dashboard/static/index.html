@@ -1,0 +1,1702 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>vLLM Dashboard</title>
+    <style>
+        /* vLLM Design System Variables */
+        :root {
+            --vllm-yellow: #fdb517;
+            --vllm-blue: #30a2ff;
+            --vllm-yellow-hover: #e5a315;
+            --vllm-blue-hover: #2891e6;
+
+            /* Dark theme colors (default) */
+            --background: #0f1117;
+            --foreground: #f8fafc;
+            --card: #1a1d27;
+            --card-foreground: #f8fafc;
+            --muted: #282d3a;
+            --muted-foreground: #94a3b8;
+            --border: rgba(255, 255, 255, 0.1);
+            --input: rgba(255, 255, 255, 0.15);
+            --ring: #475569;
+            --scrollbar-track: rgba(255, 255, 255, 0.05);
+            --scrollbar-thumb: rgba(255, 255, 255, 0.2);
+            --scrollbar-hover: rgba(255, 255, 255, 0.3);
+            --input-area-bg: rgba(0, 0, 0, 0.2);
+            --hover-bg: rgba(255, 255, 255, 0.03);
+            --shadow-color: rgba(0, 0, 0, 0.5);
+
+            /* Status colors */
+            --success: #22c55e;
+            --warning: #eab308;
+            --error: #ef4444;
+
+            --radius: 0.625rem;
+            --font-sans: Inter, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+            --font-mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+        }
+
+        /* Light theme */
+        :root.light {
+            --background: #f8fafc;
+            --foreground: #0f172a;
+            --card: #ffffff;
+            --card-foreground: #0f172a;
+            --muted: #f1f5f9;
+            --muted-foreground: #64748b;
+            --border: rgba(0, 0, 0, 0.1);
+            --input: rgba(0, 0, 0, 0.05);
+            --ring: #cbd5e1;
+            --scrollbar-track: rgba(0, 0, 0, 0.05);
+            --scrollbar-thumb: rgba(0, 0, 0, 0.2);
+            --scrollbar-hover: rgba(0, 0, 0, 0.3);
+            --input-area-bg: rgba(0, 0, 0, 0.03);
+            --hover-bg: rgba(0, 0, 0, 0.03);
+            --shadow-color: rgba(0, 0, 0, 0.15);
+        }
+
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }
+
+        html, body {
+            height: 100%;
+            overflow: hidden;
+        }
+
+        body {
+            font-family: var(--font-sans);
+            background: var(--background);
+            color: var(--foreground);
+            line-height: 1.5;
+        }
+
+        /* Custom scrollbar */
+        ::-webkit-scrollbar {
+            width: 6px;
+            height: 6px;
+        }
+
+        ::-webkit-scrollbar-track {
+            background: var(--scrollbar-track);
+        }
+
+        ::-webkit-scrollbar-thumb {
+            background: var(--scrollbar-thumb);
+            border-radius: 3px;
+        }
+
+        ::-webkit-scrollbar-thumb:hover {
+            background: var(--scrollbar-hover);
+        }
+
+        /* Main Layout - top bar + 3 columns */
+        .dashboard {
+            display: grid;
+            grid-template-rows: auto 1fr;
+            grid-template-columns: 280px 1fr 280px;
+            grid-template-areas:
+                "metrics metrics metrics"
+                "left center right";
+            height: 100vh;
+            gap: 12px;
+            padding: 12px;
+        }
+
+        /* Top Metrics Bar */
+        .metrics-bar {
+            grid-area: metrics;
+            display: flex;
+            align-items: center;
+            gap: 4px;
+            background: var(--card);
+            border: 1px solid var(--border);
+            border-radius: var(--radius);
+            padding: 6px 12px;
+        }
+
+        .metric-item {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            gap: 0;
+            padding: 2px 6px;
+            border-right: 1px solid var(--border);
+            transition: background 0.2s ease;
+            flex: 1 1 auto;
+            min-width: 0;
+        }
+
+        .metric-item:last-child {
+            border-right: none;
+        }
+
+        .metric-item:hover {
+            background: var(--hover-bg);
+        }
+
+        .metric-item .label {
+            font-size: 9px;
+            color: var(--muted-foreground);
+            text-transform: uppercase;
+            font-weight: 500;
+            letter-spacing: 0.02em;
+        }
+
+        .metric-item .value {
+            font-size: 12px;
+            font-weight: 700;
+            font-family: var(--font-mono);
+            color: var(--vllm-blue);
+        }
+
+        .metric-item .value.green { color: var(--success); }
+        .metric-item .value.yellow { color: var(--vllm-yellow); }
+        .metric-item .value.red { color: var(--error); }
+
+        .metric-item .mini-bar {
+            width: 32px;
+            height: 3px;
+            background: var(--muted);
+            border-radius: 2px;
+            overflow: hidden;
+            margin-top: 2px;
+        }
+
+        .metric-item .mini-bar .fill {
+            height: 100%;
+            background: var(--vllm-blue);
+            border-radius: 2px;
+            transition: width 0.3s ease;
+        }
+
+        .metric-item .mini-bar .fill.green {
+            background: var(--success);
+        }
+
+        .status-indicator {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            padding-right: 10px;
+            border-right: 1px solid var(--border);
+            flex-shrink: 0;
+        }
+
+        .status-indicator .dot {
+            width: 8px;
+            height: 8px;
+            background: var(--success);
+            border-radius: 50%;
+            box-shadow: 0 0 10px var(--success);
+            animation: pulse 2s ease-in-out infinite;
+        }
+
+        .status-indicator .version {
+            font-size: 12px;
+            color: var(--muted-foreground);
+            font-family: var(--font-mono);
+            font-weight: 500;
+        }
+
+        .model-indicator {
+            font-size: 12px;
+            font-weight: 600;
+            color: var(--vllm-yellow);
+            padding: 0 8px;
+            border-right: 1px solid var(--border);
+            max-width: 180px;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+            flex-shrink: 1;
+            min-width: 60px;
+        }
+
+        .theme-toggle {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 6px 10px;
+            background: var(--muted);
+            border: 1px solid var(--border);
+            border-radius: var(--radius);
+            cursor: pointer;
+            transition: all 0.2s ease;
+            flex-shrink: 0;
+        }
+
+        .theme-toggle:hover {
+            background: var(--input);
+            border-color: var(--vllm-blue);
+        }
+
+        .theme-toggle .icon {
+            width: 16px;
+            height: 16px;
+            transition: transform 0.3s ease;
+        }
+
+        .theme-toggle .icon svg {
+            width: 100%;
+            height: 100%;
+            fill: var(--muted-foreground);
+            stroke: var(--muted-foreground);
+            transition: all 0.2s ease;
+        }
+
+        .theme-toggle:hover .icon svg {
+            fill: var(--vllm-yellow);
+            stroke: var(--vllm-yellow);
+        }
+
+        /* Panel base style */
+        .panel {
+            background: var(--card);
+            border: 1px solid var(--border);
+            border-radius: var(--radius);
+            overflow: hidden;
+            transition: box-shadow 0.3s ease;
+        }
+
+        .panel:hover {
+            box-shadow: 0 4px 20px var(--shadow-color);
+        }
+
+        .panel-header {
+            padding: 14px 16px;
+            background: linear-gradient(90deg, rgba(48, 162, 255, 0.08) 0%, transparent 100%);
+            border-bottom: 1px solid var(--border);
+            font-size: 11px;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+            color: var(--vllm-blue);
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+
+        .panel-header::before {
+            content: '';
+            width: 6px;
+            height: 6px;
+            background: var(--vllm-blue);
+            border-radius: 50%;
+            box-shadow: 0 0 8px var(--vllm-blue);
+        }
+
+        /* Left Panel - Info */
+        .left-panel {
+            grid-area: left;
+            display: flex;
+            flex-direction: column;
+        }
+
+
+        /* Config section */
+        .config-scroll {
+            flex: 1;
+            overflow-y: auto;
+            padding: 0;
+        }
+
+        .config-item {
+            display: flex;
+            justify-content: space-between;
+            padding: 8px 16px;
+            border-bottom: 1px solid var(--border);
+            font-size: 11px;
+            transition: background 0.15s ease;
+        }
+
+        .config-item:hover {
+            background: rgba(48, 162, 255, 0.08);
+        }
+
+        .config-item.explicit {
+            background: rgba(253, 181, 23, 0.1);
+            border-left: 3px solid var(--vllm-yellow);
+        }
+
+        .config-item.explicit .config-key {
+            color: var(--vllm-yellow);
+            font-weight: 600;
+        }
+
+        .config-key {
+            color: var(--muted-foreground);
+            font-family: var(--font-mono);
+            flex: 1 1 auto;
+            min-width: 0;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+            padding-right: 8px;
+            text-decoration: none;
+            transition: color 0.2s ease;
+        }
+
+        a.config-key:hover {
+            color: var(--vllm-blue);
+            text-decoration: underline;
+        }
+
+        .config-val {
+            color: var(--vllm-blue);
+            font-family: var(--font-mono);
+            flex-shrink: 0;
+            max-width: 50%;
+            text-align: right;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+            cursor: help;
+        }
+
+        /* Interactive Tooltip */
+        .tooltip {
+            display: none;
+            position: fixed;
+            background: var(--card);
+            border: 1px solid var(--vllm-blue);
+            padding: 12px 16px;
+            border-radius: var(--radius);
+            font-size: 12px;
+            font-family: var(--font-mono);
+            color: var(--foreground);
+            max-width: 500px;
+            max-height: 300px;
+            overflow: auto;
+            word-break: break-all;
+            white-space: pre-wrap;
+            z-index: 10000;
+            box-shadow: 0 8px 32px var(--shadow-color);
+            user-select: text;
+            cursor: text;
+        }
+
+        .tooltip.visible {
+            display: block;
+            animation: fade-in 0.15s ease-out;
+        }
+
+        @keyframes fade-in {
+            from { opacity: 0; transform: translateY(-4px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+
+        .config-item {
+            position: relative;
+        }
+
+        .search-input {
+            margin-left: auto;
+            background: var(--muted);
+            border: 1px solid var(--border);
+            border-radius: calc(var(--radius) - 4px);
+            padding: 4px 10px;
+            color: var(--foreground);
+            font-size: 11px;
+            width: 80px;
+            outline: none;
+            transition: all 0.2s ease;
+        }
+
+        .search-input:focus {
+            border-color: var(--vllm-blue);
+            width: 110px;
+            box-shadow: 0 0 0 2px rgba(48, 162, 255, 0.2);
+        }
+
+        .search-input::placeholder {
+            color: var(--muted-foreground);
+        }
+
+        /* Center Panel - Chat */
+        .center-panel {
+            grid-area: center;
+            display: flex;
+            flex-direction: column;
+            min-width: 0;
+        }
+
+        /* Right Panel - Environment */
+        .right-panel {
+            grid-area: right;
+            display: flex;
+            flex-direction: column;
+        }
+
+        .chat-area {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+        }
+
+        .chat-messages {
+            flex: 1;
+            overflow-y: auto;
+            padding: 16px;
+        }
+
+        .chat-messages::-webkit-scrollbar {
+            width: 4px;
+        }
+
+        .chat-messages::-webkit-scrollbar-thumb {
+            background: var(--muted);
+            border-radius: 2px;
+        }
+
+        .chat-empty {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            height: 100%;
+            color: var(--muted-foreground);
+            font-size: 14px;
+        }
+
+        .message {
+            margin-bottom: 12px;
+            max-width: 80%;
+            animation: slideIn 0.2s ease;
+        }
+
+        @keyframes slideIn {
+            from { opacity: 0; transform: translateY(8px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+
+        .message-user {
+            margin-left: auto;
+        }
+
+        .message-bubble {
+            padding: 10px 14px;
+            border-radius: var(--radius);
+            font-size: 13px;
+        }
+
+        .message-user .message-bubble {
+            background: linear-gradient(135deg, var(--vllm-blue) 0%, var(--vllm-blue-hover) 100%);
+            color: white;
+            border-radius: var(--radius) var(--radius) 4px var(--radius);
+        }
+
+        .message-assistant .message-bubble {
+            background: var(--muted);
+            border: 1px solid var(--border);
+            border-radius: var(--radius) var(--radius) var(--radius) 4px;
+        }
+
+        .thinking-block {
+            background: rgba(48, 162, 255, 0.1);
+            border-left: 2px solid var(--vllm-blue);
+            padding: 8px 10px;
+            margin-bottom: 8px;
+            border-radius: 0 6px 6px 0;
+            font-size: 11px;
+        }
+
+        .thinking-header {
+            display: flex;
+            justify-content: space-between;
+            cursor: pointer;
+            color: var(--vllm-blue);
+            font-weight: 600;
+        }
+
+        .thinking-content {
+            display: none;
+            margin-top: 6px;
+            padding-top: 6px;
+            border-top: 1px solid var(--border);
+            color: var(--muted-foreground);
+            font-style: italic;
+        }
+
+        .thinking-content.expanded {
+            display: block;
+        }
+
+        .message-meta {
+            font-size: 10px;
+            color: var(--muted-foreground);
+            margin-top: 4px;
+            padding: 0 4px;
+        }
+
+        .message-user .message-meta {
+            text-align: right;
+        }
+
+        /* Chat Input */
+        .chat-input-area {
+            padding: 12px 16px;
+            border-top: 1px solid var(--border);
+            background: var(--input-area-bg);
+        }
+
+        .input-row {
+            display: flex;
+            gap: 10px;
+        }
+
+        .chat-input {
+            flex: 1;
+            background: var(--muted);
+            border: 1px solid var(--border);
+            border-radius: var(--radius);
+            padding: 10px 14px;
+            color: var(--foreground);
+            font-size: 13px;
+            outline: none;
+            transition: border-color 0.2s, box-shadow 0.2s;
+        }
+
+        .chat-input:focus {
+            border-color: var(--vllm-blue);
+            box-shadow: 0 0 0 2px rgba(48, 162, 255, 0.2);
+        }
+
+        .chat-input::placeholder {
+            color: var(--muted-foreground);
+        }
+
+        .send-btn {
+            background: linear-gradient(135deg, var(--vllm-blue) 0%, var(--vllm-blue-hover) 100%);
+            border: none;
+            border-radius: var(--radius);
+            padding: 10px 20px;
+            color: white;
+            font-weight: 600;
+            font-size: 12px;
+            cursor: pointer;
+            transition: transform 0.1s, box-shadow 0.2s;
+        }
+
+        .send-btn:hover {
+            transform: translateY(-1px);
+            box-shadow: 0 4px 12px rgba(48, 162, 255, 0.4);
+        }
+
+        .send-btn:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+            transform: none;
+        }
+
+        .params-row {
+            display: flex;
+            gap: 16px;
+            margin-bottom: 10px;
+        }
+
+        .param-item {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            gap: 4px;
+        }
+
+        .param-label {
+            font-size: 10px;
+            color: var(--muted-foreground);
+            text-transform: uppercase;
+            display: flex;
+            justify-content: space-between;
+        }
+
+        .param-val {
+            color: var(--vllm-blue);
+            font-weight: 600;
+        }
+
+        .param-item input[type="range"] {
+            width: 100%;
+            height: 4px;
+            background: var(--muted);
+            border-radius: 2px;
+            -webkit-appearance: none;
+        }
+
+        .param-item input[type="range"]::-webkit-slider-thumb {
+            -webkit-appearance: none;
+            width: 12px;
+            height: 12px;
+            background: var(--vllm-blue);
+            border-radius: 50%;
+            cursor: pointer;
+        }
+
+        .param-item input[type="number"] {
+            background: var(--muted);
+            border: 1px solid var(--border);
+            border-radius: 4px;
+            padding: 4px 8px;
+            color: var(--foreground);
+            font-size: 11px;
+            font-family: var(--font-mono);
+            width: 100%;
+            outline: none;
+        }
+
+        .param-item input[type="number"]:focus {
+            border-color: var(--vllm-blue);
+        }
+
+        .chat-controls {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 10px;
+        }
+
+        .chat-stats {
+            display: flex;
+            gap: 12px;
+            font-size: 10px;
+            color: var(--muted-foreground);
+        }
+
+        .chat-stats span {
+            display: flex;
+            gap: 4px;
+        }
+
+        .chat-stats .val {
+            color: var(--vllm-blue);
+            font-weight: 600;
+            font-family: var(--font-mono);
+        }
+
+        .clear-btn {
+            background: transparent;
+            border: 1px solid var(--border);
+            border-radius: 4px;
+            padding: 4px 10px;
+            color: var(--muted-foreground);
+            font-size: 10px;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+
+        .clear-btn:hover {
+            border-color: var(--error);
+            color: var(--error);
+        }
+
+
+        /* Typing indicator */
+        .typing {
+            display: none;
+            align-items: center;
+            gap: 4px;
+            padding: 8px 16px;
+            font-size: 12px;
+            color: var(--muted-foreground);
+        }
+
+        .typing.visible {
+            display: flex;
+        }
+
+        .typing-dot {
+            width: 6px;
+            height: 6px;
+            background: var(--vllm-blue);
+            border-radius: 50%;
+            animation: bounce 1.4s infinite;
+        }
+
+        .typing-dot:nth-child(2) { animation-delay: 0.16s; }
+        .typing-dot:nth-child(3) { animation-delay: 0.32s; }
+
+        @keyframes bounce {
+            0%, 80%, 100% { transform: scale(0); }
+            40% { transform: scale(1); }
+        }
+
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.5; }
+        }
+
+        /* Modal */
+        .modal-overlay {
+            display: none;
+            position: fixed;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background: rgba(0, 0, 0, 0.7);
+            z-index: 9999;
+            align-items: center;
+            justify-content: center;
+            backdrop-filter: blur(4px);
+        }
+
+        .modal-overlay.visible {
+            display: flex;
+            animation: fade-in 0.2s ease-out;
+        }
+
+        .modal {
+            background: var(--card);
+            border: 1px solid var(--border);
+            border-radius: var(--radius);
+            width: 90%;
+            max-width: 800px;
+            max-height: 85vh;
+            display: flex;
+            flex-direction: column;
+            box-shadow: 0 20px 60px var(--shadow-color);
+        }
+
+        .modal-header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 16px 20px;
+            border-bottom: 1px solid var(--border);
+            background: linear-gradient(90deg, rgba(48, 162, 255, 0.08) 0%, transparent 100%);
+        }
+
+        .modal-title {
+            font-size: 14px;
+            font-weight: 600;
+            color: var(--vllm-blue);
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .modal-actions {
+            display: flex;
+            gap: 8px;
+        }
+
+        .modal-btn {
+            padding: 6px 12px;
+            border-radius: calc(var(--radius) - 2px);
+            font-size: 11px;
+            font-weight: 500;
+            cursor: pointer;
+            transition: all 0.2s ease;
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
+
+        .modal-btn-primary {
+            background: var(--vllm-blue);
+            border: none;
+            color: white;
+        }
+
+        .modal-btn-primary:hover {
+            background: var(--vllm-blue-hover);
+        }
+
+        .modal-btn-secondary {
+            background: var(--muted);
+            border: 1px solid var(--border);
+            color: var(--foreground);
+        }
+
+        .modal-btn-secondary:hover {
+            border-color: var(--vllm-blue);
+        }
+
+        .modal-btn-close {
+            background: transparent;
+            border: none;
+            color: var(--muted-foreground);
+            padding: 6px;
+            font-size: 18px;
+            line-height: 1;
+        }
+
+        .modal-btn-close:hover {
+            color: var(--error);
+        }
+
+        .modal-body {
+            flex: 1;
+            overflow-y: auto;
+            padding: 16px 20px;
+        }
+
+        .modal-body pre {
+            font-family: var(--font-mono);
+            font-size: 11px;
+            line-height: 1.5;
+            color: var(--foreground);
+            white-space: pre-wrap;
+            word-break: break-word;
+            margin: 0;
+        }
+
+        .modal-loading {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            padding: 60px 20px;
+            color: var(--muted-foreground);
+            gap: 16px;
+        }
+
+        .modal-loading .spinner {
+            width: 32px;
+            height: 32px;
+            border: 3px solid var(--muted);
+            border-top-color: var(--vllm-blue);
+            border-radius: 50%;
+            animation: spin 0.8s linear infinite;
+        }
+
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
+
+        .copy-success {
+            color: var(--success) !important;
+        }
+
+        /* Env button */
+        .env-btn {
+            margin-left: auto;
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            padding: 6px 10px;
+            background: var(--muted);
+            border: 1px solid var(--border);
+            border-radius: var(--radius);
+            cursor: pointer;
+            transition: all 0.2s ease;
+            font-size: 12px;
+            color: var(--muted-foreground);
+            font-weight: 500;
+            margin-right: 8px;
+        }
+
+        .env-btn:hover {
+            background: var(--input);
+            border-color: var(--vllm-blue);
+            color: var(--vllm-blue);
+        }
+
+        .env-btn svg {
+            width: 14px;
+            height: 14px;
+            fill: currentColor;
+        }
+
+        .github-link {
+            display: flex;
+            align-items: center;
+            padding: 0 10px 0 0;
+            border-right: 1px solid var(--border);
+            color: var(--muted-foreground);
+            text-decoration: none;
+            transition: color 0.2s ease;
+        }
+
+        .github-link:hover {
+            color: var(--foreground);
+        }
+
+        .github-link svg {
+            width: 20px;
+            height: 20px;
+            fill: currentColor;
+        }
+
+        .hidden {
+            display: none !important;
+        }
+    </style>
+</head>
+<body>
+    <div class="dashboard">
+        <!-- Top Metrics Bar -->
+        <div class="metrics-bar">
+            <a href="https://github.com/vllm-project/vllm" target="_blank" class="github-link" title="vLLM on GitHub">
+                <svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+                    <path d="M12 0C5.37 0 0 5.37 0 12c0 5.31 3.435 9.795 8.205 11.385.6.105.825-.255.825-.57 0-.285-.015-1.23-.015-2.235-3.015.555-3.795-.735-4.035-1.41-.135-.345-.72-1.41-1.23-1.695-.42-.225-1.02-.78-.015-.795.945-.015 1.62.87 1.845 1.23 1.08 1.815 2.805 1.305 3.495.99.105-.78.42-1.305.765-1.605-2.67-.3-5.46-1.335-5.46-5.925 0-1.305.465-2.385 1.23-3.225-.12-.3-.54-1.53.12-3.18 0 0 1.005-.315 3.3 1.23.96-.27 1.98-.405 3-.405s2.04.135 3 .405c2.295-1.56 3.3-1.23 3.3-1.23.66 1.65.24 2.88.12 3.18.765.84 1.23 1.905 1.23 3.225 0 4.605-2.805 5.625-5.475 5.925.435.375.81 1.095.81 2.22 0 1.605-.015 2.895-.015 3.3 0 .315.225.69.825.57A12.02 12.02 0 0024 12c0-6.63-5.37-12-12-12z"/>
+                </svg>
+            </a>
+            <div class="status-indicator">
+                <div class="dot" id="status-dot"></div>
+                <span class="version" id="version">vLLM</span>
+            </div>
+            <div class="model-indicator" id="model-name">-</div>
+            <div class="metric-item" title="Number of requests currently being processed">
+                <span class="label">Running</span>
+                <span class="value green" id="m-running">0</span>
+            </div>
+            <div class="metric-item" title="Number of requests waiting in queue">
+                <span class="label">Waiting</span>
+                <span class="value yellow" id="m-waiting">0</span>
+            </div>
+            <div class="metric-item" title="Total completed requests">
+                <span class="label">Requests</span>
+                <span class="value" id="m-requests">0</span>
+            </div>
+            <div class="metric-item" title="Total tokens processed (prompt + generation)">
+                <span class="label">Tokens</span>
+                <span class="value" id="m-tokens">0</span>
+            </div>
+            <div class="metric-item" title="Time To First Token - Average time until first token is generated">
+                <span class="label">TTFT</span>
+                <span class="value" id="m-ttft">-</span>
+            </div>
+            <div class="metric-item" title="End-to-End Latency - Average total request processing time">
+                <span class="label">E2E Latency</span>
+                <span class="value" id="m-latency">-</span>
+            </div>
+            <div class="metric-item" title="Average time spent in prefill phase (processing input tokens)">
+                <span class="label">Prefill</span>
+                <span class="value" id="m-prefill">-</span>
+            </div>
+            <div class="metric-item" title="Average time spent in decode phase (generating output tokens)">
+                <span class="label">Decode</span>
+                <span class="value" id="m-decode">-</span>
+            </div>
+            <div class="metric-item" title="KV Cache Usage - Percentage of GPU KV cache memory in use">
+                <span class="label">KV Cache</span>
+                <span class="value" id="m-kv">0%</span>
+                <div class="mini-bar"><div class="fill" id="kv-bar" style="width:0%"></div></div>
+            </div>
+            <div class="metric-item" title="Prefix Cache Hit Rate - Percentage of prompt tokens found in cache">
+                <span class="label">Cache Hit</span>
+                <span class="value green" id="m-cache-hit">-</span>
+                <div class="mini-bar"><div class="fill green" id="cache-hit-bar" style="width:0%"></div></div>
+            </div>
+            <button class="env-btn" onclick="openEnvModal()" title="Collect environment info for debugging">
+                <svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+                    <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
+                    <polyline points="14 2 14 8 20 8" fill="none" stroke="currentColor" stroke-width="2"/>
+                    <line x1="16" y1="13" x2="8" y2="13" stroke="currentColor" stroke-width="2"/>
+                    <line x1="16" y1="17" x2="8" y2="17" stroke="currentColor" stroke-width="2"/>
+                    <polyline points="10 9 9 9 8 9" fill="none" stroke="currentColor" stroke-width="2"/>
+                </svg>
+                Collect Env
+            </button>
+            <button class="theme-toggle" id="theme-toggle" onclick="toggleTheme()" title="Toggle light/dark theme">
+                <span class="icon" id="theme-icon">
+                    <svg id="moon-icon" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+                        <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/>
+                    </svg>
+                    <svg id="sun-icon" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg" style="display:none">
+                        <circle cx="12" cy="12" r="5"/>
+                        <line x1="12" y1="1" x2="12" y2="3" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+                        <line x1="12" y1="21" x2="12" y2="23" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+                        <line x1="4.22" y1="4.22" x2="5.64" y2="5.64" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+                        <line x1="18.36" y1="18.36" x2="19.78" y2="19.78" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+                        <line x1="1" y1="12" x2="3" y2="12" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+                        <line x1="21" y1="12" x2="23" y2="12" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+                        <line x1="4.22" y1="19.78" x2="5.64" y2="18.36" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+                        <line x1="18.36" y1="5.64" x2="19.78" y2="4.22" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+                    </svg>
+                </span>
+            </button>
+        </div>
+
+        <!-- Left Panel: Configuration -->
+        <div class="panel left-panel">
+            <div class="panel-header">
+                Configuration
+                <input type="text" class="search-input" id="config-search" placeholder="Search..." oninput="filterList('config')">
+            </div>
+            <div class="config-scroll" id="config-list">
+                <div class="config-item">
+                    <span class="config-key">Loading...</span>
+                </div>
+            </div>
+        </div>
+
+        <!-- Center Panel: Chat -->
+        <div class="panel center-panel">
+            <div class="panel-header">
+                Quick Chat
+                <span style="margin-left:auto;font-size:10px;color:var(--muted-foreground);text-transform:none;letter-spacing:0;font-weight:400">Press Enter to send</span>
+            </div>
+
+            <div class="chat-area">
+                <div class="chat-messages" id="chat-messages">
+                    <div class="chat-empty">Send a message to start chatting</div>
+                </div>
+
+                <div class="typing" id="typing">
+                    <div class="typing-dot"></div>
+                    <div class="typing-dot"></div>
+                    <div class="typing-dot"></div>
+                    <span style="margin-left:4px">Generating...</span>
+                </div>
+
+                <div class="chat-input-area">
+                    <div class="chat-controls">
+                        <div class="chat-stats">
+                            <span>Context: <span class="val" id="stat-context">0</span> characters</span>
+                            <span>Messages: <span class="val" id="stat-messages">0</span></span>
+                        </div>
+                        <button class="clear-btn" onclick="clearChat()">Clear</button>
+                    </div>
+
+                    <div class="params-row">
+                        <div class="param-item">
+                            <div class="param-label">Temperature <span class="param-val" id="temp-val">0.7</span></div>
+                            <input type="range" id="temperature" min="0" max="2" step="0.1" value="0.7"
+                                   oninput="document.getElementById('temp-val').textContent=this.value">
+                        </div>
+                        <div class="param-item">
+                            <div class="param-label">Top P <span class="param-val" id="topp-val">0.9</span></div>
+                            <input type="range" id="top-p" min="0" max="1" step="0.05" value="0.9"
+                                   oninput="document.getElementById('topp-val').textContent=this.value">
+                        </div>
+                        <div class="param-item">
+                            <div class="param-label">Max Tokens</div>
+                            <input type="number" id="max-tokens" min="1" max="8192" value="512">
+                        </div>
+                    </div>
+
+                    <div class="input-row">
+                        <input type="text" class="chat-input" id="chat-input"
+                               placeholder="Type your message..."
+                               onkeypress="if(event.key==='Enter')sendMessage()">
+                        <button class="send-btn" id="send-btn" onclick="sendMessage()">Send</button>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Right Panel: Environment -->
+        <div class="panel right-panel">
+            <div class="panel-header">
+                Environment
+                <input type="text" class="search-input" id="env-search" placeholder="Search..." oninput="filterList('env')">
+            </div>
+            <div class="config-scroll" id="env-list">
+                <div class="config-item">
+                    <span class="config-key">Loading...</span>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Interactive Tooltip (supports text selection) -->
+    <div class="tooltip" id="tooltip"></div>
+
+    <!-- Environment Info Modal -->
+    <div class="modal-overlay" id="env-modal" onclick="closeEnvModal(event)">
+        <div class="modal" onclick="event.stopPropagation()">
+            <div class="modal-header">
+                <div class="modal-title">
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
+                        <polyline points="14 2 14 8 20 8"/>
+                        <line x1="16" y1="13" x2="8" y2="13"/>
+                        <line x1="16" y1="17" x2="8" y2="17"/>
+                    </svg>
+                    Environment Information
+                </div>
+                <div class="modal-actions">
+                    <button class="modal-btn modal-btn-primary" id="copy-env-btn" onclick="copyEnvInfo()">
+                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <rect x="9" y="9" width="13" height="13" rx="2" ry="2"/>
+                            <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>
+                        </svg>
+                        <span id="copy-btn-text">Copy</span>
+                    </button>
+                    <button class="modal-btn modal-btn-close" onclick="closeEnvModal()">&times;</button>
+                </div>
+            </div>
+            <div class="modal-body" id="env-modal-body">
+                <div class="modal-loading">
+                    <div class="spinner"></div>
+                    <span>Collecting environment information...</span>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        let currentModel = null;
+        let conversationHistory = [];
+        let tooltipTimeout = null;
+        const tooltip = document.getElementById('tooltip');
+
+        // Theme toggle
+        function initTheme() {
+            const savedTheme = localStorage.getItem('vllm-dashboard-theme');
+            const prefersDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
+            const isDark = savedTheme ? savedTheme === 'dark' : prefersDark;
+
+            if (!isDark) {
+                document.documentElement.classList.add('light');
+            }
+            updateThemeIcon(!isDark);
+        }
+
+        function toggleTheme() {
+            const isLight = document.documentElement.classList.toggle('light');
+            localStorage.setItem('vllm-dashboard-theme', isLight ? 'light' : 'dark');
+            updateThemeIcon(isLight);
+        }
+
+        function updateThemeIcon(isLight) {
+            const moonIcon = document.getElementById('moon-icon');
+            const sunIcon = document.getElementById('sun-icon');
+            if (moonIcon && sunIcon) {
+                moonIcon.style.display = isLight ? 'none' : 'block';
+                sunIcon.style.display = isLight ? 'block' : 'none';
+            }
+        }
+
+        // Initialize theme immediately
+        initTheme();
+
+        // Environment Info Modal
+        let envInfoCache = null;
+
+        function openEnvModal() {
+            const modal = document.getElementById('env-modal');
+            const modalBody = document.getElementById('env-modal-body');
+            const copyBtn = document.getElementById('copy-env-btn');
+            const copyBtnText = document.getElementById('copy-btn-text');
+
+            // Show modal with info notice first
+            modal.classList.add('visible');
+            copyBtn.disabled = true;
+            copyBtnText.textContent = 'Copy';
+            envInfoCache = null;
+
+            modalBody.innerHTML = `
+                <div style="padding: 20px 0;">
+                    <h3 style="color: var(--vllm-blue); margin-bottom: 16px; font-size: 14px;">This will collect the following information:</h3>
+                    <ul style="color: var(--foreground); font-size: 12px; line-height: 2; padding-left: 20px;">
+                        <li><strong>System Info</strong> - OS, GCC, Clang, CMake, Libc version</li>
+                        <li><strong>Python Environment</strong> - Python version and platform</li>
+                        <li><strong>PyTorch Info</strong> - Version, CUDA/ROCm build info</li>
+                        <li><strong>GPU Info</strong> - CUDA runtime, GPU models, driver, cuDNN, topology</li>
+                        <li><strong>CPU Info</strong> - Processor details</li>
+                        <li><strong>Installed Packages</strong> - Relevant pip/conda packages (torch, triton, etc.)</li>
+                        <li><strong>vLLM Info</strong> - Version and build flags</li>
+                        <li><strong>Environment Variables</strong> - VLLM_*, CUDA_*, TORCH_*, NCCL_* variables</li>
+                    </ul>
+                    <p style="color: var(--muted-foreground); font-size: 11px; margin-top: 16px;">
+                        <strong>Note:</strong> Sensitive information (API keys, tokens, passwords) will be excluded.
+                    </p>
+                    <div style="margin-top: 24px; text-align: center;">
+                        <button class="modal-btn modal-btn-primary" onclick="collectEnvInfo()" style="padding: 10px 24px; font-size: 13px;">
+                            Collect Environment Info
+                        </button>
+                    </div>
+                </div>
+            `;
+        }
+
+        async function collectEnvInfo() {
+            const modalBody = document.getElementById('env-modal-body');
+            const copyBtn = document.getElementById('copy-env-btn');
+
+            // Show loading state
+            modalBody.innerHTML = `
+                <div class="modal-loading">
+                    <div class="spinner"></div>
+                    <span>Collecting environment information...</span>
+                </div>
+            `;
+
+            try {
+                const resp = await fetch('/dashboard/api/collect-env');
+                const data = await resp.json();
+
+                if (data.status === 'success') {
+                    envInfoCache = data.output;
+                    modalBody.innerHTML = `<pre>${esc(data.output)}</pre>`;
+                    copyBtn.disabled = false;
+                } else {
+                    modalBody.innerHTML = `<pre style="color:var(--error)">Error: ${esc(data.output)}</pre>`;
+                }
+            } catch (e) {
+                modalBody.innerHTML = `<pre style="color:var(--error)">Failed to collect environment info: ${esc(e.message)}</pre>`;
+            }
+        }
+
+        function closeEnvModal(event) {
+            // Only close if clicking overlay (not modal content) or close button
+            if (!event || event.target.id === 'env-modal') {
+                document.getElementById('env-modal').classList.remove('visible');
+            }
+        }
+
+        async function copyEnvInfo() {
+            if (!envInfoCache) return;
+
+            const copyBtn = document.getElementById('copy-env-btn');
+            const copyBtnText = document.getElementById('copy-btn-text');
+
+            try {
+                await navigator.clipboard.writeText(envInfoCache);
+                copyBtn.classList.add('copy-success');
+                copyBtnText.textContent = 'Copied!';
+
+                setTimeout(() => {
+                    copyBtn.classList.remove('copy-success');
+                    copyBtnText.textContent = 'Copy';
+                }, 2000);
+            } catch (e) {
+                copyBtnText.textContent = 'Failed';
+                setTimeout(() => {
+                    copyBtnText.textContent = 'Copy';
+                }, 2000);
+            }
+        }
+
+        // Close modal on Escape key
+        document.addEventListener('keydown', (e) => {
+            if (e.key === 'Escape') {
+                closeEnvModal({ target: { id: 'env-modal' } });
+            }
+        });
+
+        // Tooltip handling - supports text selection
+        function showTooltip(e, text) {
+            if (!text) return;
+            clearTimeout(tooltipTimeout);
+            tooltip.textContent = text;
+            tooltip.classList.add('visible');
+
+            // Position tooltip
+            const rect = e.target.getBoundingClientRect();
+            let left = rect.right + 10;
+            let top = rect.top;
+
+            // Keep tooltip in viewport
+            const tooltipRect = tooltip.getBoundingClientRect();
+            if (left + 400 > window.innerWidth) {
+                left = rect.left - 410;
+            }
+            if (top + 200 > window.innerHeight) {
+                top = window.innerHeight - 210;
+            }
+
+            tooltip.style.left = Math.max(10, left) + 'px';
+            tooltip.style.top = Math.max(10, top) + 'px';
+        }
+
+        function hideTooltip() {
+            tooltipTimeout = setTimeout(() => {
+                tooltip.classList.remove('visible');
+            }, 200);
+        }
+
+        // Keep tooltip visible when mouse enters it
+        tooltip.addEventListener('mouseenter', () => clearTimeout(tooltipTimeout));
+        tooltip.addEventListener('mouseleave', () => hideTooltip());
+
+        // Delegate tooltip events for config items
+        document.addEventListener('mouseover', (e) => {
+            const item = e.target.closest('.config-item[data-tooltip]');
+            if (item) {
+                showTooltip(e, item.dataset.tooltip);
+            }
+        });
+
+        document.addEventListener('mouseout', (e) => {
+            const item = e.target.closest('.config-item[data-tooltip]');
+            if (item) {
+                hideTooltip();
+            }
+        });
+
+        // Fetch server info
+        async function fetchServerInfo() {
+            try {
+                const resp = await fetch('/dashboard/api/info');
+                const data = await resp.json();
+
+                document.getElementById('version').textContent = 'vLLM v' + data.version;
+
+                if (data.models?.length > 0) {
+                    currentModel = data.models[0].id;
+                    document.getElementById('model-name').textContent = currentModel;
+                }
+
+                // Render config and env
+                fetchConfig(data);
+            } catch (e) {
+                const dot = document.getElementById('status-dot');
+                dot.style.background = 'var(--error)';
+                dot.style.boxShadow = '0 0 8px var(--error)';
+            }
+        }
+
+        // Fetch metrics
+        async function fetchMetrics() {
+            try {
+                const resp = await fetch('/dashboard/api/metrics');
+                const data = await resp.json();
+
+                // Running & Waiting
+                const running = data['vllm:num_requests_running']?.value || 0;
+                const waiting = data['vllm:num_requests_waiting']?.value || 0;
+                document.getElementById('m-running').textContent = running;
+                document.getElementById('m-waiting').textContent = waiting;
+
+                // Requests & E2E Latency
+                const e2e = data['vllm:e2e_request_latency_seconds'];
+                if (e2e?.count > 0) {
+                    document.getElementById('m-requests').textContent = e2e.count;
+                    document.getElementById('m-latency').textContent = (e2e.sum / e2e.count).toFixed(2) + 's';
+                }
+
+                // Tokens
+                const prompt = data['vllm:prompt_tokens']?.value || 0;
+                const gen = data['vllm:generation_tokens']?.value || 0;
+                document.getElementById('m-tokens').textContent = (prompt + gen).toLocaleString();
+
+                // TTFT
+                const ttft = data['vllm:time_to_first_token_seconds'];
+                if (ttft?.count > 0) {
+                    document.getElementById('m-ttft').textContent = ((ttft.sum / ttft.count) * 1000).toFixed(0) + 'ms';
+                }
+
+                // Prefill time
+                const prefill = data['vllm:request_prefill_time_seconds'];
+                if (prefill?.count > 0) {
+                    document.getElementById('m-prefill').textContent = ((prefill.sum / prefill.count) * 1000).toFixed(0) + 'ms';
+                }
+
+                // Decode time
+                const decode = data['vllm:request_decode_time_seconds'];
+                if (decode?.count > 0) {
+                    document.getElementById('m-decode').textContent = (decode.sum / decode.count).toFixed(2) + 's';
+                }
+
+                // KV Cache
+                const kv = data['vllm:kv_cache_usage_perc'] || data['vllm:gpu_cache_usage_perc'];
+                if (kv) {
+                    const pct = (kv.value * 100).toFixed(1);
+                    document.getElementById('m-kv').textContent = pct + '%';
+                    document.getElementById('kv-bar').style.width = pct + '%';
+                }
+
+                // Prefix Cache Hit Rate
+                const cacheQueries = data['vllm:prefix_cache_queries']?.value || 0;
+                const cacheHits = data['vllm:prefix_cache_hits']?.value || 0;
+                if (cacheQueries > 0) {
+                    const hitRate = (cacheHits / cacheQueries * 100).toFixed(1);
+                    document.getElementById('m-cache-hit').textContent = hitRate + '%';
+                    document.getElementById('cache-hit-bar').style.width = hitRate + '%';
+                } else {
+                    document.getElementById('m-cache-hit').textContent = '-';
+                    document.getElementById('cache-hit-bar').style.width = '0%';
+                }
+
+            } catch (e) {
+                console.error('Metrics fetch error:', e);
+            }
+        }
+
+        // Fetch detailed config (from dashboard API, no dev mode needed)
+        async function fetchConfig(data) {
+            // Config items - render full vllm_config
+            const configList = document.getElementById('config-list');
+            const cfg = data.vllm_config;
+            const explicitArgs = new Set(data.explicit_args || []);
+            const explicitEnvs = new Set(data.explicit_envs || []);
+
+            if (!cfg) {
+                configList.innerHTML = '<div class="config-item"><span class="config-key">No config available</span></div>';
+                document.getElementById('config-search').style.display = 'none';
+                document.getElementById('env-list').innerHTML = '<div class="config-item"><span class="config-key">No env available</span></div>';
+                document.getElementById('env-search').style.display = 'none';
+                return;
+            }
+
+            try {
+                const cfg = data.vllm_config;
+                let configHtml = '';
+
+                // Recursively flatten config with prefix
+                function flattenConfig(obj, prefix = '') {
+                    let items = [];
+                    for (const [key, val] of Object.entries(obj)) {
+                        const fullKey = prefix ? `${prefix}.${key}` : key;
+                        if (val !== null && typeof val === 'object' && !Array.isArray(val)) {
+                            // For nested objects, add section header then recurse
+                            items.push({ key: fullKey, val: null, isSection: true });
+                            items = items.concat(flattenConfig(val, fullKey));
+                        } else {
+                            items.push({ key: fullKey, val: val, isSection: false });
+                        }
+                    }
+                    return items;
+                }
+
+                // Generate doc link for config item
+                function getDocUrl(fullKey) {
+                    const parts = fullKey.split('.');
+                    if (parts.length < 2) return null;
+                    // e.g., cache_config.block_size -> section=cache, key=block_size
+                    const sectionPart = parts[0].replace(/_config$/, '');
+                    const keyName = parts[parts.length - 1];
+                    // Convert section to PascalCase: cache -> CacheConfig
+                    const sectionClass = sectionPart.split('_').map(s => s.charAt(0).toUpperCase() + s.slice(1)).join('') + 'Config';
+                    return `https://docs.vllm.ai/en/latest/api/vllm/config/${sectionPart}/#vllm.config.${sectionPart}.${sectionClass}.${keyName}`;
+                }
+
+                const flatConfig = flattenConfig(cfg);
+                for (const item of flatConfig) {
+                    if (item.isSection) {
+                        // Section header
+                        const sectionName = item.key.split('.').pop();
+                        configHtml += `<div class="config-item" style="background:rgba(48,162,255,0.1);margin-top:4px;border-left:3px solid var(--vllm-blue)">
+                            <span class="config-key" style="color:var(--vllm-blue);font-weight:600">${sectionName}</span>
+                        </div>`;
+                    } else {
+                        const shortKey = item.key.split('.').pop();
+                        const fullVal = formatFullValue(item.val);
+                        // Check if this config key was explicitly set by user
+                        const isExplicit = explicitArgs.has(shortKey) || explicitArgs.has(shortKey.replace(/_/g, '-'));
+                        const docUrl = getDocUrl(item.key);
+                        const keyHtml = docUrl
+                            ? `<a href="${docUrl}" target="_blank" class="config-key" title="View documentation">${shortKey}</a>`
+                            : `<span class="config-key">${shortKey}</span>`;
+                        configHtml += `<div class="config-item${isExplicit ? ' explicit' : ''}" data-tooltip="${item.key}: ${esc(fullVal)}">
+                            ${keyHtml}
+                            <span class="config-val">${formatValue(item.val)}</span>
+                        </div>`;
+                    }
+                }
+                configList.innerHTML = configHtml || '<div class="config-item"><span class="config-key">No config</span></div>';
+
+                // Env vars
+                const envList = document.getElementById('env-list');
+                const env = data.vllm_env;
+                let envHtml = '';
+
+                for (const key of Object.keys(env).sort()) {
+                    const val = env[key];
+                    const isExplicit = explicitEnvs.has(key);
+                    const fullVal = formatFullValue(val);
+                    const valColor = val === true ? 'var(--success)' : val === false ? 'var(--muted-foreground)' : 'var(--vllm-blue)';
+                    const envDocUrl = `https://docs.vllm.ai/en/latest/api/vllm/envs/#vllm.envs.${key}`;
+                    envHtml += `<div class="config-item${isExplicit ? ' explicit' : ''}" data-tooltip="${key}: ${esc(fullVal)}">
+                        <a href="${envDocUrl}" target="_blank" class="config-key" title="View documentation">${key}</a>
+                        <span class="config-val" style="color:${valColor}">${formatValue(val)}</span>
+                    </div>`;
+                }
+                envList.innerHTML = envHtml || '<div class="config-item"><span class="config-key">No env vars</span></div>';
+
+            } catch (e) {
+                console.error('Config render error:', e);
+            }
+        }
+
+        function getNestedValue(obj, path) {
+            return path.split('.').reduce((o, k) => o?.[k], obj);
+        }
+
+        function formatValue(val) {
+            if (val === null) return '-';
+            if (val === true) return '✓';
+            if (val === false) return '✗';
+            if (typeof val === 'number') return val.toLocaleString();
+            if (typeof val === 'string' && val.length > 20) return val.substring(0, 18) + '...';
+            if (typeof val === 'object') return JSON.stringify(val).substring(0, 18) + '...';
+            return String(val);
+        }
+
+        function formatFullValue(val) {
+            if (val === true) return 'true';
+            if (val === false) return 'false';
+            if (typeof val === 'object') return JSON.stringify(val, null, 2);
+            return String(val);
+        }
+
+        // Filter config/env list
+        function filterList(type) {
+            const searchInput = document.getElementById(type + '-search');
+            const list = document.getElementById(type + '-list');
+            const query = searchInput.value.toLowerCase();
+            const items = list.querySelectorAll('.config-item');
+
+            items.forEach(item => {
+                const key = item.querySelector('.config-key')?.textContent?.toLowerCase() || '';
+                const val = item.querySelector('.config-val')?.textContent?.toLowerCase() || '';
+                const tooltip = (item.dataset.tooltip || '').toLowerCase();
+                const matches = key.includes(query) || val.includes(query) || tooltip.includes(query);
+                item.style.display = matches ? '' : 'none';
+            });
+        }
+
+        // Update context stats
+        function updateContextStats() {
+            const totalChars = conversationHistory.reduce((sum, msg) => sum + (msg.content?.length || 0), 0);
+            document.getElementById('stat-context').textContent = totalChars.toLocaleString();
+            document.getElementById('stat-messages').textContent = conversationHistory.length;
+        }
+
+        // Clear chat
+        function clearChat() {
+            document.getElementById('chat-messages').innerHTML = '<div class="chat-empty">Send a message to start chatting</div>';
+            conversationHistory = [];
+            updateContextStats();
+        }
+
+        // Parse thinking tags
+        function parseThinking(text) {
+            const match = text.match(/<think>([\s\S]*?)<\/think>/);
+            if (match) {
+                return { thinking: match[1].trim(), response: text.replace(/<think>[\s\S]*?<\/think>/, '').trim() };
+            }
+            return { thinking: null, response: text };
+        }
+
+        // Escape HTML
+        function esc(text) {
+            const div = document.createElement('div');
+            div.textContent = text;
+            return div.innerHTML;
+        }
+
+        // Send message
+        async function sendMessage() {
+            const input = document.getElementById('chat-input');
+            const sendBtn = document.getElementById('send-btn');
+            const messages = document.getElementById('chat-messages');
+            const typing = document.getElementById('typing');
+
+            const msg = input.value.trim();
+            if (!msg) return;
+
+            // Clear empty state
+            const empty = messages.querySelector('.chat-empty');
+            if (empty) empty.remove();
+
+            // Add user message
+            conversationHistory.push({ role: 'user', content: msg });
+            updateContextStats();
+            messages.innerHTML += `
+                <div class="message message-user">
+                    <div class="message-bubble">${esc(msg)}</div>
+                </div>`;
+
+            input.value = '';
+            sendBtn.disabled = true;
+            typing.classList.add('visible');
+            messages.scrollTop = messages.scrollHeight;
+
+            const startTime = Date.now();
+            let tokens = 0;
+            let fullContent = '';
+
+            try {
+                const resp = await fetch('/v1/chat/completions', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        model: currentModel,
+                        messages: conversationHistory,
+                        stream: true,
+                        temperature: parseFloat(document.getElementById('temperature').value),
+                        max_tokens: parseInt(document.getElementById('max-tokens').value) || 512,
+                        top_p: parseFloat(document.getElementById('top-p').value)
+                    })
+                });
+
+                // Create assistant message
+                const assistantDiv = document.createElement('div');
+                assistantDiv.className = 'message message-assistant';
+                assistantDiv.innerHTML = '<div class="message-bubble"><div class="message-content"></div></div>';
+                messages.appendChild(assistantDiv);
+                typing.classList.remove('visible');
+
+                const reader = resp.body.getReader();
+                const decoder = new TextDecoder();
+                const responseEl = assistantDiv.querySelector('.message-content');
+
+                while (true) {
+                    const { done, value } = await reader.read();
+                    if (done) break;
+
+                    const chunk = decoder.decode(value);
+                    for (const line of chunk.split('\n')) {
+                        if (line.startsWith('data: ') && line.slice(6) !== '[DONE]') {
+                            try {
+                                const delta = JSON.parse(line.slice(6)).choices?.[0]?.delta?.content;
+                                if (delta) {
+                                    fullContent += delta;
+                                    tokens++;
+
+                                    const { thinking, response } = parseThinking(fullContent);
+                                    let html = '';
+                                    if (thinking) {
+                                        html = `<div class="thinking-block">
+                                            <div class="thinking-header" onclick="this.nextElementSibling.classList.toggle('expanded')">
+                                                <span>Thinking</span><span style="font-size:9px;color:var(--muted-foreground)">Click to expand</span>
+                                            </div>
+                                            <div class="thinking-content">${esc(thinking)}</div>
+                                        </div>`;
+                                    }
+                                    html += esc(response);
+                                    responseEl.innerHTML = html;
+                                    messages.scrollTop = messages.scrollHeight;
+                                }
+                            } catch (e) {}
+                        }
+                    }
+                }
+
+                conversationHistory.push({ role: 'assistant', content: fullContent });
+                updateContextStats();
+
+                // Stats for message meta
+                const elapsed = (Date.now() - startTime) / 1000;
+                const speed = tokens / elapsed;
+
+                // Add meta
+                const meta = document.createElement('div');
+                meta.className = 'message-meta';
+                meta.textContent = `${tokens} tokens · ${elapsed.toFixed(2)}s · ${speed.toFixed(1)} tok/s`;
+                assistantDiv.appendChild(meta);
+
+            } catch (e) {
+                typing.classList.remove('visible');
+                messages.innerHTML += `<div class="message message-assistant">
+                    <div class="message-bubble" style="border-color:var(--error)">Error: ${esc(e.message)}</div>
+                </div>`;
+            }
+
+            sendBtn.disabled = false;
+            input.focus();
+        }
+
+        // Init
+        async function init() {
+            await fetchServerInfo();  // Also fetches config & env
+            await fetchMetrics();
+            setInterval(fetchMetrics, 5000);
+            // Auto focus chat input
+            document.getElementById('chat-input').focus();
+        }
+
+        init();
+    </script>
+</body>
+</html>
