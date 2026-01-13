@@ -15,8 +15,6 @@ from vllm.v1.attention.backend import (
     AttentionMetadata,
     AttentionType,
     CommonAttentionMetadata,
-)
-from vllm.v1.attention.backends.utils import (
     subclass_attention_backend,
 )
 from vllm.v1.attention.selector import get_attn_backend

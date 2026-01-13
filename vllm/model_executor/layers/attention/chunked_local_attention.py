@@ -13,10 +13,10 @@ from vllm.v1.attention.backend import (
     AttentionCGSupport,
     AttentionMetadataBuilder,
     CommonAttentionMetadata,
+    subclass_attention_backend,
 )
 from vllm.v1.attention.backends.utils import (
     make_local_attention_virtual_batches,
-    subclass_attention_backend,
 )
 from vllm.v1.attention.selector import get_attn_backend
 from vllm.v1.kv_cache_interface import (
