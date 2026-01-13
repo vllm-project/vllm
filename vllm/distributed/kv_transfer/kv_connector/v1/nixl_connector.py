@@ -3,7 +3,6 @@
 import contextlib
 import copy
 import logging
-import math
 import os
 import queue
 import sys
@@ -56,11 +55,12 @@ from vllm.distributed.parallel_state import (
 from vllm.forward_context import ForwardContext
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
+from vllm.utils.math_utils import cdiv
 from vllm.utils.network_utils import make_zmq_path, make_zmq_socket
 from vllm.v1.attention.backend import AttentionBackend, AttentionMetadata
 from vllm.v1.attention.backends.utils import get_kv_cache_layout
 from vllm.v1.core.sched.output import SchedulerOutput
-from vllm.v1.kv_cache_interface import SlidingWindowSpec
+from vllm.v1.kv_cache_interface import MambaSpec, SlidingWindowSpec
 from vllm.v1.worker.block_table import BlockTable
 
 if TYPE_CHECKING:
@@ -206,6 +206,7 @@ def compute_nixl_compatibility_hash(
 
     model_config = vllm_config.model_config
     cache_config = vllm_config.cache_config
+    is_hma_enabled = not vllm_config.scheduler_config.disable_hybrid_kv_cache_manager
 
     factors = {
         # Version compatibility
@@ -221,6 +222,7 @@ def compute_nixl_compatibility_hash(
         "attn_backend_name": attn_backend_name,
         "cache_dtype": str(cache_config.cache_dtype),
         "cross_layers_blocks": cross_layers_blocks,
+        "is_hma_enabled": is_hma_enabled,
     }
 
     compat_hash = hash_factors(factors)
@@ -239,7 +241,6 @@ def compute_nixl_compatibility_hash(
 
 @dataclass
 class RemoteMeta:
-    # Non-HMA | HMA blocks
     block_ids: BlockIds
     host: str
     port: int
@@ -304,7 +305,6 @@ class NixlConnectorMetadata(KVConnectorMetadata):
 
 
 class NixlConnector(KVConnectorBase_V1, SupportsHMA):
-
     @property
     def prefer_cross_layer_blocks(self) -> bool:
         backend = get_current_attn_backend(self._vllm_config)
@@ -335,6 +335,9 @@ class NixlConnector(KVConnectorBase_V1, SupportsHMA):
 
         assert vllm_config.kv_transfer_config is not None
         assert vllm_config.kv_transfer_config.engine_id is not None
+        for group in kv_cache_config.kv_cache_groups:
+            if isinstance(group.kv_cache_spec, MambaSpec):
+                raise ValueError("NixlConnector does not support Mamba models.")
         self.engine_id: EngineId = vllm_config.kv_transfer_config.engine_id
         self.kv_transfer_config = vllm_config.kv_transfer_config
         if role == KVConnectorRole.SCHEDULER:
@@ -402,7 +405,6 @@ class NixlConnector(KVConnectorBase_V1, SupportsHMA):
         request: "Request",
         block_ids: tuple[list[int], ...],
     ) -> tuple[bool, dict[str, Any] | None]:
-        # Hybrid memory allocator (HMA) enabled
         assert self.connector_scheduler is not None
         return self.connector_scheduler.request_finished(request, block_ids)
 
@@ -574,7 +576,9 @@ class NixlConnectorScheduler:
             else 0
             for group in kv_cache_config.kv_cache_groups
         ]
-        self.sw_sizes = [n_tokens // self.block_size for n_tokens in sw_sizes_tokens]
+        self.blocks_per_sw = [
+            cdiv(n_tokens, self.block_size) for n_tokens in sw_sizes_tokens
+        ]
 
     def shutdown(self):
         self._stop_event.set()
@@ -596,11 +600,12 @@ class NixlConnectorScheduler:
         # NOTE (NickLucche) This logic is currently handled at the connector level
         # because offloading connectors might want to receive the whole sequence even
         # for SWA groups. We will abstract this logic once the interface is more stable
-        assert len(block_ids) == len(self.sw_sizes), (
+        assert len(block_ids) == len(self.blocks_per_sw), (
             "Number of KV cache groups must match"
         )
+        # For non-SWA groups, blocks_per_sw is 0 so we return all block_ids unchanged
         return tuple(
-            [blocks[-self.sw_sizes[i] :] for i, blocks in enumerate(block_ids)]
+            [blocks[-self.blocks_per_sw[i] :] for i, blocks in enumerate(block_ids)]
         )
 
     def set_xfer_handshake_metadata(
@@ -1351,7 +1356,7 @@ class NixlConnectorWorker:
                 )
                 if req_meta := self._recving_metadata.get(req_id):
                     local_block_ids = get_blocks_in_fa_kv_group(
-                        req_meta.local_block_ids
+                        req_meta.local_block_ids, self.kv_cache_config
                     )
                     self._invalid_block_ids.update(local_block_ids)
                 self._failed_recv_reqs.add(req_id)
@@ -1801,8 +1806,9 @@ class NixlConnectorWorker:
         assert not (tp_ratio < 0 and self.kv_topo.is_kv_replicated(remote_engine_id))
 
         if self._is_hma_enabled:
-            assert block_size_ratio == 1, "HMA does not support different"
-            " remote block size yet"
+            assert block_size_ratio == 1, (
+                "HMA does not support different remote block size yet"
+            )
 
         kv_cache_layout = (
             self.kv_cache_layout
@@ -1817,6 +1823,9 @@ class NixlConnectorWorker:
                 logger.info(
                     "Remote is HND and local is NHD, enabled additional permute "
                     "on local device KV."
+                )
+                assert not self._is_hma_enabled, (
+                    "HMA does not support block size post processing"
                 )
                 self.enable_permute_local_kv = True
             else:
@@ -2013,6 +2022,7 @@ class NixlConnectorWorker:
             if not self.use_mla and (
                 block_size_ratio > 1 or self.enable_permute_local_kv
             ):
+                assert not self._is_hma_enabled
                 block_ids_for_blocksize_post_process[block_size_ratio].append(
                     meta.local_physical_block_ids[0]
                 )
@@ -2149,7 +2159,9 @@ class NixlConnectorWorker:
         if meta := self._recving_metadata.get(req_id):
             # For the purpose of marking blocks as invalid, only report FA ones to
             # handle blocks<>tokens mapping consistently.
-            local_block_ids = get_blocks_in_fa_kv_group(meta.local_block_ids)
+            local_block_ids = get_blocks_in_fa_kv_group(
+                meta.local_block_ids, self.kv_cache_config
+            )
             self._invalid_block_ids.update(local_block_ids)
         self.nixl_wrapper.release_xfer_handle(handle)
         self.xfer_stats.record_failed_transfer()
@@ -2290,6 +2302,7 @@ class NixlConnectorWorker:
         block_size_ratio = self.kv_topo.block_size_ratio_from_engine_id(dst_engine_id)
         if block_size_ratio > 1:
             # TODO (NickLucche) assume HMA is off. Change to handle multiple KV groups.
+            assert not self._is_hma_enabled
             local_block_ids0 = local_block_ids[0] if local_block_ids else []
             remote_block_ids0 = remote_block_ids[0]
             local_block_ids_mapped = self.get_mapped_blocks(
@@ -2319,8 +2332,7 @@ class NixlConnectorWorker:
         # then we will need to have the staging blocks on the remote side.
 
         # NOTE(rob): according to nvidia the staging blocks are used to
-        # saturate IB with heterogeneous TP sizes. We should remove the staging
-        # blocks until we are ready.
+        # saturate IB with heterogeneous TP sizes.
 
         # Number of D TP workers that will read from dst P. Propagate info
         # on notification so that dst worker can wait before freeing blocks.
@@ -2406,7 +2418,9 @@ class NixlConnectorWorker:
                 remote_rank=remote_rank,
             )
             if meta := self._recving_metadata.get(request_id):
-                fa_local_block_ids = get_blocks_in_fa_kv_group(meta.local_block_ids)
+                fa_local_block_ids = get_blocks_in_fa_kv_group(
+                    meta.local_block_ids, self.kv_cache_config
+                )
                 self._invalid_block_ids.update(fa_local_block_ids)
             self.xfer_stats.record_failed_transfer()
             if handle is not None:

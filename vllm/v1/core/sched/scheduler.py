@@ -19,6 +19,9 @@ from vllm.distributed.ec_transfer.ec_connector.base import (
 from vllm.distributed.ec_transfer.ec_connector.factory import ECConnectorFactory
 from vllm.distributed.kv_events import EventPublisherFactory, KVEventBatch
 from vllm.distributed.kv_transfer.kv_connector.factory import KVConnectorFactory
+from vllm.distributed.kv_transfer.kv_connector.utils import (
+    get_full_attention_group_idx,
+)
 from vllm.distributed.kv_transfer.kv_connector.v1 import (
     KVConnectorBase_V1,
     KVConnectorRole,
@@ -112,7 +115,7 @@ class Scheduler(SchedulerInterface):
         self.connector = None
         self.connector_prefix_cache_stats: PrefixCacheStats | None = None
         self.recompute_kv_load_failures = True
-        self._connector_supports_hma = False
+        self._full_attention_group_idx = 0
         if self.vllm_config.kv_transfer_config is not None:
             assert not self.is_encoder_decoder, (
                 "Encoder-decoder models are not currently supported with KV connectors"
@@ -128,7 +131,9 @@ class Scheduler(SchedulerInterface):
                 self.vllm_config.kv_transfer_config.kv_load_failure_policy
             )
             self.recompute_kv_load_failures = kv_load_failure_policy == "recompute"
-            self._connector_supports_hma = isinstance(self.connector, SupportsHMA)
+            self._full_attention_group_idx = get_full_attention_group_idx(
+                kv_cache_config
+            )
 
         self.kv_event_publisher = EventPublisherFactory.create(
             self.kv_events_config,
@@ -1914,7 +1919,7 @@ class Scheduler(SchedulerInterface):
 
         block_ids = self.kv_cache_manager.get_block_ids(request.request_id)
 
-        if not self._connector_supports_hma:
+        if not isinstance(self.connector, SupportsHMA):
             # NOTE(Kuntai): We should deprecate this code path after we enforce
             # all connectors to support HMA.
             # Hybrid memory allocator should be already turned off for this
@@ -1957,7 +1962,7 @@ class Scheduler(SchedulerInterface):
             block_ids = self.kv_cache_manager.get_block_ids(request.request_id)
             # When connector does not support HMA, a single group is present here
             num_computed_tokens = (
-                max(len(group) for group in block_ids) * self.block_size
+                len(block_ids[self._full_attention_group_idx]) * self.block_size
             )
             # Get number of blocks on full attention layer, we can retrieve at most
             # this many tokens
@@ -2046,10 +2051,8 @@ class Scheduler(SchedulerInterface):
             req_block_ids = self.kv_cache_manager.get_block_ids(req_id)
             # Assume FA group is present to infer number of computed tokens
             # TODO this is not padded for SW right?
-            fa_blocks_idx = max(
-                range(len(req_block_ids)), key=lambda x: len(req_block_ids[x])
-            )
-            max_num_blocks = len(req_block_ids[fa_blocks_idx])
+            fa_blocks = req_block_ids[self._full_attention_group_idx]
+            max_num_blocks = len(fa_blocks)
             # We iterate only over blocks that may contain externally computed
             # tokens
             if request.status == RequestStatus.WAITING_FOR_REMOTE_KVS:
@@ -2069,10 +2072,7 @@ class Scheduler(SchedulerInterface):
             ) // self.block_size
             # For the purpose of marking blocks as invalid, only report FA ones to
             # handle blocks<>tokens mapping consistently.
-            # for idx, block_id in zip(range(req_num_computed_blocks), req_block_ids):
-            for idx, block_id in zip(
-                range(req_num_computed_blocks), req_block_ids[fa_blocks_idx]
-            ):
+            for idx, block_id in zip(range(req_num_computed_blocks), fa_blocks):
                 if block_id not in invalid_block_ids:
                     continue
 

@@ -5,6 +5,12 @@ set -xe
 KV_BUFFER_DEVICE="cuda"  # Default to cuda
 ATTENTION_BACKEND=""  # Default to empty (use vllm default)
 CROSS_LAYERS_BLOCKS="False"
+ENABLE_HMA_FLAG=""  # Default to empty (HMA disabled by default for kv connector)
+# Check for ENABLE_HMA_FLAG environment variable
+if [[ -n "${ENABLE_HMA_FLAG:-}" ]]; then
+  ENABLE_HMA_FLAG="--no-disable-hybrid-kv-cache-manager"
+fi
+
 while [[ $# -gt 0 ]]; do
   case $1 in
     --kv_buffer_device)
@@ -30,6 +36,9 @@ done
 echo "Running accuracy tests with kv_buffer_device=$KV_BUFFER_DEVICE"
 if [[ -n "$ATTENTION_BACKEND" ]]; then
   echo "Using attention backend: $ATTENTION_BACKEND"
+fi
+if [[ -n "$ENABLE_HMA_FLAG" ]]; then
+  echo "HMA (Hybrid KV Cache Manager) enabled"
 fi
 
 DECODER_KV_LAYOUT=${DECODER_KV_LAYOUT:-"HND"} # Default to HND, optional NHD
@@ -172,6 +181,11 @@ run_tests_for_model() {
       BASE_CMD="${BASE_CMD} --attention-backend=$ATTENTION_BACKEND"
     fi
 
+    # Add HMA flag if specified
+    if [[ -n "$ENABLE_HMA_FLAG" ]]; then
+      BASE_CMD="${BASE_CMD} $ENABLE_HMA_FLAG"
+    fi
+
     if [ -n "$model_args" ]; then
     FULL_CMD="$BASE_CMD $model_args"
     else
@@ -216,6 +230,11 @@ run_tests_for_model() {
     # Add attention backend config if specified
     if [[ -n "$ATTENTION_BACKEND" ]]; then
       BASE_CMD="${BASE_CMD} --attention-backend=$ATTENTION_BACKEND"
+    fi
+
+    # Add HMA flag if specified
+    if [[ -n "$ENABLE_HMA_FLAG" ]]; then
+      BASE_CMD="${BASE_CMD} $ENABLE_HMA_FLAG"
     fi
 
   # DP-EP attention mode
