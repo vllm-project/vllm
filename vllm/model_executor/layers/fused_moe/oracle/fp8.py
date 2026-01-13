@@ -9,6 +9,9 @@ import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm import envs
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.logger import init_logger
+from vllm.model_executor.layers.fused_moe.all2all_utils import (
+    maybe_make_prepare_finalize,
+)
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
     FusedMoEQuantConfig,
@@ -356,9 +359,17 @@ def make_fp8_moe_kernel(
     moe_quant_config: FusedMoEQuantConfig,
     moe_config: FusedMoEConfig,
     fp8_backend: Fp8MoeBackend,
-    prepare_finalize: mk.FusedMoEPrepareAndFinalize,
     experts_cls: type[mk.FusedMoEPermuteExpertsUnpermute],
 ) -> tuple[mk.FusedMoEModularKernel, bool]:
+    # Create Prepare/Finalize.
+    prepare_finalize = maybe_make_prepare_finalize(
+        moe=moe_config,
+        quant_config=moe_quant_config,
+        routing_tables=None,  # TODO: init routing tables here?
+        defer_input_quant=experts_cls.should_pf_defer_input_quant(),
+        allow_new_interface=True,
+    )
+
     # Create Experts.
     if prepare_finalize.activation_format == mk.FusedMoEActivationFormat.Standard:
         experts = experts_cls.make_standard_experts(

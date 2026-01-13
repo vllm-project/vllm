@@ -30,6 +30,17 @@ class FusedMoEMethodBase(QuantizeMethodBase):
         self.moe: FusedMoEConfig = moe
         self.moe_quant_config: FusedMoEQuantConfig | None = None
 
+    @property
+    def supports_mk_interally(self) -> bool:
+        """
+        Returns True if this method supports using modular kernels (MK)
+        internally for MoE operations, False otherwise.
+
+        This method should be overridden by subclasses that support
+        modular kernels internally.
+        """
+        return False
+
     @abstractmethod
     def create_weights(
         self,

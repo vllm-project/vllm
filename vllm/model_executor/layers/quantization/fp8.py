@@ -611,8 +611,6 @@ class Fp8LinearMethod(LinearMethodBase):
 
 
 class Fp8MoEMethod(FusedMoEMethodBase):
-    _SUPPORTS_MK_INTERALLY = True
-
     """MoE method for FP8.
     Supports loading FP8 checkpoints with static weight scale and
     dynamic/static activation scale.
@@ -667,6 +665,10 @@ class Fp8MoEMethod(FusedMoEMethodBase):
 
         # Delay creation of the kernel until after process-weights.
         self.kernel: mk.FusedMoEModularKernel | None = None
+
+    @property
+    def supports_mk_interally(self) -> bool:
+        return True
 
     def create_weights(
         self,
@@ -820,28 +822,15 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         replace_parameter(layer, f"w13_{self.weight_scale_name}", w13_scale)
         replace_parameter(layer, f"w2_{self.weight_scale_name}", w2_scale)
 
-        from vllm.model_executor.layers.fused_moe.all2all_utils import (
-            maybe_make_prepare_finalize,
-        )
-
         # Setup modular kernel for TP case.
         self.moe_quant_config = self.get_fused_moe_quant_config(layer)
         if self.moe_quant_config:
-            prepare_finalize = maybe_make_prepare_finalize(
-                moe=self.moe,
-                quant_config=self.moe_quant_config,
-                routing_tables=None,  # TODO: init routing tables here?
-                defer_input_quant=self.experts_cls.should_pf_defer_input_quant(),
-                allow_new_interface=True,
-            )
-
             assert self.experts_cls is not None
             self.kernel, self.use_inplace = make_fp8_moe_kernel(
                 layer=layer,
                 moe_quant_config=self.moe_quant_config,
                 moe_config=self.moe,
                 fp8_backend=self.fp8_backend,
-                prepare_finalize=prepare_finalize,
                 experts_cls=self.experts_cls,
             )
 
