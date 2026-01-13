@@ -886,7 +886,7 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
                 moe_quant_config=self.moe_quant_config,
                 moe_config=self.moe,
                 fp8_backend=self.fp8_backend,
-            )
+            ) # noqa
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         w13 = layer.w13_weight
