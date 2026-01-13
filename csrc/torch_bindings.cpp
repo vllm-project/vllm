@@ -2,7 +2,7 @@
 #include "cuda_utils.h"
 #include "ops.h"
 #include "core/registration.h"
-
+#include "quantization/fused_kernels/fused_silu_mul_block_quant.cu"
 #include <torch/library.h>
 #include <torch/version.h>
 
@@ -108,6 +108,18 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   ops.def(
       "silu_and_mul_quant(Tensor! result, Tensor input, Tensor scale) -> ()");
   ops.impl("silu_and_mul_quant", torch::kCUDA, &silu_and_mul_quant);
+
+  // Fused SiLU+Mul + per-block quantization
+  ops.def(
+      "silu_and_mul_per_block_quant("
+      "Tensor! out, "
+      "Tensor input, "
+      "Tensor! scales, "
+      "int group_size, "
+      "Tensor? scale_ub=None, "
+      "bool is_scale_transposed=False) -> ()");
+  ops.impl("silu_and_mul_per_block_quant", torch::kCUDA, 
+           &silu_and_mul_per_block_quant);
 
 #ifndef USE_ROCM
   ops.def(

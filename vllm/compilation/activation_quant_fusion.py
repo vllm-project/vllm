@@ -19,6 +19,8 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
     kFp8StaticTensorSym,
     kNvfp4Quant,
+    GroupShape,
+    ScaleDesc,
 )
 from vllm.platforms import current_platform
 
@@ -172,6 +174,103 @@ class SiluMulNvfp4QuantPattern(ActivationQuantPattern):
 
         register_replacement(pattern, replacement, self.get_inputs(), fwd_only, pm_pass)
 
+class SiluMulBlockQuantPattern:
+    """
+    This pattern fuses silu_and_mul & block quantization.
+    
+    Fuses:
+        silu_and_mul(input) → per_token_group_quant_fp8(output, group_size)
+    Into:
+        silu_and_mul_per_block_quant(input, group_size)
+    
+    This is the GROUP/BLOCK quantization version (one scale per group of elements).
+    For PER-TOKEN quantization (one scale per entire token), use SiluMulFp8StaticQuantPattern.
+    """
+    
+    def __init__(
+        self, 
+        group_shape: GroupShape,
+        has_col_major_scales: bool = False,
+        is_e8m0: bool = False,
+    ):
+        self.group_shape = group_shape
+        self.has_col_major_scales = has_col_major_scales
+        self.is_e8m0 = is_e8m0
+        self.quant_dtype = FP8_DTYPE
+        
+        # Get current config for model dtype
+        config = get_current_vllm_config()
+        self.model_dtype = config.model_config.dtype if config.model_config else None
+        
+        # Matchers for pattern detection
+        from .matcher_utils import MatcherSiluAndMul, MatcherFp8PerTokenGroupQuant
+        self.silu_and_mul_matcher = MatcherSiluAndMul()
+        
+        # Create quant matcher for group quantization
+        scale = ScaleDesc(torch.float32, False, group_shape)
+        quant_key = QuantKey(dtype=FP8_DTYPE, scale=scale, symmetric=True)
+        self.quant_matcher = MatcherFp8PerTokenGroupQuant(
+            quant_key, 
+            has_col_major_scales=has_col_major_scales,
+            is_e8m0=is_e8m0
+        )
+    
+    def register(self, pm_pass: PatternMatcherPass) -> None:
+        """Register this pattern with the pattern matcher."""
+        
+        # DEFINE THE PATTERN TO MATCH
+        def pattern(input: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+            # Pattern: silu_and_mul → group_quant
+            result_silu_mul = self.silu_and_mul_matcher(input)
+            result_quant, scale = self.quant_matcher(result_silu_mul)
+            return result_quant, scale
+        
+        # DEFINE THE REPLACEMENT (fused operation)
+        def replacement(input: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+            # Convert to model dtype if needed
+            if self.model_dtype is not None:
+                input = input.to(dtype=self.model_dtype)
+            
+            # Allocate output tensors
+            # Note: silu_and_mul reduces width by 2 (gate||up → result)
+            output_shape = list(input.shape)
+            output_shape[-1] = output_shape[-1] // 2
+            
+            result = torch.empty(
+                output_shape, 
+                device=input.device, 
+                dtype=self.quant_dtype
+            )
+            
+            # Create scale tensor with proper layout
+            scale = self.quant_matcher.make_scale(
+                torch.empty(output_shape, device=input.device),  # Dummy tensor for shape
+                transposed=self.has_col_major_scales
+            )
+            
+            # Call the fused operation
+            at = auto_functionalized(
+                torch.ops._C.silu_and_mul_per_block_quant,
+                result=result,
+                input=input,
+                scale=scale,
+                group_size=self.group_shape[1],  # Use column dimension (128 or 64)
+                scale_ub=None,
+                is_scale_transposed=self.has_col_major_scales,
+            )
+            
+            # Return result and scale
+            return at[1], at[2]
+        
+        # REGISTER THE PATTERN
+        inputs = self.silu_and_mul_matcher.inputs()
+        pm.register_replacement(
+            pattern,
+            replacement,
+            inputs,
+            pm.fwd_only,
+            pm_pass,
+        )
 
 class ActivationQuantFusionPass(VllmPatternMatcherPass):
     """
@@ -198,6 +297,21 @@ class ActivationQuantFusionPass(VllmPatternMatcherPass):
             pattern_silu_mul_nvfp4 = SiluMulNvfp4QuantPattern()
             pattern_silu_mul_nvfp4.register(self.patterns)
 
+        # =====================================================================
+        # NEW: Register block quantization patterns
+        # =====================================================================
+        if current_platform.is_cuda():
+            # Register patterns for different group sizes and layouts
+            for group_shape in [GroupShape(1, 128), GroupShape(1, 64)]:
+                for has_col_major_scales in [True, False]:
+                    for is_e8m0 in [True, False]:
+                        pattern_silu_mul_block = SiluMulBlockQuantPattern(
+                            group_shape=group_shape,
+                            has_col_major_scales=has_col_major_scales,
+                            is_e8m0=is_e8m0,
+                        )
+                        pattern_silu_mul_block.register(self.patterns)
+
         self.dump_patterns(config, self.patterns)
 
     @VllmInductorPass.time_and_log
@@ -211,4 +325,5 @@ class ActivationQuantFusionPass(VllmPatternMatcherPass):
             ActivationQuantPattern,
             SiluMulFp8StaticQuantPattern,
             SiluMulNvfp4QuantPattern,
+            SiluMulBlockQuantPattern,
         )
