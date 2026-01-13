@@ -183,7 +183,9 @@ class EagleProposer:
                 rocm_types.append(AiterFlashAttentionMetadata)
 
             # TRITON_MLA backend support for MLA models (e.g., DeepSeek)
-            from vllm.v1.attention.backends.mla.common import MLACommonMetadata
+            from vllm.model_executor.layers.attention.mla_attention import (
+                MLACommonMetadata,
+            )
 
             rocm_types.append(MLACommonMetadata)
 
