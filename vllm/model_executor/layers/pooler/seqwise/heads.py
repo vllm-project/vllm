@@ -83,7 +83,7 @@ class EmbeddingPoolerHead(SequencePoolerHead):
 
         # for normalize
         if self.activation is not None:
-            flags = [p.normalize for p in pooling_params]
+            flags = [p.use_activation for p in pooling_params]
             if len(set(flags)) == 1:
                 if flags[0]:
                     pooled_data = self.activation(pooled_data)

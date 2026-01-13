@@ -116,8 +116,8 @@ class BertPooler(SequencePooler):
 
         # Use lambdas so that weights are not registered under `self.head`
         self.head = EmbeddingPoolerHead(
-            projector=lambda x: self.dense(x),
             head_dtype=head_dtype,
+            projector=lambda x: self.dense(x),
             activation=LambdaPoolerActivation(self.act_fn),
         )
 

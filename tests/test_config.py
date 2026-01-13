@@ -162,7 +162,7 @@ def test_get_pooling_config():
     model_config = ModelConfig(model_id)
 
     assert model_config.pooler_config is not None
-    assert model_config.pooler_config.normalize
+    assert model_config.pooler_config.use_activation
     assert model_config.pooler_config.seq_pooling_type == "MEAN"
     assert model_config.pooler_config.tok_pooling_type == "ALL"
 
