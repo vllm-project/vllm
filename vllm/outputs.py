@@ -13,7 +13,6 @@ from vllm.logger import init_logger
 from vllm.logprobs import PromptLogprobs, SampleLogprobs
 from vllm.lora.request import LoRARequest
 from vllm.multimodal.inputs import MultiModalPlaceholderDict
-from vllm.sequence import RequestMetrics
 from vllm.v1.metrics.stats import RequestStateStats
 
 logger = init_logger(__name__)
@@ -113,7 +112,7 @@ class RequestOutput:
         prompt_logprobs: PromptLogprobs | None,
         outputs: list[CompletionOutput],
         finished: bool,
-        metrics: RequestMetrics | RequestStateStats | None = None,
+        metrics: RequestStateStats | None = None,
         lora_request: LoRARequest | None = None,
         encoder_prompt: str | None = None,
         encoder_prompt_token_ids: list[int] | None = None,

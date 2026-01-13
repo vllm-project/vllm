@@ -163,15 +163,17 @@ def _fused_moe_lora_kernel(
     # accumulator
     accumulator = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.float32)
 
-    # GDC wait waits for ALL programs in the prior kernel to complete
-    # before continuing.
     if USE_GDC and not IS_PRIMARY:
         tl.extra.cuda.gdc_wait()
 
     for k in range(0, grid_k):
         k_remaining = K - k * (BLOCK_SIZE_K * SPLIT_K)
+        # GDC wait waits for ALL programs in the prior kernel to complete
+        # before continuing.
         # pre-fetch lora weight
         b = tl.load(b_ptrs, mask=offs_k[:, None] < k_remaining, other=0.0)
+        if USE_GDC and not IS_PRIMARY:
+            tl.extra.cuda.gdc_wait()
         a = tl.load(
             a_ptrs,
             mask=token_mask[:, None] & (offs_k[None, :] < k_remaining),
@@ -229,9 +231,9 @@ def _fused_moe_lora_shrink(
     num_stages: int,
     split_k: int,
     mul_routed_weight: bool = False,
+    use_gdc: bool = False,
 ) -> None:
     w1_lora_a_stacked = lora_a_stacked[0]
-    use_gdc = supports_pdl(qcurr_hidden_states.device)
     shrink_config = {
         "BLOCK_SIZE_M": block_size_m,
         "BLOCK_SIZE_N": block_size_n,
@@ -324,6 +326,7 @@ def _fused_moe_lora_expand(
     split_k: int,
     mul_routed_weight: bool = False,
     offset: int = 0,
+    use_gdc: bool = False,
 ) -> None:
     b_ptr = _get_ptr(lora_b_stacked, device)
     K = max_lora_rank
@@ -335,7 +338,6 @@ def _fused_moe_lora_expand(
         -1, a_intermediate_cache1.shape[3]
     )
 
-    use_gdc = supports_pdl(a_intermediate_cache1.device)
     expand_config = {
         "BLOCK_SIZE_M": block_size_m,
         "BLOCK_SIZE_N": block_size_n,
@@ -464,7 +466,7 @@ def _fused_moe_lora(
         dtype=output.dtype,
         device=device,
     )
-
+    use_gdc = supports_pdl(device) and not fully_sharded
     _fused_moe_lora_shrink(
         a_intermediate_cache1,
         qcurr_hidden_states,
@@ -493,6 +495,7 @@ def _fused_moe_lora(
         shrink_num_stages,
         shrink_split_k,
         mul_routed_weight,
+        use_gdc=use_gdc,
     )
 
     if fully_sharded:
@@ -540,6 +543,7 @@ def _fused_moe_lora(
         expand_split_k,
         mul_routed_weight,
         offset,
+        use_gdc=use_gdc,
     )
 
 
@@ -602,6 +606,7 @@ def _fused_moe_lora_shrink_fake(
     num_stages: int,
     split_k: int,
     mul_routed_weight: bool = False,
+    use_gdc: bool = False,
 ) -> None:
     return
 
@@ -635,6 +640,7 @@ def _fused_moe_lora_expand_fake(
     num_stages: int,
     split_k: int,
     mul_routed_weight: bool = False,
+    use_gdc: bool = False,
 ) -> None:
     return
 

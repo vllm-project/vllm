@@ -9,7 +9,6 @@ from collections.abc import AsyncGenerator, Iterable, Mapping
 from copy import copy
 from typing import Any, cast
 
-import numpy as np
 import torch
 
 import vllm.envs as envs
@@ -32,7 +31,6 @@ from vllm.transformers_utils.config import maybe_register_config_serialize_by_va
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils.async_utils import cancel_task_threadsafe
 from vllm.utils.collection_utils import as_list
-from vllm.utils.math_utils import cdiv
 from vllm.v1.engine import EngineCoreRequest
 from vllm.v1.engine.core_client import EngineCoreClient
 from vllm.v1.engine.exceptions import EngineDeadError, EngineGenerateError
@@ -281,6 +279,25 @@ class AsyncLLM(EngineClient):
 
         is_pooling = isinstance(params, PoolingParams)
 
+        if (
+            self.vllm_config.cache_config.kv_sharing_fast_prefill
+            and not is_pooling
+            and params.prompt_logprobs
+        ):
+            raise ValueError(
+                "--kv-sharing-fast-prefill produces incorrect logprobs for "
+                "prompt tokens, please disable it when the requests need "
+                "prompt logprobs"
+            )
+
+        if tokenization_kwargs is None:
+            tokenization_kwargs = {}
+        _validate_truncation_size(
+            self.model_config.max_model_len,
+            params.truncate_prompt_tokens,
+            tokenization_kwargs,
+        )
+
         # Convert Input --> Request.
         if isinstance(prompt, EngineCoreRequest):
             request = prompt
@@ -291,7 +308,10 @@ class AsyncLLM(EngineClient):
                     "latter will be used, and the former will be ignored."
                 )
         else:
-            assert prompt_text is None
+            if prompt_text is not None:
+                raise ValueError(
+                    "should only provide prompt_text with EngineCoreRequest"
+                )
             request = self.input_processor.process_inputs(
                 request_id,
                 prompt,
@@ -309,6 +329,15 @@ class AsyncLLM(EngineClient):
                 prompt_text = cast(str | None, prompt.get("prompt"))
 
         self.input_processor.assign_request_id(request)
+
+        # We start the output_handler on the first call to add_request() so
+        # we can call __init__ before the event loop, which enables us
+        # to handle startup failure gracefully in the OpenAI server.
+        self._run_output_handler()
+
+        # Respect pause state before accepting new requests.
+        async with self._pause_cond:
+            await self._pause_cond.wait_for(lambda: not self._paused)
 
         # Create a new output collector for the request.
         queue = RequestOutputCollector(params.output_kind, request.request_id)
@@ -385,37 +414,8 @@ class AsyncLLM(EngineClient):
         returning the RequestOutput back to the caller.
         """
 
-        if (
-            self.vllm_config.cache_config.kv_sharing_fast_prefill
-            and sampling_params.prompt_logprobs
-        ):
-            raise ValueError(
-                "--kv-sharing-fast-prefill produces incorrect logprobs for "
-                "prompt tokens, please disable it when the requests need "
-                "prompt logprobs"
-            )
-
         q: RequestOutputCollector | None = None
         try:
-            # We start the output_handler on the first call to generate() so
-            # we can call __init__ before the event loop, which enables us
-            # to handle startup failure gracefully in the OpenAI server.
-            self._run_output_handler()
-
-            # Wait until generation is resumed if the engine is paused.
-            async with self._pause_cond:
-                await self._pause_cond.wait_for(lambda: not self._paused)
-
-            if tokenization_kwargs is None:
-                tokenization_kwargs = {}
-                truncate_prompt_tokens = sampling_params.truncate_prompt_tokens
-
-                _validate_truncation_size(
-                    self.model_config.max_model_len,
-                    truncate_prompt_tokens,
-                    tokenization_kwargs,
-                )
-
             q = await self.add_request(
                 request_id,
                 prompt,
@@ -459,9 +459,9 @@ class AsyncLLM(EngineClient):
             raise
 
         # Request validation error.
-        except ValueError:
+        except ValueError as e:
             if self.log_requests:
-                logger.info("Request %s failed (bad request).", request_id)
+                logger.info("Request %s failed (bad request): %s.", request_id, e)
             raise
 
         # Unexpected error in the generate() task (possibly recoverable).
@@ -469,7 +469,15 @@ class AsyncLLM(EngineClient):
             if q is not None:
                 await self.abort(q.request_id, internal=True)
             if self.log_requests:
-                logger.info("Request %s failed.", request_id)
+                try:
+                    s = f"{e.__class__.__name__}: {e}"
+                except Exception as e2:
+                    s = (
+                        f"{e.__class__.__name__}: "
+                        + "error during printing an exception of class"
+                        + e2.__class__.__name__
+                    )
+                logger.info("Request %s failed due to %s.", request_id, s)
             raise EngineGenerateError() from e
 
     def _run_output_handler(self):
@@ -485,6 +493,7 @@ class AsyncLLM(EngineClient):
         log_stats = self.log_stats
         logger_manager = self.logger_manager
         input_processor = self.input_processor
+        chunk_size = envs.VLLM_V1_OUTPUT_PROC_CHUNK_SIZE
 
         async def output_handler():
             try:
@@ -500,15 +509,10 @@ class AsyncLLM(EngineClient):
                     # Split outputs into chunks of at most
                     # VLLM_V1_OUTPUT_PROC_CHUNK_SIZE, so that we don't block the
                     # event loop for too long.
-                    if num_outputs <= envs.VLLM_V1_OUTPUT_PROC_CHUNK_SIZE:
-                        slices = (outputs.outputs,)
-                    else:
-                        slices = np.array_split(
-                            outputs.outputs,
-                            cdiv(num_outputs, envs.VLLM_V1_OUTPUT_PROC_CHUNK_SIZE),
-                        )
-
-                    for i, outputs_slice in enumerate(slices):
+                    engine_core_outputs = outputs.outputs
+                    for start in range(0, num_outputs, chunk_size):
+                        end = start + chunk_size
+                        outputs_slice = engine_core_outputs[start:end]
                         # 2) Process EngineCoreOutputs.
                         processed_outputs = output_processor.process_outputs(
                             outputs_slice, outputs.timestamp, iteration_stats
@@ -517,7 +521,7 @@ class AsyncLLM(EngineClient):
                         assert not processed_outputs.request_outputs
 
                         # Allow other asyncio tasks to run between chunks
-                        if i + 1 < len(slices):
+                        if end < num_outputs:
                             await asyncio.sleep(0)
 
                         # 3) Abort any reqs that finished due to stop strings.
@@ -639,18 +643,6 @@ class AsyncLLM(EngineClient):
 
         q: RequestOutputCollector | None = None
         try:
-            # We start the output_handler on the first call to generate() so
-            # we can call __init__ before the event loop, which enables us
-            # to handle startup failure gracefully in the OpenAI server.
-            self._run_output_handler()
-
-            # Respect pause state before accepting new requests.
-            async with self._pause_cond:
-                await self._pause_cond.wait_for(lambda: not self._paused)
-
-            if tokenization_kwargs is None:
-                tokenization_kwargs = {}
-
             if truncate_prompt_tokens is not None:
                 warnings.warn(
                     "The `truncate_prompt_tokens` parameter in `AsyncLLM.encode()` "
@@ -659,12 +651,6 @@ class AsyncLLM(EngineClient):
                     DeprecationWarning,
                     stacklevel=2,
                 )
-
-            _validate_truncation_size(
-                self.model_config.max_model_len,
-                pooling_params.truncate_prompt_tokens,
-                tokenization_kwargs,
-            )
 
             q = await self.add_request(
                 request_id,

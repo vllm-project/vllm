@@ -14,12 +14,13 @@ from vllm.model_executor.layers.fused_moe.moe_align_block_size import (
 )
 from vllm.platforms import current_platform
 from vllm.utils.math_utils import round_up
+from vllm.utils.torch_utils import set_random_seed
 
 NUM_TOKENS = [1, 3, 256, 2256, 4096]
 NUM_EXPERTS = [32, 160, 256, 257]
 TOP_KS = [1, 2, 16, 32]
 BLOCK_SIZES = [32, 128]
-current_platform.seed_everything(0)
+set_random_seed(0)
 
 
 def _group_tokens_by_expert(

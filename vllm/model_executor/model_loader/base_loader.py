@@ -5,6 +5,7 @@ from abc import ABC, abstractmethod
 import torch
 import torch.nn as nn
 
+import vllm.envs as envs
 from vllm.config import ModelConfig, VllmConfig
 from vllm.config.load import LoadConfig
 from vllm.logger import init_logger
@@ -50,8 +51,21 @@ class BaseModelLoader(ABC):
                     vllm_config=vllm_config, model_config=model_config
                 )
 
+            log_model_inspection(model)
+
             logger.debug("Loading weights on %s ...", load_device)
             # Quantization does not happen in `load_weights` but after it
             self.load_weights(model, model_config)
             process_weights_after_loading(model, model_config, target_device)
+
         return model.eval()
+
+
+def log_model_inspection(model: nn.Module) -> None:
+    """Log model structure if VLLM_LOG_MODEL_INSPECTION=1."""
+    if not envs.VLLM_LOG_MODEL_INSPECTION:
+        return
+
+    from vllm.model_inspection import format_model_inspection
+
+    logger.info("vLLM model structure:\n%s", format_model_inspection(model))
