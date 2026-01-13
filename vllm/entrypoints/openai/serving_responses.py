@@ -72,19 +72,7 @@ from vllm.entrypoints.context import (
     StreamingHarmonyContext,
 )
 from vllm.entrypoints.logger import RequestLogger
-from vllm.entrypoints.openai.parser.harmony_utils import (
-    construct_harmony_previous_input_messages,
-    get_developer_message,
-    get_stop_tokens_for_assistant_actions,
-    get_system_message,
-    get_user_message,
-    has_custom_tools,
-    parse_output_message,
-    parse_remaining_state,
-    parse_response_input,
-    render_for_completion,
-)
-from vllm.entrypoints.openai.protocol import (
+from vllm.entrypoints.openai.engine.protocol import (
     DeltaMessage,
     ErrorResponse,
     InputTokensDetails,
@@ -102,9 +90,21 @@ from vllm.entrypoints.openai.protocol import (
     StreamingResponsesResponse,
     VLLMValidationError,
 )
-from vllm.entrypoints.openai.serving_engine import (
+from vllm.entrypoints.openai.engine.serving import (
     GenerationError,
     OpenAIServing,
+)
+from vllm.entrypoints.openai.parser.harmony_utils import (
+    construct_harmony_previous_input_messages,
+    get_developer_message,
+    get_stop_tokens_for_assistant_actions,
+    get_system_message,
+    get_user_message,
+    has_custom_tools,
+    parse_output_message,
+    parse_remaining_state,
+    parse_response_input,
+    render_for_completion,
 )
 from vllm.entrypoints.openai.serving_models import OpenAIServingModels
 from vllm.entrypoints.responses_utils import (
@@ -589,6 +589,13 @@ class OpenAIServingResponses(OpenAIServing):
             prev_msg=self.msg_store.get(prev_response.id) if prev_response else None,
             prev_response_output=prev_response.output if prev_response else None,
         )
+
+        chat_template_kwargs = dict(
+            reasoning_effort=None
+            if request.reasoning is None
+            else request.reasoning.effort
+        )
+
         _, engine_prompts = await self._preprocess_chat(
             request,
             tokenizer,
@@ -597,6 +604,7 @@ class OpenAIServingResponses(OpenAIServing):
             tool_parser=self.tool_parser,
             chat_template=self.chat_template,
             chat_template_content_format=self.chat_template_content_format,
+            chat_template_kwargs=chat_template_kwargs,
         )
         return messages, engine_prompts
 

@@ -8,7 +8,7 @@ import partial_json_parser
 import pytest
 from partial_json_parser.core.options import Allow
 
-from vllm.entrypoints.openai.protocol import DeltaMessage, FunctionCall, ToolCall
+from vllm.entrypoints.openai.engine.protocol import DeltaMessage, FunctionCall, ToolCall
 from vllm.tokenizers import TokenizerLike, get_tokenizer
 from vllm.tokenizers.detokenizer_utils import detokenize_incrementally
 from vllm.tool_parsers.jamba_tool_parser import JambaToolParser

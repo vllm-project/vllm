@@ -12,6 +12,7 @@ from vllm.config.model import ModelConfig
 from vllm.config.parallel import ParallelConfig
 from vllm.config.utils import config
 from vllm.logger import init_logger
+from vllm.transformers_utils.config import get_hf_text_config
 from vllm.utils.hashing import safe_hash
 from vllm.utils.import_utils import LazyLoader, has_arctic_inference
 
@@ -409,10 +410,23 @@ class SpeculativeConfig:
                             method=self.method,
                             model_type="eagle",
                         )
+                        # EAGLEConfig primarily updates architectures, so update
+                        # all architectures-related fields in draft_model_config
                         self.draft_model_config.hf_config = eagle_config
+                        self.draft_model_config.hf_text_config = get_hf_text_config(
+                            self.draft_model_config.hf_config
+                        )
                         self.draft_model_config.model_arch_config = (
                             self.draft_model_config.get_model_arch_config()
                         )
+                        model_info, arch = (
+                            self.draft_model_config.registry.inspect_model_cls(
+                                self.draft_model_config.architectures,
+                                self.draft_model_config,
+                            )
+                        )
+                        self.draft_model_config._model_info = model_info
+                        self.draft_model_config._architecture = arch
 
                 if self.num_speculative_tokens is not None and hasattr(
                     self.draft_model_config.hf_config, "num_lookahead_tokens"
