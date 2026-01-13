@@ -53,7 +53,6 @@ from vllm.model_executor.layers.quantization.kv_cache import BaseKVCacheMethod
 from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
     apply_fi_trtllm_fp8_per_tensor_moe,
     build_flashinfer_fp8_cutlass_moe_prepare_finalize,
-    select_cutlass_fp8_gemm_impl,
 )
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     W8A8BlockFp8LinearOp,
@@ -657,10 +656,9 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             # NOTE(rob): this is a hack until we unify the DP/EP
             # and TP/TEP cases.
             activation_format=(
-                mk.FusedMoEActivationFormat.BatchedExperts if (
-                    self.moe.use_deepep_ll_kernels or
-                    self.moe.use_pplx_kernels
-                ) else mk.FusedMoEActivationFormat.Standard 
+                mk.FusedMoEActivationFormat.BatchedExperts
+                if (self.moe.use_deepep_ll_kernels or self.moe.use_pplx_kernels)
+                else mk.FusedMoEActivationFormat.Standard
             ),
         )
 
@@ -901,18 +899,18 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         prepare_finalize: FusedMoEPrepareAndFinalize,
         layer: torch.nn.Module,
     ) -> FusedMoEPermuteExpertsUnpermute:
-
         # TODO(rob): this is probably fine?
         if self.fp8_backend in [Fp8MoeBackend.MARLIN, Fp8MoeBackend.AITER]:
             raise NotImplementedError(
                 "Marlin and ROCm AITER are not supported with all2all yet."
             )
 
-        # TODO(rob): is it really possible to get here?
+        # TODO(rob): look into whether we can just not do this for LoRA.
         if self.moe.is_lora_enabled:
             from vllm.model_executor.layers.fused_moe import (
                 TritonExperts,
             )
+
             return TritonExperts(quant_config=self.moe_quant_config)
 
         assert self.moe_quant_config is not None
@@ -929,7 +927,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         ):
             max_num_tokens_per_rank = prepare_finalize.max_num_tokens_per_rank()
             assert max_num_tokens_per_rank is not None
-        
+
             logger.debug(
                 "%s(%s): max_tokens_per_rank=%s, block_size=%s, per_act_token=%s",
                 self.experts_cls.__name__,
@@ -942,7 +940,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                 moe_config=self.moe,
                 quant_config=self.moe_quant_config,
                 max_num_tokens=max_num_tokens_per_rank,
-                num_dispatchers=prepare_finalize.num_dispatchers(), 
+                num_dispatchers=prepare_finalize.num_dispatchers(),
             )
         else:
             logger.debug(
