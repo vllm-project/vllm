@@ -21,7 +21,23 @@ def engine_client(request: Request) -> EngineClient:
 
 @router.get("/health", response_class=Response)
 async def health(raw_request: Request) -> Response:
-    """Health check."""
+    """Health check. Returns 503 when draining or dead.
+
+    Designed to be used as the readiness probe in a Kubernetes deployment
+    """
+    try:
+        client = engine_client(raw_request)
+        if await client.is_paused():
+            return Response(status_code=503)
+        await client.check_health()
+        return Response(status_code=200)
+    except EngineDeadError:
+        return Response(status_code=503)
+
+
+@router.get("/live", response_class=Response)
+async def live(raw_request: Request) -> Response:
+    """Liveness check. Returns 200 when draining, 503 only when dead."""
     try:
         await engine_client(raw_request).check_health()
         return Response(status_code=200)
