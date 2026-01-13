@@ -1956,7 +1956,9 @@ class Scheduler(SchedulerInterface):
             # Now that the blocks are ready, actually cache them.
             block_ids = self.kv_cache_manager.get_block_ids(request.request_id)
             # When connector does not support HMA, a single group is present here
-            num_computed_tokens = max(len(group) for group in block_ids) * self.block_size
+            num_computed_tokens = (
+                max(len(group) for group in block_ids) * self.block_size
+            )
             # Get number of blocks on full attention layer, we can retrieve at most
             # this many tokens
             num_computed_tokens = min(num_computed_tokens, request.num_tokens)
@@ -2044,7 +2046,9 @@ class Scheduler(SchedulerInterface):
             req_block_ids = self.kv_cache_manager.get_block_ids(req_id)
             # Assume FA group is present to infer number of computed tokens
             # TODO this is not padded for SW right?
-            fa_blocks_idx = max(range(len(req_block_ids)), key=lambda x: len(req_block_ids[x]))
+            fa_blocks_idx = max(
+                range(len(req_block_ids)), key=lambda x: len(req_block_ids[x])
+            )
             max_num_blocks = len(req_block_ids[fa_blocks_idx])
             # We iterate only over blocks that may contain externally computed
             # tokens
@@ -2063,10 +2067,12 @@ class Scheduler(SchedulerInterface):
             req_num_computed_blocks = (
                 req_num_computed_tokens + self.block_size - 1
             ) // self.block_size
-            # For the purpose of marking blocks as invalid, only report FA ones to 
-            # handle blocks<>tokens mapping consistently. 
+            # For the purpose of marking blocks as invalid, only report FA ones to
+            # handle blocks<>tokens mapping consistently.
             # for idx, block_id in zip(range(req_num_computed_blocks), req_block_ids):
-            for idx, block_id in zip(range(req_num_computed_blocks), req_block_ids[fa_blocks_idx]):
+            for idx, block_id in zip(
+                range(req_num_computed_blocks), req_block_ids[fa_blocks_idx]
+            ):
                 if block_id not in invalid_block_ids:
                     continue
 
@@ -2096,12 +2102,12 @@ class Scheduler(SchedulerInterface):
                 )
                 total_affected_tokens += num_affected_tokens
                 request.num_external_computed_tokens -= num_affected_tokens
-                # Collect invalid block and all downstream dependent blocks, across 
+                # Collect invalid block and all downstream dependent blocks, across
                 # all groups.
                 if evict_blocks:
                     # Assuming groups are not padded, do SW-aware eviction, example:
                     # FA: [A B C D C]
-                    # SW: [      E F] 
+                    # SW: [      E F]
                     # =>Evict E only when failure index <= E.
                     for group in req_block_ids:
                         offset = max_num_blocks - len(group)
