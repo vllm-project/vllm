@@ -15,8 +15,6 @@ from tests.v1.attention.utils import (
     create_vllm_config,
     try_get_attention_backend,
 )
-from vllm.attention.backends.abstract import AttentionType
-from vllm.attention.backends.registry import AttentionBackendEnum
 from vllm.config import ModelConfig
 from vllm.platforms import current_platform
 from vllm.utils.math_utils import cdiv
@@ -25,8 +23,9 @@ from vllm.utils.torch_utils import (
     is_torch_equal_or_newer,
     set_random_seed,
 )
+from vllm.v1.attention.backend import AttentionType, CommonAttentionMetadata
+from vllm.v1.attention.backends.registry import AttentionBackendEnum
 from vllm.v1.attention.backends.utils import (
-    CommonAttentionMetadata,
     set_kv_cache_layout,
 )
 from vllm.v1.kv_cache_interface import FullAttentionSpec
@@ -126,17 +125,17 @@ def create_and_prepopulate_kv_cache(
         Tuple of (kv_cache, updated_block_table)
     """
     batch_size = len(k_contexts)
-    seq_lens = common_attn_metadata.seq_lens_cpu
+    seq_lens = common_attn_metadata.seq_lens.cpu()
     query_lens = (
         common_attn_metadata.query_start_loc_cpu[1:]
         - common_attn_metadata.query_start_loc_cpu[:-1]
     )
-    context_lens = common_attn_metadata.num_computed_tokens_cpu
+    context_lens = seq_lens - query_lens
     block_table = common_attn_metadata.block_table_tensor
     slot_mapping = common_attn_metadata.slot_mapping
 
     # Create KV cache
-    kv_cache = torch.empty(
+    kv_cache = torch.zeros(
         2, num_blocks, block_size, num_kv_heads, head_size, dtype=dtype, device=device
     )
     kv_cache_flat = kv_cache.view(2, -1, num_kv_heads, head_size)
@@ -556,7 +555,7 @@ def _test_backend_correctness(
 @pytest.mark.parametrize("model", ["meta-llama/Meta-Llama-3-8B"])
 @pytest.mark.parametrize("tensor_parallel_size", [1, 2, 4])
 def test_causal_backend_correctness(
-    batch_spec_name: str, model: str, tensor_parallel_size: int
+    default_vllm_config, batch_spec_name: str, model: str, tensor_parallel_size: int
 ):
     """Test backend's correctness with causal attention."""
 

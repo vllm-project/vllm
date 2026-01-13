@@ -632,7 +632,7 @@ class LoRAModelManager:
                     num_experts, -1, down_proj_lora.lora_a.shape[-1]
                 )
 
-                # (output_size,num_experts,rank)
+                # (output_size,rank,num_experts)
                 gate_up_proj_lora.lora_b = gate_up_proj_lora.lora_b.reshape(
                     gate_up_proj_lora.lora_b.shape[0], -1, num_experts
                 )

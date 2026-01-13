@@ -3,7 +3,7 @@
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, NamedTuple
+from typing import TYPE_CHECKING, NamedTuple, TypeAlias
 
 import numpy as np
 import torch
@@ -69,6 +69,14 @@ class LogprobsTensors(NamedTuple):
             self.selected_token_ranks.to("cpu", non_blocking=True),
         )
 
+    def filter(self, mask: torch.Tensor) -> "LogprobsTensors":
+        """Filter the logprobs tensors with the given bool mask."""
+        return LogprobsTensors(
+            self.logprob_token_ids[mask],
+            self.logprobs[mask],
+            self.selected_token_ranks[mask],
+        )
+
     @staticmethod
     def empty_cpu(
         num_positions: int, num_tokens_per_position: int
@@ -91,7 +99,7 @@ class LogprobsTensors(NamedTuple):
 
 # [num_reqs, <dynamic>]
 # The shape of each element depends on the pooler used
-PoolerOutput = list[torch.Tensor | None] | torch.Tensor | None
+PoolerOutput: TypeAlias = torch.Tensor | list[torch.Tensor] | list[torch.Tensor | None]
 
 
 @dataclass

@@ -42,6 +42,7 @@ from vllm.config.vllm import (
     VllmConfig,
     get_cached_compilation_config,
     get_current_vllm_config,
+    get_current_vllm_config_or_none,
     get_layers_from_vllm_config,
     set_current_vllm_config,
 )
@@ -106,6 +107,7 @@ __all__ = [
     "VllmConfig",
     "get_cached_compilation_config",
     "get_current_vllm_config",
+    "get_current_vllm_config_or_none",
     "set_current_vllm_config",
     "get_layers_from_vllm_config",
     "WeightTransferConfig",

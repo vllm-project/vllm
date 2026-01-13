@@ -12,7 +12,7 @@ from vllm.config import VllmConfig
 from vllm.config.compilation import CUDAGraphMode
 from vllm.distributed.parallel_state import graph_capture, is_global_first_rank
 from vllm.forward_context import set_forward_context
-from vllm.v1.attention.backends.utils import AttentionMetadataBuilder
+from vllm.v1.attention.backend import AttentionMetadataBuilder
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.worker.gpu.attn_utils import build_attn_metadata
@@ -25,10 +25,12 @@ class CudaGraphManager:
     def __init__(
         self,
         vllm_config: VllmConfig,
+        uses_mrope: bool,
         device: torch.device,
     ):
         self.vllm_config = vllm_config
         self.scheduler_config = vllm_config.scheduler_config
+        self.uses_mrope = uses_mrope
         self.device = device
 
         self.max_model_len = vllm_config.model_config.max_model_len
@@ -79,7 +81,10 @@ class CudaGraphManager:
     ) -> None:
         num_reqs = min(num_tokens, self.max_num_reqs)
         input_ids = input_buffers.input_ids[:num_tokens]
-        positions = input_buffers.positions[:num_tokens]
+        if not self.uses_mrope:
+            positions = input_buffers.positions[:num_tokens]
+        else:
+            positions = input_buffers.mrope_positions[:, :num_tokens]
         attn_metadata = prepare_inputs_to_capture(
             num_reqs,
             num_tokens,
@@ -228,15 +233,16 @@ def prepare_inputs_to_capture(
     kv_cache_config: KVCacheConfig,
 ) -> dict[str, Any]:
     num_tokens_per_req = num_tokens // num_reqs
-    query_start_loc = input_buffers.query_start_loc
-    query_start_loc.np[: num_reqs + 1] = np.arange(num_reqs + 1) * num_tokens_per_req
-    query_start_loc.np[num_reqs:] = num_tokens
-    query_start_loc.copy_to_gpu()
-    seq_lens_np = np.full(num_reqs, max_model_len, dtype=np.int32)
+
+    query_start_loc_np = np.arange(num_reqs + 1, dtype=np.int32) * num_tokens_per_req
+    query_start_loc_np[-1] = num_tokens
+    query_start_loc_cpu = torch.from_numpy(query_start_loc_np)
+    input_buffers.query_start_loc[: num_reqs + 1] = query_start_loc_cpu
+    input_buffers.query_start_loc[num_reqs + 1 :] = num_tokens
+    query_start_loc = input_buffers.query_start_loc[: num_reqs + 1]
+
     # HACK(woosuk): For faster warmup, we set seq_lens (GPU) to num_tokens
-    # rather than max_model_len. This introduces a discrepancy between
-    # seq_lens (on GPU) and seq_lens_np (on CPU), which may cause issues for
-    # certain attention backends.
+    # rather than max_model_len.
     input_buffers.seq_lens[:num_reqs] = num_tokens
     input_buffers.seq_lens[num_reqs:] = 0
 
@@ -247,11 +253,10 @@ def prepare_inputs_to_capture(
         attn_metadata_builders=attn_metadata_builders,
         num_reqs=num_reqs,
         num_tokens=num_tokens,
-        query_start_loc_gpu=query_start_loc.gpu[: num_reqs + 1],
-        query_start_loc_cpu=query_start_loc.cpu[: num_reqs + 1],
+        query_start_loc_gpu=query_start_loc,
+        query_start_loc_cpu=query_start_loc_cpu,
         seq_lens=input_buffers.seq_lens,
-        seq_lens_np=seq_lens_np,
-        num_computed_tokens_cpu=None,  # FIXME
+        max_seq_len=max_model_len,
         block_tables=input_block_tables,
         slot_mappings=slot_mappings,
         kv_cache_config=kv_cache_config,

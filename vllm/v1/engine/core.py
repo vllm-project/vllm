@@ -65,6 +65,7 @@ from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.request import Request, RequestStatus
 from vllm.v1.serial_utils import MsgpackDecoder, MsgpackEncoder
 from vllm.v1.structured_output import StructuredOutputManager
+from vllm.v1.utils import compute_iteration_details
 from vllm.version import __version__ as VLLM_VERSION
 
 logger = init_logger(__name__)
@@ -182,7 +183,7 @@ class EngineCore:
             deque[tuple[Future[ModelRunnerOutput], SchedulerOutput, Future[Any]]] | None
         ) = None
         if self.batch_queue_size > 1:
-            logger.info("Batch queue is enabled with size %d", self.batch_queue_size)
+            logger.debug("Batch queue is enabled with size %d", self.batch_queue_size)
             self.batch_queue = deque(maxlen=self.batch_queue_size)
 
         self.is_ec_producer = (
@@ -208,7 +209,6 @@ class EngineCore:
         self.async_scheduling = vllm_config.scheduler_config.async_scheduling
 
         self.aborts_queue = queue.Queue[list[str]]()
-
         # Mark the startup heap as static so that it's ignored by GC.
         # Reduces pause times of oldest generation collections.
         freeze_gc_heap()
@@ -337,6 +337,36 @@ class EngineCore:
             )
             raise err
 
+    @contextmanager
+    def log_iteration_details(self, scheduler_output: SchedulerOutput):
+        if not self.vllm_config.observability_config.enable_logging_iteration_details:
+            yield
+            return
+        self._iteration_index = getattr(self, "_iteration_index", 0)
+        iteration_details = compute_iteration_details(scheduler_output)
+        before = time.monotonic()
+        yield
+        logger.info(
+            "".join(
+                [
+                    "Iteration(",
+                    str(self._iteration_index),
+                    "): ",
+                    str(iteration_details.num_ctx_requests),
+                    " context requests, ",
+                    str(iteration_details.num_ctx_tokens),
+                    " context tokens, ",
+                    str(iteration_details.num_generation_requests),
+                    " generation requests, ",
+                    str(iteration_details.num_generation_tokens),
+                    " generation tokens, iteration elapsed time: ",
+                    format((time.monotonic() - before) * 1000, ".2f"),
+                    " ms",
+                ]
+            )
+        )
+        self._iteration_index += 1
+
     def step(self) -> tuple[dict[int, EngineCoreOutputs], bool]:
         """Schedule, execute, and make output.
 
@@ -351,7 +381,10 @@ class EngineCore:
         scheduler_output = self.scheduler.schedule()
         future = self.model_executor.execute_model(scheduler_output, non_block=True)
         grammar_output = self.scheduler.get_grammar_bitmask(scheduler_output)
-        with self.log_error_detail(scheduler_output):
+        with (
+            self.log_error_detail(scheduler_output),
+            self.log_iteration_details(scheduler_output),
+        ):
             model_output = future.result()
             if model_output is None:
                 model_output = self.model_executor.sample_tokens(grammar_output)
@@ -447,7 +480,10 @@ class EngineCore:
 
         # Block until the next result is available.
         future, scheduler_output, exec_model_fut = batch_queue.pop()
-        with self.log_error_detail(scheduler_output):
+        with (
+            self.log_error_detail(scheduler_output),
+            self.log_iteration_details(scheduler_output),
+        ):
             model_output = future.result()
             if model_output is None:
                 # None from sample_tokens() implies that the original execute_model()
@@ -466,6 +502,18 @@ class EngineCore:
         # in a field and do it immediately once step_with_batch_queue is
         # re-called. The latter slightly favors TTFT over TPOT/throughput.
         if deferred_scheduler_output:
+            # If we are doing speculative decoding with structured output,
+            # we need to get the draft token ids from the prior step before
+            # we can compute the grammar bitmask for the deferred request.
+            if self.use_spec_decode:
+                draft_token_ids = self.model_executor.take_draft_token_ids()
+                assert draft_token_ids is not None
+                # Update the draft token ids in the scheduler output to
+                # filter out the invalid spec tokens, which will be padded
+                # with -1 and skipped by the grammar bitmask computation.
+                self.scheduler.update_draft_token_ids_in_output(
+                    draft_token_ids, deferred_scheduler_output
+                )
             # We now have the tokens needed to compute the bitmask for the
             # deferred request. Get the bitmask and call sample tokens.
             grammar_output = self.scheduler.get_grammar_bitmask(

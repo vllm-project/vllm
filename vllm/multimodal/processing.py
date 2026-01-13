@@ -1186,10 +1186,16 @@ class InputProcessingContext:
 
             typ = ProcessorMixin
 
+        from vllm.tokenizers.mistral import MistralTokenizer
+
+        tokenizer = self.tokenizer
+        if isinstance(tokenizer, MistralTokenizer):
+            tokenizer = tokenizer.transformers_tokenizer
+
         return cached_processor_from_config(
             self.model_config,
             processor_cls=typ,
-            tokenizer=self.tokenizer,
+            tokenizer=tokenizer,
             **kwargs,
         )
 
@@ -1389,6 +1395,10 @@ class BaseProcessingInfo:
         specific kwargs from model config or user inputs.
         """
         return self.ctx.get_hf_processor(**kwargs)
+
+    @property
+    def skip_prompt_length_check(self) -> bool:
+        return False
 
     @abstractmethod
     def get_supported_mm_limits(self) -> Mapping[str, int | None]:
@@ -2396,10 +2406,6 @@ class EncDecMultiModalProcessor(BaseMultiModalProcessor[_I]):
         this prompt during profiling and generation.
         """
         raise NotImplementedError
-
-    @property
-    def pad_dummy_encoder_prompt(self) -> bool:
-        return False
 
     def create_decoder_prompt(
         self,
