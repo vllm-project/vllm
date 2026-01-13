@@ -104,7 +104,10 @@ def _fused_moe_lora_kernel(
     if moe_enabled == 0:
         # Early exit for the no moe lora case.
         return
-    max_loras = tl.num_programs(axis=2)
+    # The grid size on axis 2 is (max_loras + 1) to handle the no-lora case
+    # (lora_id == -1), but sorted_token_ids and expert_ids are allocated with
+    # shape (max_loras, ...). Use (num_programs - 1) for correct bounds checking.
+    max_loras = tl.num_programs(axis=2) - 1
     grid_k = tl.cdiv(K, BLOCK_SIZE_K * SPLIT_K)
 
     # calculate pid_m,pid_n
