@@ -1,10 +1,10 @@
 #!/bin/bash
 #
-# cherry-pick-milestone.sh
+# cherry-pick-from-milestone.sh
 # Find commits from a GitHub milestone that are missing from the current branch
 # and output them in chronological order for cherry-picking.
 #
-# Usage: ./cherry-pick-milestone.sh <milestone> [--dry-run] [--execute]
+# Usage: ./cherry-pick-from-milestone.sh <milestone> [--dry-run] [--execute]
 #
 
 set -euo pipefail
