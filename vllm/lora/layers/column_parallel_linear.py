@@ -600,14 +600,19 @@ class MergedColumnParallelLinearVariableSliceWithLoRA(
         if type(source_layer) is not MergedColumnParallelLinear:
             return False
 
-        # If packed_modules_list is provided and has 3+ items, use it
+        # If packed_modules_list has 3+ items, use this class
         if len(packed_modules_list) >= 3:
             return True
 
-        # If packed_modules_list is empty or has < 3 items,
-        # check the layer's output_sizes
+        # If packed_modules_list has exactly 2 items, let
+        # MergedColumnParallelLinearWithLoRA handle it
+        if len(packed_modules_list) == 2:
+            return False
+
+        # If packed_modules_list is empty or has 1 item,
+        # check the layer's output_sizes.
         # This handles cases where the checkpoint has a single weight
-        # but the layer has multiple slices
+        # but the layer has multiple slices (3+)
         return (
             hasattr(source_layer, "output_sizes")
             and len(source_layer.output_sizes) >= 3
