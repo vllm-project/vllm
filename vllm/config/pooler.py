@@ -48,7 +48,7 @@ class PoolerConfig:
     ## for embeddings models
     normalize: bool | None = None
     """
-    Whether to normalize the embeddings outputs. Defaults to True.
+    DEPRECATED: please use `use_activation` instead.
     """
     dimensions: int | None = None
     """
@@ -75,11 +75,11 @@ class PoolerConfig:
     ## for classification models
     softmax: float | None = None
     """
-    softmax will be deprecated, please use use_activation instead.
+    DEPRECATED: please use `use_activation` instead.
     """
     activation: float | None = None
     """
-    activation will be deprecated, please use use_activation instead.
+    DEPRECATED: please use `use_activation` instead.
     """
     use_activation: bool | None = None
     """
