@@ -163,7 +163,11 @@ def _create_json_parse_error_messages(
 class SimpleContext(ConversationContext):
     """This is a context that cannot handle MCP tool calls"""
 
-    def __init__(self):
+    def __init__(
+        self,
+        reasoning_parser_cls: Callable[[TokenizerLike], ReasoningParser] | None = None,
+        tokenizer: TokenizerLike | None = None,
+    ):
         self.last_output = None
 
         # Accumulated final output for streaming mode
@@ -174,13 +178,17 @@ class SimpleContext(ConversationContext):
         self.num_prompt_tokens = 0
         self.num_output_tokens = 0
         self.num_cached_tokens = 0
-        # todo num_reasoning_tokens is not implemented yet.
         self.num_reasoning_tokens = 0
         # not implemented yet for SimpleContext
         self.all_turn_metrics = []
 
         self.input_messages: list[ResponseRawMessageAndToken] = []
         self.output_messages: list[ResponseRawMessageAndToken] = []
+
+        # Store reasoning parser for computing reasoning tokens
+        self._reasoning_parser_cls = reasoning_parser_cls
+        self._tokenizer = tokenizer
+        self._reasoning_tokens_computed = False
 
     def append_output(self, output) -> None:
         self.last_output = output
@@ -225,8 +233,46 @@ class SimpleContext(ConversationContext):
             final_output.outputs[0].token_ids = tuple(self._accumulated_token_ids)
             if self._accumulated_logprobs:
                 final_output.outputs[0].logprobs = self._accumulated_logprobs
+            # Compute reasoning tokens before returning final output
+            self._compute_reasoning_tokens()
             return final_output
         return self.last_output
+
+    def _compute_reasoning_tokens(self) -> None:
+        """Compute the number of reasoning tokens from accumulated token_ids."""
+        # Only compute once
+        if self._reasoning_tokens_computed:
+            return
+
+        # Check if we have the necessary components
+        if (
+            self._reasoning_parser_cls is None
+            or self._tokenizer is None
+            or not self._accumulated_token_ids
+        ):
+            # No reasoning parser or no tokens, reasoning tokens remain 0
+            self._reasoning_tokens_computed = True
+            return
+
+        try:
+            # Create reasoning parser instance
+            reasoning_parser = self._reasoning_parser_cls(self._tokenizer)
+
+            # Extract content token ids (non-reasoning tokens)
+            content_token_ids = reasoning_parser.extract_content_ids(
+                list(self._accumulated_token_ids)
+            )
+
+            # Calculate reasoning tokens as total - content
+            self.num_reasoning_tokens = len(self._accumulated_token_ids) - len(
+                content_token_ids
+            )
+
+            self._reasoning_tokens_computed = True
+        except Exception:
+            # If reasoning parsing fails, log and keep reasoning tokens at 0
+            logger.exception("Failed to compute reasoning tokens for SimpleContext")
+            self._reasoning_tokens_computed = True
 
     def append_tool_output(self, output) -> None:
         raise NotImplementedError("Should not be called.")

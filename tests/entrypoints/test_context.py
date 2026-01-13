@@ -8,6 +8,7 @@ from openai_harmony import Author, Message, Role, StreamState, TextContent
 
 from vllm.entrypoints.context import (
     HarmonyContext,
+    SimpleContext,
     StreamingHarmonyContext,
     TurnMetrics,
 )
@@ -597,3 +598,124 @@ def test_turn_metrics_copy_and_reset():
     assert copied_metrics.output_tokens == 20
     assert copied_metrics.cached_input_tokens == 5
     assert copied_metrics.tool_output_tokens == 3
+
+
+def test_simple_context_reasoning_tokens():
+    """Test that SimpleContext correctly tracks reasoning tokens."""
+
+    # Create a mock reasoning parser class
+    class MockReasoningParser:
+        def __init__(self, tokenizer):
+            self.tokenizer = tokenizer
+
+        def extract_content_ids(self, input_ids):
+            # Mock: assume tokens [1, 2, 3] are reasoning tokens
+            # and tokens [4, 5, 6, 7, 8] are content tokens
+            # So we return only the content tokens
+            return [tid for tid in input_ids if tid >= 4]
+
+    # Create a mock tokenizer
+    mock_tokenizer = MagicMock()
+
+    # Create SimpleContext with reasoning parser
+    context = SimpleContext(
+        reasoning_parser_cls=MockReasoningParser,
+        tokenizer=mock_tokenizer,
+    )
+
+    # Create mock outputs with reasoning and content tokens
+    # Tokens [1, 2, 3] will be reasoning, [4, 5, 6, 7, 8] will be content
+    mock_output = create_mock_request_output(
+        prompt_token_ids=[100, 101, 102],  # 3 prompt tokens
+        output_token_ids=[
+            1,
+            2,
+            3,
+            4,
+            5,
+            6,
+            7,
+            8,
+        ],  # 8 output tokens (3 reasoning + 5 content)
+        num_cached_tokens=1,
+    )
+
+    # Append output to context
+    context.append_output(mock_output)
+
+    # Verify basic token counts
+    assert context.num_prompt_tokens == 3
+    assert context.num_output_tokens == 8
+    assert context.num_cached_tokens == 1
+
+    # Access final_output to trigger reasoning token computation
+    final_output = context.final_output
+
+    # Verify reasoning tokens were computed correctly
+    # Total output tokens (8) - content tokens (5) = 3 reasoning tokens
+    assert context.num_reasoning_tokens == 3
+
+    # Verify final_output has the accumulated tokens
+    assert final_output is not None
+    assert len(final_output.outputs[0].token_ids) == 8
+
+
+def test_simple_context_no_reasoning_parser():
+    """Test that SimpleContext works without a reasoning parser."""
+
+    # Create SimpleContext without reasoning parser
+    context = SimpleContext()
+
+    # Create mock output
+    mock_output = create_mock_request_output(
+        prompt_token_ids=[100, 101, 102],
+        output_token_ids=[1, 2, 3, 4, 5],
+        num_cached_tokens=0,
+    )
+
+    # Append output to context
+    context.append_output(mock_output)
+
+    # Access final_output
+    final_output = context.final_output
+
+    # Verify reasoning tokens remain 0 when no parser is provided
+    assert context.num_reasoning_tokens == 0
+    assert context.num_output_tokens == 5
+
+
+def test_simple_context_empty_output():
+    """Test that SimpleContext handles empty output correctly."""
+
+    # Create a mock reasoning parser
+    class MockReasoningParser:
+        def __init__(self, tokenizer):
+            self.tokenizer = tokenizer
+
+        def extract_content_ids(self, input_ids):
+            return input_ids  # All tokens are content
+
+    mock_tokenizer = MagicMock()
+
+    # Create SimpleContext with reasoning parser
+    context = SimpleContext(
+        reasoning_parser_cls=MockReasoningParser,
+        tokenizer=mock_tokenizer,
+    )
+
+    # Create mock output with empty token_ids
+    mock_output = create_mock_request_output(
+        prompt_token_ids=[100, 101],
+        output_token_ids=[],  # No output tokens
+        num_cached_tokens=0,
+    )
+
+    # Append output to context
+    context.append_output(mock_output)
+
+    # Access final_output
+    final_output = context.final_output
+
+    # Verify reasoning tokens is 0 for empty output
+    assert context.num_reasoning_tokens == 0
+    assert context.num_output_tokens == 0
