@@ -176,40 +176,6 @@ def _init_kv_cache_quant(
         layer.quant_method.create_weights(layer)
 
 
-def maybe_calc_kv_scales(
-    query: torch.Tensor,
-    key: torch.Tensor,
-    value: torch.Tensor,
-    layer_name: str,
-) -> None:
-    forward_context: ForwardContext = get_forward_context()
-    self = forward_context.no_compile_layers[layer_name]
-
-    # Only calculate if the layer's calculate_kv_scales flag is True
-    # This flag gets set to False after the first forward pass
-    if not self.calculate_kv_scales:
-        return
-
-    self.calc_kv_scales(query, key, value)
-
-
-def maybe_calc_kv_scales_fake(
-    query: torch.Tensor,
-    key: torch.Tensor,
-    value: torch.Tensor,
-    layer_name: str,
-) -> None:
-    return
-
-
-direct_register_custom_op(
-    op_name="maybe_calc_kv_scales",
-    op_func=maybe_calc_kv_scales,
-    mutates_args=["query", "key", "value"],
-    fake_impl=maybe_calc_kv_scales_fake,
-)
-
-
 class Attention(nn.Module, AttentionLayerBase):
     """Attention layer.
 
@@ -530,6 +496,40 @@ class Attention(nn.Module, AttentionLayerBase):
                 head_size_v=self.head_size_v,
                 dtype=self.kv_cache_torch_dtype,
             )
+
+
+def maybe_calc_kv_scales(
+    query: torch.Tensor,
+    key: torch.Tensor,
+    value: torch.Tensor,
+    layer_name: str,
+) -> None:
+    forward_context: ForwardContext = get_forward_context()
+    self = forward_context.no_compile_layers[layer_name]
+
+    # Only calculate if the layer's calculate_kv_scales flag is True
+    # This flag gets set to False after the first forward pass
+    if not self.calculate_kv_scales:
+        return
+
+    self.calc_kv_scales(query, key, value)
+
+
+def maybe_calc_kv_scales_fake(
+    query: torch.Tensor,
+    key: torch.Tensor,
+    value: torch.Tensor,
+    layer_name: str,
+) -> None:
+    return
+
+
+direct_register_custom_op(
+    op_name="maybe_calc_kv_scales",
+    op_func=maybe_calc_kv_scales,
+    mutates_args=["query", "key", "value"],
+    fake_impl=maybe_calc_kv_scales_fake,
+)
 
 
 def get_attention_context(
