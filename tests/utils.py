@@ -1399,7 +1399,8 @@ class TestFP8Layer(torch.nn.Module):
 
 
 # TODO: Drop TestBlockFP8Layer in favour of a unified TestFP8Layer
-# after refactoring  W8A8BlockFp8LinearOp.
+# after refactoring W8A8BlockFp8LinearOp.
+# https://github.com/vllm-project/vllm/issues/31818
 class TestBlockFP8Layer:
     """
     Test helper for blockwise FP8 linear operations. Creates random weights
