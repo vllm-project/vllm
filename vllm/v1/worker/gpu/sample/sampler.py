@@ -107,6 +107,7 @@ class Sampler:
         self.penalties_state.apply_penalties_and_temperature(
             logits, idx_mapping, self.sampling_states.temperature.gpu
         )
+        self.logit_bias_state.apply_logit_bias(logits, idx_mapping, pos)
 
         # Apply min_p in place if any request has a non-zero min_p.
         do_min_p = self.sampling_states.do_min_p(idx_mapping_np)
@@ -121,6 +122,7 @@ class Sampler:
         if do_top_k or do_top_p:
             logits = apply_top_k_top_p(logits, top_k, top_p)
 
+        # Sample the next token.
         sampled = gumbel_sample(
             logits,
             idx_mapping,
