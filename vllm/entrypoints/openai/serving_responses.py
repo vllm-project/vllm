@@ -111,6 +111,7 @@ from vllm.entrypoints.responses_utils import (
     construct_input_messages,
     construct_tool_dicts,
     extract_tool_types,
+    should_continue_final_message,
 )
 from vllm.entrypoints.tool_server import ToolServer
 from vllm.inputs.data import TokensPrompt
@@ -590,6 +591,10 @@ class OpenAIServingResponses(OpenAIServing):
             prev_response_output=prev_response.output if prev_response else None,
         )
 
+        # Check if we should continue the final message (partial completion)
+        # This enables Anthropic-style partial message completion where the
+        # user provides an incomplete assistant message to continue from.
+        continue_final = should_continue_final_message(request.input)
         chat_template_kwargs = dict(
             reasoning_effort=None
             if request.reasoning is None
@@ -604,6 +609,11 @@ class OpenAIServingResponses(OpenAIServing):
             tool_parser=self.tool_parser,
             chat_template=self.chat_template,
             chat_template_content_format=self.chat_template_content_format,
+            # When continuing a partial message, we set continue_final_message=True
+            # and add_generation_prompt=False so the model continues the message
+            # rather than starting a new one.
+            add_generation_prompt=not continue_final,
+            continue_final_message=continue_final,
             chat_template_kwargs=chat_template_kwargs,
         )
         return messages, engine_prompts
