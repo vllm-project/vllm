@@ -96,6 +96,11 @@ class Sampler(nn.Module):
         sampled, processed_logprobs = self.sample(logits, sampling_metadata)
         if processed_logprobs is not None:
             raw_logprobs = processed_logprobs
+
+        # Apply enforced sequences if present (for validation/testing)
+        sampled = self.apply_enforced_sequences(
+            sampled, sampling_metadata, logits.device
+        )
         # Convert sampled token ids to int64 (long) type to ensure compatibility
         # with subsequent operations that may use these values as indices.
         # This conversion is necessary because FlashInfer sampling operations
@@ -317,3 +322,37 @@ class Sampler(nn.Module):
             sampling_metadata.repetition_penalties,
             output_token_ids,
         )
+
+    @staticmethod
+    def apply_enforced_sequences(
+        sampled: torch.Tensor,
+        sampling_metadata: SamplingMetadata,
+        device: torch.device,
+    ) -> torch.Tensor:
+        """
+        Override sampled tokens with enforced sequence tokens for validation.
+
+        For requests that have enforce_sequence set, this method replaces the
+        sampled token with the next token from the enforced sequence based on
+        how many tokens have already been generated (output_token_ids length).
+        """
+        if not sampling_metadata.enforce_sequences:
+            return sampled
+
+        output_token_ids = sampling_metadata.output_token_ids
+        for req_idx, enforce_seq in sampling_metadata.enforce_sequences.items():
+            if req_idx >= len(sampled):
+                continue
+            # Determine which token in the enforce_sequence to use
+            num_generated = len(output_token_ids[req_idx]) if req_idx < len(
+                output_token_ids
+            ) else 0
+            if num_generated < len(enforce_seq):
+                enforced_token = enforce_seq[num_generated]
+            else:
+                # If we've exhausted the sequence, use the last token
+                enforced_token = enforce_seq[-1] if enforce_seq else sampled[
+                    req_idx
+                ].item()
+            sampled[req_idx] = enforced_token
+        return sampled
