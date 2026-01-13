@@ -103,11 +103,13 @@ class Sampler:
         # Copy logits to a new FP32 tensor.
         logits = torch.empty_like(logits, dtype=torch.float32).copy_(logits)
 
+        # Apply logit bias (e.g., allowed_token_ids, min_tokens) in place.
+        self.logit_bias_state.apply_logit_bias(logits, idx_mapping, pos)
+
         # Apply penalties and temperature in place.
         self.penalties_state.apply_penalties_and_temperature(
             logits, idx_mapping, self.sampling_states.temperature.gpu
         )
-        self.logit_bias_state.apply_logit_bias(logits, idx_mapping, pos)
 
         # Apply min_p in place if any request has a non-zero min_p.
         do_min_p = self.sampling_states.do_min_p(idx_mapping_np)
