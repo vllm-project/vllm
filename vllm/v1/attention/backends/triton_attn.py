@@ -322,6 +322,14 @@ class TritonAttentionBackend(AttentionBackend):
         return True
 
     @classmethod
+    def supports_alibi_sqrt(cls) -> bool:
+        return True
+
+    @classmethod
+    def default_use_alibi_sqrt(cls) -> bool:
+        return False
+
+    @classmethod
     def supports_attn_type(cls, attn_type: str) -> bool:
         """TritonAttention supports all attention types."""
         return attn_type in (
@@ -353,6 +361,7 @@ class TritonAttentionImpl(AttentionImpl):
         attn_type: AttentionType = AttentionType.DECODER,
         kv_sharing_target_layer_name: int | None = None,
         sinks: torch.Tensor | None = None,
+        use_alibi_sqrt: bool = False,
     ) -> None:
         self.num_heads = num_heads
         self.head_size = head_size
@@ -387,6 +396,7 @@ class TritonAttentionImpl(AttentionImpl):
                 f"num_heads: {num_heads}."
             )
 
+        self.use_alibi_sqrt = use_alibi_sqrt
         self.supports_quant_query_input = current_platform.is_cuda()
 
     def forward(
@@ -527,6 +537,7 @@ class TritonAttentionImpl(AttentionImpl):
             sinks=self.sinks,
             output_scale=output_scale,
             mm_prefix_range=mm_prefix_range_tensor,
+            use_alibi_sqrt=self.use_alibi_sqrt,
         )
 
         return output

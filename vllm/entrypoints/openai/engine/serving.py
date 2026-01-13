@@ -28,6 +28,7 @@ from vllm.entrypoints.chat_utils import (
     ConversationMessage,
     apply_hf_chat_template,
     apply_mistral_chat_template,
+    apply_step_audio_2_chat_template,
     parse_chat_messages_futures,
     resolve_chat_template_content_format,
 )
@@ -114,6 +115,7 @@ from vllm.sampling_params import BeamSearchParams, SamplingParams
 from vllm.tokenizers import TokenizerLike
 from vllm.tokenizers.deepseek_v32 import DeepseekV32Tokenizer
 from vllm.tokenizers.mistral import MistralTokenizer
+from vllm.tokenizers.step_audio_2 import StepAudio2Tokenizer
 from vllm.tool_parsers import ToolParser, ToolParserManager
 from vllm.tracing import (
     contains_trace_headers,
@@ -1231,6 +1233,12 @@ class OpenAIServing:
                 conversation=conversation,
                 messages=messages,
                 model_config=model_config,
+                **_chat_template_kwargs,
+            )
+        elif isinstance(tokenizer, StepAudio2Tokenizer):
+            request_prompt = apply_step_audio_2_chat_template(
+                tokenizer,
+                conversation=conversation,
                 **_chat_template_kwargs,
             )
         else:

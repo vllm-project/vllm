@@ -34,6 +34,7 @@ _VLLM_TOKENIZERS = {
     "grok2": ("grok2", "Grok2Tokenizer"),
     "hf": ("hf", "CachedHfTokenizer"),
     "mistral": ("mistral", "MistralTokenizer"),
+    "step_audio_2": ("step_audio_2", "StepAudio2Tokenizer"),
 }
 
 

@@ -263,6 +263,7 @@ class DeltaMessage(OpenAIBaseModel):
     reasoning_content: str | None = None
     """Deprecated: use `reasoning` instead."""
     tool_calls: list[DeltaToolCall] = Field(default_factory=list)
+    tts_content: dict[str, str] | None = Field(default_factory=dict)
 
     @model_validator(mode="after")
     def handle_deprecated_reasoning_content(self):

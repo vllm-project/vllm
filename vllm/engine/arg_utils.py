@@ -447,6 +447,7 @@ class EngineArgs:
     hf_token: bool | str | None = ModelConfig.hf_token
     hf_overrides: HfOverrides = get_field(ModelConfig, "hf_overrides")
     tokenizer_revision: str | None = ModelConfig.tokenizer_revision
+    audio_parser: str | None = ModelConfig.audio_parser
     quantization: QuantizationMethods | None = ModelConfig.quantization
     allow_deprecated_quantization: bool = ModelConfig.allow_deprecated_quantization
     enforce_eager: bool = ModelConfig.enforce_eager
@@ -707,6 +708,9 @@ class EngineArgs:
         )
         model_group.add_argument(
             "--io-processor-plugin", **model_kwargs["io_processor_plugin"]
+        )
+        model_group.add_argument(
+            "--audio-parser", **model_kwargs["audio_parser"]
         )
 
         # Model loading arguments
@@ -1268,6 +1272,7 @@ class EngineArgs:
             logits_processors=self.logits_processors,
             video_pruning_rate=self.video_pruning_rate,
             io_processor_plugin=self.io_processor_plugin,
+            audio_parser=self.audio_parser,
         )
 
     def validate_tensorizer_args(self):

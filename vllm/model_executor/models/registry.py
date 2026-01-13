@@ -437,6 +437,7 @@ _MULTIMODAL_MODELS = {
     "UltravoxModel": ("ultravox", "UltravoxModel"),
     "VoxtralForConditionalGeneration": ("voxtral", "VoxtralForConditionalGeneration"),  # noqa: E501
     "VoxtralStreamingGeneration": ("voxtral_streaming", "VoxtralStreamingGeneration"),  # noqa: E501
+    "StepAudio2ForCausalLM": ("mm_step_audio", "StepAudio2ForCausalLM"),
     # [Encoder-decoder]
     "NemotronParseForConditionalGeneration": (
         "nemotron_parse",

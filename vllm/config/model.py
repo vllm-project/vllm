@@ -77,7 +77,7 @@ logger = init_logger(__name__)
 RunnerOption = Literal["auto", RunnerType]
 ConvertType = Literal["none", "embed", "classify", "reward", "mm_encoder_only"]
 ConvertOption = Literal["auto", ConvertType]
-TokenizerMode = Literal["auto", "hf", "slow", "mistral", "deepseek_v32"]
+TokenizerMode = Literal["auto", "hf", "slow", "mistral", "deepseek_v32", "step_audio_2"]
 ModelDType = Literal["auto", "half", "float16", "bfloat16", "float", "float32"]
 LogprobsMode = Literal[
     "raw_logits", "raw_logprobs", "processed_logits", "processed_logprobs"
@@ -289,6 +289,8 @@ class ModelConfig:
     definitions"""
     io_processor_plugin: str | None = None
     """IOProcessor plugin name to load at model startup"""
+    audio_parser: str | None = None
+    """Set custom parser for model deps."""
 
     # Pooler config
     pooler_config: PoolerConfig | None = None
@@ -347,6 +349,7 @@ class ModelConfig:
             "override_attention_dtype",
             "logits_processors",
             "io_processor_plugin",
+            "audio_parser",
             "pooler_config",
             "multimodal_config",
             "limit_mm_per_prompt",
