@@ -98,6 +98,10 @@ try:
                 "Please set UCX_MEM_MMAP_HOOK_MODE to 'none' manually."
             )
         else:
+            logger.info(
+                "Setting UCX_MEM_MMAP_HOOK_MODE to 'none' to avoid a rare "
+                "memory leak in UCX when using NIXL."
+            )
             os.environ["UCX_MEM_MMAP_HOOK_MODE"] = "none"
 
     if not current_platform.is_rocm():
