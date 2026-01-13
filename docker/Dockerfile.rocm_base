@@ -219,7 +219,6 @@ ARG ETCD_BRANCH
 ARG ETCD_REPO
 ARG UCX_BRANCH
 ARG UCX_REPO
-ARG USE_SCCACHE
 
 ENV ROCM_PATH=/opt/rocm
 ENV UCX_HOME=/usr/local/ucx
@@ -246,79 +245,46 @@ RUN pip install meson auditwheel patchelf tomlkit
 
 WORKDIR /workspace
 
-# Build etcd-cpp-apiv3 (CMake)
 RUN git clone ${ETCD_REPO} && \
     cd etcd-cpp-apiv3 && \
     git checkout ${ETCD_BRANCH} && \
     mkdir build && cd build && \
-    if [ "$USE_SCCACHE" = "1" ]; then \
-        cmake .. -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
-            -DCMAKE_C_COMPILER_LAUNCHER=sccache \
-            -DCMAKE_HIP_COMPILER_LAUNCHER=sccache \
-            -DCMAKE_CXX_COMPILER_LAUNCHER=sccache; \
-    else \
-        cmake .. -DCMAKE_POLICY_VERSION_MINIMUM=3.5; \
-    fi && \
+    cmake .. -DCMAKE_POLICY_VERSION_MINIMUM=3.5 && \
     make -j$(nproc) && \
-    make install && \
-    if [ "$USE_SCCACHE" = "1" ]; then sccache --show-stats; fi
+    make install
 
-# Build UCX (autotools) - sccache via CC/CXX wrapper
 RUN cd /usr/local/src && \
     git clone ${UCX_REPO} &&  \
     cd ucx  && \
     git checkout ${UCX_BRANCH} && \
     ./autogen.sh && \
     mkdir build && cd build && \
-    if [ "$USE_SCCACHE" = "1" ]; then \
-        CC="sccache gcc" CXX="sccache g++" ../configure \
-            --prefix=/usr/local/ucx \
-            --enable-shared \
-            --disable-static \
-            --disable-doxygen-doc \
-            --enable-optimizations \
-            --enable-devel-headers \
-            --with-rocm=/opt/rocm \
-            --with-verbs \
-            --with-dm \
-            --enable-mt; \
-    else \
-        ../configure \
-            --prefix=/usr/local/ucx \
-            --enable-shared \
-            --disable-static \
-            --disable-doxygen-doc \
-            --enable-optimizations \
-            --enable-devel-headers \
-            --with-rocm=/opt/rocm \
-            --with-verbs \
-            --with-dm \
-            --enable-mt; \
-    fi && \
+    ../configure \
+        --prefix=/usr/local/ucx \
+        --enable-shared \
+        --disable-static \
+        --disable-doxygen-doc \
+        --enable-optimizations \
+        --enable-devel-headers \
+        --with-rocm=/opt/rocm \
+        --with-verbs \
+        --with-dm \
+        --enable-mt && \
     make -j && \
-    make -j install && \
-    if [ "$USE_SCCACHE" = "1" ]; then sccache --show-stats; fi
+    make -j install
 
 ENV PATH=/usr/local/ucx/bin:$PATH
 ENV LD_LIBRARY_PATH=${UCX_HOME}/lib:${LD_LIBRARY_PATH}
 
-# Build RIXL (meson) - sccache via environment
 RUN git clone ${RIXL_REPO} /opt/rixl && \
     cd /opt/rixl && \
     git checkout ${RIXL_BRANCH} && \
-    if [ "$USE_SCCACHE" = "1" ]; then \
-        CC="sccache gcc" CXX="sccache g++" meson setup build --prefix=${RIXL_HOME} \
-            -Ducx_path=${UCX_HOME} \
-            -Drocm_path=${ROCM_PATH}; \
-    else \
-        meson setup build --prefix=${RIXL_HOME} \
-            -Ducx_path=${UCX_HOME} \
-            -Drocm_path=${ROCM_PATH}; \
-    fi && \
+    meson setup build --prefix=${RIXL_HOME} \
+                     -Ducx_path=${UCX_HOME} \
+                     -Drocm_path=${ROCM_PATH} && \
     cd build && \
     ninja && \
-    ninja install && \
-    if [ "$USE_SCCACHE" = "1" ]; then sccache --show-stats; fi
+    ninja install
 
 # Generate RIXL wheel
 RUN cd /opt/rixl && mkdir -p /app/install && \
