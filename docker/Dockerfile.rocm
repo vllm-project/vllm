@@ -22,9 +22,14 @@ ENV RAY_EXPERIMENTAL_NOSET_HIP_VISIBLE_DEVICES=1
 RUN apt-get update -q -y && apt-get install -q -y \
     sqlite3 libsqlite3-dev libfmt-dev libmsgpack-dev libsuitesparse-dev \
     apt-transport-https ca-certificates wget curl
-# Remove sccache
 RUN python3 -m pip install --upgrade pip
-RUN apt-get purge -y sccache; python3 -m pip uninstall -y sccache; rm -f "$(which sccache)"
+# Remove sccache only if not using sccache (it exists in base image from Dockerfile.rocm_base)
+ARG USE_SCCACHE
+RUN if [ "$USE_SCCACHE" != "1" ]; then \
+        apt-get purge -y sccache || true; \
+        python3 -m pip uninstall -y sccache || true; \
+        rm -f "$(which sccache)" || true; \
+    fi
 
 # Install UV
 RUN curl -LsSf https://astral.sh/uv/install.sh | env UV_INSTALL_DIR="/usr/local/bin" sh
@@ -44,16 +49,21 @@ ARG SCCACHE_BUCKET_NAME
 ARG SCCACHE_REGION_NAME
 ARG SCCACHE_S3_NO_CREDENTIALS
 RUN if [ "$USE_SCCACHE" = "1" ]; then \
-        echo "Installing sccache..." \
-        && SCCACHE_ARCH="x86_64" \
-        && SCCACHE_VERSION="v0.8.1" \
-        && SCCACHE_DL_URL="${SCCACHE_DOWNLOAD_URL:-https://github.com/mozilla/sccache/releases/download/${SCCACHE_VERSION}/sccache-${SCCACHE_VERSION}-${SCCACHE_ARCH}-unknown-linux-musl.tar.gz}" \
-        && curl -L -o /tmp/sccache.tar.gz ${SCCACHE_DL_URL} \
-        && tar -xzf /tmp/sccache.tar.gz -C /tmp \
-        && mv /tmp/sccache-${SCCACHE_VERSION}-${SCCACHE_ARCH}-unknown-linux-musl/sccache /usr/bin/sccache \
-        && chmod +x /usr/bin/sccache \
-        && rm -rf /tmp/sccache.tar.gz /tmp/sccache-${SCCACHE_VERSION}-${SCCACHE_ARCH}-unknown-linux-musl \
-        && sccache --version; \
+        if command -v sccache >/dev/null 2>&1; then \
+            echo "sccache already installed, skipping installation"; \
+            sccache --version; \
+        else \
+            echo "Installing sccache..." \
+            && SCCACHE_ARCH="x86_64" \
+            && SCCACHE_VERSION="v0.8.1" \
+            && SCCACHE_DL_URL="${SCCACHE_DOWNLOAD_URL:-https://github.com/mozilla/sccache/releases/download/${SCCACHE_VERSION}/sccache-${SCCACHE_VERSION}-${SCCACHE_ARCH}-unknown-linux-musl.tar.gz}" \
+            && curl -L -o /tmp/sccache.tar.gz ${SCCACHE_DL_URL} \
+            && tar -xzf /tmp/sccache.tar.gz -C /tmp \
+            && mv /tmp/sccache-${SCCACHE_VERSION}-${SCCACHE_ARCH}-unknown-linux-musl/sccache /usr/bin/sccache \
+            && chmod +x /usr/bin/sccache \
+            && rm -rf /tmp/sccache.tar.gz /tmp/sccache-${SCCACHE_VERSION}-${SCCACHE_ARCH}-unknown-linux-musl \
+            && sccache --version; \
+        fi; \
     fi
 
 # Set sccache environment variables only when USE_SCCACHE=1
