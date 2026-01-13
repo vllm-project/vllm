@@ -451,14 +451,14 @@ def make_fused_experts(
         kwargs = quant_kwargs
         print(f"Making TritonExperts {kwargs} ...")
         experts = TritonExperts(**kwargs)
-    elif fused_experts_type == NaiveBatchedExperts:
-        kwargs = batch_kwargs | quant_kwargs
-        print(f"Making NaiveBatchedExperts {kwargs} ...")
-        experts = NaiveBatchedExperts(**kwargs)
     elif fused_experts_type == TritonOrDeepGemmExperts:
         kwargs = quant_kwargs | deepgemm_kwargs
         print(f"Making TritonOrDeepGemmExperts {kwargs} ...")
         experts = TritonOrDeepGemmExperts(**kwargs)
+    elif fused_experts_type == NaiveBatchedExperts:
+        kwargs = batch_kwargs | quant_kwargs
+        print(f"Making NaiveBatchedExperts {kwargs} ...")
+        experts = NaiveBatchedExperts(**kwargs)
     elif fused_experts_type == CutlassExpertsFp8:
         strides = make_cutlass_strides(moe.num_experts, N, moe.hidden_dim)
         kwargs = {
