@@ -673,6 +673,7 @@ class NaiveBatchedExperts(mk.FusedMoEPermuteExpertsUnpermute):
         global_num_experts: int,
         local_num_experts: int,
         expert_tokens_meta: mk.ExpertTokensMetadata | None,
+        activation: str,
     ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...]]:
         num_dp = self.num_dispatchers
         num_experts = local_num_experts
@@ -867,12 +868,14 @@ class BatchedTritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
         global_num_experts: int,
         local_num_experts: int,
         expert_tokens_meta: mk.ExpertTokensMetadata | None,
+        activation: str,
     ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...]]:
         num_dp = self.num_dispatchers
         num_experts = local_num_experts
         max_num_tokens = self.max_num_tokens
+        activation_out_dim = self.adjust_N_for_activation(N, activation)
         workspace13 = (num_experts, max_num_tokens * num_dp, max(K, N))
-        workspace2 = (num_experts, max_num_tokens * num_dp, (N // 2))
+        workspace2 = (num_experts, max_num_tokens * num_dp, activation_out_dim)
         output = (num_experts, max_num_tokens * num_dp, K)
         return (workspace13, workspace2, output)
 
@@ -947,7 +950,10 @@ class BatchedTritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
         # We can reuse the memory between these because by the time we need
         # cache3, we're done with cache1
         intermediate_cache1 = _resize_cache(workspace13, (E, max_num_tokens, N))
-        intermediate_cache2 = _resize_cache(workspace2, (E, max_num_tokens, N // 2))
+        activation_out_dim = self.adjust_N_for_activation(N, activation)
+        intermediate_cache2 = _resize_cache(
+            workspace2, (E, max_num_tokens, activation_out_dim)
+        )
 
         # TODO(bnell): should this be done for any quantized type?
         if self.quant_config.use_fp8_w8a8:
@@ -978,7 +984,7 @@ class BatchedTritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
         # TODO (bnell): use triton utility from batched deep gemm.
         self.activation(
             activation,
-            intermediate_cache2.view(-1, N // 2),
+            intermediate_cache2.view(-1, activation_out_dim),
             intermediate_cache1.view(-1, N),
         )
 

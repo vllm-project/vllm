@@ -311,7 +311,7 @@ def _test_async_transfer_layer_without_mtp_worker(
             is_unchanged=is_unchanged,
             is_received_locally=is_received_locally,
             recv_metadata=recv_metadata,
-            new_indices=new_indices_cpu[layer_idx],
+            new_indices=new_indices_cpu[layer_idx].numpy(),
             ep_rank=ep_rank,
         )
 

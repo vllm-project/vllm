@@ -6,7 +6,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 from typing_extensions import assert_never
 
-from vllm.entrypoints.openai.protocol import ErrorResponse
+from vllm.entrypoints.openai.engine.protocol import ErrorResponse
 from vllm.entrypoints.openai.utils import validate_json_request
 from vllm.entrypoints.pooling.embed.protocol import (
     EmbeddingBytesResponse,

@@ -681,6 +681,10 @@ class WhisperProcessingInfo(BaseProcessingInfo):
     def get_hf_config(self) -> WhisperConfig:
         return self.ctx.get_hf_config(WhisperConfig)
 
+    @property
+    def skip_prompt_length_check(self) -> bool:
+        return True  # Because the encoder prompt is padded
+
     def get_supported_mm_limits(self) -> Mapping[str, int | None]:
         return {"audio": 1}
 
@@ -732,10 +736,6 @@ class WhisperMultiModalProcessor(EncDecMultiModalProcessor[WhisperProcessingInfo
             target_sr=feature_extractor.sampling_rate,
             target_channels=self.info.get_target_channels(),
         )
-
-    @property
-    def pad_dummy_encoder_prompt(self) -> bool:
-        return True
 
     def create_encoder_prompt(
         self,

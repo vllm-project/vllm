@@ -14,8 +14,10 @@ from vllm.utils.collection_utils import is_list_of
 from vllm.utils.import_utils import import_from_path
 
 if TYPE_CHECKING:
-    from vllm.entrypoints.openai.protocol import (
+    from vllm.entrypoints.openai.chat_completion.protocol import (
         ChatCompletionRequest,
+    )
+    from vllm.entrypoints.openai.engine.protocol import (
         DeltaMessage,
         ResponsesRequest,
     )
