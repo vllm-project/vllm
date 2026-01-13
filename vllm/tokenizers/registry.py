@@ -37,6 +37,7 @@ _VLLM_TOKENIZERS = {
     "hf": ("hf", "CachedHfTokenizer"),
     "mistral": ("mistral", "MistralTokenizer"),
     "qwen_vl": ("qwen_vl", "QwenVLTokenizer"),
+    "step_audio_2": ("step_audio_2", "StepAudio2Tokenizer"),
 }
 
 

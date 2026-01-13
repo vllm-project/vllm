@@ -335,6 +335,14 @@ class TritonAttentionBackend(AttentionBackend):
         return True
 
     @classmethod
+    def supports_alibi_sqrt(cls) -> bool:
+        return True
+
+    @classmethod
+    def default_use_alibi_sqrt(cls) -> bool:
+        return False
+
+    @classmethod
     def supports_attn_type(cls, attn_type: str) -> bool:
         """TritonAttention supports all attention types."""
         return attn_type in (
