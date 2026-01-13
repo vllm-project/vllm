@@ -170,7 +170,7 @@ def load_lora_op_config(op_type: str, add_inputs: bool | None) -> dict | None:
 
         config_path = Path(f"{user_defined_config_folder}/{config_fname}")
         if not config_path.exists():
-            logger.warning_once(f"No LoRA kernel configs founded in {config_path}")
+            logger.warning_once(f"No LoRA kernel configs found in {config_path}")
             return None
 
         # Load json
