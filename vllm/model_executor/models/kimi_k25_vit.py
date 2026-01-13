@@ -30,9 +30,9 @@ from vllm.model_executor.layers.linear import (
     RowParallelLinear,
 )
 from vllm.model_executor.models.utils import maybe_prefix
+from vllm.model_executor.models.vision import run_dp_sharded_mrope_vision_model
 from vllm.transformers_utils.configs.kimi_k25 import KimiK25VisionConfig
 
-KIMIV_VT_INFER_MAX_PATCH_NUM = 16328
 logger = init_logger(__name__)
 
 
@@ -562,6 +562,7 @@ class MoonViT3dPretrainedModel(nn.Module):
     ):
         super().__init__()
         config = deepcopy(config)
+        self.config = config  # Required for run_dp_sharded_mrope_vision_model
         self.merge_kernel_size = config.merge_kernel_size
         self.patch_size = config.patch_size
         self.merge_type = config.merge_type
@@ -633,47 +634,20 @@ def vision_tower_forward(
     grid_thw: torch.Tensor,
     mm_projector: Any,
 ) -> list[torch.Tensor]:
-    """Auto-batched vision tower forward."""
-    n = grid_thw.shape[0]
-    n_patches_each_media = grid_thw.prod(-1)
-    max_infer_batch = max(n_patches_each_media.max(), KIMIV_VT_INFER_MAX_PATCH_NUM)
-    logger.debug(
-        "vt max_infer_batch: %s, KIMIV_VT_INFER_MAX_PATCH_NUM: %s",
-        max_infer_batch,
-        KIMIV_VT_INFER_MAX_PATCH_NUM,
+    """DP-sharded vision tower forward with mrope.
+
+    Uses vLLM's standard data parallelism utility to shard the batch
+    across available GPUs, enabling parallel processing of vision features.
+    """
+    grid_thw_list = grid_thw.tolist()
+    vt_outputs = run_dp_sharded_mrope_vision_model(
+        vision_model=vision_tower,
+        pixel_values=pixel_values,
+        grid_thw_list=grid_thw_list,
+        rope_type="rope_2d",
     )
-    tensors = []
-    pre_sum = 0
-    current_group_start = 0
-    current_group_patches = 0
-
-    for i in range(n):
-        current_media_patches = n_patches_each_media[i].item()
-        if current_group_patches + current_media_patches <= max_infer_batch:
-            current_group_patches += current_media_patches
-        else:
-            if current_group_start < i:
-                group_grid_thw = grid_thw[current_group_start:i]
-                group_n_patches = n_patches_each_media[current_group_start:i].sum()
-                group_input = pixel_values[pre_sum : pre_sum + group_n_patches]
-                group_output = vision_tower(group_input, group_grid_thw)
-                proj_out = mm_projector_forward(mm_projector, group_output)
-                tensors.extend(proj_out)
-                pre_sum += group_n_patches
-
-            current_group_start = i
-            current_group_patches = current_media_patches
-
-    # Process the last group
-    if current_group_start < n:
-        group_grid_thw = grid_thw[current_group_start:n]
-        group_n_patches = n_patches_each_media[current_group_start:n].sum()
-        group_input = pixel_values[pre_sum : pre_sum + group_n_patches]
-        group_output = vision_tower(group_input, group_grid_thw)
-        proj_out = mm_projector_forward(mm_projector, group_output)
-        tensors.extend(proj_out)
-
-    return tensors
+    tensors = mm_projector_forward(mm_projector, list(vt_outputs))
+    return list(tensors)
 
 
 class KimiK25MultiModalProjector(nn.Module):
