@@ -548,6 +548,7 @@ class GptOssModel(nn.Module):
                             2 * tp_rank_start : 2 * tp_rank_end
                         ]
 
+                assert fused_name is not None
                 param = params_dict[fused_name]
                 weight_loader = getattr(param, "weight_loader", default_weight_loader)
                 weight_loader(
