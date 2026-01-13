@@ -1291,6 +1291,10 @@ class MLACommonBaseImpl(MLAAttentionImpl[A], Generic[A]):
         x = x.view(-1, self.num_heads, self.kv_lora_rank).transpose(0, 1)
         out = out.view(-1, self.num_heads, self.v_head_dim)
         if self.is_aiter_triton_fp4_bmm_enabled:
+            print(f"{x.shape=}")
+            print(f"{self.W_V.shape=}")
+            print(f"{self.W_V_scale.shape=}")
+
             out = rocm_aiter_ops.batched_gemm_a16wfp4(
                 x,
                 self.W_V,
@@ -1671,11 +1675,17 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
             )
 
             self.W_K, self.W_K_scale = quark_quntize_weight_to_mxfp4(W_UK)
+            # Convert from (L, N, P) to (N, P, L) ???
+            self.W_K = self.W_K.transpose(0, 1)
+            self.W_K_scale = self.W_K_scale.transpose(0, 1)
+
+            print(f"{W_UV.shape=}")
             self.W_V, self.W_V_scale = quark_quntize_weight_to_mxfp4(W_UV)
-            # Convert from (L, N, P) to (N, P, L)
-            self.W_K = self.W_K.permute(1, 2, 0)
-            # Convert from (L, N, V) to (N, L, V)
-            self.W_V = self.W_V.transpose(0, 1)
+            print(f"{self.W_V.shape=}")
+            print(f"{self.W_V_scale.shape=}")
+
+            # Convert from (L, N, V) to (N, L, V) ???
+            self.W_V = self.W_V.permute(1, 2, 0)
         elif self.is_aiter_triton_fp8_bmm_enabled:
             W_K = W_UK.transpose(0, 1)  # 16 512 128
             W_V = W_UV.permute(1, 2, 0)  # 16 128 512
@@ -2106,10 +2116,12 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
             if self.is_aiter_triton_fp4_bmm_enabled:
                 from aiter.ops.triton.batched_gemm_a16wfp4 import batched_gemm_a16wfp4
 
-                decode_q_nope = decode_q_nope.transpose(0, 1)
                 decode_ql_nope = None
+
                 print(f"{decode_q_nope.shape=}")
                 print(f"{self.W_K.shape=}")
+                print(f"{self.W_K_scale.shape=}")
+
                 decode_ql_nope = batched_gemm_a16wfp4(
                     decode_q_nope,
                     self.W_K,
