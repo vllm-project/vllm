@@ -48,8 +48,6 @@ from openai.types.responses.response_reasoning_item import (
 )
 from openai_harmony import Message as OpenAIHarmonyMessage
 
-from vllm.sampling_params import BeamSearchParams
-
 # Backward compatibility for OpenAI client versions
 try:  # For older openai versions (< 1.100.0)
     from openai.types.responses import ResponseTextConfig
@@ -74,6 +72,7 @@ from vllm.exceptions import VLLMValidationError
 from vllm.logger import init_logger
 from vllm.logprobs import Logprob
 from vllm.sampling_params import (
+    BeamSearchParams,
     RequestOutputKind,
     SamplingParams,
     StructuredOutputsParams,
