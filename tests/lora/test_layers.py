@@ -857,7 +857,7 @@ def test_column_parallel_packed(
 @pytest.mark.parametrize("device", DEVICES)
 @pytest.mark.parametrize("stage", STAGES)
 def test_merged_column_parallel_variable_slice(
-    dist_init, num_loras, num_slices, device, stage
+    default_vllm_config, dist_init, num_loras, num_slices, device, stage
 ) -> None:
     if current_platform.is_cuda_alike():
         torch.cuda.set_device(device)
