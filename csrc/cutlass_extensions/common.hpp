@@ -47,6 +47,20 @@ struct enable_sm75_to_sm80 : Kernel {
 };
 
 template <typename Kernel>
+struct enable_sm80_to_sm89 : Kernel {
+  template <typename... Args>
+  CUTLASS_DEVICE static void invoke(Args&&... args) {
+#if defined __CUDA_ARCH__
+  #if __CUDA_ARCH__ >= 800 && __CUDA_ARCH__ < 890
+    Kernel::invoke(std::forward<Args>(args)...);
+  #else
+    TORCH_CHECK(false, "This kernel only supports sm >= 80.");
+  #endif
+#endif
+  }
+};
+
+template <typename Kernel>
 struct enable_sm89_to_sm90 : Kernel {
   template <typename... Args>
   CUTLASS_DEVICE static void invoke(Args&&... args) {

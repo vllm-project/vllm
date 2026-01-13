@@ -1,7 +1,6 @@
 #pragma once
 
 #include "scaled_mm_c2x.cuh"
-#include "cutlass_extensions/common.hpp"
 
 /**
  * This file defines Gemm kernel configurations for SM89 (int8) based on the

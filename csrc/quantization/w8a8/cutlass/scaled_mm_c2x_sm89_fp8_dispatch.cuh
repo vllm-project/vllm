@@ -2,7 +2,6 @@
 
 #include "scaled_mm_c2x.cuh"
 #include "cutlass/float8.h"
-#include "cutlass_extensions/common.hpp"
 
 /**
  * This file defines Gemm kernel configurations for SM89 (FP8) based on the Gemm
