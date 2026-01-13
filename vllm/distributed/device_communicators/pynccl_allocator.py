@@ -60,7 +60,7 @@ def is_symmetric_memory_tensor(tensor: torch.Tensor):
     return False
 
 
-def set_graph_pool_id(graph_pool_id):
+def set_graph_pool_id(graph_pool_id: Any) -> None:
     global _graph_pool_id
     _graph_pool_id = graph_pool_id
 

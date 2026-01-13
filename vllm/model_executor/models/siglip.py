@@ -15,19 +15,21 @@ from transformers import (
     SiglipVisionConfig,
 )
 
-from vllm.attention.layers.encoder_only_attention import EncoderOnlyAttention
-from vllm.attention.layers.mm_encoder_attention import MMEncoderAttention
 from vllm.config import VllmConfig
 from vllm.config.multimodal import BaseDummyOptions, MultiModalConfig
 from vllm.distributed import divide, get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.activation import get_act_fn
+from vllm.model_executor.layers.attention.encoder_only_attention import (
+    EncoderOnlyAttention,
+)
+from vllm.model_executor.layers.attention.mm_encoder_attention import MMEncoderAttention
 from vllm.model_executor.layers.conv import Conv2dLayer
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
     QKVParallelLinear,
     RowParallelLinear,
 )
-from vllm.model_executor.layers.pooler import DispatchPooler, Pooler
+from vllm.model_executor.layers.pooler import DispatchPooler
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmbedding
 from vllm.model_executor.model_loader.weight_utils import (
@@ -127,7 +129,7 @@ class SiglipProcessingInfo(BaseProcessingInfo):
                 image_width=image_width,
                 image_height=image_height,
             ),
-            _get_vision_feature_select_strategy(pooler_config.pooling_type),
+            _get_vision_feature_select_strategy(pooler_config.seq_pooling_type),
         )
 
     def get_image_size_with_most_features(self) -> ImageSize:
@@ -996,7 +998,7 @@ class SiglipTextEmbeddings(nn.Module):
 
 
 # Assume EOS token corresponds to CLS token in text model
-@default_pooling_type("CLS")
+@default_pooling_type(seq_pooling_type="CLS")
 @MULTIMODAL_REGISTRY.register_processor(
     SiglipMultiModalProcessor,
     info=SiglipProcessingInfo,
@@ -1050,12 +1052,7 @@ class SiglipEmbeddingModel(nn.Module, SupportsMultiModal, SupportsQuant):
         assert pooler_config is not None
         self.pooler_config = pooler_config
 
-        self.pooler = DispatchPooler(
-            {
-                "token_embed": Pooler.for_token_embed(pooler_config),
-                "embed": Pooler.for_embed(pooler_config),
-            }
-        )
+        self.pooler = DispatchPooler.for_embedding(pooler_config)
 
         self._is_text_input = True
 
@@ -1128,7 +1125,7 @@ class SiglipEmbeddingModel(nn.Module, SupportsMultiModal, SupportsQuant):
     ) -> torch.Tensor:
         if feature_select_strategy is None:
             feature_select_strategy = _get_vision_feature_select_strategy(
-                self.pooler_config.pooling_type
+                self.pooler_config.seq_pooling_type
             )
 
         pooled_output = self.vision_model(
