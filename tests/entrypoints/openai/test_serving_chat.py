@@ -11,14 +11,16 @@ import pytest_asyncio
 from openai import OpenAI
 
 from vllm.config.multimodal import MultiModalConfig
-from vllm.entrypoints.openai.parser.harmony_utils import get_encoding
-from vllm.entrypoints.openai.protocol import (
+from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionRequest,
     ChatCompletionResponse,
+)
+from vllm.entrypoints.openai.chat_completion.serving import OpenAIServingChat
+from vllm.entrypoints.openai.engine.protocol import (
     ErrorResponse,
     RequestResponseMetadata,
 )
-from vllm.entrypoints.openai.serving_chat import OpenAIServingChat
+from vllm.entrypoints.openai.parser.harmony_utils import get_encoding
 from vllm.entrypoints.openai.serving_models import BaseModelPath, OpenAIServingModels
 from vllm.outputs import CompletionOutput, RequestOutput
 from vllm.tokenizers import get_tokenizer
@@ -1517,12 +1519,12 @@ class TestCreateRemainingArgsDelta:
 
     def test_preserves_id_type_name(self):
         """Test that id, type, and name are preserved from original delta."""
-        from vllm.entrypoints.openai.protocol import (
+        from vllm.entrypoints.openai.chat_completion.serving import OpenAIServingChat
+        from vllm.entrypoints.openai.engine.protocol import (
             DeltaFunctionCall,
             DeltaMessage,
             DeltaToolCall,
         )
-        from vllm.entrypoints.openai.serving_chat import OpenAIServingChat
 
         original_delta = DeltaMessage(
             tool_calls=[
@@ -1552,12 +1554,12 @@ class TestCreateRemainingArgsDelta:
 
     def test_matches_by_index(self):
         """Test that the correct tool call is matched by index."""
-        from vllm.entrypoints.openai.protocol import (
+        from vllm.entrypoints.openai.chat_completion.serving import OpenAIServingChat
+        from vllm.entrypoints.openai.engine.protocol import (
             DeltaFunctionCall,
             DeltaMessage,
             DeltaToolCall,
         )
-        from vllm.entrypoints.openai.serving_chat import OpenAIServingChat
 
         original_delta = DeltaMessage(
             tool_calls=[
@@ -1588,12 +1590,12 @@ class TestCreateRemainingArgsDelta:
 
     def test_no_matching_tool_call(self):
         """Test graceful handling when no matching tool call is found."""
-        from vllm.entrypoints.openai.protocol import (
+        from vllm.entrypoints.openai.chat_completion.serving import OpenAIServingChat
+        from vllm.entrypoints.openai.engine.protocol import (
             DeltaFunctionCall,
             DeltaMessage,
             DeltaToolCall,
         )
-        from vllm.entrypoints.openai.serving_chat import OpenAIServingChat
 
         original_delta = DeltaMessage(
             tool_calls=[
@@ -1620,8 +1622,8 @@ class TestCreateRemainingArgsDelta:
 
     def test_function_is_none(self):
         """Test handling when original tool call has no function."""
-        from vllm.entrypoints.openai.protocol import DeltaMessage, DeltaToolCall
-        from vllm.entrypoints.openai.serving_chat import OpenAIServingChat
+        from vllm.entrypoints.openai.chat_completion.serving import OpenAIServingChat
+        from vllm.entrypoints.openai.engine.protocol import DeltaMessage, DeltaToolCall
 
         original_delta = DeltaMessage(
             tool_calls=[

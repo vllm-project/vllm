@@ -10,7 +10,7 @@ from fastapi.responses import JSONResponse
 
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.openai.api_server import validate_json_request
-from vllm.entrypoints.openai.protocol import (
+from vllm.entrypoints.openai.engine.protocol import (
     ErrorResponse,
 )
 from vllm.entrypoints.serve.elastic_ep.middleware import (

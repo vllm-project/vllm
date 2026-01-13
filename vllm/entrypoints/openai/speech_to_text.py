@@ -15,7 +15,7 @@ from transformers import PreTrainedTokenizerBase
 import vllm.envs as envs
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.logger import RequestLogger
-from vllm.entrypoints.openai.protocol import (
+from vllm.entrypoints.openai.engine.protocol import (
     DeltaMessage,
     ErrorResponse,
     RequestResponseMetadata,
@@ -32,7 +32,7 @@ from vllm.entrypoints.openai.protocol import (
     UsageInfo,
     VLLMValidationError,
 )
-from vllm.entrypoints.openai.serving_engine import OpenAIServing, SpeechToTextRequest
+from vllm.entrypoints.openai.engine.serving import OpenAIServing, SpeechToTextRequest
 from vllm.entrypoints.openai.serving_models import OpenAIServingModels
 from vllm.inputs.data import PromptType
 from vllm.logger import init_logger

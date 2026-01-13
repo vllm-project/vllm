@@ -23,16 +23,7 @@ from vllm.entrypoints.chat_utils import (
     make_tool_call_id,
 )
 from vllm.entrypoints.logger import RequestLogger
-from vllm.entrypoints.openai.parser.harmony_utils import (
-    get_developer_message,
-    get_stop_tokens_for_assistant_actions,
-    get_streamable_parser_for_assistant,
-    get_system_message,
-    parse_chat_inputs_to_harmony_messages,
-    parse_chat_output,
-    render_for_completion,
-)
-from vllm.entrypoints.openai.protocol import (
+from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionLogProb,
     ChatCompletionLogProbs,
     ChatCompletionLogProbsContent,
@@ -43,6 +34,11 @@ from vllm.entrypoints.openai.protocol import (
     ChatCompletionResponseStreamChoice,
     ChatCompletionStreamResponse,
     ChatMessage,
+)
+from vllm.entrypoints.openai.chat_completion.stream_harmony import (
+    extract_harmony_streaming_delta,
+)
+from vllm.entrypoints.openai.engine.protocol import (
     DeltaFunctionCall,
     DeltaMessage,
     DeltaToolCall,
@@ -52,13 +48,19 @@ from vllm.entrypoints.openai.protocol import (
     ToolCall,
     UsageInfo,
 )
-from vllm.entrypoints.openai.serving_chat_stream_harmony import (
-    extract_harmony_streaming_delta,
-)
-from vllm.entrypoints.openai.serving_engine import (
+from vllm.entrypoints.openai.engine.serving import (
     GenerationError,
     OpenAIServing,
     clamp_prompt_logprobs,
+)
+from vllm.entrypoints.openai.parser.harmony_utils import (
+    get_developer_message,
+    get_stop_tokens_for_assistant_actions,
+    get_streamable_parser_for_assistant,
+    get_system_message,
+    parse_chat_inputs_to_harmony_messages,
+    parse_chat_output,
+    render_for_completion,
 )
 from vllm.entrypoints.openai.serving_models import OpenAIServingModels
 from vllm.entrypoints.openai.utils import maybe_filter_parallel_tool_calls

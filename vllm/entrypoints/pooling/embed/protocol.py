@@ -10,7 +10,7 @@ from pydantic import (
 
 from vllm import PoolingParams
 from vllm.entrypoints.chat_utils import ChatCompletionMessageParam
-from vllm.entrypoints.openai.protocol import OpenAIBaseModel, UsageInfo
+from vllm.entrypoints.openai.engine.protocol import OpenAIBaseModel, UsageInfo
 from vllm.utils import random_uuid
 from vllm.utils.serial_utils import EmbedDType, EncodingFormat, Endianness
 

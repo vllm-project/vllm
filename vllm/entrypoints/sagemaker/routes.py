@@ -14,16 +14,20 @@ from vllm.entrypoints.openai.api_server import (
     base,
     chat,
     completion,
-    create_chat_completion,
     create_completion,
     validate_json_request,
 )
-from vllm.entrypoints.openai.protocol import (
+from vllm.entrypoints.openai.chat_completion.api_router import (
+    create_chat_completion,
+)
+from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionRequest,
+)
+from vllm.entrypoints.openai.engine.protocol import (
     CompletionRequest,
     ErrorResponse,
 )
-from vllm.entrypoints.openai.serving_engine import OpenAIServing
+from vllm.entrypoints.openai.engine.serving import OpenAIServing
 from vllm.entrypoints.pooling.classify.api_router import classify, create_classify
 from vllm.entrypoints.pooling.classify.protocol import ClassificationRequest
 from vllm.entrypoints.pooling.embed.api_router import create_embedding, embedding

@@ -8,7 +8,7 @@ from fastapi.responses import JSONResponse, Response
 
 from vllm import envs
 from vllm.entrypoints.openai.api_server import models, validate_json_request
-from vllm.entrypoints.openai.protocol import (
+from vllm.entrypoints.openai.engine.protocol import (
     ErrorResponse,
     LoadLoRAAdapterRequest,
     UnloadLoRAAdapterRequest,

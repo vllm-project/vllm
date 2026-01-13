@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from http import HTTPStatus
 
 from vllm.engine.protocol import EngineClient
-from vllm.entrypoints.openai.protocol import (
+from vllm.entrypoints.openai.engine.protocol import (
     ErrorInfo,
     ErrorResponse,
     LoadLoRAAdapterRequest,
