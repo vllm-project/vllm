@@ -29,7 +29,8 @@ from itertools import islice
 from typing import Any
 
 import torch
-from torch import nn
+from torch import nn, Tensor
+from transformers.activations import ACT2FN
 
 from vllm.attention.layer import Attention
 from vllm.compilation.decorators import support_torch_compile
@@ -77,6 +78,22 @@ from .utils import (
 )
 
 logger = init_logger(__name__)
+
+
+class TaskMoeMLP(nn.Module):
+    def __init__(self, hidden_size: int, intermediate_size: int, hidden_act: str, prefix: str = '') -> None:
+        super().__init__()
+        self.prefix = prefix
+        self.hidden_size = hidden_size
+        self.intermediate_size = intermediate_size
+        self.gate_proj = nn.Linear(self.hidden_size, self.intermediate_size, bias=False)
+        self.up_proj = nn.Linear(self.hidden_size, self.intermediate_size, bias=False)
+        self.down_proj = nn.Linear(self.intermediate_size, self.hidden_size, bias=False)
+        self.act_fn = ACT2FN[hidden_act]
+
+    def forward(self, x):
+        down_proj = self.down_proj(self.act_fn(self.gate_proj(x)) * self.up_proj(x))
+        return down_proj
 
 
 class Qwen3TPMoeMLP(nn.Module):
@@ -136,6 +153,8 @@ class Qwen3TPMoeSparseMoeBlock(nn.Module):
         self.ep_rank = get_ep_group().rank_in_group
         self.ep_size = self.ep_group.size()
         self.n_routed_experts = config.num_experts
+        self.n_task_experts = config.num_task_experts
+        self.task_expert_merge_method = config.task_expert_merge_method
 
         self.is_sequence_parallel = parallel_config.use_sequence_parallel_moe
 
@@ -183,6 +202,21 @@ class Qwen3TPMoeSparseMoeBlock(nn.Module):
             prefix=f"{prefix}.gate",
         )
 
+        self.task_experts = nn.ModuleList(
+            [
+                TaskMoeMLP(
+                    hidden_size=config.hidden_size, 
+                    intermediate_size=config.moe_intermediate_size, 
+                    hidden_act=config.hidden_act,
+                    prefix=f"{prefix}.task_experts.{i}"
+                ) for i in range(self.n_task_experts)
+            ]
+        )
+
+        self.task_expert_gates = nn.ModuleList(
+            [nn.Linear(config.hidden_size, 1) for _ in range(self.n_task_experts)]
+        ) if self.task_expert_merge_method == 'gating' else None
+
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         assert hidden_states.dim() <= 2, (
             "Qwen3MoeSparseMoeBlock only supports 1D or 2D inputs"
@@ -199,6 +233,12 @@ class Qwen3TPMoeSparseMoeBlock(nn.Module):
         final_hidden_states = self.experts(
             hidden_states=hidden_states, router_logits=router_logits
         )
+
+        # Add task experts' outputs
+        if self.task_expert_merge_method == 'gating':
+            task_expert_outputs = self.task_experts[0](hidden_states)
+            gate_scores = torch.sigmoid(self.task_expert_gates[0](hidden_states))
+            final_hidden_states = final_hidden_states + gate_scores * task_expert_outputs
 
         if self.is_sequence_parallel:
             final_hidden_states = tensor_model_parallel_all_gather(
@@ -504,6 +544,20 @@ class Qwen3TPMoeModel(nn.Module):
 
         params_dict = dict(self.named_parameters())
         loaded_params: set[str] = set()
+
+        # load weigths for task experts separately
+        weights_left = []
+        for name, loaded_weight in weights:
+            if 'task_expert' in name:
+                print(f"Loading task expert weight: {name}")
+                param = params_dict[name]
+                weight_loader = getattr(param, "weight_loader", default_weight_loader)
+                weight_loader(param, loaded_weight)
+                loaded_params.add(name)
+            else:
+                weights_left.append((name, loaded_weight))
+        weights = weights_left
+
         expert_params_mapping = self.get_expert_mapping()
         for name, loaded_weight in weights:
             if self.quant_config is not None and (
