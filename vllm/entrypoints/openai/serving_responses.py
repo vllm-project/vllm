@@ -595,6 +595,11 @@ class OpenAIServingResponses(OpenAIServing):
         # This enables Anthropic-style partial message completion where the
         # user provides an incomplete assistant message to continue from.
         continue_final = should_continue_final_message(request.input)
+        chat_template_kwargs = dict(
+            reasoning_effort=None
+            if request.reasoning is None
+            else request.reasoning.effort
+        )
 
         _, engine_prompts = await self._preprocess_chat(
             request,
@@ -609,6 +614,7 @@ class OpenAIServingResponses(OpenAIServing):
             # rather than starting a new one.
             add_generation_prompt=not continue_final,
             continue_final_message=continue_final,
+            chat_template_kwargs=chat_template_kwargs,
         )
         return messages, engine_prompts
 
