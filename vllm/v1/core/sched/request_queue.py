@@ -71,11 +71,6 @@ class RequestQueue(ABC):
         """Iterate over the queue according to the policy."""
         pass
 
-    @abstractmethod
-    def __reversed__(self) -> Iterator[Request]:
-        """Iterate over the queue in reverse order."""
-        pass
-
 
 class FCFSRequestQueue(deque[Request], RequestQueue):
     """A first-come-first-served queue that supports deque operations."""
@@ -100,8 +95,12 @@ class FCFSRequestQueue(deque[Request], RequestQueue):
 
     def prepend_requests(self, requests: RequestQueue) -> None:
         """Prepend all requests from another queue to the front of this
-        queue."""
-        self.extendleft(reversed(requests))
+        queue.
+
+        Note: The requests will be prepended in reverse order of their
+        appearance in the `requests` queue.
+        """
+        self.extendleft(requests)
 
     def remove_request(self, request: Request) -> None:
         """Remove a specific request from the queue."""
@@ -127,10 +126,6 @@ class FCFSRequestQueue(deque[Request], RequestQueue):
     def __iter__(self) -> Iterator[Request]:
         """Iterate over the queue according to FCFS policy."""
         return super().__iter__()
-
-    def __reversed__(self) -> Iterator[Request]:
-        """Iterate over the queue in reverse order."""
-        return super().__reversed__()
 
 
 class PriorityRequestQueue(RequestQueue):
@@ -201,10 +196,6 @@ class PriorityRequestQueue(RequestQueue):
         heap_copy = self._heap[:]
         while heap_copy:
             yield heapq.heappop(heap_copy)
-
-    def __reversed__(self) -> Iterator[Request]:
-        """Iterate over the queue in reverse priority order."""
-        return reversed(list(self))
 
 
 def create_request_queue(policy: SchedulingPolicy) -> RequestQueue:

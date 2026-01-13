@@ -7,7 +7,6 @@ from torch import prod
 from transformers import Llama4Config
 
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.profiling import MultiModalProfiler
 
 from ...utils import build_model_context
 
@@ -26,9 +25,8 @@ def test_profiling(model_id: str, max_model_len: int):
     )
 
     processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config)
-    profiler = MultiModalProfiler(processor)
-
-    decoder_dummy_data = profiler.get_decoder_dummy_data(
+    decoder_dummy_data = processor.dummy_inputs.get_decoder_dummy_data(
+        processor,
         max_model_len,
         mm_counts=mm_counts,
     )
@@ -39,11 +37,12 @@ def test_profiling(model_id: str, max_model_len: int):
 
     hf_config = ctx.get_hf_config(Llama4Config)
 
-    mm_data = processor.apply(
+    mm_inputs = processor.apply(
         prompt=dummy_mm_data.prompt,
         mm_data=dummy_mm_data.mm_data,
         hf_processor_mm_kwargs=dict(),
-    )["mm_kwargs"].get_data()
+    )
+    mm_data = mm_inputs["mm_kwargs"].get_data()
 
     image_size = hf_config.vision_config.image_size
     patch_size = hf_config.vision_config.patch_size
@@ -60,12 +59,9 @@ def test_profiling(model_id: str, max_model_len: int):
         total_num_patches.item() + num_tiles.item() + 3
     )  # image start, image, image end
 
-    profiled_tokens = profiler.get_mm_max_tokens(
-        max_model_len,
-        mm_counts=mm_counts,
+    assert total_num_patches == sum(
+        item.get_num_embeds for item in mm_inputs["mm_placeholders"]["image"]
     )
-
-    assert total_num_patches == profiled_tokens["image"]
     assert total_tokens == sum(
         placeholder.length
         for placeholder in decoder_dummy_data.multi_modal_placeholders["image"]
