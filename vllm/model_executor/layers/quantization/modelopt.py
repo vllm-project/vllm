@@ -1340,11 +1340,10 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
         self.quant_config = quant_config
         self.nvfp4_backend = select_nvfp4_moe_backend()
         # TODO: move this type of check into the oracle.
-        if (
-            not self.moe.is_act_and_mul
-            and self.nvfp4_backend
-            not in [NvFp4MoeBackend.FLASHINFER_CUTLASS, NvFp4MoeBackend.MARLIN]
-        ):
+        if not self.moe.is_act_and_mul and self.nvfp4_backend not in [
+            NvFp4MoeBackend.FLASHINFER_CUTLASS,
+            NvFp4MoeBackend.MARLIN,
+        ]:
             raise NotImplementedError(
                 "Non-gated activations are only supported by FlashInfer "
                 "CUTLASS and Marlin NvFP4 MoE backends."
