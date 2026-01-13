@@ -304,26 +304,26 @@ RUN cd /opt/rixl && mkdir -p /app/install && \
         --nixl-plugins-dir ${RIXL_HOME}/lib/x86_64-linux-gnu/plugins
 
 
-# ###
-# ### FlashAttention Build
-# ###
-# FROM base AS build_fa
-# ARG FA_BRANCH
-# ARG FA_REPO
-# ARG USE_SCCACHE
-# RUN --mount=type=bind,from=build_pytorch,src=/app/install/,target=/install \
-#     pip install /install/*.whl
-# RUN git clone ${FA_REPO}
-# RUN cd flash-attention \
-#     && git checkout ${FA_BRANCH} \
-#     && git submodule update --init \
-#     && if [ "$USE_SCCACHE" = "1" ]; then \
-#            export HIP_CLANG_PATH=/opt/sccache-wrappers \
-#            && sccache --show-stats; \
-#        fi \
-#     && GPU_ARCHS=$(echo ${PYTORCH_ROCM_ARCH} | sed -e 's/;gfx1[0-9]\{3\}//g') python3 setup.py bdist_wheel --dist-dir=dist \
-#     && if [ "$USE_SCCACHE" = "1" ]; then sccache --show-stats; fi
-# RUN mkdir -p /app/install && cp /app/flash-attention/dist/*.whl /app/install
+###
+### FlashAttention Build
+###
+FROM base AS build_fa
+ARG FA_BRANCH
+ARG FA_REPO
+ARG USE_SCCACHE
+RUN --mount=type=bind,from=build_pytorch,src=/app/install/,target=/install \
+    pip install /install/*.whl
+RUN git clone ${FA_REPO}
+RUN cd flash-attention \
+    && git checkout ${FA_BRANCH} \
+    && git submodule update --init \
+    && if [ "$USE_SCCACHE" = "1" ]; then \
+           export HIP_CLANG_PATH=/opt/sccache-wrappers \
+           && sccache --show-stats; \
+       fi \
+    && GPU_ARCHS=$(echo ${PYTORCH_ROCM_ARCH} | sed -e 's/;gfx1[0-9]\{3\}//g') python3 setup.py bdist_wheel --dist-dir=dist \
+    && if [ "$USE_SCCACHE" = "1" ]; then sccache --show-stats; fi
+RUN mkdir -p /app/install && cp /app/flash-attention/dist/*.whl /app/install
 
 
 ###
@@ -361,8 +361,8 @@ FROM base AS debs_wheel_release
 RUN mkdir /app/debs
 RUN --mount=type=bind,from=build_triton,src=/app/install/,target=/install \
     cp /install/*.whl /app/debs
-# RUN --mount=type=bind,from=build_fa,src=/app/install/,target=/install \
-#     cp /install/*.whl /app/debs
+RUN --mount=type=bind,from=build_fa,src=/app/install/,target=/install \
+    cp /install/*.whl /app/debs
 RUN --mount=type=bind,from=build_amdsmi,src=/app/install/,target=/install \
     cp /install/*.whl /app/debs
 RUN --mount=type=bind,from=build_pytorch,src=/app/install/,target=/install \
@@ -375,8 +375,8 @@ FROM base AS debs
 RUN mkdir /app/debs
 RUN --mount=type=bind,from=build_triton,src=/app/install/,target=/install \
     cp /install/*.whl /app/debs
-# RUN --mount=type=bind,from=build_fa,src=/app/install/,target=/install \
-#     cp /install/*.whl /app/debs
+RUN --mount=type=bind,from=build_fa,src=/app/install/,target=/install \
+    cp /install/*.whl /app/debs
 RUN --mount=type=bind,from=build_amdsmi,src=/app/install/,target=/install \
     cp /install/*.whl /app/debs
 RUN --mount=type=bind,from=build_pytorch,src=/app/install/,target=/install \
