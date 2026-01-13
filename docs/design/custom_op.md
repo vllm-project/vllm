@@ -40,9 +40,9 @@ Furthermore, vLLM decides whether to enable or disable a `CustomOp` based on `co
 By default, if `compilation_config.backend == "inductor"` and `compilation_config.mode != CompilationMode.NONE`, a `none` will be appended into `compilation_config.custom_ops`, otherwise a `all` will be appended. In other words, this means `CustomOp` will be disabled in some platforms (i.e., those use `inductor` as dafault backend for `torch.compile`) when running with torch compile mode. In this case, Inductor generates (fused) Triton kernels for those disabled custom ops.
 
 !!! note
-    For multi-modal models, vLLM has enforece enabled some custom ops to use device-specific deep-optimized kernels for better performance in ViT part, such as `MMEncoderAttention` and `ApplyRotaryEmb`. We can also pass a `enforce_enable=True` param to the `__init__()` method of the `CustomOp` to enforce enable itself at object-level.
+    For multi-modal models, vLLM has enforced the enabling of some custom ops to use device-specific deep-optimized kernels for better performance in ViT part, such as `MMEncoderAttention` and `ApplyRotaryEmb`. We can also pass a `enforce_enable=True` param to the `__init__()` method of the `CustomOp` to enforce enable itself at object-level.
 
-    Note that this `enforce_enable` mechanism will be removed after we adding a separate `compilation_config` for multi-modal part.
+    Note that this `enforce_enable` mechanism will be removed after we add a separate `compilation_config` for multi-modal part.
 
 ## How to Customise Your Configuration for CustomOp
 
