@@ -259,15 +259,14 @@ class MambaMixer(MambaBase, CustomOp):
 
         if attn_metadata is not None:
             assert isinstance(attn_metadata, dict)
-            attn_metadata = attn_metadata.get(self.prefix)
-            if attn_metadata is not None:
-                assert isinstance(attn_metadata, Mamba1AttentionMetadata)
-                query_start_loc_p = attn_metadata.query_start_loc_p
-                state_indices_tensor = attn_metadata.state_indices_tensor
-                self_kv_cache = self.kv_cache[forward_context.virtual_engine]
-                conv_state = self_kv_cache[0].transpose(-1, -2)
-                ssm_state = self_kv_cache[1]
-                has_initial_states_p = attn_metadata.has_initial_states_p
+            attn_metadata = attn_metadata[self.prefix]
+            assert isinstance(attn_metadata, Mamba1AttentionMetadata)
+            query_start_loc_p = attn_metadata.query_start_loc_p
+            state_indices_tensor = attn_metadata.state_indices_tensor
+            self_kv_cache = self.kv_cache[forward_context.virtual_engine]
+            conv_state = self_kv_cache[0].transpose(-1, -2)
+            ssm_state = self_kv_cache[1]
+            has_initial_states_p = attn_metadata.has_initial_states_p
 
         # 1. Gated MLP's linear projection
         projected_states = self.in_proj(hidden_states)[0].transpose(-2, -1)

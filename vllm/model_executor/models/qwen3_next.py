@@ -512,10 +512,7 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
             return
 
         assert isinstance(attn_metadata, dict)
-        attn_metadata = attn_metadata.get(self.prefix)
-        if attn_metadata is None:
-            return
-
+        attn_metadata = attn_metadata[self.prefix]
         assert isinstance(attn_metadata, GDNAttentionMetadata)
         has_initial_state = attn_metadata.has_initial_state
         spec_query_start_loc = attn_metadata.spec_query_start_loc
