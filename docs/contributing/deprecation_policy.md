@@ -46,7 +46,7 @@ warning (e.g., "This will be removed in v0.10.0").
     - GitHub Issue (RFC) for feedback
     - Documentation and use of the `@typing_extensions.deprecated` decorator for Python APIs
 
-### 2.Deprecated (Off By Default)
+### 2. Deprecated (Off By Default)
 
 - **Action**: Feature is disabled by default, but can still be re-enabled via a
 CLI flag or environment variable. Feature throws an error when used without
