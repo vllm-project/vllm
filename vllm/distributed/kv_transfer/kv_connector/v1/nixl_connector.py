@@ -1984,7 +1984,7 @@ class NixlConnectorWorker:
                 block_size_ratio > 1 or self.enable_permute_local_kv
             ):
                 block_ids_for_blocksize_post_process[block_size_ratio].append(
-                    meta.local_physical_block_ids
+                    meta.local_physical_block_ids[0]
                 )
         for (
             block_size_ratio,
@@ -2264,7 +2264,7 @@ class NixlConnectorWorker:
             remote_block_ids = remote_block_ids[0]
             local_block_ids = self.get_mapped_blocks(
                 np.asarray(local_block_ids), block_size_ratio
-            )
+            ).tolist()
             if len(local_block_ids) > len(remote_block_ids):
                 # NOTE:
                 # get_mapped_blocks will always expand block_ids for n times.
@@ -2278,8 +2278,8 @@ class NixlConnectorWorker:
                 # [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12] to
                 # [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
                 local_block_ids = local_block_ids[: len(remote_block_ids)]
-            local_block_ids = tuple(local_block_ids) if local_block_ids else []
-            remote_block_ids = tuple(remote_block_ids)
+            local_block_ids = [local_block_ids] if local_block_ids else []
+            remote_block_ids = [remote_block_ids]
         # NOTE(rob): having the staging blocks be on the READER side is
         # not going to work well (since we will have to call rearrange tensors).
         # after we detect the txn is complete (which means we cannot make the
