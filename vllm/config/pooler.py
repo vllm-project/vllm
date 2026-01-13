@@ -164,21 +164,21 @@ class PoolerConfig:
 
 
 def get_use_activation(o: object):
-    if normalize := getattr(o, "normalize", None) is not None:
+    if (normalize := getattr(o, "normalize", None)) is not None:
         logger.warning_once(
             "`normalize` is deprecated and will be removed in v0.15. "
             "Please use `use_activation` instead."
         )
         return normalize
 
-    if softmax := getattr(o, "softmax", None) is not None:
+    if (softmax := getattr(o, "softmax", None)) is not None:
         logger.warning_once(
             "`softmax` is deprecated and will be removed in v0.15. "
             "Please use `use_activation` instead."
         )
         return softmax
 
-    if activation := getattr(o, "activation", None) is not None:
+    if (activation := getattr(o, "activation", None)) is not None:
         logger.warning_once(
             "`activation` is deprecated and will be removed in v0.15. "
             "Please use `use_activation` instead."
