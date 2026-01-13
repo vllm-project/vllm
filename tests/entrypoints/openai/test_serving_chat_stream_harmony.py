@@ -9,7 +9,7 @@ from unittest.mock import patch
 
 import pytest
 
-from vllm.entrypoints.openai.serving_chat_stream_harmony import (
+from vllm.entrypoints.openai.chat_completion.stream_harmony import (
     TokenState,
     extract_harmony_streaming_delta,
 )
@@ -86,7 +86,7 @@ class TestExtractHarmonyStreamingDelta:
         assert tools_streamed is False
 
     @pytest.mark.parametrize("channel", ["commentary", "analysis"])
-    @patch("vllm.entrypoints.openai.serving_chat_stream_harmony.make_tool_call_id")
+    @patch("vllm.entrypoints.openai.chat_completion.stream_harmony.make_tool_call_id")
     def test_new_tool_call(self, mock_make_tool_call_id, channel):
         """Test new tool call creation when recipient changes."""
         mock_make_tool_call_id.return_value = "call_test123"
@@ -255,7 +255,7 @@ class TestExtractHarmonyStreamingDelta:
         assert delta_message is not None
         assert delta_message.content == "Hello, World"
 
-    @patch("vllm.entrypoints.openai.serving_chat_stream_harmony.make_tool_call_id")
+    @patch("vllm.entrypoints.openai.chat_completion.stream_harmony.make_tool_call_id")
     def test_complex_batch_permutation(self, mock_make_id):
         """
         Test a complex permutation: Reasoning -> Tool Call -> Content.
@@ -304,7 +304,7 @@ class TestExtractHarmonyStreamingDelta:
         assert delta_message.content == "."
         assert tools_streamed is True
 
-    @patch("vllm.entrypoints.openai.serving_chat_stream_harmony.make_tool_call_id")
+    @patch("vllm.entrypoints.openai.chat_completion.stream_harmony.make_tool_call_id")
     def test_tool_call_index_consistency_with_ongoing_call(self, mock_make_id):
         """
         Test that an ongoing tool call continuation and subsequent new calls

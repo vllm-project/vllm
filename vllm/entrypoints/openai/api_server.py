@@ -42,11 +42,9 @@ from vllm.entrypoints.anthropic.protocol import (
 from vllm.entrypoints.anthropic.serving_messages import AnthropicServingMessages
 from vllm.entrypoints.launcher import serve_http
 from vllm.entrypoints.logger import RequestLogger
+from vllm.entrypoints.openai.chat_completion.serving import OpenAIServingChat
 from vllm.entrypoints.openai.cli_args import make_arg_parser, validate_parsed_serve_args
-from vllm.entrypoints.openai.orca_metrics import metrics_header
-from vllm.entrypoints.openai.protocol import (
-    ChatCompletionRequest,
-    ChatCompletionResponse,
+from vllm.entrypoints.openai.engine.protocol import (
     CompletionRequest,
     CompletionResponse,
     ErrorInfo,
@@ -59,9 +57,9 @@ from vllm.entrypoints.openai.protocol import (
     TranslationRequest,
     TranslationResponseVariant,
 )
-from vllm.entrypoints.openai.serving_chat import OpenAIServingChat
+from vllm.entrypoints.openai.engine.serving import OpenAIServing
+from vllm.entrypoints.openai.orca_metrics import metrics_header
 from vllm.entrypoints.openai.serving_completion import OpenAIServingCompletion
-from vllm.entrypoints.openai.serving_engine import OpenAIServing
 from vllm.entrypoints.openai.serving_models import (
     BaseModelPath,
     OpenAIServingModels,
@@ -476,47 +474,6 @@ async def create_messages(request: AnthropicMessagesRequest, raw_request: Reques
 
 
 @router.post(
-    "/v1/chat/completions",
-    dependencies=[Depends(validate_json_request)],
-    responses={
-        HTTPStatus.OK.value: {"content": {"text/event-stream": {}}},
-        HTTPStatus.BAD_REQUEST.value: {"model": ErrorResponse},
-        HTTPStatus.NOT_FOUND.value: {"model": ErrorResponse},
-        HTTPStatus.INTERNAL_SERVER_ERROR.value: {"model": ErrorResponse},
-    },
-)
-@with_cancellation
-@load_aware_call
-async def create_chat_completion(request: ChatCompletionRequest, raw_request: Request):
-    metrics_header_format = raw_request.headers.get(
-        ENDPOINT_LOAD_METRICS_FORMAT_HEADER_LABEL, ""
-    )
-    handler = chat(raw_request)
-    if handler is None:
-        return base(raw_request).create_error_response(
-            message="The model does not support Chat Completions API"
-        )
-    try:
-        generator = await handler.create_chat_completion(request, raw_request)
-    except Exception as e:
-        raise HTTPException(
-            status_code=HTTPStatus.INTERNAL_SERVER_ERROR.value, detail=str(e)
-        ) from e
-    if isinstance(generator, ErrorResponse):
-        return JSONResponse(
-            content=generator.model_dump(), status_code=generator.error.code
-        )
-
-    elif isinstance(generator, ChatCompletionResponse):
-        return JSONResponse(
-            content=generator.model_dump(),
-            headers=metrics_header(metrics_header_format),
-        )
-
-    return StreamingResponse(content=generator, media_type="text/event-stream")
-
-
-@router.post(
     "/v1/completions",
     dependencies=[Depends(validate_json_request)],
     responses={
@@ -735,8 +692,10 @@ class XRequestIdMiddleware:
 def _extract_content_from_chunk(chunk_data: dict) -> str:
     """Extract content from a streaming response chunk."""
     try:
-        from vllm.entrypoints.openai.protocol import (
+        from vllm.entrypoints.openai.chat_completion.protocol import (
             ChatCompletionStreamResponse,
+        )
+        from vllm.entrypoints.openai.engine.protocol import (
             CompletionStreamResponse,
         )
 
@@ -880,7 +839,11 @@ def build_app(args: Namespace) -> FastAPI:
     from vllm.entrypoints.serve import register_vllm_serve_api_routers
 
     register_vllm_serve_api_routers(app)
+    from vllm.entrypoints.openai.chat_completion.api_router import (
+        attach_router as register_chat_api_router,
+    )
 
+    register_chat_api_router(app)
     from vllm.entrypoints.sagemaker.routes import register_sagemaker_routes
 
     register_sagemaker_routes(router)
