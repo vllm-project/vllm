@@ -192,39 +192,13 @@ def triton_kernel_fused_experts(
     )
     gammas = routing_data.gate_scal if routing_data else None
 
-    from triton_kernels.matmul_ogs import PrecisionConfig
-
-    if isinstance(quant_config._w1.scale, torch.Tensor):
-        w1_scale = quant_config._w1.scale.detach()
-        w1_scale = w1_scale.to(dtype=torch.float32, device=w1_scale.device).contiguous()
-        w1_precision = PrecisionConfig(weight_scale=w1_scale)
-    elif isinstance(quant_config._w1.scale, PrecisionConfig):
-        w1_precision = quant_config.w1_precision
-    else:
-        raise TypeError(
-            "quant_config._w1.scale is expected to be in type of "
-            "either 'torch.Tensor' or 'PrecisionConfig'."
-        )
-
-    if isinstance(quant_config._w2.scale, torch.Tensor):
-        w2_scale = quant_config._w2.scale.detach()
-        w2_scale = w2_scale.to(dtype=torch.float32, device=w2_scale.device).contiguous()
-        w2_precision = PrecisionConfig(weight_scale=w2_scale)
-    elif isinstance(quant_config._w2.scale, PrecisionConfig):
-        w2_precision = quant_config.w2_precision
-    else:
-        raise TypeError(
-            "quant_config._w2.scale is expected to be in type of "
-            "either 'torch.Tensor' or 'PrecisionConfig'."
-        )
-
     matmul_ogs(
         hidden_states,
         w1,
         quant_config.w1_bias,
         routing_data,
         gather_indx=gather_indx,
-        precision_config=w1_precision,
+        precision_config=quant_config.w1_precision,
         gammas=gammas if apply_router_weight_on_input else None,
         fused_activation=act,
         y=intermediate_cache,
@@ -236,7 +210,7 @@ def triton_kernel_fused_experts(
         quant_config.w2_bias,
         routing_data,
         scatter_indx=scatter_indx,
-        precision_config=w2_precision,
+        precision_config=quant_config.w2_precision,
         gammas=None if apply_router_weight_on_input else gammas,
         y=output_tensor,
     )
