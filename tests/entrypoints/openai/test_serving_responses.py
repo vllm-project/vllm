@@ -14,8 +14,9 @@ from openai.types.responses.tool import (
 )
 
 from vllm.entrypoints.context import ConversationContext
-from vllm.entrypoints.openai.engine.protocol import ErrorResponse, ResponsesRequest
-from vllm.entrypoints.openai.serving_responses import (
+from vllm.entrypoints.openai.engine.protocol import ErrorResponse
+from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
+from vllm.entrypoints.openai.responses.serving import (
     OpenAIServingResponses,
     _extract_allowed_tools_from_mcp_requests,
     extract_tool_types,

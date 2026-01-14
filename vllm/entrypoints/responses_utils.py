@@ -22,10 +22,8 @@ from openai.types.responses.tool import Tool
 
 from vllm import envs
 from vllm.entrypoints.constants import MCP_PREFIX
-from vllm.entrypoints.openai.engine.protocol import (
-    ChatCompletionMessageParam,
-    ResponseInputOutputItem,
-)
+from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionMessageParam
+from vllm.entrypoints.openai.responses.protocol import ResponseInputOutputItem
 
 
 def should_continue_final_message(

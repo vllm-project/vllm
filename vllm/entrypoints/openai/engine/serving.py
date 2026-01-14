@@ -50,12 +50,14 @@ from vllm.entrypoints.openai.engine.protocol import (
     ErrorResponse,
     FunctionCall,
     FunctionDefinition,
-    ResponseInputOutputItem,
-    ResponsesRequest,
     TranscriptionRequest,
     TranscriptionResponse,
     TranslationRequest,
     VLLMValidationError,
+)
+from vllm.entrypoints.openai.responses.protocol import (
+    ResponseInputOutputItem,
+    ResponsesRequest,
 )
 from vllm.entrypoints.openai.serving_models import OpenAIServingModels
 from vllm.entrypoints.pooling.classify.protocol import (
