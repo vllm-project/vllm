@@ -48,7 +48,7 @@ cbor2 # Required for cross-language serialization of hashable objects
 ijson # Required for mistral streaming tool parser
 setproctitle # Used to set process names for better debugging and monitoring
 openai-harmony >= 0.0.3  # Required for gpt-oss
-anthropic == 0.71.0
+anthropic >= 0.71.0
 model-hosting-container-standards >= 0.1.13, < 1.0.0
 mcp
 grpcio>=1.76.0
