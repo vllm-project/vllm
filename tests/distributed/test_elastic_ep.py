@@ -12,17 +12,8 @@ from ..utils import RemoteOpenAIServer, multi_gpu_test
 MODEL_NAME = "deepseek-ai/DeepSeek-V2-Lite-Chat"
 
 NUM_GSM8K_QUESTIONS = 256
-# NOTE(yongji):
-# pplx-kernel introduces some accuracy degradation on both Hopper and Blackwell
-# (ruuning without --enable-elastic-ep)
-# but pplx-kernel does not require NVSHMEM for intra-node, and does not need
-# tools/ep_kernels/elastic_ep/eep_nvshmem.patch to fix NVSHMEM reinit issues
-# deepep_low_latency will init NVSHMEM even for intra-node, and requires
-# to build with the NVSHMEM patch to successfully scales up/down.
 EXPECTED_ACCURACY = 0.58
 ACCURACY_TOL = 0.08
-
-# pplx-kernel is relatively more stable with smaller batch sizes
 MAX_NUM_SEQS = 8
 
 
@@ -71,7 +62,7 @@ def test_elastic_ep_scaling():
         str(MAX_NUM_SEQS),
         "--enable-expert-parallel",
         "--all2all-backend",
-        "pplx",
+        "allgather_reducescatter",
         "--enable-elastic-ep",
         "--enable-eplb",
         "--eplb-config.num_redundant_experts",
@@ -142,7 +133,7 @@ def test_elastic_ep_scaling_uneven():
         str(MAX_NUM_SEQS),
         "--enable-expert-parallel",
         "--all2all-backend",
-        "pplx",
+        "allgather_reducescatter",
         "--enable-elastic-ep",
         "--enable-eplb",
         "--eplb-config.num_redundant_experts",
