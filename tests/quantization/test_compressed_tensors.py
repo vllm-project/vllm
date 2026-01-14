@@ -10,6 +10,7 @@ import torch
 from compressed_tensors.quantization import QuantizationType
 
 from tests.models.utils import check_logprobs_close
+from vllm import envs
 from vllm.model_executor.layers.fused_moe import UnquantizedFusedMoEMethod
 from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors import (  # noqa: E501
     CompressedTensors24,
@@ -32,6 +33,35 @@ from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
     sparse_cutlass_supported,
 )
 from vllm.platforms import current_platform
+from vllm.v1.attention.backends.fa_utils import get_flash_attn_version
+
+
+def _kv_cache_fp8_per_attn_head_skip_reason() -> str | None:
+    """Per attn_head FP8 KV cache is only supported with FlashAttention v3+"""
+    if not current_platform.is_cuda():
+        return "This test is skipped on non-CUDA platform."
+
+    if (
+        envs.VLLM_ATTENTION_BACKEND is not None
+        and envs.VLLM_ATTENTION_BACKEND != "FLASH_ATTN"
+    ):
+        return (
+            "This test requires FlashAttention v3+, but "
+            f"VLLM_ATTENTION_BACKEND={envs.VLLM_ATTENTION_BACKEND}."
+        )
+
+    try:
+        fa_version = get_flash_attn_version()
+    except Exception:
+        return "This test requires FlashAttention version >= 3 (CUDA init failed)."
+    if fa_version is None or fa_version < 3:
+        return "This test requires FlashAttention version >= 3."
+
+    return None
+
+
+KV_CACHE_FP8_PER_ATTN_HEAD_SKIP_REASON = _kv_cache_fp8_per_attn_head_skip_reason()
+
 
 # AITER only supports per-channel-per-channel INT8 gemm
 # and per-tensor-per-tensor INT8 GEMM.
@@ -368,7 +398,8 @@ def test_compressed_tensors_kv_cache_fp8_per_tensor(vllm_runner):
 
 
 @pytest.mark.skipif(
-    not current_platform.is_cuda(), reason="This test is skipped on non-CUDA platform."
+    KV_CACHE_FP8_PER_ATTN_HEAD_SKIP_REASON is not None,
+    reason=KV_CACHE_FP8_PER_ATTN_HEAD_SKIP_REASON,
 )
 def test_compressed_tensors_kv_cache_fp8_per_attn_head(vllm_runner):
     model_path = "nm-testing/TinyLlama-1.1B-Chat-v1.0-kvcache-fp8-attn_head"
