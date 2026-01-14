@@ -64,6 +64,7 @@ class MoEPrepareAndFinalizeNaiveEP(mk.FusedMoEPrepareAndFinalize):
                 quant_config.per_act_token_quant,
                 quant_config.block_shape,
             )
+
         # TODO - this is just for deepgemm?
         expert_tokens_meta = None
 
@@ -92,7 +93,8 @@ class MoEPrepareAndFinalizeNaiveEP(mk.FusedMoEPrepareAndFinalize):
             a1q, topk_weights, topk_ids = res
         else:
             a1q, topk_weights, topk_ids, scales = res
-            a1q_scale = res[0]
+            assert scales is not None and len(scales) == 1
+            a1q_scale = scales[0]
 
         if use_int8_view:
             a1q = a1q.view(current_platform.fp8_dtype())

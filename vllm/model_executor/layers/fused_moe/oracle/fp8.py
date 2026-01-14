@@ -379,6 +379,8 @@ def make_fp8_moe_kernel(
         allow_new_interface=True,
     )
 
+    logger.info_once("Using %s", prepare_finalize.__class__.__name__)
+
     # Create Experts.
     if prepare_finalize.activation_format == mk.FusedMoEActivationFormat.Standard:
         experts = experts_cls.make_standard_experts(

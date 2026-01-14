@@ -1901,10 +1901,12 @@ class FusedMoE(CustomOp):
         self.ensure_moe_quant_config_init()
         self.ensure_dp_chunking_init()
 
+        # TODO: this is not right anymore.
         has_separate_shared_experts = (
             not isinstance(self.quant_method, FusedMoEModularMethod)
             and self.shared_experts is not None
         )
+        has_separate_shared_experts = False
 
         use_chunked_impl = self.use_dp_chunking
 
@@ -1931,6 +1933,7 @@ class FusedMoE(CustomOp):
             isinstance(self.quant_method, FusedMoEModularMethod)
             or self.quant_method.supports_mk_interally
         )
+        logger.info_once(f"{do_naive_dispatch_combine=}")
 
         ctx = get_forward_context()
         sp_ctx = (
