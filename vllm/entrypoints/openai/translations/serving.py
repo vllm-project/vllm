@@ -9,6 +9,9 @@ from vllm.entrypoints.logger import RequestLogger
 from vllm.entrypoints.openai.engine.protocol import (
     ErrorResponse,
     RequestResponseMetadata,
+)
+from vllm.entrypoints.openai.serving_models import OpenAIServingModels
+from vllm.entrypoints.openai.translations.protocol import (
     TranscriptionRequest,
     TranscriptionResponse,
     TranscriptionResponseStreamChoice,
@@ -20,8 +23,7 @@ from vllm.entrypoints.openai.engine.protocol import (
     TranslationResponseVerbose,
     TranslationStreamResponse,
 )
-from vllm.entrypoints.openai.serving_models import OpenAIServingModels
-from vllm.entrypoints.openai.speech_to_text import OpenAISpeechToText
+from vllm.entrypoints.openai.translations.speech_to_text import OpenAISpeechToText
 from vllm.logger import init_logger
 from vllm.outputs import RequestOutput
 
