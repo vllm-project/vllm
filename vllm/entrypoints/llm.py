@@ -1846,7 +1846,7 @@ class LLM:
         This should be called after all weight updates are complete.
         """
         self.llm_engine.collective_rpc("finalize_weight_update")
-        
+
     def __repr__(self) -> str:
         """Return a transformers-style hierarchical view of the model."""
         # Cache the result to avoid repeated collective_rpc calls
