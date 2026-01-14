@@ -3,7 +3,7 @@
 from abc import ABC, abstractmethod
 from collections.abc import Mapping
 from dataclasses import dataclass, field
-from typing import Generic, NamedTuple, TypeVar
+from typing import TYPE_CHECKING, Generic
 
 import numpy as np
 import numpy.typing as npt
@@ -17,16 +17,14 @@ from vllm.config.multimodal import (
 )
 from vllm.logger import init_logger
 
-from .inputs import (
-    MultiModalDataDict,
-    MultiModalInputs,
-    MultiModalKwargsItems,
-    MultiModalPlaceholderDict,
-)
-from .processing import (
-    BaseMultiModalProcessor,
-    BaseProcessingInfo,
-)
+from .inputs import MultiModalDataDict
+
+if TYPE_CHECKING:
+    from .processing import _I
+else:
+    from typing import TypeVar
+
+    _I = TypeVar("_I")
 
 logger = init_logger(__name__)
 
@@ -42,23 +40,6 @@ class ProcessorInputs:
     mm_data: MultiModalDataDict
     hf_processor_mm_kwargs: Mapping[str, object] = field(default_factory=dict)
     tokenization_kwargs: Mapping[str, object] = field(default_factory=dict)
-
-
-class DummyEncoderData(NamedTuple):
-    """Dummy data used for profiling."""
-
-    prompt_token_ids: list[int]
-
-
-class DummyDecoderData(NamedTuple):
-    """Dummy data used for profiling."""
-
-    prompt_token_ids: list[int]
-    multi_modal_data: MultiModalKwargsItems
-    multi_modal_placeholders: MultiModalPlaceholderDict
-
-
-_I = TypeVar("_I", bound=BaseProcessingInfo)
 
 
 class BaseDummyInputsBuilder(ABC, Generic[_I]):
@@ -222,52 +203,3 @@ class BaseDummyInputsBuilder(ABC, Generic[_I]):
                 height = min(height, overrides.height)
         video = np.full((num_frames, width, height, 3), 255, dtype=np.uint8)
         return [video] * num_videos
-
-    def get_dummy_mm_inputs(
-        self,
-        processor: BaseMultiModalProcessor[_I],
-        seq_len: int,
-        mm_counts: Mapping[str, int] | None = None,
-        mm_options: Mapping[str, BaseDummyOptions] | None = None,
-    ) -> MultiModalInputs:
-        if mm_counts is None:
-            mm_counts = processor.allowed_mm_limits
-
-        processor_inputs = self.get_dummy_processor_inputs(
-            seq_len,
-            mm_counts=mm_counts,
-            mm_options=mm_options,
-        )
-
-        return processor.apply(
-            prompt=processor_inputs.prompt,
-            mm_data=processor_inputs.mm_data,
-            hf_processor_mm_kwargs=processor_inputs.hf_processor_mm_kwargs,
-            tokenization_kwargs=processor_inputs.tokenization_kwargs,
-        )
-
-    def get_decoder_dummy_data(
-        self,
-        processor: BaseMultiModalProcessor[_I],
-        seq_len: int,
-        mm_counts: Mapping[str, int] | None = None,
-        mm_options: Mapping[str, BaseDummyOptions] | None = None,
-    ) -> DummyDecoderData:
-        mm_inputs = self.get_dummy_mm_inputs(
-            processor,
-            seq_len,
-            mm_counts=mm_counts,
-            mm_options=mm_options,
-        )
-
-        prompt_token_ids = mm_inputs["prompt_token_ids"]
-        total_len = len(prompt_token_ids)
-
-        if total_len < seq_len:
-            prompt_token_ids.extend([0] * (seq_len - total_len))
-
-        return DummyDecoderData(
-            prompt_token_ids=prompt_token_ids,
-            multi_modal_data=mm_inputs["mm_kwargs"].require_data(),
-            multi_modal_placeholders=mm_inputs["mm_placeholders"],
-        )
