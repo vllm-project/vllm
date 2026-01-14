@@ -225,8 +225,7 @@ def prep_scale_for_group_broadcast(
                 f"1D scale with shape {scale.shape} cannot be broadcast to x with shape"
                 f" {x.shape}, group_shape={(rows, cols)}"
             )
-        return scale
-    raise ValueError(f"scale must be a scalar or 1D tensor, got {scale.shape}")
+    return scale
 
 
 # Quantize assuming once scale per group of elements with shape group_shape,
