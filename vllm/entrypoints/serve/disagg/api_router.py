@@ -67,9 +67,8 @@ async def generate(request: GenerateRequest, raw_request: Request):
     try:
         generator = await handler.serve_tokens(request, raw_request)
     except Exception as e:
-        raise HTTPException(
-            status_code=HTTPStatus.INTERNAL_SERVER_ERROR.value, detail=str(e)
-        ) from e
+        return handler.create_error_response(e)
+
     if isinstance(generator, ErrorResponse):
         return JSONResponse(
             content=generator.model_dump(), status_code=generator.error.code

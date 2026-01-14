@@ -14,17 +14,6 @@ ARG AITER_REPO="https://github.com/ROCm/aiter.git"
 ARG MORI_BRANCH="2d02c6a9"
 ARG MORI_REPO="https://github.com/ROCm/mori.git"
 
-#TODO: When patch has been upstreamed, switch to the main repo/branch
-# ARG RIXL_BRANCH="<TODO>"
-# ARG RIXL_REPO="https://github.com/ROCm/RIXL.git"
-ARG RIXL_BRANCH="50d63d94"
-ARG RIXL_REPO="https://github.com/vcave/RIXL.git"
-# Needed by RIXL
-ARG ETCD_BRANCH="7c6e714f"
-ARG ETCD_REPO="https://github.com/etcd-cpp-apiv3/etcd-cpp-apiv3.git"
-ARG UCX_BRANCH="da3fac2a"
-ARG UCX_REPO="https://github.com/ROCm/ucx.git"
-
 FROM ${BASE_IMAGE} AS base
 
 ENV PATH=/opt/rocm/llvm/bin:/opt/rocm/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
@@ -139,92 +128,6 @@ RUN mkdir -p /app/install && cp /app/mori/dist/*.whl /app/install
 
 
 ###
-### RIXL Build
-###
-FROM build_pytorch AS build_rixl
-ARG RIXL_BRANCH
-ARG RIXL_REPO
-ARG ETCD_BRANCH
-ARG ETCD_REPO
-ARG UCX_BRANCH
-ARG UCX_REPO
-
-ENV ROCM_PATH=/opt/rocm
-ENV UCX_HOME=/usr/local/ucx
-ENV RIXL_HOME=/usr/local/rixl
-ENV RIXL_BENCH_HOME=/usr/local/rixl_bench
-
-# RIXL build system dependences and RDMA support
-RUN apt-get -y update && apt-get -y install autoconf libtool pkg-config \
-    libgrpc-dev \
-    libgrpc++-dev \
-    libprotobuf-dev \
-    protobuf-compiler-grpc \
-    libcpprest-dev \
-    libaio-dev \
-    librdmacm1 \
-    librdmacm-dev \
-    libibverbs1 \
-    libibverbs-dev \
-    ibverbs-utils \
-    rdmacm-utils \
-    ibverbs-providers
-
-RUN pip install meson auditwheel patchelf tomlkit
-
-WORKDIR /workspace
-
-RUN git clone ${ETCD_REPO} && \
-    cd etcd-cpp-apiv3 && \
-    git checkout ${ETCD_BRANCH} && \
-    mkdir build && cd build && \
-    cmake .. -DCMAKE_POLICY_VERSION_MINIMUM=3.5 && \
-    make -j$(nproc) && \
-    make install
-
-RUN cd /usr/local/src && \
-    git clone ${UCX_REPO} &&  \
-    cd ucx  && \
-    git checkout ${UCX_BRANCH} && \
-    ./autogen.sh && \
-    mkdir build && cd build && \
-    ../configure \
-        --prefix=/usr/local/ucx \
-        --enable-shared \
-        --disable-static \
-        --disable-doxygen-doc \
-        --enable-optimizations \
-        --enable-devel-headers \
-        --with-rocm=/opt/rocm \
-        --with-verbs \
-        --with-dm \
-        --enable-mt && \
-    make -j && \
-    make -j install
-
-ENV PATH=/usr/local/ucx/bin:$PATH
-ENV LD_LIBRARY_PATH=${UCX_HOME}/lib:${LD_LIBRARY_PATH}
-
-RUN git clone ${RIXL_REPO} /opt/rixl && \
-    cd /opt/rixl && \
-    git checkout ${RIXL_BRANCH} && \
-    meson setup build --prefix=${RIXL_HOME} \
-                     -Ducx_path=${UCX_HOME} \
-                     -Drocm_path=${ROCM_PATH} && \
-    cd build && \
-    ninja && \
-    ninja install
-
-# Generate RIXL wheel
-RUN cd /opt/rixl && mkdir -p /app/install && \
-    ./contrib/build-wheel.sh \
-        --output-dir /app/install \
-        --rocm-dir ${ROCM_PATH} \
-        --ucx-plugins-dir ${UCX_HOME}/lib/ucx \
-        --nixl-plugins-dir ${RIXL_HOME}/lib/x86_64-linux-gnu/plugins
-
-
-###
 ### FlashAttention Build
 ###
 FROM base AS build_fa
@@ -274,8 +177,6 @@ RUN --mount=type=bind,from=build_aiter,src=/app/install/,target=/install \
     cp /install/*.whl /app/debs
 RUN --mount=type=bind,from=build_mori,src=/app/install/,target=/install \
     cp /install/*.whl /app/debs
-RUN --mount=type=bind,from=build_rixl,src=/app/install/,target=/install \
-    cp /install/*.whl /app/debs
 
 FROM base AS final
 RUN --mount=type=bind,from=debs,src=/app/debs,target=/install \
@@ -294,12 +195,6 @@ ARG FA_BRANCH
 ARG FA_REPO
 ARG AITER_BRANCH
 ARG AITER_REPO
-ARG RIXL_BRANCH
-ARG RIXL_REPO
-ARG ETCD_BRANCH
-ARG ETCD_REPO
-ARG UCX_BRANCH
-ARG UCX_REPO
 ARG MORI_BRANCH
 ARG MORI_REPO
 RUN echo "BASE_IMAGE: ${BASE_IMAGE}" > /app/versions.txt \
@@ -315,11 +210,5 @@ RUN echo "BASE_IMAGE: ${BASE_IMAGE}" > /app/versions.txt \
     && echo "FA_REPO: ${FA_REPO}" >> /app/versions.txt \
     && echo "AITER_BRANCH: ${AITER_BRANCH}" >> /app/versions.txt \
     && echo "AITER_REPO: ${AITER_REPO}" >> /app/versions.txt \
-    && echo "RIXL_BRANCH: ${RIXL_BRANCH}" >> /app/versions.txt \
-    && echo "RIXL_REPO: ${RIXL_REPO}" >> /app/versions.txt \
-    && echo "ETCD_BRANCH: ${ETCD_BRANCH}" >> /app/versions.txt \
-    && echo "ETCD_REPO: ${ETCD_REPO}" >> /app/versions.txt \
-    && echo "UCX_BRANCH: ${UCX_BRANCH}" >> /app/versions.txt \
-    && echo "UCX_REPO: ${UCX_REPO}" >> /app/versions.txt \
     && echo "MORI_BRANCH: ${MORI_BRANCH}" >> /app/versions.txt \
     && echo "MORI_REPO: ${MORI_REPO}" >> /app/versions.txt
