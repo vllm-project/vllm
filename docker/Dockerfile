@@ -404,11 +404,8 @@ RUN echo 'tzdata tzdata/Areas select America' | debconf-set-selections \
         libgl1 \
         gnupg \
     && apt-get install -y --no-install-recommends debian-archive-keyring \
-    && mkdir -p /etc/apt/keyrings \
-    && cp /usr/share/keyrings/debian-archive-keyring.gpg /etc/apt/keyrings/debian-bullseye.gpg \
-    && cp /usr/share/keyrings/debian-archive-keyring.gpg /etc/apt/keyrings/debian-bullseye-security.gpg \
-    && echo "deb [signed-by=/etc/apt/keyrings/debian-bullseye.gpg] http://deb.debian.org/debian bullseye main" > /etc/apt/sources.list.d/debian-bullseye.list \
-    && echo "deb [signed-by=/etc/apt/keyrings/debian-bullseye-security.gpg] http://deb.debian.org/debian-security bullseye-security main" >> /etc/apt/sources.list.d/debian-bullseye.list \
+    && echo "deb [signed-by=/usr/share/keyrings/debian-archive-keyring.gpg] http://deb.debian.org/debian bullseye main" > /etc/apt/sources.list.d/debian-bullseye.list \
+    && echo "deb [signed-by=/usr/share/keyrings/debian-archive-keyring.gpg] http://deb.debian.org/debian-security bullseye-security main" >> /etc/apt/sources.list.d/debian-bullseye.list \
     && apt-get update -y \
     && apt-get install -y --no-install-recommends \
         ffmpeg=7:4.3.9-0+deb11u1 \
@@ -422,6 +419,7 @@ RUN echo 'tzdata tzdata/Areas select America' | debconf-set-selections \
         libswresample3=7:4.3.9-0+deb11u1 \
         libswscale5=7:4.3.9-0+deb11u1 \
         libchromaprint1=1.5.0-2 \
+    && rm -f /etc/apt/sources.list.d/debian-bullseye.list \
     && if [ ! -z ${DEADSNAKES_MIRROR_URL} ] ; then \
         if [ ! -z "${DEADSNAKES_GPGKEY_URL}" ] ; then \
             mkdir -p -m 0755 /etc/apt/keyrings ; \
