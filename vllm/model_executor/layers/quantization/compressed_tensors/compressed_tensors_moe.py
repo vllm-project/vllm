@@ -237,6 +237,8 @@ class CompressedTensorsW4A4Nvfp4MoEMethod(CompressedTensorsMoEMethod):
             )
 
         super().__init__(moe)
+        self.group_size = 16
+
         # Create quant scheme, will be used later to select the quant scales.
         # NOTE(rob): we should update QuantConfig to just be the think ts
         # holds the scales. Should change the name.
