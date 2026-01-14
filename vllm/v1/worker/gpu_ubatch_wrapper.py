@@ -308,17 +308,7 @@ class UBatchWrapper:
         # Create one forward context per ubatch
         forward_contexts = []
         for i, ubatch_slice in enumerate(ubatch_slices):
-            # slot_mapping can be:
-            # - None: no slot mapping available
-            # - list: pre-sliced per ubatch, unwrap with slot_mapping[i]
-            # - dict: single slot mapping (e.g., during profile run), pass as-is
-            if slot_mapping is None:
-                ubatch_slot_mapping = None
-            elif isinstance(slot_mapping, list):
-                ubatch_slot_mapping = slot_mapping[i]
-            else:
-                # slot_mapping is a dict, pass it as-is for each ubatch
-                ubatch_slot_mapping = slot_mapping
+            assert slot_mapping is None or isinstance(slot_mapping, list)
 
             forward_contexts.append(
                 create_forward_context(
@@ -327,7 +317,7 @@ class UBatchWrapper:
                     dp_metadata=dp_metadata[i],
                     batch_descriptor=batch_descriptor,
                     cudagraph_runtime_mode=cudagraph_runtime_mode,
-                    slot_mapping=ubatch_slot_mapping,
+                    slot_mapping=slot_mapping[i] if slot_mapping is not None else None,
                 )
             )
 
