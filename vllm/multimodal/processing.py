@@ -386,6 +386,21 @@ class PromptUpdateDetails(Generic[_S]):
 
         return PromptUpdateDetails(full=seq, is_embed=is_embed)
 
+    @staticmethod
+    def select_token_ids(
+        seq: _S,
+        embed_token_ids: list[int],
+    ) -> "PromptUpdateDetails[_S]":
+        def is_embed(tokenizer: TokenizerLike | None, full: PromptSeq) -> torch.Tensor:
+            token_ids = _seq2tokens(tokenizer, full)
+
+            return torch.isin(
+                torch.tensor(token_ids),
+                torch.tensor(embed_token_ids),
+            )
+
+        return PromptUpdateDetails(full=seq, is_embed=is_embed)
+
 
 PromptUpdateInfo: TypeAlias = PromptSeq | PromptUpdateDetails
 """
