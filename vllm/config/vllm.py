@@ -254,26 +254,26 @@ class VllmConfig:
         """
         from vllm import __version__
 
-        def _compile(config_obj: SupportsCompileFactors | None) -> CompileFactors:
+        def get_factors(config_obj: SupportsCompileFactors | None) -> CompileFactors:
             return {} if config_obj is None else config_obj.compile_factors()
 
         factors: dict[str, Any] = {
             "version": __version__,
-            "model": _compile(self.model_config),
-            "cache": _compile(self.cache_config),
-            "parallel": _compile(self.parallel_config),
-            "scheduler": _compile(self.scheduler_config),
-            "device": _compile(self.device_config),
-            "load": _compile(self.load_config),
-            "attention": _compile(self.attention_config),
-            "speculative": _compile(self.speculative_config),
-            "structured_outputs": _compile(self.structured_outputs_config),
-            "observability": _compile(self.observability_config),
-            "profiler": _compile(self.profiler_config),
-            "compilation": _compile(self.compilation_config),
-            "kv_transfer": _compile(self.kv_transfer_config),
-            "ec_transfer": _compile(self.ec_transfer_config),
-            "lora": _compile(self.lora_config),
+            "model": get_factors(self.model_config),
+            "cache": get_factors(self.cache_config),
+            "parallel": get_factors(self.parallel_config),
+            "scheduler": get_factors(self.scheduler_config),
+            "device": get_factors(self.device_config),
+            "load": get_factors(self.load_config),
+            "attention": get_factors(self.attention_config),
+            "speculative": get_factors(self.speculative_config),
+            "structured_outputs": get_factors(self.structured_outputs_config),
+            "observability": get_factors(self.observability_config),
+            "profiler": get_factors(self.profiler_config),
+            "compilation": get_factors(self.compilation_config),
+            "kv_transfer": get_factors(self.kv_transfer_config),
+            "ec_transfer": get_factors(self.ec_transfer_config),
+            "lora": get_factors(self.lora_config),
         }
 
         if self.additional_config:

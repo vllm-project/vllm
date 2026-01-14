@@ -12,6 +12,7 @@ from vllm.config.model import ModelConfig
 from vllm.config.parallel import ParallelConfig
 from vllm.config.utils import CompileFactors, config, normalize_value
 from vllm.logger import init_logger
+from vllm.transformers_utils.config import get_hf_text_config
 from vllm.utils.import_utils import LazyLoader, has_arctic_inference
 
 if TYPE_CHECKING:
