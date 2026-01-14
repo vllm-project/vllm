@@ -238,7 +238,6 @@ def has_flashinfer_cutedsl_grouped_gemm_nt_masked() -> bool:
     for module_name, attr_name in required_functions:
         mod = _get_submodule(module_name)
         if not mod or not hasattr(mod, attr_name):
-            print(f"{attr_name} not found in {module_name}")
             return False
     return True
 

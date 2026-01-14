@@ -150,7 +150,8 @@ def select_nvfp4_moe_backend(
         NvFp4MoeBackend.FLASHINFER_TRTLLM,
         NvFp4MoeBackend.FLASHINFER_CUTEDSL,
         NvFp4MoeBackend.FLASHINFER_CUTLASS,
-        NvFp4MoeBackend.VLLM_CUTLASS,
+        NvFp4MoeBackend.MARLIN,
+        # NvFp4MoeBackend.VLLM_CUTLASS,
     ]
 
     if envs.is_set("VLLM_USE_FLASHINFER_MOE_FP4"):
