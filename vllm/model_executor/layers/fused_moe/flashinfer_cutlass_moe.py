@@ -8,10 +8,16 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEParallelConfig,
     FusedMoEQuantConfig,
-    FusedMoEQuantScheme,
 )
 from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceNoOP,
+)
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    QuantKey,
+    kFp8Dynamic128Sym,
+    kFp8Static128BlockSym,
+    kFp8StaticTensorSym,
+    kNvfp4Quant,
 )
 from vllm.platforms import current_platform
 from vllm.utils.flashinfer import (
@@ -86,6 +92,7 @@ class FlashInferExperts(mk.FusedMoEPermuteExpertsUnpermute):
     def _supports_current_device() -> bool:
         return (
             current_platform.is_cuda()
+            # Is this right? Or 9.0+10.0 only?
             and current_platform.has_device_capability((9, 0))
             and has_flashinfer_cutlass_fused_moe()
         )
@@ -95,23 +102,34 @@ class FlashInferExperts(mk.FusedMoEPermuteExpertsUnpermute):
         return False
 
     @staticmethod
-    def _supports_quant_scheme(quant_scheme: FusedMoEQuantScheme) -> bool:
+    def _supports_quant_scheme(
+        weight_key: QuantKey | None,
+        activation_key: QuantKey | None,
+    ) -> bool:
         # Supports:
         # * unquantized
         # * fp8 static per-tensor on 9.0+
         # * fp8 block on 9.0
         # * nvfp4 on 10.0+
-        s = quant_scheme
+
         p = current_platform
+        scheme = (weight_key, activation_key)
         return (
-            (s.is_unquantized)
-            or (s.is_fp8_w8a8 and s.per_tensor_quant and s.static_input_quant)
-            or (
-                s.is_fp8_w8a8
-                and s.block_size == (128, 128)
-                and p.is_device_capability((9, 0))
+            (
+                scheme
+                in [
+                    (None, None),
+                    (kFp8StaticTensorSym, kFp8StaticTensorSym),
+                ]
             )
-            or (s.is_nvfp4_w4a4 and p.has_device_capability((10, 0)))
+            or (
+                (scheme == (kFp8Static128BlockSym, kFp8Dynamic128Sym))
+                and (p.is_device_capability((9, 0)))
+            )
+            or (
+                (scheme == (kNvfp4Quant, kNvfp4Quant))
+                and (p.is_device_capability((10, 0)))  # GB?
+            )
         )
 
     @staticmethod

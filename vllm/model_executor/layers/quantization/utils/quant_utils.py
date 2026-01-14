@@ -20,6 +20,7 @@ if TYPE_CHECKING:
 
 FP8_DTYPE = current_platform.fp8_dtype()
 FP4_DTYPE = torch.uint8
+INT4_DTYPE = torch.int32
 
 
 def get_fp8_min_max() -> tuple[float, float]:
@@ -48,6 +49,7 @@ class GroupShape(_GroupShape):
     # Aliases for common quantization group shapes
     PER_TENSOR: ClassVar["GroupShape"]
     PER_TOKEN: ClassVar["GroupShape"]
+    PER_CHANNEL: ClassVar["GroupShape"]
 
     def is_per_tensor(self) -> bool:
         return self.row == -1 and self.col == -1
@@ -55,12 +57,16 @@ class GroupShape(_GroupShape):
     def is_per_token(self) -> bool:
         return self.row == 1 and self.col == -1
 
+    def is_per_channel(self) -> bool:
+        return self.row == -1 and self.col == 1
+
     def is_per_group(self) -> bool:
         return self.row == 1 and self.col >= 1
 
 
 GroupShape.PER_TENSOR = GroupShape(-1, -1)
 GroupShape.PER_TOKEN = GroupShape(1, -1)
+GroupShape.PER_CHANNEL = GroupShape(-1, 1)
 
 
 @dataclass(frozen=True)
@@ -77,16 +83,12 @@ class ScaleDesc:
     group_shape: GroupShape
 
     def __str__(self):
-        group_shape = (
-            "per_tensor"
-            if self.group_shape == GroupShape.PER_TENSOR
-            else (
-                "per_token"
-                if self.group_shape == GroupShape.PER_TOKEN
-                else str(self.group_shape)
-            )
-        )
-
+        d = {
+            GroupShape.PER_TENSOR: "per_tensor",
+            GroupShape.PER_TOKEN: "per_token",
+            GroupShape.PER_CHANNEL: "per_channel",
+        }
+        group_shape = d.get(self.group_shape, str(self.group_shape))
         return (
             f"{fx.graph.dtype_abbrs[self.dtype]},"
             f"{'static' if self.static else 'dynamic'},{group_shape}"
@@ -123,6 +125,9 @@ kFp8StaticTensorSym = QuantKey(FP8_DTYPE, kStaticTensorScale, symmetric=True)
 kDynamicTensorScale = ScaleDesc(torch.float32, False, GroupShape.PER_TENSOR)
 kFp8DynamicTensorSym = QuantKey(FP8_DTYPE, kDynamicTensorScale, symmetric=True)
 
+kStaticChannelScale = ScaleDesc(torch.float32, True, GroupShape.PER_CHANNEL)
+kFp8StaticChannelSym = QuantKey(FP8_DTYPE, kStaticChannelScale, symmetric=True)
+
 kDynamicTokenScale = ScaleDesc(torch.float32, False, GroupShape.PER_TOKEN)
 kFp8DynamicTokenSym = QuantKey(FP8_DTYPE, kDynamicTokenScale, symmetric=True)
 
@@ -131,6 +136,9 @@ kNvfp4Quant = QuantKey(FP4_DTYPE, scale=kNvfp4GroupScale, scale2=kStaticTensorSc
 
 kDynamic128Scale = ScaleDesc(torch.float32, False, GroupShape(1, 128))
 kFp8Dynamic128Sym = QuantKey(FP8_DTYPE, kDynamic128Scale, symmetric=True)
+
+kStatic128BlockScale = ScaleDesc(torch.float32, True, GroupShape(128, 128))
+kFp8Static128BlockSym = QuantKey(FP8_DTYPE, kStatic128BlockScale, symmetric=True)
 
 kDynamic64Scale = ScaleDesc(torch.float32, False, GroupShape(1, 64))
 kFp8Dynamic64Sym = QuantKey(FP8_DTYPE, kDynamic64Scale, symmetric=True)

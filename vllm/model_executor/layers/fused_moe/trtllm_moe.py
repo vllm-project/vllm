@@ -8,10 +8,12 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
     FusedMoEParallelConfig,
     FusedMoEQuantConfig,
-    FusedMoEQuantScheme,
 )
 from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceNoOP,
+)
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    QuantKey,
 )
 from vllm.platforms import current_platform
 
@@ -19,15 +21,14 @@ from vllm.platforms import current_platform
 class TrtLlmGenExperts(mk.FusedMoEPermuteExpertsUnpermute):
     def __init__(
         self,
-        moe: FusedMoEConfig,
+        moe_config: FusedMoEConfig,
         quant_config: FusedMoEQuantConfig,
         gemm1_alpha,
         gemm1_beta,
         gemm1_clamp_limit,
         max_capture_size,
     ):
-        super().__init__(quant_config)
-        self.moe = moe
+        super().__init__(moe_config, quant_config)
         self.gemm1_alpha = gemm1_alpha
         self.gemm1_beta = gemm1_beta
         self.gemm1_clamp_limit = gemm1_clamp_limit
@@ -46,8 +47,12 @@ class TrtLlmGenExperts(mk.FusedMoEPermuteExpertsUnpermute):
         return False
 
     @staticmethod
-    def _supports_quant_scheme(quant_scheme: FusedMoEQuantScheme) -> bool:
-        return quant_scheme.is_mxfp4_w4a16 or quant_scheme.is_mxfp4_w4a8
+    def _supports_quant_scheme(
+        weight_key: QuantKey | None,
+        activation_key: QuantKey | None,
+    ) -> bool:
+        # return quant_scheme.is_mxfp4_w4a16 or quant_scheme.is_mxfp4_w4a8
+        return False
 
     @staticmethod
     def _supports_activation(activation: str) -> bool:
@@ -104,7 +109,7 @@ class TrtLlmGenExperts(mk.FusedMoEPermuteExpertsUnpermute):
         topk = topk_ids.size(-1)
         local_num_experts = w1.size(0)
         intermediate_size = w2.size(1)
-        local_expert_offset = self.moe.ep_rank * local_num_experts
+        local_expert_offset = self.moe_config.ep_rank * local_num_experts
 
         x_quant = hidden_states
         x_scale = a1q_scale

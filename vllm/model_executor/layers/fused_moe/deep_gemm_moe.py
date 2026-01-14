@@ -9,7 +9,6 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
     FusedMoEParallelConfig,
     FusedMoEQuantConfig,
-    FusedMoEQuantScheme,
 )
 from vllm.model_executor.layers.fused_moe.deep_gemm_utils import (
     compute_aligned_M,
@@ -24,6 +23,11 @@ from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     per_token_group_quant_fp8,
     per_token_group_quant_fp8_packed_for_deepgemm,
     silu_mul_per_token_group_quant_fp8_colmajor,
+)
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    QuantKey,
+    kFp8Dynamic128Sym,
+    kFp8Static128BlockSym,
 )
 from vllm.utils.deep_gemm import (
     DeepGemmQuantScaleFMT,
@@ -129,8 +133,14 @@ class DeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
         return False
 
     @staticmethod
-    def _supports_quant_scheme(quant_scheme: FusedMoEQuantScheme) -> bool:
-        return quant_scheme.is_fp8_w8a8 and quant_scheme.block_size == (128, 128)
+    def _supports_quant_scheme(
+        weight_key: QuantKey | None,
+        activation_key: QuantKey | None,
+    ) -> bool:
+        SUPPORTED_W_A = [
+            (kFp8Static128BlockSym, kFp8Dynamic128Sym),
+        ]
+        return (weight_key, activation_key) in SUPPORTED_W_A
 
     @staticmethod
     def _supports_activation(activation: str) -> bool:

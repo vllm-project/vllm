@@ -27,7 +27,6 @@ from vllm.model_executor.layers.fused_moe import (
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
     FusedMoEQuantConfig,
-    FusedMoEQuantScheme,
     RoutingMethodType,
     fp8_w8a8_moe_quant_config,
     fp8_w8a16_moe_quant_config,
@@ -82,6 +81,12 @@ from vllm.model_executor.layers.quantization.utils.marlin_utils import (
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     convert_bf16_scales_to_fp8,
     convert_packed_uint4b8_to_signed_int4_inplace,
+    kFp8Dynamic128Sym,
+    kFp8DynamicTokenSym,
+    kFp8Static128BlockSym,
+    kFp8StaticChannelSym,
+    kFp8StaticTensorSym,
+    kNvfp4Quant,
 )
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
     normalize_e4m3fn_to_e4m3fnuz,
@@ -239,34 +244,11 @@ class CompressedTensorsW4A4Nvfp4MoEMethod(CompressedTensorsMoEMethod):
         super().__init__(moe)
         self.group_size = 16
 
-        # Create quant scheme, will be used later to select the quant scales.
-        # NOTE(rob): we should update QuantConfig to just be the think ts
-        # holds the scales. Should change the name.
-        quant_scheme = FusedMoEQuantScheme(
-            weight_dtype="nvfp4",
-            act_dtype="nvfp4" if not use_a16 else None,
-            per_tensor_quant=False,
-            per_token_quant=False,
-            block_size=None,
-            static_input_quant=False,
-        )
-
-        # Select NvFp4 MoE backend
-        # NOTE(rob): this is kind of a hack. We need to peak into
-        # the prepare-finalize selection to determine if we are using
-        # the batched or standard expert format.
-        use_batched = (
-            self.moe.moe_parallel_config.use_deepep_ll_kernels
-            or self.moe.moe_parallel_config.use_pplx_kernels
-        )
+        # Select experts implementation.
         self.nvfp4_backend, self.experts_cls = select_nvfp4_moe_backend(
             config=self.moe,
-            quant_scheme=quant_scheme,
-            activation_format=(
-                mk.FusedMoEActivationFormat.BatchedExperts
-                if use_batched
-                else mk.FusedMoEActivationFormat.Standard
-            ),
+            weight_key=kNvfp4Quant,
+            activation_key=kNvfp4Quant,
         )
 
         # Delay creation of the kernel until after process-weights.
@@ -597,38 +579,28 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
                 "channelwise, dynamic per token quantization."
             )
 
-        # Create quant scheme, will be used later to select the quant scales.
-        # NOTE(rob): we should update QuantConfig to just be the think ts
-        # holds the scales. Should change the name.
-        quant_scheme = FusedMoEQuantScheme(
-            weight_dtype=current_platform.fp8_dtype(),
-            act_dtype=current_platform.fp8_dtype(),
-            per_tensor_quant=per_tensor,
-            per_token_quant=per_channel,
-            block_size=(
-                (self.weight_block_size[0], self.weight_block_size[1])
-                if self.weight_block_size is not None
-                else None
+        ct2vllm_weight = {
+            QuantizationStrategy.CHANNEL: kFp8StaticChannelSym,
+            QuantizationStrategy.TENSOR: kFp8StaticTensorSym,
+            QuantizationStrategy.BLOCK: kFp8Static128BlockSym,
+        }
+        ct2vllm_act = {
+            QuantizationStrategy.TOKEN: kFp8DynamicTokenSym,
+            QuantizationStrategy.TENSOR: (
+                kFp8StaticTensorSym if self.static_input_scales else kFp8Dynamic128Sym
             ),
-            static_input_quant=self.static_input_scales,
-        )
+        }
+        weight_key = ct2vllm_weight[self.weight_quant.strategy]
+        if weight_key == kFp8Static128BlockSym:
+            activation_key = kFp8Dynamic128Sym
+        else:
+            activation_key = ct2vllm_act[self.input_quant.strategy]
 
         # Select Fp8 MoE backend
-        # NOTE(rob): this is kind of a hack. We need to peak into
-        # the prepare-finalize selection to determine if we are using
-        # the batched or standard expert format.
-        use_batched = (
-            self.moe.moe_parallel_config.use_deepep_ll_kernels
-            or self.moe.moe_parallel_config.use_pplx_kernels
-        )
         self.fp8_backend, self.experts_cls = select_fp8_moe_backend(
             config=self.moe,
-            quant_scheme=quant_scheme,
-            activation_format=(
-                mk.FusedMoEActivationFormat.BatchedExperts
-                if use_batched
-                else mk.FusedMoEActivationFormat.Standard
-            ),
+            weight_key=weight_key,
+            activation_key=activation_key,
             allow_vllm_cutlass=True,
         )
 
@@ -1441,8 +1413,7 @@ class CompressedTensorsWNA16MarlinMoEMethod(CompressedTensorsMoEMethod):
             max_num_tokens_per_rank = prepare_finalize.max_num_tokens_per_rank()
             assert max_num_tokens_per_rank is not None
             return BatchedMarlinExperts(
-                max_num_tokens=max_num_tokens_per_rank,
-                num_dispatchers=prepare_finalize.num_dispatchers(),
+                moe_config=self.moe,
                 quant_config=self.moe_quant_config,
                 w13_g_idx=layer.w13_weight_g_idx,
                 w2_g_idx=layer.w2_weight_g_idx,
@@ -1451,8 +1422,12 @@ class CompressedTensorsWNA16MarlinMoEMethod(CompressedTensorsMoEMethod):
                 is_k_full=self.is_k_full,
             )
         else:
+            max_num_tokens_per_rank = prepare_finalize.max_num_tokens_per_rank()
+            assert max_num_tokens_per_rank is not None
             return MarlinExperts(
                 quant_config=self.moe_quant_config,
+                max_num_tokens=max_num_tokens_per_rank,  # type: ignore[call-arg]
+                num_dispatchers=prepare_finalize.num_dispatchers(),  # type: ignore[call-arg]
                 w13_g_idx=layer.w13_weight_g_idx,
                 w2_g_idx=layer.w2_weight_g_idx,
                 w13_g_idx_sort_indices=layer.w13_g_idx_sort_indices,

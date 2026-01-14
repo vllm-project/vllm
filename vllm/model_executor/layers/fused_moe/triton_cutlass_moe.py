@@ -9,11 +9,13 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
     FusedMoEParallelConfig,
     FusedMoEQuantConfig,
-    FusedMoEQuantScheme,
 )
 from vllm.model_executor.layers.fused_moe.cutlass_moe import CutlassExpertsFp8
 from vllm.model_executor.layers.fused_moe.fallback import FallbackExperts
 from vllm.model_executor.layers.fused_moe.fused_moe import TritonExperts
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    QuantKey,
+)
 from vllm.platforms import current_platform
 
 
@@ -44,8 +46,11 @@ class TritonOrCutlassExperts(FallbackExperts):
         return CutlassExpertsFp8._supports_no_act_and_mul()
 
     @staticmethod
-    def _supports_quant_scheme(quant_scheme: FusedMoEQuantScheme) -> bool:
-        return CutlassExpertsFp8._supports_quant_scheme(quant_scheme)
+    def _supports_quant_scheme(
+        weight_key: QuantKey | None,
+        activation_key: QuantKey | None,
+    ) -> bool:
+        return CutlassExpertsFp8._supports_quant_scheme(weight_key, activation_key)
 
     @staticmethod
     def _supports_activation(activation: str) -> bool:

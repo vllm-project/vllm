@@ -16,13 +16,15 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
     FusedMoEParallelConfig,
     FusedMoEQuantConfig,
-    FusedMoEQuantScheme,
 )
 from vllm.model_executor.layers.fused_moe.utils import (
     _resize_cache,
     apply_moe_activation,
     count_expert_num_tokens,
     disable_inplace,
+)
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    QuantKey,
 )
 from vllm.utils.math_utils import cdiv
 from vllm.v1.worker.ubatching import (
@@ -513,7 +515,8 @@ class FusedMoEPermuteExpertsUnpermute(ABC):
     def is_supported_config(
         cls: type["FusedMoEPermuteExpertsUnpermute"],
         moe_config: FusedMoEConfig,
-        moe_quant_scheme: FusedMoEQuantScheme,
+        weight_key: QuantKey | None,
+        activation_key: QuantKey | None,
         activation_format: FusedMoEActivationFormat,
     ) -> tuple[bool, str | None]:
         def _make_reason(reason: str) -> str:
@@ -525,7 +528,7 @@ class FusedMoEPermuteExpertsUnpermute(ABC):
             return False, _make_reason("no act_and_mul MLP layer")
         elif not cls._supports_activation(moe_config.activation):
             return False, _make_reason(f"{moe_config.activation} activation")
-        elif not cls._supports_quant_scheme(moe_quant_scheme):
+        elif not cls._supports_quant_scheme(weight_key, activation_key):
             return False, _make_reason("quantization scheme")
         elif not cls._supports_parallel_config(moe_config.moe_parallel_config):
             return False, _make_reason("parallel config")
@@ -553,7 +556,10 @@ class FusedMoEPermuteExpertsUnpermute(ABC):
 
     @staticmethod
     @abstractmethod
-    def _supports_quant_scheme(quant_scheme: FusedMoEQuantScheme) -> bool:
+    def _supports_quant_scheme(
+        weight_key: QuantKey | None,
+        activation_key: QuantKey | None,
+    ) -> bool:
         raise NotImplementedError
 
     @staticmethod

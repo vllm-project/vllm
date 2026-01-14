@@ -11,10 +11,12 @@ from vllm.model_executor.layers.fused_moe.config import (
     FUSED_MOE_UNQUANTIZED_CONFIG,
     FusedMoEParallelConfig,
     FusedMoEQuantConfig,
-    FusedMoEQuantScheme,
 )
 from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceNoOP,
+)
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    QuantKey,
 )
 
 
@@ -293,12 +295,16 @@ class AiterExperts(mk.FusedMoEPermuteExpertsUnpermute):
         return False
 
     @staticmethod
-    def _supports_quant_scheme(quant_scheme: FusedMoEQuantScheme) -> bool:
-        return (
-            quant_scheme.is_unquantized
-            or quant_scheme.is_fp8_w8a8
-            or quant_scheme.is_mxfp4_w4a4
-        )
+    def _supports_quant_scheme(
+        weight_key: QuantKey | None,
+        activation_key: QuantKey | None,
+    ) -> bool:
+        # return (
+        #     quant_scheme.is_unquantized
+        #     or quant_scheme.is_fp8_w8a8
+        #     or quant_scheme.is_mxfp4_w4a4
+        # )
+        return False
 
     @staticmethod
     def _supports_activation(activation: str) -> bool:

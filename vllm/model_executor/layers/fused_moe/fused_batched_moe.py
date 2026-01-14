@@ -6,9 +6,9 @@ import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.model_executor.layers.fused_moe.config import (
+    FusedMoEConfig,
     FusedMoEParallelConfig,
     FusedMoEQuantConfig,
-    FusedMoEQuantScheme,
 )
 from vllm.model_executor.layers.fused_moe.fused_moe import try_get_optimal_moe_config
 from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
@@ -21,7 +21,10 @@ from vllm.model_executor.layers.fused_moe.utils import (
     normalize_batched_scales_shape,
     normalize_scales_shape,
 )
-from vllm.model_executor.layers.quantization.utils.quant_utils import group_broadcast
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    QuantKey,
+    group_broadcast,
+)
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 
@@ -638,26 +641,41 @@ class NaiveBatchedExperts(mk.FusedMoEPermuteExpertsUnpermute):
 
     def __init__(
         self,
-        max_num_tokens: int,
-        num_dispatchers: int,
+        moe_config: FusedMoEConfig,
         quant_config: FusedMoEQuantConfig,
     ):
-        super().__init__(quant_config)
+        super().__init__(moe_config, quant_config)
         assert not self.quant_config.use_int8_w8a8, "NYI"
         assert not self.quant_config.use_int8_w8a16, "NYI"
         assert not self.quant_config.use_int4_w4a16, "NYI"
         assert self.quant_config.ocp_mx_scheme is None, "NYI"
-        self.max_num_tokens = max_num_tokens
-        self.num_dispatchers = num_dispatchers
 
-    @property
-    def activation_formats(
-        self,
-    ) -> tuple[mk.FusedMoEActivationFormat, mk.FusedMoEActivationFormat]:
-        return (
-            mk.FusedMoEActivationFormat.BatchedExperts,
-            mk.FusedMoEActivationFormat.BatchedExperts,
-        )
+    @staticmethod
+    def activation_formats() -> mk.FusedMoEActivationFormat:
+        return mk.FusedMoEActivationFormat.BatchedExperts
+
+    @staticmethod
+    def _supports_current_device() -> bool:
+        return True
+
+    @staticmethod
+    def _supports_no_act_and_mul() -> bool:
+        return False
+
+    @staticmethod
+    def _supports_quant_scheme(
+        weight_key: QuantKey | None,
+        activation_key: QuantKey | None,
+    ) -> bool:
+        return False
+
+    @staticmethod
+    def _supports_activation(activation: str) -> bool:
+        return activation in ["silu", "swigluoai"]
+
+    @staticmethod
+    def _supports_parallel_config(moe_parallel_config: FusedMoEParallelConfig) -> bool:
+        return True
 
     def supports_chunking(self) -> bool:
         return False
@@ -831,19 +849,14 @@ class BatchedTritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
 
     def __init__(
         self,
-        max_num_tokens: int,
-        num_dispatchers: int,
+        moe_config: FusedMoEConfig,
         quant_config: FusedMoEQuantConfig,
     ):
-        super().__init__(quant_config)
+        super().__init__(moe_config, quant_config)
         assert not self.quant_config.use_int8_w8a8, "NYI"
         assert not self.quant_config.use_int8_w8a16, "NYI"
         assert not self.quant_config.use_int4_w4a16, "NYI"
         assert self.quant_config.ocp_mx_scheme is None, "NYI"
-        assert max_num_tokens > 0
-        assert num_dispatchers > 0
-        self.max_num_tokens = max_num_tokens
-        self.num_dispatchers = num_dispatchers
 
     @staticmethod
     def activation_format() -> mk.FusedMoEActivationFormat:
@@ -858,14 +871,18 @@ class BatchedTritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
         return False
 
     @staticmethod
-    def _supports_quant_scheme(quant_scheme: FusedMoEQuantScheme) -> bool:
-        p = current_platform
-        device_supports_fp8 = p.is_rocm() or (
-            p.is_cuda() and p.has_device_capability((9, 0))
-        )
-        return quant_scheme.is_unquantized or (
-            quant_scheme.is_fp8_w8a8 and device_supports_fp8
-        )
+    def _supports_quant_scheme(
+        weight_key: QuantKey | None,
+        activation_key: QuantKey | None,
+    ) -> bool:
+        # p = current_platform
+        # device_supports_fp8 = p.is_rocm() or (
+        #     p.is_cuda() and p.has_device_capability((9, 0))
+        # )
+        # return quant_scheme.is_unquantized or (
+        #     quant_scheme.is_fp8_w8a8 and device_supports_fp8
+        # )
+        return False
 
     @staticmethod
     def _supports_activation(activation: str) -> bool:

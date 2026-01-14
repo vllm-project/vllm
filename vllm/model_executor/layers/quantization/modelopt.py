@@ -16,7 +16,6 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
     FusedMoEQuantConfig,
-    FusedMoEQuantScheme,
 )
 from vllm.model_executor.layers.fused_moe.fused_moe_router import FusedMoERouter
 from vllm.model_executor.layers.fused_moe.layer import (
@@ -74,6 +73,8 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     GroupShape,
     cutlass_fp4_supported,
     is_layer_skipped,
+    kFp8StaticTensorSym,
+    kNvfp4Quant,
     swizzle_blockscale,
 )
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
@@ -88,7 +89,6 @@ from vllm.model_executor.parameter import (
     PerTensorScaleParameter,
 )
 from vllm.model_executor.utils import replace_parameter
-from vllm.platforms import current_platform
 from vllm.utils.flashinfer import (
     flashinfer_scaled_fp4_mm,
     has_flashinfer,
@@ -727,34 +727,11 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
         self.quant_config = quant_config
         assert self.quant_config.is_checkpoint_fp8_serialized
 
-        # Create quant scheme, will be used later to select the quant scales.
-        # NOTE(rob): we should update QuantConfig to just be the think ts
-        # holds the scales. Should change the name.
-        quant_scheme = FusedMoEQuantScheme(
-            weight_dtype=current_platform.fp8_dtype(),
-            act_dtype=current_platform.fp8_dtype(),
-            per_tensor_quant=True,
-            per_token_quant=False,
-            block_size=None,
-            static_input_quant=True,
-        )
-
         # Select Fp8 MoE backend
-        # NOTE(rob): this is kind of a hack. We need to peak into
-        # the prepare-finalize selection to determine if we are using
-        # the batched or standard expert format.
-        use_batched = (
-            self.moe.moe_parallel_config.use_deepep_ll_kernels
-            or self.moe.moe_parallel_config.use_pplx_kernels
-        )
         self.fp8_backend, self.experts_cls = select_fp8_moe_backend(
             config=self.moe,
-            quant_scheme=quant_scheme,
-            activation_format=(
-                mk.FusedMoEActivationFormat.BatchedExperts
-                if use_batched
-                else mk.FusedMoEActivationFormat.Standard
-            ),
+            weight_key=kFp8StaticTensorSym,
+            activation_key=kFp8StaticTensorSym,
         )
 
         # Delay creation of the kernel until after process-weights.
@@ -1357,34 +1334,11 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
     ) -> None:
         super().__init__(moe_config)
         self.quant_config = quant_config
-        # Create quant scheme, will be used later to select the quant scales.
-        # NOTE(rob): we should update QuantConfig to just be the think ts
-        # holds the scales. Should change the name.
-        quant_scheme = FusedMoEQuantScheme(
-            weight_dtype="nvfp4",
-            act_dtype="nvfp4",
-            per_tensor_quant=False,
-            per_token_quant=False,
-            block_size=None,
-            static_input_quant=False,
-        )
-
-        # Select NvFp4 MoE backend
-        # NOTE(rob): this is kind of a hack. We need to peak into
-        # the prepare-finalize selection to determine if we are using
-        # the batched or standard expert format.
-        use_batched = (
-            self.moe.moe_parallel_config.use_deepep_ll_kernels
-            or self.moe.moe_parallel_config.use_pplx_kernels
-        )
+        # Select experts implementation.
         self.nvfp4_backend, self.experts_cls = select_nvfp4_moe_backend(
             config=self.moe,
-            quant_scheme=quant_scheme,
-            activation_format=(
-                mk.FusedMoEActivationFormat.BatchedExperts
-                if use_batched
-                else mk.FusedMoEActivationFormat.Standard
-            ),
+            weight_key=kNvfp4Quant,
+            activation_key=kNvfp4Quant,
         )
 
         # Delay creation of the kernel until after process-weights.

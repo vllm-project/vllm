@@ -14,7 +14,6 @@ from vllm.model_executor.layers.fused_moe.all2all_utils import (
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
     FusedMoEQuantConfig,
-    FusedMoEQuantScheme,
     nvfp4_moe_quant_config,
     nvfp4_w4a16_moe_quant_config,
 )
@@ -28,6 +27,9 @@ from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
 )
 from vllm.model_executor.layers.quantization.utils.marlin_utils_fp4 import (
     prepare_nvfp4_moe_layer_for_marlin,
+)
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    QuantKey,
 )
 
 if TYPE_CHECKING:
@@ -107,13 +109,26 @@ def backend_2_kernel_cls(
 
 def select_nvfp4_moe_backend(
     config: FusedMoEConfig,
-    quant_scheme: FusedMoEQuantScheme,
-    activation_format: mk.FusedMoEActivationFormat,
+    weight_key: QuantKey | None,
+    activation_key: QuantKey | None,
 ) -> tuple[NvFp4MoeBackend, type[mk.FusedMoEPermuteExpertsUnpermute] | None]:
     """
     Select the primary NvFP4 MoE backend
     Note: Shape-specific fallbacks may still occur at runtime.
     """
+
+    # NOTE(rob): this is kind of a hack. We need to peak into
+    # the prepare-finalize selection to determine if we are using
+    # the batched or standard expert format.
+    use_batched = (
+        config.moe_parallel_config.use_deepep_ll_kernels
+        or config.moe_parallel_config.use_pplx_kernels
+    )
+    activation_format = (
+        mk.FusedMoEActivationFormat.BatchedExperts
+        if use_batched
+        else mk.FusedMoEActivationFormat.Standard
+    )
 
     def _make_log_backend(backend: NvFp4MoeBackend):
         return f"Using '{backend.value}' backend for NvFp4 MoE"
@@ -133,12 +148,13 @@ def select_nvfp4_moe_backend(
     def _return_or_raise(
         backend: NvFp4MoeBackend,
         config: FusedMoEConfig,
-        scheme: FusedMoEQuantScheme,
+        weight_key: QuantKey | None,
+        activation_key: QuantKey | None,
         activation_format: mk.FusedMoEActivationFormat,
     ) -> tuple[NvFp4MoeBackend, type[mk.FusedMoEPermuteExpertsUnpermute]]:
         k_cls = backend_2_kernel_cls(backend)
         supported, reason = k_cls.is_supported_config(
-            k_cls, config, scheme, activation_format
+            k_cls, config, weight_key, activation_key, activation_format
         )
         if supported:
             logger.info_once(_make_log_backend(backend))
@@ -167,7 +183,7 @@ def select_nvfp4_moe_backend(
             if fi_backend == FlashinferMoeBackend.TENSORRT_LLM:
                 backend = NvFp4MoeBackend.FLASHINFER_TRTLLM
                 supported, reason = is_supported_config_trtllm(
-                    config, quant_scheme, activation_format
+                    config, weight_key, activation_key, activation_format
                 )
                 if supported:
                     logger.info_once(_make_log_backend(backend))
@@ -177,14 +193,14 @@ def select_nvfp4_moe_backend(
             else:
                 backend = fi_2_vllm_backend_map[fi_backend]
                 return _return_or_raise(
-                    backend, config, quant_scheme, activation_format
+                    backend, config, weight_key, activation_key, activation_format
                 )
         else:
             # If the user is not explicit about the backend, try each.
             for backend in FLASHINFER_NVFP4_MOE_BACKENDS:
                 k_cls = backend_2_kernel_cls(backend)
                 if k_cls.is_supported_config(
-                    k_cls, config, quant_scheme, activation_format
+                    k_cls, config, weight_key, activation_key, activation_format
                 ):
                     logger.info_once(_make_log_backend(backend))
                     return backend, k_cls
@@ -196,7 +212,9 @@ def select_nvfp4_moe_backend(
 
     if envs.VLLM_TEST_FORCE_FP8_MARLIN:
         backend = NvFp4MoeBackend.MARLIN
-        return _return_or_raise(backend, config, quant_scheme, activation_format)
+        return _return_or_raise(
+            backend, config, weight_key, activation_key, activation_format
+        )
 
     # Select kernels in order of backend.
     for backend in AVAILABLE_BACKENDS:
@@ -204,7 +222,8 @@ def select_nvfp4_moe_backend(
             k_cls = None  # type: ignore[assignment]
             supported, reason = is_supported_config_trtllm(
                 config,
-                quant_scheme,
+                weight_key,
+                activation_key,
                 activation_format,
             )
         else:
@@ -212,7 +231,8 @@ def select_nvfp4_moe_backend(
             supported, reason = k_cls.is_supported_config(
                 k_cls,
                 config,
-                quant_scheme,
+                weight_key,
+                activation_key,
                 activation_format,
             )
 

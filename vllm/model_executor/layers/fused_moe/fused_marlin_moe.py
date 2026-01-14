@@ -12,7 +12,6 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
     FusedMoEParallelConfig,
     FusedMoEQuantConfig,
-    FusedMoEQuantScheme,
 )
 from vllm.model_executor.layers.fused_moe.moe_align_block_size import (
     batched_moe_align_block_size,
@@ -27,6 +26,11 @@ from vllm.model_executor.layers.quantization.utils.marlin_utils import (
     marlin_make_workspace_new,
     marlin_moe_intermediate_size,
     marlin_quant_input,
+)
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    QuantKey,
+    kFp8StaticChannelSym,
+    kNvfp4Quant,
 )
 from vllm.platforms import current_platform
 from vllm.scalar_type import ScalarType, scalar_types
@@ -567,14 +571,25 @@ class MarlinExpertsBase(mk.FusedMoEPermuteExpertsUnpermute):
         return False
 
     @staticmethod
-    def _supports_quant_scheme(quant_scheme: FusedMoEQuantScheme) -> bool:
-        return quant_scheme.weight_dtype in [
-            current_platform.fp8_dtype(),
-            torch.int8,
-            "int4",
-            "nvfp4",
-            "mxfp4",
+    def _supports_quant_scheme(
+        weight_key: QuantKey | None,
+        activation_key: QuantKey | None,
+    ) -> bool:
+        # return quant_scheme.weight_dtype in [
+        #     current_platform.fp8_dtype(),
+        #     torch.int8,
+        #     "int4",
+        #     "nvfp4",
+        #     "mxfp4",
+        # ]
+
+        # NOTE: Marlin runs activations unquantized, so
+        # it can run all activation formats.
+        SUPPORTED_W = [
+            kFp8StaticChannelSym,
+            kNvfp4Quant,
         ]
+        return weight_key in SUPPORTED_W
 
     @staticmethod
     def _supports_activation(activation: str) -> bool:

@@ -8,7 +8,6 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
     FusedMoEParallelConfig,
     FusedMoEQuantConfig,
-    FusedMoEQuantScheme,
 )
 from vllm.model_executor.layers.fused_moe.deep_gemm_moe import (
     DeepGemmExperts,
@@ -17,6 +16,9 @@ from vllm.model_executor.layers.fused_moe.deep_gemm_moe import (
 )
 from vllm.model_executor.layers.fused_moe.fallback import FallbackExperts
 from vllm.model_executor.layers.fused_moe.fused_moe import TritonExperts
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    QuantKey,
+)
 from vllm.utils.deep_gemm import (
     is_deep_gemm_e8m0_used,
 )
@@ -45,8 +47,11 @@ class TritonOrDeepGemmExperts(FallbackExperts):
         return DeepGemmExperts._supports_no_act_and_mul()
 
     @staticmethod
-    def _supports_quant_scheme(quant_scheme: FusedMoEQuantScheme) -> bool:
-        return DeepGemmExperts._supports_quant_scheme(quant_scheme)
+    def _supports_quant_scheme(
+        weight_key: QuantKey | None,
+        activation_key: QuantKey | None,
+    ) -> bool:
+        return DeepGemmExperts._supports_quant_scheme(weight_key, activation_key)
 
     @staticmethod
     def _supports_activation(activation: str) -> bool:

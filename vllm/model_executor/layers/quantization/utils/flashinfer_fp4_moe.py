@@ -12,20 +12,11 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
     FusedMoEParallelConfig,
-    FusedMoEQuantConfig,
-    FusedMoEQuantScheme,
     RoutingMethodType,
 )
-from vllm.model_executor.layers.fused_moe.flashinfer_cutedsl_moe import (
-    FlashInferCuteDSLExperts,
-)
-from vllm.model_executor.layers.fused_moe.flashinfer_cutlass_moe import (
-    FlashInferExperts,
-)
-from vllm.model_executor.layers.fused_moe.flashinfer_cutlass_prepare_finalize import (  # noqa: E501
-    create_flashinfer_prepare_finalize,
-)
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    QuantKey,
+    kNvfp4Quant,
     swizzle_blockscale,
 )
 from vllm.platforms import current_platform
@@ -46,7 +37,6 @@ __all__ = [
     "is_flashinfer_fp4_cutlass_moe_available",
     "is_flashinfer_fp4_cutedsl_moe_available",
     "reorder_w1w3_to_w3w1",
-    "build_flashinfer_fp4_cutlass_moe_prepare_finalize",
 ]
 
 #
@@ -66,9 +56,15 @@ def _supports_no_act_and_mul() -> bool:
     return False
 
 
-def _supports_quant_scheme(quant_scheme: FusedMoEQuantScheme) -> bool:
-    """Supports Fp8 per-tensor, Fp8 block, and Nvfp4 quantization."""
-    return quant_scheme.is_nvfp4_w4a4
+def _supports_quant_scheme(
+    weight_key: QuantKey | None,
+    activation_key: QuantKey | None,
+) -> bool:
+    """Supports Nvfp4 quantization."""
+    SUPPORTED_W_A = [
+        (kNvfp4Quant, kNvfp4Quant),
+    ]
+    return (weight_key, activation_key) in SUPPORTED_W_A
 
 
 def _supports_activation(activation: str) -> bool:
@@ -83,7 +79,8 @@ def _supports_moe_parallel_config(moe_parallel_config: FusedMoEParallelConfig) -
 
 def is_supported_config_trtllm(
     moe_config: FusedMoEConfig,
-    moe_quant_scheme: FusedMoEQuantScheme,
+    weight_key: QuantKey | None,
+    activation_key: QuantKey | None,
     activation_format: mk.FusedMoEActivationFormat,
 ) -> tuple[bool, str | None]:
     """
@@ -99,7 +96,7 @@ def is_supported_config_trtllm(
         return False, _make_reason("no act_and_mul MLP layer")
     elif not _supports_activation(moe_config.activation):
         return False, _make_reason(f"{moe_config.activation} activation")
-    elif not _supports_quant_scheme(moe_quant_scheme):
+    elif not _supports_quant_scheme(weight_key, activation_key):
         return False, _make_reason("quantization scheme")
     elif not _supports_moe_parallel_config(moe_config.moe_parallel_config):
         return False, _make_reason("parallel config")
@@ -143,48 +140,6 @@ def reorder_w1w3_to_w3w1(
     return (
         torch.cat([w3, w1], dim=dim).contiguous(),
         torch.cat([s3, s1], dim=dim).contiguous(),
-    )
-
-
-def build_flashinfer_fp4_cutlass_moe_prepare_finalize(
-    moe: FusedMoEConfig,
-) -> mk.FusedMoEPrepareAndFinalize:
-    """Create a FlashInfer CUTLASS fused-MoE prepare finalize kernel"""
-    use_dp = moe.moe_parallel_config.dp_size > 1
-    enable_alltoallv = moe.moe_parallel_config.all2all_backend == "flashinfer_all2allv"
-    return create_flashinfer_prepare_finalize(
-        use_dp=use_dp, use_nvfp4=True, enable_alltoallv=enable_alltoallv
-    )
-
-
-def select_nvfp4_gemm_impl(
-    moe: FusedMoEConfig,
-    moe_quant_config: FusedMoEQuantConfig,
-    allow_flashinfer: bool,
-) -> mk.FusedMoEPermuteExpertsUnpermute:
-    """Return a GEMM *experts* implementation for NV-FP4 fused-MoE layers"""
-
-    if allow_flashinfer:
-        if envs.VLLM_FLASHINFER_MOE_BACKEND == "masked_gemm":
-            return FlashInferCuteDSLExperts(
-                out_dtype=moe.in_dtype,
-                quant_config=moe_quant_config,
-            )
-        elif envs.VLLM_FLASHINFER_MOE_BACKEND == "throughput":
-            return FlashInferExperts(
-                out_dtype=moe.in_dtype,
-                quant_config=moe_quant_config,
-                ep_rank=moe.moe_parallel_config.ep_rank,
-                ep_size=moe.moe_parallel_config.ep_size,
-                tp_rank=moe.moe_parallel_config.tp_rank,
-                tp_size=moe.moe_parallel_config.tp_size,
-                use_dp=moe.moe_parallel_config.dp_size > 1,
-            )
-
-    # native cutlass experts currently don't support DP; TP case won't call this
-    raise ValueError(
-        "CutlassExpertsFp4 doesn't support DP. Use flashinfer CUTLASS "
-        "Fused MoE backend instead (set VLLM_USE_FLASHINFER_MOE_FP4=1)"
     )
 
 

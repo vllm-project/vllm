@@ -11,12 +11,14 @@ from vllm.model_executor.layers.fused_moe.config import (
     FUSED_MOE_UNQUANTIZED_CONFIG,
     FusedMoEParallelConfig,
     FusedMoEQuantConfig,
-    FusedMoEQuantScheme,
 )
 from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceNoOP,
 )
 from vllm.model_executor.layers.fused_moe.utils import _resize_cache
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    QuantKey,
+)
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.utils.import_utils import has_triton_kernels
@@ -244,9 +246,6 @@ def make_routing_data(
 
 
 class BaseOAITritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
-    def __init__(self, quant_config: FusedMoEQuantConfig):
-        super().__init__(quant_config)
-
     @staticmethod
     def _supports_current_device() -> bool:
         p = current_platform
@@ -257,8 +256,11 @@ class BaseOAITritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
         return False
 
     @staticmethod
-    def _supports_quant_scheme(quant_scheme: FusedMoEQuantScheme) -> bool:
-        return quant_scheme.is_mxfp4_w4a16
+    def _supports_quant_scheme(
+        weight_key: QuantKey | None,
+        activation_key: QuantKey | None,
+    ) -> bool:
+        return False
 
     @staticmethod
     def _supports_activation(activation: str) -> bool:
@@ -321,11 +323,6 @@ class BaseOAITritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
 
 
 class OAITritonExperts(BaseOAITritonExperts):
-    def __init__(self, quant_config: FusedMoEQuantConfig):
-        # TODO (varun) : Enable activation quantization
-        assert quant_config.use_mxfp4_w4a16, "Supports only mxfp4_w4a16"
-        super().__init__(quant_config)
-
     @staticmethod
     def activation_format() -> mk.FusedMoEActivationFormat:
         return mk.FusedMoEActivationFormat.Standard
@@ -409,12 +406,6 @@ class UnfusedOAITritonExperts(BaseOAITritonExperts):
 
     One use case for it is to inject LoRA modules on the activation and moe_sum.
     """
-
-    def __init__(self, quant_config: FusedMoEQuantConfig):
-        # TODO (varun) : Enable activation quantization
-        assert quant_config.use_mxfp4_w4a16, "Supports only mxfp4_w4a16"
-        super().__init__(quant_config)
-        self.quant_config = quant_config
 
     @staticmethod
     def activation_format() -> mk.FusedMoEActivationFormat:

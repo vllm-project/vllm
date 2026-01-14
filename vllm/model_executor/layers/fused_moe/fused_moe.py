@@ -24,7 +24,6 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
     FusedMoEParallelConfig,
     FusedMoEQuantConfig,
-    FusedMoEQuantScheme,
     _get_config_dtype_str,
 )
 from vllm.model_executor.layers.fused_moe.deep_gemm_moe import (
@@ -52,6 +51,14 @@ from vllm.model_executor.layers.fused_moe.utils import (
 from vllm.model_executor.layers.quantization.utils.mxfp4_utils import dequant_mxfp4
 from vllm.model_executor.layers.quantization.utils.mxfp6_utils import dequant_mxfp6
 from vllm.model_executor.layers.quantization.utils.ocp_mx_utils import OCP_MX_Scheme
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    QuantKey,
+    kFp8Dynamic128Sym,
+    kFp8DynamicTokenSym,
+    kFp8Static128BlockSym,
+    kFp8StaticChannelSym,
+    kFp8StaticTensorSym,
+)
 from vllm.model_executor.utils import maybe_disable_graph_partition
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
@@ -2320,17 +2327,25 @@ class TritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
         return False
 
     @staticmethod
-    def _supports_quant_scheme(quant_scheme: FusedMoEQuantScheme) -> bool:
+    def _supports_quant_scheme(
+        weight_key: QuantKey | None,
+        activation_key: QuantKey | None,
+    ) -> bool:
         p = current_platform
         device_supports_fp8 = p.is_rocm() or (
             p.is_cuda() and p.has_device_capability((9, 0))
         )
 
-        return (
-            quant_scheme.is_unquantized
-            or quant_scheme.is_fp8_w8a8
-            and device_supports_fp8
-        )
+        if not device_supports_fp8:
+            return (weight_key, activation_key) == (None, None)
+
+        SUPPORTED_W_A = [
+            (kFp8Static128BlockSym, kFp8Dynamic128Sym),
+            (kFp8StaticChannelSym, kFp8DynamicTokenSym),
+            (kFp8StaticTensorSym, kFp8DynamicTokenSym),
+            (kFp8StaticTensorSym, kFp8StaticTensorSym),
+        ]
+        return (weight_key, activation_key) in SUPPORTED_W_A
 
     @staticmethod
     def _supports_activation(activation: str) -> bool:
@@ -2515,9 +2530,11 @@ class TritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
 
 class TritonWNA16Experts(TritonExperts):
     @staticmethod
-    def _supports_quant_scheme(quant_scheme: FusedMoEQuantScheme) -> bool:
-        # TODO
-        return True
+    def _supports_quant_scheme(
+        weight_key: QuantKey | None,
+        activation_key: QuantKey | None,
+    ) -> bool:
+        return False
 
     def apply(
         self,

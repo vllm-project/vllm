@@ -26,7 +26,6 @@ from vllm.model_executor.layers.fused_moe import (
 )
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEQuantConfig,
-    FusedMoEQuantScheme,
     RoutingMethodType,
 )
 from vllm.model_executor.layers.fused_moe.fused_moe_router import FusedMoERouter
@@ -74,6 +73,9 @@ from vllm.model_executor.layers.quantization.utils.marlin_utils_fp8 import (
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     GroupShape,
     is_layer_skipped,
+    kFp8Dynamic128Sym,
+    kFp8Static128BlockSym,
+    kFp8StaticTensorSym,
 )
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
     Fp8LinearOp,
@@ -632,38 +634,24 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             "weight_scale_inv" if self.block_quant else "weight_scale"
         )
 
-        # Create quant scheme, will be used later to select the quant scales.
-        # NOTE(rob): we should update QuantConfig to just be the think ts
-        # holds the scales. Should change the name.
-        quant_scheme = FusedMoEQuantScheme(
-            weight_dtype=current_platform.fp8_dtype(),
-            act_dtype=current_platform.fp8_dtype(),
-            per_tensor_quant=not self.block_quant,
-            per_token_quant=False,
-            block_size=(
-                (self.weight_block_size[0], self.weight_block_size[1])
-                if self.weight_block_size is not None
-                else None
-            ),
-            static_input_quant=(self.quant_config.activation_scheme == "static"),
-        )
+        # Set weight key and activation key for kernel compatibility
+        if self.block_quant:
+            weight_key = kFp8Static128BlockSym
+            activation_key = kFp8Dynamic128Sym
+        else:
+            weight_key = kFp8StaticTensorSym
+            activation_key = (
+                kFp8StaticTensorSym
+                if self.quant_config.activation_scheme == "static"
+                else kFp8Dynamic128Sym
+            )
 
         # Select Fp8 MoE backend
-        # NOTE(rob): this is kind of a hack. We need to peak into
-        # the prepare-finalize selection to determine if we are using
-        # the batched or standard expert format.
-        use_batched = (
-            self.moe.moe_parallel_config.use_deepep_ll_kernels
-            or self.moe.moe_parallel_config.use_pplx_kernels
-        )
         self.fp8_backend, self.experts_cls = select_fp8_moe_backend(
             config=self.moe,
-            quant_scheme=quant_scheme,
-            activation_format=(
-                mk.FusedMoEActivationFormat.BatchedExperts
-                if use_batched
-                else mk.FusedMoEActivationFormat.Standard
-            ),
+            weight_key=weight_key,
+            activation_key=activation_key,
+            allow_vllm_cutlass=False,
         )
 
         # Delay creation of the kernel until after process-weights.

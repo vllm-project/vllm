@@ -15,7 +15,6 @@ from vllm.model_executor.layers.fused_moe.all2all_utils import (
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
     FusedMoEQuantConfig,
-    FusedMoEQuantScheme,
     fp8_w8a8_moe_quant_config,
     fp8_w8a16_moe_quant_config,
 )
@@ -33,6 +32,9 @@ from vllm.model_executor.layers.quantization.utils.fp8_utils import (
 )
 from vllm.model_executor.layers.quantization.utils.marlin_utils_fp8 import (
     prepare_fp8_moe_layer_for_marlin,
+)
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    QuantKey,
 )
 
 if TYPE_CHECKING:
@@ -122,8 +124,8 @@ def backend_2_kernel_cls(
 
 def select_fp8_moe_backend(
     config: FusedMoEConfig,
-    quant_scheme: FusedMoEQuantScheme,
-    activation_format: mk.FusedMoEActivationFormat,
+    weight_key: QuantKey | None,
+    activation_key: QuantKey | None,
     allow_vllm_cutlass: bool = False,
 ) -> tuple[Fp8MoeBackend, type[mk.FusedMoEPermuteExpertsUnpermute] | None]:
     """
@@ -133,6 +135,19 @@ def select_fp8_moe_backend(
 
     if config.is_lora_enabled:
         return Fp8MoeBackend.TRITON, backend_2_kernel_cls(Fp8MoeBackend.TRITON)
+
+    # NOTE(rob): this is kind of a hack. We need to peak into
+    # the prepare-finalize selection to determine if we are using
+    # the batched or standard expert format.
+    use_batched = (
+        config.moe_parallel_config.use_deepep_ll_kernels
+        or config.moe_parallel_config.use_pplx_kernels
+    )
+    activation_format = (
+        mk.FusedMoEActivationFormat.BatchedExperts
+        if use_batched
+        else mk.FusedMoEActivationFormat.Standard
+    )
 
     def _make_log_backend(backend: Fp8MoeBackend):
         return f"Using `{backend.value}` backend for FP8 MoE"
@@ -152,12 +167,13 @@ def select_fp8_moe_backend(
     def _return_or_raise(
         backend: Fp8MoeBackend,
         config: FusedMoEConfig,
-        scheme: FusedMoEQuantScheme,
+        weight_key: QuantKey | None,
+        activation_key: QuantKey | None,
         activation_format: mk.FusedMoEActivationFormat,
     ) -> tuple[Fp8MoeBackend, type[mk.FusedMoEPermuteExpertsUnpermute]]:
         k_cls = backend_2_kernel_cls(backend)
         supported, reason = k_cls.is_supported_config(
-            k_cls, config, scheme, activation_format
+            k_cls, config, weight_key, activation_key, activation_format
         )
         if supported:
             logger.info_once(_make_log_backend(backend))
@@ -191,7 +207,7 @@ def select_fp8_moe_backend(
             if fi_backend == FlashinferMoeBackend.TENSORRT_LLM:
                 backend = Fp8MoeBackend.FLASHINFER_TRTLLM
                 supported, reason = is_supported_config_trtllm(
-                    config, quant_scheme, activation_format
+                    config, weight_key, activation_key, activation_format
                 )
                 if supported:
                     logger.info_once(_make_log_backend(backend))
@@ -202,7 +218,7 @@ def select_fp8_moe_backend(
             elif fi_backend == FlashinferMoeBackend.CUTLASS:
                 backend = Fp8MoeBackend.FLASHINFER_CUTLASS
                 return _return_or_raise(
-                    backend, config, quant_scheme, activation_format
+                    backend, config, weight_key, activation_key, activation_format
                 )
 
             else:
@@ -217,7 +233,7 @@ def select_fp8_moe_backend(
             ]:
                 k_cls = backend_2_kernel_cls(backend)
                 if k_cls.is_supported_config(
-                    k_cls, config, quant_scheme, activation_format
+                    k_cls, config, weight_key, activation_key, activation_format
                 ):
                     logger.info_once(_make_log_backend(backend))
                     return backend, k_cls
@@ -237,12 +253,16 @@ def select_fp8_moe_backend(
                 if activation_format == mk.FusedMoEActivationFormat.Standard
                 else Fp8MoeBackend.BATCHED_DEEPGEMM
             )
-            return _return_or_raise(backend, config, quant_scheme, activation_format)
+            return _return_or_raise(
+                backend, config, weight_key, activation_key, activation_format
+            )
 
     # Handle explicit MARLIN FP8 configuration.
     if envs.VLLM_TEST_FORCE_FP8_MARLIN:
         backend = Fp8MoeBackend.MARLIN
-        return _return_or_raise(backend, config, quant_scheme, activation_format)
+        return _return_or_raise(
+            backend, config, weight_key, activation_key, activation_format
+        )
 
     # Handle explicit AITER FP8 configuration.
     if envs.is_set("VLLM_ROCM_USE_AITER") or envs.is_set("VLLM_ROCM_USE_AITER_MOE"):
@@ -250,7 +270,9 @@ def select_fp8_moe_backend(
             AVAILABLE_BACKENDS.remove(Fp8MoeBackend.AITER)
         else:
             backend = Fp8MoeBackend.AITER
-            return _return_or_raise(backend, config, quant_scheme, activation_format)
+            return _return_or_raise(
+                backend, config, weight_key, activation_key, activation_format
+            )
 
     if not allow_vllm_cutlass:
         AVAILABLE_BACKENDS.remove(Fp8MoeBackend.VLLM_CUTLASS)
@@ -261,7 +283,8 @@ def select_fp8_moe_backend(
             k_cls = None  # type: ignore[assignment]
             supported, reason = is_supported_config_trtllm(
                 config,
-                quant_scheme,
+                weight_key,
+                activation_key,
                 activation_format,
             )
         else:
@@ -269,7 +292,8 @@ def select_fp8_moe_backend(
             supported, reason = k_cls.is_supported_config(
                 k_cls,
                 config,
-                quant_scheme,
+                weight_key,
+                activation_key,
                 activation_format,
             )
 

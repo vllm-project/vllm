@@ -7,7 +7,6 @@ import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
     FusedMoEParallelConfig,
-    FusedMoEQuantScheme,
     RoutingMethodType,
 )
 from vllm.model_executor.layers.fused_moe.utils import moe_kernel_quantize_input
@@ -16,6 +15,12 @@ from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
 )
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     per_token_group_quant_fp8,
+)
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    QuantKey,
+    kFp8Dynamic128Sym,
+    kFp8Static128BlockSym,
+    kFp8StaticTensorSym,
 )
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import direct_register_custom_op
@@ -37,14 +42,16 @@ def _supports_no_act_and_mul() -> bool:
     return False
 
 
-def _supports_quant_scheme(quant_scheme: FusedMoEQuantScheme) -> bool:
-    """Supports Fp8 per-tensor, Fp8 block, and Nvfp4 quantization."""
-    s = quant_scheme
-    return (
-        (s.is_fp8_w8a8 and s.per_tensor_quant and s.static_input_quant)
-        or (s.is_fp8_w8a8 and s.block_size == (128, 128))
-        or (s.is_nvfp4_w4a4)
-    )
+def _supports_quant_scheme(
+    weight_key: QuantKey | None,
+    activation_key: QuantKey | None,
+) -> bool:
+    """Supports Fp8 per-tensor and Fp8 block."""
+    SUPPORTED_W_A = [
+        (kFp8Static128BlockSym, kFp8Dynamic128Sym),
+        (kFp8StaticTensorSym, kFp8StaticTensorSym),
+    ]
+    return (weight_key, activation_key) in SUPPORTED_W_A
 
 
 def _supports_activation(activation: str) -> bool:
@@ -59,7 +66,8 @@ def _supports_moe_parallel_config(moe_parallel_config: FusedMoEParallelConfig) -
 
 def is_supported_config_trtllm(
     moe_config: FusedMoEConfig,
-    moe_quant_scheme: FusedMoEQuantScheme,
+    weight_key: QuantKey | None,
+    activation_key: QuantKey | None,
     activation_format: mk.FusedMoEActivationFormat,
 ) -> tuple[bool, str | None]:
     """
@@ -75,7 +83,7 @@ def is_supported_config_trtllm(
         return False, _make_reason("no act_and_mul MLP layer")
     elif not _supports_activation(moe_config.activation):
         return False, _make_reason(f"{moe_config.activation} activation")
-    elif not _supports_quant_scheme(moe_quant_scheme):
+    elif not _supports_quant_scheme(weight_key, activation_key):
         return False, _make_reason("quantization scheme")
     elif not _supports_moe_parallel_config(moe_config.moe_parallel_config):
         return False, _make_reason("parallel config")
