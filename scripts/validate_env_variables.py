@@ -178,13 +178,11 @@ def check_lazy_default_consistency(variables_file: Path) -> list[str]:
                         "env_default_factory should receive exactly 1 callable argument"
                     )
 
-            elif func_name == "env_factory":
+            elif func_name == "env_factory" and len(node.args) != 2:
                 # Should have exactly 2 arguments (default value and parser)
-                if len(node.args) != 2:
-                    warnings.append(
-                        "env_factory should receive exactly "
-                        "2 arguments (default, parser)"
-                    )
+                warnings.append(
+                    "env_factory should receive exactly 2 arguments (default, parser)"
+                )
 
     # Add a note if no issues were found
     if not warnings:
