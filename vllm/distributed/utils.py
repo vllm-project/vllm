@@ -253,12 +253,13 @@ class StatelessProcessGroup:
         self.send_dst_counter[dst] += 1
         self.entries.append((key, time.time()))
 
-    def recv(self, tensor: torch.Tensor, src: int):
+    def recv(self, tensor: torch.Tensor, src: int) -> torch.Tensor:
         """Receive a tensor from a source rank."""
         key = f"send_tensor/{self.rank}/{self.recv_src_counter[src]}"
         received = pickle.loads(self.store.get(key))
         self.recv_src_counter[src] += 1
         tensor.copy_(received)
+        return tensor
 
     def all_reduce(
         self, tensor: torch.Tensor, op=torch.distributed.ReduceOp.SUM

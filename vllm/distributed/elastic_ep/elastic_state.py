@@ -418,7 +418,7 @@ class ElasticEPScalingState:
             )
         return (
             self.state == ScaleDownRemovingEngineState.COMPLETE
-            if self.worker_type == "shutdown"
+            if self.worker_type == "removing"
             else self.state == ScaleDownRemainingEngineState.COMPLETE
         )
 

@@ -182,7 +182,7 @@ class PPLXAll2AllManager(All2AllManagerBase):
         self.handle_cache = Cache()
 
     def get_handle(self, kwargs):
-        if self.internode:
+        if self.internode and not self.nvshmem_initialized:
             # inter-node communication needs nvshmem,
             # intra-node communication uses p2p mapping directly
             from pplx_kernels.nvshmem import (  # type: ignore[import-not-found]
