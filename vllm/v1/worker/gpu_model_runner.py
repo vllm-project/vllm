@@ -4203,7 +4203,7 @@ class GPUModelRunner(
 
         # We use the cache so that the item is saved to the cache,
         # but not read from the cache
-        assert dummy_mm_item is not None, "Item should not be cached"
+        assert dummy_mm_item is not None, "Item should not already be cached"
 
         dummy_mm_items = [dummy_mm_item] * max_items_per_batch
 
