@@ -2327,7 +2327,7 @@ class TritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
         )
 
         return (
-            quant_scheme.is_unquantized()
+            quant_scheme.is_unquantized
             or quant_scheme.is_fp8_w8a8
             and device_supports_fp8
         )
