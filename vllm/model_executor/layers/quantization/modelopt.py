@@ -1395,10 +1395,6 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
             self.nvfp4_backend
         )
 
-        # prepare_finalize = build_flashinfer_fp4_cutlass_moe_prepare_finalize(
-        #     self.moe
-        # )
-
     @property
     def topk_indices_dtype(self) -> torch.dtype | None:
         if self.kernel is not None:
