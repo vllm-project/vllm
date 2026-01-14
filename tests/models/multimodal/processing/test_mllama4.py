@@ -24,7 +24,7 @@ def test_profiling(model_id: str, max_model_len: int):
         limit_mm_per_prompt=mm_counts,
     )
 
-    mm_inputs = MULTIMODAL_REGISTRY.get_dummy_mm_data(
+    mm_inputs = MULTIMODAL_REGISTRY.get_dummy_mm_inputs(
         ctx.model_config,
         mm_counts=mm_counts,
     )

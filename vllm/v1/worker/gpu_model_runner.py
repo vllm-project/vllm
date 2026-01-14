@@ -4192,15 +4192,14 @@ class GPUModelRunner(
         """Dummy data for profiling and precompiling multimodal models."""
         assert self.mm_budget is not None
 
-        dummy_decoder_data = self.mm_registry.get_dummy_mm_data(
+        dummy_mm_inputs = self.mm_registry.get_dummy_mm_inputs(
             self.model_config,
             mm_counts={modality: 1},
             cache=self.mm_budget.cache,
         )
-        dummy_mm_data = dummy_decoder_data["mm_kwargs"].require_data()
 
         # Result in the maximum GPU consumption of the model
-        dummy_mm_item = dummy_mm_data[modality][0]
+        dummy_mm_item = dummy_mm_inputs["mm_kwargs"][modality][0]
         dummy_mm_items = [dummy_mm_item] * max_items_per_batch
 
         return next(

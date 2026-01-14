@@ -176,7 +176,7 @@ class MultiModalRegistry:
                 if mm_counts.get(modality, 0) > 0
             }
 
-        mm_inputs = self.get_dummy_mm_data(
+        mm_inputs = self.get_dummy_mm_inputs(
             model_config,
             mm_counts=mm_counts,
             processor=processor,
@@ -294,7 +294,7 @@ class MultiModalRegistry:
 
         return factories.build_processor(ctx, cache=cache)
 
-    def get_dummy_mm_data(
+    def get_dummy_mm_inputs(
         self,
         model_config: "ModelConfig",
         mm_counts: Mapping[str, int] | None = None,

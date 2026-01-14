@@ -926,7 +926,7 @@ def test_limit_mm_per_prompt_dummy(model_id, limit, num_supported, is_valid):
     exc_ctx = nullcontext() if is_valid else pytest.raises(ValueError, match="At most")
 
     with exc_ctx:
-        MULTIMODAL_REGISTRY.get_dummy_mm_data(
+        MULTIMODAL_REGISTRY.get_dummy_mm_inputs(
             model_config,
             mm_counts=limit_mm_per_prompt,
             processor=processor,
