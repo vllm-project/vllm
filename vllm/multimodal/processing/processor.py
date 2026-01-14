@@ -28,6 +28,7 @@ from ..inputs import (
     MultiModalDataDict,
     MultiModalEncDecInputs,
     MultiModalFieldConfig,
+    MultiModalHashes,
     MultiModalInputs,
     MultiModalKwargsItem,
     MultiModalKwargsItems,
@@ -935,12 +936,6 @@ def find_mm_placeholders(
     it = _iter_placeholders(prompt, mm_prompt_updates, tokenizer)
     return dict(full_groupby_modality(it))
 
-
-MultiModalHashes = dict[str, list[str]]
-"""
-A collection of the multi-modal hash for each item, with a similar structure as
-[`MultiModalKwargsItems`][vllm.multimodal.inputs.MultiModalKwargsItems].
-"""
 
 MultiModalIsCached = dict[str, list[bool]]
 """
