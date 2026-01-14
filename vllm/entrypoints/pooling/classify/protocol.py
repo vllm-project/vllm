@@ -11,7 +11,7 @@ from pydantic import (
 from vllm import PoolingParams
 from vllm.config.pooler import get_use_activation
 from vllm.entrypoints.chat_utils import ChatCompletionMessageParam
-from vllm.entrypoints.openai.protocol import OpenAIBaseModel, UsageInfo
+from vllm.entrypoints.openai.engine.protocol import OpenAIBaseModel, UsageInfo
 from vllm.utils import random_uuid
 
 

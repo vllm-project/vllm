@@ -22,6 +22,9 @@ from vllm.entrypoints.chat_utils import (
     ChatTemplateContentFormatOption,
 )
 from vllm.entrypoints.constants import MCP_PREFIX
+from vllm.entrypoints.openai.engine.protocol import (
+    FunctionCall,
+)
 from vllm.entrypoints.openai.parser.harmony_utils import (
     get_encoding,
     get_streamable_parser_for_assistant,
@@ -30,8 +33,7 @@ from vllm.entrypoints.openai.parser.harmony_utils import (
 from vllm.entrypoints.openai.parser.responses_parser import (
     get_responses_parser_for_simple_context,
 )
-from vllm.entrypoints.openai.protocol import (
-    FunctionCall,
+from vllm.entrypoints.openai.responses.protocol import (
     ResponseInputOutputItem,
     ResponseRawMessageAndToken,
     ResponsesRequest,

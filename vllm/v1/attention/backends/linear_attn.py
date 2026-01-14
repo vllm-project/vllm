@@ -5,13 +5,13 @@ from dataclasses import dataclass
 import torch
 
 from vllm.config import VllmConfig
-from vllm.v1.attention.backend import AttentionBackend
-from vllm.v1.attention.backends.utils import (
+from vllm.v1.attention.backend import (
+    AttentionBackend,
     AttentionCGSupport,
     AttentionMetadataBuilder,
     CommonAttentionMetadata,
-    split_decodes_and_prefills,
 )
+from vllm.v1.attention.backends.utils import split_decodes_and_prefills
 from vllm.v1.kv_cache_interface import AttentionSpec, MambaSpec
 
 
