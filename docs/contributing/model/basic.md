@@ -118,7 +118,7 @@ To support a model with interleaving sliding windows, we need to take care of th
 - Make sure the model's `config.json` contains `layer_types`.
 - In the modeling code, parse the correct sliding window value for every layer, and pass it to the attention layer's `per_layer_sliding_window` argument. For reference, check [this line](https://github.com/vllm-project/vllm/blob/996357e4808ca5eab97d4c97c7d25b3073f46aab/vllm/model_executor/models/llama.py#L171).
 
-With these two steps, interleave sliding windows should work with the model.
+With these two steps, interleaved sliding windows should work with the model.
 
 ### How to support models that use Mamba?
 

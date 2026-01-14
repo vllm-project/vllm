@@ -884,6 +884,7 @@ class ModelConfig:
                 "gptq_bitblas",
                 "awq_marlin",
                 "ipex",
+                "inc",
                 "moe_wna16",
                 "modelopt",
                 "modelopt_fp4",
@@ -1126,6 +1127,7 @@ class ModelConfig:
         """Whether to use bidirectional attention for mm positions."""
         MM_PREFIX_LM_MODELS = (
             "gemma3",
+            "molmo2",
             "paligemma",
         )
         if not hasattr(self.hf_config, "model_type"):
@@ -1494,7 +1496,7 @@ class ModelConfig:
 
         if self.runner_type != "pooling" and head_dtype != self.dtype:
             logger.warning_once(
-                "`head_dtype` currently only supports pooling models."
+                "`head_dtype` currently only supports pooling models, "
                 "fallback to model dtype [%s].",
                 self.dtype,
             )
