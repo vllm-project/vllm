@@ -24,8 +24,10 @@ from vllm.v1.attention.backend import (
     AttentionMetadataBuilder,
     AttentionType,
     CommonAttentionMetadata,
-    split_decodes_and_prefills,
     MultipleOf,
+)
+from vllm.v1.attention.backends.utils import (
+    split_decodes_and_prefills,
 )
 from vllm.v1.attention.ops.triton_prefill_attention import context_attention_fwd
 from vllm.v1.attention.ops.triton_reshape_and_cache_flash import (
