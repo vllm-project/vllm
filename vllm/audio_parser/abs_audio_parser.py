@@ -38,7 +38,7 @@ class AudioParser:
     def extract_tts_content_nonstreaming(self,
                                          output_token_ids: Sequence[int],
                                          request: ChatCompletionRequest,
-                                         is_tts_ta4_output=False):
+                                         is_tts_ta4_output: bool = False):
         raise NotImplementedError(
             "AbstractAudioParser.extract_tts_content_nonstreaming has not been implemented!"  # noqa: E501
         )
@@ -48,11 +48,12 @@ class AudioParser:
         previous_token_ids: Sequence[int],
         current_token_ids: Sequence[int],
         delta_token_ids: Sequence[int],
-        is_tts_ta4_output: False,
+        is_tts_ta4_output: bool = False,
     ) -> tuple[list, list, list]:
         raise NotImplementedError(
             "AbstractAudioParser.extract_tts_content_streaming has not been implemented!"  # noqa: E501
         )
+
 
 
 class AudioParserManager:
