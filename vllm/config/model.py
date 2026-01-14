@@ -1127,6 +1127,7 @@ class ModelConfig:
         """Whether to use bidirectional attention for mm positions."""
         MM_PREFIX_LM_MODELS = (
             "gemma3",
+            "molmo2",
             "paligemma",
         )
         if not hasattr(self.hf_config, "model_type"):

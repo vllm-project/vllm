@@ -1227,6 +1227,36 @@ def run_molmo(questions: list[str], modality: str) -> ModelRequestData:
     )
 
 
+# Molmo2
+def run_molmo2(questions: list[str], modality: str) -> ModelRequestData:
+    model_name = "allenai/Molmo2-8B"
+
+    engine_args = EngineArgs(
+        model=model_name,
+        trust_remote_code=True,
+        dtype="bfloat16",
+        limit_mm_per_prompt={modality: 1},
+        max_num_batched_tokens=36864,
+    )
+
+    if modality == "image":
+        placeholder = "<|image|>"
+    elif modality == "video":
+        placeholder = "<|video|>"
+    else:
+        raise ValueError(f"Unsupported modality for molmo2: {modality}")
+
+    prompts = [
+        f"{placeholder}<|im_start|>user\n{question}<|im_end|>\n<|im_start|>assistant\n"
+        for question in questions
+    ]
+
+    return ModelRequestData(
+        engine_args=engine_args,
+        prompts=prompts,
+    )
+
+
 # Nemontron_VL
 def run_nemotron_vl(questions: list[str], modality: str) -> ModelRequestData:
     model_name = "nvidia/Llama-3.1-Nemotron-Nano-VL-8B-V1"
@@ -1920,6 +1950,7 @@ model_example_map = {
     "minimax_vl_01": run_minimax_vl_01,
     "mistral3": run_mistral3,
     "molmo": run_molmo,
+    "molmo2": run_molmo2,
     "nemotron_vl": run_nemotron_vl,
     "NVLM_D": run_nvlm_d,
     "ovis": run_ovis,
@@ -1949,6 +1980,7 @@ MODELS_NEED_VIDEO_METADATA = [
     "glm4_1v",
     "glm4_5v",
     "glm4_5v_fp8",
+    "molmo2",
     "qwen3_vl",
     "qwen3_vl_moe",
 ]

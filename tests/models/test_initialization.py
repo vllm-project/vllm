@@ -140,6 +140,7 @@ def can_initialize(
             else None,
             trust_remote_code=model_info.trust_remote_code,
             max_model_len=model_info.max_model_len,
+            max_num_batched_tokens=model_info.max_num_batched_tokens,
             # these tests seem to produce leftover memory
             gpu_memory_utilization=0.80,
             load_format="dummy",
