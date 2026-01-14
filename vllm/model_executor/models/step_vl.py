@@ -11,17 +11,20 @@ from einops import rearrange, repeat
 from torch import nn
 from torch.nn import functional as F
 
-from vllm.model_executor.layers.attention.mm_encoder_attention import MMEncoderAttention
 from vllm.config import VllmConfig
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.activation import get_act_fn
+from vllm.model_executor.layers.attention.mm_encoder_attention import (
+    MMEncoderAttention)
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                QKVParallelLinear,
                                                RowParallelLinear)
 from vllm.model_executor.layers.quantization import QuantizationConfig
+
 from .step3_vl import Step3VLForConditionalGeneration
 from .utils import WeightsMapper, init_vllm_registered_model, maybe_prefix
 from .vision import run_dp_sharded_vision_model
+
 
 def rotate_half(x):
     x = rearrange(x, "... (d r) -> ... d r", r=2)
@@ -293,20 +296,21 @@ class PerceptionEncoderVisionBlock(nn.Module):
 
 class PerceptionEncoderVisionTransformer(nn.Module):
 
-    def __init__(self,
-                 width: int,
-                 layers: int,
-                 heads: int,
-                 max_grid_height: int,
-                 max_grid_width: int,
-                 mlp_ratio: float = 4.0,
-                 ls_init_value: float = None,
-                 act_layer: Callable = nn.GELU,
-                 norm_layer: Callable = nn.LayerNorm,
-                 use_cls_token: bool = False,
-                 quant_config: Optional[QuantizationConfig] = None,
-                 prefix: str = "",
-                 use_data_parallel: bool = False):
+    def __init__(
+            self,
+            width: int,
+            layers: int,
+            heads: int,
+            max_grid_height: int,
+            max_grid_width: int,
+            mlp_ratio: float = 4.0,
+            ls_init_value: float = None,
+            act_layer: Callable = nn.GELU,
+            norm_layer: Callable = nn.LayerNorm,
+            use_cls_token: bool = False,
+            quant_config: Optional[QuantizationConfig] = None,
+            prefix: str = "",
+            use_data_parallel: bool = False):
         super().__init__()
         self.width = width
         self.layers = layers
@@ -373,7 +377,7 @@ class PerceptionEncoderAttentionPooling(nn.Module):
                                           quant_config=quant_config,
                                           prefix=f"{prefix}.qkv_proj",
                                           disable_tp=use_data_parallel)
-        self.attn = MultiHeadAttention(self.num_heads, self.head_dim,
+        self.attn = MMEncoderAttention(self.num_heads, self.head_dim,
                                        self.scale)
         self.out_proj = RowParallelLinear(embed_dim,
                                           embed_dim,
@@ -555,7 +559,6 @@ class PerceptionEncoder(nn.Module):
 
         if strip_cls_token and self.use_cls_token:
             x = x[:, 1:, :]
-        
 
         return x
 
@@ -570,9 +573,9 @@ class PerceptionEncoder(nn.Module):
         x = self.vit_downsampler1(x)
         x = self.vit_downsampler2(x)
 
-
         B, C, T, T = x.shape
         return x.view(B, -1, T * T).transpose(1, 2)
+
 
 class StepVLForConditionalGeneration(Step3VLForConditionalGeneration):
 
