@@ -33,7 +33,6 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
     cutlass_group_gemm_supported,
 )
-from vllm.platforms import current_platform
 from vllm.scalar_type import scalar_types
 
 logger = init_logger(__name__)
@@ -868,7 +867,7 @@ class CutlassExpertsW4A8Fp8(mk.FusedMoEPermuteExpertsUnpermute):
         group_size: int,
     ):
         super().__init__(moe_config=moe_config, quant_config=quant_config)
-        self.out_dtype = moe_config.in_dtype
+        self.out_dtype = out_dtype
         self.a_strides1 = a_strides1
         self.a_strides2 = a_strides2
         self.b_strides1 = b_strides1
@@ -880,33 +879,42 @@ class CutlassExpertsW4A8Fp8(mk.FusedMoEPermuteExpertsUnpermute):
         self.group_size = group_size
 
     @staticmethod
-    def activation_format() -> mk.FusedMoEActivationFormat:
-        return mk.FusedMoEActivationFormat.Standard
-
-    @staticmethod
     def _supports_current_device() -> bool:
-        p = current_platform
-        return p.is_cuda() and p.has_device_capability((9, 0))
+        raise NotImplementedError(
+            "CutlassExpertsW4A8Fp8 is not yet used by an Oracle. "
+            "This method should not be called."
+        )
 
     @staticmethod
     def _supports_no_act_and_mul() -> bool:
-        return False
+        raise NotImplementedError(
+            "CutlassExpertsW4A8Fp8 is not yet used by an Oracle. "
+            "This method should not be called."
+        )
 
     @staticmethod
     def _supports_quant_scheme(
         weight_key: QuantKey | None,
         activation_key: QuantKey | None,
     ) -> bool:
-        # return quant_scheme.is_int4_w4a8 and quant_scheme.per_token_quant
-        return False
+        raise NotImplementedError(
+            "CutlassExpertsW4A8Fp8 is not yet used by an Oracle. "
+            "This method should not be called."
+        )
 
     @staticmethod
     def _supports_activation(activation: str) -> bool:
-        return activation in ["silu", "gelu"]
+        raise NotImplementedError(
+            "CutlassExpertsW4A8Fp8 is not yet used by an Oracle. "
+            "This method should not be called."
+        )
 
     @staticmethod
     def _supports_parallel_config(moe_parallel_config: FusedMoEParallelConfig) -> bool:
-        return True
+        raise NotImplementedError(
+            "CutlassExpertsW4A8Fp8 is not yet used by an Oracle. "
+            "This method should not be called."
+        )
 
     def supports_chunking(self) -> bool:
         return True
