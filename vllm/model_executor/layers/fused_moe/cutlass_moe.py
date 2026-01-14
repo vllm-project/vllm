@@ -18,6 +18,9 @@ from vllm.model_executor.layers.fused_moe.moe_permute_unpermute import (
     moe_permute,
     moe_unpermute,
 )
+from vllm.model_executor.layers.fused_moe.prepare_finalize import (
+    MoEPrepareAndFinalizeNoEP,
+)
 from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceDelegate,
     TopKWeightAndReduceNoOP,
@@ -1027,6 +1030,7 @@ def cutlass_moe_w4a8_fp8(
     s_strides1: torch.Tensor,
     s_strides2: torch.Tensor,
     quant_config: FusedMoEQuantConfig,
+    moe_config: FusedMoEConfig,
     activation: str = "silu",
     expert_map: torch.Tensor | None = None,
     apply_router_weight_on_input: bool = False,
@@ -1084,36 +1088,36 @@ def cutlass_moe_w4a8_fp8(
     Returns:
     - torch.Tensor: The bf16 output tensor after applying the MoE layer.
     """
-    # assert quant_config is not None
+    assert quant_config is not None
 
-    # num_experts = global_num_experts if global_num_experts != -1 else w1_q.size(0)
+    num_experts = global_num_experts if global_num_experts != -1 else w1_q.size(0)
 
-    # fn = mk.FusedMoEModularKernel(
-    #     MoEPrepareAndFinalizeNoEP(),
-    #     CutlassExpertsW4A8Fp8(
-    #         out_dtype=a.dtype,
-    #         a_strides1=a_strides1,
-    #         a_strides2=a_strides2,
-    #         b_strides1=b_strides1,
-    #         b_strides2=b_strides2,
-    #         c_strides1=c_strides1,
-    #         c_strides2=c_strides2,
-    #         s_strides1=s_strides1,
-    #         s_strides2=s_strides2,
-    #         # TODO:
-    #         quant_config=quant_config,
-    #         group_size=group_size,
-    #     ),
-    # )
+    fn = mk.FusedMoEModularKernel(
+        MoEPrepareAndFinalizeNoEP(),
+        CutlassExpertsW4A8Fp8(
+            out_dtype=a.dtype,
+            a_strides1=a_strides1,
+            a_strides2=a_strides2,
+            b_strides1=b_strides1,
+            b_strides2=b_strides2,
+            c_strides1=c_strides1,
+            c_strides2=c_strides2,
+            s_strides1=s_strides1,
+            s_strides2=s_strides2,
+            moe_config=moe_config,
+            quant_config=quant_config,
+            group_size=group_size,
+        ),
+    )
 
-    # return fn(
-    #     a,
-    #     w1_q,
-    #     w2_q,
-    #     topk_weights,
-    #     topk_ids,
-    #     activation=activation,
-    #     global_num_experts=num_experts,
-    #     expert_map=expert_map,
-    #     apply_router_weight_on_input=apply_router_weight_on_input,
-    # )
+    return fn(
+        a,
+        w1_q,
+        w2_q,
+        topk_weights,
+        topk_ids,
+        activation=activation,
+        global_num_experts=num_experts,
+        expert_map=expert_map,
+        apply_router_weight_on_input=apply_router_weight_on_input,
+    )
