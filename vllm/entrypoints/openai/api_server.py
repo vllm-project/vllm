@@ -17,12 +17,12 @@ from argparse import Namespace
 from collections.abc import AsyncIterator, Awaitable
 from contextlib import asynccontextmanager
 from http import HTTPStatus
-from typing import Annotated, Any
+from typing import Any
 
 import model_hosting_container_standards.sagemaker as sagemaker_standards
 import pydantic
 import uvloop
-from fastapi import APIRouter, Depends, FastAPI, Form, HTTPException, Request
+from fastapi import APIRouter, Depends, FastAPI, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse

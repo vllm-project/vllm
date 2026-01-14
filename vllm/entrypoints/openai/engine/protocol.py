@@ -5,12 +5,10 @@
 # https://github.com/lm-sys/FastChat/blob/168ccc29d3f7edc50823016105c024fe2282732a/fastchat/protocol/openai_api_protocol.py
 import json
 import time
-from http import HTTPStatus
 from typing import Annotated, Any, ClassVar, Literal, TypeAlias
 
 import regex as re
 import torch
-from fastapi import HTTPException, UploadFile
 from pydantic import (
     BaseModel,
     ConfigDict,
@@ -700,7 +698,6 @@ class DeltaMessage(OpenAIBaseModel):
         """Copy reasoning to reasoning_content for backward compatibility."""
         self.reasoning_content = self.reasoning
         return self
-
 
 
 ####### Tokens IN <> Tokens OUT #######
