@@ -3312,7 +3312,7 @@ class GPUModelRunner(
             use_spec_decode = len(scheduler_output.scheduled_spec_decode_tokens) > 0
             ubatch_slices_attn = ubatch_slices_padded if pad_attn else ubatch_slices
 
-            slot_mappings, slot_mappings_by_layer = self._get_slot_mappings(
+            slot_mappings_by_group, slot_mappings = self._get_slot_mappings(
                 num_tokens_padded=num_tokens_padded
                 if pad_attn or has_separate_kv_update
                 else num_tokens_unpadded,
@@ -3335,7 +3335,7 @@ class GPUModelRunner(
                     use_spec_decode=use_spec_decode,
                     num_scheduled_tokens=scheduler_output.num_scheduled_tokens,
                     cascade_attn_prefix_lens=cascade_attn_prefix_lens,
-                    slot_mappings=slot_mappings,
+                    slot_mappings=slot_mappings_by_group,
                 )
             )
 
@@ -3369,7 +3369,7 @@ class GPUModelRunner(
                 cudagraph_runtime_mode=cudagraph_mode,
                 batch_descriptor=batch_desc,
                 ubatch_slices=ubatch_slices_padded,
-                slot_mapping=slot_mappings_by_layer,
+                slot_mapping=slot_mappings,
             ),
             record_function_or_nullcontext("gpu_model_runner: forward"),
             self.maybe_get_kv_connector_output(scheduler_output) as kv_connector_output,
@@ -4449,7 +4449,7 @@ class GPUModelRunner(
 
         attn_metadata: PerLayerAttnMetadata | None = None
 
-        slot_mappings, slot_mappings_by_layer = self._get_slot_mappings(
+        slot_mappings_by_group, slot_mappings = self._get_slot_mappings(
             num_tokens_padded=num_tokens,
             num_reqs_padded=num_reqs_padded,
             num_tokens_unpadded=num_tokens_unpadded,
@@ -4481,7 +4481,7 @@ class GPUModelRunner(
                 max_query_len=max_query_len,
                 ubatch_slices=ubatch_slices_padded if pad_attn else ubatch_slices,
                 for_cudagraph_capture=is_graph_capturing,
-                slot_mappings=slot_mappings,
+                slot_mappings=slot_mappings_by_group,
             )
 
         with self.maybe_dummy_run_with_lora(
@@ -4550,7 +4550,7 @@ class GPUModelRunner(
                     cudagraph_runtime_mode=cudagraph_runtime_mode,
                     batch_descriptor=batch_desc,
                     ubatch_slices=ubatch_slices_padded,
-                    slot_mapping=slot_mappings_by_layer,
+                    slot_mapping=slot_mappings,
                 ),
             ):
                 outputs = self.model(
