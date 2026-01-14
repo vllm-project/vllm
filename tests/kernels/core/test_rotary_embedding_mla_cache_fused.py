@@ -147,8 +147,8 @@ def test_concat_and_cache_mla_rope_fused(
         query, ref_q_pe, atol=get_default_atol(query), rtol=get_default_rtol(query)
     )
     torch.testing.assert_close(
-        k_pe, ref_k_pe, atol=get_default_atol(k_pe),
-        rtol=get_default_rtol(k_pe))
+        k_pe, ref_k_pe, atol=get_default_atol(k_pe), rtol=get_default_rtol(k_pe)
+    )
 
     if kv_cache_dtype == "fp8":
         result_temp = torch.zeros_like(kv_cache, dtype=torch.float16)
@@ -164,6 +164,9 @@ def test_concat_and_cache_mla_rope_fused(
         )
         torch.testing.assert_close(result_temp, expected_temp, atol=0.001, rtol=0.1)
     else:
-        torch.testing.assert_close(kv_cache, ref_kv_cache,
-                atol=get_default_atol(kv_cache), rtol=get_default_rtol(kv_cache))
-
+        torch.testing.assert_close(
+            kv_cache,
+            ref_kv_cache,
+            atol=get_default_atol(kv_cache),
+            rtol=get_default_rtol(kv_cache),
+        )
