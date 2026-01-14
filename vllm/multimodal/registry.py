@@ -45,7 +45,7 @@ class ProcessingInfoFactory(Protocol[_I_co]):
 class DummyInputsBuilderFactory(Protocol[_I]):  # type: ignore[misc]
     """
     Constructs a
-    [`BaseDummyInputsBuilder`][vllm.multimodal.profiling.BaseDummyInputsBuilder]
+    [`BaseDummyInputsBuilder`][vllm.multimodal.processing.BaseDummyInputsBuilder]
     instance from the context.
     """
 
