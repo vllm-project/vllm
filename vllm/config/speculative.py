@@ -421,7 +421,7 @@ class SpeculativeConfig:
                         )
                         model_info, arch = (
                             self.draft_model_config.registry.inspect_model_cls(
-                                self.draft_model_config.architectures,
+                                self.draft_model_config.architecture,
                                 self.draft_model_config,
                             )
                         )
