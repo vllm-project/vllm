@@ -816,38 +816,21 @@ def unified_kv_cache_update(
     kv_cache = attn_layer.kv_cache[forward_context.virtual_engine]
 
     slot_mapping = forward_context.slot_mapping
-    if isinstance(slot_mapping, list):
-        ubatch_slices = forward_context.ubatch_slices
-        for i, slot_mapping_dict in enumerate(slot_mapping):
-            layer_slot_mapping = slot_mapping_dict.get(layer_name)
-            if layer_slot_mapping is not None:
-                assert hasattr(attn_layer.impl, "do_kv_cache_update"), (
-                    f"{attn_layer.impl.__class__.__name__} does not support "
-                    "kv cache update"
-                )
-                token_slice = ubatch_slices[i].token_slice
-                key_slice = key[token_slice] if key is not None else None
-                value_slice = value[token_slice] if value is not None else None
-                attn_layer.impl.do_kv_cache_update(
-                    attn_layer,
-                    key_slice,
-                    value_slice,
-                    kv_cache,
-                    layer_slot_mapping,
-                )
-    elif isinstance(slot_mapping, dict):
-        layer_slot_mapping = slot_mapping.get(layer_name)
-        if layer_slot_mapping is not None:
-            assert hasattr(attn_layer.impl, "do_kv_cache_update"), (
-                f"{attn_layer.impl.__class__.__name__} does not support kv cache update"
-            )
-            attn_layer.impl.do_kv_cache_update(
-                attn_layer,
-                key,
-                value,
-                kv_cache,
-                layer_slot_mapping,
-            )
+    assert isinstance(slot_mapping, dict), (
+        f"Expected slot_mapping to be a dict, got {type(slot_mapping)}. "
+    )
+    layer_slot_mapping = slot_mapping.get(layer_name)
+    if layer_slot_mapping is not None:
+        assert hasattr(attn_layer.impl, "do_kv_cache_update"), (
+            f"{attn_layer.impl.__class__.__name__} does not support kv cache update"
+        )
+        attn_layer.impl.do_kv_cache_update(
+            attn_layer,
+            key,
+            value,
+            kv_cache,
+            layer_slot_mapping,
+        )
 
     return torch.empty(0, device=kv_cache.device, dtype=kv_cache.dtype)
 
