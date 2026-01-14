@@ -1444,7 +1444,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_NVFP4_GEMM_BACKEND": env_with_choices(
         "VLLM_NVFP4_GEMM_BACKEND",
         None,
-        ["flashinfer-cudnn", "flashinfer-trtllm", "flashinfer-cutlass", "cutlass"],
+        [
+            "flashinfer-cudnn",
+            "flashinfer-trtllm",
+            "flashinfer-cutlass",
+            "cutlass",
+        ],
     ),
     # Controls garbage collection during CUDA graph capture.
     # If set to 0 (default), enables GC freezing to speed up capture time.
