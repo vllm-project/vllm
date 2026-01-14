@@ -1422,12 +1422,9 @@ class CompressedTensorsWNA16MarlinMoEMethod(CompressedTensorsMoEMethod):
                 is_k_full=self.is_k_full,
             )
         else:
-            max_num_tokens_per_rank = prepare_finalize.max_num_tokens_per_rank()
-            assert max_num_tokens_per_rank is not None
             return MarlinExperts(
+                moe_config=self.moe,
                 quant_config=self.moe_quant_config,
-                max_num_tokens=max_num_tokens_per_rank,  # type: ignore[call-arg]
-                num_dispatchers=prepare_finalize.num_dispatchers(),  # type: ignore[call-arg]
                 w13_g_idx=layer.w13_weight_g_idx,
                 w2_g_idx=layer.w2_weight_g_idx,
                 w13_g_idx_sort_indices=layer.w13_g_idx_sort_indices,
