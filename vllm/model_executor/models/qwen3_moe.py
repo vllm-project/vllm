@@ -637,6 +637,7 @@ class Qwen3MoeModel(nn.Module):
 class Qwen3MoeForCausalLM(
     nn.Module, SupportsPP, SupportsLoRA, SupportsEagle3, MixtureOfExperts
 ):
+    is_3d_moe_weight = True
     packed_modules_mapping = {
         "qkv_proj": [
             "q_proj",
