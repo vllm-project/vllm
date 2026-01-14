@@ -9,8 +9,8 @@ import pytest
 
 from vllm.config import ModelConfig
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.processing import (
-    InputProcessingContext,
+from vllm.multimodal.processing.context import InputProcessingContext
+from vllm.multimodal.processing.processor import (
     PlaceholderFeaturesInfo,
     PromptIndexTargets,
     PromptInsertion,

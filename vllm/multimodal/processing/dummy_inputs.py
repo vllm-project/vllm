@@ -3,7 +3,7 @@
 from abc import ABC, abstractmethod
 from collections.abc import Mapping
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Generic
+from typing import Generic, TypeVar
 
 import numpy as np
 import numpy.typing as npt
@@ -17,14 +17,10 @@ from vllm.config.multimodal import (
 )
 from vllm.logger import init_logger
 
-from .inputs import MultiModalDataDict
+from ..inputs import MultiModalDataDict
+from .context import BaseProcessingInfo
 
-if TYPE_CHECKING:
-    from .processing import _I
-else:
-    from typing import TypeVar
-
-    _I = TypeVar("_I")
+_I = TypeVar("_I", bound=BaseProcessingInfo)
 
 logger = init_logger(__name__)
 
