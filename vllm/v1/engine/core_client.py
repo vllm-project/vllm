@@ -1190,11 +1190,12 @@ class DPAsyncMPClient(AsyncMPClient):
     def get_engine_index_for_request(self, request_id: str) -> int:
         # DPAsyncMPClient always uses self.core_engine regardless of request_id
         # Find the index of self.core_engine in self.core_engines
-        try:
-            return self.core_engines.index(self.core_engine)
-        except ValueError as e:
-            engine_rank = int.from_bytes(self.core_engine, "little")
-            raise ValueError(f"Engine {engine_rank} not found in core_engines") from e
+        # core_engine is always core_engines[0] by design
+        assert self.core_engine in self.core_engines, (
+            f"Engine {int.from_bytes(self.core_engine, 'little')} "
+            "not found in core_engines"
+        )
+        return self.core_engines.index(self.core_engine)
 
 
 class DPLBAsyncMPClient(DPAsyncMPClient):
@@ -1260,7 +1261,10 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
         # Find the chosen_engine using self.reqs_in_flight
         chosen_engine = self.reqs_in_flight.get(request_id)
         if chosen_engine is None:
-            raise ValueError(f"Request ID {request_id} not found in reqs_in_flight")
+            raise ValueError(
+                f"Request ID {request_id} not found in reqs_in_flight "
+                "(perhaps request is already completed)"
+            )
         # Look for chosen_engine in self.core_engines and return the found index.
         try:
             return self.core_engines.index(chosen_engine)
@@ -1268,7 +1272,7 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
             engine_rank = int.from_bytes(chosen_engine, "little")
             raise ValueError(
                 f"Engine {engine_rank} not found in core_engines "
-                f"for request {request_id}"
+                f"for request {request_id} (perhaps engine is scaled down)"
             ) from e
 
     async def call_utility_async(self, method: str, *args) -> Any:
