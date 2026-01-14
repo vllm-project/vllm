@@ -1,4 +1,7 @@
 import itertools
+
+import pytest
+
 from vllm.logprobs import FlatLogprobs, Logprob
 
 
@@ -67,17 +70,11 @@ def test_flat_logprobs_out_of_range_index():
     f.append(None)
     f.append_fast([1], [0.0], itertools.chain((1,), (1,)), ["x"])
     # positive out of range
-    try:
+    with pytest.raises(IndexError, match="FlatLogprobs index out of range"):
         _ = f[10]
-        raise AssertionError("Expected IndexError for out-of-range positive index")
-    except IndexError:
-        pass
     # negative out of range
-    try:
+    with pytest.raises(IndexError, match="FlatLogprobs index out of range"):
         _ = f[-10]
-        raise AssertionError("Expected IndexError for out-of-range negative index")
-    except IndexError:
-        pass
 
 
 def test_flat_logprobs_large_data_performance():
