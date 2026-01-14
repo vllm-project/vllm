@@ -121,11 +121,18 @@ async def transfer_run_periodically(
                 and model_state.layer_to_transfer < current_num_layers
             ):
                 if not model_state.ep_buffer_ready and model_state.rebalanced:
-                    await asyncio.to_thread(model_state.buffer_lock.acquire)
+                    # Polling the lock directly in the async thread avoids
+                    # the thread switch overhead of asyncio.to_thread.
+                    # This is typically faster than offloading to a worker thread.
+                    while not model_state.buffer_lock.acquire(blocking=False):
+                        await asyncio.sleep(0)
                     try:
                         if model_state.layer_to_transfer >= current_num_layers:
                             break
-                        if not rebalancing_algorithm_executed:
+                        if (
+                            not rebalancing_algorithm_executed
+                            or model_state.new_physical_to_logical_map is None
+                        ):
                             run_rebalance_experts(model_state, state)
                             rebalancing_algorithm_executed = True
                         assert model_state.new_physical_to_logical_map is not None

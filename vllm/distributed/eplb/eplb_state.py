@@ -670,20 +670,6 @@ class EplbState:
                         ep_group=ep_group,
                         is_profile=is_profile,
                     )
-                    if (
-                        eplb_model_state.layer_to_transfer
-                        >= eplb_model_state.model.num_moe_layers
-                    ):
-                        self.post_eplb(eplb_model_state, is_profile)
-                        eplb_model_state.rebalanced = False
-                        eplb_model_state.layer_to_transfer = 0
-                        eplb_model_state.pending_global_ready_check = False
-                        logger.info(
-                            "finish async transfer for model %s rank %d layer %d",
-                            eplb_model_state.model_name,
-                            ep_group.rank(),
-                            eplb_model_state.model.num_moe_layers,
-                        )
 
         if self.expert_rearrangement_step >= self.expert_rearrangement_step_interval:
             if self.is_async and any(
@@ -1032,6 +1018,18 @@ class EplbState:
                 model_state.model_name,
                 transferred_layer,
             )
+            if model_state.layer_to_transfer >= model_state.model.num_moe_layers:
+                self.post_eplb(model_state, is_profile)
+                model_state.rebalanced = False
+                model_state.layer_to_transfer = 0
+                model_state.pending_global_ready_check = False
+                logger.info(
+                    "finish async transfer for model %s rank %d layer %d",
+                    model_state.model_name,
+                    ep_group.rank(),
+                    model_state.model.num_moe_layers,
+                )
+
         finally:
             try:
                 model_state.buffer_lock.release()
