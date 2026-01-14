@@ -176,6 +176,7 @@ def select_fp8_moe_backend(
         Fp8MoeBackend.MARLIN,
     ]
 
+    # Handle explicit FlashInfer FP8 configuration.
     if envs.is_set("VLLM_USE_FLASHINFER_MOE_FP8"):
         if not envs.VLLM_USE_FLASHINFER_MOE_FP8:
             # If the user rejects FlashInfer remove those backends.
@@ -226,7 +227,8 @@ def select_fp8_moe_backend(
                 "FlashInfer FP8 MoE backend supports the configuration."
             )
 
-    elif envs.is_set("VLLM_USE_DEEP_GEMM") or envs.is_set("VLLM_MOE_USE_DEEP_GEMM"):
+    # Handle explicit DeepGEMM FP8 configuration.
+    if envs.is_set("VLLM_USE_DEEP_GEMM") or envs.is_set("VLLM_MOE_USE_DEEP_GEMM"):
         if not envs.VLLM_USE_DEEP_GEMM or not envs.VLLM_MOE_USE_DEEP_GEMM:
             AVAILABLE_BACKENDS.remove(Fp8MoeBackend.DEEPGEMM)
         else:
@@ -237,11 +239,13 @@ def select_fp8_moe_backend(
             )
             return _return_or_raise(backend, config, quant_scheme, activation_format)
 
-    elif envs.VLLM_TEST_FORCE_FP8_MARLIN:
+    # Handle explicit MARLIN FP8 configuration.
+    if envs.VLLM_TEST_FORCE_FP8_MARLIN:
         backend = Fp8MoeBackend.MARLIN
         return _return_or_raise(backend, config, quant_scheme, activation_format)
 
-    elif envs.is_set("VLLM_ROCM_USE_AITER") or envs.is_set("VLLM_ROCM_USE_AITER_MOE"):
+    # Handle explicit AITER FP8 configuration.
+    if envs.is_set("VLLM_ROCM_USE_AITER") or envs.is_set("VLLM_ROCM_USE_AITER_MOE"):
         if not envs.VLLM_ROCM_USE_AITER or not envs.VLLM_ROCM_USE_AITER_MOE:
             AVAILABLE_BACKENDS.remove(Fp8MoeBackend.AITER)
         else:
