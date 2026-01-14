@@ -124,9 +124,7 @@ def test_models(
     model_info.check_available_online(on_fail="skip")
     model_info.check_transformers_version(on_fail="skip")
 
-    if use_rocm_aiter and (model in AITER_MODEL_LIST):
-        monkeypatch.setenv("VLLM_ROCM_USE_AITER", "1")
-    elif use_rocm_aiter and model not in AITER_MODEL_LIST:
+    if use_rocm_aiter and model not in AITER_MODEL_LIST:
         # Skip model that are not using AITER tests.
         # When more AITER kernels are added, this list will not be
         # needed as all the models will be calling AITER kernels
@@ -155,6 +153,10 @@ def test_models(
 
                 prompt_embeds.append(embed.squeeze(0))
 
+    rocm_kwargs = {}
+    if use_rocm_aiter:
+        rocm_kwargs["attention_backend"] = "ROCM_AITER_FA"
+
     with vllm_runner(
         model,
         tokenizer_name=model_info.tokenizer or model,
@@ -162,6 +164,7 @@ def test_models(
         trust_remote_code=model_info.trust_remote_code,
         max_num_seqs=2,
         enable_prompt_embeds=use_prompt_embeds,
+        **rocm_kwargs,
     ) as vllm_model:
         vllm_outputs = vllm_model.generate_greedy_logprobs(
             example_prompts, max_tokens, num_logprobs
