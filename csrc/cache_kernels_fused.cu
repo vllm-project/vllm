@@ -41,8 +41,6 @@ __global__ void concat_and_cache_mla_rope_fused_kernel(
   // Each thread block is responsible for one token.
   const int64_t token_idx = blockIdx.x;
   const int64_t pos = positions[token_idx];
-  //printf("HELLO FROM KERNEL:threadIdx.x=%d, blockIdx.x=%d\n",
-      //threadIdx.x, blockIdx.x);
 
   const qk_t* cos_sin_ptr = rope_cos_sin_cache + pos * rot_dim;
 
@@ -50,14 +48,6 @@ __global__ void concat_and_cache_mla_rope_fused_kernel(
 
   // Q ROPE
   const int nq = num_q_heads * embed_dim;
-  if (blockIdx.x == 0 && threadIdx.x == 0) {
-    printf("rot_dim=%d\n",rot_dim);
-    printf("num_q_heads=%d\n",num_q_heads);
-    printf("block_stride=%d\n",block_stride);
-    printf("block_size=%d\n",block_size);
-    printf("kv_lora_rank=%d\n",kv_lora_rank);
-    printf("blockDim.x=%d\n",blockDim.x);
-  }
   for (int i = threadIdx.x; i < nq; i += blockDim.x) {
     int head_idx = i / embed_dim;
     int pair_idx = i % embed_dim;
@@ -84,14 +74,8 @@ __global__ void concat_and_cache_mla_rope_fused_kernel(
     qk_t x_src = q_pe_head_ptr[pair_idx_x];
     qk_t y_src = q_pe_head_ptr[pair_idx_y];
 
-    //qk_t x_dst = static_cast<float>(x_src) * cos - static_cast<float>(y_src) * sin;
-    //qk_t y_dst = static_cast<float>(y_src) * cos + static_cast<float>(x_src) * sin;
     qk_t x_dst = x_src * cos - y_src * sin;
     qk_t y_dst = y_src * cos + x_src * sin;
-    //if (blockIdx.x == 0 && threadIdx.x == 0) {
-      //printf("Q rope:i=%d, x=%2.3f, y=%2.3f\n", i, static_cast<float>(x_dst),
-          //static_cast<float>(y_dst));
-    //}
 
     q_pe_head_ptr[pair_idx_x] = x_dst;
     q_pe_head_ptr[pair_idx_y] = y_dst;
@@ -129,15 +113,8 @@ __global__ void concat_and_cache_mla_rope_fused_kernel(
     qk_t x_src = k_pe_head_ptr[pair_idx_x];
     qk_t y_src = k_pe_head_ptr[pair_idx_y];
 
-    //qk_t x_dst = static_cast<float>(x_src) * cos - static_cast<float>(y_src) * sin;
-    //qk_t y_dst = static_cast<float>(y_src) * cos + static_cast<float>(x_src) * sin;
     qk_t x_dst = x_src * cos - y_src * sin;
     qk_t y_dst = y_src * cos + x_src * sin;
-    if (blockIdx.x == 0 && threadIdx.x == 0) {
-      printf("K rope:i=%d, x=%2.3f, y=%2.3f\n", i, static_cast<float>(x_dst),
-          static_cast<float>(y_dst));
-    }
-
 
     k_pe_head_ptr[pair_idx_x] = x_dst;
     k_pe_head_ptr[pair_idx_y] = y_dst;
