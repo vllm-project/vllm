@@ -312,9 +312,6 @@ class Worker(WorkerBase):
             logger.info(msg)
             return kv_cache_memory_bytes
 
-        torch.cuda.empty_cache()
-        torch.cuda.reset_peak_memory_stats()
-
         # Execute a forward pass with dummy inputs to profile the memory usage
         # of the model.
         with memory_profiling(
@@ -360,7 +357,6 @@ class Worker(WorkerBase):
             format_gib(self.available_kv_cache_memory_bytes),
             scope="local",
         )
-        gc.collect()
 
         return int(self.available_kv_cache_memory_bytes)
 
