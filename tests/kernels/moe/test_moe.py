@@ -1161,7 +1161,6 @@ def test_batched_moe_align_block_size_opcheck():
 @pytest.mark.parametrize("topk", TOP_KS)
 @pytest.mark.parametrize("k", [128, 511, 1024])
 @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
-@pytest.mark.skipif(current_platform.is_rocm(), reason="Skip for rocm")
 def test_moe_sum(m: int, topk: int, k: int, dtype: torch.dtype):
     input = torch.randn((m, topk, k), device="cuda", dtype=dtype)
     actual = torch.empty((m, k), device="cuda", dtype=dtype)
