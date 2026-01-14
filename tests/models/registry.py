@@ -887,6 +887,10 @@ _MULTIMODAL_EXAMPLE_MODELS = {
         # required by current PrefixLM implementation
         max_num_batched_tokens=31872,
     ),
+    "Moondream3ForCausalLM": _HfExamplesInfo(
+        "moondream/moondream3-preview",
+        trust_remote_code=True,
+    ),
     "NVLM_D": _HfExamplesInfo("nvidia/NVLM-D-72B", trust_remote_code=True),
     "Llama_Nemotron_Nano_VL": _HfExamplesInfo(
         "nvidia/Llama-3.1-Nemotron-Nano-VL-8B-V1",

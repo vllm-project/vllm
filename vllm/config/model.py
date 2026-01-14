@@ -1126,6 +1126,7 @@ class ModelConfig:
             "gemma3",
             "molmo2",
             "paligemma",
+            "moondream3",
         )
         if not hasattr(self.hf_config, "model_type"):
             return False

@@ -418,6 +418,8 @@ _MULTIMODAL_MODELS = {
     ),
     "MolmoForCausalLM": ("molmo", "MolmoForCausalLM"),
     "Molmo2ForConditionalGeneration": ("molmo2", "Molmo2ForConditionalGeneration"),
+    "Moondream3ForCausalLM": ("moondream3", "Moondream3ForCausalLM"),
+    "HfMoondream": ("moondream3", "Moondream3ForCausalLM"),
     "NVLM_D": ("nvlm_d", "NVLM_D_Model"),
     "OpenPanguVLForConditionalGeneration": (
         "openpangu_vl",
