@@ -35,23 +35,17 @@ from openai.types.responses import (
     ResponseCompletedEvent as OpenAIResponseCompletedEvent,
 )
 from openai.types.responses import ResponseCreatedEvent as OpenAIResponseCreatedEvent
+from openai.types.responses import ResponseFormatTextConfig as ResponseTextConfig
 from openai.types.responses import (
     ResponseInProgressEvent as OpenAIResponseInProgressEvent,
 )
-from openai.types.responses.tool import Tool
-from openai_harmony import Message as OpenAIHarmonyMessage
-
-# Backward compatibility for OpenAI client versions
-try:  # For older openai versions (< 1.100.0)
-    from openai.types.responses import ResponseTextConfig
-except ImportError:  # For newer openai versions (>= 1.100.0)
-    from openai.types.responses import ResponseFormatTextConfig as ResponseTextConfig
-
 from openai.types.responses.response import IncompleteDetails, ToolChoice
 from openai.types.responses.response_reasoning_item import (
     Content as ResponseReasoningTextContent,
 )
+from openai.types.responses.tool import Tool
 from openai.types.shared import Metadata, Reasoning
+from openai_harmony import Message as OpenAIHarmonyMessage
 from pydantic import (
     Field,
     ValidationError,
