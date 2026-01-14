@@ -193,16 +193,16 @@ def group_broadcast(t, shape):
 
 def prep_scale_for_group_broadcast(
     scale: torch.Tensor,
-    group_shape: GroupShape,
     x: torch.Tensor,
+    group_shape: GroupShape | None,
 ) -> torch.Tensor:
     """
     Prepare the input quantization scale for group broadcasting.
 
     Args:
         scale: The scale tensor (scalar or 1D).
-        group_shape: GroupShape to broadcast over.
         x: Target tensor whose shape determines broadcast dimensions.
+        group_shape: GroupShape to broadcast over.
 
     Returns:
         scale reshaped for correct broadcasting.
@@ -214,16 +214,16 @@ def prep_scale_for_group_broadcast(
         assert group_shape is not None, (
             "group_shape must be provided to correctly broadcast 1D scale"
         )
-        group_shape = _normalize_quant_group_shape(x, group_shape)
+        rows, cols = _normalize_quant_group_shape(x, group_shape)
         # Determine broadcasting dimension: either rows or columns match group size
-        if group_shape[0] == x.shape[-2]:
+        if rows == x.shape[-2]:
             scale = scale.unsqueeze(-2)
-        elif group_shape[1] == x.shape[-1]:
+        elif cols == x.shape[-1]:
             scale = scale.unsqueeze(-1)
         else:
             raise ValueError(
-                f"1D scale with shape {scale.shape} cannot be broadcast to x with shape "
-                f"{x.shape}, group_shape={group_shape}"
+                f"1D scale with shape {scale.shape} cannot be broadcast to x with shape"
+                f" {x.shape}, group_shape={(rows, cols)}"
             )
         return scale
     raise ValueError(f"scale must be a scalar or 1D tensor, got {scale.shape}")
@@ -299,7 +299,7 @@ def scaled_dequantize(
     group_shape: GroupShape | None = None,
     out_dtype: torch.dtype = torch.float32,
 ) -> torch.Tensor:
-    x_s = prep_scale_for_group_broadcast(x_s, group_shape, x_q)
+    x_s = prep_scale_for_group_broadcast(x_s, x_q, group_shape)
     if group_shape is not None:
         assert x_s.shape[-1] == x_q.shape[-1] // group_shape[1]
         assert x_s.shape[-2] == x_q.shape[-2] // group_shape[0]
