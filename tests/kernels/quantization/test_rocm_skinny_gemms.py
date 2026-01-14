@@ -12,6 +12,7 @@ from vllm.platforms.rocm import on_gfx950
 from vllm.utils.platform_utils import get_cu_count
 
 DTYPES = [torch.bfloat16, torch.float16]
+BIAS_MODES = [0, 1, 2]
 # Specific (N, K, M) combinations for targeted testing
 NKM_FACTORS_LLMM1 = [
     # Small, medium, large cases
@@ -89,16 +90,22 @@ SEEDS = [0]
 @pytest.mark.parametrize("n,k,m", NKM_FACTORS_WVSPLITKRC)
 @pytest.mark.parametrize("dtype", DTYPES)
 @pytest.mark.parametrize("seed", SEEDS)
+@pytest.mark.parametrize("bias_mode", BIAS_MODES)
 @pytest.mark.skipif(not current_platform.is_rocm(), reason="only test for rocm")
 @pytest.mark.skipif(not on_gfx950(), reason="only meant for gfx950")
-def test_rocm_wvsplitkrc_bias2D_kernel(n, k, m, dtype, seed):
+def test_rocm_wvsplitkrc_kernel(n, k, m, dtype, seed, bias_mode):
     torch.manual_seed(seed)
     cu_count = get_cu_count()
 
     xavier = math.sqrt(2 / k)  # normalize to avoid large output-bias deltas
     A = (torch.rand(n, k, dtype=dtype, device="cuda") - 0.5) * xavier
     B = (torch.rand(m, k, dtype=dtype, device="cuda") - 0.5) * xavier
-    BIAS = torch.rand(n, m, dtype=dtype, device="cuda") - 0.5
+
+    BIAS = None
+    if bias_mode == 1:
+        BIAS = torch.rand(m, dtype=dtype, device="cuda") - 0.5
+    elif bias_mode == 2:
+        BIAS = torch.rand(n, m, dtype=dtype, device="cuda") - 0.5
 
     ref_out = torch.nn.functional.linear(A, B, BIAS)
     out = ops.wvSplitKrc(B, A.view(-1, A.size(-1)), cu_count, BIAS)

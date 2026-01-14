@@ -1722,7 +1722,7 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
           }
         int nindx_ = (0 + (threadIdx.x / 16) * 4) + 0 * NTILE +
                      (N / GrpsShrB) * (threadIdx.y % GrpsShrB);
-        int adr_ = mindx + M * nindx_;
+        int adr_ = mindx + M * nindx_ / 4;
         my_cntr = atomicAdd(&cntr[adr_], 1);
         float vals[N / NTILE / GrpsShrB][4] = {};
         if (my_cntr + 1 == k_rnd) {
@@ -1842,7 +1842,7 @@ torch::Tensor wvSplitKrc(const at::Tensor& in_a, const at::Tensor& in_b,
 
   auto N_p2 = 1U << (32 - __builtin_clz(N_in - 1));
   auto axl_glbl = torch::empty(
-      {N_p2 + N_p2 / 2, M_in + (M_in + 1) / 2},
+      {N_p2 + N_p2 / 4, M_in + M_in / 4},
       torch::TensorOptions().dtype(torch::kFloat32).device(in_b.device()));
   axl_glbl.zero_();  // disable for FAST_UNSAFE_RDC_INIT
 
