@@ -50,6 +50,7 @@ from .parse import (
     MultiModalDataItems,
     MultiModalDataParser,
 )
+from .profiling import BaseDummyInputsBuilder
 
 if TYPE_CHECKING:
     from transformers.configuration_utils import PretrainedConfig
@@ -59,7 +60,6 @@ if TYPE_CHECKING:
     from vllm.config import ModelConfig, ObservabilityConfig
 
     from .cache import BaseMultiModalProcessorCache
-    from .profiling import BaseDummyInputsBuilder
 else:
     PretrainedConfig = object
     BatchFeature = object
@@ -383,6 +383,21 @@ class PromptUpdateDetails(Generic[_S]):
             token_ids = _seq2tokens(tokenizer, full)
 
             return torch.tensor(token_ids) == embed_token_id
+
+        return PromptUpdateDetails(full=seq, is_embed=is_embed)
+
+    @staticmethod
+    def select_token_ids(
+        seq: _S,
+        embed_token_ids: list[int],
+    ) -> "PromptUpdateDetails[_S]":
+        def is_embed(tokenizer: TokenizerLike | None, full: PromptSeq) -> torch.Tensor:
+            token_ids = _seq2tokens(tokenizer, full)
+
+            return torch.isin(
+                torch.tensor(token_ids),
+                torch.tensor(embed_token_ids),
+            )
 
         return PromptUpdateDetails(full=seq, is_embed=is_embed)
 
@@ -1396,6 +1411,10 @@ class BaseProcessingInfo:
         """
         return self.ctx.get_hf_processor(**kwargs)
 
+    @property
+    def skip_prompt_length_check(self) -> bool:
+        return False
+
     @abstractmethod
     def get_supported_mm_limits(self) -> Mapping[str, int | None]:
         """
@@ -2402,10 +2421,6 @@ class EncDecMultiModalProcessor(BaseMultiModalProcessor[_I]):
         this prompt during profiling and generation.
         """
         raise NotImplementedError
-
-    @property
-    def pad_dummy_encoder_prompt(self) -> bool:
-        return False
 
     def create_decoder_prompt(
         self,
