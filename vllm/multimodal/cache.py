@@ -34,7 +34,7 @@ from .inputs import (
 if TYPE_CHECKING:
     from vllm.config import ModelConfig, VllmConfig
 
-    from .processing import ResolvedPromptUpdate
+    from .processing.processor import ResolvedPromptUpdate
     from .registry import MultiModalRegistry
 
 logger = init_logger(__name__)
