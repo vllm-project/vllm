@@ -1,8 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-
-"""Integration tests for SLO management functionality."""
-
 import pytest
 from unittest.mock import AsyncMock, Mock, patch
 from vllm.config import VllmConfig, SchedulerConfig, ModelConfig
@@ -273,6 +270,3 @@ async def test_default_tier_value():
         # tier parameter not specified - should default to 1.0
     )
 
-
-if __name__ == "__main__":
-    pytest.main([__file__, "-v", "-s"])
