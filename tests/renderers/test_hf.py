@@ -5,7 +5,7 @@ import pytest
 
 from vllm.config import ModelConfig
 from vllm.entrypoints.chat_utils import load_chat_template
-from vllm.entrypoints.openai.protocol import ChatCompletionRequest
+from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
 from vllm.renderers.hf import (
     _get_hf_base_chat_template_params,
     _try_extract_ast,

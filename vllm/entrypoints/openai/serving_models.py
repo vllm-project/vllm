@@ -7,13 +7,15 @@ from dataclasses import dataclass
 from http import HTTPStatus
 
 from vllm.engine.protocol import EngineClient
-from vllm.entrypoints.openai.protocol import (
+from vllm.entrypoints.openai.engine.protocol import (
     ErrorInfo,
     ErrorResponse,
-    LoadLoRAAdapterRequest,
     ModelCard,
     ModelList,
     ModelPermission,
+)
+from vllm.entrypoints.serve.lora.protocol import (
+    LoadLoRAAdapterRequest,
     UnloadLoRAAdapterRequest,
 )
 from vllm.logger import init_logger
