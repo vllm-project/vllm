@@ -176,7 +176,7 @@ def _get_open_ports(ports_to_try: Iterable[int] = (0,), max_count: int = 1) -> s
 
     return open_ports
 
-
+_requested_ports_count = 0
 def get_open_ports_list(count: int = 5) -> list[int]:
     """
     Finds `count` open ports.
@@ -187,12 +187,13 @@ def get_open_ports_list(count: int = 5) -> list[int]:
 
     Raises OSError if less than `count` open ports have been found.
     """
+    global _requested_ports_count
     starting_port = 0
     if "VLLM_DP_MASTER_PORT" in os.environ:
-        starting_port = envs.VLLM_DP_MASTER_PORT
+        starting_port = envs.VLLM_DP_MASTER_PORT + _requested_ports_count
     elif "VLLM_PORT" in os.environ:
         assert envs.VLLM_PORT is not None
-        starting_port = envs.VLLM_PORT
+        starting_port = envs.VLLM_PORT + _requested_ports_count
 
     # give ourselves some room for failure / already taken ports
     candidate_ports = max(2 * count, 10)
@@ -214,7 +215,7 @@ def get_open_ports_list(count: int = 5) -> list[int]:
                 f"[{starting_port}, {starting_port + candidate_ports})"
             )
         raise OSError(err)
-
+    _requested_ports_count += len(open_ports)
     return list(open_ports)
 
 
