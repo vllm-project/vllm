@@ -43,7 +43,6 @@ from vllm.model_executor.models.deepseek_mtp import (
 from vllm.model_executor.models.utils import maybe_prefix
 from vllm.sequence import IntermediateTensors
 
-from .interfaces import SupportsPP
 from .openpangu import OpenPanguDecoderLayer
 
 
@@ -92,7 +91,7 @@ class OpenPanguMultiTokenPredictor(DeepSeekMultiTokenPredictor):
 
 
 @support_torch_compile
-class OpenPanguMTP(nn.Module, SupportsPP):
+class OpenPanguMTP(nn.Module):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
         self.config = vllm_config.model_config.hf_config
@@ -100,8 +99,8 @@ class OpenPanguMTP(nn.Module, SupportsPP):
             vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model")
         )
 
-    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
-        return self.model.get_input_embeddings(input_ids)
+    def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
+        return self.model.embed_input_ids(input_ids)
 
     def forward(
         self,
@@ -149,6 +148,7 @@ class OpenPanguMTP(nn.Module, SupportsPP):
         ]
 
         expert_params_mapping = FusedMoE.make_expert_params_mapping(
+            self,
             ckpt_gate_proj_name="gate_proj",
             ckpt_down_proj_name="down_proj",
             ckpt_up_proj_name="up_proj",

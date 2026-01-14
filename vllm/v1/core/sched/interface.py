@@ -85,11 +85,27 @@ class SchedulerInterface(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    def update_draft_token_ids(
-        self,
-        draft_token_ids: "DraftTokenIds",
+    def update_draft_token_ids(self, draft_token_ids: "DraftTokenIds") -> None:
+        """Update requests with newly generated draft token ids, applying
+        structured output grammar validation if needed.
+
+        Args:
+            draft_token_ids: The input draft token ids for each request.
+        """
+        raise NotImplementedError
+
+    @abstractmethod
+    def update_draft_token_ids_in_output(
+        self, draft_token_ids: "DraftTokenIds", scheduler_output: "SchedulerOutput"
     ) -> None:
-        """Update the draft token ids for the scheduled requests."""
+        """Update scheduler output with newly generated draft token ids, applying
+        structured output grammar validation if needed.
+
+        Args:
+            draft_token_ids: The input draft token ids for each request.
+            scheduler_output: Update the given scheduler_output
+                with the corresponding draft token ids.
+        """
         raise NotImplementedError
 
     @abstractmethod
@@ -152,10 +168,18 @@ class SchedulerInterface(ABC):
         return self.has_unfinished_requests() or self.has_finished_requests()
 
     @abstractmethod
-    def reset_prefix_cache(self) -> bool:
+    def reset_prefix_cache(
+        self, reset_running_requests: bool = False, reset_connector: bool = False
+    ) -> bool:
         """Reset the prefix cache for KV cache.
 
         This is particularly required when the model weights are live-updated.
+
+        Args:
+            reset_running_requests: If True, all the running requests will be
+                preempted and moved to the waiting queue. Otherwise, this method
+                will only reset the KV prefix cache when there is no running request
+                taking KV cache.
         """
         raise NotImplementedError
 

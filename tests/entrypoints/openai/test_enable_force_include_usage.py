@@ -8,7 +8,7 @@ from ...utils import RemoteOpenAIServer
 
 
 @pytest.fixture(scope="module")
-def chat_server_with_force_include_usage(request):  # noqa: F811
+def chat_server_with_force_include_usage(request):
     args = [
         # use half precision for speed and memory savings in CI environment
         "--dtype",
@@ -17,7 +17,7 @@ def chat_server_with_force_include_usage(request):  # noqa: F811
         "128",
         "--enforce-eager",
         "--max-num-seqs",
-        "1",
+        "4",
         "--enable-force-include-usage",
         "--port",
         "55857",
@@ -78,7 +78,7 @@ def transcription_server_with_force_include_usage():
         "--dtype",
         "bfloat16",
         "--max-num-seqs",
-        "1",
+        "4",
         "--enforce-eager",
         "--enable-force-include-usage",
         "--gpu-memory-utilization",

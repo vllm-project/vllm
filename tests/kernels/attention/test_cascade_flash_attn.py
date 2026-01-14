@@ -6,12 +6,21 @@ import pytest
 import torch
 
 from vllm.platforms import current_platform
+from vllm.utils.torch_utils import set_random_seed
 from vllm.v1.attention.backends.flash_attn import cascade_attention, merge_attn_states
-from vllm.vllm_flash_attn import (
-    fa_version_unsupported_reason,
-    flash_attn_varlen_func,
-    is_fa_version_supported,
-)
+
+try:
+    from vllm.vllm_flash_attn import (
+        fa_version_unsupported_reason,
+        flash_attn_varlen_func,
+        is_fa_version_supported,
+    )
+except ImportError:
+    if current_platform.is_rocm():
+        pytest.skip(
+            "vllm_flash_attn is not supported for vLLM on ROCm.",
+            allow_module_level=True,
+        )
 
 NUM_HEADS = [(4, 4), (8, 2), (16, 2)]
 HEAD_SIZES = [128, 192, 256]
@@ -31,7 +40,7 @@ def test_merge_kernel(
     dtype: torch.dtype,
 ):
     torch.set_default_device("cuda")
-    current_platform.seed_everything(0)
+    set_random_seed(0)
     num_query_heads = num_heads[0]
     num_kv_heads = num_heads[1]
     assert num_query_heads % num_kv_heads == 0
@@ -95,7 +104,7 @@ def test_cascade(
             f'to: "{fa_version_unsupported_reason(fa_version)}"'
         )
 
-    current_platform.seed_everything(0)
+    set_random_seed(0)
 
     window_size = (-1, -1)
     scale = head_size**-0.5
@@ -170,6 +179,7 @@ def test_cascade(
         logits_soft_cap=soft_cap if soft_cap is not None else 0,
         block_table=block_tables,
         common_prefix_len=common_prefix_len,
+        max_num_splits=0,  # no max
         fa_version=fa_version,
     )
 
