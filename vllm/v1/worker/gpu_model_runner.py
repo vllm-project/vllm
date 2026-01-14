@@ -96,7 +96,6 @@ from vllm.utils.platform_utils import is_pin_memory_available
 from vllm.utils.torch_utils import (
     get_dtype_size,
     kv_cache_dtype_str_to_dtype,
-    supports_dynamo,
 )
 from vllm.v1.attention.backend import (
     AttentionBackend,
@@ -3944,7 +3943,6 @@ class GPUModelRunner(
         if (
             self.vllm_config.compilation_config.mode
             == CompilationMode.STOCK_TORCH_COMPILE
-            and supports_dynamo()
         ):
             backend = self.vllm_config.compilation_config.init_backend(self.vllm_config)
             compilation_counter.stock_torch_compile_count += 1
