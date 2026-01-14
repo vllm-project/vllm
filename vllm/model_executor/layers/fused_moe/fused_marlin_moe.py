@@ -29,6 +29,7 @@ from vllm.model_executor.layers.quantization.utils.marlin_utils import (
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
+    kFp8Static128BlockSym,
     kFp8StaticChannelSym,
     kNvfp4Quant,
 )
@@ -575,17 +576,10 @@ class MarlinExpertsBase(mk.FusedMoEPermuteExpertsUnpermute):
         weight_key: QuantKey | None,
         activation_key: QuantKey | None,
     ) -> bool:
-        # return quant_scheme.weight_dtype in [
-        #     current_platform.fp8_dtype(),
-        #     torch.int8,
-        #     "int4",
-        #     "nvfp4",
-        #     "mxfp4",
-        # ]
-
-        # NOTE: Marlin runs activations unquantized, so
-        # it can run all activation formats.
+        # TODO(rob): add int4, mxfp4, int8 as integrations
+        # are migrated to use the oracle one-by-one.
         SUPPORTED_W = [
+            kFp8Static128BlockSym,
             kFp8StaticChannelSym,
             kNvfp4Quant,
         ]

@@ -35,30 +35,45 @@ class TritonOrCutlassExperts(FallbackExperts):
 
     @staticmethod
     def activation_format() -> mk.FusedMoEActivationFormat:
+        assert (
+            CutlassExpertsFp8.activation_format() == TritonExperts.activation_format()
+        )
         return CutlassExpertsFp8.activation_format()
 
     @staticmethod
     def _supports_current_device() -> bool:
-        return CutlassExpertsFp8._supports_current_device()
+        return (
+            CutlassExpertsFp8._supports_current_device()
+            and TritonExperts._supports_current_device()
+        )
 
     @staticmethod
     def _supports_no_act_and_mul() -> bool:
-        return CutlassExpertsFp8._supports_no_act_and_mul()
+        return (
+            CutlassExpertsFp8._supports_no_act_and_mul()
+            and TritonExperts._supports_no_act_and_mul()
+        )
 
     @staticmethod
     def _supports_quant_scheme(
         weight_key: QuantKey | None,
         activation_key: QuantKey | None,
     ) -> bool:
-        return CutlassExpertsFp8._supports_quant_scheme(weight_key, activation_key)
+        return CutlassExpertsFp8._supports_quant_scheme(
+            weight_key, activation_key
+        ) and TritonExperts._supports_quant_scheme(weight_key, activation_key)
 
     @staticmethod
     def _supports_activation(activation: str) -> bool:
-        return CutlassExpertsFp8._supports_activation(activation)
+        return CutlassExpertsFp8._supports_activation(
+            activation
+        ) and TritonExperts._supports_activation(activation)
 
     @staticmethod
     def _supports_parallel_config(moe_parallel_config: FusedMoEParallelConfig) -> bool:
-        return CutlassExpertsFp8._supports_parallel_config(moe_parallel_config)
+        return CutlassExpertsFp8._supports_parallel_config(
+            moe_parallel_config
+        ) and TritonExperts._supports_parallel_config(moe_parallel_config)
 
     def workspace_shapes(
         self,

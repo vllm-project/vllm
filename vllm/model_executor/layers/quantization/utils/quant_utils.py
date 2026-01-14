@@ -20,7 +20,6 @@ if TYPE_CHECKING:
 
 FP8_DTYPE = current_platform.fp8_dtype()
 FP4_DTYPE = torch.uint8
-INT4_DTYPE = torch.int32
 
 
 def get_fp8_min_max() -> tuple[float, float]:

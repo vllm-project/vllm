@@ -106,11 +106,11 @@ class FlashInferExperts(mk.FusedMoEPermuteExpertsUnpermute):
         weight_key: QuantKey | None,
         activation_key: QuantKey | None,
     ) -> bool:
-        # Supports:
-        # * unquantized
-        # * fp8 static per-tensor on 9.0+
-        # * fp8 block on 9.0
-        # * nvfp4 on 10.0+
+        # The following are supported by FlashInferExperts:
+        #   * unquantized
+        #   * fp8 static per-tensor on 9.0+
+        #   * fp8 block on 9.0
+        #   * nvfp4 on 10.0+
 
         p = current_platform
         scheme = (weight_key, activation_key)

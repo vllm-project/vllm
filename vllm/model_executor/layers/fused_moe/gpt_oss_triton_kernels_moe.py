@@ -19,7 +19,6 @@ from vllm.model_executor.layers.fused_moe.utils import _resize_cache
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
 )
-from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.utils.import_utils import has_triton_kernels
 
@@ -248,27 +247,41 @@ def make_routing_data(
 class BaseOAITritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
     @staticmethod
     def _supports_current_device() -> bool:
-        p = current_platform
-        return (p.is_cuda() and p.has_device_capability((9, 0))) or p.is_rocm()
+        raise NotImplementedError(
+            "OAITritonExperts is not yet used by an Oracle. "
+            "This method should not be called."
+        )
 
     @staticmethod
     def _supports_no_act_and_mul() -> bool:
-        return False
+        raise NotImplementedError(
+            "OAITritonExperts is not yet used by an Oracle. "
+            "This method should not be called."
+        )
 
     @staticmethod
     def _supports_quant_scheme(
         weight_key: QuantKey | None,
         activation_key: QuantKey | None,
     ) -> bool:
-        return False
+        raise NotImplementedError(
+            "OAITritonExperts is not yet used by an Oracle. "
+            "This method should not be called."
+        )
 
     @staticmethod
     def _supports_activation(activation: str) -> bool:
-        return activation in ["swigluoai"]
+        raise NotImplementedError(
+            "OAITritonExperts is not yet used by an Oracle. "
+            "This method should not be called."
+        )
 
     @staticmethod
     def _supports_parallel_config(moe_parallel_config: FusedMoEParallelConfig) -> bool:
-        return True
+        raise NotImplementedError(
+            "OAITritonExperts is not yet used by an Oracle. "
+            "This method should not be called."
+        )
 
     def supports_expert_map(self) -> bool:
         return True

@@ -292,12 +292,8 @@ class BatchedDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
         weight_key: QuantKey | None,
         activation_key: QuantKey | None,
     ) -> bool:
-        if weight_key is None or activation_key is None:
-            return False
-
-        return (
-            weight_key == kFp8Dynamic128Sym and activation_key == kFp8Static128BlockSym
-        )
+        SUPPORTED_W_A = [(kFp8Static128BlockSym, kFp8Dynamic128Sym)]
+        return (weight_key, activation_key) in SUPPORTED_W_A
 
     @staticmethod
     def _supports_activation(activation: str) -> bool:
