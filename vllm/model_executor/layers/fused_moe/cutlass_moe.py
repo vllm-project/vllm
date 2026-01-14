@@ -2,8 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """CUTLASS based Fused MoE kernels."""
 
-from collections.abc import Callable
-
 import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
@@ -36,7 +34,7 @@ def run_cutlass_moe_fp8(
     w1: torch.Tensor,
     w2: torch.Tensor,
     topk_ids: torch.Tensor,
-    activation_callable: Callable,
+    activation: str,
     global_num_experts: int,
     expert_map: torch.Tensor | None,
     w1_scale: torch.Tensor | None,
@@ -58,6 +56,7 @@ def run_cutlass_moe_fp8(
 ):
     a1q = hidden_states
 
+    assert not activation.endswith("_no_mul"), "Only gated activation is supported"
     assert w1_scale is not None
     assert w2_scale is not None
     assert w1.dtype == torch.float8_e4m3fn
@@ -201,7 +200,7 @@ def run_cutlass_moe_fp8(
         per_out_ch,
     )
 
-    activation_callable(act_out, mm1_out)
+    apply_moe_activation(activation, act_out, mm1_out)
 
     a2q, a2q_scale = ops.scaled_fp8_quant(
         act_out, a2_scale, use_per_token_if_dynamic=per_act_token, output=quant_out
@@ -291,8 +290,6 @@ class CutlassExpertsFp8Base(mk.FusedMoEPermuteExpertsUnpermute):
         if expert_tokens_meta is not None:
             expert_num_tokens = expert_tokens_meta.expert_num_tokens
 
-        activation_callable = lambda o, i: self.activation(activation, o, i)
-
         use_batched_format = (
             self.activation_formats[0] == mk.FusedMoEActivationFormat.BatchedExperts
         )
@@ -304,7 +301,7 @@ class CutlassExpertsFp8Base(mk.FusedMoEPermuteExpertsUnpermute):
             w1,
             w2,
             topk_ids,
-            activation_callable,
+            activation,
             global_num_experts,
             expert_map,
             self.w1_scale,
@@ -723,7 +720,7 @@ def run_cutlass_moe_w4a8_fp8(
     w1: torch.Tensor,
     w2: torch.Tensor,
     topk_ids: torch.Tensor,
-    activation_callable: Callable,
+    activation: str,
     global_num_experts: int,
     expert_map: torch.Tensor | None,
     w1_scale: torch.Tensor | None,
@@ -827,7 +824,7 @@ def run_cutlass_moe_w4a8_fp8(
         s_strides1,
     )
 
-    activation_callable(act_out, mm1_out)
+    apply_moe_activation(activation, act_out, mm1_out)
 
     a2q, a2q_scale = ops.scaled_fp8_quant(
         act_out, a2_scale, use_per_token_if_dynamic=per_act_token, output=quant_out
@@ -948,7 +945,6 @@ class CutlassExpertsW4A8Fp8(mk.FusedMoEPermuteExpertsUnpermute):
         assert self.w2_zp is None, "w2_zp is not supported in CUTLASS MoE"
 
         expert_num_tokens = None
-        activation_callable = lambda o, i: self.activation(activation, o, i)
 
         use_batched_format = (
             self.activation_formats[0] == mk.FusedMoEActivationFormat.BatchedExperts
@@ -963,7 +959,7 @@ class CutlassExpertsW4A8Fp8(mk.FusedMoEPermuteExpertsUnpermute):
             w1,
             w2,
             topk_ids,
-            activation_callable,
+            activation,
             global_num_experts,
             expert_map,
             self.w1_scale,

@@ -593,6 +593,7 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
             block_quant=self.block_quant,
             tp_size=moe.tp_size,
             with_lora_support=moe.is_lora_enabled,
+            is_act_and_mul=moe.is_act_and_mul,
             # TODO(rob): enable selecting this externally.
             allow_vllm_cutlass=True,
         )
