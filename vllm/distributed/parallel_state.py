@@ -1373,14 +1373,11 @@ def initialize_model_parallel(
     # Get world size and rank. Ensure some consistencies.
     assert torch.distributed.is_initialized()
 
-    data_parallel_size = 1
-    from vllm.config import get_current_vllm_config_or_none
+    from vllm.config import get_current_vllm_config
 
-    config = get_current_vllm_config_or_none()
-    if config is not None:
-        data_parallel_size = config.parallel_config.data_parallel_size
-
-    enable_elastic_ep = config is not None and config.parallel_config.enable_elastic_ep
+    config = get_current_vllm_config()
+    data_parallel_size = config.parallel_config.data_parallel_size
+    enable_elastic_ep = config.parallel_config.enable_elastic_ep
     if enable_elastic_ep:
         # Use stateless world group for global information
         world_size = get_world_group().world_size
@@ -1556,7 +1553,7 @@ def initialize_model_parallel(
     global _EP
     assert _EP is None, "expert parallel group is already initialized"
     # Don't create EP group for dense models.
-    if config is None or config.model_config is None or config.model_config.is_moe:
+    if config.model_config is None or config.model_config.is_moe:
         group_ranks = (
             all_ranks.transpose(1, 2)
             .reshape(
