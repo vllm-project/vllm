@@ -107,7 +107,11 @@ async def serve_http(
         if not enable_graceful:
             return
 
-        model_name = engine_client.model_config.served_model_name
+        served_name = engine_client.model_config.served_model_name
+        if isinstance(served_name, list):
+            model_name = served_name[0] if served_name else "unknown"
+        else:
+            model_name = served_name or "unknown"
         inflight_count = engine_client.get_num_unfinished_requests()
         logger.info(
             "Graceful shutdown: starting drain (timeout=%ds), in-flight requests: %d",
