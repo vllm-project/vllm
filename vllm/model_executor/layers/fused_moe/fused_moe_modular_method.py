@@ -96,11 +96,11 @@ class FusedMoEModularMethod(FusedMoEMethodBase, CustomOp):
         x: torch.Tensor,
         router_logits: torch.Tensor,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        if enable_eplb:
+        if layer.enable_eplb:
             if self.supports_eplb:
-                assert expert_load_view is not None
-                assert logical_to_physical_map is not None
-                assert logical_replica_count is not None
+                assert layer.expert_load_view is not None
+                assert layer.logical_to_physical_map is not None
+                assert layer.logical_replica_count is not None
             else:
                 raise NotImplementedError(
                     "EPLB is not supported for "

@@ -44,9 +44,10 @@ from vllm.utils.flashinfer import has_flashinfer_cutlass_fused_moe
 
 if current_platform.is_cuda_alike():
     from .fused_batched_moe import BatchedTritonExperts
-    from .fused_moe import TritonExperts
+    from .fused_moe import TritonExperts, fused_experts
 else:
     TritonExperts = None  # type: ignore
+    fused_experts = None  # type: ignore
 
 
 logger = init_logger(__name__)
@@ -319,9 +320,9 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
                 w2=layer.w2_weight,
                 topk_weights=topk_weights,
                 topk_ids=topk_ids,
-                expert_map=expert_map,
-                activation=activation,
-                apply_router_weight_on_input=apply_router_weight_on_input,
+                expert_map=layer.expert_map,
+                activation=layer.activation,
+                apply_router_weight_on_input=layer.apply_router_weight_on_input,
             )
 
         elif self.flashinfer_cutlass_moe_enabled:
@@ -331,8 +332,8 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
                 w2=layer.w2_weight,
                 topk_weights=topk_weights,
                 topk_ids=topk_ids,
-                activation=activation,
-                apply_router_weight_on_input=apply_router_weight_on_input,
+                activation=layer.activation,
+                apply_router_weight_on_input=layer.apply_router_weight_on_input,
             )
         else:
             result = fused_experts(
@@ -342,11 +343,11 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
                 topk_weights=topk_weights,
                 topk_ids=topk_ids,
                 inplace=True,
-                activation=activation,
+                activation=layer.activation,
                 quant_config=self.moe_quant_config,
-                apply_router_weight_on_input=apply_router_weight_on_input,
-                global_num_experts=global_num_experts,
-                expert_map=expert_map,
+                apply_router_weight_on_input=layer.apply_router_weight_on_input,
+                global_num_experts=layer.global_num_experts,
+                expert_map=layer.expert_map,
             )
 
         return result

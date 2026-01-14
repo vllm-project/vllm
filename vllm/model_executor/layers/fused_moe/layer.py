@@ -4,7 +4,6 @@
 from collections.abc import Callable, Iterable
 from contextlib import nullcontext
 from enum import Enum
-from functools import partial
 from typing import (
     TYPE_CHECKING,
     Literal,
@@ -40,19 +39,16 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEQuantConfig,
     RoutingMethodType,
 )
-from vllm.model_executor.layers.fused_moe.fused_moe import (
-    grouped_topk,
-    zero_experts_compute_triton,
-)
+from vllm.model_executor.layers.fused_moe.fused_moe import GroupedTopk
 from vllm.model_executor.layers.fused_moe.fused_moe_method_base import (
     FusedMoEMethodBase,
 )
 from vllm.model_executor.layers.fused_moe.fused_moe_modular_method import (
     FusedMoEModularMethod,
 )
+from vllm.model_executor.layers.fused_moe.fused_moe_router import FusedMoERouter
 from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (
     init_aiter_topK_meta_data,
-    rocm_aiter_grouped_topk,
 )
 from vllm.model_executor.layers.fused_moe.routed_experts_capturer import (
     RoutedExpertsCapturer,
@@ -1949,32 +1945,15 @@ class FusedMoE(CustomOp):
                 hidden_states, router_logits, has_separate_shared_experts
             )
 
-        # If there are shared experts but we are not using a modular kernel, the
-        # shared experts must be called here
-        if has_separate_shared_experts:
+        shared_output = None
+
+        # Launch shared experts early only when using a dedicated stream so the
+        # work can overlap with routing/dispatch + matmul.
+        if has_separate_shared_experts and use_shared_experts_stream:
             assert self.shared_experts is not None
-
-            if self.shared_experts_stream is not None:
-                # Clone BEFORE switching streams to avoid race condition
-                # where routed_expert kernel may mutate hidden_states.
-                hidden_states_clone = hidden_states.clone()
-                self.shared_experts_stream.wait_stream(current_stream())
-
-                # Run shared experts in parallel on a separate stream
-                with torch.cuda.stream(self.shared_experts_stream):
-                    shared_output = self.shared_experts(hidden_states_clone)
-
-                # Record that the clone will be used by shared_experts_stream
-                # to avoid gc issue from deallocation of hidden_states_clone
-                # For more details: https://docs.pytorch.org/docs/stable/generated/torch.Tensor.record_stream.html # noqa: E501
-                # NOTE: we dont need shared_output.record_stream(current_stream())
-                # because we synch the streams before using shared_output.
-                hidden_states_clone.record_stream(self.shared_experts_stream)
-
-            else:
-                shared_output = self.shared_experts(hidden_states)
-        else:
-            shared_output = None
+            assert hidden_states_clone is not None
+            with torch.cuda.stream(self.shared_experts_stream):
+                shared_output = self.shared_experts(hidden_states_clone)
 
         ctx = get_forward_context()
         sp_ctx = (
@@ -2001,8 +1980,15 @@ class FusedMoE(CustomOp):
             do_naive_dispatch = True
 
         with sp_ctx:
+            x_for_apply: torch.Tensor | tuple[torch.Tensor, torch.Tensor]
+            x_for_apply = hidden_states
             # Matrix multiply.
             if do_naive_dispatch:
+                extra_tensors: list[torch.Tensor] | None = None
+                from vllm.model_executor.layers.quantization.modelopt import (
+                    ModelOptNvFp4FusedMoE,
+                )
+
                 hidden_states, router_logits = get_ep_group().dispatch(
                     hidden_states, router_logits, self.is_sequence_parallel
                 )
@@ -2033,15 +2019,14 @@ class FusedMoE(CustomOp):
                     hidden_states_combined, router_logits, extra_tensors_combined = (
                         dispatch_res
                     )
-                    hidden_states_combined = (
-                        hidden_states_combined,
-                        extra_tensors_combined[0],
-                    )
+                    hidden_states = hidden_states_combined
+                    x_for_apply = (hidden_states_combined, extra_tensors_combined[0])
                 else:
-                    hidden_states_combined, router_logits = dispatch_res
+                    hidden_states, router_logits = dispatch_res
+                    x_for_apply = hidden_states
 
-            # Run shared experts before matrix multiply.
-            # because matrix multiply maybe modify the hidden_states.
+            # Run shared experts before matrix multiply if we are not using the
+            # dedicated stream (non-overlap path).
             if has_separate_shared_experts and not use_shared_experts_stream:
                 assert self.shared_experts is not None
                 shared_output = self.shared_experts(hidden_states)
@@ -2058,10 +2043,16 @@ class FusedMoE(CustomOp):
                     router_logits,
                     dim=0,
                 )
+                x_for_apply = (
+                    (hidden_states, x_for_apply[1])
+                    if isinstance(x_for_apply, tuple)
+                    else hidden_states
+                )
 
             final_hidden_states = self.quant_method.apply(
                 layer=self,
-                x=hidden_states,
+                router=self.router,
+                x=x_for_apply,
                 router_logits=router_logits,
             )
 
@@ -2069,15 +2060,7 @@ class FusedMoE(CustomOp):
                 assert self.shared_experts is not None
 
                 if use_shared_experts_stream:
-                    # Run shared experts in parallel on a separate stream
-                    # NOTE: We start the separate stream here and mark the
-                    # sync end point immediately after it is done. This is
-                    # important to avoid excessive stream allocations by the cuda
-                    # graph replay later.
-                    with torch.cuda.stream(self.shared_experts_stream):
-                        # Note that hidden_states clone() is necessary here to avoid
-                        # conflict with the main stream
-                        shared_output = self.shared_experts(hidden_states_clone)
+                    assert shared_output is not None
                     current_stream().wait_stream(self.shared_experts_stream)
 
                 final_hidden_states = (

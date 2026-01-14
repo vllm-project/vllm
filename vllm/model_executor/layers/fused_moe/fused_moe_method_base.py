@@ -58,7 +58,9 @@ class FusedMoEMethodBase(QuantizeMethodBase):
     ) -> FusedMoEPrepareAndFinalize | None:
         from .all2all_utils import maybe_make_prepare_finalize
 
-        prepare_finalize = maybe_make_prepare_finalize(self.moe, self.moe_quant_config)
+        prepare_finalize = maybe_make_prepare_finalize(
+            self.moe, self.moe_quant_config, routing_tables
+        )
 
         if prepare_finalize is None and self.moe.dp_size > 1 and self.moe.use_ep:
             from .naive_epdp_prepare_finalize import NaiveEPDPPrepareAndFinalize
