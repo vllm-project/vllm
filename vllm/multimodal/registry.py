@@ -12,11 +12,11 @@ from vllm.tokenizers import TokenizerLike, cached_tokenizer_from_config
 from .cache import BaseMultiModalProcessorCache
 from .inputs import MultiModalInputs
 from .processing import (
+    BaseDummyInputsBuilder,
     BaseMultiModalProcessor,
     BaseProcessingInfo,
     InputProcessingContext,
 )
-from .profiling import BaseDummyInputsBuilder
 
 if TYPE_CHECKING:
     from vllm.config import ModelConfig, ObservabilityConfig
