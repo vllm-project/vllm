@@ -681,7 +681,10 @@ class GPUModelRunner(
         #    overhead in the speculative decoding verification phase.
         # 3. Async Overlap: Using a dedicated CUDA stream for D2H copy allows the
         #    transfer to overlap with GPU kernel execution, avoiding pipeline bubbles.
-        if self.speculative_config.use_ngram_gpu():
+        if (
+            self.speculative_config is not None
+            and self.speculative_config.use_ngram_gpu()
+        ):
             self._is_empty_draft_tokens_cpu = torch.empty(
                 self.max_num_reqs, dtype=torch.bool, pin_memory=self.pin_memory
             )
@@ -933,7 +936,10 @@ class GPUModelRunner(
             self.input_batch.remove_request(req_id)
 
         # Check if ngram_gpu mode is enabled for incremental GPU tensor updates
-        is_ngram_gpu = self.speculative_config.use_ngram_gpu()
+        is_ngram_gpu = (
+            self.speculative_config is not None
+            and self.speculative_config.use_ngram_gpu()
+        )
         # Collect new/resumed requests that need full GPU tensor copy
         if is_ngram_gpu:
             ngram_gpu_new_reqs: list[CachedRequestState] = []
@@ -1005,7 +1011,10 @@ class GPUModelRunner(
 
         # Wait util _is_empty_draft_tokens async copy is done
         # Update scheduler_output for empty draft tokens (deferred sync point)
-        if self.speculative_config.use_ngram_gpu():
+        if (
+            self.speculative_config is not None
+            and self.speculative_config.use_ngram_gpu()
+        ):
             update_scheduler_for_empty_drafts(
                 self._is_empty_draft_tokens_event,
                 self._is_empty_draft_tokens_cpu,
