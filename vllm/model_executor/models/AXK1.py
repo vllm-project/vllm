@@ -65,7 +65,6 @@ from vllm.model_executor.model_loader.weight_utils import (
 from vllm.model_executor.models.deepseek_v2 import (
     DeepseekAttention,
     DeepseekV2MLP,
-    Indexer,
     yarn_get_mscale,
 )
 from vllm.model_executor.models.utils import sequence_parallel_chunk
@@ -535,30 +534,6 @@ class AXK1MLAAttention(nn.Module):
             mscale = yarn_get_mscale(scaling_factor, float(mscale_all_dim))
             self.scaling = self.scaling * mscale * mscale
 
-        self.is_v32 = hasattr(config, "index_topk")
-        logger.info(f"[DEBUG!!!] is_v32: {self.is_v32}")
-
-        if self.is_v32:
-            self.indexer_rope_emb = get_rope(
-                qk_rope_head_dim,
-                max_position=max_position_embeddings,
-                rope_parameters=config.rope_parameters,
-                is_neox_style=True,
-            )
-            self.indexer = Indexer(
-                vllm_config,
-                config,
-                hidden_size,
-                q_lora_rank,
-                quant_config,
-                cache_config,
-                topk_indices_buffer,
-                f"{prefix}.indexer",
-            )
-        else:
-            self.indexer_rope_emb = None
-            self.indexer = None
-
         mla_modules = MLAModules(
             kv_a_layernorm=self.kv_a_layernorm,
             kv_b_proj=self.kv_b_proj,
@@ -573,9 +548,9 @@ class AXK1MLAAttention(nn.Module):
             q_a_layernorm=self.q_a_layernorm if self.q_lora_rank is not None else None,
             q_b_proj=self.q_b_proj if self.q_lora_rank is not None else None,
             q_proj=self.q_proj if self.q_lora_rank is None else None,
-            indexer=self.indexer,
-            indexer_rotary_emb=self.indexer_rope_emb,
-            is_sparse=self.is_v32,
+            indexer=None,
+            indexer_rotary_emb=None,
+            is_sparse=False,
             topk_indices_buffer=topk_indices_buffer,
         )
 
@@ -609,7 +584,6 @@ class AXK1DecoderLayer(nn.Module):
         vllm_config: VllmConfig,
         prefix: str,
         config: AXK1Config | None = None,
-        topk_indices_buffer: torch.Tensor | None = None,
     ) -> None:
         super().__init__()
 
@@ -619,10 +593,10 @@ class AXK1DecoderLayer(nn.Module):
         cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config
         parallel_config = vllm_config.parallel_config
+        self.config = config
 
         self.hidden_size = config.hidden_size
         max_position_embeddings = config.max_position_embeddings
-        moe_layer_freq = config.moe_layer_freq
         # DecoderLayers are created with `make_layers` which passes the prefix
         # with the layer's index.
         layer_idx = int(prefix.split(sep=".")[-1])
@@ -656,14 +630,11 @@ class AXK1DecoderLayer(nn.Module):
             cache_config=cache_config,
             quant_config=quant_config,
             prefix=f"{prefix}.self_attn",
-            topk_indices_buffer=topk_indices_buffer,
+            topk_indices_buffer=None,
         )
 
-        if (
-            config.n_routed_experts is not None
-            and layer_idx >= config.first_k_dense_replace
-            and layer_idx % moe_layer_freq == 0
-        ):
+        self.is_layer_sparse = self._is_layer_sparse()
+        if self.is_layer_sparse:
             self.mlp = AXK1MoE(
                 config=config,
                 parallel_config=parallel_config,
@@ -686,8 +657,14 @@ class AXK1DecoderLayer(nn.Module):
             config.hidden_size, eps=config.rms_norm_eps
         )
         self.routed_scaling_factor = config.routed_scaling_factor
-        self.config = config
 
+    def _is_layer_sparse(self) -> bool:
+        return (
+            self.config.n_routed_experts is not None
+            and self.layer_idx >= self.config.first_k_dense_replace
+            and self.layer_idx % self.config.moe_layer_freq == 0
+        )
+    
     def forward(
         self,
         positions: torch.Tensor,
@@ -727,11 +704,7 @@ class AXK1DecoderLayer(nn.Module):
         hidden_states, residual = self.post_attention_layernorm(hidden_states, residual)
         hidden_states = self.mlp(hidden_states)
 
-        if (
-            self.config.n_routed_experts is not None
-            and self.layer_idx >= self.config.first_k_dense_replace
-            and self.layer_idx % self.config.moe_layer_freq == 0
-        ):
+        if self.is_layer_sparse:
             hidden_states = self.post_mlp_layernorm(hidden_states)
 
         if isinstance(self.mlp, AXK1MLP) and hidden_states.dtype == torch.float16:
@@ -752,24 +725,11 @@ class AXK1Model(nn.Module):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
 
-        config = vllm_config.model_config.hf_config
+        config: AXK1Config = vllm_config.model_config.hf_config
         quant_config = vllm_config.quant_config
         self.config = config
         self.device = current_platform.device_type
-
         self.vocab_size = config.vocab_size
-        self.is_v32 = hasattr(config, "index_topk")
-        logger.info(f"[DEBUG!!!] is_v32: {self.is_v32}")
-        if self.is_v32:
-            topk_tokens = config.index_topk
-            topk_indices_buffer = torch.empty(
-                vllm_config.scheduler_config.max_num_batched_tokens,
-                topk_tokens,
-                dtype=torch.int32,
-                device=self.device,
-            )
-        else:
-            topk_indices_buffer = None
 
         if get_pp_group().is_first_rank:
             self.embed_tokens = VocabParallelEmbedding(
@@ -782,9 +742,7 @@ class AXK1Model(nn.Module):
             self.embed_tokens = PPMissingLayer()
         self.start_layer, self.end_layer, self.layers = make_layers(
             config.num_hidden_layers,
-            lambda prefix: AXK1DecoderLayer(
-                vllm_config, prefix, topk_indices_buffer=topk_indices_buffer
-            ),
+            lambda prefix: AXK1DecoderLayer(vllm_config, prefix),
             prefix=f"{prefix}.layers",
         )
 
