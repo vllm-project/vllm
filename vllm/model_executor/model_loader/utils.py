@@ -46,7 +46,9 @@ def initialize_model(
     if "vllm_config" in all_params and "prefix" in all_params:
         # new-style model class
         with set_current_vllm_config(vllm_config, check_compile=True, prefix=prefix):
-            return model_class(vllm_config=vllm_config, prefix=prefix)
+            model = model_class(vllm_config=vllm_config, prefix=prefix)
+            model.apply(record_metadata_for_reloading)
+            return model
 
     msg = (
         "vLLM model class should accept `vllm_config` and `prefix` as "
@@ -78,7 +80,7 @@ def initialize_model(
 
     with set_current_vllm_config(vllm_config, check_compile=True, prefix=prefix):
         model = model_class(**kwargs)
-        record_metadata_for_reloading(model)
+        model.apply(record_metadata_for_reloading)
 
     return model
 
