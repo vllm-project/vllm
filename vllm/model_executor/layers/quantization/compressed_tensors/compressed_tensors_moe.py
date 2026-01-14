@@ -79,6 +79,7 @@ from vllm.model_executor.layers.quantization.utils.marlin_utils import (
 )
 from vllm.model_executor.layers.quantization.utils.marlin_utils_fp4 import (
     is_fp4_marlin_supported,
+    prepare_moe_fp4_layer_for_marlin,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     convert_bf16_scales_to_fp8,
@@ -89,6 +90,7 @@ from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
 )
 from vllm.model_executor.utils import replace_parameter, set_weight_attrs
 from vllm.platforms import CpuArchEnum, current_platform
+from vllm.scalar_type import scalar_types
 
 logger = init_logger(__name__)
 
@@ -105,6 +107,7 @@ __all__ = [
     "CompressedTensorsWNA16MarlinMoEMethod",
     "CompressedTensorsWNA16MoEMethod",
     "CompressedTensorsW4A4Nvfp4MoEMethod",
+    "CompressedTensorsW4A16Nvfp4MoEMethod",
     "CompressedTensorsW4A8Int8MoEMethod",
 ]
 
@@ -186,17 +189,19 @@ class CompressedTensorsMoEMethod(FusedMoEMethodBase):
                     weight_quant, input_quant, layer.moe_config
                 )
         elif quant_config._is_nvfp4_format(weight_quant):
-            _is_valid_nvfp4_activations = (
-                quant_config._is_nvfp4_format(input_quant) or input_quant is None
-            )
-            if not _is_valid_nvfp4_activations:
-                raise ValueError(
-                    "For NVFP4 weights, input quantization must also be NVFP4 format ",
-                    f"or None for NVFP4A16, found {input_quant}",
+            # W4A4: both weight and input are NVFP4 quantized
+            if quant_config._is_nvfp4_format(input_quant):
+                return CompressedTensorsW4A4Nvfp4MoEMethod(layer.moe_config, layer_name)
+            # W4A16: weight-only NVFP4 quantization (no input quantization)
+            elif input_quant is None:
+                return CompressedTensorsW4A16Nvfp4MoEMethod(
+                    layer.moe_config, layer_name
                 )
-            return CompressedTensorsW4A4Nvfp4MoEMethod(
-                layer.moe_config, layer_name, use_marlin=input_quant is None
-            )
+            else:
+                raise ValueError(
+                    "For NVFP4 weights, input quantization must also be NVFP4 format "
+                    f"or None for NVFP4A16, found {input_quant}"
+                )
         elif (
             quant_config._is_fp8_w8a8_sm90(weight_quant, input_quant)
             or quant_config._is_fp8_w8a8_sm100(weight_quant, input_quant)
@@ -543,6 +548,202 @@ class CompressedTensorsW4A4Nvfp4MoEMethod(CompressedTensorsMoEMethod):
                 expert_map=layer.expert_map,
                 apply_router_weight_on_input=layer.apply_router_weight_on_input,
             )
+
+
+class CompressedTensorsW4A16Nvfp4MoEMethod(CompressedTensorsMoEMethod):
+    """
+    MoE method for W4A16 NVFP4 quantization (weight-only FP4).
+    Uses Marlin kernel for fast weight-only FP4 quantization.
+    """
+
+    def __init__(
+        self,
+        moe: FusedMoEConfig,
+        layer_name: str | None = None,
+    ):
+        if not moe.is_act_and_mul:
+            raise ValueError(
+                "CompressedTensorsW4A16Nvfp4MoEMethod does not yet "
+                "support non gated MoE models."
+            )
+
+        super().__init__(moe)
+        self.group_size = 16
+        self.layer_name = layer_name
+        self.marlin_input_dtype = get_marlin_input_dtype(layer_name)
+        logger.info_once("Using Marlin for CompressedTensorsW4A16Nvfp4MoEMethod.")
+
+    def create_weights(
+        self,
+        layer: torch.nn.Module,
+        num_experts: int,
+        hidden_size: int,
+        intermediate_size_per_partition: int,
+        params_dtype: torch.dtype,
+        **extra_weight_attrs,
+    ):
+        layer.num_experts = num_experts
+        layer.hidden_size = hidden_size
+        layer.intermediate_size_per_partition = intermediate_size_per_partition
+        layer.params_dtype = params_dtype
+
+        w13_weight = torch.nn.Parameter(
+            torch.empty(
+                num_experts,
+                2 * intermediate_size_per_partition,
+                # 2 fp4 items are packed in the input dimension
+                hidden_size // 2,
+                requires_grad=False,
+                dtype=torch.uint8,
+            ),
+            requires_grad=False,
+        )
+        layer.register_parameter("w13_weight_packed", w13_weight)
+        set_weight_attrs(w13_weight, extra_weight_attrs)
+
+        w2_weight = torch.nn.Parameter(
+            torch.empty(
+                num_experts,
+                hidden_size,
+                # 2 fp4 items are packed in the input dimension
+                intermediate_size_per_partition // 2,
+                dtype=torch.uint8,
+            ),
+            requires_grad=False,
+        )
+        layer.register_parameter("w2_weight_packed", w2_weight)
+        set_weight_attrs(w2_weight, extra_weight_attrs)
+
+        w13_weight_scale = torch.nn.Parameter(
+            torch.empty(
+                num_experts,
+                2 * intermediate_size_per_partition,
+                hidden_size // self.group_size,
+                dtype=torch.float8_e4m3fn,
+            ),
+            requires_grad=False,
+        )
+        layer.register_parameter("w13_weight_scale", w13_weight_scale)
+        extra_weight_attrs.update(
+            {"quant_method": FusedMoeWeightScaleSupported.GROUP.value}
+        )
+        set_weight_attrs(w13_weight_scale, extra_weight_attrs)
+
+        w2_weight_scale = torch.nn.Parameter(
+            torch.empty(
+                num_experts,
+                hidden_size,
+                intermediate_size_per_partition // self.group_size,
+                dtype=torch.float8_e4m3fn,
+            ),
+            requires_grad=False,
+        )
+        layer.register_parameter("w2_weight_scale", w2_weight_scale)
+        extra_weight_attrs.update(
+            {"quant_method": FusedMoeWeightScaleSupported.GROUP.value}
+        )
+        set_weight_attrs(w2_weight_scale, extra_weight_attrs)
+
+        w13_weight_scale_2 = torch.nn.Parameter(
+            torch.empty(num_experts, 2, dtype=torch.float32), requires_grad=False
+        )
+        layer.register_parameter("w13_weight_global_scale", w13_weight_scale_2)
+        extra_weight_attrs.update(
+            {"quant_method": FusedMoeWeightScaleSupported.TENSOR.value}
+        )
+        set_weight_attrs(w13_weight_scale_2, extra_weight_attrs)
+
+        w2_weight_scale_2 = torch.nn.Parameter(
+            torch.empty(num_experts, dtype=torch.float32), requires_grad=False
+        )
+        layer.register_parameter("w2_weight_global_scale", w2_weight_scale_2)
+        extra_weight_attrs.update(
+            {"quant_method": FusedMoeWeightScaleSupported.TENSOR.value}
+        )
+        set_weight_attrs(w2_weight_scale_2, extra_weight_attrs)
+
+    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        """
+        Convert NVFP4 MoE weights into Marlin kernel format.
+        """
+        # NOTE(rob): wN_weight_packed -> wN_weight is because ModularKernelMethod
+        # requires this naming convention. However, the name change breaks
+        # reloading because the state dict no longer matches disk. Once we
+        # remove MKM, we should revert this change to ensure compatibility.
+        layer.w13_weight = torch.nn.Parameter(
+            layer.w13_weight_packed.data, requires_grad=False
+        )
+        delattr(layer, "w13_weight_packed")
+
+        layer.w2_weight = torch.nn.Parameter(
+            layer.w2_weight_packed.data, requires_grad=False
+        )
+        delattr(layer, "w2_weight_packed")
+
+        # Use a single gscale for w13.
+        if self.moe.is_act_and_mul and not torch.allclose(
+            layer.w13_weight_global_scale[:, 0], layer.w13_weight_global_scale[:, 1]
+        ):
+            logger.warning_once(
+                "w1_weight_global_scale must match w3_weight_global_scale. "
+                "Accuracy may be affected."
+            )
+
+        # Take inverse of global scale (Marlin expects inverted scale).
+        layer.w13_weight_scale_2 = torch.nn.Parameter(
+            1 / layer.w13_weight_global_scale[:, 0], requires_grad=False
+        )
+        layer.w2_weight_scale_2 = torch.nn.Parameter(
+            1 / layer.w2_weight_global_scale.data, requires_grad=False
+        )
+
+        # Clean up temporary attributes.
+        delattr(layer, "w13_weight_global_scale")
+        delattr(layer, "w2_weight_global_scale")
+
+        # Prepare weights for Marlin kernel.
+        prepare_moe_fp4_layer_for_marlin(layer, input_dtype=self.marlin_input_dtype)
+
+    def get_fused_moe_quant_config(
+        self, layer: torch.nn.Module
+    ) -> FusedMoEQuantConfig | None:
+        # W4A16 uses Marlin kernel, which doesn't use the modular fused_moe path.
+        return None
+
+    def apply(
+        self,
+        layer: FusedMoE,
+        router: FusedMoERouter,
+        x: torch.Tensor,
+        router_logits: torch.Tensor,
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+        assert layer.activation == "silu", "Only SiLU activation is supported."
+
+        topk_weights, topk_ids = router.select_experts(
+            hidden_states=x,
+            router_logits=router_logits,
+        )
+
+        return fused_marlin_moe(
+            x,
+            layer.w13_weight,
+            layer.w2_weight,
+            None,  # bias1
+            None,  # bias2
+            layer.w13_weight_scale,
+            layer.w2_weight_scale,
+            router_logits,
+            topk_weights,
+            topk_ids,
+            global_scale1=layer.w13_weight_scale_2,
+            global_scale2=layer.w2_weight_scale_2,
+            quant_type_id=scalar_types.float4_e2m1f.id,
+            apply_router_weight_on_input=layer.apply_router_weight_on_input,
+            global_num_experts=layer.global_num_experts,
+            expert_map=layer.expert_map,
+            input_dtype=self.marlin_input_dtype,
+            workspace=layer.workspace,
+        )
 
 
 class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
