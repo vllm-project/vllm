@@ -5,7 +5,9 @@ for manipulating the input / output of HF & vLLM test runners, which are
 typically specific to a small subset of models.
 """
 
+import logging
 import types
+import warnings
 from pathlib import PosixPath
 
 import numpy as np
@@ -30,6 +32,8 @@ from vllm.utils.collection_utils import is_list_of
 
 from .....conftest import HfRunner, ImageAsset, ImageTestAssets
 from .types import RunnerOutput
+
+logger = logging.getLogger(__name__)
 
 
 ####### vLLM output processors functions
@@ -582,7 +586,25 @@ def isaac_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
     # ----------------------------
     from ...conftest import patch_hf_vision_attn_for_rocm
 
-    patch_hf_vision_attn_for_rocm(hf_model.model)
+    try:
+        patch_hf_vision_attn_for_rocm(hf_model.model)
+    except AttributeError as e:
+        if "vision_config" in str(e):
+            warnings.warn(
+                f"Skipping ROCm vision attention patch for Isaac model: {e}. "
+                "This is expected for models without vision_config in "
+                "attention layers (e.g., Siglip2VariableLengthAttention).",
+                stacklevel=2,
+            )
+        else:
+            logger.error(
+                "Unexpected AttributeError during ROCm vision attention patch: %s. "
+                "Model type: %s. Inner model type: %s.",
+                e,
+                type(hf_model.model).__name__,
+                type(getattr(hf_model.model, "model", None)).__name__,
+            )
+            raise
 
     def patched_forward(
         self,
