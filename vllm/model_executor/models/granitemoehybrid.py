@@ -643,6 +643,7 @@ class GraniteMoeHybridForCausalLM(
             conv_kernel=hf_config.mamba_d_conv,
         )
 
+    @classmethod
     def get_mamba_state_copy_func(cls) -> tuple[MambaStateCopyFunc, MambaStateCopyFunc]:
         return MambaStateCopyFuncCalculator.mamba2_state_copy_func()
 
