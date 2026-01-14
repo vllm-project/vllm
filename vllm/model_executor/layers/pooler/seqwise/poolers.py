@@ -95,8 +95,8 @@ def pooler_for_embed(pooler_config: PoolerConfig):
     vllm_config = get_current_vllm_config()
     model_config = vllm_config.model_config
     head = EmbeddingPoolerHead(
-        projector=_load_st_projector(model_config),
         head_dtype=model_config.head_dtype,
+        projector=_load_st_projector(model_config),
         activation=PoolerNormalize(),
     )
 
@@ -116,9 +116,9 @@ def pooler_for_classify(
     vllm_config = get_current_vllm_config()
     model_config = vllm_config.model_config
     head = ClassifierPoolerHead(
+        head_dtype=model_config.head_dtype,
         classifier=classifier,
         logit_bias=model_config.pooler_config.logit_bias,
-        head_dtype=model_config.head_dtype,
         activation=resolve_classifier_act_fn(
             model_config, static_num_labels=True, act_fn=act_fn
         ),
