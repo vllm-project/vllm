@@ -4,7 +4,7 @@ from openai_harmony import (
     Message,
 )
 
-from vllm.entrypoints.openai.engine.protocol import (
+from vllm.entrypoints.openai.responses.protocol import (
     serialize_message,
     serialize_messages,
 )

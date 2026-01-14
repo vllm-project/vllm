@@ -14,6 +14,8 @@ from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionReque
 from vllm.entrypoints.openai.engine.protocol import (
     DeltaMessage,
     ExtractedToolCallInformation,
+)
+from vllm.entrypoints.openai.responses.protocol import (
     ResponsesRequest,
     ResponseTextConfig,
 )
