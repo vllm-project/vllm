@@ -64,10 +64,7 @@ def is_global_sf_supported_for_nvfp4_backend(backend: NvFp4MoeBackend) -> bool:
     # of all experts in Expert Parallel Mode when all experts are not
     # on the same rank.
 
-    return backend in [
-        NvFp4MoeBackend.FLASHINFER_CUTLASS,
-        NvFp4MoeBackend.FLASHINFER_TRTLLM,
-    ]
+    return backend in FLASHINFER_NVFP4_MOE_BACKENDS
 
 
 def backend_2_kernel_cls(
