@@ -32,7 +32,6 @@ from vllm.distributed.parallel_state import (
 from vllm.distributed.stateless_coordinator import StatelessGroupCoordinator
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.layer import FusedMoEParallelConfig
-from vllm.utils.torch_utils import supports_dynamo
 from vllm.v1.engine import ReconfigureDistributedRequest, ReconfigureRankType
 from vllm.v1.worker.gpu_ubatch_wrapper import UBatchWrapper
 from vllm.v1.worker.workspace import lock_workspace, unlock_workspace
@@ -355,7 +354,6 @@ class ElasticEPScalingExecutor:
         if (
             self.worker.vllm_config.compilation_config.mode
             == CompilationMode.STOCK_TORCH_COMPILE
-            and supports_dynamo()
         ):
             # NOTE(yongji): when using stock torch.compile,
             # torch.compile is triggered during GPUModelRunner's load_model()
