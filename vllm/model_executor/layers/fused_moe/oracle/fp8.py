@@ -190,7 +190,6 @@ def select_fp8_moe_backend(
 
             if fi_backend == FlashinferMoeBackend.TENSORRT_LLM:
                 backend = Fp8MoeBackend.FLASHINFER_TRTLLM
-                # TODO: validate activation format
                 supported, reason = is_supported_config_trtllm(
                     config, quant_scheme, activation_format
                 )

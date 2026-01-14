@@ -11,7 +11,9 @@ import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
+    FusedMoEParallelConfig,
     FusedMoEQuantConfig,
+    FusedMoEQuantScheme,
     RoutingMethodType,
 )
 from vllm.model_executor.layers.fused_moe.flashinfer_cutedsl_moe import (
@@ -46,6 +48,65 @@ __all__ = [
     "reorder_w1w3_to_w3w1",
     "build_flashinfer_fp4_cutlass_moe_prepare_finalize",
 ]
+
+#
+# Methods used by the oracle for kernel selection.
+#
+
+
+def _supports_current_device() -> bool:
+    """Supports only Blackwell-family GPUs."""
+    p = current_platform
+    # Add check flashinfer trtllm is available
+    return p.is_cuda() and p.is_device_capability_family(10)
+
+
+def _supports_no_act_and_mul() -> bool:
+    """Does not support non-gated MoE (i.e. Nemotron-Nano)."""
+    return False
+
+
+def _supports_quant_scheme(quant_scheme: FusedMoEQuantScheme) -> bool:
+    """Supports Fp8 per-tensor, Fp8 block, and Nvfp4 quantization."""
+    return quant_scheme.is_nvfp4_w4a4
+
+
+def _supports_activation(activation: str) -> bool:
+    """Supports silu activation only."""
+    return activation in ["silu"]
+
+
+def _supports_moe_parallel_config(moe_parallel_config: FusedMoEParallelConfig) -> bool:
+    """Supports EP."""
+    return True
+
+
+def is_supported_config_trtllm(
+    moe_config: FusedMoEConfig,
+    moe_quant_scheme: FusedMoEQuantScheme,
+    activation_format: mk.FusedMoEActivationFormat,
+) -> tuple[bool, str | None]:
+    """
+    This method mirrors mk.FusedMoEPermuteExpertsUnpermute.is_supported_config
+    """
+
+    def _make_reason(reason: str) -> str:
+        return f"kernel does not support {reason}"
+
+    if not _supports_current_device():
+        return False, _make_reason("current device")
+    elif not (moe_config.is_act_and_mul or _supports_no_act_and_mul()):
+        return False, _make_reason("no act_and_mul MLP layer")
+    elif not _supports_activation(moe_config.activation):
+        return False, _make_reason(f"{moe_config.activation} activation")
+    elif not _supports_quant_scheme(moe_quant_scheme):
+        return False, _make_reason("quantization scheme")
+    elif not _supports_moe_parallel_config(moe_config.moe_parallel_config):
+        return False, _make_reason("parallel config")
+    elif activation_format != mk.FusedMoEActivationFormat.Standard:
+        return False, _make_reason("activation format")
+
+    return True, None
 
 
 def is_flashinfer_fp4_cutlass_moe_available() -> bool:
@@ -284,9 +345,11 @@ def flashinfer_trtllm_fp4_moe(
 
     # Quantize input to FP4
     if isinstance(x, tuple):
+        print("ALREADY QUANTIZED")
         hidden_states_fp4, hidden_states_scale_linear_fp4 = x
     else:
         # hidden_states is the already quantized
+        print("QUANTIIZING HERE")
         (hidden_states_fp4, hidden_states_scale_linear_fp4) = flashinfer.fp4_quantize(
             x,
             layer.a1_gscale,

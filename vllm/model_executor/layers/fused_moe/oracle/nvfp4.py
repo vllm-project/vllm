@@ -1,33 +1,27 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from enum import Enum
+from typing import TYPE_CHECKING
 
 import torch
 
 import vllm.envs as envs
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.logger import init_logger
+from vllm.model_executor.layers.fused_moe.all2all_utils import (
+    maybe_make_prepare_finalize,
+)
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
     FusedMoEQuantConfig,
+    FusedMoEQuantScheme,
     nvfp4_moe_quant_config,
     nvfp4_w4a16_moe_quant_config,
 )
-from vllm.model_executor.layers.fused_moe.cutlass_moe import (
-    CutlassExpertsFp4,
-)
-from vllm.model_executor.layers.fused_moe.flashinfer_cutlass_moe import (
-    FlashInferExperts,
-)
-from vllm.model_executor.layers.fused_moe.fused_marlin_moe import (
-    MarlinExperts,
-)
-from vllm.model_executor.layers.fused_moe.prepare_finalize import (
-    MoEPrepareAndFinalizeNoEP,
-)
 from vllm.model_executor.layers.quantization.utils.flashinfer_fp4_moe import (
-    is_flashinfer_fp4_cutedsl_moe_available,
-    is_flashinfer_fp4_cutlass_moe_available,
+    is_supported_config_trtllm,
+    # is_flashinfer_fp4_cutedsl_moe_available,
+    # is_flashinfer_fp4_cutlass_moe_available,
     prepare_nvfp4_moe_layer_for_fi_or_cutlass,
 )
 from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
@@ -35,19 +29,23 @@ from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
     get_flashinfer_moe_backend,
 )
 from vllm.model_executor.layers.quantization.utils.marlin_utils_fp4 import (
-    is_fp4_marlin_supported,
+    # is_fp4_marlin_supported,
     prepare_nvfp4_moe_layer_for_marlin,
 )
-from vllm.model_executor.layers.quantization.utils.quant_utils import (
-    cutlass_fp4_supported,
-)
+
+# from vllm.model_executor.layers.quantization.utils.quant_utils import (
+#   cutlass_fp4_supported,
+# )
+
+if TYPE_CHECKING:
+    from vllm.model_executor.layers.fused_moe.layer import FusedMoE
 
 logger = init_logger(__name__)
 
 
 class NvFp4MoeBackend(Enum):
-    FLASHINFER_CUTLASS = "FlashInfer CUTLASS"
     FLASHINFER_TRTLLM = "FlashInfer TRTLLM"
+    FLASHINFER_CUTLASS = "FlashInfer CUTLASS"
     FLASHINFER_CUTEDSL = "FlashInfer CUTEDSL"
     VLLM_CUTLASS = "vLLM CUTASS"
     MARLIN = "vLLM MARLIN"
@@ -77,38 +75,162 @@ def is_global_sf_supported_for_nvfp4_backend(backend: NvFp4MoeBackend) -> bool:
     ]
 
 
-def select_nvfp4_moe_backend() -> NvFp4MoeBackend:
+def backend_2_kernel_cls(
+    backend: NvFp4MoeBackend,
+) -> type[mk.FusedMoEPermuteExpertsUnpermute]:
+    if backend == NvFp4MoeBackend.FLASHINFER_TRTLLM:
+        raise NotImplementedError
+
+    elif backend == NvFp4MoeBackend.FLASHINFER_CUTLASS:
+        from vllm.model_executor.layers.fused_moe.flashinfer_cutlass_moe import (
+            FlashInferExperts,
+        )
+
+        return FlashInferExperts
+
+    elif backend == NvFp4MoeBackend.FLASHINFER_CUTEDSL:
+        from vllm.model_executor.layers.fused_moe.flashinfer_cutedsl_moe import (
+            FlashInferCuteDSLExperts,
+        )
+
+        return FlashInferCuteDSLExperts
+
+    elif backend == NvFp4MoeBackend.VLLM_CUTLASS:
+        from vllm.model_executor.layers.fused_moe.triton_cutlass_moe import (
+            TritonOrCutlassExperts,
+        )
+
+        return TritonOrCutlassExperts
+
+    elif backend == NvFp4MoeBackend.MARLIN:
+        from vllm.model_executor.layers.fused_moe.fused_marlin_moe import (
+            MarlinExperts,
+        )
+
+        return MarlinExperts
+    else:
+        raise ValueError(f"Unknown NvFP4 MoE backend: {backend.value}")
+
+
+def select_nvfp4_moe_backend(
+    config: FusedMoEConfig,
+    quant_scheme: FusedMoEQuantScheme,
+    activation_format: mk.FusedMoEActivationFormat,
+) -> tuple[NvFp4MoeBackend, type[mk.FusedMoEPermuteExpertsUnpermute] | None]:
+    """
+    Select the primary NvFP4 MoE backend
+    Note: Shape-specific fallbacks may still occur at runtime.
+    """
+
     def _make_log_backend(backend: NvFp4MoeBackend):
         return f"Using {backend.value} backend for NvFp4 MoE"
 
-    if cutlass_fp4_supported() and not envs.VLLM_TEST_FORCE_FP8_MARLIN:
-        allow_flashinfer = (
-            is_flashinfer_fp4_cutlass_moe_available()
-            or is_flashinfer_fp4_cutedsl_moe_available()
-        )
-        if allow_flashinfer and envs.VLLM_USE_FLASHINFER_MOE_FP4:
-            backend = fi_2_vllm_backend_map[get_flashinfer_moe_backend()]
+    def _make_log_unsupported(backend: NvFp4MoeBackend, reason: str | None) -> str:
+        if reason:
+            return (
+                f"NvFP4 MoE backend `{backend.value}` does not support the "
+                f"deployment configuration since {reason}."
+            )
         else:
-            backend = NvFp4MoeBackend.VLLM_CUTLASS
-    elif is_fp4_marlin_supported():
-        backend = NvFp4MoeBackend.MARLIN
-    else:
-        raise ValueError("No NvFp4 kernel backend available for NvFp4 MoE.")
+            return (
+                f"NvFP4 MoE backend `{backend.value}` does not support the "
+                "deployment configuration."
+            )
 
-    # Log warning if FI backend requested but not available.
-    if (
-        backend not in FLASHINFER_NVFP4_MOE_BACKENDS
-        and envs.VLLM_USE_FLASHINFER_MOE_FP4
-    ):
-        logger.warning_once(
-            "Requested FlashInfer backend for NvFp4 MoE, but it's not available. "
-            "Falling back to %s for NvFp4 MoE",
-            backend.value,
-            scope="local",
+    def _return_or_raise(
+        backend: NvFp4MoeBackend,
+        config: FusedMoEConfig,
+        scheme: FusedMoEQuantScheme,
+        activation_format: mk.FusedMoEActivationFormat,
+    ) -> tuple[NvFp4MoeBackend, type[mk.FusedMoEPermuteExpertsUnpermute]]:
+        k_cls = backend_2_kernel_cls(backend)
+        supported, reason = k_cls.is_supported_config(
+            k_cls, config, scheme, activation_format
         )
-    else:
-        logger.info_once(_make_log_backend(backend), scope="local")
-    return backend
+        if supported:
+            logger.info_once(_make_log_backend(backend))
+            return backend, k_cls
+        raise ValueError(_make_log_unsupported(backend, reason))
+
+    # NOTE: the kernels are selected in the following order.
+    AVAILABLE_BACKENDS = [
+        NvFp4MoeBackend.FLASHINFER_TRTLLM,
+        NvFp4MoeBackend.FLASHINFER_CUTEDSL,
+        NvFp4MoeBackend.FLASHINFER_CUTLASS,
+        NvFp4MoeBackend.VLLM_CUTLASS,
+    ]
+
+    if envs.is_set("VLLM_USE_FLASHINFER_MOE_FP4"):
+        if not envs.VLLM_USE_FLASHINFER_MOE_FP8:
+            # If the user rejects FlashInfer remove those backends.
+            for fi_backend in FLASHINFER_NVFP4_MOE_BACKENDS:
+                AVAILABLE_BACKENDS.remove(fi_backend)
+
+        elif envs.is_set("VLLM_FLASHINFER_MOE_BACKEND"):
+            # If user is explicit about backend, validate it.
+            fi_backend = get_flashinfer_moe_backend()
+
+            if fi_backend == FlashinferMoeBackend.TENSORRT_LLM:
+                backend = NvFp4MoeBackend.FLASHINFER_TRTLLM
+                supported, reason = is_supported_config_trtllm(
+                    config, quant_scheme, activation_format
+                )
+                if supported:
+                    logger.info_once(_make_log_backend(backend))
+                    return backend, None
+                else:
+                    raise ValueError(_make_log_unsupported(backend, reason))
+            else:
+                backend = fi_2_vllm_backend_map[fi_backend]
+                return _return_or_raise(
+                    backend, config, quant_scheme, activation_format
+                )
+        else:
+            # If the user is not explicit about the backend, try each.
+            for backend in FLASHINFER_NVFP4_MOE_BACKENDS:
+                k_cls = backend_2_kernel_cls(backend)
+                if k_cls.is_supported_config(
+                    k_cls, config, quant_scheme, activation_format
+                ):
+                    logger.info_once(_make_log_backend(backend))
+                    return backend, k_cls
+
+            raise NotImplementedError(
+                "Found VLLM_USE_FLASHINFER_MOE_FP4=1, but no "
+                "FlashInfer NVFP4 MoE backend supports the configuration."
+            )
+
+    if envs.VLLM_TEST_FORCE_FP8_MARLIN:
+        backend = NvFp4MoeBackend.MARLIN
+        return _return_or_raise(backend, config, quant_scheme, activation_format)
+
+    # Select kernels in order of backend.
+    for backend in AVAILABLE_BACKENDS:
+        if backend == NvFp4MoeBackend.FLASHINFER_TRTLLM:
+            k_cls = None  # type: ignore[assignment]
+            supported, reason = is_supported_config_trtllm(
+                config,
+                quant_scheme,
+                activation_format,
+            )
+        else:
+            k_cls = backend_2_kernel_cls(backend)
+            supported, reason = k_cls.is_supported_config(
+                k_cls,
+                config,
+                quant_scheme,
+                activation_format,
+            )
+
+        if supported:
+            logger.info_once(_make_log_backend(backend), scope="local")
+            return backend, k_cls
+        else:
+            logger.info_once(_make_log_unsupported(backend, reason), scope="local")
+
+    raise NotImplementedError(
+        "No NvFp4 MoE backend supports the deployment configuration."
+    )
 
 
 def convert_to_nvfp4_moe_kernel_format(
@@ -227,46 +349,52 @@ def make_nvfp4_moe_quant_config(
 
 
 def make_nvfp4_moe_kernel(
-    backend: NvFp4MoeBackend,
-    quant_config: FusedMoEQuantConfig,
+    layer: "FusedMoE",
+    moe_quant_config: FusedMoEQuantConfig,
     moe_config: FusedMoEConfig,
-) -> mk.FusedMoEModularKernel | None:
-    assert moe_config.dp_size == 1
+    nvfp4_backend: NvFp4MoeBackend,
+    experts_cls: type[mk.FusedMoEPermuteExpertsUnpermute],
+) -> mk.FusedMoEModularKernel:
+    # Create Prepare/Finalize.
+    prepare_finalize = maybe_make_prepare_finalize(
+        moe=moe_config,
+        quant_config=moe_quant_config,
+        routing_tables=None,  # TODO: init routing tables here?
+        defer_input_quant=experts_cls.should_pf_defer_input_quant(moe_quant_config),
+        allow_new_interface=True,
+    )
 
-    UNSUPPORTED_BACKENDS = [
-        # TRTLLM does not use the modular kernl abstraction.
-        NvFp4MoeBackend.FLASHINFER_TRTLLM,
-        # CUTEDSL is used with BATCHED (masked) format only.
-        # TODO: add here once we support dp/ep via the oracle.
-        NvFp4MoeBackend.FLASHINFER_CUTEDSL,
-    ]
+    logger.info_once("Using %s", prepare_finalize.__class__.__name__)
 
-    if backend in UNSUPPORTED_BACKENDS:
-        return None
-
-    elif backend == NvFp4MoeBackend.FLASHINFER_CUTLASS:
-        return mk.FusedMoEModularKernel(
-            MoEPrepareAndFinalizeNoEP(defer_input_quant=True),
-            FlashInferExperts(
-                moe_config=moe_config,
-                quant_config=quant_config,
-            ),
+    # Create Experts.
+    if prepare_finalize.activation_format == mk.FusedMoEActivationFormat.Standard:
+        experts = experts_cls.make_standard_experts(
+            moe_config=moe_config,
+            quant_config=moe_quant_config,
         )
-
-    elif backend == NvFp4MoeBackend.VLLM_CUTLASS:
-        return mk.FusedMoEModularKernel(
-            MoEPrepareAndFinalizeNoEP(defer_input_quant=True),
-            CutlassExpertsFp4(
-                moe_config=moe_config,
-                quant_config=quant_config,
-            ),
-        )
-
-    elif backend == NvFp4MoeBackend.MARLIN:
-        return mk.FusedMoEModularKernel(
-            MoEPrepareAndFinalizeNoEP(),
-            MarlinExperts(quant_config=quant_config),
-        )
-
     else:
-        raise ValueError(f"Unknown NvFp4 MoE backend: {backend}")
+        max_num_tokens_per_rank = prepare_finalize.max_num_tokens_per_rank()
+        assert max_num_tokens_per_rank is not None
+        experts = experts_cls.make_batched_experts(
+            moe_config=moe_config,
+            quant_config=moe_quant_config,
+            max_num_tokens=max_num_tokens_per_rank,
+            num_dispatchers=prepare_finalize.num_dispatchers(),
+        )
+
+    # NOTE(rob): we only want the ModularKernel to control the SharedExpert
+    # if we are using all2all (for SBO). Need to make a change somewhere
+    # else to prevent double running the Shared Expert.
+    # This needs to be refactored.
+    kernel = mk.FusedMoEModularKernel(
+        prepare_finalize,
+        experts,
+        shared_experts=(
+            getattr(layer, "shared_expert", None)
+            if moe_config.moe_parallel_config.use_all2all_kernels
+            else None
+        ),
+        moe_parallel_config=moe_config.moe_parallel_config,
+    )
+
+    return kernel

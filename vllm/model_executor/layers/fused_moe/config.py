@@ -154,7 +154,6 @@ class FusedMoEQuantScheme:
             assert not self.per_token_quant
             assert not self.static_input_quant
             assert self.block_size is not None
-        assert self.per_block_quant or self.per_token_quant or self.per_tensor_quant
         if self.is_unquantized:
             assert self.act_dtype in UNQUANTIZED_DTYPES
 

@@ -32,13 +32,12 @@ from vllm.model_executor.layers.fused_moe.oracle.fp8 import (
     select_fp8_moe_backend,
 )
 from vllm.model_executor.layers.fused_moe.oracle.nvfp4 import (
-    FLASHINFER_NVFP4_MOE_BACKENDS,
     NvFp4MoeBackend,
     convert_to_nvfp4_moe_kernel_format,
-    is_global_sf_supported_for_nvfp4_backend,
     make_nvfp4_moe_kernel,
     make_nvfp4_moe_quant_config,
     select_nvfp4_moe_backend,
+    is_global_sf_supported_for_nvfp4_backend,
 )
 from vllm.model_executor.layers.linear import (
     LinearBase,
@@ -52,10 +51,8 @@ from vllm.model_executor.layers.quantization.base_config import (
 )
 from vllm.model_executor.layers.quantization.kv_cache import BaseKVCacheMethod
 from vllm.model_executor.layers.quantization.utils.flashinfer_fp4_moe import (
-    build_flashinfer_fp4_cutlass_moe_prepare_finalize,
     flashinfer_trtllm_fp4_moe,
     flashinfer_trtllm_fp4_routed_moe,
-    select_nvfp4_gemm_impl,
 )
 from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
     apply_fi_trtllm_fp8_per_tensor_moe,
@@ -1360,55 +1357,76 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
     ) -> None:
         super().__init__(moe_config)
         self.quant_config = quant_config
-        self.nvfp4_backend = select_nvfp4_moe_backend()
-        # TODO: move this type of check into the oracle.
-        if (
-            not self.moe.is_act_and_mul
-            and not self.nvfp4_backend == NvFp4MoeBackend.FLASHINFER_CUTLASS
-        ):
-            raise NotImplementedError(
-                "Non-gated activations are only supported by FlashInfer "
-                "CUTLASS NvFP4 MoE backend."
-            )
+        # Create quant scheme, will be used later to select the quant scales.
+        # NOTE(rob): we should update QuantConfig to just be the think ts
+        # holds the scales. Should change the name.
+        quant_scheme = FusedMoEQuantScheme(
+            weight_dtype="nvfp4",
+            act_dtype="nvfp4",
+            per_tensor_quant=False,
+            per_token_quant=False,
+            block_size=None,
+            static_input_quant=False,
+        )
 
+        # Select NvFp4 MoE backend
+        # NOTE(rob): this is kind of a hack. We need to peak into
+        # the prepare-finalize selection to determine if we are using
+        # the batched or standard expert format.
+        use_batched = (
+            self.moe.moe_parallel_config.use_deepep_ll_kernels
+            or self.moe.moe_parallel_config.use_pplx_kernels
+        )
+        self.nvfp4_backend, self.experts_cls = select_nvfp4_moe_backend(
+            config=self.moe,
+            quant_scheme=quant_scheme,
+            activation_format=(
+                mk.FusedMoEActivationFormat.BatchedExperts
+                if use_batched
+                else mk.FusedMoEActivationFormat.Standard
+            ),
+        )
+
+        # Delay creation of the kernel until after process-weights.
+        self.kernel: mk.FusedMoEModularKernel | None = None
+
+        # Used for weight loading.
         self.use_global_sf = is_global_sf_supported_for_nvfp4_backend(
             self.nvfp4_backend
         )
-        self.kernel: mk.FusedMoEModularKernel | None = None
+
+        # prepare_finalize = build_flashinfer_fp4_cutlass_moe_prepare_finalize(
+        #     self.moe
+        # )
+
+    @property
+    def topk_indices_dtype(self) -> torch.dtype | None:
+        if self.kernel is not None:
+            return self.kernel.prepare_finalize.topk_indices_dtype()
+        return None
+
+    @property
+    def supports_mk_interally(self) -> bool:
+        return True
 
     def maybe_make_prepare_finalize(
         self,
         routing_tables: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
     ) -> mk.FusedMoEPrepareAndFinalize | None:
-        UNSUPPORTED = [NvFp4MoeBackend.MARLIN, NvFp4MoeBackend.FLASHINFER_TRTLLM]
-        if self.nvfp4_backend in UNSUPPORTED:
-            return None
-        elif self.nvfp4_backend == NvFp4MoeBackend.FLASHINFER_CUTLASS:
-            # TP case: avoid convert to ModularKernelMethod - to be refactored.
-            if self.moe.dp_size == 1:
-                return None
-            # For now, fp4 moe only works with the flashinfer dispatcher.
-            prepare_finalize = build_flashinfer_fp4_cutlass_moe_prepare_finalize(
-                self.moe
-            )
-            logger.debug_once("%s", prepare_finalize.__class__.__name__)
-            return prepare_finalize
-        else:
-            return super().maybe_make_prepare_finalize(routing_tables)
+        raise ValueError(
+            "ModelOptNvFp4FusedMoE uses the new modular kernel "
+            "initialization logic. This function should not be called."
+        )
 
     def select_gemm_impl(
         self,
         prepare_finalize: mk.FusedMoEPrepareAndFinalize,
         layer: torch.nn.Module,
     ) -> mk.FusedMoEPermuteExpertsUnpermute:
-        assert self.moe_quant_config is not None
-        experts = select_nvfp4_gemm_impl(
-            self.moe,
-            self.moe_quant_config,
-            allow_flashinfer=self.nvfp4_backend in FLASHINFER_NVFP4_MOE_BACKENDS,
+        raise ValueError(
+            "ModelOptNvFp4FusedMoE uses the new modular kernel "
+            "initialization logic. This function should not be called."
         )
-        logger.debug_once("Using %s", experts.__class__.__name__)
-        return experts
 
     def uses_weight_scale_2_pattern(self) -> bool:
         """
@@ -1581,12 +1599,14 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
         replace_parameter(layer, "w2_input_scale", a2_scale)
 
         self.moe_quant_config = self.get_fused_moe_quant_config(layer)
-        use_dp = self.moe.dp_size > 1
-        if self.moe_quant_config is not None and not use_dp:
+        if self.moe_quant_config is not None:
+            assert self.experts_cls is not None
             self.kernel = make_nvfp4_moe_kernel(
-                backend=self.nvfp4_backend,
-                quant_config=self.moe_quant_config,
+                layer=layer,
+                moe_quant_config=self.moe_quant_config,
                 moe_config=self.moe,
+                nvfp4_backend=self.nvfp4_backend,
+                experts_cls=self.experts_cls,
             )
 
     def prepare_dp_allgather_tensor(
