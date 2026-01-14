@@ -11,6 +11,7 @@ from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceDelegate,
 )
 from vllm.model_executor.layers.fused_moe.utils import moe_kernel_quantize_input
+from vllm.utils.flashinfer import nvfp4_block_scale_interleave
 
 
 class MoEPrepareAndFinalizeNaiveEP(mk.FusedMoEPrepareAndFinalize):
@@ -101,10 +102,11 @@ class MoEPrepareAndFinalizeNaiveEP(mk.FusedMoEPrepareAndFinalize):
         if use_int8_view:
             a1q = a1q.view(current_platform.fp8_dtype())
 
-        # TODO(rob): move this out of the P/F.
+        # NOTE(rob): this is for FLASHINFER_CUTLASS. There are
+        # currently no other kernels that use this prepare/finalize
+        # with nvfp4. If we add others in the future, we may need
+        # a way to register how to shuffle into the kernel format.
         if use_nvfp4:
-            from vllm.utils.flashinfer import nvfp4_block_scale_interleave
-
             a1q_scale = nvfp4_block_scale_interleave(a1q_scale)
 
         return a1q, a1q_scale, expert_tokens_meta, topk_ids, topk_weights
