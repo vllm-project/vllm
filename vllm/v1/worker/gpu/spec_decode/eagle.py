@@ -17,7 +17,6 @@ from vllm.v1.worker.gpu.attn_utils import build_attn_metadata
 from vllm.v1.worker.gpu.block_table import BlockTables
 from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers
 from vllm.v1.worker.gpu.sample.gumbel import gumbel_sample
-from vllm.v1.worker.gpu.sample.metadata import SamplingMetadata
 from vllm.v1.worker.gpu.spec_decode.eagle_cudagraph import EagleCudaGraphManager
 
 logger = init_logger(__name__)
@@ -188,7 +187,6 @@ class EagleSpeculator:
     def propose(
         self,
         input_batch: InputBatch,
-        sampling_metadata: SamplingMetadata,
         # [num_tokens, hidden_size]
         last_hidden_states: torch.Tensor,
         # num_layers x [num_tokens, hidden_size]
@@ -201,6 +199,10 @@ class EagleSpeculator:
         last_sampled: torch.Tensor,
         # [num_reqs]
         next_prefill_tokens: torch.Tensor,
+        # [max_num_reqs]
+        temperature: torch.Tensor,
+        # [max_num_reqs]
+        seeds: torch.Tensor,
     ) -> torch.Tensor:
         # NOTE(woosuk): To avoid CPU-GPU synchronization without CPU knowing the
         # number of rejected tokens, we maintain the size of eagle's input_ids and
@@ -246,8 +248,8 @@ class EagleSpeculator:
         # affect the output distribution after rejection sampling.
         idx_mapping = self.idx_mapping[:num_reqs]
         idx_mapping.copy_(input_batch.idx_mapping)
-        self.temperature.copy_(sampling_metadata.temperature)
-        self.seeds.copy_(sampling_metadata.seeds)
+        self.temperature.copy_(temperature)
+        self.seeds.copy_(seeds)
         # Gather the values and copy them to the pre-allocated buffers.
         pos = self.input_buffers.positions[:num_reqs]
         torch.gather(input_batch.positions, 0, last_token_indices, out=pos)
