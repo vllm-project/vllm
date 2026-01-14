@@ -101,7 +101,7 @@ class MoEPrepareAndFinalizeNaiveEP(mk.FusedMoEPrepareAndFinalize):
         if use_int8_view:
             a1q = a1q.view(current_platform.fp8_dtype())
 
-        # TODO(rob): move this out of the experts.
+        # TODO(rob): move this out of the P/F.
         if use_nvfp4:
             from vllm.utils.flashinfer import nvfp4_block_scale_interleave
 
