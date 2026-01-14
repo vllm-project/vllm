@@ -85,11 +85,9 @@ def create_cross_attention_backend(
             new_metadata.causal = False
             max_encoder_len = int(new_metadata.encoder_seq_lens_cpu.max())
             new_metadata.max_seq_len = max_encoder_len
-            # Derive num_computed_tokens from seq_lens and query_lens
-            query_start_loc_cpu = common_attn_metadata.query_start_loc_cpu
-            query_lens_cpu = query_start_loc_cpu[1:] - query_start_loc_cpu[:-1]
-            seq_lens_cpu = common_attn_metadata.seq_lens.cpu()
-            num_computed_tokens_cpu = seq_lens_cpu - query_lens_cpu
+            num_computed_tokens_cpu = (
+                common_attn_metadata.compute_num_computed_tokens_cpu()
+            )
             # Any computed tokens indicated decode step>1 (no chunked prefill)
             num_cache_decodes = (num_computed_tokens_cpu > 0).sum().item()
             if num_cache_decodes > 0:

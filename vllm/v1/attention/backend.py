@@ -379,6 +379,12 @@ class CommonAttentionMetadata:
             self._num_computed_tokens_cache = self.seq_lens - query_lens
         return self._num_computed_tokens_cache
 
+    def compute_num_computed_tokens_cpu(self) -> torch.Tensor:
+        """Compute num_computed_tokens on CPU (seq_lens - query_lens)."""
+        query_lens_cpu = self.query_start_loc_cpu[1:] - self.query_start_loc_cpu[:-1]
+        seq_lens_cpu = self.seq_lens.cpu()
+        return seq_lens_cpu - query_lens_cpu
+
     # TODO(lucas): remove once we have FULL-CG spec-decode support
     def unpadded(
         self, num_actual_tokens: int, num_actual_reqs: int
