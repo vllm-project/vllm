@@ -5,17 +5,21 @@ import importlib
 
 import torch
 
-from vllm.attention.ops.common import pack_seq_triton, unpack_seq_triton
 from vllm.forward_context import get_forward_context
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.v1.attention.backends.mla.indexer import DeepseekV32IndexerMetadata
+from vllm.v1.attention.ops.common import pack_seq_triton, unpack_seq_triton
+
+if current_platform.is_cuda_alike():
+    from vllm import _custom_ops as ops
 
 
 @triton.jit
 def _indexer_k_quant_and_cache_kernel(
     k_ptr,  # [num_tokens, head_dim]
     kv_cache_ptr,  # [n_blks, blk_size//tile_block, head_dim // 16B, tile_block, 16B]
+    # [n_blocks, blk_size, head_dim]
     kv_cache_scale_ptr,  # [n_blks, blk_size]
     slot_mapping_ptr,  # [num_tokens]
     kv_cache_scale_stride,
@@ -23,6 +27,7 @@ def _indexer_k_quant_and_cache_kernel(
     block_size,
     num_tokens,
     head_dim: tl.constexpr,
+    LAYOUT: tl.constexpr,
     BLOCK_TILE_SIZE: tl.constexpr,
     HEAD_TILE_SIZE: tl.constexpr,
     IS_FNUZ: tl.constexpr,
@@ -30,10 +35,13 @@ def _indexer_k_quant_and_cache_kernel(
 ):
     tid = tl.program_id(0)
     offset = tl.arange(0, head_dim)
-    tile_offset = (
-        offset // HEAD_TILE_SIZE * BLOCK_TILE_SIZE * HEAD_TILE_SIZE
-        + offset % HEAD_TILE_SIZE
-    )
+    if LAYOUT == "SHUFFLE":
+        tile_offset = (
+            offset // HEAD_TILE_SIZE * BLOCK_TILE_SIZE * HEAD_TILE_SIZE
+            + offset % HEAD_TILE_SIZE
+        )
+    else:
+        tile_offset = offset
     tile_store_offset = tile_offset
     # for idx in tl.range(tid, num_tokens, n_program):
     src_ptr = k_ptr + tid * head_dim
@@ -55,12 +63,17 @@ def _indexer_k_quant_and_cache_kernel(
         scale = tl.exp2(tl.ceil(tl.log2(scale)))
 
     fp8_val = (val.to(tl.float32) / scale).to(kv_cache_ptr.type.element_ty)
-    dst_ptr = (
-        kv_cache_ptr
-        + block_id * kv_cache_value_stride
-        + tile_block_id * BLOCK_TILE_SIZE * head_dim
-        + tile_block_offset * HEAD_TILE_SIZE
-    )
+    if LAYOUT == "SHUFFLE":
+        dst_ptr = (
+            kv_cache_ptr
+            + block_id * kv_cache_value_stride
+            + tile_block_id * BLOCK_TILE_SIZE * head_dim
+            + tile_block_offset * HEAD_TILE_SIZE
+        )
+    else:
+        dst_ptr = (
+            kv_cache_ptr + block_id * kv_cache_value_stride + block_offset * head_dim
+        )
     tl.store(dst_ptr + tile_store_offset, fp8_val)
     dst_scale_ptr = kv_cache_scale_ptr + block_id * kv_cache_scale_stride + block_offset
     tl.store(dst_scale_ptr, scale)
@@ -96,6 +109,7 @@ def indexer_k_quant_and_cache_triton(
         block_size,
         num_tokens,
         head_dim,
+        "NHD",
         block_tile_size,
         head_tile_size,
         IS_FNUZ=current_platform.fp8_dtype() == torch.float8_e4m3fnuz,
@@ -106,6 +120,7 @@ def indexer_k_quant_and_cache_triton(
 @triton.jit
 def _cp_gather_indexer_quant_cache_kernel(
     kv_cache_ptr,  # [n_blks,blk_size//tile_blk,head_dim//16B,tile_blk,16B]
+    # [n_blks, blk_size, head_dim]
     kv_cache_scale_ptr,  # [n_blks, blk_size]
     k_fp8_ptr,  # [num_tokens, head_dim]
     k_scale_ptr,  # [num_tokens]
@@ -116,6 +131,7 @@ def _cp_gather_indexer_quant_cache_kernel(
     block_table_stride,
     kv_cache_stride,
     kv_cache_scale_stride,
+    LAYOUT: tl.constexpr,
     HEAD_DIM: tl.constexpr,
     BLOCK_TILE_SIZE: tl.constexpr,
     HEAD_TILE_SIZE: tl.constexpr,
@@ -134,11 +150,14 @@ def _cp_gather_indexer_quant_cache_kernel(
     block_id = tl.load(block_table_ptr + block_table_offset)
     tiled_block_id = block_offset // BLOCK_TILE_SIZE
     tiled_block_offset = block_offset % BLOCK_TILE_SIZE
-    src_cache_offset = (
-        block_id * kv_cache_stride
-        + tiled_block_id * HEAD_DIM * BLOCK_TILE_SIZE
-        + tiled_block_offset * HEAD_TILE_SIZE
-    )
+    if LAYOUT == "SHUFFLE":
+        src_cache_offset = (
+            block_id * kv_cache_stride
+            + tiled_block_id * HEAD_DIM * BLOCK_TILE_SIZE
+            + tiled_block_offset * HEAD_TILE_SIZE
+        )
+    else:
+        src_cache_offset = block_id * kv_cache_stride + block_offset * HEAD_DIM
     src_scale_offset = block_id * kv_cache_scale_stride + block_offset
     dst_offset = tid * HEAD_DIM
     src_scale_ptr = kv_cache_scale_ptr + src_scale_offset
@@ -146,10 +165,13 @@ def _cp_gather_indexer_quant_cache_kernel(
     dst_k_ptr = k_fp8_ptr + dst_offset
     scale_val = tl.load(src_scale_ptr)
     tl.store(k_scale_ptr + tid, scale_val)
-    tiled_src_offset = (
-        offset // HEAD_TILE_SIZE * HEAD_TILE_SIZE * BLOCK_TILE_SIZE
-        + offset % HEAD_TILE_SIZE
-    )
+    if LAYOUT == "SHUFFLE":
+        tiled_src_offset = (
+            offset // HEAD_TILE_SIZE * HEAD_TILE_SIZE * BLOCK_TILE_SIZE
+            + offset % HEAD_TILE_SIZE
+        )
+    else:
+        tiled_src_offset = offset
     val = tl.load(src_cache_ptr + tiled_src_offset)
     tl.store(dst_k_ptr + offset, val)
 
@@ -188,10 +210,12 @@ def cp_gather_indexer_k_quant_cache_triton(
         block_table_stride,
         k_cache_value.stride(0),
         k_cache_scale.stride(0),
+        "NHD",
         head_dim,
         block_tile_size,
         head_tile_size,
     )
+
 
 # Taken from https://github.com/deepseek-ai/DeepGEMM/blob/main/tests/test_attention.py#L156
 def fp8_paged_mqa_logits_torch(
@@ -282,31 +306,27 @@ def rocm_fp8_paged_mqa_logits(
     from vllm._aiter_ops import rocm_aiter_ops
 
     if rocm_aiter_ops.is_enabled():
-        batch_size, next_n, heads, head_dim = q_fp8.shape
-        num_blocks, block_size, _, _ = kv_cache_fp8.shape
+        from aiter.ops.triton.attention.pa_mqa_logits import (
+            deepgemm_fp8_paged_mqa_logits_stage1,
+        )
 
-        from aiter.ops.triton.pa_mqa_logits import deepgemm_fp8_paged_mqa_logits
-
-        out_logits = torch.full(
-            [batch_size * next_n, max_model_len],
+        batch_size, next_n, heads, _ = q_fp8.shape
+        out_qk = torch.full(
+            (heads, batch_size * next_n, max_model_len),
             float("-inf"),
             device="cuda",
             dtype=torch.float32,
         )
-        deepgemm_fp8_paged_mqa_logits(
+        deepgemm_fp8_paged_mqa_logits_stage1(
             q_fp8,
             kv_cache_fp8,
             weights,
-            out_logits,
+            out_qk,
             context_lens,
             block_tables,
             max_model_len,
-            ChunkK=256,
-            Preshuffle=block_size == 64,
-            KVBlockSize=block_size,
-            WavePerEU=2,
         )
-        return out_logits
+        return out_qk.sum(dim=0)
     else:
         return fp8_paged_mqa_logits_torch(
             q_fp8, kv_cache_fp8, weights, context_lens, block_tables, max_model_len
@@ -392,7 +412,7 @@ def rocm_fp8_mqa_logits(
         return importlib.util.find_spec("aiter.ops.triton.fp8_mqa_logits") is not None
 
     if rocm_aiter_ops.is_enabled() and has_mqa_logits_module():
-        from aiter.ops.triton.fp8_mqa_logits import fp8_mqa_logits
+        from aiter.ops.triton.attention.fp8_mqa_logits import fp8_mqa_logits
 
         kv, scale = kv
         return fp8_mqa_logits(q, kv, scale, weights, cu_seqlen_ks, cu_seqlen_ke)
@@ -469,7 +489,14 @@ def rocm_aiter_sparse_attn_indexer(
     has_prefill = attn_metadata.num_prefills > 0
     num_decode_tokens = attn_metadata.num_decode_tokens
 
-    indexer_k_quant_and_cache_triton(
+    # indexer_k_quant_and_cache_triton(
+    #     k,
+    #     kv_cache,
+    #     slot_mapping,
+    #     quant_block_size,
+    #     scale_fmt,
+    # )
+    ops.indexer_k_quant_and_cache(
         k,
         kv_cache,
         slot_mapping,
@@ -491,13 +518,20 @@ def rocm_aiter_sparse_attn_indexer(
                 device=k.device,
                 dtype=torch.uint8,
             )
-            cp_gather_indexer_k_quant_cache_triton(
+            # cp_gather_indexer_k_quant_cache_triton(
+            #     kv_cache,
+            #     k_fp8,
+            #     k_scale,
+            #     chunk.block_table,
+            #     chunk.cu_seq_lens,
+            #     chunk.token_to_seq,
+            # )
+            ops.cp_gather_indexer_k_quant_cache(
                 kv_cache,
                 k_fp8,
                 k_scale,
                 chunk.block_table,
                 chunk.cu_seq_lens,
-                chunk.token_to_seq,
             )
 
             logits = rocm_fp8_mqa_logits(

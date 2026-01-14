@@ -5,7 +5,6 @@
 import torch
 
 from vllm._aiter_ops import rocm_aiter_ops
-from vllm.attention.ops.common import pack_seq_triton, unpack_seq_triton
 from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.custom_op import CustomOp
@@ -15,6 +14,7 @@ from vllm.utils.torch_utils import direct_register_custom_op
 from vllm.v1.attention.backends.mla.indexer import (
     DeepseekV32IndexerMetadata,
 )
+from vllm.v1.attention.ops.common import pack_seq_triton, unpack_seq_triton
 from vllm.v1.worker.workspace import current_workspace_manager
 
 if current_platform.is_cuda_alike():
@@ -248,7 +248,7 @@ class SparseAttnIndexer(CustomOp):
         self.max_total_seq_len = max_total_seq_len
         self.topk_indices_buffer = topk_indices_buffer
 
-    def forwrad_native(
+    def forward_native(
         self,
         hidden_states: torch.Tensor,
         q_fp8: torch.Tensor,
@@ -274,7 +274,7 @@ class SparseAttnIndexer(CustomOp):
     ):
         return torch.ops.vllm.sparse_attn_indexer(
             hidden_states,
-            self.k_cache.layer_prefix,
+            self.k_cache.prefix,
             self.k_cache.kv_cache[0],
             q_fp8,
             k,
