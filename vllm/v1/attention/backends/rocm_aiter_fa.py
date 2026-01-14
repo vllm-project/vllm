@@ -7,6 +7,7 @@ from typing import ClassVar
 
 import torch
 
+import vllm.envs as envs
 from vllm.attention.layer import Attention
 from vllm.config import VllmConfig, get_layers_from_vllm_config
 from vllm.logger import init_logger
@@ -30,7 +31,6 @@ from vllm.v1.kv_cache_interface import AttentionSpec
 
 _PARTITION_SIZE_ROCM = 256
 _CP_TOKENS_PER_ITER_ROCM = 32 * 1024
-USING_SHUFFLE_LAYOUT = True
 if current_platform.is_rocm():
     import aiter
 
@@ -129,13 +129,8 @@ if current_platform.is_rocm():
             k_reg = tl.load(key_cache_ptr_offset + k_reg_offset)
             v_reg = tl.load(value_cache_ptr_offset + v_reg_offset)
             if DEQUANT:
-                kv_scale_offset = (
-                    block_id * num_heads * PAGE_SIZE + head_id * PAGE_SIZE + slot_id
-                )
-                k_dtype = key_ptr.type.element_ty
-                v_dtype = value_ptr.type.element_ty
-                k_scale = tl.load(k_scale_ptr + kv_scale_offset)
-                v_scale = tl.load(v_scale_ptr + kv_scale_offset)
+                k_scale = 1.0
+                v_scale = 1.0
                 k_reg = k_reg.to(tl.float32) * k_scale
                 v_reg = v_reg.to(tl.float32) * v_scale
             tl.store(key_ptr_offset + col_offsets, k_reg)
@@ -238,16 +233,8 @@ if current_platform.is_rocm():
         k_val = tl.load(key_ptr + src_offset_k + offset)
         v_val = tl.load(value_ptr + src_offset_v + offset)
         if QUANT:
-            dtype_max = 224 if IS_FNUZ else 448
-            kv_offset = (
-                block_id * num_kv_heads * block_size
-                + head_id * block_size
-                + block_offset
-            )
-            k_scale = tl.max(tl.abs(k_val.to(tl.float32))) / dtype_max
-            v_scale = tl.max(tl.abs(v_val.to(tl.float32))) / dtype_max
-            tl.store(k_scale_ptr + kv_offset, k_scale)
-            tl.store(v_scale_ptr + kv_offset, v_scale)
+            k_scale = 1.0
+            v_scale = 1.0
             k_dtype = key_cache_ptr.type.element_ty
             v_dtype = value_cache_ptr.type.element_ty
             k_val = (k_val.to(tl.float32) / k_scale).to(k_dtype)
@@ -397,6 +384,11 @@ class AiterFlashAttentionMetadata:
     common_prefix_len: int
     total_tokens: int
 
+    # Only for fp8 shuffle layout kv cache, we allocate kv_scale for each layer
+    # since we might integrate per token quant for kv cache in the future.
+    k_scale: dict[str, torch.Tensor] | None
+    v_scale: dict[str, torch.Tensor] | None
+
 
 class AiterFlashAttentionMetadataBuilder(
     AttentionMetadataBuilder[AiterFlashAttentionMetadata]
@@ -447,6 +439,8 @@ class AiterFlashAttentionMetadataBuilder(
             dtype=self.model_config.dtype,
             device=device,
         )
+        self.k_scale: dict[str, torch.Tensor] = {}
+        self.v_scale: dict[str, torch.Tensor] = {}
 
     def build_for_cudagraph_capture(
         self, common_attn_metadata: CommonAttentionMetadata
@@ -469,6 +463,32 @@ class AiterFlashAttentionMetadataBuilder(
             common_attn_metadata,
             decode_threshold=self.reorder_batch_threshold,
         )
+        if (
+            envs.VLLM_ROCM_SHUFFLE_KV_CACHE_LAYOUT
+            and len(self.k_scale) == 0
+            and self.vllm_config.cache_config.cache_dtype.startswith("fp8")
+        ):
+            layers = get_layers_from_vllm_config(self.vllm_config, Attention)
+            first_layer_name = [k for k in layers][0]
+            kv_cache_shape = (
+                self.vllm_config.compilation_config.static_forward_context[
+                    first_layer_name
+                ]
+                .kv_cache[0]
+                .shape
+            )
+            num_blocks = kv_cache_shape[1]
+            for layer_names in layers:
+                self.k_scale[layer_names] = torch.ones(
+                    [num_blocks, self.num_heads_kv, self.block_size],
+                    dtype=torch.float32,
+                    device=self.device,
+                )
+                self.v_scale[layer_names] = torch.ones(
+                    [num_blocks, self.num_heads_kv, self.block_size],
+                    dtype=torch.float32,
+                    device=self.device,
+                )
 
         (
             num_decodes,
@@ -651,6 +671,8 @@ class AiterFlashAttentionMetadataBuilder(
             use_cascade=use_cascade,
             common_prefix_len=common_prefix_len,
             total_tokens=self.total_tokens,
+            k_scale=self.k_scale,
+            v_scale=self.v_scale,
         )
         return attn_metadata
 
@@ -733,30 +755,6 @@ class AiterFlashAttentionImpl(AttentionImpl):
         if attn_type not in [AttentionType.DECODER, AttentionType.ENCODER_DECODER]:
             raise NotImplementedError(
                 "Encoder self-attention is not implemented for FlashAttentionImpl"
-            )
-
-    def _maybe_register_kv_scale(self, layer, kv_cache):
-        # Only shuffle layout require re-register kv_scale
-        if not USING_SHUFFLE_LAYOUT:
-            return
-        if hasattr(layer, "_k_scale"):
-            k_scale = layer._k_scale
-            if k_scale.numel() != 1:
-                return
-            num_blocks = kv_cache[0].shape[0]
-            block_size = kv_cache[0].shape[1]
-            kv_scale_shape = [num_blocks, self.num_kv_heads, block_size]
-            layer.register_buffer(
-                "_k_scale",
-                torch.ones(
-                    kv_scale_shape, dtype=torch.float32, device=kv_cache[0].device
-                ),
-            )
-            layer.register_buffer(
-                "_v_scale",
-                torch.ones(
-                    kv_scale_shape, dtype=torch.float32, device=kv_cache[0].device
-                ),
             )
 
     def extend_for_sliding_window(
@@ -893,7 +891,9 @@ class AiterFlashAttentionImpl(AttentionImpl):
                 token_to_batch=token_to_batch[chunk_idx],
                 seq_starts=chunk_starts[chunk_idx],
                 dequant=self.kv_cache_dtype.startswith("fp8"),
-                kv_cache_layout="SHUFFLE" if USING_SHUFFLE_LAYOUT else "NHD",
+                kv_cache_layout="SHUFFLE"
+                if envs.VLLM_ROCM_SHUFFLE_KV_CACHE_LAYOUT
+                else "NHD",
                 total_tokens=total_token_per_batch[chunk_idx],
             )
 
@@ -976,7 +976,6 @@ class AiterFlashAttentionImpl(AttentionImpl):
             # Profiling run.
             return output.fill_(0)
 
-        self._maybe_register_kv_scale(layer, kv_cache)
         # IMPORTANT!
         # NOTE(woosuk): With piece-wise CUDA graphs, this method is
         # executed in eager-mode PyTorch. Thus, we need to be careful
@@ -991,6 +990,9 @@ class AiterFlashAttentionImpl(AttentionImpl):
         # key and value may be None in the case of cross attention. They are
         # calculated once based on the output from the encoder and then cached
         # in KV cache.
+        if self.kv_cache_dtype.startswith("fp8"):
+            key_cache = key_cache.view(current_platform.fp8_dtype())
+            value_cache = value_cache.view(current_platform.fp8_dtype())
         if (
             self.kv_sharing_target_layer_name is None
             and key is not None
@@ -1003,7 +1005,7 @@ class AiterFlashAttentionImpl(AttentionImpl):
             # key[:num_actual_tokens] and value[:num_actual_tokens] because
             # the reshape_and_cache_flash op uses the slot_mapping's shape
             # to determine the number of actual tokens.
-            if USING_SHUFFLE_LAYOUT:
+            if envs.VLLM_ROCM_SHUFFLE_KV_CACHE_LAYOUT:
                 # We may calculate per token quant scale in
                 # reshape_and_cache_shuffle_triton which might differ from
                 # vllm's style when shuffle layout is used.
@@ -1014,8 +1016,12 @@ class AiterFlashAttentionImpl(AttentionImpl):
                     value_cache,
                     attn_metadata.slot_mapping,
                     self.kv_cache_dtype,
-                    layer._k_scale,
-                    layer._v_scale,
+                    attn_metadata.k_scale[layer.layer_name]
+                    if attn_metadata.k_scale is not None
+                    else layer._k_scale,
+                    attn_metadata.v_scale[layer.layer_name]
+                    if attn_metadata.v_scale is not None
+                    else layer._v_scale,
                 )
             else:
                 torch.ops._C_cache_ops.reshape_and_cache_flash(
@@ -1028,10 +1034,6 @@ class AiterFlashAttentionImpl(AttentionImpl):
                     layer._k_scale,
                     layer._v_scale,
                 )
-
-        if self.kv_cache_dtype.startswith("fp8"):
-            key_cache = key_cache.view(current_platform.fp8_dtype())
-            value_cache = value_cache.view(current_platform.fp8_dtype())
 
         # decode:extend:prefill
         query = query[:num_actual_tokens]
@@ -1102,15 +1104,19 @@ class AiterFlashAttentionImpl(AttentionImpl):
                     slot_mapping=attn_metadata.slot_mapping[
                         num_decodes : num_decodes + num_extends
                     ],
-                    k_scale=layer._k_scale,
-                    v_scale=layer._v_scale,
+                    k_scale=attn_metadata.k_scale[layer.layer_name]
+                    if attn_metadata.k_scale is not None
+                    else layer._k_scale,
+                    v_scale=attn_metadata.v_scale[layer.layer_name]
+                    if attn_metadata.v_scale is not None
+                    else layer._v_scale,
                 )
 
             # calculate for decodes
             if num_decodes > 0:
                 assert attn_metadata.decode_metadata is not None
                 if self.sliding_window[0] != -1:
-                    assert not USING_SHUFFLE_LAYOUT, (
+                    assert not envs.VLLM_ROCM_SHUFFLE_KV_CACHE_LAYOUT, (
                         "Sliding window with shuffle layout is not supported yet."
                     )
                     from aiter.ops.triton.unified_attention import (
@@ -1143,7 +1149,7 @@ class AiterFlashAttentionImpl(AttentionImpl):
                     return
                 assert attn_metadata.decode_metadata is not None
 
-                if USING_SHUFFLE_LAYOUT:
+                if envs.VLLM_ROCM_SHUFFLE_KV_CACHE_LAYOUT:
                     num_blocks, block_size, num_kv_heads, head_size = key_cache.shape
                     x = 16 // key_cache.element_size()
                     k_cache_template = torch.empty(
@@ -1167,8 +1173,12 @@ class AiterFlashAttentionImpl(AttentionImpl):
                         block_tables_stride0=attn_metadata.block_table[
                             :num_decodes
                         ].stride(0),
-                        K_QScale=layer._k_scale,
-                        V_QScale=layer._v_scale,
+                        K_QScale=attn_metadata.k_scale[layer.layer_name]
+                        if attn_metadata.k_scale is not None
+                        else layer._k_scale,
+                        V_QScale=attn_metadata.v_scale[layer.layer_name]
+                        if attn_metadata.v_scale is not None
+                        else layer._v_scale,
                         out_=output[:num_decode_tokens],
                     )
                 else:
