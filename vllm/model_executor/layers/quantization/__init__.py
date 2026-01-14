@@ -188,5 +188,6 @@ __all__ = [
     "QuantizationConfig",
     "QuantizationMethods",
     "get_quantization_config",
+    "register_quantization_config",
     "QUANTIZATION_METHODS",
 ]
