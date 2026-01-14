@@ -249,7 +249,7 @@ class CompressedTensorsW4A4Nvfp4MoEMethod(CompressedTensorsMoEMethod):
         self.nvfp4_backend, self.experts_cls = select_nvfp4_moe_backend(
             config=self.moe,
             weight_key=kNvfp4Static,
-            activation_key=kNvfp4Dynamic,
+            activation_key=None if use_a16 else kNvfp4Dynamic,
         )
 
         # Delay creation of the kernel until after process-weights.

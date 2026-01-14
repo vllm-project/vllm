@@ -31,7 +31,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
     kFp8Static128BlockSym,
     kFp8StaticChannelSym,
-    kNvfp4Dynamic,
+    kNvfp4Static,
 )
 from vllm.platforms import current_platform
 from vllm.scalar_type import ScalarType, scalar_types
@@ -581,7 +581,7 @@ class MarlinExpertsBase(mk.FusedMoEPermuteExpertsUnpermute):
         SUPPORTED_W = [
             kFp8Static128BlockSym,
             kFp8StaticChannelSym,
-            kNvfp4Dynamic,
+            kNvfp4Static,
         ]
         return weight_key in SUPPORTED_W
 
