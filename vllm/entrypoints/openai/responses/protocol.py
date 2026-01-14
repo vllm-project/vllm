@@ -247,8 +247,8 @@ class ResponsesRequest(OpenAIBaseModel):
 
         # Structured output
         structured_outputs = None
-        if self.text is not None and self.text.format is not None:
-            response_format = self.text.format
+        if self.text is not None:
+            response_format = self.text
             if (
                 response_format.type == "json_schema"
                 and response_format.schema_ is not None

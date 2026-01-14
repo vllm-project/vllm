@@ -17,7 +17,6 @@ from vllm.entrypoints.openai.engine.protocol import (
 )
 from vllm.entrypoints.openai.responses.protocol import (
     ResponsesRequest,
-    ResponseTextConfig,
 )
 from vllm.logger import init_logger
 from vllm.sampling_params import (
@@ -71,8 +70,7 @@ class ToolParser:
                 request.structured_outputs.json = json_schema_from_tool
                 request.response_format = None
             if isinstance(request, ResponsesRequest):
-                request.text = ResponseTextConfig()
-                request.text.format = ResponseFormatTextJSONSchemaConfig(
+                request.text = ResponseFormatTextJSONSchemaConfig(
                     name="tool_calling_response",
                     schema=json_schema_from_tool,
                     type="json_schema",
