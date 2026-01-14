@@ -13,18 +13,12 @@ from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 
 logger = init_logger(__name__)
 
-RESTORE_ATTRS = ["weight_loader"]
-
 
 """
 TODO:
 * decide on reloading interface, back-compat with reload_weights
-* pass arguments to process_weights_after_loading
-* only onload once all weights are present
-* check composability with MLA processing
+* do Attention/MLA processing
 * check composability with EPLB
-* do attention/MLA processing after module weights are processed
-    * probably means call process_after_weight_loading after weight loading
 
 Limitations:
 * Does not compose with CPU offloading. This is because `device_loading_context`
@@ -222,10 +216,6 @@ def materialize_meta_tensor(meta_tensor: torch.Tensor) -> torch.Tensor:
     tensor.__class__ = meta_tensor.__class__
     tensor.__dict__ = meta_tensor.__dict__
     assert tensor.device != torch.device("meta")
-
-    # for attr_name in RESTORE_ATTRS:
-    #     if hasattr(meta_tensor, attr_name):
-    #         setattr(tensor, attr_name, getattr(meta_tensor, attr_name))
 
     return tensor
 
