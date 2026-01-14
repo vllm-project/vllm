@@ -14,7 +14,7 @@ MODEL_NAME = "deepseek-ai/DeepSeek-V2-Lite-Chat"
 NUM_GSM8K_QUESTIONS = 256
 EXPECTED_ACCURACY = 0.58
 ACCURACY_TOL = 0.08
-MAX_NUM_SEQS = 8
+MAX_NUM_SEQS = 32
 
 
 def _send_scale_command(server: RemoteOpenAIServer, new_dp_size: int) -> bool:

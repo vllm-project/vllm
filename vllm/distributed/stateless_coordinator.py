@@ -149,6 +149,10 @@ class StatelessGroupCoordinator(GroupCoordinator):
         if self.cpu_group:
             stateless_destroy_torch_distributed_process_group(self.cpu_group)
 
+    def size(self) -> int:
+        """Return the world size of this group."""
+        return self.world_size
+
     def broadcast(self, input_: torch.Tensor, src: int = 0):
         if self.world_size == 1:
             return input_
