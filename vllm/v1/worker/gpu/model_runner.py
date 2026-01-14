@@ -286,13 +286,10 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         else:
             positions = input_batch.mrope_positions
 
-        if skip_attn:
-            slot_mappings_by_layer: dict[str, torch.Tensor] = {}
-        else:
-            slot_mappings = self.block_tables.get_dummy_slot_mappings(num_tokens)
-            slot_mappings_by_layer = build_slot_mappings_by_layer(
-                slot_mappings, self.kv_cache_config
-            )
+        slot_mappings = self.block_tables.get_dummy_slot_mappings(num_tokens)
+        slot_mappings_by_layer = build_slot_mappings_by_layer(
+            slot_mappings, self.kv_cache_config
+        )
 
         with (
             self.maybe_dummy_run_with_lora(
