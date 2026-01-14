@@ -252,6 +252,7 @@ if TYPE_CHECKING:
     VLLM_USE_V2_MODEL_RUNNER: bool = False
     VLLM_LOG_MODEL_INSPECTION: bool = False
     VLLM_DEBUG_MFU_METRICS: bool = False
+    VLLM_USE_UCC: bool = False
 
 
 def get_default_cache_root():
@@ -1616,6 +1617,8 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_DEBUG_MFU_METRICS": lambda: bool(
         int(os.getenv("VLLM_DEBUG_MFU_METRICS", "0"))
     ),
+    # If set to 1, use UCC allreduce
+    "VLLM_USE_UCC": lambda: bool(int(os.getenv("VLLM_USE_UCC", "0"))),
 }
 
 # --8<-- [end:env-vars-definition]
