@@ -183,7 +183,7 @@ class EngineCore:
             deque[tuple[Future[ModelRunnerOutput], SchedulerOutput, Future[Any]]] | None
         ) = None
         if self.batch_queue_size > 1:
-            logger.info("Batch queue is enabled with size %d", self.batch_queue_size)
+            logger.debug("Batch queue is enabled with size %d", self.batch_queue_size)
             self.batch_queue = deque(maxlen=self.batch_queue_size)
 
         self.is_ec_producer = (

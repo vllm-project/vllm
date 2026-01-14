@@ -10,6 +10,9 @@ from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.scalar_type import ScalarType
 from vllm.utils.math_utils import cdiv
+from vllm.utils.flashinfer import (
+    flashinfer_quant_nvfp4_8x4_sf_layout,
+)
 
 logger = init_logger(__name__)
 
@@ -1076,6 +1079,25 @@ def get_cutlass_moe_mm_problem_sizes(
     )
 
 
+def get_cutlass_moe_mm_problem_sizes_from_expert_offsets(
+    expert_first_token_offset: torch.Tensor,
+    problem_sizes1: torch.Tensor,
+    problem_sizes2: torch.Tensor,
+    n: int,
+    k: int,
+    swap_ab: bool,
+):
+    """Compute per-expert (M, N, K) problem sizes from expert_first_token_offset"""
+    return torch.ops._C.get_cutlass_moe_mm_problem_sizes_from_expert_offsets(
+        expert_first_token_offset,
+        problem_sizes1,
+        problem_sizes2,
+        n,
+        k,
+        swap_ab,
+    )
+
+
 def shuffle_rows(input_tensor: torch.Tensor, dst2src_map: torch.Tensor):
     """
     Shuffle and expand the input tensor according to the dst2src_map and store the result in output_tensor.
@@ -1545,7 +1567,9 @@ def permute_cols(a: torch.Tensor, perm: torch.Tensor) -> torch.Tensor:
 
 # fp4
 def scaled_fp4_quant(
-    input: torch.Tensor, input_global_scale: torch.Tensor
+    input: torch.Tensor,
+    input_global_scale: torch.Tensor,
+    backend: str = "none",
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """
     Quantize input tensor to FP4 and return quantized tensor and scale.
@@ -1559,6 +1583,7 @@ def scaled_fp4_quant(
     Args:
         input: The input tensor to be quantized to FP4
         input_global_scale: A scalar scaling factor for the entire tensor.
+        use_8x4_sf_layout: Whether to use the 8x4 or 128x4 layout for the scaling
 
     Returns:
         tuple[torch.Tensor, torch.Tensor]: The output tensor in FP4 but every
@@ -1578,23 +1603,31 @@ def scaled_fp4_quant(
         f"input.dtype needs to be fp16 or bf16 but got {input.dtype}."
     )
 
-    # Two fp4 values will be packed into an uint8.
-    output = torch.empty((m, n // 2), device=device, dtype=torch.uint8)
+    use_8x4_sf_layout = True if "trtllm" in backend and m <= 32 else False  # noqa: SIM210
 
-    # We use the rounded values to store the swizzled values. Due to the
-    # requirement of the Tensor Core, the minimum tile is 128x4 for the scales.
-    # So, we first pad the scales to multiples of 128 and 4. Then, the scales
-    # (in float8_e4m3fn) are packed into an int32 for every 4 values. More:
-    # https://docs.nvidia.com/cuda/parallel-thread-execution/#tcgen05-mma-scale-factor-b-layout-4x
-    round_up = lambda x, y: (x + y - 1) // y * y
-    rounded_m = round_up(m, 128)
-    scale_n = n // block_size
-    rounded_n = round_up(scale_n, 4)
-    output_scale = torch.empty(
-        (rounded_m, rounded_n // 4), device=device, dtype=torch.int32
-    )
+    if use_8x4_sf_layout:
+        output, output_scale = flashinfer_quant_nvfp4_8x4_sf_layout(
+            input, input_global_scale
+        )
+    else:
+        # Two fp4 values will be packed into an uint8.
+        output = torch.empty((m, n // 2), device=device, dtype=torch.uint8)
 
-    torch.ops._C.scaled_fp4_quant(output, input, output_scale, input_global_scale)
+        # We use the rounded values to store the swizzled values. Due to the
+        # requirement of the Tensor Core, the minimum tile is 128x4 for the scales.
+        # So, we first pad the scales to multiples of 128 and 4. Then, the scales
+        # (in float8_e4m3fn) are packed into an int32 for every 4 values. More:
+        # https://docs.nvidia.com/cuda/parallel-thread-execution/#tcgen05-mma-scale-factor-b-layout-4x
+        round_up = lambda x, y: (x + y - 1) // y * y
+        rounded_m = round_up(m, 128)
+        scale_n = n // block_size
+        rounded_n = round_up(scale_n, 4)
+        output_scale = torch.empty(
+            (rounded_m, rounded_n // 4), device=device, dtype=torch.int32
+        )
+
+        torch.ops._C.scaled_fp4_quant(output, input, output_scale, input_global_scale)
+
     output_scale = output_scale.view(torch.float8_e4m3fn)
     return output, output_scale
 
@@ -1734,6 +1767,7 @@ def scaled_fp8_quant(
     scale_ub: torch.Tensor | None = None,
     use_per_token_if_dynamic: bool = False,
     output: torch.Tensor | None = None,
+    group_shape: tuple[int, int] | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """
     Quantize input tensor to FP8 and return quantized tensor and scale.
@@ -1745,14 +1779,23 @@ def scaled_fp8_quant(
     will benefit from padding.
 
     Args:
-        input: The input tensor to be quantized to FP8
-        scale: Optional scaling factor for the FP8 quantization
+        input: The input tensor to be quantized to FP8 (must be 2D: [M, N])
+        scale: Optional scaling factor for the FP8 quantization. Supports:
+            - 0D or [1]: per-tensor scaling
+            - 1D: requires explicit group_shape to disambiguate per-channel
+              vs per-token (use (-1, 1) for per-channel, (1, -1) for per-token)
+            - 2D [M/group_m, N/group_n]: group scaling (e.g. [M, N/128] for
+              DeepSeek-style (1,128) groups, or [M/128, N/128] for (128,128))
         scale_ub: Optional upper bound for scaling factor in dynamic
             per token case
         num_token_padding: If specified, pad the first dimension
             of the output to at least this value.
         use_per_token_if_dynamic: Whether to do per_tensor or per_token
             in the dynamic quantization case.
+        group_shape: Optional tuple (group_m, group_n) specifying the group
+            shape for static quantization. Use -1 for "full extent" (e.g.,
+            (-1, -1) for per-tensor, (-1, 1) for per-channel, etc.)
+            Required for 1D scales; optional for 2D scales.
 
     Returns:
         tuple[torch.Tensor, torch.Tensor]: The output tensor in FP8 and
@@ -1781,8 +1824,7 @@ def scaled_fp8_quant(
             scale = torch.empty(1, device=input.device, dtype=torch.float32)
             torch.ops._C.dynamic_scaled_fp8_quant(output, input, scale)
     else:
-        assert scale.numel() == 1, f"{scale.shape}"
-        torch.ops._C.static_scaled_fp8_quant(output, input, scale)
+        torch.ops._C.static_scaled_fp8_quant(output, input, scale, group_shape)
 
     return output, scale
 
@@ -2388,6 +2430,32 @@ def concat_and_cache_mla(
 ) -> None:
     torch.ops._C_cache_ops.concat_and_cache_mla(
         kv_c, k_pe, kv_cache, slot_mapping, kv_cache_dtype, scale
+    )
+
+
+def concat_and_cache_mla_rope_fused(
+    positions: torch.Tensor,
+    q_pe: torch.Tensor,
+    k_pe: torch.Tensor,
+    kv_c: torch.Tensor,
+    cos_sin_cache: torch.Tensor,
+    is_neox: bool,
+    slot_mapping: torch.Tensor,
+    kv_cache: torch.Tensor,
+    kv_cache_dtype: str,
+    kv_cache_scale: torch.Tensor,
+) -> None:
+    torch.ops._C_cache_ops.concat_and_cache_mla_rope_fused(
+        positions,
+        q_pe,
+        k_pe,
+        kv_c,
+        cos_sin_cache,
+        is_neox,
+        slot_mapping,
+        kv_cache,
+        kv_cache_dtype,
+        kv_cache_scale,
     )
 
 

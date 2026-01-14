@@ -105,9 +105,12 @@ class ConvLayerBase(CustomOp):
         return s
 
 
+# --8<-- [start:conv2d]
 @CustomOp.register("conv2d")
 class Conv2dLayer(ConvLayerBase):
     """Conv layer with Conv2d."""
+
+    # --8<-- [end:conv2d]
 
     num_dim = 2
 
@@ -204,9 +207,12 @@ class CausalConv2dLayer(Conv2dLayer):
         return x
 
 
+# --8<-- [start:conv3d]
 @CustomOp.register("conv3d")
 class Conv3dLayer(ConvLayerBase):
     """Conv layer with Conv3d."""
+
+    # --8<-- [end:conv3d]
 
     num_dim = 3
 

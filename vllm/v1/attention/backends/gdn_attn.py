@@ -6,13 +6,15 @@ from dataclasses import dataclass
 
 import torch
 
-from vllm.attention.backends.abstract import AttentionBackend
 from vllm.config import VllmConfig
-from vllm.v1.attention.backends.utils import (
-    PAD_SLOT_ID,
+from vllm.v1.attention.backend import (
+    AttentionBackend,
     AttentionCGSupport,
     AttentionMetadataBuilder,
     CommonAttentionMetadata,
+)
+from vllm.v1.attention.backends.utils import (
+    PAD_SLOT_ID,
     compute_causal_conv1d_metadata,
     split_decodes_and_prefills,
 )

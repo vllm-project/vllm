@@ -22,7 +22,6 @@ from vllm.multimodal.processing import (
     iter_token_matches,
     replace_token_matches,
 )
-from vllm.multimodal.profiling import MultiModalProfiler
 
 from .utils import random_image
 
@@ -924,12 +923,11 @@ def test_limit_mm_per_prompt_dummy(model_id, limit, num_supported, is_valid):
     processor = MULTIMODAL_REGISTRY.create_processor(model_config)
     processor._supported_mm_limits = {"image": num_supported}
 
-    profiler = MultiModalProfiler(processor)
-
     exc_ctx = nullcontext() if is_valid else pytest.raises(ValueError, match="At most")
 
     with exc_ctx:
-        profiler.get_decoder_dummy_data(
+        processor.dummy_inputs.get_decoder_dummy_data(
+            processor,
             model_config.max_model_len,
             mm_counts=limit_mm_per_prompt,
         )
