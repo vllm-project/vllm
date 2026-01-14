@@ -22,6 +22,9 @@ from vllm.entrypoints.chat_utils import (
     ChatTemplateContentFormatOption,
 )
 from vllm.entrypoints.constants import MCP_PREFIX
+from vllm.entrypoints.openai.engine.protocol import (
+    FunctionCall,
+)
 from vllm.entrypoints.openai.parser.harmony_utils import (
     get_encoding,
     get_streamable_parser_for_assistant,
@@ -30,8 +33,7 @@ from vllm.entrypoints.openai.parser.harmony_utils import (
 from vllm.entrypoints.openai.parser.responses_parser import (
     get_responses_parser_for_simple_context,
 )
-from vllm.entrypoints.openai.protocol import (
-    FunctionCall,
+from vllm.entrypoints.openai.responses.protocol import (
     ResponseInputOutputItem,
     ResponseRawMessageAndToken,
     ResponsesRequest,
@@ -824,6 +826,7 @@ class StreamingHarmonyContext(HarmonyContext):
         self.encoding = get_encoding()
         self.last_tok = None
         self.first_tok_of_message = True
+        self.last_content_delta = None
 
     @property
     def messages(self) -> list:
@@ -832,6 +835,7 @@ class StreamingHarmonyContext(HarmonyContext):
     def append_output(self, output: RequestOutput) -> None:
         # append_output is called for each output token in streaming case,
         # so we only want to add the prompt tokens once for each message.
+        self.last_content_delta = None
         if self.first_tok_of_message:
             self._update_prefill_token_usage(output)
         # Reset self.first_tok_of_message if needed:
@@ -839,8 +843,12 @@ class StreamingHarmonyContext(HarmonyContext):
         # (finished=True), then the next token processed will mark the
         # beginning of a new message
         self.first_tok_of_message = output.finished
+        last_delta_text = ""
         for tok in output.outputs[0].token_ids:
             self.parser.process(tok)
+            last_delta_text += self.parser.last_content_delta or ""
+        if last_delta_text:
+            self.last_content_delta = last_delta_text
         self._update_decode_token_usage(output)
 
         # For streaming, update previous turn when message is complete

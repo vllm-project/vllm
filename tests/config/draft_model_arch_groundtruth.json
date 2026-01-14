@@ -31,7 +31,7 @@
     },
     "eagle618/eagle-deepseek-v3-random": {
         "model_type": "eagle",
-        "text_model_type": "deepseek_mtp",
+        "text_model_type": "eagle",
         "hidden_size": 2560,
         "total_num_hidden_layers": 1,
         "total_num_attention_heads": 32,
@@ -46,7 +46,7 @@
     },
     "yuhuili/EAGLE-LLaMA3-Instruct-8B": {
         "model_type": "eagle",
-        "text_model_type": "llama",
+        "text_model_type": "eagle",
         "hidden_size": 4096,
         "total_num_hidden_layers": 1,
         "total_num_attention_heads": 32,
@@ -61,7 +61,7 @@
     },
     "yuhuili/EAGLE3-LLaMA3.1-Instruct-8B": {
         "model_type": "eagle",
-        "text_model_type": "llama",
+        "text_model_type": "eagle",
         "hidden_size": 4096,
         "total_num_hidden_layers": 1,
         "total_num_attention_heads": 32,
