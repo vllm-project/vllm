@@ -76,7 +76,6 @@ class MemorySnapshot:
     timestamp: float = 0.0
 
     device: torch.types.Device = None
-    device_name: str = ""
     auto_measure: bool = True
 
     def __post_init__(self) -> None:
@@ -84,7 +83,6 @@ class MemorySnapshot:
             device_fn = current_platform.current_device
             assert device_fn is not None
             self.device_ = torch.device(device_fn())
-            self.device_name = current_platform.device_name
         else:
             self.device_ = torch.device(self.device)
 
@@ -157,7 +155,7 @@ class MemorySnapshot:
             f"torch_peak={format_gib(self.torch_peak)}GiB, "
             f"free_memory={format_gib(self.free_memory)}GiB, "
             f"total_memory={format_gib(self.total_memory)}GiB, "
-            f"{self.device_name}_memory={format_gib(self.cuda_memory)}GiB, "
+            f"{current_platform.device_name}_memory={format_gib(self.cuda_memory)}GiB, "
             f"torch_memory={format_gib(self.torch_memory)}GiB, "
             f"non_torch_memory={format_gib(self.non_torch_memory)}GiB, "
             f"timestamp={self.timestamp}, "
