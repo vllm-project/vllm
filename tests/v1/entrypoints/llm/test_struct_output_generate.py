@@ -35,6 +35,7 @@ EAGLE_SPEC_CONFIG = {
     "method": "eagle",
     "model": "yuhuili/EAGLE-LLaMA3.1-Instruct-8B",
     "num_speculative_tokens": 5,
+    "async_scheduling": False,
 }
 
 PARAMS_MODELS_BACKENDS_TOKENIZER_MODE = [
@@ -87,6 +88,10 @@ PARAMS_MODELS_TOKENIZER_MODE = [
     ("Qwen/Qwen2.5-1.5B-Instruct", "auto"),
 ]
 
+platform_args = {}
+if current_platform.is_rocm():
+    platform_args["async_scheduling"] = False
+
 
 class CarType(str, Enum):
     sedan = "sedan"
@@ -134,6 +139,7 @@ def test_structured_output(
         load_format="auto" if not model_name.startswith("mistralai/") else "hf",
         config_format="auto" if not model_name.startswith("mistralai/") else "hf",
         speculative_config=speculative_config,
+        **platform_args,
     )
 
     #
@@ -649,6 +655,7 @@ def test_structured_output_with_reasoning_matrices(
         ),
         tokenizer_mode=tokenizer_mode,
         speculative_config=speculative_config,
+        **({"async_scheduling": False} if current_platform.is_rocm() else {}),
         async_scheduling=async_scheduling,
     )
     tokenizer = llm.get_tokenizer()
