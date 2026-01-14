@@ -20,8 +20,6 @@ from vllm.model_executor.layers.fused_moe.config import (
 )
 from vllm.model_executor.layers.quantization.utils.flashinfer_fp4_moe import (
     is_supported_config_trtllm,
-    # is_flashinfer_fp4_cutedsl_moe_available,
-    # is_flashinfer_fp4_cutlass_moe_available,
     prepare_nvfp4_moe_layer_for_fi_or_cutlass,
 )
 from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
@@ -29,13 +27,8 @@ from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
     get_flashinfer_moe_backend,
 )
 from vllm.model_executor.layers.quantization.utils.marlin_utils_fp4 import (
-    # is_fp4_marlin_supported,
     prepare_nvfp4_moe_layer_for_marlin,
 )
-
-# from vllm.model_executor.layers.quantization.utils.quant_utils import (
-#   cutlass_fp4_supported,
-# )
 
 if TYPE_CHECKING:
     from vllm.model_executor.layers.fused_moe.layer import FusedMoE

@@ -558,8 +558,7 @@ class MarlinExpertsBase(mk.FusedMoEPermuteExpertsUnpermute):
     @staticmethod
     def _supports_current_device() -> bool:
         p = current_platform
-        # Is this right? Can we do < Ampere?
-        return p.is_cuda() and p.has_device_capability((8, 0))
+        return p.is_cuda() and p.has_device_capability((7, 5))
 
     @staticmethod
     def _supports_no_act_and_mul() -> bool:
