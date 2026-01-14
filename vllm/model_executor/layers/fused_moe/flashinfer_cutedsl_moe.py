@@ -7,6 +7,7 @@ import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm import envs
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.config import (
+    FusedMoEConfig,
     FusedMoEParallelConfig,
     FusedMoEQuantConfig,
     FusedMoEQuantScheme,
@@ -17,7 +18,6 @@ from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
 from vllm.platforms import current_platform
 from vllm.utils.flashinfer import (
     flashinfer_cutedsl_grouped_gemm_nt_masked,
-    has_flashinfer_cutedsl_grouped_gemm_nt_masked,
     scaled_fp4_grouped_quantize,
     silu_and_mul_scaled_nvfp4_experts_quantize,
 )
@@ -28,14 +28,14 @@ logger = init_logger(__name__)
 class FlashInferCuteDSLExperts(mk.FusedMoEPermuteExpertsUnpermute):
     def __init__(
         self,
-        out_dtype: torch.dtype,
+        moe_config: FusedMoEConfig,
         quant_config: FusedMoEQuantConfig,
     ):
-        super().__init__(quant_config)
+        super().__init__(moe_config, quant_config)
         assert quant_config.quant_dtype == "nvfp4", (
             "Only nvfp4 quantization are currently supported."
         )
-        self.out_dtype = out_dtype
+        self.out_dtype = moe_config.in_dtype
 
     @staticmethod
     def activation_format() -> mk.FusedMoEActivationFormat:
@@ -43,10 +43,8 @@ class FlashInferCuteDSLExperts(mk.FusedMoEPermuteExpertsUnpermute):
 
     @staticmethod
     def _supports_current_device() -> bool:
-        return (
-            current_platform.has_device_capability((10, 0))
-            and has_flashinfer_cutedsl_grouped_gemm_nt_masked()
-        )
+        # TODO: add check cutedsl support?
+        return current_platform.has_device_capability((10, 0))
 
     @staticmethod
     def _supports_no_act_and_mul() -> bool:
