@@ -1,13 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from collections.abc import Callable, Generator, Iterable
-from contextlib import contextmanager, nullcontext
+from collections.abc import Callable, Iterable
 from enum import Enum
 from typing import Literal, cast, get_args, overload
 
 import torch
-import torch.nn.functional as F
 from torch.nn.parameter import UninitializedParameter
 
 import vllm.envs as envs
@@ -16,17 +14,10 @@ from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.config.parallel import ExpertPlacementStrategy
 from vllm.distributed import (
     get_dp_group,
-    get_ep_group,
     get_pcp_group,
     get_tensor_model_parallel_world_size,
-    tensor_model_parallel_all_reduce,
 )
 from vllm.distributed.eplb.eplb_state import EplbLayerState, EplbState
-from vllm.forward_context import (
-    ForwardContext,
-    get_forward_context,
-    is_forward_context_available,
-)
 from vllm.logger import init_logger
 from vllm.model_executor.custom_op import CustomOp
 from vllm.model_executor.layers.fused_moe.config import (
@@ -35,16 +26,13 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEQuantConfig,
     RoutingMethodType,
 )
+from vllm.model_executor.layers.fused_moe.default_moe_runner import DefaultMoERunner
 from vllm.model_executor.layers.fused_moe.fused_moe_method_base import (
     FusedMoEMethodBase,
 )
 from vllm.model_executor.layers.fused_moe.fused_moe_modular_method import (
     FusedMoEModularMethod,
 )
-from vllm.model_executor.layers.fused_moe.fused_moe_router import (
-    FusedMoERouter,
-)
-from vllm.model_executor.layers.fused_moe.moe_runner import MoERunner
 from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (
     init_aiter_topK_meta_data,
 )
@@ -61,13 +49,7 @@ from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig,
 )
 from vllm.platforms import current_platform
-from vllm.utils.math_utils import cdiv, round_up
-from vllm.utils.torch_utils import (
-    aux_stream,
-    current_stream,
-    direct_register_custom_op,
-)
-from vllm.v1.worker.ubatching import dbo_current_ubatch_id
+from vllm.utils.math_utils import round_up
 
 logger = init_logger(__name__)
 
