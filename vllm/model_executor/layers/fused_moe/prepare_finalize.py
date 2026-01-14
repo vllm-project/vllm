@@ -102,10 +102,10 @@ class MoEPrepareAndFinalizeNaiveEP(mk.FusedMoEPrepareAndFinalize):
         if use_int8_view:
             a1q = a1q.view(current_platform.fp8_dtype())
 
-        # NOTE(rob): this is for FLASHINFER_CUTLASS. There are
-        # currently no other kernels that use this prepare/finalize
-        # with nvfp4. If we add others in the future, we may need
-        # a way to register how to shuffle into the kernel format.
+        # NOTE: shuffle into format expected by FLASHINFER_CUTLASS
+        # There are currently no other kernels that use this P/F
+        # with nvfp4. If we add other kernels in the future, we
+        # can regsiter a shuffle that gets called here.
         if use_nvfp4:
             a1q_scale = nvfp4_block_scale_interleave(a1q_scale)
 
