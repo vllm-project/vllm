@@ -730,28 +730,6 @@ class MarlinExperts(MarlinExpertsBase):
 
 
 class BatchedMarlinExperts(MarlinExpertsBase):
-    def __init__(
-        self,
-        max_num_tokens: int,
-        num_dispatchers: int,
-        quant_config: FusedMoEQuantConfig,
-        w13_g_idx: torch.Tensor | None = None,
-        w2_g_idx: torch.Tensor | None = None,
-        w13_g_idx_sort_indices: torch.Tensor | None = None,
-        w2_g_idx_sort_indices: torch.Tensor | None = None,
-        is_k_full: bool = True,
-    ):
-        super().__init__(
-            quant_config,
-            w13_g_idx,
-            w2_g_idx,
-            w13_g_idx_sort_indices,
-            w2_g_idx_sort_indices,
-            is_k_full,
-        )
-        self.max_num_tokens = max_num_tokens
-        self.num_dispatchers = num_dispatchers
-
     def supports_expert_map(self) -> bool:
         return True
 
