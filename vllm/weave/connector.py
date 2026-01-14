@@ -27,6 +27,7 @@ from .scheduler import WeaveConnectorScheduler
 from .worker import WeaveConnectorWorker
 
 
+
 class WeaveConnector(KVConnectorBase_V1):
     @property
     def prefer_cross_layer_blocks(self) -> bool:

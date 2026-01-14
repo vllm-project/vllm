@@ -7,7 +7,6 @@ from itertools import islice
 from typing import Any
 
 from vllm.distributed.kv_events import BlockRemoved, BlockStored, KVCacheEvent
-from vllm.distributed.kv_transfer.kv_connector.utils import yield_req_data
 from vllm.logger import init_logger
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks
 from vllm.v1.core.kv_cache_utils import BlockHash
@@ -20,6 +19,7 @@ from vllm.v1.outputs import KVConnectorOutput
 from vllm.v1.request import Request
 
 from .metadata import ReqId, WeaveConnectorMetadata
+from .policy import WeavePolicy
 
 logger = init_logger(__name__)
 
@@ -32,6 +32,12 @@ class WeaveConnectorScheduler:
         self.offloaded_block_size = spec.offloaded_block_size
         self.block_size_factor = self.offloaded_block_size // self.gpu_block_size
         self.manager: OffloadingManager = spec.get_manager()
+
+        self.policy = WeavePolicy(
+            offloaded_block_size=self.offloaded_block_size,
+            block_size_factor=self.block_size_factor,
+            manager=self.manager,
+        )
 
         self._requests: dict[ReqId, Request] = {}
         # list of GPU block IDs per request
@@ -153,83 +159,19 @@ class WeaveConnectorScheduler:
         self._reqs_being_loaded[request.request_id].update(block_hashes)
         self._next_stored_block_idx[request.request_id] = num_blocks
 
-    def _get_reqs_to_store(self, scheduler_output: SchedulerOutput):
-        reqs_to_store: dict[ReqId, TransferSpec] = {}
-        # iterate over both new and cached requests
-        for req_id, new_block_id_groups, preempted in yield_req_data(scheduler_output):
-            if preempted:
-                self._request_block_ids[req_id] = []
-
-            if new_block_id_groups:
-                new_block_ids = new_block_id_groups[0]
-                self._request_block_ids[req_id] += new_block_ids
-
-            block_ids = self._request_block_ids[req_id]
-
-            req = self._requests[req_id]
-            new_tokens = scheduler_output.num_scheduled_tokens[req_id]
-            total_tokens = req.num_computed_tokens + new_tokens
-            num_blocks = total_tokens // self.offloaded_block_size
-            start_block_idx = self._next_stored_block_idx.get(req_id, 0)
-            num_new_blocks = num_blocks - start_block_idx
-
-            if num_new_blocks <= 0:
-                continue
-
-            # NOTE: In async scheduling, placeholders may temporarily make
-            # len(req.block_hashes) < num_blocks * self.block_size_factor.
-
-            new_block_hashes = self._get_block_hashes(
-                req, start_idx=start_block_idx, end_idx=num_blocks
-            )
-            store_output = self.manager.prepare_store(new_block_hashes)
-            if store_output is None:
-                logger.warning(
-                    "Request %s: cannot store %s blocks", req_id, num_new_blocks
-                )
-                continue
-
-            self._next_stored_block_idx[req_id] = num_blocks
-
-            if not store_output.block_hashes_to_store:
-                continue
-            block_hashes_to_store = set(store_output.block_hashes_to_store)
-
-            block_hashes = self._get_block_hashes(req, end_idx=num_blocks)
-            self.manager.touch(block_hashes)
-
-            new_block_hashes = self._get_block_hashes(
-                req, start_idx=start_block_idx, end_idx=num_blocks
-            )
-            dst_spec = store_output.store_spec
-            src_block_ids: list[int] = []
-            for idx, blk_hash in enumerate(new_block_hashes):
-                if blk_hash not in block_hashes_to_store:
-                    continue
-                offloaded_block_idx = start_block_idx + idx
-                gpu_block_idx = offloaded_block_idx * self.block_size_factor
-                for i in range(self.block_size_factor):
-                    src_block_ids.append(block_ids[gpu_block_idx + i])
-            src_spec = GPULoadStoreSpec(src_block_ids)
-
-            reqs_to_store[req_id] = (src_spec, dst_spec)
-            self._reqs_being_stored[req_id] |= block_hashes_to_store
-
-            logger.debug(
-                "Request %s offloading %s blocks starting from block #%d",
-                req_id,
-                len(block_hashes_to_store),
-                start_block_idx,
-            )
-
-        return reqs_to_store
-
     def build_connector_meta(
         self, scheduler_output: SchedulerOutput
     ) -> WeaveConnectorMetadata:
         meta = WeaveConnectorMetadata(
             reqs_to_load=self._reqs_to_load,
-            reqs_to_store=self._get_reqs_to_store(scheduler_output),
+            reqs_to_store=self.policy.get_reqs_to_store(
+                scheduler_output,
+                requests=self._requests,
+                request_block_ids=self._request_block_ids,
+                next_stored_block_idx=self._next_stored_block_idx,
+                reqs_being_stored=self._reqs_being_stored,
+                get_block_hashes=self._get_block_hashes,
+            ),
         )
         self._reqs_to_load = {}
 

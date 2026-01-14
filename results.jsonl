@@ -1,0 +1,2 @@
+{"id":"vllm-af774f431ec5c13a","custom_id":"request-1","response":{"status_code":404,"request_id":"vllm-batch-a0303b440611e225","body":null},"error":{"error":{"message":"The model `meta-llama/Meta-Llama-3-8B-Instruct` does not exist.","type":"NotFoundError","param":"model","code":404}}}
+{"id":"vllm-affd1eca351da53d","custom_id":"request-2","response":{"status_code":404,"request_id":"vllm-batch-8ab1aa6272671a3b","body":null},"error":{"error":{"message":"The model `meta-llama/Meta-Llama-3-8B-Instruct` does not exist.","type":"NotFoundError","param":"model","code":404}}}

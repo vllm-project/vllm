@@ -212,7 +212,7 @@ class WeaveOffloadingSpec(OffloadingSpec):
                 raise ValueError(
                     f"Unknown eviction policy: {self.eviction_policy}. Supported policies: lru, arc"
                 )
-
+            
             if num_blocks == 0:
                 logger.warning(
                     "WeaveOffloadingSpec initialized with 0 DRAM offload blocks. "
