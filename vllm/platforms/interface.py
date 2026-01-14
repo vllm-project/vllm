@@ -589,7 +589,11 @@ class Platform:
     def __getattr__(self, key: str):
         device = getattr(torch, self.device_type, None)
         if device is not None and hasattr(device, key):
-            return getattr(device, key)
+            attr = getattr(device, key)
+            # NOTE: `hasattr(device, key)=True` can only avoid AttributeError,
+            # but the value of this attr could be `None`.
+            if attr is not None:
+                return attr
         else:
             logger.warning(
                 "Current platform %s does not have '%s' attribute.",
