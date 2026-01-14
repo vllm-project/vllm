@@ -4,7 +4,7 @@
 
 from http import HTTPStatus
 
-from fastapi import APIRouter, Depends, FastAPI, HTTPException, Request
+from fastapi import APIRouter, Depends, FastAPI, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from vllm.entrypoints.openai.chat_completion.protocol import (
@@ -53,12 +53,12 @@ async def create_chat_completion(request: ChatCompletionRequest, raw_request: Re
         return base_server.create_error_response(
             message="The model does not support Chat Completions API"
         )
+
     try:
         generator = await handler.create_chat_completion(request, raw_request)
     except Exception as e:
-        raise HTTPException(
-            status_code=HTTPStatus.INTERNAL_SERVER_ERROR.value, detail=str(e)
-        ) from e
+        return handler.create_error_response(e)
+
     if isinstance(generator, ErrorResponse):
         return JSONResponse(
             content=generator.model_dump(), status_code=generator.error.code
