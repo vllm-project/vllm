@@ -268,22 +268,26 @@ class AsyncLLM(EngineClient):
         current_num_requests = self.get_num_unfinished_requests()
         if current_num_requests / max_allowed_requests > tier:
             logger.info(
-                "Too many requests - dropping request.",
-                request_id=request_id,
-                current_num_requests=current_num_requests,
-                max_allowed_requests=max_allowed_requests,
-                tier=tier,
+                "Too many requests - dropping request. "
+                "request_id=%s current_num_requests=%d "
+                "max_allowed_requests=%d tier=%f",
+                request_id,
+                current_num_requests,
+                max_allowed_requests,
+                tier,
             )
             raise TooManyRequestsError()
 
         proposed_num_requests = current_num_requests + sampling_params.n
         if proposed_num_requests > max_allowed_requests:
             logger.warning(
-                "The request queue is full.",
-                request_id=request_id,
-                n=sampling_params.n,
-                current_num_requests=current_num_requests,
-                max_allowed_requests=max_allowed_requests,
+                "The request queue is full. "
+                "request_id=%s n=%d current_num_requests=%d "
+                "max_allowed_requests=%d",
+                request_id,
+                sampling_params.n,
+                current_num_requests,
+                max_allowed_requests,
             )
             raise QueueOverflowError()
 
@@ -310,20 +314,23 @@ class AsyncLLM(EngineClient):
         current_pending_tokens = self.get_num_pending_context_tokens()
         if current_pending_tokens > max_pending_tokens:
             logger.warning(
-                "Context tokens in request queue is full.",
-                request_id=request_id,
-                current_pending_tokens=current_pending_tokens,
-                max_pending_tokens=max_pending_tokens,
+                "Context tokens in request queue is full. "
+                "request_id=%s current_pending_tokens=%d max_pending_tokens=%d",
+                request_id,
+                current_pending_tokens,
+                max_pending_tokens,
             )
             raise MaxPendingTokensError()
 
         if current_pending_tokens / max_pending_tokens > tier:
             logger.info(
-                "Too many pending context tokens - dropping request.",
-                request_id=request_id,
-                current_pending_tokens=current_pending_tokens,
-                max_pending_tokens=max_pending_tokens,
-                tier=tier,
+                "Too many pending context tokens - dropping request. "
+                "request_id=%s current_pending_tokens=%d "
+                "max_pending_tokens=%d tier=%f",
+                request_id,
+                current_pending_tokens,
+                max_pending_tokens,
+                tier,
             )
             raise MaxTierPendingTokensError()
 
