@@ -21,6 +21,7 @@ Usage:
 
 import functools
 import os
+import sys
 from pathlib import Path
 from typing import (
     TYPE_CHECKING,
@@ -147,7 +148,8 @@ def __getattr__(name: str) -> Any:
             # Value not in Literal choices
             raise ValueError(
                 f"Invalid value for {name}: {env_value!r}. "
-                f"Must be one of (case-insensitive): {', '.join(repr(v) for v in literal_values)}"
+                f"Must be one of (case-insensitive): "
+                f"{', '.join(repr(v) for v in literal_values)}"
             )
         # Mixed types or non-string literals - exact match only
         if env_value in literal_values:
@@ -192,10 +194,14 @@ def __getattr__(name: str) -> Any:
                     result = converter(env_value)
                     # For bool, ensure the conversion is meaningful
                     # If the value is a number like "5", don't convert to bool
-                    if target_type is bool:
+                    if target_type is bool and env_value.strip().lower() not in (
+                        "1",
+                        "0",
+                        "true",
+                        "false",
+                    ):
                         # Only accept bool if value is clearly boolean
-                        if env_value.strip().lower() not in ("1", "0", "true", "false"):
-                            continue
+                        continue
                     return result
                 except (ValueError, TypeError):
                     continue
@@ -209,8 +215,11 @@ def __getattr__(name: str) -> Any:
 
     logger = logging.getLogger(__name__)
     logger.warning(
-        f"Unsupported type {var_type} for environment variable {name}. "
-        f"Returning raw string value. Consider using env_factory() for custom parsing."
+        "Unsupported type %s for environment variable %s. "
+        "Returning raw string value. Consider using "
+        "env_factory() for custom parsing.",
+        var_type,
+        name,
     )
     return env_value
 
@@ -331,7 +340,5 @@ class _EnvsModuleWrapper:
 
 
 # Replace this module with the wrapper to enable 'in' operator support
-import sys
-
 _this_module = sys.modules[__name__]
 sys.modules[__name__] = _EnvsModuleWrapper(_this_module)
