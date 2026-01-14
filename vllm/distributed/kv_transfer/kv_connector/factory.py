@@ -201,3 +201,10 @@ KVConnectorFactory.register_connector(
     "vllm.distributed.kv_transfer.kv_connector.v1.mooncake_connector",
     "MooncakeConnector",
 )
+
+# Local research connector (mem-weave).
+KVConnectorFactory.register_connector(
+    "WeaveConnector",
+    "weave.connector",
+    "WeaveConnector",
+)
