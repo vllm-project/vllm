@@ -199,7 +199,6 @@ class InternS1ProMoeSparseMoeBlock(nn.Module):
             config.hidden_size,
             config.num_experts,
             bias=False,
-            quant_config=quant_config,
             prefix=f"{prefix}.gate",
         )
 
