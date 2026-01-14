@@ -624,10 +624,10 @@ class FusedMoE(CustomOp):
             layer=self,
             moe_config=self.moe_config,
             router=router,
-            gate=self.gate,
-            shared_experts=self.shared_experts,
+            # gate=self.gate,
+            # shared_experts=self.shared_experts,
             reduce_results=self.reduce_results,
-            enable_dbo=self.vllm_config.enable_dbo,
+            enable_dbo=self.vllm_config.parallel_config.enable_dbo,
         )
 
     # Note: maybe_init_modular_kernel should only be called by
@@ -1721,20 +1721,21 @@ def _moe_forward_shared_fake(
     return shared_out, fused_out
 
 
-# XXXXXX
-# self.layer.quant_method
-# self.layer.ensure_moe_quant_config_init
-# self.layer.moe_quant_config
+# TODO
+# supply self.layer.quant_method
+# move self.layer.ensure_moe_quant_config_init
+#      self.layer.moe_quant_config
+# make gate, shared_experts into properties instead of methods
 
 
 class DefaultMoERunner(MoERunner):
     def __init__(
         self,
-        layer: FusedMoE,  # TODO: try to get rid of
+        layer: FusedMoE,  # TODO: turn into generic module/parameter blob
         moe_config: FusedMoEConfig,
         router: FusedMoERouter,
-        gate: torch.nn.Module | None,
-        shared_experts: torch.nn.Module | None,
+        # gate: torch.nn.Module | None,
+        # shared_experts: torch.nn.Module | None,
         reduce_results: bool,
         enable_dbo: bool,
     ):
@@ -1742,8 +1743,8 @@ class DefaultMoERunner(MoERunner):
         self.layer = layer
         self.moe_config = moe_config
         self.router = router
-        self.gate = gate
-        self.shared_experts = shared_experts
+        # self.gate = gate
+        # self.shared_experts = shared_experts
         self.reduce_results = reduce_results
         self.enable_dbo = enable_dbo
 
@@ -1804,11 +1805,36 @@ class DefaultMoERunner(MoERunner):
         self.batched_hidden_states: torch.Tensor | None = None
         self.batched_router_logits: torch.Tensor | None = None
 
+    # TBD
+    @property
+    def shared_experts(self) -> torch.nn.Module | None:
+        return self.layer.shared_experts
+
+    # TBD
+    @property
+    def gate(self) -> torch.nn.Module | None:
+        return self.layer.gate
+
+    # TBD
+    @property
+    def quant_method(self) -> FusedMoEMethodBase:
+        return self.layer.quant_method
+
+    # TBD
+    def ensure_moe_quant_config_init(self):
+        self.layer.ensure_moe_quant_config_init()
+
+    # TBD
+    @property
+    def moe_quant_config(self) -> FusedMoEQuantConfig | None:
+        self.layer.ensure_moe_quant_config_init()
+        return self.layer.moe_quant_config
+
     @property
     def use_flashinfer_cutlass_kernels(self):
         return (
-            self.layer.moe_quant_config is not None
-            and self.layer.moe_quant_config.quant_dtype == "nvfp4"
+            self.moe_quant_config is not None
+            and self.moe_quant_config.quant_dtype == "nvfp4"
             and self.moe_config_use_flashinfer_cutlass_kernels
         )
 
@@ -1899,10 +1925,10 @@ class DefaultMoERunner(MoERunner):
         Therefore it is required that we reduce the shared_experts output
         early.
         """
-        assert self.layer.quant_method is not None
+        assert self.quant_method is not None
         return (
-            isinstance(self.layer.quant_method, FusedMoEModularMethod)
-            and self.layer.quant_method.fused_experts.output_is_reduced()
+            isinstance(self.quant_method, FusedMoEModularMethod)
+            and self.quant_method.fused_experts.output_is_reduced()
         )
 
     def maybe_all_reduce_tensor_model_parallel(self, final_hidden_states: torch.Tensor):
@@ -2019,8 +2045,8 @@ class DefaultMoERunner(MoERunner):
             staged_router_logits.copy_(router_logits, non_blocking=True)
 
             # Matrix multiply.
-            if self.layer.quant_method.is_monolithic:
-                final_hidden_states = self.layer.quant_method.apply_monolithic(
+            if self.quant_method.is_monolithic:
+                final_hidden_states = self.quant_method.apply_monolithic(
                     layer=self.layer,
                     x=staged_hidden_states,
                     router_logits=staged_router_logits,
@@ -2102,14 +2128,14 @@ class DefaultMoERunner(MoERunner):
         hidden_states: torch.Tensor,
         router_logits: torch.Tensor,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        assert self.layer.quant_method is not None
+        assert self.quant_method is not None
 
-        self.layer.ensure_moe_quant_config_init()
+        self.ensure_moe_quant_config_init()
         self.ensure_dp_chunking_init()
 
         has_separate_shared_experts = (
-            not self.layer.quant_method.mk_owns_shared_expert
-            and self.layer.shared_experts is not None
+            not self.quant_method.mk_owns_shared_expert
+            and self.shared_experts is not None
         )
 
         use_shared_experts_stream, hidden_states_clone = (
@@ -2147,14 +2173,14 @@ class DefaultMoERunner(MoERunner):
             extra_tensors = None
             if do_naive_dispatch_combine:
                 post_quant_allgather = (
-                    self.layer.quant_method is not None
+                    self.quant_method is not None
                     and self.moe_config.dp_size > 1
                     and self.moe_config.use_ep
-                    and getattr(self.layer.quant_method, "do_post_quant_allgather", False)
+                    and getattr(self.quant_method, "do_post_quant_allgather", False)
                 )
                 if post_quant_allgather:
                     hidden_states_to_dispatch, extra_tensors = (
-                        self.layer.quant_method.prepare_dp_allgather_tensor(
+                        self.quant_method.prepare_dp_allgather_tensor(
                             self, hidden_states, router_logits
                         )
                     )
@@ -2208,8 +2234,8 @@ class DefaultMoERunner(MoERunner):
             # Figure out nicer way to do this.
             x_orig = orig_hidden_states if do_naive_dispatch_combine else hidden_states
 
-            if self.layer.quant_method.is_monolithic:
-                final_hidden_states = self.layer.quant_method.apply_monolithic(
+            if self.quant_method.is_monolithic:
+                final_hidden_states = self.quant_method.apply_monolithic(
                     layer=self.layer,
                     x=x,
                     router_logits=router_logits,
