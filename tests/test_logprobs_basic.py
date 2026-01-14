@@ -2,7 +2,7 @@ import itertools
 
 import pytest
 
-from vllm.logprobs import FlatLogprobs, Logprob
+from vllm.logprobs import FlatLogprobs
 
 
 def test_flat_logprobs_append_and_get():
@@ -12,7 +12,7 @@ def test_flat_logprobs_append_and_get():
 
     # second position: two token candidates
     token_ids = [10, 20]
-    logprobs = [ -0.1, -2.3 ]
+    logprobs = [ -0.1, -2.3]
     ranks = itertools.chain((1,), (1, 2))
     decoded = ["a", "b"]
     f.append_fast(token_ids, logprobs, ranks, decoded)
