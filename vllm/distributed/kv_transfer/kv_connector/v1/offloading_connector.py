@@ -685,9 +685,6 @@ class OffloadPromMetrics(KVConnectorPromMetrics):
         per_engine_labelvalues: dict[int, list[object]],
     ):
         super().__init__(vllm_config, metric_types, labelnames, per_engine_labelvalues)
-        self.total_op_time: dict[str, float] = {}
-        self.total_op_count: dict[str, int] = {}
-        self.total_op_bytes: dict[str, int] = {}
         self.per_engine_labelvalues: dict[tuple[int, str], list[object]] = {}
         buckets = [  # In bytes
             1e6,
@@ -729,13 +726,6 @@ class OffloadPromMetrics(KVConnectorPromMetrics):
             labelnames=labelnames + ["transfer_type"],
         )
 
-        self.gauge_kv_throughput_avg = self._gauge_cls(
-            name="vllm:kv_offload_throughput_avg",
-            documentation="Average throughput of KV offload transfers",
-            multiprocess_mode="mostrecent",
-            labelnames=labelnames + ["transfer_type"],
-        )
-
         self.counter_kv_transfers = self._counter_cls(
             name="vllm:kv_offload_num_transfers",
             documentation="Number of KV offload transfers done",
@@ -756,13 +746,6 @@ class OffloadPromMetrics(KVConnectorPromMetrics):
                 self.per_engine_labelvalues[engine_idx, transfer_type] = (
                     self._per_engine_labelvalues[engine_idx] + [transfer_type]
                 )
-            # Init:
-            if transfer_type not in self.total_op_time:
-                self.total_op_time[transfer_type] = 0
-            if transfer_type not in self.total_op_bytes:
-                self.total_op_bytes[transfer_type] = 0
-            if transfer_type not in self.total_op_count:
-                self.total_op_count[transfer_type] = 0
 
             for op in ops:
                 # Observe size histogram
@@ -770,14 +753,6 @@ class OffloadPromMetrics(KVConnectorPromMetrics):
                     *self.per_engine_labelvalues[engine_idx, transfer_type]
                 ).observe(op["op_size"])
 
-                # Calculate time
-                self.total_op_time[transfer_type] += op["op_time"]
-
-                # Calculate size
-                self.total_op_bytes[transfer_type] += op["op_size"]
-
-                # Update count
-                self.total_op_count[transfer_type] += 1
                 # Observe throughput histogram
                 if op["op_time"] != 0:
                     throughput = op["op_size"] / op["op_time"]
@@ -789,13 +764,3 @@ class OffloadPromMetrics(KVConnectorPromMetrics):
             self.counter_kv_transfers.labels(
                 *self.per_engine_labelvalues[engine_idx, transfer_type]
             ).inc(len(ops))
-            # Update average throughput
-            avg_throughput = 0.0
-            if self.total_op_time[transfer_type] > 0:
-                avg_throughput = (
-                    self.total_op_bytes[transfer_type]
-                    / self.total_op_time[transfer_type]
-                )
-            self.gauge_kv_throughput_avg.labels(
-                *self.per_engine_labelvalues[engine_idx, transfer_type]
-            ).set(avg_throughput)
