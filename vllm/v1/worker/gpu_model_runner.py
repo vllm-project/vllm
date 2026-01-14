@@ -4192,13 +4192,12 @@ class GPUModelRunner(
         """Dummy data for profiling and precompiling multimodal models."""
         assert self.mm_budget is not None
 
+        # Don't use `max_items_per_batch` here to avoid redundant computation
         dummy_mm_inputs = self.mm_registry.get_dummy_mm_inputs(
             self.model_config,
             mm_counts={modality: 1},
             cache=self.mm_budget.cache,
         )
-
-        # Result in the maximum GPU consumption of the model
         dummy_mm_item = dummy_mm_inputs["mm_kwargs"][modality][0]
 
         # We use the cache so that the item is saved to the cache,
