@@ -547,9 +547,6 @@ class FlashInferMoeA2AManager(All2AllManagerBase):
 
     def initialize(
         self,
-        world_size: int,
-        rank: int,
-        gpus_per_node: int,
         max_num_tokens: int,
         top_k: int,
         num_experts: int,
@@ -560,17 +557,18 @@ class FlashInferMoeA2AManager(All2AllManagerBase):
             return
 
         self.cleanup()
+        gpus_per_node = torch.cuda.device_count()
         logger.debug(
             "Making MoeA2A mapping: rank=%d, world size=%d",
-            rank,
-            world_size,
+            self.rank,
+            self.world_size,
         )
         self.mapping = Mapping(
-            world_size,
-            rank,
+            self.world_size,
+            self.rank,
             gpus_per_node,
-            tp_size=world_size,
-            moe_ep_size=world_size,
+            tp_size=self.world_size,
+            moe_ep_size=self.world_size,
         )
 
         from vllm.distributed.device_communicators.mnnvl_compat import (
@@ -588,7 +586,7 @@ class FlashInferMoeA2AManager(All2AllManagerBase):
         )
         combine_payload_size_per_token = hidden_size * 2  # bf16 hidden states
         self.workspace_size = moe_a2a_get_workspace_size_per_rank(
-            ep_size=world_size,
+            ep_size=self.world_size,
             max_num_tokens=max_num_tokens,
             total_dispatch_payload_size_per_token=total_dispatch_payload_size_per_token,
             combine_payload_size_per_token=combine_payload_size_per_token,
@@ -603,8 +601,6 @@ class FlashInferMoeA2AManager(All2AllManagerBase):
             mnnvl_config=dp_config,
         )
 
-        self.world_size = world_size
-        self.rank = rank
         self.gpus_per_node = gpus_per_node
         self.max_num_tokens = max_num_tokens
         self.top_k = top_k
@@ -614,35 +610,10 @@ class FlashInferMoeA2AManager(All2AllManagerBase):
 
         logger.info(
             "FlashInfer MoeA2A initialized for rank %s, size %s",
-            rank,
-            world_size,
+            self.rank,
+            self.world_size,
         )
-
-    def ensure_moe_a2a_workspace_initialized(
-        self,
-        max_num_tokens: int,
-        top_k: int,
-        num_experts: int,
-        hidden_size: int,
-    ) -> bool:
-        """Ensure workspace is initialized"""
-        if not has_flashinfer_moe_a2a():
-            return False
-
-        if self.world_size <= 1:
-            return False
-
-        if not self.initialized:
-            self.initialize(
-                world_size=self.world_size,
-                rank=self.rank,
-                gpus_per_node=torch.cuda.device_count(),
-                max_num_tokens=max_num_tokens,
-                top_k=top_k,
-                num_experts=num_experts,
-                hidden_size=hidden_size,
-            )
-        return self.initialized
+        dist.barrier()
 
     def get_handle(self, kwargs):
         return self

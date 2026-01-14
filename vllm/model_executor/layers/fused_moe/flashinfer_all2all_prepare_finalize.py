@@ -12,6 +12,7 @@ The difference is controlled by the `use_linear_scale_layout` parameter.
 import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
+from vllm.config import get_current_vllm_config
 from vllm.distributed import get_dp_group, get_ep_group
 from vllm.distributed.device_communicators.base_device_communicator import (
     All2AllManagerBase,
@@ -442,13 +443,19 @@ class FlashInferMoeA2APrepareAndFinalize(FlashInferMoEPrepareAndFinalize):
         hidden_size: int,
         use_linear_scale_layout: bool = False,
     ):
-        super().__init__(use_dp=False, use_linear_scale_layout=use_linear_scale_layout)
+        super().__init__(use_dp=True, use_linear_scale_layout=use_linear_scale_layout)
         self.max_num_tokens = max_num_tokens
         self.top_k = top_k
         self.num_experts = num_experts
         self.hidden_size = hidden_size
 
         self.all2all_manager = get_ep_group().device_communicator.all2all_manager
+        self.all2all_manager.initialize(
+            max_num_tokens=self.max_num_tokens,
+            top_k=self.top_k,
+            num_experts=self.num_experts,
+            hidden_size=self.hidden_size,
+        )
 
     def prepare(
         self,
@@ -462,13 +469,6 @@ class FlashInferMoeA2APrepareAndFinalize(FlashInferMoEPrepareAndFinalize):
     ) -> mk.PrepareResultType:
         self._apply_router_weight_on_input(
             a1, topk_weights, topk_ids, apply_router_weight_on_input
-        )
-
-        assert self.all2all_manager.ensure_moe_a2a_workspace_initialized(
-            max_num_tokens=self.max_num_tokens,
-            top_k=self.top_k,
-            num_experts=self.num_experts,
-            hidden_size=self.hidden_size,
         )
 
         global_num_tokens_cpu = get_local_sizes()
@@ -506,15 +506,15 @@ class FlashInferMoeA2APrepareAndFinalize(FlashInferMoEPrepareAndFinalize):
         )
         if a1q_scale is not None:
             a1q_recv, a1q_scale_recv, topk_ids_recv, topk_weights_recv = recv_payloads
-            a1q_scale_recv = a1q_scale_recv.view(-1, a1q_scale_recv.shape[-1])
             # Apply scale interleaving only for CUTLASS (not TRT-LLM)
             if quant_config.quant_dtype == "nvfp4" and not self.use_linear_scale_layout:
+                a1q_scale_recv = a1q_scale_recv.view(-1, a1q_scale_recv.shape[-1])
                 a1q_scale_recv = nvfp4_block_scale_interleave(a1q_scale_recv)
+            a1q_scale_recv = a1q_scale_recv.view(-1, self.hidden_size // 16)
         else:
             a1q_recv, topk_ids_recv, topk_weights_recv = recv_payloads
             a1q_scale_recv = None
         a1q_recv = a1q_recv.view(-1, a1q_recv.shape[-1])
-        a1q_scale_recv = a1q_scale_recv.view(-1, a1q_scale_recv.shape[-1] // 8)
         topk_ids_recv = topk_ids_recv.view(-1, topk_ids_recv.shape[-1])
         topk_weights_recv = topk_weights_recv.view(-1, topk_weights_recv.shape[-1])
 
@@ -570,8 +570,11 @@ def create_flashinfer_cutlass_prepare_finalize(
         elif enable_moe_a2a:
             assert use_nvfp4
             assert moe is not None
+            max_num_batched_tokens = (
+                get_current_vllm_config().scheduler_config.max_num_batched_tokens
+            )
             return FlashInferMoeA2APrepareAndFinalize(
-                max_num_tokens=moe.max_num_tokens,
+                max_num_tokens=max_num_batched_tokens,
                 top_k=moe.experts_per_token,
                 num_experts=moe.num_experts,
                 hidden_size=moe.hidden_dim,
@@ -611,8 +614,11 @@ def create_flashinfer_trtllm_prepare_finalize(
         )
     elif use_dp and enable_moe_a2a:
         assert moe is not None
+        max_num_batched_tokens = (
+            get_current_vllm_config().scheduler_config.max_num_batched_tokens
+        )
         return FlashInferMoeA2APrepareAndFinalize(
-            max_num_tokens=moe.max_num_tokens,
+            max_num_tokens=max_num_batched_tokens,
             top_k=moe.experts_per_token,
             num_experts=moe.num_experts,
             hidden_size=moe.hidden_dim,
