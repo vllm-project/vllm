@@ -751,7 +751,7 @@ def direct_register_custom_op(
     target_lib: Library | None = None,
     dispatch_key: str | None = None,
     tags: tuple[torch.Tag, ...] = (),
-):
+):  # -> Callable:
     """
     `torch.library.custom_op` can have significant overhead because it
     needs to consider complicated dispatching logic. This function
@@ -782,3 +782,5 @@ def direct_register_custom_op(
     my_lib.impl(op_name, op_func, dispatch_key=dispatch_key)
     if fake_impl is not None:
         my_lib._register_fake(op_name, fake_impl)
+
+    # return eval(f"torch.ops.{my_lib.name}.{op_name}")
