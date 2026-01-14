@@ -10,15 +10,13 @@ from vllm.logger import init_logger
 from vllm.tokenizers import TokenizerLike, cached_tokenizer_from_config
 
 from .cache import BaseMultiModalProcessorCache
+from .inputs import MultiModalInputs
 from .processing import (
     BaseMultiModalProcessor,
     BaseProcessingInfo,
     InputProcessingContext,
 )
-from .profiling import (
-    BaseDummyInputsBuilder,
-    DummyDecoderData,
-)
+from .profiling import BaseDummyInputsBuilder
 
 if TYPE_CHECKING:
     from vllm.config import ModelConfig, ObservabilityConfig
@@ -160,7 +158,6 @@ class MultiModalRegistry:
             model_config, observability_config, cache=cache
         )
 
-        seq_len = model_config.max_model_len
         if profiler_limits is None:
             profiler_limits = processor.allowed_mm_limits
 
@@ -169,7 +166,7 @@ class MultiModalRegistry:
         }
 
         max_tokens_per_item = processor.info.get_mm_max_tokens_per_item(
-            seq_len=seq_len,
+            seq_len=model_config.max_model_len,
             mm_counts=mm_counts,
         )
         if max_tokens_per_item is not None:
@@ -179,11 +176,10 @@ class MultiModalRegistry:
                 if mm_counts.get(modality, 0) > 0
             }
 
-        mm_inputs = processor.dummy_inputs.get_dummy_mm_inputs(
-            processor,
-            seq_len,
+        mm_inputs = self.get_dummy_mm_inputs(
+            model_config,
             mm_counts=mm_counts,
-            mm_options=self._extract_mm_options(model_config),
+            processor=processor,
         )
 
         return {
@@ -298,39 +294,47 @@ class MultiModalRegistry:
 
         return factories.build_processor(ctx, cache=cache)
 
-    def get_decoder_dummy_data(
+    def get_dummy_mm_inputs(
         self,
         model_config: "ModelConfig",
-        seq_len: int,
         mm_counts: Mapping[str, int] | None = None,
         *,
         cache: BaseMultiModalProcessorCache | None = None,
         observability_config: ObservabilityConfig | None = None,
-    ) -> DummyDecoderData:
+        processor: BaseMultiModalProcessor | None = None,
+    ) -> MultiModalInputs:
         """
         Create dummy data for profiling the memory usage of a model.
 
         The model is identified by `model_config`.
         """
-        processor = self.create_processor(
-            model_config, observability_config, cache=cache
-        )
-        dummy_data = processor.dummy_inputs.get_decoder_dummy_data(
-            processor,
-            seq_len,
+        seq_len = model_config.max_model_len
+
+        if processor is None:
+            processor = self.create_processor(
+                model_config, observability_config, cache=cache
+            )
+        if mm_counts is None:
+            mm_counts = processor.allowed_mm_limits
+
+        processor_inputs = processor.dummy_inputs.get_dummy_processor_inputs(
+            seq_len=seq_len,
             mm_counts=mm_counts,
             mm_options=self._extract_mm_options(model_config),
         )
+        mm_inputs = processor.apply(
+            prompt=processor_inputs.prompt,
+            mm_data=processor_inputs.mm_data,
+            hf_processor_mm_kwargs=processor_inputs.hf_processor_mm_kwargs,
+            tokenization_kwargs=processor_inputs.tokenization_kwargs,
+        )
 
-        # Having more tokens is over-conservative but otherwise fine
-        token_ids = dummy_data.prompt_token_ids
-        if len(token_ids) < seq_len:
-            raise AssertionError(
-                f"Expected at least {seq_len} dummy tokens for profiling, "
-                f"but found {len(token_ids)} tokens instead."
-            )
+        prompt_token_ids = mm_inputs["prompt_token_ids"]
+        total_len = len(prompt_token_ids)
+        if total_len < seq_len:
+            prompt_token_ids.extend([0] * (seq_len - total_len))
 
-        return dummy_data
+        return mm_inputs
 
     def get_encdec_max_encoder_len(self, model_config: "ModelConfig") -> int:
         """

@@ -5,7 +5,7 @@
 from collections.abc import AsyncGenerator
 from http import HTTPStatus
 
-from fastapi import APIRouter, Depends, FastAPI, HTTPException, Request
+from fastapi import APIRouter, Depends, FastAPI, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from vllm.entrypoints.openai.engine.protocol import ErrorResponse
@@ -17,6 +17,7 @@ from vllm.entrypoints.openai.responses.protocol import (
 from vllm.entrypoints.openai.responses.serving import OpenAIServingResponses
 from vllm.entrypoints.openai.utils import validate_json_request
 from vllm.entrypoints.utils import (
+    load_aware_call,
     with_cancellation,
 )
 from vllm.logger import init_logger
@@ -54,6 +55,7 @@ async def _convert_stream_to_sse_events(
     },
 )
 @with_cancellation
+@load_aware_call
 async def create_responses(request: ResponsesRequest, raw_request: Request):
     handler = responses(raw_request)
     if handler is None:
@@ -64,9 +66,7 @@ async def create_responses(request: ResponsesRequest, raw_request: Request):
     try:
         generator = await handler.create_responses(request, raw_request)
     except Exception as e:
-        raise HTTPException(
-            status_code=HTTPStatus.INTERNAL_SERVER_ERROR.value, detail=str(e)
-        ) from e
+        return handler.create_error_response(e)
 
     if isinstance(generator, ErrorResponse):
         return JSONResponse(
@@ -81,6 +81,7 @@ async def create_responses(request: ResponsesRequest, raw_request: Request):
 
 
 @router.get("/v1/responses/{response_id}")
+@load_aware_call
 async def retrieve_responses(
     response_id: str,
     raw_request: Request,
@@ -101,9 +102,7 @@ async def retrieve_responses(
             stream=stream,
         )
     except Exception as e:
-        raise HTTPException(
-            status_code=HTTPStatus.INTERNAL_SERVER_ERROR.value, detail=str(e)
-        ) from e
+        return handler.create_error_response(e)
 
     if isinstance(response, ErrorResponse):
         return JSONResponse(
@@ -117,6 +116,7 @@ async def retrieve_responses(
 
 
 @router.post("/v1/responses/{response_id}/cancel")
+@load_aware_call
 async def cancel_responses(response_id: str, raw_request: Request):
     handler = responses(raw_request)
     if handler is None:
@@ -128,9 +128,7 @@ async def cancel_responses(response_id: str, raw_request: Request):
     try:
         response = await handler.cancel_responses(response_id)
     except Exception as e:
-        raise HTTPException(
-            status_code=HTTPStatus.INTERNAL_SERVER_ERROR.value, detail=str(e)
-        ) from e
+        return handler.create_error_response(e)
 
     if isinstance(response, ErrorResponse):
         return JSONResponse(
