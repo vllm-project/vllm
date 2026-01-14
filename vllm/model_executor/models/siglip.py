@@ -705,6 +705,7 @@ class SiglipVisionTransformer(nn.Module):
         num_hidden_layers_override: int | None = None,
         require_post_norm: bool | None = None,
         prefix: str = "",
+        is_standalone: bool = False,
     ) -> None:
         super().__init__()
 
@@ -737,6 +738,12 @@ class SiglipVisionTransformer(nn.Module):
             self.post_layernorm = nn.LayerNorm(embed_dim, eps=config.layer_norm_eps)
         else:
             self.post_layernorm = None
+
+        # if this model is initialized as the visual encoder of a VLM, we want
+        # the hidden states and should not default to enabling the pooling head.
+        # However, we still allow the attribute to be defined to prevent potential
+        # issues with weight loading for now.
+        self.is_standalone = is_standalone
 
         self.use_head = (
             True if not hasattr(config, "vision_use_head") else config.vision_use_head
@@ -776,13 +783,13 @@ class SiglipVisionTransformer(nn.Module):
             return_all_hidden_states=select_layers is not None,
         )
 
-        if self.post_layernorm is not None:
-            encoder_outputs = self.post_layernorm(encoder_outputs)
+        if isinstance(encoder_outputs, torch.Tensor):
+            encoder_outputs = self.maybe_norm_and_pool(encoder_outputs)
+        else:
+            encoder_outputs[-1] = self.maybe_norm_and_pool(encoder_outputs[-1])
 
-        if self.use_head:
-            encoder_outputs = self.head(encoder_outputs)
-
-        # stacks feature layers if needed
+        # In the case that we have multiple feature layers,
+        # we stack and concatenate them into a tensor.
         encoder_outputs = resolve_visual_encoder_outputs(
             encoder_outputs,
             None,
@@ -792,6 +799,18 @@ class SiglipVisionTransformer(nn.Module):
         )
 
         return encoder_outputs
+
+    def maybe_norm_and_pool(self, last_hidden_state: torch.Tensor):
+        """Given the last hidden states, apply post layer normalization if
+        we have it. Then, only potentially apply the pooling head if it's
+        running as a standalone model since we generally just want the
+        hidden states when running inside a VLM.
+        """
+        if self.post_layernorm is not None:
+            last_hidden_state = self.post_layernorm(last_hidden_state)
+        if self.use_head and self.is_standalone:
+            last_hidden_state = self.head(last_hidden_state)
+        return last_hidden_state
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         stacked_params_mapping = [
@@ -841,6 +860,7 @@ class SiglipVisionModel(nn.Module):
         num_hidden_layers_override: int | None = None,
         require_post_norm: bool | None = None,
         prefix: str = "",
+        is_standalone: bool = False,
     ) -> None:
         super().__init__()
 
@@ -852,6 +872,7 @@ class SiglipVisionModel(nn.Module):
             num_hidden_layers_override=num_hidden_layers_override,
             require_post_norm=require_post_norm,
             prefix=f"{prefix}.vision_model",
+            is_standalone=is_standalone,
         )
 
     def get_input_embeddings(self) -> nn.Module:
@@ -1048,6 +1069,7 @@ class SiglipEmbeddingModel(nn.Module, SupportsMultiModal, SupportsQuant):
                 quant_config=quant_config,
                 multimodal_config=multimodal_config,
                 prefix=maybe_prefix(prefix, "vision_model"),
+                is_standalone=True,
             )
 
         pooler_config = vllm_config.model_config.pooler_config
