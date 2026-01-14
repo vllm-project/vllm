@@ -594,13 +594,13 @@ class Platform:
             # but the value of this attr could be `None`.
             if attr is not None:
                 return attr
-        else:
-            logger.warning(
-                "Current platform %s does not have '%s' attribute.",
-                self.device_type,
-                key,
-            )
-            return None
+
+        logger.warning(
+            "Current platform %s does not have '%s' attribute.",
+            self.device_type,
+            key,
+        )
+        return None
 
     def get_global_graph_pool(self) -> Any:
         """
