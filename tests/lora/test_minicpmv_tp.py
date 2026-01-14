@@ -56,7 +56,7 @@ def do_sample(llm: vllm.LLM, lora_path: str, lora_id: int) -> list[str]:
         print(f"Generated text: {generated_text!r}")
     return generated_texts
 
-
+@pytest.mark.skipif(current_platform.is_xpu(), reason="will hang on xpu")
 def test_minicpmv_lora(minicpmv_lora_files):
     llm = vllm.LLM(
         MODEL_PATH,

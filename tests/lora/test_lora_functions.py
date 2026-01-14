@@ -11,6 +11,7 @@ from vllm.entrypoints.openai.api_server import (
     build_async_engine_client_from_engine_args,
 )
 from vllm.lora.request import LoRARequest
+from vllm.platforms import current_platform
 from vllm.v1.engine.llm_engine import LLMEngine
 
 MODEL_PATH = "Qwen/Qwen3-0.6B"
@@ -23,7 +24,7 @@ def make_lora_request(lora_id: int):
         lora_name=f"{lora_id}", lora_int_id=lora_id, lora_path=LORA_MODULE_PATH
     )
 
-
+@pytest.mark.skipif(current_platform.is_xpu(), reason="case will hang on xpu")
 def test_lora_functions_sync():
     max_loras = 4
     # Create engine in eager-mode. Due to high max_loras, the CI can
@@ -72,6 +73,7 @@ def test_lora_functions_sync():
 
 
 @pytest.mark.asyncio
+@pytest.mark.skipif(current_platform.is_xpu(), reason="case will hang on xpu")
 async def test_lora_functions_async():
     max_loras = 4
     engine_args = AsyncEngineArgs(

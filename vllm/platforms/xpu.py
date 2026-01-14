@@ -275,6 +275,14 @@ class XPUPlatform(Platform):
         return torch.xpu.current_stream()
 
     @classmethod
+    def create_stream(cls, device=None):
+        return torch.xpu.Stream(device)
+
+    @classmethod
+    def stream(cls, stream):
+        return torch.xpu.stream(stream)
+
+    @classmethod
     def synchronize(cls):
         return torch.xpu.synchronize()
 
@@ -283,12 +291,16 @@ class XPUPlatform(Platform):
         return torch.xpu.empty_cache()
 
     @classmethod
-    def mem_get_info(cls):
-        return torch.xpu.mem_get_info()
+    def mem_get_info(cls, device=None):
+        return torch.xpu.mem_get_info(device)
 
     @classmethod
-    def manual_seed_all(cls):
-        return torch.xpu.manual_seed_all()
+    def get_device_properties(cls, device):
+        return torch.xpu.get_device_properties(device)
+
+    @classmethod
+    def manual_seed_all(cls, seed: int):
+        return torch.xpu.manual_seed_all(seed)
 
     @classmethod
     def check_if_supports_dtype(cls, dtype: torch.dtype):
