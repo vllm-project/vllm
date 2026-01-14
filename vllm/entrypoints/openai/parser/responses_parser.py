@@ -17,11 +17,11 @@ from openai.types.responses.response_reasoning_item import (
 )
 
 from vllm.entrypoints.constants import MCP_PREFIX
+from vllm.entrypoints.openai.engine.protocol import DeltaMessage
 from vllm.entrypoints.openai.responses.protocol import (
     ResponseInputOutputItem,
     ResponsesRequest,
 )
-from vllm.entrypoints.openai.engine.protocol import DeltaMessage
 from vllm.reasoning.abs_reasoning_parsers import ReasoningParser
 from vllm.tokenizers import TokenizerLike
 from vllm.tool_parsers.abstract_tool_parser import ToolParser
