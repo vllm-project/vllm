@@ -1575,6 +1575,12 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
         router_logits: torch.Tensor,
     ) -> tuple[torch.Tensor, list[torch.Tensor]]:
         """Optionally prepare extra tensors to carry through DP allgather/EP."""
+        if self.nvfp4_backend != NvFp4MoeBackend.FLASHINFER_TRTLLM:
+            raise RuntimeError(
+                "prepare_dp_allgather_tensor is only supported for "
+                "FlashInfer TRTLLM NVFP4 MoE backend."
+            )
+
         import flashinfer
 
         hidden_states_fp4, hidden_states_sf = flashinfer.fp4_quantize(
