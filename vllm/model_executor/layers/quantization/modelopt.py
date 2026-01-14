@@ -34,10 +34,10 @@ from vllm.model_executor.layers.fused_moe.oracle.fp8 import (
 from vllm.model_executor.layers.fused_moe.oracle.nvfp4 import (
     NvFp4MoeBackend,
     convert_to_nvfp4_moe_kernel_format,
+    is_global_sf_supported_for_nvfp4_backend,
     make_nvfp4_moe_kernel,
     make_nvfp4_moe_quant_config,
     select_nvfp4_moe_backend,
-    is_global_sf_supported_for_nvfp4_backend,
 )
 from vllm.model_executor.layers.linear import (
     LinearBase,
@@ -1605,7 +1605,6 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
                 layer=layer,
                 moe_quant_config=self.moe_quant_config,
                 moe_config=self.moe,
-                nvfp4_backend=self.nvfp4_backend,
                 experts_cls=self.experts_cls,
             )
 

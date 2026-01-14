@@ -352,7 +352,6 @@ def make_nvfp4_moe_kernel(
     layer: "FusedMoE",
     moe_quant_config: FusedMoEQuantConfig,
     moe_config: FusedMoEConfig,
-    nvfp4_backend: NvFp4MoeBackend,
     experts_cls: type[mk.FusedMoEPermuteExpertsUnpermute],
 ) -> mk.FusedMoEModularKernel:
     # Create Prepare/Finalize.
