@@ -253,7 +253,7 @@ def test_function_call_validation_failure_logs_debug(caplog):
     }
 
     # Mock the logger to verify debug was called
-    with patch("vllm.entrypoints.openai.engine.protocol.logger") as mock_logger:
+    with patch("vllm.entrypoints.openai.responses.protocol.logger") as mock_logger:
         with pytest.raises(ValueError):
             ResponsesRequest(**request_data)
 
