@@ -35,6 +35,7 @@ def _get_ptr(lora_weights: list[torch.Tensor], device: torch.device):
     _LORA_PTR_DICT[key] = ptr_tensor
     return _LORA_PTR_DICT.get(key)
 
+
 @triton.jit(
     do_not_specialize=[
         "num_valid_tokens",
@@ -106,7 +107,8 @@ def _fused_moe_lora_kernel(
     lora_id_u32 = lora_id_i32.to(tl.uint32)
 
     # valid lora_id: (0 <= lora_id < MAX_LORAS_TOTAL)
-    # Use unsigned comparison to automatically exclude -1: (-1) -> 0xFFFF_FFFF, which will not be < max_loras_u32
+    # Use unsigned comparison to automatically exclude -1: (-1) -> 0xFFFF_FFFF,
+    # which will not be < max_loras_u32
     if lora_id_u32 >= max_loras_u32:
         return
 
@@ -126,6 +128,7 @@ def _fused_moe_lora_kernel(
     pid_m = first_pid_m + ((pid_m_n % num_pid_in_group) % group_size_m)
     pid_n = (pid_m_n % num_pid_in_group) // group_size_m
 
+    # token count per (lora, expert) shard
     num_tokens_post_padded = tl.load(num_tokens_post_padded_ptr + lora_id_i32)
     if pid_m * BLOCK_SIZE_M >= num_tokens_post_padded:
         return
@@ -161,7 +164,8 @@ def _fused_moe_lora_kernel(
         other=-1,
     ).to(tl.int32)
 
-    # Using unsigned comparison: negative numbers automatically become large numbers -> mask false
+    # Using unsigned comparison: negative numbers automatically become large numbers
+    # -> mask false
     offs_token_u32 = offs_token_i32.to(tl.uint32)
     token_mask = offs_token_u32 < num_valid_u32
 
@@ -181,6 +185,7 @@ def _fused_moe_lora_kernel(
     )
 
     if USE_GDC and IS_PRIMARY:
+        # GDC launch dependents hints the runtime system to launch dependent kernels.
         tl.extra.cuda.gdc_launch_dependents()
 
     acc = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.float32)
@@ -210,11 +215,16 @@ def _fused_moe_lora_kernel(
         b_ptrs += BLOCK_SIZE_K * SPLIT_K * stride_bk
 
     if MUL_ROUTED_WEIGHT:
-        moe_weight = tl.load(topk_weights_ptr + safe_token_i32,
-                             mask=token_mask, other=0.0)
+        moe_weight = tl.load(
+            topk_weights_ptr + safe_token_i32, mask=token_mask, other=0.0
+        )
         acc *= moe_weight[:, None]
 
-    c_ptrs = cur_c_ptr + stride_cm * safe_token_i32[:, None] + stride_cn * offs_cn[None, :]
+    c_ptrs = (
+        cur_c_ptr
+        + stride_cm * safe_token_i32[:, None]
+        + stride_cn * offs_cn[None, :]
+    )
     c_mask = token_mask[:, None] & cn_mask[None, :]
 
     if SPLIT_K == 1:
@@ -224,20 +234,27 @@ def _fused_moe_lora_kernel(
         else:
             tl.store(c_ptrs, acc.to(c_ptr.dtype.element_ty), mask=c_mask)
     else:
-        tl.atomic_add(c_ptrs, acc.to(c_ptr.dtype.element_ty), mask=c_mask, sem="relaxed")
+        tl.atomic_add(
+            c_ptrs, acc.to(c_ptr.dtype.element_ty), mask=c_mask, sem="relaxed"
+        )
+
 
 @torch.inference_mode()
 def _fused_moe_lora_shrink(
     a_intermediate_cache1: torch.Tensor,
-    qcurr_hidden_states: torch.Tensor,
-    lora_a_stacked: list[torch.Tensor],
-    topk_weights: torch.Tensor,
-    sorted_token_ids: torch.Tensor,
-    expert_ids: torch.Tensor,
-    num_tokens_post_padded: torch.Tensor,
+    # (num_slices, M, top_k_num, max_lora_rank)
+    qcurr_hidden_states: torch.Tensor,  # (num_tokens, K,)
+    lora_a_stacked: list[
+        torch.Tensor
+    ],  # [(max_loras, num_experts, max_lora_rank, K,),...]
+    topk_weights: torch.Tensor,  # (num_tokens, top_k_num)
+    sorted_token_ids: torch.Tensor,  # (max_loras, _)
+    expert_ids: torch.Tensor,  # (max_loras, _ ,)
+    num_tokens_post_padded: torch.Tensor,  # (max_loras, )
     top_k_num: int,
     lora_ids: torch.Tensor,
     adapter_enabled: torch.Tensor,
+    # adding for kernel
     device: torch.device,
     N: int,
     M: int,
@@ -254,10 +271,10 @@ def _fused_moe_lora_shrink(
     num_stages: int,
     split_k: int,
     mul_routed_weight: bool = False,
+    use_gdc: bool = False,
 ) -> None:
+    # N here is max_lora_rank, passed from caller
     w1_lora_a = lora_a_stacked[0]
-    use_gdc = supports_pdl(qcurr_hidden_states.device)
-
     b_ptr = _get_ptr(lora_a_stacked, device)
     max_loras_total = sorted_token_ids.shape[0]
 
@@ -317,6 +334,7 @@ def _fused_moe_lora_shrink(
 
 _A_WS_CACHE: dict[tuple, torch.Tensor] = {}
 
+
 def _get_a_workspace(
     *,
     device: torch.device,
@@ -336,20 +354,27 @@ def _get_a_workspace(
         buf.zero_()
     return buf
 
+
 @torch.inference_mode()
 def _fused_moe_lora_expand(
-    output: torch.Tensor,
-    a_intermediate_cache1: torch.Tensor,
-    lora_b_stacked: list[torch.Tensor],
-    topk_weights: torch.Tensor,
-    sorted_token_ids: torch.Tensor,
-    expert_ids: torch.Tensor,
-    num_tokens_post_padded: torch.Tensor,
+    output: torch.Tensor,  # (num_tokens, top_k_num, N*len(lora_a_stacked),)
+    a_intermediate_cache1: torch.Tensor,  # (num_slices, M, top_k_num, max_lora_rank)
+    lora_b_stacked: list[
+        torch.Tensor
+    ],  # [(max_loras, num_experts, N, max_lora_rank,),...]
+    topk_weights: torch.Tensor,  # (num_tokens, top_k_num)
+    sorted_token_ids: torch.Tensor,  # (max_loras, _)
+    expert_ids: torch.Tensor,  # (max_loras, _ ,)
+    num_tokens_post_padded: torch.Tensor,  # (max_loras, )
     top_k_num: int,
     lora_ids: torch.Tensor,
     adapter_enabled: torch.Tensor,
+    # adding for kernel
     device: torch.device,
+    N: int,
+    M: int,
     EM: int,
+    K: int,
     num_tokens: int,
     num_experts: int,
     num_slices: int,
@@ -364,23 +389,28 @@ def _fused_moe_lora_expand(
     split_k: int,
     mul_routed_weight: bool = False,
     offset: int = 0,
+    use_gdc: bool = False,
 ) -> None:
     b_ptr = _get_ptr(lora_b_stacked, device)
     w1_lora_b = lora_b_stacked[0]
 
+    # GEMM dims for expand: A: (M * top_k, rank), B: (rank, N_out)
     K = max_lora_rank
     N = w1_output_dim_size
+    EM = EM  # keep passed EM; should be sorted_token_ids.shape[1]
 
+    # flatten slices on the M/top_k axis
     a2d = a_intermediate_cache1.view(-1, a_intermediate_cache1.shape[3])
 
+    # view into output that this expand call is responsible for
     out_view = output[:, :, offset : offset + num_slices * N]
 
-    use_gdc = supports_pdl(a2d.device)
     max_loras_total = sorted_token_ids.shape[0]
 
     grid0 = triton.cdiv(EM, block_size_m) * triton.cdiv(N, block_size_n)
     grid = (grid0, len(lora_b_stacked), lora_ids.numel())
 
+    # each slice occupies a contiguous chunk in the last dim
     slice_c_size = N * out_view.stride(2)
 
     _fused_moe_lora_kernel[grid](
@@ -429,16 +459,21 @@ def _fused_moe_lora_expand(
         num_stages=num_stages,
     )
 
+
 @torch.inference_mode()
 def _fused_moe_lora(
-    output: torch.Tensor,
-    qcurr_hidden_states: torch.Tensor,
-    lora_a_stacked: list[torch.Tensor],
-    lora_b_stacked: list[torch.Tensor],
-    topk_weights: torch.Tensor,
-    sorted_token_ids: torch.Tensor,
-    expert_ids: torch.Tensor,
-    num_tokens_post_padded: torch.Tensor,
+    output: torch.Tensor,  # (num_tokens, top_k_num, N*len(lora_a_stacked),)
+    qcurr_hidden_states: torch.Tensor,  # (num_tokens, K,)
+    lora_a_stacked: list[
+        torch.Tensor
+    ],  # [(max_loras, num_experts, max_lora_rank, K,),...]
+    lora_b_stacked: list[
+        torch.Tensor
+    ],  # [(max_loras, num_experts, N, max_lora_rank,),...]
+    topk_weights: torch.Tensor,  # (num_tokens, top_k_num)
+    sorted_token_ids: torch.Tensor,  # (max_loras, _)
+    expert_ids: torch.Tensor,  # (max_loras, _ ,)
+    num_tokens_post_padded: torch.Tensor,  # (max_loras, )
     max_lora_rank: int,
     top_k_num: int,
     lora_ids: torch.Tensor,
@@ -462,19 +497,34 @@ def _fused_moe_lora(
     offset: int = 0,
 ) -> None:
     assert len(lora_a_stacked) == len(lora_b_stacked) > 0
+    assert (
+        sorted_token_ids.dim()
+        == expert_ids.dim()
+        == topk_weights.dim()
+        == qcurr_hidden_states.dim()
+        == 2
+    )
+    assert (
+        sorted_token_ids.shape[0]
+        == expert_ids.shape[0]
+        == num_tokens_post_padded.shape[0]
+    )
+    assert output.shape[0] == topk_weights.shape[0]
+    assert top_k_num == topk_weights.shape[1]
 
     device = qcurr_hidden_states.device
     num_slices = len(lora_a_stacked)
     w1_lora_b = lora_b_stacked[0]
 
     num_experts = lora_a_stacked[0].shape[1]
+    N = max_lora_rank
     M = topk_weights.shape[0]
     EM = sorted_token_ids.shape[1]
     K = qcurr_hidden_states.shape[1]
     num_tokens = M * top_k_num
     w1_output_dim_size = w1_lora_b.shape[2]
 
-    # fully_shardedor split_k != 1(atomic_add) must be zeroed
+    # fully_sharded 或 split_k != 1 (使用 atomic_add) 时必须清零 workspace
     must_zero_a = fully_sharded or (shrink_split_k != 1)
 
     a_intermediate_cache1 = _get_a_workspace(
@@ -486,6 +536,8 @@ def _fused_moe_lora(
         rank=max_lora_rank,
         must_zero=must_zero_a,
     )
+
+    use_gdc = supports_pdl(device) and not fully_sharded
 
     _fused_moe_lora_shrink(
         a_intermediate_cache1,
@@ -499,28 +551,34 @@ def _fused_moe_lora(
         lora_ids,
         adapter_enabled,
         device,
-        N=max_lora_rank,
-        M=M,
-        EM=EM,
-        K=K,
-        num_tokens=num_tokens,
-        num_experts=num_experts,
-        num_slices=num_slices,
-        block_size_m=shrink_block_size_m,
-        block_size_n=shrink_block_size_n,
-        block_size_k=shrink_block_size_k,
-        group_size_m=shrink_group_size_m,
-        num_warps=shrink_num_warps,
-        num_stages=shrink_num_stages,
-        split_k=shrink_split_k,
-        mul_routed_weight=mul_routed_weight,
+        N,
+        M,
+        EM,
+        K,
+        num_tokens,
+        num_experts,
+        num_slices,
+        shrink_block_size_m,
+        shrink_block_size_n,
+        shrink_block_size_k,
+        shrink_group_size_m,
+        shrink_num_warps,
+        shrink_num_stages,
+        shrink_split_k,
+        mul_routed_weight,
+        use_gdc=use_gdc,
     )
 
     if fully_sharded:
         if max_lora_rank == w1_lora_b.shape[-1]:
-            a_intermediate_cache1 = tensor_model_parallel_all_reduce(a_intermediate_cache1)
+            a_intermediate_cache1 = tensor_model_parallel_all_reduce(
+                a_intermediate_cache1
+            )
         else:
-            a_intermediate_cache1 = tensor_model_parallel_all_gather(a_intermediate_cache1)
+            a_intermediate_cache1 = tensor_model_parallel_all_gather(
+                a_intermediate_cache1
+            )
+            # reset max_lora_rank to the full rank after allgather
             max_lora_rank = a_intermediate_cache1.shape[-1]
 
     _fused_moe_lora_expand(
@@ -535,21 +593,25 @@ def _fused_moe_lora(
         lora_ids,
         adapter_enabled,
         device,
-        EM=EM,
-        num_tokens=num_tokens,
-        num_experts=num_experts,
-        num_slices=num_slices,
-        max_lora_rank=max_lora_rank,
-        w1_output_dim_size=w1_output_dim_size,
-        block_size_m=expand_block_size_m,
-        block_size_n=expand_block_size_n,
-        block_size_k=expand_block_size_k,
-        group_size_m=expand_group_size_m,
-        num_warps=expand_num_warps,
-        num_stages=expand_num_stages,
-        split_k=expand_split_k,
-        mul_routed_weight=mul_routed_weight,
-        offset=offset,
+        N,
+        M,
+        EM,
+        K,
+        num_tokens,
+        num_experts,
+        num_slices,
+        max_lora_rank,
+        w1_output_dim_size,
+        expand_block_size_m,
+        expand_block_size_n,
+        expand_block_size_k,
+        expand_group_size_m,
+        expand_num_warps,
+        expand_num_stages,
+        expand_split_k,
+        mul_routed_weight,
+        offset,
+        use_gdc=use_gdc,
     )
 
 def _fused_moe_lora_fake(
