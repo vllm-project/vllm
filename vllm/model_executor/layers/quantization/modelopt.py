@@ -16,6 +16,7 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
     FusedMoEQuantConfig,
+    FusedMoEQuantScheme,
 )
 from vllm.model_executor.layers.fused_moe.fused_moe_router import FusedMoERouter
 from vllm.model_executor.layers.fused_moe.layer import (
@@ -28,6 +29,7 @@ from vllm.model_executor.layers.fused_moe.oracle.fp8 import (
     convert_to_fp8_moe_kernel_format,
     make_fp8_moe_kernel,
     make_fp8_moe_quant_config,
+    select_fp8_moe_backend,
 )
 from vllm.model_executor.layers.fused_moe.oracle.nvfp4 import (
     FLASHINFER_NVFP4_MOE_BACKENDS,
@@ -57,8 +59,6 @@ from vllm.model_executor.layers.quantization.utils.flashinfer_fp4_moe import (
 )
 from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
     apply_fi_trtllm_fp8_per_tensor_moe,
-    build_flashinfer_fp8_cutlass_moe_prepare_finalize,
-    select_cutlass_fp8_gemm_impl,
 )
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     W8A8BlockFp8LinearOp,
@@ -91,6 +91,7 @@ from vllm.model_executor.parameter import (
     PerTensorScaleParameter,
 )
 from vllm.model_executor.utils import replace_parameter
+from vllm.platforms import current_platform
 from vllm.utils.flashinfer import (
     flashinfer_scaled_fp4_mm,
     has_flashinfer,
@@ -728,46 +729,68 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
         super().__init__(moe_config)
         self.quant_config = quant_config
         assert self.quant_config.is_checkpoint_fp8_serialized
-        # self.fp8_backend = select_fp8_moe_backend(
-        #     block_quant=False,
-        #     tp_size=moe_config.moe_parallel_config.tp_size,
-        #     with_lora_support=self.moe.is_lora_enabled,
-        # )
-        self.fp8_backend = Fp8MoeBackend.FLASHINFER_CUTLASS
+
+        # Create quant scheme, will be used later to select the quant scales.
+        # NOTE(rob): we should update QuantConfig to just be the think ts
+        # holds the scales. Should change the name.
+        quant_scheme = FusedMoEQuantScheme(
+            weight_dtype=current_platform.fp8_dtype(),
+            act_dtype=current_platform.fp8_dtype(),
+            per_tensor_quant=True,
+            per_token_quant=False,
+            block_size=None,
+            static_input_quant=True,
+        )
+
+        # Select Fp8 MoE backend
+        # NOTE(rob): this is kind of a hack. We need to peak into
+        # the prepare-finalize selection to determine if we are using
+        # the batched or standard expert format.
+        use_batched = (
+            self.moe.moe_parallel_config.use_deepep_ll_kernels
+            or self.moe.moe_parallel_config.use_pplx_kernels
+        )
+        self.fp8_backend, self.experts_cls = select_fp8_moe_backend(
+            config=self.moe,
+            quant_scheme=quant_scheme,
+            activation_format=(
+                mk.FusedMoEActivationFormat.BatchedExperts
+                if use_batched
+                else mk.FusedMoEActivationFormat.Standard
+            ),
+        )
+
+        # Delay creation of the kernel until after process-weights.
         self.kernel: mk.FusedMoEModularKernel | None = None
+
+    @property
+    def topk_indices_dtype(self) -> torch.dtype | None:
+        if self.kernel is not None:
+            return self.kernel.prepare_finalize.topk_indices_dtype()
+        return None
+
+    @property
+    def supports_mk_interally(self) -> bool:
+        return True
 
     def maybe_make_prepare_finalize(
         self,
         routing_tables: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
     ) -> mk.FusedMoEPrepareAndFinalize | None:
-        # TRT LLM not supported with all2all yet.
-        if self.fp8_backend == Fp8MoeBackend.FLASHINFER_TRTLLM:
-            return None
-        elif self.fp8_backend == Fp8MoeBackend.FLASHINFER_CUTLASS:
-            # TP case: avoid convert to ModularKernelMethod - to be refactored.
-            if self.moe.dp_size == 1:
-                return None
-
-            prepare_finalize = build_flashinfer_fp8_cutlass_moe_prepare_finalize(
-                self.moe,
-                use_deepseek_fp8_block_scale=False,
-            )
-            logger.debug_once("%s", prepare_finalize.__class__.__name__)
-            return prepare_finalize
-        return super().maybe_make_prepare_finalize(routing_tables)
+        raise ValueError(
+            "ModelOptFp8MoEMethod uses the new modular kernel initialization "
+            "logic. This function should not be called."
+        )
 
     def select_gemm_impl(
         self,
         prepare_finalize: mk.FusedMoEPrepareAndFinalize,
         layer: torch.nn.Module,
     ) -> mk.FusedMoEPermuteExpertsUnpermute:
-        assert self.moe_quant_config is not None
-        experts = select_cutlass_fp8_gemm_impl(
-            self.moe,
-            self.moe_quant_config,
+        raise ValueError(
+            "ModelOptFp8MoEMethod uses the new modular kernel initialization "
+            "logic. This function should not be called."
         )
-        logger.debug_once("Using %s", experts.__class__.__name__)
-        return experts
 
     def create_weights(
         self,
@@ -879,14 +902,16 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
         replace_parameter(layer, "w13_weight_scale", w13_scale)
         replace_parameter(layer, "w2_weight_scale", w2_scale)
 
-        # Setup modular kernel for TP case.
+        # Setup modular kernel.
         self.moe_quant_config = self.get_fused_moe_quant_config(layer)
         if self.moe_quant_config:
+            assert self.experts_cls is not None
             self.kernel, self.use_inplace = make_fp8_moe_kernel(
                 moe_quant_config=self.moe_quant_config,
                 moe_config=self.moe,
                 fp8_backend=self.fp8_backend,
-            ) # noqa
+                experts_cls=self.experts_cls,
+            )
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         w13 = layer.w13_weight
