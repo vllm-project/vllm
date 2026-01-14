@@ -191,7 +191,10 @@ import functools
 from abc import abstractmethod
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import ClassVar, Generic, TypeVar, cast
+from typing import TYPE_CHECKING, ClassVar, Generic, TypeVar, cast
+
+if TYPE_CHECKING:
+    from flashinfer import BatchPrefillWithRaggedKVCacheWrapper
 
 import torch
 import torch.nn as nn
@@ -596,15 +599,12 @@ except ImportError:
         from flash_attn import flash_attn_varlen_func  # type: ignore[no-redef]
     is_vllm_fa = False
 
-try:
-    from flashinfer import BatchPrefillWithRaggedKVCacheWrapper
-    from flashinfer.prefill import cudnn_batch_prefill_with_kv_cache  # noqa: F401
 
-    flashinfer_available = True
-except ImportError:
-    BatchPrefillWithRaggedKVCacheWrapper = object
+@functools.cache
+def flashinfer_available() -> bool:
+    import importlib.util
 
-    flashinfer_available = False
+    return importlib.util.find_spec("flashinfer") is not None
 
 
 def dynamic_per_batched_tensor_quant(
@@ -697,8 +697,8 @@ class MLACommonPrefillMetadata:
 
 @dataclass
 class FlashInferPrefillMetadata(MLACommonPrefillMetadata):
-    prefill_main: BatchPrefillWithRaggedKVCacheWrapper | None = None
-    prefill_chunks: list[BatchPrefillWithRaggedKVCacheWrapper] = field(
+    prefill_main: "BatchPrefillWithRaggedKVCacheWrapper | None" = None
+    prefill_chunks: "list[BatchPrefillWithRaggedKVCacheWrapper]" = field(
         default_factory=list
     )
 
@@ -781,7 +781,7 @@ def use_flashinfer_prefill() -> bool:
     vllm_config = get_current_vllm_config()
     return (
         not vllm_config.attention_config.disable_flashinfer_prefill
-        and flashinfer_available
+        and flashinfer_available()
         and not vllm_config.attention_config.use_cudnn_prefill
         and not vllm_config.attention_config.use_trtllm_ragged_deepseek_prefill
         and current_platform.is_device_capability_family(100)
@@ -793,7 +793,7 @@ def use_cudnn_prefill() -> bool:
 
     vllm_config = get_current_vllm_config()
     return (
-        flashinfer_available
+        flashinfer_available()
         and vllm_config.attention_config.use_cudnn_prefill
         and current_platform.is_device_capability_family(100)
         and has_nvidia_artifactory()
@@ -806,7 +806,7 @@ def use_trtllm_ragged_deepseek_prefill() -> bool:
 
     vllm_config = get_current_vllm_config()
     return (
-        flashinfer_available
+        flashinfer_available()
         and vllm_config.attention_config.use_trtllm_ragged_deepseek_prefill
         and current_platform.is_device_capability_family(100)
     )
@@ -1012,6 +1012,8 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
             has_context = True
 
         if self._fi_prefill_main is None:
+            from flashinfer import BatchPrefillWithRaggedKVCacheWrapper
+
             self._fi_prefill_main = BatchPrefillWithRaggedKVCacheWrapper(
                 self._workspace_buffer, "NHD", backend="cutlass"
             )
@@ -1020,6 +1022,8 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
             num_chunks = chunked_context.cu_seq_lens.shape[0]
             # Allocate more prefill chunk wrappers if needed
             if len(self._fi_prefill_chunks) < num_chunks:
+                from flashinfer import BatchPrefillWithRaggedKVCacheWrapper
+
                 for _ in range(len(self._fi_prefill_chunks), num_chunks):
                     self._fi_prefill_chunks.append(
                         BatchPrefillWithRaggedKVCacheWrapper(
@@ -1757,6 +1761,8 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
     ):
         assert isinstance(prefill, CudnnPrefillMetadata)
         assert prefill.query_seq_lens is not None
+        from flashinfer.prefill import cudnn_batch_prefill_with_kv_cache
+
         output, lse = cudnn_batch_prefill_with_kv_cache(
             q=q,
             k_cache=k,
@@ -1816,6 +1822,8 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
         assert prefill.chunked_context is not None
         assert prefill.chunked_context.seq_lens[chunk_idx] is not None
         assert prefill.query_seq_lens is not None
+        from flashinfer.prefill import cudnn_batch_prefill_with_kv_cache
+
         return cudnn_batch_prefill_with_kv_cache(
             q=q,
             k_cache=k,
