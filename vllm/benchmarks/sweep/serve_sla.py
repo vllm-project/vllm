@@ -65,6 +65,14 @@ def _get_sla_run_path(iter_path: Path, run_number: int | None):
     return iter_path / f"run={run_number}.json"
 
 
+def _iter_sla_val_paths(base_path: Path, sla_variable: str):
+    for iter_path in base_path.glob(f"{sla_variable}=*"):
+        sla_value = int(iter_path.name.removeprefix(f"{sla_variable}="))
+        summary_path = iter_path / "summary.json"
+        if summary_path.exists():
+            yield sla_value, summary_path
+
+
 def _sla_needs_server(
     serve_comb: ParameterSweepItem,
     bench_combs: ParameterSweep,
@@ -153,6 +161,25 @@ class SLAHistory(dict[int, float]):
         )
 
 
+def _compute_margin(
+    sla_comb: SLASweepItem,
+    iter_data: list[dict[str, object]],
+):
+    assert iter_data, "Summary should not be empty"
+
+    iter_data_mean = {
+        k: sum(float(run_data[k]) for run_data in iter_data) / len(iter_data)  # type: ignore
+        for k in sla_comb
+    }
+
+    sla_margins = [
+        criterion.print_and_compute_margin(iter_data_mean, k)
+        for k, criterion in sla_comb.items()
+    ]
+
+    return max(sla_margins)
+
+
 def solve_sla(
     server: ServerProcess | None,
     bench_cmd: list[str],
@@ -170,11 +197,18 @@ def solve_sla(
     sla_data = list[dict[str, object]]()
     history = SLAHistory(min_value=sla_min_value, max_value=sla_max_value)
 
+    # Use results from previous runs
+    for past_sla_value, path in _iter_sla_val_paths(base_path, sla_variable):
+        with path.open("rb") as f:
+            past_iter_data = json.load(f)
+
+        history[past_sla_value] = _compute_margin(sla_comb, past_iter_data)
+
     # NOTE: We don't use equality here to be more robust against noisy results
     while history.get_max_passing() + 1 < history.get_min_failing():
-        if len(history) == 0:
+        if max(history, default=sla_min_value) < sla_max_value:
             val = sla_max_value
-        elif len(history) == 1:
+        elif min(history, default=sla_max_value) > sla_min_value:
             val = sla_min_value
         else:
             spl = PchipInterpolator(*history.get_xy(), extrapolate=False)
@@ -205,23 +239,14 @@ def solve_sla(
         if iter_data is None:
             return None
 
-        sla_data.extend(iter_data)
-
-        iter_data_mean = {
-            k: sum(float(run_data[k]) for run_data in iter_data) / len(iter_data)  # type: ignore
-            for k in sla_comb
-        }
-
-        sla_margins = [
-            criterion.print_and_compute_margin(iter_data_mean, k)
-            for k, criterion in sla_comb.items()
-        ]
-        history[val] = margin = max(sla_margins)
-
+        margin = _compute_margin(sla_comb, iter_data)
         if margin <= 0:
             print(f"SLA criteria are met. ({margin=:.2f})")
         else:
             print(f"SLA criteria are not met. ({margin=:.2f})")
+
+        sla_data.extend(iter_data)
+        history[val] = margin
 
     return sla_data, history
 

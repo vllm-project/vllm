@@ -198,6 +198,8 @@ class ModelConfig:
     graph and always execute the model in eager mode. If False, we will use
     CUDA graph and eager execution in hybrid for maximal performance and
     flexibility."""
+    enable_return_routed_experts: bool = False
+    """Whether to return routed experts."""
     max_logprobs: int = 20
     """Maximum number of log probabilities to return when `logprobs` is
     specified in `SamplingParams`. The default value comes the default for the
@@ -882,6 +884,7 @@ class ModelConfig:
                 "gptq_bitblas",
                 "awq_marlin",
                 "ipex",
+                "inc",
                 "moe_wna16",
                 "modelopt",
                 "modelopt_fp4",
@@ -1492,7 +1495,7 @@ class ModelConfig:
 
         if self.runner_type != "pooling" and head_dtype != self.dtype:
             logger.warning_once(
-                "`head_dtype` currently only supports pooling models."
+                "`head_dtype` currently only supports pooling models, "
                 "fallback to model dtype [%s].",
                 self.dtype,
             )
