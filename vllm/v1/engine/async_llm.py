@@ -562,7 +562,7 @@ class AsyncLLM(EngineClient):
         # Create iteration_stats per request because different requests can have
         # different engine indexes which need to be logged separately.
         for req_id in request_ids:
-            iteration_stats = IterationStats()
+            iteration_stats = IterationStats() if self.log_stats else None
             request_ids_to_abort = self.output_processor.abort_requests(
                 [req_id],
                 internal,
