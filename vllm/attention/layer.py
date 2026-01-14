@@ -391,7 +391,10 @@ class Attention(nn.Module, AttentionLayerBase):
                 )
             else:
                 kv_cache_update_out = None
-                if not self.attn_backend.forward_includes_kv_cache:
+                if not self.attn_backend.forward_includes_kv_cache and (
+                    # torch can only dispatch custom op if a tensor is passed
+                    key is not None or value is not None
+                ):
                     kv_cache_update_out = torch.ops.vllm.unified_kv_cache_update(
                         key, value, self.layer_name
                     )
