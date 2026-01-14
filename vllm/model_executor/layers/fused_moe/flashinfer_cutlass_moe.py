@@ -241,7 +241,6 @@ class FlashInferExperts(mk.FusedMoEPermuteExpertsUnpermute):
             assert self.w1_scale is not None and self.w2_scale is not None, (
                 "w1_scale and w2_scale must not be None for FlashInferExperts"
             )
-
             # Flashinfer CUTLASS kernel takes scalar global scales,
             # min because inv_scale.
             quant_scales = [
