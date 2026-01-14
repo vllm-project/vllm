@@ -1294,7 +1294,8 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
         super().__init__(*args, **kwargs)
 
         if use_trtllm_ragged_deepseek_prefill():
-            logger.info_once("Using TRT-LLM ragged DeepSeek prefill for MLA")
+            logger.info_once("Using TRT-LLM ragged DeepSeek prefill for MLA"，
+                                          scope="local")
             self._run_prefill_context_chunk = (
                 self._run_prefill_context_chunk_trtllm_ragged
             )
