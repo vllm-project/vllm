@@ -38,26 +38,26 @@ from vllm.entrypoints.context import (
     StreamingHarmonyContext,
 )
 from vllm.entrypoints.logger import RequestLogger
-from vllm.entrypoints.openai.protocol import (
+from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionNamedToolChoiceParam,
     ChatCompletionRequest,
     ChatCompletionResponse,
+)
+from vllm.entrypoints.openai.engine.protocol import (
     CompletionRequest,
     CompletionResponse,
-    DetokenizeRequest,
     ErrorInfo,
     ErrorResponse,
     FunctionCall,
     FunctionDefinition,
-    ResponseInputOutputItem,
-    ResponsesRequest,
-    TokenizeChatRequest,
-    TokenizeCompletionRequest,
-    TokenizeResponse,
     TranscriptionRequest,
     TranscriptionResponse,
     TranslationRequest,
     VLLMValidationError,
+)
+from vllm.entrypoints.openai.responses.protocol import (
+    ResponseInputOutputItem,
+    ResponsesRequest,
 )
 from vllm.entrypoints.openai.serving_models import OpenAIServingModels
 from vllm.entrypoints.pooling.classify.protocol import (
@@ -86,6 +86,12 @@ from vllm.entrypoints.responses_utils import (
     construct_input_messages,
 )
 from vllm.entrypoints.serve.disagg.protocol import GenerateRequest, GenerateResponse
+from vllm.entrypoints.serve.tokenize.protocol import (
+    DetokenizeRequest,
+    TokenizeChatRequest,
+    TokenizeCompletionRequest,
+    TokenizeResponse,
+)
 from vllm.entrypoints.utils import _validate_truncation_size
 from vllm.inputs.data import PromptType, TokensPrompt
 from vllm.inputs.parse import (
