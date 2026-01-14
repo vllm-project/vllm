@@ -762,9 +762,12 @@ def tensorize_lora_adapter(lora_path: str, tensorizer_config: TensorizerConfig):
     if tensor_path.endswith(".safetensors"):
         tensors = safetensors.torch.load_file(tensor_path)
     elif tensor_path.endswith(".bin"):
-        tensors = torch.load(tensor_path)
+        tensors = torch.load(tensor_path, weights_only=True)
     else:
-        raise ValueError("Unsupported file: %s", tensor_path)
+        raise ValueError(
+            f"Unsupported adapter model file: {tensor_path}. "
+            f"Must be a .safetensors or .bin file."
+        )
 
     with open(config_path) as f:
         config = json.load(f)

@@ -39,13 +39,13 @@ from vllm.multimodal.parse import (
     MultiModalDataItems,
 )
 from vllm.multimodal.processing import (
+    BaseDummyInputsBuilder,
     BaseMultiModalProcessor,
     BaseProcessingInfo,
     PromptReplacement,
     PromptUpdate,
     PromptUpdateDetails,
 )
-from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.processor import cached_video_processor_from_config
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
