@@ -50,6 +50,7 @@ from .parse import (
     MultiModalDataItems,
     MultiModalDataParser,
 )
+from .profiling import BaseDummyInputsBuilder
 
 if TYPE_CHECKING:
     from transformers.configuration_utils import PretrainedConfig
@@ -59,7 +60,6 @@ if TYPE_CHECKING:
     from vllm.config import ModelConfig, ObservabilityConfig
 
     from .cache import BaseMultiModalProcessorCache
-    from .profiling import BaseDummyInputsBuilder
 else:
     PretrainedConfig = object
     BatchFeature = object
