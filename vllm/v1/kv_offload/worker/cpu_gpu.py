@@ -15,7 +15,6 @@ from vllm.v1.kv_offload.worker.worker import (
     OffloadingHandler,
     TransferResult,
     TransferSpec,
-    TransferType,
 )
 
 logger = init_logger(__name__)
@@ -27,8 +26,7 @@ class Transfer:
     stream: torch.cuda.Stream
     start_event: torch.Event
     end_event: torch.Event
-    num_blocks: int
-    transfer_type: TransferType
+    num_bytes: int
 
 
 def expand_block_ids(
@@ -104,18 +102,25 @@ class SingleDirectionOffloadingHandler(OffloadingHandler):
         self.kv_dim_before_num_blocks: list[bool] = kv_dim_before_num_blocks
         self.src_block_size_factor: int = src_block_size_factor
         self.dst_block_size_factor: int = dst_block_size_factor
-
         assert len(src_tensors) > 0
         self.gpu_to_cpu: bool = self.src_tensors[0].is_cuda
-
-        # job_id -> (start_event, end_event)
-        self._transfer_events: dict[int, tuple[torch.Event, torch.Event]] = {}
+        self.transfer_type: tuple[str, str] = ("CPU", "GPU")
+        if self.gpu_to_cpu:
+            self.transfer_type = ("GPU", "CPU")
+        # job_id -> event
+        self._transfer_events: dict[int, torch.Event] = {}
         # queue of transfers (job_id, stream, event)
         self._transfers: deque[Transfer] = deque()
         # list of CUDA streams available for re-use
         self._stream_pool: list[torch.cuda.Stream] = []
         # list of CUDA events available for re-use
         self._event_pool: list[torch.Event] = []
+        self.block_size_in_bytes: int = 0
+        for tensor, split_k_and_v in zip(src_tensors, kv_dim_before_num_blocks):
+            if split_k_and_v:
+                self.block_size_in_bytes += 2 * tensor.stride(1) * tensor.element_size()
+            else:
+                self.block_size_in_bytes += tensor.stride(0) * tensor.element_size()
 
     def transfer_async(self, job_id: int, transfer_spec: TransferSpec) -> bool:
         src_spec, dst_spec = transfer_spec
@@ -177,19 +182,14 @@ class SingleDirectionOffloadingHandler(OffloadingHandler):
                     ops.swap_blocks(src_tensor, dst_tensor, src_to_dst_tensor)
             end_event.record(stream)
 
-        self._transfer_events[job_id] = (start_event, end_event)
-        transfer_type: TransferType = (
-            transfer_spec[0].medium(),
-            transfer_spec[1].medium(),
-        )
+        self._transfer_events[job_id] = end_event
         self._transfers.append(
             Transfer(
-                job_id,
-                stream,
-                start_event,
-                end_event,
-                src_sub_block_count,
-                transfer_type,
+                job_id=job_id,
+                stream=stream,
+                start_event=start_event,
+                end_event=end_event,
+                num_bytes=dst_sub_block_count * self.block_size_in_bytes,
             )
         )
 
@@ -202,11 +202,11 @@ class SingleDirectionOffloadingHandler(OffloadingHandler):
             transfer = self._transfers.popleft()
             transfer_time = transfer.start_event.elapsed_time(transfer.end_event)
             result = TransferResult(
-                transfer.job_id,
-                True,
-                transfer.num_blocks,
-                transfer_time,
-                transfer.transfer_type,
+                job_id=transfer.job_id,
+                success=True,
+                transfer_size=transfer.num_bytes,
+                transfer_time=transfer_time,
+                transfer_type=self.transfer_type,
             )
 
             results.append(result)
@@ -218,11 +218,9 @@ class SingleDirectionOffloadingHandler(OffloadingHandler):
 
     def wait(self, job_ids: set[int]):
         for job_id in job_ids:
-            events = self._transfer_events.get(job_id)
-            if events:
-                start_event, end_event = events
-                start_event.synchronize()
-                end_event.synchronize()
+            event = self._transfer_events.get(job_id)
+            if event is not None:
+                event.synchronize()
 
 
 class CpuGpuOffloadingHandlers:

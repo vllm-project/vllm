@@ -15,19 +15,12 @@ logger = init_logger(__name__)
 
 
 @dataclass
-class TransferStats:
-    num_blocks: int
-    time: float  # Can be start_time or duration
-    transfer_type: TransferType
-
-
-@dataclass
 class TransferResult:
     job_id: int
     success: bool
-    transfer_size: int
-    transfer_time: float
-    transfer_type: TransferType
+    transfer_size: int | None = None  # Size in bytes
+    transfer_time: float | None = None
+    transfer_type: TransferType | None = None
 
 
 class OffloadingHandler(ABC):
@@ -68,6 +61,14 @@ class OffloadingHandler(ABC):
         """
         pass
 
+    @abstractmethod
+    def wait(self, job_ids: set[int]) -> None:
+        """
+        Wait for jobs to finish (blocking).
+        Args:
+            job_ids: The set of job IDs to wait for.
+        """
+
 
 class OffloadingWorker:
     """
@@ -90,8 +91,6 @@ class OffloadingWorker:
     def __init__(self):
         self.handlers: set[OffloadingHandler] = set()
         self.transfer_type_to_handler: dict[TransferType, OffloadingHandler] = {}
-        # _transfer_stats: job_id -> TransferStats
-        self._transfer_stats: dict[int, TransferStats] = {}
 
     def register_handler(
         self,
@@ -156,18 +155,14 @@ class OffloadingWorker:
         finished = []
         for handler in self.handlers:
             finished.extend(handler.get_finished())
-        for transfer_result in finished:
-            transfer_stats = TransferStats(
-                transfer_result.transfer_size,
-                transfer_result.transfer_time,
-                transfer_result.transfer_type,
-            )
-            self._transfer_stats[transfer_result.job_id] = transfer_stats
         return finished
 
-    def get_stats(self, job_id: int) -> tuple[int, float, TransferType]:
-        stats = self._transfer_stats.pop(job_id)
-        num_blocks = stats.num_blocks
-        transfer_time = stats.time
-        transfer_type = stats.transfer_type
-        return num_blocks, transfer_time, transfer_type
+    def wait(self, job_ids: set[int]) -> None:
+        """
+        Wait for jobs to finish (blocking).
+
+        Args:
+            job_ids: The set of job IDs to wait for.
+        """
+        for handler in self.handlers:
+            handler.wait(job_ids)

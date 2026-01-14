@@ -49,14 +49,6 @@ class LoadStoreSpec(ABC):
         """
         pass
 
-    @property
-    @abstractmethod
-    def num_blocks(self) -> int:
-        """
-        Returns number of blocks to load/store for this spec.
-        """
-        pass
-
 
 @dataclass
 class PrepareStoreOutput:

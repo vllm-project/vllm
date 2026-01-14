@@ -73,7 +73,9 @@ class OffloadingConnectorStats(KVConnectorStats):
     def aggregate(self, other: KVConnectorStats) -> KVConnectorStats:
         if not other.is_empty():
             for k, v in other.data.items():
-                if k in self.data:
+                if k not in self.data:
+                    self.data[k] = v
+                else:
                     accumulator = self.data[k]
                     assert isinstance(accumulator, list)
                     accumulator.extend(v)
@@ -133,25 +135,7 @@ class OffloadingConnector(KVConnectorBase_V1):
         elif role == KVConnectorRole.WORKER:
             if kv_cache_config is None:
                 raise ValueError("kv_cache_config cannot be None for WORKER role")
-            self.connector_worker = OffloadingConnectorWorker(
-                spec, self.calculate_bytes_per_block(kv_cache_config, vllm_config)
-            )
-
-    def calculate_bytes_per_block(
-        self, kv_cache_config: KVCacheConfig, vllm_config: VllmConfig
-    ) -> int:
-        page_sizes = {
-            kv_cache_group.kv_cache_spec.page_size_bytes
-            for kv_cache_group in kv_cache_config.kv_cache_groups
-        }
-        assert len(page_sizes) == 1
-        page_size_bytes = page_sizes.pop()
-        kv_bytes_per_block = (
-            page_size_bytes
-            * len(kv_cache_config.kv_cache_tensors)
-            * vllm_config.parallel_config.world_size
-        )
-        return kv_bytes_per_block
+            self.connector_worker = OffloadingConnectorWorker(spec)
 
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
         assert self.connector_worker is not None
@@ -543,7 +527,7 @@ class OffloadingConnectorScheduler:
 class OffloadingConnectorWorker:
     """Implementation of Worker side methods"""
 
-    def __init__(self, spec: OffloadingSpec, bytes_per_block: int):
+    def __init__(self, spec: OffloadingSpec):
         self.spec = spec
         self.worker = OffloadingWorker()
 
@@ -560,8 +544,6 @@ class OffloadingConnectorWorker:
         self._unsubmitted_store_jobs: list[tuple[int, TransferSpec]] = []
 
         self._finished_reqs_waiting_for_store: set[ReqId] = set()
-
-        self._bytes_per_block = bytes_per_block
 
     def _generate_job_id(self) -> int:
         job_id = self._job_counter
@@ -650,13 +632,13 @@ class OffloadingConnectorWorker:
         finished_recving = set()
         for transfer_result in self.worker.get_finished():
             # we currently do not support job failures
-            job_id, success, num_blocks, transfer_time, transfer_type = astuple(
+            job_id, success, num_bytes, transfer_time, transfer_type = astuple(
                 transfer_result
             )
             assert success
             req_id, store = self._jobs.pop(job_id)
             self.kv_connector_stats.record_transfer(
-                num_blocks * self._bytes_per_block, transfer_time, transfer_type
+                num_bytes, transfer_time, transfer_type
             )
             if store:
                 req_jobs = self._store_jobs[req_id]
@@ -703,13 +685,10 @@ class OffloadPromMetrics(KVConnectorPromMetrics):
         per_engine_labelvalues: dict[int, list[object]],
     ):
         super().__init__(vllm_config, metric_types, labelnames, per_engine_labelvalues)
-        self.total_cpu_to_gpu_time = 0
-        self.total_gpu_to_cpu_time = 0
-        self.total_cpu_to_gpu_count = 0
-        self.total_gpu_to_cpu_count = 0
-        self.total_cpu_to_gpu_bytes = 0
-        self.total_gpu_to_cpu_bytes = 0
-
+        self.total_op_time: dict[str, float] = {}
+        self.total_op_count: dict[str, int] = {}
+        self.total_op_bytes: dict[str, int] = {}
+        self.per_engine_labelvalues: dict[tuple[int, str], list[object]] = {}
         buckets = [  # In bytes
             1e6,
             5e6,
@@ -736,78 +715,32 @@ class OffloadPromMetrics(KVConnectorPromMetrics):
             70e9,
         ]
 
-        offload_histogram_throughput_cpu_to_gpu = self._histogram_cls(
-            name="vllm:kv_offload_throughput_cpu_to_gpu",
-            documentation="Histogram of CPU to GPU transfer throughput, in bytes/sec.",
+        self.histogram_transfer_throughput = self._histogram_cls(
+            name="vllm:kv_offload_throughput",
+            documentation="Histogram of KV offload transfer throughput, in bytes/sec.",
             buckets=buckets_throughput[:],
-            labelnames=labelnames,
-        )
-        self.offload_histogram_throughput_cpu_to_gpu = self.make_per_engine(
-            offload_histogram_throughput_cpu_to_gpu
+            labelnames=labelnames + ["transfer_type"],
         )
 
-        offload_histogram_throughput_gpu_to_cpu = self._histogram_cls(
-            name="vllm:kv_offload_throughput_gpu_to_cpu",
-            documentation="Histogram of GPU to CPU transfer throughput, in bytes/sec.",
-            buckets=buckets_throughput[:],
-            labelnames=labelnames,
-        )
-        self.offload_histogram_throughput_gpu_to_cpu = self.make_per_engine(
-            offload_histogram_throughput_gpu_to_cpu
-        )
-        offload_histogram_size_cpu_to_gpu = self._histogram_cls(
-            name="vllm:kv_offload_size_cpu_to_gpu",
-            documentation="Histogram of CPU to GPU transfer size, in bytes.",
+        self.histogram_transfer_size = self._histogram_cls(
+            name="vllm:kv_offload_size",
+            documentation="Histogram of KV offload transfer size, in bytes.",
             buckets=buckets[:],
-            labelnames=labelnames,
-        )
-        self.offload_histogram_size_cpu_to_gpu = self.make_per_engine(
-            offload_histogram_size_cpu_to_gpu
+            labelnames=labelnames + ["transfer_type"],
         )
 
-        offload_histogram_size_gpu_to_cpu = self._histogram_cls(
-            name="vllm:kv_offload_size_gpu_to_cpu",
-            documentation="Histogram of GPU to CPU transfer size, in bytes.",
-            buckets=buckets[:],
-            labelnames=labelnames,
-        )
-        self.offload_histogram_size_gpu_to_cpu = self.make_per_engine(
-            offload_histogram_size_gpu_to_cpu
-        )
-
-        gauge_kv_gpu_to_cpu_throughput_avg = self._gauge_cls(
-            name="vllm:kv_offload_gpu_to_cpu_throughput",
-            documentation="Average throughput of a GPU-CPU transfers",
+        self.gauge_kv_throughput_avg = self._gauge_cls(
+            name="vllm:kv_offload_throughput_avg",
+            documentation="Average throughput of KV offload transfers",
             multiprocess_mode="mostrecent",
-            labelnames=labelnames,
-        )
-        self.gauge_kv_gpu_to_cpu_throughput_avg = self.make_per_engine(
-            gauge_kv_gpu_to_cpu_throughput_avg
+            labelnames=labelnames + ["transfer_type"],
         )
 
-        gauge_kv_cpu_to_gpu_throughput_avg = self._gauge_cls(
-            name="vllm:kv_offload_cpu_to_gpu_throughput",
-            documentation="Average throughput of a CPU-GPU transfers",
-            multiprocess_mode="mostrecent",
-            labelnames=labelnames,
+        self.counter_kv_transfers = self._counter_cls(
+            name="vllm:kv_offload_num_transfers",
+            documentation="Number of KV offload transfers done",
+            labelnames=labelnames + ["transfer_type"],
         )
-        self.gauge_kv_cpu_to_gpu_throughput_avg = self.make_per_engine(
-            gauge_kv_cpu_to_gpu_throughput_avg
-        )
-
-        counter_num_cpu_to_gpu = self._counter_cls(
-            name="vllm:kv_offload_num_cpu_to_gpu",
-            documentation="Number of CPU-GPU transfers done",
-            labelnames=labelnames,
-        )
-        self.counter_num_cpu_to_gpu = self.make_per_engine(counter_num_cpu_to_gpu)
-
-        counter_num_gpu_to_cpu = self._counter_cls(
-            name="vllm:kv_offload_num_gpu_to_cpu",
-            documentation="Number of GPU-CPU transfers done",
-            labelnames=labelnames,
-        )
-        self.counter_num_gpu_to_cpu = self.make_per_engine(counter_num_gpu_to_cpu)
 
     def observe(self, transfer_stats_data: dict[str, Any], engine_idx: int = 0):
         """
@@ -817,65 +750,52 @@ class OffloadPromMetrics(KVConnectorPromMetrics):
         - values are lists of OffloadingOperationMetrics objects
         """
 
-        # Process cpu_to_gpu operations
-        if "CPU_to_GPU" in transfer_stats_data:
-            cpu_to_gpu_ops = transfer_stats_data["CPU_to_GPU"]
-            assert isinstance(cpu_to_gpu_ops, list)
-            for op in cpu_to_gpu_ops:
-                # Observe size histogram
-                self.offload_histogram_size_cpu_to_gpu[engine_idx].observe(
-                    op["op_size"]
+        for transfer_type, ops in transfer_stats_data.items():
+            # Cache:
+            if (engine_idx, transfer_type) not in self.per_engine_labelvalues:
+                self.per_engine_labelvalues[engine_idx, transfer_type] = (
+                    self._per_engine_labelvalues[engine_idx] + [transfer_type]
                 )
+            # Init:
+            if transfer_type not in self.total_op_time:
+                self.total_op_time[transfer_type] = 0
+            if transfer_type not in self.total_op_bytes:
+                self.total_op_bytes[transfer_type] = 0
+            if transfer_type not in self.total_op_count:
+                self.total_op_count[transfer_type] = 0
 
-                # Calculate and observe throughput
-                self.total_cpu_to_gpu_time += op["op_time"]
-                self.total_cpu_to_gpu_bytes += op["op_size"]
+            for op in ops:
+                # Observe size histogram
+                self.histogram_transfer_size.labels(
+                    *self.per_engine_labelvalues[engine_idx, transfer_type]
+                ).observe(op["op_size"])
+
+                # Calculate time
+                self.total_op_time[transfer_type] += op["op_time"]
+
+                # Calculate size
+                self.total_op_bytes[transfer_type] += op["op_size"]
+
+                # Update count
+                self.total_op_count[transfer_type] += 1
+                # Observe throughput histogram
                 if op["op_time"] != 0:
                     throughput = op["op_size"] / op["op_time"]
-                    # Observe throughput histogram
-                    self.offload_histogram_throughput_cpu_to_gpu[engine_idx].observe(
-                        throughput
-                    )
+                    self.histogram_transfer_throughput.labels(
+                        *self.per_engine_labelvalues[engine_idx, transfer_type]
+                    ).observe(throughput)
 
             # Update counter
-            self.counter_num_cpu_to_gpu[engine_idx].inc(len(cpu_to_gpu_ops))
-
-            # Update gauge with cumulative average
-
-            avg_cpu_to_gpu_throughput = self.total_cpu_to_gpu_bytes / max(
-                self.total_cpu_to_gpu_time, 1
-            )
-            self.gauge_kv_cpu_to_gpu_throughput_avg[engine_idx].set(
-                avg_cpu_to_gpu_throughput
-            )
-
-        # Process gpu_to_cpu operations
-        if "GPU_to_CPU" in transfer_stats_data:
-            gpu_to_cpu_ops = transfer_stats_data["GPU_to_CPU"]
-            assert isinstance(gpu_to_cpu_ops, list)
-            for op in gpu_to_cpu_ops:
-                # Observe size histogram
-                self.offload_histogram_size_gpu_to_cpu[engine_idx].observe(
-                    op["op_size"]
+            self.counter_kv_transfers.labels(
+                *self.per_engine_labelvalues[engine_idx, transfer_type]
+            ).inc(len(ops))
+            # Update average throughput
+            avg_throughput = 0.0
+            if self.total_op_time[transfer_type] > 0:
+                avg_throughput = (
+                    self.total_op_bytes[transfer_type]
+                    / self.total_op_time[transfer_type]
                 )
-
-                # Calculate and observe throughput histogram
-                self.total_gpu_to_cpu_time += op["op_time"]
-                self.total_gpu_to_cpu_bytes += op["op_size"]
-                if op["op_time"] != 0:
-                    throughput = op["op_size"] / op["op_time"]
-                    # Observe throughput histogram
-                    self.offload_histogram_throughput_gpu_to_cpu[engine_idx].observe(
-                        throughput
-                    )
-            # Update counter
-            self.counter_num_gpu_to_cpu[engine_idx].inc(len(gpu_to_cpu_ops))
-
-            # Update gauge with cumulative average
-
-            avg_gpu_to_cpu_throughput = self.total_gpu_to_cpu_bytes / max(
-                self.total_gpu_to_cpu_time, 1
-            )
-            self.gauge_kv_gpu_to_cpu_throughput_avg[engine_idx].set(
-                avg_gpu_to_cpu_throughput
-            )
+            self.gauge_kv_throughput_avg.labels(
+                *self.per_engine_labelvalues[engine_idx, transfer_type]
+            ).set(avg_throughput)
