@@ -92,11 +92,11 @@ class TokenizeChatRequest(OpenAIBaseModel):
     )
     mm_processor_kwargs: dict[str, Any] | None = Field(
         default=None,
-        description=("Additional kwargs to pass to the HF processor."),
+        description="Additional kwargs to pass to the HF processor.",
     )
     tools: list[ChatCompletionToolsParam] | None = Field(
         default=None,
-        description=("A list of tools the model may call."),
+        description="A list of tools the model may call.",
     )
 
     @model_validator(mode="before")
