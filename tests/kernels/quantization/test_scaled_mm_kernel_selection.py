@@ -11,7 +11,7 @@ from abc import ABC
 import pytest
 
 from vllm.model_executor.layers.quantization.kernels.scaled_mm import (
-    ScaledMMLinearLayerConfig,
+    Int8ScaledMMLinearLayerConfig,
 )
 from vllm.model_executor.layers.quantization.kernels.scaled_mm.aiter import (
     AiterInt8ScaledMMLinearKernel,
@@ -74,12 +74,12 @@ def test_aiter_kernel_implements_is_supported():
 def test_cpu_kernel_accepts_all_configs():
     """Test that CPUInt8ScaledMMLinearKernel accepts all config combinations."""
     configs = [
-        ScaledMMLinearLayerConfig(
+        Int8ScaledMMLinearLayerConfig(
             is_channelwise=False,
             is_static_input_scheme=True,
             input_symmetric=True,
         ),
-        ScaledMMLinearLayerConfig(
+        Int8ScaledMMLinearLayerConfig(
             is_channelwise=True,
             is_static_input_scheme=False,
             input_symmetric=False,

@@ -378,7 +378,13 @@ def test_attention_quant_pattern(
             kv_cache_dtype=FP8_DTYPE,
             device=device,
             vllm_config=vllm_config,
-            w=model_unfused.w,
+            # Pass w only for FP4 (Nvfp4Quant); skip for FP8
+            # as it uses TestFP8Layer
+            **(
+                {"w": getattr(model_unfused, "w", None)}
+                if model_class.quant_key is kNvfp4Quant
+                else {}
+            ),
         )
         model_fused = model_fused.to(device)
 
