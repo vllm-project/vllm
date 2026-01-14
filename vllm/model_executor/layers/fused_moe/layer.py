@@ -1726,6 +1726,9 @@ def _moe_forward_shared_fake(
 # move self.layer.ensure_moe_quant_config_init
 #      self.layer.moe_quant_config
 # make gate, shared_experts into properties instead of methods
+#
+# Remove unused methods from FusedMoE
+#
 
 
 class DefaultMoERunner(MoERunner):
