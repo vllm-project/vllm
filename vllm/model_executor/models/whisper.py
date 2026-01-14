@@ -360,7 +360,6 @@ class WhisperEncoderLayer(nn.Module):
         self,
         *,
         vllm_config: VllmConfig,
-        skip_overflow_clamp: bool = False,
         prefix: str = "",
     ):
         super().__init__()
@@ -370,7 +369,6 @@ class WhisperEncoderLayer(nn.Module):
         block_pool_size = getattr(config, "block_pool_size", 1)
         cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config
-        self._skip_overflow_clamp = skip_overflow_clamp
 
         self.embed_dim = config.d_model
         self.self_attn = WhisperAttention(
@@ -407,7 +405,7 @@ class WhisperEncoderLayer(nn.Module):
         hidden_states = residual + hidden_states
 
         # Not compatible with torch.compile
-        if not self._skip_overflow_clamp:
+        if not torch.compiler.is_compiling():
             hidden_states = cast_overflow_tensors(hidden_states)
 
         return hidden_states
@@ -504,7 +502,6 @@ class WhisperEncoder(nn.Module):
             lambda prefix: WhisperEncoderLayer(
                 vllm_config=vllm_config,
                 prefix=f"{prefix}.layers",
-                skip_overflow_clamp=should_torch_compile_encoder(vllm_config),
             ),
             prefix=f"{prefix}.layers",
         )
