@@ -105,6 +105,31 @@ jobs:
                   }
                 ],
               },
+              cpu: {
+                // Keyword search - matches whole words only (with word boundaries)
+                keywords: [
+                  {
+                    term: "CPU Backend",
+                    searchIn: "title"
+                  },
+                  {
+                    term: "x86",
+                    searchIn: "title"
+                  },
+                  {
+                    term: "ARM",
+                    searchIn: "title"
+                  },
+                  {
+                    term: "Apple Silicon",
+                    searchIn: "title"
+                  },
+                  {
+                    term: "IBM Z",
+                    searchIn: "title"
+                  },
+                ],
+              },
               // Add more label configurations here as needed
               // example: {
               //   keywords: [...],

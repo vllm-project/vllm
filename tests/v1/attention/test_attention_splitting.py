@@ -7,13 +7,15 @@ import torch
 from tests.v1.attention.test_attention_backends import BATCH_SPECS
 from tests.v1.attention.utils import BatchSpec, create_common_attn_metadata
 from vllm.v1.attention.backends.utils import (
-    UBatchSlice,
-    _make_metadata_with_slice,
-    slice_query_start_locs,
-    split_attn_metadata,
     split_decodes_and_prefills,
 )
-from vllm.v1.worker.ubatch_utils import create_ubatch_slices
+from vllm.v1.worker.ubatch_utils import (
+    UBatchSlice,
+    _make_metadata_with_slice,
+    maybe_create_ubatch_slices,
+    slice_query_start_locs,
+    split_attn_metadata,
+)
 
 
 @pytest.fixture
@@ -154,7 +156,10 @@ def test_split_attn_metadata_decode_batch(large_decode_metadata):
 
 
 def apply_split_decodes_and_prefills(
-    query_lens: list[int], decode_threshold: int, require_uniform: bool
+    query_lens: list[int],
+    decode_threshold: int,
+    require_uniform: bool,
+    padded_num_tokens: int | None = None,
 ):
     """Helper function to apply split_decodes_and_prefills and return
     the results."""
@@ -165,6 +170,10 @@ def apply_split_decodes_and_prefills(
         block_size=16,
         device=device,
     )
+
+    if padded_num_tokens is not None:
+        common_metadata.num_actual_tokens = padded_num_tokens
+
     return split_decodes_and_prefills(
         common_metadata,
         decode_threshold=decode_threshold,
@@ -271,6 +280,22 @@ def test_split_decodes_and_prefills_uniform_mixed_batch_non_uniform_decodes():
     assert num_prefill_tokens == (sum(query_lens) - 2)  # rest of the tokens
 
 
+def test_split_decodes_and_prefills_uniform_padded_batch_all_same():
+    """uniform batch where all query lengths are identical with 0 length padded reqs."""
+    # All query lengths are 2, with decode_threshold=3 (so 2 <= 3)
+    # This triggers the padded uniform path at line 891
+    query_lens = [2, 2, 2, 0]
+    padded_num_tokens = 8
+    num_decodes, num_prefills, num_decode_tokens, num_prefill_tokens = (
+        apply_split_decodes_and_prefills(query_lens, 3, True, padded_num_tokens)
+    )
+    # With uniform batch, all requests are treated as decodes
+    assert num_decodes == 4
+    assert num_prefills == 0
+    assert num_decode_tokens == padded_num_tokens
+    assert num_prefill_tokens == 0
+
+
 @pytest.mark.parametrize(
     "seq_lens,query_lens,split_point,expected_first_reqs,expected_second_reqs",
     [
@@ -294,8 +319,15 @@ def test_prefill_split_across_ubatches(
     qsl_np = common.query_start_loc_cpu.numpy()
     num_tokens = common.num_actual_tokens
 
-    ubatch_slices = create_ubatch_slices(num_scheduled_tokens, split_point)
-    assert len(ubatch_slices) == 2
+    ubatch_slices, _ = maybe_create_ubatch_slices(
+        True,
+        num_scheduled_tokens,
+        num_tokens,
+        batch_spec.batch_size,
+        split_point=split_point,
+        num_ubatches=2,
+    )
+    assert ubatch_slices is not None and len(ubatch_slices) == 2
 
     first_meta = _make_metadata_with_slice(ubatch_slices[0], common)
     second_meta = _make_metadata_with_slice(ubatch_slices[1], common)

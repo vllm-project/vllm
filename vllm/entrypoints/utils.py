@@ -9,6 +9,7 @@ from argparse import Namespace
 from pathlib import Path
 from typing import Any
 
+import regex as re
 from fastapi import Request
 from fastapi.responses import JSONResponse, StreamingResponse
 from starlette.background import BackgroundTask, BackgroundTasks
@@ -21,16 +22,18 @@ from vllm.entrypoints.chat_utils import (
     resolve_hf_chat_template,
     resolve_mistral_chat_template,
 )
-from vllm.entrypoints.openai.cli_args import make_arg_parser
-from vllm.entrypoints.openai.protocol import (
+from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionRequest,
+)
+from vllm.entrypoints.openai.cli_args import make_arg_parser
+from vllm.entrypoints.openai.engine.protocol import (
     CompletionRequest,
     StreamOptions,
 )
 from vllm.entrypoints.openai.serving_models import LoRAModulePath
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
-from vllm.transformers_utils.tokenizers import MistralTokenizer
+from vllm.tokenizers.mistral import MistralTokenizer
 from vllm.utils.argparse_utils import FlexibleArgumentParser
 
 logger = init_logger(__name__)
@@ -317,3 +320,8 @@ async def process_chat_template(
                     model_config.model,
                 )
     return resolved_chat_template
+
+
+def sanitize_message(message: str) -> str:
+    # Avoid leaking memory address from object reprs
+    return re.sub(r" at 0x[0-9a-f]+>", ">", message)

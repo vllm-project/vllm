@@ -7,13 +7,15 @@ from dataclasses import dataclass
 from http import HTTPStatus
 
 from vllm.engine.protocol import EngineClient
-from vllm.entrypoints.openai.protocol import (
+from vllm.entrypoints.openai.engine.protocol import (
     ErrorInfo,
     ErrorResponse,
-    LoadLoRAAdapterRequest,
     ModelCard,
     ModelList,
     ModelPermission,
+)
+from vllm.entrypoints.serve.lora.protocol import (
+    LoadLoRAAdapterRequest,
     UnloadLoRAAdapterRequest,
 )
 from vllm.logger import init_logger
@@ -69,7 +71,7 @@ class OpenAIServingModels:
             )
         self.lora_resolver_lock: dict[str, Lock] = defaultdict(Lock)
 
-        self.processor = self.engine_client.processor
+        self.input_processor = self.engine_client.input_processor
         self.io_processor = self.engine_client.io_processor
         self.model_config = self.engine_client.model_config
         self.max_model_len = self.model_config.max_model_len
@@ -119,7 +121,7 @@ class OpenAIServingModels:
         lora_cards = [
             ModelCard(
                 id=lora.lora_name,
-                root=lora.local_path,
+                root=lora.path,
                 parent=lora.base_model_name
                 if lora.base_model_name
                 else self.base_model_paths[0].name,
@@ -150,7 +152,7 @@ class OpenAIServingModels:
                 lora_request.base_model_name = base_model_name
 
             # Validate that the adapter can be loaded into the engine
-            # This will also pre-load it for incoming requests
+            # This will also preload it for incoming requests
             try:
                 await self.engine_client.add_lora(lora_request)
             except Exception as e:

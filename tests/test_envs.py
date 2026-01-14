@@ -8,6 +8,7 @@ import pytest
 
 import vllm.envs as envs
 from vllm.envs import (
+    disable_envs_cache,
     enable_envs_cache,
     env_list_with_choices,
     env_set_with_choices,
@@ -36,7 +37,7 @@ def test_getattr_with_cache(monkeypatch: pytest.MonkeyPatch):
     # Enable envs cache and ignore ongoing environment changes
     enable_envs_cache()
 
-    # __getattr__ is not decorated with functools.cache
+    # __getattr__ is decorated with functools.cache
     assert hasattr(envs.__getattr__, "cache_info")
     start_hits = envs.__getattr__.cache_info().hits
 
@@ -55,6 +56,43 @@ def test_getattr_with_cache(monkeypatch: pytest.MonkeyPatch):
     # Reset envs.__getattr__ back to none-cached version to
     # avoid affecting other tests
     envs.__getattr__ = envs.__getattr__.__wrapped__
+
+
+def test_getattr_with_reset(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("VLLM_HOST_IP", "1.1.1.1")
+    # __getattr__ is not decorated with functools.cache
+    assert not hasattr(envs.__getattr__, "cache_info")
+
+    # Enable envs cache and ignore ongoing environment changes
+    enable_envs_cache()
+    assert envs.VLLM_HOST_IP == "1.1.1.1"
+    # With cache enabled, the environment variable value is cached and unchanged
+    monkeypatch.setenv("VLLM_HOST_IP", "2.2.2.2")
+    assert envs.VLLM_HOST_IP == "1.1.1.1"
+
+    disable_envs_cache()
+    assert envs.VLLM_HOST_IP == "2.2.2.2"
+    # After cache disabled, the environment variable value would be synced
+    # with os.environ
+    monkeypatch.setenv("VLLM_HOST_IP", "3.3.3.3")
+    assert envs.VLLM_HOST_IP == "3.3.3.3"
+
+
+def test_is_envs_cache_enabled() -> None:
+    assert not envs._is_envs_cache_enabled()
+    enable_envs_cache()
+    assert envs._is_envs_cache_enabled()
+
+    # Only wrap one-layer of cache, so we only need to
+    # call disable once to reset.
+    enable_envs_cache()
+    enable_envs_cache()
+    enable_envs_cache()
+    disable_envs_cache()
+    assert not envs._is_envs_cache_enabled()
+
+    disable_envs_cache()
+    assert not envs._is_envs_cache_enabled()
 
 
 class TestEnvWithChoices:
@@ -365,3 +403,54 @@ class TestEnvSetWithChoices:
         with patch.dict(os.environ, {"TEST_ENV": "option1,option1,option2"}):
             env_func = env_set_with_choices("TEST_ENV", [], ["option1", "option2"])
             assert env_func() == {"option1", "option2"}
+
+
+class TestVllmConfigureLogging:
+    """Test cases for VLLM_CONFIGURE_LOGGING environment variable."""
+
+    def test_configure_logging_defaults_to_true(self):
+        """Test that VLLM_CONFIGURE_LOGGING defaults to True when not set."""
+        # Ensure the env var is not set
+        with patch.dict(os.environ, {}, clear=False):
+            if "VLLM_CONFIGURE_LOGGING" in os.environ:
+                del os.environ["VLLM_CONFIGURE_LOGGING"]
+
+            # Clear cache if it exists
+            if hasattr(envs.__getattr__, "cache_clear"):
+                envs.__getattr__.cache_clear()
+
+            result = envs.VLLM_CONFIGURE_LOGGING
+            assert result is True
+            assert isinstance(result, bool)
+
+    def test_configure_logging_with_zero_string(self):
+        """Test that VLLM_CONFIGURE_LOGGING='0' evaluates to False."""
+        with patch.dict(os.environ, {"VLLM_CONFIGURE_LOGGING": "0"}):
+            # Clear cache if it exists
+            if hasattr(envs.__getattr__, "cache_clear"):
+                envs.__getattr__.cache_clear()
+
+            result = envs.VLLM_CONFIGURE_LOGGING
+            assert result is False
+            assert isinstance(result, bool)
+
+    def test_configure_logging_with_one_string(self):
+        """Test that VLLM_CONFIGURE_LOGGING='1' evaluates to True."""
+        with patch.dict(os.environ, {"VLLM_CONFIGURE_LOGGING": "1"}):
+            # Clear cache if it exists
+            if hasattr(envs.__getattr__, "cache_clear"):
+                envs.__getattr__.cache_clear()
+
+            result = envs.VLLM_CONFIGURE_LOGGING
+            assert result is True
+            assert isinstance(result, bool)
+
+    def test_configure_logging_with_invalid_value_raises_error(self):
+        """Test that invalid VLLM_CONFIGURE_LOGGING value raises ValueError."""
+        with patch.dict(os.environ, {"VLLM_CONFIGURE_LOGGING": "invalid"}):
+            # Clear cache if it exists
+            if hasattr(envs.__getattr__, "cache_clear"):
+                envs.__getattr__.cache_clear()
+
+            with pytest.raises(ValueError, match="invalid literal for int"):
+                _ = envs.VLLM_CONFIGURE_LOGGING

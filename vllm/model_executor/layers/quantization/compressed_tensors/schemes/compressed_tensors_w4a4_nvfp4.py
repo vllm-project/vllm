@@ -23,7 +23,10 @@ from vllm.model_executor.parameter import (
     ModelWeightParameter,
     PerTensorScaleParameter,
 )
-from vllm.utils.flashinfer import flashinfer_scaled_fp4_mm, has_flashinfer
+from vllm.utils.flashinfer import (
+    flashinfer_scaled_fp4_mm,
+    has_flashinfer,
+)
 
 logger = init_logger(__name__)
 
@@ -184,10 +187,12 @@ class CompressedTensorsW4A4Fp4(CompressedTensorsScheme):
             return out
 
         output_dtype = x.dtype
-        output_shape = [x.shape[0], layer.weight_packed.shape[0]]
+        output_shape = [*x.shape[:-1], layer.weight_packed.shape[0]]
 
         # quantize BF16 or FP16 to (FP4 and interleaved block scale)
-        x_fp4, x_blockscale = scaled_fp4_quant(x, layer.input_global_scale)
+        x_fp4, x_blockscale = scaled_fp4_quant(
+            x, layer.input_global_scale, self.backend
+        )
 
         mm_args = (
             x_fp4,

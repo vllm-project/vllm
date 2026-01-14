@@ -6,11 +6,17 @@ import importlib.util
 import pytest
 import torch
 
+from vllm.platforms import current_platform
+
 DTYPE = ["bfloat16"]
 
 TORCHAO_AVAILABLE = importlib.util.find_spec("torchao") is not None
 
 
+@pytest.mark.skipif(
+    current_platform.is_rocm() and current_platform.is_fp8_fnuz(),
+    reason="Only fp8_fnuz supported on CDNA3 architecture",
+)
 @pytest.mark.skipif(not TORCHAO_AVAILABLE, reason="torchao is not available")
 def test_pre_quantized_model(vllm_runner):
     with vllm_runner(
@@ -225,13 +231,12 @@ def test_reload_weights():
 @pytest.mark.skip(
     reason="since torchao nightly is only compatible with torch nightly"
     "currently https://github.com/pytorch/ao/issues/2919, we'll have to skip "
-    "torchao tests that requires newer versions (0.14.0.dev+) for now"
+    "torchao tests that requires newer versions (0.15.0.dev+) for now"
 )
-def test_opt_125m_float8_weight_only_safetensors_model_loading_with_params(vllm_runner):
+def test_safetensors_model_loading_with_params(vllm_runner):
     torch._dynamo.reset()
-    model_name = (
-        "torchao-testing/opt-125m-Float8WeightOnlyConfig-v2-0.14.0.dev-safetensors"
-    )
+    # using this model to test safetensors loading with file sharding
+    model_name = "torchao-testing/Qwen3-8B-INT4-0.15.0dev-safetensors"
     with vllm_runner(model_name=model_name, dtype="bfloat16") as llm:
         output = llm.generate_greedy(["The capital of France is"], max_tokens=4)
 
@@ -392,7 +397,7 @@ def test_opt_125m_int4wo_model_running_preshuffled_kernel_online_quant(
             assert not has_int4_preshuffled_tensor
 
         assert weight_attrs == [False, 1, 0, True]
-        output = llm.generate_greedy(["The capital of France is"], max_tokens=32)
+        output = llm.generate_greedy(["The capital of France is"], max_tokens=4)
 
         assert output
 

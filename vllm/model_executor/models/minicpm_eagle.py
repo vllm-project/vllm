@@ -43,7 +43,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.sequence import IntermediateTensors
 
-from .interfaces import SupportsLoRA, SupportsPP
+from .interfaces import SupportsEagle, SupportsLoRA, SupportsPP
 from .minicpm import MiniCPMAttention as EagleMiniCPMAttention
 from .minicpm import MiniCPMMLP as EagleMiniCPMMLP
 from .minicpm import MiniCPMMoE as EagleMiniCPMMoE
@@ -52,6 +52,7 @@ from .utils import (
     is_pp_missing_parameter,
     make_empty_intermediate_tensors_factory,
     maybe_prefix,
+    process_eagle_weight,
 )
 
 
@@ -68,8 +69,6 @@ class EagleMiniCPMDecoderLayer(nn.Module):
         self.cache_config = cache_config
         self.quant_config = quant_config
         self.hidden_size = config.hidden_size
-        self.rope_theta = getattr(config, "rope_theta", 10000)
-        self.rope_scaling = getattr(config, "rope_scaling", None)
         self.max_position_embeddings = getattr(config, "max_position_embeddings", 8192)
         self.prefix = prefix
         self._init_attn_block()
@@ -83,8 +82,7 @@ class EagleMiniCPMDecoderLayer(nn.Module):
             hidden_size=self.hidden_size,
             num_heads=self.config.num_attention_heads,
             num_kv_heads=self.config.num_key_value_heads,
-            rope_theta=self.rope_theta,
-            rope_scaling=self.rope_scaling,
+            rope_parameters=self.config.rope_parameters,
             max_position_embeddings=self.max_position_embeddings,
             cache_config=self.cache_config,
             quant_config=self.quant_config,
@@ -110,6 +108,7 @@ class EagleMiniCPMDecoderLayer(nn.Module):
                 top_k=self.config.num_experts_per_tok,
                 hidden_size=self.config.hidden_size,
                 intermediate_size=self.config.intermediate_size,
+                prefix=f"{self.prefix}.mlp",
             )
 
     def forward(
@@ -289,7 +288,7 @@ class EagleMiniCPMModel(nn.Module):
         return loaded_params
 
 
-class EagleMiniCPMForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
+class EagleMiniCPMForCausalLM(nn.Module, SupportsLoRA, SupportsPP, SupportsEagle):
     packed_modules_mapping = {
         "qkv_proj": [
             "q_proj",
@@ -307,7 +306,6 @@ class EagleMiniCPMForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         "embed_tokens": "input_embeddings",
         "lm_head": "output_embeddings",
     }
-    embedding_padding_modules = ["lm_head"]
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
@@ -376,8 +374,13 @@ class EagleMiniCPMForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         return logits
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
+        def transform(inputs):
+            name, loaded_weight = inputs
+            process_eagle_weight(self, name)
+            return name, loaded_weight
+
         loader = AutoWeightsLoader(
             self,
             skip_prefixes=(["lm_head."] if self.config.tie_word_embeddings else None),
         )
-        return loader.load_weights(weights)
+        return loader.load_weights(map(transform, weights))
