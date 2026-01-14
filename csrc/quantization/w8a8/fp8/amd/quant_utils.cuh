@@ -438,7 +438,7 @@ scaled_vec_conversion<uint16_t, uint8_t>(const uint8_t& a, float scale) {
   __half_raw res;
   res = __hip_cvt_fp8_to_halfraw(a, fp8_type::__default_interpret);
   res.x *= scale;
-  return res.x;
+  return res.data;
 }
 
 // fp8x2 -> half2
