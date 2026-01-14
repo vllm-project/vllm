@@ -72,12 +72,15 @@ class FlashInferExperts(mk.FusedMoEPermuteExpertsUnpermute):
         self.use_deepseek_fp8_block_scale = quant_config.is_block_quantized
 
     @staticmethod
-    def should_pf_defer_input_quant(quant_config: FusedMoEQuantConfig) -> bool:
-        # NVFP4 kenrels and FP8 block-quantized kernels apply
+    def should_pf_defer_input_quant(
+        moe_config: mk.FusedMoEConfig, quant_config: FusedMoEQuantConfig
+    ) -> bool:
+        # NVFP4 TP kernels and FP8 block-quantized kernels apply
         # input quantization inside FusedMoEPermuteExpertsUnpermute.
-        return quant_config.use_nvfp4_w4a4 or (
-            quant_config.use_fp8_w8a8 and quant_config.is_block_quantized
-        )
+        return (
+            quant_config.use_nvfp4_w4a4
+            and not moe_config.moe_parallel_config.use_all2all_kernels
+        ) or (quant_config.use_fp8_w8a8 and quant_config.is_block_quantized)
 
     @staticmethod
     def _supports_current_device() -> bool:

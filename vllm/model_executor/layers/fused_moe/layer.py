@@ -599,9 +599,6 @@ class FusedMoE(CustomOp):
             activation=activation,
             device=vllm_config.device_config.device,
         )
-        self.moe_config_use_flashinfer_cutlass_kernels = (
-            self.moe_config.use_flashinfer_cutlass_kernels
-        )
 
         self.quant_config = quant_config
 
@@ -771,14 +768,6 @@ class FusedMoE(CustomOp):
         return self.moe_parallel_config.use_deepep_ll_kernels
 
     @property
-    def use_flashinfer_cutlass_kernels(self):
-        return (
-            self.moe_quant_config is not None
-            and self.moe_quant_config.quant_dtype == "nvfp4"
-            and self.moe_config_use_flashinfer_cutlass_kernels
-        )
-
-    @property
     def use_marlin_kernels(self):
         return getattr(self.quant_method, "use_marlin", False)
 
@@ -787,7 +776,7 @@ class FusedMoE(CustomOp):
         return (
             self.moe_parallel_config.use_pplx_kernels
             or self.moe_parallel_config.use_deepep_ll_kernels
-            or (self.dp_size > 1 and self.use_flashinfer_cutlass_kernels)
+            or self.moe_parallel_config.use_fi_all2allv_kernels
         ) and envs.VLLM_ENABLE_MOE_DP_CHUNK
 
     @property

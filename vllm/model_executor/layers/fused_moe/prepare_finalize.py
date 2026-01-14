@@ -57,12 +57,14 @@ class MoEPrepareAndFinalizeNaiveEP(mk.FusedMoEPrepareAndFinalize):
             a1q = a1
             a1q_scale = None
         else:
+            use_nvfp4 = quant_config.use_nvfp4_w4a4
             a1q, a1q_scale = moe_kernel_quantize_input(
                 a1,
-                quant_config.a1_scale,
+                quant_config.a1_gscale if use_nvfp4 else quant_config.a1_scale,
                 quant_config.quant_dtype,
                 quant_config.per_act_token_quant,
                 quant_config.block_shape,
+                is_fp4_scale_swizzled=False,
             )
 
         # TODO - this is just for deepgemm?
@@ -98,6 +100,12 @@ class MoEPrepareAndFinalizeNaiveEP(mk.FusedMoEPrepareAndFinalize):
 
         if use_int8_view:
             a1q = a1q.view(current_platform.fp8_dtype())
+
+        # TODO(rob): move this out of the experts.
+        if use_nvfp4:
+            from vllm.utils.flashinfer import nvfp4_block_scale_interleave
+
+            a1q_scale = nvfp4_block_scale_interleave(a1q_scale)
 
         return a1q, a1q_scale, expert_tokens_meta, topk_ids, topk_weights
 

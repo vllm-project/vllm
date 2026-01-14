@@ -35,10 +35,7 @@ class SharedFusedMoE(FusedMoE):
         backend = self.moe_parallel_config.all2all_backend
         self.use_overlapped = (
             use_overlapped
-            and not (
-                (self.enable_eplb and backend != "allgather_reducescatter")
-                or (self.moe_config.use_flashinfer_cutlass_kernels and self.dp_size > 1)
-            )
+            and not (self.enable_eplb and backend != "allgather_reducescatter")
             and self._shared_experts is not None
         )
 

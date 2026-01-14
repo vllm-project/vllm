@@ -389,7 +389,9 @@ class FusedMoEPermuteExpertsUnpermute(ABC):
         self._num_dispatchers: int | None = None
 
     @staticmethod
-    def should_pf_defer_input_quant(quant_config: FusedMoEQuantConfig) -> bool:
+    def should_pf_defer_input_quant(
+        moe_config: FusedMoEConfig, quant_config: FusedMoEQuantConfig
+    ) -> bool:
         """
         Whether or not the PrepareFinalize should defer input quantization
         in the prepare step. If True, then the Experts kernel will

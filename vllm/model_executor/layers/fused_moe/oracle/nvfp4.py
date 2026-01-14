@@ -123,17 +123,17 @@ def select_nvfp4_moe_backend(
     """
 
     def _make_log_backend(backend: NvFp4MoeBackend):
-        return f"Using {backend.value} backend for NvFp4 MoE"
+        return f"Using '{backend.value}' backend for NvFp4 MoE"
 
     def _make_log_unsupported(backend: NvFp4MoeBackend, reason: str | None) -> str:
         if reason:
             return (
-                f"NvFP4 MoE backend `{backend.value}` does not support the "
+                f"NvFP4 MoE backend '{backend.value}' does not support the "
                 f"deployment configuration since {reason}."
             )
         else:
             return (
-                f"NvFP4 MoE backend `{backend.value}` does not support the "
+                f"NvFP4 MoE backend '{backend.value}' does not support the "
                 "deployment configuration."
             )
 
@@ -161,7 +161,7 @@ def select_nvfp4_moe_backend(
     ]
 
     if envs.is_set("VLLM_USE_FLASHINFER_MOE_FP4"):
-        if not envs.VLLM_USE_FLASHINFER_MOE_FP8:
+        if not envs.VLLM_USE_FLASHINFER_MOE_FP4:
             # If the user rejects FlashInfer remove those backends.
             for fi_backend in FLASHINFER_NVFP4_MOE_BACKENDS:
                 AVAILABLE_BACKENDS.remove(fi_backend)
@@ -359,9 +359,12 @@ def make_nvfp4_moe_kernel(
         moe=moe_config,
         quant_config=moe_quant_config,
         routing_tables=None,  # TODO: init routing tables here?
-        defer_input_quant=experts_cls.should_pf_defer_input_quant(moe_quant_config),
+        defer_input_quant=experts_cls.should_pf_defer_input_quant(
+            moe_config, moe_quant_config
+        ),
         allow_new_interface=True,
     )
+    assert prepare_finalize is not None
 
     logger.info_once("Using %s", prepare_finalize.__class__.__name__)
 

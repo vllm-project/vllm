@@ -406,9 +406,12 @@ def make_fp8_moe_kernel(
         moe=moe_config,
         quant_config=moe_quant_config,
         routing_tables=None,  # TODO: init routing tables here?
-        defer_input_quant=experts_cls.should_pf_defer_input_quant(moe_quant_config),
+        defer_input_quant=experts_cls.should_pf_defer_input_quant(
+            moe_config, moe_quant_config
+        ),
         allow_new_interface=True,
     )
+    assert prepare_finalize is not None
 
     logger.info_once("Using %s", prepare_finalize.__class__.__name__)
 
