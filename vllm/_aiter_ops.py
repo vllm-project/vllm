@@ -7,12 +7,12 @@ import torch
 from torch._ops import OpOverload
 
 import vllm.envs as envs
-from vllm.attention.ops.rocm_aiter_mla_sparse import (
+from vllm.platforms import current_platform
+from vllm.utils.torch_utils import direct_register_custom_op, is_torch_equal_or_newer
+from vllm.v1.attention.ops.rocm_aiter_mla_sparse import (
     rocm_aiter_sparse_attn_indexer,
     rocm_aiter_sparse_attn_indexer_fake,
 )
-from vllm.platforms import current_platform
-from vllm.utils.torch_utils import direct_register_custom_op, is_torch_equal_or_newer
 
 _FP8_DTYPE = current_platform.fp8_dtype()
 

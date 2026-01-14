@@ -7,6 +7,7 @@ import torch
 
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
+from vllm.platforms import current_platform
 from vllm.utils.deep_gemm import get_paged_mqa_logits_metadata, is_deep_gemm_supported
 from vllm.v1.attention.backend import (
     AttentionBackend,
@@ -24,7 +25,9 @@ logger = init_logger(__name__)
 
 
 class DeepseekV32IndexerBackend(AttentionBackend):
-    supported_kernel_block_sizes: ClassVar[list[int | MultipleOf]] = [64]
+    @staticmethod
+    def get_supported_kernel_block_sizes() -> list[int | MultipleOf]:
+        return [1 if current_platform.is_rocm() else 64]
 
     @classmethod
     def get_supported_head_sizes(cls) -> list[int]:

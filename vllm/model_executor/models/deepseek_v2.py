@@ -78,7 +78,6 @@ from vllm.v1.attention.backend import AttentionBackend
 from vllm.v1.attention.backends.mla.indexer import (
     DeepseekV32IndexerBackend,
 )
-from vllm.v1.attention.ops.common import pack_seq_triton, unpack_seq_triton
 from vllm.v1.kv_cache_interface import KVCacheSpec, MLAAttentionSpec
 
 from .interfaces import MixtureOfExperts, SupportsEagle, SupportsLoRA, SupportsPP
@@ -89,9 +88,6 @@ from .utils import (
     make_layers,
     maybe_prefix,
 )
-
-if current_platform.is_cuda_alike() or current_platform.is_xpu():
-    pass
 
 logger = init_logger(__name__)
 

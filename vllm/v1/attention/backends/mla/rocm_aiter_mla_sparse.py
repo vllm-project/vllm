@@ -11,11 +11,11 @@ from vllm import _custom_ops as ops
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
-from vllm.triton_utils import tl, triton
 from vllm.model_executor.layers.attention.mla_attention import (
     MLACommonBaseImpl,
     get_mla_dims,
 )
+from vllm.triton_utils import tl, triton
 from vllm.v1.attention.backend import (
     AttentionBackend,
     AttentionCGSupport,
@@ -157,7 +157,6 @@ class ROCMAiterMLASparseMetadataBuilder(
         parallel_config = vllm_config.parallel_config
         self.device = device
         max_num_batched_tokens = vllm_config.scheduler_config.max_num_batched_tokens
-        max_num_seqs = vllm_config.scheduler_config.max_num_seqs
 
         self.num_heads = self.model_config.get_num_attention_heads(parallel_config)
         self.mla_dims = get_mla_dims(self.model_config)
@@ -182,7 +181,7 @@ class ROCMAiterMLASparseMetadataBuilder(
             0, max_num_batched_tokens + 1, dtype=torch.int32, device=device
         )
         self.paged_kv_last_page_len = torch.ones(
-            max_num_seqs, dtype=torch.int32, device=device
+            max_num_batched_tokens, dtype=torch.int32, device=device
         )
 
         # These two needs to be calculated in runtime,
@@ -193,7 +192,7 @@ class ROCMAiterMLASparseMetadataBuilder(
             device=device,
         )
         self.paged_kv_indptr = torch.zeros(
-            [max_num_seqs + 1], dtype=torch.int32, device=device
+            [max_num_batched_tokens + 1], dtype=torch.int32, device=device
         )
 
     def build(
