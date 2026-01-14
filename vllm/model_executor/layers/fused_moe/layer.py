@@ -1901,12 +1901,17 @@ class FusedMoE(CustomOp):
         self.ensure_moe_quant_config_init()
         self.ensure_dp_chunking_init()
 
-        # TODO: this is not right anymore.
+        # TODO: figure out a better way to express who is responsible for the SE.
+        mk_has_shared_expert = (
+            self.quant_method.supports_mk_interally
+            and hasattr(self.quant_method, "kernel")
+            and getattr(self.quant_method.kernel, "shared_experts", None) is not None
+        )
         has_separate_shared_experts = (
             not isinstance(self.quant_method, FusedMoEModularMethod)
+            and not mk_has_shared_expert
             and self.shared_experts is not None
         )
-        has_separate_shared_experts = False
 
         use_chunked_impl = self.use_dp_chunking
 
