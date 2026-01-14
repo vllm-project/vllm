@@ -9,6 +9,9 @@ import vllm.envs as envs
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.scalar_type import ScalarType
+from vllm.utils.flashinfer import (
+    flashinfer_quant_nvfp4_8x4_sf_layout,
+)
 
 logger = init_logger(__name__)
 
@@ -1563,7 +1566,9 @@ def permute_cols(a: torch.Tensor, perm: torch.Tensor) -> torch.Tensor:
 
 # fp4
 def scaled_fp4_quant(
-    input: torch.Tensor, input_global_scale: torch.Tensor
+    input: torch.Tensor,
+    input_global_scale: torch.Tensor,
+    backend: str = "none",
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """
     Quantize input tensor to FP4 and return quantized tensor and scale.
@@ -1577,6 +1582,7 @@ def scaled_fp4_quant(
     Args:
         input: The input tensor to be quantized to FP4
         input_global_scale: A scalar scaling factor for the entire tensor.
+        use_8x4_sf_layout: Whether to use the 8x4 or 128x4 layout for the scaling
 
     Returns:
         tuple[torch.Tensor, torch.Tensor]: The output tensor in FP4 but every
@@ -1596,23 +1602,31 @@ def scaled_fp4_quant(
         f"input.dtype needs to be fp16 or bf16 but got {input.dtype}."
     )
 
-    # Two fp4 values will be packed into an uint8.
-    output = torch.empty((m, n // 2), device=device, dtype=torch.uint8)
+    use_8x4_sf_layout = True if "trtllm" in backend and m <= 32 else False  # noqa: SIM210
 
-    # We use the rounded values to store the swizzled values. Due to the
-    # requirement of the Tensor Core, the minimum tile is 128x4 for the scales.
-    # So, we first pad the scales to multiples of 128 and 4. Then, the scales
-    # (in float8_e4m3fn) are packed into an int32 for every 4 values. More:
-    # https://docs.nvidia.com/cuda/parallel-thread-execution/#tcgen05-mma-scale-factor-b-layout-4x
-    round_up = lambda x, y: (x + y - 1) // y * y
-    rounded_m = round_up(m, 128)
-    scale_n = n // block_size
-    rounded_n = round_up(scale_n, 4)
-    output_scale = torch.empty(
-        (rounded_m, rounded_n // 4), device=device, dtype=torch.int32
-    )
+    if use_8x4_sf_layout:
+        output, output_scale = flashinfer_quant_nvfp4_8x4_sf_layout(
+            input, input_global_scale
+        )
+    else:
+        # Two fp4 values will be packed into an uint8.
+        output = torch.empty((m, n // 2), device=device, dtype=torch.uint8)
 
-    torch.ops._C.scaled_fp4_quant(output, input, output_scale, input_global_scale)
+        # We use the rounded values to store the swizzled values. Due to the
+        # requirement of the Tensor Core, the minimum tile is 128x4 for the scales.
+        # So, we first pad the scales to multiples of 128 and 4. Then, the scales
+        # (in float8_e4m3fn) are packed into an int32 for every 4 values. More:
+        # https://docs.nvidia.com/cuda/parallel-thread-execution/#tcgen05-mma-scale-factor-b-layout-4x
+        round_up = lambda x, y: (x + y - 1) // y * y
+        rounded_m = round_up(m, 128)
+        scale_n = n // block_size
+        rounded_n = round_up(scale_n, 4)
+        output_scale = torch.empty(
+            (rounded_m, rounded_n // 4), device=device, dtype=torch.int32
+        )
+
+        torch.ops._C.scaled_fp4_quant(output, input, output_scale, input_global_scale)
+
     output_scale = output_scale.view(torch.float8_e4m3fn)
     return output, output_scale
 
