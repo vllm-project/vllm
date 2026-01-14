@@ -17,6 +17,7 @@ from vllm.config.compilation import (
     DynamicShapesType,
 )
 from vllm.forward_context import set_forward_context
+from vllm.platforms import current_platform
 from vllm.tokenizers import get_tokenizer
 from vllm.utils.torch_utils import is_torch_equal_or_newer
 
@@ -99,8 +100,8 @@ def test_dynamic_shapes_compilation(
     # Clean up GPU memory
     del model
     gc.collect()
-    torch.cuda.empty_cache()
-    torch.cuda.synchronize()
+    current_platform.empty_cache()
+    current_platform.synchronize()
     print("GPU memory cleared")
 
 
@@ -184,7 +185,7 @@ def test_model_specialization_with_evaluate_guards(
         ):
             monkeypatch.setenv("VLLM_CACHE_ROOT", tmpdirname)
 
-            model = model_class(vllm_config=vllm_config).cuda()
+            model = model_class(vllm_config=vllm_config).to(current_platform.device_name)
 
             model(input1)
 
@@ -208,11 +209,11 @@ def test_model_specialization_with_evaluate_guards(
             else:
                 model(input2)
 
-    test(ModelWithSizeCheck, torch.randn(20, 10).cuda(), torch.randn(5, 10).cuda())
-    test(ModelWithSizeCheck, torch.randn(5, 10).cuda(), torch.randn(20, 10).cuda())
+    test(ModelWithSizeCheck, torch.randn(20, 10).to(current_platform.device_name), torch.randn(5, 10).to(current_platform.device_name))
+    test(ModelWithSizeCheck, torch.randn(5, 10).to(current_platform.device_name), torch.randn(20, 10).to(current_platform.device_name))
     test(
         ModelWithOneSizeCheck,
-        torch.randn(20, 10).cuda(),
-        torch.randn(1, 10).cuda(),
+        torch.randn(20, 10).to(current_platform.device_name),
+        torch.randn(1, 10).to(current_platform.device_name),
         is_01_specialization=True,
     )

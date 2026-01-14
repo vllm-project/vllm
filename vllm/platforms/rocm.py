@@ -659,6 +659,14 @@ class RocmPlatform(Platform):
         return torch.cuda.current_stream()
 
     @classmethod
+    def create_stream(cls, device=None):
+        return torch.cuda.Stream(device)
+
+    @classmethod
+    def stream(cls, stream):
+        return torch.cuda.stream(stream)
+
+    @classmethod
     def synchronize(cls):
         return torch.cuda.synchronize()
 
@@ -667,12 +675,16 @@ class RocmPlatform(Platform):
         return torch.cuda.empty_cache()
 
     @classmethod
-    def mem_get_info(cls):
-        return torch.cuda.mem_get_info()
+    def mem_get_info(cls, device=None):
+        return torch.cuda.mem_get_info(device)
 
     @classmethod
-    def manual_seed_all(cls):
-        return torch.cuda.manual_seed_all()
+    def get_device_properties(cls, device):
+        return torch.cuda.get_device_properties(device)
+
+    @classmethod
+    def manual_seed_all(cls, seed: int):
+        return torch.cuda.manual_seed_all(seed)
 
     @classmethod
     def check_if_supports_dtype(cls, dtype: torch.dtype):

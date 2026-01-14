@@ -6,7 +6,7 @@ import pytest
 import torch
 
 from vllm import _custom_ops as ops
-
+from vllm.platforms import current_platform
 
 def round_up(x, base):
     return ((x + base - 1) // base) * base
@@ -27,7 +27,7 @@ def sample_data(num_experts, max_loras, num_tokens, topk_num):
             topk_ids[i, j] = pool[j]
         token_lora_mapping[i] = random.randint(0, max_loras - 1)
 
-    return topk_ids.to("cuda"), token_lora_mapping.to("cuda")
+    return topk_ids.to(current_platform.device_name), token_lora_mapping.to(current_platform.device_name)
 
 
 @pytest.mark.parametrize("num_tokens", [100, 200, 1024, 4096])  # 81920
@@ -54,14 +54,14 @@ def test_moe_lora_align_block_size(
         (max_loras * max_num_tokens_padded,),
         topk_ids.numel(),
         dtype=torch.int32,
-        device="cuda",
+        device=current_platform.device_name,
     )
     expert_ids = torch.full(
-        (max_loras * max_num_m_blocks,), num_experts, dtype=torch.int32, device="cuda"
+        (max_loras * max_num_m_blocks,), num_experts, dtype=torch.int32, device=current_platform.device_name
     )
-    num_tokens_post_pad = torch.zeros((max_loras,), dtype=torch.int32, device="cuda")
-    adapter_enabled = torch.ones((max_loras + 1,), dtype=torch.int32, device="cuda")
-    lora_ids = torch.arange(max_loras + 2, dtype=torch.int32, device="cuda")
+    num_tokens_post_pad = torch.zeros((max_loras,), dtype=torch.int32, device=current_platform.device_name)
+    adapter_enabled = torch.ones((max_loras + 1,), dtype=torch.int32, device=current_platform.device_name)
+    lora_ids = torch.arange(max_loras + 2, dtype=torch.int32, device=current_platform.device_name)
 
     # call kernel
     ops.moe_lora_align_block_size(

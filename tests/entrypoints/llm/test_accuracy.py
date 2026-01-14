@@ -65,6 +65,8 @@ TPU_TP_TEST_STR = ""  # "tensor_parallel_size=4"
 def test_lm_eval_accuracy_v1_engine(model):
     """Run with the V1 Engine."""
 
+    if current_platform.is_xpu and model == "google/gemma-3-1b-it":
+        pytest.skip("xpu will meet segmentation fault at this case")
     more_args = None
     if current_platform.is_tpu():
         # Limit compilation time for TPU V1
