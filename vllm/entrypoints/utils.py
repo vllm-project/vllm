@@ -277,7 +277,11 @@ def should_include_usage(
 def process_lora_modules(
     args_lora_modules: list[LoRAModulePath], default_mm_loras: dict[str, str] | None
 ) -> list[LoRAModulePath]:
+<<<<<<< HEAD
     from vllm.entrypoints.openai.models.serving import LoRAModulePath
+=======
+    from vllm.entrypoints.openai.serving_models import LoRAModulePath
+>>>>>>> 48b67ba75 ([Frontend] Standardize use of `create_error_response` (#32319))
 
     lora_modules = args_lora_modules
     if default_mm_loras:
