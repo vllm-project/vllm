@@ -980,7 +980,12 @@ async def init_app_state(
     state.args = args
 
     # initialize draining metric to 0 so it's scrapeable from startup
-    get_server_draining_gauge(engine_client.model_config.served_model_name)
+    served_name = engine_client.model_config.served_model_name
+    if isinstance(served_name, list):
+        draining_model_name = served_name[0] if served_name else "unknown"
+    else:
+        draining_model_name = served_name or "unknown"
+    get_server_draining_gauge(draining_model_name)
 
     supported_tasks = await engine_client.get_supported_tasks()
     logger.info("Supported tasks: %s", supported_tasks)
