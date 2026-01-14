@@ -17,6 +17,7 @@ from vllm.entrypoints.openai.responses.protocol import (
 from vllm.entrypoints.openai.responses.serving import OpenAIServingResponses
 from vllm.entrypoints.openai.utils import validate_json_request
 from vllm.entrypoints.utils import (
+    load_aware_call,
     with_cancellation,
 )
 from vllm.logger import init_logger
@@ -54,6 +55,7 @@ async def _convert_stream_to_sse_events(
     },
 )
 @with_cancellation
+@load_aware_call
 async def create_responses(request: ResponsesRequest, raw_request: Request):
     handler = responses(raw_request)
     if handler is None:
@@ -79,6 +81,7 @@ async def create_responses(request: ResponsesRequest, raw_request: Request):
 
 
 @router.get("/v1/responses/{response_id}")
+@load_aware_call
 async def retrieve_responses(
     response_id: str,
     raw_request: Request,
@@ -113,6 +116,7 @@ async def retrieve_responses(
 
 
 @router.post("/v1/responses/{response_id}/cancel")
+@load_aware_call
 async def cancel_responses(response_id: str, raw_request: Request):
     handler = responses(raw_request)
     if handler is None:
