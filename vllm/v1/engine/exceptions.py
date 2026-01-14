@@ -14,7 +14,7 @@ class GracefulHTTPError(ValueError):
     """
 
     def __init__(self, message: str, http_status: HTTPStatus):
-        super().__init__()
+        super().__init__(message)
         self.message = message
         self.http_status = http_status
 
