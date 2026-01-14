@@ -120,3 +120,77 @@ def test_elastic_ep_scaling():
             f"(diff: {scale_down_accuracy - initial_accuracy:+.3f})"
         )
         print(f"  Tolerance:  {ACCURACY_TOL:.3f}")
+
+
+@multi_gpu_test(num_gpus=4)
+def test_elastic_ep_scaling_uneven():
+    """Test scale up with uneven worker distribution.
+
+    This tests the case where num_new_workers % old_dp_size != 0,
+    specifically 2 -> 3 where remainder = 1 % 2 = 1.
+    This exercises the remainder handling in sender-receiver pairing.
+    """
+    vllm_serve_args = [
+        "--trust-remote-code",
+        "--tensor-parallel-size",
+        "1",
+        "--gpu-memory-utilization",
+        "0.9",
+        "--max-model-len",
+        "4096",
+        "--max-num-seqs",
+        str(MAX_NUM_SEQS),
+        "--enable-expert-parallel",
+        "--all2all-backend",
+        "pplx",
+        "--enable-elastic-ep",
+        "--enable-eplb",
+        "--eplb-config.num_redundant_experts",
+        "0",
+        "--data-parallel-backend",
+        "ray",
+        "--data-parallel-size",
+        "2",
+    ]
+
+    leader_address = os.environ.get("LEADER_ADDRESS")
+    if leader_address:
+        vllm_serve_args.extend(["--data-parallel-address", leader_address])
+
+    with RemoteOpenAIServer(
+        MODEL_NAME, vllm_serve_args, env_dict={}, max_wait_seconds=1200
+    ) as server:
+        initial_accuracy = _run_gsm8k_eval(server, "Initial (2 GPUs)")
+
+        # Scale 2 -> 3: This has remainder = 1 % 2 = 1
+        # Tests uneven sender-receiver pairing
+        assert _send_scale_command(server, 3)
+        time.sleep(10)
+        scale_up_accuracy = _run_gsm8k_eval(server, "After scale up (3 GPUs)")
+
+        assert scale_up_accuracy >= initial_accuracy - ACCURACY_TOL, (
+            f"Scale up accuracy {scale_up_accuracy:.3f} dropped more than "
+            f"{ACCURACY_TOL} below initial accuracy {initial_accuracy:.3f}"
+        )
+
+        # Scale back down to 2
+        assert _send_scale_command(server, 2)
+        time.sleep(5)
+        scale_down_accuracy = _run_gsm8k_eval(server, "After scale down (2 GPUs)")
+
+        assert scale_down_accuracy >= initial_accuracy - ACCURACY_TOL, (
+            f"Scale down accuracy {scale_down_accuracy:.3f} dropped more than "
+            f"{ACCURACY_TOL} below initial accuracy {initial_accuracy:.3f}"
+        )
+
+        print("\nAccuracy Summary (Uneven Scaling):")
+        print(f"  Initial:    {initial_accuracy:.3f}")
+        print(
+            f"  Scale up:   {scale_up_accuracy:.3f} "
+            f"(diff: {scale_up_accuracy - initial_accuracy:+.3f})"
+        )
+        print(
+            f"  Scale down: {scale_down_accuracy:.3f} "
+            f"(diff: {scale_down_accuracy - initial_accuracy:+.3f})"
+        )
+        print(f"  Tolerance:  {ACCURACY_TOL:.3f}")
