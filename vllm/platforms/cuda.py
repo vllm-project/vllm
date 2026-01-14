@@ -17,17 +17,17 @@ from typing_extensions import ParamSpec
 
 # import custom ops, trigger op registration
 import vllm._C  # noqa
-from vllm.attention.backends.registry import AttentionBackendEnum
 from vllm.logger import init_logger
 from vllm.utils.import_utils import import_pynvml
 from vllm.utils.torch_utils import cuda_device_count_stateless
+from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 from .interface import DeviceCapability, Platform, PlatformEnum
 
 if TYPE_CHECKING:
-    from vllm.attention.selector import AttentionSelectorConfig
     from vllm.config import VllmConfig
     from vllm.config.cache import CacheDType
+    from vllm.v1.attention.selector import AttentionSelectorConfig
 else:
     VllmConfig = None
     CacheDType = None
@@ -151,7 +151,7 @@ class CudaPlatformBase(Platform):
 
     @classmethod
     def check_and_update_config(cls, vllm_config: "VllmConfig") -> None:
-        from vllm.attention.backends.registry import AttentionBackendEnum
+        from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
         parallel_config = vllm_config.parallel_config
         model_config = vllm_config.model_config
@@ -203,7 +203,7 @@ class CudaPlatformBase(Platform):
                 use_cutlass_mla = backend == AttentionBackendEnum.CUTLASS_MLA
                 use_flashinfer_mla = backend == AttentionBackendEnum.FLASHINFER_MLA
 
-            from vllm.attention.ops.flashmla import is_flashmla_dense_supported
+            from vllm.v1.attention.ops.flashmla import is_flashmla_dense_supported
 
             if (
                 use_flashmla

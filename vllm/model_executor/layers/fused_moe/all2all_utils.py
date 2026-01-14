@@ -15,9 +15,6 @@ from vllm.model_executor.layers.fused_moe.config import (
 from vllm.model_executor.layers.fused_moe.modular_kernel import (
     FusedMoEPrepareAndFinalize,
 )
-from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
-    build_flashinfer_fp8_cutlass_moe_prepare_finalize,
-)
 from vllm.platforms import current_platform
 from vllm.utils.import_utils import has_deep_ep, has_pplx
 
@@ -80,17 +77,12 @@ def maybe_make_prepare_finalize(
 
     prepare_finalize: FusedMoEPrepareAndFinalize | None = None
 
-    if moe.use_flashinfer_cutlass_kernels:
-        assert quant_config is not None
-        use_deepseek_fp8_block_scale = (
-            quant_config is not None and quant_config.is_block_quantized
-        )
-        prepare_finalize = build_flashinfer_fp8_cutlass_moe_prepare_finalize(
-            moe=moe,
-            use_deepseek_fp8_block_scale=use_deepseek_fp8_block_scale,
-        )
+    # TODO(rob): update this as part of the MoE refactor.
+    assert not moe.use_flashinfer_cutlass_kernels, (
+        "Must be created in modelopt.py or fp8.py"
+    )
 
-    elif moe.use_pplx_kernels:
+    if moe.use_pplx_kernels:
         assert quant_config is not None
 
         hidden_dim_bytes, hidden_scale_bytes = pplx_hidden_dim_scale_bytes(

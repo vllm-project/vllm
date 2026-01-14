@@ -108,7 +108,7 @@ method_map = {
 
 
 def converting(
-    model_name, classifier_from_tokens, path, method, use_pad_token=False, device="cpu"
+    model_name, classifier_from_tokens, path, method, use_sep_token=False, device="cpu"
 ):
     """
     Main conversion function to transform a CausalLM model to SequenceClassification.
@@ -118,7 +118,7 @@ def converting(
         classifier_from_tokens: List of tokens used for classification
         path: Output path to save the converted model
         method: Conversion method ('from_2_way_softmax' or 'no_post_processing')
-        use_pad_token: Whether to use padding token in the sequence classification model
+        use_sep_token: Whether to use separating token in the sequence classification model
         device: Device to load the model on ('cpu' or 'cuda')
     """
     assert method in method_map, f"Unknown method: {method}"
@@ -149,10 +149,10 @@ def converting(
         causal_lm, seq_cls_model, tokenizer, classifier_from_tokens, device
     )
 
-    # Configure padding token settings
-    # Note: Reranker models typically don't use padding tokens by default
-    seq_cls_model.config.use_pad_token = use_pad_token
-    seq_cls_model.config.pad_token_id = tokenizer.pad_token_id
+    # Configure separating token settings
+    # Note: `llm as reranker` defaults to not using separating token.
+    seq_cls_model.config.use_sep_token = use_sep_token
+    seq_cls_model.config.sep_token_id = tokenizer.sep_token_id
 
     # Save the converted model and tokenizer
     seq_cls_model.save_pretrained(path)
@@ -203,6 +203,6 @@ if __name__ == "__main__":
         model_name=args.model_name,
         classifier_from_tokens=json.loads(args.classifier_from_tokens),
         method=args.method,
-        use_pad_token=args.use_pad_token,
+        use_sep_token=args.use_sep_token,
         path=args.path,
     )

@@ -29,6 +29,7 @@ def start_async_worker(
     ep_group = get_ep_group().device_group
     rank = ep_group.rank()
     device_index = state.cuda_device_index
+    assert state.is_async
 
     def thread_target() -> None:
         assert device_index is not None
@@ -41,8 +42,8 @@ def start_async_worker(
                 transfer_run_periodically(
                     state=state,
                     ep_group=ep_group,
-                    is_profile=is_profile,
                     cuda_stream=cuda_stream,
+                    is_profile=is_profile,
                 )
             )
         except Exception as exc:  # pragma: no cover - diagnostic path
@@ -58,16 +59,15 @@ def start_async_worker(
 async def transfer_run_periodically(
     state: "EplbState",
     ep_group: ProcessGroup,
+    cuda_stream: torch.cuda.Stream,
     is_profile: bool = False,
-    cuda_stream: torch.cuda.Stream = None,
 ) -> None:
     while True:
         await asyncio.to_thread(state.rearrange_event.wait)
         logger.info("async worker woke up for EPLB transfer")
 
+        assert state.is_async
         for model_state in state.model_states.values():
-            if not model_state.is_async_enabled:
-                continue
             current_num_layers = model_state.model.num_moe_layers
             while (
                 model_state.rebalanced
@@ -86,7 +86,7 @@ async def transfer_run_periodically(
                         (
                             model_state.is_unchanged,
                             model_state.is_received_locally,
-                            model_state.experts_recv_loc,
+                            model_state.recv_metadata,
                         ) = await transfer_layer(
                             old_global_expert_indices=model_state.physical_to_logical_map,
                             new_global_expert_indices=model_state.new_physical_to_logical_map,

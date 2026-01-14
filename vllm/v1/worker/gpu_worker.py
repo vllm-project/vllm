@@ -13,7 +13,7 @@ import torch
 import torch.nn as nn
 
 import vllm.envs as envs
-from vllm.config import CUDAGraphMode, VllmConfig
+from vllm.config import CUDAGraphMode, VllmConfig, set_current_vllm_config
 from vllm.config.compilation import CompilationMode
 from vllm.distributed import (
     ensure_model_parallel_initialized,
@@ -37,8 +37,7 @@ from vllm.platforms import current_platform
 from vllm.profiler.wrapper import CudaProfilerWrapper, TorchProfilerWrapper
 from vllm.sequence import IntermediateTensors
 from vllm.tasks import SupportedTask
-from vllm.utils.mem_constants import GiB_bytes
-from vllm.utils.mem_utils import MemorySnapshot, memory_profiling
+from vllm.utils.mem_utils import MemorySnapshot, format_gib, memory_profiling
 from vllm.utils.torch_utils import set_random_seed
 from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheSpec
@@ -47,7 +46,7 @@ from vllm.v1.outputs import (
     DraftTokenIds,
     ModelRunnerOutput,
 )
-from vllm.v1.utils import report_usage_stats
+from vllm.v1.utils import compute_iteration_details, report_usage_stats
 from vllm.v1.worker.utils import is_residual_scattered_for_sp
 from vllm.v1.worker.worker_base import WorkerBase
 from vllm.v1.worker.workspace import init_workspace_manager
@@ -80,7 +79,7 @@ class Worker(WorkerBase):
 
         # configure float32 matmul precision according to vLLM env.
         precision = envs.VLLM_FLOAT32_MATMUL_PRECISION
-        torch.backends.cuda.matmul.fp32_precision = precision
+        torch.set_float32_matmul_precision(precision)
 
         from vllm.distributed.elastic_ep.elastic_execute import ElasticEPScalingExecutor
 
@@ -132,9 +131,9 @@ class Worker(WorkerBase):
         used_bytes = total - free_bytes_after_sleep
         assert freed_bytes >= 0, "Memory usage increased after sleeping."
         logger.info(
-            "Sleep mode freed %.2f GiB memory, %.2f GiB memory is still in use.",
-            freed_bytes / GiB_bytes,
-            used_bytes / GiB_bytes,
+            "Sleep mode freed %s GiB memory, %s GiB memory is still in use.",
+            format_gib(freed_bytes),
+            format_gib(used_bytes),
         )
 
     def wake_up(self, tags: list[str] | None = None) -> None:
@@ -239,6 +238,10 @@ class Worker(WorkerBase):
             # take current memory snapshot
             self.init_snapshot = init_snapshot = MemorySnapshot(device=self.device)
             self.requested_memory = request_memory(init_snapshot, self.cache_config)
+            logger.debug("worker init memory snapshot: %r", self.init_snapshot)
+            logger.debug(
+                "worker requested memory: %sGiB", format_gib(self.requested_memory)
+            )
         else:
             raise RuntimeError(f"Not support device type: {self.device_config.device}")
 
@@ -270,8 +273,8 @@ class Worker(WorkerBase):
     # FIXME(youkaichao & ywang96): Use TorchDispatchMode instead of memory pool
     # to hijack tensor allocation.
     def load_model(self) -> None:
-        dummy_weights = os.environ.get("VLLM_ELASTIC_EP_SCALE_UP_LAUNCH") == "1"
-        if dummy_weights:
+        eep_scale_up = os.environ.get("VLLM_ELASTIC_EP_SCALE_UP_LAUNCH") == "1"
+        if eep_scale_up:
             (
                 expanded_physical_to_logical,
                 num_logical_experts,
@@ -282,10 +285,12 @@ class Worker(WorkerBase):
                 num_physical_experts - num_logical_experts
             )
 
-        with self._maybe_get_memory_pool_context(tag="weights"):
-            self.model_runner.load_model(dummy_weights=dummy_weights)
+        with self._maybe_get_memory_pool_context(
+            tag="weights"
+        ) and set_current_vllm_config(self.vllm_config):
+            self.model_runner.load_model(dummy_weights=eep_scale_up)
 
-        if dummy_weights:
+        if eep_scale_up:
             self.model_runner.setup_eplb_from_mapping(
                 expanded_physical_to_logical, old_num_physical_experts
             )
@@ -310,15 +315,14 @@ class Worker(WorkerBase):
             You may limit the usage of GPU memory
             by adjusting the `gpu_memory_utilization` parameter.
         """
-        GiB = lambda b: b / GiB_bytes
         if kv_cache_memory_bytes := self.cache_config.kv_cache_memory_bytes:
             # still need a profile run which compiles the model for
             # max_num_batched_tokens
             self.model_runner.profile_run()
 
             msg = (
-                f"Initial free memory {GiB(self.init_snapshot.free_memory):.2f} "
-                f"GiB, reserved {GiB(kv_cache_memory_bytes):.2f} GiB memory for "
+                f"Initial free memory {format_gib(self.init_snapshot.free_memory)} "
+                f"GiB, reserved {format_gib(kv_cache_memory_bytes)} GiB memory for "
                 "KV Cache as specified by kv_cache_memory_bytes config and "
                 "skipped memory profiling. This does not respect the "
                 "gpu_memory_utilization config. Only use kv_cache_memory_bytes "
@@ -330,9 +334,6 @@ class Worker(WorkerBase):
             )
             logger.info(msg)
             return kv_cache_memory_bytes
-
-        torch.cuda.empty_cache()
-        torch.cuda.reset_peak_memory_stats()
 
         # Execute a forward pass with dummy inputs to profile the memory usage
         # of the model.
@@ -350,8 +351,8 @@ class Worker(WorkerBase):
         # GPU did not change their memory usage during the profiling.
         assert self.init_snapshot.free_memory > free_gpu_memory, (
             "Error in memory profiling. "
-            f"Initial free memory {GiB(self.init_snapshot.free_memory)} GiB, "
-            f"current free memory {GiB(free_gpu_memory)} GiB. "
+            f"Initial free memory {format_gib(self.init_snapshot.free_memory)} GiB, "
+            f"current free memory {format_gib(free_gpu_memory)} GiB. "
             "This happens when other processes sharing the same container "
             "release GPU memory while vLLM is profiling during initialization. "
             "To fix this, ensure consistent GPU memory allocation or "
@@ -363,24 +364,22 @@ class Worker(WorkerBase):
 
         unrequested_memory = self.init_snapshot.free_memory - self.requested_memory
         logger.debug(
-            "Initial free memory: %.2f GiB; Requested memory: %.2f (util), %.2f GiB",
-            GiB(self.init_snapshot.free_memory),
+            "Initial free memory: %s GiB; Requested memory: %f (util), %s GiB",
+            format_gib(self.init_snapshot.free_memory),
             self.cache_config.gpu_memory_utilization,
-            GiB(self.requested_memory),
+            format_gib(self.requested_memory),
         )
         logger.debug(
-            "Free memory after profiling: %.2f GiB (total), "
-            "%.2f GiB (within requested)",
-            GiB(free_gpu_memory),
-            GiB(free_gpu_memory - unrequested_memory),
+            "Free memory after profiling: %s GiB (total), %s GiB (within requested)",
+            format_gib(free_gpu_memory),
+            format_gib(free_gpu_memory - unrequested_memory),
         )
         logger.debug(profile_result)
         logger.info_once(
-            "Available KV cache memory: %.2f GiB",
-            GiB(self.available_kv_cache_memory_bytes),
+            "Available KV cache memory: %s GiB",
+            format_gib(self.available_kv_cache_memory_bytes),
             scope="local",
         )
-        gc.collect()
 
         return int(self.available_kv_cache_memory_bytes)
 
@@ -412,7 +411,7 @@ class Worker(WorkerBase):
         """
         self.model_config.max_model_len = max_model_len
         if self.model_runner is not None:
-            self.model_runner.max_model_len = max_model_len
+            self.model_runner.update_max_model_len(max_model_len)
         logger.debug("Updated max_model_len to %d", max_model_len)
 
     def initialize_from_config(self, kv_cache_config: KVCacheConfig) -> None:
@@ -484,7 +483,6 @@ class Worker(WorkerBase):
             # CUDAGraph memory size and may not utilize all gpu memory.
             # Users may want fine-grained control to specify kv cache
             # memory size.
-            GiB = lambda b: round(b / GiB_bytes, 2)
 
             # empirically observed that the memory profiling may
             # slightly underestimate the memory consumption.
@@ -509,24 +507,24 @@ class Worker(WorkerBase):
 
             msg = (
                 f"Free memory on device "
-                f"({GiB(self.init_snapshot.free_memory)}/"
-                f"{GiB(self.init_snapshot.total_memory)} GiB) on startup. "
+                f"({format_gib(self.init_snapshot.free_memory)}/"
+                f"{format_gib(self.init_snapshot.total_memory)} GiB) on startup. "
                 f"Desired GPU memory utilization is "
                 f"({self.cache_config.gpu_memory_utilization}, "
-                f"{GiB(self.requested_memory)} GiB). "
-                f"Actual usage is {GiB(self.model_runner.model_memory_usage)} "
-                f"GiB for weight, {GiB(self.peak_activation_memory)} GiB "
-                f"for peak activation, {GiB(self.non_torch_memory)} GiB "
-                f"for non-torch memory, and {GiB(cuda_graph_memory_bytes)} "
+                f"{format_gib(self.requested_memory)} GiB). "
+                f"Actual usage is {format_gib(self.model_runner.model_memory_usage)} "
+                f"GiB for weight, {format_gib(self.peak_activation_memory)} GiB "
+                f"for peak activation, {format_gib(self.non_torch_memory)} GiB "
+                f"for non-torch memory, and {format_gib(cuda_graph_memory_bytes)} "
                 f"GiB for CUDAGraph memory. Replace gpu_memory_utilization "
                 f"config with `--kv-cache-memory="
                 f"{kv_cache_memory_bytes_to_requested_limit}` "
-                f"({GiB(kv_cache_memory_bytes_to_requested_limit)} GiB) to fit "
+                f"({format_gib(kv_cache_memory_bytes_to_requested_limit)} GiB) to fit "
                 f"into requested memory, or `--kv-cache-memory="
                 f"{kv_cache_memory_bytes_to_gpu_limit}` "
-                f"({GiB(kv_cache_memory_bytes_to_gpu_limit)} GiB) to fully "
+                f"({format_gib(kv_cache_memory_bytes_to_gpu_limit)} GiB) to fully "
                 f"utilize gpu memory. Current kv cache memory in use is "
-                f"{GiB(self.available_kv_cache_memory_bytes)} GiB."
+                f"{format_gib(self.available_kv_cache_memory_bytes)} GiB."
             )
 
             logger.debug(msg)
@@ -568,18 +566,29 @@ class Worker(WorkerBase):
 
     def annotate_profile(self, scheduler_output):
         # add trace annotation so that we can easily distinguish
-        # new/cached request numbers in each iteration
+        # context/generation request numbers in each iteration.
+        # A context request is a request that has not yet generated any tokens
         if not self.profiler:
             return nullcontext()
 
         self.profiler.step()
 
-        num_new = len(scheduler_output.scheduled_new_reqs)
-        num_cached = len(scheduler_output.scheduled_cached_reqs.req_ids)
+        iteration_details = compute_iteration_details(scheduler_output)
 
-        return self.profiler.annotate_context_manager(
-            f"execute_new_{num_new}_cached_{num_cached}"
+        annotation = "".join(
+            [
+                "execute_context_",
+                str(iteration_details.num_ctx_requests),
+                "(",
+                str(iteration_details.num_ctx_tokens),
+                ")_generation_",
+                str(iteration_details.num_generation_requests),
+                "(",
+                str(iteration_details.num_generation_tokens),
+                ")",
+            ]
         )
+        return self.profiler.annotate_context_manager(annotation)
 
     @torch.inference_mode()
     def sample_tokens(
