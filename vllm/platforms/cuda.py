@@ -50,8 +50,8 @@ def _get_backend_priorities(
     if use_mla:
         if device_capability.major == 10:
             return [
-                AttentionBackendEnum.CUTLASS_MLA,
                 AttentionBackendEnum.FLASHINFER_MLA,
+                AttentionBackendEnum.CUTLASS_MLA,
                 AttentionBackendEnum.FLASH_ATTN_MLA,
                 AttentionBackendEnum.FLASHMLA,
                 AttentionBackendEnum.TRITON_MLA,
