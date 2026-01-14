@@ -7,9 +7,10 @@
 This script validates that:
 1. No direct imports of vllm.envs._variables exist in the codebase
    (except in envs/__init__.py which needs it for TYPE_CHECKING)
-2. All variables in _variables.py have valid type annotations
-3. Lazy default factories return values matching their type annotations
-4. EnvFactory instances have consistent types between default_value and parse function
+2. All variables in _variables.py have valid type annotations (no Any allowed)
+3. Default values match their declared types (basic check)
+
+Note: Factory function type consistency is handled by mypy.
 """
 
 import ast
@@ -42,6 +43,7 @@ class DirectImportChecker(ast.NodeVisitor):
 
     def visit_ImportFrom(self, node: ast.ImportFrom) -> None:
         """Check ImportFrom nodes for direct imports of _variables."""
+        # Check absolute imports (e.g., from vllm.envs._variables import X)
         if node.module and (
             node.module == "vllm.envs._variables"
             or node.module.startswith("vllm.envs._variables.")
@@ -51,6 +53,27 @@ class DirectImportChecker(ast.NodeVisitor):
                 f"Direct import from vllm.envs._variables is not allowed. "
                 f"Use 'import vllm.envs as envs' instead."
             )
+
+        # Check relative imports (e.g., from ._variables import X)
+        if node.level > 0:
+            # from ._variables import X or from ._variables.submodule import X
+            if node.module and (
+                node.module == "_variables" or node.module.startswith("_variables.")
+            ):
+                self.errors.append(
+                    f"{self.filename}:{node.lineno}: "
+                    f"Relative import from _variables is not allowed. "
+                    f"Use 'import vllm.envs as envs' instead."
+                )
+            # from . import _variables
+            if node.module is None or node.module == "":
+                for alias in node.names:
+                    if alias.name == "_variables":
+                        self.errors.append(
+                            f"{self.filename}:{node.lineno}: "
+                            f"Relative import of _variables is not allowed. "
+                            f"Use 'import vllm.envs as envs' instead."
+                        )
 
 
 def check_no_direct_imports(vllm_root: Path) -> list[str]:
@@ -74,10 +97,6 @@ def check_no_direct_imports(vllm_root: Path) -> list[str]:
         if py_file.name == "_variables.py":
             continue
 
-        # Skip test files for now (they might need special imports)
-        if "test" in py_file.name:
-            continue
-
         try:
             with open(py_file) as f:
                 tree = ast.parse(f.read(), filename=str(py_file))
@@ -92,8 +111,94 @@ def check_no_direct_imports(vllm_root: Path) -> list[str]:
     return errors
 
 
+def _is_any_type(annotation: ast.expr) -> bool:
+    """Check if an annotation is the Any type."""
+    # Check for bare 'Any'
+    if isinstance(annotation, ast.Name) and annotation.id == "Any":
+        return True
+    # Check for 'typing.Any'
+    return (
+        isinstance(annotation, ast.Attribute)
+        and annotation.attr == "Any"
+        and isinstance(annotation.value, ast.Name)
+        and annotation.value.id == "typing"
+    )
+
+
+def _get_annotation_base_type(annotation: ast.expr) -> str | None:
+    """Extract the base type name from an annotation.
+
+    Returns the base type name (e.g., 'str', 'int', 'bool', 'list', 'dict')
+    or None if it cannot be determined.
+    """
+    if isinstance(annotation, ast.Name):
+        return annotation.id
+    if isinstance(annotation, ast.Subscript) and isinstance(annotation.value, ast.Name):
+        # Handle generic types like list[str], dict[str, int], Optional[str]
+        return annotation.value.id
+    if isinstance(annotation, ast.BinOp) and isinstance(annotation.op, ast.BitOr):
+        # Union type using | syntax (e.g., str | None)
+        # Return None as we can't easily validate unions
+        return None
+    return None
+
+
+def _get_default_value_type(value: ast.expr) -> str | None:
+    """Get the Python type name of a default value from AST.
+
+    Returns the type name or None if it cannot be determined.
+    """
+    if isinstance(value, ast.Constant):
+        if value.value is None:
+            return "NoneType"
+        return type(value.value).__name__
+    if isinstance(value, ast.List):
+        return "list"
+    if isinstance(value, ast.Dict):
+        return "dict"
+    if isinstance(value, ast.Tuple):
+        return "tuple"
+    if isinstance(value, ast.Set):
+        return "set"
+    # For calls (like EnvFactory(...)), we can't easily determine the type
+    return None
+
+
+def _types_are_compatible(annotation_type: str, value_type: str) -> bool:
+    """Check if a value type is compatible with an annotation type."""
+    # Direct match
+    if annotation_type.lower() == value_type.lower():
+        return True
+
+    # Optional types allow None
+    if annotation_type == "Optional" and value_type == "NoneType":
+        return True
+
+    # Common type aliases
+    type_aliases = {
+        "List": "list",
+        "Dict": "dict",
+        "Tuple": "tuple",
+        "Set": "set",
+        "Str": "str",
+        "Int": "int",
+        "Float": "float",
+        "Bool": "bool",
+    }
+
+    norm_annotation = type_aliases.get(annotation_type, annotation_type).lower()
+    norm_value = type_aliases.get(value_type, value_type).lower()
+
+    return norm_annotation == norm_value
+
+
 def check_variable_type_annotations(variables_file: Path) -> list[str]:
-    """Check that all variables in _variables.py have type annotations.
+    """Check that all variables in _variables.py have valid type annotations.
+
+    Validates:
+    - All uppercase variables have type annotations
+    - No variables use 'Any' type
+    - Default values match their declared types (when determinable)
 
     Args:
         variables_file: Path to _variables.py
@@ -111,14 +216,38 @@ def check_variable_type_annotations(variables_file: Path) -> list[str]:
     for node in ast.walk(tree):
         if isinstance(node, ast.AnnAssign):
             # This is a type-annotated assignment
-            if (
-                isinstance(node.target, ast.Name)
-                and node.target.id.isupper()
-                and node.annotation is None
-            ):
+            if isinstance(node.target, ast.Name) and node.target.id.isupper():
                 var_name = node.target.id
-                # This is an environment variable (all caps) missing type annotation
-                errors.append(f"Variable {var_name} is missing type annotation")
+
+                # Check for missing annotation
+                if node.annotation is None:
+                    errors.append(f"Variable {var_name} is missing type annotation")
+                    continue
+
+                # Check for Any type
+                if _is_any_type(node.annotation):
+                    errors.append(
+                        f"Variable {var_name} uses 'Any' type which is not allowed. "
+                        f"Please use a specific type annotation."
+                    )
+
+                # Check default value type compatibility
+                if node.value is not None:
+                    annotation_type = _get_annotation_base_type(node.annotation)
+                    value_type = _get_default_value_type(node.value)
+
+                    if (
+                        annotation_type is not None
+                        and value_type is not None
+                        and value_type != "NoneType"  # Allow None for Optional
+                        and not _types_are_compatible(annotation_type, value_type)
+                    ):
+                        errors.append(
+                            f"Variable {var_name} has type annotation "
+                            f"'{annotation_type}' but default value is of type "
+                            f"'{value_type}'"
+                        )
+
         elif isinstance(node, ast.Assign):
             # This is a plain assignment without type annotation
             for target in node.targets:
@@ -134,64 +263,6 @@ def check_variable_type_annotations(variables_file: Path) -> list[str]:
                     )
 
     return errors
-
-
-def check_lazy_default_consistency(variables_file: Path) -> list[str]:
-    """Check that env_factory and env_default_factory are used correctly.
-
-    This performs basic structural checks:
-    - env_factory receives exactly 2 arguments (default value, parser function)
-    - env_default_factory receives exactly 1 argument (callable)
-
-    Note: This does NOT perform full type consistency validation between
-    type hints and factory return types. Full type checking would require
-    runtime analysis or a static type checker like mypy.
-
-    Args:
-        variables_file: Path to _variables.py
-
-    Returns:
-        List of warning messages
-    """
-    warnings = []
-
-    with open(variables_file) as f:
-        content = f.read()
-
-    # Parse the file using AST for more accurate analysis
-    try:
-        tree = ast.parse(content)
-    except SyntaxError:
-        warnings.append("Could not parse _variables.py - syntax error")
-        return warnings
-
-    # Check for proper usage of env_factory and env_default_factory
-    # This only checks argument counts, not type consistency
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
-            func_name = node.func.id
-
-            if func_name == "env_default_factory":
-                # Should have exactly 1 argument (a callable)
-                if len(node.args) != 1:
-                    warnings.append(
-                        "env_default_factory should receive exactly 1 callable argument"
-                    )
-
-            elif func_name == "env_factory" and len(node.args) != 2:
-                # Should have exactly 2 arguments (default value and parser)
-                warnings.append(
-                    "env_factory should receive exactly 2 arguments (default, parser)"
-                )
-
-    # Add a note if no issues were found
-    if not warnings:
-        warnings.append(
-            "NOTE: Basic structural checks passed. For full type consistency "
-            "validation, run mypy on vllm/envs/_variables.py"
-        )
-
-    return warnings
 
 
 def main() -> int:
@@ -232,30 +303,11 @@ def main() -> int:
     type_errors = check_variable_type_annotations(variables_file)
     if type_errors:
         all_errors.extend(type_errors)
-        print(f"   ✗ Found {len(type_errors)} missing type annotation(s)")
+        print(f"   ✗ Found {len(type_errors)} type annotation error(s)")
         for error in type_errors:
             print(f"     - {error}")
     else:
-        print("   ✓ All variables have type annotations")
-
-    # Check 3: Lazy defaults consistency
-    print("\n3. Checking factory function usage...")
-    lazy_warnings = check_lazy_default_consistency(variables_file)
-    # Separate informational notes from actual warnings
-    notes = [w for w in lazy_warnings if w.startswith("NOTE:")]
-    actual_warnings = [w for w in lazy_warnings if not w.startswith("NOTE:")]
-
-    if actual_warnings:
-        print(f"   ⚠ Found {len(actual_warnings)} warning(s)")
-        for warning in actual_warnings:
-            print(f"     - {warning}")
-    else:
-        print("   ✓ Factory functions used correctly")
-
-    # Display informational notes
-    if notes:
-        for note in notes:
-            print(f"   ℹ {note[6:]}")  # Skip "NOTE: " prefix
+        print("   ✓ All variables have valid type annotations")
 
     print()
     if all_errors:

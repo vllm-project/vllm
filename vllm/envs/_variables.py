@@ -133,18 +133,9 @@ VLLM_ROCM_USE_AITER: bool = False
 VLLM_ROCM_USE_AITER_FP4_ASM_GEMM: bool = False
 """(ROCm only) Use asynchronous iterators for FP4 ASM GEMM operations."""
 
-<<<<<<< HEAD
-<<<<<<< HEAD
-=======
 VLLM_ROCM_USE_AITER_FP4BMM: bool = False
 """(ROCm only) Use asynchronous iterators for FP4 BMM operations."""
 
->>>>>>> 6a1fca724 (fix ruff check failure)
-=======
-VLLM_ROCM_USE_AITER_FP4BMM: bool = False
-"""(ROCm only) Use asynchronous iterators for FP4 BMM operations."""
-
->>>>>>> c92ac0939 (fix ruff check failure)
 VLLM_ROCM_USE_AITER_FP8BMM: bool = False
 """(ROCm only) Use asynchronous iterators for FP8 BMM operations."""
 
@@ -466,6 +457,20 @@ VLLM_VIDEO_LOADER_BACKEND: str = "opencv"
 
 VLLM_MEDIA_CONNECTOR: str = "http"
 """Connector type for media loading. Default is http."""
+
+VLLM_MM_HASHER_ALGORITHM: str = env_with_choices(
+    "VLLM_MM_HASHER_ALGORITHM",
+    "blake3",
+    ["blake3", "sha256", "sha512"],
+    case_sensitive=False,
+)
+"""
+Hash algorithm for multimodal content hashing.
+- "blake3": Default, fast cryptographic hash (not FIPS 140-3 compliant)
+- "sha256": FIPS 140-3 compliant, widely supported
+- "sha512": FIPS 140-3 compliant, faster on 64-bit systems
+Use sha256 or sha512 for FIPS compliance in government/enterprise deployments.
+"""
 
 # ================== Installation Time Env Vars ==================
 
