@@ -151,13 +151,16 @@ def run_benchmark(
     print(f"Output file: {output_path}")
 
     if output_path.exists():
-        print("Found existing results. Skipping.")
-        with output_path.open("rb") as f:
-            run_data = json.load(f)
-        print("[END BENCHMARK]")
-        return _update_run_data(
-            run_data, serve_overrides, startup_overrides, run_number
-        )
+        try:
+            with output_path.open("r", encoding="utf-8") as f:
+                run_data = json.load(f)
+            print("Found existing results. Skipping.")
+            print("[END BENCHMARK]")
+            return _update_run_data(
+                run_data, serve_overrides, startup_overrides, run_number
+            )
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            print(f"Corrupted or invalid result file found: {output_path}. Rerunning.")
 
     if dry_run:
         print("[END BENCHMARK]")
@@ -170,14 +173,14 @@ def run_benchmark(
         check=True,
     )
 
-    with output_path.open("rb") as f:
+    with output_path.open("r", encoding="utf-8") as f:
         run_data = json.load(f)
 
     run_data = _update_run_data(
         run_data, serve_overrides, startup_overrides, run_number
     )
 
-    with output_path.open("w") as f:
+    with output_path.open("w", encoding="utf-8") as f:
         json.dump(run_data, f, indent=4)
 
     print("[END BENCHMARK]")
@@ -211,7 +214,9 @@ def run_comb(
     if dry_run:
         return None
 
-    with _get_comb_run_path(base_path, run_number=None).open("w") as f:
+    with _get_comb_run_path(base_path, run_number=None).open(
+        "w", encoding="utf-8"
+    ) as f:
         json.dump(comb_data, f, indent=4)
 
     return comb_data
