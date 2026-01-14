@@ -36,6 +36,7 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatMessage,
 )
 from vllm.entrypoints.openai.chat_completion.stream_harmony import (
+    TokenState,
     extract_harmony_streaming_delta,
 )
 from vllm.entrypoints.openai.engine.protocol import (
@@ -826,12 +827,22 @@ class OpenAIServingChat(OpenAIServing):
                     if self.use_harmony:
                         harmony_parser = harmony_parsers[i]
                         prev_recipient = harmony_parser.current_recipient
-                        delta_text = ""
+
+                        # Track accumulated content per token with their state
+                        token_states: list[TokenState] = []
                         for token_id in output.token_ids:
                             harmony_parser.process(token_id)
-                            delta_text += harmony_parser.last_content_delta or ""
+                            token_delta = harmony_parser.last_content_delta or ""
+                            token_states.append(
+                                TokenState(
+                                    harmony_parser.current_channel,
+                                    harmony_parser.current_recipient,
+                                    token_delta,
+                                )
+                            )
+                        delta_text = "".join(delta for _, _, delta in token_states)
                         cur_channel = harmony_parser.current_channel
-                        cur_recipient = harmony_parser.current_recipient
+
                         # handle the case where several tokens where generated at once
                         # including the final token, leading to a delta in the text
                         # but the current channel to be empty (start state)
@@ -869,10 +880,8 @@ class OpenAIServingChat(OpenAIServing):
                         delta_message, tools_streamed_flag = (
                             extract_harmony_streaming_delta(
                                 harmony_parser=harmony_parser,
-                                cur_channel=cur_channel,
-                                cur_recipient=cur_recipient,
+                                token_states=token_states,
                                 prev_recipient=prev_recipient,
-                                delta_text=delta_text,
                                 include_reasoning=request.include_reasoning,
                             )
                         )
@@ -1139,17 +1148,23 @@ class OpenAIServingChat(OpenAIServing):
 
                     # Log streaming delta if output logging is enabled
                     if self.enable_log_outputs and self.request_logger:
-                        delta_content = ""
+                        delta_content_parts = []
                         if delta_message.content:
-                            delta_content = delta_message.content
-                        elif delta_message.tool_calls:
-                            delta_content = "".join(
+                            delta_content_parts.append(delta_message.content)
+                        if delta_message.reasoning_content:
+                            reasoning = delta_message.reasoning_content
+                            delta_content_parts.append(f"[reasoning: {reasoning}]")
+                        if delta_message.tool_calls:
+                            tool_args = "".join(
                                 tc.function.arguments
                                 for tc in delta_message.tool_calls
                                 if tc.function and tc.function.arguments
                             )
+                            if tool_args:
+                                delta_content_parts.append(f"[tool_calls: {tool_args}]")
 
-                        if delta_content and self.enable_log_deltas:
+                        if delta_content_parts and self.enable_log_deltas:
+                            delta_content = " ".join(delta_content_parts)
                             self.request_logger.log_outputs(
                                 request_id=request_id,
                                 outputs=delta_content,
