@@ -191,6 +191,44 @@ def group_broadcast(t, shape):
     return t
 
 
+def prep_scale_for_group_broadcast(
+    scale: torch.Tensor,
+    group_shape: GroupShape,
+    x: torch.Tensor,
+) -> torch.Tensor:
+    """
+    Prepare the input quantization scale for group broadcasting.
+
+    Args:
+        scale: The scale tensor (scalar or 1D).
+        group_shape: GroupShape to broadcast over.
+        x: Target tensor whose shape determines broadcast dimensions.
+
+    Returns:
+        scale reshaped for correct broadcasting.
+    """
+    if scale.ndim == 0:
+        # Scalar scale, expand to (1, 1)
+        return scale.view(1, 1)
+    if scale.ndim == 1:
+        assert group_shape is not None, (
+            "group_shape must be provided to correctly broadcast 1D scale"
+        )
+        group_shape = _normalize_quant_group_shape(x, group_shape)
+        # Determine broadcasting dimension: either rows or columns match group size
+        if group_shape[0] == x.shape[-2]:
+            scale = scale.unsqueeze(-2)
+        elif group_shape[1] == x.shape[-1]:
+            scale = scale.unsqueeze(-1)
+        else:
+            raise ValueError(
+                f"1D scale with shape {scale.shape} cannot be broadcast to x with shape "
+                f"{x.shape}, group_shape={group_shape}"
+            )
+        return scale
+    raise ValueError(f"scale must be a scalar or 1D tensor, got {scale.shape}")
+
+
 # Quantize assuming once scale per group of elements with shape group_shape,
 # example group shapes:
 #  * (-1, -1)   for per-tensor quantization
@@ -261,29 +299,7 @@ def scaled_dequantize(
     group_shape: GroupShape | None = None,
     out_dtype: torch.dtype = torch.float32,
 ) -> torch.Tensor:
-    if group_shape is not None:
-        group_shape = _normalize_quant_group_shape(x_q, group_shape)
-
-    if x_s.numel() == 1:  # scalar
-        x_s = x_s.reshape(1, 1)  # normalize all scalar-like tensors to (1, 1)
-    if x_s.ndim == 1:
-        if group_shape is None:
-            raise AssertionError(
-                "if x_s is 1D tensor, group_shape must be provided otherwise "
-                "its ambiguous which dimension to broadcast x_s to"
-            )
-        # unsqueeze the scales for the dimension where we want to broadcast
-        # across the full extent
-        if group_shape[0] == x_q.shape[-2]:
-            x_s = x_s.unsqueeze(-2)
-        elif group_shape[1] == x_q.shape[-1]:
-            x_s = x_s.unsqueeze(-1)
-        else:
-            raise AssertionError(
-                "if x_s is a vector we should be broadcasting it to the full "
-                "extent of one of the dimensions"
-            )
-
+    x_s = prep_scale_for_group_broadcast(x_s, group_shape, x_q)
     if group_shape is not None:
         assert x_s.shape[-1] == x_q.shape[-1] // group_shape[1]
         assert x_s.shape[-2] == x_q.shape[-2] // group_shape[0]
