@@ -1573,11 +1573,9 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
         """Optionally prepare extra tensors to carry through DP allgather/EP."""
         import flashinfer
 
-        assert self.moe_quant_config is not None
-        a1_gscale = self.moe_quant_config.a1_gscale
         hidden_states_fp4, hidden_states_sf = flashinfer.fp4_quantize(
             hidden_states,
-            a1_gscale,
+            layer.a1_gscale,
             is_sf_swizzled_layout=False,
         )
         extra_tensors: list[torch.Tensor] = [hidden_states_sf]
