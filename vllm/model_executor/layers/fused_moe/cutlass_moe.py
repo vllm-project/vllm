@@ -21,7 +21,10 @@ from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceDelegate,
     TopKWeightAndReduceNoOP,
 )
-from vllm.model_executor.layers.fused_moe.utils import _resize_cache
+from vllm.model_executor.layers.fused_moe.utils import (
+    _resize_cache,
+    apply_moe_activation,
+)
 from vllm.scalar_type import scalar_types
 
 logger = init_logger(__name__)
@@ -436,6 +439,7 @@ def run_cutlass_moe_fp4(
     w2_alphas: torch.Tensor,
     topk_weights: torch.Tensor,
     topk_ids: torch.Tensor,
+    activation: str,
     workspace13: torch.Tensor,
     workspace2: torch.Tensor,
     m: int,
@@ -544,8 +548,7 @@ def run_cutlass_moe_fp4(
         num_topk,
     )
     c1 = _resize_cache(workspace13, (m * topk, n * 2))
-    # Note: c2 workspace is no longer needed since SiLU is fused with quantization.
-    # c3 reuses workspace13 after c1 is consumed.
+    c2 = _resize_cache(workspace2, (m * topk, n))
     c3 = _resize_cache(workspace13, (m * topk, k))
     ops.cutlass_fp4_moe_mm(
         c1,
@@ -559,10 +562,18 @@ def run_cutlass_moe_fp4(
         blockscale_offsets[:-1],
     )
     del rep_a_fp4, rep_a_blockscale
-    # Fused SiLU+Mul+NVFP4 quantization
-    int_fp4, int_blockscale = ops.silu_and_mul_scaled_fp4_experts_quant(
-        c1, a2_gscale, expert_offsets, blockscale_offsets, num_topk
-    )
+    if activation == "silu":
+        # Fused SiLU+Mul+NVFP4 quantization
+        # Note: c2 workspace is no longer needed since SiLU is fused with quantization.
+        # c3 reuses workspace13 after c1 is consumed.
+        int_fp4, int_blockscale = ops.silu_and_mul_scaled_fp4_experts_quant(
+            c1, a2_gscale, expert_offsets, blockscale_offsets, num_topk
+        )
+    else:
+        apply_moe_activation(activation, c2, c1)
+        int_fp4, int_blockscale = ops.scaled_fp4_experts_quant(
+            c2, a2_gscale, expert_offsets, blockscale_offsets, num_topk
+        )
 
     ops.cutlass_fp4_moe_mm(
         c3,
@@ -693,6 +704,7 @@ class CutlassExpertsFp4(mk.FusedMoEPermuteExpertsUnpermute):
             w2_alphas=self.g2_alphas,
             topk_weights=topk_weights,
             topk_ids=topk_ids,
+            activation=activation,
             workspace13=workspace13,
             workspace2=workspace2,
             m=m,
