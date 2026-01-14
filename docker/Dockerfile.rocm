@@ -68,6 +68,78 @@ COPY --from=build_vllm ${COMMON_WORKDIR}/vllm/.buildkite /.buildkite
 COPY --from=build_vllm ${COMMON_WORKDIR}/vllm/vllm/v1 /vllm_v1
 
 # -----------------------
+# RIXL/UCX build stages
+FROM base AS build_rixl
+ARG RIXL_BRANCH="f33a5599"
+ARG RIXL_REPO="https://github.com/ROCm/RIXL.git"
+ARG UCX_BRANCH="da3fac2a"
+ARG UCX_REPO="https://github.com/ROCm/ucx.git"
+ENV ROCM_PATH=/opt/rocm
+ENV UCX_HOME=/usr/local/ucx
+ENV RIXL_HOME=/usr/local/rixl
+ENV RIXL_BENCH_HOME=/usr/local/rixl_bench
+
+# RIXL build system dependences and RDMA support
+RUN apt-get -y update && apt-get -y install autoconf libtool pkg-config \
+    libgrpc-dev \
+    libgrpc++-dev \
+    libprotobuf-dev \
+    protobuf-compiler-grpc \
+    libcpprest-dev \
+    libaio-dev \
+    librdmacm1 \
+    librdmacm-dev \
+    libibverbs1 \
+    libibverbs-dev \
+    ibverbs-utils \
+    rdmacm-utils \
+    ibverbs-providers \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN uv pip install --system meson auditwheel patchelf tomlkit
+
+RUN cd /usr/local/src && \
+    git clone ${UCX_REPO} &&  \
+    cd ucx  && \
+    git checkout ${UCX_BRANCH} && \
+    ./autogen.sh && \
+    mkdir build && cd build && \
+    ../configure \
+        --prefix=/usr/local/ucx \
+        --enable-shared \
+        --disable-static \
+        --disable-doxygen-doc \
+        --enable-optimizations \
+        --enable-devel-headers \
+        --with-rocm=/opt/rocm \
+        --with-verbs \
+        --with-dm \
+        --enable-mt && \
+    make -j && \
+    make install
+
+ENV PATH=/usr/local/ucx/bin:$PATH
+ENV LD_LIBRARY_PATH=${UCX_HOME}/lib:${LD_LIBRARY_PATH}
+
+RUN git clone ${RIXL_REPO} /opt/rixl && \
+    cd /opt/rixl && \
+    git checkout ${RIXL_BRANCH} && \
+    meson setup build --prefix=${RIXL_HOME} \
+                     -Ducx_path=${UCX_HOME} \
+                     -Drocm_path=${ROCM_PATH} && \
+    cd build && \
+    ninja && \
+    ninja install
+
+# Generate RIXL wheel
+RUN cd /opt/rixl && mkdir -p /app/install && \
+    ./contrib/build-wheel.sh \
+        --output-dir /app/install \
+        --rocm-dir ${ROCM_PATH} \
+        --ucx-plugins-dir ${UCX_HOME}/lib/ucx \
+        --nixl-plugins-dir ${RIXL_HOME}/lib/x86_64-linux-gnu/plugins
+
+# -----------------------
 # Test vLLM image
 FROM base AS test
 
@@ -82,6 +154,10 @@ RUN --mount=type=bind,from=export_vllm,src=/,target=/install \
     && uv pip install --system -r requirements/rocm-test.txt \
     && pip uninstall -y vllm \
     && uv pip install --system *.whl
+
+# Install RIXL wheel
+RUN --mount=type=bind,from=build_rixl,src=/app/install,target=/rixl_install \
+    uv pip install --system /rixl_install/*.whl
 
 WORKDIR /vllm-workspace
 ARG COMMON_WORKDIR
