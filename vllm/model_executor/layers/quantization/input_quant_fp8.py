@@ -159,7 +159,7 @@ class QuantFP8(CustomOp):
 
             scale = (x_max / _FP8_MAX).clamp(min=_FP8_MIN_SCALING_FACTOR)
         else:
-            scale = prep_scale_for_group_broadcast(scale, self.group_shape, x)
+            scale = prep_scale_for_group_broadcast(scale, x, self.group_shape)
 
         # Even for dynamic per-token scales,
         # reciprocal performs slightly better than division
