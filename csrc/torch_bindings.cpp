@@ -2,7 +2,6 @@
 #include "cuda_utils.h"
 #include "ops.h"
 #include "core/registration.h"
-#include "quantization/fused_kernels/fused_silu_mul_block_quant.cu"
 #include <torch/library.h>
 #include <torch/version.h>
 

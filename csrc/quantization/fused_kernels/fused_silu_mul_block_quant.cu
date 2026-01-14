@@ -227,10 +227,7 @@ void silu_and_mul_per_block_quant_dispatch(
         });
 }
 
-// =============================================================================
 // Main entry point (called from Python)
-// =============================================================================
-
 void silu_and_mul_per_block_quant(
     torch::Tensor& out,
     torch::Tensor const& input,
@@ -240,22 +237,12 @@ void silu_and_mul_per_block_quant(
     bool is_scale_transposed
 ) {
     // Validate input types
-    static c10::ScalarType kFp8Type = is_fp8_ocp()
-                                        ? c10::ScalarType::Float8_e4m3fn
-                                        : c10::ScalarType::Float8_e4m3fnuz;
-    TORCH_CHECK(out.dtype() == kFp8Type || out.dtype() == torch::kInt8,
-                "Output must be FP8 or INT8");
     TORCH_CHECK(out.is_contiguous() && input.is_contiguous(),
                 "Tensors must be contiguous");
     TORCH_CHECK(input.dtype() == torch::kFloat16 || input.dtype() == torch::kBFloat16,
                 "Input must be FP16 or BF16");
     TORCH_CHECK(scales.dtype() == torch::kFloat32,
                 "Scales must be FP32");
-    
-    if (scale_ub.has_value()) {
-        TORCH_CHECK(out.dtype() == kFp8Type,
-                    "scale_ub only supported for FP8 output");
-    }
     
     // Only support group_size = 64 or 128 for now
     TORCH_CHECK(group_size == 128 || group_size == 64,
