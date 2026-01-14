@@ -959,6 +959,12 @@ class FusedMoEParallelConfig:
         )
 
         if use_ep:
+            # Expert Parallelism (EP) mode: DP + EP / TP + EP / DP + TP + EP
+            #
+            # In EP, each device owns a disjoint set of experts fully.
+            # There is no tensor parallelism within experts. Instead, experts
+            # are distributed across devices. We convert the TP dimensions
+            # (which were flattened across DP and PCP) into EP dimensions.
             ep_size, ep_rank = tp_size, tp_rank
             tp_size, tp_rank = 1, 0
         else:
