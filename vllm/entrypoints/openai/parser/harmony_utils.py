@@ -44,7 +44,7 @@ from openai_harmony import Role as OpenAIHarmonyRole
 
 from vllm import envs
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionToolsParam
-from vllm.entrypoints.openai.engine.protocol import (
+from vllm.entrypoints.openai.responses.protocol import (
     ResponseInputOutputItem,
     ResponsesRequest,
 )
