@@ -89,10 +89,10 @@ if TYPE_CHECKING:
     VLLM_HTTP_TIMEOUT_KEEP_ALIVE: int = 5  # seconds
     VLLM_PLUGINS: list[str] | None = None
     VLLM_LORA_RESOLVER_CACHE_DIR: str | None = None
+    VLLM_LORA_RESOLVER_HF_REPO_LIST: str | None = None
     # Deprecated env variables for profiling, kept for backward compatibility
     # See also vllm/config/profiler.py and `--profiler-config` argument
     VLLM_TORCH_CUDA_PROFILE: str | None = None
-    VLLM_LORA_RESOLVER_HF_REPO_LIST: str | None = None
     VLLM_TORCH_PROFILER_DIR: str | None = None
     VLLM_TORCH_PROFILER_RECORD_SHAPES: str | None = None
     VLLM_TORCH_PROFILER_WITH_PROFILE_MEMORY: str | None = None

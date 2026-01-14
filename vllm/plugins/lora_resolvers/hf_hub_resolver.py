@@ -6,13 +6,24 @@ import os
 from huggingface_hub import HfApi, snapshot_download
 
 import vllm.envs as envs
+from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.lora.resolver import LoRAResolverRegistry
 from vllm.plugins.lora_resolvers.filesystem_resolver import FilesystemResolver
 
+logger = init_logger(__name__)
+
 
 class HfHubResolver(FilesystemResolver):
     def __init__(self, repo_list: list[str]):
+        logger.warning(
+            "LoRA is allowing resolution from the following repositories on"
+            " HF Hub: %s please note that allowing remote downloads"
+            " is not secure, and that this plugin is not intended for use in"
+            " production environments.",
+            repo_list,
+        )
+
         self.repo_list: list[str] = repo_list
         self.adapter_dirs: dict[str, set[str]] = {}
 
@@ -114,8 +125,19 @@ def register_hf_hub_resolver():
     """Register the Hf hub LoRA Resolver with vLLM"""
 
     hf_repo_list = envs.VLLM_LORA_RESOLVER_HF_REPO_LIST
+    is_enabled = (
+        envs.VLLM_PLUGINS is not None and "lora_hf_hub_resolver" in envs.VLLM_PLUGINS
+    )
     if hf_repo_list:
-        hf_hub_resolver = HfHubResolver(hf_repo_list.split(","))
-        LoRAResolverRegistry.register_resolver("Hf Hub Resolver", hf_hub_resolver)
+        if not is_enabled:
+            logger.warning(
+                "It appears that VLLM_LORA_RESOLVER_HF_REPO_LIST is set, but "
+                "lora_hf_hub_resolver is not enabled in VLLM_PLUGINS; you must"
+                " enable this resolver directly in VLLM_PLUGINS to use it "
+                " because it allows remote downloads."
+            )
+        else:
+            hf_hub_resolver = HfHubResolver(hf_repo_list.split(","))
+            LoRAResolverRegistry.register_resolver("Hf Hub Resolver", hf_hub_resolver)
 
     return
