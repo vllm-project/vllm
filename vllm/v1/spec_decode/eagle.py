@@ -469,7 +469,9 @@ class EagleProposer:
             # Increment the maximum sequence length. We increment max_seq_len
             # unconditionally even though some seq_lens may have been capped above,
             # as max_seq_len serves as an upper bound for sequence lengths.
-            common_attn_metadata.max_seq_len += 1
+            common_attn_metadata.max_seq_len = min(
+                common_attn_metadata.max_seq_len + 1, self.max_model_len
+            )
 
             # Also update the CPU-side shadow; NOTE: this is hacky and should be
             # removed in when common_attn_metadata.seq_lens_cpu is deprecated.
