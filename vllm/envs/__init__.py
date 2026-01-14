@@ -279,11 +279,40 @@ def is_set(env_var_name: str) -> bool:
     return env_var_name in os.environ
 
 
+def maybe_convert_bool(val: str | bool | None) -> bool | None:
+    """Convert a value to boolean if it's a string representation.
+
+    Args:
+        val: Value to convert (string, bool, or None)
+
+    Returns:
+        Boolean value, or None if input is None
+
+    Example:
+        >>> maybe_convert_bool("1")
+        True
+        >>> maybe_convert_bool("false")
+        False
+        >>> maybe_convert_bool(None)
+        None
+        >>> maybe_convert_bool(True)
+        True
+    """
+    if isinstance(val, bool):
+        return val
+    if val is None:
+        return None
+    if isinstance(val, str):
+        return val.lower() in ("1", "true", "yes", "on")
+    return bool(val)
+
+
 # Re-export key utility functions for convenience
 __all__ = [
     "enable_envs_cache",
     "disable_envs_cache",
     "is_set",
+    "maybe_convert_bool",
 ]
 
 
