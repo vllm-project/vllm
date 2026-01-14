@@ -63,6 +63,7 @@ from vllm.entrypoints.chat_utils import ChatCompletionMessageParam
 from vllm.entrypoints.openai.engine.protocol import (
     OpenAIBaseModel,
 )
+from vllm.entrypoints.openai.reasoning_encryption import decrypt_reasoning_content
 from vllm.exceptions import VLLMValidationError
 from vllm.logger import init_logger
 from vllm.sampling_params import (
@@ -323,6 +324,8 @@ class ResponsesRequest(OpenAIBaseModel):
         Function calls provided as dicts are converted to ResponseFunctionToolCall
         objects before validation, while invalid structures are left for Pydantic
         to reject with appropriate error messages.
+
+        Also extracts id from encrypted_content for reasoning items if missing.
         """
 
         input_data = data.get("input")
@@ -342,15 +345,31 @@ class ResponsesRequest(OpenAIBaseModel):
 
         processed_input = []
         for item in input_data:
-            if isinstance(item, dict) and item.get("type") == "function_call":
-                try:
-                    processed_input.append(ResponseFunctionToolCall(**item))
-                except ValidationError:
-                    # Let Pydantic handle validation for malformed function calls
-                    logger.debug(
-                        "Failed to parse function_call to ResponseFunctionToolCall, "
-                        "leaving for Pydantic validation"
-                    )
+            if isinstance(item, dict):
+                item_type = item.get("type")
+
+                # Extract id from encrypted_content for reasoning items if missing
+                if (
+                    item_type == "reasoning"
+                    and "id" not in item
+                    and "encrypted_content" in item
+                ):
+                    decrypted = decrypt_reasoning_content(item["encrypted_content"])
+                    if decrypted and "id" in decrypted:
+                        item["id"] = decrypted["id"]
+
+                # Handle function_call special case
+                if item_type == "function_call":
+                    try:
+                        processed_input.append(ResponseFunctionToolCall(**item))
+                    except ValidationError:
+                        # Let Pydantic handle validation for malformed function calls
+                        logger.debug(
+                            "Failed to parse function_call to "
+                            "ResponseFunctionToolCall, leaving for Pydantic validation"
+                        )
+                        processed_input.append(item)
+                else:
                     processed_input.append(item)
             else:
                 processed_input.append(item)
