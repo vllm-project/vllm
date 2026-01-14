@@ -45,7 +45,7 @@ def do_sample(llm: vllm.LLM, lora_path: str, lora_id: int) -> list[str]:
         print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
     return generated_texts
 
-
+@pytest.mark.skipif(current_platform.is_xpu(), reason="python core dump on xpu")
 def test_ilama_lora(ilama_lora_files):
     llm = vllm.LLM(
         MODEL_PATH,

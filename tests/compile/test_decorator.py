@@ -15,6 +15,7 @@ from vllm.config import (
     set_current_vllm_config,
 )
 from vllm.forward_context import BatchDescriptor, set_forward_context
+from vllm.platforms import current_platform
 from vllm.utils.torch_utils import is_torch_equal_or_newer
 
 # This import automatically registers `torch.ops.silly.attention`
@@ -30,7 +31,7 @@ def run_model(
 ):
     with set_forward_context({}, vllm_config=vllm_config):
         # warmup for the model with cudagraph_mode NONE
-        model(torch.randn(BATCH_SIZE, MLP_SIZE).cuda())
+        model(torch.randn(BATCH_SIZE, MLP_SIZE).to(current_platform.device_name))
 
         # simulate cudagraphs capturing
         with set_forward_context(
@@ -41,7 +42,7 @@ def run_model(
                 num_tokens=2,
             ),
         ):
-            model(torch.randn(2, MLP_SIZE).cuda())
+            model(torch.randn(2, MLP_SIZE).to(current_platform.device_name))
         with set_forward_context(
             {},
             vllm_config=vllm_config,
@@ -50,7 +51,7 @@ def run_model(
                 num_tokens=1,
             ),
         ):
-            model(torch.randn(1, MLP_SIZE).cuda())
+            model(torch.randn(1, MLP_SIZE).to(current_platform.device_name))
 
         # simulate cudagraphs replay
         with set_forward_context(
@@ -61,7 +62,7 @@ def run_model(
                 num_tokens=2,
             ),
         ):
-            output = model(torch.randn(2, MLP_SIZE).cuda())
+            output = model(torch.randn(2, MLP_SIZE).to(current_platform.device_name))
 
         output = output.cpu()
         return output.cpu()
@@ -122,7 +123,7 @@ def test_ignore_torch_compile_decorator(use_inductor_graph_partition, monkeypatc
     class C(B): ...
 
     with set_current_vllm_config(vllm_config):
-        mod_A = A(vllm_config=vllm_config, prefix="").eval().cuda()
+        mod_A = A(vllm_config=vllm_config, prefix="").eval().to(current_platform.device_name)
 
     # A has support_torch_compile
     with compilation_counter.expect(
@@ -135,7 +136,7 @@ def test_ignore_torch_compile_decorator(use_inductor_graph_partition, monkeypatc
         run_model(vllm_config, mod_A, cudagraph_runtime_mode)
 
     with set_current_vllm_config(vllm_config):
-        mod_B = B(vllm_config=vllm_config, prefix="").eval().cuda()
+        mod_B = B(vllm_config=vllm_config, prefix="").eval().to(current_platform.device_name)
 
     # B's ignore_torch_compile should override A's support_torch_compile
     with compilation_counter.expect(
@@ -148,7 +149,7 @@ def test_ignore_torch_compile_decorator(use_inductor_graph_partition, monkeypatc
         run_model(vllm_config, mod_B, cudagraph_runtime_mode)
 
     with set_current_vllm_config(vllm_config):
-        mod_C = C(vllm_config=vllm_config, prefix="").eval().cuda()
+        mod_C = C(vllm_config=vllm_config, prefix="").eval().to(current_platform.device_name)
 
     # C's support_torch_compile should override B's ignore_torch_compile
     with compilation_counter.expect(
@@ -222,7 +223,7 @@ def test_conditional_compile_enable_if(use_inductor_graph_partition, monkeypatch
     cudagraph_runtime_mode = CUDAGraphMode.PIECEWISE
 
     with set_current_vllm_config(vllm_config):
-        mod_A = A(vllm_config=vllm_config, prefix="").eval().cuda()
+        mod_A = A(vllm_config=vllm_config, prefix="").eval().to(current_platform.device_name)
 
     if use_inductor_graph_partition:
         expected_num_piecewise_graphs_seen = 2
@@ -262,7 +263,7 @@ def test_conditional_compile_enable_if(use_inductor_graph_partition, monkeypatch
     )
 
     with set_current_vllm_config(vllm_config):
-        mod_A = A(vllm_config=vllm_config, prefix="").eval().cuda()
+        mod_A = A(vllm_config=vllm_config, prefix="").eval().to(current_platform.device_name)
 
     if use_inductor_graph_partition:
         expected_num_piecewise_graphs_seen = 1

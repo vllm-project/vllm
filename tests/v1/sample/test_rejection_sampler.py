@@ -307,7 +307,6 @@ def test_parametrized_cases(rejection_sampler, spec_tokens, output_tokens, expec
 @pytest.mark.parametrize("batch_size", [1, 4, 8])
 @pytest.mark.parametrize("frac_seeded", [0.0, 0.5])
 @pytest.mark.parametrize("n_rep", [20])
-@pytest.mark.skipif(current_platform.is_xpu(), reason="will meet python core dump on xpu")
 def test_deterministic_when_seeded(
     rejection_sampler,
     k: int,
@@ -567,7 +566,6 @@ def _test_masked_logits(
             continue
         assert token_id in unmasked_indices[i]
 
-@pytest.mark.skipif(current_platform.is_xpu(), reason="will meet python core dump on xpu")
 @pytest.mark.parametrize("top_k", [1, 5, 99])
 def test_top_k(rejection_sampler, top_k):
     """Test rejection sampling with top-k sampling"""
@@ -609,7 +607,6 @@ def test_top_k(rejection_sampler, top_k):
         sampling_metadata=sampling_metadata,
     )
 
-@pytest.mark.skipif(current_platform.is_xpu(), reason="will meet python core dump on xpu")
 @pytest.mark.parametrize("top_p", [0.5, 0.9, 0.99])
 def test_top_p(rejection_sampler, top_p):
     """Test rejection sampling with top-p sampling"""

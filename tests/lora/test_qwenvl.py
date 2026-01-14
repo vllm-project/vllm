@@ -2,9 +2,11 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from dataclasses import dataclass
 
+import pytest
 import vllm
 from vllm.assets.image import ImageAsset
 from vllm.lora.request import LoRARequest
+from vllm.platforms import current_platform
 from vllm.sampling_params import BeamSearchParams
 
 
@@ -201,7 +203,7 @@ def test_qwen25vl_lora(qwen25vl_lora_files):
     for lora_id in [1, 2]:
         tester.run_test(TEST_IMAGES, expected_outputs=EXPECTED_OUTPUTS, lora_id=lora_id)
 
-
+@pytest.mark.skipif(current_platform.is_xpu(), reason="will meet python core dump on xpu")
 def test_qwen25vl_vision_lora(qwen25vl_vision_lora_files):
     config = TestConfig(
         model_path=QWEN25VL_MODEL_PATH,
@@ -220,7 +222,7 @@ def test_qwen25vl_vision_lora(qwen25vl_vision_lora_files):
             lora_id=lora_id,
         )
 
-
+@pytest.mark.skipif(current_platform.is_xpu(), reason="will meet python core dump on xpu")
 def test_qwen3vl_vision_lora(qwen3vl_vision_lora_files):
     config = TestConfig(
         model_path=QWEN3VL_MODEL_PATH,
@@ -239,7 +241,7 @@ def test_qwen3vl_vision_lora(qwen3vl_vision_lora_files):
             lora_id=lora_id,
         )
 
-
+@pytest.mark.skipif(current_platform.is_xpu(), reason="will meet python core dump on xpu")
 def test_qwen2vl_multiple_lora_types(
     qwen2vl_language_lora_files,
     qwen2vl_vision_tower_connector_lora_files,

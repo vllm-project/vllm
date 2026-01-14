@@ -79,7 +79,16 @@ PARAMS_MODELS_BACKENDS_TOKENIZER_MODE = [
     ("mistralai/Ministral-8B-Instruct-2410", "outlines", "auto", NGRAM_SPEC_CONFIG),
     ("mistralai/Ministral-8B-Instruct-2410", "guidance", "hf", NGRAM_SPEC_CONFIG),
     ("Qwen/Qwen2.5-1.5B-Instruct", "xgrammar", "auto", NGRAM_SPEC_CONFIG),
-    ("meta-llama/Meta-Llama-3.1-8B-Instruct", "xgrammar", "auto", EAGLE_SPEC_CONFIG),
+    pytest.param(
+        "meta-llama/Meta-Llama-3.1-8B-Instruct",
+        "xgrammar",
+        "auto",
+        EAGLE_SPEC_CONFIG,
+        marks=pytest.mark.skipif(
+            current_platform.is_xpu(),
+            reason="python core dump on xpu"
+        ),
+    ),
 ]
 
 PARAMS_MODELS_TOKENIZER_MODE = [
