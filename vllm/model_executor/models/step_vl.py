@@ -27,7 +27,6 @@ from .step3_vl import Step3VLForConditionalGeneration
 from .utils import WeightsMapper, init_vllm_registered_model, maybe_prefix
 from .vision import run_dp_sharded_vision_model
 
-
 _DEFAULT_NORM_LAYER = partial(nn.LayerNorm, eps=1e-5)
 
 
