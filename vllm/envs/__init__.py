@@ -22,11 +22,25 @@ Usage:
 import functools
 import os
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Literal, Union, get_args, get_origin, get_type_hints
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    Literal,
+    Union,
+    get_args,
+    get_origin,
+    get_type_hints,
+)
 
 # Import the variables module for accessing defaults and type hints
 from vllm.envs import _variables
-from vllm.envs.utils import EnvFactory, is_type_with_args, parse_list, parse_path, unwrap_optional
+from vllm.envs.utils import (
+    EnvFactory,
+    is_type_with_args,
+    parse_list,
+    parse_path,
+    unwrap_optional,
+)
 
 if TYPE_CHECKING:
     # For type checkers and IDEs, import all variable declarations directly
@@ -150,7 +164,9 @@ def __getattr__(name: str) -> Any:
             f"Must be one of: {', '.join(repr(v) for v in literal_values)}"
         )
 
-    if origin is Union or (origin is not None and str(origin) == "<class 'types.UnionType'>"):
+    if origin is Union or (
+        origin is not None and str(origin) == "<class 'types.UnionType'>"
+    ):
         # Handle Union types by trying each type in order of specificity
         # More specific types first (bool, int, float) before generic (str)
         union_args = get_args(var_type)
@@ -169,7 +185,9 @@ def __getattr__(name: str) -> Any:
 
         # Try conversions in priority order, but only for types in the Union
         for target_type, converter in type_priority:
-            if target_type in non_none_types or (target_type is type(Path) and Path in non_none_types):
+            if target_type in non_none_types or (
+                target_type is type(Path) and Path in non_none_types
+            ):
                 try:
                     result = converter(env_value)
                     # For bool, ensure the conversion is meaningful
@@ -264,6 +282,7 @@ __all__ = [
 # Module wrapper to support 'in' operator for checking if env var is set
 # ============================================================================
 
+
 class _EnvsModuleWrapper:
     """Wrapper that allows using 'in' operator to check if env var is set.
 
@@ -313,5 +332,6 @@ class _EnvsModuleWrapper:
 
 # Replace this module with the wrapper to enable 'in' operator support
 import sys
+
 _this_module = sys.modules[__name__]
 sys.modules[__name__] = _EnvsModuleWrapper(_this_module)

@@ -8,7 +8,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any, TypeVar, Union, get_args, get_origin
 
-T = TypeVar('T')
+T = TypeVar("T")
 
 
 class EnvFactory:
@@ -110,7 +110,9 @@ def unwrap_optional(type_hint: Any) -> Any:
 
     # Handle Union types (including Optional which is Union[T, None])
     # Also handle Python 3.10+ union syntax (int | None creates types.UnionType)
-    if origin is Union or (origin is not None and str(origin) == "<class 'types.UnionType'>"):
+    if origin is Union or (
+        origin is not None and str(origin) == "<class 'types.UnionType'>"
+    ):
         args = get_args(type_hint)
         # Filter out NoneType
         non_none_args = [arg for arg in args if arg is not type(None)]
@@ -123,7 +125,9 @@ def unwrap_optional(type_hint: Any) -> Any:
     return type_hint
 
 
-def is_type_with_args(type_hint: Any, base_type: type, expected_args: list[type]) -> bool:
+def is_type_with_args(
+    type_hint: Any, base_type: type, expected_args: list[type]
+) -> bool:
     """Check if a type hint matches a generic type with specific arguments.
 
     For example, check if type_hint is list[str].

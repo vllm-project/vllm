@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Simple test script to verify the new envs module works.
 
 This script should be run from the repository root:
@@ -21,6 +23,7 @@ from pathlib import Path
 repo_root = Path(__file__).parent.parent
 sys.path.insert(0, str(repo_root))
 
+
 def test_basic_access():
     """Test basic environment variable access."""
     import vllm.envs as envs
@@ -28,7 +31,9 @@ def test_basic_access():
     print("Testing basic access...")
 
     # Test string default
-    print(f"VLLM_HOST_IP: {envs.VLLM_HOST_IP!r} (type: {type(envs.VLLM_HOST_IP).__name__})")
+    print(
+        f"VLLM_HOST_IP: {envs.VLLM_HOST_IP!r} (type: {type(envs.VLLM_HOST_IP).__name__})"
+    )
     assert isinstance(envs.VLLM_HOST_IP, str)
     assert envs.VLLM_HOST_IP == ""
 
@@ -38,7 +43,9 @@ def test_basic_access():
     assert envs.LOCAL_RANK == 0
 
     # Test bool default
-    print(f"VLLM_USE_MODELSCOPE: {envs.VLLM_USE_MODELSCOPE!r} (type: {type(envs.VLLM_USE_MODELSCOPE).__name__})")
+    print(
+        f"VLLM_USE_MODELSCOPE: {envs.VLLM_USE_MODELSCOPE!r} (type: {type(envs.VLLM_USE_MODELSCOPE).__name__})"
+    )
     assert isinstance(envs.VLLM_USE_MODELSCOPE, bool)
     assert envs.VLLM_USE_MODELSCOPE == False
 
@@ -63,6 +70,7 @@ def test_env_var_parsing():
 
     # Reload the module to pick up env vars
     import vllm.envs as envs
+
     if hasattr(envs, "__wrapped__"):
         importlib.reload(envs)
 
@@ -85,7 +93,9 @@ def test_env_var_parsing():
 
     # Test bool parsing
     use_modelscope = envs.VLLM_USE_MODELSCOPE
-    print(f"VLLM_USE_MODELSCOPE: {use_modelscope!r} (type: {type(use_modelscope).__name__})")
+    print(
+        f"VLLM_USE_MODELSCOPE: {use_modelscope!r} (type: {type(use_modelscope).__name__})"
+    )
     assert isinstance(use_modelscope, bool)
     assert use_modelscope == True
 
@@ -146,7 +156,9 @@ def test_is_set():
     # Set it
     os.environ["VLLM_TEST_VAR_123"] = "test"
     assert envs.is_set("VLLM_TEST_VAR_123")
-    print(f"After setting: is_set('VLLM_TEST_VAR_123'): {envs.is_set('VLLM_TEST_VAR_123')}")
+    print(
+        f"After setting: is_set('VLLM_TEST_VAR_123'): {envs.is_set('VLLM_TEST_VAR_123')}"
+    )
 
     # Clean up
     del os.environ["VLLM_TEST_VAR_123"]
@@ -171,5 +183,6 @@ if __name__ == "__main__":
     except Exception as e:
         print(f"\n✗ Test failed with error: {e}")
         import traceback
+
         traceback.print_exc()
         sys.exit(1)
