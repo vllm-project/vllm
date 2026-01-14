@@ -463,7 +463,9 @@ class InputBatch:
         # _prepare_input_ids.
         start_index = self.num_tokens_no_spec[req_index]
         end_token_index = start_index + num_spec_tokens
-        self.token_ids_cpu[req_index, start_index:end_token_index] = spec_token_ids
+        # Replace -1 values with 0 to avoid embedding lookup errors
+        safe_spec_token_ids = [tok if tok != -1 else 0 for tok in spec_token_ids]
+        self.token_ids_cpu[req_index, start_index:end_token_index] = safe_spec_token_ids
         cur_spec_token_ids.extend(spec_token_ids)
 
     def remove_request(self, req_id: str) -> int | None:
