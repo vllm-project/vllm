@@ -18,6 +18,7 @@ from vllm.entrypoints.serve.lora.protocol import (
     LoadLoRAAdapterRequest,
     UnloadLoRAAdapterRequest,
 )
+from vllm.entrypoints.utils import sanitize_message
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.lora.resolver import LoRAResolver, LoRAResolverRegistry
@@ -302,5 +303,9 @@ def create_error_response(
     status_code: HTTPStatus = HTTPStatus.BAD_REQUEST,
 ) -> ErrorResponse:
     return ErrorResponse(
-        error=ErrorInfo(message=message, type=err_type, code=status_code.value)
+        error=ErrorInfo(
+            message=sanitize_message(message),
+            type=err_type,
+            code=status_code.value,
+        )
     )

@@ -94,7 +94,7 @@ from vllm.entrypoints.serve.tokenize.protocol import (
     TokenizeCompletionRequest,
     TokenizeResponse,
 )
-from vllm.entrypoints.utils import _validate_truncation_size
+from vllm.entrypoints.utils import _validate_truncation_size, sanitize_message
 from vllm.inputs.data import PromptType, TokensPrompt
 from vllm.inputs.parse import (
     PromptComponents,
@@ -768,10 +768,14 @@ class OpenAIServing:
                 err_type = "BadRequestError"
                 status_code = HTTPStatus.BAD_REQUEST
                 param = exc.parameter
-            elif isinstance(exc, (ValueError, TypeError, RuntimeError)):
+            elif isinstance(exc, (ValueError, TypeError, RuntimeError, OverflowError)):
                 # Common validation errors from user input
                 err_type = "BadRequestError"
                 status_code = HTTPStatus.BAD_REQUEST
+                param = None
+            elif isinstance(exc, NotImplementedError):
+                err_type = "NotImplementedError"
+                status_code = HTTPStatus.NOT_IMPLEMENTED
                 param = None
             elif exc.__class__.__name__ == "TemplateError":
                 # jinja2.TemplateError (avoid importing jinja2)
@@ -791,9 +795,10 @@ class OpenAIServing:
                 traceback.print_exc()
             else:
                 traceback.print_stack()
+
         return ErrorResponse(
             error=ErrorInfo(
-                message=message,
+                message=sanitize_message(message),
                 type=err_type,
                 code=status_code.value,
                 param=param,
