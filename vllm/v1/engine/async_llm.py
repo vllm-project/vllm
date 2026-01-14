@@ -593,25 +593,25 @@ class AsyncLLM(EngineClient):
             self._paused = True
             self._paused_keep_mode = mode == "keep"
 
-        if mode == "keep":
-            # Freeze requests in the scheduler - they will resume on
-            # resume_generation().
-            await self.engine_core.pause_scheduler_async()
-            return
+            if mode == "keep":
+                # Freeze requests in the scheduler - they will resume on
+                # resume_generation().
+                await self.engine_core.pause_scheduler_async()
+                return
 
-        if mode == "abort":
-            request_ids = list(self.output_processor.request_states.keys())
-            if request_ids:
-                await self.abort(request_ids, internal=True)
+            if mode == "abort":
+                request_ids = list(self.output_processor.request_states.keys())
+                if request_ids:
+                    await self.abort(request_ids, internal=True)
 
-        # Wait for running requests to drain before clearing cache.
-        if self.output_processor.has_unfinished_requests():
-            await self.output_processor.wait_for_requests_to_drain()
+            # Wait for running requests to drain before clearing cache.
+            if self.output_processor.has_unfinished_requests():
+                await self.output_processor.wait_for_requests_to_drain()
 
-        # Clear cache
-        if clear_cache:
-            await self.reset_prefix_cache()
-            await self.reset_mm_cache()
+            # Clear cache
+            if clear_cache:
+                await self.reset_prefix_cache()
+                await self.reset_mm_cache()
 
     async def resume_generation(self) -> None:
         """Resume generation after :meth:`pause_generation`."""

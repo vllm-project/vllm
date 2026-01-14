@@ -395,13 +395,14 @@ class EngineCore:
         )
         self._iteration_index += 1
 
-    def step(self) -> tuple[dict[int, EngineCoreOutputs], bool]:
-        """Schedule, execute, and make output.
+    def _check_pause_state(self) -> tuple[dict[int, EngineCoreOutputs], bool] | None:
+        """Check and handle scheduler pause state.
 
-        Returns tuple of outputs and a flag indicating whether the model
-        was executed.
+        Returns:
+            None if not paused and processing should continue.
+            A tuple of (outputs, model_executed=False) if paused or pause was
+            just acknowledged.
         """
-
         # Check if pause was requested - acknowledge and enter paused state.
         if self._scheduler_pause_requested:
             self._scheduler_paused = True
@@ -416,6 +417,18 @@ class EngineCore:
         # If paused, don't schedule any work.
         if self._scheduler_paused:
             return {}, False
+
+        return None
+
+    def step(self) -> tuple[dict[int, EngineCoreOutputs], bool]:
+        """Schedule, execute, and make output.
+
+        Returns tuple of outputs and a flag indicating whether the model
+        was executed.
+        """
+
+        if (pause_result := self._check_pause_state()) is not None:
+            return pause_result
 
         # Check for any requests remaining in the scheduler - unfinished,
         # or finished and not yet removed from the batch.
@@ -467,20 +480,8 @@ class EngineCore:
         batch in the job queue is finished.
         3. Update the scheduler from the output.
         """
-        # Check if pause was requested - acknowledge and enter paused state.
-        if self._scheduler_pause_requested:
-            self._scheduler_paused = True
-            self._scheduler_pause_requested = False
-            # Send acknowledgement to the client that requested the pause.
-            client_idx = self._pause_requester_client_index
-            self._pause_requester_client_index = None
-            if client_idx is not None:
-                return {client_idx: EngineCoreOutputs(pause_acknowledged=True)}, False
-            return {}, False
-
-        # If paused, don't schedule any work.
-        if self._scheduler_paused:
-            return {}, False
+        if (pause_result := self._check_pause_state()) is not None:
+            return pause_result
 
         batch_queue = self.batch_queue
         assert batch_queue is not None
