@@ -1312,7 +1312,7 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
             self._run_prefill_new_tokens = self._run_prefill_new_tokens_cudnn
             self._pad_v = False
         else:  # Use FlashAttention
-            logger.info_once("Using FlashAttention prefill for MLA")
+            logger.info_once("Using FlashAttention prefill for MLA", scope="local")
             self._run_prefill_context_chunk = self._run_prefill_context_chunk_fa
             self._run_prefill_new_tokens = self._run_prefill_new_tokens_fa
 
