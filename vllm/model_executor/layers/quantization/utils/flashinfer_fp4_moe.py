@@ -345,11 +345,9 @@ def flashinfer_trtllm_fp4_moe(
 
     # Quantize input to FP4
     if isinstance(x, tuple):
-        print("ALREADY QUANTIZED")
         hidden_states_fp4, hidden_states_scale_linear_fp4 = x
     else:
         # hidden_states is the already quantized
-        print("QUANTIIZING HERE")
         (hidden_states_fp4, hidden_states_scale_linear_fp4) = flashinfer.fp4_quantize(
             x,
             layer.a1_gscale,
