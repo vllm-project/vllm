@@ -103,7 +103,7 @@ class EngineCoreClient(ABC):
         client_addresses: dict[str, str] | None = None,
         client_count: int = 1,
         client_index: int = 0,
-    ) -> "MPClient":
+    ) -> "AsyncMPClient":
         parallel_config = vllm_config.parallel_config
         client_args = (
             vllm_config,
@@ -832,6 +832,8 @@ class AsyncMPClient(MPClient):
         self.client_count = client_count
         self.client_index = client_index
         self.outputs_queue = asyncio.Queue[EngineCoreOutputs | Exception]()
+        # Future for pause acknowledgement from EngineCore.
+        self._pause_ack_future: asyncio.Future[None] | None = None
         try:
             # If we are running in an asyncio event loop, start the queue task.
             # Otherwise, it will be started lazily. If it is not started here,
@@ -855,7 +857,8 @@ class AsyncMPClient(MPClient):
         output_handler: (
             Callable[[AsyncMPClient, EngineCoreOutputs], Awaitable[None]] | None
         ) = getattr(self.__class__, "process_engine_outputs", None)
-        _self_ref = weakref.ref(self) if output_handler else None
+        # Always create ref for pause_acknowledged handling.
+        _self_ref = weakref.ref(self)
         output_socket = resources.output_socket
         assert output_socket is not None
 
@@ -869,8 +872,14 @@ class AsyncMPClient(MPClient):
                         _process_utility_output(outputs.utility_output, utility_results)
                         continue
 
+                    # Handle pause acknowledgement.
+                    if outputs.pause_acknowledged:
+                        _self = _self_ref()
+                        if _self and _self._pause_ack_future is not None:
+                            _self._pause_ack_future.set_result(None)
+                        continue
+
                     if output_handler is not None:
-                        assert _self_ref is not None
                         _self = _self_ref()
                         if not _self:
                             # Client has been garbage collected, abort.
@@ -964,6 +973,25 @@ class AsyncMPClient(MPClient):
     async def abort_requests_async(self, request_ids: list[str]) -> None:
         if request_ids and not self.resources.engine_dead:
             await self._send_input(EngineCoreRequestType.ABORT, request_ids)
+
+    async def pause_scheduler_async(self) -> None:
+        """Pause the scheduler, keeping requests frozen in queue.
+        Blocks until the EngineCore acknowledges the pause.
+        """
+        # Create future to wait for acknowledgement.
+        self._pause_ack_future = asyncio.get_running_loop().create_future()
+        # Send pause request with client_index for acknowledgement routing.
+        await self._send_input(EngineCoreRequestType.PAUSE, self.client_index)
+        self._ensure_output_queue_task()
+        # Wait for acknowledgement from EngineCore.
+        try:
+            await self._pause_ack_future
+        finally:
+            self._pause_ack_future = None
+
+    async def resume_scheduler_async(self) -> None:
+        """Resume the scheduler after a pause."""
+        await self._send_input(EngineCoreRequestType.RESUME, None)
 
     async def profile_async(self, is_start: bool = True) -> None:
         await self.call_utility_async("profile", is_start)
@@ -1173,6 +1201,18 @@ class DPAsyncMPClient(AsyncMPClient):
 
     def get_core_engine_for_request(self, request: EngineCoreRequest):
         return self.core_engine
+
+    async def pause_scheduler_async(self) -> None:
+        """Pause the scheduler, keeping requests frozen in queue."""
+        raise NotImplementedError(
+            "pause_scheduler_async is not yet supported for data parallel"
+        )
+
+    async def resume_scheduler_async(self) -> None:
+        """Resume the scheduler after a pause."""
+        raise NotImplementedError(
+            "resume_scheduler_async is not yet supported for data parallel"
+        )
 
 
 class DPLBAsyncMPClient(DPAsyncMPClient):

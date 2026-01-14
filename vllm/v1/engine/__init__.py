@@ -4,7 +4,7 @@
 import enum
 import time
 from collections.abc import Mapping
-from typing import Any
+from typing import Any, Literal
 
 import msgspec
 import numpy as np
@@ -17,6 +17,12 @@ from vllm.sampling_params import SamplingParams
 from vllm.v1.metrics.stats import SchedulerStats
 from vllm.v1.outputs import LogprobsLists, LogprobsTensors
 from vllm.v1.serial_utils import UtilityResult
+
+# Type for pause_generation mode parameter.
+# - "abort": Abort all in-flight requests immediately (default).
+# - "wait": Wait for in-flight requests to complete before pausing.
+# - "keep": Freeze requests in queue; they resume on resume_generation().
+PauseMode = Literal["abort", "wait", "keep"]
 
 # These are possible values of RequestOutput.finish_reason,
 # so form part of the external API.
@@ -188,6 +194,9 @@ class EngineCoreOutputs(
     # "old" wave, so the next wave needs to be started in other engines.
     start_wave: int | None = None
 
+    # Acknowledgement that the scheduler has paused (for mode="keep").
+    pause_acknowledged: bool = False
+
     def __post_init__(self):
         if self.timestamp == 0.0:
             self.timestamp = time.monotonic()
@@ -205,6 +214,9 @@ class EngineCoreRequestType(enum.Enum):
     UTILITY = b"\x03"
     # Sentinel used within EngineCoreProc.
     EXECUTOR_FAILED = b"\x04"
+    # Pause/resume scheduler with requests kept frozen in queue.
+    PAUSE = b"\x05"
+    RESUME = b"\x06"
 
 
 class ReconfigureDistributedRequest(msgspec.Struct):

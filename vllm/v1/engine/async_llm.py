@@ -31,7 +31,7 @@ from vllm.transformers_utils.config import maybe_register_config_serialize_by_va
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils.async_utils import cancel_task_threadsafe
 from vllm.utils.collection_utils import as_list
-from vllm.v1.engine import EngineCoreRequest
+from vllm.v1.engine import EngineCoreRequest, PauseMode
 from vllm.v1.engine.core_client import EngineCoreClient
 from vllm.v1.engine.exceptions import EngineDeadError, EngineGenerateError
 from vllm.v1.engine.input_processor import InputProcessor
@@ -154,6 +154,7 @@ class AsyncLLM(EngineClient):
         # Pause / resume state for async RL workflows.
         self._pause_cond = asyncio.Condition()
         self._paused = False
+        self._paused_keep_mode = False
 
         self.output_handler: asyncio.Task | None = None
         try:
@@ -565,7 +566,7 @@ class AsyncLLM(EngineClient):
     async def pause_generation(
         self,
         *,
-        wait_for_inflight_requests: bool = False,
+        mode: PauseMode = "abort",
         clear_cache: bool = True,
     ) -> None:
         """
@@ -574,20 +575,31 @@ class AsyncLLM(EngineClient):
         New generation/encoding requests are blocked until resume.
 
         Args:
-            wait_for_inflight_requests: When ``True`` waits for in-flight
-                requests to finish before pausing. When ``False`` (default),
-                immediately aborts any in-flight requests.
+            mode: How to handle in-flight requests:
+                - ``"abort"``: Abort all in-flight requests immediately
+                  (default).
+                - ``"wait"``: Wait for in-flight requests to complete.
+                - ``"keep"``: Freeze requests in queue; they resume on
+                  :meth:`resume_generation`.
             clear_cache: Whether to clear KV cache and prefix cache after
                 draining. Set to ``False`` to preserve cache for faster resume.
                 Default is ``True`` (clear caches).
+                Ignored when ``mode="keep"``.
         """
 
         async with self._pause_cond:
             if self._paused:
                 return
             self._paused = True
+            self._paused_keep_mode = mode == "keep"
 
-        if not wait_for_inflight_requests:
+        if mode == "keep":
+            # Freeze requests in the scheduler - they will resume on
+            # resume_generation().
+            await self.engine_core.pause_scheduler_async()
+            return
+
+        if mode == "abort":
             request_ids = list(self.output_processor.request_states.keys())
             if request_ids:
                 await self.abort(request_ids, internal=True)
@@ -605,7 +617,12 @@ class AsyncLLM(EngineClient):
         """Resume generation after :meth:`pause_generation`."""
 
         async with self._pause_cond:
+            was_keep_mode = getattr(self, "_paused_keep_mode", False)
+            # If we were in keep mode, resume the scheduler.
+            if was_keep_mode:
+                await self.engine_core.resume_scheduler_async()
             self._paused = False
+            self._paused_keep_mode = False
             self._pause_cond.notify_all()  # Wake up all waiting requests
 
     async def is_paused(self) -> bool:

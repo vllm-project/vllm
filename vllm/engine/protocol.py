@@ -3,7 +3,7 @@
 
 from abc import ABC, abstractmethod
 from collections.abc import AsyncGenerator, Iterable, Mapping
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from vllm.config import ModelConfig, VllmConfig
 from vllm.inputs.data import PromptType
@@ -16,6 +16,9 @@ from vllm.tasks import SupportedTask
 from vllm.tokenizers import TokenizerLike
 from vllm.v1.engine import EngineCoreRequest
 from vllm.v1.engine.input_processor import InputProcessor
+
+if TYPE_CHECKING:
+    from vllm.v1.engine import PauseMode
 
 
 class EngineClient(ABC):
@@ -150,16 +153,19 @@ class EngineClient(ABC):
     async def pause_generation(
         self,
         *,
-        wait_for_inflight_requests: bool = False,
+        mode: "PauseMode" = "abort",
         clear_cache: bool = True,
     ) -> None:
         """Pause new generation/encoding requests.
 
         Args:
-            wait_for_inflight_requests: When ``True`` waits for in-flight requests
-                to finish before pausing. When ``False`` (default), aborts in-flight
-                requests immediately.
+            mode: How to handle in-flight requests:
+                - ``"abort"``: Abort all in-flight requests immediately (default).
+                - ``"wait"``: Wait for in-flight requests to complete.
+                - ``"keep"``: Freeze requests in queue; they resume on
+                  :meth:`resume_generation`.
             clear_cache: Whether to clear KV and prefix caches after draining.
+                Ignored when ``mode="keep"``.
         """
         ...
 
