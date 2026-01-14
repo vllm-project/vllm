@@ -341,6 +341,11 @@ class MambaModelConfig(VerifyAndUpdateConfig):
                 "Please report any issues you may observe.",
                 cache_config.mamba_cache_mode,
             )
+            # By default, mamba block size will be set to max_model_len (see
+            # below). When enabling prefix caching, we align mamba block size
+            # to the block size as the basic granularity for prefix caching.
+            if cache_config.mamba_block_size is None:
+                cache_config.mamba_block_size = cache_config.block_size
         else:
             if cache_config.mamba_cache_mode != "none":
                 cache_config.mamba_cache_mode = "none"
