@@ -5,7 +5,7 @@
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from types import MappingProxyType
-from typing import ClassVar, NamedTuple
+from typing import TYPE_CHECKING, ClassVar, NamedTuple
 
 import numpy
 import torch
@@ -15,8 +15,22 @@ from vllm._custom_ops import cutlass_scaled_mm_supports_fp4
 from vllm.platforms import current_platform
 from vllm.scalar_type import ScalarType, scalar_types
 
+if TYPE_CHECKING:
+    from vllm.model_executor.layers.linear import LinearBase
+
 FP8_DTYPE = current_platform.fp8_dtype()
 FP4_DTYPE = torch.uint8
+
+
+def get_fp8_min_max() -> tuple[float, float]:
+    """Get the min and max values for FP8 quantization."""
+    # Using the default value (240.0) from pytorch will cause accuracy
+    # issue on dynamic quantization models on ROCm. Here, use 224.0 for fnuz
+    # on ROCm platforms that use the torch.float8_e4m3fnuz dtype.
+    if current_platform.is_fp8_fnuz():
+        return -224.0, 224.0
+    finfo = torch.finfo(current_platform.fp8_dtype())
+    return finfo.min, finfo.max
 
 
 # Use proxy as NamedTuple direct subclasses cannot have static members
@@ -147,11 +161,14 @@ def _normalize_quant_group_shape(x: torch.Tensor, group_shape: GroupShape):
 # with an extent of 1, since this can be done implicitly by pytorch
 def group_broadcast(t, shape):
     for i, s in enumerate(shape):
-        if t.shape[i] != s and t.shape[i] != 1:
-            assert s % t.shape[i] == 0
+        # If tensor has fewer dimensions than target shape, treat missing
+        # dimensions as size 1 (standard PyTorch broadcasting behavior)
+        t_dim_size = t.shape[i] if i < t.ndim else 1
+        if t_dim_size != s and t_dim_size != 1:
+            assert s % t_dim_size == 0
             t = (
                 t.unsqueeze(i + 1)
-                .expand(*t.shape[: i + 1], s // t.shape[i], *t.shape[i + 1 :])
+                .expand(*t.shape[: i + 1], s // t_dim_size, *t.shape[i + 1 :])
                 .flatten(i, i + 1)
             )
     return t
@@ -169,7 +186,16 @@ def scaled_quantize(
     x: torch.Tensor,
     group_shape: GroupShape,
     quant_dtype: torch.dtype,
+    compute_dtype: torch.dtype | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
+    """
+    Args:
+        x: Input tensor to quantize
+        group_shape: Shape of quantization groups
+        quant_dtype: Target quantized dtype (e.g., torch.float8_e4m3fn)
+        compute_dtype: Optional dtype for intermediate computations.
+            If None, uses input dtype. Use torch.float32 for higher precision.
+    """
     group_shape = _normalize_quant_group_shape(x, group_shape)
     assert quant_dtype.is_floating_point, (
         "currently `scaled_quantize` only supports floating point dtypes "
@@ -178,11 +204,14 @@ def scaled_quantize(
 
     finfo = torch.finfo(quant_dtype)
 
+    # Convert to compute dtype if specified
+    x_compute = x if compute_dtype is None else x.to(compute_dtype)
+
     # Reshape (M, N) into (BLK_M, BLOCK_SIZE_M, BLK_N, BLOCK_SIZE_N)
     assert x.ndim == 2
     assert x.shape[0] % group_shape[0] == 0 and x.shape[1] % group_shape[1] == 0
     blk_m, blk_n = x.shape[0] // group_shape[0], x.shape[1] // group_shape[1]
-    x_blkd = x.reshape(blk_m, group_shape[0], blk_n, group_shape[1])
+    x_blkd = x_compute.reshape(blk_m, group_shape[0], blk_n, group_shape[1])
 
     # Permute to (BLK_M, BLK_N, BLOCK_SIZE_M, BLOCK_SIZE_N)
     x_blkd_permd = x_blkd.permute(0, 2, 1, 3)
@@ -213,7 +242,7 @@ def scaled_dequantize(
     x_s: torch.Tensor,
     group_shape: GroupShape | None = None,
     out_dtype: torch.dtype = torch.float32,
-) -> tuple[torch.Tensor, torch.Tensor]:
+) -> torch.Tensor:
     if group_shape is not None:
         group_shape = _normalize_quant_group_shape(x_q, group_shape)
 
@@ -242,6 +271,62 @@ def scaled_dequantize(
         assert x_s.shape[-2] == x_q.shape[-2] // group_shape[0]
     x_s = group_broadcast(x_s.to(torch.float32), x_q.shape)
     return (x_q.to(torch.float32) * x_s).to(out_dtype)
+
+
+def get_attribute_fallback(obj, attributes: list[str]):
+    for attr in attributes:
+        if hasattr(obj, attr):
+            return getattr(obj, attr)
+    raise AttributeError(f"'{obj}' has no recognized attributes: {attributes}.")
+
+
+def get_and_maybe_dequant_weights(
+    layer: "LinearBase", out_dtype: torch.dtype = torch.float32
+):
+    """Return layer's unquantized weights in [out, in] layout"""
+    from vllm.model_executor.layers.linear import UnquantizedLinearMethod
+    from vllm.model_executor.layers.quantization.fp8 import Fp8LinearMethod
+
+    weight = get_attribute_fallback(layer, ["weight", "qweight", "weight_packed"])
+
+    # Unquantized layer: just return base weights
+    if layer.quant_method is None or isinstance(
+        layer.quant_method, UnquantizedLinearMethod
+    ):
+        return weight.to(out_dtype)
+
+    # Simple Fp8 case: rescale with tensor or block weight scales
+    if (
+        isinstance(layer.quant_method, Fp8LinearMethod)
+        and not layer.quant_method.use_marlin
+    ):
+        weight_scales = get_attribute_fallback(
+            layer, ["weight_scale", "weight_scale_inv"]
+        )
+        dequant_weights = scaled_dequantize(
+            weight,
+            weight_scales,
+            group_shape=layer.weight_block_size,
+            out_dtype=out_dtype,
+        )
+        # per-tensor scaling stores weights in [in, out] layout
+        if not layer.quant_method.block_quant:
+            dequant_weights = dequant_weights.T
+        return dequant_weights
+
+    # NOTE: Most generic base case
+    # - Call the layer with identity matrix which returns unquantized weights.
+    # - Must be used with extra care when dealing with static activation quantization:
+    #   quantizing 1.0 may lead to over/underflows
+    # - Should only be used offline, since it's O(N^3)
+    assert hasattr(layer, "input_size_per_partition")
+    eye = torch.eye(
+        layer.input_size_per_partition,
+        dtype=out_dtype,
+        device=weight.device,
+    )
+    dequant_weights = layer.quant_method.apply(layer, eye, bias=None).to(out_dtype)
+    return dequant_weights.T
 
 
 def pack_quantized_values_into_int32(

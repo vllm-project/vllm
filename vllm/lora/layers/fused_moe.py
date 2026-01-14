@@ -24,7 +24,6 @@ from vllm.model_executor.layers.fused_moe.fused_marlin_moe import (
 )
 from vllm.model_executor.layers.fused_moe.fused_moe import (
     TritonExperts,
-    try_get_optimal_moe_config,
 )
 from vllm.model_executor.layers.fused_moe.fused_moe_modular_method import (
     FusedMoEModularMethod,
@@ -39,7 +38,7 @@ from vllm.model_executor.layers.fused_moe.prepare_finalize import (
     MoEPrepareAndFinalizeNoEP,
 )
 
-from .utils import _get_lora_device
+from .utils import _get_lora_device, try_get_optimal_moe_lora_config
 
 
 class FusedMoEWithLoRA(BaseLayerWithLoRA):
@@ -103,15 +102,21 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
             )
         else:  # fall back to the default config
             get_config_func = functools.partial(
-                try_get_optimal_moe_config,
-                layer.w13_weight.size(),
-                layer.w2_weight.size(),
-                top_k,
-                config_dtype,
+                try_get_optimal_moe_lora_config,
+                w1_shape=layer.w13_weight.size(),
+                w2_shape=layer.w2_weight.size(),
+                rank=rank,
+                top_k=top_k,
+                dtype=config_dtype,
+                M=M,
                 block_shape=layer.quant_method.moe_quant_config.block_shape,
             )
-            shrink_config = get_config_func(M)
-            expand_config = get_config_func(M)
+            shrink_config = get_config_func(
+                op_type=f"fused_moe_lora_{op_prefix}_shrink"
+            )
+            expand_config = get_config_func(
+                op_type=f"fused_moe_lora_{op_prefix}_expand"
+            )
         shrink_config = self._normalize_keys(shrink_config)
         expand_config = self._normalize_keys(expand_config)
         return shrink_config, expand_config
@@ -130,7 +135,6 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
                 prepare_finalize, self.base_layer
             ),
             self.base_layer.shared_experts,
-            getattr(self.base_layer, "shared_experts_stream", None),
         )
         if quant_config.use_mxfp4_w4a16:
             assert isinstance(
@@ -429,9 +433,9 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
         current_lora_rank = w13_lora_a.shape[1]
         assert current_lora_rank % self.tp_size == 0
         # Based on S-LoRA, we slice W13/W1/W3 A along the rank dim.
-        sliced_rank = current_lora_rank // self.tp_size
-        start_idx = self.tp_rank * sliced_rank
-        end_idx = (self.tp_rank + 1) * sliced_rank
+        shard_size = self.w13_lora_a_stacked[0].shape[2]
+        start_idx = self.tp_rank * shard_size
+        end_idx = (self.tp_rank + 1) * shard_size
         return w13_lora_a[:, start_idx:end_idx, :]
 
     def _slice_w13_b(self, w13_lora_b: torch.Tensor):
@@ -466,11 +470,10 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
             return w2_lora_b
         # Based on S-LoRA, we slice W2 B along the hidden_size dim.
         # w2_lora_b shape (num_experts,output_size,rank)
-        current_lora_size = w2_lora_b.shape[1]
+        shard_size = self.w2_lora_b_stacked[0].shape[2]
+        start_idx = self.tp_rank * shard_size
+        end_idx = (self.tp_rank + 1) * shard_size
 
-        sliced_size = current_lora_size // self.tp_size
-        start_idx = self.tp_rank * sliced_size
-        end_idx = (self.tp_rank + 1) * sliced_size
         return w2_lora_b[:, start_idx:end_idx, :]
 
     def reset_lora(self, index: int):
@@ -672,19 +675,8 @@ class FusedMoE3DWithLoRA(FusedMoEWithLoRA):
         self.reset_lora(index)
         self.adapter_enabled[index] = 1
 
-        num_experts = self.w13_lora_a_stacked[0].shape[1]
         w13_lora_a, w2_lora_a = lora_a
         w13_lora_b, w2_lora_b = lora_b
-
-        # (num_experts,rank,input_size)
-        w13_lora_a = w13_lora_a.reshape(num_experts, -1, w13_lora_a.shape[-1])
-        w2_lora_a = w2_lora_a.reshape(num_experts, -1, w2_lora_a.shape[-1])
-        # (output_size,num_experts,rank)
-        w13_lora_b = w13_lora_b.reshape(w13_lora_b.shape[0], num_experts, -1)
-        w2_lora_b = w2_lora_b.reshape(w2_lora_b.shape[0], num_experts, -1)
-        # (num_experts,output_size,rank)
-        w13_lora_b = w13_lora_b.permute(1, 0, 2)
-        w2_lora_b = w2_lora_b.permute(1, 0, 2)
 
         sliced_w13_lora_a = self._slice_w13_a(w13_lora_a)
         sliced_w13_lora_b = self._slice_w13_b(w13_lora_b)
@@ -732,7 +724,7 @@ class FusedMoE3DWithLoRA(FusedMoEWithLoRA):
         """
         Full size
         """
-        return self.w2_lora_a_stacked[0].shape[-2]
+        return self.base_layer.hidden_size
 
     @classmethod
     def can_replace_layer(

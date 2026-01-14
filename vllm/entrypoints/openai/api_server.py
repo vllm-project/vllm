@@ -14,7 +14,7 @@ import socket
 import tempfile
 import uuid
 from argparse import Namespace
-from collections.abc import AsyncGenerator, AsyncIterator, Awaitable
+from collections.abc import AsyncIterator, Awaitable
 from contextlib import asynccontextmanager
 from http import HTTPStatus
 from typing import Annotated, Any
@@ -42,31 +42,26 @@ from vllm.entrypoints.anthropic.protocol import (
 from vllm.entrypoints.anthropic.serving_messages import AnthropicServingMessages
 from vllm.entrypoints.launcher import serve_http
 from vllm.entrypoints.logger import RequestLogger
+from vllm.entrypoints.openai.chat_completion.serving import OpenAIServingChat
 from vllm.entrypoints.openai.cli_args import make_arg_parser, validate_parsed_serve_args
-from vllm.entrypoints.openai.orca_metrics import metrics_header
-from vllm.entrypoints.openai.protocol import (
-    ChatCompletionRequest,
-    ChatCompletionResponse,
+from vllm.entrypoints.openai.engine.protocol import (
     CompletionRequest,
     CompletionResponse,
     ErrorInfo,
     ErrorResponse,
-    ResponsesRequest,
-    ResponsesResponse,
-    StreamingResponsesResponse,
     TranscriptionRequest,
     TranscriptionResponseVariant,
     TranslationRequest,
     TranslationResponseVariant,
 )
-from vllm.entrypoints.openai.serving_chat import OpenAIServingChat
+from vllm.entrypoints.openai.engine.serving import OpenAIServing
+from vllm.entrypoints.openai.orca_metrics import metrics_header
+from vllm.entrypoints.openai.responses.serving import OpenAIServingResponses
 from vllm.entrypoints.openai.serving_completion import OpenAIServingCompletion
-from vllm.entrypoints.openai.serving_engine import OpenAIServing
 from vllm.entrypoints.openai.serving_models import (
     BaseModelPath,
     OpenAIServingModels,
 )
-from vllm.entrypoints.openai.serving_responses import OpenAIServingResponses
 from vllm.entrypoints.openai.serving_transcription import (
     OpenAIServingTranscription,
     OpenAIServingTranslation,
@@ -88,8 +83,10 @@ from vllm.entrypoints.utils import (
     log_non_default_args,
     process_chat_template,
     process_lora_modules,
+    sanitize_message,
     with_cancellation,
 )
+from vllm.exceptions import VLLMValidationError
 from vllm.logger import init_logger
 from vllm.reasoning import ReasoningParserManager
 from vllm.tasks import POOLING_TASKS
@@ -311,112 +308,6 @@ async def show_version():
     return JSONResponse(content=ver)
 
 
-async def _convert_stream_to_sse_events(
-    generator: AsyncGenerator[StreamingResponsesResponse, None],
-) -> AsyncGenerator[str, None]:
-    """Convert the generator to a stream of events in SSE format"""
-    async for event in generator:
-        event_type = getattr(event, "type", "unknown")
-        # https://developer.mozilla.org/en-US/docs/Web/API/Server-sent_events/Using_server-sent_events#event_stream_format
-        event_data = (
-            f"event: {event_type}\ndata: {event.model_dump_json(indent=None)}\n\n"
-        )
-        yield event_data
-
-
-@router.post(
-    "/v1/responses",
-    dependencies=[Depends(validate_json_request)],
-    responses={
-        HTTPStatus.OK.value: {"content": {"text/event-stream": {}}},
-        HTTPStatus.BAD_REQUEST.value: {"model": ErrorResponse},
-        HTTPStatus.NOT_FOUND.value: {"model": ErrorResponse},
-        HTTPStatus.INTERNAL_SERVER_ERROR.value: {"model": ErrorResponse},
-    },
-)
-@with_cancellation
-async def create_responses(request: ResponsesRequest, raw_request: Request):
-    handler = responses(raw_request)
-    if handler is None:
-        return base(raw_request).create_error_response(
-            message="The model does not support Responses API"
-        )
-    try:
-        generator = await handler.create_responses(request, raw_request)
-    except Exception as e:
-        raise HTTPException(
-            status_code=HTTPStatus.INTERNAL_SERVER_ERROR.value, detail=str(e)
-        ) from e
-
-    if isinstance(generator, ErrorResponse):
-        return JSONResponse(
-            content=generator.model_dump(), status_code=generator.error.code
-        )
-    elif isinstance(generator, ResponsesResponse):
-        return JSONResponse(content=generator.model_dump())
-
-    return StreamingResponse(
-        content=_convert_stream_to_sse_events(generator), media_type="text/event-stream"
-    )
-
-
-@router.get("/v1/responses/{response_id}")
-async def retrieve_responses(
-    response_id: str,
-    raw_request: Request,
-    starting_after: int | None = None,
-    stream: bool | None = False,
-):
-    handler = responses(raw_request)
-    if handler is None:
-        return base(raw_request).create_error_response(
-            message="The model does not support Responses API"
-        )
-
-    try:
-        response = await handler.retrieve_responses(
-            response_id,
-            starting_after=starting_after,
-            stream=stream,
-        )
-    except Exception as e:
-        raise HTTPException(
-            status_code=HTTPStatus.INTERNAL_SERVER_ERROR.value, detail=str(e)
-        ) from e
-
-    if isinstance(response, ErrorResponse):
-        return JSONResponse(
-            content=response.model_dump(), status_code=response.error.code
-        )
-    elif isinstance(response, ResponsesResponse):
-        return JSONResponse(content=response.model_dump())
-    return StreamingResponse(
-        content=_convert_stream_to_sse_events(response), media_type="text/event-stream"
-    )
-
-
-@router.post("/v1/responses/{response_id}/cancel")
-async def cancel_responses(response_id: str, raw_request: Request):
-    handler = responses(raw_request)
-    if handler is None:
-        return base(raw_request).create_error_response(
-            message="The model does not support Responses API"
-        )
-
-    try:
-        response = await handler.cancel_responses(response_id)
-    except Exception as e:
-        raise HTTPException(
-            status_code=HTTPStatus.INTERNAL_SERVER_ERROR.value, detail=str(e)
-        ) from e
-
-    if isinstance(response, ErrorResponse):
-        return JSONResponse(
-            content=response.model_dump(), status_code=response.error.code
-        )
-    return JSONResponse(content=response.model_dump())
-
-
 @router.post(
     "/v1/messages",
     dependencies=[Depends(validate_json_request)],
@@ -469,47 +360,6 @@ async def create_messages(request: AnthropicMessagesRequest, raw_request: Reques
         resp = generator.model_dump(exclude_none=True)
         logger.debug("Anthropic Messages Response: %s", resp)
         return JSONResponse(content=resp)
-
-    return StreamingResponse(content=generator, media_type="text/event-stream")
-
-
-@router.post(
-    "/v1/chat/completions",
-    dependencies=[Depends(validate_json_request)],
-    responses={
-        HTTPStatus.OK.value: {"content": {"text/event-stream": {}}},
-        HTTPStatus.BAD_REQUEST.value: {"model": ErrorResponse},
-        HTTPStatus.NOT_FOUND.value: {"model": ErrorResponse},
-        HTTPStatus.INTERNAL_SERVER_ERROR.value: {"model": ErrorResponse},
-    },
-)
-@with_cancellation
-@load_aware_call
-async def create_chat_completion(request: ChatCompletionRequest, raw_request: Request):
-    metrics_header_format = raw_request.headers.get(
-        ENDPOINT_LOAD_METRICS_FORMAT_HEADER_LABEL, ""
-    )
-    handler = chat(raw_request)
-    if handler is None:
-        return base(raw_request).create_error_response(
-            message="The model does not support Chat Completions API"
-        )
-    try:
-        generator = await handler.create_chat_completion(request, raw_request)
-    except Exception as e:
-        raise HTTPException(
-            status_code=HTTPStatus.INTERNAL_SERVER_ERROR.value, detail=str(e)
-        ) from e
-    if isinstance(generator, ErrorResponse):
-        return JSONResponse(
-            content=generator.model_dump(), status_code=generator.error.code
-        )
-
-    elif isinstance(generator, ChatCompletionResponse):
-        return JSONResponse(
-            content=generator.model_dump(),
-            headers=metrics_header(metrics_header_format),
-        )
 
     return StreamingResponse(content=generator, media_type="text/event-stream")
 
@@ -733,8 +583,10 @@ class XRequestIdMiddleware:
 def _extract_content_from_chunk(chunk_data: dict) -> str:
     """Extract content from a streaming response chunk."""
     try:
-        from vllm.entrypoints.openai.protocol import (
+        from vllm.entrypoints.openai.chat_completion.protocol import (
             ChatCompletionStreamResponse,
+        )
+        from vllm.entrypoints.openai.engine.protocol import (
             CompletionStreamResponse,
         )
 
@@ -878,7 +730,17 @@ def build_app(args: Namespace) -> FastAPI:
     from vllm.entrypoints.serve import register_vllm_serve_api_routers
 
     register_vllm_serve_api_routers(app)
+    from vllm.entrypoints.openai.chat_completion.api_router import (
+        attach_router as register_chat_api_router,
+    )
 
+    register_chat_api_router(app)
+
+    from vllm.entrypoints.openai.responses.api_router import (
+        attach_router as register_responses_api_router,
+    )
+
+    register_responses_api_router(app)
     from vllm.entrypoints.sagemaker.routes import register_sagemaker_routes
 
     register_sagemaker_routes(router)
@@ -902,7 +764,7 @@ def build_app(args: Namespace) -> FastAPI:
     async def http_exception_handler(_: Request, exc: HTTPException):
         err = ErrorResponse(
             error=ErrorInfo(
-                message=exc.detail,
+                message=sanitize_message(exc.detail),
                 type=HTTPStatus(exc.status_code).phrase,
                 code=exc.status_code,
             )
@@ -911,8 +773,6 @@ def build_app(args: Namespace) -> FastAPI:
 
     @app.exception_handler(RequestValidationError)
     async def validation_exception_handler(_: Request, exc: RequestValidationError):
-        from vllm.entrypoints.openai.protocol import VLLMValidationError
-
         param = None
         for error in exc.errors():
             if "ctx" in error and "error" in error["ctx"]:
@@ -931,7 +791,7 @@ def build_app(args: Namespace) -> FastAPI:
 
         err = ErrorResponse(
             error=ErrorInfo(
-                message=message,
+                message=sanitize_message(message),
                 type=HTTPStatus.BAD_REQUEST.phrase,
                 code=HTTPStatus.BAD_REQUEST,
                 param=param,
@@ -1091,6 +951,7 @@ async def init_app_state(
             enable_prompt_tokens_details=args.enable_prompt_tokens_details,
             enable_force_include_usage=args.enable_force_include_usage,
             enable_log_outputs=args.enable_log_outputs,
+            enable_log_deltas=args.enable_log_deltas,
             log_error_stack=args.log_error_stack,
         )
         if "generate" in supported_tasks

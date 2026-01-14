@@ -35,13 +35,15 @@ from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from vllm.sequence import IntermediateTensors
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
-from .blip import BlipVisionModel
+from .blip import BlipVisionModel, get_blip_num_patches
 from .interfaces import (
     MultiModalEmbeddings,
+    SupportsLoRA,
     SupportsMultiModal,
     SupportsPP,
     SupportsQuant,
 )
+from .module_mapping import MultiModelKeys
 from .utils import AutoWeightsLoader, init_vllm_registered_model, maybe_prefix
 
 
@@ -521,7 +523,7 @@ class Blip2MultiModalProcessor(BaseMultiModalProcessor[Blip2ProcessingInfo]):
     dummy_inputs=Blip2DummyInputsBuilder,
 )
 class Blip2ForConditionalGeneration(
-    nn.Module, SupportsMultiModal, SupportsPP, SupportsQuant
+    nn.Module, SupportsLoRA, SupportsMultiModal, SupportsPP, SupportsQuant
 ):
     @classmethod
     def get_placeholder_str(cls, modality: str, i: int) -> str | None:
@@ -538,9 +540,17 @@ class Blip2ForConditionalGeneration(
         multimodal_config = vllm_config.model_config.multimodal_config
         self.config = config
         self.multimodal_config = multimodal_config
+        vision_config = config.vision_config
+        self._vision_tokens_per_image = (
+            get_blip_num_patches(
+                image_size=vision_config.image_size,
+                patch_size=vision_config.patch_size,
+            )
+            + 1  # include class token
+        )
 
         # TODO: Optionally initializes this for supporting embeddings.
-        self.vision_model = BlipVisionModel(config.vision_config, quant_config)
+        self.vision_model = BlipVisionModel(vision_config, quant_config)
 
         self.query_tokens = nn.Parameter(
             torch.zeros(1, config.num_query_tokens, config.qformer_config.hidden_size)
@@ -691,3 +701,36 @@ class Blip2ForConditionalGeneration(
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         loader = AutoWeightsLoader(self)
         return loader.load_weights(weights)
+
+    def get_mm_mapping(self) -> MultiModelKeys:
+        return MultiModelKeys.from_string_field(
+            language_model="language_model",
+            connector=["qformer", "language_projection"],
+            tower_model="vision_model",
+        )
+
+    def get_num_mm_encoder_tokens(
+        self,
+        num_image_tokens: int,
+    ) -> int:
+        if num_image_tokens <= 0:
+            return 0
+        assert num_image_tokens % self.config.num_query_tokens == 0, (
+            "The number of image tokens must be a multiple of "
+            "the number of query tokens."
+        )
+        num_images = num_image_tokens / self.config.num_query_tokens
+        return num_images * self._vision_tokens_per_image
+
+    def get_num_mm_connector_tokens(
+        self,
+        num_vision_tokens: int,
+    ) -> int:
+        if num_vision_tokens <= 0:
+            return 0
+        assert num_vision_tokens % self._vision_tokens_per_image == 0, (
+            "The number of vision tokens must be a multiple of "
+            "the number of tokens per image."
+        )
+        num_images = num_vision_tokens / self._vision_tokens_per_image
+        return num_images * self.config.num_query_tokens

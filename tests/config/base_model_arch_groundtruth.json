@@ -1,0 +1,359 @@
+{
+    "state-spaces/mamba-130m-hf": {
+        "architectures": [
+            "MambaForCausalLM"
+        ],
+        "model_type": "mamba",
+        "text_model_type": "mamba",
+        "hidden_size": 768,
+        "total_num_hidden_layers": 24,
+        "total_num_attention_heads": 0,
+        "head_size": 0,
+        "vocab_size": 50280,
+        "total_num_kv_heads": 0,
+        "num_experts": 0,
+        "is_deepseek_mla": false,
+        "is_multimodal_model": false,
+        "dtype": "torch.float32"
+    },
+    "mistralai/Mamba-Codestral-7B-v0.1": {
+        "architectures": [
+            "Mamba2ForCausalLM"
+        ],
+        "model_type": "mamba",
+        "text_model_type": "mamba",
+        "hidden_size": 4096,
+        "total_num_hidden_layers": 64,
+        "total_num_attention_heads": 0,
+        "head_size": 0,
+        "vocab_size": 32768,
+        "total_num_kv_heads": 0,
+        "num_experts": 0,
+        "is_deepseek_mla": false,
+        "is_multimodal_model": false,
+        "dtype": "torch.bfloat16"
+    },
+    "ibm-nasa-geospatial/Prithvi-EO-2.0-300M-TL-Sen1Floods11": {
+        "architectures": [
+            "Terratorch"
+        ],
+        "model_type": "timm_wrapper",
+        "text_model_type": "timm_wrapper",
+        "hidden_size": 0,
+        "total_num_hidden_layers": 0,
+        "total_num_attention_heads": 0,
+        "head_size": 0,
+        "vocab_size": 0,
+        "total_num_kv_heads": 0,
+        "num_experts": 0,
+        "is_deepseek_mla": false,
+        "is_multimodal_model": true,
+        "dtype": "torch.float32"
+    },
+    "tiiuae/falcon-mamba-7b-instruct": {
+        "architectures": [
+            "FalconMambaForCausalLM"
+        ],
+        "model_type": "falcon_mamba",
+        "text_model_type": "falcon_mamba",
+        "hidden_size": 4096,
+        "total_num_hidden_layers": 64,
+        "total_num_attention_heads": 0,
+        "head_size": 0,
+        "vocab_size": 65024,
+        "total_num_kv_heads": 0,
+        "num_experts": 0,
+        "is_deepseek_mla": false,
+        "is_multimodal_model": false,
+        "dtype": "torch.bfloat16"
+    },
+    "Zyphra/Zamba2-7B-instruct": {
+        "architectures": [
+            "Zamba2ForCausalLM"
+        ],
+        "model_type": "zamba2",
+        "text_model_type": "zamba2",
+        "hidden_size": 3584,
+        "total_num_hidden_layers": 81,
+        "total_num_attention_heads": 32,
+        "head_size": 224,
+        "vocab_size": 32000,
+        "total_num_kv_heads": 32,
+        "num_experts": 0,
+        "is_deepseek_mla": false,
+        "is_multimodal_model": false,
+        "dtype": "torch.bfloat16"
+    },
+    "mosaicml/mpt-7b": {
+        "architectures": [
+            "MPTForCausalLM"
+        ],
+        "model_type": "mpt",
+        "text_model_type": "mpt",
+        "hidden_size": 4096,
+        "total_num_hidden_layers": 32,
+        "total_num_attention_heads": 32,
+        "head_size": 128,
+        "vocab_size": 50432,
+        "total_num_kv_heads": 32,
+        "num_experts": 0,
+        "is_deepseek_mla": false,
+        "is_multimodal_model": false,
+        "dtype": "torch.bfloat16"
+    },
+    "databricks/dbrx-instruct": {
+        "architectures": [
+            "DbrxForCausalLM"
+        ],
+        "model_type": "dbrx",
+        "text_model_type": "dbrx",
+        "hidden_size": 6144,
+        "total_num_hidden_layers": 40,
+        "total_num_attention_heads": 48,
+        "head_size": 128,
+        "vocab_size": 100352,
+        "total_num_kv_heads": 8,
+        "num_experts": 0,
+        "is_deepseek_mla": false,
+        "is_multimodal_model": false,
+        "dtype": "torch.bfloat16"
+    },
+    "tiiuae/falcon-7b": {
+        "architectures": [
+            "FalconForCausalLM"
+        ],
+        "model_type": "falcon",
+        "text_model_type": "falcon",
+        "hidden_size": 4544,
+        "total_num_hidden_layers": 32,
+        "total_num_attention_heads": 71,
+        "head_size": 64,
+        "vocab_size": 65024,
+        "total_num_kv_heads": 1,
+        "num_experts": 0,
+        "is_deepseek_mla": false,
+        "is_multimodal_model": false,
+        "dtype": "torch.bfloat16"
+    },
+    "tiiuae/falcon-40b": {
+        "architectures": [
+            "FalconForCausalLM"
+        ],
+        "model_type": "falcon",
+        "text_model_type": "falcon",
+        "hidden_size": 8192,
+        "total_num_hidden_layers": 60,
+        "total_num_attention_heads": 128,
+        "head_size": 64,
+        "vocab_size": 65024,
+        "total_num_kv_heads": 8,
+        "num_experts": 0,
+        "is_deepseek_mla": false,
+        "is_multimodal_model": false,
+        "dtype": "torch.bfloat16"
+    },
+    "luccafong/deepseek_mtp_main_random": {
+        "architectures": [
+            "DeepseekV3ForCausalLM"
+        ],
+        "model_type": "deepseek_v3",
+        "text_model_type": "deepseek_v3",
+        "hidden_size": 2560,
+        "total_num_hidden_layers": 5,
+        "total_num_attention_heads": 32,
+        "head_size": 576,
+        "vocab_size": 129280,
+        "total_num_kv_heads": 32,
+        "num_experts": 72,
+        "is_deepseek_mla": true,
+        "is_multimodal_model": false,
+        "dtype": "torch.bfloat16"
+    },
+    "luccafong/deepseek_mtp_draft_random": {
+        "architectures": [
+            "DeepseekV3ForCausalLM"
+        ],
+        "model_type": "deepseek_v3",
+        "text_model_type": "deepseek_v3",
+        "hidden_size": 2560,
+        "total_num_hidden_layers": 10,
+        "total_num_attention_heads": 32,
+        "head_size": 576,
+        "vocab_size": 129280,
+        "total_num_kv_heads": 32,
+        "num_experts": 72,
+        "is_deepseek_mla": true,
+        "is_multimodal_model": false,
+        "dtype": "torch.bfloat16"
+    },
+    "Qwen/Qwen3-Next-80B-A3B-Instruct": {
+        "architectures": [
+            "Qwen3NextForCausalLM"
+        ],
+        "model_type": "qwen3_next",
+        "text_model_type": "qwen3_next",
+        "hidden_size": 2048,
+        "total_num_hidden_layers": 48,
+        "total_num_attention_heads": 16,
+        "head_size": 256,
+        "vocab_size": 151936,
+        "total_num_kv_heads": 2,
+        "num_experts": 512,
+        "is_deepseek_mla": false,
+        "is_multimodal_model": false,
+        "dtype": "torch.bfloat16"
+    },
+    "tiny-random/qwen3-next-moe": {
+        "architectures": [
+            "Qwen3NextForCausalLM"
+        ],
+        "model_type": "qwen3_next",
+        "text_model_type": "qwen3_next",
+        "hidden_size": 8,
+        "total_num_hidden_layers": 4,
+        "total_num_attention_heads": 16,
+        "head_size": 32,
+        "vocab_size": 151936,
+        "total_num_kv_heads": 8,
+        "num_experts": 32,
+        "is_deepseek_mla": false,
+        "is_multimodal_model": false,
+        "dtype": "torch.bfloat16"
+    },
+    "zai-org/GLM-4.5": {
+        "architectures": [
+            "Glm4MoeForCausalLM"
+        ],
+        "model_type": "glm4_moe",
+        "text_model_type": "glm4_moe",
+        "hidden_size": 5120,
+        "total_num_hidden_layers": 92,
+        "total_num_attention_heads": 96,
+        "head_size": 128,
+        "vocab_size": 151552,
+        "total_num_kv_heads": 8,
+        "num_experts": 160,
+        "is_deepseek_mla": false,
+        "is_multimodal_model": false,
+        "dtype": "torch.bfloat16"
+    },
+    "baidu/ERNIE-4.5-21B-A3B-PT": {
+        "architectures": [
+            "Ernie4_5_MoeForCausalLM"
+        ],
+        "model_type": "ernie4_5_moe",
+        "text_model_type": "ernie4_5_moe",
+        "hidden_size": 2560,
+        "total_num_hidden_layers": 28,
+        "total_num_attention_heads": 20,
+        "head_size": 128,
+        "vocab_size": 103424,
+        "total_num_kv_heads": 4,
+        "num_experts": 64,
+        "is_deepseek_mla": false,
+        "is_multimodal_model": false,
+        "dtype": "torch.bfloat16"
+    },
+    "lmsys/gpt-oss-20b-bf16": {
+        "architectures": [
+            "GptOssForCausalLM"
+        ],
+        "model_type": "gpt_oss",
+        "text_model_type": "gpt_oss",
+        "hidden_size": 2880,
+        "total_num_hidden_layers": 24,
+        "total_num_attention_heads": 64,
+        "head_size": 64,
+        "vocab_size": 201088,
+        "total_num_kv_heads": 8,
+        "num_experts": 32,
+        "is_deepseek_mla": false,
+        "is_multimodal_model": false,
+        "dtype": "torch.bfloat16"
+    },
+    "deepseek-ai/DeepSeek-V3.2-Exp": {
+        "architectures": [
+            "DeepseekV32ForCausalLM"
+        ],
+        "model_type": "deepseek_v32",
+        "text_model_type": "deepseek_v32",
+        "hidden_size": 7168,
+        "total_num_hidden_layers": 61,
+        "total_num_attention_heads": 128,
+        "head_size": 576,
+        "vocab_size": 129280,
+        "total_num_kv_heads": 128,
+        "num_experts": 256,
+        "is_deepseek_mla": true,
+        "is_multimodal_model": false,
+        "dtype": "torch.bfloat16"
+    },
+    "meta-llama/Llama-4-Scout-17B-16E-Instruct": {
+        "architectures": [
+            "Llama4ForConditionalGeneration"
+        ],
+        "model_type": "llama4",
+        "text_model_type": "llama4_text",
+        "hidden_size": 5120,
+        "total_num_hidden_layers": 48,
+        "total_num_attention_heads": 40,
+        "head_size": 128,
+        "vocab_size": 202048,
+        "total_num_kv_heads": 8,
+        "num_experts": 16,
+        "is_deepseek_mla": false,
+        "is_multimodal_model": true,
+        "dtype": "torch.bfloat16"
+    },
+    "nvidia/Llama-3_3-Nemotron-Super-49B-v1": {
+        "architectures": [
+            "DeciLMForCausalLM"
+        ],
+        "model_type": "nemotron-nas",
+        "text_model_type": "nemotron-nas",
+        "hidden_size": 8192,
+        "total_num_hidden_layers": 80,
+        "total_num_attention_heads": 64,
+        "head_size": 128,
+        "vocab_size": 128256,
+        "total_num_kv_heads": 8,
+        "num_experts": 0,
+        "is_deepseek_mla": false,
+        "is_multimodal_model": false,
+        "dtype": "torch.bfloat16"
+    },
+    "XiaomiMiMo/MiMo-7B-RL": {
+        "architectures": [
+            "MiMoForCausalLM"
+        ],
+        "model_type": "mimo",
+        "text_model_type": "mimo",
+        "hidden_size": 4096,
+        "total_num_hidden_layers": 36,
+        "total_num_attention_heads": 32,
+        "head_size": 128,
+        "vocab_size": 151680,
+        "total_num_kv_heads": 8,
+        "num_experts": 0,
+        "is_deepseek_mla": false,
+        "is_multimodal_model": false,
+        "dtype": "torch.bfloat16"
+    },
+    "meituan-longcat/LongCat-Flash-Chat": {
+        "architectures": [
+            "LongcatFlashForCausalLM"
+        ],
+        "model_type": "longcat_flash",
+        "text_model_type": "longcat_flash",
+        "hidden_size": 6144,
+        "total_num_hidden_layers": 28,
+        "total_num_attention_heads": 64,
+        "head_size": 576,
+        "vocab_size": 131072,
+        "total_num_kv_heads": 64,
+        "num_experts": 512,
+        "is_deepseek_mla": true,
+        "is_multimodal_model": false,
+        "dtype": "torch.float32"
+    }
+}
