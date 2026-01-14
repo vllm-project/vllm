@@ -68,16 +68,32 @@ class DPCoordinator:
         # Assume coordinator is colocated with front-end procs when not in
         # either external or hybrid DP LB mode.
         local_only = not (external_lb or hybrid_lb)
-        front_publish_address = get_engine_client_zmq_addr(
-            local_only=local_only, host=host
-        )
 
         local_only_eng = dp_size == parallel_config.data_parallel_size_local
         # NOTE(yongji): handling scaling from intra-node to inter-node
         if parallel_config.enable_elastic_ep:
             local_only_eng = False
-        back_publish_address = get_engine_client_zmq_addr(local_only_eng, host)
-        back_output_address = get_engine_client_zmq_addr(local_only_eng, host)
+
+        # Use pre-allocated ports when elastic EP is enabled to avoid
+        # port collision race conditions with stateless group ports.
+        coordinator_ports = parallel_config.get_coordinator_zmq_ports()
+        if coordinator_ports:
+            # Ports are: [front_publish, back_output, back_publish]
+            front_publish_address = get_engine_client_zmq_addr(
+                local_only=local_only, host=host, port=coordinator_ports[0]
+            )
+            back_output_address = get_engine_client_zmq_addr(
+                local_only_eng, host, port=coordinator_ports[1]
+            )
+            back_publish_address = get_engine_client_zmq_addr(
+                local_only_eng, host, port=coordinator_ports[2]
+            )
+        else:
+            front_publish_address = get_engine_client_zmq_addr(
+                local_only=local_only, host=host
+            )
+            back_output_address = get_engine_client_zmq_addr(local_only_eng, host)
+            back_publish_address = get_engine_client_zmq_addr(local_only_eng, host)
 
         context = get_mp_context()
         self.proc: multiprocessing.Process = context.Process(

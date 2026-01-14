@@ -272,6 +272,13 @@ class ParallelConfig:
     len(self._stateless_world_group_port_list) == 1,
     """
 
+    _coordinator_zmq_port_list: list[int] = Field(default_factory=list)
+    """List of pre-allocated ports for DPCoordinator ZMQ sockets when
+    enable_elastic_ep is True. These are allocated together with stateless
+    group ports to avoid port collision race conditions.
+    Contains 3 ports: [front_publish, back_output, back_publish].
+    """
+
     decode_context_parallel_size: int = 1
     """Number of decode context parallel groups, because the world size does
     not change by dcp, it simply reuse the GPUs of TP group, and tp_size
@@ -413,6 +420,14 @@ class ParallelConfig:
     def get_next_stateless_ep_group_port(self) -> list[int]:
         return self._stateless_ep_group_port_list.pop()
 
+    def get_coordinator_zmq_ports(self) -> list[int]:
+        """Return pre-allocated ports for DPCoordinator ZMQ sockets.
+
+        Returns list of 3 ports: [front_publish, back_output, back_publish].
+        Only available when enable_elastic_ep is True.
+        """
+        return self._coordinator_zmq_port_list
+
     def stateless_init_dp_group(self, return_store: bool = False) -> ProcessGroup:
         # NOTE: In high-concurrency scenarios multiple processes
         # can pick the same (currently free) port through a race
@@ -537,6 +552,10 @@ class ParallelConfig:
             "data_parallel_master_ip",
             "data_parallel_master_port",
             "_data_parallel_master_port_list",
+            "_coordinator_zmq_port_list",
+            "_stateless_world_group_port_list",
+            "_stateless_dp_group_port_list",
+            "_stateless_ep_group_port_list",
             "data_parallel_rpc_port",
             "rank",
             "master_addr",
@@ -602,9 +621,15 @@ class ParallelConfig:
             # we need 3 ports for each comm group in `StatelessGroupCoordinator`.
             # one for stateless CPU group, one for stateless device group,
             # one for stateless TCPStore group.
+            # We also allocate 3 ports for DPCoordinator ZMQ sockets to avoid
+            # race conditions where get_open_port() returns a port that was
+            # already allocated but not yet bound.
             total_ports_needed = (num_world_groups + num_dp_groups + num_ep_groups) * 3
+            coordinator_ports_needed = 3  # front_publish, back_output, back_publish
             if not self._stateless_world_group_port_list:
-                all_ports = get_open_ports_list(total_ports_needed + 5)
+                all_ports = get_open_ports_list(
+                    total_ports_needed + 5 + coordinator_ports_needed
+                )
                 # NOTE(yongji): allocate 5 ports for _data_parallel_master_port_list
                 # as in the case when elastic EP is not enabled
                 # (the regular DP code path below this if: `get_open_ports_list(5)`).
@@ -614,6 +639,9 @@ class ParallelConfig:
                 # to ensure the allocated ports are distinct.
                 self._data_parallel_master_port_list = all_ports[-5:]
                 all_ports = all_ports[:-5]
+                # Allocate coordinator ZMQ ports
+                self._coordinator_zmq_port_list = all_ports[-coordinator_ports_needed:]
+                all_ports = all_ports[:-coordinator_ports_needed]
                 self._stateless_world_group_port_list = [
                     all_ports[i : i + 3] for i in range(0, num_world_groups * 3, 3)
                 ]
