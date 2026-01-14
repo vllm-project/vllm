@@ -18,7 +18,6 @@ from vllm.config.utils import (
     Range,
     config,
     get_compile_factors,
-    hash_factors,
 )
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
@@ -286,13 +285,11 @@ class DynamicShapesConfig:
     whether all tensor sizes can use 32 bit indexing.
     """
 
-    def compute_hash(self) -> str:
+    def compile_factors(self) -> CompileFactors:
         """
-        Provide a hash for DynamicShapesConfig
+        Provide the factors used for hashing DynamicShapesConfig.
         """
-
-        factors = get_compile_factors(self, set())
-        return hash_factors(factors)
+        return get_compile_factors(self, set())
 
 
 @config

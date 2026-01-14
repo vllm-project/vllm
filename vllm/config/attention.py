@@ -6,7 +6,7 @@ from typing import Any, Literal
 from pydantic import field_validator
 from pydantic.dataclasses import dataclass
 
-from vllm.config.utils import config
+from vllm.config.utils import CompileFactors, config, get_compile_factors
 from vllm.logger import init_logger
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
@@ -61,6 +61,14 @@ class AttentionConfig:
         ignored_factors: list[str] = []
         factors = get_hash_factors(self, ignored_factors)
         return hash_factors(factors)
+
+    def compile_factors(self) -> CompileFactors:
+        """
+        Provide the factors that affect the compiled computation graph.
+        All dataclass fields participate; add fields to an ignore set if
+        they should not influence compilation cache keys.
+        """
+        return get_compile_factors(self, set())
 
     @field_validator("backend", mode="before")
     @classmethod

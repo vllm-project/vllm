@@ -9,7 +9,7 @@ from pydantic.dataclasses import dataclass
 from typing_extensions import Self
 
 import vllm.envs as envs
-from vllm.config.utils import config
+from vllm.config.utils import CompileFactors, config
 from vllm.logger import init_logger
 from vllm.utils.hashing import safe_hash
 
@@ -87,6 +87,10 @@ class ProfilerConfig:
         factors: list[Any] = []
         hash_str = safe_hash(str(factors).encode(), usedforsecurity=False).hexdigest()
         return hash_str
+
+    def compile_factors(self) -> CompileFactors:
+        # Profiling setup does not affect the computation graph, so hash neutral.
+        return {}
 
     def _get_from_env_if_set(self, field_name: str, env_var_name: str) -> None:
         """Get field from env var if set, with deprecation warning."""
