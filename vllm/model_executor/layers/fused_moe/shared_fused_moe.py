@@ -21,7 +21,6 @@ class SharedFusedMoE(FusedMoE):
     def __init__(
         self,
         shared_experts: torch.nn.Module | None,
-        gate: torch.nn.Module | None = None,
         use_overlapped: bool = True,
         routed_input_transform: torch.nn.Module | None = None,
         **kwargs,
@@ -48,15 +47,9 @@ class SharedFusedMoE(FusedMoE):
             and self._shared_experts is not None
         )
 
-        self._gate = gate
-
     @property
     def shared_experts(self) -> torch.nn.Module | None:
         return self._shared_experts if self.use_overlapped else None
-
-    @property
-    def gate(self) -> torch.nn.Module | None:
-        return self._gate if self.use_overlapped else None
 
     @property
     def is_internal_router(self) -> bool:
