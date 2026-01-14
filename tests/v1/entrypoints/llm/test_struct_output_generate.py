@@ -35,7 +35,6 @@ EAGLE_SPEC_CONFIG = {
     "method": "eagle",
     "model": "yuhuili/EAGLE-LLaMA3.1-Instruct-8B",
     "num_speculative_tokens": 5,
-    "async_scheduling": False,
 }
 
 PARAMS_MODELS_BACKENDS_TOKENIZER_MODE = [
@@ -655,7 +654,6 @@ def test_structured_output_with_reasoning_matrices(
         ),
         tokenizer_mode=tokenizer_mode,
         speculative_config=speculative_config,
-        **({"async_scheduling": False} if current_platform.is_rocm() else {}),
         async_scheduling=async_scheduling,
     )
     tokenizer = llm.get_tokenizer()
