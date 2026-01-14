@@ -174,6 +174,10 @@ def _types_are_compatible(annotation_type: str, value_type: str) -> bool:
     if annotation_type == "Optional" and value_type == "NoneType":
         return True
 
+    # Literal types are compatible with their underlying type (usually str)
+    if annotation_type == "Literal":
+        return True
+
     # Common type aliases
     type_aliases = {
         "List": "list",
