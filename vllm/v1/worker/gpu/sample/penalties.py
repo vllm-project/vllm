@@ -1,9 +1,87 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import numpy as np
 import torch
 
+from vllm.sampling_params import SamplingParams
 from vllm.triton_utils import tl, triton
-from vllm.v1.worker.gpu.sample.metadata import SamplingMetadata
+from vllm.utils.math_utils import cdiv
+from vllm.v1.worker.gpu.buffer_utils import UvaBackedTensor
+
+
+class PenaltiesState:
+    def __init__(self, max_num_reqs: int, vocab_size: int, device: torch.device):
+        self.max_num_reqs = max_num_reqs
+        self.vocab_size = vocab_size
+        self.device = device
+
+        self.repetition_penalty = UvaBackedTensor(max_num_reqs, dtype=torch.float32)
+        self.frequency_penalty = UvaBackedTensor(max_num_reqs, dtype=torch.float32)
+        self.presence_penalty = UvaBackedTensor(max_num_reqs, dtype=torch.float32)
+
+        # Initialize repetition penalty manually because 0 is an invalid value for it.
+        self.repetition_penalty.np.fill(1.0)
+        self.repetition_penalty.copy_to_uva()
+
+        # Statistics for penalties.
+        self.prompt_bin_mask = torch.zeros(
+            self.max_num_reqs,
+            cdiv(self.vocab_size, 32),
+            dtype=torch.int32,
+            device=self.device,
+        )
+        # TODO(woosuk): This tensor is rarely used but can be very large, taking up
+        # GBs of GPU memory. Optimize the memory usage.
+        self.output_bin_counts = torch.zeros(
+            self.max_num_reqs, self.vocab_size, dtype=torch.int32, device=self.device
+        )
+
+        self._penalties_reqs: list[int] = []
+
+    def add_request(self, req_idx: int, sampling_params: SamplingParams) -> None:
+        self.repetition_penalty.np[req_idx] = sampling_params.repetition_penalty
+        self.frequency_penalty.np[req_idx] = sampling_params.frequency_penalty
+        self.presence_penalty.np[req_idx] = sampling_params.presence_penalty
+        if use_penalty(sampling_params):
+            self._penalties_reqs.append(req_idx)
+
+    def apply_staged_writes(
+        self,
+        prefill_token_ids: torch.Tensor,
+        prefill_lens: np.ndarray,
+        prompt_lens: np.ndarray,
+    ) -> None:
+        # TODO(woosuk): Optimize this.
+        for req_idx in self._penalties_reqs:
+            bincount(
+                prefill_token_ids[req_idx],
+                int(prefill_lens[req_idx]),
+                int(prompt_lens[req_idx]),
+                self.prompt_bin_mask[req_idx],
+                self.output_bin_counts[req_idx],
+            )
+        self._penalties_reqs.clear()
+
+        self.repetition_penalty.copy_to_uva()
+        self.frequency_penalty.copy_to_uva()
+        self.presence_penalty.copy_to_uva()
+
+    def apply_penalties_and_temperature(
+        self,
+        logits: torch.Tensor,
+        idx_mapping: torch.Tensor,
+        temperature: torch.Tensor,
+    ) -> None:
+        apply_penalties_and_temperature(
+            logits,
+            idx_mapping,
+            temperature,
+            self.repetition_penalty.gpu,
+            self.frequency_penalty.gpu,
+            self.presence_penalty.gpu,
+            self.prompt_bin_mask,
+            self.output_bin_counts,
+        )
 
 
 @triton.jit
@@ -84,7 +162,13 @@ def _penalties_and_temperature_kernel(
 
 def apply_penalties_and_temperature(
     logits: torch.Tensor,
-    sampling_metadata: SamplingMetadata,
+    idx_mapping: torch.Tensor,
+    temperature: torch.Tensor,
+    repetition_penalty: torch.Tensor,
+    frequency_penalty: torch.Tensor,
+    presence_penalty: torch.Tensor,
+    prompt_bin_mask: torch.Tensor,
+    output_bin_counts: torch.Tensor,
 ) -> None:
     num_reqs, vocab_size = logits.shape
     BLOCK_SIZE = 8192
@@ -92,15 +176,15 @@ def apply_penalties_and_temperature(
     _penalties_and_temperature_kernel[(num_reqs, num_blocks)](
         logits,
         logits.stride(0),
-        sampling_metadata.idx_mapping,
-        sampling_metadata.repetition_penalty,
-        sampling_metadata.frequency_penalty,
-        sampling_metadata.presence_penalty,
-        sampling_metadata.temperature,
-        sampling_metadata.prompt_bin_mask,
-        sampling_metadata.prompt_bin_mask.stride(0),
-        sampling_metadata.output_bin_counts,
-        sampling_metadata.output_bin_counts.stride(0),
+        idx_mapping,
+        repetition_penalty,
+        frequency_penalty,
+        presence_penalty,
+        temperature,
+        prompt_bin_mask,
+        prompt_bin_mask.stride(0),
+        output_bin_counts,
+        output_bin_counts.stride(0),
         vocab_size,
         BLOCK_SIZE=BLOCK_SIZE,
     )
@@ -152,4 +236,12 @@ def bincount(
         prompt_bin_mask,
         output_bin_counts,
         BLOCK_SIZE=BLOCK_SIZE,
+    )
+
+
+def use_penalty(sampling_params: SamplingParams) -> bool:
+    return (
+        sampling_params.repetition_penalty != 1.0
+        or sampling_params.frequency_penalty != 0.0
+        or sampling_params.presence_penalty != 0.0
     )
