@@ -27,6 +27,7 @@ import anthropic
 import cloudpickle
 import httpx
 import openai
+import psutil
 import pytest
 import requests
 import torch
@@ -181,6 +182,23 @@ class RemoteOpenAIServer:
         return self
 
     def __exit__(self, exc_type, exc_value, traceback):
+        # Kill all child processes (including Ray workers) before terminating
+        # the main process to avoid orphaned processes holding onto ports
+        try:
+            parent = psutil.Process(self.proc.pid)
+            children = parent.children(recursive=True)
+            for child in children:
+                with suppress(psutil.NoSuchProcess):
+                    child.terminate()
+            # Wait for children to terminate
+            psutil.wait_procs(children, timeout=5)
+            # Force kill any remaining children
+            for child in children:
+                with suppress(psutil.NoSuchProcess):
+                    child.kill()
+        except psutil.NoSuchProcess:
+            pass  # Main process already exited
+
         self.proc.terminate()
         try:
             self.proc.wait(8)
