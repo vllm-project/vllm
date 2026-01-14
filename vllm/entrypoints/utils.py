@@ -7,7 +7,7 @@ import functools
 import os
 from argparse import Namespace
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import regex as re
 from fastapi import Request
@@ -22,17 +22,24 @@ from vllm.entrypoints.chat_utils import (
     resolve_hf_chat_template,
     resolve_mistral_chat_template,
 )
-from vllm.entrypoints.openai.cli_args import make_arg_parser
-from vllm.entrypoints.openai.protocol import (
-    ChatCompletionRequest,
-    CompletionRequest,
-    StreamOptions,
-)
-from vllm.entrypoints.openai.serving_models import LoRAModulePath
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.tokenizers.mistral import MistralTokenizer
 from vllm.utils.argparse_utils import FlexibleArgumentParser
+
+if TYPE_CHECKING:
+    from vllm.entrypoints.openai.protocol import (
+        ChatCompletionRequest,
+        CompletionRequest,
+        StreamOptions,
+    )
+    from vllm.entrypoints.openai.serving_models import LoRAModulePath
+else:
+    ChatCompletionRequest = object
+    CompletionRequest = object
+    StreamOptions = object
+    LoRAModulePath = object
+
 
 logger = init_logger(__name__)
 
@@ -206,7 +213,7 @@ def _validate_truncation_size(
 
 def get_max_tokens(
     max_model_len: int,
-    request: ChatCompletionRequest | CompletionRequest,
+    request: "ChatCompletionRequest | CompletionRequest",
     input_length: int,
     default_sampling_params: dict,
 ) -> int:
@@ -227,6 +234,8 @@ def get_max_tokens(
 
 
 def log_non_default_args(args: Namespace | EngineArgs):
+    from vllm.entrypoints.openai.cli_args import make_arg_parser
+
     non_default_args = {}
 
     # Handle Namespace
@@ -255,7 +264,7 @@ def log_non_default_args(args: Namespace | EngineArgs):
 
 
 def should_include_usage(
-    stream_options: StreamOptions | None, enable_force_include_usage: bool
+    stream_options: "StreamOptions | None", enable_force_include_usage: bool
 ) -> tuple[bool, bool]:
     if stream_options:
         include_usage = stream_options.include_usage or enable_force_include_usage
@@ -270,6 +279,8 @@ def should_include_usage(
 def process_lora_modules(
     args_lora_modules: list[LoRAModulePath], default_mm_loras: dict[str, str] | None
 ) -> list[LoRAModulePath]:
+    from vllm.entrypoints.openai.serving_models import LoRAModulePath
+
     lora_modules = args_lora_modules
     if default_mm_loras:
         default_mm_lora_paths = [
