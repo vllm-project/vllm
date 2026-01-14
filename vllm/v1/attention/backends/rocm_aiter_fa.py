@@ -152,7 +152,7 @@ if current_platform.is_rocm():
         total_tokens: int,
     ):
         assert kv_cache_layout in ["NHD", "SHUFFLE"], (
-            "kv_cache_layout only support v0, NHD, HND, SHUFFLE"
+            "kv_cache_layout only support NHD, SHUFFLE"
         )
         head_dim = key.shape[2]
         x = 16 // key_cache.element_size()
@@ -464,7 +464,7 @@ class AiterFlashAttentionMetadataBuilder(
             decode_threshold=self.reorder_batch_threshold,
         )
         if (
-            rocm_aiter_ops._SHUFFLE_KV_CACHE_ENABLED
+            rocm_aiter_ops.is_shuffle_kv_cache_enabled()
             and len(self.k_scale) == 0
             and self.vllm_config.cache_config.cache_dtype.startswith("fp8")
         ):
@@ -892,7 +892,7 @@ class AiterFlashAttentionImpl(AttentionImpl):
                 seq_starts=chunk_starts[chunk_idx],
                 dequant=self.kv_cache_dtype.startswith("fp8"),
                 kv_cache_layout="SHUFFLE"
-                if rocm_aiter_ops._SHUFFLE_KV_CACHE_ENABLED
+                if rocm_aiter_ops.is_shuffle_kv_cache_enabled()
                 else "NHD",
                 total_tokens=total_token_per_batch[chunk_idx],
             )
@@ -1005,7 +1005,7 @@ class AiterFlashAttentionImpl(AttentionImpl):
             # key[:num_actual_tokens] and value[:num_actual_tokens] because
             # the reshape_and_cache_flash op uses the slot_mapping's shape
             # to determine the number of actual tokens.
-            if rocm_aiter_ops._SHUFFLE_KV_CACHE_ENABLED:
+            if rocm_aiter_ops.is_shuffle_kv_cache_enabled():
                 # We may calculate per token quant scale in
                 # reshape_and_cache_shuffle_triton which might differ from
                 # vllm's style when shuffle layout is used.
@@ -1116,7 +1116,7 @@ class AiterFlashAttentionImpl(AttentionImpl):
             if num_decodes > 0:
                 assert attn_metadata.decode_metadata is not None
                 if self.sliding_window[0] != -1:
-                    assert not rocm_aiter_ops._SHUFFLE_KV_CACHE_ENABLED, (
+                    assert not rocm_aiter_ops.is_shuffle_kv_cache_enabled(), (
                         "Sliding window with shuffle layout is not supported yet."
                     )
                     from aiter.ops.triton.unified_attention import (
@@ -1149,7 +1149,7 @@ class AiterFlashAttentionImpl(AttentionImpl):
                     return
                 assert attn_metadata.decode_metadata is not None
 
-                if rocm_aiter_ops._SHUFFLE_KV_CACHE_ENABLED:
+                if rocm_aiter_ops.is_shuffle_kv_cache_enabled():
                     num_blocks, block_size, num_kv_heads, head_size = key_cache.shape
                     x = 16 // key_cache.element_size()
                     k_cache_template = torch.empty(
