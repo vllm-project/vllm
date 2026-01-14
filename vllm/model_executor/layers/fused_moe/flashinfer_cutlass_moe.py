@@ -17,7 +17,8 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8Dynamic128Sym,
     kFp8Static128BlockSym,
     kFp8StaticTensorSym,
-    kNvfp4Quant,
+    kNvfp4Dynamic,
+    kNvfp4Static,
 )
 from vllm.platforms import current_platform
 from vllm.utils.flashinfer import (
@@ -127,7 +128,7 @@ class FlashInferExperts(mk.FusedMoEPermuteExpertsUnpermute):
                 and (p.is_device_capability((9, 0)))
             )
             or (
-                (scheme == (kNvfp4Quant, kNvfp4Quant))
+                (scheme == (kNvfp4Static, kNvfp4Dynamic))
                 and (p.is_device_capability((10, 0)))  # GB?
             )
         )

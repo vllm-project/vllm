@@ -74,7 +74,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     cutlass_fp4_supported,
     is_layer_skipped,
     kFp8StaticTensorSym,
-    kNvfp4Quant,
+    kNvfp4Dynamic,
     swizzle_blockscale,
 )
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
@@ -1337,8 +1337,8 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
         # Select experts implementation.
         self.nvfp4_backend, self.experts_cls = select_nvfp4_moe_backend(
             config=self.moe,
-            weight_key=kNvfp4Quant,
-            activation_key=kNvfp4Quant,
+            weight_key=kNvfp4Dynamic,
+            activation_key=kNvfp4Dynamic,
         )
 
         # Delay creation of the kernel until after process-weights.

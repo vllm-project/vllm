@@ -16,7 +16,8 @@ from vllm.model_executor.layers.fused_moe.config import (
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
-    kNvfp4Quant,
+    kNvfp4Dynamic,
+    kNvfp4Static,
     swizzle_blockscale,
 )
 from vllm.platforms import current_platform
@@ -62,7 +63,7 @@ def _supports_quant_scheme(
 ) -> bool:
     """Supports Nvfp4 quantization."""
     SUPPORTED_W_A = [
-        (kNvfp4Quant, kNvfp4Quant),
+        (kNvfp4Static, kNvfp4Dynamic),
     ]
     return (weight_key, activation_key) in SUPPORTED_W_A
 
