@@ -235,10 +235,6 @@ def models(request: Request) -> OpenAIServingModels:
     return request.app.state.openai_serving_models
 
 
-def responses(request: Request) -> OpenAIServingResponses | None:
-    return request.app.state.openai_serving_responses
-
-
 def messages(request: Request) -> AnthropicServingMessages:
     return request.app.state.anthropic_serving_messages
 
@@ -257,10 +253,6 @@ def tokenization(request: Request) -> OpenAIServingTokenization:
 
 def engine_client(request: Request) -> EngineClient:
     return request.app.state.engine_client
-
-
-def generate_tokens(request: Request) -> ServingTokens | None:
-    return request.app.state.serving_tokens
 
 
 @router.get("/load")
