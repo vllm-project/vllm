@@ -9,6 +9,7 @@ import torch
 import vllm._custom_ops as ops
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.model_executor.layers.fused_moe.config import (
+    FusedMoEConfig,
     FusedMoEParallelConfig,
     FusedMoEQuantConfig,
     FusedMoEQuantScheme,
@@ -534,6 +535,7 @@ def batched_fused_marlin_moe(
 class MarlinExpertsBase(mk.FusedMoEPermuteExpertsUnpermute):
     def __init__(
         self,
+        moe_config: FusedMoEConfig,
         quant_config: FusedMoEQuantConfig,
         w13_g_idx: torch.Tensor | None = None,
         w2_g_idx: torch.Tensor | None = None,
@@ -553,7 +555,7 @@ class MarlinExpertsBase(mk.FusedMoEPermuteExpertsUnpermute):
         self.w13_g_idx_sort_indices = w13_g_idx_sort_indices
         self.w2_g_idx_sort_indices = w2_g_idx_sort_indices
         self.is_k_full = is_k_full
-        super().__init__(quant_config)
+        super().__init__(moe_config, quant_config)
 
     @staticmethod
     def _supports_current_device() -> bool:
@@ -626,24 +628,6 @@ class MarlinExpertsBase(mk.FusedMoEPermuteExpertsUnpermute):
 
 
 class MarlinExperts(MarlinExpertsBase):
-    def __init__(
-        self,
-        quant_config: FusedMoEQuantConfig,
-        w13_g_idx: torch.Tensor | None = None,
-        w2_g_idx: torch.Tensor | None = None,
-        w13_g_idx_sort_indices: torch.Tensor | None = None,
-        w2_g_idx_sort_indices: torch.Tensor | None = None,
-        is_k_full: bool = True,
-    ):
-        super().__init__(
-            quant_config,
-            w13_g_idx,
-            w2_g_idx,
-            w13_g_idx_sort_indices,
-            w2_g_idx_sort_indices,
-            is_k_full,
-        )
-
     def supports_expert_map(self) -> bool:
         return True
 

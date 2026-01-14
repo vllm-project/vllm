@@ -89,11 +89,11 @@ def backend_2_kernel_cls(
         return FlashInferCuteDSLExperts
 
     elif backend == NvFp4MoeBackend.VLLM_CUTLASS:
-        from vllm.model_executor.layers.fused_moe.triton_cutlass_moe import (
-            TritonOrCutlassExperts,
+        from vllm.model_executor.layers.fused_moe.cutlass_moe import (
+            CutlassExpertsFp4,
         )
 
-        return TritonOrCutlassExperts
+        return CutlassExpertsFp4
 
     elif backend == NvFp4MoeBackend.MARLIN:
         from vllm.model_executor.layers.fused_moe.fused_marlin_moe import (
