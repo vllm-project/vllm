@@ -952,43 +952,28 @@ class FusedMoEParallelConfig:
             and vllm_parallel_config.enable_expert_parallel
         )
 
-        dp_size = dp_size_
-        dp_rank = get_dp_group().rank_in_group if dp_size > 1 else 0
-        pcp_size = pcp_size_
-        pcp_rank = get_pcp_group().rank_in_group if pcp_size > 1 else 0
+        dp_rank = get_dp_group().rank_in_group if dp_size_ > 1 else 0
+        pcp_rank = get_pcp_group().rank_in_group if pcp_size_ > 1 else 0
         tp_size, tp_rank = FusedMoEParallelConfig.flatten_tp_across_dp_and_pcp(
             tp_size_, dp_size_, dp_rank, pcp_size_, pcp_rank
         )
 
-        if not use_ep:
-            return FusedMoEParallelConfig(
-                tp_size=tp_size,
-                tp_rank=tp_rank,
-                pcp_size=pcp_size,
-                pcp_rank=pcp_rank,
-                dp_size=dp_size,
-                dp_rank=dp_rank,
-                ep_size=1,
-                ep_rank=0,
-                use_ep=False,
-                all2all_backend=vllm_parallel_config.all2all_backend,
-            )
-        # DP + EP / TP + EP / DP + TP + EP
-        assert use_ep
-        # In EP, each device owns a set of experts fully. There is no tensor
-        # parallel update tp_size, tp_rank, ep_size and ep_rank to reflect that.
-        ep_size = tp_size
-        ep_rank = tp_rank
+        if use_ep:
+            ep_size, ep_rank = tp_size, tp_rank
+            tp_size, tp_rank = 1, 0
+        else:
+            ep_size, ep_rank = 1, 0
+
         return FusedMoEParallelConfig(
-            tp_size=1,
-            tp_rank=0,
-            pcp_size=pcp_size,
+            tp_size=tp_size,
+            tp_rank=tp_rank,
+            pcp_size=pcp_size_,
             pcp_rank=pcp_rank,
-            dp_size=dp_size,
+            dp_size=dp_size_,
             dp_rank=dp_rank,
             ep_size=ep_size,
             ep_rank=ep_rank,
-            use_ep=True,
+            use_ep=use_ep,
             all2all_backend=vllm_parallel_config.all2all_backend,
         )
 
