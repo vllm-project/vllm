@@ -12,11 +12,11 @@ from vllm.tokenizers import TokenizerLike, cached_tokenizer_from_config
 from .cache import BaseMultiModalProcessorCache
 from .inputs import MultiModalInputs
 from .processing import (
+    BaseDummyInputsBuilder,
     BaseMultiModalProcessor,
     BaseProcessingInfo,
     InputProcessingContext,
 )
-from .profiling import BaseDummyInputsBuilder
 
 if TYPE_CHECKING:
     from vllm.config import ModelConfig, ObservabilityConfig
@@ -45,7 +45,7 @@ class ProcessingInfoFactory(Protocol[_I_co]):
 class DummyInputsBuilderFactory(Protocol[_I]):  # type: ignore[misc]
     """
     Constructs a
-    [`BaseDummyInputsBuilder`][vllm.multimodal.profiling.BaseDummyInputsBuilder]
+    [`BaseDummyInputsBuilder`][vllm.multimodal.processing.BaseDummyInputsBuilder]
     instance from the context.
     """
 
