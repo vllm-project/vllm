@@ -12,8 +12,7 @@ from typing import final
 import torch
 
 from vllm.lora.layers import LoRAMapping
-from vllm.triton_utils import HAS_TRITON, triton
-from vllm.utils.math_utils import round_up
+from vllm.triton_utils import HAS_TRITON
 
 if HAS_TRITON:
     from vllm.lora.ops.triton_ops import (
@@ -23,7 +22,6 @@ if HAS_TRITON:
         lora_shrink,
     )
 
-from vllm import _custom_ops as ops
 
 from .punica_base import PunicaWrapperBase
 
@@ -313,49 +311,47 @@ class PunicaWrapperGPU(PunicaWrapperBase):
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
         Aligns tokens and experts into block-sized chunks for LoRA-based
-        mixture-of-experts (MoE) execution.
+        mixture-of-experts (MoE) execution using combined virtual experts.
+
+        The approach combines (lora_id, expert_id) into a single "virtual expert"
+        index: virtual_expert = lora_id * num_experts + expert_id
+
+        For tokens without LoRA (token_lora_mapping == -1), we set
+        topk_ids_lora to -1 to indicate they should be skipped.
         """
-        max_num_tokens_padded = topk_ids.numel() + num_experts * (block_size - 1)
-        if pad_sorted_ids:
-            max_num_tokens_padded = round_up(max_num_tokens_padded, block_size)
-        sorted_ids = torch.empty(
-            (max_loras * max_num_tokens_padded,),
-            dtype=torch.int32,
-            device=topk_ids.device,
-        )
-        max_num_m_blocks = triton.cdiv(max_num_tokens_padded, block_size)
-        # Expert ids must be set default to -1 to prevent a blank block
-        expert_ids = torch.empty(
-            (max_loras * max_num_m_blocks,),
-            dtype=torch.int32,
-            device=topk_ids.device,
-        )
-        num_tokens_post_pad = torch.empty(
-            (max_loras), dtype=torch.int32, device=topk_ids.device
+        from vllm.model_executor.layers.fused_moe.moe_align_block_size import (
+            moe_align_block_size,
         )
 
-        (token_lora_mapping, _, _, _, lora_ids, _) = self.token_mapping_meta.meta_args(
+        (token_lora_mapping, _, _, _, _, _) = self.token_mapping_meta.meta_args(
             num_tokens
         )
 
-        ops.moe_lora_align_block_size(
-            topk_ids,
-            token_lora_mapping,
-            num_experts,
-            block_size,
-            max_loras,
-            max_num_tokens_padded,
-            max_num_m_blocks,
-            sorted_ids,
-            expert_ids,
-            num_tokens_post_pad,
-            adapter_enabled,
-            lora_ids,
-        )
-        if expert_map is not None:
-            expert_ids = expert_map[expert_ids]
+        # Number of virtual experts = num_experts * max_loras
+        num_expert_lora = num_experts * max_loras
+        token_lora_expanded = token_lora_mapping.unsqueeze(1)  # (num_tokens, 1)
 
-        return sorted_ids, expert_ids, num_tokens_post_pad
+        # Create mask for valid LoRA tokens
+        has_lora = token_lora_expanded >= 0  # (num_tokens, 1)
+
+        topk_ids_lora = torch.where(
+            has_lora,
+            token_lora_expanded * num_experts + topk_ids,
+            torch.tensor(-1, dtype=topk_ids.dtype, device=topk_ids.device),
+        )
+
+        # Call standard moe_align_block_size with num_expert_lora virtual experts
+        # Use ignore_invalid_experts=True to skip -1 entries
+        sorted_token_ids, expert_ids, num_tokens_post_pad = moe_align_block_size(
+            topk_ids_lora,
+            block_size,
+            num_expert_lora,
+            expert_map=None,  # Ignore expert_map for now per requirements
+            pad_sorted_ids=pad_sorted_ids,
+            ignore_invalid_experts=True,  # Skip -1 entries
+        )
+
+        return sorted_token_ids, expert_ids, num_tokens_post_pad
 
     def add_lora_fused_moe(
         self,
@@ -364,9 +360,9 @@ class PunicaWrapperGPU(PunicaWrapperBase):
         lora_a_stacked: tuple[torch.Tensor, ...],
         lora_b_stacked: tuple[torch.Tensor, ...],
         topk_weights: torch.Tensor,
-        sorted_token_ids: torch.Tensor,
+        sorted_token_ids: torch.Tensor,  # 1D tensor
         expert_ids: torch.Tensor,
-        num_tokens_post_padded: torch.Tensor,
+        num_tokens_post_padded: torch.Tensor,  # scalar tensor
         max_lora_rank: int,
         top_k_num: int,
         shrink_config,
@@ -378,8 +374,10 @@ class PunicaWrapperGPU(PunicaWrapperBase):
     ):
         """
         Performs a fused forward computation for LoRA of Mixture-of-Experts (MoE) layer.
+
+        Uses combined virtual expert indexing where expert_ids contains:
+            expert_id_lora = lora_id * num_experts + expert_id
         """
-        (_, _, _, _, lora_ids, _) = self.token_mapping_meta.meta_args(x.size(0))
         fused_moe_lora(
             y,
             x,
@@ -391,8 +389,6 @@ class PunicaWrapperGPU(PunicaWrapperBase):
             num_tokens_post_padded,
             max_lora_rank,
             top_k_num,
-            lora_ids,
-            adapter_enabled,
             shrink_config.get("BLOCK_SIZE_M", 64),
             shrink_config.get("BLOCK_SIZE_N", 64),
             shrink_config.get("BLOCK_SIZE_K", 32),

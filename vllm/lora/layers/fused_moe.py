@@ -211,10 +211,6 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
                     num_tokens_post_padded_lora
                 )
 
-                expert_ids_lora = expert_ids_lora.view(self.max_loras, -1)
-                sorted_token_ids_lora = sorted_token_ids_lora.view(self.max_loras, -1)
-                #
-
                 self.punica_wrapper.add_lora_fused_moe(
                     input.view(-1, top_k, input.shape[-1]),
                     hidden_states,
@@ -270,9 +266,6 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
                 num_tokens_post_padded_lora = moe_state_dict[
                     "num_tokens_post_padded_lora"
                 ]
-
-                expert_ids_lora = expert_ids_lora.view(self.max_loras, -1)
-                sorted_token_ids_lora = sorted_token_ids_lora.view(self.max_loras, -1)
                 intermediate_cache2 = moe_state_dict["intermediate_cache2"]
                 intermediate_cache3 = args[0]
 
