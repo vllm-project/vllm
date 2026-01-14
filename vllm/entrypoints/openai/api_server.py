@@ -259,6 +259,10 @@ def engine_client(request: Request) -> EngineClient:
 async def get_server_load_metrics(request: Request):
     # This endpoint returns the current server load metrics.
     # It tracks requests utilizing the GPU from the following routes:
+    # - /v1/responses
+    # - /v1/responses/{response_id}
+    # - /v1/responses/{response_id}/cancel
+    # - /v1/messages
     # - /v1/chat/completions
     # - /v1/completions
     # - /v1/audio/transcriptions
