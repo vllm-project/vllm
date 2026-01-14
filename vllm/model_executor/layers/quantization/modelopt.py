@@ -1564,6 +1564,10 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
                 moe_config=self.moe,
             )
 
+    @property
+    def do_post_quant_allgather(self):
+        return self.nvfp4_backend == NvFp4MoeBackend.FLASHINFER_TRTLLM
+
     def prepare_dp_allgather_tensor(
         self,
         layer: FusedMoE,
