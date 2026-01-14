@@ -18,8 +18,9 @@ from vllm.config import (
     VllmConfig,
 )
 from vllm.forward_context import set_forward_context
+from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.utils import record_function_or_nullcontext
-from vllm.v1.worker.gpu_input_batch import InputBatch
+from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
 
 
 @support_torch_compile()
@@ -37,16 +38,6 @@ class NgramGPUKernel(nn.Module):
     2. Dynamic Shapes:
        - Batch size (dim 0) is automatically marked as dynamic in support_torch_compile
        - torch.compile generates specialized kernels for different shapes
-
-    3. Graph Compilation:
-       - Note: fullgraph=True does NOT mean the forward pass runs as a single
-         CUDA Graph. nsys profiling shows ~5 separate Triton kernel launches.
-         torch.compile with fullgraph=True ensures complete Dynamo tracing
-         without fallbacks, but Inductor still generates multiple kernels.
-       - CUDA Graph capture is disabled (cudagraph_mode=NONE) for this module
-         because: (1) the kernel launch overhead is minimal compared to the
-         actual computation, and (2) the n-gram matching workload is simple
-         enough that CUDA Graph capture would be overkill with little benefit.
     """
 
     def __init__(
@@ -508,3 +499,156 @@ class NgramProposerGPU:
 
     def load_model(self, *args, **kwargs):
         self.kernel.load_model(*args, **kwargs)
+
+
+def update_scheduler_for_empty_drafts(
+    is_empty_draft_tokens_event: torch.cuda.Event,
+    is_empty_draft_tokens_cpu: torch.Tensor,
+    scheduler_output: "SchedulerOutput",
+    req_id_to_index: dict[str, int],
+) -> None:
+    """Update scheduler_output for requests with empty draft tokens.
+
+    This method is called between _update_states and _prepare_inputs to
+    defer the sync point for is_empty_draft_tokens. By delaying the sync,
+    the async D2H copy has more time to complete, reducing kernel bubbles.
+
+    Args:
+        scheduler_output: The scheduler output to update.
+        req_id_to_index: A mapping from request IDs to their indices in the batch.
+    """
+    req_data = scheduler_output.scheduled_cached_reqs
+
+    # Sync the is_empty_draft_tokens copy (should be complete by now)
+    is_empty_draft_tokens_event.synchronize()
+    is_empty_draft_tokens_cpu = is_empty_draft_tokens_cpu
+
+    for req_id in req_data.req_ids:
+        req_index = req_id_to_index.get(req_id)
+
+        if is_empty_draft_tokens_cpu[req_index].item():
+            spec_token_ids = scheduler_output.scheduled_spec_decode_tokens.get(
+                req_id, []
+            )
+            num_spec_tokens = len(spec_token_ids)
+            scheduler_output.total_num_scheduled_tokens -= num_spec_tokens
+            scheduler_output.num_scheduled_tokens[req_id] -= num_spec_tokens
+            scheduler_output.scheduled_spec_decode_tokens.pop(req_id, None)
+
+
+def update_ngram_gpu_tensors_incremental(
+    input_batch: InputBatch,
+    token_ids_gpu_tensor: torch.Tensor,
+    num_tokens_no_spec_gpu: torch.Tensor,
+    new_reqs: list[CachedRequestState],
+    device: torch.device,
+) -> None:
+    """Incrementally update token_ids_gpu_tensor and num_tokens_no_spec_gpu
+    for ngram GPU proposer.
+
+    This method handles three cases:
+    1. First run (no prev_req_id_to_index): full initialization
+    2. Index changes due to condense/reorder: GPU scatter to new positions
+    3. New/resumed requests: full copy of prompt + output tokens
+
+    Args:
+        new_reqs: List of new or resumed requests that need full tensor copy.
+    """
+    prev_req_id_to_index = input_batch.prev_req_id_to_index
+    curr_req_id_to_index = input_batch.req_id_to_index
+
+    if not curr_req_id_to_index:
+        return
+
+    # Build set of new request IDs for fast lookup
+    new_req_ids = {req.req_id for req in new_reqs}
+
+    # Case 1: First run, no previous state - full initialization
+    if prev_req_id_to_index is None:
+        for idx in curr_req_id_to_index.values():
+            num_tokens = input_batch.num_tokens_no_spec[idx]
+            if num_tokens > 0:
+                token_ids_gpu_tensor[idx, :num_tokens].copy_(
+                    input_batch.token_ids_cpu_tensor[idx, :num_tokens],
+                    non_blocking=True,
+                )
+                num_tokens_no_spec_gpu[idx : idx + 1].copy_(
+                    input_batch.num_tokens_no_spec_cpu_tensor[idx : idx + 1],
+                    non_blocking=True,
+                )
+        return
+
+    # Case 2: Detect index changes, collect requests needing reorder
+    reorder_src: list[int] = []
+    reorder_dst: list[int] = []
+
+    for req_id, curr_idx in curr_req_id_to_index.items():
+        # Skip new requests (handled separately later)
+        if req_id in new_req_ids:
+            continue
+
+        prev_idx = prev_req_id_to_index.get(req_id)
+        if prev_idx is not None and prev_idx != curr_idx:
+            reorder_src.append(prev_idx)
+            reorder_dst.append(curr_idx)
+
+    # GPU scatter reorder
+    if reorder_src:
+        src_tensor = torch.tensor(reorder_src, dtype=torch.long, device=device)
+        dst_tensor = torch.tensor(reorder_dst, dtype=torch.long, device=device)
+
+        # Clone to avoid overwriting during scatter
+        temp_token_ids = token_ids_gpu_tensor[src_tensor].clone()
+        temp_num_tokens = num_tokens_no_spec_gpu[src_tensor].clone()
+
+        token_ids_gpu_tensor[dst_tensor] = temp_token_ids
+        num_tokens_no_spec_gpu[dst_tensor] = temp_num_tokens
+    # Case 3: Full copy for new/resumed requests
+    # Use data already stored in input_batch by add_request()
+    for req_state in new_reqs:
+        new_req_idx = curr_req_id_to_index.get(req_state.req_id)
+        if new_req_idx is None:
+            continue
+
+        num_tokens = input_batch.num_tokens_no_spec[new_req_idx]
+        if num_tokens > 0:
+            # Copy from input_batch.token_ids_cpu to GPU
+            token_ids_gpu_tensor[new_req_idx, :num_tokens].copy_(
+                input_batch.token_ids_cpu_tensor[new_req_idx, :num_tokens],
+                non_blocking=True,
+            )
+            num_tokens_no_spec_gpu[new_req_idx : new_req_idx + 1].copy_(
+                input_batch.num_tokens_no_spec_cpu_tensor[
+                    new_req_idx : new_req_idx + 1
+                ],
+                non_blocking=True,
+            )
+
+
+def copy_is_empty_draft_tokens(
+    is_empty_draft_tokens_cpu: torch.Tensor,
+    is_empty_draft_tokens_copy_stream: torch.cuda.Stream,
+    is_empty_draft_tokens_event: torch.cuda.Event,
+    is_empty_draft_tokens: torch.Tensor | None,
+    batch_size: int,
+) -> None:
+    """Async copy is_empty_draft_tokens to CPU using dedicated stream.
+
+    This method uses a separate CUDA stream to overlap the D2H copy with
+    GPU kernel execution, avoiding GPU kernel gaps that would occur if
+    the copy was issued on the default stream.
+    """
+    if is_empty_draft_tokens is None:
+        return
+
+    num_reqs_to_copy = min(batch_size, is_empty_draft_tokens.shape[0])
+    if num_reqs_to_copy <= 0:
+        return
+
+    default_stream = torch.cuda.current_stream()
+    with torch.cuda.stream(is_empty_draft_tokens_copy_stream):
+        is_empty_draft_tokens_copy_stream.wait_stream(default_stream)
+        is_empty_draft_tokens_cpu[:num_reqs_to_copy].copy_(
+            is_empty_draft_tokens[:num_reqs_to_copy], non_blocking=True
+        )
+        is_empty_draft_tokens_event.record()
