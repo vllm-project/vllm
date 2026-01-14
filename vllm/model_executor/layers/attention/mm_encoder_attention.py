@@ -138,7 +138,6 @@ class MMEncoderAttention(CustomOp):
             v=value,
             scale=self.scale,
             cu_seqlens=cu_seqlens,
-            softmax_scale=self.scale,
         )
         if is_reshaped:
             output = output.reshape(bsz, q_len, -1)
