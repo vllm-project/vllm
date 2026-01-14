@@ -694,7 +694,7 @@ class CompressedTensorsW4A16Nvfp4MoEMethod(CompressedTensorsMoEMethod):
             1 / layer.w13_weight_global_scale[:, 0], requires_grad=False
         )
         layer.w2_weight_scale_2 = torch.nn.Parameter(
-            1 / layer.w2_weight_global_scale.data, requires_grad=False
+            1 / layer.w2_weight_global_scale, requires_grad=False
         )
 
         # Clean up temporary attributes.
