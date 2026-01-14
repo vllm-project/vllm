@@ -13,7 +13,7 @@ from openai.types.responses import (
 from openai.types.responses.tool import Tool
 from partial_json_parser.core.options import Allow
 
-from vllm.entrypoints.openai.protocol import (
+from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionNamedToolChoiceParam,
     ChatCompletionToolsParam,
 )

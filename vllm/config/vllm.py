@@ -584,19 +584,21 @@ class VllmConfig:
             else:
                 self.scheduler_config.async_scheduling = True
 
-        if (
-            self.scheduler_config.async_scheduling
-            and not self.parallel_config.disable_nccl_for_dp_synchronization
-        ):
-            logger.info_once(
-                "Disabling NCCL for DP synchronization when using async scheduling."
-            )
-            self.parallel_config.disable_nccl_for_dp_synchronization = True
-
         logger.info_once(
             "Asynchronous scheduling is %s.",
             "enabled" if self.scheduler_config.async_scheduling else "disabled",
         )
+
+        if self.parallel_config.disable_nccl_for_dp_synchronization is None:
+            if self.scheduler_config.async_scheduling:
+                logger.info_once(
+                    "Disabling NCCL for DP synchronization "
+                    "when using async scheduling.",
+                    scope="local",
+                )
+                self.parallel_config.disable_nccl_for_dp_synchronization = True
+            else:
+                self.parallel_config.disable_nccl_for_dp_synchronization = False
 
         from vllm.platforms import current_platform
 
@@ -625,9 +627,9 @@ class VllmConfig:
             and self.compilation_config.mode != CompilationMode.VLLM_COMPILE
         ):
             logger.warning(
-                "Inductor compilation was disabled by user settings,"
-                "Optimizations settings that are only active during"
-                "Inductor compilation will be ignored."
+                "Inductor compilation was disabled by user settings, "
+                "optimizations settings that are only active during "
+                "inductor compilation will be ignored."
             )
 
         def has_blocked_weights():
@@ -743,7 +745,7 @@ class VllmConfig:
 
             logger.warning_once(
                 "--kv-sharing-fast-prefill requires changes on model side for "
-                "correctness and to realize prefill savings. "
+                "correctness and to realize prefill savings."
             )
         # TODO: Move after https://github.com/vllm-project/vllm/pull/26847 lands
         self._set_compile_ranges()
@@ -766,7 +768,7 @@ class VllmConfig:
             and not self.cache_config.enable_prefix_caching
         ):
             logger.warning(
-                "KV cache events are on, but prefix caching is not enabled."
+                "KV cache events are on, but prefix caching is not enabled. "
                 "Use --enable-prefix-caching to enable."
             )
         if (
@@ -775,9 +777,9 @@ class VllmConfig:
             and not self.kv_events_config.enable_kv_cache_events
         ):
             logger.warning(
-                "KV cache events are disabled,"
-                "but the scheduler is configured to publish them."
-                "Modify KVEventsConfig.enable_kv_cache_events"
+                "KV cache events are disabled, "
+                "but the scheduler is configured to publish them. "
+                "Modify KVEventsConfig.enable_kv_cache_events "
                 "to True to enable."
             )
         current_platform.check_and_update_config(self)
@@ -846,7 +848,7 @@ class VllmConfig:
                         else "pipeline parallelism"
                     )
                     logger.warning_once(
-                        "Sequence parallelism not supported with"
+                        "Sequence parallelism not supported with "
                         "native rms_norm when using %s, "
                         "this will likely lead to an error.",
                         regime,
@@ -863,7 +865,7 @@ class VllmConfig:
                 logger.warning_once(
                     "No piecewise cudagraph for executing cascade attention."
                     " Will fall back to eager execution if a batch runs "
-                    "into cascade attentions"
+                    "into cascade attentions."
                 )
 
             if self.compilation_config.cudagraph_mode.requires_piecewise_compilation():
