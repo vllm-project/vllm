@@ -49,7 +49,7 @@ class Fp8MoeBackend(Enum):
     BATCHED_DEEPGEMM = "Batched DeepGEMM"
     MARLIN = "Marlin"
     TRITON = "Triton"
-    BATCHED_TRITON = "Triton"
+    BATCHED_TRITON = "Batched Triton"
     AITER = "AITER"
     VLLM_CUTLASS = "vLLM CUTLASS"
 
@@ -134,7 +134,19 @@ def select_fp8_moe_backend(
         return Fp8MoeBackend.TRITON, backend_2_kernel_cls(Fp8MoeBackend.TRITON)
 
     def _make_log_backend(backend: Fp8MoeBackend):
-        return f"Using {backend.value} backend for FP8 MoE"
+        return f"Using `{backend.value}` backend for FP8 MoE"
+
+    def _make_log_unsupported(backend: Fp8MoeBackend, reason: str | None) -> str:
+        if reason:
+            return (
+                f"FP8 MoE backend `{backend.value}` does not support the "
+                f"deployment configuration since {reason}."
+            )
+        else:
+            return (
+                f"FP8 MoE backend `{backend.value}` does not support the "
+                "deployment configuration."
+            )
 
     def _return_or_raise(
         backend: Fp8MoeBackend,
@@ -149,13 +161,7 @@ def select_fp8_moe_backend(
         if supported:
             logger.info_once(_make_log_backend(backend))
             return backend, k_cls
-
-        assert reason is not None
-        raise ValueError(
-            f"Requested FP8 MoE backend `{backend.value}` "
-            "does not support the deployment configuration since "
-            f"{reason}."
-        )
+        raise ValueError(_make_log_unsupported(backend, reason))
 
     # NOTE: the kernels are selected in the following order.
     AVAILABLE_BACKENDS = [
@@ -183,13 +189,14 @@ def select_fp8_moe_backend(
             if fi_backend == FlashinferMoeBackend.TENSORRT_LLM:
                 backend = Fp8MoeBackend.FLASHINFER_TRTLLM
                 # TODO: validate activation format
-                if is_supported_config_trtllm(config, quant_scheme):
-                    logger.info_once(_make_log_backend(backend))
-                    return backend, None  # ?
-                raise ValueError(
-                    f"Requested FP8 MoE backend `{backend.value}` "
-                    "does not support the deployment configuration."
+                supported, reason = is_supported_config_trtllm(
+                    config, quant_scheme, activation_format
                 )
+                if supported:
+                    logger.info_once(_make_log_backend(backend))
+                    return backend, None
+                else:
+                    raise ValueError(_make_log_unsupported(backend, reason))
 
             elif fi_backend == FlashinferMoeBackend.CUTLASS:
                 backend = Fp8MoeBackend.FLASHINFER_CUTLASS
@@ -234,19 +241,39 @@ def select_fp8_moe_backend(
         backend = Fp8MoeBackend.MARLIN
         return _return_or_raise(backend, config, quant_scheme, activation_format)
 
-    elif envs.VLLM_ROCM_USE_AITER and envs.VLLM_ROCM_USE_AITER_MOE:
-        backend = Fp8MoeBackend.AITER
-        return _return_or_raise(backend, config, quant_scheme, activation_format)
+    elif envs.is_set("VLLM_ROCM_USE_AITER") or envs.is_set("VLLM_ROCM_USE_AITER_MOE"):
+        if not envs.VLLM_ROCM_USE_AITER or not envs.VLLM_ROCM_USE_AITER_MOE:
+            AVAILABLE_BACKENDS.remove(Fp8MoeBackend.AITER)
+        else:
+            backend = Fp8MoeBackend.AITER
+            return _return_or_raise(backend, config, quant_scheme, activation_format)
 
     if not allow_vllm_cutlass:
         AVAILABLE_BACKENDS.remove(Fp8MoeBackend.VLLM_CUTLASS)
 
     # Select kernels in order of backend.
     for backend in AVAILABLE_BACKENDS:
-        k_cls = backend_2_kernel_cls(backend)
-        if k_cls.is_supported_config(k_cls, config, quant_scheme, activation_format):
-            logger.info_once(_make_log_backend(backend))
+        if backend == Fp8MoeBackend.FLASHINFER_TRTLLM:
+            k_cls = None  # type: ignore[assignment]
+            supported, reason = is_supported_config_trtllm(
+                config,
+                quant_scheme,
+                activation_format,
+            )
+        else:
+            k_cls = backend_2_kernel_cls(backend)
+            supported, reason = k_cls.is_supported_config(
+                k_cls,
+                config,
+                quant_scheme,
+                activation_format,
+            )
+
+        if supported:
+            logger.info_once(_make_log_backend(backend), scope="local")
             return backend, k_cls
+        else:
+            logger.info_once(_make_log_unsupported(backend, reason), scope="local")
 
     raise NotImplementedError(
         "No FP8 MoE backend supports the deployment configuration."

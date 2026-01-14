@@ -3,6 +3,7 @@
 
 import torch
 
+import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
     FusedMoEParallelConfig,
@@ -59,17 +60,29 @@ def _supports_moe_parallel_config(moe_parallel_config: FusedMoEParallelConfig) -
 def is_supported_config_trtllm(
     moe_config: FusedMoEConfig,
     moe_quant_scheme: FusedMoEQuantScheme,
-) -> bool:
+    activation_format: mk.FusedMoEActivationFormat,
+) -> tuple[bool, str | None]:
     """
     This method mirrors mk.FusedMoEPermuteExpertsUnpermute.is_supported_config
     """
-    return (
-        _supports_current_device()
-        and (moe_config.is_act_and_mul or _supports_no_act_and_mul())
-        and _supports_activation(moe_config.activation)
-        and _supports_quant_scheme(moe_quant_scheme)
-        and _supports_moe_parallel_config(moe_config.moe_parallel_config)
-    )
+
+    def _make_reason(reason: str) -> str:
+        return f"kernel does not support {reason}"
+
+    if not _supports_current_device():
+        return False, _make_reason("current device")
+    elif not (moe_config.is_act_and_mul or _supports_no_act_and_mul()):
+        return False, _make_reason("no act_and_mul MLP layer")
+    elif not _supports_activation(moe_config.activation):
+        return False, _make_reason(f"{moe_config.activation} activation")
+    elif not _supports_quant_scheme(moe_quant_scheme):
+        return False, _make_reason("quantization scheme")
+    elif not _supports_moe_parallel_config(moe_config.moe_parallel_config):
+        return False, _make_reason("parallel config")
+    elif activation_format != mk.FusedMoEActivationFormat.Standard:
+        return False, _make_reason("activation format")
+
+    return True, None
 
 
 def flashinfer_fused_moe_blockscale_fp8(

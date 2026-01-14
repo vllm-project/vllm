@@ -284,7 +284,9 @@ class AiterExperts(mk.FusedMoEPermuteExpertsUnpermute):
 
     @staticmethod
     def _supports_current_device() -> bool:
-        return rocm_aiter_ops.IS_AITER_FOUND
+        # Figure out a way to check if ROCm AITER is available.
+        # return rocm_aiter_ops.is_fused_moe_enabled()
+        return False
 
     @staticmethod
     def _supports_no_act_and_mul() -> bool:

@@ -1933,7 +1933,6 @@ class FusedMoE(CustomOp):
             isinstance(self.quant_method, FusedMoEModularMethod)
             or self.quant_method.supports_mk_interally
         )
-        logger.info_once(f"{do_naive_dispatch_combine=}")
 
         ctx = get_forward_context()
         sp_ctx = (
