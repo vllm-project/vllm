@@ -133,6 +133,18 @@ VLLM_ROCM_USE_AITER: bool = False
 VLLM_ROCM_USE_AITER_FP4_ASM_GEMM: bool = False
 """(ROCm only) Use asynchronous iterators for FP4 ASM GEMM operations."""
 
+<<<<<<< HEAD
+<<<<<<< HEAD
+=======
+VLLM_ROCM_USE_AITER_FP4BMM: bool = False
+"""(ROCm only) Use asynchronous iterators for FP4 BMM operations."""
+
+>>>>>>> 6a1fca724 (fix ruff check failure)
+=======
+VLLM_ROCM_USE_AITER_FP4BMM: bool = False
+"""(ROCm only) Use asynchronous iterators for FP4 BMM operations."""
+
+>>>>>>> c92ac0939 (fix ruff check failure)
 VLLM_ROCM_USE_AITER_FP8BMM: bool = False
 """(ROCm only) Use asynchronous iterators for FP8 BMM operations."""
 
