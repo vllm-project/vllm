@@ -598,6 +598,7 @@ class FlashAttentionImpl(AttentionImpl):
         - FlashAttention 3
         - Hopper GPUs (sm90+)
         - FP8 static tensor quantization
+        - Non-DCP (Distributed Context Parallelism) mode
 
         This fusion avoids a separate quantization pass after attention.
         """
@@ -608,8 +609,11 @@ class FlashAttentionImpl(AttentionImpl):
             return False
 
         # Only Hopper (sm90+) supports this feature
-        device_capability = current_platform.get_device_capability()
-        if device_capability is None or device_capability.major < 9:
+        if not current_platform.has_device_capability(90):
+            return False
+
+        # DCP mode is not supported
+        if self.dcp_world_size > 1:
             return False
 
         # Only FP8 static tensor quantization is supported
