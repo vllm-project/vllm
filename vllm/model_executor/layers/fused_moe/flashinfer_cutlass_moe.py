@@ -73,10 +73,11 @@ class FlashInferExperts(mk.FusedMoEPermuteExpertsUnpermute):
 
     @staticmethod
     def should_pf_defer_input_quant(quant_config: FusedMoEQuantConfig) -> bool:
-        """
-        FlashInfer CUTLASS Block FP8 path handles input quantization.
-        """
-        return quant_config.is_block_quantized
+        # NVFP4 kenrels and FP8 block-quantized kernels apply
+        # input quantization inside FusedMoEPermuteExpertsUnpermute.
+        return quant_config.use_nvfp4_w4a4 or (
+            quant_config.use_fp8_w8a8 and quant_config.is_block_quantized
+        )
 
     @staticmethod
     def _supports_current_device() -> bool:
