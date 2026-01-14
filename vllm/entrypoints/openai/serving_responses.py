@@ -72,19 +72,7 @@ from vllm.entrypoints.context import (
     StreamingHarmonyContext,
 )
 from vllm.entrypoints.logger import RequestLogger
-from vllm.entrypoints.openai.parser.harmony_utils import (
-    construct_harmony_previous_input_messages,
-    get_developer_message,
-    get_stop_tokens_for_assistant_actions,
-    get_system_message,
-    get_user_message,
-    has_custom_tools,
-    parse_output_message,
-    parse_remaining_state,
-    parse_response_input,
-    render_for_completion,
-)
-from vllm.entrypoints.openai.protocol import (
+from vllm.entrypoints.openai.engine.protocol import (
     DeltaMessage,
     ErrorResponse,
     InputTokensDetails,
@@ -102,15 +90,28 @@ from vllm.entrypoints.openai.protocol import (
     StreamingResponsesResponse,
     VLLMValidationError,
 )
-from vllm.entrypoints.openai.serving_engine import (
+from vllm.entrypoints.openai.engine.serving import (
     GenerationError,
     OpenAIServing,
+)
+from vllm.entrypoints.openai.parser.harmony_utils import (
+    construct_harmony_previous_input_messages,
+    get_developer_message,
+    get_stop_tokens_for_assistant_actions,
+    get_system_message,
+    get_user_message,
+    has_custom_tools,
+    parse_output_message,
+    parse_remaining_state,
+    parse_response_input,
+    render_for_completion,
 )
 from vllm.entrypoints.openai.serving_models import OpenAIServingModels
 from vllm.entrypoints.responses_utils import (
     construct_input_messages,
     construct_tool_dicts,
     extract_tool_types,
+    should_continue_final_message,
 )
 from vllm.entrypoints.tool_server import ToolServer
 from vllm.inputs.data import TokensPrompt
@@ -589,6 +590,17 @@ class OpenAIServingResponses(OpenAIServing):
             prev_msg=self.msg_store.get(prev_response.id) if prev_response else None,
             prev_response_output=prev_response.output if prev_response else None,
         )
+
+        # Check if we should continue the final message (partial completion)
+        # This enables Anthropic-style partial message completion where the
+        # user provides an incomplete assistant message to continue from.
+        continue_final = should_continue_final_message(request.input)
+        chat_template_kwargs = dict(
+            reasoning_effort=None
+            if request.reasoning is None
+            else request.reasoning.effort
+        )
+
         _, engine_prompts = await self._preprocess_chat(
             request,
             tokenizer,
@@ -597,6 +609,12 @@ class OpenAIServingResponses(OpenAIServing):
             tool_parser=self.tool_parser,
             chat_template=self.chat_template,
             chat_template_content_format=self.chat_template_content_format,
+            # When continuing a partial message, we set continue_final_message=True
+            # and add_generation_prompt=False so the model continues the message
+            # rather than starting a new one.
+            add_generation_prompt=not continue_final,
+            continue_final_message=continue_final,
+            chat_template_kwargs=chat_template_kwargs,
         )
         return messages, engine_prompts
 
