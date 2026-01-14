@@ -4200,6 +4200,11 @@ class GPUModelRunner(
 
         # Result in the maximum GPU consumption of the model
         dummy_mm_item = dummy_mm_inputs["mm_kwargs"][modality][0]
+
+        # We use the cache so that the item is saved to the cache,
+        # but not read from the cache
+        assert dummy_mm_item is not None, "Item should not be cached"
+
         dummy_mm_items = [dummy_mm_item] * max_items_per_batch
 
         return next(
