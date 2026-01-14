@@ -32,7 +32,8 @@ def test_basic_access():
 
     # Test string default
     print(
-        f"VLLM_HOST_IP: {envs.VLLM_HOST_IP!r} (type: {type(envs.VLLM_HOST_IP).__name__})"
+        f"VLLM_HOST_IP: {envs.VLLM_HOST_IP!r} "
+        f"(type: {type(envs.VLLM_HOST_IP).__name__})"
     )
     assert isinstance(envs.VLLM_HOST_IP, str)
     assert envs.VLLM_HOST_IP == ""
@@ -44,10 +45,11 @@ def test_basic_access():
 
     # Test bool default
     print(
-        f"VLLM_USE_MODELSCOPE: {envs.VLLM_USE_MODELSCOPE!r} (type: {type(envs.VLLM_USE_MODELSCOPE).__name__})"
+        f"VLLM_USE_MODELSCOPE: {envs.VLLM_USE_MODELSCOPE!r} "
+        f"(type: {type(envs.VLLM_USE_MODELSCOPE).__name__})"
     )
     assert isinstance(envs.VLLM_USE_MODELSCOPE, bool)
-    assert envs.VLLM_USE_MODELSCOPE == False
+    assert not envs.VLLM_USE_MODELSCOPE
 
     # Test Optional[int] default
     print(f"VLLM_PORT: {envs.VLLM_PORT!r} (type: {type(envs.VLLM_PORT).__name__})")
@@ -94,10 +96,11 @@ def test_env_var_parsing():
     # Test bool parsing
     use_modelscope = envs.VLLM_USE_MODELSCOPE
     print(
-        f"VLLM_USE_MODELSCOPE: {use_modelscope!r} (type: {type(use_modelscope).__name__})"
+        f"VLLM_USE_MODELSCOPE: {use_modelscope!r} "
+        f"(type: {type(use_modelscope).__name__})"
     )
     assert isinstance(use_modelscope, bool)
-    assert use_modelscope == True
+    assert use_modelscope
 
     # Test Optional[int] parsing with custom function
     port = envs.VLLM_PORT
@@ -157,7 +160,8 @@ def test_is_set():
     os.environ["VLLM_TEST_VAR_123"] = "test"
     assert envs.is_set("VLLM_TEST_VAR_123")
     print(
-        f"After setting: is_set('VLLM_TEST_VAR_123'): {envs.is_set('VLLM_TEST_VAR_123')}"
+        f"After setting: is_set('VLLM_TEST_VAR_123'): "
+        f"{envs.is_set('VLLM_TEST_VAR_123')}"
     )
 
     # Clean up

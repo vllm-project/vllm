@@ -249,7 +249,8 @@ def env_list_with_choices(
                 if val_lower not in choices_lower:
                     raise ValueError(
                         f"Invalid value '{val}' in {env_name}. "
-                        f"Must be one of (case-insensitive): {', '.join(allowed_choices)}"
+                        f"Must be one of (case-insensitive): "
+                        f"{', '.join(allowed_choices)}"
                     )
                 # Use canonical choice
                 idx = choices_lower.index(val_lower)

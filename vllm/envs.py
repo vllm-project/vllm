@@ -267,10 +267,14 @@ def maybe_convert_int(value: str | None) -> int | None:
     return int(value)
 
 
-def maybe_convert_bool(value: str | None) -> bool | None:
-    if value is None:
+def maybe_convert_bool(val: str | bool | None) -> bool | None:
+    if isinstance(val, bool):
+        return val
+    if val is None:
         return None
-    return bool(int(value))
+    if isinstance(val, str):
+        return val.lower() in ("1", "true", "yes", "on")
+    return bool(val)
 
 
 def disable_compile_cache() -> bool:

@@ -35,6 +35,31 @@ else:
     def parse_path(x): ...
     def parse_list(x): ...
 
+
+def disable_compile_cache() -> bool:
+    """Check if compile cache should be disabled."""
+    return bool(int(os.getenv("VLLM_DISABLE_COMPILE_CACHE", "0")))
+
+
+def use_aot_compile() -> bool:
+    """Determine if AOT compilation should be used."""
+    from vllm.model_executor.layers.batch_invariant import (
+        vllm_is_batch_invariant,
+    )
+    from vllm.utils.torch_utils import is_torch_equal_or_newer
+
+    default_value = (
+        "1"
+        if is_torch_equal_or_newer("2.10.0.dev") and not disable_compile_cache()
+        else "0"
+    )
+
+    return (
+        not vllm_is_batch_invariant()
+        and os.environ.get("VLLM_USE_AOT_COMPILE", default_value) == "1"
+    )
+
+
 # ================== Network and Communication ==================
 
 VLLM_HOST_IP: str = ""
@@ -99,6 +124,51 @@ LD_LIBRARY_PATH: str | None = None
 VLLM_ROCM_SLEEP_MEM_CHUNK_SIZE: int = 256
 """ROCm memory chunk size for sleep operations (in MB)."""
 
+VLLM_ROCM_FP8_MFMA_PAGE_ATTN: bool = False
+"""(ROCm only) Enable FP8 MFMA (Matrix Fused Multiply-Add) for paged attention."""
+
+VLLM_ROCM_USE_AITER: bool = False
+"""(ROCm only) Use asynchronous iterators for data loading."""
+
+VLLM_ROCM_USE_AITER_FP4_ASM_GEMM: bool = False
+"""(ROCm only) Use asynchronous iterators for FP4 ASM GEMM operations."""
+
+VLLM_ROCM_USE_AITER_FP8BMM: bool = False
+"""(ROCm only) Use asynchronous iterators for FP8 BMM operations."""
+
+VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS: bool = False
+"""(ROCm only) Use asynchronous iterators for fusion shared experts."""
+
+VLLM_ROCM_USE_AITER_LINEAR: bool = False
+"""(ROCm only) Use asynchronous iterators for linear layers."""
+
+VLLM_ROCM_USE_AITER_MHA: bool = False
+"""(ROCm only) Use asynchronous iterators for multi-head attention layers."""
+
+VLLM_ROCM_USE_AITER_MLA: bool = False
+"""(ROCm only) Use asynchronous iterators for MLA layers."""
+
+VLLM_ROCM_USE_AITER_MOE: bool = False
+"""(ROCm only) Use asynchronous iterators for Mixture of Experts layers."""
+
+VLLM_ROCM_USE_AITER_RMSNORM: bool = False
+"""(ROCm only) Use asynchronous iterators for RMSNorm layers."""
+
+VLLM_ROCM_USE_AITER_TRITON_ROPE: bool = False
+"""(ROCm only) Use asynchronous iterators for Triton RoPE implementation."""
+
+VLLM_ROCM_USE_AITER_PAGED_ATTN: bool = False
+"""(ROCm only) Use asynchronous iterators for paged attention."""
+
+VLLM_ROCM_USE_AITER_UNIFIED_ATTENTION: bool = False
+"""(ROCm only) Use asynchronous iterators for unified attention."""
+
+VLLM_ROCM_USE_AITER_TRITON_GEMM: bool = False
+"""(ROCm only) Use asynchronous iterators for Triton GEMM operations."""
+
+VLLM_ROCM_SHUFFLE_KV_CACHE_LAYOUT: bool = False
+"""(ROCm only) Shuffle key-value cache layout for better memory access patterns."""
+
 VLLM_V1_USE_PREFILL_DECODE_ATTENTION: bool = False
 """Use separate attention implementations for prefill and decode phases in V1."""
 
@@ -106,7 +176,8 @@ VLLM_FLASH_ATTN_VERSION: int | None = None
 """FlashAttention version to use. If None, auto-detected."""
 
 LOCAL_RANK: int = 0
-"""Local rank of the process in the distributed setting, used to determine the GPU device id."""
+"""Local rank of the process in the distributed setting, 
+used to determine the GPU device id."""
 
 CUDA_VISIBLE_DEVICES: str | None = None
 """Used to control the visible devices in the distributed setting."""
@@ -218,7 +289,8 @@ VLLM_LOGGING_CONFIG_PATH: str | None = None
 VLLM_LOGGING_COLOR: str = "auto"
 """
 Controls colored logging output.
-Options: "auto" (default, colors when terminal), "1" (always use colors), "0" (never use colors).
+Options: "auto" (default, colors when terminal), 
+"1" (always use colors), "0" (never use colors).
 """
 
 NO_COLOR: bool = env_factory(False, lambda x: True)
@@ -233,6 +305,9 @@ If set to a non-positive value, defaults to 10.0 seconds.
 """
 
 # ================== Debugging and Tracing ==================
+
+VLLM_PROCESS_NAME_PREFIX: str = "VLLM"
+"""Prefix for process names in logs and monitoring. Default is "VLLM"."""
 
 VLLM_TRACE_FUNCTION: int = 0
 """
@@ -313,9 +388,7 @@ VLLM_XLA_USE_SPMD: bool = False
 
 # ================== Kernel Config ==================
 
-VLLM_USE_FLASHINFER_SAMPLER: bool | None = env_factory(
-    None, _parse_optional_bool_int
-)
+VLLM_USE_FLASHINFER_SAMPLER: bool | None = env_factory(None, _parse_optional_bool_int)
 """If set, vllm will use flashinfer sampler."""
 
 VLLM_FUSED_MOE_CHUNK_SIZE: int = 16 * 1024
@@ -390,9 +463,7 @@ Target device of vLLM.
 Options: cuda (default), rocm, cpu.
 """
 
-VLLM_MAIN_CUDA_VERSION: str = env_factory(
-    "12.9", lambda x: x.lower() if x else "12.9"
-)
+VLLM_MAIN_CUDA_VERSION: str = env_factory("12.9", lambda x: x.lower() if x else "12.9")
 """
 Main CUDA version of vLLM. This follows PyTorch but can be overridden.
 """
@@ -422,9 +493,7 @@ def _get_use_precompiled_default() -> bool:
     """Check for VLLM_USE_PRECOMPILED or VLLM_PRECOMPILED_WHEEL_LOCATION."""
     if os.getenv("VLLM_USE_PRECOMPILED", "0").strip().lower() in ("1", "true"):
         return True
-    if os.getenv("VLLM_PRECOMPILED_WHEEL_LOCATION"):
-        return True
-    return False
+    return os.getenv("VLLM_PRECOMPILED_WHEEL_LOCATION")
 
 
 VLLM_USE_PRECOMPILED: bool = env_default_factory(_get_use_precompiled_default)
@@ -507,7 +576,546 @@ VLLM_TORCH_PROFILER_WITH_STACK: str | None = None
 VLLM_TORCH_PROFILER_WITH_FLOPS: str | None = None
 """(Deprecated) Profile FLOPs."""
 
-# ... More variables would be added here to complete the migration ...
+VLLM_TORCH_PROFILER_USE_GZIP: str | None = None
+"""(Deprecated) Control whether torch profiler gzip-compresses profiling files."""
+
+VLLM_TORCH_PROFILER_DUMP_CUDA_TIME_TOTAL: str | None = None
+"""(Deprecated) Control whether torch profiler dumps the self_cuda_time_total table."""
+
+VLLM_PROFILER_DELAY_ITERS: str | None = None
+"""(Deprecated) Delay number of iterations before starting profiling."""
+
+VLLM_PROFILER_MAX_ITERS: str | None = None
+"""(Deprecated) Maximum number of iterations to profile."""
+
+# ================== Compilation and Build Flags ==================
+
+VLLM_USE_AOT_COMPILE: bool = env_default_factory(lambda: use_aot_compile())
+"""
+Enable/disable AOT compilation. Ensures compilation is done in warmup phase
+and reused in subsequent calls. Auto-enabled in torch >= 2.10.0 
+when compile cache is enabled.
+"""
+
+VLLM_USE_BYTECODE_HOOK: bool = True
+"""Enable/disable bytecode in TorchCompileWithNoGuardsWrapper."""
+
+VLLM_FORCE_AOT_LOAD: bool = False
+"""
+Force vllm to always load AOT compiled models from disk.
+Failure to load will result in a hard error when enabled.
+Ignored when VLLM_USE_AOT_COMPILE is disabled.
+"""
+
+VLLM_USE_STANDALONE_COMPILE: bool = True
+"""
+Enable/disable Inductor standalone compile.
+In torch <= 2.7 ignored; in torch >= 2.9 enabled by default.
+"""
+
+VLLM_DISABLE_COMPILE_CACHE: bool = env_default_factory(lambda: disable_compile_cache())
+"""Disable torch.compile cache."""
+
+VLLM_COMPILE_CACHE_SAVE_FORMAT: Literal["binary", "unpacked"] = "binary"
+"""
+Format for saving torch.compile cache artifacts.
+- "binary": saves as binary file (multiprocess safe)
+- "unpacked": saves as directory structure (for inspection/debugging, 
+NOT multiprocess safe)
+"""
+
+# ================== Additional Device and Hardware Settings ==================
+
+CUDA_HOME: str | None = None
+"""Path to cudatoolkit home directory (should contain bin, include, 
+and lib directories)."""
+
+VLLM_CUDART_SO_PATH: str | None = None
+"""Path to CUDART shared library. Useful when find_loaded_library() doesn't work."""
+
+VLLM_NCCL_INCLUDE_PATH: str | None = None
+"""Path to NCCL include directory."""
+
+VLLM_USE_NCCL_SYMM_MEM: bool = False
+"""Use NCCL symmetric memory for communication."""
+
+VLLM_DISABLE_PYNCCL: bool = False
+"""Disable pynccl (using torch.distributed instead)."""
+
+VLLM_ROCM_CUSTOM_PAGED_ATTN: bool = True
+"""(ROCm only) Custom paged attention kernel for MI3* cards."""
+
+VLLM_ROCM_FP8_PADDING: bool = True
+"""(ROCm only) Pad the FP8 weights to 256 bytes for ROCm."""
+
+VLLM_ROCM_MOE_PADDING: bool = True
+"""(ROCm only) Pad the weights for the MOE kernel."""
+
+VLLM_ROCM_USE_SKINNY_GEMM: bool = True
+"""(ROCm only) Use skinny GEMM kernels."""
+
+VLLM_ROCM_QUICK_REDUCE_CAST_BF16_TO_FP16: bool = True
+"""
+(ROCm only) Custom quick allreduce kernel for MI3* cards.
+Due to lack of bfloat16 asm instruction, if set to 1, input is converted to fp16.
+"""
+
+VLLM_ROCM_QUICK_REDUCE_MAX_SIZE_BYTES_MB: int | None = None
+"""
+(ROCm only) Maximum allowed number of data bytes (MB) for custom quick allreduce 
+communication.
+Data exceeding this size will use either custom allreduce or RCCL communication.
+"""
+
+VLLM_ROCM_QUICK_REDUCE_QUANTIZATION: Literal["FP", "INT8", "INT6", "INT4", "NONE"] = (
+    "NONE"
+)
+"""
+(ROCm only) Custom quick allreduce kernel quantization level for MI3* cards.
+Recommended for large models.
+"""
+
+VLLM_FLASH_ATTN_MAX_NUM_SPLITS_FOR_CUDA_GRAPH: int = 32
+"""Flash Attention MLA max number splits for CUDA graph decode."""
+
+VLLM_ENABLE_CUDAGRAPH_GC: bool = False
+"""Enable CUDA graph garbage collection."""
+
+VLLM_USE_CUDNN_PREFILL: bool = False
+"""Use cuDNN for prefill operations."""
+
+VLLM_USE_TRTLLM_RAGGED_DEEPSEEK_PREFILL: bool = False
+"""Use TensorRT-LLM ragged prefill for DeepSeek models."""
+
+VLLM_USE_TRTLLM_ATTENTION: str | None = None
+"""Use TensorRT-LLM attention implementation."""
+
+VLLM_V1_OUTPUT_PROC_CHUNK_SIZE: int = 128
+"""
+Maximum number of requests to handle in a single asyncio task when processing
+per-token outputs in the V1 AsyncLLM interface.
+"""
+
+# ================== TPU and XLA Settings ==================
+
+VLLM_TPU_BUCKET_PADDING_GAP: int = 0
+"""
+Gap between padding buckets for the forward pass.
+If set to 8, forward pass will run with [16, 24, 32, ...].
+"""
+
+VLLM_TPU_MOST_MODEL_LEN: int | None = None
+"""Most common model length for TPU bucketing."""
+
+VLLM_TPU_USING_PATHWAYS: bool = env_default_factory(
+    lambda: bool("proxy" in os.getenv("JAX_PLATFORMS", "").lower())
+)
+"""Whether using Pathways for TPU."""
+
+# ================== Additional Distributed Settings ==================
+
+VLLM_ALL2ALL_BACKEND: (
+    Literal[
+        "naive",
+        "pplx",
+        "deepep_high_throughput",
+        "deepep_low_latency",
+        "allgather_reducescatter",
+        "flashinfer_all2allv",
+    ]
+    | None
+) = None
+"""
+All2all backend for vllm's expert parallel communication.
+Options: naive, pplx, deepep_high_throughput, deepep_low_latency,
+allgather_reducescatter, flashinfer_all2allv.
+"""
+
+VLLM_ALLREDUCE_USE_SYMM_MEM: bool = True
+"""Whether to use PyTorch symmetric memory for allreduce."""
+
+VLLM_DP_RANK: int = 0
+"""Rank of the process in the data parallel setting."""
+
+VLLM_DP_RANK_LOCAL: int = -1
+"""Local rank of the process in the data parallel setting. 
+Defaults to VLLM_DP_RANK when not set."""
+
+VLLM_DP_SIZE: int = 1
+"""World size of the data parallel setting."""
+
+VLLM_DP_MASTER_IP: str = ""
+"""IP address of the master node in the data parallel setting."""
+
+VLLM_DP_MASTER_PORT: int = 0
+"""Port of the master node in the data parallel setting."""
+
+VLLM_MOE_DP_CHUNK_SIZE: int = 256
+"""
+Quantum of tokens that can be dispatched from a DP rank in MoE with Data-Parallel,
+Expert-Parallel and Batched All-to-All dispatch/combine kernels.
+"""
+
+VLLM_ENABLE_MOE_DP_CHUNK: bool = True
+"""Enable MOE data parallel chunking."""
+
+VLLM_RANDOMIZE_DP_DUMMY_INPUTS: bool = False
+"""Randomize inputs during dummy runs when using Data Parallel."""
+
+VLLM_RAY_PER_WORKER_GPUS: float = 1.0
+"""
+Number of GPUs per worker in Ray. If set to a fraction, allows Ray to schedule
+multiple actors on a single GPU.
+"""
+
+VLLM_RAY_BUNDLE_INDICES: str = ""
+"""
+Bundle indices for Ray. If set, controls precisely which indices are used for
+the Ray bundle for every worker. Format: comma-separated list of integers.
+"""
+
+VLLM_RAY_DP_PACK_STRATEGY: Literal["strict", "fill", "span"] = "strict"
+"""
+Strategy to pack the data parallel ranks for Ray.
+- "fill": for DP master node, allocate exactly data-parallel-size-local DP ranks
+- "strict": allocate exactly data-parallel-size-local DP ranks to each picked node
+- "span": allocate one DP rank over as many nodes as required for set world_size
+"""
+
+VLLM_FLASHINFER_ALLREDUCE_FUSION_THRESHOLDS_MB: str | None = "{}"
+"""FlashInfer allreduce fusion thresholds in MB."""
+
+# ================== Additional Kernel Settings ==================
+
+VLLM_USE_TRITON_AWQ: bool = False
+"""Use Triton implementations of AWQ."""
+
+VLLM_SKIP_P2P_CHECK: bool = True
+"""
+Skip P2P check. We assume drivers can report p2p status correctly.
+If the program hangs when using custom allreduce, set to False to verify p2p is working.
+"""
+
+VLLM_DISABLED_KERNELS: list[str] = env_factory(None, parse_list)
+"""
+List of quantization kernels to disable (comma-separated).
+Used for testing and performance comparisons.
+Currently only affects MPLinearKernel selection.
+"""
+
+VLLM_USE_DEEP_GEMM: bool = True
+"""Allow use of DeepGemm kernels for fused moe ops."""
+
+VLLM_MOE_USE_DEEP_GEMM: bool = True
+"""Allow use of DeepGemm specifically for MoE fused ops (overrides only MoE)."""
+
+VLLM_USE_DEEP_GEMM_E8M0: bool = True
+"""Use E8M0 scaling when DeepGEMM is used on Blackwell GPUs."""
+
+VLLM_DEEP_GEMM_WARMUP: Literal["skip", "full", "relax"] = "relax"
+"""
+DeepGemm warmup strategy. Warmup JITs required kernels before model execution
+but increases startup time.
+- "skip": Skip warmup
+- "full": Warmup by running all possible gemm shapes
+- "relax": Select gemm shapes based on heuristics
+"""
+
+VLLM_USE_FUSED_MOE_GROUPED_TOPK: bool = True
+"""Use fused grouped_topk for MoE expert selection."""
+
+VLLM_BLOCKSCALE_FP8_GEMM_FLASHINFER: bool = False
+"""
+Allow use of FlashInfer FP8 block-scale GEMM for linear layers.
+Uses TensorRT-LLM kernels and requires SM90+ (Hopper).
+"""
+
+VLLM_USE_FLASHINFER_MOE_FP16: bool = False
+"""Allow use of FlashInfer MoE kernels for FP16 fused moe ops."""
+
+VLLM_USE_FLASHINFER_MOE_FP8: bool = False
+"""Allow use of FlashInfer MoE kernels for FP8 fused moe ops."""
+
+VLLM_USE_FLASHINFER_MOE_FP4: bool = False
+"""Allow use of FlashInfer CUTLASS kernels for FP4 fused moe ops."""
+
+VLLM_USE_FLASHINFER_MOE_MXFP4_MXFP8: bool = False
+"""Use FlashInfer MXFP8 (activation) x MXFP4 (weight) MoE backend."""
+
+VLLM_USE_FLASHINFER_MOE_MXFP4_MXFP8_CUTLASS: bool = False
+"""
+Use FlashInfer CUTLASS backend for MXFP8 (activation) x MXFP4 (weight) MoE.
+Separate from TRTLLMGEN path controlled by VLLM_USE_FLASHINFER_MOE_MXFP4_MXFP8.
+"""
+
+VLLM_USE_FLASHINFER_MOE_MXFP4_BF16: bool = False
+"""Use FlashInfer BF16 (activation) x MXFP4 (weight) MoE backend."""
+
+VLLM_FLASHINFER_MOE_BACKEND: Literal["throughput", "latency", "masked_gemm"] = "latency"
+"""FlashInfer MoE backend type."""
+
+VLLM_FLASHINFER_WORKSPACE_BUFFER_SIZE: int = 394 * 1024 * 1024
+"""Workspace buffer size for the FlashInfer backend (in bytes)."""
+
+VLLM_FLASHINFER_DISABLE_Q_QUANTIZATION: bool = False
+"""Disable query quantization in FlashInfer."""
+
+VLLM_HAS_FLASHINFER_CUBIN: bool = False
+"""Whether FlashInfer CUBIN kernels are available."""
+
+VLLM_USE_FBGEMM: bool = False
+"""Use FBGEMM kernels."""
+
+VLLM_MARLIN_USE_ATOMIC_ADD: bool = False
+"""Use atomicAdd reduce in GPTQ/AWQ Marlin kernel."""
+
+VLLM_MARLIN_INPUT_DTYPE: Literal["int8", "fp8"] | None = None
+"""Activation dtype for Marlin kernel."""
+
+VLLM_MXFP4_USE_MARLIN: bool | None = None
+"""Use Marlin kernel in MXFP4 quantization method."""
+
+# ================== Additional Debugging Settings ==================
+
+VLLM_PATTERN_MATCH_DEBUG: str | None = None
+"""
+Debug pattern matching inside custom passes.
+Should be set to the fx.Node name (e.g. 'getitem_34' or 'scaled_mm_3').
+"""
+
+VLLM_DEBUG_DUMP_PATH: str | None = None
+"""
+Dump fx graphs to the given directory.
+Overrides CompilationConfig.debug_dump_path if set.
+"""
+
+VLLM_DEBUG_WORKSPACE: bool = False
+"""Logging of workspace resize operations."""
+
+VLLM_DEBUG_MFU_METRICS: bool = False
+"""Debug logging for --enable-mfu-metrics."""
+
+VLLM_GC_DEBUG: str = ""
+"""Garbage collection debug settings."""
+
+VLLM_CUSTOM_SCOPES_FOR_PROFILING: bool = False
+"""Add optional custom scopes for profiling. Disable to avoid overheads."""
+
+VLLM_NVTX_SCOPES_FOR_PROFILING: bool = False
+"""Add NVTX scopes for profiling."""
+
+# ================== MOE and Quantization Settings ==================
+
+VLLM_DEEPEPLL_NVFP4_DISPATCH: bool = False
+"""
+Use DeepEPLL kernels for NVFP4 quantization and dispatch method.
+Only supported on Blackwell GPUs.
+"""
+
+VLLM_DEEPEP_BUFFER_SIZE_MB: int = 1024
+"""Size in MB of the buffers (NVL and RDMA) used by DeepEP."""
+
+VLLM_DEEPEP_HIGH_THROUGHPUT_FORCE_INTRA_NODE: bool = False
+"""
+Force DeepEP to use intranode kernel for inter-node communication 
+in high throughput mode.
+Useful for higher prefill throughput on systems supporting 
+multi-node nvlink (e.g. GB200).
+"""
+
+VLLM_DEEPEP_LOW_LATENCY_USE_MNNVL: bool = False
+"""
+Allow DeepEP to use MNNVL (multi-node nvlink) for internode_ll kernel.
+Turn on for better latency on GB200-like systems.
+"""
+
+VLLM_USE_NVFP4_CT_EMULATIONS: bool = False
+"""Use NVFP4 CT emulations."""
+
+VLLM_NVFP4_GEMM_BACKEND: str | None = None
+"""NVFP4 GEMM backend selection."""
+
+VLLM_MAX_TOKENS_PER_EXPERT_FP4_MOE: int = 163840
+"""
+Maximum number of tokens per expert supported by the NVFP4 MoE CUTLASS Kernel.
+Used to create a buffer for the blockscale tensor of activations NVFP4 Quantization.
+"""
+
+VLLM_MOE_ROUTING_SIMULATION_STRATEGY: str | None = None
+"""MOE routing simulation strategy."""
+
+# ================== Additional Attention and Memory Settings ==================
+
+VLLM_ALLOW_CHUNKED_LOCAL_ATTN_WITH_HYBRID_KV_CACHE: bool = True
+"""
+Allow chunked local attention with Hybrid KV cache in Llama4 models.
+Currently disabled by default due to latency regression.
+"""
+
+VLLM_KV_CACHE_LAYOUT: Literal["NHD", "HND"] | None = None
+"""KV cache memory layout. Options: NHD, HND."""
+
+VLLM_KV_EVENTS_USE_INT_BLOCK_HASHES: bool = True
+"""Use integer block hashes for KV cache events."""
+
+VLLM_OBJECT_STORAGE_SHM_BUFFER_NAME: str = "VLLM_OBJECT_STORAGE_SHM_BUFFER"
+"""Shared memory buffer name for object storage."""
+
+VLLM_MLA_DISABLE: bool = False
+"""Disable the MLA attention optimizations."""
+
+# ================== Scale Constants ==================
+
+Q_SCALE_CONSTANT: int = 200
+"""Divisor for dynamic query scale factor calculation for FP8 KV Cache."""
+
+K_SCALE_CONSTANT: int = 200
+"""Divisor for dynamic key scale factor calculation for FP8 KV Cache."""
+
+V_SCALE_CONSTANT: int = 100
+"""Divisor for dynamic value scale factor calculation for FP8 KV Cache."""
+
+# ================== Additional Runtime Settings ==================
+
+VLLM_ALLOW_INSECURE_SERIALIZATION: bool = False
+"""
+Allow insecure serialization using pickle.
+Useful for environments where it is deemed safe to use the insecure method.
+"""
+
+VLLM_ALLOW_RUNTIME_LORA_UPDATING: bool = False
+"""Allow loading or unloading LoRA adapters at runtime."""
+
+VLLM_CI_USE_S3: bool = False
+"""Use S3 path for model loading in CI via RunAI Streamer."""
+
+VLLM_COMPUTE_NANS_IN_LOGITS: bool = False
+"""
+Enable checking whether generated logits contain NaNs, indicating corrupted output.
+Useful for debugging but may add compute overhead.
+"""
+
+VLLM_DBO_COMM_SMS: int = 20
+"""
+Number of SMs to allocate for communication kernels when running DBO.
+The rest will be allocated to compute.
+"""
+
+VLLM_DISABLE_SHARED_EXPERTS_STREAM: bool = False
+"""Disable shared experts stream."""
+
+VLLM_SHARED_EXPERTS_STREAM_TOKEN_THRESHOLD: int = 256
+"""Token threshold for shared experts stream."""
+
+VLLM_ENABLE_INDUCTOR_COORDINATE_DESCENT_TUNING: bool = True
+"""Enable Inductor coordinate descent tuning."""
+
+VLLM_ENABLE_INDUCTOR_MAX_AUTOTUNE: bool = True
+"""Enable Inductor max autotune."""
+
+VLLM_ENABLE_RESPONSES_API_STORE: bool = False
+"""Enable responses API store."""
+
+VLLM_ENABLE_V1_MULTIPROCESSING: bool = True
+"""Enable multiprocessing in LLM for the V1 code path."""
+
+VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS: int = 300
+"""Timeout in seconds for model execution."""
+
+VLLM_GPT_OSS_HARMONY_SYSTEM_INSTRUCTIONS: bool = False
+"""Enable GPT OSS Harmony system instructions."""
+
+VLLM_LOG_BATCHSIZE_INTERVAL: float = -1.0
+"""Interval for logging batch size statistics."""
+
+VLLM_LOG_MODEL_INSPECTION: bool = False
+"""Enable logging of model inspection details."""
+
+VLLM_LOOPBACK_IP: str = ""
+"""Loopback IP address."""
+
+VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT: int = 480
+"""Timeout for aborting requests in Mooncake."""
+
+VLLM_MOONCAKE_BOOTSTRAP_PORT: int = 8998
+"""Port used for Mooncake handshake between remote agents."""
+
+VLLM_MORIIO_CONNECTOR_READ_MODE: bool = False
+"""Moriio connector read mode."""
+
+VLLM_MORIIO_NUM_WORKERS: int = 1
+"""Number of Moriio workers."""
+
+VLLM_MORIIO_POST_BATCH_SIZE: int = -1
+"""Moriio POST batch size."""
+
+VLLM_MORIIO_QP_PER_TRANSFER: int = 1
+"""Moriio queue pairs per transfer."""
+
+VLLM_MQ_MAX_CHUNK_BYTES_MB: int = 16
+"""Maximum chunk size in MB for message queue."""
+
+VLLM_MSGPACK_ZERO_COPY_THRESHOLD: int = 256
+"""
+Threshold for msgspec to use 'zero copy' for serialization/deserialization of tensors.
+Tensors below this limit are encoded into the msgpack buffer, tensors above 
+are sent separately.
+"""
+
+VLLM_NIXL_ABORT_REQUEST_TIMEOUT: int = 480
+"""Timeout for aborting requests in NIXL."""
+
+VLLM_NIXL_SIDE_CHANNEL_HOST: str = "localhost"
+"""IP address used for NIXL handshake between remote agents."""
+
+VLLM_NIXL_SIDE_CHANNEL_PORT: int = 5600
+"""Port used for NIXL handshake between remote agents."""
+
+VLLM_SERVER_DEV_MODE: bool = False
+"""
+Run vLLM in development mode, enabling additional endpoints for developing and debugging
+(e.g. `/reset_prefix_cache`).
+"""
+
+VLLM_SLEEP_WHEN_IDLE: bool = False
+"""Put workers to sleep when idle."""
+
+VLLM_TEST_FORCE_LOAD_FORMAT: str | None = None
+"""Force a specific load format for testing."""
+
+VLLM_TEST_FORCE_FP8_MARLIN: bool = False
+"""
+Force FP8 Marlin to be used for FP8 quantization 
+regardless of hardware support for FP8 compute.
+"""
+
+VLLM_TOOL_JSON_ERROR_AUTOMATIC_RETRY: bool = False
+"""Automatically retry on JSON parsing errors in tool calls."""
+
+VLLM_TOOL_PARSE_REGEX_TIMEOUT_SECONDS: int = 1
+"""Timeout in seconds for tool parse regex operations."""
+
+VLLM_TUNED_CONFIG_FOLDER: str | None = None
+"""Folder containing tuned configuration files."""
+
+VLLM_USE_EXPERIMENTAL_PARSER_CONTEXT: bool = False
+"""Use experimental parser context."""
+
+VLLM_USE_V2_MODEL_RUNNER: bool = False
+"""Enable V2 model runner."""
+
+VLLM_V1_USE_OUTLINES_CACHE: bool = False
+"""
+Use the outlines cache for V1.
+This cache is unbounded and on disk, so it's not safe 
+in environments with potentially malicious users.
+"""
+
+VLLM_XGRAMMAR_CACHE_MB: int = 512
+"""
+Cache size in MB used by the xgrammar compiler.
+Default of 512 MB should be enough for roughly 1000 JSON schemas.
+"""
 
 # ================== Internal: Default Values Store ==================
 # This dict is used internally by the __getattr__ mechanism to access defaults
