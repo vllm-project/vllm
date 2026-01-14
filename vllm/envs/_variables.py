@@ -21,13 +21,9 @@ if not TYPE_CHECKING:
     from vllm.envs.utils import (
         env_default_factory,
         env_factory,
-<<<<<<< HEAD
-        env_with_choices,
-=======
         env_set_with_choices,
         env_with_choices,
         parse_list,
->>>>>>> 30f21e542 ([RFC] Improve environment variable declaration and handling (#31249))
         parse_path,
     )
 else:
@@ -35,13 +31,9 @@ else:
     def env_default_factory(x): ...
     def env_factory(x, y): ...
     def env_with_choices(a, b, c, **kwargs): ...
-<<<<<<< HEAD
-    def parse_path(x): ...
-=======
     def env_set_with_choices(a, b, c, **kwargs): ...
     def parse_path(x): ...
     def parse_list(x): ...
->>>>>>> 30f21e542 ([RFC] Improve environment variable declaration and handling (#31249))
 
 # ================== Network and Communication ==================
 
@@ -82,15 +74,12 @@ the VLLM_PORT value.
 VLLM_RPC_BASE_PATH: str = tempfile.gettempdir()
 """Base path for RPC socket files. Defaults to system temp directory."""
 
-<<<<<<< HEAD
-=======
 VLLM_RPC_TIMEOUT: int = 10000
 """RPC timeout in milliseconds."""
 
 VLLM_HTTP_TIMEOUT_KEEP_ALIVE: int = 5
 """HTTP keep-alive timeout in seconds."""
 
->>>>>>> 30f21e542 ([RFC] Improve environment variable declaration and handling (#31249))
 # ================== Feature Flags ==================
 
 VLLM_USE_MODELSCOPE: bool = False
@@ -152,13 +141,8 @@ S3_ENDPOINT_URL: str | None = None
 
 # ================== Paths and Directories ==================
 
-<<<<<<< HEAD
-VLLM_MODEL_REDIRECT_PATH: str | None = None
-"""Path to redirect model loading."""
-=======
 VLLM_MODEL_REDIRECT_PATH: Path | None = None
 """Path to redirect model loading. Automatically expands ~ and environment variables."""
->>>>>>> 30f21e542 ([RFC] Improve environment variable declaration and handling (#31249))
 
 
 def _get_default_cache_root() -> str:
@@ -237,11 +221,7 @@ Controls colored logging output.
 Options: "auto" (default, colors when terminal), "1" (always use colors), "0" (never use colors).
 """
 
-<<<<<<< HEAD
-NO_COLOR: bool = env_factory(False, lambda x: x != "0")
-=======
 NO_COLOR: bool = env_factory(False, lambda x: True)
->>>>>>> 30f21e542 ([RFC] Improve environment variable declaration and handling (#31249))
 """Standard unix flag for disabling ANSI color codes."""
 
 VLLM_LOG_STATS_INTERVAL: float = env_factory(
@@ -297,17 +277,6 @@ def _parse_optional_bool_int(value: str) -> bool | None:
     return bool(int(value))
 
 
-<<<<<<< HEAD
-VLLM_USE_FLASHINFER_SAMPLER: bool | None = env_factory(
-    None, _parse_optional_bool_int
-)
-"""If set, vllm will use flashinfer sampler."""
-
-VLLM_PP_LAYER_PARTITION: str | None = None
-"""Pipeline stage partition strategy."""
-
-=======
->>>>>>> 30f21e542 ([RFC] Improve environment variable declaration and handling (#31249))
 # ================== CPU Backend ==================
 
 VLLM_CPU_KVCACHE_SPACE: int = 0
@@ -342,16 +311,12 @@ VLLM_XLA_CHECK_RECOMPILATION: bool = False
 VLLM_XLA_USE_SPMD: bool = False
 """Use XLA SPMD (Single Program Multiple Data) partitioning."""
 
-<<<<<<< HEAD
-# ================== MOE (Mixture of Experts) ==================
-=======
 # ================== Kernel Config ==================
 
 VLLM_USE_FLASHINFER_SAMPLER: bool | None = env_factory(
     None, _parse_optional_bool_int
 )
 """If set, vllm will use flashinfer sampler."""
->>>>>>> 30f21e542 ([RFC] Improve environment variable declaration and handling (#31249))
 
 VLLM_FUSED_MOE_CHUNK_SIZE: int = 16 * 1024
 """Chunk size for fused MOE operations."""
@@ -359,11 +324,7 @@ VLLM_FUSED_MOE_CHUNK_SIZE: int = 16 * 1024
 VLLM_ENABLE_FUSED_MOE_ACTIVATION_CHUNKING: bool = True
 """Enable chunking for fused MOE activations."""
 
-<<<<<<< HEAD
-# ================== Ray Configuration ==================
-=======
 # ================== Distributed Config ==================
->>>>>>> 30f21e542 ([RFC] Improve environment variable declaration and handling (#31249))
 
 VLLM_USE_RAY_COMPILED_DAG_CHANNEL_TYPE: Literal["auto", "nccl", "shm"] = "auto"
 """Channel type for Ray compiled DAG. Options: auto, nccl, shm."""
@@ -374,12 +335,8 @@ VLLM_USE_RAY_COMPILED_DAG_OVERLAP_COMM: bool = False
 VLLM_USE_RAY_WRAPPED_PP_COMM: bool = True
 """Use Ray-wrapped pipeline parallelism communication."""
 
-<<<<<<< HEAD
-# ================== Worker Configuration ==================
-=======
 VLLM_PP_LAYER_PARTITION: str | None = None
 """Pipeline parallelism layer partition strategy."""
->>>>>>> 30f21e542 ([RFC] Improve environment variable declaration and handling (#31249))
 
 VLLM_WORKER_MULTIPROC_METHOD: Literal["fork", "spawn"] = "fork"
 """Multiprocessing method for workers. Options: fork, spawn."""
@@ -440,23 +397,11 @@ VLLM_MAIN_CUDA_VERSION: str = env_factory(
 Main CUDA version of vLLM. This follows PyTorch but can be overridden.
 """
 
-<<<<<<< HEAD
-VLLM_FLOAT32_MATMUL_PRECISION: Literal["highest", "high", "medium"] = env_with_choices(
-    "VLLM_FLOAT32_MATMUL_PRECISION",
-    "highest",
-    ["highest", "high", "medium"],
-    case_sensitive=False,
-)
-"""
-Controls PyTorch float32 matmul precision mode within vLLM workers.
-Valid options mirror torch.set_float32_matmul_precision.
-=======
 VLLM_FLOAT32_MATMUL_PRECISION: Literal["highest", "high", "medium"] = "highest"
 """
 Controls PyTorch float32 matmul precision mode within vLLM workers.
 Valid options mirror torch.set_float32_matmul_precision.
 Automatically validated (case-insensitive).
->>>>>>> 30f21e542 ([RFC] Improve environment variable declaration and handling (#31249))
 """
 
 MAX_JOBS: str | None = None
@@ -511,29 +456,6 @@ VERBOSE: bool = False
 VLLM_ALLOW_LONG_MAX_MODEL_LEN: bool = False
 """Allow model max length to exceed default limits."""
 
-<<<<<<< HEAD
-# ================== RPC and HTTP Configuration ==================
-
-VLLM_RPC_TIMEOUT: int = 10000
-"""RPC timeout in milliseconds."""
-
-VLLM_HTTP_TIMEOUT_KEEP_ALIVE: int = 5
-"""HTTP keep-alive timeout in seconds."""
-
-# ================== Plugins ==================
-
-
-def _parse_plugins_list(value: str) -> list[str]:
-    """Parse comma-separated plugin list."""
-    if not value.strip():
-        return []
-    return [item.strip() for item in value.split(",") if item.strip()]
-
-
-VLLM_PLUGINS: list[str] | None = env_factory(None, _parse_plugins_list)
-"""List of vLLM plugins to load (comma-separated)."""
-
-=======
 # ================== Plugins ==================
 
 
@@ -555,7 +477,6 @@ Example: VLLM_GPT_OSS_SYSTEM_TOOL_MCP_LABELS=container,code_interpreter
 If the server_label of your MCP tool is not in this list, it will be completely ignored.
 """
 
->>>>>>> 30f21e542 ([RFC] Improve environment variable declaration and handling (#31249))
 # ================== LoRA Configuration ==================
 
 VLLM_LORA_RESOLVER_CACHE_DIR: str | None = None

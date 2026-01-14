@@ -15,7 +15,6 @@ This script validates that:
 import ast
 import sys
 from pathlib import Path
-from typing import Any, get_type_hints
 
 
 class DirectImportChecker(ast.NodeVisitor):
@@ -86,7 +85,7 @@ def check_no_direct_imports(vllm_root: Path) -> list[str]:
             checker = DirectImportChecker(str(py_file.relative_to(vllm_root)))
             checker.visit(tree)
             errors.extend(checker.errors)
-        except SyntaxError as e:
+        except SyntaxError:
             # Skip files with syntax errors (might be Python 2 or broken)
             continue
 
@@ -112,16 +111,22 @@ def check_variable_type_annotations(variables_file: Path) -> list[str]:
     for node in ast.walk(tree):
         if isinstance(node, ast.AnnAssign):
             # This is a type-annotated assignment
-            if isinstance(node.target, ast.Name) and node.target.id.isupper() and node.annotation is None:
+            if (
+                isinstance(node.target, ast.Name)
+                and node.target.id.isupper()
+                and node.annotation is None
+            ):
                 var_name = node.target.id
                 # This is an environment variable (all caps) missing type annotation
-                errors.append(
-                    f"Variable {var_name} is missing type annotation"
-                )
+                errors.append(f"Variable {var_name} is missing type annotation")
         elif isinstance(node, ast.Assign):
             # This is a plain assignment without type annotation
             for target in node.targets:
-                if isinstance(target, ast.Name) and target.id.isupper() and not target.id.startswith("_"):
+                if (
+                    isinstance(target, ast.Name)
+                    and target.id.isupper()
+                    and not target.id.startswith("_")
+                ):
                     var_name = target.id
                     errors.append(
                         f"Variable {var_name} must have a type annotation. "
@@ -166,20 +171,19 @@ def check_lazy_default_consistency(variables_file: Path) -> list[str]:
         if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
             func_name = node.func.id
 
-            if func_name == 'env_default_factory':
+            if func_name == "env_default_factory":
                 # Should have exactly 1 argument (a callable)
                 if len(node.args) != 1:
                     warnings.append(
-                        f"env_default_factory should receive "
-                        f"exactly 1 callable argument"
+                        "env_default_factory should receive exactly 1 callable argument"
                     )
 
-            elif func_name == 'env_factory':
+            elif func_name == "env_factory":
                 # Should have exactly 2 arguments (default value and parser)
                 if len(node.args) != 2:
                     warnings.append(
-                        f"env_factory should receive exactly "
-                        f"2 arguments (default, parser)"
+                        "env_factory should receive exactly "
+                        "2 arguments (default, parser)"
                     )
 
     # Add a note if no issues were found
