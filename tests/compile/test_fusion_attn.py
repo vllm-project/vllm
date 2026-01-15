@@ -177,6 +177,16 @@ class TestAttentionFp8StaticQuantPatternModel(AttentionQuantPatternModel):
             weight_shape=(hidden_size, hidden_size),
             activation_quant_key=self.quant_key,
             weight_quant_key=self.quant_key,
+            device=self.device,
+        )
+
+        self.w = kwargs.get(
+            "w",
+            {
+                "weight": self.fp8_linear.weight,
+                "wscale": self.fp8_linear.weight_scale,
+                "scale": self.fp8_linear.input_scale,
+            },
         )
 
     def forward(self, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor):
@@ -378,13 +388,7 @@ def test_attention_quant_pattern(
             kv_cache_dtype=FP8_DTYPE,
             device=device,
             vllm_config=vllm_config,
-            # Pass w only for FP4 (Nvfp4Quant); skip for FP8
-            # as it uses TestFP8Layer
-            **(
-                {"w": getattr(model_unfused, "w", None)}
-                if model_class.quant_key is kNvfp4Quant
-                else {}
-            ),
+            w=model_unfused.w,
         )
         model_fused = model_fused.to(device)
 
