@@ -90,6 +90,7 @@ class UniProcExecutor(Executor):
             future = Future[Any]()
             future.set_result(result if single_value else [result])
         except Exception as e:
+            print(f'xw32 exception in collective_rpc: {e=}')
             future = Future[Any]()
             future.set_exception(e)
         return future
