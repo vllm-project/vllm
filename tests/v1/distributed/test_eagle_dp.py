@@ -9,18 +9,28 @@ import pytest
 
 from vllm import SamplingParams
 from vllm.engine.arg_utils import AsyncEngineArgs
+from vllm.platforms import current_platform
 from vllm.sampling_params import RequestOutputKind
 from vllm.v1.engine.async_llm import AsyncLLM
 
 DP_SIZE = int(os.getenv("DP_SIZE", 2))
 
+if current_platform.is_rocm():
+    ATTN_BACKENDS = ["ROCM_ATTN", "ROCM_AITER_FA", "TRITON_ATTN", "FLEX_ATTENTION"]
+else:
+    ATTN_BACKENDS = ["FLASH_ATTN"]
+
 
 @pytest.mark.asyncio
-async def test_run_eagle_dp(monkeypatch: pytest.MonkeyPatch):
-    # This test checks that running a model with and without eagle
-    # leads to identical tokens. This is only true in batch invariant mode
-    # (because the target model verifies all draft tokens in one big forward pass)
-    monkeypatch.setenv("VLLM_BATCH_INVARIANT", "1")
+@pytest.mark.parametrize("attn_backend", ATTN_BACKENDS)
+async def test_run_eagle_dp(monkeypatch: pytest.MonkeyPatch, attn_backend: str):
+    # For ROCm, we don't apply batch invariance because the supported attention
+    # backends have non-deterministic behavior.
+    if not current_platform.is_rocm():
+        # This test checks that running a model with and without eagle
+        # leads to identical tokens. This is only true in batch invariant mode
+        # (because the target model verifies all draft tokens in one big forward pass)
+        monkeypatch.setenv("VLLM_BATCH_INVARIANT", "1")
 
     target_model = "meta-llama/Llama-3.1-8B-Instruct"
     draft_model = "yuhuili/EAGLE-LLaMA3.1-Instruct-8B"
@@ -34,7 +44,7 @@ async def test_run_eagle_dp(monkeypatch: pytest.MonkeyPatch):
         data_parallel_backend="mp",  # ray takes more time
         trust_remote_code=True,
         max_model_len=16384,
-        attention_config={"backend": "FLASH_ATTN"},
+        attention_config={"backend": attn_backend},
     )
 
     eagle_engine_args = replace(
