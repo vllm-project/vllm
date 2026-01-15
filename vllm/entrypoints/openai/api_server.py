@@ -44,8 +44,8 @@ from vllm.entrypoints.openai.engine.protocol import (
     ErrorResponse,
 )
 from vllm.entrypoints.openai.engine.serving import OpenAIServing
+from vllm.entrypoints.openai.models.protocol import BaseModelPath
 from vllm.entrypoints.openai.models.serving import (
-    BaseModelPath,
     OpenAIServingModels,
 )
 from vllm.entrypoints.openai.responses.serving import OpenAIServingResponses

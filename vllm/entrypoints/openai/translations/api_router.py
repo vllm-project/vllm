@@ -5,7 +5,7 @@
 from http import HTTPStatus
 from typing import Annotated
 
-from fastapi import APIRouter, FastAPI, Form, HTTPException, Request
+from fastapi import APIRouter, FastAPI, Form, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from vllm.entrypoints.openai.engine.protocol import ErrorResponse
