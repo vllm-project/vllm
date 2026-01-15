@@ -9,9 +9,6 @@ import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm import envs
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.logger import init_logger
-from vllm.model_executor.layers.fused_moe.all2all_utils import (
-    maybe_make_prepare_finalize,
-)
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
     FusedMoEQuantConfig,
@@ -20,6 +17,9 @@ from vllm.model_executor.layers.fused_moe.config import (
 )
 from vllm.model_executor.layers.fused_moe.flashinfer_trtllm_moe import (
     is_supported_config_trtllm,
+)
+from vllm.model_executor.layers.fused_moe.prepare_finalize import (
+    MoEPrepareAndFinalizeNoEP,
 )
 from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
     FlashinferMoeBackend,
@@ -437,38 +437,21 @@ def make_fp8_moe_kernel(
         )
 
     # Create Prepare/Finalize.
-    prepare_finalize = maybe_make_prepare_finalize(
-        moe=moe_config,
-        quant_config=moe_quant_config,
-        routing_tables=None,  # TODO: init routing tables here?
+    prepare_finalize = MoEPrepareAndFinalizeNoEP(
         defer_input_quant=experts_cls.should_pf_defer_input_quant(
             moe_config, moe_quant_config
         ),
-        allow_new_interface=True,
     )
-    assert prepare_finalize is not None
-
-    logger.info_once("Using %s", prepare_finalize.__class__.__name__)
 
     # Create Experts.
-    if prepare_finalize.activation_format == mk.FusedMoEActivationFormat.Standard:
-        experts = experts_cls.make_standard_experts(
-            moe_config=moe_config,
-            quant_config=moe_quant_config,
-        )
-    else:
-        max_num_tokens_per_rank = prepare_finalize.max_num_tokens_per_rank()
-        assert max_num_tokens_per_rank is not None
-        experts = experts_cls.make_batched_experts(
-            moe_config=moe_config,
-            quant_config=moe_quant_config,
-            max_num_tokens=max_num_tokens_per_rank,
-            num_dispatchers=prepare_finalize.num_dispatchers(),
-        )
+    experts = experts_cls.make_standard_experts(
+        moe_config=moe_config,
+        quant_config=moe_quant_config,
+    )
 
-    # NOTE(rob): we only want the ModularKernel to control the SharedExpert
-    # if we are using all2all (for SBO). Bill is making this explict
-    # in the new MoERunner class.
+    # NOTE(rob): we only want the mk to control the shared_expert
+    # if using all2all (for SBO). bnell is making this explict in
+    # the new MoE runner class.
     kernel = mk.FusedMoEModularKernel(
         prepare_finalize,
         experts,
