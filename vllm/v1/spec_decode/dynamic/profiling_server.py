@@ -137,21 +137,9 @@ def start_server(
         return None
 
 
-# def kill_server(port: int, server_process: subprocess.Popen | None):
-#     if server_process:
-#         server_process.kill()
-#     kill_gpu_processes(port)
-
-
 def kill_server(port, server_process):
-    # REMOVE
-    # print(f"Killing server on port {port}...")
-
     if server_process:
         os.killpg(os.getpgid(server_process.pid), signal.SIGKILL)
-
-    # REMOVE
-    # print(f"Killed server process with PID: {server_process.pid if server_process else 'N/A'}")
 
     wait_for_gpu_memory_to_clear()
 
@@ -159,6 +147,3 @@ def kill_server(port, server_process):
     config_path = os.path.expanduser("~/.config/vllm")
     if os.path.exists(config_path):
         subprocess.run(["rm", "-rf", config_path])
-
-    # REMOVE
-    # print(f"Killed server on port {port} and cleaned up GPU processes.")
