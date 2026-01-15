@@ -35,7 +35,7 @@ class MultiModalBudget:
         self.model_config = model_config = vllm_config.model_config
         self.scheduler_config = scheduler_config = vllm_config.scheduler_config
         self.mm_registry = mm_registry
-        self.cache = cache = mm_registry.processor_only_cache_from_config(model_config)
+        self.cache = cache = mm_registry.processor_only_cache_from_config(vllm_config)
 
         self.max_model_len = model_config.max_model_len
         self.max_num_reqs = scheduler_config.max_num_seqs
