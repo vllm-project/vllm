@@ -689,6 +689,11 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
       SRCS "${SRCS}"
       CUDA_ARCHS "${FP4_ARCHS}")
     list(APPEND VLLM_EXT_SRC "${SRCS}")
+    # Also set FP4_ARCHS for cache_kernels.cu since it contains NVFP4 KV cache code
+    # that uses cvt.e2m1x2.f32 instruction requiring sm_100a (not sm_100)
+    set_gencode_flags_for_srcs(
+      SRCS "csrc/cache_kernels.cu"
+      CUDA_ARCHS "${FP4_ARCHS}")
     list(APPEND VLLM_GPU_FLAGS "-DENABLE_NVFP4_SM100=1")
     list(APPEND VLLM_GPU_FLAGS "-DENABLE_CUTLASS_MOE_SM100=1")
     message(STATUS "Building NVFP4 for archs: ${FP4_ARCHS}")
