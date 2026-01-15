@@ -391,7 +391,8 @@ class MultiModalRegistry:
         return mm_config.mm_processor_cache_type
 
     def processor_cache_from_config(
-        self, vllm_config: "VllmConfig"
+        self,
+        vllm_config: "VllmConfig",
     ) -> BaseMultiModalProcessorCache | None:
         """Return a `BaseMultiModalProcessorCache`, if enabled."""
         cache_type = self._get_cache_type(vllm_config)
