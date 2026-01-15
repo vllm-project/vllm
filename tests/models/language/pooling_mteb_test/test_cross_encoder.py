@@ -12,7 +12,7 @@ RERANK_MODELS = [
     RerankModelInfo(
         "cross-encoder/ms-marco-TinyBERT-L-2-v2",
         architecture="BertForSequenceClassification",
-        pooling_type="CLS",
+        seq_pooling_type="CLS",
         attn_type="encoder_only",
         is_prefix_caching_supported=False,
         is_chunked_prefill_supported=False,
@@ -21,7 +21,7 @@ RERANK_MODELS = [
     RerankModelInfo(
         "tomaarsen/Qwen3-Reranker-0.6B-seq-cls",
         architecture="Qwen3ForSequenceClassification",
-        pooling_type="LAST",
+        seq_pooling_type="LAST",
         attn_type="decoder",
         is_prefix_caching_supported=True,
         is_chunked_prefill_supported=True,

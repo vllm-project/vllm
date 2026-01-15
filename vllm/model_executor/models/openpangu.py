@@ -30,7 +30,6 @@ from torch import nn
 from transformers import PretrainedConfig
 
 from vllm.attention.layer import Attention, AttentionType
-from vllm.attention.layers.static_sink_attention import StaticSinkAttention
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, ParallelConfig, VllmConfig
 from vllm.distributed import (
@@ -42,6 +41,9 @@ from vllm.distributed import (
     tensor_model_parallel_all_gather,
 )
 from vllm.model_executor.layers.activation import SiluAndMul
+from vllm.model_executor.layers.attention.static_sink_attention import (
+    StaticSinkAttention,
+)
 from vllm.model_executor.layers.fused_moe import SharedFusedMoE
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
@@ -1161,6 +1163,7 @@ class OpenPanguModel(nn.Module):
         has_experts = hasattr(self.config, "n_routed_experts")
         if has_experts:
             expert_merge_mapping = SharedFusedMoE.make_expert_params_mapping(
+                self,
                 ckpt_gate_proj_name="gate_proj",
                 ckpt_down_proj_name="down_proj",
                 ckpt_up_proj_name="up_proj",

@@ -50,6 +50,7 @@ NUM_MAPPINGS = [3]
 @pytest.mark.parametrize("device", CUDA_DEVICES)
 @torch.inference_mode()
 def test_transfer(
+    default_vllm_config,
     gpu_to_cpu: bool,
     num_mappings: int,
     head_size: int,

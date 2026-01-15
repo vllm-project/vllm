@@ -1,3 +1,4 @@
+Llama-4-Scout-Fp8-CT-vllm-cutlass.yaml
 Llama-4-Scout-Fp8-ModelOpt-fi-trtllm.yaml
 Qwen3-30B-A3B-Fp8-AutoFp8-fi-trtllm.yaml  
 Qwen3-30B-A3B-NvFp4-CT-vllm-cutlass.yaml
