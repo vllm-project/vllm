@@ -17,6 +17,8 @@ from typing_extensions import ParamSpec
 from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.forward_context import set_forward_context
 from vllm.model_executor.layers.fused_moe.config import (
+    FusedMoEConfig,
+    FusedMoEParallelConfig,
     FusedMoEQuantConfig,
     fp8_w8a8_moe_quant_config,
 )
@@ -160,6 +162,25 @@ class TestTensors:
         )
 
 
+def make_dummy_moe_config(
+    test_config: TestConfig,
+) -> FusedMoEConfig:
+    """
+    This is a dummy config for the mk constructor interface.
+    DeepGEMM does not actually use it so we put dummy values.
+    """
+    return FusedMoEConfig(
+        num_experts=test_config.num_experts,
+        experts_per_token=test_config.topk,
+        hidden_dim=test_config.k,
+        intermediate_size_per_partition=test_config.n,
+        num_local_experts=test_config.num_experts,
+        parallel_config=FusedMoEParallelConfig.make_no_parallel(),
+        in_dtype=torch.bfloat16,
+        device="cuda",
+    )
+
+
 def make_ll_modular_kernel(
     pg: ProcessGroup,
     pgi: ProcessGroupInfo,
@@ -192,6 +213,7 @@ def make_ll_modular_kernel(
         max_num_tokens=max_tokens_per_rank,
         num_dispatchers=pgi.world_size // dp_size,
         quant_config=quant_config,
+        moe_config=make_dummy_moe_config(test_config),
     )
     mk = FusedMoEModularKernel(prepare_finalize=a2a, fused_experts=fused_experts)
     return mk
@@ -219,7 +241,7 @@ def make_ht_modular_kernel(
         block_shape=test_config.block_size,
     )
 
-    fused_experts = DeepGemmExperts(quant_config)
+    fused_experts = DeepGemmExperts(quant_config, make_dummy_moe_config(test_config))
     mk = FusedMoEModularKernel(prepare_finalize=a2a, fused_experts=fused_experts)
     return mk
 
