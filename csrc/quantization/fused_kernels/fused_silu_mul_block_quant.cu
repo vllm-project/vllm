@@ -171,8 +171,6 @@ __device__ void silu_and_mul_per_block_quant_vec(
     // Forward to scalar kernel logic...
 }
 
-}  // namespace vllm
-
 // =============================================================================
 // Dispatch function (host code)
 // =============================================================================
@@ -226,6 +224,8 @@ void silu_and_mul_per_block_quant_dispatch(
         });
 }
 
+}  // namespace vllm
+
 // Main entry point (called from Python)
 void silu_and_mul_per_block_quant(
     torch::Tensor& out,
@@ -235,22 +235,18 @@ void silu_and_mul_per_block_quant(
     std::optional<torch::Tensor> scale_ub,
     bool is_scale_transposed
 ) {
-    // Validate input types
     TORCH_CHECK(out.is_contiguous() && input.is_contiguous(),
                 "Tensors must be contiguous");
     TORCH_CHECK(input.dtype() == torch::kFloat16 || input.dtype() == torch::kBFloat16,
                 "Input must be FP16 or BF16");
     TORCH_CHECK(scales.dtype() == torch::kFloat32,
                 "Scales must be FP32");
-    
-    // Only support group_size = 64 or 128 for now
     TORCH_CHECK(group_size == 128 || group_size == 64,
                 "Unsupported group size: ", group_size, " (only 64 and 128 supported)");
     
-    // Dispatch based on input type
     VLLM_DISPATCH_FLOATING_TYPES(
         input.scalar_type(), "silu_and_mul_per_block_quant_dispatch", [&] {
-            silu_and_mul_per_block_quant_dispatch<scalar_t>(
+            vllm::silu_and_mul_per_block_quant_dispatch<scalar_t>(
                 out, input, scales, group_size, scale_ub, is_scale_transposed
             );
         });
