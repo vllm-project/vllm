@@ -8,8 +8,7 @@ import itertools
 from collections.abc import Iterable
 from typing import Any, NamedTuple
 
-from vllm.attention.backends.registry import AttentionBackendEnum
-
+from tests.v1.attention.utils import AttentionBackendEnum
 from vllm import LLM, SamplingParams
 from vllm.config import CompilationConfig, CUDAGraphMode
 from vllm.platforms import current_platform
