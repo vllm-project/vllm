@@ -13,7 +13,7 @@ References:
 
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
-from typing import ClassVar, Final, Literal, Optional
+from typing import Literal
 
 import numpy as np
 import PIL.Image
@@ -22,37 +22,33 @@ import torch.nn as nn
 from transformers import BatchFeature
 
 from vllm.config import VllmConfig
-from vllm.platforms import current_platform
-from vllm.utils import set_default_torch_dtype
-from vllm.config.multimodal import BaseDummyOptions, MultiModalConfig
+from vllm.config.multimodal import BaseDummyOptions
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.linear import ColumnParallelLinear, RowParallelLinear
 from vllm.model_executor.layers.quantization import QuantizationConfig
-from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (
     MultiModalDataDict,
     MultiModalFieldConfig,
-    MultiModalInputs,
     MultiModalKwargsItems,
 )
 from vllm.multimodal.parse import (
-    ImageProcessorItems,
     ImageSize,
     MultiModalDataItems,
 )
 from vllm.multimodal.processing import (
     BaseMultiModalProcessor,
     BaseProcessingInfo,
-    InputProcessingContext,
     PromptIndexTargets,
     PromptInsertion,
     PromptUpdate,
     PromptUpdateDetails,
 )
 from vllm.multimodal.profiling import BaseDummyInputsBuilder
+from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.configs import OpenVLAConfig
+from vllm.utils import set_default_torch_dtype
 
 from .interfaces import MultiModalEmbeddings, SupportsMultiModal, SupportsPP
 from .utils import (
@@ -97,8 +93,10 @@ class PrismaticVisionBackbone(nn.Module):
         """Initialize timm models. Called during weight loading."""
         try:
             import timm
-        except ImportError:
-            raise ImportError("timm is required for OpenVLA: pip install timm")
+        except ImportError as err:
+            raise ImportError(
+                "timm is required for OpenVLA: pip install timm"
+            ) from err
 
         img_size = self.image_sizes[0] if self.image_sizes else 224
 
@@ -199,7 +197,7 @@ class PrismaticProjector(nn.Module):
         vision_dim: int,
         llm_dim: int,
         use_fused: bool = True,
-        quant_config: Optional[QuantizationConfig] = None,
+        quant_config: QuantizationConfig | None = None,
         prefix: str = "",
     ):
         super().__init__()
@@ -274,7 +272,8 @@ class OpenVLAImagePixelInputs:
     """Schema for OpenVLA image pixel inputs."""
 
     type: Literal["pixel_values"] = "pixel_values"
-    pixel_values: torch.Tensor = field(default=None)  # Shape: (batch * num_images, 3, height, width)
+    # Shape: (batch * num_images, 6, height, width) - 6 channels for dual norm
+    pixel_values: torch.Tensor = field(default=None)
 
 
 class OpenVLAProcessingInfo(BaseProcessingInfo):
@@ -585,25 +584,28 @@ class OpenVLAForActionPrediction(nn.Module, SupportsMultiModal, SupportsPP):
         super().__init__()
 
         config = vllm_config.model_config.hf_config
-        quant_config = vllm_config.quant_config
         multimodal_config = vllm_config.model_config.multimodal_config
 
         self.config = config
         self.multimodal_config = multimodal_config
 
         # Vision backbone config
-        self.timm_model_ids = getattr(
-            config,
-            "timm_model_ids",
-            ["vit_large_patch14_reg4_dinov2.lvd142m", "vit_so400m_patch14_siglip_224"],
-        )
+        default_timm_ids = [
+            "vit_large_patch14_reg4_dinov2.lvd142m",
+            "vit_so400m_patch14_siglip_224",
+        ]
+        self.timm_model_ids = getattr(config, "timm_model_ids", default_timm_ids)
         self.image_sizes = getattr(config, "image_sizes", [224, 224])
         self.use_fused_vision_backbone = getattr(
             config, "use_fused_vision_backbone", True
         )
 
         # Vision backbone
-        if multimodal_config is not None and multimodal_config.get_limit_per_prompt("image"):
+        has_image_input = (
+            multimodal_config is not None
+            and multimodal_config.get_limit_per_prompt("image")
+        )
+        if has_image_input:
             self.vision_backbone = PrismaticVisionBackbone(
                 image_sizes=self.image_sizes,
                 use_fused_vision_backbone=self.use_fused_vision_backbone,
