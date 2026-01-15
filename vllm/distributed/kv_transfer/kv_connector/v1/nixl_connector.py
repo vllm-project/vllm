@@ -905,9 +905,9 @@ class NixlConnectorWorker:
 
             self.core_rsv_for_kv = []
             for node in os.listdir(SYS_NODE):
-                if not node.startswith("node"):
+                if not node.startswith("node") or not node[4:].isdigit():
                     continue
-                node_id = int(node.replace("node", ""))
+                node_id = int(node[4:])
                 node_path = f"{SYS_NODE}/{node}"
 
                 seen_phys = set()
