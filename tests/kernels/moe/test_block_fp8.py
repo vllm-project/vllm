@@ -3,8 +3,8 @@
 
 import pytest
 import torch
-import vllm.model_executor.layers.fused_moe.modular_kernels as mk
 
+import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from tests.kernels.moe.utils import make_test_quant_config, make_test_weights
 from tests.kernels.quant_utils import (
     native_per_token_group_quant_fp8,
