@@ -130,7 +130,6 @@ def _fwd_kernel(
             mask &= pos_q >= pos_k
 
         # Bidirectional sliding window masks
-        use_sliding_window = (SLIDING_WINDOW_Q > 0) or (SLIDING_WINDOW_K > 0)
         sliding_mask_q = (
             pos_q - pos_k <= SLIDING_WINDOW_Q if SLIDING_WINDOW_Q > 0 else None
         )
@@ -142,43 +141,30 @@ def _fwd_kernel(
         if sliding_mask_k is not None:
             mask &= sliding_mask_k
 
-        qk = tl.zeros([BLOCK_M, BLOCK_N], dtype=tl.float32)
-        qk += tl.where(mask, 0, float("-inf"))
-        qk += tl.dot(q, k)
-        qk *= sm_scale
+        qk = tl.dot(q, k)
+        qk = tl.where(mask, qk * sm_scale, -1.0e8)
 
         # -- compute m_ij, p, l_ij
         m_ij = tl.max(qk, 1)
         # For sliding window there's a chance the max is -inf due to masking of
         # the entire row. In this case we need to set m_j 0 to avoid NaN
-        m_ij_masked = (
-            tl.where(m_ij > float("-inf"), m_ij, 0.0) if use_sliding_window else m_ij
-        )
         # -- compute p and l_ij --
-        p = tl.exp(qk - m_ij_masked[:, None])
+        p = tl.exp(qk - m_ij[:, None])
         l_ij = tl.sum(p, 1)
         # -- update m_i and l_i
         m_i_new = tl.maximum(m_i, m_ij)
         alpha = tl.exp(m_i - m_i_new)
         beta = tl.exp(m_ij - m_i_new)
         # mask alpha and beta for sliding window
-        if use_sliding_window:
-            alpha = tl.where(m_i_new > float("-inf"), alpha, 1.0)
-            beta = tl.where(m_i_new > float("-inf"), beta, 0.0)
         l_i_new = alpha * l_i + beta * l_ij
         # -- update output accumulator --
         # scale p
         # For sliding window there's a chance the l_i_new is 0 due to masking
         # the entire row. We need to set l_i_new 1 to avoid zero division
-        if use_sliding_window:
-            l_i_new_mask = (l_i_new != 0.0) & (m_i_new > float("-inf"))
-            l_i_new_safe = tl.where(l_i_new_mask, l_i_new, 1.0)
-        else:
-            l_i_new_safe = l_i_new
-        p_scale = beta / l_i_new_safe
+        p_scale = beta / l_i_new
         p = p * p_scale[:, None]
         # scale acc
-        acc_scale = l_i / l_i_new_safe * alpha
+        acc_scale = l_i / l_i_new * alpha
         acc = acc * acc_scale[:, None]
         # update acc
         v = tl.load(
