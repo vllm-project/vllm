@@ -2076,6 +2076,24 @@ def test_compatibility_hash_validation(
     )
     decode_connector = NixlConnector(local_vllm_config, KVConnectorRole.WORKER)
     decode_worker = decode_connector.connector_worker
+    test_shape = decode_worker.attn_backend.get_kv_cache_shape(
+        num_blocks=1, block_size=16, num_kv_heads=1, head_size=1
+    )
+    decode_worker.kv_topo = TpKVTopology(
+        tp_rank=decode_worker.tp_rank,
+        engine_id=decode_worker.engine_id,
+        remote_tp_size=decode_worker._tp_size,  # shared state
+        remote_block_size=decode_worker._block_size,  # shared state
+        is_mla=decode_worker.use_mla,
+        total_num_kv_heads=decode_worker.model_config.get_total_num_kv_heads(),
+        attn_backend=decode_worker.attn_backend,
+        tensor_shape=test_shape,
+    )
+    decode_worker.compat_hash = compute_nixl_compatibility_hash(
+        decode_worker.vllm_config,
+        decode_worker.backend_name,
+        decode_worker.kv_topo.cross_layers_blocks,
+    )
 
     remote_config_params: dict[str, Any] = {
         "model": "facebook/opt-125m",
