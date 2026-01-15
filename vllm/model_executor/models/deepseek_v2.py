@@ -717,16 +717,15 @@ def sparse_attn_indexer(
             # decode_threshold since we unstrictly split
             # prefill and decode by decode_threshold
             # (currently set to 1 + speculative tokens)
+
+            # [num_decode_tokens, n_head, head_dim] -> [bs, 1+next_n, n_head, head_dim]
             padded_q_fp8_decode_tokens = pack_seq_triton(
                 q_fp8[:num_decode_tokens], decode_lens
             )
-            padded_weights = pack_seq_triton(
-                weights[:num_decode_tokens], decode_lens
-            ).reshape(
-                padded_q_fp8_decode_tokens.shape[0]
-                * padded_q_fp8_decode_tokens.shape[1],
-                -1,
-            )
+            # [num_decode_tokens, n_head] -> [bs, 1+next_n, n_head]
+            padded_weights = pack_seq_triton(weights[:num_decode_tokens], decode_lens)
+            # [bs, 1+next_n, n_head] -> [batch_size * next_n, n_head]
+            padded_weights = padded_weights.flatten(0, 1)
         else:
             padded_q_fp8_decode_tokens = q_fp8[:num_decode_tokens].reshape(
                 decode_lens.shape[0], -1, *q_fp8.shape[1:]
