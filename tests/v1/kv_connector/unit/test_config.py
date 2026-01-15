@@ -75,9 +75,7 @@ def test_kv_offloading_size_only_uses_native_default():
     )
 
     kv_transfer_config = vllm_config.kv_transfer_config
-    assert kv_transfer_config is not None
+    kv_connector_extra_config = kv_transfer_config.kv_connector_extra_config
     assert kv_transfer_config.kv_connector == "OffloadingConnector"
     assert kv_transfer_config.kv_role == "kv_both"
-    assert kv_transfer_config.kv_connector_extra_config["cpu_bytes_to_use"] == 4.0 * (
-        1 << 30
-    )
+    assert kv_connector_extra_config["cpu_bytes_to_use"] == 4.0 * (1 << 30)
