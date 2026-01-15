@@ -190,7 +190,8 @@ def maybe_make_prepare_finalize(
     elif moe.use_naive_kernels and allow_new_interface:
         prepare_finalize = MoEPrepareAndFinalizeNaiveEP(
             defer_input_quant,
-            moe.moe_parallel_config.is_sequence_parallel,
+            is_sequence_parallel=(moe.moe_parallel_config.is_sequence_parallel),
+            num_dispatchers=all2all_manager.world_size,
         )
 
     return prepare_finalize

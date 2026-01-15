@@ -882,6 +882,10 @@ class CutlassExpertsW4A8Fp8(mk.FusedMoEPermuteExpertsUnpermute):
         self.group_size = group_size
 
     @staticmethod
+    def activation_format() -> mk.FusedMoEActivationFormat:
+        return mk.FusedMoEActivationFormat.Standard
+
+    @staticmethod
     def _supports_current_device() -> bool:
         raise NotImplementedError(
             "CutlassExpertsW4A8Fp8 is not yet used by an Oracle. "

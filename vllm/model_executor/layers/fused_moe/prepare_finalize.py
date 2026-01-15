@@ -19,10 +19,12 @@ class MoEPrepareAndFinalizeNaiveEP(mk.FusedMoEPrepareAndFinalize):
         self,
         defer_input_quant: bool = False,
         is_sequence_parallel: bool = False,
+        num_dispatchers: int = 1,
     ) -> None:
         super().__init__()
         self.defer_input_quant = defer_input_quant
         self.is_sequence_parallel = is_sequence_parallel
+        self._num_dispatchers = num_dispatchers
 
     @property
     def activation_format(self) -> mk.FusedMoEActivationFormat:
@@ -35,7 +37,7 @@ class MoEPrepareAndFinalizeNaiveEP(mk.FusedMoEPrepareAndFinalize):
         return None
 
     def num_dispatchers(self) -> int:
-        return 1
+        return self._num_dispatchers
 
     def output_is_reduced(self) -> bool:
         return False

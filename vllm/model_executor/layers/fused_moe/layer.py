@@ -1684,6 +1684,7 @@ class FusedMoE(CustomOp):
         early.
         """
         assert self.quant_method is not None
+        # TODO(rob): investigate this.
         return (
             isinstance(self.quant_method, FusedMoEModularMethod)
             and self.quant_method.fused_experts.output_is_reduced()
