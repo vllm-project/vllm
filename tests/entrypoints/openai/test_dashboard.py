@@ -192,17 +192,42 @@ class TestDashboardRouter:
         # Should return a dict (may be empty if no metrics available)
         assert isinstance(data, dict)
 
-    def test_dashboard_api_collect_env(self, client):
-        """Test GET /dashboard/api/collect-env returns env info."""
-        response = client.get("/dashboard/api/collect-env")
+    def test_dashboard_api_metrics_with_lora(self, app):
+        """Test /dashboard/api/metrics includes LoRA info when available."""
+        # Mock serving models with LoRA adapters
+        mock_base_model = MagicMock()
+        mock_base_model.id = "base-model"
+        mock_base_model.root = "base-model"
+        mock_base_model.parent = None
+
+        mock_lora_adapter = MagicMock()
+        mock_lora_adapter.id = "lora-adapter-1"
+        mock_lora_adapter.root = "lora-adapter-1"
+        mock_lora_adapter.parent = "base-model"
+
+        mock_models_response = MagicMock()
+        mock_models_response.data = [mock_base_model, mock_lora_adapter]
+
+        mock_serving_models = AsyncMock()
+        mock_serving_models.show_available_models = AsyncMock(
+            return_value=mock_models_response
+        )
+
+        app.state.openai_serving_models = mock_serving_models
+
+        client = TestClient(app)
+        response = client.get("/dashboard/api/metrics")
 
         assert response.status_code == 200
         data = response.json()
 
-        assert "status" in data
-        assert "output" in data
-        # Status should be success or error
-        assert data["status"] in ("success", "error")
+        # Should have internal stats with LoRA info
+        assert "internal" in data
+        assert "lora" in data["internal"]
+        assert data["internal"]["lora"]["count"] == 1
+        assert len(data["internal"]["lora"]["adapters"]) == 1
+        assert data["internal"]["lora"]["adapters"][0]["id"] == "lora-adapter-1"
+        assert data["internal"]["lora"]["adapters"][0]["parent"] == "base-model"
 
 
 class TestAttachRouter:

@@ -101,82 +101,23 @@
             grid-template-rows: auto 1fr;
             grid-template-columns: 280px 1fr 280px;
             grid-template-areas:
-                "metrics metrics metrics"
+                "topbar topbar topbar"
                 "left center right";
             height: 100vh;
             gap: 12px;
             padding: 12px;
         }
 
-        /* Top Metrics Bar */
-        .metrics-bar {
-            grid-area: metrics;
+        /* Top Bar */
+        .top-bar {
+            grid-area: topbar;
             display: flex;
             align-items: center;
-            gap: 4px;
+            gap: 8px;
             background: var(--card);
             border: 1px solid var(--border);
             border-radius: var(--radius);
-            padding: 6px 12px;
-        }
-
-        .metric-item {
-            display: flex;
-            flex-direction: column;
-            align-items: center;
-            gap: 0;
-            padding: 2px 6px;
-            border-right: 1px solid var(--border);
-            transition: background 0.2s ease;
-            flex: 1 1 auto;
-            min-width: 0;
-        }
-
-        .metric-item:last-child {
-            border-right: none;
-        }
-
-        .metric-item:hover {
-            background: var(--hover-bg);
-        }
-
-        .metric-item .label {
-            font-size: 9px;
-            color: var(--muted-foreground);
-            text-transform: uppercase;
-            font-weight: 500;
-            letter-spacing: 0.02em;
-        }
-
-        .metric-item .value {
-            font-size: 12px;
-            font-weight: 700;
-            font-family: var(--font-mono);
-            color: var(--vllm-blue);
-        }
-
-        .metric-item .value.green { color: var(--success); }
-        .metric-item .value.yellow { color: var(--vllm-yellow); }
-        .metric-item .value.red { color: var(--error); }
-
-        .metric-item .mini-bar {
-            width: 32px;
-            height: 3px;
-            background: var(--muted);
-            border-radius: 2px;
-            overflow: hidden;
-            margin-top: 2px;
-        }
-
-        .metric-item .mini-bar .fill {
-            height: 100%;
-            background: var(--vllm-blue);
-            border-radius: 2px;
-            transition: width 0.3s ease;
-        }
-
-        .metric-item .mini-bar .fill.green {
-            background: var(--success);
+            padding: 8px 12px;
         }
 
         .status-indicator {
@@ -185,7 +126,6 @@
             gap: 6px;
             padding-right: 10px;
             border-right: 1px solid var(--border);
-            flex-shrink: 0;
         }
 
         .status-indicator .dot {
@@ -209,13 +149,10 @@
             font-weight: 600;
             color: var(--vllm-yellow);
             padding: 0 8px;
-            border-right: 1px solid var(--border);
-            max-width: 180px;
+            max-width: 300px;
             overflow: hidden;
             text-overflow: ellipsis;
             white-space: nowrap;
-            flex-shrink: 1;
-            min-width: 60px;
         }
 
         .theme-toggle {
@@ -228,7 +165,6 @@
             border-radius: var(--radius);
             cursor: pointer;
             transition: all 0.2s ease;
-            flex-shrink: 0;
         }
 
         .theme-toggle:hover {
@@ -298,6 +234,13 @@
             flex-direction: column;
         }
 
+        .left-panel-section {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            min-height: 0;
+            overflow: hidden;
+        }
 
         /* Config section */
         .config-scroll {
@@ -730,177 +673,8 @@
             50% { opacity: 0.5; }
         }
 
-        /* Modal */
-        .modal-overlay {
-            display: none;
-            position: fixed;
-            top: 0;
-            left: 0;
-            right: 0;
-            bottom: 0;
-            background: rgba(0, 0, 0, 0.7);
-            z-index: 9999;
-            align-items: center;
-            justify-content: center;
-            backdrop-filter: blur(4px);
-        }
-
-        .modal-overlay.visible {
-            display: flex;
-            animation: fade-in 0.2s ease-out;
-        }
-
-        .modal {
-            background: var(--card);
-            border: 1px solid var(--border);
-            border-radius: var(--radius);
-            width: 90%;
-            max-width: 800px;
-            max-height: 85vh;
-            display: flex;
-            flex-direction: column;
-            box-shadow: 0 20px 60px var(--shadow-color);
-        }
-
-        .modal-header {
-            display: flex;
-            align-items: center;
-            justify-content: space-between;
-            padding: 16px 20px;
-            border-bottom: 1px solid var(--border);
-            background: linear-gradient(90deg, rgba(48, 162, 255, 0.08) 0%, transparent 100%);
-        }
-
-        .modal-title {
-            font-size: 14px;
-            font-weight: 600;
-            color: var(--vllm-blue);
-            display: flex;
-            align-items: center;
-            gap: 8px;
-        }
-
-        .modal-actions {
-            display: flex;
-            gap: 8px;
-        }
-
-        .modal-btn {
-            padding: 6px 12px;
-            border-radius: calc(var(--radius) - 2px);
-            font-size: 11px;
-            font-weight: 500;
-            cursor: pointer;
-            transition: all 0.2s ease;
-            display: flex;
-            align-items: center;
-            gap: 6px;
-        }
-
-        .modal-btn-primary {
-            background: var(--vllm-blue);
-            border: none;
-            color: white;
-        }
-
-        .modal-btn-primary:hover {
-            background: var(--vllm-blue-hover);
-        }
-
-        .modal-btn-secondary {
-            background: var(--muted);
-            border: 1px solid var(--border);
-            color: var(--foreground);
-        }
-
-        .modal-btn-secondary:hover {
-            border-color: var(--vllm-blue);
-        }
-
-        .modal-btn-close {
-            background: transparent;
-            border: none;
-            color: var(--muted-foreground);
-            padding: 6px;
-            font-size: 18px;
-            line-height: 1;
-        }
-
-        .modal-btn-close:hover {
-            color: var(--error);
-        }
-
-        .modal-body {
-            flex: 1;
-            overflow-y: auto;
-            padding: 16px 20px;
-        }
-
-        .modal-body pre {
-            font-family: var(--font-mono);
-            font-size: 11px;
-            line-height: 1.5;
-            color: var(--foreground);
-            white-space: pre-wrap;
-            word-break: break-word;
-            margin: 0;
-        }
-
-        .modal-loading {
-            display: flex;
-            flex-direction: column;
-            align-items: center;
-            justify-content: center;
-            padding: 60px 20px;
-            color: var(--muted-foreground);
-            gap: 16px;
-        }
-
-        .modal-loading .spinner {
-            width: 32px;
-            height: 32px;
-            border: 3px solid var(--muted);
-            border-top-color: var(--vllm-blue);
-            border-radius: 50%;
-            animation: spin 0.8s linear infinite;
-        }
-
-        @keyframes spin {
-            to { transform: rotate(360deg); }
-        }
-
         .copy-success {
             color: var(--success) !important;
-        }
-
-        /* Env button */
-        .env-btn {
-            margin-left: auto;
-            display: flex;
-            align-items: center;
-            gap: 6px;
-            padding: 6px 10px;
-            background: var(--muted);
-            border: 1px solid var(--border);
-            border-radius: var(--radius);
-            cursor: pointer;
-            transition: all 0.2s ease;
-            font-size: 12px;
-            color: var(--muted-foreground);
-            font-weight: 500;
-            margin-right: 8px;
-        }
-
-        .env-btn:hover {
-            background: var(--input);
-            border-color: var(--vllm-blue);
-            color: var(--vllm-blue);
-        }
-
-        .env-btn svg {
-            width: 14px;
-            height: 14px;
-            fill: currentColor;
         }
 
         .github-link {
@@ -930,8 +704,8 @@
 </head>
 <body>
     <div class="dashboard">
-        <!-- Top Metrics Bar -->
-        <div class="metrics-bar">
+        <!-- Top Bar -->
+        <div class="top-bar">
             <a href="https://github.com/vllm-project/vllm" target="_blank" class="github-link" title="vLLM on GitHub">
                 <svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
                     <path d="M12 0C5.37 0 0 5.37 0 12c0 5.31 3.435 9.795 8.205 11.385.6.105.825-.255.825-.57 0-.285-.015-1.23-.015-2.235-3.015.555-3.795-.735-4.035-1.41-.135-.345-.72-1.41-1.23-1.695-.42-.225-1.02-.78-.015-.795.945-.015 1.62.87 1.845 1.23 1.08 1.815 2.805 1.305 3.495.99.105-.78.42-1.305.765-1.605-2.67-.3-5.46-1.335-5.46-5.925 0-1.305.465-2.385 1.23-3.225-.12-.3-.54-1.53.12-3.18 0 0 1.005-.315 3.3 1.23.96-.27 1.98-.405 3-.405s2.04.135 3 .405c2.295-1.56 3.3-1.23 3.3-1.23.66 1.65.24 2.88.12 3.18.765.84 1.23 1.905 1.23 3.225 0 4.605-2.805 5.625-5.475 5.925.435.375.81 1.095.81 2.22 0 1.605-.015 2.895-.015 3.3 0 .315.225.69.825.57A12.02 12.02 0 0024 12c0-6.63-5.37-12-12-12z"/>
@@ -942,58 +716,7 @@
                 <span class="version" id="version">vLLM</span>
             </div>
             <div class="model-indicator" id="model-name">-</div>
-            <div class="metric-item" title="Number of requests currently being processed">
-                <span class="label">Running</span>
-                <span class="value green" id="m-running">0</span>
-            </div>
-            <div class="metric-item" title="Number of requests waiting in queue">
-                <span class="label">Waiting</span>
-                <span class="value yellow" id="m-waiting">0</span>
-            </div>
-            <div class="metric-item" title="Total completed requests">
-                <span class="label">Requests</span>
-                <span class="value" id="m-requests">0</span>
-            </div>
-            <div class="metric-item" title="Total tokens processed (prompt + generation)">
-                <span class="label">Tokens</span>
-                <span class="value" id="m-tokens">0</span>
-            </div>
-            <div class="metric-item" title="Time To First Token - Average time until first token is generated">
-                <span class="label">TTFT</span>
-                <span class="value" id="m-ttft">-</span>
-            </div>
-            <div class="metric-item" title="End-to-End Latency - Average total request processing time">
-                <span class="label">E2E Latency</span>
-                <span class="value" id="m-latency">-</span>
-            </div>
-            <div class="metric-item" title="Average time spent in prefill phase (processing input tokens)">
-                <span class="label">Prefill</span>
-                <span class="value" id="m-prefill">-</span>
-            </div>
-            <div class="metric-item" title="Average time spent in decode phase (generating output tokens)">
-                <span class="label">Decode</span>
-                <span class="value" id="m-decode">-</span>
-            </div>
-            <div class="metric-item" title="KV Cache Usage - Percentage of GPU KV cache memory in use">
-                <span class="label">KV Cache</span>
-                <span class="value" id="m-kv">0%</span>
-                <div class="mini-bar"><div class="fill" id="kv-bar" style="width:0%"></div></div>
-            </div>
-            <div class="metric-item" title="Prefix Cache Hit Rate - Percentage of prompt tokens found in cache">
-                <span class="label">Cache Hit</span>
-                <span class="value green" id="m-cache-hit">-</span>
-                <div class="mini-bar"><div class="fill green" id="cache-hit-bar" style="width:0%"></div></div>
-            </div>
-            <button class="env-btn" onclick="openEnvModal()" title="Collect environment info for debugging">
-                <svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
-                    <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
-                    <polyline points="14 2 14 8 20 8" fill="none" stroke="currentColor" stroke-width="2"/>
-                    <line x1="16" y1="13" x2="8" y2="13" stroke="currentColor" stroke-width="2"/>
-                    <line x1="16" y1="17" x2="8" y2="17" stroke="currentColor" stroke-width="2"/>
-                    <polyline points="10 9 9 9 8 9" fill="none" stroke="currentColor" stroke-width="2"/>
-                </svg>
-                Collect Env
-            </button>
+            <div style="flex:1"></div>
             <button class="theme-toggle" id="theme-toggle" onclick="toggleTheme()" title="Toggle light/dark theme">
                 <span class="icon" id="theme-icon">
                     <svg id="moon-icon" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
@@ -1014,15 +737,28 @@
             </button>
         </div>
 
-        <!-- Left Panel: Configuration -->
+        <!-- Left Panel: Configuration + Environment -->
         <div class="panel left-panel">
-            <div class="panel-header">
-                Configuration
-                <input type="text" class="search-input" id="config-search" placeholder="Search..." oninput="filterList('config')">
+            <div class="left-panel-section">
+                <div class="panel-header">
+                    Configuration
+                    <input type="text" class="search-input" id="config-search" placeholder="Search..." oninput="filterList('config')">
+                </div>
+                <div class="config-scroll" id="config-list">
+                    <div class="config-item">
+                        <span class="config-key">Loading...</span>
+                    </div>
+                </div>
             </div>
-            <div class="config-scroll" id="config-list">
-                <div class="config-item">
-                    <span class="config-key">Loading...</span>
+            <div class="left-panel-section" style="border-top: 1px solid var(--border);">
+                <div class="panel-header">
+                    Environment
+                    <input type="text" class="search-input" id="env-search" placeholder="Search..." oninput="filterList('env')">
+                </div>
+                <div class="config-scroll" id="env-list">
+                    <div class="config-item">
+                        <span class="config-key">Loading...</span>
+                    </div>
                 </div>
             </div>
         </div>
@@ -1082,13 +818,12 @@
             </div>
         </div>
 
-        <!-- Right Panel: Environment -->
+        <!-- Right Panel: Runtime Stats -->
         <div class="panel right-panel">
             <div class="panel-header">
-                Environment
-                <input type="text" class="search-input" id="env-search" placeholder="Search..." oninput="filterList('env')">
+                Runtime Stats
             </div>
-            <div class="config-scroll" id="env-list">
+            <div class="config-scroll" id="stats-list">
                 <div class="config-item">
                     <span class="config-key">Loading...</span>
                 </div>
@@ -1098,39 +833,6 @@
 
     <!-- Interactive Tooltip (supports text selection) -->
     <div class="tooltip" id="tooltip"></div>
-
-    <!-- Environment Info Modal -->
-    <div class="modal-overlay" id="env-modal" onclick="closeEnvModal(event)">
-        <div class="modal" onclick="event.stopPropagation()">
-            <div class="modal-header">
-                <div class="modal-title">
-                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                        <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
-                        <polyline points="14 2 14 8 20 8"/>
-                        <line x1="16" y1="13" x2="8" y2="13"/>
-                        <line x1="16" y1="17" x2="8" y2="17"/>
-                    </svg>
-                    Environment Information
-                </div>
-                <div class="modal-actions">
-                    <button class="modal-btn modal-btn-primary" id="copy-env-btn" onclick="copyEnvInfo()">
-                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                            <rect x="9" y="9" width="13" height="13" rx="2" ry="2"/>
-                            <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>
-                        </svg>
-                        <span id="copy-btn-text">Copy</span>
-                    </button>
-                    <button class="modal-btn modal-btn-close" onclick="closeEnvModal()">&times;</button>
-                </div>
-            </div>
-            <div class="modal-body" id="env-modal-body">
-                <div class="modal-loading">
-                    <div class="spinner"></div>
-                    <span>Collecting environment information...</span>
-                </div>
-            </div>
-        </div>
-    </div>
 
     <script>
         let currentModel = null;
@@ -1167,111 +869,6 @@
 
         // Initialize theme immediately
         initTheme();
-
-        // Environment Info Modal
-        let envInfoCache = null;
-
-        function openEnvModal() {
-            const modal = document.getElementById('env-modal');
-            const modalBody = document.getElementById('env-modal-body');
-            const copyBtn = document.getElementById('copy-env-btn');
-            const copyBtnText = document.getElementById('copy-btn-text');
-
-            // Show modal with info notice first
-            modal.classList.add('visible');
-            copyBtn.disabled = true;
-            copyBtnText.textContent = 'Copy';
-            envInfoCache = null;
-
-            modalBody.innerHTML = `
-                <div style="padding: 20px 0;">
-                    <h3 style="color: var(--vllm-blue); margin-bottom: 16px; font-size: 14px;">This will collect the following information:</h3>
-                    <ul style="color: var(--foreground); font-size: 12px; line-height: 2; padding-left: 20px;">
-                        <li><strong>System Info</strong> - OS, GCC, Clang, CMake, Libc version</li>
-                        <li><strong>Python Environment</strong> - Python version and platform</li>
-                        <li><strong>PyTorch Info</strong> - Version, CUDA/ROCm build info</li>
-                        <li><strong>GPU Info</strong> - CUDA runtime, GPU models, driver, cuDNN, topology</li>
-                        <li><strong>CPU Info</strong> - Processor details</li>
-                        <li><strong>Installed Packages</strong> - Relevant pip/conda packages (torch, triton, etc.)</li>
-                        <li><strong>vLLM Info</strong> - Version and build flags</li>
-                        <li><strong>Environment Variables</strong> - VLLM_*, CUDA_*, TORCH_*, NCCL_* variables</li>
-                    </ul>
-                    <p style="color: var(--muted-foreground); font-size: 11px; margin-top: 16px;">
-                        <strong>Note:</strong> Sensitive information (API keys, tokens, passwords) will be excluded.
-                    </p>
-                    <div style="margin-top: 24px; text-align: center;">
-                        <button class="modal-btn modal-btn-primary" onclick="collectEnvInfo()" style="padding: 10px 24px; font-size: 13px;">
-                            Collect Environment Info
-                        </button>
-                    </div>
-                </div>
-            `;
-        }
-
-        async function collectEnvInfo() {
-            const modalBody = document.getElementById('env-modal-body');
-            const copyBtn = document.getElementById('copy-env-btn');
-
-            // Show loading state
-            modalBody.innerHTML = `
-                <div class="modal-loading">
-                    <div class="spinner"></div>
-                    <span>Collecting environment information...</span>
-                </div>
-            `;
-
-            try {
-                const resp = await fetch('/dashboard/api/collect-env');
-                const data = await resp.json();
-
-                if (data.status === 'success') {
-                    envInfoCache = data.output;
-                    modalBody.innerHTML = `<pre>${esc(data.output)}</pre>`;
-                    copyBtn.disabled = false;
-                } else {
-                    modalBody.innerHTML = `<pre style="color:var(--error)">Error: ${esc(data.output)}</pre>`;
-                }
-            } catch (e) {
-                modalBody.innerHTML = `<pre style="color:var(--error)">Failed to collect environment info: ${esc(e.message)}</pre>`;
-            }
-        }
-
-        function closeEnvModal(event) {
-            // Only close if clicking overlay (not modal content) or close button
-            if (!event || event.target.id === 'env-modal') {
-                document.getElementById('env-modal').classList.remove('visible');
-            }
-        }
-
-        async function copyEnvInfo() {
-            if (!envInfoCache) return;
-
-            const copyBtn = document.getElementById('copy-env-btn');
-            const copyBtnText = document.getElementById('copy-btn-text');
-
-            try {
-                await navigator.clipboard.writeText(envInfoCache);
-                copyBtn.classList.add('copy-success');
-                copyBtnText.textContent = 'Copied!';
-
-                setTimeout(() => {
-                    copyBtn.classList.remove('copy-success');
-                    copyBtnText.textContent = 'Copy';
-                }, 2000);
-            } catch (e) {
-                copyBtnText.textContent = 'Failed';
-                setTimeout(() => {
-                    copyBtnText.textContent = 'Copy';
-                }, 2000);
-            }
-        }
-
-        // Close modal on Escape key
-        document.addEventListener('keydown', (e) => {
-            if (e.key === 'Escape') {
-                closeEnvModal({ target: { id: 'env-modal' } });
-            }
-        });
 
         // Tooltip handling - supports text selection
         function showTooltip(e, text) {
@@ -1351,61 +948,8 @@
                 const resp = await fetch('/dashboard/api/metrics');
                 const data = await resp.json();
 
-                // Running & Waiting
-                const running = data['vllm:num_requests_running']?.value || 0;
-                const waiting = data['vllm:num_requests_waiting']?.value || 0;
-                document.getElementById('m-running').textContent = running;
-                document.getElementById('m-waiting').textContent = waiting;
-
-                // Requests & E2E Latency
-                const e2e = data['vllm:e2e_request_latency_seconds'];
-                if (e2e?.count > 0) {
-                    document.getElementById('m-requests').textContent = e2e.count;
-                    document.getElementById('m-latency').textContent = (e2e.sum / e2e.count).toFixed(2) + 's';
-                }
-
-                // Tokens
-                const prompt = data['vllm:prompt_tokens']?.value || 0;
-                const gen = data['vllm:generation_tokens']?.value || 0;
-                document.getElementById('m-tokens').textContent = (prompt + gen).toLocaleString();
-
-                // TTFT
-                const ttft = data['vllm:time_to_first_token_seconds'];
-                if (ttft?.count > 0) {
-                    document.getElementById('m-ttft').textContent = ((ttft.sum / ttft.count) * 1000).toFixed(0) + 'ms';
-                }
-
-                // Prefill time
-                const prefill = data['vllm:request_prefill_time_seconds'];
-                if (prefill?.count > 0) {
-                    document.getElementById('m-prefill').textContent = ((prefill.sum / prefill.count) * 1000).toFixed(0) + 'ms';
-                }
-
-                // Decode time
-                const decode = data['vllm:request_decode_time_seconds'];
-                if (decode?.count > 0) {
-                    document.getElementById('m-decode').textContent = (decode.sum / decode.count).toFixed(2) + 's';
-                }
-
-                // KV Cache
-                const kv = data['vllm:kv_cache_usage_perc'] || data['vllm:gpu_cache_usage_perc'];
-                if (kv) {
-                    const pct = (kv.value * 100).toFixed(1);
-                    document.getElementById('m-kv').textContent = pct + '%';
-                    document.getElementById('kv-bar').style.width = pct + '%';
-                }
-
-                // Prefix Cache Hit Rate
-                const cacheQueries = data['vllm:prefix_cache_queries']?.value || 0;
-                const cacheHits = data['vllm:prefix_cache_hits']?.value || 0;
-                if (cacheQueries > 0) {
-                    const hitRate = (cacheHits / cacheQueries * 100).toFixed(1);
-                    document.getElementById('m-cache-hit').textContent = hitRate + '%';
-                    document.getElementById('cache-hit-bar').style.width = hitRate + '%';
-                } else {
-                    document.getElementById('m-cache-hit').textContent = '-';
-                    document.getElementById('cache-hit-bar').style.width = '0%';
-                }
+                // Update Runtime Stats panel
+                renderRuntimeStats(data);
 
             } catch (e) {
                 console.error('Metrics fetch error:', e);
@@ -1414,8 +958,8 @@
 
         // Fetch detailed config (from dashboard API, no dev mode needed)
         async function fetchConfig(data) {
-            // Config items - render full vllm_config
             const configList = document.getElementById('config-list');
+            const envList = document.getElementById('env-list');
             const cfg = data.vllm_config;
             const explicitArgs = new Set(data.explicit_args || []);
             const explicitEnvs = new Set(data.explicit_envs || []);
@@ -1423,13 +967,12 @@
             if (!cfg) {
                 configList.innerHTML = '<div class="config-item"><span class="config-key">No config available</span></div>';
                 document.getElementById('config-search').style.display = 'none';
-                document.getElementById('env-list').innerHTML = '<div class="config-item"><span class="config-key">No env available</span></div>';
+                envList.innerHTML = '<div class="config-item"><span class="config-key">No env available</span></div>';
                 document.getElementById('env-search').style.display = 'none';
                 return;
             }
 
             try {
-                const cfg = data.vllm_config;
                 let configHtml = '';
 
                 // Recursively flatten config with prefix
@@ -1452,10 +995,8 @@
                 function getDocUrl(fullKey) {
                     const parts = fullKey.split('.');
                     if (parts.length < 2) return null;
-                    // e.g., cache_config.block_size -> section=cache, key=block_size
                     const sectionPart = parts[0].replace(/_config$/, '');
                     const keyName = parts[parts.length - 1];
-                    // Convert section to PascalCase: cache -> CacheConfig
                     const sectionClass = sectionPart.split('_').map(s => s.charAt(0).toUpperCase() + s.slice(1)).join('') + 'Config';
                     return `https://docs.vllm.ai/en/latest/api/vllm/config/${sectionPart}/#vllm.config.${sectionPart}.${sectionClass}.${keyName}`;
                 }
@@ -1463,7 +1004,6 @@
                 const flatConfig = flattenConfig(cfg);
                 for (const item of flatConfig) {
                     if (item.isSection) {
-                        // Section header
                         const sectionName = item.key.split('.').pop();
                         configHtml += `<div class="config-item" style="background:rgba(48,162,255,0.1);margin-top:4px;border-left:3px solid var(--vllm-blue)">
                             <span class="config-key" style="color:var(--vllm-blue);font-weight:600">${sectionName}</span>
@@ -1471,7 +1011,6 @@
                     } else {
                         const shortKey = item.key.split('.').pop();
                         const fullVal = formatFullValue(item.val);
-                        // Check if this config key was explicitly set by user
                         const isExplicit = explicitArgs.has(shortKey) || explicitArgs.has(shortKey.replace(/_/g, '-'));
                         const docUrl = getDocUrl(item.key);
                         const keyHtml = docUrl
@@ -1485,27 +1024,169 @@
                 }
                 configList.innerHTML = configHtml || '<div class="config-item"><span class="config-key">No config</span></div>';
 
-                // Env vars
-                const envList = document.getElementById('env-list');
+                // Render environment variables in separate panel
                 const env = data.vllm_env;
                 let envHtml = '';
-
-                for (const key of Object.keys(env).sort()) {
-                    const val = env[key];
-                    const isExplicit = explicitEnvs.has(key);
-                    const fullVal = formatFullValue(val);
-                    const valColor = val === true ? 'var(--success)' : val === false ? 'var(--muted-foreground)' : 'var(--vllm-blue)';
-                    const envDocUrl = `https://docs.vllm.ai/en/latest/api/vllm/envs/#vllm.envs.${key}`;
-                    envHtml += `<div class="config-item${isExplicit ? ' explicit' : ''}" data-tooltip="${key}: ${esc(fullVal)}">
-                        <a href="${envDocUrl}" target="_blank" class="config-key" title="View documentation">${key}</a>
-                        <span class="config-val" style="color:${valColor}">${formatValue(val)}</span>
-                    </div>`;
+                if (env && Object.keys(env).length > 0) {
+                    for (const key of Object.keys(env).sort()) {
+                        const val = env[key];
+                        const isExplicit = explicitEnvs.has(key);
+                        const fullVal = formatFullValue(val);
+                        const valColor = val === true ? 'var(--success)' : val === false ? 'var(--muted-foreground)' : 'var(--vllm-blue)';
+                        const envDocUrl = `https://docs.vllm.ai/en/latest/api/vllm/envs/#vllm.envs.${key}`;
+                        envHtml += `<div class="config-item${isExplicit ? ' explicit' : ''}" data-tooltip="${key}: ${esc(fullVal)}">
+                            <a href="${envDocUrl}" target="_blank" class="config-key" title="View documentation">${key}</a>
+                            <span class="config-val" style="color:${valColor}">${formatValue(val)}</span>
+                        </div>`;
+                    }
                 }
                 envList.innerHTML = envHtml || '<div class="config-item"><span class="config-key">No env vars</span></div>';
 
             } catch (e) {
                 console.error('Config render error:', e);
             }
+        }
+
+        // Render runtime stats in right panel
+        function renderRuntimeStats(metricsData) {
+            const statsList = document.getElementById('stats-list');
+            let html = '';
+
+            // Performance Metrics Section
+            html += `<div class="config-item" style="background:rgba(48,162,255,0.1);border-left:3px solid var(--vllm-blue)">
+                <span class="config-key" style="color:var(--vllm-blue);font-weight:600">Performance Metrics</span>
+            </div>`;
+
+            // Extract key metrics
+            const running = metricsData['vllm:num_requests_running']?.value || 0;
+            const waiting = metricsData['vllm:num_requests_waiting']?.value || 0;
+            const e2e = metricsData['vllm:e2e_request_latency_seconds'];
+            const ttft = metricsData['vllm:time_to_first_token_seconds'];
+            const prefill = metricsData['vllm:request_prefill_time_seconds'];
+            const decode = metricsData['vllm:request_decode_time_seconds'];
+            const promptTokens = metricsData['vllm:prompt_tokens']?.value || 0;
+            const genTokens = metricsData['vllm:generation_tokens']?.value || 0;
+            const kv = metricsData['vllm:kv_cache_usage_perc'] || metricsData['vllm:gpu_cache_usage_perc'];
+            const cacheQueries = metricsData['vllm:prefix_cache_queries']?.value || 0;
+            const cacheHits = metricsData['vllm:prefix_cache_hits']?.value || 0;
+
+            const stats = [
+                { key: 'Running Requests', val: running, color: 'var(--success)' },
+                { key: 'Waiting Requests', val: waiting, color: 'var(--vllm-yellow)' },
+                { key: 'Total Requests', val: e2e?.count || 0 },
+                { key: 'Prompt Tokens', val: promptTokens.toLocaleString() },
+                { key: 'Generation Tokens', val: genTokens.toLocaleString() },
+                { key: 'KV Cache Usage', val: kv ? (kv.value * 100).toFixed(1) + '%' : '-' },
+                { key: 'Cache Hit Rate', val: cacheQueries > 0 ? (cacheHits / cacheQueries * 100).toFixed(1) + '%' : '-', color: 'var(--success)' },
+                { key: 'Avg TTFT', val: ttft?.count > 0 ? ((ttft.sum / ttft.count) * 1000).toFixed(0) + 'ms' : '-' },
+                { key: 'Avg E2E Latency', val: e2e?.count > 0 ? (e2e.sum / e2e.count).toFixed(2) + 's' : '-' },
+                { key: 'Avg Prefill Time', val: prefill?.count > 0 ? ((prefill.sum / prefill.count) * 1000).toFixed(0) + 'ms' : '-' },
+                { key: 'Avg Decode Time', val: decode?.count > 0 ? (decode.sum / decode.count).toFixed(2) + 's' : '-' },
+            ];
+
+            for (const stat of stats) {
+                const color = stat.color || 'var(--vllm-blue)';
+                html += `<div class="config-item">
+                    <span class="config-key">${stat.key}</span>
+                    <span class="config-val" style="color:${color}">${stat.val}</span>
+                </div>`;
+            }
+
+            // Engine Stats Section (always show)
+            html += `<div class="config-item" style="background:rgba(48,162,255,0.1);margin-top:8px;border-left:3px solid var(--vllm-blue)">
+                <span class="config-key" style="color:var(--vllm-blue);font-weight:600">Engine Stats</span>
+            </div>`;
+
+            const internal = metricsData.internal;
+
+            // 1. Perf Stats (MFU) - top
+            const flops = internal?.perf?.num_flops_per_gpu;
+            const readBytes = internal?.perf?.num_read_bytes_per_gpu;
+            const writeBytes = internal?.perf?.num_write_bytes_per_gpu;
+            html += `<div class="config-item" data-tooltip="FLOPs per GPU in last iteration">
+                <span class="config-key">FLOPs/GPU</span>
+                <span class="config-val">${flops !== undefined ? formatLargeNumber(flops) : '-'}</span>
+            </div>`;
+            html += `<div class="config-item" data-tooltip="Read bytes per GPU in last iteration">
+                <span class="config-key">Read Bytes/GPU</span>
+                <span class="config-val">${readBytes !== undefined ? formatBytes(readBytes) : '-'}</span>
+            </div>`;
+            html += `<div class="config-item" data-tooltip="Write bytes per GPU in last iteration">
+                <span class="config-key">Write Bytes/GPU</span>
+                <span class="config-val">${writeBytes !== undefined ? formatBytes(writeBytes) : '-'}</span>
+            </div>`;
+
+            // 2. CUDAGraph Stats
+            html += `<div class="config-item">
+                <span class="config-key">CUDAGraph Captured</span>
+                <span class="config-val">${internal?.cudagraph?.captured !== undefined ? internal.cudagraph.captured : '-'}</span>
+            </div>`;
+            if (internal?.cudagraph?.recent?.length > 0) {
+                html += `<div class="config-item" style="background:rgba(48,162,255,0.05);margin-top:4px;border-left:2px solid var(--vllm-blue)">
+                    <span class="config-key" style="color:var(--muted-foreground);font-size:10px">CUDAGraph Recent</span>
+                </div>`;
+                for (const cg of internal.cudagraph.recent.slice(0, 5)) {
+                    const padding = cg.num_padded_tokens - cg.num_unpadded_tokens;
+                    const paddingPct = cg.num_padded_tokens > 0 ? (padding / cg.num_padded_tokens * 100).toFixed(1) : 0;
+                    html += `<div class="config-item" data-tooltip="Mode: ${cg.runtime_mode}, Unpadded: ${cg.num_unpadded_tokens}, Padded: ${cg.num_padded_tokens}">
+                        <span class="config-key" style="font-size:10px">${cg.runtime_mode}</span>
+                        <span class="config-val" style="font-size:10px">${cg.num_unpadded_tokens}→${cg.num_padded_tokens} (${paddingPct}% pad)</span>
+                    </div>`;
+                }
+            }
+
+            // 3. KV Cache Stats
+            const kvEvictions = internal?.kv_cache?.eviction_events;
+            html += `<div class="config-item">
+                <span class="config-key">KV Eviction Events</span>
+                <span class="config-val">${kvEvictions !== undefined ? kvEvictions : '-'}</span>
+            </div>`;
+
+            // 4. LoRA Stats - bottom
+            const loraCount = internal?.lora?.count || 0;
+            html += `<div class="config-item">
+                <span class="config-key">LoRA Adapters Loaded</span>
+                <span class="config-val">${loraCount > 0 ? loraCount : '-'}</span>
+            </div>`;
+            if (internal?.lora?.adapters?.length > 0) {
+                for (const adapter of internal.lora.adapters.slice(0, 5)) {
+                    html += `<div class="config-item" data-tooltip="Parent model: ${adapter.parent}">
+                        <span class="config-key" style="font-size:10px;padding-left:12px">${adapter.id}</span>
+                        <span class="config-val" style="font-size:10px;color:var(--muted-foreground)">${adapter.parent}</span>
+                    </div>`;
+                }
+            }
+            const waitingLora = internal?.scheduler?.waiting_lora_adapters;
+            const runningLora = internal?.scheduler?.running_lora_adapters;
+            html += `<div class="config-item">
+                <span class="config-key">Waiting LoRA Adapters</span>
+                <span class="config-val">${waitingLora !== undefined ? waitingLora : '-'}</span>
+            </div>`;
+            html += `<div class="config-item">
+                <span class="config-key">Running LoRA Adapters</span>
+                <span class="config-val">${runningLora !== undefined ? runningLora : '-'}</span>
+            </div>`;
+
+            statsList.innerHTML = html || '<div class="config-item"><span class="config-key">No stats available</span></div>';
+        }
+
+        // Format large numbers with K/M/G suffixes
+        function formatLargeNumber(num) {
+            if (num === 0) return '0';
+            if (num >= 1e12) return (num / 1e12).toFixed(2) + 'T';
+            if (num >= 1e9) return (num / 1e9).toFixed(2) + 'G';
+            if (num >= 1e6) return (num / 1e6).toFixed(2) + 'M';
+            if (num >= 1e3) return (num / 1e3).toFixed(2) + 'K';
+            return num.toString();
+        }
+
+        // Format bytes with appropriate unit
+        function formatBytes(bytes) {
+            if (bytes === 0) return '0 B';
+            const k = 1024;
+            const sizes = ['B', 'KB', 'MB', 'GB', 'TB'];
+            const i = Math.floor(Math.log(bytes) / Math.log(k));
+            return (bytes / Math.pow(k, i)).toFixed(2) + ' ' + sizes[i];
         }
 
         function getNestedValue(obj, path) {

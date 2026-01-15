@@ -167,7 +167,11 @@ async def dashboard_info(request: Request) -> JSONResponse:
 
 @router.get("/dashboard/api/metrics")
 async def dashboard_metrics(request: Request) -> JSONResponse:
-    """Get metrics for dashboard display."""
+    """Get metrics for dashboard display.
+
+    Returns both Prometheus metrics and internal engine stats that are only
+    accessible in-process (not available via external /metrics endpoint).
+    """
     metrics: dict = {}
 
     # Try to get metrics from prometheus registry
@@ -206,33 +210,49 @@ async def dashboard_metrics(request: Request) -> JSONResponse:
     except Exception:
         pass
 
+    # Get internal engine stats (only available in-process)
+    internal: dict = {}
+    try:
+        engine_client = getattr(request.app.state, "engine_client", None)
+        if engine_client is not None:
+            # Try to get internal stats from the engine
+            internal_stats = getattr(engine_client, "get_internal_stats", None)
+            if internal_stats is not None:
+                stats = await internal_stats()
+                if stats:
+                    internal = stats
+    except Exception as e:
+        logger.debug("Failed to get internal engine stats: %s", e)
+
+    # Try to get LoRA adapter info from serving models
+    try:
+        serving_models = getattr(request.app.state, "openai_serving_models", None)
+        if serving_models is not None:
+            lora_stats = await _get_lora_stats(serving_models)
+            if lora_stats:
+                internal["lora"] = lora_stats
+    except Exception as e:
+        logger.debug("Failed to get LoRA stats: %s", e)
+
+    if internal:
+        metrics["internal"] = internal
+
     return JSONResponse(content=metrics)
 
 
-@router.get("/dashboard/api/collect-env")
-async def dashboard_collect_env() -> JSONResponse:
-    """Collect environment information for debugging.
-
-    This runs the same collection as `vllm collect-env` CLI command.
-    Useful for users to copy environment info when reporting issues.
-    """
-    import asyncio
-    from concurrent.futures import ThreadPoolExecutor
-
+async def _get_lora_stats(serving_models) -> dict | None:
+    """Get LoRA adapter statistics from serving models."""
     try:
-        from vllm.collect_env import get_pretty_env_info
-
-        # Run in thread pool since it executes subprocess commands
-        loop = asyncio.get_event_loop()
-        with ThreadPoolExecutor() as executor:
-            env_info = await loop.run_in_executor(executor, get_pretty_env_info)
-
-        return JSONResponse(content={"output": env_info, "status": "success"})
-    except Exception as e:
-        logger.warning("Failed to collect environment info: %s", e)
-        return JSONResponse(
-            content={"output": str(e), "status": "error"}, status_code=500
-        )
+        models_response = await serving_models.show_available_models()
+        lora_adapters = [m for m in models_response.data if m.parent is not None]
+        if lora_adapters:
+            return {
+                "count": len(lora_adapters),
+                "adapters": [{"id": a.id, "parent": a.parent} for a in lora_adapters],
+            }
+    except Exception:
+        pass
+    return None
 
 
 def attach_router(app: FastAPI) -> None:
