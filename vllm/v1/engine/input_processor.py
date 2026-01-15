@@ -17,7 +17,7 @@ from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
 from vllm.multimodal.cache import processor_cache_from_config
 from vllm.multimodal.inputs import MultiModalFeatureSpec, MultiModalUUIDDict
 from vllm.multimodal.parse import MultiModalDataParser
-from vllm.multimodal.processing import set_request_id
+from vllm.multimodal.processing.context import set_request_id
 from vllm.multimodal.utils import argsort_mm_positions
 from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import _SAMPLING_EPS, SamplingParams
