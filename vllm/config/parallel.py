@@ -697,7 +697,7 @@ class ParallelConfig:
             os.environ["VLLM_ENABLE_V1_MULTIPROCESSING"] = "0"
             logger.info("Disabling V1 multiprocessing for external launcher.")
 
-        if self.distributed_executor_backend is None and self.world_size > 1:
+        if self.distributed_executor_backend is None and self.world_size_across_dp > 1:
             # We use multiprocessing by default if world_size fits on the
             # current node and we aren't in a ray placement group.
 
