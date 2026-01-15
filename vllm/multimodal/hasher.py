@@ -4,8 +4,7 @@
 import hashlib
 import pickle
 import uuid
-from collections.abc import Iterable
-from typing import Callable
+from collections.abc import Callable, Iterable
 
 import numpy as np
 import torch
@@ -32,6 +31,7 @@ def _get_hasher_factory() -> Callable[[], "hashlib._Hash"]:
 
     if algorithm == "blake3":
         from blake3 import blake3
+
         return blake3
     elif algorithm == "sha256":
         return hashlib.sha256
