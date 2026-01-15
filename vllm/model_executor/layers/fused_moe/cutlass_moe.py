@@ -645,6 +645,7 @@ class CutlassExpertsFp4(mk.FusedMoEPermuteExpertsUnpermute):
     def _supports_activation(activation: str) -> bool:
         return activation in ["silu"]
 
+    @staticmethod
     def _supports_parallel_config(moe_parallel_config: FusedMoEParallelConfig) -> bool:
         # CutlassExpertsFp4 does not support expert map, which is
         # needed for STANDARD activation format kernels in EP mode.
