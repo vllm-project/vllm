@@ -45,15 +45,15 @@ logger = init_logger(__name__)
 
 class Fp8MoeBackend(Enum):
     NONE = 0
-    FLASHINFER_TRTLLM = "FlashInfer TRTLLM"
-    FLASHINFER_CUTLASS = "FlashInfer CUTLASS"
-    DEEPGEMM = "DeepGEMM"
-    BATCHED_DEEPGEMM = "Batched DeepGEMM"
-    MARLIN = "Marlin"
-    TRITON = "Triton"
-    BATCHED_TRITON = "Batched Triton"
+    FLASHINFER_TRTLLM = "FLASHINFER_TRTLLM"
+    FLASHINFER_CUTLASS = "FLASHINFER_CUTLASS"
+    DEEPGEMM = "DEEPGEMM"
+    BATCHED_DEEPGEMM = "BATCHED_DEEPGEMM"
+    MARLIN = "MARLIN"
+    TRITON = "TRITON"
+    BATCHED_TRITON = "BATCHED_TRITON"
     AITER = "AITER"
-    VLLM_CUTLASS = "vLLM CUTLASS"
+    VLLM_CUTLASS = "VLLM_CUTLASS"
 
 
 def backend_2_kernel_cls(
