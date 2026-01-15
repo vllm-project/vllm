@@ -280,6 +280,7 @@ def select_fp8_moe_backend(
                 activation_format,
             )
         else:
+            print(f"{backend=}")
             k_cls = backend_2_kernel_cls(backend)
             supported, reason = k_cls.is_supported_config(
                 k_cls,

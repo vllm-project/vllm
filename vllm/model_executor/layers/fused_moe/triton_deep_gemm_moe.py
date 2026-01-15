@@ -23,14 +23,20 @@ from vllm.utils.deep_gemm import (
 class TritonOrDeepGemmExperts(FallbackExperts):
     """DeepGemm with fallback to Triton for low latency shapes."""
 
-    _experts_cls = DeepGemmExperts
-    _fallback_cls = TritonExperts
-
     def __init__(self, moe_config: FusedMoEConfig, quant_config: FusedMoEQuantConfig):
         super().__init__(
             experts=DeepGemmExperts(moe_config, quant_config),
             fallback_experts=TritonExperts(moe_config, quant_config),
         )
+
+    @classmethod
+    def get_clss(
+        cls,
+    ) -> tuple[
+        type[mk.FusedMoEPermuteExpertsUnpermute],
+        type[mk.FusedMoEPermuteExpertsUnpermute],
+    ]:
+        return (DeepGemmExperts, TritonExperts)
 
     def workspace_shapes(
         self,

@@ -32,6 +32,15 @@ class TritonOrCutlassExperts(FallbackExperts):
             fallback_experts=TritonExperts(moe_config, quant_config),
         )
 
+    @classmethod
+    def get_clss(
+        cls,
+    ) -> tuple[
+        type[mk.FusedMoEPermuteExpertsUnpermute],
+        type[mk.FusedMoEPermuteExpertsUnpermute],
+    ]:
+        return (CutlassExpertsFp8, TritonExperts)
+
     def workspace_shapes(
         self,
         M: int,
