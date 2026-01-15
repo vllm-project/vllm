@@ -207,7 +207,7 @@ def prep_scale_for_group_broadcast(
     Returns:
         scale reshaped for correct broadcasting.
     """
-    if scale.ndim == 0:
+    if scale.ndim == 0 or scale.numel() == 1:
         # Scalar scale, expand to (1, 1)
         return scale.view(1, 1)
     if scale.ndim == 1:
