@@ -39,6 +39,8 @@ ONBUILD COPY ./ vllm/
 FROM base AS fetch_vllm_1
 ARG VLLM_REPO="https://github.com/vllm-project/vllm.git"
 ARG VLLM_BRANCH="main"
+ENV VLLM_REPO=${VLLM_REPO}
+ENV VLLM_BRANCH=${VLLM_BRANCH}
 ONBUILD RUN git clone ${VLLM_REPO} \
 	    && cd vllm \
 	    && git fetch -v --prune -- origin ${VLLM_BRANCH} \
@@ -235,3 +237,7 @@ ENV KINETO_CONFIG="${COMMON_WORKDIR}/libkineto.conf"
 RUN echo "VLLM_BASE_IMAGE=${BASE_IMAGE}" >> ${COMMON_WORKDIR}/versions.txt
 
 CMD ["/bin/bash"]
+
+#Set entrypoint for vllm-openai official images
+FROM final As vllm-openai
+ENTRYPOINT ["vllm", "serve"]
