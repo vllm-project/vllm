@@ -410,7 +410,7 @@ class MultiModalRegistry:
     def processor_only_cache_from_config(
         self,
         model_config: "ModelConfig",
-    ):
+    ) -> MultiModalProcessorOnlyCache | None:
         """Return a `MultiModalProcessorOnlyCache`, if enabled."""
         if not self.supports_multimodal_inputs(model_config):
             return None
