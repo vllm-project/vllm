@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import json
 import math
+from collections.abc import Mapping, Sequence
 from functools import cached_property
 from typing import Any
 
@@ -48,7 +49,7 @@ class StepAudio2Tokenizer(Qwen2TokenizerFast):
 
     def apply_chat_template_no_trans(
         self,
-        conversation: list[dict[str, str]] | list[list[dict[str, str]]],
+        conversation: Sequence[Mapping[str, Any]],
         tools: list[dict] | None = None,
         documents: list[dict[str, str]] | None = None,
         chat_template: str | None = None,
@@ -62,7 +63,7 @@ class StepAudio2Tokenizer(Qwen2TokenizerFast):
         return_assistant_tokens_mask: bool = False,
         tokenizer_kwargs: dict[str, Any] | None = None,
         **kwargs,
-    ) -> list[int]:
+    ) -> str:
         """Convert chat messages to token IDs sequence.
 
         Args:
@@ -154,7 +155,7 @@ class StepAudio2Tokenizer(Qwen2TokenizerFast):
 
     def apply_chat_template_trans_ta4(
         self,
-        conversation: list[dict[str, str]] | list[list[dict[str, str]]],
+        conversation: Sequence[Mapping[str, Any]],
         tools: list[dict] | None = None,
         documents: list[dict[str, str]] | None = None,
         chat_template: str | None = None,
@@ -179,7 +180,7 @@ class StepAudio2Tokenizer(Qwen2TokenizerFast):
         Returns:
             list[int]: Sequence of token IDs
         """
-        result = []
+        result: list[str | dict[str, Any]] = []
         messages = conversation
         if continue_final_message and add_generation_prompt:
             raise ValueError(
@@ -207,11 +208,18 @@ class StepAudio2Tokenizer(Qwen2TokenizerFast):
                 if "tts_content" not in message:
                     result.append(message_content)
                 else:
-                    tts_content = message["tts_content"]
-                    if "tts_text" not in tts_content or "tts_audio" not in tts_content:  # noqa: E501
+                    tts_content_raw = message["tts_content"]
+                    if (
+                        "tts_text" not in tts_content_raw
+                        or "tts_audio" not in tts_content_raw
+                    ):
                         raise ValueError("tts_text/tts_audio must in tts_content keys.")
-                    tts_content["text"] = message_content
-                    result.append(tts_content)
+                    tts_content_dict: dict[str, Any] = {
+                        "tts_text": tts_content_raw["tts_text"],
+                        "tts_audio": tts_content_raw["tts_audio"],
+                        "text": message_content,
+                    }
+                    result.append(tts_content_dict)
                 if message.get("tool_calls"):
                     for tool_call in message["tool_calls"]:
                         if "function" in tool_call:
@@ -284,13 +292,18 @@ class StepAudio2Tokenizer(Qwen2TokenizerFast):
         )
         return all_token_ids
 
-    def trans_text_audio_to_ta4(self, content_list: list[str]):
-        result = []
+    def trans_text_audio_to_ta4(
+        self, content_list: list[str | dict[str, Any]]
+    ) -> list[int]:
+        result: list[int] = []
         for content in content_list:
             if isinstance(content, str):
                 content_tokens = self.tokenize(content)
                 content_token_ids = self.convert_tokens_to_ids(content_tokens)
-                result += content_token_ids
+                if isinstance(content_token_ids, int):
+                    result.append(content_token_ids)
+                else:
+                    result += content_token_ids
 
             elif isinstance(content, dict):
                 tts_text_tokens = self.tokenize(content["tts_text"])
