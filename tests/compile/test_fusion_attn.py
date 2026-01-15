@@ -27,6 +27,9 @@ from vllm.config import (
     set_current_vllm_config,
 )
 from vllm.forward_context import get_forward_context, set_forward_context
+from vllm.model_executor.layers.quantization.kernels.scaled_mm.cutlass import (
+    CutlassFP8ScaledMMLinearKernel,
+)
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
     kFp8StaticTensorSym,
@@ -178,6 +181,9 @@ class TestAttentionFp8StaticQuantPatternModel(AttentionQuantPatternModel):
             activation_quant_key=self.quant_key,
             weight_quant_key=self.quant_key,
             device=self.device,
+            force_kernel=CutlassFP8ScaledMMLinearKernel
+            if current_platform.is_cuda()
+            else None,
         )
 
         self.w = kwargs.get(
