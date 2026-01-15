@@ -1040,16 +1040,24 @@ class Qwen3MoeLLMModel(Qwen3MoeModel):
             assert intermediate_tensors is not None
             hidden_states = intermediate_tensors["hidden_states"]
             residual = intermediate_tensors["residual"]
-        capture_set = set(capture_hidden_states_indices) if capture_hidden_states_indices is not None else None
-        captured_hidden_states: dict[str, torch.Tensor] | None = {} if capture_hidden_states_indices is not None else None
+        # Completely bypass capture logic if indices is None or empty.
+        # This keeps the graph clean for torch.compile in the common case.
+        if capture_hidden_states_indices:
+            capture_set = set(capture_hidden_states_indices)
+            captured_hidden_states = []
+        else:
+            capture_set = None
+            captured_hidden_states = None
+
         for layer_idx, layer in enumerate(
             self.layers[self.start_layer : self.end_layer]
         ):
             layer_idx = layer_idx + self.start_layer
             
-            if captured_hidden_states is not None and capture_set is not None:
+            # Use a simple boolean check that Dynamo can easily specialize.
+            if captured_hidden_states is not None:
                 if f"layer_{layer_idx}" in capture_set:
-                    captured_hidden_states[str(layer_idx)] = hidden_states.clone() #use .clone() to avoid in-place operations
+                    captured_hidden_states.append(hidden_states.clone())
 
             hidden_states, residual = layer(
                 positions,
@@ -1070,8 +1078,12 @@ class Qwen3MoeLLMModel(Qwen3MoeModel):
                 {"hidden_states": hidden_states, "residual": residual}
             )
         hidden_states, _ = self.norm(hidden_states, residual)
-        if captured_hidden_states is not None and "last_hidden_state" in capture_set:
-            captured_hidden_states["last_hidden_state"] = hidden_states.clone()
+        if capture_hidden_states_indices is not None:
+            if "last_hidden_state" in capture_set:
+                captured_hidden_states.append(hidden_states.clone())
+        # ALWAYS return a tuple to keep torch.compile's output schema stable.
+        # Dynamic return structures (returning Tensor vs Tuple) lead to 
+        # "Expected tensors only, but got int" errors in standalone_compile.
         return hidden_states, captured_hidden_states
 
 
@@ -1878,7 +1890,11 @@ class Qwen3OmniMoeThinkerForConditionalGeneration(
         if inputs_embeds is not None and get_pp_group().is_first_rank:
             self._clear_deepstack_input_embeds(inputs_embeds.size(0))
 
-        return hidden_states if captured_hidden_states is None else (hidden_states, captured_hidden_states)
+        # Re-apply the conditional return logic to satisfy vLLM's infrastructure.
+        # When captured_hidden_states is None, only return hidden_states.
+        if captured_hidden_states is None:
+            return hidden_states
+        return hidden_states, captured_hidden_states
 
     def compute_logits(
         self,
