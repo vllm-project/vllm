@@ -26,12 +26,6 @@ from vllm.entrypoints.chat_utils import (
     ChatTemplateContentFormatOption,
     ConversationMessage,
 )
-from vllm.entrypoints.context import (
-    ConversationContext,
-    HarmonyContext,
-    ParsableContext,
-    StreamingHarmonyContext,
-)
 from vllm.entrypoints.logger import RequestLogger
 from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionNamedToolChoiceParam,
@@ -49,9 +43,18 @@ from vllm.entrypoints.openai.engine.protocol import (
     FunctionDefinition,
 )
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
+from vllm.entrypoints.openai.responses.context import (
+    ConversationContext,
+    HarmonyContext,
+    ParsableContext,
+    StreamingHarmonyContext,
+)
 from vllm.entrypoints.openai.responses.protocol import (
     ResponseInputOutputItem,
     ResponsesRequest,
+)
+from vllm.entrypoints.openai.responses.utils import (
+    construct_input_messages,
 )
 from vllm.entrypoints.openai.translations.protocol import (
     TranscriptionRequest,
@@ -80,9 +83,6 @@ from vllm.entrypoints.pooling.score.protocol import (
     ScoreResponse,
 )
 from vllm.entrypoints.renderer import BaseRenderer, CompletionRenderer, RenderConfig
-from vllm.entrypoints.responses_utils import (
-    construct_input_messages,
-)
 from vllm.entrypoints.serve.disagg.protocol import GenerateRequest, GenerateResponse
 from vllm.entrypoints.serve.tokenize.protocol import (
     DetokenizeRequest,
