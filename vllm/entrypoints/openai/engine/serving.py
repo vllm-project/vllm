@@ -31,32 +31,36 @@ from vllm.entrypoints.chat_utils import (
     parse_chat_messages_futures,
     resolve_chat_template_content_format,
 )
-from vllm.entrypoints.context import (
-    ConversationContext,
-    HarmonyContext,
-    ParsableContext,
-    StreamingHarmonyContext,
-)
 from vllm.entrypoints.logger import RequestLogger
 from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionNamedToolChoiceParam,
     ChatCompletionRequest,
     ChatCompletionResponse,
 )
-from vllm.entrypoints.openai.engine.protocol import (
+from vllm.entrypoints.openai.completion.protocol import (
     CompletionRequest,
     CompletionResponse,
+)
+from vllm.entrypoints.openai.engine.protocol import (
     ErrorInfo,
     ErrorResponse,
     FunctionCall,
     FunctionDefinition,
-    VLLMValidationError,
+)
+from vllm.entrypoints.openai.models.serving import OpenAIServingModels
+from vllm.entrypoints.openai.responses.context import (
+    ConversationContext,
+    HarmonyContext,
+    ParsableContext,
+    StreamingHarmonyContext,
 )
 from vllm.entrypoints.openai.responses.protocol import (
     ResponseInputOutputItem,
     ResponsesRequest,
 )
-from vllm.entrypoints.openai.serving_models import OpenAIServingModels
+from vllm.entrypoints.openai.responses.utils import (
+    construct_input_messages,
+)
 from vllm.entrypoints.openai.translations.protocol import (
     TranscriptionRequest,
     TranscriptionResponse,
@@ -84,9 +88,6 @@ from vllm.entrypoints.pooling.score.protocol import (
     ScoreResponse,
 )
 from vllm.entrypoints.renderer import BaseRenderer, CompletionRenderer, RenderConfig
-from vllm.entrypoints.responses_utils import (
-    construct_input_messages,
-)
 from vllm.entrypoints.serve.disagg.protocol import GenerateRequest, GenerateResponse
 from vllm.entrypoints.serve.tokenize.protocol import (
     DetokenizeRequest,
@@ -95,6 +96,7 @@ from vllm.entrypoints.serve.tokenize.protocol import (
     TokenizeResponse,
 )
 from vllm.entrypoints.utils import _validate_truncation_size, sanitize_message
+from vllm.exceptions import VLLMValidationError
 from vllm.inputs.data import PromptType, TokensPrompt
 from vllm.inputs.parse import (
     PromptComponents,

@@ -84,10 +84,7 @@ class LLMEngine:
             self.dp_group = None
         self.should_execute_dummy_batch = False
 
-        if self.model_config.skip_tokenizer_init:
-            tokenizer = None
-        else:
-            tokenizer = cached_tokenizer_from_config(self.model_config)
+        tokenizer = cached_tokenizer_from_config(self.model_config)
 
         self.input_processor = InputProcessor(self.vllm_config, tokenizer)
         self.io_processor = get_io_processor(
