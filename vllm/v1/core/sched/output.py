@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING
 from typing_extensions import deprecated
 
 from vllm._bc_linter import bc_linter_include
+from vllm.v1.spec_decode.metrics import SpecDecodingStats
 
 if TYPE_CHECKING:
     import numpy as np
@@ -206,6 +207,9 @@ class SchedulerOutput:
 
     # EC Cache Connector metadata
     ec_connector_metadata: ECConnectorMetadata | None = None
+
+    # Spec Decoding stats for all requests.
+    spec_decoding_stats_all: SpecDecodingStats | None = None
 
     @classmethod
     def make_empty(cls) -> "SchedulerOutput":

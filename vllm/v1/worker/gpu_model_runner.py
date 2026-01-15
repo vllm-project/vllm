@@ -3605,17 +3605,9 @@ class GPUModelRunner(
     ) -> list[list[int]] | torch.Tensor:
         optimal_num_speculative_tokens = None
         if self.dynamic_sd_manager:
-            batch_size = self.input_batch.num_reqs
-            optimal_num_speculative_tokens = (
-                self.dynamic_sd_manager.get_optimal_num_speculative_tokens(
-                    self.input_batch.num_reqs
-                )
-            )
-
-            # REMOVE
-            print(
-                f"Batch size: {batch_size}, "
-                f"Optimal num speculative tokens: {optimal_num_speculative_tokens}"
+            optimal_num_speculative_tokens = self.dynamic_sd_manager.step(
+                scheduler_output.spec_decoding_stats_all,
+                self.input_batch.num_reqs,
             )
 
         num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens

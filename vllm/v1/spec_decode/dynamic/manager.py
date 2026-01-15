@@ -31,11 +31,15 @@ class DynamicSpeculativeDecodingManager:
         dynamic_config: DynamicSpeculativeConfig | None,
         vllm_max_batch_size: int,
         vllm_num_speculative_tokens: int,
+        warmup_steps: int = 10, # TODO: make this configurable
     ):
         self.dynamic_config = dynamic_config
         self.vllm_max_batch_size = vllm_max_batch_size
+        self.vllm_num_speculative_tokens = vllm_num_speculative_tokens
         self.batch_stats = self.dynamic_config.batch_stats
         self.available_batch_sizes = sorted(self.dynamic_config.batch_stats.keys())
+        self.steps = 0
+        self.warmup_steps = warmup_steps
 
         # Sanity check
         assert (
@@ -76,6 +80,42 @@ class DynamicSpeculativeDecodingManager:
 
         self.update_optimal_num_speculative_tokens()
 
+    def step(self, spec_decoding_stats_all, batch_size: int) -> int:
+        self.steps += 1
+        if self.should_update():
+            acceptance_rate_per_pos = self.compute_acceptance_rate_per_pos(spec_decoding_stats_all)
+            self.update_acceptance_rate_per_pos(
+                acceptance_rate_per_pos
+            )
+            
+        optimal_num_speculative_tokens = (
+            self.get_optimal_num_speculative_tokens(
+                batch_size
+            )
+        )
+
+        return optimal_num_speculative_tokens
+    
+    def compute_acceptance_rate_per_pos(self, spec_decoding_stats_all) -> list[float]:
+        acceptance_rate_per_pos = []
+        for i in range(self.vllm_num_speculative_tokens):
+            if spec_decoding_stats_all.num_draft_tokens_per_pos[i] == 0:
+                acceptance_rate = 0.0
+            else:
+                acceptance_rate = (
+                    spec_decoding_stats_all.num_accepted_tokens_per_pos[i]
+                    / spec_decoding_stats_all.num_draft_tokens_per_pos[i]
+                )
+
+            acceptance_rate_per_pos.append(acceptance_rate)
+
+        return acceptance_rate_per_pos
+
+    def should_update(self) -> bool:
+        # making this a separate function for easier overriding or extension
+        return self.steps > self.warmup_steps
+
+
     def get_optimal_num_speculative_tokens(self, batch_size: int) -> int:
         assert batch_size > 0, "batch_size must be > 0"
         assert batch_size <= self.vllm_max_batch_size, (
@@ -89,14 +129,21 @@ class DynamicSpeculativeDecodingManager:
             for bs in range(1, self.vllm_max_batch_size + 1)
         }
 
+    def update_acceptance_rate_per_pos(
+        self, acceptance_rate_per_pos: list[float]
+    ):
+        self.dynamic_config.acceptance_rate_per_pos = acceptance_rate_per_pos
+        self.update_optimal_num_speculative_tokens()
+
+
     def _get_batch_stats(self, batch_size: int) -> dict:
         # import pdb; pdb.set_trace()
         if batch_size not in self.batch_stats:
             # find the nearest batch size smaller and bigger than the given batch size
             # and return the weighted avg of their stats
-            print(
-                f"Finding batch stats for batch_size: {batch_size} in self.available_batch_sizes: {self.available_batch_sizes}"
-            )
+            # print(
+            #     f"Finding batch stats for batch_size: {batch_size} in self.available_batch_sizes: {self.available_batch_sizes}"
+            # )
 
             smaller_bs = [bs for bs in self.available_batch_sizes if bs < batch_size]
             smaller_bs = (
@@ -108,9 +155,9 @@ class DynamicSpeculativeDecodingManager:
             )
 
             # REMOVE
-            print(
-                f"smaller_bs: {smaller_bs}, larger_bs: {larger_bs}, batch_size: {batch_size}"
-            )
+            # print(
+            #     f"smaller_bs: {smaller_bs}, larger_bs: {larger_bs}, batch_size: {batch_size}"
+            # )
 
             smaller_bs_stat = self.batch_stats[smaller_bs]
             larger_bs_stat = self.batch_stats[larger_bs]
@@ -118,7 +165,7 @@ class DynamicSpeculativeDecodingManager:
             ratio = (batch_size - smaller_bs) / (larger_bs - smaller_bs)
 
             # REMOVE
-            print(f"ratio: {ratio}")
+            # print(f"ratio: {ratio}")
 
             avg_stat: dict[int, float] = {}
             for k in smaller_bs_stat:
@@ -158,9 +205,9 @@ class DynamicSpeculativeDecodingManager:
                 chosen_num_drafts = num_drafts
 
             # REMOVE
-            print(
-                f"num_drafts: {num_drafts}, al: {curr_al}, itl: {curr_itl}, goodput: {curr_goodput}"
-            )
+            # print(
+            #     f"num_drafts: {num_drafts}, al: {curr_al}, itl: {curr_itl}, goodput: {curr_goodput}"
+            # )
 
         return chosen_num_drafts
 

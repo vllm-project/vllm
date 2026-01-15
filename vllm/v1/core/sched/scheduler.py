@@ -203,6 +203,7 @@ class Scheduler(SchedulerInterface):
             if speculative_config.use_eagle():
                 self.use_eagle = True
                 self.num_lookahead_tokens = self.num_spec_tokens
+            self.spec_decoding_stats_all = SpecDecodingStats.new(self.num_spec_tokens)
 
         # Create the KV cache manager.
         self.kv_cache_manager = KVCacheManager(
@@ -739,7 +740,10 @@ class Scheduler(SchedulerInterface):
             # the previous and the current steps.
             finished_req_ids=self.finished_req_ids,
             free_encoder_mm_hashes=self.encoder_cache_manager.get_freed_mm_hashes(),
+            spec_decoding_stats_all=self.spec_decoding_stats_all,
         )
+
+        # REMOVE
 
         # NOTE(Kuntai): this function is designed for multiple purposes:
         # 1. Plan the KV cache store
@@ -1530,6 +1534,14 @@ class Scheduler(SchedulerInterface):
         num_draft_tokens: int,
         num_accepted_tokens: int,
     ) -> SpecDecodingStats | None:
+        # Save this so its accessible by scheduler and can
+        # be sent to engine for Dynamic SD.
+        if self.spec_decoding_stats_all is not None:
+            self.spec_decoding_stats_all.observe_draft(
+                num_draft_tokens=num_draft_tokens,
+                num_accepted_tokens=num_accepted_tokens,
+            )
+
         if not self.log_stats:
             return None
         if spec_decoding_stats is None:
