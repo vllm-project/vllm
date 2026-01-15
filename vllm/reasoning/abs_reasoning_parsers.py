@@ -8,7 +8,7 @@ from collections.abc import Callable, Sequence
 from functools import cached_property
 from typing import TYPE_CHECKING, Any
 
-from vllm.entrypoints.tool_server import ToolServer
+from vllm.entrypoints.mcp.tool_server import ToolServer
 from vllm.logger import init_logger
 from vllm.utils.collection_utils import is_list_of
 from vllm.utils.import_utils import import_from_path

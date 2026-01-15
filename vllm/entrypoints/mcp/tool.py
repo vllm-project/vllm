@@ -15,7 +15,7 @@ from vllm.utils import random_uuid
 
 if TYPE_CHECKING:
     # Avoid circular import.
-    from vllm.entrypoints.context import ConversationContext
+    from vllm.entrypoints.openai.responses.context import ConversationContext
 
 logger = init_logger(__name__)
 
@@ -81,7 +81,7 @@ class HarmonyBrowserTool(Tool):
         logger.info_once("Browser tool initialized")
 
     async def get_result(self, context: "ConversationContext") -> Any:
-        from vllm.entrypoints.context import HarmonyContext
+        from vllm.entrypoints.openai.responses.context import HarmonyContext
 
         assert isinstance(context, HarmonyContext)
         last_msg = context.messages[-1]
@@ -141,7 +141,7 @@ class HarmonyPythonTool(Tool):
         logger.info_once("Code interpreter tool initialized")
 
     async def get_result(self, context: "ConversationContext") -> Any:
-        from vllm.entrypoints.context import HarmonyContext
+        from vllm.entrypoints.openai.responses.context import HarmonyContext
 
         assert isinstance(context, HarmonyContext)
         last_msg = context.messages[-1]
@@ -155,7 +155,7 @@ class HarmonyPythonTool(Tool):
         This function converts parsable context types to harmony and
         back so we can use GPTOSS demo python tool
         """
-        from vllm.entrypoints.context import ParsableContext
+        from vllm.entrypoints.openai.responses.context import ParsableContext
 
         assert isinstance(context, ParsableContext)
 

@@ -7,7 +7,7 @@ import pytest_asyncio
 from openai import OpenAI
 from openai_harmony import ToolDescription, ToolNamespaceConfig
 
-from vllm.entrypoints.tool_server import MCPToolServer
+from vllm.entrypoints.mcp.tool_server import MCPToolServer
 
 from ....utils import RemoteOpenAIServer
 

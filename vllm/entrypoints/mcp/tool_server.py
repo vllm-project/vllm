@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING, Any
 
 from openai_harmony import ToolDescription, ToolNamespaceConfig
 
-from vllm.entrypoints.tool import HarmonyBrowserTool, HarmonyPythonTool, Tool
+from vllm.entrypoints.mcp.tool import HarmonyBrowserTool, HarmonyPythonTool, Tool
 from vllm.logger import init_logger
 
 logger = init_logger(__name__)
