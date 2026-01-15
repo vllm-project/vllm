@@ -1342,7 +1342,12 @@ class Scheduler(SchedulerInterface):
 
         if (
             stats := self.make_stats(
-                num_running_reqs, num_waiting_reqs, spec_decoding_stats, kv_connector_stats, cudagraph_stats, perf_stats
+                num_running_reqs,
+                num_waiting_reqs,
+                spec_decoding_stats,
+                kv_connector_stats,
+                cudagraph_stats,
+                perf_stats,
             )
         ) is not None:
             # Return stats to only one of the front-ends.
@@ -1590,8 +1595,8 @@ class Scheduler(SchedulerInterface):
 
     def make_stats(
         self,
-        num_running_reqs: int,
-        num_waiting_reqs: int,
+        num_running_reqs: int | None = None,
+        num_waiting_reqs: int | None = None,
         spec_decoding_stats: SpecDecodingStats | None = None,
         kv_connector_stats: KVConnectorStats | None = None,
         cudagraph_stats: CUDAGraphStat | None = None,
@@ -1611,6 +1616,14 @@ class Scheduler(SchedulerInterface):
         connector_stats_payload = (
             kv_connector_stats.data if kv_connector_stats else None
         )
+
+        num_running_reqs = (
+            num_running_reqs if num_running_reqs is not None else len(self.running)
+        )
+        num_waiting_reqs = (
+            num_waiting_reqs if num_waiting_reqs is not None else len(self.waiting)
+        )
+
         return SchedulerStats(
             num_running_reqs=num_running_reqs,
             num_waiting_reqs=num_waiting_reqs,
