@@ -913,6 +913,101 @@
             color: var(--error);
         }
 
+        /* Upload button */
+        .upload-btn {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            width: 40px;
+            height: 40px;
+            background: var(--muted);
+            border: 1px solid var(--border);
+            border-radius: var(--radius);
+            cursor: pointer;
+            color: var(--muted-foreground);
+            transition: all 0.2s ease;
+            flex-shrink: 0;
+        }
+
+        .upload-btn:hover {
+            border-color: var(--vllm-blue);
+            color: var(--vllm-blue);
+        }
+
+        .upload-btn svg {
+            width: 18px;
+            height: 18px;
+        }
+
+        /* Image preview area */
+        .image-preview-area {
+            display: none;
+            flex-wrap: wrap;
+            gap: 8px;
+            padding: 8px 0;
+        }
+
+        .image-preview-area.has-images {
+            display: flex;
+        }
+
+        .image-preview-item {
+            position: relative;
+            width: 60px;
+            height: 60px;
+            border-radius: calc(var(--radius) - 2px);
+            overflow: hidden;
+            border: 1px solid var(--border);
+        }
+
+        .image-preview-item img {
+            width: 100%;
+            height: 100%;
+            object-fit: cover;
+        }
+
+        .image-preview-item .remove-btn {
+            position: absolute;
+            top: 2px;
+            right: 2px;
+            width: 18px;
+            height: 18px;
+            background: rgba(0, 0, 0, 0.7);
+            border: none;
+            border-radius: 50%;
+            color: white;
+            font-size: 12px;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            opacity: 0;
+            transition: opacity 0.15s ease;
+        }
+
+        .image-preview-item:hover .remove-btn {
+            opacity: 1;
+        }
+
+        /* Message with images */
+        .message-images {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 6px;
+            margin-bottom: 8px;
+        }
+
+        .message-images img {
+            max-width: 200px;
+            max-height: 150px;
+            border-radius: calc(var(--radius) - 2px);
+            cursor: pointer;
+            transition: transform 0.2s ease;
+        }
+
+        .message-images img:hover {
+            transform: scale(1.02);
+        }
 
         /* Typing indicator */
         .typing {
@@ -1214,7 +1309,18 @@
                         <button class="clear-btn" onclick="clearChat()">Clear</button>
                     </div>
 
+                    <!-- Image preview area -->
+                    <div class="image-preview-area" id="image-preview-area"></div>
+
                     <div class="input-row">
+                        <input type="file" id="image-input" accept="image/*" multiple style="display:none" onchange="handleImageUpload(event)">
+                        <button class="upload-btn" onclick="document.getElementById('image-input').click()" title="Upload image">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                <rect x="3" y="3" width="18" height="18" rx="2" ry="2"/>
+                                <circle cx="8.5" cy="8.5" r="1.5"/>
+                                <polyline points="21 15 16 10 5 21"/>
+                            </svg>
+                        </button>
                         <input type="text" class="chat-input" id="chat-input"
                                placeholder="Type your message..."
                                onkeypress="if(event.key==='Enter')sendMessage()">
@@ -1262,6 +1368,98 @@
         };
 
         let chatParams = { ...defaultParams };
+
+        // Pending images for multimodal messages
+        let pendingImages = [];  // Array of {dataUrl: string, file: File}
+
+        // Handle image file upload
+        function handleImageUpload(event) {
+            const files = event.target.files;
+            for (const file of files) {
+                if (file.type.startsWith('image/')) {
+                    const reader = new FileReader();
+                    reader.onload = (e) => {
+                        const dataUrl = e.target.result;
+                        pendingImages.push({ dataUrl, file });
+                        renderImagePreviews();
+                    };
+                    reader.readAsDataURL(file);
+                }
+            }
+            // Reset input so same file can be selected again
+            event.target.value = '';
+        }
+
+        // Render image previews
+        function renderImagePreviews() {
+            const area = document.getElementById('image-preview-area');
+            if (pendingImages.length === 0) {
+                area.classList.remove('has-images');
+                area.innerHTML = '';
+                return;
+            }
+
+            area.classList.add('has-images');
+            area.innerHTML = pendingImages.map((img, idx) => `
+                <div class="image-preview-item">
+                    <img src="${img.dataUrl}" alt="Preview">
+                    <button class="remove-btn" onclick="removeImage(${idx})">×</button>
+                </div>
+            `).join('');
+        }
+
+        // Remove an image from pending list
+        function removeImage(index) {
+            pendingImages.splice(index, 1);
+            renderImagePreviews();
+        }
+
+        // Clear all pending images
+        function clearPendingImages() {
+            pendingImages = [];
+            renderImagePreviews();
+        }
+
+        // Handle drag & drop for images
+        function setupDragDrop() {
+            const chatArea = document.querySelector('.chat-input-area');
+            if (!chatArea) return;
+
+            ['dragenter', 'dragover', 'dragleave', 'drop'].forEach(event => {
+                chatArea.addEventListener(event, (e) => {
+                    e.preventDefault();
+                    e.stopPropagation();
+                });
+            });
+
+            ['dragenter', 'dragover'].forEach(event => {
+                chatArea.addEventListener(event, () => {
+                    chatArea.style.borderColor = 'var(--vllm-blue)';
+                    chatArea.style.background = 'rgba(48, 162, 255, 0.1)';
+                });
+            });
+
+            ['dragleave', 'drop'].forEach(event => {
+                chatArea.addEventListener(event, () => {
+                    chatArea.style.borderColor = '';
+                    chatArea.style.background = '';
+                });
+            });
+
+            chatArea.addEventListener('drop', (e) => {
+                const files = e.dataTransfer.files;
+                for (const file of files) {
+                    if (file.type.startsWith('image/')) {
+                        const reader = new FileReader();
+                        reader.onload = (ev) => {
+                            pendingImages.push({ dataUrl: ev.target.result, file });
+                            renderImagePreviews();
+                        };
+                        reader.readAsDataURL(file);
+                    }
+                }
+            });
+        }
 
         // Load saved parameters from localStorage
         function loadParams() {
@@ -1855,8 +2053,25 @@
 
         // Update context stats
         function updateContextStats() {
-            const totalChars = conversationHistory.reduce((sum, msg) => sum + (msg.content?.length || 0), 0);
-            document.getElementById('stat-context').textContent = totalChars.toLocaleString();
+            let totalChars = 0;
+            let imageCount = 0;
+
+            for (const msg of conversationHistory) {
+                if (typeof msg.content === 'string') {
+                    totalChars += msg.content.length;
+                } else if (Array.isArray(msg.content)) {
+                    for (const part of msg.content) {
+                        if (part.type === 'text') {
+                            totalChars += part.text?.length || 0;
+                        } else if (part.type === 'image_url') {
+                            imageCount++;
+                        }
+                    }
+                }
+            }
+
+            const statsText = imageCount > 0 ? `${totalChars.toLocaleString()} + ${imageCount} img` : totalChars.toLocaleString();
+            document.getElementById('stat-context').textContent = statsText;
             document.getElementById('stat-messages').textContent = conversationHistory.length;
         }
 
@@ -1864,6 +2079,7 @@
         function clearChat() {
             document.getElementById('chat-messages').innerHTML = '<div class="chat-empty">Send a message to start chatting</div>';
             conversationHistory = [];
+            clearPendingImages();
             updateContextStats();
         }
 
@@ -1891,19 +2107,51 @@
             const typing = document.getElementById('typing');
 
             const msg = input.value.trim();
-            if (!msg) return;
+            if (!msg && pendingImages.length === 0) return;
 
             // Clear empty state
             const empty = messages.querySelector('.chat-empty');
             if (empty) empty.remove();
 
-            // Add user message
-            conversationHistory.push({ role: 'user', content: msg });
+            // Build message content (multimodal if images present)
+            let messageContent;
+            let displayImagesHtml = '';
+
+            if (pendingImages.length > 0) {
+                // Multimodal content array
+                messageContent = [];
+
+                // Add images first
+                for (const img of pendingImages) {
+                    messageContent.push({
+                        type: 'image_url',
+                        image_url: { url: img.dataUrl }
+                    });
+                    displayImagesHtml += `<img src="${img.dataUrl}" alt="Uploaded image">`;
+                }
+
+                // Add text if present
+                if (msg) {
+                    messageContent.push({ type: 'text', text: msg });
+                }
+            } else {
+                // Text only
+                messageContent = msg;
+            }
+
+            // Add user message to history
+            conversationHistory.push({ role: 'user', content: messageContent });
             updateContextStats();
+
+            // Display user message with images
+            const imagesSection = displayImagesHtml ? `<div class="message-images">${displayImagesHtml}</div>` : '';
             messages.innerHTML += `
                 <div class="message message-user">
-                    <div class="message-bubble">${esc(msg)}</div>
+                    <div class="message-bubble">${imagesSection}${msg ? esc(msg) : ''}</div>
                 </div>`;
+
+            // Clear pending images
+            clearPendingImages();
 
             input.value = '';
             sendBtn.disabled = true;
@@ -2046,6 +2294,7 @@
             loadParams();            // Load saved chat parameters
             restoreParamsPanel();    // Restore params panel expand state
             restoreFilterToggles();  // Restore saved toggle states
+            setupDragDrop();         // Enable drag & drop for images
             await fetchServerInfo();  // Also fetches config & env
             await fetchMetrics();
             setInterval(fetchMetrics, 5000);
