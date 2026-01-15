@@ -18,12 +18,12 @@ from vllm.v1.kv_offload.mediums import (
     DRAMLoadStoreSpec,
     GPULoadStoreSpec,
 )
-from vllm.v1.kv_offload.worker.cpu_cpu import CpuCpuOffloadingHandler
 from vllm.v1.kv_offload.spec import OffloadingSpec
-from vllm.v1.kv_offload.worker.cpu_gpu import CpuGpuOffloadingHandlers
 from vllm.v1.kv_offload.worker.worker import OffloadingHandler
 
 from .cxl_backend import WeaveCXLBackend
+from .dram_cxl import WeaveDramCxlOffloadingHandler
+from .cpu_gpu import WeaveGPUDramOffloadingHandlers
 from .dram_backend import WeaveDRAMBackend
 from .numa import numa_membind
 from .two_tier_manager import TwoTierOffloadingManager
@@ -276,10 +276,10 @@ class WeaveOffloadingSpec(OffloadingSpec):
         self._manager: OffloadingManager | None = None
 
         # Worker-side
-        self._dram_handlers: CpuGpuOffloadingHandlers | None = None
-        self._cxl_handlers: CpuGpuOffloadingHandlers | None = None
-        self._cpu_cpu_dram_to_cxl: CpuCpuOffloadingHandler | None = None
-        self._cpu_cpu_cxl_to_dram: CpuCpuOffloadingHandler | None = None
+        self._dram_handlers: WeaveGPUDramOffloadingHandlers | None = None
+        self._cxl_handlers: WeaveGPUDramOffloadingHandlers | None = None
+        self._dram_cxl_dram_to_cxl: WeaveDramCxlOffloadingHandler | None = None
+        self._dram_cxl_cxl_to_dram: WeaveDramCxlOffloadingHandler | None = None
 
         # Optional tuning knobs
         self.eviction_policy: str = (
@@ -376,7 +376,7 @@ class WeaveOffloadingSpec(OffloadingSpec):
                     self.weave_config.cxl_bytes_to_use // kv_bytes_per_offloaded_block
                 )
 
-            self._dram_handlers = CpuGpuOffloadingHandlers(
+            self._dram_handlers = WeaveGPUDramOffloadingHandlers(
                 attn_backends=attn_backends,
                 gpu_block_size=self.gpu_block_size,
                 cpu_block_size=self.offloaded_block_size,
@@ -385,7 +385,7 @@ class WeaveOffloadingSpec(OffloadingSpec):
             )
 
             with numa_membind(self.weave_config.cxl_numa_node):
-                self._cxl_handlers = CpuGpuOffloadingHandlers(
+                self._cxl_handlers = WeaveGPUDramOffloadingHandlers(
                     attn_backends=attn_backends,
                     gpu_block_size=self.gpu_block_size,
                     cpu_block_size=self.offloaded_block_size,
@@ -393,14 +393,14 @@ class WeaveOffloadingSpec(OffloadingSpec):
                     gpu_caches=kv_caches,
                 )
 
-            self._cpu_cpu_dram_to_cxl = CpuCpuOffloadingHandler(
+            self._dram_cxl_dram_to_cxl = WeaveDramCxlOffloadingHandler(
                 src_tensors=self._dram_handlers.cpu_tensors,
                 dst_tensors=self._cxl_handlers.cpu_tensors,
                 kv_dim_before_num_blocks=self._dram_handlers.kv_dim_before_num_blocks,
                 src_block_size_factor=self._dram_handlers.cpu_block_size_factor,
                 dst_block_size_factor=self._cxl_handlers.cpu_block_size_factor,
             )
-            self._cpu_cpu_cxl_to_dram = CpuCpuOffloadingHandler(
+            self._dram_cxl_cxl_to_dram = WeaveDramCxlOffloadingHandler(
                 src_tensors=self._cxl_handlers.cpu_tensors,
                 dst_tensors=self._dram_handlers.cpu_tensors,
                 kv_dim_before_num_blocks=self._dram_handlers.kv_dim_before_num_blocks,
@@ -410,10 +410,10 @@ class WeaveOffloadingSpec(OffloadingSpec):
 
         assert self._dram_handlers is not None
         assert self._cxl_handlers is not None
-        assert self._cpu_cpu_dram_to_cxl is not None
-        assert self._cpu_cpu_cxl_to_dram is not None
+        assert self._dram_cxl_dram_to_cxl is not None
+        assert self._dram_cxl_cxl_to_dram is not None
 
         yield GPULoadStoreSpec, DRAMLoadStoreSpec, self._dram_handlers.gpu_to_cpu_handler
         yield DRAMLoadStoreSpec, GPULoadStoreSpec, self._dram_handlers.cpu_to_gpu_handler
-        yield DRAMLoadStoreSpec, CXLLoadStoreSpec, self._cpu_cpu_dram_to_cxl
-        yield CXLLoadStoreSpec, DRAMLoadStoreSpec, self._cpu_cpu_cxl_to_dram
+        yield DRAMLoadStoreSpec, CXLLoadStoreSpec, self._dram_cxl_dram_to_cxl
+        yield CXLLoadStoreSpec, DRAMLoadStoreSpec, self._dram_cxl_cxl_to_dram
