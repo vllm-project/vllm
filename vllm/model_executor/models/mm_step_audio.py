@@ -549,30 +549,6 @@ class Adaptor(nn.Module):
         x = self.linear2(x)
         return x
 
-
-class StepASREncoder(nn.Module):
-
-    def __init__(self, config: StepAudio2EncoderConfig):
-        super().__init__()
-        config = config.get_audio_encoder_config()
-        self.config = config
-        self.encoder = AudioEncoder(config.n_mels, config.n_audio_ctx,
-                                    config.n_audio_state, config.n_audio_head,
-                                    config.n_audio_layer)
-        self.adaptor = Adaptor(config.n_audio_state, config.llm_dim,
-                               config.kernel_size, config.adapter_stride,
-                               config.adapter_state)
-
-    def forward(self, x: torch.Tensor,
-                x_len: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-        x, x_len = self.encoder(x, x_len)
-        x = self.adaptor(x)
-        x_len = (
-            x_len - 1
-        ) // 2 + 1  # FIXME(ys): hard code for audio token num, padding 1, kernel size 3, stride 2 # noqa: E501
-        return x, x_len
-
-
 @MULTIMODAL_REGISTRY.register_processor(
     Step1fAudioMultiModalProcessor,
     info=Step1fAudioProcessingInfo,
@@ -739,7 +715,12 @@ class StepAudio2ForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
 
         audio_features, audio_lens = self.encoder(audio_mels, audio_lens)
         audio_features = self.adapter(audio_features)
-        audio_feature_lens = (audio_lens - 1) // 2 + 1
+
+        kernel_size = self.adapter.conv.kernel_size[0]
+        stride = self.adapter.conv.stride[0]
+        padding = self.adapter.conv.padding[0]
+        audio_feature_lens = (audio_lens + 2 * padding -
+                                kernel_size) // stride + 1
 
         audio_feature_list = [
             audio_features[i, : audio_feature_lens[i]]
