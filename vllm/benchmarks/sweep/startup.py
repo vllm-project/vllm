@@ -151,16 +151,13 @@ def run_benchmark(
     print(f"Output file: {output_path}")
 
     if output_path.exists():
-        try:
-            with output_path.open("r", encoding="utf-8") as f:
-                run_data = json.load(f)
-            print("Found existing results. Skipping.")
-            print("[END BENCHMARK]")
+        print("Found existing results. Skipping.")
+
+        with output_path.open("r", encoding="utf-8") as f:
+            run_data = json.load(f)
             return _update_run_data(
                 run_data, serve_overrides, startup_overrides, run_number
             )
-        except (json.JSONDecodeError, UnicodeDecodeError):
-            print(f"Corrupted or invalid result file found: {output_path}. Rerunning.")
 
     if dry_run:
         print("[END BENCHMARK]")
