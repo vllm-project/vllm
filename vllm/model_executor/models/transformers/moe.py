@@ -37,9 +37,12 @@ if TYPE_CHECKING:
     from vllm.config import VllmConfig
 
 
+# --8<-- [start:transformers_fused_moe]
 @CustomOp.register("transformers_fused_moe")
 class TransformersFusedMoE(FusedMoE):
     """Custom FusedMoE for the Transformers modeling backend."""
+
+    # --8<-- [end:transformers_fused_moe]
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -165,6 +168,7 @@ class MoEMixin(MixtureOfExperts):
         for gate_proj, down_proj, up_proj in ckpt_names:
             expert_mapping.extend(
                 FusedMoE.make_expert_params_mapping(
+                    self,
                     ckpt_gate_proj_name=gate_proj,
                     ckpt_down_proj_name=down_proj,
                     ckpt_up_proj_name=up_proj,

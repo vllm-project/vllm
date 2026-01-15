@@ -10,7 +10,7 @@ from pydantic import (
 
 from vllm import PoolingParams
 from vllm.entrypoints.chat_utils import ChatCompletionMessageParam
-from vllm.entrypoints.openai.protocol import OpenAIBaseModel, UsageInfo
+from vllm.entrypoints.openai.engine.protocol import OpenAIBaseModel, UsageInfo
 from vllm.utils import random_uuid
 from vllm.utils.serial_utils import EmbedDType, EncodingFormat, Endianness
 
@@ -75,7 +75,7 @@ class EmbeddingCompletionRequest(OpenAIBaseModel):
         return PoolingParams(
             truncate_prompt_tokens=self.truncate_prompt_tokens,
             dimensions=self.dimensions,
-            normalize=self.normalize,
+            use_activation=self.normalize,
         )
 
 
@@ -97,7 +97,16 @@ class EmbeddingChatRequest(OpenAIBaseModel):
             "model."
         ),
     )
-
+    continue_final_message: bool = Field(
+        default=False,
+        description=(
+            "If this is set, the chat will be formatted so that the final "
+            "message in the chat is open-ended, without any EOS tokens. The "
+            "model will continue this message rather than starting a new one. "
+            'This allows you to "prefill" part of the model\'s response for it. '
+            "Cannot be used at the same time as `add_generation_prompt`."
+        ),
+    )
     add_special_tokens: bool = Field(
         default=False,
         description=(
@@ -180,7 +189,7 @@ class EmbeddingChatRequest(OpenAIBaseModel):
         return PoolingParams(
             truncate_prompt_tokens=self.truncate_prompt_tokens,
             dimensions=self.dimensions,
-            normalize=self.normalize,
+            use_activation=self.normalize,
         )
 
 

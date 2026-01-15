@@ -66,7 +66,11 @@ def can_initialize(
 
     model_info = EXAMPLE_MODELS.get_hf_info(model_arch)
     model_info.check_available_online(on_fail="skip")
-    model_info.check_transformers_version(on_fail="skip")
+    model_info.check_transformers_version(
+        on_fail="skip",
+        check_max_version=False,
+        check_version_reason="vllm",
+    )
 
     hf_overrides_fn = partial(
         dummy_hf_overrides,
@@ -136,6 +140,7 @@ def can_initialize(
             else None,
             trust_remote_code=model_info.trust_remote_code,
             max_model_len=model_info.max_model_len,
+            max_num_batched_tokens=model_info.max_num_batched_tokens,
             # these tests seem to produce leftover memory
             gpu_memory_utilization=0.80,
             load_format="dummy",

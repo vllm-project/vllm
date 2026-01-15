@@ -7,25 +7,25 @@ from typing import ClassVar
 
 import torch
 
-from vllm.attention.backends.abstract import (
-    AttentionBackend,
-    AttentionImpl,
-    AttentionType,
-    MultipleOf,
-)
 from vllm.attention.layer import Attention
-from vllm.attention.ops.merge_attn_states import merge_attn_states
 from vllm.config import VllmConfig, get_layers_from_vllm_config
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.utils.math_utils import cdiv
 from vllm.utils.platform_utils import get_cu_count
-from vllm.v1.attention.backends.utils import (
+from vllm.v1.attention.backend import (
+    AttentionBackend,
     AttentionCGSupport,
+    AttentionImpl,
     AttentionMetadataBuilder,
+    AttentionType,
     CommonAttentionMetadata,
+    MultipleOf,
+)
+from vllm.v1.attention.backends.utils import (
     split_decodes_prefills_and_extends,
 )
+from vllm.v1.attention.ops.merge_attn_states import merge_attn_states
 from vllm.v1.kv_cache_interface import AttentionSpec
 
 _PARTITION_SIZE_ROCM = 256
@@ -337,7 +337,7 @@ class AiterFlashAttentionMetadataBuilder(
 
         query_start_loc_cpu = common_attn_metadata.query_start_loc_cpu
 
-        seq_lens = common_attn_metadata.seq_lens_cpu
+        seq_lens = common_attn_metadata.seq_lens.cpu()
 
         query_lens_cpu = query_start_loc_cpu[1:] - query_start_loc_cpu[:-1]
 
@@ -367,7 +367,7 @@ class AiterFlashAttentionMetadataBuilder(
         if num_extends > 0:
             num_extends_slice = slice(num_decodes, num_decodes + num_extends)
             query_lens_for_extend = query_lens_cpu[num_extends_slice]
-            seq_lens_for_extend = common_attn_metadata.seq_lens_cpu[num_extends_slice]
+            seq_lens_for_extend = seq_lens[num_extends_slice]
             computed_kv_lens = seq_lens_for_extend - query_lens_for_extend
             swa_metadata = None
             if self.aot_sliding_window is not None:
