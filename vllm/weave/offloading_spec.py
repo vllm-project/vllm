@@ -33,6 +33,39 @@ def _coerce_int(name: str, value: Any) -> int:
     return int_value
 
 
+def _coerce_float(name: str, value: Any) -> float:
+    if value is None:
+        raise TypeError(f"{name} must be a number, got None")
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise TypeError(f"{name} must be a number, got {type(value).__name__}")
+    return float(value)
+
+
+def _coerce_fraction(name: str, value: Any) -> float:
+    f = _coerce_float(name, value)
+    if not (0.0 <= f <= 1.0):
+        raise ValueError(f"{name} must be within [0, 1], got {f}")
+    return f
+
+
+def _coerce_bool(name: str, value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in ("1", "true", "t", "yes", "y", "on"):
+            return True
+        if normalized in ("0", "false", "f", "no", "n", "off"):
+            return False
+    raise TypeError(f"{name} must be a bool, got {type(value).__name__}")
+
+
+def _parse_ratio_or_auto(name: str, value: Any) -> float | Literal["auto"]:
+    if isinstance(value, str) and value.strip().lower() == "auto":
+        return "auto"
+    return _coerce_fraction(name, value)
+
+
 def _parse_mode(value: Any) -> WeaveOffloadingMode:
     if isinstance(value, WeaveOffloadingMode):
         return value
@@ -79,9 +112,7 @@ def _gb_to_bytes(gb: Any) -> int:
 
 @dataclass
 class WeaveOffloadingConfig:
-    # NOTE: for now we use vLLM's existing CPU offloading backend as a stand-in
-    # for the DRAM tier. CXL tier will be wired in later.
-    dram_bytes_to_use: int
+    dram_bytes_to_use: int = 0
     cxl_bytes_to_use: int = 0
     mode: WeaveOffloadingMode = WeaveOffloadingMode.DEFAULT
     
@@ -130,10 +161,79 @@ class WeaveOffloadingConfig:
             cxl_bytes_to_use = 0
 
         mode = _parse_mode(raw.get("mode", WeaveOffloadingMode.DEFAULT))
+
+        defaults = cls()
+
+        dram_high_watermark = defaults.dram_high_watermark
+        if "dram_high_watermark" in raw:
+            dram_high_watermark = _coerce_fraction(
+                "dram_high_watermark", raw["dram_high_watermark"]
+            )
+
+        dram_low_watermark = defaults.dram_low_watermark
+        if "dram_low_watermark" in raw:
+            dram_low_watermark = _coerce_fraction(
+                "dram_low_watermark", raw["dram_low_watermark"]
+            )
+
+        if dram_low_watermark > dram_high_watermark:
+            raise ValueError(
+                "dram_low_watermark must be <= dram_high_watermark, got: "
+                f"{dram_low_watermark} > {dram_high_watermark}"
+            )
+
+        kv_prefill_dram_ratio = defaults.kv_prefill_dram_ratio
+        if "kv_prefill_dram_ratio" in raw:
+            kv_prefill_dram_ratio = _parse_ratio_or_auto(
+                "kv_prefill_dram_ratio", raw["kv_prefill_dram_ratio"]
+            )
+
+        flush_batch_size_MB = defaults.flush_batch_size_MB
+        if "flush_batch_size_MB" in raw:
+            flush_batch_size_MB = _coerce_int(
+                "flush_batch_size_MB", raw["flush_batch_size_MB"]
+            )
+
+        flush_budget_MBps = defaults.flush_budget_MBps
+        if "flush_budget_MBps" in raw:
+            flush_budget_MBps = _coerce_int("flush_budget_MBps", raw["flush_budget_MBps"])
+
+        kv_hot_window_tokens = defaults.kv_hot_window_tokens
+        if "kv_hot_window_tokens" in raw:
+            kv_hot_window_tokens = _coerce_int(
+                "kv_hot_window_tokens", raw["kv_hot_window_tokens"]
+            )
+
+        kv_prefetch_blocks = defaults.kv_prefetch_blocks
+        if "kv_prefetch_blocks" in raw:
+            kv_prefetch_blocks = _coerce_int(
+                "kv_prefetch_blocks", raw["kv_prefetch_blocks"]
+            )
+
+        promotion_budget_MBps = defaults.promotion_budget_MBps
+        if "promotion_budget_MBps" in raw:
+            promotion_budget_MBps = _coerce_int(
+                "promotion_budget_MBps", raw["promotion_budget_MBps"]
+            )
+
+        decode_allow_sync_cxl_read = defaults.decode_allow_sync_cxl_read
+        if "decode_allow_sync_cxl_read" in raw:
+            decode_allow_sync_cxl_read = _coerce_bool(
+                "decode_allow_sync_cxl_read", raw["decode_allow_sync_cxl_read"]
+            )
         return cls(
             dram_bytes_to_use=dram_bytes_to_use,
             cxl_bytes_to_use=cxl_bytes_to_use,
             mode=mode,
+            dram_high_watermark=dram_high_watermark,
+            dram_low_watermark=dram_low_watermark,
+            kv_prefill_dram_ratio=kv_prefill_dram_ratio,
+            flush_batch_size_MB=flush_batch_size_MB,
+            flush_budget_MBps=flush_budget_MBps,
+            kv_hot_window_tokens=kv_hot_window_tokens,
+            kv_prefetch_blocks=kv_prefetch_blocks,
+            promotion_budget_MBps=promotion_budget_MBps,
+            decode_allow_sync_cxl_read=decode_allow_sync_cxl_read,
         )
 
 class WeaveOffloadingSpec(OffloadingSpec):
