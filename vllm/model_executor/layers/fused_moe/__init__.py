@@ -11,9 +11,6 @@ from vllm.model_executor.layers.fused_moe.config import (
 from vllm.model_executor.layers.fused_moe.fused_moe_method_base import (
     FusedMoEMethodBase,
 )
-from vllm.model_executor.layers.fused_moe.fused_moe_router import (
-    FusedMoERouter,
-)
 from vllm.model_executor.layers.fused_moe.layer import (
     FusedMoE,
     FusedMoeWeightScaleSupported,
@@ -22,6 +19,9 @@ from vllm.model_executor.layers.fused_moe.modular_kernel import (
     FusedMoEActivationFormat,
     FusedMoEPermuteExpertsUnpermute,
     FusedMoEPrepareAndFinalize,
+)
+from vllm.model_executor.layers.fused_moe.router.fused_moe_router import (
+    FusedMoERouter,
 )
 from vllm.model_executor.layers.fused_moe.shared_fused_moe import SharedFusedMoE
 from vllm.model_executor.layers.fused_moe.unquantized_fused_moe_method import (
@@ -88,10 +88,10 @@ if HAS_TRITON:
         fused_experts,
         get_config_file_name,
     )
-    from vllm.model_executor.layers.fused_moe.fused_topk_router import (
+    from vllm.model_executor.layers.fused_moe.router.fused_topk_router import (
         fused_topk,
     )
-    from vllm.model_executor.layers.fused_moe.grouped_topk_router import (
+    from vllm.model_executor.layers.fused_moe.router.grouped_topk_router import (
         GroupedTopk,
     )
     from vllm.model_executor.layers.fused_moe.triton_deep_gemm_moe import (
