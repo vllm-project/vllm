@@ -109,6 +109,7 @@ def test_flashinfer_fp4_moe_no_graph(
                 ep_rank=0,
                 use_ep=False,
                 all2all_backend="allgather_reducescatter",
+                isequence_parallel=False,
             ),
             in_dtype=dtype,
             is_act_and_mul=is_gated_act,

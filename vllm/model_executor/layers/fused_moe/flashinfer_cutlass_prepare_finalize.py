@@ -364,9 +364,13 @@ def create_flashinfer_prepare_finalize(
             assert use_nvfp4
             return FlashInferAllToAllMoEPrepareAndFinalize(use_dp)
         defer_input_quant = use_deepseek_fp8_block_scale or use_nvfp4
-        return MoEPrepareAndFinalizeNaiveEP(defer_input_quant=defer_input_quant)
+        return MoEPrepareAndFinalizeNaiveEP(
+            defer_input_quant=defer_input_quant, is_sequence_parallel=False
+        )
     else:
         # CUTLASS FP8 BLOCK and CUTLASS NVFP4 apply input quantization
         # in a single call with the MoE experts kernel.
         defer_input_quant = use_deepseek_fp8_block_scale or use_nvfp4
-        return MoEPrepareAndFinalizeNoEP(defer_input_quant=defer_input_quant)
+        return MoEPrepareAndFinalizeNoEP(
+            defer_input_quant=defer_input_quant,
+        )

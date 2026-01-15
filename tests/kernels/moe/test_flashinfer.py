@@ -127,6 +127,7 @@ class TestData:
             ep_rank=0,
             use_ep=False,
             all2all_backend="naive",
+            isequence_parallel=False,
         )
 
         # flashinfer expects swapped rows for w13

@@ -15,9 +15,14 @@ from vllm.utils.flashinfer import nvfp4_block_scale_interleave
 
 
 class MoEPrepareAndFinalizeNaiveEP(mk.FusedMoEPrepareAndFinalize):
-    def __init__(self, defer_input_quant: bool = False) -> None:
+    def __init__(
+        self,
+        defer_input_quant: bool = False,
+        is_sequence_parallel: bool = False,
+    ) -> None:
         super().__init__()
         self.defer_input_quant = defer_input_quant
+        self.is_sequence_parallel = is_sequence_parallel
 
     @property
     def activation_format(self) -> mk.FusedMoEActivationFormat:
@@ -89,7 +94,7 @@ class MoEPrepareAndFinalizeNaiveEP(mk.FusedMoEPrepareAndFinalize):
             a1q,
             topk_weights,
             topk_ids,
-            is_sequence_parallel=False,  # TODO: support SP
+            is_sequence_parallel=self.is_sequence_parallel,
             extra_tensors=scales,
         )
         if skip_gather_scales:
@@ -131,7 +136,9 @@ class MoEPrepareAndFinalizeNaiveEP(mk.FusedMoEPrepareAndFinalize):
             apply_router_weight_on_input=apply_router_weight_on_input,
         )
 
-        output.copy_(get_ep_group().combine(out, is_sequence_parallel=False))
+        output.copy_(
+            get_ep_group().combine(out, is_sequence_parallel=self.is_sequence_parallel)
+        )
 
 
 class MoEPrepareAndFinalizeNoEP(mk.FusedMoEPrepareAndFinalize):

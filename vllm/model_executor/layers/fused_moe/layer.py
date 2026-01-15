@@ -360,7 +360,7 @@ class FusedMoE(CustomOp):
         enable_eplb: bool = False,
         num_redundant_experts: int = 0,
         has_bias: bool = False,
-        is_sequence_parallel=False,
+        is_sequence_parallel: bool = False,
         expert_mapping: list[tuple[str, str, int, str]] | None = None,
         n_shared_experts: int | None = None,
         routing_method_type: RoutingMethodType | None = None,
