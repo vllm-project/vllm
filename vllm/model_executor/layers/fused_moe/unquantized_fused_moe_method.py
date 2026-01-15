@@ -262,7 +262,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
                 self.kernel = mk.FusedMoEModularKernel(
                     MoEPrepareAndFinalizeNoEP(),
                     AiterExperts(
-                        moe_config=self.moe_quant_config,
+                        moe_config=self.moe,
                         quant_config=self.moe_quant_config,
                     ),
                 )
@@ -285,7 +285,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
                 self.kernel = mk.FusedMoEModularKernel(
                     MoEPrepareAndFinalizeNoEP(),
                     TritonExperts(
-                        moe_config=self.moe_quant_config,
+                        moe_config=self.moe,
                         quant_config=self.moe_quant_config,
                     ),
                     shared_experts=None,
