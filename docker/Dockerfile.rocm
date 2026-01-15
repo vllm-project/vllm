@@ -1,7 +1,7 @@
 # default base image
 ARG REMOTE_VLLM="0"
 ARG COMMON_WORKDIR=/app
-ARG BASE_IMAGE=rocm/vllm-dev:base
+ARG BASE_IMAGE=rocm/vllm-dev:base_triton_test_dockerfile_update_20251219_tuned_20251219
 
 # Sccache configuration (only used in release pipeline)
 ARG USE_SCCACHE
@@ -387,6 +387,10 @@ ENV SAFETENSORS_FAST_GPU=1
 
 # Performance environment variable.
 ENV HIP_FORCE_DEV_KERNARG=1
+
+# Change the default to match upstream triton
+# https://github.com/triton-lang/triton/blob/main/python/triton/knobs.py#L505
+ENV AMDGCN_USE_BUFFER_OPS=1
 
 # Workaround for ROCm profiler limits
 RUN echo "ROCTRACER_MAX_EVENTS=10000000" > ${COMMON_WORKDIR}/libkineto.conf

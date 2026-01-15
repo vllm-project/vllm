@@ -97,7 +97,7 @@ if TYPE_CHECKING:
     VLLM_SKIP_P2P_CHECK: bool = False
     VLLM_DISABLED_KERNELS: list[str] = []
     VLLM_DISABLE_PYNCCL: bool = False
-    VLLM_ROCM_USE_AITER: bool = False
+    VLLM_ROCM_USE_AITER: bool = True
     VLLM_ROCM_USE_AITER_PAGED_ATTN: bool = False
     VLLM_ROCM_USE_AITER_LINEAR: bool = True
     VLLM_ROCM_USE_AITER_MOE: bool = True
@@ -106,7 +106,7 @@ if TYPE_CHECKING:
     VLLM_ROCM_USE_AITER_RMSNORM: bool = True
     VLLM_ROCM_USE_AITER_TRITON_FUSED_ADD_RMSNORM_PAD: bool = True
     VLLM_ROCM_USE_AITER_MLA: bool = True
-    VLLM_ROCM_USE_AITER_MHA: bool = True
+    VLLM_ROCM_USE_AITER_MHA: bool = False
     VLLM_ROCM_USE_AITER_FP4_ASM_GEMM: bool = False
     VLLM_ROCM_USE_AITER_TRITON_ROPE: bool = False
     VLLM_ROCM_USE_AITER_FP8BMM: bool = True
@@ -281,6 +281,15 @@ def use_aot_compile() -> bool:
     return (
         not vllm_is_batch_invariant()
         and os.environ.get("VLLM_USE_AOT_COMPILE", default_value) == "1"
+    )
+
+
+def use_aiter() -> bool:
+    from vllm.platforms.rocm import on_mi3xx
+
+    return on_mi3xx() and os.environ.get("VLLM_ROCM_USE_AITER", "1").lower() in (
+        "1",
+        "true",
     )
 
 
@@ -885,9 +894,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
     ),
     # Disable aiter ops unless specifically enabled.
     # Acts as a parent switch to enable the rest of the other operations.
-    "VLLM_ROCM_USE_AITER": lambda: (
-        os.getenv("VLLM_ROCM_USE_AITER", "False").lower() in ("true", "1")
-    ),
+    "VLLM_ROCM_USE_AITER": use_aiter,
     # Whether to use aiter paged attention.
     # By default is disabled.
     "VLLM_ROCM_USE_AITER_PAGED_ATTN": lambda: (
@@ -932,7 +939,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Whether to use aiter mha ops.
     # By default is enabled.
     "VLLM_ROCM_USE_AITER_MHA": lambda: (
-        os.getenv("VLLM_ROCM_USE_AITER_MHA", "True").lower() in ("true", "1")
+        os.getenv("VLLM_ROCM_USE_AITER_MHA", "False").lower() in ("true", "1")
     ),
     # Whether to use aiter fp4 gemm asm.
     # By default is disabled.
