@@ -56,6 +56,17 @@ class PluggableLayer(nn.Module):
             )
         return super().__new__(layer_cls_to_instantiate)
 
+    # Decorator to register pluggable layers.
+    @classmethod
+    def register(cls, name: str):
+        def decorator(op_cls):
+            assert name not in op_registry, f"Duplicate op name: {name}"
+            op_cls.name = name
+            op_registry[name] = op_cls
+            return op_cls
+
+        return decorator
+
     # Decorator to register out-of-tree(oot) pluggable layers.
     # For OOT pluggable layers:
     #   if in-tree layer class is registered with an oot_custom_layer,
