@@ -18,6 +18,8 @@ from vllm.v1.kv_offload.worker.worker import (
     TransferSpec,
 )
 
+from ..utils.numa import numa_membind
+
 logger = init_logger(__name__)
 
 
@@ -78,7 +80,7 @@ class SingleDirectionOffloadingHandler(OffloadingHandler):
 
         src_sub_block_count = src_blocks.size * self.src_block_size_factor
         dst_sub_block_count = dst_blocks.size * self.dst_block_size_factor
-        src_sub_blocks_to_skip = -dst_blocks.size % self.src_block_size_factor
+        src_sub_blocks_to_skip = -dst_sub_block_count % self.src_block_size_factor
 
         assert dst_sub_block_count == src_sub_block_count - src_sub_blocks_to_skip
 
@@ -142,6 +144,7 @@ class WeaveGPUDramOffloadingHandlers:
         num_cpu_blocks: int,
         gpu_caches: dict[str, torch.Tensor],
         attn_backends: dict[str, type[AttentionBackend]],
+        numa_node: int | None = None,
     ):
         assert gpu_caches
         assert cpu_block_size % gpu_block_size == 0
@@ -154,61 +157,62 @@ class WeaveGPUDramOffloadingHandlers:
         cpu_tensors: list[torch.Tensor] = []
         kv_dim_before_num_blocks: list[bool] = []
         kernel_block_size: int | None = None
-        for layer_name, gpu_tensor in gpu_caches.items():
-            gpu_tensors.append(gpu_tensor)
+        with numa_membind(numa_node, strict=True):
+            for layer_name, gpu_tensor in gpu_caches.items():
+                gpu_tensors.append(gpu_tensor)
 
-            gpu_shape = gpu_tensor.shape
-            attn_backend = attn_backends[layer_name]
-            test_shape = attn_backend.get_kv_cache_shape(
-                num_blocks=1234, block_size=16, num_kv_heads=8, head_size=256
-            )
-
-            has_layers_dim = False
-            if len(gpu_shape) != len(test_shape):
-                assert len(gpu_shape) == len(test_shape) + 1
-                num_blocks_idx = 0
-                has_layers_dim = True
-                kv_dim_before_num_blocks.append(False)
-                test_shape = (80,) + test_shape
-            elif test_shape[0] == 1234:
-                num_blocks_idx = 0
-                kv_dim_before_num_blocks.append(False)
-            else:
-                assert test_shape[0] == 2
-                assert test_shape[1] == 1234
-                assert gpu_shape[0] == 2
-
-                num_blocks_idx = 1
-                kv_dim_before_num_blocks.append(True)
-
-            try:
-                kv_cache_stride_order = attn_backend.get_kv_cache_stride_order(
-                    include_num_layers_dimension=has_layers_dim
+                gpu_shape = gpu_tensor.shape
+                attn_backend = attn_backends[layer_name]
+                test_shape = attn_backend.get_kv_cache_shape(
+                    num_blocks=1234, block_size=16, num_kv_heads=8, head_size=256
                 )
-                assert len(kv_cache_stride_order) == len(gpu_shape)
-            except (AttributeError, NotImplementedError):
-                kv_cache_stride_order = tuple(range(len(gpu_shape)))
 
-            test_shape = tuple(test_shape[i] for i in kv_cache_stride_order)
+                has_layers_dim = False
+                if len(gpu_shape) != len(test_shape):
+                    assert len(gpu_shape) == len(test_shape) + 1
+                    num_blocks_idx = 0
+                    has_layers_dim = True
+                    kv_dim_before_num_blocks.append(False)
+                    test_shape = (80,) + test_shape
+                elif test_shape[0] == 1234:
+                    num_blocks_idx = 0
+                    kv_dim_before_num_blocks.append(False)
+                else:
+                    assert test_shape[0] == 2
+                    assert test_shape[1] == 1234
+                    assert gpu_shape[0] == 2
 
-            block_size_idx = test_shape.index(16)
-            if kernel_block_size is not None:
-                assert kernel_block_size == gpu_shape[block_size_idx]
-            else:
-                kernel_block_size = gpu_shape[block_size_idx]
-                assert gpu_block_size % kernel_block_size == 0
+                    num_blocks_idx = 1
+                    kv_dim_before_num_blocks.append(True)
 
-            cpu_shape = list(gpu_shape)
-            cpu_shape[num_blocks_idx] = num_cpu_blocks * block_size_factor
+                try:
+                    kv_cache_stride_order = attn_backend.get_kv_cache_stride_order(
+                        include_num_layers_dimension=has_layers_dim
+                    )
+                    assert len(kv_cache_stride_order) == len(gpu_shape)
+                except (AttributeError, NotImplementedError):
+                    kv_cache_stride_order = tuple(range(len(gpu_shape)))
 
-            cpu_tensors.append(
-                torch.zeros(
-                    cpu_shape,
-                    dtype=gpu_tensor.dtype,
-                    device="cpu",
-                    pin_memory=pin_memory,
+                test_shape = tuple(test_shape[i] for i in kv_cache_stride_order)
+
+                block_size_idx = test_shape.index(16)
+                if kernel_block_size is not None:
+                    assert kernel_block_size == gpu_shape[block_size_idx]
+                else:
+                    kernel_block_size = gpu_shape[block_size_idx]
+                    assert gpu_block_size % kernel_block_size == 0
+
+                cpu_shape = list(gpu_shape)
+                cpu_shape[num_blocks_idx] = num_cpu_blocks * block_size_factor
+
+                cpu_tensors.append(
+                    torch.zeros(
+                        cpu_shape,
+                        dtype=gpu_tensor.dtype,
+                        device="cpu",
+                        pin_memory=pin_memory,
+                    )
                 )
-            )
 
         assert kernel_block_size is not None
         gpu_block_size_factor = gpu_block_size // kernel_block_size

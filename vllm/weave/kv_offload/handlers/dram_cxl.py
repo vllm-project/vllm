@@ -44,7 +44,7 @@ class WeaveDramCxlOffloadingHandler(OffloadingHandler):
 
         src_sub_block_count = src_blocks.size * self.src_block_size_factor
         dst_sub_block_count = dst_blocks.size * self.dst_block_size_factor
-        src_sub_blocks_to_skip = -dst_blocks.size % self.src_block_size_factor
+        src_sub_blocks_to_skip = -dst_sub_block_count % self.src_block_size_factor
 
         if dst_sub_block_count != src_sub_block_count - src_sub_blocks_to_skip:
             self._finished.append((job_id, False))

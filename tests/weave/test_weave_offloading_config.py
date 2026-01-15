@@ -1,6 +1,6 @@
 import pytest
 
-from vllm.weave.offloading_spec import WeaveOffloadingConfig, WeaveOffloadingMode
+from vllm.weave.kv_offload.spec import WeaveOffloadingConfig, WeaveOffloadingMode
 
 pytestmark = pytest.mark.skip_global_cleanup
 

@@ -2,9 +2,9 @@ import pytest
 
 from vllm.v1.core.kv_cache_utils import BlockHash
 from vllm.v1.kv_offload.mediums import CXLLoadStoreSpec, DRAMLoadStoreSpec
-from vllm.weave.cxl_backend import WeaveCXLBackend
-from vllm.weave.dram_backend import WeaveDRAMBackend
-from vllm.weave.two_tier_manager import TwoTierOffloadingManager
+from vllm.weave.kv_offload.backends.cxl_backend import WeaveCXLBackend
+from vllm.weave.kv_offload.backends.dram_backend import WeaveDRAMBackend
+from vllm.weave.kv_offload.two_tier_manager import TwoTierOffloadingManager
 
 pytestmark = pytest.mark.skip_global_cleanup
 

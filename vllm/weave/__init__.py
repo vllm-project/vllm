@@ -27,21 +27,21 @@ __all__ = [
 
 def __getattr__(name: str):
     if name == "WeaveConnector":
-        return import_module(".connector", __name__).WeaveConnector
+        return import_module(".connector.connector", __name__).WeaveConnector
     if name == "WeaveConnectorMetadata":
-        return import_module(".metadata", __name__).WeaveConnectorMetadata
+        return import_module(".connector.metadata", __name__).WeaveConnectorMetadata
     if name == "WeaveConnectorScheduler":
-        return import_module(".scheduler", __name__).WeaveConnectorScheduler
+        return import_module(".connector.scheduler", __name__).WeaveConnectorScheduler
     if name == "WeaveConnectorWorker":
-        return import_module(".worker", __name__).WeaveConnectorWorker
+        return import_module(".connector.worker", __name__).WeaveConnectorWorker
     if name == "WeaveOffloadingSpec":
-        return import_module(".offloading_spec", __name__).WeaveOffloadingSpec
+        return import_module(".kv_offload.spec", __name__).WeaveOffloadingSpec
     raise AttributeError(name)
 
 
 if TYPE_CHECKING:
-    from .connector import WeaveConnector as WeaveConnector
-    from .metadata import WeaveConnectorMetadata as WeaveConnectorMetadata
-    from .offloading_spec import WeaveOffloadingSpec as WeaveOffloadingSpec
-    from .scheduler import WeaveConnectorScheduler as WeaveConnectorScheduler
-    from .worker import WeaveConnectorWorker as WeaveConnectorWorker
+    from .connector.connector import WeaveConnector as WeaveConnector
+    from .connector.metadata import WeaveConnectorMetadata as WeaveConnectorMetadata
+    from .connector.scheduler import WeaveConnectorScheduler as WeaveConnectorScheduler
+    from .connector.worker import WeaveConnectorWorker as WeaveConnectorWorker
+    from .kv_offload.spec import WeaveOffloadingSpec as WeaveOffloadingSpec

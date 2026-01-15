@@ -21,11 +21,11 @@ from vllm.v1.kv_offload.mediums import (
 from vllm.v1.kv_offload.spec import OffloadingSpec
 from vllm.v1.kv_offload.worker.worker import OffloadingHandler
 
-from .cxl_backend import WeaveCXLBackend
-from .dram_cxl import WeaveDramCxlOffloadingHandler
-from .gpu_dram import WeaveGPUDramOffloadingHandlers
-from .dram_backend import WeaveDRAMBackend
-from .numa import numa_membind
+from .backends.cxl_backend import WeaveCXLBackend
+from .backends.dram_backend import WeaveDRAMBackend
+from .handlers.dram_cxl import WeaveDramCxlOffloadingHandler
+from .handlers.gpu_dram import WeaveGPUDramOffloadingHandlers
+from .utils.numa import numa_membind
 from .two_tier_manager import TwoTierOffloadingManager
 
 logger = init_logger(__name__)
@@ -141,7 +141,8 @@ class WeaveOffloadingConfig:
     decode_allow_sync_cxl_read: bool = True
 
     cxl_numa_node: int | None = None
-    
+
+    eviction_policy: Literal["lru", "arc"] = "lru" 
 
     @classmethod
     def from_dict(cls, raw: Mapping[str, Any]) -> "WeaveOffloadingConfig":
@@ -236,6 +237,10 @@ class WeaveOffloadingConfig:
         cxl_numa_node = defaults.cxl_numa_node
         if "cxl_numa_node" in raw and raw["cxl_numa_node"] is not None:
             cxl_numa_node = _coerce_int("cxl_numa_node", raw["cxl_numa_node"])
+        
+        eviction_policy = defaults.eviction_policy
+        if "eviction_policy" in raw:
+            eviction_policy = _coerce_str("eviction_policy", raw["eviction_policy"])
         return cls(
             dram_bytes_to_use=dram_bytes_to_use,
             cxl_bytes_to_use=cxl_bytes_to_use,
@@ -250,6 +255,7 @@ class WeaveOffloadingConfig:
             promotion_budget_MBps=promotion_budget_MBps,
             decode_allow_sync_cxl_read=decode_allow_sync_cxl_read,
             cxl_numa_node=cxl_numa_node,
+            eviction_policy=eviction_policy
         )
 
 class WeaveOffloadingSpec(OffloadingSpec):
@@ -282,9 +288,7 @@ class WeaveOffloadingSpec(OffloadingSpec):
         self._dram_cxl_cxl_to_dram: WeaveDramCxlOffloadingHandler | None = None
 
         # Optional tuning knobs
-        self.eviction_policy: str = (
-            extra.get("eviction_policy", "lru") if isinstance(extra, Mapping) else "lru"
-        )
+        self.eviction_policy = self.weave_config.eviction_policy
 
     def _get_kv_bytes_per_offloaded_block(self) -> int:
         if self.kv_cache_config is None:
@@ -382,16 +386,17 @@ class WeaveOffloadingSpec(OffloadingSpec):
                 cpu_block_size=self.offloaded_block_size,
                 num_cpu_blocks=num_dram_blocks,
                 gpu_caches=kv_caches,
+                numa_node=0,
             )
 
-            with numa_membind(self.weave_config.cxl_numa_node):
-                self._cxl_handlers = WeaveGPUDramOffloadingHandlers(
-                    attn_backends=attn_backends,
-                    gpu_block_size=self.gpu_block_size,
-                    cpu_block_size=self.offloaded_block_size,
-                    num_cpu_blocks=num_cxl_blocks,
-                    gpu_caches=kv_caches,
-                )
+            self._cxl_handlers = WeaveGPUDramOffloadingHandlers(
+                attn_backends=attn_backends,
+                gpu_block_size=self.gpu_block_size,
+                cpu_block_size=self.offloaded_block_size,
+                num_cpu_blocks=num_cxl_blocks,
+                gpu_caches=kv_caches,
+                numa_node=self.weave_config.cxl_numa_node,
+            )
 
             self._dram_cxl_dram_to_cxl = WeaveDramCxlOffloadingHandler(
                 src_tensors=self._dram_handlers.cpu_tensors,

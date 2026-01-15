@@ -14,19 +14,25 @@ def _load_libnuma() -> ctypes.CDLL | None:
 
 
 @contextmanager
-def numa_membind(node: int | None):
+def numa_membind(node: int | None, *, strict: bool = False):
     if node is None:
         yield
         return
 
     lib = _load_libnuma()
     if lib is None:
+        if strict:
+            raise RuntimeError(
+                "NUMA membind requested but libnuma is not available (libnuma.so)."
+            )
         yield
         return
 
     try:
         lib.numa_available.restype = ctypes.c_int
         if lib.numa_available() == -1:
+            if strict:
+                raise RuntimeError("NUMA membind requested but NUMA is not available")
             yield
             return
 
@@ -40,7 +46,10 @@ def numa_membind(node: int | None):
 
         prev = lib.numa_get_mems_allowed()
         mask = lib.numa_parse_nodestring(str(int(node)).encode("utf-8"))
-        if mask:
+        if not mask:
+            if strict:
+                raise RuntimeError(f"NUMA membind requested but failed to parse node: {node}")
+        else:
             lib.numa_set_membind(mask)
             lib.numa_set_strict(1)
 
@@ -55,4 +64,6 @@ def numa_membind(node: int | None):
             if prev:
                 lib.numa_free_nodemask(prev)
     except Exception:
+        if strict:
+            raise
         yield

@@ -58,5 +58,5 @@ OffloadingSpecFactory.register_spec(
 )
 
 OffloadingSpecFactory.register_spec(
-    "WeaveOffloadingSpec", "vllm.weave.offloading_spec", "WeaveOffloadingSpec"
+    "WeaveOffloadingSpec", "vllm.weave.kv_offload.spec", "WeaveOffloadingSpec"
 )

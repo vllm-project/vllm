@@ -7,6 +7,7 @@ from vllm.v1.core.kv_cache_utils import BlockHash
 from vllm.v1.kv_offload.abstract import LoadStoreSpec
 from vllm.v1.kv_offload.backend import Backend, BlockStatus
 from vllm.v1.kv_offload.mediums import DRAMLoadStoreSpec
+from collections import deque
 
 
 class WeaveDRAMBlockStatus(BlockStatus):
@@ -22,29 +23,17 @@ class WeaveDRAMBackend(Backend):
         super().__init__(block_size=block_size, medium=DRAMLoadStoreSpec.medium())
 
         self.num_blocks: int = num_blocks
-        self.num_allocated_blocks: int = 0
-        self.allocated_blocks_free_list: list[int] = []
+        self.allocated_blocks_free_list: deque[int] = deque()
+        self.allocated_blocks_free_list.extend(range(num_blocks))
 
-    def get_num_free_blocks(self):
-        return (
-            len(self.allocated_blocks_free_list)
-            + self.num_blocks
-            - self.num_allocated_blocks
-        )
+    def get_num_free_blocks(self) -> int:
+        return len(self.allocated_blocks_free_list)
 
     def allocate_blocks(self, block_hashes: list[BlockHash]) -> list[BlockStatus]:
-        num_fresh_blocks = min(
-            len(block_hashes), self.num_blocks - self.num_allocated_blocks
-        )
-        num_reused_blocks = len(block_hashes) - num_fresh_blocks
-        assert len(self.allocated_blocks_free_list) >= num_reused_blocks
+        assert len(self.allocated_blocks_free_list) >= len(block_hashes)
 
         blocks: list[BlockStatus] = []
-        for _ in range(num_fresh_blocks):
-            blocks.append(WeaveDRAMBlockStatus(self.num_allocated_blocks))
-            self.num_allocated_blocks += 1
-
-        for _ in range(num_reused_blocks):
+        for _ in range(len(block_hashes)):
             block_id = self.allocated_blocks_free_list.pop()
             blocks.append(WeaveDRAMBlockStatus(block_id))
 

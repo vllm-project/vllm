@@ -205,6 +205,6 @@ KVConnectorFactory.register_connector(
 # Local research connector (mem-weave).
 KVConnectorFactory.register_connector(
     "WeaveConnector",
-    "vllm.weave.connector",
+    "vllm.weave.connector.connector",
     "WeaveConnector",
 )
