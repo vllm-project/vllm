@@ -31,7 +31,6 @@ from vllm.multimodal.processing import (
 from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from vllm.sequence import IntermediateTensors
 from vllm.tokenizers import TokenizerLike
-from vllm.transformers_utils.configs import StepAudio2EncoderConfig
 
 from .interfaces import MultiModalEmbeddings, SupportsMultiModal, SupportsPP
 from .utils import (
@@ -76,9 +75,8 @@ class Step1fProcessor:
         self.max_chunk_size = 29  # from audio encoder position embedding length equals 1500, means 29.98s audio # noqa: E501
         self.sampling_rate = 16000
         self._mel_filters = torch.from_numpy(
-            librosa.filters.mel(sr=self.sampling_rate,
-                                n_fft=400,
-                                n_mels=self.n_mels))
+            librosa.filters.mel(sr=self.sampling_rate, n_fft=400, n_mels=self.n_mels)
+        )
 
     @property
     def audio_token_id(self) -> int:
@@ -92,7 +90,7 @@ class Step1fProcessor:
         audio = F.pad(torch.from_numpy(audio.astype(np.float32)), (0, padding))
         window = torch.hann_window(400).to(audio.device)
         stft = torch.stft(audio, 400, 160, window=window, return_complex=True)
-        magnitudes = stft[..., :-1].abs()**2
+        magnitudes = stft[..., :-1].abs() ** 2
         filters = self._mel_filters
         mel_spec = filters @ magnitudes
 
@@ -106,13 +104,14 @@ class Step1fProcessor:
 
     def get_num_audio_tokens(self, max_feature_len: int) -> int:
         encoder_output_dim = (
-            max_feature_len +
-            1) // 2 // 2  # from hych: align with log-to-mel padding 479
+            (max_feature_len + 1) // 2 // 2
+        )  # from hych: align with log-to-mel padding 479
         padding = 1
         kernel_size = 3
         stride = 2
-        adapter_output_dim = (encoder_output_dim + 2 * padding -
-                              kernel_size) // stride + 1
+        adapter_output_dim = (
+            encoder_output_dim + 2 * padding - kernel_size
+        ) // stride + 1
         return adapter_output_dim
 
     def _get_audio_repl(
@@ -128,8 +127,7 @@ class Step1fProcessor:
         ]
         return text, token_ids
 
-    def replace_placeholder(self, text: str, placeholder: str,
-                            repls: list[str]) -> str:
+    def replace_placeholder(self, text: str, placeholder: str, repls: list[str]) -> str:
         parts = text.split(placeholder)
 
         if len(parts) - 1 != len(repls):
@@ -171,19 +169,18 @@ class Step1fProcessor:
                 audio_mels = self.preprocess_audio(audio)
                 audio_mels_lst.append(audio_mels)
                 audio_repl_str, audio_repl_ids = self._get_audio_repl(
-                    audio_mels.shape[0])
+                    audio_mels.shape[0]
+                )
                 audio_repl_str_lst.append(audio_repl_str)
                 audio_repl_ids_lst.extend(audio_repl_ids)
             audio_inputs = {
-                "audio_mels":
-                torch.concat(audio_mels_lst),
-                "audio_lens":
-                [audio_mels.shape[0] for audio_mels in audio_mels_lst]
+                "audio_mels": torch.concat(audio_mels_lst),
+                "audio_lens": [audio_mels.shape[0] for audio_mels in audio_mels_lst],
             }
 
             text = [
-                self.replace_placeholder(t, self.audio_token,
-                                         audio_repl_str_lst) for t in text
+                self.replace_placeholder(t, self.audio_token, audio_repl_str_lst)
+                for t in text
             ]
             text_inputs = self.tokenizer(text)
 
@@ -197,7 +194,6 @@ class Step1fProcessor:
 
 
 class Step1fAudioProcessingInfo(BaseProcessingInfo):
-
     def get_hf_processor(self) -> Step1fProcessor:
         return Step1fProcessor(
             self.get_hf_config(),
@@ -213,18 +209,17 @@ class Step1fAudioProcessingInfo(BaseProcessingInfo):
         mm_counts: Mapping[str, int],
     ) -> Mapping[str, int]:
         hf_processor = self.get_hf_processor()
-        max_audio_length = int(hf_processor.sampling_rate *
-                               hf_processor.max_chunk_size)
+        max_audio_length = int(hf_processor.sampling_rate * hf_processor.max_chunk_size)
         dummy_audio_tensor = np.zeros(max_audio_length, dtype=np.float32)
         dummy_audio_mels = hf_processor.preprocess_audio(dummy_audio_tensor)
         num_audio_tokens = len(
-            hf_processor._get_audio_repl(dummy_audio_mels.shape[0])[1])
+            hf_processor._get_audio_repl(dummy_audio_mels.shape[0])[1]
+        )
         return {"audio": num_audio_tokens}
 
     def get_num_mm_tokens(self, mm_data: MultiModalDataDict) -> int:
         if len(mm_data) != 1 or "audio" not in mm_data:
-            raise ValueError(
-                "mm_data could only contain one key 'audio' for step1f")
+            raise ValueError("mm_data could only contain one key 'audio' for step1f")
 
         audio_data = mm_data["audio"]
         if not isinstance(audio_data, (list, tuple)):
@@ -237,11 +232,10 @@ class Step1fAudioProcessingInfo(BaseProcessingInfo):
             if isinstance(audio, tuple) and len(audio) == 2:
                 audio_array, sample_rate = audio
                 # Calculate resampled length without actual resampling
-                if hasattr(audio_array, '__len__') and sample_rate > 0:
+                if hasattr(audio_array, "__len__") and sample_rate > 0:
                     original_length = len(audio_array)
                     # Resample to 16000Hz
-                    resampled_length = int(original_length * 16000 /
-                                           sample_rate)
+                    resampled_length = int(original_length * 16000 / sample_rate)
                     audio_array = np.zeros(resampled_length, dtype=np.float32)
                 else:
                     # Fallback to original length if we can't calculate
@@ -251,8 +245,7 @@ class Step1fAudioProcessingInfo(BaseProcessingInfo):
                 audio_array = audio
 
             audio_mels = hf_processor.preprocess_audio(audio_array)
-            audio_repl_ids = hf_processor._get_audio_repl(
-                audio_mels.shape[0])[1]
+            audio_repl_ids = hf_processor._get_audio_repl(audio_mels.shape[0])[1]
             total_tokens += len(audio_repl_ids)
 
         return total_tokens
@@ -263,15 +256,14 @@ class Step1fAudioProcessingInfo(BaseProcessingInfo):
         token_ids: Sequence[int] | None = None,
     ) -> bool:
         if len(mm_data) != 1 or "audio" not in mm_data:
-            raise ValueError(
-                "mm_data could only contain one key 'audio' for step1f")
+            raise ValueError("mm_data could only contain one key 'audio' for step1f")
 
         audio_data = mm_data["audio"]
 
         for audio in audio_data:
             if isinstance(audio, tuple) and len(audio) == 2:
                 audio_array, sample_rate = audio
-                if hasattr(audio_array, '__len__') and sample_rate > 0:
+                if hasattr(audio_array, "__len__") and sample_rate > 0:
                     duration = len(audio_array) / sample_rate
                     if duration > 29.98:
                         raise ValueError(
@@ -288,8 +280,9 @@ class Step1fAudioProcessingInfo(BaseProcessingInfo):
             audio_token_id = tokenizer.get_vocab()["<audio_patch>"]
 
             # Count audio placeholder tokens in token_ids
-            placeholder_token_count = sum(1 for token_id in token_ids
-                                          if token_id == audio_token_id)
+            placeholder_token_count = sum(
+                1 for token_id in token_ids if token_id == audio_token_id
+            )
 
             # Expected placeholder count should match the number of audio items in mm_data # noqa: E501
             expected_placeholder_count = len(audio_data)
@@ -302,9 +295,7 @@ class Step1fAudioProcessingInfo(BaseProcessingInfo):
         return True
 
 
-class Step1fAudioDummyInputsBuilder(
-        BaseDummyInputsBuilder[Step1fAudioProcessingInfo]):
-
+class Step1fAudioDummyInputsBuilder(BaseDummyInputsBuilder[Step1fAudioProcessingInfo]):
     def get_dummy_text(self, mm_counts: Mapping[str, int]) -> str:
         num_audios = mm_counts.get("audio", 0)
         return "<audio_patch>" * num_audios
@@ -316,8 +307,7 @@ class Step1fAudioDummyInputsBuilder(
         mm_options: Mapping[str, BaseDummyOptions] | None = None,
     ) -> MultiModalDataDict:
         hf_processor = self.info.get_hf_processor()
-        audio_len = int(hf_processor.sampling_rate *
-                        hf_processor.max_chunk_size)
+        audio_len = int(hf_processor.sampling_rate * hf_processor.max_chunk_size)
         num_audios = mm_counts.get("audio", 0)
         audio_overrides = mm_options.get("audio") if mm_options else None
         return {
@@ -330,8 +320,8 @@ class Step1fAudioDummyInputsBuilder(
 
 
 class Step1fAudioMultiModalProcessor(
-        BaseMultiModalProcessor[Step1fAudioProcessingInfo]):
-
+    BaseMultiModalProcessor[Step1fAudioProcessingInfo]
+):
     def _get_data_parser(self) -> MultiModalDataParser:
         return MultiModalDataParser(target_sr=16000)
 
@@ -343,8 +333,7 @@ class Step1fAudioMultiModalProcessor(
         audio_lens = hf_inputs.get("audio_lens", torch.empty(0))
 
         return dict(
-            audio_mels=MultiModalFieldConfig.flat_from_sizes(
-                "audio", audio_lens),
+            audio_mels=MultiModalFieldConfig.flat_from_sizes("audio", audio_lens),
             audio_lens=MultiModalFieldConfig.batched("audio"),
         )
 
@@ -381,10 +370,7 @@ class Step1fAudioMultiModalProcessor(
 def make_non_pad_mask(lengths: torch.Tensor, max_len: int = 0) -> torch.Tensor:
     batch_size = lengths.size(0)
     max_len = max_len if max_len > 0 else lengths.max().item()
-    seq_range = torch.arange(0,
-                             max_len,
-                             dtype=torch.int64,
-                             device=lengths.device)
+    seq_range = torch.arange(0, max_len, dtype=torch.int64, device=lengths.device)
     seq_range_expand = seq_range.unsqueeze(0).expand(batch_size, max_len)
     seq_length_expand = lengths.unsqueeze(-1)
     mask = seq_range_expand >= seq_length_expand
@@ -398,12 +384,11 @@ def mask_to_bias(mask: torch.Tensor, dtype: torch.dtype) -> torch.Tensor:
     # attention mask bias
     # NOTE(Mddct): torch.finfo jit issues
     #     chunk_masks = (1.0 - chunk_masks) * torch.finfo(dtype).min
-    mask = (1.0 - mask) * -1.0e+10
+    mask = (1.0 - mask) * -1.0e10
     return mask
 
 
 class MultiHeadAttention(nn.Module):
-
     def __init__(self, n_state: int, n_head: int):
         super().__init__()
         self.n_head = n_head
@@ -424,13 +409,15 @@ class MultiHeadAttention(nn.Module):
         wv, qk = self.qkv_attention(q, k, v, mask)
         return self.out(wv), qk
 
-    def qkv_attention(self,
-                      q: torch.Tensor,
-                      k: torch.Tensor,
-                      v: torch.Tensor,
-                      mask: torch.Tensor | None = None):
+    def qkv_attention(
+        self,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        mask: torch.Tensor | None = None,
+    ):
         _, T, D = q.shape
-        scale = (D // self.n_head)**-0.25
+        scale = (D // self.n_head) ** -0.25
         q = q.view(*q.shape[:2], self.n_head, -1).permute(0, 2, 1, 3) * scale
         k = k.view(*k.shape[:2], self.n_head, -1).permute(0, 2, 3, 1) * scale
         v = v.view(*v.shape[:2], self.n_head, -1).permute(0, 2, 1, 3)
@@ -445,7 +432,6 @@ class MultiHeadAttention(nn.Module):
 
 
 class ResidualAttentionBlock(nn.Module):
-
     def __init__(self, n_state: int, n_head: int):
         super().__init__()
 
@@ -453,8 +439,9 @@ class ResidualAttentionBlock(nn.Module):
         self.attn_ln = nn.LayerNorm(n_state)
 
         n_mlp = n_state * 4
-        self.mlp = nn.Sequential(nn.Linear(n_state, n_mlp), nn.GELU(),
-                                 nn.Linear(n_mlp, n_state))
+        self.mlp = nn.Sequential(
+            nn.Linear(n_state, n_mlp), nn.GELU(), nn.Linear(n_mlp, n_state)
+        )
         self.mlp_ln = nn.LayerNorm(n_state)
 
     def forward(
@@ -468,25 +455,23 @@ class ResidualAttentionBlock(nn.Module):
 
 
 class AudioEncoder(nn.Module):
-
-    def __init__(self, n_mels: int, n_ctx: int, n_state: int, n_head: int,
-                 n_layer: int):
+    def __init__(
+        self, n_mels: int, n_ctx: int, n_state: int, n_head: int, n_layer: int
+    ):
         super().__init__()
         self.conv1 = nn.Conv1d(n_mels, n_state, kernel_size=3, padding=1)
-        self.conv2 = nn.Conv1d(n_state,
-                               n_state,
-                               kernel_size=3,
-                               stride=2,
-                               padding=1)
+        self.conv2 = nn.Conv1d(n_state, n_state, kernel_size=3, stride=2, padding=1)
         self.positional_embedding = nn.Embedding(n_ctx, n_state)
 
         self.blocks: Iterable[ResidualAttentionBlock] = nn.ModuleList(
-            [ResidualAttentionBlock(n_state, n_head) for _ in range(n_layer)])
+            [ResidualAttentionBlock(n_state, n_head) for _ in range(n_layer)]
+        )
         self.avg_pooler = nn.AvgPool1d(2, stride=2)
         self.after_norm = nn.LayerNorm(n_state)
 
-    def forward(self, x: torch.Tensor,
-                x_len: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    def forward(
+        self, x: torch.Tensor, x_len: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         """
         x : torch.Tensor, shape = (batch_size, n_mels, T)
             the mel spectrogram of the audio
@@ -498,11 +483,13 @@ class AudioEncoder(nn.Module):
         x = F.gelu(self.conv2(x))
         x = x.permute(0, 2, 1)  # (B, T // 2, n_state)
         mask = make_non_pad_mask(x_len, T).unsqueeze(1)  # (B, 1, T)
-        mask = mask_to_bias(mask[:, :, (T + 1) % 2::2],
-                            x.dtype)  # (B, 1, T // 2)
+        mask = mask_to_bias(mask[:, :, (T + 1) % 2 :: 2], x.dtype)  # (B, 1, T // 2)
 
-        x = (x + self.positional_embedding.weight[:x.shape[1], :]).to(
-            x.dtype).contiguous()
+        x = (
+            (x + self.positional_embedding.weight[: x.shape[1], :])
+            .to(x.dtype)
+            .contiguous()
+        )
 
         for block in self.blocks:
             x = block(x, mask.unsqueeze(1))
@@ -516,21 +503,18 @@ class AudioEncoder(nn.Module):
 
 
 class Adaptor(nn.Module):
-
-    def __init__(self,
-                 n_state: int = 1280,
-                 n_hidden: int = 3072,
-                 kernel_size: int = 7,
-                 stride: int = 4,
-                 adapter_state: int = 2048):
+    def __init__(
+        self,
+        n_state: int = 1280,
+        n_hidden: int = 3072,
+        kernel_size: int = 7,
+        stride: int = 4,
+        adapter_state: int = 2048,
+    ):
         super().__init__()
         self.stride = stride
         if self.stride != -1:
-            self.conv = nn.Conv1d(n_state,
-                                  n_state,
-                                  kernel_size,
-                                  stride,
-                                  padding=1)
+            self.conv = nn.Conv1d(n_state, n_state, kernel_size, stride, padding=1)
         self.linear1 = nn.Linear(n_state, adapter_state)
         self.relu = nn.ReLU()
         self.linear2 = nn.Linear(adapter_state, n_hidden)
@@ -549,10 +533,12 @@ class Adaptor(nn.Module):
         x = self.linear2(x)
         return x
 
+
 @MULTIMODAL_REGISTRY.register_processor(
     Step1fAudioMultiModalProcessor,
     info=Step1fAudioProcessingInfo,
-    dummy_inputs=Step1fAudioDummyInputsBuilder)
+    dummy_inputs=Step1fAudioDummyInputsBuilder,
+)
 class StepAudio2ForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
     @classmethod
     def get_placeholder_str(cls, modality: str, i: int) -> str | None:
@@ -570,23 +556,29 @@ class StepAudio2ForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
         self.config = config
         self.multimodal_config = multimodal_config
 
-        self.encoder = AudioEncoder(config.audio_encoder_config.n_mels,
-                                    config.audio_encoder_config.n_audio_ctx,
-                                    config.audio_encoder_config.n_audio_state,
-                                    config.audio_encoder_config.n_audio_head,
-                                    config.audio_encoder_config.n_audio_layer)
-        self.adapter = Adaptor(config.audio_encoder_config.n_audio_state,
-                               config.audio_encoder_config.llm_dim,
-                               config.audio_encoder_config.kernel_size,
-                               config.audio_encoder_config.adapter_stride)
+        self.encoder = AudioEncoder(
+            config.audio_encoder_config.n_mels,
+            config.audio_encoder_config.n_audio_ctx,
+            config.audio_encoder_config.n_audio_state,
+            config.audio_encoder_config.n_audio_head,
+            config.audio_encoder_config.n_audio_layer,
+        )
+        self.adapter = Adaptor(
+            config.audio_encoder_config.n_audio_state,
+            config.audio_encoder_config.llm_dim,
+            config.audio_encoder_config.kernel_size,
+            config.audio_encoder_config.adapter_stride,
+        )
 
         self.language_model = init_vllm_registered_model(
             vllm_config=vllm_config,
             hf_config=config.text_config,
-            prefix=maybe_prefix(prefix, "language_model"))
+            prefix=maybe_prefix(prefix, "language_model"),
+        )
 
         self.make_empty_intermediate_tensors = (
-            self.language_model.make_empty_intermediate_tensors)
+            self.language_model.make_empty_intermediate_tensors
+        )
 
     @property
     def device(self):
@@ -719,8 +711,7 @@ class StepAudio2ForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
         kernel_size = self.adapter.conv.kernel_size[0]
         stride = self.adapter.conv.stride[0]
         padding = self.adapter.conv.padding[0]
-        audio_feature_lens = (audio_lens + 2 * padding -
-                                kernel_size) // stride + 1
+        audio_feature_lens = (audio_lens + 2 * padding - kernel_size) // stride + 1
 
         audio_feature_list = [
             audio_features[i, : audio_feature_lens[i]]

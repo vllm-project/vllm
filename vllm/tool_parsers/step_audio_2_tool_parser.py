@@ -3,32 +3,33 @@
 
 import json
 from collections.abc import Sequence
-from typing import Union
 
-from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
-                                              DeltaFunctionCall, DeltaMessage,
-                                              DeltaToolCall,
-                                              ExtractedToolCallInformation,
-                                              FunctionCall, ToolCall)
-from vllm.tool_parsers.abstract_tool_parser import ToolParser
-from vllm.tool_parsers.utils import extract_intermediate_diff
+from vllm.entrypoints.openai.protocol import (
+    ChatCompletionRequest,
+    DeltaFunctionCall,
+    DeltaMessage,
+    DeltaToolCall,
+    ExtractedToolCallInformation,
+    FunctionCall,
+    ToolCall,
+)
 from vllm.logger import init_logger
 from vllm.tokenizers import TokenizerLike
+from vllm.tool_parsers.abstract_tool_parser import ToolParser
+from vllm.tool_parsers.utils import extract_intermediate_diff
 from vllm.utils import random_uuid
 
 logger = init_logger(__name__)
 
 
 class StepAudio2ToolParser(ToolParser):
-
     def __init__(self, tokenizer: TokenizerLike):
         super().__init__(tokenizer)
         self.position = 0
         self.previous_end_position = 0  # 跟踪上一个函数调用结束的位置
 
-    def adjust_request(
-            self, request: ChatCompletionRequest) -> ChatCompletionRequest:
-        if request.tools and request.tool_choice != 'none':
+    def adjust_request(self, request: ChatCompletionRequest) -> ChatCompletionRequest:
+        if request.tools and request.tool_choice != "none":
             # do not skip special tokens because internlm use the special
             # tokens to indicated the start and end of the tool calls
             # information.
@@ -44,49 +45,50 @@ class StepAudio2ToolParser(ToolParser):
         current_token_ids: Sequence[int],
         delta_token_ids: Sequence[int],
         request: ChatCompletionRequest,
-    ) -> Union[DeltaMessage, None]:
-        if '<tool_call>' not in current_text:
+    ) -> DeltaMessage | None:
+        if "<tool_call>" not in current_text:
             self.position = len(current_text)
             return DeltaMessage(content=delta_text)
 
         # 处理函数调用结束和新的函数调用开始
-        if '</tool_call>' in current_text[self.previous_end_position:]:
-            end_pos = current_text.find('</tool_call>',
-                                        self.previous_end_position)
-            next_start = current_text.find('<tool_call>', end_pos)
+        if "</tool_call>" in current_text[self.previous_end_position :]:
+            end_pos = current_text.find("</tool_call>", self.previous_end_position)
+            next_start = current_text.find("<tool_call>", end_pos)
 
             if next_start > end_pos and next_start > self.position:
-                self.previous_end_position = end_pos + len('</tool_call>')
+                self.previous_end_position = end_pos + len("</tool_call>")
                 self.position = next_start
                 self.current_tool_id += 1
                 self.current_tool_name_sent = False
                 self.streamed_args_for_tool.append("")
                 self.prev_tool_call_arr.append({})
             elif end_pos > self.position:
-                if delta_text and ('<tool_call>' in delta_text
-                                   or '</tool_call>' in delta_text):
+                if delta_text and (
+                    "<tool_call>" in delta_text or "</tool_call>" in delta_text
+                ):
                     return None
                 return DeltaMessage(content=delta_text)
 
-        if '<tool_call>' not in current_text[self.position:]:
-            if delta_text and ('<tool_call>' in delta_text
-                               or '</tool_call>' in delta_text):
+        if "<tool_call>" not in current_text[self.position :]:
+            if delta_text and (
+                "<tool_call>" in delta_text or "</tool_call>" in delta_text
+            ):
                 return None
             return DeltaMessage(content=delta_text)
 
-        new_delta = current_text[self.position:]
-        text, action = new_delta.split('<tool_call>', 1)
+        new_delta = current_text[self.position :]
+        text, action = new_delta.split("<tool_call>", 1)
 
         if len(text) > 0:
             self.position = self.position + len(text)
             return DeltaMessage(content=text)
 
         action = action.strip()
-        if '</tool_call>' in action:
-            action = action.split('</tool_call>')[0].strip()
+        if "</tool_call>" in action:
+            action = action.split("</tool_call>")[0].strip()
 
         # 解析新格式：function\nforecast_weather\n{"location": "shanghai"}
-        action_parts = action.split('\n', 2)
+        action_parts = action.split("\n", 2)
         if len(action_parts) < 3:
             return None
 
@@ -100,7 +102,7 @@ class StepAudio2ToolParser(ToolParser):
                     args_dict = json.loads(arguments)
                     tool_call_arr["parameters"] = args_dict
             except json.JSONDecodeError:
-                logger.debug('Failed to parse arguments as JSON')
+                logger.debug("Failed to parse arguments as JSON")
                 tool_call_arr["parameters"] = None
                 if self.current_tool_name_sent:
                     return None
@@ -123,21 +125,26 @@ class StepAudio2ToolParser(ToolParser):
             # if the current tool name hasn't been sent, send if available
             # - otherwise send nothing
             if not self.current_tool_name_sent:
-                delta = DeltaMessage(tool_calls=[
-                    DeltaToolCall(index=self.current_tool_id,
-                                  type="function",
-                                  id=f"chatcmpl-tool-{random_uuid()}",
-                                  function=DeltaFunctionCall(
-                                      name=function_name).model_dump(
-                                          exclude_none=True))
-                ])
+                delta = DeltaMessage(
+                    tool_calls=[
+                        DeltaToolCall(
+                            index=self.current_tool_id,
+                            type="function",
+                            id=f"chatcmpl-tool-{random_uuid()}",
+                            function=DeltaFunctionCall(name=function_name).model_dump(
+                                exclude_none=True
+                            ),
+                        )
+                    ]
+                )
                 self.current_tool_name_sent = True
                 self.streamed_args_for_tool[self.current_tool_id] = ""
             # now we know we're on the same tool call and we're streaming
             # arguments
             else:
-                prev_arguments = self.prev_tool_call_arr[
-                    self.current_tool_id].get("parameters")
+                prev_arguments = self.prev_tool_call_arr[self.current_tool_id].get(
+                    "parameters"
+                )
                 cur_arguments = tool_call_arr.get("parameters")
 
                 # not arguments generated
@@ -146,44 +153,52 @@ class StepAudio2ToolParser(ToolParser):
                 # will never happen
                 elif not cur_arguments and prev_arguments:
                     logger.error(
-                        "INVARIANT - impossible to have arguments reset "
-                        "mid-arguments")
+                        "INVARIANT - impossible to have arguments reset mid-arguments"
+                    )
                     delta = None
                 # first time to get parameters
                 elif cur_arguments and not prev_arguments:
                     # 直接使用完整的参数而不是尝试查找 delta_text
-                    cur_arguments_json = json.dumps(cur_arguments,
-                                                    ensure_ascii=False)
+                    cur_arguments_json = json.dumps(cur_arguments, ensure_ascii=False)
 
-                    delta = DeltaMessage(tool_calls=[
-                        DeltaToolCall(index=self.current_tool_id,
-                                      function=DeltaFunctionCall(
-                                          arguments=cur_arguments_json).
-                                      model_dump(exclude_none=True))
-                    ])
-                    self.streamed_args_for_tool[
-                        self.current_tool_id] = cur_arguments_json
+                    delta = DeltaMessage(
+                        tool_calls=[
+                            DeltaToolCall(
+                                index=self.current_tool_id,
+                                function=DeltaFunctionCall(
+                                    arguments=cur_arguments_json
+                                ).model_dump(exclude_none=True),
+                            )
+                        ]
+                    )
+                    self.streamed_args_for_tool[self.current_tool_id] = (
+                        cur_arguments_json
+                    )
                 # both prev and cur parameters, send the increase parameters
                 elif cur_arguments and prev_arguments:
-                    cur_args_json = json.dumps(cur_arguments,
-                                               ensure_ascii=False)
-                    prev_args_json = json.dumps(prev_arguments,
-                                                ensure_ascii=False)
+                    cur_args_json = json.dumps(cur_arguments, ensure_ascii=False)
+                    prev_args_json = json.dumps(prev_arguments, ensure_ascii=False)
 
                     argument_diff = extract_intermediate_diff(
-                        cur_args_json, prev_args_json)
+                        cur_args_json, prev_args_json
+                    )
 
                     if not argument_diff:
                         delta = None
                     else:
-                        delta = DeltaMessage(tool_calls=[
-                            DeltaToolCall(index=self.current_tool_id,
-                                          function=DeltaFunctionCall(
-                                              arguments=argument_diff).
-                                          model_dump(exclude_none=True))
-                        ])
-                        self.streamed_args_for_tool[
-                            self.current_tool_id] += argument_diff
+                        delta = DeltaMessage(
+                            tool_calls=[
+                                DeltaToolCall(
+                                    index=self.current_tool_id,
+                                    function=DeltaFunctionCall(
+                                        arguments=argument_diff
+                                    ).model_dump(exclude_none=True),
+                                )
+                            ]
+                        )
+                        self.streamed_args_for_tool[self.current_tool_id] += (
+                            argument_diff
+                        )
 
             # 更新当前工具调用的信息
             self.prev_tool_call_arr[self.current_tool_id] = tool_call_arr
@@ -191,8 +206,8 @@ class StepAudio2ToolParser(ToolParser):
         except Exception:
             logger.exception("Error trying to handle streaming tool call.")
             logger.debug(
-                "Skipping chunk as a result of tool streaming extraction "
-                "error")
+                "Skipping chunk as a result of tool streaming extraction error"
+            )
             return None
 
     def extract_tool_calls(
@@ -204,47 +219,49 @@ class StepAudio2ToolParser(ToolParser):
         tools = request.tools
 
         # 检查是否包含函数调用
-        if '<tool_call>' in text:
+        if "<tool_call>" in text:
             # 首先分离文本和工具调用部分
-            parts = text.split('<tool_call>', 1)
+            parts = text.split("<tool_call>", 1)
             content_text = parts[0]
             remaining_text = parts[1]
 
             tool_calls = []
             remaining_part = ""
             # 处理所有的函数调用
-            while '<tool_call>' in remaining_text or remaining_text:
+            while "<tool_call>" in remaining_text or remaining_text:
                 # 如果有结束标记，则提取当前函数调用
-                if '</tool_call>' in remaining_text:
+                if "</tool_call>" in remaining_text:
                     action_part, remaining_part = remaining_text.split(
-                        '</tool_call>', 1)
+                        "</tool_call>", 1
+                    )
 
                     # 解析函数调用信息
-                    action_parts = action_part.split('\n', 2)
+                    action_parts = action_part.split("\n", 2)
                     if len(action_parts) >= 3:
                         function_type, function_name, parameters = action_parts
 
                         try:
                             params_dict = json.loads(parameters)
-                            params_str = json.dumps(params_dict,
-                                                    ensure_ascii=False)
+                            params_str = json.dumps(params_dict, ensure_ascii=False)
 
                             # 验证函数名是否在可用工具列表中
                             if not tools or function_name in [
-                                    t.function.name for t in tools
+                                t.function.name for t in tools
                             ]:
                                 tool_calls.append(
-                                    ToolCall(function=FunctionCall(
-                                        name=function_name,
-                                        arguments=params_str)))
+                                    ToolCall(
+                                        function=FunctionCall(
+                                            name=function_name, arguments=params_str
+                                        )
+                                    )
+                                )
                         except json.JSONDecodeError:
                             # 参数解析失败，跳过当前函数调用
                             pass
 
                     # 检查是否有更多函数调用
-                    if '<tool_call>' in remaining_part:
-                        _, remaining_text = remaining_part.split(
-                            '<tool_call>', 1)
+                    if "<tool_call>" in remaining_part:
+                        _, remaining_text = remaining_part.split("<tool_call>", 1)
                     else:
                         break
                 else:
@@ -258,22 +275,20 @@ class StepAudio2ToolParser(ToolParser):
                 return ExtractedToolCallInformation(
                     tools_called=True,
                     tool_calls=tool_calls,
-                    content=content_text if content_text else None)
+                    content=content_text if content_text else None,
+                )
 
         # 没有有效的工具调用，返回原始文本
-        return ExtractedToolCallInformation(tools_called=False,
-                                            tool_calls=[],
-                                            content=text)
+        return ExtractedToolCallInformation(
+            tools_called=False, tool_calls=[], content=text
+        )
 
 
 if __name__ == "__main__":
     parser = StepAudio2ToolParser(tokenizer=None)
     request = ChatCompletionRequest(
         model="step_audio_2",
-        messages=[{
-            "role": "user",
-            "content": "你好"
-        }],
+        messages=[{"role": "user", "content": "你好"}],
     )
     stream_output = [
         "xxx",
@@ -282,15 +297,15 @@ if __name__ == "__main__":
         "function\n",
         "forecast",
         "_weather\n",
-        "{\"location\":",
-        " \"shanghai\"}",
+        '{"location":',
+        ' "shanghai"}',
         "</tool_call>",
         "<tool_call>",
         "function\n",
         "forecast",
         "_temperature\n",
-        "{\"location\": ",
-        "\"beijing\"}",
+        '{"location": ',
+        '"beijing"}',
         "</tool_call>",
         "zzz",
         "",

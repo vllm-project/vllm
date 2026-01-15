@@ -709,9 +709,7 @@ class EngineArgs:
         model_group.add_argument(
             "--io-processor-plugin", **model_kwargs["io_processor_plugin"]
         )
-        model_group.add_argument(
-            "--audio-parser", **model_kwargs["audio_parser"]
-        )
+        model_group.add_argument("--audio-parser", **model_kwargs["audio_parser"])
 
         # Model loading arguments
         load_kwargs = get_kwargs(LoadConfig)
