@@ -96,7 +96,6 @@ def test_reshape_and_cache(
 
     # Clone the KV caches.
     if kv_cache_dtype == "fp8":
-        print(f"key_cache.dtype={key_cache.dtype}")
         cloned_key_cache = torch.empty_like(key_cache, dtype=torch.float16)
         ops.convert_fp8(cloned_key_cache, key_cache, k_scale.item())
         cloned_value_cache = torch.empty_like(value_cache, dtype=torch.float16)
