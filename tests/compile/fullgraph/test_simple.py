@@ -19,6 +19,7 @@ from vllm.config import (
     set_current_vllm_config,
 )
 from vllm.forward_context import BatchDescriptor, set_forward_context
+from vllm.platforms import current_platform
 from vllm.utils.torch_utils import is_torch_equal_or_newer
 
 from ...utils import create_new_process_for_each_test
@@ -74,7 +75,7 @@ def _run_simple_model(
     with set_current_vllm_config(vllm_config):
         model = SillyModel(vllm_config=vllm_config, prefix="")
 
-    inputs = torch.randn(100).cuda()
+    inputs = torch.randn(100).to(current_platform.device_name)
 
     with (
         compilation_counter.expect(
@@ -98,7 +99,7 @@ def _run_simple_model(
                 num_tokens=2,
             ),
         ):
-            model(torch.randn(2).cuda())
+            model(torch.randn(2).to(current_platform.device_name))
         with set_forward_context(
             None,
             vllm_config=vllm_config,
@@ -107,9 +108,9 @@ def _run_simple_model(
                 num_tokens=1,
             ),
         ):
-            model(torch.randn(1).cuda())
+            model(torch.randn(1).to(current_platform.device_name))
 
-        input = torch.zeros(2).cuda()
+        input = torch.zeros(2).to(current_platform.device_name)
         reset_global_counter()
         with set_forward_context(
             None,
