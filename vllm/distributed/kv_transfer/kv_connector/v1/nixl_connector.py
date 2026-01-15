@@ -2099,7 +2099,7 @@ class NixlConnectorWorker:
         Start loading by triggering non-blocking nixl_xfer.
         We check for these trnxs to complete in each step().
         """
-        if self.device_type == "cpu":
+        if self.device_type == "cpu" and self.core_rsv_for_kv:
             os.sched_setaffinity(0, self.core_rsv_for_kv)
 
         for req_id, meta in metadata.reqs_to_recv.items():
