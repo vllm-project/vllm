@@ -135,9 +135,15 @@ class LoRAModelManager:
                 llm_punica_wrapper
             )
 
-    def _maybe_init_mm(self, vllm_config: VllmConfig, max_num_batched_tokens) -> None:
-        self.supports_tower_connector_lora = False
+    def _maybe_init_mm(
+        self,
+        vllm_config: VllmConfig,
+        max_num_batched_tokens: int,
+    ) -> None:
         model_config: ModelConfig = vllm_config.model_config
+        mm_registry = MULTIMODAL_REGISTRY
+
+        self.supports_tower_connector_lora = False
         self.mm_mapping: MultiModelKeys = self.model.get_mm_mapping()
 
         # Only one language model can be included in the model.
@@ -154,9 +160,7 @@ class LoRAModelManager:
         self.punica_wrapper_mapping[lm_prefix] = llm_punica_wrapper
 
         if self.lora_config.enable_tower_connector_lora:
-            self.mm_processor_info = MULTIMODAL_REGISTRY.create_processor(
-                model_config
-            ).info
+            self.mm_processor_info = mm_registry.create_processor(model_config).info
             self.supports_tower_connector_lora = self.supports_mm and hasattr(
                 self.model, "get_num_mm_encoder_tokens"
             )
@@ -169,11 +173,7 @@ class LoRAModelManager:
             "GitHub if you encounter them."
         )
 
-        mm_budget = MultiModalBudget(
-            model_config,
-            vllm_config.scheduler_config,
-            MULTIMODAL_REGISTRY,
-        )
+        mm_budget = MultiModalBudget(vllm_config, mm_registry)
         limit_per_prompt: int = max(
             self.mm_processor_info.get_allowed_mm_limits().values()
         )
