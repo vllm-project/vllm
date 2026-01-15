@@ -93,6 +93,7 @@ class TestDashboardRouter:
         app.state.openai_serving_models = None
         app.state.vllm_config = None
         app.state.args = None
+        app.state.engine_client = None
 
         return app
 
@@ -148,6 +149,38 @@ class TestDashboardRouter:
         assert len(data["models"]) == 1
         assert data["models"][0]["id"] == "test-model"
         assert data["models"][0]["root"] == "test-model-root"
+
+    def test_dashboard_api_info_health_check(self, app):
+        """Test /dashboard/api/info uses engine health check."""
+        # Mock healthy engine client
+        mock_engine_client = AsyncMock()
+        mock_engine_client.check_health = AsyncMock(return_value=None)
+
+        app.state.engine_client = mock_engine_client
+
+        client = TestClient(app)
+        response = client.get("/dashboard/api/info")
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["status"] == "running"
+
+    def test_dashboard_api_info_unhealthy_engine(self, app):
+        """Test /dashboard/api/info reports unhealthy when engine is dead."""
+        from vllm.v1.engine.exceptions import EngineDeadError
+
+        # Mock unhealthy engine client
+        mock_engine_client = AsyncMock()
+        mock_engine_client.check_health = AsyncMock(side_effect=EngineDeadError())
+
+        app.state.engine_client = mock_engine_client
+
+        client = TestClient(app)
+        response = client.get("/dashboard/api/info")
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["status"] == "unhealthy"
 
     def test_dashboard_api_metrics(self, client):
         """Test GET /dashboard/api/metrics returns metrics."""

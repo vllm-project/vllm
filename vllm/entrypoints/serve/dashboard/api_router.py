@@ -106,10 +106,23 @@ async def dashboard_index() -> HTMLResponse:
 @router.get("/dashboard/api/info")
 async def dashboard_info(request: Request) -> JSONResponse:
     """Get server information for dashboard display."""
+    from vllm.v1.engine.exceptions import EngineDeadError
+
     info: dict = {
         "version": VLLM_VERSION,
         "status": "running",
     }
+
+    # Check engine health
+    try:
+        engine_client = getattr(request.app.state, "engine_client", None)
+        if engine_client is not None:
+            await engine_client.check_health()
+            info["status"] = "running"
+    except EngineDeadError:
+        info["status"] = "unhealthy"
+    except Exception as e:
+        logger.debug("Failed to check engine health: %s", e)
 
     # Get model information
     try:
