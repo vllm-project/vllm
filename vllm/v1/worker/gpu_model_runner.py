@@ -5675,10 +5675,10 @@ class GPUModelRunner(
         )
         routed_experts_capturer = RoutedExpertsCapturer.create()
         block_size = self.cache_config.block_size
-        self.max_num_kv_tokens = (
-            self.kv_cache_config.num_blocks // len(self.kv_cache_config.kv_cache_groups)
-            + 1
-        ) * block_size
+        num_gpu_blocks = self.cache_config.num_gpu_blocks
+        if num_gpu_blocks is None:
+            num_gpu_blocks = self.kv_cache_config.num_blocks
+        self.max_num_kv_tokens = (num_gpu_blocks + 1) * block_size
 
         routed_experts_capturer.init_buffer(
             max_num_batched_tokens=self.scheduler_config.max_num_batched_tokens,
