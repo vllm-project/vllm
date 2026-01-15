@@ -1551,19 +1551,19 @@ void indexer_k_quant_and_cache(
 
     // Dispatch based on input dtype - unified with other types
     if (k.dtype() == torch::kFloat32) {
-      indexer_k_quant_and_cache_nvfp4_kernel<float>
+      vllm::indexer_k_quant_and_cache_nvfp4_kernel<float>
           <<<nvfp4_grid, nvfp4_block, 0, stream>>>(
               k.data_ptr<float>(), kv_cache.data_ptr<uint8_t>(),
               slot_mapping.data_ptr<int64_t>(), head_dim, cache_block_size,
               cache_stride);
     } else if (k.dtype() == torch::kFloat16) {
-      indexer_k_quant_and_cache_nvfp4_kernel<half>
+      vllm::indexer_k_quant_and_cache_nvfp4_kernel<half>
           <<<nvfp4_grid, nvfp4_block, 0, stream>>>(
               reinterpret_cast<half*>(k.data_ptr()),
               kv_cache.data_ptr<uint8_t>(), slot_mapping.data_ptr<int64_t>(),
               head_dim, cache_block_size, cache_stride);
     } else if (k.dtype() == torch::kBFloat16) {
-      indexer_k_quant_and_cache_nvfp4_kernel<__nv_bfloat16>
+      vllm::indexer_k_quant_and_cache_nvfp4_kernel<__nv_bfloat16>
           <<<nvfp4_grid, nvfp4_block, 0, stream>>>(
               reinterpret_cast<__nv_bfloat16*>(k.data_ptr()),
               kv_cache.data_ptr<uint8_t>(), slot_mapping.data_ptr<int64_t>(),
