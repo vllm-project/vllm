@@ -22,10 +22,14 @@ from vllm.connections import HTTPConnection, global_http_connection
 from vllm.logger import init_logger
 from vllm.utils.registry import ExtensionManager
 
-from .audio import AudioEmbeddingMediaIO, AudioMediaIO
-from .base import MediaIO
-from .image import ImageEmbeddingMediaIO, ImageMediaIO
-from .video import VideoMediaIO
+from .media import (
+    AudioEmbeddingMediaIO,
+    AudioMediaIO,
+    ImageEmbeddingMediaIO,
+    ImageMediaIO,
+    MediaIO,
+    VideoMediaIO,
+)
 
 if TYPE_CHECKING:
     from .inputs import (

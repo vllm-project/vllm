@@ -12,7 +12,7 @@ from PIL import Image
 
 from vllm.logger import init_logger
 
-from .base import MediaWithBytes
+from .media import MediaWithBytes
 
 logger = init_logger(__name__)
 

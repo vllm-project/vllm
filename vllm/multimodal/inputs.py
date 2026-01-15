@@ -32,7 +32,7 @@ if TYPE_CHECKING:
     from PIL.Image import Image
     from transformers.feature_extraction_utils import BatchFeature
 
-    from .base import MediaWithBytes
+    from .media import MediaWithBytes
 else:
     torch = LazyLoader("torch", globals(), "torch")
 

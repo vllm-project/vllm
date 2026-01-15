@@ -23,7 +23,6 @@ from vllm.utils.collection_utils import is_list_of
 from vllm.utils.import_utils import LazyLoader
 
 from .audio import AudioResampler, AudioSpec, normalize_audio
-from .base import MediaWithBytes
 from .inputs import (
     AudioItem,
     HfAudioItem,
@@ -36,6 +35,7 @@ from .inputs import (
     MultiModalKwargsItems,
     VideoItem,
 )
+from .media import MediaWithBytes
 
 _T = TypeVar("_T")
 _I = TypeVar("_I")
