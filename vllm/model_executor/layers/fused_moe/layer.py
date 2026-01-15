@@ -47,7 +47,6 @@ from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
     get_flashinfer_moe_backend,
 )
 from vllm.platforms import current_platform
-from vllm.utils.flashinfer import has_flashinfer_trtllm_fused_moe
 from vllm.utils.math_utils import cdiv, round_up
 from vllm.utils.torch_utils import (
     aux_stream,
@@ -1937,21 +1936,12 @@ class FusedMoE(CustomOp):
         with sp_ctx:
             extra_tensors = None
             if do_naive_dispatch_combine:
-                # Avoid circular import
-                from vllm.model_executor.layers.quantization.modelopt import (
-                    ModelOptNvFp4FusedMoE,
-                )
 
                 post_quant_allgather = (
                     self.quant_method is not None
                     and self.dp_size > 1
                     and self.use_ep
-                    and isinstance(self.quant_method, ModelOptNvFp4FusedMoE)
-                    and has_flashinfer_trtllm_fused_moe()
-                    and get_flashinfer_moe_backend()
-                    == FlashinferMoeBackend.TENSORRT_LLM
-                    and self.moe_parallel_config.all2all_backend
-                    == "allgather_reducescatter"
+                    and getattr(self.quant_method, "do_post_quant_allgather", False)
                 )
                 if post_quant_allgather:
                     hidden_states_to_dispatch, extra_tensors = (
