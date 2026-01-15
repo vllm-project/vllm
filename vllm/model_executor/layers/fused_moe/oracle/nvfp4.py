@@ -114,6 +114,15 @@ def select_nvfp4_moe_backend(
     Note: Shape-specific fallbacks may still occur at runtime.
     """
 
+    # NOTE: the kernels are selected in the following order.
+    AVAILABLE_BACKENDS = [
+        NvFp4MoeBackend.FLASHINFER_TRTLLM,
+        NvFp4MoeBackend.FLASHINFER_CUTEDSL,
+        NvFp4MoeBackend.FLASHINFER_CUTLASS,
+        NvFp4MoeBackend.MARLIN,
+        # NvFp4MoeBackend.VLLM_CUTLASS,
+    ]
+
     # NOTE(rob): this is kind of a hack. We need to peak into
     # the prepare-finalize selection to determine if we are using
     # the batched or standard expert format.
@@ -128,7 +137,11 @@ def select_nvfp4_moe_backend(
     )
 
     def _make_log_backend(backend: NvFp4MoeBackend):
-        return f"Using '{backend.value}' backend for NvFp4 MoE"
+        available_backend_strs = [b.value for b in AVAILABLE_BACKENDS]
+        return (
+            f"Using '{backend.value}' NvFp4 MoE backend out "
+            f"of potential backends: {available_backend_strs}."
+        )
 
     def _make_log_unsupported(backend: NvFp4MoeBackend, reason: str | None) -> str:
         if reason:
@@ -157,15 +170,6 @@ def select_nvfp4_moe_backend(
             logger.info_once(_make_log_backend(backend))
             return backend, k_cls
         raise ValueError(_make_log_unsupported(backend, reason))
-
-    # NOTE: the kernels are selected in the following order.
-    AVAILABLE_BACKENDS = [
-        NvFp4MoeBackend.FLASHINFER_TRTLLM,
-        NvFp4MoeBackend.FLASHINFER_CUTEDSL,
-        NvFp4MoeBackend.FLASHINFER_CUTLASS,
-        NvFp4MoeBackend.MARLIN,
-        # NvFp4MoeBackend.VLLM_CUTLASS,
-    ]
 
     if envs.is_set("VLLM_USE_FLASHINFER_MOE_FP4"):
         if not envs.VLLM_USE_FLASHINFER_MOE_FP4:
@@ -380,7 +384,7 @@ def make_nvfp4_moe_kernel_for_mkm(
             quant_config=quant_config,
         )
 
-    logger.info_once("Using %s", experts.__class__.__name__)
+    logger.debug_once("Using %s", experts.__class__.__name__)
     return experts
 
 

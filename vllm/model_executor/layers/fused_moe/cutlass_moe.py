@@ -294,10 +294,6 @@ class CutlassExpertsFp8Base(mk.FusedMoEPermuteExpertsUnpermute):
     def _supports_activation(activation: str) -> bool:
         return activation in ["silu"]
 
-    @staticmethod
-    def _supports_parallel_config(moe_parallel_config: FusedMoEParallelConfig) -> bool:
-        return True
-
     def finalize_weight_and_reduce_impl(self) -> mk.TopKWeightAndReduce:
         # Let PrepareAndFinalize::finalize() decide the impl.
         return TopKWeightAndReduceDelegate()
@@ -367,6 +363,14 @@ class CutlassExpertsFp8(CutlassExpertsFp8Base):
     def activation_format() -> mk.FusedMoEActivationFormat:
         return mk.FusedMoEActivationFormat.Standard
 
+    @staticmethod
+    def _supports_parallel_config(moe_parallel_config: FusedMoEParallelConfig) -> bool:
+        # CutlassExpertsFp8 does not support expert map, which is
+        # needed for STANDARD activation format kernels in EP mode.
+        # Note that the BATCHED activation format does not use
+        # the expert map for identifying experts.
+        return moe_parallel_config.ep_size == 1
+
     def supports_chunking(self) -> bool:
         return True
 
@@ -399,6 +403,13 @@ class CutlassExpertsFp8(CutlassExpertsFp8Base):
 
 
 class CutlassBatchedExpertsFp8(CutlassExpertsFp8Base):
+    @staticmethod
+    def _supports_parallel_config(moe_parallel_config: FusedMoEParallelConfig) -> bool:
+        # BATCHED activation format works with EP because
+        # expert_map is not used to identify experts (the
+        # info is encoded/managed by the P/F logic).
+        return True
+
     @staticmethod
     def activation_format() -> mk.FusedMoEActivationFormat:
         return mk.FusedMoEActivationFormat.BatchedExperts

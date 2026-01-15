@@ -50,6 +50,7 @@ class Fp8MoeBackend(Enum):
     BATCHED_TRITON = "BATCHED_TRITON"
     AITER = "AITER"
     VLLM_CUTLASS = "VLLM_CUTLASS"
+    BATCHED_VLLM_CUTLASS = "BATCHED_VLLM_CUTLASS"
 
 
 def backend_2_kernel_cls(
@@ -114,6 +115,13 @@ def backend_2_kernel_cls(
 
         return TritonOrCutlassExperts
 
+    elif backend == Fp8MoeBackend.BATCHED_VLLM_CUTLASS:
+        from vllm.model_executor.layers.fused_moe.cutlass_moe import (
+            CutlassBatchedExpertsFp8,
+        )
+
+        return CutlassBatchedExpertsFp8
+
     else:
         raise ValueError(f"Unknown FP8 MoE backend: {backend.value}")
 
@@ -132,6 +140,20 @@ def select_fp8_moe_backend(
     if config.is_lora_enabled:
         return Fp8MoeBackend.TRITON, backend_2_kernel_cls(Fp8MoeBackend.TRITON)
 
+    # NOTE: the kernels are selected in the following order.
+    AVAILABLE_BACKENDS = [
+        Fp8MoeBackend.AITER,
+        Fp8MoeBackend.FLASHINFER_TRTLLM,
+        Fp8MoeBackend.FLASHINFER_CUTLASS,
+        Fp8MoeBackend.DEEPGEMM,
+        Fp8MoeBackend.BATCHED_DEEPGEMM,
+        Fp8MoeBackend.VLLM_CUTLASS,
+        Fp8MoeBackend.BATCHED_VLLM_CUTLASS,
+        Fp8MoeBackend.TRITON,
+        Fp8MoeBackend.BATCHED_TRITON,
+        Fp8MoeBackend.MARLIN,
+    ]
+
     # NOTE(rob): We need to peak into the P/F selection to determine
     # if we are using the batched or standard expert format, which
     # if not ideal. Once we unify TP + DP/EP, we can select P/F first.
@@ -142,17 +164,21 @@ def select_fp8_moe_backend(
     )
 
     def _make_log_backend(backend: Fp8MoeBackend):
-        return f"Using `{backend.value}` backend for FP8 MoE"
+        available_backend_strs = [b.value for b in AVAILABLE_BACKENDS]
+        return (
+            f"Using '{backend.value}' Fp8 MoE backend out "
+            f"of potential backends: {available_backend_strs}."
+        )
 
     def _make_log_unsupported(backend: Fp8MoeBackend, reason: str | None) -> str:
         if reason:
             return (
-                f"FP8 MoE backend `{backend.value}` does not support the "
+                f"FP8 MoE backend '{backend.value}' does not support the "
                 f"deployment configuration since {reason}."
             )
         else:
             return (
-                f"FP8 MoE backend `{backend.value}` does not support the "
+                f"FP8 MoE backend '{backend.value}' does not support the "
                 "deployment configuration."
             )
 
@@ -171,19 +197,6 @@ def select_fp8_moe_backend(
             logger.info_once(_make_log_backend(backend))
             return backend, k_cls
         raise ValueError(_make_log_unsupported(backend, reason))
-
-    # NOTE: the kernels are selected in the following order.
-    AVAILABLE_BACKENDS = [
-        Fp8MoeBackend.AITER,
-        Fp8MoeBackend.FLASHINFER_TRTLLM,
-        Fp8MoeBackend.FLASHINFER_CUTLASS,
-        Fp8MoeBackend.DEEPGEMM,
-        Fp8MoeBackend.BATCHED_DEEPGEMM,
-        Fp8MoeBackend.VLLM_CUTLASS,
-        Fp8MoeBackend.TRITON,
-        Fp8MoeBackend.BATCHED_TRITON,
-        Fp8MoeBackend.MARLIN,
-    ]
 
     # Handle explicit FlashInfer FP8 configuration.
     if envs.is_set("VLLM_USE_FLASHINFER_MOE_FP8"):
@@ -268,6 +281,7 @@ def select_fp8_moe_backend(
 
     if not allow_vllm_cutlass:
         AVAILABLE_BACKENDS.remove(Fp8MoeBackend.VLLM_CUTLASS)
+        AVAILABLE_BACKENDS.remove(Fp8MoeBackend.BATCHED_VLLM_CUTLASS)
 
     # Select kernels in order of backend.
     for backend in AVAILABLE_BACKENDS:
@@ -435,7 +449,7 @@ def make_fp8_moe_kernel_for_mkm(
             quant_config=quant_config,
         )
 
-    logger.info_once("Using %s", experts.__class__.__name__)
+    logger.debug_once("Using %s", experts.__class__.__name__)
     return experts
 
 

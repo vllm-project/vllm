@@ -442,8 +442,15 @@ class CompressedTensorsW4A4Nvfp4MoEMethod(CompressedTensorsMoEMethod):
         layer.w13_input_scale = a13_scale
         layer.w2_input_scale = a2_scale
 
+        # Setup modular kernel for TP case and naive DP/EP case.
+        # In non-naive DP/EP case, we will create a ModularKernelMethod.
+        # TODO(rob): unify these so FP8MoEMethod owns the ModularKernel
+        # in both cases.
         self.moe_quant_config = self.get_fused_moe_quant_config(layer)
-        if self.moe_quant_config is not None:
+        if self.moe_quant_config and (
+            (not self.moe.moe_parallel_config.use_all2all_kernels)
+            or self.moe.moe_parallel_config.use_naive_all2all_kernels
+        ):
             assert self.experts_cls is not None
             self.kernel = make_nvfp4_moe_kernel(
                 moe_quant_config=self.moe_quant_config,
@@ -2359,6 +2366,7 @@ class CompressedTensorsW4A8Fp8MoEMethod(CompressedTensorsMoEMethod):
             layer.w2_weight_packed,
             topk_weights,
             topk_ids,
+            moe_config=self.moe,
             quant_config=self.moe_quant_config,
             activation=layer.activation,
             global_num_experts=layer.global_num_experts,
