@@ -12,8 +12,7 @@ import pytest
 import torch
 
 # vLLM fused-expert reference (Triton fallback + DeepGEMM option)
-import vllm.model_executor.layers.fused_moe.modular_kernels as mk
-
+import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
     FusedMoEParallelConfig,
@@ -121,8 +120,9 @@ def run_single_case(m, n, k, topk, num_experts, block_size):
                 intermediate_size_per_partition=n,
                 num_local_experts=num_experts,
                 activation="silu",
-                parallel_config=FusedMoEParallelConfig.make_no_parallel(),
+                moe_parallel_config=FusedMoEParallelConfig.make_no_parallel(),
                 in_dtype=tokens_bf16.dtype,
+                device=w1.device,
             ),
             quant_config=quant_config,
         ),
