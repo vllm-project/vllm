@@ -67,8 +67,7 @@ class All2AllManagerBase:
     def dispatch(
         self,
         hidden_states: torch.Tensor,
-        topk_weights: torch.Tensor,
-        topk_ids: torch.Tensor,
+        router_logits: torch.Tensor,
         is_sequence_parallel: bool = False,
         extra_tensors: list[torch.Tensor] | None = None,
     ) -> Any:
@@ -284,16 +283,18 @@ class DeviceCommunicatorBase:
     def dispatch(
         self,
         hidden_states: torch.Tensor,
-        topk_weights: torch.Tensor,
-        topk_ids: torch.Tensor,
+        router_logits: torch.Tensor,
         is_sequence_parallel: bool = False,
         extra_tensors: list[torch.Tensor] | None = None,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    ) -> (
+        tuple[torch.Tensor, torch.Tensor]
+        | tuple[torch.Tensor, torch.Tensor, list[torch.Tensor]]
+    ):
         """
         Dispatch the hidden states and router logits to the appropriate device.
         This is a no-op in the base class.
         """
-        return hidden_states, topk_weights, topk_ids
+        return hidden_states, router_logits
 
     def combine(
         self, hidden_states: torch.Tensor, is_sequence_parallel: bool = False

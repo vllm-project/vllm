@@ -62,14 +62,10 @@ class NaiveAll2AllManager(All2AllManagerBase):
     def dispatch(
         self,
         hidden_states: torch.Tensor,
-        topk_weights: torch.Tensor,
-        topk_ids: torch.Tensor,
+        router_logits: torch.Tensor,
         is_sequence_parallel: bool = False,
         extra_tensors: list[torch.Tensor] | None = None,
-    ) -> (
-        tuple[torch.Tensor, torch.Tensor, torch.Tensor]
-        | tuple[torch.Tensor, torch.Tensor, torch.Tensor, list[torch.Tensor]]
-    ):
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         if extra_tensors is not None:
             raise NotImplementedError(
                 "extra_tensors is not supported for NaiveAll2AllManager"
@@ -82,21 +78,11 @@ class NaiveAll2AllManager(All2AllManagerBase):
         hidden_states = self.naive_multicast(
             hidden_states, cu_tokens_across_sp_cpu, is_sequence_parallel
         )
-        topk_weights = self.naive_multicast(
-            topk_weights, cu_tokens_across_sp_cpu, is_sequence_parallel
-        )
-        topk_ids = self.naive_multicast(
-            topk_ids, cu_tokens_across_sp_cpu, is_sequence_parallel
+        router_logits = self.naive_multicast(
+            router_logits, cu_tokens_across_sp_cpu, is_sequence_parallel
         )
 
-        if extra_tensors is None:
-            return hidden_states, topk_weights, topk_ids
-
-        extra_tensors = [
-            self.naive_multicast(t, cu_tokens_across_sp_cpu, is_sequence_parallel)
-            for t in extra_tensors
-        ]
-        return hidden_states, topk_weights, topk_ids, extra_tensors
+        return hidden_states, router_logits
 
     def combine(
         self, hidden_states: torch.Tensor, is_sequence_parallel: bool = False
@@ -131,13 +117,12 @@ class AgRsAll2AllManager(All2AllManagerBase):
     def dispatch(
         self,
         hidden_states: torch.Tensor,
-        topk_weights: torch.Tensor,
-        topk_ids: torch.Tensor,
+        router_logits: torch.Tensor,
         is_sequence_parallel: bool = False,
         extra_tensors: list[torch.Tensor] | None = None,
     ) -> (
-        tuple[torch.Tensor, torch.Tensor, torch.Tensor]
-        | tuple[torch.Tensor, torch.Tensor, torch.Tensor, list[torch.Tensor]]
+        tuple[torch.Tensor, torch.Tensor]
+        | tuple[torch.Tensor, torch.Tensor, list[torch.Tensor]]
     ):
         """
         Gather hidden_states and router_logits from all dp ranks.
@@ -149,7 +134,7 @@ class AgRsAll2AllManager(All2AllManagerBase):
         dist_group = get_ep_group() if is_sequence_parallel else get_dp_group()
         assert sizes[dist_group.rank_in_group] == hidden_states.shape[0]
 
-        tensors_to_gather = [hidden_states, topk_weights, topk_ids]
+        tensors_to_gather = [hidden_states, router_logits]
         if extra_tensors is not None:
             tensors_to_gather.extend(extra_tensors)
 
@@ -159,14 +144,9 @@ class AgRsAll2AllManager(All2AllManagerBase):
             sizes=sizes,
         )
 
-        hidden_states = gathered_tensors[0]
-        topk_weights = gathered_tensors[1]
-        topk_ids = gathered_tensors[2]
-
-        if extra_tensors is None:
-            return hidden_states, topk_weights, topk_ids
-
-        return hidden_states, topk_weights, topk_ids, gathered_tensors[3:]
+        if extra_tensors is not None:
+            return (gathered_tensors[0], gathered_tensors[1], gathered_tensors[2:])
+        return gathered_tensors[0], gathered_tensors[1]
 
     def combine(
         self, hidden_states: torch.Tensor, is_sequence_parallel: bool = False
@@ -239,11 +219,10 @@ class PPLXAll2AllManager(All2AllManagerBase):
     def dispatch(
         self,
         hidden_states: torch.Tensor,
-        topk_weights: torch.Tensor,
-        topk_ids: torch.Tensor,
+        router_logits: torch.Tensor,
         is_sequence_parallel: bool = False,
         extra_tensors: list[torch.Tensor] | None = None,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         raise NotImplementedError
 
     def combine(
@@ -288,11 +267,10 @@ class DeepEPAll2AllManagerBase(All2AllManagerBase):
     def dispatch(
         self,
         hidden_states: torch.Tensor,
-        topk_weights: torch.Tensor,
-        topk_ids: torch.Tensor,
+        router_logits: torch.Tensor,
         is_sequence_parallel: bool = False,
         extra_tensors: list[torch.Tensor] | None = None,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         raise NotImplementedError
 
     def combine(
