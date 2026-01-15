@@ -16,7 +16,10 @@ from openai.types.responses.response_reasoning_item import (
 )
 
 from vllm.entrypoints.constants import MCP_PREFIX
-from vllm.entrypoints.openai.protocol import ResponseInputOutputItem, ResponsesRequest
+from vllm.entrypoints.openai.responses.protocol import (
+    ResponseInputOutputItem,
+    ResponsesRequest,
+)
 from vllm.outputs import CompletionOutput
 from vllm.reasoning.abs_reasoning_parsers import ReasoningParser
 from vllm.tokenizers import TokenizerLike
@@ -51,7 +54,13 @@ class ResponsesParser:
         if tool_parser_cls is not None:
             self.tool_parser_instance = tool_parser_cls(tokenizer)
 
+        # Store the last finish_reason to determine response status
+        self.finish_reason: str | None = None
+
     def process(self, output: CompletionOutput) -> "ResponsesParser":
+        # Store the finish_reason from the output
+        self.finish_reason = output.finish_reason
+
         reasoning_content, content = self.reasoning_parser_instance.extract_reasoning(
             output.text, request=self.request
         )

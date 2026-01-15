@@ -6,13 +6,15 @@ from dataclasses import dataclass
 
 import torch
 
-from vllm.attention.backends.abstract import AttentionBackend
-from vllm.attention.backends.utils import PAD_SLOT_ID
 from vllm.config import VllmConfig
-from vllm.v1.attention.backends.utils import (
+from vllm.v1.attention.backend import (
+    AttentionBackend,
     AttentionCGSupport,
     AttentionMetadataBuilder,
     CommonAttentionMetadata,
+)
+from vllm.v1.attention.backends.utils import (
+    PAD_SLOT_ID,
     compute_causal_conv1d_metadata,
     split_decodes_and_prefills,
 )
@@ -75,8 +77,10 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
         self.compilation_config = vllm_config.compilation_config
         self.speculative_config = vllm_config.speculative_config
         self.kv_cache_spec = kv_cache_spec
+
         if self.speculative_config:
-            self.num_spec = self.speculative_config.num_speculative_tokens
+            assert self.speculative_config.num_speculative_tokens is not None
+            self.num_spec: int = self.speculative_config.num_speculative_tokens
         else:
             self.num_spec = 0
         self.use_spec_decode = self.num_spec > 0
@@ -85,10 +89,15 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
         self.use_full_cuda_graph = (
             self.compilation_config.cudagraph_mode.has_full_cudagraphs()
         )
-        self.decode_cudagraph_max_bs = min(
-            self.vllm_config.scheduler_config.max_num_seqs * (self.num_spec + 1),
-            self.compilation_config.max_cudagraph_capture_size,
+
+        self.decode_cudagraph_max_bs = (
+            self.vllm_config.scheduler_config.max_num_seqs * (self.num_spec + 1)
         )
+        if self.compilation_config.max_cudagraph_capture_size is not None:
+            self.decode_cudagraph_max_bs = min(
+                self.decode_cudagraph_max_bs,
+                self.compilation_config.max_cudagraph_capture_size,
+            )
 
         self.spec_state_indices_tensor = torch.empty(
             (self.decode_cudagraph_max_bs, self.num_spec + 1),
@@ -142,8 +151,7 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
         m = common_attn_metadata
 
         query_start_loc = m.query_start_loc
-        context_lens = m.num_computed_tokens_cpu
-        context_lens_tensor = context_lens.to(query_start_loc.device, non_blocking=True)
+        context_lens_tensor = m.compute_num_computed_tokens()
         nums_dict, batch_ptr, token_chunk_offset_ptr = None, None, None
 
         if (
@@ -370,6 +378,5 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
 
         num_accepted_tokens = torch.diff(m.query_start_loc)
         num_decode_draft_tokens_cpu = (num_accepted_tokens - 1).cpu()
-        m._num_computed_tokens_cpu = m.seq_lens_cpu - num_accepted_tokens.cpu()
 
         return self.build(0, m, num_accepted_tokens, num_decode_draft_tokens_cpu)

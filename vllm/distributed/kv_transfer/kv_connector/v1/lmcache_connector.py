@@ -5,7 +5,6 @@ from typing import TYPE_CHECKING, Any
 
 import torch
 
-from vllm.attention.backends.abstract import AttentionMetadata
 from vllm.config import VllmConfig
 from vllm.distributed.kv_events import (
     BlockStored,
@@ -19,6 +18,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorRole,
 )
 from vllm.logger import init_logger
+from vllm.v1.attention.backend import AttentionMetadata
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.outputs import KVConnectorOutput
 
@@ -234,7 +234,7 @@ class LMCacheConnectorV1(KVConnectorBase_V1):
                 lora_id=e.lora_id,
                 block_size=e.block_size,
                 medium=e.medium,
-                lora_name=e.lora_name,
+                lora_name=getattr(e, "lora_name", None),
             )
             for e in events
         ]

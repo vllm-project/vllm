@@ -4,8 +4,8 @@
 
 from abc import ABC, abstractmethod
 
-from vllm.attention.backends.abstract import AttentionBackend
 from vllm.config import VllmConfig
+from vllm.v1.attention.backend import AttentionBackend, AttentionImpl
 from vllm.v1.kv_cache_interface import KVCacheSpec
 
 
@@ -17,6 +17,8 @@ class AttentionLayerBase(ABC):
     This provides a common interface for getting attention backends
     from different layer types.
     """
+
+    impl: "AttentionImpl"
 
     @abstractmethod
     def get_attn_backend(self) -> type[AttentionBackend]:

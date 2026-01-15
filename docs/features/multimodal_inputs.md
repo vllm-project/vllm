@@ -166,49 +166,51 @@ Full example: [examples/offline_inference/vision_language_multi_image.py](../../
 
 If using the [LLM.chat](../models/generative_models.md#llmchat) method, you can pass images directly in the message content using various formats: image URLs, PIL Image objects, or pre-computed embeddings:
 
-```python
-from vllm import LLM
-from vllm.assets.image import ImageAsset
+??? code
 
-llm = LLM(model="llava-hf/llava-1.5-7b-hf")
-image_url = "https://picsum.photos/id/32/512/512"
-image_pil = ImageAsset('cherry_blossom').pil_image
-image_embeds = torch.load(...)
+    ```python
+    from vllm import LLM
+    from vllm.assets.image import ImageAsset
 
-conversation = [
-    {"role": "system", "content": "You are a helpful assistant"},
-    {"role": "user", "content": "Hello"},
-    {"role": "assistant", "content": "Hello! How can I assist you today?"},
-    {
-        "role": "user",
-        "content": [
-            {
-                "type": "image_url",
-                "image_url": {"url": image_url},
-            },
-            {
-                "type": "image_pil",
-                "image_pil": image_pil,
-            },
-            {
-                "type": "image_embeds",
-                "image_embeds": image_embeds,
-            },
-            {
-                "type": "text",
-                "text": "What's in these images?",
-            },
-        ],
-    },
-]
+    llm = LLM(model="llava-hf/llava-1.5-7b-hf")
+    image_url = "https://picsum.photos/id/32/512/512"
+    image_pil = ImageAsset('cherry_blossom').pil_image
+    image_embeds = torch.load(...)
 
-# Perform inference and log output.
-outputs = llm.chat(conversation)
+    conversation = [
+        {"role": "system", "content": "You are a helpful assistant"},
+        {"role": "user", "content": "Hello"},
+        {"role": "assistant", "content": "Hello! How can I assist you today?"},
+        {
+            "role": "user",
+            "content": [
+                {
+                    "type": "image_url",
+                    "image_url": {"url": image_url},
+                },
+                {
+                    "type": "image_pil",
+                    "image_pil": image_pil,
+                },
+                {
+                    "type": "image_embeds",
+                    "image_embeds": image_embeds,
+                },
+                {
+                    "type": "text",
+                    "text": "What's in these images?",
+                },
+            ],
+        },
+    ]
 
-for o in outputs:
-    generated_text = o.outputs[0].text
-    print(generated_text)
-```
+    # Perform inference and log output.
+    outputs = llm.chat(conversation)
+
+    for o in outputs:
+        generated_text = o.outputs[0].text
+        print(generated_text)
+    ```
 
 Multi-image input can be extended to perform video captioning. We show this with [Qwen2-VL](https://huggingface.co/Qwen/Qwen2-VL-2B-Instruct) as it supports videos:
 
@@ -353,6 +355,44 @@ Full example: [examples/offline_inference/vision_language.py](../../examples/off
 You can pass a tuple `(array, sampling_rate)` to the `'audio'` field of the multi-modal dictionary.
 
 Full example: [examples/offline_inference/audio_language.py](../../examples/offline_inference/audio_language.py)
+
+#### Automatic Audio Channel Normalization
+
+vLLM automatically normalizes audio channels for models that require specific audio formats. When loading audio with libraries like `torchaudio`, stereo files return shape `[channels, time]`, but many audio models (particularly Whisper-based models) expect mono audio with shape `[time]`.
+
+**Supported models with automatic mono conversion:**
+
+- **Whisper** and all Whisper-based models
+- **Qwen2-Audio**
+- **Qwen2.5-Omni** / **Qwen3-Omni** (inherits from Qwen2.5-Omni)
+- **Ultravox**
+
+For these models, vLLM automatically:
+
+1. Detects if the model requires mono audio via the feature extractor
+2. Converts multi-channel audio to mono using channel averaging
+3. Handles both `(channels, time)` format (torchaudio) and `(time, channels)` format (soundfile)
+
+**Example with stereo audio:**
+
+```python
+import torchaudio
+from vllm import LLM
+
+# Load stereo audio file - returns (channels, time) shape
+audio, sr = torchaudio.load("stereo_audio.wav")
+print(f"Original shape: {audio.shape}")  # e.g., torch.Size([2, 16000])
+
+# vLLM automatically converts to mono for Whisper-based models
+llm = LLM(model="openai/whisper-large-v3")
+
+outputs = llm.generate({
+    "prompt": "",
+    "multi_modal_data": {"audio": (audio.numpy(), sr)},
+})
+```
+
+No manual conversion is needed - vLLM handles the channel normalization automatically based on the model's requirements.
 
 ### Embedding Inputs
 
@@ -687,6 +727,31 @@ Full example: [examples/online_serving/openai_chat_completion_client_for_multimo
     export VLLM_VIDEO_FETCH_TIMEOUT=<timeout>
     ```
 
+#### Video Frame Recovery
+
+For improved robustness when processing potentially corrupted or truncated video files, vLLM supports optional frame recovery using a dynamic window forward-scan approach. When enabled, if a target frame fails to load during sequential reading, the next successfully grabbed frame (before the next target frame) will be used in its place.
+
+To enable video frame recovery, pass the `frame_recovery` parameter via `--media-io-kwargs`:
+
+```bash
+# Example: Enable frame recovery
+vllm serve Qwen/Qwen3-VL-30B-A3B-Instruct \
+  --media-io-kwargs '{"video": {"frame_recovery": true}}'
+```
+
+**Parameters:**
+
+- `frame_recovery`: Boolean flag to enable forward-scan recovery. When `true`, failed frames are recovered using the next available frame within the dynamic window (up to the next target frame). Default is `false`.
+
+**How it works:**
+
+1. The system reads frames sequentially
+2. If a target frame fails to grab, it's marked as "failed"
+3. The next successfully grabbed frame (before reaching the next target) is used to recover the failed frame
+4. This approach handles both mid-video corruption and end-of-video truncation
+
+Works with common video formats like MP4 when using OpenCV backends.
+
 #### Custom RGBA Background Color
 
 To use a custom background color for RGBA images, pass the `rgba_background_color` parameter via `--media-io-kwargs`:
@@ -892,6 +957,8 @@ The following example demonstrates how to pass image embeddings to the OpenAI se
     ```
 
 For Online Serving, you can also skip sending media if you expect cache hits with provided UUIDs. You can do so by sending media like this:
+
+??? code
 
     ```python
         # Image/video/audio URL:

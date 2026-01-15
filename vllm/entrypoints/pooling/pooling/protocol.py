@@ -9,7 +9,7 @@ from pydantic import (
 
 from vllm import PoolingParams
 from vllm.config.pooler import get_use_activation
-from vllm.entrypoints.openai.protocol import OpenAIBaseModel, UsageInfo
+from vllm.entrypoints.openai.engine.protocol import OpenAIBaseModel, UsageInfo
 from vllm.entrypoints.pooling.embed.protocol import (
     EmbeddingChatRequest,
     EmbeddingCompletionRequest,
@@ -40,7 +40,6 @@ class PoolingCompletionRequest(EmbeddingCompletionRequest):
         return PoolingParams(
             truncate_prompt_tokens=self.truncate_prompt_tokens,
             dimensions=self.dimensions,
-            normalize=self.normalize,
             use_activation=get_use_activation(self),
         )
 
@@ -66,7 +65,6 @@ class PoolingChatRequest(EmbeddingChatRequest):
         return PoolingParams(
             truncate_prompt_tokens=self.truncate_prompt_tokens,
             dimensions=self.dimensions,
-            normalize=self.normalize,
             use_activation=get_use_activation(self),
         )
 

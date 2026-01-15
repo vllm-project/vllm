@@ -10,10 +10,12 @@ from openai.types.responses.response_format_text_json_schema_config import (
     ResponseFormatTextJSONSchemaConfig,
 )
 
-from vllm.entrypoints.openai.protocol import (
-    ChatCompletionRequest,
+from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
+from vllm.entrypoints.openai.engine.protocol import (
     DeltaMessage,
     ExtractedToolCallInformation,
+)
+from vllm.entrypoints.openai.responses.protocol import (
     ResponsesRequest,
     ResponseTextConfig,
 )
@@ -67,6 +69,7 @@ class ToolParser:
                 # tool_choice: "Forced Function" or "required" will override
                 # structured output json settings to make tool calling work correctly
                 request.structured_outputs.json = json_schema_from_tool
+                request.response_format = None
             if isinstance(request, ResponsesRequest):
                 request.text = ResponseTextConfig()
                 request.text.format = ResponseFormatTextJSONSchemaConfig(

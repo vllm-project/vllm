@@ -14,7 +14,7 @@ from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.utils.hashing import sha256_cbor, xxhash_cbor
 from vllm.utils.math_utils import cdiv
-from vllm.utils.mem_constants import GiB_bytes
+from vllm.utils.mem_utils import format_gib
 from vllm.v1.kv_cache_interface import (
     ChunkedLocalAttentionSpec,
     FullAttentionSpec,
@@ -633,9 +633,9 @@ def _check_enough_kv_cache_memory(
 
         raise ValueError(
             f"To serve at least one request with the models's max seq len "
-            f"({max_model_len}), ({needed_memory / GiB_bytes:.2f} GiB KV "
+            f"({max_model_len}), ({format_gib(needed_memory)} GiB KV "
             f"cache is needed, which is larger than the available KV cache "
-            f"memory ({available_memory / GiB_bytes:.2f} GiB). {estimated_msg}"
+            f"memory ({format_gib(available_memory)} GiB). {estimated_msg}"
             f"Try increasing `gpu_memory_utilization` or decreasing `max_model_len` "
             f"when initializing the engine. "
             f"See https://docs.vllm.ai/en/latest/configuration/conserving_memory/ "
@@ -1185,6 +1185,7 @@ def unify_hybrid_kv_cache_specs(kv_cache_spec: dict[str, KVCacheSpec]):
                     head_size=spec.head_size,
                     dtype=spec.dtype,
                     sliding_window=spec.sliding_window,
+                    page_size_padded=spec.page_size_padded,
                 )
             elif isinstance(spec, ChunkedLocalAttentionSpec):
                 kv_cache_spec[layer_name] = FullAttentionSpec(
@@ -1193,6 +1194,7 @@ def unify_hybrid_kv_cache_specs(kv_cache_spec: dict[str, KVCacheSpec]):
                     head_size=spec.head_size,
                     dtype=spec.dtype,
                     attention_chunk_size=spec.attention_chunk_size,
+                    page_size_padded=spec.page_size_padded,
                 )
 
     if not (
@@ -1441,10 +1443,10 @@ def _auto_fit_max_model_len(
         vllm_config.model_config.max_model_len = auto_fit_max
         logger.info_once(
             "Auto-fit max_model_len: reduced from %d to %d to fit in "
-            "available GPU memory (%.2f GiB available for KV cache)",
+            "available GPU memory (%s GiB available for KV cache)",
             original_max,
             auto_fit_max,
-            min_available_memory / GiB_bytes,
+            format_gib(min_available_memory),
             scope="local",
         )
 

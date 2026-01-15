@@ -15,10 +15,10 @@ from vllm.distributed.kv_events import BlockStored, KVEventBatch
 from vllm.platforms import current_platform
 
 CPU_BLOCK_SIZES = [48]
-ATTN_BACKENDS = ["FLASH_ATTN"]
+ATTN_BACKENDS = []
 
 if current_platform.is_cuda():
-    ATTN_BACKENDS.append("FLASHINFER")
+    ATTN_BACKENDS = ["FLASH_ATTN", "FLASHINFER", "TRITON_ATTN"]
 elif current_platform.is_rocm():
     ATTN_BACKENDS = ["TRITON_ATTN"]
 
@@ -161,7 +161,7 @@ def test_cpu_offloading(cpu_block_size: int, attn_backend: str) -> None:
         kv_connector="OffloadingConnector",
         kv_role="kv_both",
         kv_connector_extra_config={
-            "num_cpu_blocks": 1000,
+            "cpu_bytes_to_use": 500 << 20,
             "block_size": cpu_block_size,
         },
     )

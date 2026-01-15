@@ -507,12 +507,7 @@ class MPClient(EngineCoreClient):
             offline_mode = parallel_config.data_parallel_rank_local is not None
             # Client manages local+remote EngineCores in pure internal LB case.
             # Client manages local EngineCores in hybrid and external LB case.
-            local_engines_only = (
-                parallel_config.data_parallel_hybrid_lb
-                or parallel_config.data_parallel_external_lb
-            )
-
-            num_ranks = dp_local_size if local_engines_only else dp_size
+            num_ranks = dp_local_size if parallel_config.local_engines_only else dp_size
             self.engine_ranks_managed = (
                 [dp_rank] if offline_mode else list(range(dp_rank, dp_rank + num_ranks))
             )
@@ -533,7 +528,7 @@ class MPClient(EngineCoreClient):
                     timeout=VLLM_ENGINE_READY_TIMEOUT_S * 1000  # convert to ms
                 ):
                     raise TimeoutError(
-                        "Timed out waiting for engines to send"
+                        "Timed out waiting for engines to send "
                         "initial message on input socket."
                     )
                 identity, _ = sync_input_socket.recv_multipart()

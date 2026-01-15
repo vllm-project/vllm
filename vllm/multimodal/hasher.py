@@ -12,7 +12,7 @@ from PIL import Image
 
 from vllm.logger import init_logger
 
-from .base import MediaWithBytes
+from .media import MediaWithBytes
 
 logger = init_logger(__name__)
 
@@ -98,6 +98,9 @@ class MultiModalHasher:
         key: str,
         obj: object,
     ) -> Iterable[bytes | memoryview]:
+        if obj is None:
+            yield key.encode("utf-8")
+            return
         # Recursive cases
         if isinstance(obj, (list, tuple)):
             for i, elem in enumerate(obj):

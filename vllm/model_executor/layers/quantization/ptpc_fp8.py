@@ -103,21 +103,25 @@ class PTPCFp8LinearMethod(Fp8LinearMethod):
         )
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
-        layer.weight = torch.nn.Parameter(layer.weight.data, requires_grad=False)
-
-        assert layer.weight.data.dtype == torch.bfloat16, (
-            f"Currently torch._scaled_mm (hipBLASLt) rowwise gemm only support output dtype of bfloat16. {str(layer.weight.data.dtype)} is specified."  # noqa: E501
-        )
-        # Quantize the weights.
-        qweight, weight_scale = ops.scaled_fp8_quant(
-            layer.weight, scale=None, use_per_token_if_dynamic=True
+        assert layer.weight.data.dtype not in (torch.float16, torch.float32), (
+            "Currently torch._scaled_mm (hipBLASLt) rowwise gemm only support "
+            f"output dtype of bfloat16. {layer.weight.data.dtype} is specified."
         )
 
-        # Update the layer with the new values.
-        layer.weight = Parameter(
-            qweight.t(), requires_grad=False
-        )  # Pretranspose the weight
-        layer.weight_scale = Parameter(weight_scale, requires_grad=False)
+        if layer.weight.data.dtype == torch.bfloat16:
+            # Quantize the weights.
+            qweight, weight_scale = ops.scaled_fp8_quant(
+                layer.weight, scale=None, use_per_token_if_dynamic=True
+            )
+
+            # Update the layer with the new values.
+            layer.weight = Parameter(
+                qweight.t(), requires_grad=False
+            )  # Pretranspose the weight
+            layer.weight_scale = Parameter(weight_scale, requires_grad=False)
+        else:
+            assert layer.weight.data.dtype == current_platform.fp8_dtype()
+            assert getattr(layer, "weight_scale", None) is not None
         layer.input_scale = None
 
     def apply(

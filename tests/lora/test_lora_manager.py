@@ -111,7 +111,7 @@ def create_packed_lora(
     return LoRAModel(lora_id, 8, loras)
 
 
-def test_replace_submodules(dist_init, dummy_model):
+def test_replace_submodules(default_vllm_config, dist_init, dummy_model):
     model = dummy_model
     manager = LoRAModelManager(
         model,
@@ -133,7 +133,7 @@ def test_replace_submodules(dist_init, dummy_model):
 
 
 @pytest.mark.parametrize("device", DEVICES)
-def test_lora_model_manager(dist_init, dummy_model, device):
+def test_lora_model_manager(default_vllm_config, dist_init, dummy_model, device):
     model = dummy_model
     model_lora1 = create_lora(
         1, model, ["layer1.dense1", "dense2", "lm_head"], device=device
@@ -199,7 +199,9 @@ def test_lora_model_manager(dist_init, dummy_model, device):
 
 
 @pytest.mark.parametrize("device", DEVICES)
-def test_lora_lru_cache_model_manager(dist_init, dummy_model, device):
+def test_lora_lru_cache_model_manager(
+    default_vllm_config, dist_init, dummy_model, device
+):
     model = dummy_model
     model_lora1 = create_lora(
         1, model, ["layer1.dense1", "dense2", "lm_head"], device=device
@@ -289,7 +291,7 @@ def test_lora_lru_cache_model_manager(dist_init, dummy_model, device):
 
 
 @pytest.mark.parametrize("device", DEVICES)
-def test_lru_lora_model_manager(dist_init, dummy_model, device):
+def test_lru_lora_model_manager(default_vllm_config, dist_init, dummy_model, device):
     # This tests just the LRU cache functionality, everything else is
     # tested in test_lora_model_manager
     model = dummy_model
@@ -415,7 +417,9 @@ def test_lru_lora_model_manager(dist_init, dummy_model, device):
 
 
 @pytest.mark.parametrize("device", DEVICES)
-def test_lru_cache_worker_adapter_manager(dist_init, dummy_model, device, tmp_path):
+def test_lru_cache_worker_adapter_manager(
+    default_vllm_config, dist_init, dummy_model, device, tmp_path
+):
     lora_config = LoRAConfig(
         max_lora_rank=8, max_cpu_loras=4, max_loras=4, lora_dtype=DEFAULT_DTYPE
     )
@@ -529,7 +533,9 @@ def test_lru_cache_worker_adapter_manager(dist_init, dummy_model, device, tmp_pa
 
 
 @pytest.mark.parametrize("device", DEVICES)
-def test_worker_adapter_manager(dist_init, dummy_model_gate_up, device, tmp_path):
+def test_worker_adapter_manager(
+    default_vllm_config, dist_init, dummy_model_gate_up, device, tmp_path
+):
     # Should remove every LoRA not specified in the request.
     lora_config = LoRAConfig(
         max_lora_rank=8, max_cpu_loras=4, max_loras=4, lora_dtype=DEFAULT_DTYPE
@@ -636,7 +642,7 @@ def test_worker_adapter_manager(dist_init, dummy_model_gate_up, device, tmp_path
 
 
 @pytest.mark.parametrize("device", DEVICES)
-def test_packed_loras(dist_init, dummy_model_gate_up, device):
+def test_packed_loras(default_vllm_config, dist_init, dummy_model_gate_up, device):
     model = dummy_model_gate_up
     model_lora = create_packed_lora(
         1,

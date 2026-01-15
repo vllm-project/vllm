@@ -19,14 +19,6 @@ from flashinfer.utils import FP4Tensor
 from typing_extensions import override
 
 from vllm import envs
-from vllm.attention.backends.abstract import (
-    AttentionBackend,
-    AttentionImpl,
-    AttentionType,
-    MultipleOf,
-)
-from vllm.attention.ops.common import cp_lse_ag_out_rs
-from vllm.attention.ops.merge_attn_states import merge_attn_states
 from vllm.config import CUDAGraphMode, VllmConfig, get_current_vllm_config
 from vllm.config.cache import CacheDType
 from vllm.distributed.parallel_state import get_dcp_group
@@ -48,10 +40,17 @@ from vllm.utils.flashinfer import (
 )
 from vllm.utils.math_utils import cdiv
 from vllm.utils.platform_utils import is_pin_memory_available
-from vllm.v1.attention.backends.utils import (
+from vllm.utils.torch_utils import is_strictly_contiguous
+from vllm.v1.attention.backend import (
+    AttentionBackend,
     AttentionCGSupport,
+    AttentionImpl,
     AttentionMetadataBuilder,
+    AttentionType,
     CommonAttentionMetadata,
+    MultipleOf,
+)
+from vllm.v1.attention.backends.utils import (
     KVCacheLayoutType,
     get_dcp_local_seq_lens,
     get_kv_cache_layout,
@@ -59,6 +58,8 @@ from vllm.v1.attention.backends.utils import (
     infer_global_hyperparameters,
     split_decodes_and_prefills,
 )
+from vllm.v1.attention.ops.common import cp_lse_ag_out_rs
+from vllm.v1.attention.ops.merge_attn_states import merge_attn_states
 from vllm.v1.kv_cache_interface import AttentionSpec
 from vllm.v1.utils import CpuGpuBuffer
 
@@ -530,11 +531,12 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             self._decode_wrappers_cudagraph: dict[
                 int, BatchDecodeWithPagedKVCacheWrapper
             ] = {}
-            self._decode_cudagraph_max_bs = min(
-                (1 + num_spec_tokens) * max_num_reqs,
-                self.compilation_config.max_cudagraph_capture_size,
-            )
-
+            self._decode_cudagraph_max_bs = (1 + num_spec_tokens) * max_num_reqs
+            if self.compilation_config.max_cudagraph_capture_size is not None:
+                self._decode_cudagraph_max_bs = min(
+                    self._decode_cudagraph_max_bs,
+                    self.compilation_config.max_cudagraph_capture_size,
+                )
         try:
             self.dcp_world_size = get_dcp_group().world_size
             self.dcp_rank = get_dcp_group().rank_in_group
@@ -870,7 +872,9 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         # Guard access to seq_lens_cpu, which may not always be needed
         # and can be expensive to retrieve in async mode.
         needs_seq_lens_cpu = self.use_dcp or use_cascade or not is_only_trtllm_decode
-        seq_lens_cpu = common_attn_metadata.seq_lens_cpu if needs_seq_lens_cpu else None
+        seq_lens_cpu = (
+            common_attn_metadata.seq_lens.cpu() if needs_seq_lens_cpu else None
+        )
         seq_lens_np = seq_lens_cpu.numpy() if seq_lens_cpu is not None else None
         num_blocks_np = (
             (seq_lens_np + (page_size - 1)) // page_size
@@ -1389,11 +1393,11 @@ class FlashInferImpl(AttentionImpl):
 
                 # This path needs to be enabled with VLLM_KV_CACHE_LAYOUT = HND
                 assert get_kv_cache_layout() == "HND"
-                assert prefill_query.is_contiguous()
-                assert kv_cache_permute.is_contiguous()
-                assert workspace_buffer.is_contiguous()
-                assert block_tables_prefill.is_contiguous()
-                assert seq_lens_prefill.is_contiguous()
+                assert is_strictly_contiguous(prefill_query)
+                assert is_strictly_contiguous(kv_cache_permute)
+                assert is_strictly_contiguous(workspace_buffer)
+                assert is_strictly_contiguous(block_tables_prefill)
+                assert is_strictly_contiguous(seq_lens_prefill)
 
                 if output.dtype == FP4_DTYPE:
                     assert self.o_sf_scale is not None
@@ -1500,11 +1504,11 @@ class FlashInferImpl(AttentionImpl):
 
                 # This path needs to be enabled with VLLM_KV_CACHE_LAYOUT = HND
                 assert get_kv_cache_layout() == "HND"
-                assert decode_query.is_contiguous()
-                assert kv_cache_permute.is_contiguous()
-                assert workspace_buffer.is_contiguous()
-                assert block_tables_decode.is_contiguous()
-                assert seq_lens_decode.is_contiguous()
+                assert is_strictly_contiguous(decode_query)
+                assert is_strictly_contiguous(kv_cache_permute)
+                assert is_strictly_contiguous(workspace_buffer)
+                assert is_strictly_contiguous(block_tables_decode)
+                assert is_strictly_contiguous(seq_lens_decode)
 
                 if output.dtype == FP4_DTYPE:
                     assert self.o_sf_scale is not None

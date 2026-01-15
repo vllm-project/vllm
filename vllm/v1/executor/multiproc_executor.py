@@ -411,9 +411,9 @@ class MultiprocExecutor(Executor):
 
     @cached_property
     def max_concurrent_batches(self) -> int:
-        if self.scheduler_config.async_scheduling:
-            return 2
-        return self.parallel_config.pipeline_parallel_size
+        # PP requires PP-size concurrent batches to fill the pipeline.
+        pp_size = self.parallel_config.pipeline_parallel_size
+        return 2 if pp_size <= 1 and self.scheduler_config.async_scheduling else pp_size
 
     def _get_output_rank(self) -> int:
         # Only returns ModelRunnerOutput from TP rank=0 and PP rank=-1
@@ -519,9 +519,7 @@ class WorkerProc:
         shared_worker_lock: LockType,
     ):
         self.rank = rank
-        wrapper = WorkerWrapperBase(
-            vllm_config=vllm_config, rpc_rank=local_rank, global_rank=rank
-        )
+        wrapper = WorkerWrapperBase(rpc_rank=local_rank, global_rank=rank)
         # TODO: move `init_worker` to executor level as a collective rpc call
         all_kwargs: list[dict] = [
             {} for _ in range(vllm_config.parallel_config.world_size)

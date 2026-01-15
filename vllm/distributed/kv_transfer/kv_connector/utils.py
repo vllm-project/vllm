@@ -6,15 +6,15 @@ KV cache helper for store.
 
 from collections.abc import Iterator
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Any, Literal, cast
 
 import torch
 
-from vllm.attention.backends.abstract import AttentionBackend
-from vllm.attention.backends.registry import AttentionBackendEnum
-from vllm.config import get_current_vllm_config
+from vllm.config import VllmConfig, get_current_vllm_config, get_layers_from_vllm_config
 from vllm.distributed.kv_transfer.kv_connector.factory import KVConnectorFactory
 from vllm.logger import init_logger
+from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
+from vllm.v1.attention.backend import AttentionBackend
 from vllm.v1.outputs import KVConnectorOutput, ModelRunnerOutput
 
 if TYPE_CHECKING:
@@ -204,6 +204,84 @@ def copy_kv_blocks(
         copy_fn(src_tensor, dst_tensor, src_indices, dst_indices)
 
 
+def kv_postprocess_blksize_on_receive(cache, indices, block_size_ratio):
+    """
+    Transforms the layout of received KV cache blocks to the local block_size.
+    (Only works for local blocksize > remote blocksize)
+
+    example:
+    local blocksize = 16 tokens, remote blocksize = 4 tokens
+    local block[0] = remote block[0, 1, 2, 3]
+    remote is |h0-b0|h1-b0|h2-b0|h3-b0|h0-b1|h1-b1|h2-b1|h3-b1|...
+    local is  |h0-b0..................|h1-b0..................|...
+    permute is to:
+    1. view => view remote as n_blocks * remote_shape(H,remoteN,D)
+    2. permute => (H, nblocks, remoteN, D)
+    3. flatten => (H, localN, D)
+    """
+    blocks_to_update = cache.index_select(0, indices)
+    # use physical order
+    blocks_to_update = blocks_to_update.permute(0, 2, 1, 3)
+    n_kv_heads, block_size, head_size = blocks_to_update.shape[1:]
+    remote_block_size = block_size // block_size_ratio
+    n_blocks = block_size_ratio
+
+    permuted_blocks = (
+        blocks_to_update.reshape(-1, n_blocks, n_kv_heads, remote_block_size, head_size)
+        .permute(0, 2, 1, 3, 4)
+        .flatten(2, 3)
+    )
+    permuted_blocks = permuted_blocks.permute(0, 2, 1, 3)
+    cache.index_copy_(0, indices, permuted_blocks)
+
+
+def kv_postprocess_layout_on_receive(cache, indices):
+    """Transforms the layout of received KV cache blocks to the local format.
+
+    This method corrects layout mismatches from direct memory copies by
+    permuting the tensor dimensions.
+
+    - **Source Layout:** `[num_blocks, n_kv_head, block_size, head_dim]`
+    - **Target Layout:** `[num_blocks, block_size, n_kv_head, head_dim]`
+
+    Implementation:
+    - x = blocks_to_update.reshape(src_shape) # view local kv with sender layout
+    - permuted_blocks = x.permute(*inv_order) # transpose n_kv_heads, block_size
+    - cache.index_copy_(0, indices, permuted_blocks) # copy permuted kv back
+
+    """
+    blocks_to_update = cache.index_select(0, indices)
+    target_shape = list(blocks_to_update.shape)
+    target_shape[0] = -1
+    inv_order = [0, 2, 1, 3]
+    src_shape = tuple(target_shape[i] for i in inv_order)
+    blocks_to_update = cache.index_select(0, indices)
+    permuted_blocks = blocks_to_update.reshape(src_shape).permute(*inv_order)
+    cache.index_copy_(0, indices, permuted_blocks)
+
+
+def kv_postprocess_blksize_and_layout_on_receive(cache, indices, block_size_ratio):
+    """
+    Transforms the layout of received KV cache to the local block_size and HND.
+    (Only works for local blocksize > remote blocksize)
+
+    prefill is HND, smaller block_size
+    decode(local) is NHD, larger block_size
+    """
+    blocks_to_update = cache.index_select(0, indices)
+
+    block_size, n_kv_heads, head_size = blocks_to_update.shape[1:]
+    remote_block_size = block_size // block_size_ratio
+    n_blocks = block_size_ratio
+
+    permuted_blocks = (
+        blocks_to_update.reshape(-1, n_blocks, n_kv_heads, remote_block_size, head_size)
+        .permute(0, 1, 3, 2, 4)
+        .flatten(1, 2)
+    )
+    cache.index_copy_(0, indices, permuted_blocks)
+
+
 def yield_req_data(
     scheduler_output,
 ) -> Iterator[tuple[str, tuple[list[int], ...], bool]]:
@@ -251,9 +329,6 @@ class TpKVTopology:
             len(kv_cache_shape) == 5 and kv_cache_shape[0] == 1
         )
 
-        attn_backend = AttentionBackendEnum[self.attn_backend.get_name()]
-        self._use_pallas = attn_backend == AttentionBackendEnum.PALLAS
-
     @property
     def is_kv_layout_blocks_first(self) -> bool:
         return self._is_kv_layout_blocks_first
@@ -261,7 +336,7 @@ class TpKVTopology:
     @property
     def split_k_and_v(self) -> bool:
         # Whether to register regions for K and V separately (when present).
-        return not (self.is_mla or self._use_pallas or self.is_kv_layout_blocks_first)
+        return not (self.is_mla or self.is_kv_layout_blocks_first)
 
     @property
     def tp_size(self) -> int:
@@ -359,3 +434,26 @@ class TpKVTopology:
     ) -> list[int]:
         remote_tp_size = self.remote_tp_size[remote_engine_id]
         return self.get_target_remote_ranks(remote_tp_size)
+
+
+def get_current_attn_backend(vllm_config: VllmConfig):
+    layer_type = cast(type[Any], AttentionLayerBase)
+    layers = get_layers_from_vllm_config(vllm_config, layer_type, None)
+    if layers:
+        backend = next(iter(layers.values())).get_attn_backend()
+    else:
+        # Fallback for tests, when static_forward_context is empty.
+        logger.debug(
+            "No layers found in the vLLM config. "
+            "Falling back to default attention backend."
+        )
+        from vllm.v1.attention.selector import get_attn_backend
+
+        backend = get_attn_backend(
+            head_size=vllm_config.model_config.get_head_size(),
+            dtype=vllm_config.model_config.dtype,
+            kv_cache_dtype=vllm_config.cache_config.cache_dtype,
+            block_size=vllm_config.cache_config.block_size,
+            use_mla=vllm_config.model_config.use_mla,
+        )
+    return backend

@@ -46,15 +46,14 @@ from transformers.models.glm4v.image_processing_glm4v import (
 from transformers.models.glm4v.video_processing_glm4v import Glm4vVideoProcessor
 from transformers.video_utils import VideoMetadata
 
-from vllm.attention.backends.registry import AttentionBackendEnum
-from vllm.attention.layers.mm_encoder_attention import (
-    MMEncoderAttention,
-)
 from vllm.config import MultiModalConfig, VllmConfig
 from vllm.config.multimodal import BaseDummyOptions, VideoDummyOptions
 from vllm.distributed import get_tensor_model_parallel_world_size, parallel_state
 from vllm.distributed import utils as dist_utils
 from vllm.logger import init_logger
+from vllm.model_executor.layers.attention.mm_encoder_attention import (
+    MMEncoderAttention,
+)
 from vllm.model_executor.layers.conv import Conv2dLayer, Conv3dLayer
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
@@ -80,15 +79,16 @@ from vllm.multimodal.inputs import (
 )
 from vllm.multimodal.parse import ImageSize, MultiModalDataItems, MultiModalDataParser
 from vllm.multimodal.processing import (
+    BaseDummyInputsBuilder,
     BaseMultiModalProcessor,
     BaseProcessingInfo,
     PromptReplacement,
     PromptUpdate,
     PromptUpdateDetails,
 )
-from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from vllm.sequence import IntermediateTensors
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
+from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 from ..layers.activation import SiluAndMul
 from .interfaces import (
@@ -304,6 +304,7 @@ class Glm4vVisionAttention(nn.Module):
         self.attn = MMEncoderAttention(
             num_heads=self.num_attention_heads_per_partition,
             head_size=self.hidden_size_per_attention_head,
+            scale=self.hidden_size_per_attention_head**-0.5,
             multimodal_config=multimodal_config,
         )
 
@@ -1787,6 +1788,20 @@ class Glm4vForConditionalGeneration(
             connector="visual.merger.",
             tower_model="visual.",
         )
+
+    def get_num_mm_encoder_tokens(
+        self,
+        num_image_tokens: int,
+    ) -> int:
+        merge_size = self.config.vision_config.spatial_merge_size
+        return num_image_tokens * (merge_size**2)
+
+    def get_num_mm_connector_tokens(
+        self,
+        num_vision_tokens: int,
+    ) -> int:
+        merge_size = self.config.vision_config.spatial_merge_size
+        return num_vision_tokens // (merge_size**2)
 
 
 @MULTIMODAL_REGISTRY.register_processor(

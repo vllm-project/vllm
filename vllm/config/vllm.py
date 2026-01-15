@@ -498,17 +498,15 @@ class VllmConfig:
         Right now, this function reads the offloading settings from
         CacheConfig and configures the KVTransferConfig accordingly.
         """
-        if (kv_offloading_backend := self.cache_config.kv_offloading_backend) is None:
+        # KV offloading is only activated when kv_offloading_size is set.
+        if (kv_offloading_size := self.cache_config.kv_offloading_size) is None:
             return
+
+        kv_offloading_backend = self.cache_config.kv_offloading_backend
 
         # If no KVTransferConfig is provided, create a default one.
         if self.kv_transfer_config is None:
             self.kv_transfer_config = KVTransferConfig()
-
-        if (kv_offloading_size := self.cache_config.kv_offloading_size) is None:
-            raise ValueError(
-                "You must set kv_offloading_size when kv_offloading_backend is set."
-            )
         num_kv_ranks = (
             self.parallel_config.tensor_parallel_size
             * self.parallel_config.pipeline_parallel_size
@@ -516,12 +514,8 @@ class VllmConfig:
 
         if kv_offloading_backend == "native":
             self.kv_transfer_config.kv_connector = "OffloadingConnector"
-            kv_bytes_per_rank = kv_offloading_size * (1 << 30) / num_kv_ranks
-
-            # NOTE(ApostaC): the actual calculation for num_cpu_blocks should be
-            # done after the model's KV cache is initialized
             self.kv_transfer_config.kv_connector_extra_config.update(
-                {"kv_bytes_per_rank": kv_bytes_per_rank, "num_cpu_blocks": 0}
+                {"cpu_bytes_to_use": kv_offloading_size * (1 << 30)}
             )
         elif kv_offloading_backend == "lmcache":
             self.kv_transfer_config.kv_connector = "LMCacheConnectorV1"
@@ -567,11 +561,6 @@ class VllmConfig:
 
         if self.scheduler_config.async_scheduling:
             # Async scheduling explicitly enabled, hard fail any incompatibilities.
-            if self.parallel_config.pipeline_parallel_size > 1:
-                raise ValueError(
-                    "Async scheduling is not yet compatible with "
-                    "pipeline_parallel_size > 1."
-                )
             # Currently, async scheduling only support eagle speculative
             # decoding.
             if self.speculative_config is not None:
@@ -582,11 +571,8 @@ class VllmConfig:
                     )
                 if self.speculative_config.disable_padded_drafter_batch:
                     raise ValueError(
-                        "async scheduling for EAGLE/MTP kind of speculative "
-                        "decoding is enabled, but disable_padded_drafter_batch=True "
-                        "disable_padded_drafter_batch=True is not supported for "
-                        "this situation now. please set "
-                        "disable_padded_drafter_batch=Fasle"
+                        "Async scheduling is not compatible with "
+                        "disable_padded_drafter_batch=True."
                     )
             if not executor_supports_async_sched:
                 raise ValueError(
@@ -596,51 +582,54 @@ class VllmConfig:
                 )
         elif self.scheduler_config.async_scheduling is None:
             # Enable async scheduling unless there is an incompatible option.
-            if self.parallel_config.pipeline_parallel_size > 1:
-                logger.warning(
-                    "Async scheduling is not yet supported with "
-                    "pipeline_parallel_size > 1 and will be disabled."
+            if (
+                self.speculative_config is not None
+                and self.speculative_config.method not in get_args(EagleModelTypes)
+            ):
+                logger.warning_once(
+                    "Async scheduling not supported with %s-based "
+                    "speculative decoding and will be disabled.",
+                    self.speculative_config.method,
+                    scope="local",
                 )
                 self.scheduler_config.async_scheduling = False
-            elif self.speculative_config is not None:
-                if self.speculative_config.method not in get_args(EagleModelTypes):
-                    logger.warning(
-                        "Async scheduling not supported with %s-based "
-                        "speculative decoding and will be disabled.",
-                        self.speculative_config.method,
-                    )
-                else:
-                    logger.warning(
-                        "Async scheduling will be disabled because some features do "
-                        "not currently work in conjunction with speculative decoding. "
-                        "To use async scheduling with spec decoding anyway, "
-                        "enable it explicitly via async_scheduling=True."
-                    )
+            elif (
+                self.speculative_config is not None
+                and self.speculative_config.disable_padded_drafter_batch
+            ):
+                logger.warning_once(
+                    "Async scheduling is not compatible with "
+                    "disable_padded_drafter_batch=True and will be disabled.",
+                    scope="local",
+                )
                 self.scheduler_config.async_scheduling = False
             elif not executor_supports_async_sched:
-                logger.warning(
+                logger.warning_once(
                     "Async scheduling will be disabled because it is not supported "
                     "with the `%s` distributed executor backend (only `mp`, `uni`, and "
                     "`external_launcher` are supported).",
                     executor_backend,
+                    scope="local",
                 )
                 self.scheduler_config.async_scheduling = False
             else:
                 self.scheduler_config.async_scheduling = True
 
-        if (
-            self.scheduler_config.async_scheduling
-            and not self.parallel_config.disable_nccl_for_dp_synchronization
-        ):
-            logger.info_once(
-                "Disabling NCCL for DP synchronization when using async scheduling."
-            )
-            self.parallel_config.disable_nccl_for_dp_synchronization = True
-
         logger.info_once(
             "Asynchronous scheduling is %s.",
             "enabled" if self.scheduler_config.async_scheduling else "disabled",
         )
+
+        if self.parallel_config.disable_nccl_for_dp_synchronization is None:
+            if self.scheduler_config.async_scheduling:
+                logger.info_once(
+                    "Disabling NCCL for DP synchronization "
+                    "when using async scheduling.",
+                    scope="local",
+                )
+                self.parallel_config.disable_nccl_for_dp_synchronization = True
+            else:
+                self.parallel_config.disable_nccl_for_dp_synchronization = False
 
         from vllm.platforms import current_platform
 
@@ -669,9 +658,9 @@ class VllmConfig:
             and self.compilation_config.mode != CompilationMode.VLLM_COMPILE
         ):
             logger.warning(
-                "Inductor compilation was disabled by user settings,"
-                "Optimizations settings that are only active during"
-                "Inductor compilation will be ignored."
+                "Inductor compilation was disabled by user settings, "
+                "optimizations settings that are only active during "
+                "inductor compilation will be ignored."
             )
 
         def has_blocked_weights():
@@ -787,7 +776,7 @@ class VllmConfig:
 
             logger.warning_once(
                 "--kv-sharing-fast-prefill requires changes on model side for "
-                "correctness and to realize prefill savings. "
+                "correctness and to realize prefill savings."
             )
         # TODO: Move after https://github.com/vllm-project/vllm/pull/26847 lands
         self._set_compile_ranges()
@@ -810,7 +799,7 @@ class VllmConfig:
             and not self.cache_config.enable_prefix_caching
         ):
             logger.warning(
-                "KV cache events are on, but prefix caching is not enabled."
+                "KV cache events are on, but prefix caching is not enabled. "
                 "Use --enable-prefix-caching to enable."
             )
         if (
@@ -819,9 +808,9 @@ class VllmConfig:
             and not self.kv_events_config.enable_kv_cache_events
         ):
             logger.warning(
-                "KV cache events are disabled,"
-                "but the scheduler is configured to publish them."
-                "Modify KVEventsConfig.enable_kv_cache_events"
+                "KV cache events are disabled, "
+                "but the scheduler is configured to publish them. "
+                "Modify KVEventsConfig.enable_kv_cache_events "
                 "to True to enable."
             )
         current_platform.check_and_update_config(self)
@@ -890,7 +879,7 @@ class VllmConfig:
                         else "pipeline parallelism"
                     )
                     logger.warning_once(
-                        "Sequence parallelism not supported with"
+                        "Sequence parallelism not supported with "
                         "native rms_norm when using %s, "
                         "this will likely lead to an error.",
                         regime,
@@ -907,7 +896,7 @@ class VllmConfig:
                 logger.warning_once(
                     "No piecewise cudagraph for executing cascade attention."
                     " Will fall back to eager execution if a batch runs "
-                    "into cascade attentions"
+                    "into cascade attentions."
                 )
 
             if self.compilation_config.cudagraph_mode.requires_piecewise_compilation():
@@ -1264,12 +1253,6 @@ class VllmConfig:
             computed_compile_ranges_split_points
         )
 
-    def recalculate_max_model_len(self, max_model_len: int):
-        # Can only be called in try_verify_and_update_config
-        model_config = self.model_config
-        max_model_len = model_config.get_and_verify_max_len(max_model_len)
-        self.model_config.max_model_len = max_model_len
-
     def try_verify_and_update_config(self):
         if self.model_config is None:
             return
@@ -1353,6 +1336,7 @@ class VllmConfig:
             f"disable_custom_all_reduce={self.parallel_config.disable_custom_all_reduce}, "  # noqa
             f"quantization={self.model_config.quantization}, "
             f"enforce_eager={self.model_config.enforce_eager}, "
+            f"enable_return_routed_experts={self.model_config.enable_return_routed_experts}, "  # noqa
             f"kv_cache_dtype={self.cache_config.cache_dtype}, "
             f"device_config={self.device_config.device}, "
             f"structured_outputs_config={self.structured_outputs_config!r}, "
@@ -1447,11 +1431,18 @@ def get_cached_compilation_config():
 
 def get_current_vllm_config() -> VllmConfig:
     if _current_vllm_config is None:
-        # in ci, usually when we test custom ops/modules directly,
-        # we don't set the vllm config. In that case, we set a default
-        # config.
-        logger.warning("Current vLLM config is not set.")
-        return VllmConfig()
+        raise AssertionError(
+            "Current vLLM config is not set. This typically means "
+            "get_current_vllm_config() was called outside of a "
+            "set_current_vllm_config() context, or a CustomOp was instantiated "
+            "at module import time or model forward time when config is not set. "
+            "For tests that directly test custom ops/modules, use the "
+            "'default_vllm_config' pytest fixture from tests/conftest.py."
+        )
+    return _current_vllm_config
+
+
+def get_current_vllm_config_or_none() -> VllmConfig | None:
     return _current_vllm_config
 
 

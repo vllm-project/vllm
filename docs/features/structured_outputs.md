@@ -39,7 +39,7 @@ request. You may also choose a specific backend, along with
 some options. A full set of options is available in the `vllm serve --help`
 text.
 
-Now let´s see an example for each of the cases, starting with the `choice`, as it´s the easiest one:
+Now let's see an example for each of the cases, starting with the `choice`, as it's the easiest one:
 
 ??? code
 
@@ -126,12 +126,12 @@ The next example shows how to use the `response_format` parameter with a Pydanti
     ```
 
 !!! tip
-    While not strictly necessary, normally it´s better to indicate in the prompt the
+    While not strictly necessary, normally it's better to indicate in the prompt the
     JSON schema and how the fields should be populated. This can improve the
     results notably in most cases.
 
 Finally we have the `grammar` option, which is probably the most
-difficult to use, but it´s really powerful. It allows us to define complete
+difficult to use, but it's really powerful. It allows us to define complete
 languages like SQL queries. It works by using a context free EBNF grammar.
 As an example, we can use to define a specific format of simplified SQL queries:
 
@@ -303,7 +303,7 @@ An example of using `structural_tag` can be found here: [examples/online_serving
 ## Offline Inference
 
 Offline inference allows for the same types of structured outputs.
-To use it, we´ll need to configure the structured outputs using the class `StructuredOutputsParams` inside `SamplingParams`.
+To use it, we'll need to configure the structured outputs using the class `StructuredOutputsParams` inside `SamplingParams`.
 The main available options inside `StructuredOutputsParams` are:
 
 - `json`
