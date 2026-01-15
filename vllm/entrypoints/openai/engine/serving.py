@@ -43,9 +43,11 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionRequest,
     ChatCompletionResponse,
 )
-from vllm.entrypoints.openai.engine.protocol import (
+from vllm.entrypoints.openai.completion.protocol import (
     CompletionRequest,
     CompletionResponse,
+)
+from vllm.entrypoints.openai.engine.protocol import (
     ErrorInfo,
     ErrorResponse,
     FunctionCall,

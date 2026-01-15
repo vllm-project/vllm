@@ -31,8 +31,10 @@ if TYPE_CHECKING:
     from vllm.entrypoints.openai.chat_completion.protocol import (
         ChatCompletionRequest,
     )
-    from vllm.entrypoints.openai.engine.protocol import (
+    from vllm.entrypoints.openai.completion.protocol import (
         CompletionRequest,
+    )
+    from vllm.entrypoints.openai.engine.protocol import (
         StreamOptions,
     )
     from vllm.entrypoints.openai.serving_models import LoRAModulePath

@@ -63,10 +63,7 @@ async def create_transcriptions(
     try:
         generator = await handler.create_transcription(audio_data, request, raw_request)
     except Exception as e:
-        raise HTTPException(
-            status_code=HTTPStatus.INTERNAL_SERVER_ERROR.value, detail=str(e)
-        ) from e
-
+        return handler.create_error_response(e)
     if isinstance(generator, ErrorResponse):
         return JSONResponse(
             content=generator.model_dump(), status_code=generator.error.code

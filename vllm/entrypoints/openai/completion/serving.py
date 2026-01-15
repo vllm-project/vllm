@@ -12,13 +12,15 @@ from fastapi import Request
 
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.logger import RequestLogger
-from vllm.entrypoints.openai.engine.protocol import (
+from vllm.entrypoints.openai.completion.protocol import (
     CompletionLogProbs,
     CompletionRequest,
     CompletionResponse,
     CompletionResponseChoice,
     CompletionResponseStreamChoice,
     CompletionStreamResponse,
+)
+from vllm.entrypoints.openai.engine.protocol import (
     ErrorResponse,
     PromptTokenUsageInfo,
     RequestResponseMetadata,
