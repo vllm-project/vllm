@@ -10,6 +10,7 @@ import pytest
 import pytest_asyncio
 from openai import OpenAI
 
+from vllm._aiter_ops import is_aiter_found_and_supported
 from vllm.config.multimodal import MultiModalConfig
 from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionRequest,
@@ -23,7 +24,6 @@ from vllm.entrypoints.openai.engine.protocol import (
 from vllm.entrypoints.openai.models.serving import BaseModelPath, OpenAIServingModels
 from vllm.entrypoints.openai.parser.harmony_utils import get_encoding
 from vllm.outputs import CompletionOutput, RequestOutput
-from vllm.platforms import current_platform
 from vllm.tokenizers import get_tokenizer
 from vllm.tool_parsers import ToolParserManager
 from vllm.v1.engine.async_llm import AsyncLLM
@@ -109,13 +109,13 @@ def gptoss_speculative_server(default_server_args: list[str]):
         f'"method": "eagle3", "num_speculative_tokens": 3}}',
         f"--attention-backend={
             'TRITON_ATTN'
-            if not current_platform.is_rocm()
+            if not is_aiter_found_and_supported()
             else 'ROCM_AITER_UNIFIED_ATTN'
         }",
     ]
     # gpt-oss requires AITER unified attention on ROCm
     env_dict = None
-    if current_platform.is_rocm():
+    if is_aiter_found_and_supported():
         env_dict = {"VLLM_ROCM_USE_AITER": "1"}
     with RemoteOpenAIServer(
         GPT_OSS_MODEL_NAME, server_args, env_dict=env_dict
