@@ -806,6 +806,10 @@ class AsyncLLM(EngineClient):
         async with self._pause_cond:
             return self._paused
 
+    async def has_pending_kv_transfers(self) -> bool:
+        """Check if there are pending async KV transfers in the engine."""
+        return await self.engine_core.call_utility_async("has_pending_kv_transfers")
+
     def get_num_unfinished_requests(self) -> int:
         """Return the number of in-flight requests."""
         return self.output_processor.get_num_unfinished_requests()

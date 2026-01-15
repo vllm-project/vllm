@@ -613,6 +613,10 @@ class EngineCore:
         # Reset the GPU model runner's encoder cache (physical storage)
         self.model_executor.reset_encoder_cache()
 
+    def has_pending_kv_transfers(self) -> bool:
+        """Check if there are pending async KV transfers."""
+        return self.scheduler.get_num_pending_kv_transfers() > 0
+
     def sleep(self, level: int = 1):
         self.model_executor.sleep(level)
 

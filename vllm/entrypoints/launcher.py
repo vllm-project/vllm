@@ -135,6 +135,26 @@ async def serve_http(
                 ),
                 timeout=drain_timeout,
             )
+
+            # wait for pending async KV transfers to complete
+            elapsed = time.monotonic() - start_time
+            remaining_timeout = max(0, drain_timeout - elapsed)
+            kv_poll_interval = 0.1
+
+            if hasattr(engine_client, "has_pending_kv_transfers"):
+                while remaining_timeout > 0:
+                    has_pending = await engine_client.has_pending_kv_transfers()
+                    if not has_pending:
+                        break
+                    await asyncio.sleep(kv_poll_interval)
+                    elapsed = time.monotonic() - start_time
+                    remaining_timeout = max(0, drain_timeout - elapsed)
+                else:
+                    logger.warning(
+                        "Graceful shutdown: KV transfers did not complete "
+                        "within drain timeout"
+                    )
+
             elapsed = time.monotonic() - start_time
             logger.info(
                 "Graceful shutdown: drain complete, drained %d requests in %.1fs",

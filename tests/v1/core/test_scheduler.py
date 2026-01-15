@@ -73,6 +73,67 @@ def test_get_num_unfinished_requests():
         assert scheduler.get_num_unfinished_requests() == len(requests) - i - 1
 
 
+def test_get_num_pending_kv_transfers_no_connector():
+    """Without a KV connector, pending KV transfers should always be 0."""
+    scheduler = create_scheduler()
+    requests = create_requests(num_requests=3)
+    for request in requests:
+        scheduler.add_request(request)
+
+    # no connector = always 0
+    assert scheduler.get_num_pending_kv_transfers() == 0
+
+    scheduler.finish_requests(requests[0].request_id, RequestStatus.FINISHED_STOPPED)
+    assert scheduler.get_num_pending_kv_transfers() == 0
+
+
+def test_get_num_pending_kv_transfers_with_connector():
+    """With a KV connector that delays block free, track pending transfers."""
+    scheduler = create_scheduler(
+        use_kv_connector=mock_kv(matched_tokens=0, is_async=False)
+    )
+    requests = create_requests(num_requests=3)
+    for request in requests:
+        scheduler.add_request(request)
+
+    # schedule to move requests to running
+    scheduler.schedule()
+    assert len(scheduler.running) == 3
+    assert scheduler.get_num_pending_kv_transfers() == 0
+
+    # mock the connector to delay block free (simulates async KV send)
+    scheduler.connector.request_finished = Mock(return_value=(True, {"test": "params"}))
+
+    # finish first request - should have pending KV transfer
+    scheduler.finish_requests(requests[0].request_id, RequestStatus.FINISHED_STOPPED)
+    assert requests[0].request_id in scheduler.requests  # still in requests
+    assert len(scheduler.running) == 2  # removed from running
+    assert scheduler.get_num_pending_kv_transfers() == 1
+
+    # finish second request
+    scheduler.finish_requests(requests[1].request_id, RequestStatus.FINISHED_STOPPED)
+    assert scheduler.get_num_pending_kv_transfers() == 2
+
+    # simulate finished_sending for first request
+    from vllm.v1.outputs import KVConnectorOutput
+
+    kv_output = KVConnectorOutput(finished_sending={requests[0].request_id})
+    scheduler._update_from_kv_xfer_finished(kv_output)
+    assert requests[0].request_id not in scheduler.requests  # now freed
+    assert scheduler.get_num_pending_kv_transfers() == 1
+
+    # finish the last running request and clear all pending
+    scheduler.finish_requests(requests[2].request_id, RequestStatus.FINISHED_STOPPED)
+    assert scheduler.get_num_pending_kv_transfers() == 2
+
+    # clear remaining pending transfers
+    kv_output = KVConnectorOutput(
+        finished_sending={requests[1].request_id, requests[2].request_id}
+    )
+    scheduler._update_from_kv_xfer_finished(kv_output)
+    assert scheduler.get_num_pending_kv_transfers() == 0
+
+
 @pytest.mark.parametrize(
     "enable_prefix_caching, prompt_logprobs",
     [
