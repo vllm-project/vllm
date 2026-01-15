@@ -125,36 +125,19 @@ async def serve_http(
         # expose draining state via prometheus for external load balancers
         set_server_draining(model_name, draining=True)
 
+        async def _drain_operations() -> None:
+            # pause generation and wait for in-flight requests
+            await engine_client.pause_generation(
+                wait_for_inflight_requests=True,
+                clear_cache=False,
+            )
+            # wait for pending async KV transfers to complete
+            if engine_client.vllm_config.kv_transfer_config is not None:
+                await engine_client.wait_for_kv_transfers_complete()
+
         start_time = time.monotonic()
         try:
-            # pause generation and wait for in-flight requests
-            await asyncio.wait_for(
-                engine_client.pause_generation(
-                    wait_for_inflight_requests=True,
-                    clear_cache=False,
-                ),
-                timeout=drain_timeout,
-            )
-
-            # wait for pending async KV transfers to complete
-            elapsed = time.monotonic() - start_time
-            remaining_timeout = max(0, drain_timeout - elapsed)
-            kv_poll_interval = 0.1
-
-            if hasattr(engine_client, "has_pending_kv_transfers"):
-                while remaining_timeout > 0:
-                    has_pending = await engine_client.has_pending_kv_transfers()
-                    if not has_pending:
-                        break
-                    await asyncio.sleep(kv_poll_interval)
-                    elapsed = time.monotonic() - start_time
-                    remaining_timeout = max(0, drain_timeout - elapsed)
-                else:
-                    logger.warning(
-                        "Graceful shutdown: KV transfers did not complete "
-                        "within drain timeout"
-                    )
-
+            await asyncio.wait_for(_drain_operations(), timeout=drain_timeout)
             elapsed = time.monotonic() - start_time
             logger.info(
                 "Graceful shutdown: drain complete, drained %d requests in %.1fs",

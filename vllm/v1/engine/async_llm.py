@@ -810,6 +810,15 @@ class AsyncLLM(EngineClient):
         """Check if there are pending async KV transfers in the engine."""
         return await self.engine_core.call_utility_async("has_pending_kv_transfers")
 
+    async def wait_for_kv_transfers_complete(self, poll_interval: float = 0.1) -> None:
+        """Wait until all pending KV transfers complete."""
+        logged = False
+        while await self.has_pending_kv_transfers():
+            if not logged:
+                logger.info("Waiting for pending KV transfers to complete")
+                logged = True
+            await asyncio.sleep(poll_interval)
+
     def get_num_unfinished_requests(self) -> int:
         """Return the number of in-flight requests."""
         return self.output_processor.get_num_unfinished_requests()

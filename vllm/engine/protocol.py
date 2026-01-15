@@ -191,6 +191,11 @@ class EngineClient(ABC):
         ...
 
     @abstractmethod
+    async def wait_for_kv_transfers_complete(self) -> None:
+        """Wait until all pending KV transfers complete."""
+        ...
+
+    @abstractmethod
     def get_num_unfinished_requests(self) -> int:
         """Return the number of in-flight requests."""
         ...
