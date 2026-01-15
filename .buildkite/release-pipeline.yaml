@@ -169,6 +169,24 @@ steps:
     env:
       DOCKER_BUILDKIT: "1"
 
+  - block: "Build ROCm release image"
+    key: block-rocm-release-image-build
+    depends_on: ~
+
+  - label: "Build release image (ROCm)"
+    depends_on: block-rocm-release-image-build
+    id: build-release-image-rocm
+    agents:
+      queue: cpu_queue_postmerge
+    commands:
+      - "aws ecr-public get-login-password --region us-east-1 | docker login --username AWS --password-stdin public.ecr.aws/q9t5s3a7"
+      # Build base image first
+      - "DOCKER_BUILDKIT=1 docker build --build-arg max_jobs=16 --tag rocm/vllm-dev:base-$BUILDKITE_COMMIT --target final --progress plain -f docker/Dockerfile.rocm_base ."
+      # Build vLLM ROCm image using the base
+      - "DOCKER_BUILDKIT=1 docker build --build-arg max_jobs=16 --build-arg BASE_IMAGE=rocm/vllm-dev:base-$BUILDKITE_COMMIT --tag public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-rocm --target vllm-openai --progress plain -f docker/Dockerfile.rocm ."
+      - "docker push public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-rocm"
+
+  
   - label: "Build and publish nightly multi-arch image to DockerHub"
     depends_on:
       - create-multi-arch-manifest
