@@ -894,10 +894,8 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             return None
 
         elif self.fp8_backend == Fp8MoeBackend.FLASHINFER_CUTLASS:
-            if (
-                not self.moe.moe_parallel_config.use_all2all_kernels
-                or self.moe.moe_parallel_config.use_naive_all2all_kernels
-            ):
+            # For no-EP case, don't use the MKM framework.
+            if not self.moe.moe_parallel_config.use_all2all_kernels:
                 return None
 
             prepare_finalize = build_flashinfer_fp8_cutlass_moe_prepare_finalize(
