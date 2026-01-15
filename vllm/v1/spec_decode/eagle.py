@@ -35,10 +35,6 @@ from vllm.v1.attention.backends.tree_attn import (
     TreeAttentionMetadataBuilder,
 )
 from vllm.v1.attention.backends.triton_attn import TritonAttentionMetadata
-from vllm.v1.attention.backends.utils import (
-    AttentionMetadataBuilder,
-    CommonAttentionMetadata,
-)
 from vllm.v1.cudagraph_dispatcher import CudagraphDispatcher
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.sample.metadata import SamplingMetadata
