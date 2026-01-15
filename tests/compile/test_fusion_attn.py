@@ -27,9 +27,6 @@ from vllm.config import (
     set_current_vllm_config,
 )
 from vllm.forward_context import get_forward_context, set_forward_context
-from vllm.model_executor.layers.quantization.kernels.scaled_mm.cutlass import (
-    CutlassFP8ScaledMMLinearKernel,
-)
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
     kFp8StaticTensorSym,
@@ -181,19 +178,19 @@ class TestAttentionFp8StaticQuantPatternModel(AttentionQuantPatternModel):
             activation_quant_key=self.quant_key,
             weight_quant_key=self.quant_key,
             device=self.device,
-            force_kernel=CutlassFP8ScaledMMLinearKernel
-            if current_platform.is_cuda()
-            else None,
         )
 
-        self.w = kwargs.get(
-            "w",
-            {
-                "weight": self.fp8_linear.weight,
-                "wscale": self.fp8_linear.weight_scale,
-                "scale": self.fp8_linear.input_scale,
-            },
-        )
+        w = kwargs.get("w")
+        if w is not None:
+            self.fp8_linear.weight = w["weight"]
+            self.fp8_linear.weight_scale = w["wscale"]
+            self.fp8_linear.input_scale = w["scale"]
+
+        self.w = {
+            "weight": self.fp8_linear.weight,
+            "wscale": self.fp8_linear.weight_scale,
+            "scale": self.fp8_linear.input_scale,
+        }
 
     def forward(self, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor):
         """Forward pass that creates the pattern to be fused."""
