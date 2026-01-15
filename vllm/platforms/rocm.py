@@ -89,10 +89,11 @@ def with_amdsmi_context(fn):
 
 
 @cache
+@with_amdsmi_context
 def _get_gpu_arch() -> str:
-    if not torch.cuda.is_available():
-        return ""
-    return torch.cuda.get_device_properties("cuda").gcnArchName
+    h = amdsmi_get_processor_handles()[0]
+    asic = amdsmi_get_gpu_asic_info(h)
+    return asic["target_graphics_version"]
 
 
 @cache
