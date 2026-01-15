@@ -207,9 +207,17 @@ def prep_scale_for_group_broadcast(
     Returns:
         scale reshaped for correct broadcasting.
     """
-    if scale.ndim == 0 or scale.numel() == 1:
-        # Scalar scale, expand to (1, 1)
-        return scale.view(1, 1)
+    if scale.numel() == 1:
+        # For per-tensor quant, keep the scale as a scalar (not reshaped to (1, 1)).
+        # This avoids misclassifying it as channelwise quant in Fp8LinearOp.apply,
+        # where the "per_tensor_activations" check relies on "x_scale.dim() < 2":
+        #   per_tensor_activations = (x_scale.numel() == 1) and x_scale.dim() < 2
+        # For all other cases, reshape scalar scales to (1, 1) for broadcasting.
+        return (
+            scale
+            if group_shape is not None and group_shape.is_per_tensor()
+            else scale.reshape(1, 1)
+        )
     if scale.ndim == 1:
         assert group_shape is not None, (
             "group_shape must be provided to correctly broadcast 1D scale"
