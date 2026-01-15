@@ -130,6 +130,7 @@ def _fwd_kernel(
             mask &= pos_q >= pos_k
 
         # Bidirectional sliding window masks
+        use_sliding_window = (SLIDING_WINDOW_Q > 0) or (SLIDING_WINDOW_K > 0)
         sliding_mask_q = (
             pos_q - pos_k <= SLIDING_WINDOW_Q if SLIDING_WINDOW_Q > 0 else None
         )
@@ -150,26 +151,30 @@ def _fwd_kernel(
         m_ij = tl.max(qk, 1)
         # For sliding window there's a chance the max is -inf due to masking of
         # the entire row. In this case we need to set m_j 0 to avoid NaN
-        m_ij_valid_mask = m_ij > float("-inf")
-        m_ij_masked = tl.where(m_ij_valid_mask, m_ij, 0.0)
+        m_ij_masked = (
+            tl.where(m_ij > float("-inf"), m_ij, 0.0) if use_sliding_window else m_ij
+        )
         # -- compute p and l_ij --
         p = tl.exp(qk - m_ij_masked[:, None])
         l_ij = tl.sum(p, 1)
         # -- update m_i and l_i
         m_i_new = tl.maximum(m_i, m_ij)
-        m_i_new_mask = m_i_new > float("-inf")
         alpha = tl.exp(m_i - m_i_new)
         beta = tl.exp(m_ij - m_i_new)
         # mask alpha and beta for sliding window
-        alpha = tl.where(m_i_new_mask, alpha, 1.0)
-        beta = tl.where(m_i_new_mask, beta, 0.0)
+        if use_sliding_window:
+            alpha = tl.where(m_i_new > float("-inf"), alpha, 1.0)
+            beta = tl.where(m_i_new > float("-inf"), beta, 0.0)
         l_i_new = alpha * l_i + beta * l_ij
         # -- update output accumulator --
         # scale p
         # For sliding window there's a chance the l_i_new is 0 due to masking
         # the entire row. We need to set l_i_new 1 to avoid zero division
-        l_i_new_mask = (l_i_new != 0.0) & (m_i_new_mask > float("-inf"))
-        l_i_new_safe = tl.where(l_i_new_mask, l_i_new, 1.0)
+        if use_sliding_window:
+            l_i_new_mask = (l_i_new != 0.0) & (m_i_new > float("-inf"))
+            l_i_new_safe = tl.where(l_i_new_mask, l_i_new, 1.0)
+        else:
+            l_i_new_safe = l_i_new
         p_scale = beta / l_i_new_safe
         p = p * p_scale[:, None]
         # scale acc
