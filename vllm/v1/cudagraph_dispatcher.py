@@ -73,6 +73,23 @@ class CudagraphDispatcher:
                 else:
                     self._bs_to_padded_graph_size[bs] = end
 
+        # Validate that compile_sizes won't be changed by padding.
+        # Only validate when cudagraphs are actually being used.
+        if (
+            self.compilation_config.compile_sizes
+            and self.cudagraph_mode != CUDAGraphMode.NONE
+        ):
+            for size in self.compilation_config.compile_sizes:
+                if size <= self.compilation_config.max_cudagraph_capture_size:
+                    padded = self._bs_to_padded_graph_size[size]
+                    if padded != size:
+                        raise ValueError(
+                            f"compile_sizes contains {size} which would be "
+                            f"padded to {padded}. All compile_sizes must be "
+                            "values that won't be changed by cudagraph padding. "
+                            "Use values from cudagraph_capture_sizes."
+                        )
+
     def _create_padded_batch_descriptor(
         self, num_tokens: int, uniform_decode: bool, has_lora: bool
     ) -> BatchDescriptor:
