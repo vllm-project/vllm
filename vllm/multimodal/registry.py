@@ -446,4 +446,4 @@ class MultiModalRegistry:
         elif cache_type == "shm":
             return ShmObjectStoreReceiverCache(vllm_config, shared_worker_lock)
         else:
-            raise ValueError(f"Unknown cache type: {cache_type}")
+            raise ValueError(f"Unknown cache type: {cache_type!r}")
