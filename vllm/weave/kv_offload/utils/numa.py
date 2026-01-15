@@ -36,13 +36,29 @@ def numa_membind(node: int | None, *, strict: bool = False):
             yield
             return
 
+        free_fn = None
+        if hasattr(lib, "numa_free_nodemask"):
+            free_fn = lib.numa_free_nodemask
+        elif hasattr(lib, "numa_bitmask_free"):
+            free_fn = lib.numa_bitmask_free
+        if free_fn is None:
+            if strict:
+                raise RuntimeError(
+                    "NUMA membind requested but libnuma is missing a free function "
+                    "(expected numa_free_nodemask or numa_bitmask_free)."
+                )
+            yield
+            return
+
+        free_fn.argtypes = [ctypes.c_void_p]
+        free_fn.restype = None
+
         lib.numa_parse_nodestring.restype = ctypes.c_void_p
         lib.numa_parse_nodestring.argtypes = [ctypes.c_char_p]
 
         lib.numa_get_mems_allowed.restype = ctypes.c_void_p
         lib.numa_set_membind.argtypes = [ctypes.c_void_p]
         lib.numa_set_strict.argtypes = [ctypes.c_int]
-        lib.numa_free_nodemask.argtypes = [ctypes.c_void_p]
 
         prev = lib.numa_get_mems_allowed()
         mask = lib.numa_parse_nodestring(str(int(node)).encode("utf-8"))
@@ -60,9 +76,9 @@ def numa_membind(node: int | None, *, strict: bool = False):
                 lib.numa_set_membind(prev)
                 lib.numa_set_strict(0)
             if mask:
-                lib.numa_free_nodemask(mask)
+                free_fn(mask)
             if prev:
-                lib.numa_free_nodemask(prev)
+                free_fn(prev)
     except Exception:
         if strict:
             raise
