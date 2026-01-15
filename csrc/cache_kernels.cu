@@ -638,6 +638,7 @@ __global__ void indexer_k_quant_and_cache_nvfp4_kernel(
     reinterpret_cast<float*>(&kv_cache[scale_byte_offset])[0] = quantized_scale;
   }
 }
+#endif  // USE_ROCM
 
 template <int BLOCK_Y_SIZE>
 __global__ void cp_gather_indexer_k_quant_cache_kernel(
@@ -675,9 +676,9 @@ __global__ void cp_gather_indexer_k_quant_cache_kernel(
     }
   }
 
-  #ifndef USE_ROCM
+#ifndef USE_ROCM
   __syncwarp();
-  #endif
+#endif
 
   if (head_idx >= head_dim || token_idx >= num_tokens) {
     return;
@@ -705,20 +706,20 @@ __global__ void cp_gather_indexer_k_quant_cache_kernel(
 
 }  // namespace vllm
 
-  // KV_T is the data type of key and value tensors.
-  // CACHE_T is the stored data type of kv-cache.
-  // KV_DTYPE is the real data type of kv-cache.
-  #define CALL_RESHAPE_AND_CACHE(KV_T, CACHE_T, KV_DTYPE)               \
-    vllm::reshape_and_cache_kernel<KV_T, CACHE_T, KV_DTYPE>             \
-        <<<grid, block, 0, stream>>>(                                   \
-            reinterpret_cast<KV_T*>(key.data_ptr()),                    \
-            reinterpret_cast<KV_T*>(value.data_ptr()),                  \
-            reinterpret_cast<CACHE_T*>(key_cache.data_ptr()),           \
-            reinterpret_cast<CACHE_T*>(value_cache.data_ptr()),         \
-            slot_mapping.data_ptr<int64_t>(), key_stride, value_stride, \
-            num_heads, head_size, block_size, x,                        \
-            reinterpret_cast<const float*>(k_scale.data_ptr()),         \
-            reinterpret_cast<const float*>(v_scale.data_ptr()));
+// KV_T is the data type of key and value tensors.
+// CACHE_T is the stored data type of kv-cache.
+// KV_DTYPE is the real data type of kv-cache.
+#define CALL_RESHAPE_AND_CACHE(KV_T, CACHE_T, KV_DTYPE)               \
+  vllm::reshape_and_cache_kernel<KV_T, CACHE_T, KV_DTYPE>             \
+      <<<grid, block, 0, stream>>>(                                   \
+          reinterpret_cast<KV_T*>(key.data_ptr()),                    \
+          reinterpret_cast<KV_T*>(value.data_ptr()),                  \
+          reinterpret_cast<CACHE_T*>(key_cache.data_ptr()),           \
+          reinterpret_cast<CACHE_T*>(value_cache.data_ptr()),         \
+          slot_mapping.data_ptr<int64_t>(), key_stride, value_stride, \
+          num_heads, head_size, block_size, x,                        \
+          reinterpret_cast<const float*>(k_scale.data_ptr()),         \
+          reinterpret_cast<const float*>(v_scale.data_ptr()));
 
 void reshape_and_cache(
     torch::Tensor& key,    // [num_tokens, num_heads, head_size]
@@ -812,30 +813,30 @@ void reshape_and_cache_flash(
                              CALL_RESHAPE_AND_CACHE_FLASH);
 }
 
-  // KV_T is the data type of key and value tensors.
-  // CACHE_T is the stored data type of kv-cache.
-  // KV_DTYPE is the real data type of kv-cache.
-  #define CALL_CONCAT_AND_CACHE_MLA(KV_T, CACHE_T, KV_DTYPE)              \
-    vllm::concat_and_cache_mla_kernel<KV_T, CACHE_T, KV_DTYPE>            \
-        <<<grid, block, 0, stream>>>(                                     \
-            reinterpret_cast<KV_T*>(kv_c.data_ptr()),                     \
-            reinterpret_cast<KV_T*>(k_pe.data_ptr()),                     \
-            reinterpret_cast<CACHE_T*>(kv_cache.data_ptr()),              \
-            slot_mapping.data_ptr<int64_t>(), block_stride, entry_stride, \
-            kv_c_stride, k_pe_stride, kv_lora_rank, pe_dim, block_size,   \
-            reinterpret_cast<const float*>(scale.data_ptr()));
+// KV_T is the data type of key and value tensors.
+// CACHE_T is the stored data type of kv-cache.
+// KV_DTYPE is the real data type of kv-cache.
+#define CALL_CONCAT_AND_CACHE_MLA(KV_T, CACHE_T, KV_DTYPE)              \
+  vllm::concat_and_cache_mla_kernel<KV_T, CACHE_T, KV_DTYPE>            \
+      <<<grid, block, 0, stream>>>(                                     \
+          reinterpret_cast<KV_T*>(kv_c.data_ptr()),                     \
+          reinterpret_cast<KV_T*>(k_pe.data_ptr()),                     \
+          reinterpret_cast<CACHE_T*>(kv_cache.data_ptr()),              \
+          slot_mapping.data_ptr<int64_t>(), block_stride, entry_stride, \
+          kv_c_stride, k_pe_stride, kv_lora_rank, pe_dim, block_size,   \
+          reinterpret_cast<const float*>(scale.data_ptr()));
 
-  // KV_T is the data type of key and value tensors.
-  // CACHE_T is the stored data type of kv-cache.
-  #define CALL_CONCAT_AND_CACHE_DS_MLA(KV_T, CACHE_T, KV_DTYPE)           \
-    vllm::concat_and_cache_ds_mla_kernel<KV_T, CACHE_T, KV_DTYPE>         \
-        <<<grid, block, 0, stream>>>(                                     \
-            reinterpret_cast<KV_T*>(kv_c.data_ptr()),                     \
-            reinterpret_cast<KV_T*>(k_pe.data_ptr()),                     \
-            reinterpret_cast<CACHE_T*>(kv_cache.data_ptr()),              \
-            slot_mapping.data_ptr<int64_t>(), block_stride, entry_stride, \
-            kv_c_stride, k_pe_stride, kv_lora_rank, pe_dim, block_size,   \
-            reinterpret_cast<const float*>(scale.data_ptr()));
+// KV_T is the data type of key and value tensors.
+// CACHE_T is the stored data type of kv-cache.
+#define CALL_CONCAT_AND_CACHE_DS_MLA(KV_T, CACHE_T, KV_DTYPE)           \
+  vllm::concat_and_cache_ds_mla_kernel<KV_T, CACHE_T, KV_DTYPE>         \
+      <<<grid, block, 0, stream>>>(                                     \
+          reinterpret_cast<KV_T*>(kv_c.data_ptr()),                     \
+          reinterpret_cast<KV_T*>(k_pe.data_ptr()),                     \
+          reinterpret_cast<CACHE_T*>(kv_cache.data_ptr()),              \
+          slot_mapping.data_ptr<int64_t>(), block_stride, entry_stride, \
+          kv_c_stride, k_pe_stride, kv_lora_rank, pe_dim, block_size,   \
+          reinterpret_cast<const float*>(scale.data_ptr()));
 
 void concat_and_cache_mla(
     torch::Tensor& kv_c,          // [num_tokens, kv_lora_rank]
@@ -915,10 +916,10 @@ __global__ void convert_fp8_kernel(const Tin* __restrict__ src_cache,
 
 }  // namespace vllm
 
-  #define CALL_CONVERT_FP8(Tout, Tin, KV_DTYPE)                                \
-    vllm::convert_fp8_kernel<Tout, Tin, KV_DTYPE><<<grid, block, 0, stream>>>( \
-        reinterpret_cast<Tin*>(src_cache.data_ptr()),                          \
-        reinterpret_cast<Tout*>(dst_cache.data_ptr()), scale, block_stride);
+#define CALL_CONVERT_FP8(Tout, Tin, KV_DTYPE)                                \
+  vllm::convert_fp8_kernel<Tout, Tin, KV_DTYPE><<<grid, block, 0, stream>>>( \
+      reinterpret_cast<Tin*>(src_cache.data_ptr()),                          \
+      reinterpret_cast<Tout*>(dst_cache.data_ptr()), scale, block_stride);
 
 // Only for testing.
 void convert_fp8(torch::Tensor& dst_cache, torch::Tensor& src_cache,
@@ -1079,7 +1080,7 @@ __global__ void gather_and_maybe_dequant_cache(
     return;
   }
 
-  #pragma unroll
+#pragma unroll
   for (int token_id = blockIdx.x; token_id < num_tokens;
        token_id += gridDim.x) {
     int64_t batch_id = token_to_seq[token_id];
@@ -1103,7 +1104,7 @@ __global__ void gather_and_maybe_dequant_cache(
     scalar_t* dst_ = dst + token_id * dst_entry_stride;
     cache_t* src_ = const_cast<cache_t*>(src_cache) + cache_offset;
 
-  #pragma unroll
+#pragma unroll
     for (int idx = threadIdx.x; idx < vec_iter_cnt; idx += CTA_SIZE) {
       if constexpr (kv_dt == Fp8KVCacheDataType::kAuto) {
         reinterpret_cast<stype*>(dst_)[idx] =
@@ -1111,7 +1112,7 @@ __global__ void gather_and_maybe_dequant_cache(
       } else {
         ltype loaded_val = reinterpret_cast<ltype*>(src_)[idx];
         stype store_val;
-  #pragma unroll
+#pragma unroll
         for (int j = 0; j < vec_size; ++j) {
           store_val.val[j] = fp8::scaled_convert<scalar_t, cache_t, kv_dt>(
               loaded_val.val[j], *scale);
@@ -1123,7 +1124,7 @@ __global__ void gather_and_maybe_dequant_cache(
     constexpr int32_t tail_cnt = ENTRY_SIZE % vec_size;
     dst_ = dst_ + ENTRY_SIZE - tail_cnt;
     src_ = src_ + ENTRY_SIZE - tail_cnt;
-  #pragma unroll
+#pragma unroll
     for (int idx = threadIdx.x; idx < tail_cnt; idx += CTA_SIZE) {
       if constexpr (kv_dt == Fp8KVCacheDataType::kAuto) {
         dst_[idx] = static_cast<scalar_t>(src_[idx]);
@@ -1137,22 +1138,22 @@ __global__ void gather_and_maybe_dequant_cache(
 
 }  // namespace vllm
 
-  // Macro to dispatch the kernel based on the data type.
-  // SCALAR_T is the data type of the destination tensor.
-  // CACHE_T is the stored data type of kv-cache.
-  // KV_DTYPE is the real data type of kv-cache.
-  #define CALL_GATHER_CACHE(SCALAR_T, CACHE_T, KV_DTYPE)                      \
-    vllm::gather_and_maybe_dequant_cache<SCALAR_T, CACHE_T, KV_DTYPE, 576,    \
-                                         thread_block_size>                   \
-        <<<grid, block, 0, stream>>>(                                         \
-            reinterpret_cast<CACHE_T*>(src_cache.data_ptr()),                 \
-            reinterpret_cast<SCALAR_T*>(dst.data_ptr()),                      \
-            block_table.data_ptr<int32_t>(), cu_seq_lens.data_ptr<int32_t>(), \
-            token_to_seq.data_ptr<int32_t>(), num_tokens, block_size,         \
-            block_table_stride, cache_block_stride, cache_entry_stride,       \
-            dst_entry_stride,                                                 \
-            reinterpret_cast<const float*>(dummy_scale.data_ptr()),           \
-            seq_starts_ptr);
+// Macro to dispatch the kernel based on the data type.
+// SCALAR_T is the data type of the destination tensor.
+// CACHE_T is the stored data type of kv-cache.
+// KV_DTYPE is the real data type of kv-cache.
+#define CALL_GATHER_CACHE(SCALAR_T, CACHE_T, KV_DTYPE)                      \
+  vllm::gather_and_maybe_dequant_cache<SCALAR_T, CACHE_T, KV_DTYPE, 576,    \
+                                       thread_block_size>                   \
+      <<<grid, block, 0, stream>>>(                                         \
+          reinterpret_cast<CACHE_T*>(src_cache.data_ptr()),                 \
+          reinterpret_cast<SCALAR_T*>(dst.data_ptr()),                      \
+          block_table.data_ptr<int32_t>(), cu_seq_lens.data_ptr<int32_t>(), \
+          token_to_seq.data_ptr<int32_t>(), num_tokens, block_size,         \
+          block_table_stride, cache_block_stride, cache_entry_stride,       \
+          dst_entry_stride,                                                 \
+          reinterpret_cast<const float*>(dummy_scale.data_ptr()),           \
+          seq_starts_ptr);
 
 // Gather sequences from the cache into the destination tensor.
 //  - cu_seq_lens contains the cumulative sequence lengths for each batch
@@ -1368,14 +1369,14 @@ __global__ void cp_gather_cache(
 }
 }  // namespace vllm
 
-  // Macro to dispatch the kernel based on the data type.
-  #define CALL_CP_GATHER_CACHE(CPY_DTYPE)                                 \
-    vllm::cp_gather_cache<CPY_DTYPE><<<grid, block, 0, stream>>>(         \
-        reinterpret_cast<CPY_DTYPE*>(src_cache.data_ptr()),               \
-        reinterpret_cast<CPY_DTYPE*>(dst.data_ptr()),                     \
-        block_table.data_ptr<int32_t>(), cu_seq_lens.data_ptr<int32_t>(), \
-        block_size, entry_size, block_table_stride, cache_block_stride,   \
-        cache_entry_stride, dst_entry_stride, seq_starts_ptr);
+// Macro to dispatch the kernel based on the data type.
+#define CALL_CP_GATHER_CACHE(CPY_DTYPE)                                 \
+  vllm::cp_gather_cache<CPY_DTYPE><<<grid, block, 0, stream>>>(         \
+      reinterpret_cast<CPY_DTYPE*>(src_cache.data_ptr()),               \
+      reinterpret_cast<CPY_DTYPE*>(dst.data_ptr()),                     \
+      block_table.data_ptr<int32_t>(), cu_seq_lens.data_ptr<int32_t>(), \
+      block_size, entry_size, block_table_stride, cache_block_stride,   \
+      cache_entry_stride, dst_entry_stride, seq_starts_ptr);
 
 // Gather sequences from the cache into the destination tensor.
 //  - cu_seq_lens contains the cumulative sequence lengths for each batch
@@ -1506,15 +1507,15 @@ void cp_gather_and_upconvert_fp8_kv_cache(
       dst_entry_stride);
 }
 
-  // Macro to dispatch the kernel based on the data type.
-  // This macro is redefined in indexer_k_quant_and_cache function for NVFP4
-  #define CALL_INDEXER_K_QUANT_AND_CACHE(KV_T, CACHE_T, KV_DTYPE)         \
-    vllm::indexer_k_quant_and_cache_kernel<KV_T, CACHE_T, KV_DTYPE>       \
-        <<<grid, block, 0, stream>>>(                                     \
-            reinterpret_cast<KV_T*>(k.data_ptr()),                        \
-            reinterpret_cast<CACHE_T*>(kv_cache.data_ptr()),              \
-            slot_mapping.data_ptr<int64_t>(), head_dim, quant_block_size, \
-            cache_block_size, cache_stride, use_ue8m0);
+// Macro to dispatch the kernel based on the data type.
+// This macro is redefined in indexer_k_quant_and_cache function for NVFP4
+#define CALL_INDEXER_K_QUANT_AND_CACHE(KV_T, CACHE_T, KV_DTYPE)         \
+  vllm::indexer_k_quant_and_cache_kernel<KV_T, CACHE_T, KV_DTYPE>       \
+      <<<grid, block, 0, stream>>>(                                     \
+          reinterpret_cast<KV_T*>(k.data_ptr()),                        \
+          reinterpret_cast<CACHE_T*>(kv_cache.data_ptr()),              \
+          slot_mapping.data_ptr<int64_t>(), head_dim, quant_block_size, \
+          cache_block_size, cache_stride, use_ue8m0);
 
 void indexer_k_quant_and_cache(
     torch::Tensor& k,             // [num_tokens, head_dim]
@@ -1588,19 +1589,19 @@ void indexer_k_quant_and_cache(
   }
 }
 
-  // Macro to dispatch the kernel based on the data amount.
-  #define CALL_CP_GATHER_INDEXER_K_QUANT_CACHE(BLOCK_Y_SIZE)                  \
-    vllm::cp_gather_indexer_k_quant_cache_kernel<BLOCK_Y_SIZE>                \
-        <<<dim3((num_tokens + BLOCK_Y_SIZE - 1) / BLOCK_Y_SIZE,               \
-                (head_dim + 8 * vec_size - 1) / (8 * vec_size)),              \
-           dim3(8, BLOCK_Y_SIZE), 0, stream>>>(                               \
-            reinterpret_cast<char*>(kv_cache.data_ptr()),                     \
-            reinterpret_cast<char*>(dst_k.data_ptr()),                        \
-            reinterpret_cast<char*>(dst_scale.data_ptr()),                    \
-            block_table.data_ptr<int32_t>(), cu_seq_lens.data_ptr<int32_t>(), \
-            batch_size, dst_k.stride(0), dst_k.size(1), kv_cache.stride(0),   \
-            kv_cache.stride(1), kv_cache.size(1), block_table.size(1),        \
-            num_tokens, quant_block_size);
+// Macro to dispatch the kernel based on the data amount.
+#define CALL_CP_GATHER_INDEXER_K_QUANT_CACHE(BLOCK_Y_SIZE)                  \
+  vllm::cp_gather_indexer_k_quant_cache_kernel<BLOCK_Y_SIZE>                \
+      <<<dim3((num_tokens + BLOCK_Y_SIZE - 1) / BLOCK_Y_SIZE,               \
+              (head_dim + 8 * vec_size - 1) / (8 * vec_size)),              \
+         dim3(8, BLOCK_Y_SIZE), 0, stream>>>(                               \
+          reinterpret_cast<char*>(kv_cache.data_ptr()),                     \
+          reinterpret_cast<char*>(dst_k.data_ptr()),                        \
+          reinterpret_cast<char*>(dst_scale.data_ptr()),                    \
+          block_table.data_ptr<int32_t>(), cu_seq_lens.data_ptr<int32_t>(), \
+          batch_size, dst_k.stride(0), dst_k.size(1), kv_cache.stride(0),   \
+          kv_cache.stride(1), kv_cache.size(1), block_table.size(1),        \
+          num_tokens, quant_block_size);
 
 void cp_gather_indexer_k_quant_cache(
     const torch::Tensor& kv_cache,  // [num_blocks, block_size, cache_stride]
