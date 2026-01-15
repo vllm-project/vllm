@@ -114,6 +114,8 @@ def gptoss_speculative_server(default_server_args: list[str]):
         }",
     ]
     # gpt-oss requires AITER unified attention on ROCm
+    # TODO: Remove after fixing TRITON_ATTN issue on ROCm
+    # https://github.com/vllm-project/vllm/issues/32434
     env_dict = None
     if is_aiter_found_and_supported():
         env_dict = {"VLLM_ROCM_USE_AITER": "1"}
