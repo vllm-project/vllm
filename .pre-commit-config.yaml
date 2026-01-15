@@ -147,6 +147,12 @@ repos:
     entry: python tools/pre_commit/validate_config.py
     language: python
     additional_dependencies: [regex]
+  - id: attention-backend-docs
+    name: Check attention backend documentation is up to date
+    entry: python tools/pre_commit/generate_attention_backend_docs.py --check
+    language: python
+    files: ^(vllm/v1/attention/backends/.*\.py|docs/design/attention_backends\.md)$
+    pass_filenames: false
   # Keep `suggestion` last
   - id: suggestion
     name: Suggestion
