@@ -703,8 +703,8 @@ class MLAAttention(nn.Module, AttentionLayerBase):
 
         This method exposes the batch splitting and surrounding GEMMs to
         torch.compile for better fusion opportunities. The data-dependent
-        splitting is handled inside the mla_split_and_slice custom op to
-        avoid Dynamo graph breaks.
+        split point comes from a custom op, and slicing stays traceable
+        by using torch.narrow.
         """
         forward_context: ForwardContext = get_forward_context()
         kv_cache = self.kv_cache[forward_context.virtual_engine]
@@ -714,18 +714,20 @@ class MLAAttention(nn.Module, AttentionLayerBase):
 
         fp8_attention = self.kv_cache_dtype.startswith("fp8")
 
-        # Split batch into decode and prefill parts via custom op.
-        # The op handles data-dependent slicing internally to avoid Dynamo graph breaks.
-        (
-            decode_q,
-            prefill_q,
-            prefill_k_pe,
-            prefill_k_c_normed,
-            decode_output,
-            prefill_output,
-        ) = torch.ops.vllm.mla_split_and_slice(
-            q, kv_c_normed, k_pe, output, self.layer_name
+        # Split batch into decode and prefill parts using a custom op that
+        # returns a dynamic SymInt for the split point. 
+        # Use torch.narrow to keep the slicing traceable by torch.compile.
+        num_decode_tokens = torch.ops.vllm.mla_split_batch(q, self.layer_name)
+        num_prefill_tokens = q.shape[0] - num_decode_tokens
+
+        decode_q = q.narrow(0, 0, num_decode_tokens)
+        prefill_q = q.narrow(0, num_decode_tokens, num_prefill_tokens)
+        prefill_k_pe = k_pe.narrow(0, num_decode_tokens, num_prefill_tokens)
+        prefill_k_c_normed = kv_c_normed.narrow(
+            0, num_decode_tokens, num_prefill_tokens
         )
+        decode_output = output.narrow(0, 0, num_decode_tokens)
+        prefill_output = output.narrow(0, num_decode_tokens, num_prefill_tokens)
 
         # Write to KV cache via custom op
         torch.ops.vllm.mla_write_kv_cache(
@@ -1824,101 +1826,6 @@ direct_register_custom_op(
 )
 
 
-def mla_split_and_slice(
-    q: torch.Tensor,
-    kv_c_normed: torch.Tensor,
-    k_pe: torch.Tensor,
-    output: torch.Tensor,
-    layer_name: str,
-) -> tuple[
-    torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor
-]:
-    """Split batch into decode and prefill parts using attention metadata.
-
-    This keeps the data-dependent split inside a custom op so that
-    torch.compile sees it as an opaque dynamic-shape op, avoiding Python-
-    level data-dependent guards while still enabling fusion on the
-    surrounding GEMMs/pointwise ops. Also slices the output tensor
-    to avoid data-dependent slicing in Python code.
-
-    Returns:
-        decode_q, prefill_q, prefill_k_pe, prefill_k_c_normed,
-        decode_output, prefill_output
-    """
-    # Get data-dependent split point from attention metadata (cudagraph-unsafe),
-    # but keep it encapsulated inside this custom op.
-    forward_context: ForwardContext = get_forward_context()
-    attn_metadata = forward_context.attn_metadata
-    if isinstance(attn_metadata, dict):
-        attn_metadata = attn_metadata[layer_name]
-    num_decode_tokens = 0 if attn_metadata is None else attn_metadata.num_decode_tokens
-
-    # Split batch into decode and prefill slices
-    decode_q = q[:num_decode_tokens]
-    prefill_q = q[num_decode_tokens:]
-    prefill_k_pe = k_pe[num_decode_tokens:]
-    prefill_k_c_normed = kv_c_normed[num_decode_tokens:]
-
-    # Also slice output tensor to avoid data-dependent slicing in Python code
-    decode_output = output[:num_decode_tokens]
-    prefill_output = output[num_decode_tokens:]
-
-    return (
-        decode_q,
-        prefill_q,
-        prefill_k_pe,
-        prefill_k_c_normed,
-        decode_output,
-        prefill_output,
-    )
-
-
-def mla_split_and_slice_fake(
-    q: torch.Tensor,
-    kv_c_normed: torch.Tensor,
-    k_pe: torch.Tensor,
-    output: torch.Tensor,
-    layer_name: str,
-) -> tuple[
-    torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor
-]:
-    """Fake implementation for torch.compile.
-
-    Creates output tensors with unbacked symbolic sizes. The split point
-    is data-dependent, so we create independent unbacked symints for the
-    decode and prefill sizes.
-    """
-    ctx = torch.library.get_ctx()
-    num_decode = ctx.new_dynamic_size()
-    num_prefill = ctx.new_dynamic_size()
-
-    decode_q = q.new_empty((num_decode, *q.shape[1:]))
-    prefill_q = q.new_empty((num_prefill, *q.shape[1:]))
-    prefill_k_pe = k_pe.new_empty((num_prefill, *k_pe.shape[1:]))
-    prefill_k_c_normed = kv_c_normed.new_empty((num_prefill, *kv_c_normed.shape[1:]))
-    decode_output = output.new_empty((num_decode, *output.shape[1:]))
-    prefill_output = output.new_empty((num_prefill, *output.shape[1:]))
-
-    return (
-        decode_q,
-        prefill_q,
-        prefill_k_pe,
-        prefill_k_c_normed,
-        decode_output,
-        prefill_output,
-    )
-
-
-direct_register_custom_op(
-    op_name="mla_split_and_slice",
-    op_func=mla_split_and_slice,
-    mutates_args=[],
-    fake_impl=mla_split_and_slice_fake,
-    dispatch_key=current_platform.dispatch_key,
-    tags=(torch._C.Tag.cudagraph_unsafe,),
-)
-
-
 def mla_attention_decode(
     decode_q: torch.Tensor,
     kv_cache: torch.Tensor,
@@ -1968,24 +1875,28 @@ def mla_attention_decode_fake(
         num_heads = q_tensor.shape[0]
         # Estimate kv_lora_rank from the latent dim
         kv_lora_rank = q_tensor.shape[2]
+        out_dtype = q_tensor.dtype
+        out_device = q_tensor.device
     else:
         # FP8 case: decode_q is (B, N, L+R)
         batch_size = decode_q.shape[0]
         num_heads = decode_q.shape[1]
         # For FP8, we need to estimate the kv_lora_rank
         kv_lora_rank = decode_q.shape[2] - 64  # Subtract rope dim (typically 64)
+        out_dtype = decode_q.dtype
+        out_device = decode_q.device
 
     # Output is in latent space: (B, N, kv_lora_rank)
     attn_out = torch.empty(
         (batch_size, num_heads, kv_lora_rank),
-        dtype=torch.bfloat16,
-        device=kv_cache.device,
+        dtype=out_dtype,
+        device=out_device,
     )
     # LSE shape: typically (B, N) or None
     lse = torch.empty(
         (batch_size, num_heads),
         dtype=torch.float32,
-        device=kv_cache.device,
+        device=out_device,
     )
     return attn_out, lse
 
