@@ -35,6 +35,9 @@ from vllm.model_executor.layers.fused_moe.fused_moe_router import FusedMoERouter
 from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (
     init_aiter_topK_meta_data,
 )
+from vllm.model_executor.layers.fused_moe.routed_experts_capturer import (
+    RoutedExpertsCapturer,
+)
 from vllm.model_executor.layers.fused_moe.routing_simulator import RoutingSimulator
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig,
@@ -302,6 +305,7 @@ class FusedMoERouterImpl(FusedMoERouter):
         return self.layer._select_experts(hidden_states, router_logits)
 
 
+# --8<-- [start:fused_moe]
 @CustomOp.register("fused_moe")
 class FusedMoE(CustomOp):
     """FusedMoE layer for MoE models.
@@ -325,6 +329,8 @@ class FusedMoE(CustomOp):
         enable_eplb: Whether to enable expert parallelism load balancer.
         router_logits_dtype: Data type for router logits buffers.
     """
+
+    # --8<-- [end:fused_moe]
 
     def __init__(
         self,
@@ -540,6 +546,20 @@ class FusedMoE(CustomOp):
         self.apply_router_weight_on_input = apply_router_weight_on_input
         self.activation = activation
 
+        self._grouped_topk_impl: GroupedTopk | None = None
+        if self.use_grouped_topk:
+            assert self.num_expert_group is not None
+            assert self.topk_group is not None
+            self._grouped_topk_impl = GroupedTopk(
+                topk=self.top_k,
+                renormalize=self.renormalize,
+                num_expert_group=self.num_expert_group,
+                topk_group=self.topk_group,
+                scoring_func=self.scoring_func,
+                routed_scaling_factor=self.routed_scaling_factor,
+                num_fused_shared_experts=self.num_fused_shared_experts,
+            )
+
         if self.scoring_func != "softmax" and not self.use_grouped_topk:
             raise ValueError(
                 "Only softmax scoring function is supported for non-grouped topk."
@@ -683,6 +703,13 @@ class FusedMoE(CustomOp):
     @property
     def shared_experts(self) -> torch.nn.Module | None:
         return None
+
+    @property
+    def layer_id(self):
+        # Delayed import to avoid circular dependency
+        from vllm.model_executor.models.utils import extract_layer_index
+
+        return extract_layer_index(self.layer_name)
 
     @property
     def gate(self) -> torch.nn.Module | None:
@@ -1588,19 +1615,8 @@ class FusedMoE(CustomOp):
 
         # DeepSeekv2 uses grouped_top_k
         elif self.use_grouped_topk and valid_grouping():
-            assert self.topk_group is not None
-            assert self.num_expert_group is not None
-            grouped_topk_impl = GroupedTopk(
-                topk=self.top_k,
-                renormalize=self.renormalize,
-                num_expert_group=self.num_expert_group,
-                topk_group=self.topk_group,
-                scoring_func=self.scoring_func,
-                routed_scaling_factor=self.routed_scaling_factor,
-                num_fused_shared_experts=self.num_fused_shared_experts,
-            )
-
-            topk_weights, topk_ids = grouped_topk_impl(
+            assert self._grouped_topk_impl is not None
+            topk_weights, topk_ids = self._grouped_topk_impl(
                 hidden_states=hidden_states,
                 gating_output=router_logits,
                 e_score_correction_bias=self.e_score_correction_bias,
@@ -1643,6 +1659,18 @@ class FusedMoE(CustomOp):
             topk_ids = topk_ids.to(dtype=indices_type)
 
         assert topk_ids.dtype == indices_type or indices_type is None
+
+        if (
+            self.vllm_config.model_config is not None
+            and self.vllm_config.model_config.enable_return_routed_experts
+        ):
+            # In dummy runs, the capturer is not initialized.
+            capturer = RoutedExpertsCapturer.get_instance()
+            if capturer is not None:  # in dummmy_run may be None
+                capturer.capture(  # noqa
+                    layer_id=self.layer_id,
+                    topk_ids=topk_ids,
+                )
 
         return topk_weights, topk_ids
 

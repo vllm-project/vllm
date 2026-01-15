@@ -8,7 +8,6 @@ import numpy as np
 import torch
 import torch.nn as nn
 
-from vllm.attention.backends.registry import AttentionBackendEnum
 from vllm.config import (
     CompilationMode,
     CUDAGraphMode,
@@ -27,15 +26,16 @@ from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.platforms import current_platform
 from vllm.triton_utils import triton
 from vllm.utils.platform_utils import is_pin_memory_available
+from vllm.v1.attention.backend import (
+    AttentionMetadataBuilder,
+    CommonAttentionMetadata,
+)
+from vllm.v1.attention.backends.registry import AttentionBackendEnum
 from vllm.v1.attention.backends.tree_attn import (
     TreeAttentionMetadata,
     TreeAttentionMetadataBuilder,
 )
 from vllm.v1.attention.backends.triton_attn import TritonAttentionMetadata
-from vllm.v1.attention.backends.utils import (
-    AttentionMetadataBuilder,
-    CommonAttentionMetadata,
-)
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.sample.sampler import _SAMPLING_EPS
@@ -183,9 +183,16 @@ class EagleProposer:
                 rocm_types.append(AiterFlashAttentionMetadata)
 
             # TRITON_MLA backend support for MLA models (e.g., DeepSeek)
-            from vllm.v1.attention.backends.mla.common import MLACommonMetadata
+            from vllm.model_executor.layers.attention.mla_attention import (
+                MLACommonMetadata,
+            )
 
             rocm_types.append(MLACommonMetadata)
+
+            # FlexAttention backend support
+            from vllm.v1.attention.backends.flex_attention import FlexAttentionMetadata
+
+            rocm_types.append(FlexAttentionMetadata)
 
             self.allowed_attn_types = tuple(rocm_types)
 

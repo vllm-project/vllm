@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import os
 import time
 from collections.abc import Mapping
 from typing import Any, Literal, cast
@@ -16,13 +17,14 @@ from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
 from vllm.multimodal.cache import processor_cache_from_config
 from vllm.multimodal.inputs import MultiModalFeatureSpec, MultiModalUUIDDict
 from vllm.multimodal.parse import MultiModalDataParser
-from vllm.multimodal.processing import EncDecMultiModalProcessor, set_request_id
+from vllm.multimodal.processing.context import set_request_id
 from vllm.multimodal.utils import argsort_mm_positions
 from vllm.pooling_params import PoolingParams
-from vllm.sampling_params import SamplingParams
+from vllm.sampling_params import _SAMPLING_EPS, SamplingParams
 from vllm.tokenizers import TokenizerLike
 from vllm.tokenizers.mistral import MistralTokenizer
 from vllm.utils import length_from_prompt_token_ids_or_embeds, random_uuid
+from vllm.utils.torch_utils import set_default_torch_num_threads
 from vllm.v1.engine import EngineCoreRequest
 from vllm.v1.metrics.stats import MultiModalCacheStats
 from vllm.v1.structured_output.backend_guidance import (
@@ -153,23 +155,16 @@ class InputProcessor:
         # Logits processors not supported.
         if params.logits_processors:
             raise ValueError(
-                "vLLM V1 does not support per request user provided logits processors."
+                "vLLM V1 does not support per request user-provided logits processors."
             )
-        # Async scheduling + spec decode currently incompatible with some
-        # sampling parameters.
-        if (
-            self.vllm_config.speculative_config is not None
-            and self.vllm_config.scheduler_config.async_scheduling
-            and (
-                params.frequency_penalty != 0.0
-                or params.presence_penalty != 0.0
-                or params.repetition_penalty != 1.0
-                or params.bad_words_token_ids
-            )
+
+        # Some sampling parameters are not yet compatible with spec decoding.
+        if self.vllm_config.speculative_config is not None and (
+            params.min_tokens > 1 or params.min_p > _SAMPLING_EPS or params.logit_bias
         ):
             raise ValueError(
-                "async scheduling with spec decoding doesn't yet support "
-                "penalties or bad words in sampling parameters."
+                "The min_tokens, min_p, and logit_bias sampling parameters "
+                "are not yet supported with speculative decoding."
             )
 
     def _validate_params(
@@ -375,6 +370,10 @@ class InputProcessor:
             # Remember that this backend was set automatically
             params.structured_outputs._backend_was_auto = True
 
+        # Run post-init validation. This is also important to ensure subsequent
+        # roundtrip serialization/deserialization won't fail.
+        params.structured_outputs.__post_init__()
+
     def _maybe_build_mm_uuids(
         self,
         request_id: str,
@@ -500,7 +499,15 @@ class InputProcessor:
         # 1. Tokenize text prompt, with LoRA request if one exists.
         # 2. For multimodal models with a merged preprocessor, preprocess
         #   multimodal data and expand prompt token ids accordingly.
-        with set_request_id(request_id):
+        num_threads = int(os.environ.get("OMP_NUM_THREADS", "1"))
+        if "OMP_NUM_THREADS" not in os.environ:
+            logger.debug_once(
+                "OMP_NUM_THREADS is not set; defaulting Torch threads to %d for "
+                "input preprocessing.",
+                num_threads,
+            )
+
+        with set_request_id(request_id), set_default_torch_num_threads(num_threads):
             processed_inputs: ProcessorInputs = self.input_preprocessor.preprocess(
                 prompt,
                 tokenization_kwargs=tokenization_kwargs,
@@ -648,17 +655,18 @@ class InputProcessor:
 
         max_prompt_len = self.model_config.max_model_len
         if prompt_len > max_prompt_len:
-            if prompt_type == "encoder" and model_config.is_multimodal_model:
+            if model_config.is_multimodal_model:
                 mm_registry = self.input_preprocessor.mm_registry
-                mm_processor = mm_registry.create_processor(
+                model_cls = mm_registry._get_model_cls(model_config)
+                factories = model_cls._processor_factory
+                ctx = mm_registry._create_processing_ctx(
                     model_config,
-                    self.vllm_config.observability_config,
                     tokenizer=tokenizer,
                 )
-                assert isinstance(mm_processor, EncDecMultiModalProcessor)
+                mm_info = factories.info(ctx)
 
-                if mm_processor.pad_dummy_encoder_prompt:
-                    return  # Skip encoder length check for Whisper
+                if mm_info.skip_prompt_length_check:
+                    return
 
             if model_config.is_multimodal_model:
                 suggestion = (
