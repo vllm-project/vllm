@@ -836,7 +836,7 @@ def extend_all_queries_by_1(
     # query start loc must be increased by [+0, +1, +2, ..., +batch_size]
     new_query_start_loc = cad.query_start_loc + arange[: len(cad.query_start_loc)]
     new_query_start_loc_cpu = cad.query_start_loc_cpu + torch.arange(
-        len(cad.query_start_loc_cpu)
+        len(cad.query_start_loc_cpu), dtype=torch.int32
     )
     new_cad = cad.replace(
         query_start_loc=new_query_start_loc,
