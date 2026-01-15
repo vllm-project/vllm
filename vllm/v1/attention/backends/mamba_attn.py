@@ -40,13 +40,13 @@ class BaseMambaAttentionMetadata:
 
     state_indices_tensor: torch.Tensor
 
-    # The following tensors are only used for prefix caching with all mode and
+    # The following tensors are only used for prefix caching in all mode and
     # are None if disabled
     block_idx_last_scheduled_token: torch.Tensor | None
     block_idx_first_scheduled_token_p: torch.Tensor | None
     block_idx_last_computed_token: torch.Tensor | None
 
-    # The following tensor is only used for prefix caching with align mode
+    # The following tensor is only used for prefix caching in align mode
     seq_lens: torch.Tensor
 
     # The following attributes are for triton implementation of causal_conv1d

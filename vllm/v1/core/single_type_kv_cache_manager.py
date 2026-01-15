@@ -747,8 +747,10 @@ class MambaManager(SingleTypeKVCacheManager):
         self.mamba_cache_mode = kv_cache_spec.mamba_cache_mode
         self.num_speculative_blocks: int = kv_cache_spec.num_speculative_blocks
         if self.mamba_cache_mode == "align":
+            # Mapping from request ID to the index of the block
+            # allocated in the previous step
             self.last_state_block_idx: dict[str, int] = {}
-            # the set of the requests that have been allocated blocks
+            # The set of the requests that have been allocated blocks
             self._allocated_block_reqs: set[str] = set()
 
     @classmethod
@@ -803,8 +805,14 @@ class MambaManager(SingleTypeKVCacheManager):
         assert isinstance(self.kv_cache_spec, MambaSpec)
         super().remove_skipped_blocks(request_id, num_computed_tokens)
         if self.mamba_cache_mode == "align":
-            # TODO: need comments
+            # `last_state_block_idx` refers to the block index allocated two steps ago.
+            # The block allocated in the previous step is used to copy Mamba states
+            # into the block allocated in the current step; the earlier block is
+            # no longer needed and should be freed here.
             last_state_block_idx = self.last_state_block_idx.get(request_id)
+            # Blocks allocated during prefill may be non-contiguous. Use
+            # `last_state_block_idx` to free the appropriate block and replace it
+            # with a null block.
             if (
                 last_state_block_idx is not None
                 and last_state_block_idx

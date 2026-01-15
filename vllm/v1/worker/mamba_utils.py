@@ -193,7 +193,6 @@ def postprocess_mamba(
     num_accepted_tokens_cpu = input_batch.num_accepted_tokens_cpu
     # NOTE: can be optimized as this function always returns the same result
     mamba_group_ids, mamba_spec = get_mamba_groups(kv_cache_config)
-    # TODO: vectorize this loop
     src_state_list: list[int] = []
     dest_state_list: list[int] = []
     num_elements_list: list[int] = []
