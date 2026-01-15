@@ -11,7 +11,7 @@ from mistral_common.protocol.instruct.request import InstructRequest
 from mistral_common.protocol.instruct.tool_calls import FunctionCall, ToolCall
 from partial_json_parser.core.options import Allow
 
-from vllm.entrypoints.openai.protocol import DeltaMessage, DeltaToolCall
+from vllm.entrypoints.openai.engine.protocol import DeltaMessage, DeltaToolCall
 from vllm.tokenizers import TokenizerLike, get_tokenizer
 from vllm.tokenizers.detokenizer_utils import detokenize_incrementally
 from vllm.tokenizers.mistral import MistralTokenizer
