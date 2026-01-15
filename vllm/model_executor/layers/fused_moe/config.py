@@ -878,6 +878,10 @@ class FusedMoEParallelConfig:
     def use_deepep_ll_kernels(self):
         return self.use_all2all_kernels and self.all2all_backend == "deepep_low_latency"
 
+    @property
+    def use_batched_activation_format(self):
+        return self.use_deepep_ll_kernels or self.use_pplx_kernels
+
     @staticmethod
     def flatten_tp_across_dp_and_pcp(
         tp_size: int, dp_size: int, dp_rank: int, pcp_size: int, pcp_rank: int
