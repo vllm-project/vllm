@@ -160,7 +160,7 @@ __inline__ __device__ bf16_8_t vec_conversion<bf16_8_t, uint2>(const uint2& a) {
 template <>
 __inline__ __device__ float vec_conversion<float, uint8_t>(const uint8_t& a) {
   __half_raw res = __hip_cvt_fp8_to_halfraw(a, fp8_type::__default_interpret);
-  return static_cast<float>(res.x);
+  return static_cast<float>(res.data);
 }
 
 // fp8x2 -> float2
@@ -437,7 +437,7 @@ __inline__ __device__ uint16_t
 scaled_vec_conversion<uint16_t, uint8_t>(const uint8_t& a, float scale) {
   __half_raw res;
   res = __hip_cvt_fp8_to_halfraw(a, fp8_type::__default_interpret);
-  res.x *= scale;
+  res.data *= scale;
   return res.data;
 }
 
