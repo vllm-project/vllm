@@ -338,7 +338,7 @@ If you use triton kernels with cuda 13, you might see an error like `ptxas fatal
 vllm.v1.engine.exceptions.EngineDeadError: EngineCore encountered an issue. See stack trace (above) for the root cause.
 ```
 
-It means that the ptxas in triton bundle not compatible with your device. You need to set `TRITON_PTXAS_PATH` environment variable to use cuda toolkit's ptxas manually instead:
+It means that the ptxas in the triton bundle is not compatible with your device. You need to set `TRITON_PTXAS_PATH` environment variable to use cuda toolkit's ptxas manually instead:
 
 ```shell
 export CUDA_HOME=/usr/local/cuda

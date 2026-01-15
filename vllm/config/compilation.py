@@ -909,6 +909,20 @@ class CompilationConfig:
         # May get recomputed in the model runner if adjustment is needed for spec-decode
         self.compute_bs_to_padded_graph_size()
 
+        # Validate that compile_sizes won't be changed by padding.
+        # Only validate when cudagraphs are actually being used.
+        if self.compile_sizes and self.cudagraph_mode != CUDAGraphMode.NONE:
+            for size in self.compile_sizes:
+                if size <= self.max_cudagraph_capture_size:
+                    padded = self.bs_to_padded_graph_size[size]
+                    if padded != size:
+                        raise ValueError(
+                            f"compile_sizes contains {size} which would be "
+                            f"padded to {padded}. All compile_sizes must be "
+                            "values that won't be changed by cudagraph padding. "
+                            "Use values from cudagraph_capture_sizes."
+                        )
+
     def set_splitting_ops_for_v1(
         self, all2all_backend: str, data_parallel_size: int = 1
     ):
@@ -949,8 +963,8 @@ class CompilationConfig:
                     )
                 if self.cudagraph_mode == CUDAGraphMode.PIECEWISE:
                     logger.warning_once(
-                        "Piecewise compilation with empty splitting_ops do not"
-                        "contains piecewise cudagraph. Setting cudagraph_"
+                        "Piecewise compilation with empty splitting_ops does not "
+                        "contain piecewise cudagraph. Setting cudagraph_"
                         "mode to NONE. Hint: If you are using attention "
                         "backends that support cudagraph, consider manually "
                         "setting cudagraph_mode to FULL or FULL_DECODE_ONLY "
@@ -959,8 +973,8 @@ class CompilationConfig:
                     self.cudagraph_mode = CUDAGraphMode.NONE
                 elif self.cudagraph_mode == CUDAGraphMode.FULL_AND_PIECEWISE:
                     logger.warning_once(
-                        "Piecewise compilation with empty splitting_ops do "
-                        "not contains piecewise cudagraph. Setting "
+                        "Piecewise compilation with empty splitting_ops does "
+                        "not contain piecewise cudagraph. Setting "
                         "cudagraph_mode to FULL."
                     )
                     self.cudagraph_mode = CUDAGraphMode.FULL
