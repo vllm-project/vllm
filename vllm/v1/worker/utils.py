@@ -8,7 +8,7 @@ import torch
 from typing_extensions import deprecated
 
 from vllm.attention.layer import Attention
-from vllm.config import CacheConfig, ModelConfig, SchedulerConfig, VllmConfig
+from vllm.config import CacheConfig, VllmConfig
 from vllm.logger import init_logger
 from vllm.model_executor.models.interfaces import MultiModalEmbeddings
 from vllm.model_executor.models.utils import extract_layer_index
@@ -27,14 +27,13 @@ class MultiModalBudget:
 
     def __init__(
         self,
-        model_config: ModelConfig,
-        scheduler_config: SchedulerConfig,
+        vllm_config: VllmConfig,
         mm_registry: MultiModalRegistry,
     ) -> None:
         super().__init__()
 
-        self.model_config = model_config
-        self.scheduler_config = scheduler_config
+        self.model_config = model_config = vllm_config.model_config
+        self.scheduler_config = scheduler_config = vllm_config.scheduler_config
         self.mm_registry = mm_registry
         self.cache = cache = mm_registry.processor_only_cache_from_config(model_config)
 

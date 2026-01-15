@@ -388,6 +388,7 @@ class MultiModalRegistry:
         if not is_ipc_supported:
             return "processor_only"
 
+        mm_config = model_config.get_multimodal_config()
         return mm_config.mm_processor_cache_type
 
     def processor_cache_from_config(
@@ -409,17 +410,14 @@ class MultiModalRegistry:
 
     def processor_only_cache_from_config(
         self,
-        model_config: "ModelConfig",
+        vllm_config: "VllmConfig",
     ) -> MultiModalProcessorOnlyCache | None:
         """Return a `MultiModalProcessorOnlyCache`, if enabled."""
-        if not self.supports_multimodal_inputs(model_config):
+        cache_type = self._get_cache_type(vllm_config)
+        if cache_type is None:
             return None
 
-        mm_config = model_config.get_multimodal_config()
-        if mm_config.mm_processor_cache_gb <= 0:
-            return None
-
-        return MultiModalProcessorOnlyCache(model_config)
+        return MultiModalProcessorOnlyCache(vllm_config.model_config)
 
     def engine_receiver_cache_from_config(
         self,
