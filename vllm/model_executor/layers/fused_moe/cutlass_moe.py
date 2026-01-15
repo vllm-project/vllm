@@ -32,10 +32,13 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8DynamicTokenSym,
     kFp8StaticChannelSym,
     kFp8StaticTensorSym,
+    kNvfp4Dynamic,
+    kNvfp4Static,
 )
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
     cutlass_group_gemm_supported,
 )
+from vllm.platforms import current_platform
 from vllm.scalar_type import scalar_types
 
 logger = init_logger(__name__)
@@ -622,16 +625,30 @@ def run_cutlass_moe_fp4(
     return
 
 
-# Split into batched and non-batched
 class CutlassExpertsFp4(mk.FusedMoEPermuteExpertsUnpermute):
-    def __init__(
-        self,
-        moe_config: FusedMoEConfig,
-        quant_config: FusedMoEQuantConfig,
-    ):
-        super().__init__(moe_config=moe_config, quant_config=quant_config)
-        self.max_experts_per_worker = moe_config.num_local_experts
-        self.out_dtype = moe_config.in_dtype
+    @staticmethod
+    def _supports_current_device() -> bool:
+        return current_platform.has_device_capability((10, 0))
+
+    @staticmethod
+    def _supports_no_act_and_mul() -> bool:
+        return False
+
+    @staticmethod
+    def _supports_quant_scheme(
+        weight_key: QuantKey | None,
+        activation_key: QuantKey | None,
+    ) -> bool:
+        return (weight_key, activation_key) == (kNvfp4Static, kNvfp4Dynamic)
+
+    @staticmethod
+    def _supports_activation(activation: str) -> bool:
+        return activation in ["silu"]
+
+    def _supports_parallel_config(moe_parallel_config: FusedMoEParallelConfig) -> bool:
+        # CutlassExpertsFp4 does not support expert map, which is
+        # needed for STANDARD activation format kernels in EP mode.
+        return moe_parallel_config.ep_size == 1
 
     @staticmethod
     def activation_format() -> mk.FusedMoEActivationFormat:
@@ -647,7 +664,7 @@ class CutlassExpertsFp4(mk.FusedMoEPermuteExpertsUnpermute):
         return TopKWeightAndReduceNoOP()
 
     def workspace_dtype(self, act_dtype: torch.dtype) -> torch.dtype:
-        return self.out_dtype if self.out_dtype is not None else act_dtype
+        return act_dtype
 
     def workspace_shapes(
         self,
@@ -660,19 +677,9 @@ class CutlassExpertsFp4(mk.FusedMoEPermuteExpertsUnpermute):
         expert_tokens_meta: mk.ExpertTokensMetadata | None,
         activation: str,
     ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...]]:
-        activation_out_dim = self.adjust_N_for_activation(N, activation)
-        workspace1: tuple[int, ...] = ()
-        workspace2: tuple[int, ...] = ()
-        output: tuple[int, ...] = ()
-        if False:
-            # if self.use_batched_format:
-            workspace1 = (self.max_experts_per_worker, M, max(N, K))
-            workspace2 = (self.max_experts_per_worker, M, activation_out_dim)
-            output = (self.max_experts_per_worker, M, K)
-        else:
-            workspace1 = (M * topk, max(2 * N, K))
-            workspace2 = (M * topk, N)
-            output = (M, K)
+        workspace1 = (M * topk, max(2 * N, K))
+        workspace2 = (M * topk, N)
+        output = (M, K)
         return (workspace1, workspace2, output)
 
     def apply(
