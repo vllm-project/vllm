@@ -160,7 +160,7 @@ __inline__ __device__ bf16_8_t vec_conversion<bf16_8_t, uint2>(const uint2& a) {
 template <>
 __inline__ __device__ float vec_conversion<float, uint8_t>(const uint8_t& a) {
   __half_raw res = __hip_cvt_fp8_to_halfraw(a, fp8_type::__default_interpret);
-  return static_cast<float>(res.data);
+  return __half2float(res);
 }
 
 // fp8x2 -> float2
@@ -386,7 +386,7 @@ template <>
 __inline__ __device__ float scaled_vec_conversion<float, uint8_t>(
     const uint8_t& a, float scale) {
   __half_raw res = __hip_cvt_fp8_to_halfraw(a, fp8_type::__default_interpret);
-  return static_cast<float>(res.data) * scale;
+  return __half2float(res) * scale;
 }
 
 // fp8x2 -> float2
@@ -435,10 +435,8 @@ scaled_vec_conversion<Float8_, uint2>(const uint2& a, float scale) {
 template <>
 __inline__ __device__ uint16_t
 scaled_vec_conversion<uint16_t, uint8_t>(const uint8_t& a, float scale) {
-  __half_raw res;
-  res = __hip_cvt_fp8_to_halfraw(a, fp8_type::__default_interpret);
-  res.data *= scale;
-  return res.data;
+  __half_raw res = __hip_cvt_fp8_to_halfraw(a, fp8_type::__default_interpret);
+  return __half_as_ushort(__float2half_rn(__half2float(res) * scale));
 }
 
 // fp8x2 -> half2
@@ -450,8 +448,8 @@ scaled_vec_conversion<uint32_t, uint16_t>(const uint16_t& a, float scale) {
     uint32_t ui32;
   } tmp;
   tmp.h2r = __hip_cvt_fp8x2_to_halfraw2(a, fp8_type::__default_interpret);
-  tmp.h2r.x.data *= scale;
-  tmp.h2r.y.data *= scale;
+  tmp.h2r.x.data = __float2half_rn(__half2float(tmp.h2r.x.data) * scale);
+  tmp.h2r.y.data = __float2half_rn(__half2float(tmp.h2r.y.data) * scale);
   return tmp.ui32;
 }
 
@@ -486,11 +484,9 @@ __inline__ __device__ uint4 scaled_vec_conversion<uint4, uint2>(const uint2& a,
 template <>
 __inline__ __device__ uint8_t
 scaled_vec_conversion<uint8_t, uint16_t>(const uint16_t& a, float scale) {
-  __half_raw tmp;
-  tmp.x = a;
-  tmp.data /= scale;
-  return __hip_cvt_halfraw_to_fp8(tmp, fp8_type::__default_saturation,
-                                  fp8_type::__default_interpret);
+  float tmp = __half2float(__ushort_as_half(a)) / scale;
+  return __hip_cvt_float_to_fp8(tmp, fp8_type::__default_saturation,
+                                fp8_type::__default_interpret);
 }
 
 // halfx2 -> fp8x2
@@ -502,8 +498,8 @@ scaled_vec_conversion<uint16_t, uint32_t>(const uint32_t& a, float scale) {
     __half2_raw h2r;
   } tmp;
   tmp.ui32 = a;
-  tmp.h2r.x.data /= scale;
-  tmp.h2r.y.data /= scale;
+  tmp.h2r.x.data = __float2half_rn(__half2float(tmp.h2r.x.data) / scale);
+  tmp.h2r.y.data = __float2half_rn(__half2float(tmp.h2r.y.data) / scale);
   return __hip_cvt_halfraw2_to_fp8x2(tmp.h2r, fp8_type::__default_saturation,
                                      fp8_type::__default_interpret);
 }
