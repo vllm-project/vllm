@@ -895,6 +895,51 @@ class NixlConnectorWorker:
         else:
             self.use_host_buffer = self.kv_buffer_device == "cpu"
 
+        if self.device_type == "cpu":
+            """
+            Discover NUMA topology and keep the last physical core of each numa
+            into one core group list for nixl start_kv_load()
+            """
+            SYS_NODE = "/sys/devices/system/node"
+            SYS_CPU = "/sys/devices/system/cpu"
+
+            self.core_rsv_for_kv = []
+            for node in os.listdir(SYS_NODE):
+                if not node.startswith("node"):
+                    continue
+                node_id = int(node.replace("node", ""))
+                node_path = f"{SYS_NODE}/{node}"
+
+                seen_phys = set()
+                for cpu in os.listdir(node_path):
+                    if not cpu.startswith("cpu") or not cpu[3:].isdigit():
+                        continue
+
+                    cpu_id = int(cpu[3:])
+                    # thread_siblings based on cpu_id
+                    path = f"{SYS_CPU}/cpu{cpu_id}/topology/thread_siblings_list"
+
+                    if os.path.exists(path):
+                        # parse_cpu_list '0-3,8-11' -> [0,1,2,3,8,9,10,11]
+                        s = open(path).read()
+                        cpus = []
+                        for part in s.strip().split(","):
+                            if "-" in part:
+                                a, b = map(int, part.split("-"))
+                                cpus.extend(range(a, b + 1))
+                            else:
+                                cpus.append(int(part))
+                        siblings = cpus
+                    else:
+                        siblings = [cpu_id]
+
+                    phys = min(siblings)
+
+                    if phys not in seen_phys:
+                        seen_phys.add(phys)
+
+                self.core_rsv_for_kv.append(max(seen_phys))
+
         # support for oot platform which can't register nixl memory
         # type based on kv_buffer_device
         nixl_memory_type = current_platform.get_nixl_memory_type()
@@ -2054,6 +2099,9 @@ class NixlConnectorWorker:
         Start loading by triggering non-blocking nixl_xfer.
         We check for these trnxs to complete in each step().
         """
+        if self.device_type == "cpu":
+            os.sched_setaffinity(0, self.core_rsv_for_kv)
+
         for req_id, meta in metadata.reqs_to_recv.items():
             meta.local_physical_block_ids = self._logical_to_kernel_block_ids(
                 meta.local_block_ids
