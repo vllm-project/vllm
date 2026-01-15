@@ -1196,7 +1196,10 @@ class OpenAIServing:
         conversation, engine_prompt = await renderer.render_messages_async(
             messages,
             chat_template_content_format=chat_template_content_format,
-            tokenize=isinstance(renderer.tokenizer, MistralTokenizer),
+            tokenize=(
+                chat_template_kwargs.pop("tokenize", False)
+                or isinstance(renderer.tokenizer, MistralTokenizer)
+            ),
             **chat_template_kwargs,
         )
 
