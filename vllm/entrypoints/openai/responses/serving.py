@@ -467,9 +467,12 @@ class OpenAIServingResponses(OpenAIServing):
 
                 if self.reasoning_parser is not None:
                     reasoning_parser = self.reasoning_parser(tokenizer)
-                    if isinstance(
-                        struct_out := sampling_params.structured_outputs,
-                        StructuredOutputsParams,
+                    if (
+                        isinstance(
+                            struct_out := sampling_params.structured_outputs,
+                            StructuredOutputsParams,
+                        )
+                        and struct_out.all_non_structural_tag_constraints_none()
                     ):
                         sampling_params.structured_outputs = replace(
                             struct_out,
