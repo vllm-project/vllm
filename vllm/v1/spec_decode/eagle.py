@@ -224,15 +224,16 @@ class EagleProposer:
         Eagle only supports PIECEWISE cudagraphs (via mixed_mode).
         This should be called after adjust_cudagraph_sizes_for_spec_decode.
         """
-        eagle_cudagraph_mode = (
-            CUDAGraphMode.PIECEWISE
-            if not self.speculative_config.enforce_eager
-            and cudagraph_mode.mixed_mode() != CUDAGraphMode.NONE
-            else CUDAGraphMode.NONE
-        )
-        self.cudagraph_dispatcher.initialize_cudagraph_keys(
-            eagle_cudagraph_mode, uniform_decode_query_len=1
-        )
+        if (
+            not self.speculative_config.enforce_eager
+            and cudagraph_mode.mixed_mode()
+            in [CUDAGraphMode.PIECEWISE, CUDAGraphMode.FULL]
+        ):
+            eagle_cudagraph_mode = CUDAGraphMode.PIECEWISE
+        else:
+            eagle_cudagraph_mode = CUDAGraphMode.NONE
+
+        self.cudagraph_dispatcher.initialize_cudagraph_keys(eagle_cudagraph_mode)
 
     def propose(
         self,
