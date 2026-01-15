@@ -690,9 +690,9 @@ class SiglipMultiheadAttentionPoolingHead(nn.Module):
         hidden_state = self.mlp(hidden_state)
         hidden_state += residual
 
-        pooled = hidden_state[:, 0]
-
-        return pooled.unsqueeze(1)
+        # Handled by resolve_visual_encoder_outputs
+        # return hidden_state[:, 0]
+        return hidden_state
 
 
 class SiglipVisionTransformer(nn.Module):
