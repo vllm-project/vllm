@@ -467,6 +467,250 @@
             flex-direction: column;
         }
 
+        /* Parameters Panel */
+        .params-panel {
+            border-bottom: 1px solid var(--border);
+            background: var(--muted);
+            overflow: hidden;
+            transition: max-height 0.2s ease;
+        }
+
+        .params-header {
+            display: flex;
+            align-items: center;
+            padding: 8px 12px;
+            cursor: pointer;
+            user-select: none;
+            font-size: 11px;
+            color: var(--muted-foreground);
+            gap: 8px;
+        }
+
+        .params-header:hover {
+            background: rgba(48, 162, 255, 0.05);
+        }
+
+        .params-header .params-icon {
+            width: 14px;
+            height: 14px;
+            fill: none;
+            stroke: currentColor;
+            stroke-width: 2;
+        }
+
+        .params-header .params-summary {
+            display: flex;
+            gap: 16px;
+            flex: 1;
+        }
+
+        .params-header .params-summary code {
+            color: var(--muted-foreground);
+            font-family: var(--font-mono);
+            font-size: 10px;
+            background: none;
+        }
+
+        .params-header .params-summary code span {
+            color: var(--vllm-blue);
+        }
+
+        .params-header .expand-icon {
+            width: 12px;
+            height: 12px;
+            fill: none;
+            stroke: currentColor;
+            stroke-width: 2;
+            transition: transform 0.2s ease;
+        }
+
+        .params-panel.expanded .params-header .expand-icon {
+            transform: rotate(180deg);
+        }
+
+        .params-content {
+            max-height: 0;
+            overflow: hidden;
+            transition: max-height 0.2s ease;
+        }
+
+        .params-panel.expanded .params-content {
+            max-height: 400px;
+            overflow-y: auto;
+        }
+
+        .params-content::-webkit-scrollbar {
+            width: 4px;
+        }
+
+        .params-content::-webkit-scrollbar-thumb {
+            background: var(--border);
+            border-radius: 2px;
+        }
+
+        .params-grid {
+            padding: 12px;
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+        }
+
+        .param-row {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+        }
+
+        .param-label {
+            font-family: var(--font-mono);
+            font-size: 11px;
+            color: var(--muted-foreground);
+            min-width: 120px;
+            flex-shrink: 0;
+            background: none;
+        }
+
+        .param-control {
+            flex: 1;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        /* Slider */
+        .param-slider {
+            flex: 1;
+            -webkit-appearance: none;
+            appearance: none;
+            height: 4px;
+            background: var(--border);
+            border-radius: 2px;
+            outline: none;
+        }
+
+        .param-slider::-webkit-slider-thumb {
+            -webkit-appearance: none;
+            appearance: none;
+            width: 14px;
+            height: 14px;
+            background: var(--vllm-blue);
+            border-radius: 50%;
+            cursor: pointer;
+            transition: transform 0.1s ease;
+        }
+
+        .param-slider::-webkit-slider-thumb:hover {
+            transform: scale(1.2);
+        }
+
+        .param-slider::-moz-range-thumb {
+            width: 14px;
+            height: 14px;
+            background: var(--vllm-blue);
+            border-radius: 50%;
+            cursor: pointer;
+            border: none;
+        }
+
+        .param-value {
+            font-family: var(--font-mono);
+            font-size: 11px;
+            color: var(--vllm-blue);
+            min-width: 45px;
+            text-align: right;
+        }
+
+        /* Number input */
+        .param-input {
+            width: 80px;
+            padding: 4px 8px;
+            background: var(--background);
+            border: 1px solid var(--border);
+            border-radius: calc(var(--radius) - 4px);
+            color: var(--foreground);
+            font-family: var(--font-mono);
+            font-size: 11px;
+            outline: none;
+        }
+
+        .param-input:focus {
+            border-color: var(--vllm-blue);
+        }
+
+        /* Toggle switch */
+        .param-toggle {
+            position: relative;
+            width: 36px;
+            height: 20px;
+            background: var(--border);
+            border-radius: 10px;
+            cursor: pointer;
+            transition: background 0.2s ease;
+        }
+
+        .param-toggle.active {
+            background: var(--vllm-blue);
+        }
+
+        .param-toggle::after {
+            content: '';
+            position: absolute;
+            top: 2px;
+            left: 2px;
+            width: 16px;
+            height: 16px;
+            background: white;
+            border-radius: 50%;
+            transition: left 0.2s ease;
+        }
+
+        .param-toggle.active::after {
+            left: 18px;
+        }
+
+        /* Select dropdown */
+        .param-select {
+            padding: 4px 24px 4px 8px;
+            background: var(--background);
+            border: 1px solid var(--border);
+            border-radius: calc(var(--radius) - 4px);
+            color: var(--foreground);
+            font-size: 11px;
+            outline: none;
+            cursor: pointer;
+            appearance: none;
+            background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%23888' stroke-width='2'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E");
+            background-repeat: no-repeat;
+            background-position: right 6px center;
+        }
+
+        .param-select:focus {
+            border-color: var(--vllm-blue);
+        }
+
+        /* Reset button */
+        .params-footer {
+            display: flex;
+            justify-content: flex-end;
+            padding: 8px 12px;
+            border-top: 1px solid var(--border);
+        }
+
+        .params-reset {
+            font-size: 10px;
+            color: var(--muted-foreground);
+            background: none;
+            border: none;
+            cursor: pointer;
+            padding: 4px 8px;
+            border-radius: calc(var(--radius) - 4px);
+        }
+
+        .params-reset:hover {
+            background: var(--border);
+            color: var(--foreground);
+        }
+
         .chat-area {
             flex: 1;
             display: flex;
@@ -626,65 +870,6 @@
             opacity: 0.5;
             cursor: not-allowed;
             transform: none;
-        }
-
-        .params-row {
-            display: flex;
-            gap: 16px;
-            margin-bottom: 10px;
-        }
-
-        .param-item {
-            flex: 1;
-            display: flex;
-            flex-direction: column;
-            gap: 4px;
-        }
-
-        .param-label {
-            font-size: 10px;
-            color: var(--muted-foreground);
-            text-transform: uppercase;
-            display: flex;
-            justify-content: space-between;
-        }
-
-        .param-val {
-            color: var(--vllm-blue);
-            font-weight: 600;
-        }
-
-        .param-item input[type="range"] {
-            width: 100%;
-            height: 4px;
-            background: var(--muted);
-            border-radius: 2px;
-            -webkit-appearance: none;
-        }
-
-        .param-item input[type="range"]::-webkit-slider-thumb {
-            -webkit-appearance: none;
-            width: 12px;
-            height: 12px;
-            background: var(--vllm-blue);
-            border-radius: 50%;
-            cursor: pointer;
-        }
-
-        .param-item input[type="number"] {
-            background: var(--muted);
-            border: 1px solid var(--border);
-            border-radius: 4px;
-            padding: 4px 8px;
-            color: var(--foreground);
-            font-size: 11px;
-            font-family: var(--font-mono);
-            width: 100%;
-            outline: none;
-        }
-
-        .param-item input[type="number"]:focus {
-            border-color: var(--vllm-blue);
         }
 
         .chat-controls {
@@ -890,6 +1075,124 @@
                 <span style="margin-left:auto;font-size:10px;color:var(--muted-foreground);text-transform:none;letter-spacing:0;font-weight:400">Press Enter to send</span>
             </div>
 
+            <!-- Parameters Panel -->
+            <div class="params-panel" id="params-panel">
+                <div class="params-header" onclick="toggleParamsPanel()">
+                    <svg class="params-icon" viewBox="0 0 24 24"><path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"/><circle cx="12" cy="12" r="3"/></svg>
+                    <div class="params-summary">
+                        <code>temperature=<span id="summary-temp">0.7</span></code>
+                        <code>max_tokens=<span id="summary-max">512</span></code>
+                        <code id="summary-thinking" style="display:none"></code>
+                    </div>
+                    <svg class="expand-icon" viewBox="0 0 24 24"><path d="m6 9 6 6 6-6"/></svg>
+                </div>
+                <div class="params-content">
+                    <div class="params-grid">
+                        <div class="param-row">
+                            <code class="param-label">temperature</code>
+                            <div class="param-control">
+                                <input type="range" class="param-slider" id="param-temperature"
+                                       min="0" max="2" step="0.1" value="0.7"
+                                       oninput="updateParam('temperature', this.value)">
+                                <span class="param-value" id="val-temperature">0.7</span>
+                            </div>
+                        </div>
+                        <div class="param-row">
+                            <code class="param-label">max_tokens</code>
+                            <div class="param-control">
+                                <input type="number" class="param-input" id="param-max-tokens"
+                                       min="1" max="32768" value="512"
+                                       oninput="updateParam('max_tokens', this.value)">
+                            </div>
+                        </div>
+                        <div class="param-row">
+                            <code class="param-label">top_p</code>
+                            <div class="param-control">
+                                <input type="range" class="param-slider" id="param-top-p"
+                                       min="0" max="1" step="0.05" value="1.0"
+                                       oninput="updateParam('top_p', this.value)">
+                                <span class="param-value" id="val-top-p">1.0</span>
+                            </div>
+                        </div>
+                        <div class="param-row">
+                            <code class="param-label">top_k</code>
+                            <div class="param-control">
+                                <input type="number" class="param-input" id="param-top-k"
+                                       min="0" max="100" value="0" placeholder="0"
+                                       oninput="updateParam('top_k', this.value)">
+                            </div>
+                        </div>
+                        <div class="param-row">
+                            <code class="param-label">frequency_penalty</code>
+                            <div class="param-control">
+                                <input type="range" class="param-slider" id="param-freq-penalty"
+                                       min="-2" max="2" step="0.1" value="0"
+                                       oninput="updateParam('frequency_penalty', this.value)">
+                                <span class="param-value" id="val-freq-penalty">0</span>
+                            </div>
+                        </div>
+                        <div class="param-row">
+                            <code class="param-label">presence_penalty</code>
+                            <div class="param-control">
+                                <input type="range" class="param-slider" id="param-pres-penalty"
+                                       min="-2" max="2" step="0.1" value="0"
+                                       oninput="updateParam('presence_penalty', this.value)">
+                                <span class="param-value" id="val-pres-penalty">0</span>
+                            </div>
+                        </div>
+                        <div class="param-row">
+                            <code class="param-label">repetition_penalty</code>
+                            <div class="param-control">
+                                <input type="range" class="param-slider" id="param-rep-penalty"
+                                       min="0.1" max="2" step="0.1" value="1.0"
+                                       oninput="updateParam('repetition_penalty', this.value)">
+                                <span class="param-value" id="val-rep-penalty">1.0</span>
+                            </div>
+                        </div>
+                        <div class="param-row">
+                            <code class="param-label">seed</code>
+                            <div class="param-control">
+                                <input type="number" class="param-input" id="param-seed"
+                                       placeholder="null"
+                                       oninput="updateParam('seed', this.value)">
+                            </div>
+                        </div>
+                        <div class="param-row">
+                            <code class="param-label">stop</code>
+                            <div class="param-control">
+                                <input type="text" class="param-input" id="param-stop"
+                                       placeholder="[]" style="width:100px"
+                                       oninput="updateParam('stop', this.value)">
+                            </div>
+                        </div>
+                        <div class="param-row">
+                            <code class="param-label">reasoning_effort</code>
+                            <div class="param-control">
+                                <select class="param-select" id="param-reasoning" onchange="updateParam('reasoning_effort', this.value)">
+                                    <option value="">-</option>
+                                    <option value="low">low</option>
+                                    <option value="medium">medium</option>
+                                    <option value="high">high</option>
+                                </select>
+                            </div>
+                        </div>
+                        <div class="param-row">
+                            <code class="param-label" title="chat_template_kwargs: {enable_thinking: ...}">enable_thinking</code>
+                            <div class="param-control">
+                                <select class="param-select" id="param-thinking" onchange="updateParam('thinking', this.value)">
+                                    <option value="">-</option>
+                                    <option value="enable">true</option>
+                                    <option value="disable">false</option>
+                                </select>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="params-footer">
+                        <button class="params-reset" onclick="resetParams()">Reset to Defaults</button>
+                    </div>
+                </div>
+            </div>
+
             <div class="chat-area">
                 <div class="chat-messages" id="chat-messages">
                     <div class="chat-empty">Send a message to start chatting</div>
@@ -905,27 +1208,10 @@
                 <div class="chat-input-area">
                     <div class="chat-controls">
                         <div class="chat-stats">
-                            <span>Context: <span class="val" id="stat-context">0</span> characters</span>
+                            <span>Context: <span class="val" id="stat-context">0</span> chars</span>
                             <span>Messages: <span class="val" id="stat-messages">0</span></span>
                         </div>
                         <button class="clear-btn" onclick="clearChat()">Clear</button>
-                    </div>
-
-                    <div class="params-row">
-                        <div class="param-item">
-                            <div class="param-label">Temperature <span class="param-val" id="temp-val">0.7</span></div>
-                            <input type="range" id="temperature" min="0" max="2" step="0.1" value="0.7"
-                                   oninput="document.getElementById('temp-val').textContent=this.value">
-                        </div>
-                        <div class="param-item">
-                            <div class="param-label">Top P <span class="param-val" id="topp-val">0.9</span></div>
-                            <input type="range" id="top-p" min="0" max="1" step="0.05" value="0.9"
-                                   oninput="document.getElementById('topp-val').textContent=this.value">
-                        </div>
-                        <div class="param-item">
-                            <div class="param-label">Max Tokens</div>
-                            <input type="number" id="max-tokens" min="1" max="8192" value="512">
-                        </div>
                     </div>
 
                     <div class="input-row">
@@ -959,6 +1245,189 @@
         let conversationHistory = [];
         let tooltipTimeout = null;
         const tooltip = document.getElementById('tooltip');
+
+        // Chat parameters with defaults
+        const defaultParams = {
+            temperature: 0.7,
+            max_tokens: 512,
+            top_p: 1.0,
+            top_k: 0,
+            frequency_penalty: 0,
+            presence_penalty: 0,
+            repetition_penalty: 1.0,
+            seed: null,
+            stop: '',
+            thinking: '',  // '': default, 'enable': on, 'disable': off
+            reasoning_effort: ''
+        };
+
+        let chatParams = { ...defaultParams };
+
+        // Load saved parameters from localStorage
+        function loadParams() {
+            const saved = localStorage.getItem('vllm-dashboard-params');
+            if (saved) {
+                try {
+                    chatParams = { ...defaultParams, ...JSON.parse(saved) };
+                } catch (e) {
+                    chatParams = { ...defaultParams };
+                }
+            }
+            applyParamsToUI();
+        }
+
+        // Save parameters to localStorage
+        function saveParams() {
+            localStorage.setItem('vllm-dashboard-params', JSON.stringify(chatParams));
+            updateParamsSummary();
+        }
+
+        // Apply parameters to UI controls
+        function applyParamsToUI() {
+            // Sliders
+            setSliderValue('temperature', chatParams.temperature);
+            setSliderValue('top-p', chatParams.top_p);
+            setSliderValue('freq-penalty', chatParams.frequency_penalty);
+            setSliderValue('pres-penalty', chatParams.presence_penalty);
+            setSliderValue('rep-penalty', chatParams.repetition_penalty);
+
+            // Number inputs
+            const maxTokensEl = document.getElementById('param-max-tokens');
+            if (maxTokensEl) maxTokensEl.value = chatParams.max_tokens;
+
+            const topKEl = document.getElementById('param-top-k');
+            if (topKEl) topKEl.value = chatParams.top_k;
+
+            const seedEl = document.getElementById('param-seed');
+            if (seedEl) seedEl.value = chatParams.seed || '';
+
+            const stopEl = document.getElementById('param-stop');
+            if (stopEl) stopEl.value = chatParams.stop || '';
+
+            // Selects
+            const thinkingEl = document.getElementById('param-thinking');
+            if (thinkingEl) thinkingEl.value = chatParams.thinking || '';
+
+            const reasoningEl = document.getElementById('param-reasoning');
+            if (reasoningEl) reasoningEl.value = chatParams.reasoning_effort || '';
+
+            updateParamsSummary();
+        }
+
+        // Helper to set slider value and display
+        function setSliderValue(name, value) {
+            const slider = document.getElementById('param-' + name);
+            const display = document.getElementById('val-' + name);
+            if (slider) slider.value = value;
+            if (display) display.textContent = value;
+        }
+
+        // Update parameter value
+        function updateParam(name, value) {
+            // Convert to appropriate type
+            if (['temperature', 'top_p', 'frequency_penalty', 'presence_penalty', 'repetition_penalty'].includes(name)) {
+                chatParams[name] = parseFloat(value);
+            } else if (['max_tokens', 'top_k', 'seed'].includes(name)) {
+                chatParams[name] = value === '' ? null : parseInt(value);
+            } else {
+                chatParams[name] = value;
+            }
+
+            // Update display for sliders
+            const displayMap = {
+                'temperature': 'val-temperature',
+                'top_p': 'val-top-p',
+                'frequency_penalty': 'val-freq-penalty',
+                'presence_penalty': 'val-pres-penalty',
+                'repetition_penalty': 'val-rep-penalty'
+            };
+
+            if (displayMap[name]) {
+                const display = document.getElementById(displayMap[name]);
+                if (display) display.textContent = value;
+            }
+
+            saveParams();
+        }
+
+        // Toggle boolean parameter
+        function toggleBoolParam(name) {
+            chatParams[name] = !chatParams[name];
+            const el = document.getElementById('param-' + name);
+            if (el) el.classList.toggle('active', chatParams[name]);
+            saveParams();
+        }
+
+        // Update summary display in collapsed header
+        function updateParamsSummary() {
+            document.getElementById('summary-temp').textContent = chatParams.temperature;
+            document.getElementById('summary-max').textContent = chatParams.max_tokens;
+
+            const thinkingEl = document.getElementById('summary-thinking');
+            if (thinkingEl) {
+                if (chatParams.thinking === 'enable') {
+                    thinkingEl.innerHTML = 'enable_thinking=<span>true</span>';
+                    thinkingEl.style.display = '';
+                } else if (chatParams.thinking === 'disable') {
+                    thinkingEl.innerHTML = 'enable_thinking=<span>false</span>';
+                    thinkingEl.style.display = '';
+                } else {
+                    thinkingEl.style.display = 'none';
+                }
+            }
+        }
+
+        // Toggle params panel expand/collapse
+        function toggleParamsPanel() {
+            const panel = document.getElementById('params-panel');
+            panel.classList.toggle('expanded');
+            localStorage.setItem('vllm-dashboard-params-expanded', panel.classList.contains('expanded') ? '1' : '0');
+        }
+
+        // Restore params panel state
+        function restoreParamsPanel() {
+            if (localStorage.getItem('vllm-dashboard-params-expanded') === '1') {
+                document.getElementById('params-panel')?.classList.add('expanded');
+            }
+        }
+
+        // Reset parameters to defaults
+        function resetParams() {
+            chatParams = { ...defaultParams };
+            applyParamsToUI();
+            saveParams();
+        }
+
+        // Build request body with parameters
+        function buildRequestParams() {
+            const params = {
+                model: currentModel,
+                temperature: chatParams.temperature,
+                max_tokens: chatParams.max_tokens,
+                top_p: chatParams.top_p,
+                stream: true
+            };
+
+            // Only include non-default values
+            if (chatParams.top_k > 0) params.top_k = chatParams.top_k;
+            if (chatParams.frequency_penalty !== 0) params.frequency_penalty = chatParams.frequency_penalty;
+            if (chatParams.presence_penalty !== 0) params.presence_penalty = chatParams.presence_penalty;
+            if (chatParams.repetition_penalty !== 1.0) params.repetition_penalty = chatParams.repetition_penalty;
+            if (chatParams.seed !== null) params.seed = chatParams.seed;
+            if (chatParams.stop) {
+                params.stop = chatParams.stop.split(',').map(s => s.trim()).filter(s => s);
+            }
+            if (chatParams.reasoning_effort) params.reasoning_effort = chatParams.reasoning_effort;
+
+            // chat_template_kwargs for thinking mode
+            if (chatParams.thinking === 'enable') {
+                params.chat_template_kwargs = { enable_thinking: true };
+            } else if (chatParams.thinking === 'disable') {
+                params.chat_template_kwargs = { enable_thinking: false };
+            }
+
+            return params;
+        }
 
         // Theme toggle
         function initTheme() {
@@ -1446,17 +1915,13 @@
             let fullContent = '';
 
             try {
+                const requestParams = buildRequestParams();
+                requestParams.messages = conversationHistory;
+
                 const resp = await fetch('/v1/chat/completions', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({
-                        model: currentModel,
-                        messages: conversationHistory,
-                        stream: true,
-                        temperature: parseFloat(document.getElementById('temperature').value),
-                        max_tokens: parseInt(document.getElementById('max-tokens').value) || 512,
-                        top_p: parseFloat(document.getElementById('top-p').value)
-                    })
+                    body: JSON.stringify(requestParams)
                 });
 
                 // Create assistant message
@@ -1578,6 +2043,8 @@
 
         // Init
         async function init() {
+            loadParams();            // Load saved chat parameters
+            restoreParamsPanel();    // Restore params panel expand state
             restoreFilterToggles();  // Restore saved toggle states
             await fetchServerInfo();  // Also fetches config & env
             await fetchMetrics();
