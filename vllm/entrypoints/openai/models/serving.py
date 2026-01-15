@@ -3,7 +3,6 @@
 
 from asyncio import Lock
 from collections import defaultdict
-from dataclasses import dataclass
 from http import HTTPStatus
 
 from vllm.engine.protocol import EngineClient
@@ -14,6 +13,7 @@ from vllm.entrypoints.openai.engine.protocol import (
     ModelList,
     ModelPermission,
 )
+from vllm.entrypoints.openai.models.protocol import BaseModelPath, LoRAModulePath
 from vllm.entrypoints.serve.lora.protocol import (
     LoadLoRAAdapterRequest,
     UnloadLoRAAdapterRequest,
@@ -25,19 +25,6 @@ from vllm.lora.resolver import LoRAResolver, LoRAResolverRegistry
 from vllm.utils.counter import AtomicCounter
 
 logger = init_logger(__name__)
-
-
-@dataclass
-class BaseModelPath:
-    name: str
-    model_path: str
-
-
-@dataclass
-class LoRAModulePath:
-    name: str
-    path: str
-    base_model_name: str | None = None
 
 
 class OpenAIServingModels:

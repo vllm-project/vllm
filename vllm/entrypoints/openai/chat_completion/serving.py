@@ -54,6 +54,7 @@ from vllm.entrypoints.openai.engine.serving import (
     OpenAIServing,
     clamp_prompt_logprobs,
 )
+from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.entrypoints.openai.parser.harmony_utils import (
     get_developer_message,
     get_stop_tokens_for_assistant_actions,
@@ -63,7 +64,6 @@ from vllm.entrypoints.openai.parser.harmony_utils import (
     parse_chat_output,
     render_for_completion,
 )
-from vllm.entrypoints.openai.serving_models import OpenAIServingModels
 from vllm.entrypoints.openai.utils import maybe_filter_parallel_tool_calls
 from vllm.entrypoints.utils import get_max_tokens, should_include_usage
 from vllm.inputs.data import TokensPrompt
