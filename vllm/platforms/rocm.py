@@ -90,29 +90,33 @@ def with_amdsmi_context(fn):
 
 
 @cache
+def _get_gpu_arch() -> str:
+    if not torch.cuda.is_available():
+        return ""
+    return torch.cuda.get_device_properties("cuda").gcnArchName
+
+
+@cache
 def on_gfx1x() -> bool:
-    GPU_ARCH = torch.cuda.get_device_properties("cuda").gcnArchName
+    GPU_ARCH = _get_gpu_arch()
     return any(arch in GPU_ARCH for arch in ["gfx11", "gfx12"])
 
 
 @cache
 def on_mi3xx() -> bool:
-    GPU_ARCH = torch.cuda.get_device_properties("cuda").gcnArchName
+    GPU_ARCH = _get_gpu_arch()
     return any(arch in GPU_ARCH for arch in ["gfx942", "gfx950"])
 
 
 @cache
-@with_amdsmi_context
 def on_gfx9() -> bool:
-    h = amdsmi_get_processor_handles()[0]
-    asic = amdsmi_get_gpu_asic_info(h)
-    GPU_ARCH = asic["target_graphics_version"]
+    GPU_ARCH = _get_gpu_arch()
     return any(arch in GPU_ARCH for arch in ["gfx90a", "gfx942", "gfx950"])
 
 
 @cache
 def on_gfx950() -> bool:
-    GPU_ARCH = torch.cuda.get_device_properties("cuda").gcnArchName
+    GPU_ARCH = _get_gpu_arch()
     return any(arch in GPU_ARCH for arch in ["gfx950"])
 
 
