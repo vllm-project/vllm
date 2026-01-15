@@ -645,6 +645,26 @@ class VllmConfig:
             else:
                 self.parallel_config.disable_nccl_for_dp_synchronization = False
 
+        if (
+            self.speculative_config is not None
+            and self.speculative_config.async_spec_zero_bubble_mode
+        ):
+            if not self.scheduler_config.async_scheduling:
+                logger.warning_once(
+                    "Disabling async_spec_zero_bubble_mode as async_scheduling is "
+                    "disabled."
+                )
+                self.speculative_config.async_spec_zero_bubble_mode = False
+            elif (
+                self.model_config is not None
+                and not self.model_config.disable_cascade_attn
+            ):
+                logger.warning_once(
+                    "Cascade attention is not compatible with "
+                    "async_spec_zero_bubble_mode now."
+                )
+                self.model_config.disable_cascade_attn = True
+
         from vllm.platforms import current_platform
 
         if (
