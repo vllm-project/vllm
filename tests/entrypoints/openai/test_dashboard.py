@@ -155,6 +155,8 @@ class TestDashboardRouter:
         # Mock healthy engine client
         mock_engine_client = AsyncMock()
         mock_engine_client.check_health = AsyncMock(return_value=None)
+        mock_engine_client.is_sleeping = AsyncMock(return_value=False)
+        mock_engine_client.is_paused = AsyncMock(return_value=False)
 
         app.state.engine_client = mock_engine_client
 
@@ -164,6 +166,8 @@ class TestDashboardRouter:
         assert response.status_code == 200
         data = response.json()
         assert data["status"] == "running"
+        assert data["is_sleeping"] is False
+        assert data["is_paused"] is False
 
     def test_dashboard_api_info_unhealthy_engine(self, app):
         """Test /dashboard/api/info reports unhealthy when engine is dead."""
@@ -172,6 +176,8 @@ class TestDashboardRouter:
         # Mock unhealthy engine client
         mock_engine_client = AsyncMock()
         mock_engine_client.check_health = AsyncMock(side_effect=EngineDeadError())
+        mock_engine_client.is_sleeping = AsyncMock(return_value=False)
+        mock_engine_client.is_paused = AsyncMock(return_value=False)
 
         app.state.engine_client = mock_engine_client
 
@@ -182,6 +188,53 @@ class TestDashboardRouter:
         data = response.json()
         assert data["status"] == "unhealthy"
 
+    def test_dashboard_api_info_sleeping_engine(self, app):
+        """Test /dashboard/api/info reports is_sleeping when engine is sleeping."""
+        # Mock sleeping engine client
+        mock_engine_client = AsyncMock()
+        mock_engine_client.check_health = AsyncMock(return_value=None)
+        mock_engine_client.is_sleeping = AsyncMock(return_value=True)
+        mock_engine_client.is_paused = AsyncMock(return_value=False)
+
+        app.state.engine_client = mock_engine_client
+
+        client = TestClient(app)
+        response = client.get("/dashboard/api/info")
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["status"] == "running"
+        assert data["is_sleeping"] is True
+
+    def test_dashboard_api_info_server_load(self, app):
+        """Test /dashboard/api/info includes server_load when available."""
+        app.state.server_load_metrics = 5
+
+        client = TestClient(app)
+        response = client.get("/dashboard/api/info")
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["server_load"] == 5
+
+    def test_dashboard_api_info_paused_engine(self, app):
+        """Test /dashboard/api/info reports is_paused when engine is paused."""
+        # Mock paused engine client
+        mock_engine_client = AsyncMock()
+        mock_engine_client.check_health = AsyncMock(return_value=None)
+        mock_engine_client.is_sleeping = AsyncMock(return_value=False)
+        mock_engine_client.is_paused = AsyncMock(return_value=True)
+
+        app.state.engine_client = mock_engine_client
+
+        client = TestClient(app)
+        response = client.get("/dashboard/api/info")
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["status"] == "running"
+        assert data["is_paused"] is True
+
     def test_dashboard_api_metrics(self, client):
         """Test GET /dashboard/api/metrics returns metrics."""
         response = client.get("/dashboard/api/metrics")
@@ -191,43 +244,6 @@ class TestDashboardRouter:
 
         # Should return a dict (may be empty if no metrics available)
         assert isinstance(data, dict)
-
-    def test_dashboard_api_metrics_with_lora(self, app):
-        """Test /dashboard/api/metrics includes LoRA info when available."""
-        # Mock serving models with LoRA adapters
-        mock_base_model = MagicMock()
-        mock_base_model.id = "base-model"
-        mock_base_model.root = "base-model"
-        mock_base_model.parent = None
-
-        mock_lora_adapter = MagicMock()
-        mock_lora_adapter.id = "lora-adapter-1"
-        mock_lora_adapter.root = "lora-adapter-1"
-        mock_lora_adapter.parent = "base-model"
-
-        mock_models_response = MagicMock()
-        mock_models_response.data = [mock_base_model, mock_lora_adapter]
-
-        mock_serving_models = AsyncMock()
-        mock_serving_models.show_available_models = AsyncMock(
-            return_value=mock_models_response
-        )
-
-        app.state.openai_serving_models = mock_serving_models
-
-        client = TestClient(app)
-        response = client.get("/dashboard/api/metrics")
-
-        assert response.status_code == 200
-        data = response.json()
-
-        # Should have internal stats with LoRA info
-        assert "internal" in data
-        assert "lora" in data["internal"]
-        assert data["internal"]["lora"]["count"] == 1
-        assert len(data["internal"]["lora"]["adapters"]) == 1
-        assert data["internal"]["lora"]["adapters"][0]["id"] == "lora-adapter-1"
-        assert data["internal"]["lora"]["adapters"][0]["parent"] == "base-model"
 
 
 class TestAttachRouter:

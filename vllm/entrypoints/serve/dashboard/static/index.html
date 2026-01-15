@@ -155,6 +155,50 @@
             white-space: nowrap;
         }
 
+        .load-indicator {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            padding: 0 10px;
+            border-left: 1px solid var(--border);
+            font-size: 11px;
+            color: var(--muted-foreground);
+        }
+
+        .load-indicator .load-label {
+            font-weight: 500;
+        }
+
+        .load-indicator .load-value {
+            font-family: var(--font-mono);
+            color: var(--vllm-blue);
+            font-weight: 600;
+        }
+
+        .sleeping-indicator, .paused-indicator {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            padding: 4px 10px;
+            margin-left: 8px;
+            background: rgba(234, 179, 8, 0.15);
+            border: 1px solid var(--warning);
+            border-radius: calc(var(--radius) - 2px);
+            font-size: 11px;
+            font-weight: 600;
+            color: var(--warning);
+        }
+
+        .paused-indicator {
+            background: rgba(239, 68, 68, 0.15);
+            border-color: var(--error);
+            color: var(--error);
+        }
+
+        .sleeping-indicator.hidden, .paused-indicator.hidden {
+            display: none;
+        }
+
         .theme-toggle {
             display: flex;
             align-items: center;
@@ -716,6 +760,16 @@
                 <span class="version" id="version">vLLM</span>
             </div>
             <div class="model-indicator" id="model-name">-</div>
+            <div class="load-indicator">
+                <span class="load-label">Load:</span>
+                <span class="load-value" id="server-load">-</span>
+            </div>
+            <div class="sleeping-indicator hidden" id="sleeping-indicator">
+                Sleeping
+            </div>
+            <div class="paused-indicator hidden" id="paused-indicator">
+                Paused
+            </div>
             <div style="flex:1"></div>
             <button class="theme-toggle" id="theme-toggle" onclick="toggleTheme()" title="Toggle light/dark theme">
                 <span class="icon" id="theme-icon">
@@ -933,6 +987,50 @@
                     document.getElementById('model-name').textContent = currentModel;
                 }
 
+                // Update server load
+                const loadEl = document.getElementById('server-load');
+                if (data.server_load != null) {
+                    loadEl.textContent = data.server_load;
+                } else {
+                    loadEl.textContent = '-';
+                }
+
+                // Update sleeping status
+                const sleepingEl = document.getElementById('sleeping-indicator');
+                const pausedEl = document.getElementById('paused-indicator');
+                const statusDot = document.getElementById('status-dot');
+
+                if (data.is_sleeping === true) {
+                    sleepingEl.classList.remove('hidden');
+                    statusDot.style.background = 'var(--warning)';
+                    statusDot.style.boxShadow = '0 0 10px var(--warning)';
+                } else {
+                    sleepingEl.classList.add('hidden');
+                }
+
+                if (data.is_paused === true) {
+                    pausedEl.classList.remove('hidden');
+                    statusDot.style.background = 'var(--error)';
+                    statusDot.style.boxShadow = '0 0 10px var(--error)';
+                } else {
+                    pausedEl.classList.add('hidden');
+                }
+
+                // Set status dot color based on state priority: error > paused > sleeping > running
+                if (data.status === 'unhealthy') {
+                    statusDot.style.background = 'var(--error)';
+                    statusDot.style.boxShadow = '0 0 10px var(--error)';
+                } else if (data.is_paused === true) {
+                    statusDot.style.background = 'var(--error)';
+                    statusDot.style.boxShadow = '0 0 10px var(--error)';
+                } else if (data.is_sleeping === true) {
+                    statusDot.style.background = 'var(--warning)';
+                    statusDot.style.boxShadow = '0 0 10px var(--warning)';
+                } else if (data.status === 'running') {
+                    statusDot.style.background = 'var(--success)';
+                    statusDot.style.boxShadow = '0 0 10px var(--success)';
+                }
+
                 // Render config and env
                 fetchConfig(data);
             } catch (e) {
@@ -1092,101 +1190,7 @@
                 </div>`;
             }
 
-            // Engine Stats Section (always show)
-            html += `<div class="config-item" style="background:rgba(48,162,255,0.1);margin-top:8px;border-left:3px solid var(--vllm-blue)">
-                <span class="config-key" style="color:var(--vllm-blue);font-weight:600">Engine Stats</span>
-            </div>`;
-
-            const internal = metricsData.internal;
-
-            // 1. Perf Stats (MFU) - top
-            const flops = internal?.perf?.num_flops_per_gpu;
-            const readBytes = internal?.perf?.num_read_bytes_per_gpu;
-            const writeBytes = internal?.perf?.num_write_bytes_per_gpu;
-            html += `<div class="config-item" data-tooltip="FLOPs per GPU in last iteration">
-                <span class="config-key">FLOPs/GPU</span>
-                <span class="config-val">${flops != null ? formatLargeNumber(flops) : '-'}</span>
-            </div>`;
-            html += `<div class="config-item" data-tooltip="Read bytes per GPU in last iteration">
-                <span class="config-key">Read Bytes/GPU</span>
-                <span class="config-val">${readBytes != null ? formatBytes(readBytes) : '-'}</span>
-            </div>`;
-            html += `<div class="config-item" data-tooltip="Write bytes per GPU in last iteration">
-                <span class="config-key">Write Bytes/GPU</span>
-                <span class="config-val">${writeBytes != null ? formatBytes(writeBytes) : '-'}</span>
-            </div>`;
-
-            // 2. CUDAGraph Stats
-            html += `<div class="config-item">
-                <span class="config-key">CUDAGraph Captured</span>
-                <span class="config-val">${internal?.cudagraph?.captured != null ? internal.cudagraph.captured : '-'}</span>
-            </div>`;
-            if (internal?.cudagraph?.recent?.length > 0) {
-                html += `<div class="config-item" style="background:rgba(48,162,255,0.05);margin-top:4px;border-left:2px solid var(--vllm-blue)">
-                    <span class="config-key" style="color:var(--muted-foreground);font-size:10px">CUDAGraph Recent</span>
-                </div>`;
-                for (const cg of internal.cudagraph.recent.slice(0, 5)) {
-                    const padding = cg.num_padded_tokens - cg.num_unpadded_tokens;
-                    const paddingPct = cg.num_padded_tokens > 0 ? (padding / cg.num_padded_tokens * 100).toFixed(1) : 0;
-                    html += `<div class="config-item" data-tooltip="Mode: ${cg.runtime_mode}, Unpadded: ${cg.num_unpadded_tokens}, Padded: ${cg.num_padded_tokens}">
-                        <span class="config-key" style="font-size:10px">${cg.runtime_mode}</span>
-                        <span class="config-val" style="font-size:10px">${cg.num_unpadded_tokens}→${cg.num_padded_tokens} (${paddingPct}% pad)</span>
-                    </div>`;
-                }
-            }
-
-            // 3. KV Cache Stats
-            const kvEvictions = internal?.kv_cache?.eviction_events;
-            html += `<div class="config-item">
-                <span class="config-key">KV Eviction Events</span>
-                <span class="config-val">${kvEvictions != null ? kvEvictions : '-'}</span>
-            </div>`;
-
-            // 4. LoRA Stats - bottom
-            const loraCount = internal?.lora?.count || 0;
-            html += `<div class="config-item">
-                <span class="config-key">LoRA Adapters Loaded</span>
-                <span class="config-val">${loraCount > 0 ? loraCount : '-'}</span>
-            </div>`;
-            if (internal?.lora?.adapters?.length > 0) {
-                for (const adapter of internal.lora.adapters.slice(0, 5)) {
-                    html += `<div class="config-item" data-tooltip="Parent model: ${adapter.parent}">
-                        <span class="config-key" style="font-size:10px;padding-left:12px">${adapter.id}</span>
-                        <span class="config-val" style="font-size:10px;color:var(--muted-foreground)">${adapter.parent}</span>
-                    </div>`;
-                }
-            }
-            const waitingLora = internal?.scheduler?.waiting_lora_adapters;
-            const runningLora = internal?.scheduler?.running_lora_adapters;
-            html += `<div class="config-item">
-                <span class="config-key">Waiting LoRA Adapters</span>
-                <span class="config-val">${waitingLora != null ? waitingLora : '-'}</span>
-            </div>`;
-            html += `<div class="config-item">
-                <span class="config-key">Running LoRA Adapters</span>
-                <span class="config-val">${runningLora != null ? runningLora : '-'}</span>
-            </div>`;
-
             statsList.innerHTML = html || '<div class="config-item"><span class="config-key">No stats available</span></div>';
-        }
-
-        // Format large numbers with K/M/G suffixes
-        function formatLargeNumber(num) {
-            if (num === 0) return '0';
-            if (num >= 1e12) return (num / 1e12).toFixed(2) + 'T';
-            if (num >= 1e9) return (num / 1e9).toFixed(2) + 'G';
-            if (num >= 1e6) return (num / 1e6).toFixed(2) + 'M';
-            if (num >= 1e3) return (num / 1e3).toFixed(2) + 'K';
-            return num.toString();
-        }
-
-        // Format bytes with appropriate unit
-        function formatBytes(bytes) {
-            if (bytes === 0) return '0 B';
-            const k = 1024;
-            const sizes = ['B', 'KB', 'MB', 'GB', 'TB'];
-            const i = Math.floor(Math.log(bytes) / Math.log(k));
-            return (bytes / Math.pow(k, i)).toFixed(2) + ' ' + sizes[i];
         }
 
         function getNestedValue(obj, path) {
@@ -1368,11 +1372,62 @@
             input.focus();
         }
 
+        // Refresh dynamic server info (load, sleeping, paused status)
+        async function refreshServerStatus() {
+            try {
+                const resp = await fetch('/dashboard/api/info');
+                const data = await resp.json();
+
+                // Update server load
+                const loadEl = document.getElementById('server-load');
+                if (data.server_load != null) {
+                    loadEl.textContent = data.server_load;
+                } else {
+                    loadEl.textContent = '-';
+                }
+
+                // Update sleeping and paused status
+                const sleepingEl = document.getElementById('sleeping-indicator');
+                const pausedEl = document.getElementById('paused-indicator');
+                const statusDot = document.getElementById('status-dot');
+
+                if (data.is_sleeping === true) {
+                    sleepingEl.classList.remove('hidden');
+                } else {
+                    sleepingEl.classList.add('hidden');
+                }
+
+                if (data.is_paused === true) {
+                    pausedEl.classList.remove('hidden');
+                } else {
+                    pausedEl.classList.add('hidden');
+                }
+
+                // Set status dot color based on state priority
+                if (data.status === 'unhealthy') {
+                    statusDot.style.background = 'var(--error)';
+                    statusDot.style.boxShadow = '0 0 10px var(--error)';
+                } else if (data.is_paused === true) {
+                    statusDot.style.background = 'var(--error)';
+                    statusDot.style.boxShadow = '0 0 10px var(--error)';
+                } else if (data.is_sleeping === true) {
+                    statusDot.style.background = 'var(--warning)';
+                    statusDot.style.boxShadow = '0 0 10px var(--warning)';
+                } else if (data.status === 'running') {
+                    statusDot.style.background = 'var(--success)';
+                    statusDot.style.boxShadow = '0 0 10px var(--success)';
+                }
+            } catch (e) {
+                console.error('Status refresh error:', e);
+            }
+        }
+
         // Init
         async function init() {
             await fetchServerInfo();  // Also fetches config & env
             await fetchMetrics();
             setInterval(fetchMetrics, 5000);
+            setInterval(refreshServerStatus, 5000);  // Refresh load/sleeping status
             // Auto focus chat input
             document.getElementById('chat-input').focus();
         }

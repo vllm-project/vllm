@@ -5,9 +5,8 @@ Dashboard router for vLLM web UI.
 
 Provides endpoints for:
 - /dashboard - Main dashboard HTML page
-- /dashboard/api/info - Server information JSON (includes full config & env)
+- /dashboard/api/info - Server information JSON (config, env, load, status)
 - /dashboard/api/metrics - Metrics JSON
-- /dashboard/api/collect-env - Collect environment info for debugging
 """
 
 import pathlib
@@ -162,6 +161,34 @@ async def dashboard_info(request: Request) -> JSONResponse:
     except Exception as e:
         logger.warning("Failed to get explicit_args for dashboard: %s", e)
 
+    # Get server load metrics
+    try:
+        server_load = getattr(request.app.state, "server_load_metrics", None)
+        if server_load is not None:
+            info["server_load"] = server_load
+    except Exception as e:
+        logger.debug("Failed to get server_load for dashboard: %s", e)
+
+    # Check if engine is sleeping (only available in dev mode)
+    try:
+        engine_client = getattr(request.app.state, "engine_client", None)
+        if engine_client is not None:
+            is_sleeping_method = getattr(engine_client, "is_sleeping", None)
+            if is_sleeping_method is not None:
+                info["is_sleeping"] = await is_sleeping_method()
+    except Exception as e:
+        logger.debug("Failed to check is_sleeping for dashboard: %s", e)
+
+    # Check if engine is paused (for RLHF workflows)
+    try:
+        engine_client = getattr(request.app.state, "engine_client", None)
+        if engine_client is not None:
+            is_paused_method = getattr(engine_client, "is_paused", None)
+            if is_paused_method is not None:
+                info["is_paused"] = await is_paused_method()
+    except Exception as e:
+        logger.debug("Failed to check is_paused for dashboard: %s", e)
+
     return JSONResponse(content=info)
 
 
@@ -210,56 +237,7 @@ async def dashboard_metrics(request: Request) -> JSONResponse:
     except Exception:
         pass
 
-    # Get internal engine stats (only available in-process)
-    # Always return internal structure so frontend can show placeholders
-    internal: dict = {
-        "perf": None,
-        "cudagraph": None,
-        "kv_cache": None,
-        "scheduler": None,
-        "lora": None,
-    }
-
-    try:
-        engine_client = getattr(request.app.state, "engine_client", None)
-        if engine_client is not None:
-            # Try to get internal stats from the engine
-            internal_stats = getattr(engine_client, "get_internal_stats", None)
-            if internal_stats is not None:
-                stats = await internal_stats()
-                if stats:
-                    internal.update(stats)
-    except Exception as e:
-        logger.debug("Failed to get internal engine stats: %s", e)
-
-    # Try to get LoRA adapter info from serving models
-    try:
-        serving_models = getattr(request.app.state, "openai_serving_models", None)
-        if serving_models is not None:
-            lora_stats = await _get_lora_stats(serving_models)
-            if lora_stats:
-                internal["lora"] = lora_stats
-    except Exception as e:
-        logger.debug("Failed to get LoRA stats: %s", e)
-
-    metrics["internal"] = internal
-
     return JSONResponse(content=metrics)
-
-
-async def _get_lora_stats(serving_models) -> dict | None:
-    """Get LoRA adapter statistics from serving models."""
-    try:
-        models_response = await serving_models.show_available_models()
-        lora_adapters = [m for m in models_response.data if m.parent is not None]
-        if lora_adapters:
-            return {
-                "count": len(lora_adapters),
-                "adapters": [{"id": a.id, "parent": a.parent} for a in lora_adapters],
-            }
-    except Exception:
-        pass
-    return None
 
 
 def attach_router(app: FastAPI) -> None:
