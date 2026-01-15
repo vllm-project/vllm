@@ -248,6 +248,8 @@ def scaled_dequantize(
 
     if x_s.ndim == 0:  # scalar
         x_s = x_s.unsqueeze(-1).unsqueeze(-1)  # convert to (1, 1) tensor
+    if x_s.numel() == 1:  # scalar
+        x_s = x_s.unsqueeze(0)
     if x_s.ndim == 1:
         if group_shape is None:
             raise AssertionError(
