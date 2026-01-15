@@ -458,13 +458,14 @@ class InputProcessor:
         self._validate_lora(lora_request)
         self._validate_params(params)
 
-        data_parallel_size = self.vllm_config.parallel_config.data_parallel_size
-        if data_parallel_rank is not None and not (
-            0 <= data_parallel_rank < data_parallel_size
-        ):
+        parallel_config = self.vllm_config.parallel_config
+        dp_size = parallel_config.data_parallel_size
+        dp_local_size = parallel_config.data_parallel_size_local
+        num_ranks = dp_local_size if parallel_config.local_engines_only else dp_size
+        if data_parallel_rank is not None and not (0 <= data_parallel_rank < num_ranks):
             raise ValueError(
                 f"data_parallel_rank {data_parallel_rank} "
-                f"is out of range [0, {data_parallel_size})."
+                f"is out of range [0, {num_ranks})."
             )
 
         if arrival_time is None:
