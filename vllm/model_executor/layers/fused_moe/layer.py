@@ -1923,7 +1923,6 @@ class FusedMoE(CustomOp):
                 hidden_states, router_logits, has_separate_shared_experts
             )
 
-        # TODO(rob): remove this once we migrate to internal use of MK.
         do_naive_dispatch_combine: bool = self.dp_size > 1 and not (
             isinstance(self.quant_method, FusedMoEModularMethod)
             or self.quant_method.supports_mk_interally
