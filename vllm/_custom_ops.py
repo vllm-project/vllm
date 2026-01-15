@@ -507,7 +507,7 @@ def silu_and_mul_per_block_quant(
             (num_groups, num_tokens),
             device=input.device,
             dtype=torch.float32,
-        ).transpose(0, 1)  # Transpose to get [num_tokens, num_groups] view
+        )
     else:
         scales = torch.empty(
             (num_tokens, num_groups),
