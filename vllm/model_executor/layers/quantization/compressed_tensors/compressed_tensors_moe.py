@@ -911,9 +911,7 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
             per_act_token_quant=(
                 self.input_quant.strategy == QuantizationStrategy.TOKEN
             ),
-            per_out_ch_quant=(
-                self.weight_quant.strategy == QuantizationStrategy.CHANNEL
-            ),
+            per_out_ch_quant=(self.input_quant.strategy == QuantizationStrategy.TOKEN),
             block_shape=self.weight_block_size,
         )
 
