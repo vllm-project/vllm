@@ -920,16 +920,19 @@ class NixlConnectorWorker:
                     path = f"{SYS_CPU}/cpu{cpu_id}/topology/thread_siblings_list"
 
                     if os.path.exists(path):
-                        # parse_cpu_list '0-3,8-11' -> [0,1,2,3,8,9,10,11]
-                        s = open(path).read()
-                        cpus = []
-                        for part in s.strip().split(","):
-                            if "-" in part:
-                                a, b = map(int, part.split("-"))
-                                cpus.extend(range(a, b + 1))
-                            else:
-                                cpus.append(int(part))
-                        siblings = cpus
+                        try:
+                            with open(path) as f:
+                                s = f.read()
+                            cpus = []
+                            for part in s.strip().split(","):
+                                if "-" in part:
+                                    a, b = map(int, part.split("-"))
+                                    cpus.extend(range(a, b + 1))
+                                else:
+                                    cpus.append(int(part))
+                            siblings = cpus if cpus else [cpu_id]
+                        except (IOError, ValueError):
+                            siblings = [cpu_id]
                     else:
                         siblings = [cpu_id]
 
