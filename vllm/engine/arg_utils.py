@@ -402,6 +402,7 @@ class EngineArgs:
     data_parallel_rpc_port: int | None = None
     data_parallel_hybrid_lb: bool = False
     data_parallel_external_lb: bool = False
+    data_parallel_heartbeat: bool = False
     data_parallel_backend: str = ParallelConfig.data_parallel_backend
     enable_expert_parallel: bool = ParallelConfig.enable_expert_parallel
     all2all_backend: str = ParallelConfig.all2all_backend
@@ -847,6 +848,11 @@ class EngineArgs:
             "--data-parallel-external-lb",
             "-dpe",
             **parallel_kwargs["data_parallel_external_lb"],
+        )
+        parallel_group.add_argument(
+            "--data-parallel-heartbeat",
+            "-dphb",
+            **parallel_kwargs["data_parallel_heartbeat"],
         )
         parallel_group.add_argument(
             "--enable-expert-parallel",
@@ -1585,6 +1591,7 @@ class EngineArgs:
             data_parallel_size=self.data_parallel_size,
             data_parallel_rank=self.data_parallel_rank or 0,
             data_parallel_external_lb=data_parallel_external_lb,
+            data_parallel_heartbeat=self.data_parallel_heartbeat,
             data_parallel_size_local=data_parallel_size_local,
             master_addr=self.master_addr,
             master_port=self.master_port,

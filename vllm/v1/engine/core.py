@@ -738,7 +738,11 @@ class EngineCoreProc(EngineCore):
                     raise RuntimeError("Input socket thread died during startup")
                 assert addresses.coordinator_input is not None
                 logger.info("Waiting for READY message from DP Coordinator...")
-            if self.has_coordinator:
+            if (
+                self.has_coordinator
+                and vllm_config.parallel_config.data_parallel_heartbeat
+            ):
+                logger.info("Starting DP Coordinator heartbeat watchdog...")
                 self._start_coord_watchdog()
 
     @contextmanager
@@ -1093,7 +1097,13 @@ class EngineCoreProc(EngineCore):
                         "DP coordinator heartbeat timed out (>%ss); exiting.",
                         timeout_s,
                     )
-                    os._exit(1)
+                    self.input_queue.put_nowait(
+                        (
+                            EngineCoreRequestType.EXECUTOR_FAILED,
+                            "DP coordinator heartbeat timed out.",
+                        )
+                    )
+                    return
 
         self._coord_watchdog_thread = threading.Thread(
             target=monitor, daemon=True, name="DPCoordWatchdog"

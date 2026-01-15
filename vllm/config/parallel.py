@@ -132,6 +132,12 @@ class ParallelConfig:
     between local data parallel ranks, but an external LB balances
     between vLLM nodes/replicas. Set explicitly in conjunction with
     --data-parallel-start-rank."""
+
+    data_parallel_heartbeat: bool = False
+    """Whether to enable heartbeat messages for data parallel
+    communication. This can help detect failed data parallel ranks
+    more quickly."""
+
     is_moe_model: bool | None = None
     """Whether the deployed model is MoE (if known)."""
     enable_expert_parallel: bool = False

@@ -227,7 +227,9 @@ class DPCoordinatorProc:
                         (EngineCoreRequestType.HEARTBEAT.value, b"")
                     )
                     last_heartbeat_time = now
-                    logger.info("Send HEARTBEAT multipart to engines from coordinator.")
+                    logger.debug(
+                        "Send HEARTBEAT multipart to engines from coordinator."
+                    )
 
                 events = poller.poll(timeout=max(min_timeout, wait_for - elapsed))
                 if not events:
