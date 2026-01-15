@@ -254,7 +254,7 @@ class MultiModalRegistry:
         observability_config: "ObservabilityConfig | None" = None,
         tokenizer: TokenizerLike | None = None,
     ) -> InputProcessingContext:
-        if tokenizer is None and not model_config.skip_tokenizer_init:
+        if tokenizer is None:
             tokenizer = cached_tokenizer_from_config(model_config)
 
         return InputProcessingContext(
