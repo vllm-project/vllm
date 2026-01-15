@@ -125,6 +125,16 @@ class ModelOptFp8KVCacheMethod(BaseKVCacheMethod):
         super().__init__(quant_config)
 
 
+class ModelOptNvFp4KVCacheMethod(BaseKVCacheMethod):
+    """
+    Supports loading kv-cache scaling factors from NVFP4 checkpoints.
+    Uses Python-layer quantization/dequantization with scaled_fp4_quant kernel.
+    """
+
+    def __init__(self, quant_config: "ModelOptQuantConfigBase"):
+        super().__init__(quant_config)
+
+
 class ModelOptQuantConfigBase(QuantizationConfig):
     LinearMethodCls: type = LinearMethodBase
     FusedMoEMethodCls: type = FusedMoEMethodBase
@@ -1559,7 +1569,7 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
 
 ModelOptNvFp4Config.LinearMethodCls = ModelOptNvFp4LinearMethod
 ModelOptNvFp4Config.FusedMoEMethodCls = ModelOptNvFp4FusedMoE
-ModelOptNvFp4Config.KVCacheMethodCls = ModelOptFp8KVCacheMethod
+ModelOptNvFp4Config.KVCacheMethodCls = ModelOptNvFp4KVCacheMethod
 
 
 class ModelOptMxFp8Config(ModelOptQuantConfigBase):

@@ -67,6 +67,7 @@ class AttentionSpec(KVCacheSpec):
     head_size: int
     dtype: torch.dtype
     page_size_padded: int | None = None
+    cache_dtype_str: str | None = None  # For NVFP4 and other quantized cache types
 
     @property
     def page_size_bytes(self) -> int:
@@ -78,6 +79,21 @@ class AttentionSpec(KVCacheSpec):
 
     @property
     def real_page_size_bytes(self) -> int:
+        # For NVFP4, data is packed: 2 FP4 values per uint8, so head_size/2
+        # Scales are stored in kv_cache itself (as float32), one per 16 elements
+        if self.cache_dtype_str == "nvfp4":
+            # NVFP4: packed data (head_size/2 uint8) + scales
+            # (head_size/16 * 4 bytes float32)
+            packed_data_size = (self.head_size // 2) * get_dtype_size(
+                self.dtype
+            )  # uint8 = 1 byte
+            scale_size = (self.head_size // 16) * 4  # float32 = 4 bytes
+            return (
+                2
+                * self.block_size
+                * self.num_kv_heads
+                * (packed_data_size + scale_size)
+            )
         return (
             2
             * self.block_size
@@ -153,6 +169,15 @@ class FullAttentionSpec(AttentionSpec):
         assert not any(isinstance(spec, MLAAttentionSpec) for spec in specs), (
             "MLAAttentionSpec should be merged in MLAAttentionSpec.merge"
         )
+        cache_dtype_str_set = set(
+            spec.cache_dtype_str for spec in specs if spec.cache_dtype_str is not None
+        )
+        assert len(cache_dtype_str_set) <= 1, (
+            "All attention layers in the same KV cache group must use the same "
+            "cache dtype string."
+        )
+        cache_dtype_str = cache_dtype_str_set.pop() if cache_dtype_str_set else None
+
         merged_spec = cls(
             block_size=specs[0].block_size,
             num_kv_heads=specs[0].num_kv_heads,
@@ -160,6 +185,7 @@ class FullAttentionSpec(AttentionSpec):
             head_size_v=specs[0].head_size_v,
             dtype=specs[0].dtype,
             page_size_padded=specs[0].page_size_padded,
+            cache_dtype_str=cache_dtype_str,
             sliding_window=cls.merge_window_sizes(sliding_window),
             attention_chunk_size=cls.merge_window_sizes(attention_chunk_size),
         )
@@ -179,6 +205,18 @@ class FullAttentionSpec(AttentionSpec):
 
     @property
     def real_page_size_bytes(self) -> int:
+        # For NVFP4, data is packed: 2 FP4 values per uint8
+        # Scales are stored in kv_cache itself (as float32), one per 16 elements
+        if self.cache_dtype_str == "nvfp4":
+            # NVFP4: packed data (head_size/2 uint8) + scales
+            # (head_size/16 * 4 bytes float32)
+            packed_data_size = (
+                (self.head_size + self.head_size_v) // 2
+            ) * get_dtype_size(self.dtype)  # uint8 = 1 byte
+            scale_size = (
+                (self.head_size + self.head_size_v) // 16
+            ) * 4  # float32 = 4 bytes
+            return self.block_size * self.num_kv_heads * (packed_data_size + scale_size)
         return (
             self.block_size
             * self.num_kv_heads

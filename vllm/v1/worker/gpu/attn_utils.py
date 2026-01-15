@@ -62,6 +62,7 @@ def init_attn_backend(
 
 def _allocate_kv_cache(kv_cache_config: KVCacheConfig, device: torch.device):
     kv_cache_raw_tensors: dict[str, torch.Tensor] = {}
+
     for kv_cache_tensor in kv_cache_config.kv_cache_tensors:
         tensor = torch.zeros(kv_cache_tensor.size, dtype=torch.int8, device=device)
         for layer_name in kv_cache_tensor.shared_by:
@@ -83,6 +84,7 @@ def _reshape_kv_cache(
     attn_backends: dict[str, AttentionBackend],
 ) -> dict[str, torch.Tensor]:
     kv_caches: dict[str, torch.Tensor] = {}
+
     for kv_cache_group_spec in kv_cache_config.kv_cache_groups:
         kv_cache_spec = kv_cache_group_spec.kv_cache_spec
         assert isinstance(kv_cache_spec, AttentionSpec)
@@ -97,6 +99,7 @@ def _reshape_kv_cache(
                 kv_cache_spec.block_size,
                 kv_cache_spec.num_kv_heads,
                 kv_cache_spec.head_size,
+                cache_dtype_str=kv_cache_spec.cache_dtype_str,
             )
 
             # FIXME(woosuk): Add kv_cache_stride_order to all attention backends.

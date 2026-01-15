@@ -72,7 +72,9 @@ void indexer_k_quant_and_cache(
     torch::Tensor& kv_cache,      // [num_blocks, block_size, cache_stride]
     torch::Tensor& slot_mapping,  // [num_tokens]
     int64_t quant_block_size,     // quantization block size
-    const std::string& scale_fmt);
+    const std::string&
+        scale_fmt  // For NVFP4, scales are stored in kv_cache itself
+);
 
 // Extract function to gather quantized K cache
 void cp_gather_indexer_k_quant_cache(
