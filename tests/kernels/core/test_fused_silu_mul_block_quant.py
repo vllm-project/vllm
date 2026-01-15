@@ -1,0 +1,239 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
+import pytest
+import torch
+import torch.nn.functional as F
+
+import vllm._custom_ops as ops
+from tests.kernels.utils import opcheck
+from vllm.model_executor.layers.quantization.utils.fp8_utils import (
+    per_token_group_quant_fp8,
+)
+from vllm.platforms import current_platform
+
+DTYPES = [torch.float16, torch.bfloat16]
+QUANT_DTYPES = [torch.float8_e4m3fn]
+VEC_HIDDEN_SIZES = [1024, 1025, 1027, 1029]
+# Avoid combinatorial explosion with full Cartesian product
+NUM_TOKENS_HIDDEN_SIZES = [
+    *[(1, i) for i in [64, *VEC_HIDDEN_SIZES, 2048, 5120]],
+    *[(16, i) for i in [64, *VEC_HIDDEN_SIZES, 5120]],
+    *[(128, i) for i in [64, *VEC_HIDDEN_SIZES]],
+    *[(512, i) for i in [64, 5120]],
+]
+
+SCALE_UBS = [False]  # Scale upper bound not supported yet
+GROUP_SIZES = [[1, 64], [1, 128]]
+IS_SCALE_TRANSPOSED = [False, True]
+SEEDS = [0]
+CUDA_DEVICES = [
+    f"cuda:{i}" for i in range(1 if torch.cuda.device_count() == 1 else 2)
+]
+
+
+def as_float32_tensor(x: float | torch.Tensor) -> torch.Tensor:
+    return torch.as_tensor(x, dtype=torch.float32, device="cuda")
+
+
+def ref_silu_and_mul_per_block_quant(
+    x: torch.Tensor,
+    quant_dtype: torch.dtype,
+    scale_ub: torch.Tensor | None,
+    group_size: list[int],
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Reference implementation: unfused SiLU+Mul then group quantization."""
+    hidden = x.shape[-1] // 2
+    gate, up = x.split(hidden, dim=-1)
+    
+    # SiLU(gate) * up
+    silu_out = F.silu(gate) * up
+    
+    # Group quantize
+    if quant_dtype == current_platform.fp8_dtype():
+        torch_out, scales = per_token_group_quant_fp8(
+            silu_out, group_size=group_size[1], use_ue8m0=False
+        )
+    else:
+        raise ValueError(f"Unsupported quant_dtype: {quant_dtype}")
+    
+    return torch_out, scales
+
+
+def ref_impl(
+    x: torch.Tensor,
+    quant_dtype: torch.dtype,
+    scale_ub: torch.Tensor | None,
+    group_size: list[int],
+) -> tuple[torch.Tensor, torch.Tensor]:
+    return ref_silu_and_mul_per_block_quant(x, quant_dtype, scale_ub, group_size)
+
+
+def ops_impl(
+    x: torch.Tensor,
+    quant_dtype: torch.dtype,
+    scale_ub: torch.Tensor | None,
+    group_size: list[int],
+    is_scale_transposed: bool,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Fused kernel implementation."""
+    out, scales = ops.silu_and_mul_per_block_quant(
+        x, group_size, quant_dtype, scale_ub, is_scale_transposed
+    )
+    
+    # Transpose scales back if needed for comparison
+    if is_scale_transposed:
+        scales = scales.t().contiguous()
+    
+    return out, scales
+
+
+@pytest.mark.parametrize("num_tokens, hidden_size", NUM_TOKENS_HIDDEN_SIZES)
+@pytest.mark.parametrize("has_scale_ub", SCALE_UBS)
+@pytest.mark.parametrize("dtype", DTYPES)
+@pytest.mark.parametrize("quant_dtype", QUANT_DTYPES)
+@pytest.mark.parametrize("group_size", GROUP_SIZES)
+@pytest.mark.parametrize("is_scale_transposed", IS_SCALE_TRANSPOSED)
+@pytest.mark.parametrize("seed", SEEDS)
+@pytest.mark.parametrize("device", CUDA_DEVICES)
+@torch.inference_mode()
+def test_silu_and_mul_per_block_quant(
+    default_vllm_config,
+    num_tokens: int,
+    hidden_size: int,
+    has_scale_ub: bool,
+    dtype: torch.dtype,
+    quant_dtype: torch.dtype,
+    group_size: list[int],
+    is_scale_transposed: bool,
+    seed: int,
+    device: str,
+) -> None:
+    """Test SiLU+Mul+Block Quantization kernel correctness."""
+    torch.random.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed(seed)
+    torch.set_default_device(device)
+    torch.cuda.set_device(device)
+
+    if hidden_size % group_size[1] != 0:
+        # Skip invalid configurations
+        return
+
+    if has_scale_ub:
+        # Scale upper bound not implemented yet
+        pytest.skip("Scale upper bound not yet supported")
+
+    # Make inputs: [num_tokens, hidden_size * 2] for [gate || up]
+    scale = 1 / hidden_size
+    x = torch.randn(num_tokens, hidden_size * 2, dtype=dtype, device=device) * scale
+    scale_ub = None
+
+    # Reference implementation
+    ref_out, ref_scales = ref_impl(x, quant_dtype, scale_ub, group_size)
+    
+    # Fused kernel implementation
+    ops_out, ops_scales = ops_impl(
+        x, quant_dtype, scale_ub, group_size, is_scale_transposed
+    )
+
+    # Check output dtype
+    assert ref_out.dtype == quant_dtype
+    assert ops_out.dtype == quant_dtype
+
+    # Check scale correctness
+    assert torch.allclose(ref_scales, ops_scales, rtol=1e-5, atol=1e-5), \
+        f"Scale mismatch: max diff = {(ref_scales - ops_scales).abs().max()}"
+
+    # Check output correctness
+    a = ref_out.to(dtype=torch.float32)
+    b = ops_out.to(dtype=torch.float32)
+    ok = torch.allclose(a, b, atol=1.0)  # FP8 has limited precision
+    
+    if not ok:
+        # Fallback: compare dequantized values with relaxed tolerance
+        a_deq = a * ref_scales.repeat_interleave(group_size[1], dim=1)
+        b_deq = b * ops_scales.repeat_interleave(group_size[1], dim=1)
+        ok = torch.allclose(a_deq, b_deq, rtol=5e-2, atol=5e-2)
+        
+        if not ok:
+            max_diff = (a_deq - b_deq).abs().max()
+            print(f"Max dequantized difference: {max_diff}")
+    
+    assert ok, "Output values don't match within tolerance"
+
+    # Test opcheck for correctness verification
+    output = torch.empty(num_tokens, hidden_size, device=device, dtype=quant_dtype)
+    num_groups = hidden_size // group_size[1]
+    if is_scale_transposed:
+        scales = torch.empty(num_groups, num_tokens, device=device, dtype=torch.float32)
+    else:
+        scales = torch.empty(num_tokens, num_groups, device=device, dtype=torch.float32)
+
+    opcheck(
+        torch.ops._C.silu_and_mul_per_block_quant,
+        (output, x, scales, group_size[1], scale_ub, is_scale_transposed),
+    )
+
+
+@pytest.mark.parametrize("dtype", [torch.float16])
+@pytest.mark.parametrize("hidden_size", [4096])
+@pytest.mark.parametrize("num_tokens", [128])
+@pytest.mark.parametrize("group_size", [[1, 128]])
+def test_silu_block_quant_shapes(
+    default_vllm_config, dtype: torch.dtype, hidden_size: int, num_tokens: int, group_size: list[int]
+):
+    """Test that output shapes are correct."""
+    torch.set_default_device("cuda")
+    
+    x = torch.randn(num_tokens, hidden_size * 2, dtype=dtype, device="cuda")
+    
+    # Test row-major scales
+    out, scales = ops.silu_and_mul_per_block_quant(
+        x,
+        group_size=group_size,
+        quant_dtype=torch.float8_e4m3fn,
+        is_scale_transposed=False,
+    )
+    
+    assert out.shape == (num_tokens, hidden_size)
+    assert scales.shape == (num_tokens, hidden_size // group_size[1])
+    
+    # Test column-major scales
+    out, scales = ops.silu_and_mul_per_block_quant(
+        x,
+        group_size=group_size,
+        quant_dtype=torch.float8_e4m3fn,
+        is_scale_transposed=True,
+    )
+    
+    assert out.shape == (num_tokens, hidden_size)
+    assert scales.shape == (hidden_size // group_size[1], num_tokens)
+
+
+@pytest.mark.parametrize("dtype", [torch.float16])
+@pytest.mark.parametrize("batch_size", [1, 16, 256])
+@pytest.mark.parametrize("hidden_size", [1024, 5120, 14336])
+def test_silu_block_quant_edge_cases(
+    default_vllm_config, dtype: torch.dtype, batch_size: int, hidden_size: int
+):
+    """Test edge cases: single token, large batch, large hidden size."""
+    torch.set_default_device("cuda")
+    
+    x = torch.randn(batch_size, hidden_size * 2, dtype=dtype, device="cuda")
+    
+    out, scales = ops.silu_and_mul_per_block_quant(
+        x,
+        group_size=[1, 128],
+        quant_dtype=torch.float8_e4m3fn,
+        is_scale_transposed=False,
+    )
+    
+    assert out.shape == (batch_size, hidden_size)
+    assert out.dtype == torch.float8_e4m3fn
+    assert scales.dtype == torch.float32
+    
+    # Check no NaN or Inf
+    assert not torch.isnan(out.float()).any()
+    assert not torch.isnan(scales).any()
+    assert not torch.isinf(scales).any()
