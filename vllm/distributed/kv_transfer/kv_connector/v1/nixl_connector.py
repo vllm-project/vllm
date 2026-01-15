@@ -907,7 +907,6 @@ class NixlConnectorWorker:
             for node in os.listdir(SYS_NODE):
                 if not node.startswith("node") or not node[4:].isdigit():
                     continue
-                node_id = int(node[4:])
                 node_path = f"{SYS_NODE}/{node}"
 
                 seen_phys = set()
@@ -923,7 +922,7 @@ class NixlConnectorWorker:
                         try:
                             with open(path) as f:
                                 s = f.read()
-                            cpus = []
+                            cpus: list[int] = []
                             for part in s.strip().split(","):
                                 if "-" in part:
                                     a, b = map(int, part.split("-"))
@@ -931,7 +930,7 @@ class NixlConnectorWorker:
                                 else:
                                     cpus.append(int(part))
                             siblings = cpus if cpus else [cpu_id]
-                        except (IOError, ValueError):
+                        except (OSError, ValueError):
                             siblings = [cpu_id]
                     else:
                         siblings = [cpu_id]
@@ -941,7 +940,7 @@ class NixlConnectorWorker:
                     if phys not in seen_phys:
                         seen_phys.add(phys)
 
-                if len(seen_phys)>0: 
+                if len(seen_phys) > 0:
                     self.core_rsv_for_kv.append(max(seen_phys))
 
         # support for oot platform which can't register nixl memory
