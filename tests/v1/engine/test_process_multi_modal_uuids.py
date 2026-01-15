@@ -12,9 +12,8 @@ from vllm.config import (
     MultiModalConfig,
     VllmConfig,
 )
-from vllm.multimodal.inputs import MultiModalUUIDDict
+from vllm.multimodal import MultiModalRegistry, MultiModalUUIDDict
 from vllm.sampling_params import SamplingParams
-from vllm.v1.engine import input_processor as input_processor_mod
 from vllm.v1.engine.input_processor import InputProcessor
 
 cherry_pil_image = ImageAsset("cherry_blossom").pil_image
@@ -42,9 +41,9 @@ def _mock_input_processor(
         raising=True,
     )
     monkeypatch.setattr(
-        input_processor_mod,
+        MultiModalRegistry,
         "processor_cache_from_config",
-        lambda vllm_config, mm_registry: None,
+        lambda self, vllm_config: None,
         raising=True,
     )
 

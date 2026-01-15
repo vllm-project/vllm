@@ -24,7 +24,7 @@ import numpy as np
 
 from vllm.benchmarks.throughput import get_requests
 from vllm.engine.arg_utils import EngineArgs
-from vllm.multimodal.processing import (
+from vllm.multimodal.processing.context import (
     get_timing_stats_from_engine_client,
 )
 from vllm.utils.gc_utils import freeze_gc_heap
