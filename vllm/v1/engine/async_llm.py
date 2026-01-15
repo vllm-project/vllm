@@ -557,7 +557,7 @@ class AsyncLLM(EngineClient):
             [request_id] if isinstance(request_id, str) else as_list(request_id)
         )
         all_request_ids_to_abort = []
-        request_stats_map: dict[str, IterationStats] = {}
+        request_stats_map: dict[str, IterationStats | None] = {}
 
         # Create iteration_stats per request because different requests can have
         # different engine indexes which need to be logged separately.

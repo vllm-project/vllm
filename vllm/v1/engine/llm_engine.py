@@ -210,7 +210,7 @@ class LLMEngine:
         """Remove request_ids from EngineCore and Detokenizer."""
 
         all_request_ids_to_abort = []
-        request_stats_map: dict[str, IterationStats] = {}
+        request_stats_map: dict[str, IterationStats | None] = {}
 
         # Create iteration_stats per request because different requests can have
         # different engine indexes which need to be logged separately.
