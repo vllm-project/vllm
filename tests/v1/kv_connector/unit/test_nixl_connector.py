@@ -419,7 +419,24 @@ class FakeNixlConnectorWorker(NixlConnectorWorker):
         self._hand_shake_latency = hand_shake_latency
         self.kv_cache_layout = kv_cache_layout
         # Mock register_kv_caches attribute needed for tests that do not call it.
+        test_shape = self.attn_backend.get_kv_cache_shape(
+            num_blocks=1, block_size=16, num_kv_heads=1, head_size=1
+        )
         self.src_xfer_handles_by_block_size = {self.block_size: 1}
+        self.kv_topo = TpKVTopology(
+            tp_rank=self.tp_rank,
+            engine_id=self.engine_id,
+            remote_tp_size=self._tp_size,  # shared state
+            remote_block_size=self._block_size,  # shared state
+            is_mla=self.use_mla,
+            total_num_kv_heads=self.model_config.get_total_num_kv_heads(),
+            attn_backend=self.attn_backend,
+            tensor_shape=test_shape,
+        )
+
+        self.compat_hash = compute_nixl_compatibility_hash(
+            self.vllm_config, self.backend_name, self.kv_topo.cross_layers_blocks
+        )
 
     def _nixl_handshake(
         self, host: str, port: int, remote_tp_size: int, expected_engine_id: str
