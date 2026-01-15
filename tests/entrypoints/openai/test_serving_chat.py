@@ -35,6 +35,7 @@ from .utils import (
 )
 
 GPT_OSS_MODEL_NAME = "openai/gpt-oss-20b"
+GPT_OSS_SPECULATOR_NAME = "RedHatAI/gpt-oss-20b-speculator.eagle3"
 
 
 @pytest.fixture(scope="module")
@@ -66,7 +67,8 @@ def exclude_tools_when_tool_choice_none(request) -> bool:
 
 @pytest.fixture(scope="module")
 def default_server_args(
-    with_tool_parser: bool, exclude_tools_when_tool_choice_none: bool
+    with_tool_parser: bool,
+    exclude_tools_when_tool_choice_none: bool,
 ):
     args = [
         # use half precision for speed and memory savings in CI environment
@@ -76,7 +78,7 @@ def default_server_args(
         "--reasoning-parser",
         "openai_gptoss",
         "--gpu-memory-utilization",
-        "0.8",
+        "0.85",
     ]
     if with_tool_parser:
         args.extend(
@@ -91,9 +93,21 @@ def default_server_args(
     return args
 
 
-@pytest.fixture(scope="module")
+@pytest.fixture(scope="class")
 def gptoss_server(default_server_args: list[str]):
     server_args = default_server_args + ["--attention-backend=TRITON_ATTN"]
+    with RemoteOpenAIServer(GPT_OSS_MODEL_NAME, server_args) as remote_server:
+        yield remote_server
+
+
+@pytest.fixture(scope="class")
+def gptoss_speculative_server(default_server_args: list[str]):
+    server_args = default_server_args + [
+        "--speculative-config",
+        f'{{"model": "{GPT_OSS_SPECULATOR_NAME}", '
+        f'"method": "eagle3", "num_speculative_tokens": 3}}',
+        "--attention-backend=TRITON_ATTN",
+    ]
     with RemoteOpenAIServer(GPT_OSS_MODEL_NAME, server_args) as remote_server:
         yield remote_server
 
@@ -104,314 +118,360 @@ async def gptoss_client(gptoss_server):
         yield async_client
 
 
-@pytest.mark.asyncio
-async def test_gpt_oss_chat_tool_call_streaming(
-    gptoss_client: OpenAI, with_tool_parser: bool
-):
-    tools = [
-        {
-            "type": "function",
-            "function": {
-                "name": "get_current_weather",
-                "description": "Get the current weather in a given location",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "city": {"type": "string"},
-                        "state": {"type": "string"},
-                        "unit": {
-                            "type": "string",
-                            "enum": ["celsius", "fahrenheit"],
+@pytest_asyncio.fixture
+async def gptoss_speculative_client(gptoss_speculative_server):
+    async with gptoss_speculative_server.get_async_client() as async_client:
+        yield async_client
+
+
+class TestGPTOSSChat:
+    @pytest.mark.asyncio
+    async def test_gpt_oss_chat_tool_call_streaming(
+        self, gptoss_client: OpenAI, with_tool_parser: bool
+    ):
+        tools = [
+            {
+                "type": "function",
+                "function": {
+                    "name": "get_current_weather",
+                    "description": "Get the current weather in a given location",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "city": {"type": "string"},
+                            "state": {"type": "string"},
+                            "unit": {
+                                "type": "string",
+                                "enum": ["celsius", "fahrenheit"],
+                            },
                         },
+                        "required": ["city", "state", "unit"],
                     },
-                    "required": ["city", "state", "unit"],
                 },
-            },
-        }
-    ]
+            }
+        ]
 
-    messages = [
-        {"role": "user", "content": "What is the weather in Dallas, TX?"},
-    ]
+        messages = [
+            {"role": "user", "content": "What is the weather in Dallas, TX?"},
+        ]
 
-    stream = await gptoss_client.chat.completions.create(
-        model=GPT_OSS_MODEL_NAME,
-        messages=messages,
-        tools=tools if with_tool_parser else None,
-        stream=True,
-    )
-
-    name = None
-    args_buf = ""
-    content_buf = ""
-    async for chunk in stream:
-        delta = chunk.choices[0].delta
-        if delta.tool_calls:
-            tc = delta.tool_calls[0]
-            if tc.function and tc.function.name:
-                name = tc.function.name
-            if tc.function and tc.function.arguments:
-                args_buf += tc.function.arguments
-        if getattr(delta, "content", None):
-            content_buf += delta.content
-    if with_tool_parser:
-        assert name is not None
-        assert len(args_buf) > 0
-    else:
-        assert name is None
-        assert len(args_buf) == 0
-        assert len(content_buf) > 0
-
-
-@pytest.mark.asyncio
-async def test_gpt_oss_multi_turn_chat(gptoss_client: OpenAI, with_tool_parser: bool):
-    if not with_tool_parser:
-        pytest.skip("skip non-tool for multi-turn tests")
-    tools = [
-        {
-            "type": "function",
-            "function": {
-                "name": "get_current_weather",
-                "description": "Get the current weather in a given location",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "city": {"type": "string"},
-                        "state": {"type": "string"},
-                        "unit": {
-                            "type": "string",
-                            "enum": ["celsius", "fahrenheit"],
-                        },
-                    },
-                    "required": ["city", "state", "unit"],
-                },
-            },
-        }
-    ]
-
-    messages = [
-        {"role": "system", "content": "you are a helpful assistant"},
-        {"role": "user", "content": "What is the weather in Dallas, TX with celsius?"},
-    ]
-
-    first = await gptoss_client.chat.completions.create(
-        model=GPT_OSS_MODEL_NAME,
-        messages=messages,
-        tools=tools,
-        temperature=0.0,
-    )
-    first_msg = first.choices[0].message
-    assert first_msg.tool_calls is not None and len(first_msg.tool_calls) > 0
-    tc = first_msg.tool_calls[0]
-    assert tc.function is not None and tc.function.name == "get_current_weather"
-    args1 = tc.function.arguments
-    assert args1 is not None and len(args1) > 0
-    assert not first_msg.content
-
-    messages.append({"role": "assistant", "content": args1})
-    messages.append(
-        {"role": "user", "content": "Now convert to celsius and return JSON only"}
-    )
-
-    second = await gptoss_client.chat.completions.create(
-        model=GPT_OSS_MODEL_NAME,
-        messages=messages,
-        tools=tools,
-        temperature=0.0,
-    )
-    second_msg = second.choices[0].message
-    assert (second_msg.content is not None and len(second_msg.content) > 0) or (
-        second_msg.tool_calls is not None and len(second_msg.tool_calls) > 0
-    )
-
-
-@pytest.mark.asyncio
-async def test_gpt_oss_tool_message_array_content(
-    gptoss_client: OpenAI, with_tool_parser: bool
-):
-    """Test that tool messages support both string and array content formats."""
-    if not with_tool_parser:
-        pytest.skip("skip non-tool for array content tests")
-
-    tools = [
-        {
-            "type": "function",
-            "function": {
-                "name": "get_weather",
-                "description": "Get the current weather in a given location",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "city": {"type": "string"},
-                        "state": {"type": "string"},
-                    },
-                    "required": ["city", "state"],
-                },
-            },
-        }
-    ]
-
-    # Test 1: Tool message with string content
-    messages_string = [
-        {"role": "user", "content": "What's the weather in Paris?"},
-        {
-            "role": "assistant",
-            "tool_calls": [
-                {
-                    "id": "call_123",
-                    "type": "function",
-                    "function": {
-                        "name": "get_weather",
-                        "arguments": '{"city": "Paris", "state": "TX"}',
-                    },
-                }
-            ],
-        },
-        {"role": "tool", "content": "The weather in Paris, TX is sunny, 22°C"},
-    ]
-
-    response_string = await gptoss_client.chat.completions.create(
-        model=GPT_OSS_MODEL_NAME,
-        messages=messages_string,
-        tools=tools,
-        temperature=0.0,
-    )
-
-    assert response_string is not None
-    assert response_string.choices[0].message is not None
-
-    # Test 2: Tool message with array content
-    messages_array = [
-        {"role": "user", "content": "What's the weather in Dallas?"},
-        {
-            "role": "assistant",
-            "tool_calls": [
-                {
-                    "id": "call_456",
-                    "type": "function",
-                    "function": {
-                        "name": "get_weather",
-                        "arguments": '{"city": "Dallas", "state": "TX"}',
-                    },
-                }
-            ],
-        },
-        {
-            "role": "tool",
-            "content": [
-                {"type": "text", "text": "f2e897a7-2705-4337-8193-2a8f57b81618"}
-            ],
-        },
-    ]
-
-    response_array = await gptoss_client.chat.completions.create(
-        model=GPT_OSS_MODEL_NAME,
-        messages=messages_array,
-        tools=tools,
-        temperature=0.0,
-    )
-
-    assert response_array is not None
-    assert response_array.choices[0].message is not None
-
-    # Test 3: Tool message with multiple array content items
-    messages_multi_array = [
-        {"role": "user", "content": "Search for information"},
-        {
-            "role": "assistant",
-            "tool_calls": [
-                {
-                    "id": "call_789",
-                    "type": "function",
-                    "function": {
-                        "name": "get_weather",
-                        "arguments": '{"city": "Austin", "state": "TX"}',
-                    },
-                }
-            ],
-        },
-        {
-            "role": "tool",
-            "content": [
-                {"type": "text", "text": "Weather data: "},
-                {"type": "text", "text": "Austin, TX - Partly cloudy, 25°C"},
-                {"type": "text", "text": " with 60% humidity"},
-            ],
-        },
-    ]
-
-    response_multi_array = await gptoss_client.chat.completions.create(
-        model=GPT_OSS_MODEL_NAME,
-        messages=messages_multi_array,
-        tools=tools,
-        temperature=0.0,
-    )
-
-    assert response_multi_array is not None
-    assert response_multi_array.choices[0].message is not None
-
-
-@pytest.mark.asyncio
-async def test_gpt_oss_tool_choice_none(
-    gptoss_client: OpenAI,
-    with_tool_parser: bool,
-    exclude_tools_when_tool_choice_none: bool,
-):
-    if not (with_tool_parser and exclude_tools_when_tool_choice_none):
-        pytest.skip(
-            "skip tool_choice tests when non-tool or "
-            "--exclude-tools-when-tool-choice-none not set"
+        stream = await gptoss_client.chat.completions.create(
+            model=GPT_OSS_MODEL_NAME,
+            messages=messages,
+            tools=tools if with_tool_parser else None,
+            stream=True,
         )
 
-    tools = [
-        {
-            "type": "function",
-            "function": {
-                "name": "get_current_weather",
-                "description": "Get the current weather in a given location",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "city": {"type": "string"},
-                        "state": {"type": "string"},
-                        "unit": {
-                            "type": "string",
-                            "enum": ["celsius", "fahrenheit"],
+        name = None
+        args_buf = ""
+        content_buf = ""
+        async for chunk in stream:
+            delta = chunk.choices[0].delta
+            if delta.tool_calls:
+                tc = delta.tool_calls[0]
+                if tc.function and tc.function.name:
+                    name = tc.function.name
+                if tc.function and tc.function.arguments:
+                    args_buf += tc.function.arguments
+            if getattr(delta, "content", None):
+                content_buf += delta.content
+        if with_tool_parser:
+            assert name is not None
+            assert len(args_buf) > 0
+        else:
+            assert name is None
+            assert len(args_buf) == 0
+            assert len(content_buf) > 0
+
+    @pytest.mark.asyncio
+    async def test_gpt_oss_multi_turn_chat(
+        self, gptoss_client: OpenAI, with_tool_parser: bool
+    ):
+        if not with_tool_parser:
+            pytest.skip("skip non-tool for multi-turn tests")
+        tools = [
+            {
+                "type": "function",
+                "function": {
+                    "name": "get_current_weather",
+                    "description": "Get the current weather in a given location",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "city": {"type": "string"},
+                            "state": {"type": "string"},
+                            "unit": {
+                                "type": "string",
+                                "enum": ["celsius", "fahrenheit"],
+                            },
                         },
+                        "required": ["city", "state", "unit"],
                     },
-                    "required": ["city", "state", "unit"],
                 },
+            }
+        ]
+
+        messages = [
+            {"role": "system", "content": "you are a helpful assistant"},
+            {
+                "role": "user",
+                "content": "What is the weather in Dallas, TX with celsius?",
             },
-        }
-    ]
+        ]
 
-    messages = [
-        {
-            "role": "user",
-            "content": "What's the temperature(in degrees Celsius) in Dallas?",
-        },
-    ]
+        first = await gptoss_client.chat.completions.create(
+            model=GPT_OSS_MODEL_NAME,
+            messages=messages,
+            tools=tools,
+            temperature=0.0,
+        )
+        first_msg = first.choices[0].message
+        assert first_msg.tool_calls is not None and len(first_msg.tool_calls) > 0
+        tc = first_msg.tool_calls[0]
+        assert tc.function is not None and tc.function.name == "get_current_weather"
+        args1 = tc.function.arguments
+        assert args1 is not None and len(args1) > 0
+        assert not first_msg.content
 
-    tool_choice_auto = await gptoss_client.chat.completions.create(
-        model=GPT_OSS_MODEL_NAME,
-        messages=messages,
-        tools=tools,
-        tool_choice="auto",
-        temperature=0.0,
-    )
-    msg = tool_choice_auto.choices[0].message
-    assert len(msg.tool_calls) == 1
+        messages.append({"role": "assistant", "content": args1})
+        messages.append(
+            {"role": "user", "content": "Now convert to celsius and return JSON only"}
+        )
 
-    tool_choice_none = await gptoss_client.chat.completions.create(
-        model=GPT_OSS_MODEL_NAME,
-        messages=messages,
-        tools=tools,
-        tool_choice="none",
-        temperature=0.0,
-    )
+        second = await gptoss_client.chat.completions.create(
+            model=GPT_OSS_MODEL_NAME,
+            messages=messages,
+            tools=tools,
+            temperature=0.0,
+        )
+        second_msg = second.choices[0].message
+        assert (second_msg.content is not None and len(second_msg.content) > 0) or (
+            second_msg.tool_calls is not None and len(second_msg.tool_calls) > 0
+        )
 
-    msg = tool_choice_none.choices[0].message
-    assert len(msg.tool_calls) == 0
+    @pytest.mark.asyncio
+    async def test_gpt_oss_tool_message_array_content(
+        self, gptoss_client: OpenAI, with_tool_parser: bool
+    ):
+        """Test that tool messages support both string and array content formats."""
+        if not with_tool_parser:
+            pytest.skip("skip non-tool for array content tests")
+
+        tools = [
+            {
+                "type": "function",
+                "function": {
+                    "name": "get_weather",
+                    "description": "Get the current weather in a given location",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "city": {"type": "string"},
+                            "state": {"type": "string"},
+                        },
+                        "required": ["city", "state"],
+                    },
+                },
+            }
+        ]
+
+        # Test 1: Tool message with string content
+        messages_string = [
+            {"role": "user", "content": "What's the weather in Paris?"},
+            {
+                "role": "assistant",
+                "tool_calls": [
+                    {
+                        "id": "call_123",
+                        "type": "function",
+                        "function": {
+                            "name": "get_weather",
+                            "arguments": '{"city": "Paris", "state": "TX"}',
+                        },
+                    }
+                ],
+            },
+            {"role": "tool", "content": "The weather in Paris, TX is sunny, 22°C"},
+        ]
+
+        response_string = await gptoss_client.chat.completions.create(
+            model=GPT_OSS_MODEL_NAME,
+            messages=messages_string,
+            tools=tools,
+            temperature=0.0,
+        )
+
+        assert response_string is not None
+        assert response_string.choices[0].message is not None
+
+        # Test 2: Tool message with array content
+        messages_array = [
+            {"role": "user", "content": "What's the weather in Dallas?"},
+            {
+                "role": "assistant",
+                "tool_calls": [
+                    {
+                        "id": "call_456",
+                        "type": "function",
+                        "function": {
+                            "name": "get_weather",
+                            "arguments": '{"city": "Dallas", "state": "TX"}',
+                        },
+                    }
+                ],
+            },
+            {
+                "role": "tool",
+                "content": [
+                    {"type": "text", "text": "f2e897a7-2705-4337-8193-2a8f57b81618"}
+                ],
+            },
+        ]
+
+        response_array = await gptoss_client.chat.completions.create(
+            model=GPT_OSS_MODEL_NAME,
+            messages=messages_array,
+            tools=tools,
+            temperature=0.0,
+        )
+
+        assert response_array is not None
+        assert response_array.choices[0].message is not None
+
+        # Test 3: Tool message with multiple array content items
+        messages_multi_array = [
+            {"role": "user", "content": "Search for information"},
+            {
+                "role": "assistant",
+                "tool_calls": [
+                    {
+                        "id": "call_789",
+                        "type": "function",
+                        "function": {
+                            "name": "get_weather",
+                            "arguments": '{"city": "Austin", "state": "TX"}',
+                        },
+                    }
+                ],
+            },
+            {
+                "role": "tool",
+                "content": [
+                    {"type": "text", "text": "Weather data: "},
+                    {"type": "text", "text": "Austin, TX - Partly cloudy, 25°C"},
+                    {"type": "text", "text": " with 60% humidity"},
+                ],
+            },
+        ]
+
+        response_multi_array = await gptoss_client.chat.completions.create(
+            model=GPT_OSS_MODEL_NAME,
+            messages=messages_multi_array,
+            tools=tools,
+            temperature=0.0,
+        )
+
+        assert response_multi_array is not None
+        assert response_multi_array.choices[0].message is not None
+
+    @pytest.mark.asyncio
+    async def test_gpt_oss_tool_choice_none(
+        self,
+        gptoss_client: OpenAI,
+        with_tool_parser: bool,
+        exclude_tools_when_tool_choice_none: bool,
+    ):
+        if not (with_tool_parser and exclude_tools_when_tool_choice_none):
+            pytest.skip(
+                "skip tool_choice tests when non-tool or "
+                "--exclude-tools-when-tool-choice-none not set"
+            )
+
+        tools = [
+            {
+                "type": "function",
+                "function": {
+                    "name": "get_current_weather",
+                    "description": "Get the current weather in a given location",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "city": {"type": "string"},
+                            "state": {"type": "string"},
+                            "unit": {
+                                "type": "string",
+                                "enum": ["celsius", "fahrenheit"],
+                            },
+                        },
+                        "required": ["city", "state", "unit"],
+                    },
+                },
+            }
+        ]
+
+        messages = [
+            {
+                "role": "user",
+                "content": "What's the temperature(in degrees Celsius) in Dallas?",
+            },
+        ]
+
+        tool_choice_auto = await gptoss_client.chat.completions.create(
+            model=GPT_OSS_MODEL_NAME,
+            messages=messages,
+            tools=tools,
+            tool_choice="auto",
+            temperature=0.0,
+        )
+        msg = tool_choice_auto.choices[0].message
+        assert len(msg.tool_calls) == 1
+
+        tool_choice_none = await gptoss_client.chat.completions.create(
+            model=GPT_OSS_MODEL_NAME,
+            messages=messages,
+            tools=tools,
+            tool_choice="none",
+            temperature=0.0,
+        )
+
+        msg = tool_choice_none.choices[0].message
+        assert len(msg.tool_calls) == 0
+
+
+class TestGPTOSSSpeculativeChat:
+    @pytest.mark.asyncio
+    async def test_gpt_oss_speculative_reasoning_leakage(
+        self,
+        gptoss_speculative_client: OpenAI,
+        with_tool_parser: bool,
+    ):
+        if not with_tool_parser:
+            pytest.skip("skip non-tool for array content tests")
+
+        messages = [
+            {"role": "user", "content": "Calculate 2+2. Return the answer 4 only."},
+        ]
+
+        stream = await gptoss_speculative_client.chat.completions.create(
+            model=GPT_OSS_MODEL_NAME,
+            messages=messages,
+            stream=True,
+            temperature=0.0,
+        )
+
+        content = ""
+        reasoning_content = ""
+        async for chunk in stream:
+            delta = chunk.choices[0].delta
+            if delta.content:
+                content += delta.content
+
+            chunk_reasoning = getattr(delta, "reasoning", None)
+            if chunk_reasoning:
+                reasoning_content += delta.reasoning
+
+        assert len(reasoning_content) > 0, "No reasoning was generated."
+        assert content.strip() == "4"
 
 
 MODEL_NAME = "openai-community/gpt2"
