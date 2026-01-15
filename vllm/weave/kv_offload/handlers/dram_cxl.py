@@ -14,6 +14,13 @@ from vllm.v1.kv_offload.worker.worker import OffloadingHandler, TransferResult, 
 from .gpu_dram import expand_block_ids
 
 
+def _swap_blocks_cpu(src: torch.Tensor, dst: torch.Tensor,
+                     mapping: torch.Tensor) -> None:
+    src_ids = mapping[:, 0].to(dtype=torch.long)
+    dst_ids = mapping[:, 1].to(dtype=torch.long)
+    dst.index_copy_(0, dst_ids, src.index_select(0, src_ids))
+
+
 class WeaveDramCxlOffloadingHandler(OffloadingHandler):
     def __init__(
         self,
@@ -66,10 +73,17 @@ class WeaveDramCxlOffloadingHandler(OffloadingHandler):
             if kv_dim:
                 src_key_cache, src_value_cache = src_tensor
                 dst_key_cache, dst_value_cache = dst_tensor
-                ops.swap_blocks(src_key_cache, dst_key_cache, mapping)
-                ops.swap_blocks(src_value_cache, dst_value_cache, mapping)
+                if src_key_cache.is_cuda or dst_key_cache.is_cuda:
+                    ops.swap_blocks(src_key_cache, dst_key_cache, mapping)
+                    ops.swap_blocks(src_value_cache, dst_value_cache, mapping)
+                else:
+                    _swap_blocks_cpu(src_key_cache, dst_key_cache, mapping)
+                    _swap_blocks_cpu(src_value_cache, dst_value_cache, mapping)
             else:
-                ops.swap_blocks(src_tensor, dst_tensor, mapping)
+                if src_tensor.is_cuda or dst_tensor.is_cuda:
+                    ops.swap_blocks(src_tensor, dst_tensor, mapping)
+                else:
+                    _swap_blocks_cpu(src_tensor, dst_tensor, mapping)
 
         self._finished.append((job_id, True))
         return True
