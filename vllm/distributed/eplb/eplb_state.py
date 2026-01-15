@@ -978,10 +978,13 @@ class EplbState:
             retries += 1
             if retries >= max_retries:
                 raise RuntimeError(
-                    f"Rank {ep_group.rank()}: buffer_lock timeout after {max_retries * 10}s")
+                    f"Rank {ep_group.rank()}: buffer_lock timeout after {max_retries * 10}s"
+                )
             logger.warning(
                 "Rank %d: EPLB buffer_lock acquire failed, retrying (%d/%d)",
-                ep_group.rank(), retries, max_retries,
+                ep_group.rank(),
+                retries,
+                max_retries,
             )
         try:
             assert model_state.new_physical_to_logical_map is not None
