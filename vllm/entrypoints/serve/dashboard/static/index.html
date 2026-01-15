@@ -144,17 +144,6 @@
             font-weight: 500;
         }
 
-        .model-indicator {
-            font-size: 12px;
-            font-weight: 600;
-            color: var(--vllm-yellow);
-            padding: 0 8px;
-            max-width: 300px;
-            overflow: hidden;
-            text-overflow: ellipsis;
-            white-space: nowrap;
-        }
-
         .load-indicator {
             display: flex;
             align-items: center;
@@ -382,26 +371,84 @@
             position: relative;
         }
 
-        .search-input {
+        /* Icon buttons for filter and search */
+        .panel-actions {
+            display: flex;
+            align-items: center;
+            gap: 4px;
             margin-left: auto;
+        }
+
+        .icon-btn {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            width: 24px;
+            height: 24px;
+            border: none;
+            background: transparent;
+            color: var(--muted-foreground);
+            cursor: pointer;
+            border-radius: calc(var(--radius) - 4px);
+            transition: all 0.15s ease;
+        }
+
+        .icon-btn:hover {
+            background: var(--muted);
+            color: var(--foreground);
+        }
+
+        .icon-btn.active {
+            background: rgba(48, 162, 255, 0.15);
+            color: var(--vllm-blue);
+        }
+
+        .icon-btn svg {
+            width: 14px;
+            height: 14px;
+            fill: none;
+            stroke: currentColor;
+            stroke-width: 2;
+            stroke-linecap: round;
+            stroke-linejoin: round;
+        }
+
+        /* Expandable search input */
+        .search-wrapper {
+            display: flex;
+            align-items: center;
+            overflow: hidden;
+            max-width: 24px;
+            transition: max-width 0.2s ease;
+        }
+
+        .search-wrapper.expanded {
+            max-width: 120px;
+        }
+
+        .search-wrapper .search-input {
+            width: 90px;
+            opacity: 0;
+            padding: 4px 8px;
+            margin-left: 4px;
             background: var(--muted);
             border: 1px solid var(--border);
             border-radius: calc(var(--radius) - 4px);
-            padding: 4px 10px;
             color: var(--foreground);
             font-size: 11px;
-            width: 80px;
             outline: none;
-            transition: all 0.2s ease;
+            transition: opacity 0.15s ease;
         }
 
-        .search-input:focus {
+        .search-wrapper.expanded .search-input {
+            opacity: 1;
+        }
+
+        .search-wrapper .search-input:focus {
             border-color: var(--vllm-blue);
-            width: 110px;
-            box-shadow: 0 0 0 2px rgba(48, 162, 255, 0.2);
         }
 
-        .search-input::placeholder {
+        .search-wrapper .search-input::placeholder {
             color: var(--muted-foreground);
         }
 
@@ -759,7 +806,6 @@
                 <div class="dot" id="status-dot"></div>
                 <span class="version" id="version">vLLM</span>
             </div>
-            <div class="model-indicator" id="model-name">-</div>
             <div class="load-indicator">
                 <span class="load-label">Load:</span>
                 <span class="load-value" id="server-load">-</span>
@@ -796,7 +842,17 @@
             <div class="left-panel-section">
                 <div class="panel-header">
                     Configuration
-                    <input type="text" class="search-input" id="config-search" placeholder="Search..." oninput="filterList('config')">
+                    <div class="panel-actions">
+                        <button class="icon-btn" id="config-filter-btn" title="Show only set values" onclick="toggleFilter('config')">
+                            <svg viewBox="0 0 24 24"><path d="M22 3H2l8 9.46V19l4 2v-8.54L22 3z"/></svg>
+                        </button>
+                        <div class="search-wrapper" id="config-search-wrapper">
+                            <button class="icon-btn" title="Search" onclick="toggleSearch('config')">
+                                <svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg>
+                            </button>
+                            <input type="text" class="search-input" id="config-search" placeholder="Search..." oninput="filterList('config')">
+                        </div>
+                    </div>
                 </div>
                 <div class="config-scroll" id="config-list">
                     <div class="config-item">
@@ -807,7 +863,17 @@
             <div class="left-panel-section" style="border-top: 1px solid var(--border);">
                 <div class="panel-header">
                     Environment
-                    <input type="text" class="search-input" id="env-search" placeholder="Search..." oninput="filterList('env')">
+                    <div class="panel-actions">
+                        <button class="icon-btn" id="env-filter-btn" title="Show only set values" onclick="toggleFilter('env')">
+                            <svg viewBox="0 0 24 24"><path d="M22 3H2l8 9.46V19l4 2v-8.54L22 3z"/></svg>
+                        </button>
+                        <div class="search-wrapper" id="env-search-wrapper">
+                            <button class="icon-btn" title="Search" onclick="toggleSearch('env')">
+                                <svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg>
+                            </button>
+                            <input type="text" class="search-input" id="env-search" placeholder="Search..." oninput="filterList('env')">
+                        </div>
+                    </div>
                 </div>
                 <div class="config-scroll" id="env-list">
                     <div class="config-item">
@@ -820,7 +886,7 @@
         <!-- Center Panel: Chat -->
         <div class="panel center-panel">
             <div class="panel-header">
-                Quick Chat
+                <span id="model-name" style="color:var(--vllm-yellow);text-transform:none;letter-spacing:0;max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="">-</span>
                 <span style="margin-left:auto;font-size:10px;color:var(--muted-foreground);text-transform:none;letter-spacing:0;font-weight:400">Press Enter to send</span>
             </div>
 
@@ -984,7 +1050,9 @@
 
                 if (data.models?.length > 0) {
                     currentModel = data.models[0].id;
-                    document.getElementById('model-name').textContent = currentModel;
+                    const modelEl = document.getElementById('model-name');
+                    modelEl.textContent = currentModel;
+                    modelEl.title = currentModel;  // Show full name on hover
                 }
 
                 // Update server load
@@ -1140,6 +1208,10 @@
                 }
                 envList.innerHTML = envHtml || '<div class="config-item"><span class="config-key">No env vars</span></div>';
 
+                // Apply filters after rendering (respect saved toggle states)
+                filterList('config');
+                filterList('env');
+
             } catch (e) {
                 console.error('Config render error:', e);
             }
@@ -1214,20 +1286,102 @@
             return String(val);
         }
 
+        // Toggle filter (show only set values)
+        function toggleFilter(type) {
+            const btn = document.getElementById(type + '-filter-btn');
+            const isActive = btn.classList.toggle('active');
+            localStorage.setItem(`vllm-dashboard-${type}-explicit`, isActive ? '1' : '0');
+            filterList(type);
+        }
+
+        // Toggle search input
+        function toggleSearch(type) {
+            const wrapper = document.getElementById(type + '-search-wrapper');
+            const input = document.getElementById(type + '-search');
+            const isExpanded = wrapper.classList.toggle('expanded');
+            if (isExpanded) {
+                input.focus();
+            } else {
+                input.value = '';
+                filterList(type);
+            }
+        }
+
         // Filter config/env list
         function filterList(type) {
             const searchInput = document.getElementById(type + '-search');
+            const filterBtn = document.getElementById(type + '-filter-btn');
             const list = document.getElementById(type + '-list');
-            const query = searchInput.value.toLowerCase();
+            const query = (searchInput?.value || '').toLowerCase();
+            const onlyExplicit = filterBtn?.classList.contains('active') || false;
             const items = list.querySelectorAll('.config-item');
 
             items.forEach(item => {
                 const key = item.querySelector('.config-key')?.textContent?.toLowerCase() || '';
                 const val = item.querySelector('.config-val')?.textContent?.toLowerCase() || '';
                 const tooltip = (item.dataset.tooltip || '').toLowerCase();
-                const matches = key.includes(query) || val.includes(query) || tooltip.includes(query);
-                item.style.display = matches ? '' : 'none';
+                const isExplicit = item.classList.contains('explicit');
+                const isSection = !item.dataset.tooltip && item.style.background; // Section headers
+
+                // Match search query
+                const matchesSearch = key.includes(query) || val.includes(query) || tooltip.includes(query);
+
+                // Match explicit filter (section headers always show if any explicit items exist)
+                const matchesExplicit = !onlyExplicit || isExplicit || isSection;
+
+                item.style.display = (matchesSearch && matchesExplicit) ? '' : 'none';
             });
+
+            // Hide section headers that have no visible children
+            if (onlyExplicit) {
+                hideSectionHeadersWithoutChildren(list);
+            }
+        }
+
+        // Hide section headers if they have no visible explicit items after them
+        function hideSectionHeadersWithoutChildren(list) {
+            const items = Array.from(list.querySelectorAll('.config-item'));
+            let currentSection = null;
+            let hasVisibleChild = false;
+
+            // First pass: determine which sections have visible children
+            const sectionsWithChildren = new Set();
+            for (let i = 0; i < items.length; i++) {
+                const item = items[i];
+                const isSection = !item.dataset.tooltip && item.style.background;
+
+                if (isSection) {
+                    if (currentSection && hasVisibleChild) {
+                        sectionsWithChildren.add(currentSection);
+                    }
+                    currentSection = item;
+                    hasVisibleChild = false;
+                } else if (item.style.display !== 'none' && item.classList.contains('explicit')) {
+                    hasVisibleChild = true;
+                }
+            }
+            // Don't forget the last section
+            if (currentSection && hasVisibleChild) {
+                sectionsWithChildren.add(currentSection);
+            }
+
+            // Second pass: hide sections without visible children
+            for (const item of items) {
+                const isSection = !item.dataset.tooltip && item.style.background;
+                if (isSection && !sectionsWithChildren.has(item)) {
+                    item.style.display = 'none';
+                }
+            }
+        }
+
+        // Restore filter toggle states from localStorage
+        function restoreFilterToggles() {
+            if (localStorage.getItem('vllm-dashboard-config-explicit') === '1') {
+                document.getElementById('config-filter-btn')?.classList.add('active');
+            }
+            if (localStorage.getItem('vllm-dashboard-env-explicit') === '1') {
+                document.getElementById('env-filter-btn')?.classList.add('active');
+            }
         }
 
         // Update context stats
@@ -1424,6 +1578,7 @@
 
         // Init
         async function init() {
+            restoreFilterToggles();  // Restore saved toggle states
             await fetchServerInfo();  // Also fetches config & env
             await fetchMetrics();
             setInterval(fetchMetrics, 5000);
