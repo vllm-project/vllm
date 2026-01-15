@@ -70,6 +70,7 @@ class ToolParser:
                 request.structured_outputs = StructuredOutputsParams(
                     json=json_schema_from_tool
                 )
+                request.response_format = None
             if isinstance(request, ResponsesRequest):
                 request.text = ResponseTextConfig()
                 request.text.format = ResponseFormatTextJSONSchemaConfig(
