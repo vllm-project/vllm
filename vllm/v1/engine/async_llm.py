@@ -258,7 +258,7 @@ class AsyncLLM(EngineClient):
     def _validate_max_num_reqs_scheduling(
         self,
         request_id: str,
-        sampling_params: SamplingParams,
+        params: SamplingParams | PoolingParams,
         tier: float,
     ) -> None:
         max_allowed_requests = self.scheduler_config.max_num_reqs
@@ -278,14 +278,16 @@ class AsyncLLM(EngineClient):
             )
             raise TooManyRequestsError()
 
-        proposed_num_requests = current_num_requests + sampling_params.n
+        # PoolingParams doesn't have .n attribute, default to 1
+        n = params.n if isinstance(params, SamplingParams) else 1
+        proposed_num_requests = current_num_requests + n
         if proposed_num_requests > max_allowed_requests:
             logger.warning(
                 "The request queue is full. "
                 "request_id=%s n=%d current_num_requests=%d "
                 "max_allowed_requests=%d",
                 request_id,
-                sampling_params.n,
+                n,
                 current_num_requests,
                 max_allowed_requests,
             )
@@ -337,10 +339,10 @@ class AsyncLLM(EngineClient):
     def _validate_request_scheduling(
         self,
         request_id: str,
-        sampling_params: SamplingParams,
+        params: SamplingParams | PoolingParams,
         tier: float,
     ) -> None:
-        self._validate_max_num_reqs_scheduling(request_id, sampling_params, tier)
+        self._validate_max_num_reqs_scheduling(request_id, params, tier)
         self._validate_max_pending_context_tokens_scheduling(request_id, tier)
 
     def __del__(self):
