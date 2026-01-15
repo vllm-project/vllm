@@ -16,7 +16,7 @@ from vllm.v1.engine.async_llm import AsyncLLM
 DP_SIZE = int(os.getenv("DP_SIZE", 2))
 
 if current_platform.is_rocm():
-    ATTN_BACKENDS = ["ROCM_ATTN", "ROCM_AITER_FA", "TRITON_ATTN", "FLEX_ATTENTION"]
+    ATTN_BACKENDS = ["ROCM_ATTN", "TRITON_ATTN", "FLEX_ATTENTION"]
 else:
     ATTN_BACKENDS = ["FLASH_ATTN"]
 
