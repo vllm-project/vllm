@@ -300,6 +300,9 @@ def get_and_maybe_dequant_weights(
     if (
         isinstance(layer.quant_method, Fp8LinearMethod)
         and not layer.quant_method.use_marlin
+        # DeepGEMM transforms the scales using `transform_sf_into_required_layout` into
+        # a layout that is not compatible with `scaled_dequantize`.
+        and not layer.quant_method.use_deep_gemm
     ):
         weight_scales = get_attribute_fallback(
             layer, ["weight_scale", "weight_scale_inv"]
