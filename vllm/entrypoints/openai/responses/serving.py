@@ -708,12 +708,10 @@ class OpenAIServingResponses(OpenAIServing):
                 input_messages = context.input_messages
                 output_messages = context.output_messages
 
-            # TODO: Calculate usage.
-            # assert final_res.prompt_token_ids is not None
-            num_tool_output_tokens = 0
+            num_tool_output_tokens = context.num_tool_output_tokens
 
             # Check finish reason from the parser
-            if context.parser.finish_reason == "length":
+            if context.finish_reason == "length":
                 status = "incomplete"
         else:
             assert isinstance(context, SimpleContext)
