@@ -210,6 +210,12 @@ Note that you can use reasoning with any provided structured outputs feature. Th
 
 See also: [full example](../examples/online_serving/structured_outputs.md)
 
+!!! note
+    When using Qwen3 Coder models with reasoning enabled, structured outputs might become disabled if the reasoning content does not get parsed into of the `reasoning` field separately (v0.11.2+).
+    To use both features together, you must explicitly enable structured outputs in reasoning mode.
+    To do so, add the following flag when starting the vLLM server: `--structured-outputs-config.enable_in_reasoning=1`.
+    See also: [Reasoning Outputs](reasoning_outputs.md) documentation.
+
 ## Experimental Automatic Parsing (OpenAI API)
 
 This section covers the OpenAI beta wrapper over the `client.chat.completions.create()` method that provides richer integrations with Python specific types.
