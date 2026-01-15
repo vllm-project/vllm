@@ -93,7 +93,7 @@ from .utils import (
     is_pp_missing_parameter,
     make_empty_intermediate_tensors_factory,
     make_layers,
-    maybe_prefix,
+    maybe_prefix
 )
 
 logger = init_logger(__name__)
@@ -303,7 +303,7 @@ class ViTMLP(nn.Module):
             hidden_dim,
             bias=True,
             quant_config=quant_config,
-            prefix=maybe_prefix(prefix, "w1"),
+            prefix=f"{prefix}.w1",
         )
         # Activation function.
         self.act = get_act_fn(hidden_act)
@@ -312,7 +312,7 @@ class ViTMLP(nn.Module):
             dim,
             bias=True,
             quant_config=quant_config,
-            prefix=maybe_prefix(prefix, "w2"),
+            prefix=f"{prefix}.w2",
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -367,14 +367,14 @@ class ViTMultiHeadDotProductAttention(nn.Module):
             self.total_num_kv_heads,
             bias=use_bias,
             quant_config=quant_config,
-            prefix=maybe_prefix(prefix, "merged_qkv"),
+            prefix=f"{prefix}.merged_qkv",
         )
         self.wo = RowParallelLinear(
             self.total_num_heads * self.head_dim,
             self.hidden_size,
             bias=use_bias,
             quant_config=quant_config,
-            prefix=maybe_prefix(prefix, "wo"),
+            prefix=f"{prefix}.wo",
         )
         self.scale = self.head_dim**-0.5
         self.attn = MMEncoderAttention(
@@ -419,7 +419,7 @@ class Molmo2VisionBlock(nn.Module):
             hidden_dim=config.intermediate_size,
             hidden_act=config.hidden_act,
             quant_config=quant_config,
-            prefix=maybe_prefix(prefix, "feed_forward"),
+            prefix=f"{prefix}.feed_forward",
         )
         self.attention_norm = nn.LayerNorm(
             config.hidden_size,
@@ -586,21 +586,21 @@ class ImagePoolingAttention(nn.Module):
             self.total_num_heads * self.head_dim,
             bias=use_bias,
             quant_config=quant_config,
-            prefix=maybe_prefix(prefix, "q_proj"),
+            prefix=f"{prefix}.q_proj",
         )
         self.merged_kv = MergedColumnParallelLinear(
             self.input_dim,
             [self.total_num_kv_heads * self.head_dim] * 2,
             bias=use_bias,
             quant_config=quant_config,
-            prefix=maybe_prefix(prefix, "merged_kv"),
+            prefix=f"{prefix}.merged_kv",
         )
         self.o_proj = RowParallelLinear(
             self.total_num_heads * self.head_dim,
             self.hidden_size,
             bias=use_bias,
             quant_config=quant_config,
-            prefix=maybe_prefix(prefix, "o_proj"),
+            prefix=f"{prefix}.o_proj",
         )
         self.scale = self.head_dim**-0.5
         self.use_pytorch_sdpa = use_pytorch_sdpa
@@ -691,7 +691,7 @@ class ImageProjectorMLP(nn.Module):
             [hidden_dim] * 2,
             bias=False,
             quant_config=quant_config,
-            prefix=maybe_prefix(prefix, "merged_linear"),
+            prefix=f"{prefix}.merged_linear",
         )
         # Activation function.
         assert hidden_act == "silu"
@@ -703,7 +703,7 @@ class ImageProjectorMLP(nn.Module):
             output_dim,
             bias=False,
             quant_config=quant_config,
-            prefix=maybe_prefix(prefix, "down_proj"),
+            prefix=f"{prefix}.down_proj",
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -758,7 +758,7 @@ class Molmo2VisionBackbone(nn.Module, SupportsQuant):
             head_dim=adapter_config.head_dim,
             use_pytorch_sdpa=adapter_config.pooling_attention_mask,
             quant_config=quant_config,
-            prefix=maybe_prefix(prefix, "image_pooling_2d"),
+            prefix=f"{prefix}.image_pooling_2d",
         )
         self.image_projector = ImageProjectorMLP(
             input_dim=adapter_config.hidden_size,
@@ -766,7 +766,7 @@ class Molmo2VisionBackbone(nn.Module, SupportsQuant):
             output_dim=adapter_config.text_hidden_size,
             hidden_act=adapter_config.hidden_act,
             quant_config=quant_config,
-            prefix=maybe_prefix(prefix, "image_projector"),
+            prefix=f"{prefix}.image_projector",
         )
 
     @property
