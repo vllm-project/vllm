@@ -624,8 +624,6 @@ steps:
     - pytest -v -s kernels/moe/test_deepgemm.py
     - pytest -v -s kernels/moe/test_batched_deepgemm.py
     - pytest -v -s kernels/attention/test_deepgemm_attention.py
-    - pytest -v -s kernels/moe/test_cutlass_moe.py
-    - pytest -v -s kernels/moe/test_deepgemm.py
 
   
 - label: Kernels FP8 MoE Test (1 of 2 H100)
