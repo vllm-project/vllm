@@ -410,9 +410,9 @@ class EngineCore:
             # Send acknowledgement to the client that requested the pause.
             client_idx = self._pause_requester_client_index
             self._pause_requester_client_index = None
-            if client_idx is not None:
-                return {client_idx: EngineCoreOutputs(pause_acknowledged=True)}, False
-            return {}, False
+            if client_idx is None:
+                raise RuntimeError("Pause request received but no client index found")
+            return {client_idx: EngineCoreOutputs(pause_acknowledged=True)}, False
 
         # If paused, don't schedule any work.
         if self._scheduler_paused:
@@ -1022,6 +1022,7 @@ class EngineCoreProc(EngineCore):
             not self.engines_running
             and not self.scheduler.has_requests()
             and not self.batch_queue
+            and not self._scheduler_pause_requested
         ):
             if self.input_queue.empty():
                 # Drain aborts queue; all aborts are also processed via input_queue.
