@@ -224,6 +224,29 @@ if [[ $commands == *"--shard-id="* ]]; then
     echo "All shards reported no tests collected. Failing the build."
     exit 1
   fi
+elif [[ $VLLM_TEST_GROUP_NAME == *"mi325_4-2-node-tests-4-gpus-in-total"* ]]; then
+## INVOCATION OF MULTI-NODE TESTS
+  export DCKR_VER=$(docker --version)
+  export commands="curl -fsSL https://get.docker.com -o get-docker.sh && sh get-docker.sh --version $(DCKR_VER) && rm get-docker.sh"
+
+  echo " ### Multi-node docker ($DCKR_VER) \n ### Render devices: $BUILDKITE_AGENT_META_DATA_RENDER_DEVICES"
+  docker run \
+          --device /dev/kfd $BUILDKITE_AGENT_META_DATA_RENDER_DEVICES \
+          --network=host \
+          --shm-size=16gb \
+          --group-add "$render_gid" \
+          --rm \
+          -e HF_TOKEN \
+          -e AWS_ACCESS_KEY_ID \
+          -e AWS_SECRET_ACCESS_KEY \
+          -e DCKR_VER \
+          -v "${HF_CACHE}:${HF_MOUNT}" \
+          -e "HF_HOME=${HF_MOUNT}" \
+          -e "PYTHONPATH=${MYPYTHONPATH}" \
+          --name "${container_name}" \
+          "${image_name}" \
+          /bin/bash -c "${commands}"  
+
 else
   echo "Render devices: $BUILDKITE_AGENT_META_DATA_RENDER_DEVICES"
   docker run \
