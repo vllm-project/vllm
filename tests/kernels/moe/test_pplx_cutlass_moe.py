@@ -142,7 +142,7 @@ def pplx_cutlass_moe(
     def make_moe_config() -> FusedMoEConfig:
         return FusedMoEConfig(
             num_experts=num_experts,
-            experts_per_token=1,
+            experts_per_token=topk,
             hidden_dim=hidden_dim,
             intermediate_size_per_partition=intermediate_dim,
             num_local_experts=num_local_experts,
