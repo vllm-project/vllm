@@ -120,9 +120,6 @@ class RoutingMethodType(IntEnum):
     Unspecified = 6.0
 
 
-UNQUANTIZED_DTYPES = [torch.bfloat16, torch.float16, torch.float32]
-
-
 @dataclass
 class FusedMoEQuantDesc:
     """
@@ -359,10 +356,6 @@ class FusedMoEQuantConfig:
     @property
     def use_mxfp4_w4a16(self) -> bool:
         return self._a1.dtype is None and self._w1.dtype == "mxfp4"
-
-    @property
-    def use_mxfp4_w4a8(self) -> bool:
-        return self._a1.dtype == "mxfp8" and self._w1.dtype == "mxfp4"
 
     @property
     def use_mxfp4_w4a4(self) -> bool:
