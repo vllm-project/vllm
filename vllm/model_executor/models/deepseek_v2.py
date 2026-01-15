@@ -724,7 +724,7 @@ def sparse_attn_indexer(
             )
             # [num_decode_tokens, n_head] -> [bs, 1+next_n, n_head]
             padded_weights = pack_seq_triton(weights[:num_decode_tokens], decode_lens)
-            # [bs, 1+next_n, n_head] -> [batch_size * next_n, n_head]
+            # [bs, 1+next_n, n_head] -> [bs * next_n, n_head]
             padded_weights = padded_weights.flatten(0, 1)
         else:
             padded_q_fp8_decode_tokens = q_fp8[:num_decode_tokens].reshape(
