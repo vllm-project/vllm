@@ -43,10 +43,16 @@ If you are only developing vLLM's Python code, install vLLM using:
 VLLM_USE_PRECOMPILED=1 uv pip install -e .
 ```
 
-If you are developing vLLM's Python and CUDA/C++ code, install vLLM using:
+If you are developing vLLM's Python and CUDA/C++ code, install Pytorch first:
 
 ```bash
-uv pip install -e .
+uv pip install torch torchvision torchaudio --extra-index-url https://download.pytorch.org/whl/cu129
+```
+
+then install vLLM using:
+
+```bash
+uv pip install -e . --no-build-isolation
 ```
 
 For more details about installing from source and installing for other hardware, check out the [installation instructions](../getting_started/installation/README.md) for your hardware and head to the "Build wheel from source" section.

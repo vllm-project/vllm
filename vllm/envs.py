@@ -128,6 +128,7 @@ if TYPE_CHECKING:
     VLLM_ROCM_FP8_PADDING: bool = True
     VLLM_ROCM_MOE_PADDING: bool = True
     VLLM_ROCM_CUSTOM_PAGED_ATTN: bool = True
+    VLLM_ROCM_SHUFFLE_KV_CACHE_LAYOUT: bool = False
     VLLM_ENABLE_V1_MULTIPROCESSING: bool = True
     VLLM_LOG_BATCHSIZE_INTERVAL: float = -1
     VLLM_DISABLE_COMPILE_CACHE: bool = False
@@ -1018,6 +1019,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_ROCM_CUSTOM_PAGED_ATTN": lambda: (
         os.getenv("VLLM_ROCM_CUSTOM_PAGED_ATTN", "True").lower() in ("true", "1")
     ),
+    # Whether to use the shuffled kv cache layout
+    "VLLM_ROCM_SHUFFLE_KV_CACHE_LAYOUT": lambda: (
+        os.getenv("VLLM_ROCM_SHUFFLE_KV_CACHE_LAYOUT", "False").lower() in ("true", "1")
+    ),
     # Custom quick allreduce kernel for MI3* cards
     # Choice of quantization level: FP, INT8, INT6, INT4 or NONE
     # Recommended for large models to get allreduce
@@ -1444,7 +1449,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_NVFP4_GEMM_BACKEND": env_with_choices(
         "VLLM_NVFP4_GEMM_BACKEND",
         None,
-        ["flashinfer-cudnn", "flashinfer-trtllm", "flashinfer-cutlass", "cutlass"],
+        [
+            "flashinfer-cudnn",
+            "flashinfer-trtllm",
+            "flashinfer-cutlass",
+            "cutlass",
+        ],
     ),
     # Controls garbage collection during CUDA graph capture.
     # If set to 0 (default), enables GC freezing to speed up capture time.
