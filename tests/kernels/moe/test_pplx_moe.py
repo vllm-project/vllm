@@ -29,6 +29,7 @@ except ImportError:
 
 from tests.kernels.moe.modular_kernel_tools.parallel_utils import _set_vllm_config
 from tests.kernels.moe.utils import (
+    make_dummy_moe_config,
     make_shared_experts,
     make_test_weights,
     naive_batched_moe,
@@ -580,10 +581,11 @@ def pplx_moe(
         a2_scale=a2_scale_chunk,
     )
 
-    experts = BatchedTritonExperts(
+    experts = BatchedTritonExperts.make_batched_experts(
         max_num_tokens=max_num_tokens,
         num_dispatchers=prepare_finalize.num_dispatchers(),
         quant_config=quant_config,
+        moe_config=make_dummy_moe_config(),
     )
 
     fused_experts = FusedMoEModularKernel(

@@ -17,8 +17,6 @@ from typing_extensions import ParamSpec
 from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.forward_context import set_forward_context
 from vllm.model_executor.layers.fused_moe.config import (
-    FusedMoEConfig,
-    FusedMoEParallelConfig,
     FusedMoEQuantConfig,
     fp8_w8a8_moe_quant_config,
 )
@@ -35,7 +33,7 @@ from vllm.v1.worker.workspace import init_workspace_manager
 
 from ...utils import multi_gpu_test
 from .parallel_utils import ProcessGroupInfo, parallel_launch
-from .utils import make_test_weights
+from .utils import make_dummy_moe_config, make_test_weights
 
 if has_deep_ep():
     from vllm.model_executor.layers.fused_moe.deepep_ht_prepare_finalize import (
@@ -162,24 +160,6 @@ class TestTensors:
         )
 
 
-def make_dummy_moe_config() -> FusedMoEConfig:
-    """
-    This is a dummy config for the mk constructor interface.
-    DeepGEMM does not actually use it so we put dummy values.
-    """
-    return FusedMoEConfig(
-        num_experts=1,
-        experts_per_token=1,
-        hidden_dim=1,
-        intermediate_size_per_partition=1,
-        num_local_experts=1,
-        moe_parallel_config=FusedMoEParallelConfig.make_no_parallel(),
-        activation="silu",
-        in_dtype=torch.bfloat16,
-        device="cuda",
-    )
-
-
 def make_ll_modular_kernel(
     pg: ProcessGroup,
     pgi: ProcessGroupInfo,
@@ -208,7 +188,7 @@ def make_ll_modular_kernel(
         block_shape=test_config.block_size,
     )
 
-    fused_experts = BatchedDeepGemmExperts(
+    fused_experts = BatchedDeepGemmExperts.make_batched_experts(
         max_num_tokens=max_tokens_per_rank,
         num_dispatchers=pgi.world_size // dp_size,
         quant_config=quant_config,

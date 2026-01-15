@@ -6,6 +6,7 @@ import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from tests.kernels.moe.utils import (
+    make_dummy_moe_config,
     make_test_moe_config,
     make_test_quant_config,
     make_test_weights,
@@ -18,8 +19,6 @@ from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.fused_moe import fused_experts
 from vllm.model_executor.layers.fused_moe.config import (
-    FusedMoEConfig,
-    FusedMoEParallelConfig,
     fp8_w8a8_moe_quant_config,
 )
 from vllm.model_executor.layers.fused_moe.deep_gemm_moe import (
@@ -262,21 +261,10 @@ def test_w8a8_block_fp8_deep_gemm_fused_moe(M, N, K, E, topk, seed, monkeypatch)
         block_shape=block_size,
     )
 
-    moe_config = FusedMoEConfig(
-        num_experts=E,
-        experts_per_token=topk,
-        hidden_dim=K,
-        intermediate_size_per_partition=N,
-        num_local_experts=E,
-        activation="silu",
-        parallel_config=FusedMoEParallelConfig.make_no_parallel(),
-        in_dtype=dtype,
-    )
-
     deep_gemm_experts = mk.FusedMoEModularKernel(
         prepare_finalize=MoEPrepareAndFinalizeNoEP(),
         fused_experts=TritonOrDeepGemmExperts.make_standard_experts(
-            moe_config=moe_config,
+            moe_config=make_dummy_moe_config(),
             quant_config=quant_config,
         ),
     )

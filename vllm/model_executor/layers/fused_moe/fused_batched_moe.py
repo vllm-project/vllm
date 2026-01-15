@@ -657,7 +657,7 @@ class NaiveBatchedExperts(mk.FusedMoEPermuteExpertsUnpermute):
         assert self.quant_config.ocp_mx_scheme is None, "NYI"
 
     @staticmethod
-    def activation_formats() -> mk.FusedMoEActivationFormat:
+    def activation_format() -> mk.FusedMoEActivationFormat:
         return mk.FusedMoEActivationFormat.BatchedExperts
 
     @staticmethod

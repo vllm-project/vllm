@@ -10,13 +10,12 @@ import pytest
 import torch.distributed
 from torch.distributed import ProcessGroup
 
+from tests.kernels.moe.utils import make_dummy_moe_config
 from vllm import _custom_ops as ops
 from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.fused_moe import TritonExperts
 from vllm.model_executor.layers.fused_moe.config import (
-    FusedMoEConfig,
-    FusedMoEParallelConfig,
     FusedMoEQuantConfig,
 )
 from vllm.model_executor.layers.fused_moe.fused_batched_moe import BatchedTritonExperts
@@ -124,24 +123,6 @@ class TestTensors:
         )
 
 
-def make_dummy_moe_config() -> FusedMoEConfig:
-    """
-    This is a dummy config for the mk constructor interface.
-    DeepGEMM does not actually use it so we put dummy values.
-    """
-    return FusedMoEConfig(
-        num_experts=1,
-        experts_per_token=1,
-        hidden_dim=1,
-        intermediate_size_per_partition=1,
-        num_local_experts=1,
-        moe_parallel_config=FusedMoEParallelConfig.make_no_parallel(),
-        activation="silu",
-        in_dtype=torch.bfloat16,
-        device="cuda",
-    )
-
-
 def make_modular_kernel(
     pg: ProcessGroup,
     pgi: ProcessGroupInfo,
@@ -186,7 +167,7 @@ def make_modular_kernel(
 
     if low_latency_mode:
         assert not quant_config.per_act_token_quant, "not supported in ll mode"
-        fused_experts = BatchedTritonExperts(
+        fused_experts = BatchedTritonExperts.make_batched_experts(
             max_num_tokens=MAX_TOKENS_PER_RANK,
             num_dispatchers=num_dispatchers,
             moe_config=moe_config,

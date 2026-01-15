@@ -24,6 +24,24 @@ from vllm.utils.deep_gemm import per_block_cast_to_fp8
 from vllm.utils.math_utils import round_up
 
 
+def make_dummy_moe_config() -> FusedMoEConfig:
+    """
+    This is a dummy config for the mk constructor interface as
+    DeepGEMM and Triton do not actually use this config.
+    """
+    return FusedMoEConfig(
+        num_experts=1,
+        experts_per_token=1,
+        hidden_dim=1,
+        intermediate_size_per_partition=1,
+        num_local_experts=1,
+        moe_parallel_config=FusedMoEParallelConfig.make_no_parallel(),
+        activation="silu",
+        in_dtype=torch.bfloat16,
+        device="cuda",
+    )
+
+
 def triton_moe(
     a: torch.Tensor,
     w1: torch.Tensor,
@@ -81,10 +99,11 @@ def batched_moe(
         BatchedPrepareAndFinalize(
             max_num_tokens, num_dispatchers=1, num_local_experts=w1.shape[0], rank=0
         ),
-        BatchedTritonExperts(
+        BatchedTritonExperts.make_batched_experts(
             max_num_tokens=max_num_tokens,
             num_dispatchers=1,
             quant_config=quant_config,
+            moe_config=make_dummy_moe_config(),
         ),
     )
 
@@ -121,10 +140,11 @@ def naive_batched_moe(
         BatchedPrepareAndFinalize(
             max_num_tokens, num_dispatchers=1, num_local_experts=w1.shape[0], rank=0
         ),
-        NaiveBatchedExperts(
+        NaiveBatchedExperts.make_batched_experts(
             max_num_tokens=max_num_tokens,
             num_dispatchers=1,
             quant_config=quant_config,
+            moe_config=make_dummy_moe_config(),
         ),
     )
 
