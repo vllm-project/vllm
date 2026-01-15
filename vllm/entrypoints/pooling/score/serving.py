@@ -25,7 +25,7 @@ from vllm.entrypoints.pooling.score.protocol import (
     ScoreResponse,
     ScoreResponseData,
 )
-from vllm.entrypoints.pooling.score.score_utils import (
+from vllm.entrypoints.pooling.score.utils import (
     ScoreContentPartParam,
     ScoreMultiModalParam,
     _cosine_similarity,

@@ -10,7 +10,7 @@ from vllm.entrypoints.chat_utils import (
     ChatCompletionContentPartImageParam,
     ChatCompletionContentPartTextParam,
 )
-from vllm.entrypoints.pooling.score.score_utils import ScoreMultiModalParam
+from vllm.entrypoints.pooling.score.utils import ScoreMultiModalParam
 
 from ....conftest import HfRunner, VllmRunner
 
