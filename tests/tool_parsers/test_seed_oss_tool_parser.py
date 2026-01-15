@@ -495,3 +495,157 @@ def test_streaming_tool_calls(
         actual_args = json.loads(arguments_str)
         expected_args = json.loads(expected_tool.function.arguments)
         assert actual_args == expected_args
+
+
+@pytest.fixture
+def typed_tools():
+    """Tools with non-string parameter types for testing type conversion."""
+    return [
+        ChatCompletionToolsParam(
+            type="function",
+            function={
+                "name": "search_products",
+                "description": "Search for products with filters",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "categories": {
+                            "type": "array",
+                            "description": "List of category names to search in",
+                        },
+                        "max_price": {
+                            "type": "integer",
+                            "description": "Maximum price filter",
+                        },
+                        "in_stock": {
+                            "type": "boolean",
+                            "description": "Filter for in-stock items only",
+                        },
+                        "rating": {
+                            "type": "number",
+                            "description": "Minimum rating filter",
+                        },
+                    },
+                    "required": ["categories"],
+                },
+            },
+        ),
+    ]
+
+
+def test_extract_tool_calls_with_typed_params(seed_oss_tool_parser, typed_tools):
+    """Test non-streaming extraction with typed parameters."""
+    model_output = """<seed:tool_call>
+<function=search_products>
+<parameter=categories>["electronics", "computers"]</parameter>
+<parameter=max_price>500</parameter>
+<parameter=in_stock>true</parameter>
+<parameter=rating>4.5</parameter>
+</function>
+</seed:tool_call>"""
+
+    request = ChatCompletionRequest(model=MODEL, messages=[], tools=typed_tools)
+    extracted = seed_oss_tool_parser.extract_tool_calls(model_output, request=request)
+
+    assert extracted.tools_called
+    assert len(extracted.tool_calls) == 1
+
+    tool_call = extracted.tool_calls[0]
+    args = json.loads(tool_call.function.arguments)
+
+    # Verify type conversion
+    assert args["categories"] == ["electronics", "computers"]
+    assert args["max_price"] == 500
+    assert isinstance(args["max_price"], int)
+    assert args["in_stock"] is True
+    assert isinstance(args["in_stock"], bool)
+    assert args["rating"] == 4.5
+    assert isinstance(args["rating"], float)
+
+
+def test_streaming_tool_calls_with_typed_params(
+    seed_oss_tool_parser, seed_oss_tokenizer, typed_tools
+):
+    """Test streaming extraction with typed parameters (issue #32352 fix).
+
+    This test verifies that the streaming parser correctly converts
+    parameter types (arrays, integers, booleans, floats) instead of
+    returning them as strings.
+    """
+    model_output = """<seed:think>
+</seed:think>
+<seed:tool_call>
+<function=search_products>
+<parameter=categories>["electronics", "computers"]</parameter>
+<parameter=max_price>500</parameter>
+<parameter=in_stock>true</parameter>
+<parameter=rating>4.5</parameter>
+</function>
+</seed:tool_call>"""
+
+    request = ChatCompletionRequest(model=MODEL, messages=[], tools=typed_tools)
+
+    tool_states = {}
+
+    for delta_message in stream_delta_message_generator(
+        seed_oss_tool_parser, seed_oss_tokenizer, model_output, request
+    ):
+        if delta_message.tool_calls:
+            for tool_call in delta_message.tool_calls:
+                idx = tool_call.index
+
+                if idx not in tool_states:
+                    tool_states[idx] = {
+                        "id": None,
+                        "name": None,
+                        "arguments": "",
+                        "type": None,
+                    }
+
+                if tool_call.id:
+                    tool_states[idx]["id"] = tool_call.id
+
+                if tool_call.type:
+                    tool_states[idx]["type"] = tool_call.type
+
+                if tool_call.function:
+                    if tool_call.function.name:
+                        tool_states[idx]["name"] = tool_call.function.name
+
+                    if tool_call.function.arguments is not None:
+                        tool_states[idx]["arguments"] += tool_call.function.arguments
+
+    # Should have exactly one tool call
+    assert len(tool_states) == 1
+
+    state = tool_states[0]
+    assert state["name"] == "search_products"
+
+    # Parse the accumulated JSON arguments
+    arguments_str = state["arguments"]
+    assert arguments_str is not None
+    args = json.loads(arguments_str)
+
+    # Critical: Verify type conversion works in streaming mode
+    # Before fix, these would all be strings
+    assert args["categories"] == ["electronics", "computers"], (
+        f"Expected array, got {type(args['categories'])}: {args['categories']}"
+    )
+    assert args["max_price"] == 500, (
+        f"Expected int 500, got {type(args['max_price'])}: {args['max_price']}"
+    )
+    assert isinstance(args["max_price"], int), (
+        f"max_price should be int, got {type(args['max_price'])}"
+    )
+    assert args["in_stock"] is True, (
+        f"Expected bool True, got {type(args['in_stock'])}: {args['in_stock']}"
+    )
+    assert isinstance(args["in_stock"], bool), (
+        f"in_stock should be bool, got {type(args['in_stock'])}"
+    )
+    assert args["rating"] == 4.5, (
+        f"Expected float 4.5, got {type(args['rating'])}: {args['rating']}"
+    )
+    assert isinstance(args["rating"], float), (
+        f"rating should be float, got {type(args['rating'])}"
+    )
