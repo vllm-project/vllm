@@ -528,7 +528,7 @@ def _awq_gemm_fake_impl(
     split_k_iters: int,
 ) -> torch.Tensor:
     M, N = input.shape[0], qweight.shape[1] * 8
-    return torch.empty((M, N), dtype=scales.dtype, device=input.device)
+    return torch.empty((M, N), dtype=input.dtype, device=input.device)
 
 
 direct_register_custom_op(
