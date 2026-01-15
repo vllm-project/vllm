@@ -4,13 +4,14 @@ from dataclasses import dataclass
 
 import torch
 
-from vllm.attention.backends.abstract import AttentionBackend
 from vllm.config import VllmConfig
-from vllm.v1.attention.backends.utils import (
+from vllm.v1.attention.backend import (
+    AttentionBackend,
+    AttentionCGSupport,
     AttentionMetadataBuilder,
     CommonAttentionMetadata,
-    split_decodes_and_prefills,
 )
+from vllm.v1.attention.backends.utils import split_decodes_and_prefills
 from vllm.v1.kv_cache_interface import AttentionSpec, MambaSpec
 
 
@@ -34,6 +35,8 @@ class LinearAttentionMetadata:
 
 class LinearAttentionMetadataBuilder(AttentionMetadataBuilder[LinearAttentionMetadata]):
     reorder_batch_threshold: int = 1
+
+    _cudagraph_support = AttentionCGSupport.UNIFORM_SINGLE_TOKEN_DECODE
 
     def __init__(
         self,

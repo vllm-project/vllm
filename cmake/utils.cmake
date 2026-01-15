@@ -129,6 +129,49 @@ function (get_torch_gpu_compiler_flags OUT_GPU_FLAGS GPU_LANG)
   set(${OUT_GPU_FLAGS} ${GPU_FLAGS} PARENT_SCOPE)
 endfunction()
 
+# Find libgomp that gets shipped with PyTorch wheel and create a shim dir with:
+#   libgomp.so    -> libgomp-<hash>.so...
+#   libgomp.so.1  -> libgomp-<hash>.so...
+# OUTPUT: TORCH_GOMP_SHIM_DIR  ("" if not found)
+function(vllm_prepare_torch_gomp_shim TORCH_GOMP_SHIM_DIR)
+  set(${TORCH_GOMP_SHIM_DIR} "" PARENT_SCOPE)
+
+  # Use run_python to locate vendored libgomp; never throw on failure.
+  run_python(_VLLM_TORCH_GOMP_PATH
+    "
+import os, glob
+import torch
+torch_pkg = os.path.dirname(torch.__file__)
+site_root = os.path.dirname(torch_pkg)
+
+# Search both torch.libs and torch/lib
+roots = [os.path.join(site_root, 'torch.libs'), os.path.join(torch_pkg, 'lib')]
+candidates = []
+for root in roots:
+    if not os.path.isdir(root):
+        continue
+    candidates.extend(glob.glob(os.path.join(root, 'libgomp*.so*')))
+
+print(candidates[0] if candidates else '')
+"
+    "failed to probe for libgomp")
+
+  if(_VLLM_TORCH_GOMP_PATH STREQUAL "" OR NOT EXISTS "${_VLLM_TORCH_GOMP_PATH}")
+    return()
+  endif()
+
+  # Create shim under the build tree
+  set(_shim "${CMAKE_BINARY_DIR}/gomp_shim")
+  file(MAKE_DIRECTORY "${_shim}")
+
+  execute_process(COMMAND ${CMAKE_COMMAND} -E rm -f "${_shim}/libgomp.so")
+  execute_process(COMMAND ${CMAKE_COMMAND} -E rm -f "${_shim}/libgomp.so.1")
+  execute_process(COMMAND ${CMAKE_COMMAND} -E create_symlink "${_VLLM_TORCH_GOMP_PATH}" "${_shim}/libgomp.so")
+  execute_process(COMMAND ${CMAKE_COMMAND} -E create_symlink "${_VLLM_TORCH_GOMP_PATH}" "${_shim}/libgomp.so.1")
+
+  set(${TORCH_GOMP_SHIM_DIR} "${_shim}" PARENT_SCOPE)
+endfunction()
+
 # Macro for converting a `gencode` version number to a cmake version number.
 macro(string_to_ver OUT_VER IN_STR)
   string(REGEX REPLACE "\([0-9]+\)\([0-9]\)" "\\1.\\2" ${OUT_VER} ${IN_STR})
@@ -415,21 +458,20 @@ macro(override_gpu_arches GPU_ARCHES GPU_LANG GPU_SUPPORTED_ARCHES)
 endmacro()
 
 #
-# Define a target named `GPU_MOD_NAME` for a single extension. The
+# Define a target named `MOD_NAME` for a single extension. The
 # arguments are:
 #
 # DESTINATION <dest>         - Module destination directory.
-# LANGUAGE <lang>            - The GPU language for this module, e.g CUDA, HIP,
-#                              etc.
+# LANGUAGE <lang>            - The language for this module, e.g. CUDA, HIP,
+#                              CXX, etc.
 # SOURCES <sources>          - List of source files relative to CMakeLists.txt
 #                              directory.
 #
 # Optional arguments:
 #
-# ARCHITECTURES <arches>     - A list of target GPU architectures in cmake
-#                              format.
-#                              Refer `CMAKE_CUDA_ARCHITECTURES` documentation
-#                              and `CMAKE_HIP_ARCHITECTURES` for more info.
+# ARCHITECTURES <arches>     - A list of target architectures in cmake format.
+#                              For GPU, refer to CMAKE_CUDA_ARCHITECTURES and
+#                              CMAKE_HIP_ARCHITECTURES for more info.
 #                              ARCHITECTURES will use cmake's defaults if
 #                              not provided.
 # COMPILE_FLAGS <flags>      - Extra compiler flags passed to NVCC/hip.
@@ -440,63 +482,67 @@ endmacro()
 #
 # Note: optimization level/debug info is set via cmake build type.
 #
-function (define_gpu_extension_target GPU_MOD_NAME)
+function (define_extension_target MOD_NAME)
   cmake_parse_arguments(PARSE_ARGV 1
-    GPU
+    ARG
     "WITH_SOABI"
     "DESTINATION;LANGUAGE;USE_SABI"
     "SOURCES;ARCHITECTURES;COMPILE_FLAGS;INCLUDE_DIRECTORIES;LIBRARIES")
 
   # Add hipify preprocessing step when building with HIP/ROCm.
-  if (GPU_LANGUAGE STREQUAL "HIP")
-    hipify_sources_target(GPU_SOURCES ${GPU_MOD_NAME} "${GPU_SOURCES}")
+  if (ARG_LANGUAGE STREQUAL "HIP")
+    hipify_sources_target(ARG_SOURCES ${MOD_NAME} "${ARG_SOURCES}")
   endif()
 
-  if (GPU_WITH_SOABI)
-    set(GPU_WITH_SOABI WITH_SOABI)
+  if (ARG_WITH_SOABI)
+    set(SOABI_KEYWORD WITH_SOABI)
   else()
-    set(GPU_WITH_SOABI)
+    set(SOABI_KEYWORD "")
   endif()
 
-  if (GPU_USE_SABI)
-    Python_add_library(${GPU_MOD_NAME} MODULE USE_SABI ${GPU_USE_SABI} ${GPU_WITH_SOABI} "${GPU_SOURCES}")
+  run_python(IS_FREETHREADED_PYTHON
+    "import sysconfig; print(1 if sysconfig.get_config_var(\"Py_GIL_DISABLED\") else 0)"
+    "Failed to determine whether interpreter is free-threaded")
+
+  # Free-threaded Python doesn't yet support the stable ABI (see PEP 803/809),
+  # so avoid using the stable ABI under free-threading only.
+  if (ARG_USE_SABI AND NOT IS_FREETHREADED_PYTHON)
+    Python_add_library(${MOD_NAME} MODULE USE_SABI ${ARG_USE_SABI} ${SOABI_KEYWORD} "${ARG_SOURCES}")
   else()
-    Python_add_library(${GPU_MOD_NAME} MODULE ${GPU_WITH_SOABI} "${GPU_SOURCES}")
+    Python_add_library(${MOD_NAME} MODULE ${SOABI_KEYWORD} "${ARG_SOURCES}")
   endif()
 
-  if (GPU_LANGUAGE STREQUAL "HIP")
+  if (ARG_LANGUAGE STREQUAL "HIP")
     # Make this target dependent on the hipify preprocessor step.
-    add_dependencies(${GPU_MOD_NAME} hipify${GPU_MOD_NAME})
+    add_dependencies(${MOD_NAME} hipify${MOD_NAME})
     # Make sure we include the hipified versions of the headers, and avoid conflicts with the ones in the original source folder
-    target_include_directories(${GPU_MOD_NAME} PRIVATE ${CMAKE_CURRENT_BINARY_DIR}/csrc
-      ${GPU_INCLUDE_DIRECTORIES})
+    target_include_directories(${MOD_NAME} PRIVATE ${CMAKE_CURRENT_BINARY_DIR}/csrc
+      ${ARG_INCLUDE_DIRECTORIES})
   else()
-    target_include_directories(${GPU_MOD_NAME} PRIVATE csrc
-      ${GPU_INCLUDE_DIRECTORIES})
+    target_include_directories(${MOD_NAME} PRIVATE csrc
+      ${ARG_INCLUDE_DIRECTORIES})
   endif()
 
-  if (GPU_ARCHITECTURES)
-    set_target_properties(${GPU_MOD_NAME} PROPERTIES
-      ${GPU_LANGUAGE}_ARCHITECTURES "${GPU_ARCHITECTURES}")
+  if (ARG_ARCHITECTURES)
+    set_target_properties(${MOD_NAME} PROPERTIES
+      ${ARG_LANGUAGE}_ARCHITECTURES "${ARG_ARCHITECTURES}")
   endif()
 
+  target_compile_options(${MOD_NAME} PRIVATE
+    $<$<COMPILE_LANGUAGE:${ARG_LANGUAGE}>:${ARG_COMPILE_FLAGS}>)
 
-  target_compile_options(${GPU_MOD_NAME} PRIVATE
-    $<$<COMPILE_LANGUAGE:${GPU_LANGUAGE}>:${GPU_COMPILE_FLAGS}>)
+  target_compile_definitions(${MOD_NAME} PRIVATE
+    "-DTORCH_EXTENSION_NAME=${MOD_NAME}")
 
-  target_compile_definitions(${GPU_MOD_NAME} PRIVATE
-    "-DTORCH_EXTENSION_NAME=${GPU_MOD_NAME}")
-
-
-  target_link_libraries(${GPU_MOD_NAME} PRIVATE torch ${GPU_LIBRARIES})
+  target_link_libraries(${MOD_NAME} PRIVATE torch ${ARG_LIBRARIES})
 
   # Don't use `TORCH_LIBRARIES` for CUDA since it pulls in a bunch of
   # dependencies that are not necessary and may not be installed.
-  if (GPU_LANGUAGE STREQUAL "CUDA")
-    target_link_libraries(${GPU_MOD_NAME} PRIVATE CUDA::cudart CUDA::cuda_driver)
+  if (ARG_LANGUAGE STREQUAL "CUDA")
+    target_link_libraries(${MOD_NAME} PRIVATE torch CUDA::cudart CUDA::cuda_driver ${ARG_LIBRARIES})
   else()
-    target_link_libraries(${GPU_MOD_NAME} PRIVATE ${TORCH_LIBRARIES})
+    target_link_libraries(${MOD_NAME} PRIVATE torch ${TORCH_LIBRARIES} ${ARG_LIBRARIES})
   endif()
 
-  install(TARGETS ${GPU_MOD_NAME} LIBRARY DESTINATION ${GPU_DESTINATION} COMPONENT ${GPU_MOD_NAME})
+  install(TARGETS ${MOD_NAME} LIBRARY DESTINATION ${ARG_DESTINATION} COMPONENT ${MOD_NAME})
 endfunction()

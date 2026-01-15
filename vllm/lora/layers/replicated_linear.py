@@ -53,6 +53,18 @@ class ReplicatedLinearWithLoRA(BaseLinearLayerWithLoRA):
         source_layer: nn.Module,
         lora_config: LoRAConfig,
         packed_modules_list: list,
-        model_config: PretrainedConfig | None,
+        model_config: PretrainedConfig | None = None,
     ) -> bool:
         return type(source_layer) is ReplicatedLinear
+
+    def slice_lora_a(
+        self, lora_a: torch.Tensor | list[torch.Tensor | None]
+    ) -> torch.Tensor | list[torch.Tensor | None]:
+        """Slice lora a if splitting for tensor parallelism."""
+        return lora_a
+
+    def slice_lora_b(
+        self, lora_b: torch.Tensor | list[torch.Tensor | None]
+    ) -> torch.Tensor | list[torch.Tensor | None]:
+        """Slice lora b if splitting with tensor parallelism."""
+        return lora_b

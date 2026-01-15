@@ -9,12 +9,14 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from vllm.config.multimodal import MultiModalConfig
-from vllm.entrypoints.openai.protocol import CompletionRequest, ErrorResponse
-from vllm.entrypoints.openai.serving_completion import OpenAIServingCompletion
-from vllm.entrypoints.openai.serving_models import BaseModelPath, OpenAIServingModels
+from vllm.entrypoints.openai.completion.protocol import CompletionRequest
+from vllm.entrypoints.openai.completion.serving import OpenAIServingCompletion
+from vllm.entrypoints.openai.engine.protocol import ErrorResponse
+from vllm.entrypoints.openai.models.protocol import BaseModelPath
+from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.lora.request import LoRARequest
 from vllm.lora.resolver import LoRAResolver, LoRAResolverRegistry
-from vllm.transformers_utils.tokenizer import get_tokenizer
+from vllm.tokenizers import get_tokenizer
 from vllm.v1.engine.async_llm import AsyncLLM
 
 MODEL_NAME = "openai-community/gpt2"
@@ -40,6 +42,7 @@ class MockModelConfig:
     tokenizer_revision: str | None = None
     multimodal_config: MultiModalConfig = field(default_factory=MultiModalConfig)
     hf_config: MockHFConfig = field(default_factory=MockHFConfig)
+    logits_processors: list[str] | None = None
     logits_processor_pattern: str | None = None
     diff_sampling_param: dict | None = None
     allowed_local_media_path: str = ""
@@ -60,13 +63,13 @@ class MockLoRAResolver(LoRAResolver):
             return LoRARequest(
                 lora_name="test-lora",
                 lora_int_id=1,
-                lora_local_path="/fake/path/test-lora",
+                lora_path="/fake/path/test-lora",
             )
         elif lora_name == "invalid-lora":
             return LoRARequest(
                 lora_name="invalid-lora",
                 lora_int_id=2,
-                lora_local_path="/fake/path/invalid-lora",
+                lora_path="/fake/path/invalid-lora",
             )
         return None
 
@@ -113,7 +116,7 @@ def mock_serving_setup():
     mock_engine.add_lora.reset_mock()
 
     mock_engine.model_config = MockModelConfig()
-    mock_engine.processor = MagicMock()
+    mock_engine.input_processor = MagicMock()
     mock_engine.io_processor = MagicMock()
 
     models = OpenAIServingModels(

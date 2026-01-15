@@ -54,13 +54,13 @@ from vllm.multimodal.parse import (
     MultiModalDataParser,
 )
 from vllm.multimodal.processing import (
+    BaseDummyInputsBuilder,
     BaseMultiModalProcessor,
     BaseProcessingInfo,
     PromptReplacement,
     PromptUpdate,
     PromptUpdateDetails,
 )
-from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from vllm.sequence import IntermediateTensors
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
@@ -101,7 +101,7 @@ class Qwen2AudioEmbeddingInputs(TensorSchema):
 
     audio_embeds: Annotated[
         list[torch.Tensor],
-        TensorShape("bn", "naf", "hs"),
+        TensorShape("bn", "naf", "hs", dynamic_dims={"naf"}),
     ]
 
 
@@ -139,6 +139,10 @@ class Qwen2AudioProcessingInfo(BaseProcessingInfo):
         feature_extractor = hf_processor.feature_extractor  # type: ignore
         assert isinstance(feature_extractor, WhisperFeatureExtractor)
         return feature_extractor
+
+    def get_target_channels(self) -> int:
+        """Return target audio channels for Qwen2 Audio models (mono)."""
+        return 1
 
     def get_supported_mm_limits(self) -> Mapping[str, int | None]:
         return {"audio": None}
@@ -201,7 +205,10 @@ class Qwen2AudioMultiModalDataParser(MultiModalDataParser):
 class Qwen2AudioMultiModalProcessor(BaseMultiModalProcessor[Qwen2AudioProcessingInfo]):
     def _get_data_parser(self) -> MultiModalDataParser:
         feature_extractor = self.info.get_feature_extractor()
-        return Qwen2AudioMultiModalDataParser(target_sr=feature_extractor.sampling_rate)
+        return Qwen2AudioMultiModalDataParser(
+            target_sr=feature_extractor.sampling_rate,
+            target_channels=self.info.get_target_channels(),
+        )
 
     def _call_hf_processor(
         self,
@@ -346,16 +353,6 @@ class Qwen2AudioForConditionalGeneration(nn.Module, SupportsMultiModal, Supports
             self.language_model.make_empty_intermediate_tensors
         )
 
-    def _validate_and_reshape_mm_tensor(
-        self, mm_input: object, name: str
-    ) -> torch.Tensor:
-        if not isinstance(mm_input, (torch.Tensor, list)):
-            raise ValueError(f"Incorrect type of {name}. Got type: {type(mm_input)}")
-        if isinstance(mm_input, torch.Tensor):
-            return mm_input.reshape(-1, *mm_input.shape[2:])
-        else:
-            return torch.concat(mm_input)
-
     def _parse_and_validate_audio_input(
         self, **kwargs: object
     ) -> Qwen2AudioInputs | None:
@@ -367,24 +364,11 @@ class Qwen2AudioForConditionalGeneration(nn.Module, SupportsMultiModal, Supports
             return None
 
         if audio_embeds is not None:
-            if not isinstance(audio_embeds, (torch.Tensor, list)):
-                raise ValueError(
-                    f"Incorrect type of audio embeds. Got type: {type(audio_embeds)}"
-                )
-            audio_embeds = self._validate_and_reshape_mm_tensor(
-                audio_embeds, "audio_embeds"
-            )
             return Qwen2AudioEmbeddingInputs(
                 type="audio_embeds", audio_embeds=audio_embeds
             )
 
         if input_features is not None:
-            input_features = self._validate_and_reshape_mm_tensor(
-                input_features, "input_features"
-            )
-            feature_attention_mask = self._validate_and_reshape_mm_tensor(
-                feature_attention_mask, "feature_attention_mask"
-            )
             return Qwen2AudioFeatureInputs(
                 type="audio_features",
                 input_features=input_features,
@@ -460,7 +444,7 @@ class Qwen2AudioForConditionalGeneration(nn.Module, SupportsMultiModal, Supports
     def get_language_model(self) -> torch.nn.Module:
         return self.language_model
 
-    def get_multimodal_embeddings(self, **kwargs: object) -> MultiModalEmbeddings:
+    def embed_multimodal(self, **kwargs: object) -> MultiModalEmbeddings:
         audio_input = self._parse_and_validate_audio_input(**kwargs)
         if audio_input is None:
             return []

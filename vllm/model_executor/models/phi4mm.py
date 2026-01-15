@@ -21,7 +21,6 @@ from vllm.distributed import get_pp_group
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.vocab_parallel_embedding import (
-    DEFAULT_VOCAB_PADDING_SIZE,
     ParallelLMHead,
 )
 from vllm.model_executor.models.llama import LlamaModel
@@ -41,14 +40,14 @@ from vllm.multimodal.parse import (
     MultiModalDataItems,
     MultiModalDataParser,
 )
-from vllm.multimodal.processing import (
+from vllm.multimodal.processing import BaseDummyInputsBuilder
+from vllm.multimodal.processing.processor import (
     BaseMultiModalProcessor,
     BaseProcessingInfo,
     PromptReplacement,
     PromptUpdate,
     ResolvedPromptUpdate,
 )
-from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from vllm.sequence import IntermediateTensors
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
@@ -429,14 +428,13 @@ class Phi4MMImageEncoder(nn.Module):
                 output_imgs.append(torch.cat([sub_img, self.glb_GN, glb_img], dim=1))
             else:
                 raise NotImplementedError(
-                    f'hd_transform_order = {self.hd_transform_order}, "\
-                        "not implemented'
+                    f"hd_transform_order = {self.hd_transform_order}, not implemented"
                 )
 
             # temp_len = int((h*w+1)*144 + 1 + (h+1)*12)
             assert temp_len == output_imgs[-1].shape[1], (
-                f'temp_len: {temp_len}, output_imgs[-1].shape[1]: "\
-                    "{output_imgs[-1].shape[1]}'
+                f"temp_len: {temp_len}, output_imgs[-1].shape[1]: "
+                f"{output_imgs[-1].shape[1]}"
             )
 
             output_len.append(temp_len)
@@ -985,8 +983,6 @@ class Phi4MMForCausalLM(nn.Module, SupportsLoRA, SupportsMultiModal):
     Implements the Phi-4-multimodal-instruct model in vLLM.
     """
 
-    merge_by_field_config = True
-
     packed_modules_mapping = {
         "qkv_proj": [
             "qkv_proj",
@@ -1023,12 +1019,10 @@ class Phi4MMForCausalLM(nn.Module, SupportsLoRA, SupportsMultiModal):
         multimodal_config = vllm_config.model_config.multimodal_config
         assert multimodal_config, "multimodal_config is required"
         quant_config = vllm_config.quant_config
-        lora_config = vllm_config.lora_config
 
         self.config = config
         self.multimodal_config = multimodal_config
         self.quant_config = quant_config
-        self.lora_config = lora_config
 
         # Tensor/Pipeline parallel not supported for now.
         assert get_pp_group().world_size == 1, "pipeline parallel is not supported"
@@ -1055,23 +1049,16 @@ class Phi4MMForCausalLM(nn.Module, SupportsLoRA, SupportsMultiModal):
             vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model")
         )
 
-        self.unpadded_vocab_size = config.vocab_size
-        if lora_config:
-            self.unpadded_vocab_size += lora_config.lora_extra_vocab_size
         self.lm_head = ParallelLMHead(
-            self.unpadded_vocab_size,
+            config.vocab_size,
             config.hidden_size,
-            org_num_embeddings=config.vocab_size,
-            padding_size=DEFAULT_VOCAB_PADDING_SIZE,
             quant_config=quant_config,
             prefix=maybe_prefix(prefix, "lm_head"),
         )
         if config.tie_word_embeddings:
             self.lm_head = self.lm_head.tie_weights(self.model.embed_tokens)
         logit_scale = getattr(config, "logit_scale", 1.0)
-        self.logits_processor = LogitsProcessor(
-            self.unpadded_vocab_size, config.vocab_size, logit_scale
-        )
+        self.logits_processor = LogitsProcessor(config.vocab_size, scale=logit_scale)
 
     def _parse_and_validate_audio_input(
         self, **kwargs: object
@@ -1190,7 +1177,7 @@ class Phi4MMForCausalLM(nn.Module, SupportsLoRA, SupportsMultiModal):
         )
         return image_embeds
 
-    def get_multimodal_embeddings(self, **kwargs: object) -> MultiModalEmbeddings:
+    def embed_multimodal(self, **kwargs: object) -> MultiModalEmbeddings:
         modalities = self._parse_and_validate_multimodal_inputs(**kwargs)
         if not modalities:
             return []

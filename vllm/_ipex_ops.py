@@ -151,7 +151,9 @@ class ipex_ops:
     def rms_norm(
         input: torch.Tensor, weight: torch.Tensor, epsilon: float
     ) -> torch.Tensor:
-        return ipex.llm.functional.rms_norm(input, weight, epsilon)
+        out = torch.empty_like(input)
+        torch.ops.torch_ipex.rms_norm_vllm(out, input.contiguous(), weight, epsilon)
+        return out
 
     @staticmethod
     def fused_add_rms_norm(
@@ -160,10 +162,7 @@ class ipex_ops:
         weight: torch.Tensor,
         epsilon: float,
     ) -> None:
-        tmp = ipex.llm.functional.add_rms_norm(
-            residual, input, weight, None, epsilon, True
-        )
-        input.copy_(tmp)
+        torch.ops.torch_ipex.fused_add_rms_norm_vllm(input, residual, weight, epsilon)
 
     @staticmethod
     def varlen_attention(
@@ -271,21 +270,23 @@ class ipex_ops:
 
     @staticmethod
     def flash_attn_varlen_func(
-        out: torch.Tensor,
         q: torch.Tensor,
         k: torch.Tensor,
         v: torch.Tensor,
         cu_seqlens_q: torch.Tensor,
-        seqused_k: torch.Tensor,  # we don't support this in ipex kernel
         max_seqlen_q: int,
         max_seqlen_k: int,
-        softmax_scale: float,
-        causal: bool,
-        block_table: torch.Tensor,
-        alibi_slopes: torch.Tensor | None,
+        softmax_scale: float | None = None,
+        causal: bool = False,
+        out: torch.Tensor | None = None,
+        block_table: torch.Tensor | None = None,
+        alibi_slopes: torch.Tensor | None = None,
         window_size: list[int] | None = None,
         softcap: float | None = 0.0,
+        seqused_k: torch.Tensor | None = None,
         cu_seqlens_k: torch.Tensor | None = None,
+        # passed in qwen vl
+        dropout_p: float = 0.0,
         # The following parameters are not used in ipex kernel currently,
         # we keep API compatible to CUDA's.
         scheduler_metadata=None,
@@ -296,41 +297,63 @@ class ipex_ops:
         num_splits=0,
         s_aux: torch.Tensor | None = None,
     ):
-        if cu_seqlens_k is None:
-            # cu_seqlens_k is not used in ipex kernel.
-            cu_seqlens_k = torch.cumsum(seqused_k, dim=0)
-            cu_seqlens_k = torch.cat(
-                [
-                    torch.tensor([0], device=seqused_k.device, dtype=torch.int32),
-                    cu_seqlens_k,
-                ]
-            ).to(torch.int32)
-
+        if out is None:
+            out = torch.empty(q.shape, dtype=q.dtype, device=q.device)
         real_window_size: tuple[int, int]
         if window_size is None:
             real_window_size = (-1, -1)
         else:
             assert len(window_size) == 2
             real_window_size = (window_size[0], window_size[1])
-        return ipex.llm.modules.PagedAttention.flash_attn_varlen_func(
-            out,
-            q.contiguous(),
-            k,
-            v,
-            cu_seqlens_q,
-            cu_seqlens_k,
-            max_seqlen_q,
-            max_seqlen_k,
-            softmax_scale,
-            causal,
-            block_table,
-            alibi_slopes,
-            softcap=softcap,
-            window_size_left=real_window_size[0],
-            window_size_right=real_window_size[1],
-            k_scale=1.0,
-            v_scale=1.0,
-        )
+
+        if block_table is None:
+            assert cu_seqlens_k is not None, (
+                "cu_seqlens_k can't be None when calling varlen_attention."
+            )
+            if softmax_scale is None:
+                softmax_scale = q.shape[-1] ** (-0.5)
+            ipex_ops.varlen_attention(
+                q.contiguous(),
+                k.contiguous(),
+                v.contiguous(),
+                out,
+                cu_seqlens_q,
+                cu_seqlens_k,
+                None,
+                max_seqlen_q,
+                max_seqlen_k,
+                0.0,
+                softmax_scale,
+                False,
+                causal,
+                False,
+                None,
+                real_window_size[0],
+                real_window_size[1],
+                -1,
+            )
+            return out
+        else:
+            return ipex.llm.modules.PagedAttention.flash_attn_varlen_func(
+                out,
+                q.contiguous(),
+                k,
+                v,
+                cu_seqlens_q,
+                seqused_k,
+                max_seqlen_q,
+                max_seqlen_k,
+                softmax_scale,
+                causal,
+                block_table,
+                alibi_slopes,
+                sink=s_aux,
+                softcap=softcap,
+                window_size_left=real_window_size[0],
+                window_size_right=real_window_size[1],
+                k_scale=1.0,
+                v_scale=1.0,
+            )
 
     @staticmethod
     def get_scheduler_metadata(
@@ -359,18 +382,6 @@ class ipex_ops:
             "get_scheduler_metadata is not implemented for ipex_ops, returning None."
         )
         return None
-
-    @staticmethod
-    def copy_blocks(
-        key_caches: list[torch.Tensor],
-        value_caches: list[torch.Tensor],
-        block_mapping: torch.Tensor,
-    ) -> None:
-        torch.xpu.copy_blocks(  # type: ignore
-            key_caches,
-            value_caches,
-            block_mapping,
-        )
 
     @staticmethod
     def swap_blocks(

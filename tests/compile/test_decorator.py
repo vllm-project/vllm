@@ -15,7 +15,7 @@ from vllm.config import (
     set_current_vllm_config,
 )
 from vllm.forward_context import BatchDescriptor, set_forward_context
-from vllm.utils import is_torch_equal_or_newer
+from vllm.utils.torch_utils import is_torch_equal_or_newer
 
 # This import automatically registers `torch.ops.silly.attention`
 from . import silly_attention  # noqa: F401
@@ -80,7 +80,6 @@ def test_ignore_torch_compile_decorator(use_inductor_graph_partition, monkeypatc
     vllm_config = VllmConfig(
         compilation_config=CompilationConfig(
             mode=CompilationMode.VLLM_COMPILE,
-            use_cudagraph=True,
             splitting_ops=["silly::attention"],
             cudagraph_capture_sizes=[1, 2],
             use_inductor_graph_partition=use_inductor_graph_partition,
@@ -215,7 +214,6 @@ def test_conditional_compile_enable_if(use_inductor_graph_partition, monkeypatch
         ),
         compilation_config=CompilationConfig(
             mode=CompilationMode.VLLM_COMPILE,
-            use_cudagraph=True,
             splitting_ops=["silly::attention"],
             cudagraph_capture_sizes=[1, 2],
             use_inductor_graph_partition=use_inductor_graph_partition,
@@ -257,7 +255,6 @@ def test_conditional_compile_enable_if(use_inductor_graph_partition, monkeypatch
         ),
         compilation_config=CompilationConfig(
             mode=CompilationMode.VLLM_COMPILE,
-            use_cudagraph=True,
             splitting_ops=["silly::attention"],
             cudagraph_capture_sizes=[1, 2],
             use_inductor_graph_partition=use_inductor_graph_partition,

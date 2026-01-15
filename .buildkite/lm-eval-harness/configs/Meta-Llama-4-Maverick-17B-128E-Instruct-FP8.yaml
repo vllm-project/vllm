@@ -1,7 +1,6 @@
 # For hf script, without -t option (tensor parallel size).
-# bash .buildkite/lm-eval-harness/run-lm-eval-gsm-vllm-baseline.sh -m meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8 -b 32 -l 250 -t 8 -f 5
+# bash .buildkite/lm-eval-harness/run-lm-eval-mmlupro-vllm-baseline.sh -m meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8 -l 250 -t 8 -f 5
 model_name: "meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8"
-backend: "vllm-vlm"
 tasks:
 - name: "mmlu_pro"
   metrics:
@@ -9,3 +8,4 @@ tasks:
     value: 0.80
 limit: 250 # will run on 250 * 14 subjects = 3500 samples
 num_fewshot: 5
+rtol: 0.05

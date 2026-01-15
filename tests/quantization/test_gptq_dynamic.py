@@ -14,6 +14,7 @@ from vllm.model_executor.layers.quantization.gptq_marlin import GPTQMarlinLinear
 from vllm.model_executor.layers.quantization.utils.gptq_utils import (
     get_dynamic_override,
 )
+from vllm.platforms import current_platform
 
 PROMPT = "On the surface of Mars, we found"
 
@@ -21,7 +22,10 @@ PROMPT = "On the surface of Mars, we found"
 # The second layer is quantized using bits=8, group_size=32
 # All other layers (layer index >= 2) are not quantized
 MODEL_QUANT = [
-    ("ModelCloud/Qwen1.5-1.8B-Chat-GPTQ-4bits-dynamic-cfg-with-lm_head-symTrue", True),
+    (
+        "ModelCloud/Qwen1.5-1.8B-Chat-GPTQ-4bits-dynamic-cfg-with-lm_head-symTrue",
+        current_platform.is_cuda(),
+    ),
     (
         "ModelCloud/Qwen1.5-1.8B-Chat-GPTQ-4bits-dynamic-cfg-with-lm_head-symFalse",
         False,
@@ -40,7 +44,9 @@ def test_gptq_with_dynamic(
         GPTQMarlinLinearMethod if use_marlin_kernel else (GPTQLinearMethod)
     )
 
-    with vllm_runner(model_id, dtype=torch.float16, max_model_len=2048) as llm:
+    with vllm_runner(
+        model_id, dtype=torch.float16, max_model_len=2048, enforce_eager=True
+    ) as llm:
 
         def check_model(model):
             for name, submodule in model.named_modules():

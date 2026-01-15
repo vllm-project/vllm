@@ -13,7 +13,7 @@ pytestmark = pytest.mark.cpu_test
 @pytest.fixture
 def unsupported_string_schemas():
     return [
-        {"type": "string", "format": "email"},
+        {"type": "string", "format": "non_existing_format"},
     ]
 
 
@@ -44,8 +44,6 @@ def unsupported_array_schemas():
 @pytest.fixture
 def unsupported_object_schemas():
     return [
-        {"type": "object", "minProperties": 1},
-        {"type": "object", "maxProperties": 5},
         {"type": "object", "propertyNames": {"pattern": "^[a-z]+$"}},
         {"type": "object", "patternProperties": {"^S": {"type": "string"}}},
     ]
@@ -58,6 +56,7 @@ def supported_schema():
         "properties": {
             "name": {"type": "string"},
             "age": {"type": "integer"},
+            "email": {"type": "string", "format": "email"},
             "status": {"type": "string"},
             "scores": {"type": "array", "items": {"type": "number"}},
             "car_type": {"type": "string", "enum": ["sedan", "suv", "truck"]},
@@ -78,6 +77,8 @@ def supported_schema():
                 },
             },
         },
+        "minProperties": 1,
+        "maxProperties": 100,
     }
 
 

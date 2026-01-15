@@ -5,7 +5,6 @@ import os
 from typing import TYPE_CHECKING, Optional
 
 import huggingface_hub
-import regex as re
 from huggingface_hub.utils import (
     EntryNotFoundError,
     HfHubHTTPError,
@@ -23,6 +22,8 @@ from vllm.lora.layers import (
     BaseLayerWithLoRA,
     ColumnParallelLinearWithLoRA,
     ColumnParallelLinearWithShardedLoRA,
+    FusedMoE3DWithLoRA,
+    FusedMoEWithLoRA,
     LogitsProcessorWithLoRA,
     MergedColumnParallelLinearWithLoRA,
     MergedColumnParallelLinearWithShardedLoRA,
@@ -35,7 +36,9 @@ from vllm.lora.layers import (
     RowParallelLinearWithShardedLoRA,
     VocabParallelEmbeddingWithLoRA,
 )
+from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.layers.linear import LinearBase
+from vllm.model_executor.utils import get_moe_expert_mapping, get_packed_modules_mapping
 
 if TYPE_CHECKING:
     from vllm.model_executor.layers.logits_processor import LogitsProcessor
@@ -43,6 +46,15 @@ if TYPE_CHECKING:
     from vllm.model_executor.models.utils import WeightsMapper
 
 logger = init_logger(__name__)
+
+_GLOBAL_LORA_ID = 0
+
+
+def get_lora_id():
+    global _GLOBAL_LORA_ID
+    _GLOBAL_LORA_ID += 1
+    return _GLOBAL_LORA_ID
+
 
 _all_lora_classes: set[type[BaseLayerWithLoRA]] = {
     VocabParallelEmbeddingWithLoRA,
@@ -58,7 +70,17 @@ _all_lora_classes: set[type[BaseLayerWithLoRA]] = {
     MergedColumnParallelLinearWithShardedLoRA,
     MergedQKVParallelLinearWithShardedLoRA,
     RowParallelLinearWithShardedLoRA,
+    FusedMoEWithLoRA,
+    FusedMoE3DWithLoRA,
 }
+
+
+def is_moe_model(model: nn.Module) -> bool:
+    """Checks if the model contains FusedMoE layers and warns the user."""
+    if any(isinstance(module, FusedMoE) for module in model.modules()):
+        logger.info_once("MoE model detected. Using fused MoE LoRA implementation.")
+        return True
+    return False
 
 
 def from_layer(
@@ -154,37 +176,13 @@ def parse_fine_tuned_lora_name(
     raise ValueError(f"{name} is unsupported LoRA weight")
 
 
-def is_regex_target_modules(
-    load_modules: str | list[str], expected_lora_modules: list[str]
-) -> bool:
-    """
-    PEFT supports passing `target_modules` in the form of regular expressions,
-    such as `model.*(q_proj|k_proj|v_proj)$`. This function is mainly used to
-    determine whether the suffix in the regular expression is present in the
-    `expected_lora_modules`.
-    """
-
-    def is_valid_regex(pattern):
-        try:
-            re.compile(pattern)
-            return True
-        except re.error:
-            return False
-
-    def is_subset(sub_list, full_list):
-        return set(sub_list).issubset(set(full_list))
-
-    # Similar to PEFT's processing logic, regex-related operations are only
-    #  executed when the load_modules is a `str`.
-    if not isinstance(load_modules, str):
-        return False
-
-    if is_valid_regex(load_modules):
-        match = re.search(r"\((.*?)\)\$?$", load_modules)
-        if match:
-            suffix = match.group(1).split("|")
-            return is_subset(suffix, expected_lora_modules)
-    return False
+def is_base_embeddding_weights(name: str) -> bool:
+    # hardcoded subfixes for input & output embedding weights
+    embedding_suffixes = (
+        ".embed_tokens.base_layer.weight",
+        ".lm_head.base_layer.weight",
+    )
+    return name.endswith(embedding_suffixes)
 
 
 def get_supported_lora_modules(model: nn.Module) -> list[str]:
@@ -203,6 +201,9 @@ def get_supported_lora_modules(model: nn.Module) -> list[str]:
 
         # get all the linear subfixes.
         if isinstance(module, (LinearBase,)):
+            supported_lora_modules.add(name.split(".")[-1])
+
+        if isinstance(module, (FusedMoE,)):
             supported_lora_modules.add(name.split(".")[-1])
 
     return list(supported_lora_modules)
@@ -252,3 +253,29 @@ def get_adapter_absolute_path(lora_path: str) -> str:
         return lora_path
 
     return local_snapshot_path
+
+
+def process_packed_modules_mapping(model: nn.Module) -> dict[str, list[str]]:
+    if is_moe_model(model):
+        if moe_packed_mapping := get_moe_expert_mapping(model):
+            # This method generates and returns a dictionary mapping packed module
+            # names to lists of their corresponding submodule names. It includes
+            # both static mappings and dynamic mappings for expert layers, where
+            # the expert indices are expanded based on the configured number
+            # of routed experts.
+            packed_modules_mapping = get_packed_modules_mapping(model)
+            if not model.is_3d_moe_weight:
+                # 3D MoE LoRA does not need `packed_modules_mapping`
+                packed_modules_mapping["experts"] = [
+                    weight_name.rstrip(".")
+                    for _, weight_name, _, _ in moe_packed_mapping
+                ]
+
+            return packed_modules_mapping
+        else:
+            raise AttributeError(
+                "To support LoRA for MoE model, "
+                "'get_expert_mapping' must be implemented"
+            )
+    else:
+        return get_packed_modules_mapping(model)

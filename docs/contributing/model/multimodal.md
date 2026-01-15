@@ -36,7 +36,7 @@ Further update the model as follows:
   
   More conveniently, you can simply pass `**kwargs` to the [forward][torch.nn.Module.forward] method and retrieve the keyword parameters for multimodal inputs from it.
 
-- Implement [get_multimodal_embeddings][vllm.model_executor.models.interfaces.SupportsMultiModal.get_multimodal_embeddings] that returns the embeddings from running the multimodal inputs through the multimodal tokenizer of the model. Below we provide a boilerplate of a typical implementation pattern, but feel free to adjust it to your own needs.
+- Implement [embed_multimodal][vllm.model_executor.models.interfaces.SupportsMultiModal.embed_multimodal] that returns the embeddings from running the multimodal inputs through the multimodal tokenizer of the model. Below we provide a boilerplate of a typical implementation pattern, but feel free to adjust it to your own needs.
 
     ??? code
 
@@ -49,7 +49,7 @@ Further update the model as follows:
                 image_features = self.vision_encoder(image_input)
                 return self.multi_modal_projector(image_features)
 
-            def get_multimodal_embeddings(
+            def embed_multimodal(
                 self,
                 **kwargs: object,
             ) -> MultiModalEmbeddings | None:
@@ -69,7 +69,7 @@ Further update the model as follows:
 !!! note
     By default, vLLM merges the multimodal embeddings into text embeddings depending on the information of their locations defined in
     [PlaceholderRange][vllm.multimodal.inputs.PlaceholderRange] from input processing.
-    This logic can be found at [get_input_embeddings][vllm.model_executor.models.interfaces.SupportsMultiModal.get_input_embeddings].
+    This logic can be found at [embed_input_ids][vllm.model_executor.models.interfaces.SupportsMultiModal.embed_input_ids].
 
     You may override this method if additional logic is required for your model when merging embeddings. 
 
@@ -116,12 +116,10 @@ def get_supported_mm_limits(self) -> Mapping[str, int | None]:
 
 ## 3. Specify dummy inputs
 
-Then, inherit [BaseDummyInputsBuilder][vllm.multimodal.profiling.BaseDummyInputsBuilder] to construct dummy inputs for
-HF processing as well as memory profiling.
+Then, inherit [BaseDummyInputsBuilder][vllm.multimodal.processing.BaseDummyInputsBuilder] to construct dummy inputs for
+HF processing. The processed outputs are also used for memory profiling.
 
-### For memory profiling
-
-Override the abstract methods [get_dummy_text][vllm.multimodal.profiling.BaseDummyInputsBuilder.get_dummy_text] and [get_dummy_mm_data][vllm.multimodal.profiling.BaseDummyInputsBuilder.get_dummy_mm_data] to construct dummy inputs for memory profiling. These dummy inputs should result in the worst-case memory usage of the model so that vLLM can reserve the correct amount of memory for it.
+Override the abstract methods [get_dummy_text][vllm.multimodal.processing.BaseDummyInputsBuilder.get_dummy_text] and [get_dummy_mm_data][vllm.multimodal.processing.BaseDummyInputsBuilder.get_dummy_mm_data] to construct dummy inputs. These dummy inputs should result in the worst-case memory usage of the model so that vLLM can reserve the correct amount of memory for it.
 
 Assuming that the memory usage increases with the number of tokens, the dummy inputs can be constructed to maximize the number of output embeddings, which is the same number as placeholder feature tokens.
 
@@ -507,7 +505,7 @@ return a schema of the tensors outputted by the HF processor that are related to
     ```
 
     !!! note
-        Our [actual code](gh-file:vllm/model_executor/models/llava.py) additionally supports
+        Our [actual code](../../../vllm/model_executor/models/llava.py) additionally supports
         pre-computed image embeddings, which can be passed to be model via the `image_embeds` argument.
 
 === "With postprocessing: Fuyu"
@@ -569,7 +567,7 @@ return a schema of the tensors outputted by the HF processor that are related to
         ```
 
     !!! note
-        Our [actual code](gh-file:vllm/model_executor/models/fuyu.py) has special handling
+        Our [actual code](../../../vllm/model_executor/models/fuyu.py) has special handling
         for text-only inputs to prevent unnecessary warnings from HF processor.
 
     !!! note
@@ -803,7 +801,7 @@ Each [PromptUpdate][vllm.multimodal.processing.PromptUpdate] instance specifies 
 ## 5. Register processor-related classes
 
 After you have defined [BaseProcessingInfo][vllm.multimodal.processing.BaseProcessingInfo] (Step 2),
-[BaseDummyInputsBuilder][vllm.multimodal.profiling.BaseDummyInputsBuilder] (Step 3),
+[BaseDummyInputsBuilder][vllm.multimodal.processing.BaseDummyInputsBuilder] (Step 3),
 and [BaseMultiModalProcessor][vllm.multimodal.processing.BaseMultiModalProcessor] (Step 4),
 decorate the model class with [MULTIMODAL_REGISTRY.register_processor][vllm.multimodal.registry.MultiModalRegistry.register_processor]
 to register them to the multi-modal registry:
@@ -828,8 +826,8 @@ Some HF processors directly insert feature tokens without replacing anything in 
 
 Examples:
 
-- BLIP-2 (insert at start of prompt): <gh-file:vllm/model_executor/models/blip2.py>
-- Molmo (insert after `<|endoftext|>` token): <gh-file:vllm/model_executor/models/molmo.py>
+- BLIP-2 (insert at start of prompt): [vllm/model_executor/models/blip2.py](../../../vllm/model_executor/models/blip2.py)
+- Molmo (insert after `<|endoftext|>` token): [vllm/model_executor/models/molmo.py](../../../vllm/model_executor/models/molmo.py)
 
 ### Handling prompt updates unrelated to multi-modal data
 
@@ -837,9 +835,9 @@ Examples:
 
 Examples:
 
-- Chameleon (appends `sep_token`): <gh-file:vllm/model_executor/models/chameleon.py>
-- Fuyu (appends `boa_token`): <gh-file:vllm/model_executor/models/fuyu.py>
-- Molmo (applies chat template which is not defined elsewhere): <gh-file:vllm/model_executor/models/molmo.py>
+- Chameleon (appends `sep_token`): [vllm/model_executor/models/chameleon.py](../../../vllm/model_executor/models/chameleon.py)
+- Fuyu (appends `boa_token`): [vllm/model_executor/models/fuyu.py](../../../vllm/model_executor/models/fuyu.py)
+- Molmo (applies chat template which is not defined elsewhere): [vllm/model_executor/models/molmo.py](../../../vllm/model_executor/models/molmo.py)
 
 ### Custom HF processor
 
@@ -847,6 +845,6 @@ Some models don't define an HF processor class on HF Hub. In that case, you can 
 
 Examples:
 
-- DeepSeek-VL2: <gh-file:vllm/model_executor/models/deepseek_vl2.py>
-- InternVL: <gh-file:vllm/model_executor/models/internvl.py>
-- Qwen-VL: <gh-file:vllm/model_executor/models/qwen_vl.py>
+- DeepSeek-VL2: [vllm/model_executor/models/deepseek_vl2.py](../../../vllm/model_executor/models/deepseek_vl2.py)
+- InternVL: [vllm/model_executor/models/internvl.py](../../../vllm/model_executor/models/internvl.py)
+- Qwen-VL: [vllm/model_executor/models/qwen_vl.py](../../../vllm/model_executor/models/qwen_vl.py)

@@ -12,8 +12,8 @@ from vllm.distributed.parallel_state import (
     initialize_model_parallel,
 )
 from vllm.model_executor.layers.mamba.mamba_mixer2 import Mixer2RMSNormGated
-from vllm.platforms import current_platform
-from vllm.utils import update_environment_variables
+from vllm.utils.system_utils import update_environment_variables
+from vllm.utils.torch_utils import set_random_seed
 
 
 @multi_gpu_test(num_gpus=2)
@@ -68,7 +68,7 @@ def mixer2_gated_norm_tensor_parallel(
     dtype: torch.dtype,
     device: str,
 ):
-    current_platform.seed_everything(0)
+    set_random_seed(0)
 
     device = torch.device(f"cuda:{local_rank}")
     torch.cuda.set_device(device)

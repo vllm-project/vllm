@@ -1,0 +1,55 @@
+[
+    {
+        "test_name": "latency_llama8B_tp1",
+        "environment_variables": {
+            "PT_HPU_LAZY_MODE": 1,
+            "VLLM_CONTIGUOUS_PA": 1,
+            "VLLM_DEFRAG": 1
+        },
+        "parameters": {
+            "model": "meta-llama/Meta-Llama-3.1-8B-Instruct",
+            "tensor_parallel_size": 1,
+            "load_format": "dummy",
+            "num-iters-warmup": 5,
+            "num-iters": 15,
+            "max-model-len": 256,
+            "async-scheduling": ""
+        }
+    },
+    {
+        "test_name": "latency_llama70B_tp4",
+        "environment_variables": {
+            "PT_HPU_LAZY_MODE": 1,
+            "PT_HPU_ENABLE_LAZY_COLLECTIVES": 1,
+            "VLLM_CONTIGUOUS_PA": 1,
+            "VLLM_DEFRAG": 1
+        },
+        "parameters": {
+            "model": "meta-llama/Meta-Llama-3.1-70B-Instruct",
+            "tensor_parallel_size": 4,
+            "load_format": "dummy",
+            "num-iters-warmup": 5,
+            "num-iters": 15,
+            "max-model-len": 256,
+            "async-scheduling": ""
+        }
+    },
+    {
+        "test_name": "latency_mixtral8x7B_tp2",
+        "environment_variables": {
+            "PT_HPU_LAZY_MODE": 1,
+            "PT_HPU_ENABLE_LAZY_COLLECTIVES": 1,
+            "VLLM_CONTIGUOUS_PA": 1,
+            "VLLM_DEFRAG": 1
+        },
+        "parameters": {
+            "model": "mistralai/Mixtral-8x7B-Instruct-v0.1",
+            "tensor_parallel_size": 2,
+            "load_format": "dummy",
+            "num-iters-warmup": 5,
+            "num-iters": 15,
+            "max-model-len": 256,
+            "async-scheduling": ""
+        }
+    }
+]

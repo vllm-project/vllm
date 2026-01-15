@@ -11,10 +11,16 @@ from transformers import RobertaConfig
 from vllm.config import ModelConfig, PoolerConfig, VllmConfig
 from vllm.model_executor.layers.pooler import (
     BOSEOSFilter,
-    ClassifierPooler,
-    CLSPool,
     DispatchPooler,
     Pooler,
+)
+from vllm.model_executor.layers.pooler.seqwise import (
+    pooler_for_embed,
+)
+from vllm.model_executor.layers.pooler.tokwise import (
+    AllPool,
+    pooler_for_token_classify,
+    pooler_for_token_embed,
 )
 from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmbedding
 from vllm.model_executor.model_loader.default_loader import DefaultModelLoader
@@ -61,12 +67,6 @@ class RobertaEmbedding(nn.Module):
             torch.arange(config.max_position_embeddings).unsqueeze(0),
         )
 
-        self.position_embedding_type = config.position_embedding_type
-        if self.position_embedding_type != "absolute":
-            raise ValueError(
-                "Only 'absolute' position_embedding_type" + " is supported"
-            )
-
     def forward(
         self,
         input_ids: torch.Tensor,
@@ -100,14 +100,14 @@ class RobertaClassificationHead(nn.Module):
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # CLSPool has already been applied in `pooling`
+        # Token extraction has already been applied in `pooler.pooling`
         x = self.dense(x)
         x = torch.tanh(x)
         x = self.out_proj(x)
         return x
 
 
-@default_pooling_type("CLS")
+@default_pooling_type(seq_pooling_type="CLS")
 class RobertaEmbeddingModel(BertEmbeddingModel):
     """A model that uses Roberta to provide embedding functionalities."""
 
@@ -139,12 +139,12 @@ class RobertaEmbeddingModel(BertEmbeddingModel):
     def _build_model(
         self, vllm_config: VllmConfig, prefix: str = ""
     ) -> BertModel | BertWithRope:
-        if vllm_config.model_config.hf_config.position_embedding_type == "rotary":
-            return JinaRobertaModel(vllm_config=vllm_config, prefix=prefix)
+        hf_config = vllm_config.model_config.hf_config
+        kwargs = dict(vllm_config=vllm_config, prefix=prefix)
+        if getattr(hf_config, "position_embedding_type", "absolute") == "absolute":
+            return BertModel(**kwargs, embedding_class=RobertaEmbedding)
         else:
-            return BertModel(
-                vllm_config=vllm_config, prefix=prefix, embedding_class=RobertaEmbedding
-            )
+            return JinaRobertaModel(**kwargs)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
         weights_list = list(weights)
@@ -209,15 +209,18 @@ class BgeM3EmbeddingModel(RobertaEmbeddingModel):
         self.sparse_linear = nn.Linear(self.hidden_size, 1, dtype=self.head_dtype)
         return DispatchPooler(
             {
-                "embed": Pooler.for_embed(pooler_config),
+                "embed": pooler_for_embed(pooler_config),
                 "token_embed": BOSEOSFilter(
-                    Pooler.for_token_embed(pooler_config),
+                    pooler_for_token_embed(pooler_config),
                     self.bos_token_id,
                     self.eos_token_id,
                 ),
                 "token_classify": BOSEOSFilter(
-                    Pooler.for_token_classify(
-                        pooler_config, classifier=self.sparse_linear, act_fn=torch.relu
+                    pooler_for_token_classify(
+                        pooler_config,
+                        pooling=AllPool(),
+                        classifier=self.sparse_linear,
+                        act_fn=torch.relu,
                     ),
                     self.bos_token_id,
                     self.eos_token_id,
@@ -241,7 +244,7 @@ class BgeM3EmbeddingModel(RobertaEmbeddingModel):
                 weight_loader(param, loaded_weight)
 
 
-@default_pooling_type("CLS")
+@default_pooling_type(seq_pooling_type="CLS")
 class RobertaForSequenceClassification(nn.Module, SupportsCrossEncoding):
     """A model that uses Roberta to provide embedding functionalities.
 
@@ -283,26 +286,17 @@ class RobertaForSequenceClassification(nn.Module, SupportsCrossEncoding):
         pooler_config = vllm_config.model_config.pooler_config
         assert pooler_config is not None
 
-        self.pooler = DispatchPooler(
-            {
-                "token_classify": Pooler.for_token_classify(
-                    pooler_config=pooler_config, classifier=self.classifier
-                ),
-                "classify": ClassifierPooler(
-                    pooling=CLSPool(), classifier=self.classifier, act_fn="classify"
-                ),
-                "score": ClassifierPooler(
-                    pooling=CLSPool(), classifier=self.classifier, act_fn="score"
-                ),
-            }
+        self.pooler = DispatchPooler.for_seq_cls(
+            pooler_config,
+            classifier=self.classifier,
         )
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
         loader = AutoWeightsLoader(self)
         return loader.load_weights(weights, mapper=self.jina_to_vllm_mapper)
 
-    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
-        return self.roberta.get_input_embeddings(input_ids)
+    def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
+        return self.roberta.embed_input_ids(input_ids)
 
     def forward(
         self,

@@ -1,8 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from vllm.distributed.kv_transfer.kv_connector.v1.shared_storage_connector import (  # noqa: E501
-    SharedStorageConnectorMetadata,
+from vllm.distributed.kv_transfer.kv_connector.v1.example_connector import (  # noqa: E501
+    ExampleConnectorMetadata,
 )
 from vllm.distributed.kv_transfer.kv_transfer_state import (
     ensure_kv_transfer_initialized,
@@ -11,7 +11,7 @@ from vllm.distributed.kv_transfer.kv_transfer_state import (
 from vllm.v1.core.sched.output import CachedRequestData, SchedulerOutput
 from vllm.v1.worker.kv_connector_model_runner_mixin import KVConnectorModelRunnerMixin
 
-# Importing utils registers TestSharedStorageConnector with the factory
+# Importing utils registers TestExampleConnector with the factory
 from .utils import create_vllm_config
 
 
@@ -26,15 +26,13 @@ def _make_empty_scheduler_output():
         num_common_prefix_blocks=[],
         finished_req_ids=set(),
         free_encoder_mm_hashes=[],
-        structured_output_request_ids=[],
-        grammar_bitmask=None,
-        kv_connector_metadata=SharedStorageConnectorMetadata(),
+        kv_connector_metadata=ExampleConnectorMetadata(),
     )
 
 
 def test_kv_connector_mixin_clears_metadata():
     vllm_config = create_vllm_config()
-    vllm_config.kv_transfer_config.kv_connector = "TestSharedStorageConnector"
+    vllm_config.kv_transfer_config.kv_connector = "TestExampleConnector"
     vllm_config.kv_transfer_config.kv_role = "kv_both"
     vllm_config.kv_transfer_config.kv_connector_extra_config["name"] = "unit"
 

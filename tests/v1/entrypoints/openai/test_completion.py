@@ -6,11 +6,10 @@ import openai  # use the official client for correctness check
 import pytest
 import pytest_asyncio
 import regex as re
-import requests
 from openai import BadRequestError
 
 from tests.utils import RemoteOpenAIServer
-from vllm.transformers_utils.tokenizer import get_tokenizer
+from vllm.tokenizers import get_tokenizer
 
 # any model with a chat template should work here
 MODEL_NAME = "facebook/opt-125m"
@@ -686,17 +685,3 @@ async def test_invalid_grammar(client: openai.AsyncOpenAI, model_name: str):
                 "structured_outputs": {"grammar": invalid_simplified_sql_grammar}
             },
         )
-
-
-@pytest.mark.asyncio
-async def test_completion_with_empty_prompt_embeds(client: openai.AsyncOpenAI) -> None:
-    """Test completion with empty prompt embeds."""
-    payload: dict[str, object] = {"prompt": "Hello", "prompt_embeds": []}
-    headers: dict[str, str] = {"Content-Type": "application/json"}
-    # base_url = http://localhost:8000/v1/completions
-    response = requests.post(
-        f"{client.base_url}completions", headers=headers, json=payload
-    )
-    assert response.status_code == 200, (
-        f"Expected status code 200, got {response.status_code}. "
-    )

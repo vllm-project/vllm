@@ -23,7 +23,7 @@ llm = LLM(model="ibm-granite/granite-3.1-8b-instruct", tensor_parallel_size=2)
 !!! note
     With tensor parallelism enabled, each process will read the whole model and split it into chunks, which makes the disk reading time even longer (proportional to the size of tensor parallelism).
 
-    You can convert the model checkpoint to a sharded checkpoint using <gh-file:examples/offline_inference/save_sharded_state.py>. The conversion process might take some time, but later you can load the sharded checkpoint much faster. The model loading time should remain constant regardless of the size of tensor parallelism.
+    You can convert the model checkpoint to a sharded checkpoint using [examples/offline_inference/save_sharded_state.py](../../examples/offline_inference/save_sharded_state.py). The conversion process might take some time, but later you can load the sharded checkpoint much faster. The model loading time should remain constant regardless of the size of tensor parallelism.
 
 ## Quantization
 
@@ -48,9 +48,6 @@ llm = LLM(model="adept/fuyu-8b", max_model_len=2048, max_num_seqs=2)
 ## Reduce CUDA Graphs
 
 By default, we optimize model inference using CUDA graphs which take up extra memory in the GPU.
-
-!!! warning
-    CUDA graph capture takes up more memory in V1 than in V0.
 
 You can adjust `compilation_config` to achieve a better balance between inference speed and memory usage:
 

@@ -179,8 +179,6 @@ class MiniMaxVL01MultiModalProcessor(
     dummy_inputs=MiniMaxVL01DummyInputsBuilder,
 )
 class MiniMaxVL01ForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP):
-    merge_by_field_config = True
-
     packed_modules_mapping = {
         "qkv_proj": ["q_proj", "k_proj", "v_proj"],
         "gate_up_proj": ["gate_proj", "up_proj"],
@@ -206,7 +204,8 @@ class MiniMaxVL01ForConditionalGeneration(nn.Module, SupportsMultiModal, Support
         # TODO: Optionally initializes this for supporting embeddings.
         self.vision_tower = init_vision_tower_for_llava(
             config,
-            quant_config,
+            quant_config=quant_config,
+            multimodal_config=multimodal_config,
             require_post_norm=False,
             prefix=maybe_prefix(prefix, "vision_tower"),
         )
@@ -353,7 +352,7 @@ class MiniMaxVL01ForConditionalGeneration(nn.Module, SupportsMultiModal, Support
 
         raise AssertionError("This line should be unreachable.")
 
-    def get_multimodal_embeddings(self, **kwargs: object) -> MultiModalEmbeddings:
+    def embed_multimodal(self, **kwargs: object) -> MultiModalEmbeddings:
         image_input = self._parse_and_validate_image_input(**kwargs)
         if image_input is None:
             return []
@@ -371,8 +370,8 @@ class MiniMaxVL01ForConditionalGeneration(nn.Module, SupportsMultiModal, Support
         if intermediate_tensors is not None:
             inputs_embeds = None
         elif inputs_embeds is None:
-            vision_embeddings = self.get_multimodal_embeddings(**kwargs)
-            inputs_embeds = self.get_input_embeddings(
+            vision_embeddings = self.embed_multimodal(**kwargs)
+            inputs_embeds = self.embed_input_ids(
                 input_ids,
                 vision_embeddings,
                 is_multimodal=input_ids == self.config.image_token_index,

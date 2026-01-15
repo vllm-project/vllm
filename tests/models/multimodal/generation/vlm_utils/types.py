@@ -14,7 +14,7 @@ from transformers.models.auto.auto_factory import _BaseAutoModelClass
 
 from vllm.config.model import RunnerOption
 from vllm.logprobs import SampleLogprobs
-from vllm.transformers_utils.tokenizer import AnyTokenizer
+from vllm.tokenizers import TokenizerLike
 
 from .....conftest import (
     AUDIO_ASSETS,
@@ -50,8 +50,8 @@ MULTI_IMAGE_BASE_PROMPT = f"Image-1: {TEST_IMG_PLACEHOLDER}Image-2: {TEST_IMG_PL
 VIDEO_BASE_PROMPT = f"{TEST_VIDEO_PLACEHOLDER}Why is this video funny?"
 
 
-IMAGE_SIZE_FACTORS = [(), (1.0,), (1.0, 1.0, 1.0), (0.25, 0.5, 1.0)]
-EMBEDDING_SIZE_FACTORS = [(), (1.0,), (1.0, 1.0, 1.0)]
+IMAGE_SIZE_FACTORS = [(1.0,), (1.0, 1.0, 1.0), (0.25, 0.5, 1.0)]
+EMBEDDING_SIZE_FACTORS = [(1.0,), (1.0, 1.0, 1.0)]
 RunnerOutput = tuple[list[int], str, SampleLogprobs | None]
 
 
@@ -126,7 +126,7 @@ class VLMTestInfo(NamedTuple):
     vllm_runner_kwargs: dict[str, Any] | None = None
 
     # Optional callable which gets a list of token IDs from the model tokenizer
-    get_stop_token_ids: Callable[[AnyTokenizer], list[int]] | None = None
+    get_stop_token_ids: Callable[[TokenizerLike], list[int]] | None = None
     # Optional list of strings to stop generation, useful when stop tokens are
     # not special tokens in the tokenizer
     stop_str: list[str] | None = None
@@ -154,7 +154,8 @@ class VLMTestInfo(NamedTuple):
     dtype: str = "auto"
     distributed_executor_backend: str | None = None
     # Only expanded in video tests
-    num_video_frames: int = 16
+    num_video_frames: int | tuple[int] = 16
+    needs_video_metadata: bool = False
 
     # Fixed image sizes / image size factors; most tests use image_size_factors
     # The values provided for these two fields will be stacked and expanded
@@ -212,5 +213,6 @@ class ExpandableVLMTestArgs(NamedTuple):
     size_wrapper: ImageSizeWrapper | None = None
     # Video only
     num_video_frames: int | None = None
+    needs_video_metadata: bool = False
     # Custom inputs only
     custom_test_opts: CustomTestOptions | None = None

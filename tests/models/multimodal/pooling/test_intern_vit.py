@@ -7,7 +7,7 @@ from huggingface_hub import snapshot_download
 from transformers import AutoConfig, AutoModel, CLIPImageProcessor
 
 from vllm.distributed import cleanup_dist_env_and_memory
-from vllm.utils import STR_DTYPE_TO_TORCH_DTYPE
+from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
 
 from ....conftest import ImageTestAssets
 
@@ -73,7 +73,9 @@ def run_intern_vit_test(
     ],
 )
 @pytest.mark.parametrize("dtype", ["half"])
-def test_models(dist_init, image_assets, model_id, dtype: str) -> None:
+def test_models(
+    default_vllm_config, dist_init, image_assets, model_id, dtype: str
+) -> None:
     run_intern_vit_test(
         image_assets,
         model_id,

@@ -26,18 +26,19 @@
 
 from collections.abc import Iterable
 from itertools import islice
-from typing import Any
 
 import torch
 from torch import nn
 from transformers import LlamaConfig
 
-from vllm.attention import Attention, AttentionType
-from vllm.attention.layers.encoder_only_attention import EncoderOnlyAttention
+from vllm.attention.layer import Attention
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.activation import SiluAndMul
+from vllm.model_executor.layers.attention.encoder_only_attention import (
+    EncoderOnlyAttention,
+)
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
     MergedColumnParallelLinear,
@@ -48,7 +49,6 @@ from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.vocab_parallel_embedding import (
-    DEFAULT_VOCAB_PADDING_SIZE,
     ParallelLMHead,
     VocabParallelEmbedding,
 )
@@ -57,8 +57,15 @@ from vllm.model_executor.model_loader.weight_utils import (
     maybe_remap_kv_scale_name,
 )
 from vllm.sequence import IntermediateTensors
+from vllm.v1.attention.backend import AttentionType
 
-from .interfaces import SupportsEagle3, SupportsLoRA, SupportsPP
+from .adapters import as_embedding_model, as_seq_cls_model
+from .interfaces import (
+    SupportsEagle,
+    SupportsEagle3,
+    SupportsLoRA,
+    SupportsPP,
+)
 from .utils import (
     AutoWeightsLoader,
     PPMissingLayer,
@@ -120,8 +127,6 @@ class LlamaAttention(nn.Module):
         hidden_size: int,
         num_heads: int,
         num_kv_heads: int,
-        rope_theta: float = 10000,
-        rope_scaling: dict[str, Any] | None = None,
         max_position_embeddings: int = 8192,
         quant_config: QuantizationConfig | None = None,
         bias: bool = False,
@@ -152,13 +157,18 @@ class LlamaAttention(nn.Module):
         if head_dim is None:
             head_dim = self.hidden_size // self.total_num_heads
         self.head_dim = head_dim
-        # Phi models introduced a partial_rotary_factor parameter in the config
-        self.partial_rotary_factor = getattr(config, "partial_rotary_factor", 1)
         self.q_size = self.num_heads * self.head_dim
         self.kv_size = self.num_kv_heads * self.head_dim
         self.scaling = self.head_dim**-0.5
-        self.rope_theta = rope_theta
         self.max_position_embeddings = max_position_embeddings
+
+        llama_4_scaling_config = getattr(config, "llama_4_scaling", None)
+        self.do_llama_4_scaling = llama_4_scaling_config is not None
+        if self.do_llama_4_scaling:
+            self.llama_4_scaling_original_max_position_embeddings = (
+                llama_4_scaling_config["original_max_position_embeddings"]
+            )
+            self.llama_4_scaling_beta = llama_4_scaling_config["beta"]
 
         self.qkv_proj = QKVParallelLinear(
             hidden_size=hidden_size,
@@ -178,9 +188,7 @@ class LlamaAttention(nn.Module):
             prefix=f"{prefix}.o_proj",
         )
 
-        self._init_rotary_emb(
-            config, rope_scaling=rope_scaling, quant_config=quant_config
-        )
+        self._init_rotary_emb(config, quant_config=quant_config)
 
         sliding_window = None
         if layer_types := getattr(config, "layer_types", None):
@@ -195,8 +203,8 @@ class LlamaAttention(nn.Module):
                 # This is a target model, use layer_idx directly
                 effective_layer_idx = layer_idx
             assert effective_layer_idx < len(layer_types), (
-                f"effective_layer_idx: {effective_layer_idx} \
-                is out of bounds for layer_types: {layer_types}"
+                f"effective_layer_idx: {effective_layer_idx} "
+                f"is out of bounds for layer_types: {layer_types}"
             )
 
             is_sliding = layer_types[effective_layer_idx] == "sliding_attention"
@@ -221,6 +229,17 @@ class LlamaAttention(nn.Module):
             prefix=f"{prefix}.attn",
         )
 
+    def _get_llama_4_attn_scale(self, positions: torch.Tensor) -> torch.Tensor:
+        # Llama4 scaling
+        scaling = 1 + self.llama_4_scaling_beta * torch.log(
+            1
+            + torch.floor(
+                positions / self.llama_4_scaling_original_max_position_embeddings
+            )
+        )
+        # Broadcast over head_dim
+        return scaling.unsqueeze(-1)
+
     def forward(
         self,
         positions: torch.Tensor,
@@ -229,6 +248,9 @@ class LlamaAttention(nn.Module):
         qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
         q, k = self.rotary_emb(positions, q, k)
+        if self.do_llama_4_scaling:
+            attn_scale = self._get_llama_4_attn_scale(positions)
+            q = (q * attn_scale).to(q.dtype)
         attn_output = self.attn(q, k, v)
         output, _ = self.o_proj(attn_output)
         return output
@@ -236,7 +258,6 @@ class LlamaAttention(nn.Module):
     def _init_rotary_emb(
         self,
         config: LlamaConfig,
-        rope_scaling: dict[str, Any] | None,
         quant_config: QuantizationConfig | None,
     ) -> None:
         is_neox_style = True
@@ -246,12 +267,9 @@ class LlamaAttention(nn.Module):
 
         self.rotary_emb = get_rope(
             self.head_dim,
-            rotary_dim=self.head_dim,
             max_position=self.max_position_embeddings,
-            base=self.rope_theta,
-            rope_scaling=rope_scaling,
+            rope_parameters=getattr(config, "rope_parameters", None),
             is_neox_style=is_neox_style,
-            partial_rotary_factor=self.partial_rotary_factor,
         )
 
 
@@ -269,14 +287,6 @@ class LlamaDecoderLayer(nn.Module):
         quant_config = self.get_quant_config(vllm_config)
 
         self.hidden_size = config.hidden_size
-        rope_theta = getattr(config, "rope_theta", 10000)
-        rope_scaling = getattr(config, "rope_scaling", None)
-        if rope_scaling is not None and getattr(
-            config, "original_max_position_embeddings", None
-        ):
-            rope_scaling["original_max_position_embeddings"] = (
-                config.original_max_position_embeddings
-            )
         max_position_embeddings = getattr(config, "max_position_embeddings", 8192)
         # Support abacusai/Smaug-72B-v0.1 with attention_bias
         # Support internlm/internlm-7b with bias
@@ -304,8 +314,6 @@ class LlamaDecoderLayer(nn.Module):
             num_kv_heads=getattr(
                 config, "num_key_value_heads", config.num_attention_heads
             ),
-            rope_theta=rope_theta,
-            rope_scaling=rope_scaling,
             max_position_embeddings=max_position_embeddings,
             quant_config=quant_config,
             bias=attention_bias,
@@ -351,7 +359,21 @@ class LlamaDecoderLayer(nn.Module):
         return vllm_config.quant_config
 
 
-@support_torch_compile
+def llama_model_invariants(
+    input_ids, positions, intermediate_tensors=None, inputs_embeds=None
+):
+    """Shape invariants for Llama model compilation, those are translated to
+    runtime assertions for unbacked dynamic shapes and are compiled away for
+    backed"""
+    if input_ids is not None:
+        torch._check(positions.size()[0] == input_ids.size()[0])
+
+
+@support_torch_compile(
+    # TODO[#32068]: Investigate recompilation
+    # mark_unbacked_dims={"input_ids": 0},
+    shape_invariants=llama_model_invariants
+)
 class LlamaModel(nn.Module):
     def __init__(
         self,
@@ -364,24 +386,18 @@ class LlamaModel(nn.Module):
 
         config = vllm_config.model_config.hf_config
         quant_config = vllm_config.quant_config
-        lora_config = vllm_config.lora_config
 
         self.config = config
         self.quant_config = quant_config
-        lora_vocab = (
-            (lora_config.lora_extra_vocab_size * (lora_config.max_loras or 1))
-            if lora_config
-            else 0
-        )
-        self.vocab_size = config.vocab_size + lora_vocab
-        self.org_vocab_size = config.vocab_size
+
+        self.vocab_size = config.vocab_size
+
         if get_pp_group().is_first_rank or (
             config.tie_word_embeddings and get_pp_group().is_last_rank
         ):
             self.embed_tokens = VocabParallelEmbedding(
                 self.vocab_size,
                 config.hidden_size,
-                org_num_embeddings=config.vocab_size,
                 quant_config=quant_config,
             )
         else:
@@ -402,7 +418,7 @@ class LlamaModel(nn.Module):
             ["hidden_states", "residual"], config.hidden_size
         )
 
-    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
+    def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)
 
     def forward(
@@ -416,7 +432,7 @@ class LlamaModel(nn.Module):
             if inputs_embeds is not None:
                 hidden_states = inputs_embeds
             else:
-                hidden_states = self.get_input_embeddings(input_ids)
+                hidden_states = self.embed_input_ids(input_ids)
             residual = None
         else:
             assert intermediate_tensors is not None
@@ -507,7 +523,9 @@ class LlamaModel(nn.Module):
         return loaded_params
 
 
-class LlamaForCausalLM(nn.Module, SupportsLoRA, SupportsPP, SupportsEagle3):
+class LlamaForCausalLM(
+    nn.Module, SupportsLoRA, SupportsPP, SupportsEagle, SupportsEagle3
+):
     packed_modules_mapping = {
         "qkv_proj": ["q_proj", "k_proj", "v_proj"],
         "gate_up_proj": ["gate_proj", "up_proj"],
@@ -518,7 +536,6 @@ class LlamaForCausalLM(nn.Module, SupportsLoRA, SupportsPP, SupportsEagle3):
         "embed_tokens": "input_embeddings",
         "lm_head": "output_embeddings",
     }
-    embedding_padding_modules = ["lm_head"]
 
     # Mistral/Llama models can also be loaded with --load-format mistral
     # from consolidated.safetensors checkpoints
@@ -556,9 +573,7 @@ class LlamaForCausalLM(nn.Module, SupportsLoRA, SupportsPP, SupportsEagle3):
         super().__init__()
         config = vllm_config.model_config.hf_config
         quant_config = vllm_config.quant_config
-        lora_config = vllm_config.lora_config
         self.config = config
-        self.lora_config = lora_config
 
         self.model = self._init_model(
             vllm_config=vllm_config,
@@ -567,20 +582,9 @@ class LlamaForCausalLM(nn.Module, SupportsLoRA, SupportsPP, SupportsEagle3):
         )
 
         if get_pp_group().is_last_rank:
-            self.unpadded_vocab_size = config.vocab_size
-            if lora_config:
-                self.unpadded_vocab_size += lora_config.lora_extra_vocab_size
             self.lm_head = ParallelLMHead(
-                self.unpadded_vocab_size,
+                config.vocab_size,
                 config.hidden_size,
-                org_num_embeddings=config.vocab_size,
-                padding_size=(
-                    DEFAULT_VOCAB_PADDING_SIZE
-                    # We need bigger padding if using lora for kernel
-                    # compatibility
-                    if not lora_config
-                    else lora_config.lora_vocab_padding_size
-                ),
                 quant_config=quant_config,
                 prefix=maybe_prefix(prefix, "lm_head"),
             )
@@ -589,7 +593,7 @@ class LlamaForCausalLM(nn.Module, SupportsLoRA, SupportsPP, SupportsEagle3):
 
             logit_scale = getattr(config, "logit_scale", 1.0)
             self.logits_processor = LogitsProcessor(
-                self.unpadded_vocab_size, config.vocab_size, logit_scale
+                config.vocab_size, scale=logit_scale
             )
         else:
             self.lm_head = PPMissingLayer()
@@ -618,8 +622,8 @@ class LlamaForCausalLM(nn.Module, SupportsLoRA, SupportsPP, SupportsEagle3):
     ):
         return LlamaModel(vllm_config=vllm_config, prefix=prefix, layer_type=layer_type)
 
-    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
-        return self.model.get_input_embeddings(input_ids)
+    def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
+        return self.model.embed_input_ids(input_ids)
 
     def forward(
         self,
@@ -706,3 +710,15 @@ class LlamaForCausalLM(nn.Module, SupportsLoRA, SupportsPP, SupportsEagle3):
                 name = name.replace(item, mapping[item])
 
         return name, loaded_weight
+
+
+class LlamaBidirectionalForSequenceClassification(as_seq_cls_model(LlamaForCausalLM)):
+    # This class sets the correct attention type and pooling type
+    # through LlamaBidirectionalConfig.
+    pass
+
+
+class LlamaBidirectionalModel(as_embedding_model(LlamaForCausalLM)):
+    # This class sets the correct attention type and pooling type
+    # through LlamaBidirectionalConfig.
+    pass
