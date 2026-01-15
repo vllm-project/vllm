@@ -18,9 +18,6 @@ from vllm.platforms import current_platform
 class TritonOrCutlassExperts(FallbackExperts):
     """Cutlass with fallback to Triton for low latency shapes on SM100."""
 
-    _experts_cls = CutlassExpertsFp8
-    _fallback_cls = TritonExperts
-
     def __init__(
         self,
         moe_config: FusedMoEConfig,
@@ -32,10 +29,8 @@ class TritonOrCutlassExperts(FallbackExperts):
             fallback_experts=TritonExperts(moe_config, quant_config),
         )
 
-    @classmethod
-    def get_clss(
-        cls,
-    ) -> tuple[
+    @staticmethod
+    def get_clss() -> tuple[
         type[mk.FusedMoEPermuteExpertsUnpermute],
         type[mk.FusedMoEPermuteExpertsUnpermute],
     ]:

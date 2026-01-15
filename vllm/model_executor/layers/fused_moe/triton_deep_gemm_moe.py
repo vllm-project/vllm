@@ -29,10 +29,8 @@ class TritonOrDeepGemmExperts(FallbackExperts):
             fallback_experts=TritonExperts(moe_config, quant_config),
         )
 
-    @classmethod
-    def get_clss(
-        cls,
-    ) -> tuple[
+    @staticmethod
+    def get_clss() -> tuple[
         type[mk.FusedMoEPermuteExpertsUnpermute],
         type[mk.FusedMoEPermuteExpertsUnpermute],
     ]:
