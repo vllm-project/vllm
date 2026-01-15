@@ -364,9 +364,9 @@ class PunicaWrapperGPU(PunicaWrapperBase):
         lora_a_stacked: tuple[torch.Tensor, ...],
         lora_b_stacked: tuple[torch.Tensor, ...],
         topk_weights: torch.Tensor,
-        sorted_token_ids: torch.Tensor,
+        sorted_token_ids: torch.Tensor | None,
         expert_ids: torch.Tensor,
-        num_tokens_post_padded: torch.Tensor,
+        num_tokens_post_padded: torch.Tensor | None,
         max_lora_rank: int,
         top_k_num: int,
         shrink_config,
@@ -375,11 +375,22 @@ class PunicaWrapperGPU(PunicaWrapperBase):
         mul_routed_weight=False,
         fully_sharded: bool = False,
         offset: int = 0,
+        naive_block_assignment: bool = False,
+        token_lora_mapping: torch.Tensor | None = None,
     ):
         """
         Performs a fused forward computation for LoRA of Mixture-of-Experts (MoE) layer.
         """
-        (_, _, _, _, lora_ids, _) = self.token_mapping_meta.meta_args(x.size(0))
+        (
+            token_lora_mapping_meta,
+            _,
+            _,
+            _,
+            lora_ids,
+            _,
+        ) = self.token_mapping_meta.meta_args(x.size(0))
+        if token_lora_mapping is None:
+            token_lora_mapping = token_lora_mapping_meta
         fused_moe_lora(
             y,
             x,
@@ -389,6 +400,7 @@ class PunicaWrapperGPU(PunicaWrapperBase):
             sorted_token_ids,
             expert_ids,
             num_tokens_post_padded,
+            token_lora_mapping,
             max_lora_rank,
             top_k_num,
             lora_ids,
@@ -407,6 +419,7 @@ class PunicaWrapperGPU(PunicaWrapperBase):
             expand_config.get("NUM_WARPS", 4),
             expand_config.get("NUM_STAGES", 3),
             expand_config.get("SPLIT_K", 1),
+            naive_block_assignment,
             mul_routed_weight,
             fully_sharded,
             offset,

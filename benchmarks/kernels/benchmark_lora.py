@@ -842,6 +842,7 @@ class BenchmarkTensors:
             "sorted_token_ids": sorted_token_ids,
             "expert_ids": expert_ids,
             "num_tokens_post_padded": num_tokens_post_padded,
+            "token_lora_mapping": self.lora_kernel_meta.token_lora_mapping,
             "top_k_num": ctx.top_k_num,
             "device": self.input.device,
             "N": lora_rank,
@@ -858,6 +859,7 @@ class BenchmarkTensors:
             "shrink_num_warps": kernel_config["NUM_WARPS"],
             "shrink_num_stages": kernel_config["NUM_STAGES"],
             "shrink_split_k": kernel_config.get("SPLIT_K", 1),
+            "naive_block_assignment": False,
             "mul_routed_weight": op_type.is_fused_moe_lora_down_fn(),
         }
 
@@ -915,6 +917,7 @@ class BenchmarkTensors:
             "sorted_token_ids": sorted_token_ids,
             "expert_ids": expert_ids,
             "num_tokens_post_padded": num_tokens_post_padded,
+            "token_lora_mapping": self.lora_kernel_meta.token_lora_mapping,
             "top_k_num": ctx.top_k_num,
             "device": self.input.device,
             "N": lora_rank,
@@ -933,6 +936,7 @@ class BenchmarkTensors:
             "expand_num_warps": kernel_config["NUM_WARPS"],
             "expand_num_stages": kernel_config["NUM_STAGES"],
             "expand_split_k": kernel_config.get("SPLIT_K", 1),
+            "naive_block_assignment": False,
             "mul_routed_weight": op_type.is_fused_moe_lora_down_fn(),
         }
 
