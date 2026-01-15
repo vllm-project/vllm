@@ -172,19 +172,19 @@ def test_deepgemm_vs_triton(m, n, k, topk, num_experts, monkeypatch, workspace_i
     with monkeypatch.context() as mp:
         mp.setenv("VLLM_USE_DEEP_GEMM", "1")
 
-        _fused_moe_mod = importlib.import_module(
+        _DeepGemmExperts = importlib.import_module(
             "vllm.model_executor.layers.fused_moe.deep_gemm_moe"
-        )
+        ).DeepGemmExperts
 
         call_counter = {"cnt": 0}
 
-        orig_fn = _fused_moe_mod.apply
+        orig_fn = _DeepGemmExperts.apply
 
         def _spy_apply(*args, **kwargs):
             call_counter["cnt"] += 1
             return orig_fn(*args, **kwargs)
 
-        monkeypatch.setattr(_fused_moe_mod, "apply", _spy_apply)
+        monkeypatch.setattr(_DeepGemmExperts, "apply", _spy_apply)
         if topk > num_experts:
             pytest.skip(f"topk={topk} > num_experts={num_experts}")
 
