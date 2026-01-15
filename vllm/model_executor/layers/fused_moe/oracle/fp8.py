@@ -420,16 +420,6 @@ def make_fp8_moe_kernel_for_mkm(
     experts_cls: type[mk.FusedMoEPermuteExpertsUnpermute],
     prepare_finalize: mk.FusedMoEPrepareAndFinalize,
 ) -> mk.FusedMoEPermuteExpertsUnpermute:
-    # TODO(rob): unify after we merge tp and dp/ep.
-    if (not moe_config.moe_parallel_config.use_all2all_kernels) or (
-        moe_config.moe_parallel_config.all2all_backend
-        in ["allgather_reducescatter", "naive"]
-    ):
-        raise ValueError(
-            "make_fp8_moe_kernel_for_mkm should only create "
-            "kernel for non-naive A2A P/F."
-        )
-
     if prepare_finalize.activation_format == mk.FusedMoEActivationFormat.BatchedExperts:
         max_num_tokens_per_rank = prepare_finalize.max_num_tokens_per_rank()
         assert max_num_tokens_per_rank is not None

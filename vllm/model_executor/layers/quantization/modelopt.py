@@ -757,7 +757,6 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
         # TRT LLM not supported with all2all yet.
         if self.fp8_backend == Fp8MoeBackend.FLASHINFER_TRTLLM:
             return None
-
         elif self.fp8_backend == Fp8MoeBackend.FLASHINFER_CUTLASS:
             # For no-EP case, don't use the MKM framework.
             if not self.moe.moe_parallel_config.use_all2all_kernels:
@@ -769,7 +768,6 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
             )
             logger.debug_once("%s", prepare_finalize.__class__.__name__)
             return prepare_finalize
-
         return super().maybe_make_prepare_finalize(routing_tables)
 
     def select_gemm_impl(
