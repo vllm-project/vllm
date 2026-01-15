@@ -3280,8 +3280,10 @@ class GPUModelRunner(
                 logger.error("RoutedExpertsCapturer not initialized.")
 
         if scheduler_output.preempted_req_ids and has_kv_transfer_group():
+            assert scheduler_output.kv_connector_metadata is not None
             get_kv_transfer_group().handle_preemptions(
-                scheduler_output.preempted_req_ids
+                scheduler_output.preempted_req_ids,
+                scheduler_output.kv_connector_metadata,
             )
 
         num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens

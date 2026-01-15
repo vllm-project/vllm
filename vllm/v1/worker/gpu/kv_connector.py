@@ -63,9 +63,13 @@ class ActiveKVConnector(KVConnector):
         if self._disabled:
             return
 
-        if scheduler_output.preempted_req_ids:
-            self.kv_connector.handle_preemptions(scheduler_output.preempted_req_ids)
         assert scheduler_output.kv_connector_metadata is not None
+        if scheduler_output.preempted_req_ids:
+            self.kv_connector.handle_preemptions(
+                scheduler_output.preempted_req_ids,
+                scheduler_output.kv_connector_metadata,
+            )
+
         self.kv_connector.bind_connector_metadata(
             scheduler_output.kv_connector_metadata
         )

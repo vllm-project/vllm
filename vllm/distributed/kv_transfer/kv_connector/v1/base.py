@@ -265,7 +265,9 @@ class KVConnectorBase_V1(ABC):
         """
         return
 
-    def handle_preemptions(self, preempted_req_ids: set[str]):
+    def handle_preemptions(
+        self, preempted_req_ids: set[str], connector_metadata: KVConnectorMetadata
+    ):
         """
         Handle preempted requests BEFORE their blocks are overwritten.
         Needed for connectors which use async saves (e.g., OffloadingConnector)
