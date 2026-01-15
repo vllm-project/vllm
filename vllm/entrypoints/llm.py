@@ -158,6 +158,7 @@ class LLM:
         enforce_eager: Whether to enforce eager execution. If True, we will
             disable CUDA graph and always execute the model in eager mode.
             If False, we will use CUDA graph and eager execution in hybrid.
+        enable_return_routed_experts: Whether to return routed experts.
         disable_custom_all_reduce: See
             [ParallelConfig][vllm.config.ParallelConfig].
         hf_token: The token to use as HTTP bearer authorization for remote files
@@ -172,7 +173,7 @@ class LLM:
             The available overrides depend on the model that is being run.
             For example, for Phi-3-Vision: `{"num_crops": 4}`.
         pooler_config: Initialize non-default pooling config for the pooling
-            model. e.g. `PoolerConfig(pooling_type="mean", normalize=False)`.
+            model. e.g. `PoolerConfig(seq_pooling_type="MEAN", normalize=False)`.
         compilation_config: Either an integer or a dictionary. If it is an
             integer, it is used as the mode of compilation optimization. If it
             is a dictionary, it can specify the full compilation configuration.
@@ -209,6 +210,7 @@ class LLM:
         swap_space: float = 4,
         cpu_offload_gb: float = 0,
         enforce_eager: bool = False,
+        enable_return_routed_experts: bool = False,
         disable_custom_all_reduce: bool = False,
         hf_token: bool | str | None = None,
         hf_overrides: HfOverrides | None = None,
@@ -317,6 +319,7 @@ class LLM:
             swap_space=swap_space,
             cpu_offload_gb=cpu_offload_gb,
             enforce_eager=enforce_eager,
+            enable_return_routed_experts=enable_return_routed_experts,
             disable_custom_all_reduce=disable_custom_all_reduce,
             hf_token=hf_token,
             hf_overrides=hf_overrides,
@@ -347,6 +350,9 @@ class LLM:
         self.model_config = self.llm_engine.model_config
         self.input_processor = self.llm_engine.input_processor
         self.io_processor = self.llm_engine.io_processor
+
+        # Cache for __repr__ to avoid repeated collective_rpc calls
+        self._cached_repr: str | None = None
 
     def get_tokenizer(self) -> TokenizerLike:
         return self.llm_engine.get_tokenizer()
@@ -1786,3 +1792,16 @@ class LLM:
         # This is necessary because some requests may be finished earlier than
         # its previous requests.
         return sorted(outputs, key=lambda x: int(x.request_id))
+
+    def __repr__(self) -> str:
+        """Return a transformers-style hierarchical view of the model."""
+        # Cache the result to avoid repeated collective_rpc calls
+        if self._cached_repr is None:
+            results = self.llm_engine.collective_rpc("get_model_inspection")
+            # In distributed settings, we get results from all workers
+            # Just return the first one (they should all be the same)
+            if results:
+                self._cached_repr = results[0]
+            else:
+                self._cached_repr = f"LLM(model={self.model_config.model!r})"
+        return self._cached_repr

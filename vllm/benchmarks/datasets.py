@@ -1376,7 +1376,9 @@ def add_dataset_parser(parser: FlexibleArgumentParser):
         "--custom-output-len",
         type=int,
         default=256,
-        help="Number of output tokens per request, used only for custom dataset.",
+        help="Number of output tokens per request. Unless it is set to -1, the "
+        "value overrides potential output length loaded from the dataset. It is "
+        "used only for custom dataset.",
     )
 
     spec_bench_group = parser.add_argument_group("spec bench dataset options")
@@ -1958,10 +1960,12 @@ class CustomDataset(BenchmarkDataset):
     Implements the Custom dataset.  Loads data from a JSONL file and generates
     sample requests based on conversation turns. E.g.,
     ```
-    {"prompt": "What is the capital of India?"}
-    {"prompt": "What is the capital of Iran?"}
-    {"prompt": "What is the capital of China?"}
+    {"prompt": "What is the capital of India?", "output_tokens": 10}
+    {"prompt": "What is the capital of Iran?", "output_tokens": 1520}
+    {"prompt": "What is the capital of China?", "output_tokens": 819}
     ```
+    Note that 'output_tokens' column is optional and has to be provided only if
+    'custom-output-len' argument is None or -1.
     """
 
     def __init__(self, **kwargs) -> None:
@@ -2031,6 +2035,23 @@ class CustomDataset(BenchmarkDataset):
                 break
             prompt = item["prompt"]
 
+            new_output_len = output_len
+            if output_len is None or output_len == -1:
+                # check that the request has an 'output_tokens' field
+                if "output_tokens" not in item:
+                    raise ValueError(
+                        "If no output length is provided the "
+                        "custom dataset must contain an 'output_tokens' field."
+                    )
+                # Use number of output tokens from the request data
+                try:
+                    new_output_len = int(item["output_tokens"])
+                except (ValueError, TypeError) as e:
+                    raise ValueError(
+                        f"Invalid value for 'output_tokens' in custom dataset: "
+                        f"'{item['output_tokens']}'. Must be an integer."
+                    ) from e
+
             # apply template
             if not skip_chat_template:
                 prompt = tokenizer.apply_chat_template(
@@ -2044,7 +2065,7 @@ class CustomDataset(BenchmarkDataset):
                 SampleRequest(
                     prompt=prompt,
                     prompt_len=prompt_len,
-                    expected_output_len=output_len,
+                    expected_output_len=new_output_len,
                     request_id=request_id_prefix + str(i),
                 )
             )
