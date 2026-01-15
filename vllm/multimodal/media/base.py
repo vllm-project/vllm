@@ -4,7 +4,7 @@
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Generic, TypeVar
+from typing import Any, Generic, TypeVar
 
 import numpy as np
 
@@ -32,13 +32,14 @@ class MediaWithBytes(Generic[_T]):
         """Allow np.array(obj) to return np.array(obj.media)."""
         return np.array(self.media, *args, **kwargs)
 
+    def __getstate__(self):
+        return self.__dict__.copy()
+
+    def __setstate__(self, state: dict[str, Any]):
+        self.__dict__.update(state)
+
     def __getattr__(self, name: str):
         """Delegate attribute access to the underlying media object."""
-        # Guard against recursion during unpickling when media isn't set yet.
-        # pickle creates objects without calling __init__, so self.media may
-        # not exist when __getattr__ is called for methods like __setstate__.
-        if "media" not in self.__dict__:
-            raise AttributeError(name)
         return getattr(self.media, name)
 
 
