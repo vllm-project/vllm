@@ -331,8 +331,12 @@ class DefaultMoERunner(MoERunner):
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         assert self.batched_hidden_states is not None
         assert self.batched_router_logits is not None
-        assert self.batched_hidden_states.dtype == full_hidden_states.dtype
-        assert self.batched_router_logits.dtype == full_router_logits.dtype
+        assert self.batched_hidden_states.dtype == full_hidden_states.dtype, (
+            f"{self.batched_hidden_states.dtype} == {full_hidden_states.dtype}"
+        )
+        assert self.batched_router_logits.dtype == full_router_logits.dtype, (
+            f"{self.batched_router_logits.dtype} == {full_router_logits.dtype}"
+        )
         # Check size compatibility.
         assert self.batched_hidden_states.size(-1) == full_hidden_states.size(-1)
         assert self.batched_router_logits.size(-1) == full_router_logits.size(-1)
