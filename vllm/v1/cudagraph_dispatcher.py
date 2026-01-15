@@ -57,6 +57,8 @@ class CudagraphDispatcher:
         )
 
         self.keys_initialized = False
+        # Default cudagraph_mode to NONE until initialize_cudagraph_keys is called
+        self.cudagraph_mode = CUDAGraphMode.NONE
 
     def _compute_bs_to_padded_graph_size(self) -> None:
         """Pre-compute the mapping from batch size to padded graph size."""
@@ -125,6 +127,12 @@ class CudagraphDispatcher:
         # This should be called only after attention backend is initialized. So we can
         # get the correct cudagraph mode after backend support is resolved.
         self.cudagraph_mode = cudagraph_mode
+
+        # Early exit if cudagraphs are disabled (e.g., on CPU platforms)
+        if cudagraph_mode == CUDAGraphMode.NONE:
+            self.keys_initialized = True
+            return
+
         self._compute_bs_to_padded_graph_size()
 
         # LoRA activation cases to specialize the cuda graphs on
