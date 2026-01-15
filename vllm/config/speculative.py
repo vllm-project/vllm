@@ -388,7 +388,9 @@ class SpeculativeConfig:
                             "one layer. Might need some code changes "
                             "to support multiple layers."
                         )
-                elif self.method != "draft_model":
+                elif self.method == "draft_model":
+                    pass
+                else:
                     raise NotImplementedError(
                         f"Unsupported speculative method: '{self.method}'"
                     )
