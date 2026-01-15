@@ -157,8 +157,8 @@ class SpeculativeConfig:
     """The parallel configuration for the target model."""
 
     # dynamic speculative decoding control
-    """Configuration for dynamic speculative decoding, if provided."""
-    dynamic_config: DynamicSpeculativeConfig | None = None
+    """Path to config file for dynamic speculative decoding, if provided."""
+    dynamic_config_path: str | None = None
 
     # params generated in the post-init stage
     draft_model_config: SkipValidation[ModelConfig] = None  # type: ignore
@@ -503,6 +503,17 @@ class SpeculativeConfig:
                         self.target_parallel_config, self.draft_tensor_parallel_size
                     )
                 )
+
+        # load DynamicSpeculativeConfig: maybe use get_hf_file_to_dict() later
+        if self.dynamic_config_path is not None:
+            import json
+            with open(self.dynamic_config_path) as f:
+                data = json.load(f)
+
+            self.dynamic_config = DynamicSpeculativeConfig.model_validate(data)
+        else:
+            self.dynamic_config = None
+
         return self
 
     def _validate_suffix_decoding(self):

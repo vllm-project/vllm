@@ -467,6 +467,10 @@ class GPUModelRunner(
             else:
                 self.dynamic_sd_manager = None
 
+            # REMOVE
+            if self.dynamic_sd_manager:
+                print(f"_optimal_num_speculative_tokens: {self.dynamic_sd_manager._optimal_num_speculative_tokens}")
+
         # Request states.
         self.requests: dict[str, CachedRequestState] = {}
         # NOTE(rob): num_prompt_logprobs only includes reqs
