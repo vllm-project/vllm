@@ -9,7 +9,10 @@ import vllm.envs as envs
 from vllm.distributed import get_dp_group, get_ep_group
 from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
-from vllm.utils.flashinfer import has_flashinfer_all2all
+from vllm.utils.flashinfer import (
+    has_flashinfer_all2all,
+    has_flashinfer_moe_a2a,
+)
 from vllm.utils.import_utils import has_deep_ep, has_pplx
 
 from .base_device_communicator import All2AllManagerBase, Cache
@@ -19,6 +22,14 @@ if has_flashinfer_all2all():
     from flashinfer.comm.mnnvl import MnnvlConfig  # type: ignore[import-not-found]
     from flashinfer.comm.trtllm_alltoall import (
         MnnvlMoe,  # type: ignore[import-not-found]
+    )
+
+if has_flashinfer_moe_a2a():
+    from flashinfer.comm import Mapping  # type: ignore[import-not-found]
+    from flashinfer.comm.mnnvl import MnnvlConfig  # type: ignore[import-not-found]
+    from flashinfer.comm.trtllm_moe_alltoall import (
+        MoeAlltoAll,  # type: ignore[import-not-found]
+        moe_a2a_get_workspace_size_per_rank,
     )
 
 logger = init_logger(__name__)
@@ -505,5 +516,116 @@ class FlashInferAllToAllManager(All2AllManagerBase):
             finally:
                 self.workspace_tensor = None
                 self.prepare_workspace_tensor = None
+                self.mapping = None
+                self.initialized = False
+
+
+class FlashInferMoeA2AManager(All2AllManagerBase):
+    """
+    All2All communication based on FlashInfer's MoeAlltoAll kernel.
+    This is a newer kernel from trtllm that should perform better than the kernel
+    used by flashinfer_all2allv.
+    """
+
+    rank: int
+    world_size: int
+
+    def __init__(self, cpu_group):
+        assert has_flashinfer_moe_a2a(), (
+            "flashinfer trtllm_moe_alltoall module not found. "
+            "Please install/check flashinfer"
+        )
+        super().__init__(cpu_group)
+        logger.debug(
+            "Initialize FlashInfer MoeA2A rank=%d, world size=%d",
+            self.rank,
+            self.world_size,
+        )
+        self.initialized = False
+        self.moe_alltoall: MoeAlltoAll | None = None
+        self.mapping = None
+
+    def initialize(
+        self,
+        max_num_tokens: int,
+        top_k: int,
+        num_experts: int,
+        hidden_size: int,
+    ):
+        """Initialize the MoeAlltoAll workspace."""
+        if self.initialized:
+            return
+
+        self.cleanup()
+        gpus_per_node = torch.cuda.device_count()
+        logger.debug(
+            "Making MoeA2A mapping: rank=%d, world size=%d",
+            self.rank,
+            self.world_size,
+        )
+        self.mapping = Mapping(
+            self.world_size,
+            self.rank,
+            gpus_per_node,
+            tp_size=self.world_size,
+            moe_ep_size=self.world_size,
+        )
+
+        from vllm.distributed.device_communicators.mnnvl_compat import (
+            CustomCommunicator,
+        )
+
+        dp_config = MnnvlConfig(
+            comm_backend=CustomCommunicator(get_dp_group().cpu_group),
+        )
+        total_dispatch_payload_size_per_token = (
+                hidden_size // 2  # nvfp4 hidden states
+                + hidden_size // 16  # fp8 scaling factors
+                + top_k * 4  # int32 topks ids
+                + top_k * 4  # float32 topk weights
+        )
+        combine_payload_size_per_token = hidden_size * 2  # bf16 hidden states
+        self.workspace_size = moe_a2a_get_workspace_size_per_rank(
+            ep_size=self.world_size,
+            max_num_tokens=max_num_tokens,
+            total_dispatch_payload_size_per_token=total_dispatch_payload_size_per_token,
+            combine_payload_size_per_token=combine_payload_size_per_token,
+        )
+
+        self.moe_alltoall = MoeAlltoAll(
+            mapping=self.mapping,
+            max_num_tokens=max_num_tokens,
+            top_k=top_k,
+            num_experts=num_experts,
+            workspace_size_per_rank=self.workspace_size,
+            mnnvl_config=dp_config,
+        )
+
+        self.gpus_per_node = gpus_per_node
+        self.max_num_tokens = max_num_tokens
+        self.top_k = top_k
+        self.num_experts = num_experts
+        self.hidden_size = hidden_size
+        self.initialized = True
+
+        logger.info(
+            "FlashInfer MoeA2A initialized for rank %s, size %s",
+            self.rank,
+            self.world_size,
+        )
+        dist.barrier()
+
+    def get_handle(self, kwargs):
+        return self
+
+    def cleanup(self):
+        """Clean up resources."""
+        if self.initialized and self.moe_alltoall is not None:
+            try:
+                del self.moe_alltoall
+            except Exception as e:
+                logger.warning("Failed to cleanup FlashInfer MoeA2A workspace: %s", e)
+            finally:
+                self.moe_alltoall = None
                 self.mapping = None
                 self.initialized = False

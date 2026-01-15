@@ -232,16 +232,16 @@ if has_pplx():
     )
 
 if has_flashinfer_cutlass_fused_moe() and current_platform.has_device_capability(100):
+    from vllm.model_executor.layers.fused_moe.flashinfer_all2all_prepare_finalize import (  # noqa: E501
+        FlashInferMoEPrepareAndFinalize,
+        create_flashinfer_cutlass_prepare_finalize,
+    )
     from vllm.model_executor.layers.fused_moe.flashinfer_cutlass_moe import (
         FlashInferExperts,
     )
-    from vllm.model_executor.layers.fused_moe.flashinfer_cutlass_prepare_finalize import (  # noqa: E501
-        FlashInferCutlassMoEPrepareAndFinalize,
-        create_flashinfer_prepare_finalize,
-    )
 
     register_prepare_and_finalize(
-        FlashInferCutlassMoEPrepareAndFinalize,
+        FlashInferMoEPrepareAndFinalize,
         standard_format,
         nvfp4_types + fp8_types,
         blocked_quantization_support=True,
@@ -260,7 +260,7 @@ if has_flashinfer_cutlass_fused_moe() and current_platform.has_device_capability
         supports_expert_map=True,
     )
 else:
-    FlashInferCutlassMoEPrepareAndFinalize = None
+    FlashInferMoEPrepareAndFinalize = None
 
 if has_deep_gemm() and is_deep_gemm_supported():
     register_experts(
@@ -392,8 +392,8 @@ def make_prepare_finalize(
         prepare_finalize = maybe_make_prepare_finalize(moe, quant_config)
         assert prepare_finalize is not None
         return prepare_finalize
-    elif prepare_finalize_type == FlashInferCutlassMoEPrepareAndFinalize:
-        return create_flashinfer_prepare_finalize(
+    elif prepare_finalize_type == FlashInferMoEPrepareAndFinalize:
+        return create_flashinfer_cutlass_prepare_finalize(
             use_dp=moe.moe_parallel_config.dp_size > 1
         )
     else:
