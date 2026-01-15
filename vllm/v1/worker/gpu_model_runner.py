@@ -61,7 +61,7 @@ from vllm.model_executor.layers.rotary_embedding import (
 from vllm.model_executor.model_loader import TensorizerLoader, get_model_loader
 from vllm.model_executor.model_loader.reload_utils import (
     layerwise_restore_and_process,
-    unwrap_weight_loaders,
+    finalize_layerwise_restore_and_process,
 )
 from vllm.model_executor.models.interfaces import (
     MultiModalEmbeddings,
@@ -4255,7 +4255,7 @@ class GPUModelRunner(
                 # load weights from checkpoint/ original model format
                 model.apply(layerwise_restore_and_process)
                 loaded_weights = model.load_weights(weights_iterator)
-                model.apply(unwrap_weight_loaders)
+                model.apply(finalize_layerwise_restore_and_process)
 
             else:
                 # load weights from kernel format

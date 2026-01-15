@@ -11,6 +11,7 @@ Limitations:
       doesn't work in all cases (e.g., when parameter is renamed).
     - Does not handle layers where only some weight elements are loaded, but some
       weights aren't. For example, only loading q_scale, but not k_scale or v_scale
+    - Unties weights during loading, but not on cuda graph
 
 TODO:
     - Decide on reloading interface, back-compat with reload_weights
@@ -20,8 +21,8 @@ TODO:
 
 import inspect
 from functools import wraps
-from itertools import chain
 from typing import Callable
+from dataclasses import dataclass, field
 
 import torch
 from torch.utils._python_dispatch import TorchDispatchMode
@@ -122,17 +123,14 @@ class CopyNumelCounter(TorchDispatchMode):
         if kwargs is None:
             kwargs = {}
 
-        if func is torch.ops.aten.copy_.default:
-            if args[0].device.type == "meta":
-                assert args[0].numel() == args[1].numel()
-                self.copied_numel += args[0].numel()
+        if func is torch.ops.aten.copy_.default and args[0].device.type == "meta":
+            assert args[0].numel() == args[1].numel()
+            self.copied_numel += args[0].numel()
 
         return func(*args, **kwargs)
 
 
-def get_numel_loaded(
-    weight_loader: Callable, args: inspect.BoundArguments
-) -> int:
+def get_numel_loaded(weight_loader: Callable, args: inspect.BoundArguments) -> int:
     """
     Determine how many elements would be loaded by a weight loader call.
 
@@ -157,18 +155,40 @@ def record_metadata_for_reloading(layer: torch.nn.Module) -> None:
 
     Note: Buffers will be restored as parameters.
     """
-    layer.restore_metadata = (
-        {
-            name: to_meta_tensor(param)
-            for name, param in layer._parameters.items()
-            if param is not None
-        },
-        {
-            name: to_meta_tensor(buffer)
-            for name, buffer in layer._buffers.items()
-            if buffer is not None
-        },
+    LAYER_RELOADING_INFO[layer] = LayerReloadingInfo(
+        restore_metadata=(
+            {
+                name: to_meta_tensor(param)
+                for name, param in layer._parameters.items()
+                if param is not None
+            },
+            {
+                name: to_meta_tensor(buffer)
+                for name, buffer in layer._buffers.items()
+                if buffer is not None
+            },
+        )
     )
+
+
+
+LayerTensors = tuple[dict[str, torch.Tensor], dict[str, torch.Tensor]]
+
+@dataclass
+class LayerReloadingInfo:
+    restore_metadata: LayerTensors
+    kernel_tensors: LayerTensors = ({}, {})
+    load_numel: int | float = 0
+    load_numel_total: int | float = float("inf")
+    loaded_weight_kwargs: list[tuple[str, inspect.BoundArguments]] = field(default_factory=list)
+
+    def reset(self):
+        self.kernel_tensors = ({}, {})
+        self.load_numel = 0
+        self.load_numel_total = float("inf")
+        self.loaded_weight_kwargs = list()
+
+LAYER_RELOADING_INFO: dict[torch.nn.Module, LayerReloadingInfo] = dict()
 
 
 @torch.no_grad()
@@ -187,13 +207,15 @@ def layerwise_restore_and_process(layer: torch.nn.Module) -> None:
     3. Run quantization processing if applicable
     4. Copy processed values back to original tensor storage
     """
-    if not hasattr(layer, "restore_metadata"):
+    if layer not in LAYER_RELOADING_INFO:
         raise ValueError(
             "Must call `record_metadata_for_reloading` before a model can be reloaded"
         )
+    
+    info = LAYER_RELOADING_INFO[layer]
 
     # Save current tensors for later copying
-    layer.kernel_tensors = (
+    info.kernel_tensors = (
         {
             name: param
             for name, param in layer._parameters.items()
@@ -207,66 +229,64 @@ def layerwise_restore_and_process(layer: torch.nn.Module) -> None:
     )
 
     # Restore layer parameters/buffers onto meta device
-    kernel_params, kernel_buffers = layer.kernel_tensors
+    kernel_params, kernel_buffers = info.kernel_tensors
     for name, param in kernel_params.items():
         delattr(layer, name)
     for name, buffer in kernel_buffers.items():
         delattr(layer, name)
 
-    restore_params, restore_buffers = layer.restore_metadata
+    restore_params, restore_buffers = info.restore_metadata
     for name, param in restore_params.items():
         layer.register_parameter(name, param)
     for name, buffer in restore_buffers.items():
         layer.register_buffer(name, buffer)
 
     # Track loading progress to determine when to process/copy
-    load_numel_remaining = get_layer_size(layer)
-
-    # Cache for loaded weight arguments until all are ready
-    loaded_weight_kwargs: list[tuple[str, inspect.BoundArguments]] = []
+    info.load_numel = 0
+    info.load_numel_total = get_layer_size(layer)
 
     # Wrap each parameter's weight loader
     # Note that nested wrapping will occur for shared tensors
-    for param_name, param in get_module_tensors(layer).items():
+    for name, param in get_module_tensors(layer).items():
         weight_loader = getattr(param, "weight_loader", default_weight_loader)
         weight_loader_signature = inspect.signature(weight_loader)
 
         def make_restore_loader(
+            layer: torch.nn.Module,
+            param_name: str,
             original_loader: Callable,
             loader_signature: inspect.Signature,
-            name: str,
         ) -> Callable:
             """Create a wrapped weight loader that defers processing."""
 
-            @wraps(original_loader)
+            @wraps(original_loader, assigned=("__doc__", "__annotations__"))
             def restore_and_process_loader(*args, **kwargs):
-                nonlocal load_numel_remaining
-
                 # Bind and normalize arguments
                 bound_args = loader_signature.bind(*args, **kwargs)
                 bound_args.apply_defaults()
 
-                # Cache loaded weights until all are ready
-                loaded_weight_kwargs.append((name, bound_args))
-
-                # Track loading progress
-                # also triggers inner wrapped function for shared tensors
-                load_numel_remaining -= get_numel_loaded(original_loader, bound_args)
+                # Cache loaded weights, track loading progress
+                # `get_numel_loaded` triggers inner wrapped function for shared tensors
+                info = LAYER_RELOADING_INFO[layer]
+                info.loaded_weight_kwargs.append((param_name, bound_args))
+                info.load_numel += get_numel_loaded(original_loader, bound_args)
 
                 # Process and copy when all weights are loaded
-                if load_numel_remaining <= 0 and hasattr(layer, "kernel_tensors"):
-                    _finalize_layer_loading(layer, loaded_weight_kwargs, original_loader)
+                if (
+                    info.load_numel >= info.load_numel_total
+                    and not isinstance(layer, (Attention, MLAAttention))
+                ):
+                    _finalize_process_layer(layer, original_loader)
 
             return restore_and_process_loader
 
         param.weight_loader = make_restore_loader(
-            weight_loader, weight_loader_signature, param_name
+            layer, name, weight_loader, weight_loader_signature
         )
 
 
-def _finalize_layer_loading(
+def _finalize_process_layer(
     layer: torch.nn.Module,
-    loaded_weight_kwargs: list[tuple[str, inspect.BoundArguments]],
     weight_loader: Callable,
 ) -> None:
     """
@@ -278,30 +298,26 @@ def _finalize_layer_loading(
     3. Runs quantization processing if applicable
     4. Copies processed values back to original tensor storage
     """
+    # Get info related to reloading
+    info = LAYER_RELOADING_INFO[layer]
+
     # Materialize layer onto device
     materialize_layer(layer)
 
-    # Load all cached weights
-    for name, args in loaded_weight_kwargs:
+    # Load all cached weights into materialized layer
+    for name, args in info.loaded_weight_kwargs:
         param = getattr(layer, name)
         args.arguments["param"] = param
-        weight_loader(*args.args, **args.kwargs)
+        unwrap_loader(weight_loader)(*args.args, **args.kwargs)
 
     # Process weights (quantization, repacking, etc.)
+    # Attention/MLA gets processed in `finalize_layerwise_restore_and_process`
     quant_method = getattr(layer, "quant_method", None)
     if isinstance(quant_method, QuantizeMethodBase):
-        # Quant methods expect parameters on the target device for processing.
-        # This handles cases like CPU offloading where we move parameters
-        # onto device for processing and back off after.
         quant_method.process_weights_after_loading(layer)
 
-    # TODO: make sure that attention does not get processed here
-    # probably need to make loaded_weight_kwargs a layer attribute
-    # then do the processing in unwrap_weight_loaders
-
     # Copy processed values into original tensor storage (preserves cudagraph refs)
-    print(f"finalize: {layer.__class__.__name__}")
-    parameters, buffers = layer.kernel_tensors
+    parameters, buffers = info.kernel_tensors
     for param in parameters.values():
         param.data.copy_(getattr(layer, name))
         layer.register_parameter(name, param)
@@ -309,10 +325,18 @@ def _finalize_layer_loading(
         buffer.data.copy_(getattr(layer, name))
         layer.register_buffer(name, buffer)
 
-    del layer.kernel_tensors
+    info.reset()
 
 
-def unwrap_weight_loaders(layer: torch.nn.Module) -> None:
+def unwrap_loader(loader: Callable) -> Callable:
+    while loader.__name__ == "restore_and_process_loader":
+        loader = loader.__wrapped__
+
+    return loader
+    
+
+
+def finalize_layerwise_restore_and_process(layer: torch.nn.Module) -> None:
     """
     Remove the outermost layer of weight loading wrappers.
 
@@ -325,64 +349,31 @@ def unwrap_weight_loaders(layer: torch.nn.Module) -> None:
     for param in get_module_tensors(layer).values():
         if hasattr(param, "weight_loader"):
             # TODO: limit unwrapping to only the layerwise weight loaders
-            param.weight_loader = inspect.unwrap(param.weight_loader)
+            param.weight_loader = unwrap_loader(param.weight_loader)
 
-    # TODO: process attention
+    info = LAYER_RELOADING_INFO[layer]
 
-    # # Process weights (quantization, repacking, etc.)
-    # quant_method = getattr(layer, "quant_method", None)
-    # if isinstance(quant_method, QuantizeMethodBase):
-    #     # Quant methods expect parameters on the target device for processing.
-    #     # This handles cases like CPU offloading where we move parameters
-    #     # onto device for processing and back off after.
-    #     quant_method.process_weights_after_loading(layer)
-
-    # elif isinstance(layer, (Attention, MLAAttention)) and hasattr(
-    #     layer, "process_weights_after_loading"
-    # ):
-    #     # # Copy processed values into original tensor storage (preserves cudagraph refs)
-    #     # for name in layer.kernel_tensors.keys():
-    #     #     layer.kernel_tensors[name].data.copy_(getattr(layer, name))
-    #     #     setattr(layer, name, layer.kernel_tensors[name])
+    # Cannot process a layer if only some elements are loaded
+    if info.load_numel > 0 and info.load_numel < info.load_numel_total:
+        raise ValueError("Only some weights loaded")
+    
+    # Attention/MLA layers are processed after all other layers
+    if isinstance(layer, (Attention, MLAAttention)):
+        if info.load_numel > 0:
+            raise NotImplementedError("Layerwise reloading of Q/K/V scale weights")
         
-    #     # # TODO(lucas): see if there is a way to unify the signatures
-    #     # # of process_weights_after_loading
-    #     # #layer.process_weights_after_loading(model_config.dtype)
-    #     # layer.process_weights_after_loading(torch.bfloat16)
-
-    #     # # Copy processed values into original tensor storage (preserves cudagraph refs)
-    #     # for name in layer.kernel_tensors.keys():
-    #     #     layer.kernel_tensors[name].data.copy_(getattr(layer, name))
-    #     #     setattr(layer, name, layer.kernel_tensors[name])
-
-    #     del layer.kernel_tensors
-
-    # else:
-    if hasattr(layer, "kernel_tensors"):
-        # print("unwrap process")
-        # print(layer.__class__.__name__)
-        # print(layer.kernel_tensors)
-        print(f"late finalize: {layer.__class__.__name__}")
-
-        # ApplyRotaryEmb has no tensors
-        # Llama3RotaryEmbedding has cos_sin_cache
-
-
-        # Handle modules with kernel tensors that don't load module tensors.
-        # For these cases, finalize layerwise loading by removing meta tensors
-        # and copying back the kernel tensors.
-
-        if hasattr(layer, "kernel_tensors"):
+        # No processing: place kernel tensors back
+        else:
             for name in get_module_tensors(layer).keys():
                 delattr(layer, name)
 
-            parameters, buffers = layer.kernel_tensors
+            parameters, buffers = LAYER_RELOADING_INFO[layer].kernel_tensors
             for name, param in parameters.items():
                 layer.register_parameter(name, param)
             for name, buffer in buffers.items():
                 layer.register_buffer(name, buffer)
 
-            del layer.kernel_tensors
+    info.reset()
 
 
 def supports_reloading():
@@ -394,7 +385,7 @@ def supports_reloading():
     def wrapper(*args, **kwargs):
         model.apply(layerwise_restore_and_process)
         ret = func(*args, **kwargs)
-        model.apply(unwrap_weight_loaders)
+        model.apply(finalize_layerwise_restore_and_process)
 
         return ret
 
