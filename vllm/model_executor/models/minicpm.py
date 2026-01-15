@@ -90,6 +90,7 @@ class MiniCPMMoE(nn.Module):
         intermediate_size: int,
         params_dtype: torch.dtype | None = None,
         tp_size: int | None = None,
+        prefix: str = "",
     ):
         super().__init__()
         self.tp_size = tp_size or get_tensor_model_parallel_world_size()
@@ -108,6 +109,7 @@ class MiniCPMMoE(nn.Module):
             bias=False,
             params_dtype=self.params_dtype,
             quant_config=None,
+            prefix=f"{prefix}.gate",
         )
 
         self.ws = nn.Parameter(
@@ -352,6 +354,7 @@ class MiniCPMDecoderLayer(nn.Module):
                 hidden_act=self.config.hidden_act,
                 hidden_act_param=getattr(self.config, "hidden_act_param", 0.0),
                 quant_config=self.quant_config,
+                prefix=f"{self.prefix}.mlp",
             )
         else:
             self.mlp = MiniCPMMoE(
@@ -359,6 +362,7 @@ class MiniCPMDecoderLayer(nn.Module):
                 top_k=self.config.num_experts_per_tok,
                 hidden_size=self.config.hidden_size,
                 intermediate_size=self.config.intermediate_size,
+                prefix=f"{self.prefix}.mlp",
             )
 
     def forward(

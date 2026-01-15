@@ -12,16 +12,16 @@ from typing_extensions import assert_never, override
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.chat_utils import ChatTemplateContentFormatOption
 from vllm.entrypoints.logger import RequestLogger
-from vllm.entrypoints.openai.protocol import (
+from vllm.entrypoints.openai.engine.protocol import (
     ErrorResponse,
     UsageInfo,
 )
-from vllm.entrypoints.openai.serving_engine import (
+from vllm.entrypoints.openai.engine.serving import (
     EmbeddingServeContext,
     OpenAIServing,
     ServeContext,
 )
-from vllm.entrypoints.openai.serving_models import OpenAIServingModels
+from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.entrypoints.pooling.embed.protocol import (
     EmbeddingBytesResponse,
     EmbeddingChatRequest,
@@ -89,7 +89,7 @@ class EmbeddingMixin(OpenAIServing):
                     chat_template=ctx.request.chat_template or ctx.chat_template,
                     chat_template_content_format=ctx.chat_template_content_format,
                     add_generation_prompt=ctx.request.add_generation_prompt,
-                    continue_final_message=False,
+                    continue_final_message=ctx.request.continue_final_message,
                     add_special_tokens=ctx.request.add_special_tokens,
                 )
             else:

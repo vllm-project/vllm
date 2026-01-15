@@ -31,6 +31,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import GroupShape
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import Fp8LinearOp
 from vllm.platforms import current_platform
 from vllm.utils.system_utils import update_environment_variables
+from vllm.utils.torch_utils import set_random_seed
 
 from ...utils import multi_gpu_test
 from ..backend import TestBackend
@@ -232,7 +233,7 @@ def sequence_parallelism_pass_on_test_model(
     fuse_norm_quant: bool,
     dynamic: bool,
 ):
-    current_platform.seed_everything(0)
+    set_random_seed(0)
 
     device = torch.device(f"cuda:{local_rank}")
     torch.cuda.set_device(device)
