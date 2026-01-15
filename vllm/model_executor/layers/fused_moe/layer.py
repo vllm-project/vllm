@@ -1936,7 +1936,7 @@ class FusedMoE(CustomOp):
                     self.quant_method is not None
                     and self.dp_size > 1
                     and self.use_ep
-                    and getattr(self.quant_config, "post_quant_allgather", False)
+                    and getattr(self.quant_method, "do_post_quant_allgather", False)
                 )
                 if post_quant_allgather:
                     hidden_states_to_dispatch, extra_tensors = (
