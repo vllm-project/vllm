@@ -8,14 +8,14 @@ import torch
 import vllm.envs as envs
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.logger import init_logger
-from vllm.model_executor.layers.fused_moe.all2all_utils import (
-    maybe_make_prepare_finalize,
-)
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
     FusedMoEQuantConfig,
     nvfp4_moe_quant_config,
     nvfp4_w4a16_moe_quant_config,
+)
+from vllm.model_executor.layers.fused_moe.prepare_finalize import (
+    MoEPrepareAndFinalizeNoEP,
 )
 from vllm.model_executor.layers.quantization.utils.flashinfer_fp4_moe import (
     is_supported_config_trtllm,
@@ -33,7 +33,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 )
 
 if TYPE_CHECKING:
-    from vllm.model_executor.layers.fused_moe.layer import FusedMoE
+    pass
 
 logger = init_logger(__name__)
 
@@ -359,55 +359,66 @@ def make_nvfp4_moe_quant_config(
     )
 
 
+def make_nvfp4_moe_kernel_for_mkm(
+    moe_config: FusedMoEConfig,
+    quant_config: FusedMoEQuantConfig,
+    experts_cls: type[mk.FusedMoEPermuteExpertsUnpermute],
+    prepare_finalize: mk.FusedMoEPrepareAndFinalize,
+) -> mk.FusedMoEPermuteExpertsUnpermute:
+    if prepare_finalize.activation_format == mk.FusedMoEActivationFormat.BatchedExperts:
+        max_num_tokens_per_rank = prepare_finalize.max_num_tokens_per_rank()
+        assert max_num_tokens_per_rank is not None
+        return experts_cls.make_batched_experts(
+            moe_config=moe_config,
+            quant_config=quant_config,
+            max_num_tokens=max_num_tokens_per_rank,
+            num_dispatchers=prepare_finalize.num_dispatchers(),
+        )
+    else:
+        return experts_cls.make_standard_experts(
+            moe_config=moe_config,
+            quant_config=quant_config,
+        )
+
+
 def make_nvfp4_moe_kernel(
-    layer: "FusedMoE",
     moe_quant_config: FusedMoEQuantConfig,
     moe_config: FusedMoEConfig,
     experts_cls: type[mk.FusedMoEPermuteExpertsUnpermute],
 ) -> mk.FusedMoEModularKernel:
+    # TODO(rob): unify after we merge tp and dp/ep.
+    if (
+        moe_config.moe_parallel_config.use_all2all_kernels
+        and moe_config.moe_parallel_config.all2all_backend
+        not in ["allgather_reducescatter", "naive"]
+    ):
+        raise ValueError(
+            "NvFP4 Oracle should not create non-naive A2A P/F. "
+            "This should happen via the ModularKernelMethod."
+        )
+
     # Create Prepare/Finalize.
-    prepare_finalize = maybe_make_prepare_finalize(
-        moe=moe_config,
-        quant_config=moe_quant_config,
-        routing_tables=None,  # TODO: init routing tables here?
+    prepare_finalize = MoEPrepareAndFinalizeNoEP(
         defer_input_quant=experts_cls.should_pf_defer_input_quant(
             moe_config, moe_quant_config
         ),
-        allow_new_interface=True,
     )
-    assert prepare_finalize is not None
-
-    logger.info_once("Using %s", prepare_finalize.__class__.__name__)
 
     # Create Experts.
-    if prepare_finalize.activation_format == mk.FusedMoEActivationFormat.Standard:
-        experts = experts_cls.make_standard_experts(
-            moe_config=moe_config,
-            quant_config=moe_quant_config,
-        )
-    else:
-        max_num_tokens_per_rank = prepare_finalize.max_num_tokens_per_rank()
-        assert max_num_tokens_per_rank is not None
-        experts = experts_cls.make_batched_experts(
-            moe_config=moe_config,
-            quant_config=moe_quant_config,
-            max_num_tokens=max_num_tokens_per_rank,
-            num_dispatchers=prepare_finalize.num_dispatchers(),
-        )
+    experts = experts_cls.make_standard_experts(
+        moe_config=moe_config,
+        quant_config=moe_quant_config,
+    )
 
-    # NOTE(rob): we only want the ModularKernel to control the SharedExpert
-    # if we are using all2all (for SBO). Need to make a change somewhere
-    # else to prevent double running the Shared Expert.
-    # This needs to be refactored.
+    # NOTE(rob): we only want the mk to control the shared_expert
+    # if using all2all (for SBO). bnell is making this explict in
+    # the new MoE runner class.
     kernel = mk.FusedMoEModularKernel(
         prepare_finalize,
         experts,
-        shared_experts=(
-            getattr(layer, "shared_expert", None)
-            if moe_config.moe_parallel_config.use_all2all_kernels
-            else None
-        ),
+        shared_experts=None,
         moe_parallel_config=moe_config.moe_parallel_config,
     )
 
+    # TODO(rob): update inplace logic to be part of the kernel.
     return kernel

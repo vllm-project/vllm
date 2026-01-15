@@ -36,6 +36,7 @@ from vllm.model_executor.layers.fused_moe.oracle.nvfp4 import (
     convert_to_nvfp4_moe_kernel_format,
     is_global_sf_supported_for_nvfp4_backend,
     make_nvfp4_moe_kernel,
+    make_nvfp4_moe_kernel_for_mkm,
     make_nvfp4_moe_quant_config,
     select_nvfp4_moe_backend,
 )
@@ -51,6 +52,7 @@ from vllm.model_executor.layers.quantization.base_config import (
 )
 from vllm.model_executor.layers.quantization.kv_cache import BaseKVCacheMethod
 from vllm.model_executor.layers.quantization.utils.flashinfer_fp4_moe import (
+    build_flashinfer_fp4_cutlass_moe_prepare_finalize,
     flashinfer_trtllm_fp4_moe,
     flashinfer_trtllm_fp4_routed_moe,
 )
@@ -1380,19 +1382,34 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
         self,
         routing_tables: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
     ) -> mk.FusedMoEPrepareAndFinalize | None:
-        raise ValueError(
-            "ModelOptNvFp4FusedMoE uses the new modular kernel "
-            "initialization logic. This function should not be called."
-        )
+        if self.nvfp4_backend == NvFp4MoeBackend.FLASHINFER_TRTLLM:
+            return None
+        elif self.nvfp4_backend == NvFp4MoeBackend.FLASHINFER_CUTLASS:
+            # For no-EP case, don't use the MKM framework.
+            if not self.moe.moe_parallel_config.use_all2all_kernels:
+                return None
+
+            # For now, fp4 moe only works with the flashinfer dispatcher.
+            prepare_finalize = build_flashinfer_fp4_cutlass_moe_prepare_finalize(
+                self.moe
+            )
+            logger.debug_once("%s", prepare_finalize.__class__.__name__)
+            return prepare_finalize
+        else:
+            return super().maybe_make_prepare_finalize(routing_tables)
 
     def select_gemm_impl(
         self,
         prepare_finalize: mk.FusedMoEPrepareAndFinalize,
         layer: torch.nn.Module,
     ) -> mk.FusedMoEPermuteExpertsUnpermute:
-        raise ValueError(
-            "ModelOptNvFp4FusedMoE uses the new modular kernel "
-            "initialization logic. This function should not be called."
+        assert self.moe_quant_config is not None
+        assert self.experts_cls is not None
+        return make_nvfp4_moe_kernel_for_mkm(
+            moe_config=self.moe,
+            quant_config=self.moe_quant_config,
+            experts_cls=self.experts_cls,
+            prepare_finalize=prepare_finalize,
         )
 
     def uses_weight_scale_2_pattern(self) -> bool:
@@ -1569,7 +1586,6 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
         if self.moe_quant_config is not None:
             assert self.experts_cls is not None
             self.kernel = make_nvfp4_moe_kernel(
-                layer=layer,
                 moe_quant_config=self.moe_quant_config,
                 moe_config=self.moe,
                 experts_cls=self.experts_cls,
