@@ -16,6 +16,7 @@ from vllm.config import VllmConfig
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.attention.mm_encoder_attention import MMEncoderAttention
+from vllm.model_executor.layers.conv import Conv2dLayer
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
     QKVParallelLinear,
@@ -149,7 +150,6 @@ class PerceptionEncoderLayerScale(nn.Module):
     def __init__(self, dim, init_values=1e-5, inplace=False):
         super().__init__()
         self.inplace = inplace
-        self.dim = dim
         self.gamma = nn.Parameter(init_values * torch.ones(dim))
 
     def forward(self, x):
@@ -352,12 +352,9 @@ class PerceptionEncoderVisionTransformer(nn.Module):
             ]
         )
 
-    def forward(self, x: torch.Tensor, grid_hw: tuple[int, int], layer_idx: int = -1):
-        stop_idx = (self.layers + layer_idx) % self.layers
-        for i, block in enumerate(self.resblocks):
+    def forward(self, x: torch.Tensor, grid_hw: tuple[int, int]):
+        for block in self.resblocks:
             x = block(x, grid_hw=grid_hw)
-            if i == stop_idx:
-                break
         return x
 
 
@@ -460,7 +457,7 @@ class PerceptionEncoder(nn.Module):
             raise ValueError("use_rope2d must be True")
         self.image_size = config.image_size
 
-        self.conv1 = nn.Conv2d(
+        self.conv1 = Conv2dLayer(
             in_channels=3,
             out_channels=config.width,
             kernel_size=config.patch_size,
@@ -500,10 +497,10 @@ class PerceptionEncoder(nn.Module):
         else:
             self.attn_pool = None
 
-        self.vit_downsampler1 = nn.Conv2d(
+        self.vit_downsampler1 = Conv2dLayer(
             config.width, config.width * 2, kernel_size=3, stride=2, padding=1
         )
-        self.vit_downsampler2 = nn.Conv2d(
+        self.vit_downsampler2 = Conv2dLayer(
             config.width * 2, config.width * 4, kernel_size=3, stride=2, padding=1
         )
 
