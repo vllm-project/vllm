@@ -34,6 +34,7 @@ from vllm.model_executor.layers.fused_moe.oracle.fp8 import (
     Fp8MoeBackend,
     convert_to_fp8_moe_kernel_format,
     make_fp8_moe_kernel,
+    make_fp8_moe_kernel_for_mkm,
     make_fp8_moe_quant_config,
     select_fp8_moe_backend,
 )
@@ -905,39 +906,12 @@ class Fp8MoEMethod(FusedMoEMethodBase):
     ) -> FusedMoEPermuteExpertsUnpermute:
         assert self.moe_quant_config is not None
         assert self.experts_cls is not None
-
-        if (
-            prepare_finalize.activation_format
-            == mk.FusedMoEActivationFormat.BatchedExperts
-        ):
-            max_num_tokens_per_rank = prepare_finalize.max_num_tokens_per_rank()
-            assert max_num_tokens_per_rank is not None
-            logger.debug(
-                "%s(%s): max_tokens_per_rank=%s, block_size=%s, per_act_token=%s",
-                self.experts_cls.__name__,
-                self.__class__.__name__,
-                max_num_tokens_per_rank,
-                self.weight_block_size,
-                False,
-            )
-            return self.experts_cls.make_batched_experts(
-                moe_config=self.moe,
-                quant_config=self.moe_quant_config,
-                max_num_tokens=max_num_tokens_per_rank,
-                num_dispatchers=prepare_finalize.num_dispatchers(),
-            )
-        else:
-            logger.debug(
-                "%s(%s): max_tokens_per_rank=%s, block_size=%s, per_act_token=%s",
-                self.experts_cls.__name__,
-                self.__class__.__name__,
-                self.weight_block_size,
-                False,
-            )
-            return self.experts_cls.make_standard_experts(
-                moe_config=self.moe,
-                quant_config=self.moe_quant_config,
-            )
+        return make_fp8_moe_kernel_for_mkm(
+            moe_config=self.moe,
+            quant_config=self.moe_quant_config,
+            experts_cls=self.experts_cls,
+            prepare_finalize=prepare_finalize,
+        )
 
     def get_fused_moe_quant_config(
         self, layer: torch.nn.Module

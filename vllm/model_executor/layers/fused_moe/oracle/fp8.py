@@ -414,6 +414,42 @@ def make_fp8_moe_quant_config(
     )
 
 
+def maybe_make_prepare_finalize_for_mkm():
+    pass
+
+
+def make_fp8_moe_kernel_for_mkm(
+    moe_config: FusedMoEConfig,
+    quant_config: FusedMoEQuantConfig,
+    experts_cls: type[mk.FusedMoEPermuteExpertsUnpermute],
+    prepare_finalize: mk.FusedMoEPrepareAndFinalize,
+) -> mk.FusedMoEPermuteExpertsUnpermute:
+    # TODO(rob): unify after we merge tp and dp/ep.
+    if (not moe_config.moe_parallel_config.use_all2all_kernels) or (
+        moe_config.moe_parallel_config.all2all_backend
+        in ["allgather_reducescatter", "naive"]
+    ):
+        raise ValueError(
+            "make_fp8_moe_kernel_for_mkm should only create "
+            "kernel for non-naive A2A P/F."
+        )
+
+    if prepare_finalize.activation_format == mk.FusedMoEActivationFormat.BatchedExperts:
+        max_num_tokens_per_rank = prepare_finalize.max_num_tokens_per_rank()
+        assert max_num_tokens_per_rank is not None
+        return experts_cls.make_batched_experts(
+            moe_config=moe_config,
+            quant_config=quant_config,
+            max_num_tokens=max_num_tokens_per_rank,
+            num_dispatchers=prepare_finalize.num_dispatchers(),
+        )
+    else:
+        return experts_cls.make_standard_experts(
+            moe_config=moe_config,
+            quant_config=quant_config,
+        )
+
+
 def make_fp8_moe_kernel(
     moe_quant_config: FusedMoEQuantConfig,
     moe_config: FusedMoEConfig,
