@@ -320,29 +320,6 @@ def per_token_cast_to_fp8(
     return fp8_data.view(m, n + pad_size)[:, :n], (x_amax / 448.0).view(m, -1)
 
 
-def make_test_moe_config(
-    topk: int,
-    e: int,
-    n: int,
-    k: int,
-    in_dtype: torch.dtype,
-    make_gate: bool = True,
-    activation: str = "silu",
-) -> FusedMoEConfig:
-    return FusedMoEConfig(
-        num_experts=e,
-        experts_per_token=topk,
-        hidden_dim=k,
-        intermediate_size_per_partition=n,
-        num_local_experts=e,
-        activation=activation,
-        device="cuda",
-        in_dtype=in_dtype,
-        moe_parallel_config=FusedMoEParallelConfig.make_no_parallel(),
-        is_act_and_mul=make_gate,
-    )
-
-
 def make_test_quant_config(
     e: int,
     n: int,

@@ -7,7 +7,6 @@ import torch
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from tests.kernels.moe.utils import (
     make_dummy_moe_config,
-    make_test_moe_config,
     make_test_quant_config,
     make_test_weights,
 )
@@ -172,15 +171,8 @@ def test_w8a8_block_fp8_fused_moe(
         per_act_token_quant=False,
         block_shape=block_size,
     )
-    moe_config = make_test_moe_config(
-        topk=topk,
-        e=E,
-        n=N,
-        k=K,
-        in_dtype=dtype,
-    )
 
-    m_fused_moe = modular_triton_fused_moe(moe_config, quant_config)
+    m_fused_moe = modular_triton_fused_moe(make_dummy_moe_config(), quant_config)
 
     topk_weights, topk_ids, _ = fused_topk(a, score.float(), topk, False)
 
