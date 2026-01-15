@@ -200,6 +200,7 @@ def select_nvfp4_moe_backend(
         else:
             # If the user is not explicit about the backend, try each.
             for backend in FLASHINFER_NVFP4_MOE_BACKENDS:
+                # TODO: this is wrong
                 k_cls = backend_2_kernel_cls(backend)
                 if k_cls.is_supported_config(
                     k_cls, config, weight_key, activation_key, activation_format
