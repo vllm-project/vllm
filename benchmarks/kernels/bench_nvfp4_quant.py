@@ -146,8 +146,16 @@ def test_accuracy():
         x_vals=[1, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096],
         x_log=False,
         line_arg="method",
-        line_vals=["flashinfer_swizzled", "vllm_swizzled"],
-        line_names=["FlashInfer (swizzled)", "vLLM (swizzled)"],
+        line_vals=[
+            "flashinfer_swizzled_no_convert",
+            "flashinfer_swizzled_convert",
+            "vllm_swizzled_convert",
+        ],
+        line_names=[
+            "FlashInfer (swizzled, no convert)",
+            "FlashInfer (swizzled + convert)",
+            "vLLM (swizzled + convert)",
+        ],
         ylabel="us (lower is better)",
         plot_name="NVFP4 E2E Quantization + Conversion Latency (us)",
         args={},
@@ -155,12 +163,16 @@ def test_accuracy():
 )
 def benchmark_e2e_quantization(batch_size, method, N, K):
     """
-    End-to-end benchmark: quantization + conversion to linear layout.
+    End-to-end benchmark: quantization with/without conversion.
 
-    This tests the complete path from input quantization to linear scale
-    conversion, as required by TRTLLM kernels. Following reviewer's suggestion:
-    we should force FlashInfer to swizzle the SF layout rather than linearizing
-    the vLLM quantized output, as swizzling is actually needed e2e.
+    This tests different paths:
+    - FlashInfer swizzled (no convert): for kernels needing swizzled layout
+    - FlashInfer swizzled + convert: for kernels needing linear layout (TRTLLM)
+    - vLLM swizzled + convert: current path for TRTLLM kernels
+
+    Following reviewer's suggestion: force FlashInfer to swizzle the SF layout
+    rather than linearizing the vLLM quantized output, as swizzling is actually
+    needed e2e (for some kernels like FlashInfer CUTLASS).
     """
     M = batch_size
     device = "cuda"
@@ -174,8 +186,21 @@ def benchmark_e2e_quantization(batch_size, method, N, K):
 
     quantiles = [0.5, 0.2, 0.8]
 
-    if method == "flashinfer_swizzled":
+    if method == "flashinfer_swizzled_no_convert":
+        # FlashInfer quantization with swizzled layout, no conversion
+        # (for kernels that need swizzled layout, e.g., FlashInfer CUTLASS)
+        def fn():
+            fp4, scale_swizzled = flashinfer_fp4_quantize(
+                a, a_global_scale, is_sf_swizzled_layout=True
+            )
+            scale_swizzled = scale_swizzled.view(torch.float8_e4m3fn)
+            # No conversion - use swizzled layout directly (needed e2e)
+            return fp4, scale_swizzled
+
+        ms, min_ms, max_ms = triton.testing.do_bench_cudagraph(fn, quantiles=quantiles)
+    elif method == "flashinfer_swizzled_convert":
         # FlashInfer quantization with swizzled layout, then convert to linear
+        # (for kernels that need linear layout, e.g., TRTLLM)
         def fn():
             fp4, scale_swizzled = flashinfer_fp4_quantize(
                 a, a_global_scale, is_sf_swizzled_layout=True
@@ -188,7 +213,7 @@ def benchmark_e2e_quantization(batch_size, method, N, K):
             return fp4, scale_linear
 
         ms, min_ms, max_ms = triton.testing.do_bench_cudagraph(fn, quantiles=quantiles)
-    elif method == "vllm_swizzled":
+    elif method == "vllm_swizzled_convert":
         # vLLM quantization (outputs swizzled), then convert to linear
         def fn():
             fp4, scale_swizzled = ops.scaled_fp4_quant(a, a_global_scale)
@@ -242,12 +267,18 @@ if __name__ == "__main__":
         print("\n" + "=" * 80)
         print("Running E2E Benchmark: Quantization + Conversion to Linear")
         print("=" * 80)
+        print("This benchmark tests different quantization paths:")
         print(
-            "This benchmark tests the complete path from input quantization"
-            " to linear scale conversion, as required by TRTLLM kernels."
+            "  - FlashInfer swizzled (no convert): for kernels needing swizzled"
+            " layout (e.g., FlashInfer CUTLASS)"
         )
         print(
-            "Following reviewer's suggestion: we force FlashInfer to swizzle"
+            "  - FlashInfer swizzled + convert: for kernels needing linear"
+            " layout (e.g., TRTLLM)"
+        )
+        print("  - vLLM swizzled + convert: current path for TRTLLM kernels")
+        print(
+            "\nFollowing reviewer's suggestion: force FlashInfer to swizzle"
             " the SF layout rather than linearizing the vLLM quantized output,"
             " as swizzling is actually needed e2e."
         )
