@@ -35,8 +35,34 @@ from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 logger = init_logger(__name__)
 
 
+LayerTensors = tuple[dict[str, torch.Tensor], dict[str, torch.Tensor]]
+
+@dataclass
+class LayerReloadingInfo:
+    # model format (meta), populated by `record_metadata_for_reloading`
+    restore_metadata: LayerTensors
+
+    # kernel format (device)
+    kernel_tensors: LayerTensors = ({}, {})
+
+    # track how many restored elements are ready for loading
+    load_numel: int | float = 0
+    load_numel_total: int | float = float("inf")
+
+    # stores arguments and tensors ready for loading
+    loaded_weights: list[tuple[str, inspect.BoundArguments]] = field(default_factory=list)
+
+    def reset(self):
+        self.kernel_tensors = ({}, {})
+        self.load_numel = 0
+        self.load_numel_total = float("inf")
+        self.loaded_weights = list()
+
+LAYER_RELOADING_INFO: dict[torch.nn.Module, LayerReloadingInfo] = dict()
+
+
 # -----------------------------------------------------------------------------
-# Tensor Utilities
+# Materialize Utilities
 # -----------------------------------------------------------------------------
 
 
@@ -64,47 +90,16 @@ def materialize_meta_tensor(meta_tensor: torch.Tensor) -> torch.Tensor:
     )
     tensor.__class__ = meta_tensor.__class__
     tensor.__dict__ = meta_tensor.__dict__
-    assert tensor.device != torch.device("meta")
     return tensor
-
-
-def get_module_tensors(module: torch.nn.Module) -> dict[str, torch.Tensor]:
-    """Get all parameters and buffers from a module as a dict."""
-    params = {
-        name: value
-        for name, value in module._parameters.items()
-        if value is not None
-    }
-    buffers = {
-        name: torch.nn.Buffer(value)
-        for name, value in module._buffers.items()
-        if value is not None
-    }
-    return params | buffers
-
-
-# -----------------------------------------------------------------------------
-# Layer Utilities
-# -----------------------------------------------------------------------------
-
-
-def get_layer_size(layer: torch.nn.Module) -> int:
-    """Calculate total number of elements across all tensors in a layer."""
-    return sum(tensor.numel() for tensor in get_module_tensors(layer).values())
 
 
 def materialize_layer(layer: torch.nn.Module) -> None:
     """Materialize all meta tensors in a layer to actual tensors."""
-    for name, tensor in get_module_tensors(layer).items():
+    for name, tensor in get_layer_tensors(layer).items():
         setattr(layer, name, materialize_meta_tensor(tensor))
 
 
-# -----------------------------------------------------------------------------
-# Copy Tracking
-# -----------------------------------------------------------------------------
-
-
-class CopyNumelCounter(TorchDispatchMode):
+class MetaCopyCounter(TorchDispatchMode):
     """
     Tracks total number of elements modified with `copy_`.
 
@@ -114,10 +109,9 @@ class CopyNumelCounter(TorchDispatchMode):
     Note: Assumes that copy kwargs are not used.
     """
 
-    def __init__(self, param: torch.Tensor):
+    def __init__(self):
         super().__init__()
         self.copied_numel = 0
-        self.param = param
 
     def __torch_dispatch__(self, func, types, args=(), kwargs=None):
         if kwargs is None:
@@ -136,9 +130,41 @@ def get_numel_loaded(weight_loader: Callable, args: inspect.BoundArguments) -> i
 
     Runs the weight loader with a CopyNumelCounter to track copy operations.
     """
-    with CopyNumelCounter(args.arguments["param"]) as counter:
+    assert args.arguments["param"].device.type == "meta"
+    with MetaCopyCounter() as counter:
         weight_loader(*args.args, **args.kwargs)
     return counter.copied_numel
+
+
+# -----------------------------------------------------------------------------
+# Layer Utilities
+# -----------------------------------------------------------------------------
+
+
+def get_layer_tensors(layer: torch.nn.Module) -> dict[str, torch.Tensor]:
+    """Get all parameters and buffers from a module as a dict."""
+    params, buffers = get_layer_params_buffers(layer)
+    return params | buffers
+
+
+def get_layer_params_buffers(layer: torch.nn.Module) -> LayerTensors:
+    return (
+        {
+            name: param
+            for name, param in layer._parameters.items()
+            if param is not None
+        },
+        {
+            name: buffer
+            for name, buffer in layer._buffers.items()
+            if buffer is not None
+        },
+    )
+
+
+def get_layer_size(layer: torch.nn.Module) -> int:
+    """Calculate total number of elements across all tensors in a layer."""
+    return sum(tensor.numel() for tensor in get_layer_tensors(layer).values())
 
 
 # -----------------------------------------------------------------------------
@@ -155,40 +181,26 @@ def record_metadata_for_reloading(layer: torch.nn.Module) -> None:
 
     Note: Buffers will be restored as parameters.
     """
-    LAYER_RELOADING_INFO[layer] = LayerReloadingInfo(
-        restore_metadata=(
-            {
-                name: to_meta_tensor(param)
-                for name, param in layer._parameters.items()
-                if param is not None
-            },
-            {
-                name: to_meta_tensor(buffer)
-                for name, buffer in layer._buffers.items()
-                if buffer is not None
-            },
-        )
-    )
+    params, buffers = get_layer_params_buffers(layer)
+    params = {name: to_meta_tensor(param) for name, param in params.items()}
+    buffers = {name: to_meta_tensor(buffer) for name, buffer in buffers.items()}
+    LAYER_RELOADING_INFO[layer] = LayerReloadingInfo(restore_metadata=(params, buffers))
 
 
+def restore_layer_on_meta(layer: torch.nn.Module):
+    if layer not in LAYER_RELOADING_INFO:
+        raise ValueError("Must call `record_metadata_for_reloading` reloading")
+    
+    info = LAYER_RELOADING_INFO[layer]
+    
+    for name in get_layer_tensors(layer).keys():
+        delattr(layer, name)
 
-LayerTensors = tuple[dict[str, torch.Tensor], dict[str, torch.Tensor]]
-
-@dataclass
-class LayerReloadingInfo:
-    restore_metadata: LayerTensors
-    kernel_tensors: LayerTensors = ({}, {})
-    load_numel: int | float = 0
-    load_numel_total: int | float = float("inf")
-    loaded_weight_kwargs: list[tuple[str, inspect.BoundArguments]] = field(default_factory=list)
-
-    def reset(self):
-        self.kernel_tensors = ({}, {})
-        self.load_numel = 0
-        self.load_numel_total = float("inf")
-        self.loaded_weight_kwargs = list()
-
-LAYER_RELOADING_INFO: dict[torch.nn.Module, LayerReloadingInfo] = dict()
+    restore_params, restore_buffers = info.restore_metadata
+    for name, param in restore_params.items():
+        layer.register_parameter(name, param)
+    for name, buffer in restore_buffers.items():
+        layer.register_buffer(name, buffer)
 
 
 @torch.no_grad()
@@ -208,38 +220,15 @@ def layerwise_restore_and_process(layer: torch.nn.Module) -> None:
     4. Copy processed values back to original tensor storage
     """
     if layer not in LAYER_RELOADING_INFO:
-        raise ValueError(
-            "Must call `record_metadata_for_reloading` before a model can be reloaded"
-        )
+        raise ValueError("Must call `record_metadata_for_reloading` reloading")
     
     info = LAYER_RELOADING_INFO[layer]
 
     # Save current tensors for later copying
-    info.kernel_tensors = (
-        {
-            name: param
-            for name, param in layer._parameters.items()
-            if param is not None
-        },
-        {
-            name: buffer
-            for name, buffer in layer._buffers.items()
-            if buffer is not None
-        },
-    )
+    info.kernel_tensors = get_layer_params_buffers(layer)
 
     # Restore layer parameters/buffers onto meta device
-    kernel_params, kernel_buffers = info.kernel_tensors
-    for name, param in kernel_params.items():
-        delattr(layer, name)
-    for name, buffer in kernel_buffers.items():
-        delattr(layer, name)
-
-    restore_params, restore_buffers = info.restore_metadata
-    for name, param in restore_params.items():
-        layer.register_parameter(name, param)
-    for name, buffer in restore_buffers.items():
-        layer.register_buffer(name, buffer)
+    restore_layer_on_meta(layer)
 
     # Track loading progress to determine when to process/copy
     info.load_numel = 0
@@ -247,7 +236,7 @@ def layerwise_restore_and_process(layer: torch.nn.Module) -> None:
 
     # Wrap each parameter's weight loader
     # Note that nested wrapping will occur for shared tensors
-    for name, param in get_module_tensors(layer).items():
+    for name, param in get_layer_tensors(layer).items():
         weight_loader = getattr(param, "weight_loader", default_weight_loader)
         weight_loader_signature = inspect.signature(weight_loader)
 
@@ -268,7 +257,7 @@ def layerwise_restore_and_process(layer: torch.nn.Module) -> None:
                 # Cache loaded weights, track loading progress
                 # `get_numel_loaded` triggers inner wrapped function for shared tensors
                 info = LAYER_RELOADING_INFO[layer]
-                info.loaded_weight_kwargs.append((param_name, bound_args))
+                info.loaded_weights.append((param_name, bound_args))
                 info.load_numel += get_numel_loaded(original_loader, bound_args)
 
                 # Process and copy when all weights are loaded
@@ -305,7 +294,7 @@ def _finalize_process_layer(
     materialize_layer(layer)
 
     # Load all cached weights into materialized layer
-    for name, args in info.loaded_weight_kwargs:
+    for name, args in info.loaded_weights:
         param = getattr(layer, name)
         args.arguments["param"] = param
         unwrap_loader(weight_loader)(*args.args, **args.kwargs)
@@ -346,7 +335,7 @@ def finalize_layerwise_restore_and_process(layer: torch.nn.Module) -> None:
     Also handles cleanup for modules (like Attention) that have kernel tensors
     but don't load module tensors (e.g., when model is not quantized).
     """
-    for param in get_module_tensors(layer).values():
+    for param in get_layer_tensors(layer).values():
         if hasattr(param, "weight_loader"):
             # TODO: limit unwrapping to only the layerwise weight loaders
             param.weight_loader = unwrap_loader(param.weight_loader)
@@ -364,7 +353,7 @@ def finalize_layerwise_restore_and_process(layer: torch.nn.Module) -> None:
         
         # No processing: place kernel tensors back
         else:
-            for name in get_module_tensors(layer).keys():
+            for name in get_layer_tensors(layer).keys():
                 delattr(layer, name)
 
             parameters, buffers = LAYER_RELOADING_INFO[layer].kernel_tensors
