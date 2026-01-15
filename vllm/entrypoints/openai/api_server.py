@@ -31,8 +31,6 @@ from starlette.datastructures import URL, Headers, MutableHeaders, State
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 import vllm.envs as envs
-from vllm.distributed.weight_transfer import WeightUpdateRequest
-from vllm.distributed.weight_transfer.base import WeightTransferInitRequest
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.anthropic.protocol import (
@@ -388,57 +386,6 @@ async def create_completion(request: CompletionRequest, raw_request: Request):
         )
 
     return StreamingResponse(content=generator, media_type="text/event-stream")
-
-
-@router.post("/init_weight_transfer")
-async def init_weight_transfer(raw_request: Request):
-    try:
-        body = await raw_request.json()
-    except json.JSONDecodeError as e:
-        raise HTTPException(status_code=400, detail="Invalid JSON format") from e  # noqa: B904
-    init_info = body.get("init_info")
-    if init_info is None:
-        raise HTTPException(
-            status_code=HTTPStatus.BAD_REQUEST.value,
-            detail="Missing 'init_info' in request body",
-        )
-    await engine_client(raw_request).init_weight_transfer(
-        WeightTransferInitRequest(init_info=init_info)
-    )
-    return JSONResponse(content={"message": "Weight transfer initialized"})
-
-
-@router.post("/update_weights")
-async def update_weights(raw_request: Request):
-    try:
-        body = await raw_request.json()
-    except json.JSONDecodeError as e:
-        raise HTTPException(status_code=400, detail="Invalid JSON format") from e  # noqa: B904
-    update_info = body.get("update_info")
-    if update_info is None:
-        raise HTTPException(
-            status_code=HTTPStatus.BAD_REQUEST.value,
-            detail="Missing 'update_info' in request body",
-        )
-    await engine_client(raw_request).update_weights(
-        request=WeightUpdateRequest(update_info=update_info)
-    )
-    return JSONResponse(content={"message": "Weights updated"})
-
-
-@router.post("/finalize_weight_update")
-async def finalize_weight_update(raw_request: Request):
-    await engine_client(raw_request).finalize_weight_update()
-    return JSONResponse(content={"message": "Weight update finalized"})
-
-
-@router.get("/get_world_size")
-async def get_world_size(raw_request: Request):
-    """Get the world size from the parallel config (TP * PP * DP)."""
-    world_size = engine_client(
-        raw_request
-    ).vllm_config.parallel_config.world_size_across_dp
-    return JSONResponse(content={"world_size": world_size})
 
 
 def load_log_config(log_config_file: str | None) -> dict | None:

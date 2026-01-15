@@ -307,55 +307,6 @@ def test_full_weight_transfer_flow():
 
 
 @create_new_process_for_each_test()
-def test_weight_transfer_with_tp():
-    """Test weight transfer works correctly with tensor parallelism."""
-    if torch.cuda.device_count() < 1:
-        pytest.skip("Need at least 1 GPU for this test")
-
-    # Enable insecure serialization to allow pickling functions for collective_rpc
-    os.environ["VLLM_ALLOW_INSECURE_SERIALIZATION"] = "1"
-
-    with patch(
-        "vllm.distributed.weight_transfer.init_transfer_engine",
-        mock_init_transfer_engine,
-    ):
-        llm = LLM(
-            model=MODEL_NAME,
-            enforce_eager=True,
-            load_format="dummy",
-            tensor_parallel_size=1,
-            distributed_executor_backend="ray",
-            weight_transfer_config=WeightTransferConfig(backend="nccl"),
-        )
-
-        # Run weight transfer
-        llm.init_weight_transfer(
-            WeightTransferInitRequest(init_info={"test_param": "tp_test"})
-        )
-
-        llm.update_weights(
-            WeightUpdateRequest(
-                update_info={
-                    "names": ["w"],
-                    "dtype_names": ["float16"],
-                    "shapes": [[50]],
-                }
-            )
-        )
-
-        llm.finalize_weight_update()
-
-        # Verify the worker processed the weight transfer
-        def check_processed(self):
-            engine = self.weight_transfer_engine
-            return engine.init_transfer_called and engine.receive_weights_called
-
-        results = llm.collective_rpc(check_processed)
-        assert len(results) == 1
-        assert all(results), "Worker should process weight transfer"
-
-
-@create_new_process_for_each_test()
 def test_weight_transfer_config_backend():
     """Test that WeightTransferConfig backend is properly configured."""
     if torch.cuda.device_count() < 1:

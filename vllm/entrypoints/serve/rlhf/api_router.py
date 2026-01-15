@@ -1,12 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-
+import json
 from http import HTTPStatus
 
-from fastapi import APIRouter, FastAPI, Query, Request
+from fastapi import APIRouter, FastAPI, HTTPException, Query, Request
 from fastapi.responses import JSONResponse
 
+from vllm.distributed.weight_transfer import WeightUpdateRequest
+from vllm.distributed.weight_transfer.base import WeightTransferInitRequest
 from vllm.engine.protocol import EngineClient
 from vllm.logger import init_logger
 
@@ -96,6 +98,57 @@ async def is_paused(raw_request: Request) -> JSONResponse:
         )
 
     return JSONResponse(content={"is_paused": paused})
+
+
+@router.post("/init_weight_transfer")
+async def init_weight_transfer(raw_request: Request):
+    try:
+        body = await raw_request.json()
+    except json.JSONDecodeError as e:
+        raise HTTPException(status_code=400, detail="Invalid JSON format") from e  # noqa: B904
+    init_info = body.get("init_info")
+    if init_info is None:
+        raise HTTPException(
+            status_code=HTTPStatus.BAD_REQUEST.value,
+            detail="Missing 'init_info' in request body",
+        )
+    await engine_client(raw_request).init_weight_transfer(
+        WeightTransferInitRequest(init_info=init_info)
+    )
+    return JSONResponse(content={"message": "Weight transfer initialized"})
+
+
+@router.post("/update_weights")
+async def update_weights(raw_request: Request):
+    try:
+        body = await raw_request.json()
+    except json.JSONDecodeError as e:
+        raise HTTPException(status_code=400, detail="Invalid JSON format") from e  # noqa: B904
+    update_info = body.get("update_info")
+    if update_info is None:
+        raise HTTPException(
+            status_code=HTTPStatus.BAD_REQUEST.value,
+            detail="Missing 'update_info' in request body",
+        )
+    await engine_client(raw_request).update_weights(
+        request=WeightUpdateRequest(update_info=update_info)
+    )
+    return JSONResponse(content={"message": "Weights updated"})
+
+
+@router.post("/finalize_weight_update")
+async def finalize_weight_update(raw_request: Request):
+    await engine_client(raw_request).finalize_weight_update()
+    return JSONResponse(content={"message": "Weight update finalized"})
+
+
+@router.get("/get_world_size")
+async def get_world_size(raw_request: Request):
+    """Get the world size from the parallel config (TP * PP * DP)."""
+    world_size = engine_client(
+        raw_request
+    ).vllm_config.parallel_config.world_size_across_dp
+    return JSONResponse(content={"world_size": world_size})
 
 
 def attach_router(app: FastAPI):
