@@ -605,8 +605,8 @@ steps:
   commands:
     - pytest -v -s kernels/mamba
 
-- label: Kernels FP8 MoE Test (1 of 3 H100)
-  timeout_in_minutes: 120
+- label: Kernels DeepGEMM Test (H100)
+  timeout_in_minutes: 45
   gpu: h100
   num_gpus: 1
   optional: true
@@ -616,33 +616,35 @@ steps:
   - vllm/model_executor/layers/fused_moe
   - vllm/model_executor/layers/quantization
   - tests/kernels/quantization/test_block_fp8.py
-  - tests/kernels/moe
+  - tests/kernels/moe/test_deepgemm.py
+  - tests/kernels/moe/test_batched_deepgemm.py
   - tests/kernels/attention/test_deepgemm_attention.py
   commands:
     - pytest -v -s kernels/quantization/test_block_fp8.py -k deep_gemm
-      - pytest -v -s kernels/attention/test_deepgemm_attention.py
+    - pytest -v -s kernels/moe/test_deepgemm.py
     - pytest -v -s kernels/moe/test_batched_deepgemm.py
-    - pytest -v -s kernels/moe/test_batched_moe.py
-    # - pytest -v -s kernels/moe/test_block_fp8.py
-    # - pytest -v -s kernels/moe/test_block_int8.py
+    - pytest -v -s kernels/attention/test_deepgemm_attention.py
     - pytest -v -s kernels/moe/test_cutlass_moe.py
     - pytest -v -s kernels/moe/test_deepgemm.py
 
   
-- label: Kernels FP8 MoE Test (2 of 3 H100)
+- label: Kernels FP8 MoE Test (1 of 2 H100)
   timeout_in_minutes: 90
   gpu: h100
   num_gpus: 1
   optional: true
   commands:
+    - pytest -v -s kernels/moe/test_cutlass_moe.py
     - pytest -v -s kernels/moe/test_flashinfer.py
     - pytest -v -s kernels/moe/test_gpt_oss_triton_kernels.py
     - pytest -v -s kernels/moe/test_modular_oai_triton_moe.py
     - pytest -v -s kernels/moe/test_moe.py
-        - pytest -v -s kernels/moe/test_triton_no_act_mul.py
+    - pytest -v -s kernels/moe/test_triton_no_act_mul.py
     - pytest -v -s kernels/moe/test_triton_moe_ptpc_fp8.py
+    # - pytest -v -s kernels/moe/test_block_fp8.py
+    # - pytest -v -s kernels/moe/test_block_int8.py
 
-- label: Kernels FP8 MoE Test (3 of 3 H100)
+- label: Kernels FP8 MoE Test (2 of 2 H100)
   timeout_in_minutes: 90
   gpu: h100
   num_gpus: 2
