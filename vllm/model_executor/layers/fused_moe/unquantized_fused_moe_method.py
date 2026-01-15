@@ -45,6 +45,7 @@ else:
 logger = init_logger(__name__)
 
 
+# --8<-- [start:unquantized_fused_moe]
 @CustomOp.register("unquantized_fused_moe")
 class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
     """MoE method without quantization."""
