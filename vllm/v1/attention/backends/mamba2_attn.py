@@ -22,7 +22,6 @@ from vllm.v1.attention.backends.utils import (
     compute_causal_conv1d_metadata,
     split_decodes_and_prefills,
 )
-
 from vllm.v1.kv_cache_interface import AttentionSpec
 
 
