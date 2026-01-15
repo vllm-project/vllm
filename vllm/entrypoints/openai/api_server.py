@@ -44,11 +44,11 @@ from vllm.entrypoints.openai.engine.protocol import (
     ErrorResponse,
 )
 from vllm.entrypoints.openai.engine.serving import OpenAIServing
-from vllm.entrypoints.openai.responses.serving import OpenAIServingResponses
-from vllm.entrypoints.openai.serving_models import (
+from vllm.entrypoints.openai.models.serving import (
     BaseModelPath,
     OpenAIServingModels,
 )
+from vllm.entrypoints.openai.responses.serving import OpenAIServingResponses
 from vllm.entrypoints.openai.translations.serving import (
     OpenAIServingTranscription,
     OpenAIServingTranslation,
@@ -219,10 +219,6 @@ def base(request: Request) -> OpenAIServing:
     return tokenization(request)
 
 
-def models(request: Request) -> OpenAIServingModels:
-    return request.app.state.openai_serving_models
-
-
 def tokenization(request: Request) -> OpenAIServingTokenization:
     return request.app.state.openai_serving_tokenization
 
@@ -252,14 +248,6 @@ async def get_server_load_metrics(request: Request):
     # - /v1/rerank
     # - /v2/rerank
     return JSONResponse(content={"server_load": request.app.state.server_load_metrics})
-
-
-@router.get("/v1/models")
-async def show_available_models(raw_request: Request):
-    handler = models(raw_request)
-
-    models_ = await handler.show_available_models()
-    return JSONResponse(content=models_.model_dump())
 
 
 @router.get("/version")
@@ -366,7 +354,7 @@ def _extract_content_from_chunk(chunk_data: dict) -> str:
         from vllm.entrypoints.openai.chat_completion.protocol import (
             ChatCompletionStreamResponse,
         )
-        from vllm.entrypoints.openai.engine.protocol import (
+        from vllm.entrypoints.openai.completion.protocol import (
             CompletionStreamResponse,
         )
 
@@ -537,6 +525,11 @@ def build_app(args: Namespace) -> FastAPI:
     )
 
     register_anthropic_api_router(app)
+    from vllm.entrypoints.openai.models.api_router import (
+        attach_router as register_models_api_router,
+    )
+
+    register_models_api_router(app)
     from vllm.entrypoints.sagemaker.routes import register_sagemaker_routes
 
     register_sagemaker_routes(router)

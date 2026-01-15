@@ -52,13 +52,12 @@ from vllm.entrypoints.openai.engine.protocol import (
     ErrorResponse,
     FunctionCall,
     FunctionDefinition,
-    VLLMValidationError,
 )
+from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.entrypoints.openai.responses.protocol import (
     ResponseInputOutputItem,
     ResponsesRequest,
 )
-from vllm.entrypoints.openai.serving_models import OpenAIServingModels
 from vllm.entrypoints.openai.translations.protocol import (
     TranscriptionRequest,
     TranscriptionResponse,
@@ -97,6 +96,7 @@ from vllm.entrypoints.serve.tokenize.protocol import (
     TokenizeResponse,
 )
 from vllm.entrypoints.utils import _validate_truncation_size, sanitize_message
+from vllm.exceptions import VLLMValidationError
 from vllm.inputs.data import PromptType, TokensPrompt
 from vllm.inputs.parse import (
     PromptComponents,

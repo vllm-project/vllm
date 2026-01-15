@@ -3,9 +3,8 @@
 
 # Adapted from
 # https://github.com/lm-sys/FastChat/blob/168ccc29d3f7edc50823016105c024fe2282732a/fastchat/protocol/openai_api_protocol.py
-import json
 import time
-from typing import Annotated, Any, ClassVar, Literal, TypeAlias
+from typing import Any, ClassVar, Literal, TypeAlias
 
 import regex as re
 import torch
@@ -17,14 +16,9 @@ from pydantic import (
 )
 
 from vllm.entrypoints.chat_utils import make_tool_call_id
-from vllm.exceptions import VLLMValidationError
 from vllm.logger import init_logger
-from vllm.logprobs import Logprob
 from vllm.sampling_params import (
-    BeamSearchParams,
-    RequestOutputKind,
     SamplingParams,
-    StructuredOutputsParams,
 )
 from vllm.utils import random_uuid
 from vllm.utils.import_utils import resolve_obj_by_qualname
@@ -224,7 +218,6 @@ def get_logits_processors(
             "for more information."
         )
     return None
-
 
 
 class FunctionCall(OpenAIBaseModel):

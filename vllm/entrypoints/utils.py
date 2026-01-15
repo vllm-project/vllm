@@ -37,7 +37,7 @@ if TYPE_CHECKING:
     from vllm.entrypoints.openai.engine.protocol import (
         StreamOptions,
     )
-    from vllm.entrypoints.openai.serving_models import LoRAModulePath
+    from vllm.entrypoints.openai.models.serving import LoRAModulePath
 else:
     ChatCompletionRequest = object
     CompletionRequest = object
@@ -283,7 +283,7 @@ def should_include_usage(
 def process_lora_modules(
     args_lora_modules: list[LoRAModulePath], default_mm_loras: dict[str, str] | None
 ) -> list[LoRAModulePath]:
-    from vllm.entrypoints.openai.serving_models import LoRAModulePath
+    from vllm.entrypoints.openai.models.serving import LoRAModulePath
 
     lora_modules = args_lora_modules
     if default_mm_loras:
