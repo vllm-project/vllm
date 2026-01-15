@@ -175,7 +175,7 @@ def make_dummy_moe_config(
         hidden_dim=test_config.k,
         intermediate_size_per_partition=test_config.n,
         num_local_experts=test_config.num_experts,
-        parallel_config=FusedMoEParallelConfig.make_no_parallel(),
+        moe_parallel_config=FusedMoEParallelConfig.make_no_parallel(),
         in_dtype=torch.bfloat16,
         device="cuda",
     )
