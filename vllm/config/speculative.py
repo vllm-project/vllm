@@ -388,8 +388,10 @@ class SpeculativeConfig:
                             "one layer. Might need some code changes "
                             "to support multiple layers."
                         )
-                else:
-                    self.method = "draft_model"
+                elif self.method != "draft_model":
+                    raise NotImplementedError(
+                        f"Unsupported speculative method: '{self.method}'"
+                    )
 
                 # Replace hf_config for EAGLE draft_model
                 if self.method in ("eagle", "eagle3"):
