@@ -136,16 +136,12 @@ def select_fp8_moe_backend(
     if config.is_lora_enabled:
         return Fp8MoeBackend.TRITON, backend_2_kernel_cls(Fp8MoeBackend.TRITON)
 
-    # NOTE(rob): this is kind of a hack. We need to peak into
-    # the prepare-finalize selection to determine if we are using
-    # the batched or standard expert format.
-    use_batched = (
-        config.moe_parallel_config.use_deepep_ll_kernels
-        or config.moe_parallel_config.use_pplx_kernels
-    )
+    # NOTE(rob): We need to peak into the P/F selection to determine
+    # if we are using the batched or standard expert format, which
+    # if not ideal. Once we unify TP + DP/EP, we can select P/F first.
     activation_format = (
         mk.FusedMoEActivationFormat.BatchedExperts
-        if use_batched
+        if config.moe_parallel_config.use_batched_activation_format
         else mk.FusedMoEActivationFormat.Standard
     )
 
@@ -429,6 +425,17 @@ def make_fp8_moe_kernel(
     fp8_backend: Fp8MoeBackend,
     experts_cls: type[mk.FusedMoEPermuteExpertsUnpermute],
 ) -> tuple[mk.FusedMoEModularKernel, bool]:
+    # TODO(rob): unify after we merge tp and dp/ep.
+    if (
+        moe_config.moe_parallel_config.use_all2all_kernels
+        and moe_config.moe_parallel_config.all2all_backend
+        not in ["allgather_reducescatter", "naive"]
+    ):
+        raise ValueError(
+            "Fp8 Oracle should not create non-naive A2A P/F. "
+            "This should happen via the ModularKernelMethod."
+        )
+
     # Create Prepare/Finalize.
     prepare_finalize = maybe_make_prepare_finalize(
         moe=moe_config,
@@ -460,17 +467,12 @@ def make_fp8_moe_kernel(
         )
 
     # NOTE(rob): we only want the ModularKernel to control the SharedExpert
-    # if we are using all2all (for SBO). Need to make a change somewhere
-    # else to prevent double running the Shared Expert.
-    # This needs to be refactored.
+    # if we are using all2all (for SBO). Bill is making this explict
+    # in the new MoERunner class.
     kernel = mk.FusedMoEModularKernel(
         prepare_finalize,
         experts,
-        shared_experts=(
-            getattr(layer, "shared_expert", None)
-            if moe_config.moe_parallel_config.use_all2all_kernels
-            else None
-        ),
+        shared_experts=None,
         moe_parallel_config=moe_config.moe_parallel_config,
     )
 
