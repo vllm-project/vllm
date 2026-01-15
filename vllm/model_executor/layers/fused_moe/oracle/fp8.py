@@ -414,10 +414,6 @@ def make_fp8_moe_quant_config(
     )
 
 
-def maybe_make_prepare_finalize_for_mkm():
-    pass
-
-
 def make_fp8_moe_kernel_for_mkm(
     moe_config: FusedMoEConfig,
     quant_config: FusedMoEQuantConfig,

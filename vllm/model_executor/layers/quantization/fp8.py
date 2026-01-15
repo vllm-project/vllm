@@ -891,6 +891,10 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         routing_tables: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
     ) -> mk.FusedMoEPrepareAndFinalize | None:
         if self.fp8_backend == Fp8MoeBackend.FLASHINFER_CUTLASS:
+            # For no EP case, don't use the MKM framework.
+            if self.moe.moe_parallel_config.use_all2all_kernels:
+                return None
+
             prepare_finalize = build_flashinfer_fp8_cutlass_moe_prepare_finalize(
                 self.moe,
                 use_deepseek_fp8_block_scale=self.block_quant,
