@@ -8,7 +8,11 @@ from tests.kernels.quant_utils import per_block_cast_to_int8
 from tests.kernels.quantization.nvfp4_utils import FLOAT4_E2M1_MAX, FLOAT8_E4M3_MAX
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.fused_moe import fused_experts, fused_topk
-from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
+from vllm.model_executor.layers.fused_moe.config import (
+    FusedMoEConfig,
+    FusedMoEParallelConfig,
+    FusedMoEQuantConfig,
+)
 from vllm.model_executor.layers.fused_moe.fused_batched_moe import (
     BatchedPrepareAndFinalize,
     BatchedTritonExperts,
@@ -294,6 +298,29 @@ def per_token_cast_to_fp8(
     x_amax = x_view.abs().float().amax(dim=2).view(m, -1).clamp(1e-4)
     fp8_data = (x_view * (448.0 / x_amax.unsqueeze(2))).to(torch.float8_e4m3fn)
     return fp8_data.view(m, n + pad_size)[:, :n], (x_amax / 448.0).view(m, -1)
+
+
+def make_test_moe_config(
+    topk: int,
+    e: int,
+    n: int,
+    k: int,
+    in_dtype: torch.dtype,
+    make_gate: bool = True,
+    activation: str = "silu",
+) -> FusedMoEConfig:
+    return FusedMoEConfig(
+        num_experts=e,
+        experts_per_token=topk,
+        hidden_dim=k,
+        intermediate_size_per_partition=n,
+        num_local_experts=e,
+        activation=activation,
+        device="cuda",
+        in_dtype=in_dtype,
+        moe_parallel_config=FusedMoEParallelConfig.make_no_parallel(),
+        is_act_and_mul=make_gate,
+    )
 
 
 def make_test_quant_config(
