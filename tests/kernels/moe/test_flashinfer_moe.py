@@ -110,7 +110,9 @@ def test_flashinfer_fp4_moe_no_graph(
                     quant_config=quant_config,
                 )
             ),
-            FlashInferExperts(moe_config=moe_config, quant_config=quant_config),
+            FlashInferExperts.make_standard_experts(
+                moe_config=moe_config, quant_config=quant_config
+            ),
         )
 
         fi_activation = {"silu_and_mul": "silu", "relu2": "relu2_no_mul"}[activation]

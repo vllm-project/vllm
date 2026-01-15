@@ -129,7 +129,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
             )
         else:
             logger.debug("TritonExperts %s", self.moe)
-            return TritonExperts(
+            return TritonExperts.make_standard_experts(
                 moe_config=self.moe,
                 quant_config=self.moe_quant_config,
             )
@@ -261,7 +261,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
                 self.use_inplace = True
                 self.kernel = mk.FusedMoEModularKernel(
                     MoEPrepareAndFinalizeNoEP(),
-                    AiterExperts(
+                    AiterExperts.make_standard_experts(
                         moe_config=self.moe,
                         quant_config=self.moe_quant_config,
                     ),
@@ -275,7 +275,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
 
                 self.kernel = mk.FusedMoEModularKernel(
                     MoEPrepareAndFinalizeNoEP(),
-                    FlashInferExperts(
+                    FlashInferExperts.make_standard_experts(
                         moe_config=self.moe,
                         quant_config=self.moe_quant_config,
                     ),
@@ -284,7 +284,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
                 self.use_inplace = True
                 self.kernel = mk.FusedMoEModularKernel(
                     MoEPrepareAndFinalizeNoEP(),
-                    TritonExperts(
+                    TritonExperts.make_standard_experts(
                         moe_config=self.moe,
                         quant_config=self.moe_quant_config,
                     ),

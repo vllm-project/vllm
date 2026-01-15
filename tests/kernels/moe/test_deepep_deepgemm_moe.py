@@ -220,7 +220,7 @@ def make_ht_modular_kernel(
         block_shape=test_config.block_size,
     )
 
-    fused_experts = DeepGemmExperts(
+    fused_experts = DeepGemmExperts.make_standard_experts(
         moe_config=make_dummy_moe_config(),
         quant_config=quant_config,
     )

@@ -174,7 +174,7 @@ def make_modular_kernel(
             quant_config=quant_config,
         )
     else:
-        fused_experts = TritonExperts(
+        fused_experts = TritonExperts.make_standard_experts(
             moe_config=moe_config,
             quant_config=quant_config,
         )

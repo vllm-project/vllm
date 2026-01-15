@@ -309,7 +309,10 @@ def test_flashinfer_cutlass_moe_fp8_no_graph(
                     quant_config=quant_config,
                 )
             ),
-            FlashInferExperts(moe_config=moe_config, quant_config=quant_config),
+            FlashInferExperts.make_standard_experts(
+                moe_config=moe_config,
+                quant_config=quant_config,
+            ),
         )
 
         flashinfer_cutlass_output = kernel(
