@@ -23,7 +23,7 @@ from vllm.entrypoints.openai.engine.serving import (
     OpenAIServing,
     ServeContext,
 )
-from vllm.entrypoints.openai.serving_models import OpenAIServingModels
+from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.entrypoints.pooling.classify.protocol import (
     ClassificationChatRequest,
     ClassificationCompletionRequest,

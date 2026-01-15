@@ -76,12 +76,12 @@ from vllm.entrypoints.openai.engine.protocol import (
     DeltaMessage,
     ErrorResponse,
     RequestResponseMetadata,
-    VLLMValidationError,
 )
 from vllm.entrypoints.openai.engine.serving import (
     GenerationError,
     OpenAIServing,
 )
+from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.entrypoints.openai.parser.harmony_utils import (
     construct_harmony_previous_input_messages,
     get_developer_message,
@@ -108,7 +108,6 @@ from vllm.entrypoints.openai.responses.protocol import (
     ResponseUsage,
     StreamingResponsesResponse,
 )
-from vllm.entrypoints.openai.serving_models import OpenAIServingModels
 from vllm.entrypoints.responses_utils import (
     construct_input_messages,
     construct_tool_dicts,
@@ -116,6 +115,7 @@ from vllm.entrypoints.responses_utils import (
     should_continue_final_message,
 )
 from vllm.entrypoints.tool_server import ToolServer
+from vllm.exceptions import VLLMValidationError
 from vllm.inputs.data import TokensPrompt
 from vllm.logger import init_logger
 from vllm.logprobs import Logprob as SampleLogprob
