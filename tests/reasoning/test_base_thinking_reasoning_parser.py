@@ -251,6 +251,59 @@ class TestBaseThinkingReasoningParserExtraction:
         assert reasoning_list == []
         assert content is None
 
+    def test_extract_multiple_reasoning_blocks(self, test_tokenizer):
+        """Test extraction of multiple reasoning blocks."""
+        parser = TestThinkingReasoningParser(test_tokenizer)
+        request = ChatCompletionRequest(messages=[], model="test-model")
+
+        model_output = (
+            "<test:think>First reasoning</test:think>"
+            "<test:think>Second reasoning</test:think>"
+            "Final content"
+        )
+        reasoning_list, content = parser.extract_reasoning(model_output, request)
+
+        assert reasoning_list == ["First reasoning", "Second reasoning"]
+        assert content == "Final content"
+
+    def test_extract_multiple_reasoning_blocks_with_intermediate_content(
+        self, test_tokenizer
+    ):
+        """Test extraction of multiple reasoning blocks with content between them."""
+        parser = TestThinkingReasoningParser(test_tokenizer)
+        request = ChatCompletionRequest(messages=[], model="test-model")
+
+        # When there's content between reasoning blocks, the first content
+        # triggers another search for reasoning blocks
+        model_output = (
+            "<test:think>First reasoning</test:think>"
+            "Some middle content"
+            "<test:think>Second reasoning</test:think>"
+            "Final content"
+        )
+        reasoning_list, content = parser.extract_reasoning(model_output, request)
+
+        # The parser should find both reasoning blocks
+        # TODO: modify this unit test when we support interleaved thinking
+        assert reasoning_list == ["First reasoning", "Second reasoning"]
+        assert content == "Final content"
+
+    def test_extract_three_reasoning_blocks(self, test_tokenizer):
+        """Test extraction of three reasoning blocks."""
+        parser = TestThinkingReasoningParser(test_tokenizer)
+        request = ChatCompletionRequest(messages=[], model="test-model")
+
+        model_output = (
+            "<test:think>First</test:think>"
+            "<test:think>Second</test:think>"
+            "<test:think>Third</test:think>"
+            "Done"
+        )
+        reasoning_list, content = parser.extract_reasoning(model_output, request)
+
+        assert reasoning_list == ["First", "Second", "Third"]
+        assert content == "Done"
+
 
 class TestBaseThinkingReasoningParserStreaming:
     """Test streaming functionality of BaseThinkingReasoningParser."""
