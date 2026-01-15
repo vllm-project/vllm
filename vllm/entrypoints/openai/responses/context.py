@@ -22,11 +22,10 @@ from vllm.entrypoints.chat_utils import (
     ChatTemplateContentFormatOption,
 )
 from vllm.entrypoints.constants import MCP_PREFIX
+from vllm.entrypoints.mcp.tool import Tool
+from vllm.entrypoints.mcp.tool_server import ToolServer
 from vllm.entrypoints.openai.engine.protocol import (
     FunctionCall,
-    ResponseInputOutputItem,
-    ResponseRawMessageAndToken,
-    ResponsesRequest,
 )
 from vllm.entrypoints.openai.parser.harmony_utils import (
     get_encoding,
@@ -36,9 +35,12 @@ from vllm.entrypoints.openai.parser.harmony_utils import (
 from vllm.entrypoints.openai.parser.responses_parser import (
     get_responses_parser_for_simple_context,
 )
-from vllm.entrypoints.responses_utils import construct_tool_dicts
-from vllm.entrypoints.tool import Tool
-from vllm.entrypoints.tool_server import ToolServer
+from vllm.entrypoints.openai.responses.protocol import (
+    ResponseInputOutputItem,
+    ResponseRawMessageAndToken,
+    ResponsesRequest,
+)
+from vllm.entrypoints.openai.responses.utils import construct_tool_dicts
 from vllm.outputs import RequestOutput
 from vllm.reasoning.abs_reasoning_parsers import ReasoningParser
 from vllm.tokenizers import TokenizerLike
