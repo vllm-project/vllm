@@ -211,7 +211,15 @@ async def dashboard_metrics(request: Request) -> JSONResponse:
         pass
 
     # Get internal engine stats (only available in-process)
-    internal: dict = {}
+    # Always return internal structure so frontend can show placeholders
+    internal: dict = {
+        "perf": None,
+        "cudagraph": None,
+        "kv_cache": None,
+        "scheduler": None,
+        "lora": None,
+    }
+
     try:
         engine_client = getattr(request.app.state, "engine_client", None)
         if engine_client is not None:
@@ -220,7 +228,7 @@ async def dashboard_metrics(request: Request) -> JSONResponse:
             if internal_stats is not None:
                 stats = await internal_stats()
                 if stats:
-                    internal = stats
+                    internal.update(stats)
     except Exception as e:
         logger.debug("Failed to get internal engine stats: %s", e)
 
@@ -234,8 +242,7 @@ async def dashboard_metrics(request: Request) -> JSONResponse:
     except Exception as e:
         logger.debug("Failed to get LoRA stats: %s", e)
 
-    if internal:
-        metrics["internal"] = internal
+    metrics["internal"] = internal
 
     return JSONResponse(content=metrics)
 

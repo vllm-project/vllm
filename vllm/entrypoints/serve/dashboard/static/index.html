@@ -1105,21 +1105,21 @@
             const writeBytes = internal?.perf?.num_write_bytes_per_gpu;
             html += `<div class="config-item" data-tooltip="FLOPs per GPU in last iteration">
                 <span class="config-key">FLOPs/GPU</span>
-                <span class="config-val">${flops !== undefined ? formatLargeNumber(flops) : '-'}</span>
+                <span class="config-val">${flops != null ? formatLargeNumber(flops) : '-'}</span>
             </div>`;
             html += `<div class="config-item" data-tooltip="Read bytes per GPU in last iteration">
                 <span class="config-key">Read Bytes/GPU</span>
-                <span class="config-val">${readBytes !== undefined ? formatBytes(readBytes) : '-'}</span>
+                <span class="config-val">${readBytes != null ? formatBytes(readBytes) : '-'}</span>
             </div>`;
             html += `<div class="config-item" data-tooltip="Write bytes per GPU in last iteration">
                 <span class="config-key">Write Bytes/GPU</span>
-                <span class="config-val">${writeBytes !== undefined ? formatBytes(writeBytes) : '-'}</span>
+                <span class="config-val">${writeBytes != null ? formatBytes(writeBytes) : '-'}</span>
             </div>`;
 
             // 2. CUDAGraph Stats
             html += `<div class="config-item">
                 <span class="config-key">CUDAGraph Captured</span>
-                <span class="config-val">${internal?.cudagraph?.captured !== undefined ? internal.cudagraph.captured : '-'}</span>
+                <span class="config-val">${internal?.cudagraph?.captured != null ? internal.cudagraph.captured : '-'}</span>
             </div>`;
             if (internal?.cudagraph?.recent?.length > 0) {
                 html += `<div class="config-item" style="background:rgba(48,162,255,0.05);margin-top:4px;border-left:2px solid var(--vllm-blue)">
@@ -1139,7 +1139,7 @@
             const kvEvictions = internal?.kv_cache?.eviction_events;
             html += `<div class="config-item">
                 <span class="config-key">KV Eviction Events</span>
-                <span class="config-val">${kvEvictions !== undefined ? kvEvictions : '-'}</span>
+                <span class="config-val">${kvEvictions != null ? kvEvictions : '-'}</span>
             </div>`;
 
             // 4. LoRA Stats - bottom
@@ -1160,11 +1160,11 @@
             const runningLora = internal?.scheduler?.running_lora_adapters;
             html += `<div class="config-item">
                 <span class="config-key">Waiting LoRA Adapters</span>
-                <span class="config-val">${waitingLora !== undefined ? waitingLora : '-'}</span>
+                <span class="config-val">${waitingLora != null ? waitingLora : '-'}</span>
             </div>`;
             html += `<div class="config-item">
                 <span class="config-key">Running LoRA Adapters</span>
-                <span class="config-val">${runningLora !== undefined ? runningLora : '-'}</span>
+                <span class="config-val">${runningLora != null ? runningLora : '-'}</span>
             </div>`;
 
             statsList.innerHTML = html || '<div class="config-item"><span class="config-key">No stats available</span></div>';
