@@ -11,7 +11,7 @@ from vllm import _custom_ops as ops
 from vllm.v1.kv_offload.mediums import BlockIDsLoadStoreSpec
 from vllm.v1.kv_offload.worker.worker import OffloadingHandler, TransferResult, TransferSpec
 
-from .cpu_gpu import expand_block_ids
+from .gpu_dram import expand_block_ids
 
 
 class WeaveDramCxlOffloadingHandler(OffloadingHandler):

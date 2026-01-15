@@ -23,7 +23,7 @@ from vllm.v1.kv_offload.worker.worker import OffloadingHandler
 
 from .cxl_backend import WeaveCXLBackend
 from .dram_cxl import WeaveDramCxlOffloadingHandler
-from .cpu_gpu import WeaveGPUDramOffloadingHandlers
+from .gpu_dram import WeaveGPUDramOffloadingHandlers
 from .dram_backend import WeaveDRAMBackend
 from .numa import numa_membind
 from .two_tier_manager import TwoTierOffloadingManager
