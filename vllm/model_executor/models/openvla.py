@@ -37,6 +37,7 @@ from vllm.multimodal.parse import (
     MultiModalDataItems,
 )
 from vllm.multimodal.processing import (
+    BaseDummyInputsBuilder,
     BaseMultiModalProcessor,
     BaseProcessingInfo,
     PromptIndexTargets,
@@ -44,11 +45,10 @@ from vllm.multimodal.processing import (
     PromptUpdate,
     PromptUpdateDetails,
 )
-from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.configs import OpenVLAConfig
-from vllm.utils import set_default_torch_dtype
+from vllm.utils.torch_utils import set_default_torch_dtype
 
 from .interfaces import MultiModalEmbeddings, SupportsMultiModal, SupportsPP
 from .utils import (
@@ -94,9 +94,7 @@ class PrismaticVisionBackbone(nn.Module):
         try:
             import timm
         except ImportError as err:
-            raise ImportError(
-                "timm is required for OpenVLA: pip install timm"
-            ) from err
+            raise ImportError("timm is required for OpenVLA: pip install timm") from err
 
         img_size = self.image_sizes[0] if self.image_sizes else 224
 
