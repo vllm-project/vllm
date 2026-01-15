@@ -425,7 +425,6 @@ class ParallelConfig:
     # to avoid the excess work.
     #
     # Not needed for pplx-kernels as it can handle duplicate input tokens.
-    # TODO(rob): investigate 'flashinfer_all2allv'?
     @property
     def use_sequence_parallel_moe(self) -> bool:
         return (

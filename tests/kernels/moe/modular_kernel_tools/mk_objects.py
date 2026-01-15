@@ -237,6 +237,7 @@ if has_flashinfer_cutlass_fused_moe() and current_platform.has_device_capability
     )
     from vllm.model_executor.layers.fused_moe.flashinfer_cutlass_prepare_finalize import (  # noqa: E501
         FlashInferCutlassMoEPrepareAndFinalize,
+        create_flashinfer_prepare_finalize,
     )
 
     register_prepare_and_finalize(
@@ -388,12 +389,13 @@ def make_prepare_finalize(
     quant_config: FusedMoEQuantConfig,
 ) -> mk.FusedMoEPrepareAndFinalize:
     if backend != "naive" and backend is not None:
-        # TODO(rob): add defer input quant.
-        prepare_finalize = maybe_make_prepare_finalize(
-            moe, quant_config, allow_new_interface=True
-        )
+        prepare_finalize = maybe_make_prepare_finalize(moe, quant_config)
         assert prepare_finalize is not None
         return prepare_finalize
+    elif prepare_finalize_type == FlashInferCutlassMoEPrepareAndFinalize:
+        return create_flashinfer_prepare_finalize(
+            use_dp=moe.moe_parallel_config.dp_size > 1
+        )
     else:
         return MoEPrepareAndFinalizeNoEP()
 
