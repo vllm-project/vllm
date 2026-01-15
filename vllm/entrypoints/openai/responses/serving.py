@@ -64,24 +64,18 @@ from vllm.entrypoints.chat_utils import (
     ChatCompletionMessageParam,
     ChatTemplateContentFormatOption,
 )
-from vllm.entrypoints.context import (
-    ConversationContext,
-    HarmonyContext,
-    ParsableContext,
-    SimpleContext,
-    StreamingHarmonyContext,
-)
 from vllm.entrypoints.logger import RequestLogger
+from vllm.entrypoints.mcp.tool_server import ToolServer
 from vllm.entrypoints.openai.engine.protocol import (
     DeltaMessage,
     ErrorResponse,
     RequestResponseMetadata,
-    VLLMValidationError,
 )
 from vllm.entrypoints.openai.engine.serving import (
     GenerationError,
     OpenAIServing,
 )
+from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.entrypoints.openai.parser.harmony_utils import (
     construct_harmony_previous_input_messages,
     get_developer_message,
@@ -93,6 +87,13 @@ from vllm.entrypoints.openai.parser.harmony_utils import (
     parse_remaining_state,
     parse_response_input,
     render_for_completion,
+)
+from vllm.entrypoints.openai.responses.context import (
+    ConversationContext,
+    HarmonyContext,
+    ParsableContext,
+    SimpleContext,
+    StreamingHarmonyContext,
 )
 from vllm.entrypoints.openai.responses.protocol import (
     InputTokensDetails,
@@ -108,14 +109,13 @@ from vllm.entrypoints.openai.responses.protocol import (
     ResponseUsage,
     StreamingResponsesResponse,
 )
-from vllm.entrypoints.openai.serving_models import OpenAIServingModels
-from vllm.entrypoints.responses_utils import (
+from vllm.entrypoints.openai.responses.utils import (
     construct_input_messages,
     construct_tool_dicts,
     extract_tool_types,
     should_continue_final_message,
 )
-from vllm.entrypoints.tool_server import ToolServer
+from vllm.exceptions import VLLMValidationError
 from vllm.inputs.data import TokensPrompt
 from vllm.logger import init_logger
 from vllm.logprobs import Logprob as SampleLogprob
