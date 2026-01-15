@@ -26,6 +26,7 @@ __global__ void silu_and_mul_per_block_quant_kernel(
     // Each thread block processes ONE token
     int const token_idx = blockIdx.x;
     int const tid = threadIdx.x;
+    int const num_tokens = gridDim.x;
     
     // Input layout: [gate || up] concatenated along last dimension
     // gate: input[token_idx, 0:hidden_size]
@@ -42,7 +43,7 @@ __global__ void silu_and_mul_per_block_quant_kernel(
     float* token_scales = is_scale_transposed 
         ? scales + token_idx  // Column-major: jump by 1, stride by num_tokens
         : scales + token_idx * num_groups;  // Row-major: contiguous
-    int const scale_stride = is_scale_transposed ? blockDim.x : 1;
+    int const scale_stride = is_scale_transposed ? num_tokens : 1;
     
     // Process elements in groups
     // Each thread processes multiple elements across groups
