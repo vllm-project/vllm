@@ -257,7 +257,6 @@ class CompressedTensorsW4A4Nvfp4MoEMethod(CompressedTensorsMoEMethod):
         # Delay creation of the kernel until after process-weights.
         self.kernel: mk.FusedMoEModularKernel | None = None
 
-        # Used for weight loading.
         self.use_global_sf = is_global_sf_supported_for_nvfp4_backend(
             self.nvfp4_backend
         )
