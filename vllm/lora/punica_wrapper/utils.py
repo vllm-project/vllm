@@ -99,11 +99,11 @@ def convert_mapping(
     }
 
     prompt_mapping: list[int] = [
-        id_to_index.get(x, -1) if x > 0 else -1 for x in mapping.prompt_mapping
+        id_to_index[x] if x > 0 else -1 for x in mapping.prompt_mapping
     ]
     for i in range(len(index_mapping_indices)):
         lora_id = index_mapping_indices[i]
-        lora_idx = id_to_index.get(lora_id, -1) if lora_id > 0 else -1
+        lora_idx = id_to_index[lora_id] if lora_id > 0 else -1
         embedding_indices[i] = lora_idx if lora_id > 0 else 0
         lora_indices[i] = lora_idx
 
