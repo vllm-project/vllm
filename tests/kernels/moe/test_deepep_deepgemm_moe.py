@@ -349,9 +349,6 @@ def triton_impl(
         topk_ids=topk_ids,
         inplace=False,
         quant_config=quant_config,
-        # Make sure this is set to False so we
-        # don't end up comparing the same implementation.
-        allow_deep_gemm=False,
     )
 
 

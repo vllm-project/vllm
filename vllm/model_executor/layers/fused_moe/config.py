@@ -1025,6 +1025,22 @@ class FusedMoEParallelConfig:
             all2all_backend=vllm_parallel_config.all2all_backend,
         )
 
+    @classmethod
+    def make_no_parallel(cls) -> "FusedMoEParallelConfig":
+        """For usage in CI/CD and testing."""
+        return FusedMoEParallelConfig(
+            tp_size=1,
+            tp_rank=0,
+            pcp_size=1,
+            pcp_rank=0,
+            dp_size=1,
+            dp_rank=0,
+            ep_size=1,
+            ep_rank=0,
+            use_ep=False,
+            all2all_backend="naive",
+        )
+
 
 # Adapted from pplx-kernels tests/all_to_all_utils.py
 @dataclass

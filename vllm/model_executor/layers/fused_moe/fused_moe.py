@@ -26,10 +26,6 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEQuantConfig,
     _get_config_dtype_str,
 )
-from vllm.model_executor.layers.fused_moe.deep_gemm_moe import (
-    _valid_deep_gemm,
-    deep_gemm_moe_fp8,
-)
 from vllm.model_executor.layers.fused_moe.moe_align_block_size import (
     moe_align_block_size,
 )
@@ -62,7 +58,6 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 from vllm.model_executor.utils import maybe_disable_graph_partition
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
-from vllm.utils.deep_gemm import is_deep_gemm_e8m0_used
 from vllm.utils.torch_utils import direct_register_custom_op, is_torch_equal_or_newer
 
 logger = init_logger(__name__)
@@ -1919,66 +1914,36 @@ def fused_experts(
     global_num_experts: int = -1,
     expert_map: torch.Tensor | None = None,
     quant_config: FusedMoEQuantConfig | None = None,
-    allow_deep_gemm: bool = False,
 ) -> torch.Tensor:
     if quant_config is None:
         quant_config = FUSED_MOE_UNQUANTIZED_CONFIG
 
-    # For now, disable DeepGemm for small N (<= 512) until better
-    # permute/unpermute ops are available.
-    # However, on B200, we use DeepGemm for all cases because they only support
-    # E8M0 scale, which means we requantize the weight and input to the specific
-    # scale. Fallen back to cutlass or triton for some cases would cause
-    # accuracy issue.
-    if (
-        allow_deep_gemm
-        and quant_config.use_fp8_w8a8
-        and (is_deep_gemm_e8m0_used() or _valid_deep_gemm(hidden_states, w1, w2))
-    ):
-        assert quant_config is not None
-        return deep_gemm_moe_fp8(
-            hidden_states=hidden_states,
-            w1=w1,
-            w2=w2,
-            topk_weights=topk_weights,
-            topk_ids=topk_ids,
-            inplace=inplace,
-            activation=activation,
-            global_num_experts=global_num_experts,
-            expert_map=expert_map,
-            w1_scale=quant_config.w1_scale,
-            w2_scale=quant_config.w2_scale,
-            a1_scale=quant_config.a1_scale,
-            a2_scale=quant_config.a2_scale,
-            apply_router_weight_on_input=apply_router_weight_on_input,
-        )
-    else:
-        return dispatch_fused_experts_func(inplace)(
-            hidden_states=hidden_states,
-            w1=w1,
-            w2=w2,
-            topk_weights=topk_weights,
-            topk_ids=topk_ids,
-            activation=activation,
-            apply_router_weight_on_input=apply_router_weight_on_input,
-            use_fp8_w8a8=quant_config.use_fp8_w8a8,
-            use_int8_w8a8=quant_config.use_int8_w8a8,
-            use_int8_w8a16=quant_config.use_int8_w8a16,
-            use_int4_w4a16=quant_config.use_int4_w4a16,
-            ocp_mx_scheme=quant_config.ocp_mx_scheme,
-            per_channel_quant=quant_config.per_act_token_quant,
-            global_num_experts=global_num_experts,
-            expert_map=expert_map,
-            w1_scale=quant_config.w1_scale,
-            w2_scale=quant_config.w2_scale,
-            w1_zp=quant_config.w1_zp,
-            w2_zp=quant_config.w2_zp,
-            a1_scale=quant_config.a1_scale,
-            a2_scale=quant_config.a2_scale,
-            block_shape=quant_config.block_shape,
-            w1_bias=quant_config.w1_bias,
-            w2_bias=quant_config.w2_bias,
-        )
+    return dispatch_fused_experts_func(inplace)(
+        hidden_states=hidden_states,
+        w1=w1,
+        w2=w2,
+        topk_weights=topk_weights,
+        topk_ids=topk_ids,
+        activation=activation,
+        apply_router_weight_on_input=apply_router_weight_on_input,
+        use_fp8_w8a8=quant_config.use_fp8_w8a8,
+        use_int8_w8a8=quant_config.use_int8_w8a8,
+        use_int8_w8a16=quant_config.use_int8_w8a16,
+        use_int4_w4a16=quant_config.use_int4_w4a16,
+        ocp_mx_scheme=quant_config.ocp_mx_scheme,
+        per_channel_quant=quant_config.per_act_token_quant,
+        global_num_experts=global_num_experts,
+        expert_map=expert_map,
+        w1_scale=quant_config.w1_scale,
+        w2_scale=quant_config.w2_scale,
+        w1_zp=quant_config.w1_zp,
+        w2_zp=quant_config.w2_zp,
+        a1_scale=quant_config.a1_scale,
+        a2_scale=quant_config.a2_scale,
+        block_shape=quant_config.block_shape,
+        w1_bias=quant_config.w1_bias,
+        w2_bias=quant_config.w2_bias,
+    )
 
 
 def _get_config_quant_dtype(

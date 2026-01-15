@@ -3,6 +3,7 @@
 
 import pytest
 import torch
+import vllm.model_executor.layers.fused_moe.modular_kernels as mk
 
 from tests.kernels.moe.utils import make_test_quant_config, make_test_weights
 from tests.kernels.quant_utils import (
@@ -12,13 +13,23 @@ from tests.kernels.quant_utils import (
 from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.fused_moe import fused_experts
+from vllm.model_executor.layers.fused_moe.config import (
+    FusedMoEConfig,
+    FusedMoEParallelConfig,
+    fp8_w8a8_moe_quant_config,
+)
 from vllm.model_executor.layers.fused_moe.deep_gemm_moe import (
     _valid_deep_gemm_shape,
-    deep_gemm_moe_fp8,
 )
 from vllm.model_executor.layers.fused_moe.fused_moe import (
     fused_topk,
     modular_triton_fused_moe,
+)
+from vllm.model_executor.layers.fused_moe.prepare_finalize import (
+    MoEPrepareAndFinalizeNoEP,
+)
+from vllm.model_executor.layers.fused_moe.triton_deep_gemm_moe import (
+    TritonOrDeepGemmExperts,
 )
 from vllm.platforms import current_platform
 from vllm.utils.deep_gemm import (
@@ -233,6 +244,40 @@ def test_w8a8_block_fp8_deep_gemm_fused_moe(M, N, K, E, topk, seed, monkeypatch)
     )
 
     topk_weights, topk_ids, _ = fused_topk(a, score.float(), topk, False)
+
+    quant_config = fp8_w8a8_moe_quant_config(
+        w1_scale=w1_s,
+        w2_scale=w2_s,
+        block_shape=block_size,
+    )
+
+    moe_config = FusedMoEConfig(
+        num_experts=E,
+        experts_per_token=topk,
+        hidden_dim=K,
+        intermediate_size_per_partition=N,
+        num_local_experts=E,
+        activation="silu",
+        parallel_config=FusedMoEParallelConfig.make_no_parallel(),
+        in_dtype=dtype,
+    )
+
+    deep_gemm_experts = mk.FusedMoEModularKernel(
+        prepare_finalize=MoEPrepareAndFinalizeNoEP(),
+        fused_experts=TritonOrDeepGemmExperts.make_standard_experts(
+            moe_config=moe_config,
+            quant_config=quant_config,
+        ),
+    )
+
+    def deep_gemm_moe_fp8(a, w1, w2, w1_s, w2_s, topk_weights, topk_ids):
+        return deep_gemm_experts(
+            hidden_states=a,
+            w1=w1,
+            w2=w2,
+            topk_weights=topk_weights,
+            topk_ids=topk_ids,
+        )
 
     # Set the context to avoid lots of warning spam.
     with set_current_vllm_config(vllm_config):
