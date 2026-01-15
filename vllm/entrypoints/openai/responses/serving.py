@@ -9,7 +9,7 @@ from collections import deque
 from collections.abc import AsyncGenerator, AsyncIterator, Callable, Sequence
 from contextlib import AsyncExitStack
 from copy import copy
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from http import HTTPStatus
 from typing import Final
 
@@ -467,16 +467,16 @@ class OpenAIServingResponses(OpenAIServing):
 
                 if self.reasoning_parser is not None:
                     reasoning_parser = self.reasoning_parser(tokenizer)
-                    sampling_params.structured_outputs = (
-                        None
-                        if (struct_out := sampling_params.structured_outputs) is None
-                        or struct_out.all_non_structural_tag_constraints_none()
-                        else StructuredOutputsParams(
+                    if isinstance(
+                        struct_out := sampling_params.structured_outputs,
+                        StructuredOutputsParams,
+                    ):
+                        sampling_params.structured_outputs = replace(
+                            struct_out,
                             structural_tag=reasoning_parser.prepare_structured_tag(
                                 struct_out.structural_tag, self.tool_server
-                            )
+                            ),
                         )
-                    )
                 generator = self._generate_with_builtin_tools(
                     request_id=request.request_id,
                     engine_prompt=engine_prompt,
