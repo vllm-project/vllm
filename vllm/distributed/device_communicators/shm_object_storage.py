@@ -126,6 +126,7 @@ class SingleWriterShmRingBuffer:
         self.data_buffer_end = 0
 
         if create:
+            logger.debug("Creating new shared memory buffer: %s", name)
             # we are creating a buffer
             self.metadata: dict[int, int] = {}  # monotonic_id -> start address
             self.shared_memory = shared_memory.SharedMemory(
@@ -169,11 +170,18 @@ class SingleWriterShmRingBuffer:
         self.data_buffer_start = 0
         self.data_buffer_end = 0
 
-    def __del__(self):
+    def close(self) -> None:
+        """Close the shared memory."""
         if hasattr(self, "shared_memory"):
-            self.shared_memory.close()
-            if self.is_writer:
-                self.shared_memory.unlink()
+            try:
+                self.shared_memory.close()
+                if self.is_writer:
+                    self.shared_memory.unlink()
+            except Exception as e:
+                logger.warning("Error closing shared memory: %s", e)
+
+    def __del__(self):
+        self.close()
 
     def int2byte(self, integer: int) -> bytes:
         """Convert an integer to bytes."""
@@ -662,6 +670,10 @@ class SingleWriterShmObjectStorage:
                 # pre-touch has no effect on writer side
                 if reader_count >= self.n_readers:
                     self.increment_reader_flag(data_view[: self.flag_bytes])
+
+    def close(self) -> None:
+        """Close the shared memory."""
+        self.ring_buffer.close()
 
     def handle(self):
         """Get handle for sharing across processes."""

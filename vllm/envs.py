@@ -9,6 +9,7 @@ import sys
 import tempfile
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any, Literal
+import uuid
 
 if TYPE_CHECKING:
     VLLM_HOST_IP: str = ""
@@ -1538,8 +1539,13 @@ environment_variables: dict[str, Callable[[], Any]] = {
     ),
     # Name of the shared memory buffer used for object storage.
     # Only effective when mm_config.mm_processor_cache_type == "shm".
-    "VLLM_OBJECT_STORAGE_SHM_BUFFER_NAME": lambda: os.getenv(
-        "VLLM_OBJECT_STORAGE_SHM_BUFFER_NAME", "VLLM_OBJECT_STORAGE_SHM_BUFFER"
+    # Automatically generates a unique UUID-based name per process tree
+    # if not explicitly set.
+    "VLLM_OBJECT_STORAGE_SHM_BUFFER_NAME": lambda: (
+        os.getenv("VLLM_OBJECT_STORAGE_SHM_BUFFER_NAME")
+        or (name := f"VLLM_OBJECT_STORAGE_SHM_BUFFER_{uuid.uuid4().hex}")
+        and not os.environ.__setitem__("VLLM_OBJECT_STORAGE_SHM_BUFFER_NAME", name)
+        and name
     ),
     # The size in MB of the buffers (NVL and RDMA) used by DeepEP
     "VLLM_DEEPEP_BUFFER_SIZE_MB": lambda: int(
