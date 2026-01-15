@@ -970,8 +970,14 @@ class EplbState:
         ep_group: ProcessGroup,
         is_profile: bool = False,
     ):
-        if not model_state.buffer_lock.acquire(blocking=False):
-            return
+        # We call move_to_workspace only when ep_buffer_ready is 1.
+        # It means we only need to wait for the lock for a short time.
+        while not model_state.buffer_lock.acquire(blocking=True, timeout=10.0):
+            logger.warning(
+                "Rank %d: EPLB buffer_lock acquire failed, "
+                "waiting for another 10 seconds to retry.",
+                ep_group.rank(),
+            )
         try:
             assert model_state.new_physical_to_logical_map is not None
             device_index = model_state.cuda_device_index or self.cuda_device_index
