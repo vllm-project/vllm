@@ -37,7 +37,7 @@ from vllm.entrypoints.openai.engine.protocol import (
     ErrorResponse,
     StreamOptions,
 )
-from vllm.entrypoints.openai.serving_models import OpenAIServingModels
+from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 
 logger = logging.getLogger(__name__)
 
