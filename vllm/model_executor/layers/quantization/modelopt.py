@@ -1388,7 +1388,6 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
             # For no-EP case, don't use the MKM framework.
             if not self.moe.moe_parallel_config.use_all2all_kernels:
                 return None
-
             # For now, fp4 moe only works with the flashinfer dispatcher.
             prepare_finalize = build_flashinfer_fp4_cutlass_moe_prepare_finalize(
                 self.moe
