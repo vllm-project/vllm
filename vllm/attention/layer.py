@@ -730,15 +730,12 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         prefill_output = output.narrow(0, num_decode_tokens, num_prefill_tokens)
 
         # Write to KV cache via custom op
-        torch.ops.vllm.mla_write_kv_cache(
+        dummy_tensor = torch.ops.vllm.mla_write_kv_cache(
             kv_c_normed,
             k_pe,
-            kv_cache,
+            self.kv_cache[0],
             self.layer_name,
         )
-
-        if fp8_attention:
-            kv_cache = kv_cache.view(current_platform.fp8_dtype())
 
         # Prefill path: kv_b_proj GEMM is visible to torch.compile for fusion
         kv_nope = self.kv_b_proj(prefill_k_c_normed)[0].view(
@@ -1781,11 +1778,12 @@ def mla_write_kv_cache(
     k_pe: torch.Tensor,
     kv_cache: torch.Tensor,
     layer_name: str,
-) -> None:
+) -> torch.Tensor:
     """Write KV data to cache.
 
     This custom op writes the compressed KV and positional embeddings to the
     KV cache. It's marked cudagraph_unsafe because slot_mapping is data-dependent.
+    Returns a dummy tensor to maintain dependency ordering for torch.compile.
     """
     forward_context: ForwardContext = get_forward_context()
     attn_metadata = forward_context.attn_metadata
@@ -1793,8 +1791,14 @@ def mla_write_kv_cache(
         attn_metadata = attn_metadata[layer_name]
     attn_layer: MLAAttention = forward_context.no_compile_layers[layer_name]
 
+    # Get kv_cache from attn_layer - try different access patterns
+    kv_cache = attn_layer.kv_cache[forward_context.virtual_engine]
+
     if attn_metadata is None or kv_cache.numel() == 0:
-        return
+        # Return dummy tensor even when no work is done
+        return kv_c_normed[:1].detach()
+
+    
 
     ops.concat_and_cache_mla(
         kv_c_normed,
@@ -1805,15 +1809,18 @@ def mla_write_kv_cache(
         scale=attn_layer._k_scale,
     )
 
+    # Return dummy tensor to maintain ordering dependencies
+    return kv_c_normed[:1].detach()
 
 def mla_write_kv_cache_fake(
     kv_c_normed: torch.Tensor,
     k_pe: torch.Tensor,
     kv_cache: torch.Tensor,
     layer_name: str,
-) -> None:
+) -> torch.Tensor:
     """Fake implementation for torch.compile."""
-    return
+    # Return slice of input tensor to maintain device/type consistency
+    return kv_c_normed[:1].detach()
 
 
 direct_register_custom_op(
@@ -1843,6 +1850,10 @@ def mla_attention_decode(
     if isinstance(attn_metadata, dict):
         attn_metadata = attn_metadata[layer_name]
     attn_layer: MLAAttention = forward_context.no_compile_layers[layer_name]
+
+    # kv_cache = attn_layer.kv_cache[forward_context.virtual_engine]
+    # if attn_layer.kv_cache_dtype.startswith("fp8"):
+    #     kv_cache = kv_cache.view(current_platform.fp8_dtype())
 
     # Handle empty input (no decode tokens in this batch)
     if decode_q.shape[0] == 0:
@@ -1915,7 +1926,7 @@ def mla_attention_prefill_with_output(
     q: torch.Tensor,
     k: torch.Tensor,
     v: torch.Tensor,
-    kv_cache: torch.Tensor,
+    dummy_tensor: torch.Tensor,
     output: torch.Tensor,
     layer_name: str,
 ) -> None:
@@ -1930,6 +1941,10 @@ def mla_attention_prefill_with_output(
     if isinstance(attn_metadata, dict):
         attn_metadata = attn_metadata[layer_name]
     attn_layer: MLAAttention = forward_context.no_compile_layers[layer_name]
+
+    kv_cache = attn_layer.kv_cache[forward_context.virtual_engine]
+    if attn_layer.kv_cache_dtype.startswith("fp8"):
+        kv_cache = kv_cache.view(current_platform.fp8_dtype())
 
     # Handle empty input (no prefill tokens in this batch) or profile run
     if attn_metadata is None or q.shape[0] == 0:
