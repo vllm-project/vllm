@@ -26,12 +26,12 @@ from vllm.multimodal.parse import (
     VideoProcessorItems,
 )
 from vllm.multimodal.processing import (
+    BaseDummyInputsBuilder,
     BaseMultiModalProcessor,
     BaseProcessingInfo,
     PromptReplacement,
     PromptUpdate,
 )
-from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from vllm.sequence import IntermediateTensors
 from vllm.utils.collection_utils import is_list_of
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
@@ -299,8 +299,6 @@ class LlavaNextMultiModalProjector(nn.Module):
     dummy_inputs=LlavaNextVideoDummyInputsBuilder,
 )
 class LlavaNextVideoForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP):
-    merge_by_field_config = True
-
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_prefix={
             # mapping for new names in checkpoint saved after transformers v4.52
@@ -323,6 +321,7 @@ class LlavaNextVideoForConditionalGeneration(nn.Module, SupportsMultiModal, Supp
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
         super().__init__()
+
         config = vllm_config.model_config.hf_config
         quant_config = vllm_config.quant_config
         multimodal_config = vllm_config.model_config.multimodal_config
@@ -333,7 +332,8 @@ class LlavaNextVideoForConditionalGeneration(nn.Module, SupportsMultiModal, Supp
         # Initialize the vision tower only up to the required feature layer
         self.vision_tower = init_vision_tower_for_llava(
             config,
-            quant_config,
+            quant_config=quant_config,
+            multimodal_config=multimodal_config,
             require_post_norm=False,
             prefix=maybe_prefix(prefix, "vision_tower"),
         )
@@ -422,7 +422,7 @@ class LlavaNextVideoForConditionalGeneration(nn.Module, SupportsMultiModal, Supp
     def get_language_model(self) -> torch.nn.Module:
         return self.language_model
 
-    def get_multimodal_embeddings(self, **kwargs: object) -> MultiModalEmbeddings:
+    def embed_multimodal(self, **kwargs: object) -> MultiModalEmbeddings:
         video_input = self._parse_and_validate_video_input(**kwargs)
         if video_input is None:
             return []

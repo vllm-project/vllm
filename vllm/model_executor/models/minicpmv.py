@@ -71,7 +71,8 @@ from vllm.multimodal.parse import (
     VideoItem,
     VideoProcessorItems,
 )
-from vllm.multimodal.processing import (
+from vllm.multimodal.processing import BaseDummyInputsBuilder
+from vllm.multimodal.processing.processor import (
     BaseMultiModalProcessor,
     BaseProcessingInfo,
     PromptReplacement,
@@ -80,7 +81,6 @@ from vllm.multimodal.processing import (
     ResolvedPromptUpdate,
     _seq2text,
 )
-from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.utils.collection_utils import flatten_2d_lists
@@ -139,7 +139,7 @@ class MiniCPMVImageEmbeddingInputs(TensorSchema):
     type: Literal["image_embeds"]
     image_embeds: Annotated[
         torch.Tensor | list[torch.Tensor],
-        TensorShape("bn", "ns", "hs"),
+        TensorShape("bn", "ns", "hs", dynamic_dims={"ns"}),
     ]
 
 
@@ -1003,8 +1003,6 @@ class MiniCPMVBaseModel(nn.Module, SupportsMultiModal, SupportsPP):
     instantiated.
     """
 
-    merge_by_field_config = True
-
     supports_encoder_tp_data = True
 
     @classmethod
@@ -1139,7 +1137,7 @@ class MiniCPMVBaseModel(nn.Module, SupportsMultiModal, SupportsPP):
     def get_language_model(self) -> torch.nn.Module:
         return self.llm
 
-    def get_multimodal_embeddings(self, **kwargs: object) -> MultiModalEmbeddings:
+    def embed_multimodal(self, **kwargs: object) -> MultiModalEmbeddings:
         modalities = self._parse_and_validate_multimodal_inputs(**kwargs)
         if not modalities:
             return []
@@ -1741,5 +1739,4 @@ class MiniCPMV(MiniCPMVBaseModel, SupportsMultiModal, SupportsLoRA):
         # so update values before init is called
         cls.packed_modules_mapping.update(instance_cls.packed_modules_mapping)
         cls.embedding_modules.update(instance_cls.embedding_modules)
-        cls.embedding_padding_modules += instance_cls.embedding_padding_modules
         return instance_cls(vllm_config=vllm_config, prefix=prefix)

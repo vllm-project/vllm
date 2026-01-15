@@ -14,7 +14,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Transformers backend mixin for multi-modal models."""
+"""Transformers modeling backend mixin for multi-modal models."""
 
 from collections.abc import Mapping
 from typing import TYPE_CHECKING
@@ -22,23 +22,29 @@ from typing import TYPE_CHECKING
 import torch
 
 from vllm.config.utils import getattr_iter
+from vllm.logger import init_logger
 from vllm.model_executor.models.interfaces import SupportsMRoPE, SupportsMultiModal
 from vllm.model_executor.models.utils import WeightsMapper
 from vllm.multimodal import MultiModalKwargsItems
 from vllm.multimodal.inputs import (
     MultiModalDataDict,
+    MultiModalFeatureSpec,
     MultiModalFieldConfig,
     MultiModalInputs,
     MultiModalUUIDDict,
     PlaceholderRange,
 )
 from vllm.multimodal.parse import ImageProcessorItems, MultiModalDataItems
-from vllm.multimodal.processing import BaseMultiModalProcessor, BaseProcessingInfo
-from vllm.multimodal.profiling import BaseDummyInputsBuilder
+from vllm.multimodal.processing import (
+    BaseDummyInputsBuilder,
+    BaseMultiModalProcessor,
+    BaseProcessingInfo,
+)
+from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 
 if TYPE_CHECKING:
-    from transformers import BatchFeature, PretrainedConfig
+    from transformers import BatchFeature
 
     from vllm.config import VllmConfig
     from vllm.config.multimodal import BaseDummyOptions
@@ -50,6 +56,8 @@ DYNAMIC_ARG_DIMS = {
     "intermediate_tensors": 0,
     "inputs_embeds": 0,
 }
+
+logger = init_logger(__name__)
 
 
 class MultiModalProcessingInfo(BaseProcessingInfo):
@@ -263,7 +271,7 @@ class MultiModalProcessor(BaseMultiModalProcessor[MultiModalProcessingInfo]):
 
 class MultiModalMixin(SupportsMultiModal, SupportsMRoPE):
     supports_multimodal_raw_input_only = True
-    merge_by_field_config = True
+
     # Backwards compatibility for prev released models. State dicts back then
     # had different formats and cannot be loaded with `AutoModel` mapping as is
     hf_to_vllm_mapper = WeightsMapper(
@@ -309,9 +317,9 @@ class MultiModalMixin(SupportsMultiModal, SupportsMRoPE):
         return model_output
 
     def get_language_model(self) -> torch.nn.Module:
-        """Transformers backend multimodal classes do not contain a separate vLLM
-        language model class. Therefore, in order to return a language model vLLM class,
-        we use a wrapper to give `self` the same interface as a text model."""
+        """Transformers modeling backend multimodal classes do not contain a separate
+        vLLM language model class. Therefore, in order to return a language model vLLM
+        class, we use a wrapper to give `self` the same interface as a text model."""
 
         # Exclude self and object
         bases = self.__class__.mro()[1:-1]
@@ -329,7 +337,7 @@ class MultiModalMixin(SupportsMultiModal, SupportsMRoPE):
 
         return LanguageModel(self)
 
-    def get_multimodal_embeddings(self, **kwargs):
+    def embed_multimodal(self, **kwargs):
         pixel_values: torch.Tensor | None = kwargs.pop("pixel_values", None)
         image_embeds: torch.Tensor | None = kwargs.pop("image_embeds", None)
         # Model might use `image_patches` instead of `pixel_values`
@@ -344,8 +352,29 @@ class MultiModalMixin(SupportsMultiModal, SupportsMRoPE):
 
         num_image_patches = kwargs.pop("num_image_patches")
         kwargs.pop("token_type_ids", None)  # used only in `forward`
+
         if pixel_values is not None:
-            vision_embeddings = self.model.get_image_features(pixel_values, **kwargs)
+            # ROCm: Force math SDP backend for vision encoder to avoid accuracy issues
+            # with flash_sdp and mem_efficient_sdp
+            if current_platform.is_rocm():
+                # TODO: [ROCm] Fix accuracy issues with flash backend
+                logger.debug(
+                    "ROCm platform detected. Forcing math SDP backend "
+                    "for vision encoder. Currently ROCm platform has "
+                    "accuracy issues with `flash_sdp` and"
+                    "`mem_efficient_sdp` backends. See issue: "
+                    "https://github.com/vllm-project/vllm/issues/30167"
+                )
+                with torch.nn.attention.sdpa_kernel(
+                    backends=[torch.nn.attention.SDPBackend.MATH]
+                ):
+                    vision_embeddings = self.model.get_image_features(
+                        pixel_values, **kwargs
+                    )
+            else:
+                vision_embeddings = self.model.get_image_features(
+                    pixel_values, **kwargs
+                )
 
             if isinstance(vision_embeddings, torch.Tensor):
                 if vision_embeddings.ndim == 2:
@@ -363,26 +392,45 @@ class MultiModalMixin(SupportsMultiModal, SupportsMRoPE):
                 ]
 
             return vision_embeddings
+        else:
+            logger.debug(
+                "No pixel values or image embeddings provided for multimodal embedding."
+            )
+            return None
 
     def get_mrope_input_positions(
         self,
         input_tokens: list[int],
-        hf_config: "PretrainedConfig",
-        image_grid_thw: list[list[int]] | torch.Tensor | None,
-        video_grid_thw: list[list[int]] | torch.Tensor | None,
-        second_per_grid_ts: list[float] | None = None,
-        context_len: int = 0,
-        seq_len: int | None = None,
-        audio_feature_lengths: torch.Tensor | None = None,
-        use_audio_in_video: bool = False,
+        mm_features: list[MultiModalFeatureSpec],
     ) -> tuple[torch.Tensor, int]:
-        if any((second_per_grid_ts, audio_feature_lengths, use_audio_in_video)):
-            raise NotImplementedError("Transformers backend only supports images.")
+        kwargs = MultiModalFeatureSpec.gather_kwargs(
+            mm_features,
+            {
+                "image_grid_thw",
+                "video_grid_thw",
+                "second_per_grid_ts",
+                "audio_feature_lengths",
+                "use_audio_in_video",
+            },
+        )
+        if any(
+            v
+            for k, v in kwargs.items()
+            if k not in {"image_grid_thw", "video_grid_thw"}
+        ):
+            raise NotImplementedError(
+                "Transformers modeling backend only supports images."
+            )
 
-        if isinstance(image_grid_thw, list):
-            image_grid_thw = torch.tensor(image_grid_thw)
-        if isinstance(video_grid_thw, list):
-            video_grid_thw = torch.tensor(video_grid_thw)
+        image_grid_thw = kwargs.get("image_grid_thw", [])
+        video_grid_thw = kwargs.get("video_grid_thw", [])
+
+        image_grid_thw = (torch.stack if image_grid_thw else torch.tensor)(
+            image_grid_thw
+        )
+        video_grid_thw = (torch.stack if video_grid_thw else torch.tensor)(
+            video_grid_thw
+        )
 
         mrope_positions, mrope_position_delta = self.model.get_rope_index(
             input_ids=torch.tensor(input_tokens).unsqueeze(0),
@@ -390,7 +438,7 @@ class MultiModalMixin(SupportsMultiModal, SupportsMRoPE):
             video_grid_thw=video_grid_thw,
         )
 
-        mrope_positions = mrope_positions[:, 0, context_len:seq_len]
+        mrope_positions = mrope_positions[:, 0]
         mrope_position_delta = mrope_position_delta[0].item()
 
         return mrope_positions, mrope_position_delta

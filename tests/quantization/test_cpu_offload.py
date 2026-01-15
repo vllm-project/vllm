@@ -19,8 +19,8 @@ def test_cpu_offload_fp8():
     # Test loading a quantized checkpoint
     compare_two_settings(
         "neuralmagic/Qwen2-1.5B-Instruct-FP8",
-        [],
-        ["--cpu-offload-gb", "1"],
+        ["--enforce_eager"],
+        ["--enforce_eager", "--cpu-offload-gb", "1"],
         max_wait_seconds=480,
     )
 
@@ -35,8 +35,8 @@ def test_cpu_offload_gptq(monkeypatch):
     # Test GPTQ Marlin
     compare_two_settings(
         "Qwen/Qwen2-1.5B-Instruct-GPTQ-Int4",
-        [],
-        ["--cpu-offload-gb", "1"],
+        ["--enforce_eager"],
+        ["--enforce_eager", "--cpu-offload-gb", "1"],
         max_wait_seconds=480,
     )
 
@@ -51,8 +51,8 @@ def test_cpu_offload_awq(monkeypatch):
     # Test AWQ Marlin
     compare_two_settings(
         "Qwen/Qwen2-1.5B-Instruct-AWQ",
-        [],
-        ["--cpu-offload-gb", "1"],
+        ["--enforce_eager"],
+        ["--enforce_eager", "--cpu-offload-gb", "1"],
         max_wait_seconds=480,
     )
 
@@ -66,8 +66,8 @@ def test_cpu_offload_compressed_tensors(monkeypatch):
     monkeypatch.setenv("VLLM_TEST_FORCE_LOAD_FORMAT", "auto")
     # Test wNa16
     compare_two_settings(
-        "nm-testing/tinyllama-oneshot-w4a16-channel-v2",
-        [],
-        ["--cpu-offload-gb", "1"],
+        "nm-testing/Qwen1.5-MoE-A2.7B-Chat-quantized.w4a16",
+        ["--enforce_eager"],
+        ["--enforce_eager", "--cpu-offload-gb", "1"],
         max_wait_seconds=480,
     )

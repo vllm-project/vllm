@@ -27,7 +27,7 @@ import torch
 from torch import nn
 from transformers import OPTConfig
 
-from vllm.attention import Attention
+from vllm.attention.layer import Attention
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
@@ -262,7 +262,7 @@ class OPTDecoder(nn.Module):
             prefix=f"{prefix}.layers",
         )
 
-    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
+    def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)
 
     def forward(
@@ -274,7 +274,7 @@ class OPTDecoder(nn.Module):
     ) -> torch.Tensor | IntermediateTensors:
         if get_pp_group().is_first_rank:
             if inputs_embeds is None:
-                inputs_embeds = self.get_input_embeddings(input_ids)
+                inputs_embeds = self.embed_input_ids(input_ids)
             pos_embeds = self.embed_positions(positions)
             if self.project_in is not None:
                 inputs_embeds, _ = self.project_in(inputs_embeds)
@@ -311,8 +311,8 @@ class OPTModel(nn.Module):
             ["hidden_states"], config.hidden_size
         )
 
-    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
-        return self.decoder.get_input_embeddings(input_ids)
+    def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
+        return self.decoder.embed_input_ids(input_ids)
 
     def forward(
         self,
@@ -394,8 +394,8 @@ class OPTForCausalLM(nn.Module, SupportsPP, SupportsLoRA):
             self.model.make_empty_intermediate_tensors
         )
 
-    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
-        return self.model.get_input_embeddings(input_ids)
+    def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
+        return self.model.embed_input_ids(input_ids)
 
     def forward(
         self,

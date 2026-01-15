@@ -166,49 +166,51 @@ Full example: [examples/offline_inference/vision_language_multi_image.py](../../
 
 If using the [LLM.chat](../models/generative_models.md#llmchat) method, you can pass images directly in the message content using various formats: image URLs, PIL Image objects, or pre-computed embeddings:
 
-```python
-from vllm import LLM
-from vllm.assets.image import ImageAsset
+??? code
 
-llm = LLM(model="llava-hf/llava-1.5-7b-hf")
-image_url = "https://picsum.photos/id/32/512/512"
-image_pil = ImageAsset('cherry_blossom').pil_image
-image_embeds = torch.load(...)
+    ```python
+    from vllm import LLM
+    from vllm.assets.image import ImageAsset
 
-conversation = [
-    {"role": "system", "content": "You are a helpful assistant"},
-    {"role": "user", "content": "Hello"},
-    {"role": "assistant", "content": "Hello! How can I assist you today?"},
-    {
-        "role": "user",
-        "content": [
-            {
-                "type": "image_url",
-                "image_url": {"url": image_url},
-            },
-            {
-                "type": "image_pil",
-                "image_pil": image_pil,
-            },
-            {
-                "type": "image_embeds",
-                "image_embeds": image_embeds,
-            },
-            {
-                "type": "text",
-                "text": "What's in these images?",
-            },
-        ],
-    },
-]
+    llm = LLM(model="llava-hf/llava-1.5-7b-hf")
+    image_url = "https://picsum.photos/id/32/512/512"
+    image_pil = ImageAsset('cherry_blossom').pil_image
+    image_embeds = torch.load(...)
 
-# Perform inference and log output.
-outputs = llm.chat(conversation)
+    conversation = [
+        {"role": "system", "content": "You are a helpful assistant"},
+        {"role": "user", "content": "Hello"},
+        {"role": "assistant", "content": "Hello! How can I assist you today?"},
+        {
+            "role": "user",
+            "content": [
+                {
+                    "type": "image_url",
+                    "image_url": {"url": image_url},
+                },
+                {
+                    "type": "image_pil",
+                    "image_pil": image_pil,
+                },
+                {
+                    "type": "image_embeds",
+                    "image_embeds": image_embeds,
+                },
+                {
+                    "type": "text",
+                    "text": "What's in these images?",
+                },
+            ],
+        },
+    ]
 
-for o in outputs:
-    generated_text = o.outputs[0].text
-    print(generated_text)
-```
+    # Perform inference and log output.
+    outputs = llm.chat(conversation)
+
+    for o in outputs:
+        generated_text = o.outputs[0].text
+        print(generated_text)
+    ```
 
 Multi-image input can be extended to perform video captioning. We show this with [Qwen2-VL](https://huggingface.co/Qwen/Qwen2-VL-2B-Instruct) as it supports videos:
 
@@ -354,6 +356,44 @@ You can pass a tuple `(array, sampling_rate)` to the `'audio'` field of the mult
 
 Full example: [examples/offline_inference/audio_language.py](../../examples/offline_inference/audio_language.py)
 
+#### Automatic Audio Channel Normalization
+
+vLLM automatically normalizes audio channels for models that require specific audio formats. When loading audio with libraries like `torchaudio`, stereo files return shape `[channels, time]`, but many audio models (particularly Whisper-based models) expect mono audio with shape `[time]`.
+
+**Supported models with automatic mono conversion:**
+
+- **Whisper** and all Whisper-based models
+- **Qwen2-Audio**
+- **Qwen2.5-Omni** / **Qwen3-Omni** (inherits from Qwen2.5-Omni)
+- **Ultravox**
+
+For these models, vLLM automatically:
+
+1. Detects if the model requires mono audio via the feature extractor
+2. Converts multi-channel audio to mono using channel averaging
+3. Handles both `(channels, time)` format (torchaudio) and `(time, channels)` format (soundfile)
+
+**Example with stereo audio:**
+
+```python
+import torchaudio
+from vllm import LLM
+
+# Load stereo audio file - returns (channels, time) shape
+audio, sr = torchaudio.load("stereo_audio.wav")
+print(f"Original shape: {audio.shape}")  # e.g., torch.Size([2, 16000])
+
+# vLLM automatically converts to mono for Whisper-based models
+llm = LLM(model="openai/whisper-large-v3")
+
+outputs = llm.generate({
+    "prompt": "",
+    "multi_modal_data": {"audio": (audio.numpy(), sr)},
+})
+```
+
+No manual conversion is needed - vLLM handles the channel normalization automatically based on the model's requirements.
+
 ### Embedding Inputs
 
 To input pre-computed embeddings belonging to a data type (i.e. image, video, or audio) directly to the language model,
@@ -364,6 +404,8 @@ You must enable this feature via `enable_mm_embeds=True`.
 !!! warning
     The vLLM engine may crash if incorrect shape of embeddings is passed.
     Only enable this flag for trusted users!
+
+#### Image Embeddings
 
 ??? code
 
@@ -441,6 +483,38 @@ For Qwen2-VL and MiniCPM-V, we accept additional parameters alongside the embedd
         print(generated_text)
     ```
 
+For Qwen3-VL, the `image_embeds` should contain both the base image embedding and deepstack features.
+
+#### Audio Embedding Inputs
+
+You can pass pre-computed audio embeddings similar to image embeddings:
+
+??? code
+
+    ```python
+    from vllm import LLM
+    import torch
+
+    # Enable audio embeddings support
+    llm = LLM(model="fixie-ai/ultravox-v0_5-llama-3_2-1b", enable_mm_embeds=True)
+
+    # Refer to the HuggingFace repo for the correct format to use
+    prompt = "USER: <audio>\nWhat is in this audio?\nASSISTANT:"
+
+    # Load pre-computed audio embeddings
+    # torch.Tensor of shape (1, audio_feature_size, hidden_size of LM)
+    audio_embeds = torch.load(...)
+
+    outputs = llm.generate({
+        "prompt": prompt,
+        "multi_modal_data": {"audio": audio_embeds},
+    })
+
+    for o in outputs:
+        generated_text = o.outputs[0].text
+        print(generated_text)
+    ```
+
 ## Online Serving
 
 Our OpenAI-compatible server accepts multi-modal data via the [Chat Completions API](https://platform.openai.com/docs/api-reference/chat). Media inputs also support optional UUIDs users can provide to uniquely identify each media, which is used to cache the media results across requests.
@@ -472,6 +546,7 @@ Then, you can use the OpenAI client as follows:
 ??? code
 
     ```python
+    import os
     from openai import OpenAI
 
     openai_api_key = "EMPTY"
@@ -483,8 +558,11 @@ Then, you can use the OpenAI client as follows:
     )
 
     # Single-image input inference
-    image_url = "https://upload.wikimedia.org/wikipedia/commons/thumb/d/dd/Gfp-wisconsin-madison-the-nature-boardwalk.jpg/2560px-Gfp-wisconsin-madison-the-nature-boardwalk.jpg"
 
+    # Public image URL for testing remote image processing
+    image_url = "https://vllm-public-assets.s3.us-west-2.amazonaws.com/vision_model_images/2560px-Gfp-wisconsin-madison-the-nature-boardwalk.jpg"
+
+    # Create chat completion with remote image
     chat_response = client.chat.completions.create(
         model="microsoft/Phi-3.5-vision-instruct",
         messages=[
@@ -508,9 +586,38 @@ Then, you can use the OpenAI client as follows:
     )
     print("Chat completion output:", chat_response.choices[0].message.content)
 
+    # Local image file path (update this to point to your actual image file)
+    image_file = "/path/to/image.jpg"
+
+    # Create chat completion with local image file
+    # Launch the API server/engine with the --allowed-local-media-path argument.
+    if os.path.exists(image_file):
+        chat_completion_from_local_image_url = client.chat.completions.create(
+            model="microsoft/Phi-3.5-vision-instruct",
+            messages=[
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": "What’s in this image?",
+                        },
+                        {
+                            "type": "image_url",
+                            "image_url": {"url": f"file://{image_file}"},
+                        },
+                    ],
+                }
+            ],
+        )
+        result = chat_completion_from_local_image_url.choices[0].message.content
+        print("Chat completion output from local image file:\n", result)
+    else:
+        print(f"Local image file not found at {image_file}, skipping local file test.")
+
     # Multi-image input inference
-    image_url_duck = "https://upload.wikimedia.org/wikipedia/commons/d/da/2015_Kaczka_krzy%C5%BCowka_w_wodzie_%28samiec%29.jpg"
-    image_url_lion = "https://upload.wikimedia.org/wikipedia/commons/7/77/002_The_lion_king_Snyggve_in_the_Serengeti_National_Park_Photo_by_Giles_Laurent.jpg"
+    image_url_duck = "https://vllm-public-assets.s3.us-west-2.amazonaws.com/multimodal_asset/duck.jpg"
+    image_url_lion = "https://vllm-public-assets.s3.us-west-2.amazonaws.com/multimodal_asset/lion.jpg"
 
     chat_response = client.chat.completions.create(
         model="microsoft/Phi-3.5-vision-instruct",
@@ -619,6 +726,31 @@ Full example: [examples/online_serving/openai_chat_completion_client_for_multimo
     ```bash
     export VLLM_VIDEO_FETCH_TIMEOUT=<timeout>
     ```
+
+#### Video Frame Recovery
+
+For improved robustness when processing potentially corrupted or truncated video files, vLLM supports optional frame recovery using a dynamic window forward-scan approach. When enabled, if a target frame fails to load during sequential reading, the next successfully grabbed frame (before the next target frame) will be used in its place.
+
+To enable video frame recovery, pass the `frame_recovery` parameter via `--media-io-kwargs`:
+
+```bash
+# Example: Enable frame recovery
+vllm serve Qwen/Qwen3-VL-30B-A3B-Instruct \
+  --media-io-kwargs '{"video": {"frame_recovery": true}}'
+```
+
+**Parameters:**
+
+- `frame_recovery`: Boolean flag to enable forward-scan recovery. When `true`, failed frames are recovered using the next available frame within the dynamic window (up to the next target frame). Default is `false`.
+
+**How it works:**
+
+1. The system reads frames sequentially
+2. If a target frame fails to grab, it's marked as "failed"
+3. The next successfully grabbed frame (before reaching the next target) is used to recover the failed frame
+4. This approach handles both mid-video corruption and end-of-video truncation
+
+Works with common video formats like MP4 when using OpenCV backends.
 
 #### Custom RGBA Background Color
 
@@ -763,14 +895,12 @@ The following example demonstrates how to pass image embeddings to the OpenAI se
 ??? code
 
     ```python
+    from vllm.utils.serial_utils import tensor2base64
+
     image_embedding = torch.load(...)
     grid_thw = torch.load(...) # Required by Qwen/Qwen2-VL-2B-Instruct
 
-    buffer = io.BytesIO()
-    torch.save(image_embedding, buffer)
-    buffer.seek(0)
-    binary_data = buffer.read()
-    base64_image_embedding = base64.b64encode(binary_data).decode('utf-8')
+    base64_image_embedding = tensor2base64(image_embedding)
 
     client = OpenAI(
         # defaults to os.environ.get("OPENAI_API_KEY")
@@ -828,6 +958,8 @@ The following example demonstrates how to pass image embeddings to the OpenAI se
 
 For Online Serving, you can also skip sending media if you expect cache hits with provided UUIDs. You can do so by sending media like this:
 
+??? code
+
     ```python
         # Image/video/audio URL:
         {
@@ -860,5 +992,11 @@ For Online Serving, you can also skip sending media if you expect cache hits wit
     ```
 
 !!! note
-    Only one message can contain `{"type": "image_embeds"}`.
+    Multiple messages can now contain `{"type": "image_embeds"}`, enabling you to pass multiple image embeddings in a single request (similar to regular images). The number of embeddings is limited by `--limit-mm-per-prompt`.
+
+    **Important**: The embedding shape format differs based on the number of embeddings:
+
+    - **Single embedding**: 3D tensor of shape `(1, feature_size, hidden_size)`
+    - **Multiple embeddings**: List of 2D tensors, each of shape `(feature_size, hidden_size)`
+
     If used with a model that requires additional parameters, you must also provide a tensor for each of them, e.g. `image_grid_thw`, `image_sizes`, etc.

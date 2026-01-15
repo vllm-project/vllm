@@ -57,7 +57,7 @@ class TeleFLMModel(LlamaModel):
         if self.use_mup:
             self.input_mult = self.config.input_mult
 
-    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
+    def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         embedding = self.embed_tokens(input_ids)
         if self.use_mup:
             embedding = embedding * self.input_mult
@@ -74,5 +74,5 @@ class TeleFLMForCausalLM(LlamaForCausalLM):
             self.output_mult = self.config.output_mult / self.mup_scale_factor
             logit_scale = self.output_mult
             self.logits_processor = LogitsProcessor(
-                self.unpadded_vocab_size, self.config.vocab_size, logit_scale
+                self.config.vocab_size, scale=logit_scale
             )

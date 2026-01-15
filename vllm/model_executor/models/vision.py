@@ -10,7 +10,7 @@ from typing import Final, Generic, Literal, Protocol, TypeAlias, TypeVar
 import torch
 from transformers import PretrainedConfig
 
-from vllm.attention.backends.registry import _Backend
+from vllm.config import VllmConfig
 from vllm.distributed import (
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
@@ -18,6 +18,7 @@ from vllm.distributed import (
 )
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
+from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 logger = init_logger(__name__)
 
@@ -82,22 +83,21 @@ def get_vit_attn_backend(
     head_size: int,
     dtype: torch.dtype,
     *,
-    attn_backend_override: _Backend | None = None,
-) -> _Backend:
+    attn_backend_override: AttentionBackendEnum | None = None,
+) -> AttentionBackendEnum:
     """
     Get the available attention backend for Vision Transformer.
     """
-    if attn_backend_override is not None:
-        return attn_backend_override
+    return current_platform.get_vit_attn_backend(
+        head_size,
+        dtype,
+        backend=attn_backend_override,
+    )
 
-    # Lazy import to avoid circular dependency
-    from vllm.attention.selector import get_env_variable_attn_backend
 
-    selected_backend: _Backend | None = get_env_variable_attn_backend()
-    if selected_backend is not None:
-        return selected_backend
-
-    return current_platform.get_vit_attn_backend(head_size, dtype)
+def should_torch_compile_mm_vit(vllm_config: VllmConfig) -> bool:
+    """Callable to be passed to `@support_torch_compile`'s `enable_if` argument."""
+    return vllm_config.compilation_config.compile_mm_encoder
 
 
 VisionFeatureSelectStrategyStr = Literal["class", "default", "full"]
@@ -544,19 +544,3 @@ def get_llm_pos_ids_for_vision(
     llm_pos_ids_list.append(_llm_pos_ids + start_idx)
     llm_pos_ids = torch.cat(llm_pos_ids_list, dim=1)
     return llm_pos_ids
-
-
-# Due to a performance regression with Conv3D in PyTorch2.9, we reshape
-# Conv3D weights to Linear weights for better performance.
-# See: https://github.com/vllm-project/vllm/issues/27406
-# and https://github.com/pytorch/pytorch/issues/166122
-# FIXME(Isotr0py): Revert the PR introduces this workaround
-# (https://github.com/vllm-project/vllm/pull/27418),
-# once the performance issue is resolved in PyTorch.
-def conv3d_to_linear_weight(conv3d_weight: torch.Tensor) -> torch.Tensor:
-    """
-    Reshape Conv3D weight to Linear weight. Only work when kernel_size==stride.
-    """
-    out_channels, in_channels, kt, kh, kw = conv3d_weight.shape
-    linear_weight = conv3d_weight.reshape(out_channels, in_channels * kt * kh * kw)
-    return linear_weight

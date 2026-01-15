@@ -5,15 +5,13 @@ vLLM supports AMD GPUs with ROCm 6.3 or above, and torch 2.8.0 and above.
 !!! tip
     [Docker](#set-up-using-docker) is the recommended way to use vLLM on ROCm.
 
-!!! warning
-    There are no pre-built wheels for this device, so you must either use the pre-built Docker image or build vLLM from source.
-
 # --8<-- [end:installation]
 # --8<-- [start:requirements]
 
-- GPU: MI200s (gfx90a), MI300 (gfx942), MI350 (gfx950), Radeon RX 7900 series (gfx1100/1101), Radeon RX 9000 series (gfx1200/1201)
+- GPU: MI200s (gfx90a), MI300 (gfx942), MI350 (gfx950), Radeon RX 7900 series (gfx1100/1101), Radeon RX 9000 series (gfx1200/1201), Ryzen AI MAX / AI 300 Series (gfx1151/1150)
 - ROCm 6.3 or above
     - MI350 requires ROCm 7.0 or above
+    - Ryzen AI MAX / AI 300 Series requires ROCm 7.0.2 or above
 
 # --8<-- [end:requirements]
 # --8<-- [start:set-up-using-python]
@@ -100,9 +98,24 @@ Currently, there are no pre-built ROCm wheels.
     !!! note
         - You will need to config the `$AITER_BRANCH_OR_COMMIT` for your purpose.
         - The validated `$AITER_BRANCH_OR_COMMIT` can be found in the [docker/Dockerfile.rocm_base](https://github.com/vllm-project/vllm/blob/main/docker/Dockerfile.rocm_base).
-        
 
-4. Build vLLM. For example, vLLM on ROCM 7.0 can be built with the following steps:
+
+4. If you want to use MORI for EP or PD disaggregation, you can install [MORI](https://github.com/ROCm/mori) using the following steps:
+
+    ```bash
+    git clone https://github.com/ROCm/mori.git
+    cd mori
+    git checkout $MORI_BRANCH_OR_COMMIT
+    git submodule sync; git submodule update --init --recursive
+    MORI_GPU_ARCHS="gfx942;gfx950" python3 install .
+    ```
+
+    !!! note
+        - You will need to config the `$MORI_BRANCH_OR_COMMIT` for your purpose.
+        - The validated `$MORI_BRANCH_OR_COMMIT` can be found in the [docker/Dockerfile.rocm_base](https://github.com/vllm-project/vllm/blob/main/docker/Dockerfile.rocm_base).
+
+
+5. Build vLLM. For example, vLLM on ROCM 7.0 can be built with the following steps:
 
     ???+ console "Commands"
 

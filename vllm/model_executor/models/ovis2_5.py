@@ -10,8 +10,7 @@ import torch
 import torch.nn as nn
 from transformers import BaseImageProcessor, BatchFeature, PretrainedConfig
 
-from vllm.attention.backends.registry import _Backend
-from vllm.config import VllmConfig
+from vllm.config import MultiModalConfig, VllmConfig
 from vllm.config.multimodal import BaseDummyOptions
 from vllm.model_executor.layers.linear import ReplicatedLinear
 from vllm.model_executor.layers.quantization import QuantizationConfig
@@ -31,11 +30,11 @@ from vllm.multimodal.inputs import (
 )
 from vllm.multimodal.parse import ImageSize, MultiModalDataItems
 from vllm.multimodal.processing import (
+    BaseDummyInputsBuilder,
     BaseMultiModalProcessor,
     BaseProcessingInfo,
     PromptReplacement,
 )
-from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.processors.ovis2_5 import Ovis2_5Processor
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
@@ -104,18 +103,16 @@ class VisualTokenizer(torch.nn.Module):
         config: PretrainedConfig,
         visual_vocab_size: int,
         quant_config: QuantizationConfig | None = None,
+        multimodal_config: MultiModalConfig | None = None,
         prefix: str = "",
-        use_data_parallel: bool = False,
-        attn_backend_override: _Backend | None = None,
     ):
         super().__init__()
         self.config = config
         self.vit = self._init_backbone(
             config=config,
             quant_config=quant_config,
+            multimodal_config=multimodal_config,
             prefix=f"{prefix}.vit",
-            use_data_parallel=use_data_parallel,
-            attn_backend_override=attn_backend_override,
         )
         # reserved tokens for INDICATOR_IDS
         head_dim = visual_vocab_size - len(INDICATOR_IDS)
@@ -133,18 +130,16 @@ class VisualTokenizer(torch.nn.Module):
         self,
         config: PretrainedConfig,
         quant_config: QuantizationConfig | None = None,
+        multimodal_config: QuantizationConfig | None = None,
         prefix: str = "",
-        use_data_parallel: bool = False,
-        attn_backend_override: _Backend | None = None,
     ):
         model_type = config.model_type
         if model_type == "siglip2_navit":
             return Siglip2NavitModel(
                 config=config,
                 quant_config=quant_config,
+                multimodal_config=multimodal_config,
                 prefix=prefix,
-                use_data_parallel=use_data_parallel,
-                attn_backend_override=attn_backend_override,
             )
         raise ValueError(f"Unsupported visual tokenizer model_type: {model_type}")
 
@@ -456,8 +451,6 @@ class Ovis2_5MultiModalProcessor(BaseMultiModalProcessor[Ovis2_5ProcessingInfo])
     dummy_inputs=Ovis2_5DummyInputsBuilder,
 )
 class Ovis2_5(nn.Module, SupportsMultiModal, SupportsPP):
-    merge_by_field_config = True
-
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
         config = vllm_config.model_config.hf_config
@@ -470,17 +463,12 @@ class Ovis2_5(nn.Module, SupportsMultiModal, SupportsPP):
             prefix=maybe_prefix(prefix, "llm"),
         )
 
-        attn_backend_override = (
-            multimodal_config.mm_encoder_attn_backend
-            if multimodal_config is not None
-            else None
-        )
         self.visual_tokenizer = VisualTokenizer(
             config=config.vit_config,
             visual_vocab_size=config.visual_vocab_size,
+            multimodal_config=multimodal_config,
             quant_config=quant_config,
             prefix=f"{prefix}.visual_tokenizer",
-            attn_backend_override=attn_backend_override,
         )
 
         self.vte = VisualEmbedding(config.visual_vocab_size, config.hidden_size)
@@ -617,7 +605,7 @@ class Ovis2_5(nn.Module, SupportsMultiModal, SupportsPP):
 
         return modalities
 
-    def get_multimodal_embeddings(self, **kwargs: object) -> MultiModalEmbeddings:
+    def embed_multimodal(self, **kwargs: object) -> MultiModalEmbeddings:
         modalities = self._parse_and_validate_multimodal_inputs(**kwargs)
         if not modalities:
             return []

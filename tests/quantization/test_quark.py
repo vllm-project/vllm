@@ -8,7 +8,6 @@ See also `tests/kernels/moe/test_ocp_mx_moe.py`.
 """
 
 import importlib.metadata
-import os
 from dataclasses import dataclass
 from importlib.util import find_spec
 
@@ -213,11 +212,11 @@ def test_ocp_mx_wikitext_correctness(config: AccuracyTestConfig, tp_size: int):
     task = "wikitext"
     rtol = 0.1
 
-    # Smaller cuda_graph_sizes to speed up the test.
+    # Smaller cudagraph_capture_sizes to speed up the test.
     results = lm_eval.simple_evaluate(
         model="vllm",
         model_args=config.get_model_args(
-            tp_size=tp_size, kwargs={"cuda_graph_sizes": [16]}
+            tp_size=tp_size, kwargs={"cudagraph_capture_sizes": [16]}
         ),
         tasks=task,
         batch_size=64,
@@ -246,8 +245,6 @@ def test_mxfp4_gsm8k_correctness(config: AccuracyTestConfig):
     task = "gsm8k"
     rtol = 0.03
 
-    os.environ["VLLM_USE_TRITON_FLASH_ATTN"] = "0"
-
     results = lm_eval.simple_evaluate(
         model="vllm",
         model_args=config.get_model_args(tp_size=8, model_max_len=38768),
@@ -262,8 +259,6 @@ def test_mxfp4_gsm8k_correctness(config: AccuracyTestConfig):
         measured_value - rtol < EXPECTED_VALUE
         and measured_value + rtol > EXPECTED_VALUE
     ), f"Expected: {EXPECTED_VALUE} |  Measured: {measured_value}"
-
-    del os.environ["VLLM_USE_TRITON_FLASH_ATTN"]
 
 
 @pytest.mark.skipif(not QUARK_MXFP4_AVAILABLE, reason="amd-quark>=0.9 is not available")

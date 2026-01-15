@@ -1,17 +1,19 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from enum import IntEnum
-from functools import cache, lru_cache
+from functools import lru_cache
 
 import torch
 
-from vllm import envs
+import vllm.model_executor.layers.fused_moe.modular_kernel as mk
+from vllm._aiter_ops import rocm_aiter_ops
 from vllm.model_executor.layers.fused_moe.config import (
     FUSED_MOE_UNQUANTIZED_CONFIG,
     FusedMoEQuantConfig,
 )
-from vllm.platforms import current_platform
-from vllm.utils.torch_utils import direct_register_custom_op
+from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
+    TopKWeightAndReduceNoOP,
+)
 
 
 class QuantMethod(IntEnum):
@@ -35,27 +37,6 @@ class ActivationMethod(IntEnum):
     # without importing the ActivationType enum from AITER globally.
     SILU = 0
     GELU = 1
-
-
-@cache
-def is_rocm_aiter_moe_enabled() -> bool:
-    return (
-        current_platform.is_rocm()
-        and envs.VLLM_ROCM_USE_AITER_MOE
-        and envs.VLLM_ROCM_USE_AITER
-    )
-
-
-@cache
-def use_mxfp4_aiter_moe() -> bool:
-    return current_platform.is_rocm() and envs.VLLM_ROCM_USE_AITER
-
-
-@cache
-def is_rocm_aiter_fusion_shared_expert_enabled() -> bool:
-    return (
-        envs.VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS and is_rocm_aiter_moe_enabled()
-    )
 
 
 aiter_topK_meta_data = None
@@ -114,250 +95,6 @@ def init_aiter_topK_meta_data(
     aiter_topK_meta_data = (total_topk_weights, total_topk_ids)
 
 
-def rocm_aiter_asm_moe_tkw1_impl(
-    hidden_states: torch.Tensor,
-    w1: torch.Tensor,
-    w2: torch.Tensor,
-    topk_weights: torch.Tensor,
-    topk_ids: torch.Tensor,
-    fc1_scale: torch.Tensor | None = None,
-    fc2_scale: torch.Tensor | None = None,
-    fc1_smooth_scale: torch.Tensor | None = None,
-    fc2_smooth_scale: torch.Tensor | None = None,
-    a16: bool = False,
-    per_tensor_quant_scale: torch.Tensor | None = None,
-    expert_mask: torch.Tensor | None = None,
-    activation_method: int = ActivationMethod.SILU.value,
-) -> torch.Tensor:
-    from aiter import ActivationType
-    from aiter.fused_moe_bf16_asm import asm_moe_tkw1
-
-    activation = ActivationType(activation_method)
-
-    return asm_moe_tkw1(
-        hidden_states,
-        w1,
-        w2,
-        topk_weights,
-        topk_ids,
-        fc1_scale=fc1_scale,
-        fc2_scale=fc2_scale,
-        fc1_smooth_scale=fc1_smooth_scale,
-        fc2_smooth_scale=fc2_smooth_scale,
-        a16=a16,
-        per_tensor_quant_scale=per_tensor_quant_scale,
-        expert_mask=expert_mask,
-        activation=activation,
-    )
-
-
-def rocm_aiter_asm_moe_tkw1_fake(
-    hidden_states: torch.Tensor,
-    w1: torch.Tensor,
-    w2: torch.Tensor,
-    topk_weights: torch.Tensor,
-    topk_ids: torch.Tensor,
-    fc1_scale: torch.Tensor | None = None,
-    fc2_scale: torch.Tensor | None = None,
-    fc1_smooth_scale: torch.Tensor | None = None,
-    fc2_smooth_scale: torch.Tensor | None = None,
-    a16: bool = False,
-    per_tensor_quant_scale: torch.Tensor | None = None,
-    expert_mask: torch.Tensor | None = None,
-    activation_method: int = ActivationMethod.SILU.value,
-) -> torch.Tensor:
-    return torch.empty_like(hidden_states)
-
-
-def rocm_aiter_topk_softmax_impl(
-    topk_weights: torch.Tensor,
-    topk_indices: torch.Tensor,
-    token_expert_indices: torch.Tensor,
-    gating_output: torch.Tensor,
-    renormalize: bool,
-) -> None:
-    from aiter import topk_softmax
-
-    topk_softmax(
-        topk_weights, topk_indices, token_expert_indices, gating_output, renormalize
-    )
-
-
-def rocm_aiter_topk_softmax_fake(
-    topk_weights: torch.Tensor,
-    topk_indices: torch.Tensor,
-    token_expert_indices: torch.Tensor,
-    gating_output: torch.Tensor,
-    renormalize: bool,
-) -> None:
-    pass
-
-
-def rocm_aiter_biased_grouped_topk_impl(
-    gating_output: torch.Tensor,
-    correction_bias: torch.Tensor,
-    topk_weights: torch.Tensor,
-    topk_ids: torch.Tensor,
-    num_expert_group: int,
-    topk_group: int,
-    need_renorm: bool,
-    routed_scaling_factor: float = 1.0,  # mul to topk_weights
-) -> None:
-    from aiter import biased_grouped_topk
-
-    biased_grouped_topk(
-        gating_output,
-        correction_bias,
-        topk_weights,
-        topk_ids,
-        num_expert_group,
-        topk_group,
-        need_renorm,
-        routed_scaling_factor,
-    )
-
-
-def rocm_aiter_biased_grouped_topk_fake(
-    gating_output: torch.Tensor,
-    correction_bias: torch.Tensor,
-    topk_weights: torch.Tensor,
-    topk_ids: torch.Tensor,
-    num_expert_group: int,
-    topk_group: int,
-    need_renorm: bool,
-    routed_scaling_factor: float = 1.0,  # mul to topk_weights
-) -> None:
-    pass
-
-
-def rocm_aiter_grouped_topk_impl(
-    gating_output: torch.Tensor,
-    topk_weights: torch.Tensor,
-    topk_ids: torch.Tensor,
-    num_expert_group: int,
-    topk_group: int,
-    need_renorm: bool,
-    scoring_func: str = "softmax",
-    routed_scaling_factor: float = 1.0,  # mul to topk_weights
-) -> None:
-    from aiter import grouped_topk
-
-    grouped_topk(
-        gating_output,
-        topk_weights,
-        topk_ids,
-        num_expert_group,
-        topk_group,
-        need_renorm,
-        scoring_func,
-        routed_scaling_factor,
-    )
-
-
-def rocm_aiter_grouped_topk_fake(
-    gating_output: torch.Tensor,
-    topk_weights: torch.Tensor,
-    topk_ids: torch.Tensor,
-    num_expert_group: int,
-    topk_group: int,
-    need_renorm: bool,
-    scoring_func: str = "softmax",
-    routed_scaling_factor: float = 1.0,  # mul to topk_weights
-) -> None:
-    pass
-
-
-def rocm_aiter_fused_moe_impl(
-    hidden_states: torch.Tensor,
-    w1: torch.Tensor,
-    w2: torch.Tensor,
-    topk_weight: torch.Tensor,
-    topk_ids: torch.Tensor,
-    expert_mask: torch.Tensor | None = None,
-    activation_method: int = ActivationMethod.SILU.value,
-    quant_method: int = QuantMethod.NO.value,
-    doweight_stage1: bool = False,
-    w1_scale: torch.Tensor | None = None,
-    w2_scale: torch.Tensor | None = None,
-    a1_scale: torch.Tensor | None = None,
-    a2_scale: torch.Tensor | None = None,
-) -> torch.Tensor:
-    from aiter import ActivationType, QuantType
-    from aiter.fused_moe import fused_moe
-
-    activation = ActivationType(activation_method)
-    quant_type = QuantType(quant_method)
-
-    return fused_moe(
-        hidden_states,
-        w1,
-        w2,
-        topk_weight,
-        topk_ids,
-        expert_mask,
-        activation,
-        quant_type,
-        doweight_stage1,
-        w1_scale,
-        w2_scale,
-        a1_scale,
-        a2_scale,
-    )
-
-
-def rocm_aiter_fused_moe_fake(
-    hidden_states: torch.Tensor,
-    w1: torch.Tensor,
-    w2: torch.Tensor,
-    topk_weight: torch.Tensor,
-    topk_ids: torch.Tensor,
-    expert_mask: torch.Tensor | None = None,
-    activation_method: int = ActivationMethod.SILU.value,
-    quant_method: int = QuantMethod.NO.value,
-    doweight_stage1: bool = False,
-    w1_scale: torch.Tensor | None = None,
-    w2_scale: torch.Tensor | None = None,
-    a1_scale: torch.Tensor | None = None,
-    a2_scale: torch.Tensor | None = None,
-) -> torch.Tensor:
-    return torch.empty_like(hidden_states)
-
-
-if current_platform.is_rocm():
-    direct_register_custom_op(
-        op_name="rocm_aiter_asm_moe_tkw1",
-        op_func=rocm_aiter_asm_moe_tkw1_impl,
-        fake_impl=rocm_aiter_asm_moe_tkw1_fake,
-    )
-
-    direct_register_custom_op(
-        op_name="rocm_aiter_fused_moe",
-        op_func=rocm_aiter_fused_moe_impl,
-        fake_impl=rocm_aiter_fused_moe_fake,
-    )
-
-    direct_register_custom_op(
-        op_name="rocm_aiter_topk_softmax",
-        op_func=rocm_aiter_topk_softmax_impl,
-        mutates_args=["topk_weights", "topk_indices", "token_expert_indices"],
-        fake_impl=rocm_aiter_topk_softmax_fake,
-    )
-
-    direct_register_custom_op(
-        op_name="rocm_aiter_biased_grouped_topk",
-        op_func=rocm_aiter_biased_grouped_topk_impl,
-        mutates_args=["topk_weights", "topk_ids"],
-        fake_impl=rocm_aiter_biased_grouped_topk_fake,
-    )
-
-    direct_register_custom_op(
-        op_name="rocm_aiter_grouped_topk",
-        op_func=rocm_aiter_grouped_topk_impl,
-        mutates_args=["topk_weights", "topk_ids"],
-        fake_impl=rocm_aiter_grouped_topk_fake,
-    )
-
-
 def rocm_aiter_grouped_topk(
     hidden_states: torch.Tensor,
     gating_output: torch.Tensor,
@@ -372,7 +109,10 @@ def rocm_aiter_grouped_topk(
 ) -> tuple[torch.Tensor, torch.Tensor]:
     token = hidden_states.shape[0]
     device = hidden_states.device
-    if is_rocm_aiter_fusion_shared_expert_enabled() and num_fused_shared_experts > 0:
+    if (
+        rocm_aiter_ops.is_fusion_moe_shared_experts_enabled()
+        and num_fused_shared_experts > 0
+    ):
         assert aiter_topK_meta_data is not None, (
             "AITER topK meta data is not initialized. "
             "Please ensure that init_aiter_topK_meta_data "
@@ -397,7 +137,7 @@ def rocm_aiter_grouped_topk(
         topk_weights = torch.empty((token, topk), dtype=torch.float32, device=device)
 
     if e_score_correction_bias is not None:
-        torch.ops.vllm.rocm_aiter_biased_grouped_topk(
+        rocm_aiter_ops.biased_grouped_topk(
             gating_output,
             e_score_correction_bias.to(gating_output.dtype),
             topk_weights,
@@ -409,7 +149,7 @@ def rocm_aiter_grouped_topk(
         )
     else:
         assert scoring_func == "softmax" or scoring_func == "sigmoid"
-        torch.ops.vllm.rocm_aiter_grouped_topk(
+        rocm_aiter_ops.grouped_topk(
             gating_output,
             topk_weights,
             topk_ids,
@@ -420,7 +160,10 @@ def rocm_aiter_grouped_topk(
             routed_scaling_factor=routed_scaling_factor,
         )
 
-    if is_rocm_aiter_fusion_shared_expert_enabled() and num_fused_shared_experts > 0:
+    if (
+        rocm_aiter_ops.is_fusion_moe_shared_experts_enabled()
+        and num_fused_shared_experts > 0
+    ):
         return total_topk_weights, total_topk_ids
     return topk_weights, topk_ids
 
@@ -464,7 +207,7 @@ def rocm_aiter_fused_experts(
             "Only support topk=1 when `apply_router_weight_on_input` is True"
         )
 
-        return torch.ops.vllm.rocm_aiter_asm_moe_tkw1(
+        return rocm_aiter_ops.asm_moe_tkw1(
             hidden_states,
             w1,
             w2,
@@ -482,12 +225,13 @@ def rocm_aiter_fused_experts(
 
     else:
         quant_method = QuantMethod.NO.value
-
+        # quark moe for mxfp4 w_dtype mxfp4 a_dtype
+        if quant_config.use_mxfp4_w4a4:
+            quant_method = QuantMethod.BLOCK_1X32.value
         # w8a8 block-scaled
         if quant_config.block_shape is not None and quant_config.use_fp8_w8a8:
             assert not apply_router_weight_on_input, (
-                "apply_router_weight_on_input is\
-                not supported for block scaled moe"
+                "apply_router_weight_on_input is not supported for block scaled moe"
             )
             assert quant_config.w1_scale is not None
             assert quant_config.w2_scale is not None
@@ -507,7 +251,7 @@ def rocm_aiter_fused_experts(
                 "Only support topk=1 when `apply_router_weight_on_input` is True"
             )
 
-        return torch.ops.vllm.rocm_aiter_fused_moe(
+        return rocm_aiter_ops.fused_moe(
             hidden_states,
             w1,
             w2,
@@ -524,37 +268,80 @@ def rocm_aiter_fused_experts(
         )
 
 
-def rocm_aiter_topk_softmax(
-    topk_weights: torch.Tensor,
-    topk_indices: torch.Tensor,
-    token_expert_indices: torch.Tensor,
-    gating_output: torch.Tensor,
-    renormalize: bool,
-) -> tuple[torch.Tensor, ...]:
-    torch.ops.vllm.rocm_aiter_topk_softmax(
-        topk_weights, topk_indices, token_expert_indices, gating_output, renormalize
-    )
-    return topk_weights, topk_indices
+class AiterExperts(mk.FusedMoEPermuteExpertsUnpermute):
+    def __init__(self, quant_config):
+        super().__init__(quant_config)
 
+    @property
+    def activation_formats(
+        self,
+    ) -> tuple[mk.FusedMoEActivationFormat, mk.FusedMoEActivationFormat]:
+        return (
+            mk.FusedMoEActivationFormat.Standard,
+            mk.FusedMoEActivationFormat.Standard,
+        )
 
-def shuffle_weights(
-    *tensors: torch.Tensor, layout: tuple[int, int] = (16, 16)
-) -> tuple[torch.Tensor, ...]:
-    """
-    Applies shuffle_weight function from AITER to each
-    input tensor and returns them.
+    def supports_expert_map(self):
+        return True
 
-    Rearranges (shuffles) the input tensor/s
-    into a specified block layout for optimized computation.
+    def supports_chunking(self):
+        return False
 
-    Args:
-        *tensors: Variable number of torch.Tensor objects.
-        layout: A pair of integers specifying the block sizes used to divide
-            the tensors during shuffling. Default is (16, 16).
+    def finalize_weight_and_reduce_impl(self) -> mk.TopKWeightAndReduce:
+        return TopKWeightAndReduceNoOP()
 
-    Returns:
-    A Tuple of shuffled tensors.
-    """
-    from aiter.ops.shuffle import shuffle_weight
+    def workspace_shapes(
+        self,
+        M: int,
+        N: int,
+        K: int,
+        topk: int,
+        global_num_experts: int,
+        local_num_experts: int,
+        expert_tokens_meta: mk.ExpertTokensMetadata | None,
+        activation: str,
+    ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...]]:
+        # Workspaces are managed internally by AITER.
+        workspace1 = (0,)
+        workspace2 = (0,)
+        output = (M, K)
+        return (workspace1, workspace2, output)
 
-    return tuple(shuffle_weight(tensor, layout=layout) for tensor in tensors)
+    def apply(
+        self,
+        output: torch.Tensor,
+        hidden_states: torch.Tensor,
+        w1: torch.Tensor,
+        w2: torch.Tensor,
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
+        activation: str,
+        global_num_experts: int,
+        expert_map: torch.Tensor | None,
+        a1q_scale: torch.Tensor | None,
+        a2_scale: torch.Tensor | None,
+        workspace13: torch.Tensor,
+        workspace2: torch.Tensor,
+        expert_tokens_meta: mk.ExpertTokensMetadata | None,
+        apply_router_weight_on_input: bool,
+    ):
+        # TODO(rob): rocm_aiter_fused_experts uses self.quant_config's
+        # a_scales for static quantization. Update this to fit better
+        # with the interface once all quant integrations are complete.
+        assert a1q_scale is None
+        assert a2_scale == self.quant_config.a2_scale
+        assert expert_tokens_meta is None
+
+        result = rocm_aiter_fused_experts(
+            hidden_states=hidden_states,
+            w1=w1,
+            w2=w2,
+            topk_weights=topk_weights,
+            topk_ids=topk_ids,
+            activation=activation,
+            apply_router_weight_on_input=apply_router_weight_on_input,
+            expert_map=expert_map,
+            quant_config=self.quant_config,
+        )
+        assert result.shape == output.shape
+        output.copy_(result)

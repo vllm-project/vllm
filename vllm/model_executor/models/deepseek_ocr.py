@@ -14,9 +14,11 @@ from vllm.config import VllmConfig
 from vllm.config.multimodal import BaseDummyOptions
 from vllm.model_executor.models.interfaces import (
     MultiModalEmbeddings,
+    SupportsLoRA,
     SupportsMultiModal,
     SupportsPP,
 )
+from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.model_executor.models.utils import (
     AutoWeightsLoader,
     WeightsMapper,
@@ -27,7 +29,7 @@ from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (
     MultiModalDataDict,
     MultiModalFieldConfig,
-    MultiModalKwargs,
+    MultiModalKwargsItems,
     NestedTensors,
 )
 from vllm.multimodal.parse import (
@@ -37,14 +39,15 @@ from vllm.multimodal.parse import (
     MultiModalDataItems,
 )
 from vllm.multimodal.processing import (
+    BaseDummyInputsBuilder,
     BaseMultiModalProcessor,
     BaseProcessingInfo,
     PromptReplacement,
     PromptUpdate,
 )
-from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from vllm.sampling_params import SamplingParams
 from vllm.sequence import IntermediateTensors
+from vllm.tokenizers import cached_tokenizer_from_config
 from vllm.transformers_utils.configs.deepseek_vl2 import DeepseekVLV2Config
 from vllm.transformers_utils.processors.deepseek_ocr import (
     BASE_SIZE,
@@ -53,7 +56,6 @@ from vllm.transformers_utils.processors.deepseek_ocr import (
     DeepseekOCRProcessor,
     count_tiles,
 )
-from vllm.transformers_utils.tokenizer import cached_tokenizer_from_config
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 from vllm.v1.sample.logits_processor import (
     AdapterLogitsProcessor,
@@ -131,25 +133,18 @@ class NGramPerReqLogitsProcessor(AdapterLogitsProcessor):
     """Example of overriding the wrapper class `__init__()` in order to utilize
     info about the device type"""
 
-    def __init__(
-        self, vllm_config: VllmConfig, device: torch.device, is_pin_memory: bool
-    ):
-        super().__init__(vllm_config, device, is_pin_memory)
-
-    def is_argmax_invariant(self) -> bool:
-        return True
-
-    def new_req_logits_processor(
-        self,
-        params: SamplingParams,
-    ) -> RequestLogitsProcessor | None:
+    @classmethod
+    def validate_params(cls, params: SamplingParams):
         ngram_size = params.extra_args and params.extra_args.get("ngram_size")
         window_size = params.extra_args and params.extra_args.get("window_size", 100)
         whitelist_token_ids = params.extra_args and params.extra_args.get(
             "whitelist_token_ids", None
         )
+        # if ngram_size is not provided, skip validation because the processor
+        # will not be used.
         if ngram_size is None:
             return None
+
         if not isinstance(ngram_size, int) or ngram_size <= 0:
             raise ValueError(
                 f"`ngram_size` has to be a strictly positive integer, got {ngram_size}."
@@ -163,13 +158,26 @@ class NGramPerReqLogitsProcessor(AdapterLogitsProcessor):
             whitelist_token_ids, Iterable
         ):
             raise ValueError(
-                "`whitelist_token_ids` has to be a set of integers, "
+                "`whitelist_token_ids` has to be a sequence of integers, "
                 f"got {whitelist_token_ids}."
             )
-        else:
-            whitelist_token_ids = (
-                set(whitelist_token_ids) if whitelist_token_ids else None
-            )
+
+    def is_argmax_invariant(self) -> bool:
+        return False
+
+    def new_req_logits_processor(
+        self,
+        params: SamplingParams,
+    ) -> RequestLogitsProcessor | None:
+        ngram_size = params.extra_args and params.extra_args.get("ngram_size")
+        window_size = params.extra_args and params.extra_args.get("window_size", 100)
+        whitelist_token_ids = params.extra_args and params.extra_args.get(
+            "whitelist_token_ids", None
+        )
+        if ngram_size is None:
+            return None
+
+        whitelist_token_ids = set(whitelist_token_ids) if whitelist_token_ids else None
         return NoRepeatNGramLogitsProcessor(
             ngram_size=ngram_size,
             window_size=window_size,
@@ -299,7 +307,7 @@ class DeepseekOCRMultiModalProcessor(
         self,
         mm_items: MultiModalDataItems,
         hf_processor_mm_kwargs: Mapping[str, object],
-        out_mm_kwargs: MultiModalKwargs,
+        out_mm_kwargs: MultiModalKwargsItems,
     ) -> Sequence[PromptUpdate]:
         hf_processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
 
@@ -337,9 +345,7 @@ class DeepseekOCRMultiModalProcessor(
     info=DeepseekOCRProcessingInfo,
     dummy_inputs=DeepseekOCRDummyInputsBuilder,
 )
-class DeepseekOCRForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
-    merge_by_field_config = True
-
+class DeepseekOCRForCausalLM(nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA):
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_prefix={
             # map prefix for language backbone
@@ -391,6 +397,7 @@ class DeepseekOCRForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
         self.vision_model = DeepCLIPVisionTransformer(
             config=clip_vision_config,
             quant_config=quant_config,
+            multimodal_config=multimodal_config,
             prefix=maybe_prefix(prefix, "vision_model"),
         )
 
@@ -411,18 +418,10 @@ class DeepseekOCRForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
                 f"Only 2D tile_tag is supported currently, got: {self.tile_tag}"
             )
 
-        if self.text_config.topk_method == "noaux_tc":
-            architectures = ["DeepseekV3ForCausalLM"]
-        elif not self.text_config.use_mla:
-            architectures = ["DeepseekForCausalLM"]
-        else:
-            architectures = ["DeepseekV2ForCausalLM"]
-
         self.language_model = init_vllm_registered_model(
             vllm_config=vllm_config,
             hf_config=self.text_config,
             prefix=maybe_prefix(prefix, "language_model"),
-            architectures=architectures,
         )
 
         self.make_empty_intermediate_tensors = (
@@ -439,19 +438,16 @@ class DeepseekOCRForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
         if pixel_values is None or torch.sum(pixel_values).item() == 0:
             return None
 
-        if pixel_values is not None:
-            base_size = self.vision_config.image_size
-            return DeepseekOCRImagePixelInputs(
-                type="pixel_values",
-                data=pixel_values,
-                images_crop=images_crop,
-                images_spatial_crop=images_spatial_crop,
-                resolve_bindings={
-                    "base_size": base_size,
-                },
-            )
-
-        raise AssertionError("This line should be unreachable.")
+        base_size = self.vision_config.image_size
+        return DeepseekOCRImagePixelInputs(
+            type="pixel_values",
+            data=pixel_values,
+            images_crop=images_crop,
+            images_spatial_crop=images_spatial_crop,
+            resolve_bindings={
+                "base_size": base_size,
+            },
+        )
 
     def _encode_global_features(self, image_tensor: torch.Tensor) -> torch.Tensor:
         global_features_1 = self.sam_model(image_tensor)
@@ -559,9 +555,7 @@ class DeepseekOCRForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
     def get_language_model(self) -> torch.nn.Module:
         return self.language_model
 
-    def get_multimodal_embeddings(
-        self, **kwargs: object
-    ) -> MultiModalEmbeddings | None:
+    def embed_multimodal(self, **kwargs: object) -> MultiModalEmbeddings | None:
         image_input = self._parse_and_validate_image_input(**kwargs)
         if image_input is None:
             return None
@@ -595,3 +589,13 @@ class DeepseekOCRForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
         loader = AutoWeightsLoader(self)
         autoloaded_weights = loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
         return autoloaded_weights
+
+    def get_mm_mapping(self) -> MultiModelKeys:
+        """
+        Get the module prefix in multimodal models
+        """
+        return MultiModelKeys.from_string_field(
+            language_model="language_model",
+            connector="projector",
+            tower_model=["sam_model", "vision_model"],
+        )

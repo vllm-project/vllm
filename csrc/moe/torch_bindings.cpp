@@ -19,7 +19,8 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, m) {
       "moe_align_block_size(Tensor topk_ids, int num_experts,"
       "                     int block_size, Tensor! sorted_token_ids,"
       "                     Tensor! experts_ids,"
-      "                     Tensor! num_tokens_post_pad) -> ()");
+      "                     Tensor! num_tokens_post_pad,"
+      "                     Tensor? maybe_expert_map) -> ()");
   m.impl("moe_align_block_size", torch::kCUDA, &moe_align_block_size);
 
   // Aligning the number of tokens to be processed by each expert such
@@ -44,7 +45,10 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, m) {
       "                     int max_num_m_blocks, "
       "                     Tensor !sorted_token_ids,"
       "                     Tensor !experts_ids,"
-      "                     Tensor !num_tokens_post_pad) -> () ");
+      "                     Tensor !num_tokens_post_pad,"
+      "                     Tensor !adapter_enabled,"
+      "                     Tensor !lora_ids,"
+      "                     Tensor? maybe_expert_map) -> () ");
   m.impl("moe_lora_align_block_size", torch::kCUDA, &moe_lora_align_block_size);
 
 #ifndef USE_ROCM
@@ -61,16 +65,18 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, m) {
   m.def(
       "moe_wna16_marlin_gemm(Tensor! a, Tensor? c_or_none,"
       "Tensor! b_q_weight, Tensor? b_bias_or_none,"
-      "Tensor! b_scales, Tensor? global_scale, Tensor? "
+      "Tensor! b_scales, Tensor? a_scales, Tensor? global_scale, Tensor? "
       "b_zeros_or_none,"
       "Tensor? g_idx_or_none, Tensor? perm_or_none, Tensor! workspace,"
       "Tensor sorted_token_ids,"
       "Tensor! expert_ids, Tensor! num_tokens_past_padded,"
       "Tensor! topk_weights, int moe_block_size, int top_k, "
-      "bool mul_topk_weights, bool is_ep, int b_q_type_id,"
+      "bool mul_topk_weights, int b_type_id,"
       "int size_m, int size_n, int size_k,"
       "bool is_full_k, bool use_atomic_add,"
-      "bool use_fp32_reduce, bool is_zp_float) -> Tensor");
+      "bool use_fp32_reduce, bool is_zp_float,"
+      "int thread_k, int thread_n, int blocks_per_sm) -> Tensor");
+
   m.def(
       "marlin_gemm_moe(Tensor! a, Tensor! b_q_weights, Tensor! sorted_ids, "
       "Tensor! topk_weights, Tensor! topk_ids, Tensor! b_scales, Tensor! "
@@ -105,9 +111,10 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, m) {
 
   // Apply grouped topk routing to select experts.
   m.def(
-      "grouped_topk(Tensor scores, Tensor scores_with_bias, int n_group, int "
+      "grouped_topk(Tensor scores, int n_group, int "
       "topk_group, int topk, bool renormalize, float "
-      "routed_scaling_factor) -> (Tensor, Tensor)");
+      "routed_scaling_factor, Tensor bias, int scoring_func) -> (Tensor, "
+      "Tensor)");
   m.impl("grouped_topk", torch::kCUDA, &grouped_topk);
 #endif
 }

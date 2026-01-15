@@ -2,11 +2,10 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import contextlib
 import copy
-import hashlib
 import os
 from collections.abc import Callable
 from contextlib import ExitStack
-from typing import Any
+from typing import Any, Literal
 from unittest.mock import patch
 
 import torch
@@ -16,6 +15,8 @@ import torch.fx as fx
 import vllm.envs as envs
 from vllm.compilation.counter import compilation_counter
 from vllm.config import VllmConfig
+from vllm.config.utils import Range
+from vllm.utils.hashing import safe_hash
 from vllm.utils.torch_utils import is_torch_equal_or_newer
 
 
@@ -30,7 +31,7 @@ class CompilerInterface:
 
     def initialize_cache(
         self, cache_dir: str, disable_cache: bool = False, prefix: str = ""
-    ):
+    ) -> None:
         """
         when the vLLM process uses `cache_dir` as the cache directory,
         the compiler should initialize itself with the cache directory,
@@ -63,16 +64,16 @@ class CompilerInterface:
         graph: fx.GraphModule,
         example_inputs: list[Any],
         compiler_config: dict[str, Any],
-        runtime_shape: int | None = None,
+        compile_range: Range,
         key: str | None = None,
-    ) -> tuple[Callable | None, Any | None]:
+    ) -> tuple[Callable[..., Any] | None, Any | None]:
         """
         Compile the graph with the given example inputs and compiler config,
-        with a runtime shape. If the `runtime_shape` is None, it means
-        the `example_inputs` have a dynamic shape. Otherwise, the
-        `runtime_shape` specifies the shape of the inputs. Right now we only
-        support one variable shape for all inputs, which is the batchsize
-        (number of tokens) during inference.
+        with a range. The `compile_range` specifies the range of the inputs,
+        it could be concrete size (if compile_sizes is provided), e.g. [4, 4]
+        or a range [5, 8].
+        Right now we only support one variable in ranges for all inputs,
+         which is the batchsize (number of tokens) during inference.
 
         Dynamo will make sure `graph(*example_inputs)` is valid.
 
@@ -98,8 +99,8 @@ class CompilerInterface:
         graph: fx.GraphModule,
         example_inputs: list[Any],
         graph_index: int,
-        runtime_shape: int | None = None,
-    ) -> Callable:
+        compile_range: Range,
+    ) -> Callable[..., Any]:
         """
         Load the compiled function from the handle.
         Raises an error if the handle is invalid.
@@ -137,13 +138,13 @@ class AlwaysHitShapeEnv:
     def __init__(self) -> None:
         self.guards: list[Any] = []
 
-    def evaluate_guards_expression(self, *args, **kwargs):
+    def evaluate_guards_expression(self, *args: Any, **kwargs: Any) -> Literal[True]:
         return True
 
-    def get_pruned_guards(self, *args, **kwargs):
+    def get_pruned_guards(self, *args: Any, **kwargs: Any) -> list[Any]:
         return []
 
-    def produce_guards_expression(self, *args, **kwargs):
+    def produce_guards_expression(self, *args: Any, **kwargs: Any) -> Literal[""]:
         return ""
 
 
@@ -163,6 +164,23 @@ def get_inductor_factors() -> list[Any]:
     return factors
 
 
+def is_compile_cache_enabled(
+    vllm_additional_inductor_config: dict[str, Any],
+) -> bool:
+    vllm_inductor_config_disable_cache = vllm_additional_inductor_config.get(
+        "force_disable_caches", False
+    )
+
+    # TODO(gmagogsfm): Replace torch._inductor.config.force_disable_caches
+    # with torch.compiler.config.force_disable_caches when minimum PyTorch
+    # version reaches 2.10
+    return (
+        not envs.VLLM_DISABLE_COMPILE_CACHE
+        and not torch._inductor.config.force_disable_caches
+        and not vllm_inductor_config_disable_cache
+    )
+
+
 class InductorStandaloneAdaptor(CompilerInterface):
     """
     The adaptor for the Inductor compiler.
@@ -175,16 +193,19 @@ class InductorStandaloneAdaptor(CompilerInterface):
 
     name = "inductor_standalone"
 
+    def __init__(self, save_format: Literal["binary", "unpacked"]) -> None:
+        self.save_format = save_format
+
     def compute_hash(self, vllm_config: VllmConfig) -> str:
         factors = get_inductor_factors()
-        hash_str = hashlib.md5(
-            str(factors).encode(), usedforsecurity=False
-        ).hexdigest()[:10]
+        hash_str = safe_hash(str(factors).encode(), usedforsecurity=False).hexdigest()[
+            :10
+        ]
         return hash_str
 
     def initialize_cache(
         self, cache_dir: str, disable_cache: bool = False, prefix: str = ""
-    ):
+    ) -> None:
         self.cache_dir = cache_dir
 
     def compile(
@@ -192,20 +213,20 @@ class InductorStandaloneAdaptor(CompilerInterface):
         graph: fx.GraphModule,
         example_inputs: list[Any],
         compiler_config: dict[str, Any],
-        runtime_shape: int | None = None,
+        compile_range: Range,
         key: str | None = None,
-    ) -> tuple[Callable | None, Any | None]:
+    ) -> tuple[Callable[..., Any] | None, Any | None]:
         compilation_counter.num_inductor_compiles += 1
         current_config = {}
         if compiler_config is not None:
             current_config.update(compiler_config)
-        set_inductor_config(current_config, runtime_shape)
+        set_inductor_config(current_config, compile_range)
         set_functorch_config()
 
-        if isinstance(runtime_shape, int):
+        if compile_range.is_single_size():
             dynamic_shapes = "from_example_inputs"
         else:
-            dynamic_shapes = "from_tracing_context"
+            dynamic_shapes = "from_graph"
 
         from torch._inductor import standalone_compile
 
@@ -215,12 +236,12 @@ class InductorStandaloneAdaptor(CompilerInterface):
             dynamic_shapes=dynamic_shapes,
             options={"config_patches": current_config},
         )
-
         # Save the compiled artifact to disk in the specified path
         assert key is not None
         path = os.path.join(self.cache_dir, key)
-        if not envs.VLLM_DISABLE_COMPILE_CACHE:
-            compiled_graph.save(path=path, format="unpacked")
+
+        if is_compile_cache_enabled(compiler_config):
+            compiled_graph.save(path=path, format=self.save_format)
             compilation_counter.num_compiled_artifacts_saved += 1
         return compiled_graph, (key, path)
 
@@ -230,20 +251,20 @@ class InductorStandaloneAdaptor(CompilerInterface):
         graph: fx.GraphModule,
         example_inputs: list[Any],
         graph_index: int,
-        runtime_shape: int | None = None,
-    ) -> Callable:
+        compile_range: Range,
+    ) -> Callable[..., Any]:
         assert isinstance(handle, tuple)
         assert isinstance(handle[0], str)
         assert isinstance(handle[1], str)
         path = handle[1]
         inductor_compiled_graph = torch._inductor.CompiledArtifact.load(
-            path=path, format="unpacked"
+            path=path, format=self.save_format
         )
         from torch._inductor.compile_fx import graph_returns_tuple
 
         returns_tuple = graph_returns_tuple(graph)
 
-        def compiled_graph_wrapper(*args):
+        def compiled_graph_wrapper(*args: Any) -> tuple[Any, ...] | Any:
             graph_output = inductor_compiled_graph(*args)
             # unpack the tuple if needed
             # TODO(rzou): the implication is that we're not
@@ -265,20 +286,20 @@ class InductorAdaptor(CompilerInterface):
 
     def compute_hash(self, vllm_config: VllmConfig) -> str:
         factors = get_inductor_factors()
-        hash_str = hashlib.md5(
-            str(factors).encode(), usedforsecurity=False
-        ).hexdigest()[:10]
+        hash_str = safe_hash(str(factors).encode(), usedforsecurity=False).hexdigest()[
+            :10
+        ]
         return hash_str
 
     def initialize_cache(
         self, cache_dir: str, disable_cache: bool = False, prefix: str = ""
-    ):
+    ) -> None:
         self.cache_dir = cache_dir
         self.prefix = prefix
         self.base_cache_dir = cache_dir[: -len(prefix)] if prefix else cache_dir
         if disable_cache:
             return
-        # redirect the cache directory to a sub-directory
+        # redirect the cache directory to a subdirectory
         # set flags so that Inductor and Triton store their cache
         # in the cache_dir, then users only need to copy the cache_dir
         # to another machine to reuse the cache.
@@ -294,9 +315,9 @@ class InductorAdaptor(CompilerInterface):
         graph: fx.GraphModule,
         example_inputs: list[Any],
         compiler_config: dict[str, Any],
-        runtime_shape: int | None = None,
+        compile_range: Range,
         key: str | None = None,
-    ) -> tuple[Callable | None, Any | None]:
+    ) -> tuple[Callable[..., Any] | None, Any | None]:
         compilation_counter.num_inductor_compiles += 1
         from torch._inductor.compile_fx import compile_fx
 
@@ -308,7 +329,7 @@ class InductorAdaptor(CompilerInterface):
         current_config["fx_graph_cache"] = True
         current_config["fx_graph_remote_cache"] = False
 
-        set_inductor_config(current_config, runtime_shape)
+        set_inductor_config(current_config, compile_range)
         set_functorch_config()
 
         # inductor can inplace modify the graph, so we need to copy it
@@ -327,7 +348,7 @@ class InductorAdaptor(CompilerInterface):
             original_load = FxGraphCache.load
             original_load_name = "torch._inductor.codecache.FxGraphCache.load"
 
-            def hijack_load(*args, **kwargs):
+            def hijack_load(*args: Any, **kwargs: Any) -> Any:
                 inductor_compiled_graph = original_load(*args, **kwargs)
                 nonlocal file_path
                 compiled_fn = inductor_compiled_graph.current_callable
@@ -354,7 +375,7 @@ class InductorAdaptor(CompilerInterface):
             # function renamed in 2.6
             original_load_name = None
 
-            def hijacked_compile_fx_inner(*args, **kwargs):
+            def hijacked_compile_fx_inner(*args: Any, **kwargs: Any) -> Any:
                 output = torch._inductor.compile_fx.compile_fx_inner(*args, **kwargs)
                 nonlocal hash_str
                 inductor_compiled_graph = output
@@ -380,13 +401,13 @@ class InductorAdaptor(CompilerInterface):
                     hash_str = inductor_compiled_graph._fx_graph_cache_key
                 return output
 
-        def hijack_compiled_fx_graph_hash(*args, **kwargs):
+        def hijack_compiled_fx_graph_hash(*args: Any, **kwargs: Any) -> Any:
             out = compiled_fx_graph_hash(*args, **kwargs)
             nonlocal hash_str
             hash_str = out[0]
             return out
 
-        def _check_can_cache(*args, **kwargs):
+        def _check_can_cache(*args: Any, **kwargs: Any) -> None:
             # no error means it can be cached.
             # Inductor refuses to cache the graph outside of Dynamo
             # tracing context, and also disables caching for graphs
@@ -469,10 +490,8 @@ class InductorAdaptor(CompilerInterface):
                 config_patches=current_config,
             )
 
-        # We treat VLLM_DISABLE_COMPILE_CACHE as the overall switch for torch
-        # compilation cache. So turn off the checks if we disable the
-        # compilation cache.
-        if not envs.VLLM_DISABLE_COMPILE_CACHE:
+        # Turn off the checks if we disable the compilation cache.
+        if is_compile_cache_enabled(compiler_config):
             if hash_str is None:
                 raise RuntimeError(
                     "vLLM failed to compile the model. The most "
@@ -493,8 +512,8 @@ class InductorAdaptor(CompilerInterface):
         graph: fx.GraphModule,
         example_inputs: list[Any],
         graph_index: int,
-        runtime_shape: int | None = None,
-    ) -> Callable:
+        compile_range: Range,
+    ) -> Callable[..., Any]:
         assert isinstance(handle, tuple)
         assert isinstance(handle[0], str)
         assert isinstance(handle[1], str)
@@ -527,7 +546,7 @@ class InductorAdaptor(CompilerInterface):
                     hash_str, example_inputs, True, False
                 )
                 assert inductor_compiled_graph is not None, (
-                    "Inductor cache lookup failed. Please remove"
+                    "Inductor cache lookup failed. Please remove "
                     f"the cache directory and try again."  # noqa
                 )
             elif torch.__version__ >= "2.6":
@@ -538,7 +557,7 @@ class InductorAdaptor(CompilerInterface):
                     hash_str, example_inputs, True, None, constants
                 )
                 assert inductor_compiled_graph is not None, (
-                    "Inductor cache lookup failed. Please remove"
+                    "Inductor cache lookup failed. Please remove "
                     f"the cache directory and try again."  # noqa
                 )
 
@@ -553,7 +572,7 @@ class InductorAdaptor(CompilerInterface):
         returns_tuple = graph_returns_tuple(graph)
 
         # this is the callable we return to Dynamo to run
-        def compiled_graph(*args):
+        def compiled_graph(*args: Any) -> tuple[Any, ...] | Any:
             # convert args to list
             list_args = list(args)
             graph_output = inductor_compiled_graph(list_args)
@@ -565,7 +584,7 @@ class InductorAdaptor(CompilerInterface):
 
         return compiled_graph
 
-    def metrics_context(self) -> contextlib.AbstractContextManager:
+    def metrics_context(self) -> contextlib.AbstractContextManager[Any]:
         """
         This method returns the Dynamo metrics context (if it exists,
         otherwise a null context). It is used by various compile components.
@@ -584,14 +603,14 @@ class InductorAdaptor(CompilerInterface):
         if is_torch_equal_or_newer("2.6"):
             import torch._dynamo.utils
 
-            return torch._dynamo.utils.get_metrics_context()
+            return torch._dynamo.utils.get_metrics_context()  # type: ignore[no-any-return]
         else:
             return contextlib.nullcontext()
 
 
-def set_inductor_config(config, runtime_shape):
-    if isinstance(runtime_shape, int):
-        # for a specific batchsize, tuning triton kernel parameters
+def set_inductor_config(config: dict[str, Any], compile_range: Range) -> None:
+    if compile_range.is_single_size():
+        # for a specific batch size, tuning triton kernel parameters
         # can be beneficial
         config["max_autotune"] = envs.VLLM_ENABLE_INDUCTOR_MAX_AUTOTUNE
         config["coordinate_descent_tuning"] = (
@@ -599,7 +618,7 @@ def set_inductor_config(config, runtime_shape):
         )
 
 
-def set_functorch_config():
+def set_functorch_config() -> None:
     torch._functorch.config.bundled_autograd_cache = False
 
 
@@ -611,9 +630,9 @@ class EagerAdaptor(CompilerInterface):
         graph: fx.GraphModule,
         example_inputs: list[Any],
         compiler_config: dict[str, Any],
-        runtime_shape: int | None = None,
+        compile_range: Range,
         key: str | None = None,
-    ) -> tuple[Callable | None, Any | None]:
+    ) -> tuple[Callable[..., Any] | None, Any | None]:
         compilation_counter.num_eager_compiles += 1
         # we don't need to compile the graph, just return the graph itself.
         # It does not support caching, return None for the handle.

@@ -15,7 +15,7 @@ from dataclasses import asdict
 from typing import NamedTuple
 
 from huggingface_hub import snapshot_download
-from transformers import AutoTokenizer
+from transformers import AutoProcessor, AutoTokenizer
 
 from vllm import LLM, EngineArgs, SamplingParams
 from vllm.assets.image import ImageAsset
@@ -72,7 +72,7 @@ def run_aria(questions: list[str], modality: str) -> ModelRequestData:
 # Aya Vision
 def run_aya_vision(questions: list[str], modality: str) -> ModelRequestData:
     assert modality == "image"
-    model_name = "CohereForAI/aya-vision-8b"
+    model_name = "CohereLabs/aya-vision-8b"
 
     engine_args = EngineArgs(
         model=model_name,
@@ -111,6 +111,32 @@ def run_bee(questions: list[str], modality: str) -> ModelRequestData:
         limit_mm_per_prompt={modality: 1},
         trust_remote_code=True,
     )
+
+    return ModelRequestData(
+        engine_args=engine_args,
+        prompts=prompts,
+    )
+
+
+def run_bagel(questions: list[str], modality: str) -> ModelRequestData:
+    assert modality == "image"
+    model_name = "ByteDance-Seed/BAGEL-7B-MoT"
+
+    engine_args = EngineArgs(
+        model=model_name,
+        trust_remote_code=True,
+        max_model_len=8192,
+        max_num_seqs=2,
+        limit_mm_per_prompt={modality: 1},
+    )
+
+    prompts = [
+        (
+            f"<|im_start|>user\n<|image_pad|>\n{question}<|im_end|>\n"
+            f"<|im_start|>assistant\n"
+        )
+        for question in questions
+    ]
 
     return ModelRequestData(
         engine_args=engine_args,
@@ -538,6 +564,31 @@ def run_h2ovl(questions: list[str], modality: str) -> ModelRequestData:
     )
 
 
+# HunyuanOCR
+def run_hunyuan_vl(questions: list[str], modality: str) -> ModelRequestData:
+    assert modality == "image"
+
+    model_name = "tencent/HunyuanOCR"
+
+    engine_args = EngineArgs(
+        model=model_name,
+        max_model_len=8192,
+        limit_mm_per_prompt={modality: 1},
+    )
+
+    placeholder = "<｜hy_place▁holder▁no▁100｜><｜hy_place▁holder▁no▁102｜><｜hy_place▁holder▁no▁101｜>"  # noqa: E501
+    prompts = [
+        f"<｜hy_begin▁of▁sentence｜>{placeholder}{question}<｜hy_User｜>"
+        for question in questions
+    ]
+
+    return ModelRequestData(
+        engine_args=engine_args,
+        prompts=prompts,
+        stop_token_ids=None,
+    )
+
+
 # naver-hyperclovax/HyperCLOVAX-SEED-Vision-Instruct-3B
 def run_hyperclovax_seed_vision(
     questions: list[str], modality: str
@@ -718,6 +769,33 @@ def run_internvl(questions: list[str], modality: str) -> ModelRequestData:
     )
 
 
+# Kanana-V
+def run_kanana_v(questions: list[str], modality: str) -> ModelRequestData:
+    assert modality == "image"
+
+    model_name = "kakaocorp/kanana-1.5-v-3b-instruct"
+
+    engine_args = EngineArgs(
+        model=model_name,
+        max_model_len=8192,
+        trust_remote_code=True,
+        limit_mm_per_prompt={modality: 1},
+    )
+
+    tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
+    messages = [
+        [{"role": "user", "content": f"<image>\n{question}"}] for question in questions
+    ]
+    prompts = tokenizer.apply_chat_template(
+        messages, tokenize=False, add_generation_prompt=True
+    )
+
+    return ModelRequestData(
+        engine_args=engine_args,
+        prompts=prompts,
+    )
+
+
 # Keye-VL
 def run_keye_vl(questions: list[str], modality: str) -> ModelRequestData:
     model_name = "Kwai-Keye/Keye-VL-8B-Preview"
@@ -816,6 +894,37 @@ def run_lightonocr(questions: list[str], modality: str) -> ModelRequestData:
     engine_args = EngineArgs(
         model="lightonai/LightOnOCR-1B",
         limit_mm_per_prompt={modality: 1},
+    )
+
+    return ModelRequestData(
+        engine_args=engine_args,
+        prompts=prompts,
+    )
+
+
+def run_lfm2_vl(questions: list[str], modality: str) -> ModelRequestData:
+    assert modality == "image"
+
+    model_name = "LiquidAI/LFM2-VL-450M"
+
+    engine_args = EngineArgs(
+        model=model_name,
+        max_model_len=4096,
+        limit_mm_per_prompt={modality: 1},
+    )
+
+    processor = AutoProcessor.from_pretrained(model_name)
+    messages = [
+        [
+            {
+                "role": "user",
+                "content": [{"type": "image"}, {"type": "text", "text": question}],
+            }
+        ]
+        for question in questions
+    ]
+    prompts = processor.apply_chat_template(
+        messages, tokenize=False, add_generation_prompt=True
     )
 
     return ModelRequestData(
@@ -1118,6 +1227,36 @@ def run_molmo(questions: list[str], modality: str) -> ModelRequestData:
     )
 
 
+# Molmo2
+def run_molmo2(questions: list[str], modality: str) -> ModelRequestData:
+    model_name = "allenai/Molmo2-8B"
+
+    engine_args = EngineArgs(
+        model=model_name,
+        trust_remote_code=True,
+        dtype="bfloat16",
+        limit_mm_per_prompt={modality: 1},
+        max_num_batched_tokens=36864,
+    )
+
+    if modality == "image":
+        placeholder = "<|image|>"
+    elif modality == "video":
+        placeholder = "<|video|>"
+    else:
+        raise ValueError(f"Unsupported modality for molmo2: {modality}")
+
+    prompts = [
+        f"{placeholder}<|im_start|>user\n{question}<|im_end|>\n<|im_start|>assistant\n"
+        for question in questions
+    ]
+
+    return ModelRequestData(
+        engine_args=engine_args,
+        prompts=prompts,
+    )
+
+
 # Nemontron_VL
 def run_nemotron_vl(questions: list[str], modality: str) -> ModelRequestData:
     model_name = "nvidia/Llama-3.1-Nemotron-Nano-VL-8B-V1"
@@ -1242,6 +1381,32 @@ def run_ovis2_5(questions: list[str], modality: str) -> ModelRequestData:
     )
 
 
+# PaddleOCR-VL
+def run_paddleocr_vl(questions: list[str], modality: str) -> ModelRequestData:
+    assert modality == "image"
+
+    model_name = "PaddlePaddle/PaddleOCR-VL"
+
+    engine_args = EngineArgs(
+        model=model_name,
+        max_model_len=4096,
+        max_num_seqs=2,
+        limit_mm_per_prompt={modality: 1},
+        trust_remote_code=True,
+    )
+
+    placeholder = "<|IMAGE_START|><|IMAGE_PLACEHOLDER|><|IMAGE_END|>"
+    prompts = [
+        (f"<|begin_of_sentence|>User: {question}{placeholder}\nAssistant: ")
+        for question in questions
+    ]
+
+    return ModelRequestData(
+        engine_args=engine_args,
+        prompts=prompts,
+    )
+
+
 # PaliGemma
 def run_paligemma(questions: list[str], modality: str) -> ModelRequestData:
     assert modality == "image"
@@ -1338,41 +1503,6 @@ def run_phi4mm(questions: list[str], modality: str) -> ModelRequestData:
         # Note - mm_processor_kwargs can also be passed to generate/chat calls
         mm_processor_kwargs={"dynamic_hd": 16},
         limit_mm_per_prompt={modality: 1},
-    )
-
-    return ModelRequestData(
-        engine_args=engine_args,
-        prompts=prompts,
-        lora_requests=[LoRARequest("vision", 1, vision_lora_path)],
-    )
-
-
-# HF format Phi-4-multimodal-instruct
-def run_phi4_multimodal(questions: list[str], modality: str) -> ModelRequestData:
-    """
-    Phi-4-multimodal-instruct supports both image and audio inputs. Here, we
-    show how to process image inputs.
-    """
-    assert modality == "image"
-    model_path = snapshot_download(
-        "microsoft/Phi-4-multimodal-instruct", revision="refs/pr/70"
-    )
-    # Since the vision-lora and speech-lora co-exist with the base model,
-    # we have to manually specify the path of the lora weights.
-    vision_lora_path = os.path.join(model_path, "vision-lora")
-    prompts = [
-        f"<|user|><|image|>{question}<|end|><|assistant|>" for question in questions
-    ]
-    engine_args = EngineArgs(
-        model=model_path,
-        max_model_len=5120,
-        max_num_seqs=2,
-        max_num_batched_tokens=12800,
-        enable_lora=True,
-        max_lora_rank=320,
-        # Note - mm_processor_kwargs can also be passed to generate/chat calls
-        mm_processor_kwargs={"dynamic_hd": 16},
-        limit_mm_per_prompt={"image": 1},
     )
 
     return ModelRequestData(
@@ -1510,7 +1640,7 @@ def run_qwen2_5_omni(questions: list[str], modality: str):
         mm_processor_kwargs={
             "min_pixels": 28 * 28,
             "max_pixels": 1280 * 28 * 28,
-            "fps": [1],
+            "fps": 1,
         },
         limit_mm_per_prompt={modality: 1},
     )
@@ -1750,7 +1880,10 @@ def run_tarsier2(questions: list[str], modality: str) -> ModelRequestData:
     engine_args = EngineArgs(
         model=model_name,
         max_model_len=4096,
-        hf_overrides={"architectures": ["Tarsier2ForConditionalGeneration"]},
+        hf_overrides={
+            "architectures": ["Tarsier2ForConditionalGeneration"],
+            "model_type": "tarsier2",
+        },
         limit_mm_per_prompt={modality: 1},
     )
 
@@ -1778,6 +1911,7 @@ def run_tarsier2(questions: list[str], modality: str) -> ModelRequestData:
 model_example_map = {
     "aria": run_aria,
     "aya_vision": run_aya_vision,
+    "bagel": run_bagel,
     "bee": run_bee,
     "blip-2": run_blip2,
     "chameleon": run_chameleon,
@@ -1794,14 +1928,17 @@ model_example_map = {
     "glm4_5v": run_glm4_5v,
     "glm4_5v_fp8": run_glm4_5v_fp8,
     "h2ovl_chat": run_h2ovl,
+    "hunyuan_vl": run_hunyuan_vl,
     "hyperclovax_seed_vision": run_hyperclovax_seed_vision,
     "idefics3": run_idefics3,
     "interns1": run_interns1,
     "internvl_chat": run_internvl,
+    "kanana_v": run_kanana_v,
     "keye_vl": run_keye_vl,
     "keye_vl1_5": run_keye_vl1_5,
     "kimi_vl": run_kimi_vl,
     "lightonocr": run_lightonocr,
+    "lfm2_vl": run_lfm2_vl,
     "llama4": run_llama4,
     "llava": run_llava,
     "llava-next": run_llava_next,
@@ -1813,15 +1950,16 @@ model_example_map = {
     "minimax_vl_01": run_minimax_vl_01,
     "mistral3": run_mistral3,
     "molmo": run_molmo,
+    "molmo2": run_molmo2,
     "nemotron_vl": run_nemotron_vl,
     "NVLM_D": run_nvlm_d,
     "ovis": run_ovis,
     "ovis2_5": run_ovis2_5,
+    "paddleocr_vl": run_paddleocr_vl,
     "paligemma": run_paligemma,
     "paligemma2": run_paligemma2,
     "phi3_v": run_phi3v,
     "phi4_mm": run_phi4mm,
-    "phi4_multimodal": run_phi4_multimodal,
     "pixtral_hf": run_pixtral_hf,
     "qwen_vl": run_qwen_vl,
     "qwen2_vl": run_qwen2_vl,
@@ -1842,6 +1980,7 @@ MODELS_NEED_VIDEO_METADATA = [
     "glm4_1v",
     "glm4_5v",
     "glm4_5v_fp8",
+    "molmo2",
     "qwen3_vl",
     "qwen3_vl_moe",
 ]
@@ -1975,7 +2114,7 @@ def parse_args():
     parser.add_argument(
         "--seed",
         type=int,
-        default=None,
+        default=0,
         help="Set the seed when initializing `vllm.LLM`.",
     )
 
@@ -2011,6 +2150,13 @@ def parse_args():
         help="If True, will send all requests in a second batch with empty mm "
         "data to verify cache hits with UUIDs.",
     )
+    parser.add_argument(
+        "--tensor-parallel-size",
+        "-tp",
+        type=int,
+        default=None,
+        help="Tensor parallel size to override the model's default setting. ",
+    )
     return parser.parse_args()
 
 
@@ -2018,6 +2164,12 @@ def main(args):
     model = args.model_type
     if model not in model_example_map:
         raise ValueError(f"Model type {model} is not supported.")
+
+    if args.tensor_parallel_size is not None and args.tensor_parallel_size < 1:
+        raise ValueError(
+            f"tensor_parallel_size must be a positive integer, "
+            f"got {args.tensor_parallel_size}"
+        )
 
     modality = args.modality
     mm_input = get_multi_modal_input(args)
@@ -2036,6 +2188,8 @@ def main(args):
         "seed": args.seed,
         "mm_processor_cache_gb": 0 if args.disable_mm_processor_cache else 4,
     }
+    if args.tensor_parallel_size is not None:
+        engine_args["tensor_parallel_size"] = args.tensor_parallel_size
     llm = LLM(**engine_args)
 
     # Don't want to check the flag multiple times, so just hijack `prompts`.

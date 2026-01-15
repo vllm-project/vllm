@@ -57,6 +57,7 @@ class TrtLlmGenExperts(mk.FusedMoEPermuteExpertsUnpermute):
         global_num_experts: int,
         local_num_experts: int,
         expert_tokens_meta: mk.ExpertTokensMetadata | None,
+        activation: str,
     ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...]]:
         # The workspaces for this implementation are managed by flashinfer.
         workspace1 = (0,)
@@ -127,10 +128,17 @@ class TrtLlmGenExperts(mk.FusedMoEPermuteExpertsUnpermute):
             "routing_method_type": 1,
             "do_finalize": True,
             "output": output,
-            "tune_max_num_tokens": self.max_capture_size,
+            "tune_max_num_tokens": max(self.max_capture_size, 1),
         }
 
         from flashinfer import trtllm_fp4_block_scale_routed_moe
 
-        trtllm_fp4_block_scale_routed_moe(**kwargs)
+        from vllm.utils.flashinfer import autotune
+
+        with autotune(False):
+            # Enable autotune when,
+            # https://github.com/flashinfer-ai/flashinfer/issues/2023 is
+            # resolved.
+            trtllm_fp4_block_scale_routed_moe(**kwargs)
+
         return output
