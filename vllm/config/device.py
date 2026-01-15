@@ -26,9 +26,9 @@ class CudaInfo:
     gpu_name: str | None = None
     """GPU name (e.g., 'NVIDIA A100-SXM4-40GB'). """
     gpu_memory: str | None = None
-    """Total GPU memory in bytes. """
-    gpu_compute_capability: tuple[int, int] | None = None
-    """GPU compute capability as (major, minor) tuple. """
+    """Total GPU memory (e.g., '39.59 GiB'). """
+    gpu_compute_capability: str | None = None
+    """GPU compute capability as a string (e.g., '8.6'). """
     gpu_multi_processor_count: int | None = None
     """Number of streaming multiprocessors (SMs). """
     gpu_device_index: int | None = None
@@ -40,7 +40,7 @@ class CudaInfo:
     gpu_pci_domain_id: int | None = None
     """GPU PCI domain ID. """
     gpu_l2_cache_size: str | None = None
-    """GPU L2 cache size in bytes. """
+    """GPU L2 cache size (e.g., '6.00 MiB'). """
 
     # CPU and platform information
     cpu_count: int | None = None
@@ -54,7 +54,7 @@ class CudaInfo:
     platform_info: str | None = None
     """Platform information string."""
     total_memory: str | None = None
-    """Total system memory in bytes."""
+    """Total system memory (e.g., '15.91 GiB'). """
 
     @classmethod
     def collect(
@@ -97,8 +97,10 @@ class CudaInfo:
             l2_cache_size,
         ) = cuda_get_device_properties(device_index, property_names)
 
-        cuda_info.gpu_memory = f"{gpu_memory / 1024 / 1024 / 1024:.2f} GiB"
-        cuda_info.gpu_l2_cache_size = f"{l2_cache_size / 1024 / 1024:.2f} MiB"
+        if gpu_memory is not None:
+            cuda_info.gpu_memory = f"{gpu_memory / 1024 / 1024 / 1024:.2f} GiB"
+        if l2_cache_size is not None:
+            cuda_info.gpu_l2_cache_size = f"{l2_cache_size / 1024 / 1024:.2f} MiB"
         cuda_info.gpu_compute_capability = (
             f"{major}.{minor}" if major is not None and minor is not None else None
         )
@@ -118,8 +120,11 @@ class CudaInfo:
         # Platform information
         cuda_info.architecture = platform.machine()
         cuda_info.platform_info = platform.platform()
+        total_memory = psutil.virtual_memory().total
         cuda_info.total_memory = (
-            f"{psutil.virtual_memory().total / 1024 / 1024 / 1024:.2f} GiB"
+            f"{total_memory / 1024 / 1024 / 1024:.2f} GiB"
+            if total_memory is not None
+            else None
         )
 
         return cuda_info
