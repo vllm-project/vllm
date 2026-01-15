@@ -639,8 +639,8 @@ steps:
     - pytest -v -s kernels/moe/test_moe.py
     - pytest -v -s kernels/moe/test_triton_no_act_mul.py
     - pytest -v -s kernels/moe/test_triton_moe_ptpc_fp8.py
-    # - pytest -v -s kernels/moe/test_block_fp8.py
-    # - pytest -v -s kernels/moe/test_block_int8.py
+    # - pytest -v -s kernels/moe/test_block_fp8.py - failing on main
+    - pytest -v -s kernels/moe/test_block_int8.py
 
 - label: Kernels FP8 MoE Test (2 of 2 H100)
   timeout_in_minutes: 90
@@ -652,7 +652,7 @@ steps:
     - pytest -v -s kernels/moe/test_deepep_moe.py
     - pytest -v -s kernels/moe/test_pplx_cutlass_moe.py
     - pytest -v -s kernels/moe/test_pplx_moe.py
-    # - pytest -v -s tests/kernels/moe/test_modular_kernel_combinations.py
+    # - pytest -v -s tests/kernels/moe/test_modular_kernel_combinations.py - failing on main
   
 - label: Kernels Fp4 MoE Test (B200)
   timeout_in_minutes: 60
