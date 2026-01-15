@@ -9,6 +9,8 @@ which is useful for weight updates without full model reconstruction.
 Limitations:
     - Does not compose with CPU offloading. This is because `device_loading_context`
       doesn't work in all cases (e.g., when parameter is renamed).
+    - Does not handle layers where only some weight elements are loaded, but some
+      weights aren't. For example, only loading q_scale, but not k_scale or v_scale
 
 TODO:
     - Decide on reloading interface, back-compat with reload_weights
@@ -24,6 +26,7 @@ from typing import Callable
 import torch
 from torch.utils._python_dispatch import TorchDispatchMode
 
+from vllm.attention.layer import Attention, MLAAttention
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.base_config import QuantizeMethodBase
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
@@ -66,11 +69,17 @@ def materialize_meta_tensor(meta_tensor: torch.Tensor) -> torch.Tensor:
 
 def get_module_tensors(module: torch.nn.Module) -> dict[str, torch.Tensor]:
     """Get all parameters and buffers from a module as a dict."""
-    return {
+    params = {
         name: value
-        for name, value in chain(module._parameters.items(), module._buffers.items())
+        for name, value in module._parameters.items()
         if value is not None
     }
+    buffers = {
+        name: torch.nn.Buffer(value)
+        for name, value in module._buffers.items()
+        if value is not None
+    }
+    return params | buffers
 
 
 # -----------------------------------------------------------------------------
@@ -184,9 +193,26 @@ def layerwise_restore_and_process(layer: torch.nn.Module) -> None:
         )
 
     # Save current tensors for later copying
-    layer.kernel_tensors = get_module_tensors(layer)
+    layer.kernel_tensors = (
+        {
+            name: param
+            for name, param in layer._parameters.items()
+            if param is not None
+        },
+        {
+            name: buffer
+            for name, buffer in layer._buffers.items()
+            if buffer is not None
+        },
+    )
 
     # Restore layer parameters/buffers onto meta device
+    kernel_params, kernel_buffers = layer.kernel_tensors
+    for name, param in kernel_params.items():
+        delattr(layer, name)
+    for name, buffer in kernel_buffers.items():
+        delattr(layer, name)
+
     restore_params, restore_buffers = layer.restore_metadata
     for name, param in restore_params.items():
         layer.register_parameter(name, param)
@@ -200,14 +226,10 @@ def layerwise_restore_and_process(layer: torch.nn.Module) -> None:
     loaded_weight_kwargs: list[tuple[str, inspect.BoundArguments]] = []
 
     # Wrap each parameter's weight loader
+    # Note that nested wrapping will occur for shared tensors
     for param_name, param in get_module_tensors(layer).items():
         weight_loader = getattr(param, "weight_loader", default_weight_loader)
         weight_loader_signature = inspect.signature(weight_loader)
-
-        # Skip shared params
-        if weight_loader.__name__ == "restore_and_process_loader":
-            print("skip")
-            continue
 
         def make_restore_loader(
             original_loader: Callable,
@@ -228,6 +250,7 @@ def layerwise_restore_and_process(layer: torch.nn.Module) -> None:
                 loaded_weight_kwargs.append((name, bound_args))
 
                 # Track loading progress
+                # also triggers inner wrapped function for shared tensors
                 load_numel_remaining -= get_numel_loaded(original_loader, bound_args)
 
                 # Process and copy when all weights are loaded
@@ -272,10 +295,19 @@ def _finalize_layer_loading(
         # onto device for processing and back off after.
         quant_method.process_weights_after_loading(layer)
 
+    # TODO: make sure that attention does not get processed here
+    # probably need to make loaded_weight_kwargs a layer attribute
+    # then do the processing in unwrap_weight_loaders
+
     # Copy processed values into original tensor storage (preserves cudagraph refs)
-    for name in layer.kernel_tensors.keys():
-        layer.kernel_tensors[name].data.copy_(getattr(layer, name))
-        setattr(layer, name, layer.kernel_tensors[name])
+    print(f"finalize: {layer.__class__.__name__}")
+    parameters, buffers = layer.kernel_tensors
+    for param in parameters.values():
+        param.data.copy_(getattr(layer, name))
+        layer.register_parameter(name, param)
+    for buffer in buffers.values():
+        buffer.data.copy_(getattr(layer, name))
+        layer.register_buffer(name, buffer)
 
     del layer.kernel_tensors
 
@@ -291,23 +323,66 @@ def unwrap_weight_loaders(layer: torch.nn.Module) -> None:
     but don't load module tensors (e.g., when model is not quantized).
     """
     for param in get_module_tensors(layer).values():
-        weight_loader = getattr(param, "weight_loader", default_weight_loader)
-
-        # Unwrap if this is a wrapped partial function
-        print(weight_loader)
-        if weight_loader.__name__ == "restore_and_process_loader":
-            print("unwrap")
-            param.weight_loader = weight_loader.__wrapped__
+        if hasattr(param, "weight_loader"):
+            # TODO: limit unwrapping to only the layerwise weight loaders
+            param.weight_loader = inspect.unwrap(param.weight_loader)
 
     # TODO: process attention
 
-    # Handle modules with kernel tensors that don't load module tensors.
-    # For these cases, finalize layerwise loading by removing meta tensors
-    # and copying back the kernel tensors.
+    # # Process weights (quantization, repacking, etc.)
+    # quant_method = getattr(layer, "quant_method", None)
+    # if isinstance(quant_method, QuantizeMethodBase):
+    #     # Quant methods expect parameters on the target device for processing.
+    #     # This handles cases like CPU offloading where we move parameters
+    #     # onto device for processing and back off after.
+    #     quant_method.process_weights_after_loading(layer)
+
+    # elif isinstance(layer, (Attention, MLAAttention)) and hasattr(
+    #     layer, "process_weights_after_loading"
+    # ):
+    #     # # Copy processed values into original tensor storage (preserves cudagraph refs)
+    #     # for name in layer.kernel_tensors.keys():
+    #     #     layer.kernel_tensors[name].data.copy_(getattr(layer, name))
+    #     #     setattr(layer, name, layer.kernel_tensors[name])
+        
+    #     # # TODO(lucas): see if there is a way to unify the signatures
+    #     # # of process_weights_after_loading
+    #     # #layer.process_weights_after_loading(model_config.dtype)
+    #     # layer.process_weights_after_loading(torch.bfloat16)
+
+    #     # # Copy processed values into original tensor storage (preserves cudagraph refs)
+    #     # for name in layer.kernel_tensors.keys():
+    #     #     layer.kernel_tensors[name].data.copy_(getattr(layer, name))
+    #     #     setattr(layer, name, layer.kernel_tensors[name])
+
+    #     del layer.kernel_tensors
+
+    # else:
     if hasattr(layer, "kernel_tensors"):
-        for name in layer.kernel_tensors.keys():
-            setattr(layer, name, layer.kernel_tensors[name])
-        del layer.kernel_tensors
+        # print("unwrap process")
+        # print(layer.__class__.__name__)
+        # print(layer.kernel_tensors)
+        print(f"late finalize: {layer.__class__.__name__}")
+
+        # ApplyRotaryEmb has no tensors
+        # Llama3RotaryEmbedding has cos_sin_cache
+
+
+        # Handle modules with kernel tensors that don't load module tensors.
+        # For these cases, finalize layerwise loading by removing meta tensors
+        # and copying back the kernel tensors.
+
+        if hasattr(layer, "kernel_tensors"):
+            for name in get_module_tensors(layer).keys():
+                delattr(layer, name)
+
+            parameters, buffers = layer.kernel_tensors
+            for name, param in parameters.items():
+                layer.register_parameter(name, param)
+            for name, buffer in buffers.items():
+                layer.register_buffer(name, buffer)
+
+            del layer.kernel_tensors
 
 
 def supports_reloading():

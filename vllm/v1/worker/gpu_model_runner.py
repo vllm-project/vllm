@@ -4233,8 +4233,10 @@ class GPUModelRunner(
         # load weights from disk if none are provided
         if weights_iterator is None:
             if self.model_config.model == "meta-llama/Llama-3.2-1B-Instruct":
+                print("use counter")
                 self.model_config.model = "nm-testing/Llama-3.2-1B-Instruct-DEBUG-COUNTER"
             else:
+                print("use language")
                 self.model_config.model = "meta-llama/Llama-3.2-1B-Instruct"
             #self.load_config.download_dir = 
             model_loader = get_model_loader(self.load_config)
