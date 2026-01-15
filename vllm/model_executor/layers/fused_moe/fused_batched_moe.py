@@ -24,6 +24,12 @@ from vllm.model_executor.layers.fused_moe.utils import (
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
     group_broadcast,
+    kFp8Dynamic128Sym,
+    kFp8DynamicTensorSym,
+    kFp8DynamicTokenSym,
+    kFp8Static128BlockSym,
+    kFp8StaticChannelSym,
+    kFp8StaticTensorSym,
 )
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
@@ -875,14 +881,21 @@ class BatchedTritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
         weight_key: QuantKey | None,
         activation_key: QuantKey | None,
     ) -> bool:
-        # p = current_platform
-        # device_supports_fp8 = p.is_rocm() or (
-        #     p.is_cuda() and p.has_device_capability((9, 0))
-        # )
-        # return quant_scheme.is_unquantized or (
-        #     quant_scheme.is_fp8_w8a8 and device_supports_fp8
-        # )
-        return False
+        p = current_platform
+        p = current_platform
+        device_supports_fp8 = p.is_rocm() or (
+            p.is_cuda() and p.has_device_capability((9, 0))
+        )
+
+        SUPPORTED_W_A_FP8 = [
+            (kFp8Static128BlockSym, kFp8Dynamic128Sym),
+            (kFp8StaticChannelSym, kFp8DynamicTokenSym),
+            (kFp8StaticTensorSym, kFp8StaticTensorSym),
+            (kFp8StaticTensorSym, kFp8DynamicTensorSym),
+        ]
+        return (weight_key, activation_key) == (None, None) or (
+            device_supports_fp8 and (weight_key, activation_key) in SUPPORTED_W_A_FP8
+        )
 
     @staticmethod
     def _supports_activation(activation: str) -> bool:
