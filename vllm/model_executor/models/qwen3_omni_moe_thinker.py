@@ -1028,6 +1028,7 @@ class Qwen3MoeLLMModel(Qwen3MoeModel):
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,
         deepstack_input_embeds: IntermediateTensors | None = None,
+        capture_hidden_states_indices: Sequence[str] | None = None,
     ) -> torch.Tensor | IntermediateTensors:
         if get_pp_group().is_first_rank:
             if inputs_embeds is not None:
@@ -1039,10 +1040,16 @@ class Qwen3MoeLLMModel(Qwen3MoeModel):
             assert intermediate_tensors is not None
             hidden_states = intermediate_tensors["hidden_states"]
             residual = intermediate_tensors["residual"]
+        capture_set = set(capture_hidden_states_indices) if capture_hidden_states_indices is not None else None
+        captured_hidden_states: dict[str, torch.Tensor] | None = {} if capture_hidden_states_indices is not None else None
         for layer_idx, layer in enumerate(
             self.layers[self.start_layer : self.end_layer]
         ):
             layer_idx = layer_idx + self.start_layer
+            
+            if captured_hidden_states is not None and capture_set is not None:
+                if f"layer_{layer_idx}" in capture_set:
+                    captured_hidden_states[str(layer_idx)] = hidden_states.clone() #use .clone() to avoid in-place operations
 
             hidden_states, residual = layer(
                 positions,
@@ -1063,7 +1070,9 @@ class Qwen3MoeLLMModel(Qwen3MoeModel):
                 {"hidden_states": hidden_states, "residual": residual}
             )
         hidden_states, _ = self.norm(hidden_states, residual)
-        return hidden_states
+        if captured_hidden_states is not None and "last_hidden_state" in capture_set:
+            captured_hidden_states["last_hidden_state"] = hidden_states.clone()
+        return hidden_states, captured_hidden_states
 
 
 class Qwen3MoeLLMForCausalLM(Qwen3MoeForCausalLM):
@@ -1841,6 +1850,7 @@ class Qwen3OmniMoeThinkerForConditionalGeneration(
         inputs_embeds: torch.Tensor | None = None,
         **kwargs: object,
     ) -> torch.Tensor | IntermediateTensors:
+        capture_hidden_states_indices = kwargs.get("capture_hidden_states_indices", None)
         if intermediate_tensors is not None:
             inputs_embeds = None
 
@@ -1855,19 +1865,20 @@ class Qwen3OmniMoeThinkerForConditionalGeneration(
         else:
             deepstack_input_embeds = None
 
-        hidden_states = self.language_model.model(
+        hidden_states, captured_hidden_states = self.language_model.model(
             input_ids,
             positions,
             intermediate_tensors,
             inputs_embeds=inputs_embeds,
             # args for deepstack
             deepstack_input_embeds=deepstack_input_embeds,
+            capture_hidden_states_indices=capture_hidden_states_indices,
         )
 
         if inputs_embeds is not None and get_pp_group().is_first_rank:
             self._clear_deepstack_input_embeds(inputs_embeds.size(0))
 
-        return hidden_states
+        return hidden_states if captured_hidden_states is None else (hidden_states, captured_hidden_states)
 
     def compute_logits(
         self,
