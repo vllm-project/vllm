@@ -12,6 +12,7 @@ from vllm import LLM, SamplingParams
 from vllm.config import CompilationConfig
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import is_torch_equal_or_newer
+from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 
 @contextlib.contextmanager
@@ -69,6 +70,10 @@ def llm_pair(request):
             pytest.skip("Only Hopper GPUs support FA3 and FlashMLA")
         elif backend_config.specific_gpu_arch == (10, 0):
             pytest.skip("Only Blackwell GPUs support Cutlass MLA")
+
+    # FlashInfer is not supported on ROCm
+    if backend_config == AttentionBackendEnum.FLASHINFER and current_platform.is_rocm():
+        pytest.skip("FlashInfer is not supported on ROCm")
 
     env_vars = {
         # Force native sampler to avoid potential nondeterminism in FlashInfer

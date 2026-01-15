@@ -34,7 +34,11 @@ class MediaWithBytes(Generic[_T]):
 
     def __getattr__(self, name: str):
         """Delegate attribute access to the underlying media object."""
-        # This is only called when the attribute is not found on self
+        # Guard against recursion during unpickling when media isn't set yet.
+        # pickle creates objects without calling __init__, so self.media may
+        # not exist when __getattr__ is called for methods like __setstate__.
+        if "media" not in self.__dict__:
+            raise AttributeError(name)
         return getattr(self.media, name)
 
 
