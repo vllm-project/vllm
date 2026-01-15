@@ -128,7 +128,7 @@ class CudagraphDispatcher:
         # get the correct cudagraph mode after backend support is resolved.
         self.cudagraph_mode = cudagraph_mode
 
-        # Early exit if cudagraphs are disabled (e.g., on CPU platforms)
+        # Early exit if cudagraphs are disabled
         if cudagraph_mode == CUDAGraphMode.NONE:
             self.keys_initialized = True
             return
