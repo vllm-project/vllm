@@ -42,7 +42,7 @@ class PluggableLayer(nn.Module):
             raise TypeError(
                 f"Cannot instantiate '{cls.__name__}': its 'name' attribute "
                 f"was not set, possibly because it was not decorated with "
-                f"@PluggableLayer.register, or it's the PluggableLayer base class itself."
+                f"@PluggableLayer.register, or it's the PluggableLayer itself."
             ) from None
 
         if layer_class_name not in op_registry_oot:
