@@ -312,8 +312,8 @@ void silu_and_mul_per_block_quant_dispatch(
     
     // Launch configuration
     dim3 grid(num_tokens);
-    // Use 256 threads for good vectorization and occupancy
-    dim3 block(256);
+    const int max_block_size = (num_tokens <= 256) ? 512 : 256;
+    dim3 block(std::min(hidden_size, max_block_size));
     
     const at::cuda::OptionalCUDAGuard device_guard(device_of(input));
     const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
