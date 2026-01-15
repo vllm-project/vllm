@@ -53,7 +53,8 @@ class SeedOssToolParser(ToolParser):
         self.think_start_token: str = "<seed:think>"
         self.think_end_token: str = "</seed:think>"
         self.is_tool_call_started: bool = False
-        self.is_thinking_end: bool = False
+        # thinking should be false by default if using reasoning parser
+        self.is_thinking: bool = False
         self.failed_count: int = 0
         self._reset_streaming_state()
 
@@ -107,6 +108,7 @@ class SeedOssToolParser(ToolParser):
         self.accumulated_text = ""
         self.json_started = False
         self.json_closed = False
+        self.is_thinking = False
 
     def _get_arguments_config(
         self, func_name: str, tools: list[ChatCompletionToolsParam] | None
@@ -423,15 +425,19 @@ class SeedOssToolParser(ToolParser):
                 # Continue processing next tool
                 return None
 
-        # Check if end thinking
-        if not self.is_thinking_end and (
-            self.think_end_token_id in delta_token_ids
-            or self.think_end_token in delta_text
+        # Handle thinking state
+        if (
+            self.think_start_token in delta_text
+            and self.think_end_token not in delta_text
         ):
-            self.is_thinking_end = True
+            self.is_thinking = True
+        # End thinking once we see the end tag
+        if self.is_thinking and self.think_end_token in delta_text:
+            self.is_thinking = False
 
         # If thinking hasn't ended yet, don't process any tool calls
-        if not self.is_thinking_end:
+        if self.is_thinking:
+            # Still in thinking, return content
             return DeltaMessage(content=delta_text)
 
         # Handle normal content before tool calls
