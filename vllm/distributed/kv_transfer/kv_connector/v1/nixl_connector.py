@@ -941,7 +941,8 @@ class NixlConnectorWorker:
                     if phys not in seen_phys:
                         seen_phys.add(phys)
 
-                self.core_rsv_for_kv.append(max(seen_phys))
+                if len(seen_phys)>0: 
+                    self.core_rsv_for_kv.append(max(seen_phys))
 
         # support for oot platform which can't register nixl memory
         # type based on kv_buffer_device
