@@ -321,8 +321,6 @@ class Hermes2ProToolParser(ToolParser):
                 if isinstance(function_arguments, dict):
                     function_arguments = json.dumps(function_arguments)
                 if function_name:
-                    logger.debug("Function name: %s", function_name)
-                    logger.debug("Function arguments: %s", function_arguments)
                     self.current_tool_name_sent = True
                     self.streamed_args_for_tool[self.current_tool_id] += (
                         function_arguments
