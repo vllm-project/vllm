@@ -119,8 +119,8 @@ def select_nvfp4_moe_backend(
         NvFp4MoeBackend.FLASHINFER_TRTLLM,
         NvFp4MoeBackend.FLASHINFER_CUTEDSL,
         NvFp4MoeBackend.FLASHINFER_CUTLASS,
+        NvFp4MoeBackend.VLLM_CUTLASS,
         NvFp4MoeBackend.MARLIN,
-        # NvFp4MoeBackend.VLLM_CUTLASS,
     ]
 
     # NOTE(rob): this is kind of a hack. We need to peak into
