@@ -182,8 +182,11 @@ class BaseThinkingReasoningParser(ReasoningParser):
                     # No start token was found either
                     # If we already found some reasoning, remaining is content
                     # Otherwise, it's just content with no reasoning
-                    final_content = remaining if remaining else None
-                    return reasoning_list, final_content
+                    if not reasoning_list:
+                        if remaining:
+                            reasoning_list.append(remaining)
+                        return reasoning_list, None
+                    return reasoning_list, remaining or None
             else:
                 # End token found - extract this reasoning block
                 reasoning, _, after_end = remaining.partition(self.end_token)
