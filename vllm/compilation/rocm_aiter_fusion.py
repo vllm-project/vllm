@@ -170,7 +170,7 @@ class AiterRMSFp8GroupQuantPattern(AiterRMSNormQuantPattern):
         epsilon: float,
         quant_dtype: torch.dtype,
         group_shape: GroupShape,
-        symmetric: bool =True,
+        symmetric: bool = True,
     ) -> None:
         scale = ScaleDesc(torch.float32, False, group_shape)
         key = FusedRMSQuantKey(
