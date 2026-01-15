@@ -598,9 +598,10 @@ class FlashAttentionImpl(AttentionImpl):
         - FlashAttention 3
         - Hopper GPUs (sm90+)
         - FP8 static tensor quantization
-        - Non-DCP (Distributed Context Parallelism) mode
 
-        This fusion avoids a separate quantization pass after attention.
+        Note: For DCP and cascade attention, quantization is applied after
+        the attention merge step rather than being fused into the kernel.
+        This is transparent to the fusion pass.
         """
         from vllm.platforms import current_platform
 
@@ -610,10 +611,6 @@ class FlashAttentionImpl(AttentionImpl):
 
         # Only Hopper (sm90+) supports this feature
         if not current_platform.has_device_capability(90):
-            return False
-
-        # DCP mode is not supported
-        if self.dcp_world_size > 1:
             return False
 
         # Only FP8 static tensor quantization is supported
@@ -850,16 +847,6 @@ class FlashAttentionImpl(AttentionImpl):
             "FlashAttention version not detected."
         )
 
-        # TODO(sachinkumarsingh092): Implement fused output quantization for
-        # DCP attention.
-        # DCP attention merges context and query outputs, so output_scale
-        # would need to be applied during the merge step or to both intermediate
-        # outputs. For now, DCP attention does not support fused output quant.
-        if output_scale is not None:
-            raise NotImplementedError(
-                "Fused output quantization is not yet supported for DCP attention"
-            )
-
         cu_seqlens_q = attn_metadata.query_start_loc
         max_seqlen_q = attn_metadata.max_query_len
         block_table = attn_metadata.block_table
@@ -929,6 +916,10 @@ class FlashAttentionImpl(AttentionImpl):
             query_attn_out,
             query_lse,
         )
+
+        # Apply FP8 output quantization after merging if requested.
+        if output_scale is not None:
+            output[:] = ops.scaled_fp8_quant(output, output_scale)[0]
 
     def _forward_encoder_attention(
         self,
@@ -1112,16 +1103,6 @@ def cascade_attention(
         "Cascade attention does not support sliding window."
     )
 
-    # TODO(sachinkumarsingh092): Implement fused output quantization for
-    # cascade attention.
-    # Cascade attention merges prefix and suffix outputs, so output_scale
-    # would need to be applied during the merge step or to both intermediate
-    # outputs. For now, cascade attention does not support fused output quant.
-    if output_scale is not None:
-        raise NotImplementedError(
-            "Fused output quantization is not yet supported for cascade attention"
-        )
-
     num_tokens = query.shape[0]
     block_size = key_cache.shape[-3]
     assert common_prefix_len % block_size == 0
@@ -1182,3 +1163,7 @@ def cascade_attention(
 
     # Merge prefix and suffix outputs, and store the result in output.
     merge_attn_states(output, prefix_output, prefix_lse, suffix_output, suffix_lse)
+
+    # Apply FP8 output quantization after merging if requested.
+    if output_scale is not None:
+        output[:] = ops.scaled_fp8_quant(output, output_scale)[0]
