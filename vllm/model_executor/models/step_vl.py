@@ -575,7 +575,7 @@ class PerceptionEncoder(nn.Module):
             x = x + self.sample_abs_posemb(grid_h, grid_w)
 
         x = self.ln_pre(x)
-        x = self.transformer(x, grid_hw=(grid_h, grid_w), layer_idx=layer_idx)
+        x = self.transformer(x, grid_hw=(grid_h, grid_w))
         if norm:
             x = self.ln_post(x)
 
@@ -617,7 +617,7 @@ class StepVLForConditionalGeneration(Step3VLForConditionalGeneration):
     )
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
-        super().__init__()
+        super(Step3VLForConditionalGeneration, self).__init__()
 
         config = vllm_config.model_config.hf_config
         multimodal_config = vllm_config.model_config.multimodal_config
