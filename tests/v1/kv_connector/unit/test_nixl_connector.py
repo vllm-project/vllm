@@ -19,7 +19,10 @@ import torch
 
 from vllm import LLM
 from vllm.config import KVTransferConfig
-from vllm.distributed.kv_transfer.kv_connector.utils import KVOutputAggregator
+from vllm.distributed.kv_transfer.kv_connector.utils import (
+    KVOutputAggregator,
+    TpKVTopology,
+)
 from vllm.distributed.kv_transfer.kv_connector.v1 import nixl_connector
 from vllm.distributed.kv_transfer.kv_connector.v1.metrics import KVConnectorStats
 from vllm.distributed.kv_transfer.kv_connector.v1.multi_connector import (
@@ -367,6 +370,21 @@ def test_kv_transfer_handshake(dist_init):
         # Decode connector will be able to create handshake with the prefill connector.
         decode_connector = NixlConnector(vllm_config, KVConnectorRole.WORKER)
 
+        decode_connector.kv_topo = TpKVTopology(
+            tp_rank=decode_connector.tp_rank,
+            engine_id=decode_connector.engine_id,
+            remote_tp_size=decode_connector._tp_size,  # shared state
+            remote_block_size=decode_connector._block_size,  # shared state
+            is_mla=decode_connector.use_mla,
+            total_num_kv_heads=decode_connector.model_config.get_total_num_kv_heads(),
+            attn_backend=decode_connector.attn_backend,
+            tensor_shape=next(iter(kv_caches.values())).shape,
+        )
+        decode_connector.compat_hash = compute_nixl_compatibility_hash(
+            decode_connector.vllm_config,
+            decode_connector.backend_name,
+            decode_connector.kv_topo.cross_layers_blocks,
+        )
         # Here we are testing the retrieval of NIXLAgentMetadata.
         # Knowing the implementation detail, we override the add_remote_agent
         # to validate the metadata received is the same as the one in prefill_connector.
