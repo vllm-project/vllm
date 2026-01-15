@@ -8,6 +8,9 @@ import torch
 from weight_shapes import WEIGHT_SHAPES
 
 from vllm import _custom_ops as ops
+from vllm.model_executor.layers.quantization.utils.nvfp4_emulation_utils import (
+    convert_swizzled_to_linear,
+)
 from vllm.platforms import current_platform
 from vllm.scalar_type import scalar_types
 from vllm.triton_utils import triton
@@ -137,6 +140,71 @@ def test_accuracy():
     print("\nAll accuracy tests passed!")
 
 
+@triton.testing.perf_report(
+    triton.testing.Benchmark(
+        x_names=["batch_size"],
+        x_vals=[1, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096],
+        x_log=False,
+        line_arg="method",
+        line_vals=["flashinfer_swizzled", "vllm_swizzled"],
+        line_names=["FlashInfer (swizzled)", "vLLM (swizzled)"],
+        ylabel="us (lower is better)",
+        plot_name="NVFP4 E2E Quantization + Conversion Latency (us)",
+        args={},
+    )
+)
+def benchmark_e2e_quantization(batch_size, method, N, K):
+    """
+    End-to-end benchmark: quantization + conversion to linear layout.
+
+    This tests the complete path from input quantization to linear scale
+    conversion, as required by TRTLLM kernels. Following reviewer's suggestion:
+    we should force FlashInfer to swizzle the SF layout rather than linearizing
+    the vLLM quantized output, as swizzling is actually needed e2e.
+    """
+    M = batch_size
+    device = "cuda"
+    dtype = torch.bfloat16
+
+    # Create input tensor
+    a = torch.randn((M, K), device=device, dtype=dtype)
+
+    # Compute global scale for activation
+    a_global_scale = compute_global_scale(a)
+
+    quantiles = [0.5, 0.2, 0.8]
+
+    if method == "flashinfer_swizzled":
+        # FlashInfer quantization with swizzled layout, then convert to linear
+        def fn():
+            fp4, scale_swizzled = flashinfer_fp4_quantize(
+                a, a_global_scale, is_sf_swizzled_layout=True
+            )
+            scale_swizzled = scale_swizzled.view(torch.float8_e4m3fn)
+            # Convert swizzled to linear (required by TRTLLM kernels)
+            scale_linear = convert_swizzled_to_linear(
+                scale_swizzled, M, K, block_size=16
+            )
+            return fp4, scale_linear
+
+        ms, min_ms, max_ms = triton.testing.do_bench_cudagraph(fn, quantiles=quantiles)
+    elif method == "vllm_swizzled":
+        # vLLM quantization (outputs swizzled), then convert to linear
+        def fn():
+            fp4, scale_swizzled = ops.scaled_fp4_quant(a, a_global_scale)
+            # Convert swizzled to linear (required by TRTLLM kernels)
+            scale_linear = convert_swizzled_to_linear(
+                scale_swizzled, M, K, block_size=16
+            )
+            return fp4, scale_linear
+
+        ms, min_ms, max_ms = triton.testing.do_bench_cudagraph(fn, quantiles=quantiles)
+
+    # Convert ms to us for better readability at small batch sizes
+    to_us = lambda t_ms: t_ms * 1000
+    return to_us(ms), to_us(max_ms), to_us(min_ms)
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
         description="Benchmark NVFP4 quantization: vLLM vs FlashInfer"
@@ -160,18 +228,47 @@ if __name__ == "__main__":
         action="store_true",
         help="Run accuracy tests",
     )
+    parser.add_argument(
+        "--e2e",
+        action="store_true",
+        help="Run end-to-end benchmark (quantization + conversion)",
+    )
     args = parser.parse_args()
 
     if args.accuracy:
         test_accuracy()
 
-    for K, N, model in prepare_shapes(args):
-        print(f"\n{model}, N={N} K={K}")
-        benchmark.run(
-            print_data=True,
-            save_path=args.save_path,
-            N=N,
-            K=K,
+    if args.e2e:
+        print("\n" + "=" * 80)
+        print("Running E2E Benchmark: Quantization + Conversion to Linear")
+        print("=" * 80)
+        print(
+            "This benchmark tests the complete path from input quantization"
+            " to linear scale conversion, as required by TRTLLM kernels."
         )
+        print(
+            "Following reviewer's suggestion: we force FlashInfer to swizzle"
+            " the SF layout rather than linearizing the vLLM quantized output,"
+            " as swizzling is actually needed e2e."
+        )
+        print("=" * 80)
+
+        for K, N, model in prepare_shapes(args):
+            print(f"\n{model}, N={N} K={K}")
+            benchmark_e2e_quantization.run(
+                print_data=True,
+                save_path=args.save_path,
+                N=N,
+                K=K,
+            )
+    else:
+        for K, N, model in prepare_shapes(args):
+            print(f"\n{model}, N={N} K={K}")
+            benchmark.run(
+                print_data=True,
+                save_path=args.save_path,
+                N=N,
+                K=K,
+            )
 
     print("\nBenchmark finished!")
