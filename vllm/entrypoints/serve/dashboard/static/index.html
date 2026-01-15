@@ -1334,6 +1334,14 @@
         <div class="panel right-panel">
             <div class="panel-header">
                 Runtime Stats
+                <div class="panel-actions">
+                    <div class="search-wrapper" id="stats-search-wrapper">
+                        <button class="icon-btn" title="Search" onclick="toggleSearch('stats')">
+                            <svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg>
+                        </button>
+                        <input type="text" class="search-input" id="stats-search" placeholder="Search..." oninput="filterList('stats')">
+                    </div>
+                </div>
             </div>
             <div class="config-scroll" id="stats-list">
                 <div class="config-item">
@@ -1779,13 +1787,16 @@
         async function fetchMetrics() {
             try {
                 const resp = await fetch('/dashboard/api/metrics');
+                if (!resp.ok) return;  // Silently ignore errors
                 const data = await resp.json();
 
                 // Update Runtime Stats panel
                 renderRuntimeStats(data);
+                // Reapply search filter if active
+                filterList('stats');
 
             } catch (e) {
-                console.error('Metrics fetch error:', e);
+                // Silently ignore - avoid console spam
             }
         }
 
@@ -1889,45 +1900,142 @@
             const statsList = document.getElementById('stats-list');
             let html = '';
 
-            // Performance Metrics Section
-            html += `<div class="config-item" style="background:rgba(48,162,255,0.1);border-left:3px solid var(--vllm-blue)">
-                <span class="config-key" style="color:var(--vllm-blue);font-weight:600">Performance Metrics</span>
-            </div>`;
+            // Helper to add section header
+            const addSection = (title, tooltip = '') => {
+                const hint = tooltip ? `<span style="margin-left:6px;cursor:help;opacity:0.6" title="${tooltip}">?</span>` : '';
+                html += `<div class="config-item" style="background:rgba(48,162,255,0.1);border-left:3px solid var(--vllm-blue)">
+                    <span class="config-key" style="color:var(--vllm-blue);font-weight:600">${title}${hint}</span>
+                </div>`;
+            };
 
-            // Extract key metrics
+            // Helper to add stat item
+            const addStat = (key, val, color = '') => {
+                const c = color || 'var(--vllm-blue)';
+                html += `<div class="config-item">
+                    <span class="config-key">${key}</span>
+                    <span class="config-val" style="color:${c}">${val}</span>
+                </div>`;
+            };
+
+            // Extract all metrics
+            // Gauges
             const running = metricsData['vllm:num_requests_running']?.value || 0;
             const waiting = metricsData['vllm:num_requests_waiting']?.value || 0;
-            const e2e = metricsData['vllm:e2e_request_latency_seconds'];
-            const ttft = metricsData['vllm:time_to_first_token_seconds'];
-            const prefill = metricsData['vllm:request_prefill_time_seconds'];
-            const decode = metricsData['vllm:request_decode_time_seconds'];
+            const kv = metricsData['vllm:kv_cache_usage_perc'] || metricsData['vllm:gpu_cache_usage_perc'];
+
+            // Counters
             const promptTokens = metricsData['vllm:prompt_tokens']?.value || 0;
             const genTokens = metricsData['vllm:generation_tokens']?.value || 0;
-            const kv = metricsData['vllm:kv_cache_usage_perc'] || metricsData['vllm:gpu_cache_usage_perc'];
+            const preemptions = metricsData['vllm:num_preemptions']?.value || 0;
+            const corrupted = metricsData['vllm:corrupted_requests']?.value || 0;
             const cacheQueries = metricsData['vllm:prefix_cache_queries']?.value || 0;
             const cacheHits = metricsData['vllm:prefix_cache_hits']?.value || 0;
+            const mmCacheQueries = metricsData['vllm:mm_cache_queries']?.value || 0;
+            const mmCacheHits = metricsData['vllm:mm_cache_hits']?.value || 0;
+            const extCacheQueries = metricsData['vllm:external_prefix_cache_queries']?.value || 0;
+            const extCacheHits = metricsData['vllm:external_prefix_cache_hits']?.value || 0;
 
-            const stats = [
-                { key: 'Running Requests', val: running, color: 'var(--success)' },
-                { key: 'Waiting Requests', val: waiting, color: 'var(--vllm-yellow)' },
-                { key: 'Total Requests', val: e2e?.count || 0 },
-                { key: 'Prompt Tokens', val: promptTokens.toLocaleString() },
-                { key: 'Generation Tokens', val: genTokens.toLocaleString() },
-                { key: 'KV Cache Usage', val: kv ? (kv.value * 100).toFixed(1) + '%' : '-' },
-                { key: 'Cache Hit Rate', val: cacheQueries > 0 ? (cacheHits / cacheQueries * 100).toFixed(1) + '%' : '-', color: 'var(--success)' },
-                { key: 'Avg TTFT', val: ttft?.count > 0 ? ((ttft.sum / ttft.count) * 1000).toFixed(0) + 'ms' : '-' },
-                { key: 'Avg E2E Latency', val: e2e?.count > 0 ? (e2e.sum / e2e.count).toFixed(2) + 's' : '-' },
-                { key: 'Avg Prefill Time', val: prefill?.count > 0 ? ((prefill.sum / prefill.count) * 1000).toFixed(0) + 'ms' : '-' },
-                { key: 'Avg Decode Time', val: decode?.count > 0 ? (decode.sum / decode.count).toFixed(2) + 's' : '-' },
-            ];
+            // Histograms
+            const e2e = metricsData['vllm:e2e_request_latency_seconds'];
+            const ttft = metricsData['vllm:time_to_first_token_seconds'];
+            const itl = metricsData['vllm:inter_token_latency_seconds'];
+            const queueTime = metricsData['vllm:request_queue_time_seconds'];
+            const inferenceTime = metricsData['vllm:request_inference_time_seconds'];
+            const prefill = metricsData['vllm:request_prefill_time_seconds'];
+            const decode = metricsData['vllm:request_decode_time_seconds'];
+            const tpot = metricsData['vllm:request_time_per_output_token_seconds'];
+            const reqPromptTokens = metricsData['vllm:request_prompt_tokens'];
+            const reqGenTokens = metricsData['vllm:request_generation_tokens'];
+            const iterTokens = metricsData['vllm:iteration_tokens_total'];
+            const maxGenTokens = metricsData['vllm:request_max_num_generation_tokens'];
+            const paramsN = metricsData['vllm:request_params_n'];
+            const paramsMaxTokens = metricsData['vllm:request_params_max_tokens'];
+            const prefillKvComputed = metricsData['vllm:request_prefill_kv_computed_tokens'];
+            const kvLifetime = metricsData['vllm:kv_block_lifetime_seconds'];
+            const kvIdle = metricsData['vllm:kv_block_idle_before_evict_seconds'];
+            const kvReuseGap = metricsData['vllm:kv_block_reuse_gap_seconds'];
 
-            for (const stat of stats) {
-                const color = stat.color || 'var(--vllm-blue)';
-                html += `<div class="config-item">
-                    <span class="config-key">${stat.key}</span>
-                    <span class="config-val" style="color:${color}">${stat.val}</span>
-                </div>`;
-            }
+            // Request success by finish reason (labels: stop, length, abort)
+            const reqSuccessStop = metricsData['vllm:request_success:stop']?.value || 0;
+            const reqSuccessLength = metricsData['vllm:request_success:length']?.value || 0;
+            const reqSuccessAbort = metricsData['vllm:request_success:abort']?.value || 0;
+
+            // Speculative decoding counters
+            const specDrafts = metricsData['vllm:spec_decode_num_drafts']?.value || 0;
+            const specDraftTokens = metricsData['vllm:spec_decode_num_draft_tokens']?.value || 0;
+            const specAcceptedTokens = metricsData['vllm:spec_decode_num_accepted_tokens']?.value || 0;
+
+            // LoRA info (find any key starting with vllm:lora_requests_info)
+            const loraKey = Object.keys(metricsData).find(k => k.startsWith('vllm:lora_requests_info'));
+            const loraInfo = loraKey ? metricsData[loraKey] : null;
+
+            // Request Stats
+            addSection('Request Stats');
+            addStat('Running Requests', running, 'var(--success)');
+            addStat('Waiting Requests', waiting, 'var(--vllm-yellow)');
+            addStat('Total Requests', e2e?.count || 0);
+            addStat('Finished (stop)', reqSuccessStop, 'var(--success)');
+            addStat('Finished (length)', reqSuccessLength);
+            addStat('Finished (abort)', reqSuccessAbort, reqSuccessAbort > 0 ? 'var(--vllm-yellow)' : '');
+            addStat('Preemptions', preemptions, preemptions > 0 ? 'var(--vllm-yellow)' : '');
+            addStat('Corrupted Requests', corrupted, corrupted > 0 ? 'var(--error)' : '');
+
+            // Latency Stats
+            addSection('Latency Stats');
+            addStat('Avg TTFT', ttft?.count > 0 ? ((ttft.sum / ttft.count) * 1000).toFixed(0) + 'ms' : '-');
+            addStat('Avg ITL', itl?.count > 0 ? ((itl.sum / itl.count) * 1000).toFixed(1) + 'ms' : '-');
+            addStat('Avg TPOT', tpot?.count > 0 ? ((tpot.sum / tpot.count) * 1000).toFixed(1) + 'ms' : '-');
+            addStat('Avg Queue Time', queueTime?.count > 0 ? ((queueTime.sum / queueTime.count) * 1000).toFixed(0) + 'ms' : '-');
+            addStat('Avg Prefill Time', prefill?.count > 0 ? ((prefill.sum / prefill.count) * 1000).toFixed(0) + 'ms' : '-');
+            addStat('Avg Decode Time', decode?.count > 0 ? (decode.sum / decode.count).toFixed(2) + 's' : '-');
+            addStat('Avg Inference Time', inferenceTime?.count > 0 ? (inferenceTime.sum / inferenceTime.count).toFixed(2) + 's' : '-');
+            addStat('Avg E2E Latency', e2e?.count > 0 ? (e2e.sum / e2e.count).toFixed(2) + 's' : '-');
+
+            // Cache Stats
+            addSection('Cache Stats');
+            addStat('KV Cache Usage', kv ? (kv.value * 100).toFixed(1) + '%' : '-');
+            addStat('Prefix Cache Hit', cacheQueries > 0 ? (cacheHits / cacheQueries * 100).toFixed(1) + '%' : '-', 'var(--success)');
+            addStat('MM Cache Hit', mmCacheQueries > 0 ? (mmCacheHits / mmCacheQueries * 100).toFixed(1) + '%' : '-', 'var(--success)');
+            addStat('Ext Cache Hit', extCacheQueries > 0 ? (extCacheHits / extCacheQueries * 100).toFixed(1) + '%' : '-', 'var(--success)');
+            addStat('Avg Prefill KV Computed', prefillKvComputed?.count > 0 ? (prefillKvComputed.sum / prefillKvComputed.count).toFixed(0) : '-');
+
+            // Token Stats
+            addSection('Token Stats');
+            addStat('Prompt Tokens (Total)', promptTokens.toLocaleString());
+            addStat('Generation Tokens (Total)', genTokens.toLocaleString());
+            addStat('Avg Prompt Tokens/Req', reqPromptTokens?.count > 0 ? (reqPromptTokens.sum / reqPromptTokens.count).toFixed(0) : '-');
+            addStat('Avg Gen Tokens/Req', reqGenTokens?.count > 0 ? (reqGenTokens.sum / reqGenTokens.count).toFixed(0) : '-');
+            addStat('Avg Tokens/Iteration', iterTokens?.count > 0 ? (iterTokens.sum / iterTokens.count).toFixed(0) : '-');
+
+            // Request Params
+            addSection('Request Params');
+            addStat('Avg max_tokens Param', paramsMaxTokens?.count > 0 ? (paramsMaxTokens.sum / paramsMaxTokens.count).toFixed(0) : '-');
+            addStat('Avg n Param', paramsN?.count > 0 ? (paramsN.sum / paramsN.count).toFixed(1) : '-');
+            addStat('Avg Max Gen Tokens', maxGenTokens?.count > 0 ? (maxGenTokens.sum / maxGenTokens.count).toFixed(0) : '-');
+
+            // KV Block Stats (requires --kv-cache-metrics)
+            addSection('KV Block Stats', 'Requires --kv-cache-metrics flag');
+            addStat('Avg KV Block Lifetime', kvLifetime?.count > 0 ? (kvLifetime.sum / kvLifetime.count).toFixed(2) + 's' : '-');
+            addStat('Avg KV Idle Before Evict', kvIdle?.count > 0 ? (kvIdle.sum / kvIdle.count).toFixed(2) + 's' : '-');
+            addStat('Avg KV Reuse Gap', kvReuseGap?.count > 0 ? (kvReuseGap.sum / kvReuseGap.count).toFixed(2) + 's' : '-');
+
+            // Speculative Decoding Stats (requires speculative decoding enabled)
+            addSection('Spec Decode Stats', 'Requires speculative decoding enabled');
+            addStat('Draft Rounds', specDrafts.toLocaleString());
+            addStat('Draft Tokens', specDraftTokens.toLocaleString());
+            addStat('Accepted Tokens', specAcceptedTokens.toLocaleString());
+            const specAcceptRate = specDraftTokens > 0 ? (specAcceptedTokens / specDraftTokens * 100).toFixed(1) + '%' : '-';
+            addStat('Acceptance Rate', specAcceptRate, specDraftTokens > 0 ? 'var(--success)' : '');
+            const meanAcceptLen = specDrafts > 0 ? (1 + specAcceptedTokens / specDrafts).toFixed(2) : '-';
+            addStat('Mean Accept Length', meanAcceptLen);
+
+            // LoRA Stats (requires LoRA enabled)
+            addSection('LoRA Stats', 'Requires LoRA enabled');
+            const runningAdapters = loraInfo?.labels?.running_lora_adapters || '';
+            const waitingAdapters = loraInfo?.labels?.waiting_lora_adapters || '';
+            addStat('Max LoRA', loraInfo?.labels?.max_lora || '-');
+            addStat('Running Adapters', runningAdapters ? runningAdapters.split(',').length : '-', runningAdapters ? 'var(--success)' : '');
+            addStat('Waiting Adapters', waitingAdapters ? waitingAdapters.split(',').length : '-');
 
             statsList.innerHTML = html || '<div class="config-item"><span class="config-key">No stats available</span></div>';
         }
@@ -1974,7 +2082,7 @@
             }
         }
 
-        // Filter config/env list
+        // Filter config/env/stats list
         function filterList(type) {
             const searchInput = document.getElementById(type + '-search');
             const filterBtn = document.getElementById(type + '-filter-btn');
@@ -2243,6 +2351,7 @@
         async function refreshServerStatus() {
             try {
                 const resp = await fetch('/dashboard/api/info');
+                if (!resp.ok) return;  // Silently ignore errors
                 const data = await resp.json();
 
                 // Update server load
@@ -2285,7 +2394,7 @@
                     statusDot.style.boxShadow = '0 0 10px var(--success)';
                 }
             } catch (e) {
-                console.error('Status refresh error:', e);
+                // Silently ignore - avoid console spam
             }
         }
 

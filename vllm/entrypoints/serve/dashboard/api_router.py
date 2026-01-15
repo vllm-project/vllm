@@ -213,6 +213,19 @@ async def dashboard_metrics(request: Request) -> JSONResponse:
         snapshot = get_metrics_snapshot()
         for metric in snapshot:
             name = metric.name
+            # For labeled metrics, create unique keys to avoid overwriting
+            # e.g. vllm:request_success with finished_reason label
+            if metric.labels:
+                # Filter out common labels (model_name, engine) for key
+                key_labels = {
+                    k: v
+                    for k, v in metric.labels.items()
+                    if k not in ("model_name", "engine")
+                }
+                if key_labels:
+                    # Create key like "vllm:request_success:stop"
+                    label_suffix = ":".join(str(v) for v in key_labels.values())
+                    name = f"{metric.name}:{label_suffix}"
             if isinstance(metric, (Counter, Gauge)):
                 metrics[name] = {
                     "value": metric.value,
