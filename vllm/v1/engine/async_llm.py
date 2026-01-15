@@ -106,10 +106,7 @@ class AsyncLLM(EngineClient):
                 "enabling logging without default stat loggers."
             )
 
-        if self.model_config.skip_tokenizer_init:
-            tokenizer = None
-        else:
-            tokenizer = cached_tokenizer_from_config(self.model_config)
+        tokenizer = cached_tokenizer_from_config(self.model_config)
 
         self.input_processor = InputProcessor(self.vllm_config, tokenizer)
         self.io_processor = get_io_processor(
@@ -525,9 +522,10 @@ class AsyncLLM(EngineClient):
                             await asyncio.sleep(0)
 
                         # 3) Abort any reqs that finished due to stop strings.
-                        await engine_core.abort_requests_async(
-                            processed_outputs.reqs_to_abort
-                        )
+                        if processed_outputs.reqs_to_abort:
+                            await engine_core.abort_requests_async(
+                                processed_outputs.reqs_to_abort
+                            )
 
                     output_processor.update_scheduler_stats(outputs.scheduler_stats)
 
