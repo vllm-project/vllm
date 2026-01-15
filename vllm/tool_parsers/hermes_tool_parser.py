@@ -316,12 +316,28 @@ class Hermes2ProToolParser(ToolParser):
                 if current_tool_call is None:
                     return None
                 function_name: str | None = current_tool_call.get("name")
-                function_arguments: str = ""
-                function_arguments = current_tool_call.get("arguments") or ""
-                if isinstance(function_arguments, dict):
-                    function_arguments = json.dumps(function_arguments)
                 if function_name:
                     self.current_tool_name_sent = True
+                    match = re.search(
+                        r'\{"name":\s*"'
+                        + re.escape(function_name)
+                        + r'"\s*,\s*"arguments":\s*(.*)',
+                        tool_call_portion.strip(),
+                        re.DOTALL,
+                    )
+                    function_arguments = ""
+                    if match:
+                        function_arguments = match.group(1)
+                        try:
+                            json.loads(tool_call_portion)
+                            if (
+                                isinstance(function_arguments, str)
+                                and len(function_arguments.rstrip()) >= 1
+                                and function_arguments.rstrip()[-1] == "}"
+                            ):
+                                function_arguments = function_arguments.rstrip()[:-1]
+                        except Exception:
+                            pass
                     self.streamed_args_for_tool[self.current_tool_id] += (
                         function_arguments
                     )
@@ -376,13 +392,13 @@ class Hermes2ProToolParser(ToolParser):
             logger.debug("against new ones: %s", cur_arguments)
 
             # case -- no arguments have been created yet. skip sending a delta.
-            if not cur_arguments and not prev_arguments:
+            if cur_arguments is None and prev_arguments is None:
                 logger.debug("Skipping text %s - no arguments", delta_text)
                 delta = None
 
             # case -- prev arguments are defined, but non are now.
             #   probably impossible, but not a fatal error - just keep going
-            elif not cur_arguments and prev_arguments:
+            elif cur_arguments is None and prev_arguments is not None:
                 logger.error(
                     "should be impossible to have arguments reset "
                     "mid-call. skipping streaming anything."
@@ -391,7 +407,23 @@ class Hermes2ProToolParser(ToolParser):
 
             # case -- we now have the first info about arguments available from
             #   autocompleting the JSON
-            elif cur_arguments and not prev_arguments:
+            elif cur_arguments is not None and prev_arguments is None:
+                # although this is the first info about arguments, it could at the
+                # same time be the last info - because large chunks size can
+                # include both the beginning and the end of the arguments JSON.
+                # If so, we should trim off the last '}' from delta_text.
+                try:
+                    json.loads(tool_call_portion)
+                    is_complete_json = True
+                    if (
+                        isinstance(delta_text, str)
+                        and len(delta_text.rstrip()) >= 1
+                        and delta_text.rstrip()[-1] == "}"
+                    ):
+                        delta_text = delta_text.rstrip()[:-1]
+                except Exception:
+                    is_complete_json = False
+
                 # extract the content after {"name": ..., "arguments":
                 #   directly from tool_call_portion as cur_arguments_json,
                 #   since cur_arguments may differ from the original text
@@ -408,27 +440,48 @@ class Hermes2ProToolParser(ToolParser):
                     tool_call_portion.strip(),
                     re.DOTALL,
                 )
+                cur_arguments_start_index = 0
                 if match:
                     cur_arguments_json = match.group(1)
+                    cur_arguments_start_index = match.start(1)
                 else:
                     cur_arguments_json = json.dumps(cur_arguments, ensure_ascii=False)
+                delta_text_start_index = tool_call_portion.strip().rindex(delta_text)
+                delta_text_args_start_index = (
+                    cur_arguments_start_index - delta_text_start_index
+                )
+                if delta_text_args_start_index < 0:
+                    delta_text_args_start_index = 0
+                delta_text_args = delta_text[delta_text_args_start_index:]
 
-                logger.debug("finding %s in %s", delta_text, cur_arguments_json)
+                logger.debug("finding %s in %s", delta_text_args, cur_arguments_json)
+
+                # get the location where previous args differ from current.
+                if delta_text_args not in cur_arguments_json:
+                    return None
+                args_delta_start_loc = cur_arguments_json.rindex(delta_text_args)
+                args_delta_end_loc = args_delta_start_loc + len(delta_text_args)
+
+                # use that to find the actual delta
+                arguments_delta = cur_arguments_json[
+                    args_delta_start_loc:args_delta_end_loc
+                ]
+                logger.debug("First tokens in arguments received: %s", arguments_delta)
 
                 delta = DeltaMessage(
                     tool_calls=[
                         DeltaToolCall(
                             index=self.current_tool_id,
                             function=DeltaFunctionCall(
-                                arguments=cur_arguments_json
+                                arguments=arguments_delta
                             ).model_dump(exclude_none=True),
                         )
                     ]
                 )
-                self.streamed_args_for_tool[self.current_tool_id] += cur_arguments_json
+                self.streamed_args_for_tool[self.current_tool_id] += arguments_delta
 
             # last case -- we have an update to existing arguments.
-            elif cur_arguments and prev_arguments:
+            elif cur_arguments is not None and prev_arguments is not None:
                 # judge whether the tool_call_portion is a complete JSON
                 try:
                     json.loads(tool_call_portion)
