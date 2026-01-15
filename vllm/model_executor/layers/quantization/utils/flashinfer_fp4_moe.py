@@ -138,6 +138,23 @@ def is_flashinfer_fp4_cutedsl_moe_available() -> bool:
     )
 
 
+def reorder_w1w3_to_w3w1(
+    weight: torch.Tensor, scale: torch.Tensor, dim: int = -2
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Re-order the concatenated `[w1, w3]` tensors to `[w3, w1]`"""
+    size = weight.size(dim)
+    assert size % 2 == 0, f"Expected even size in dim {dim}, got {size}"
+    half = size // 2
+
+    w1, w3 = weight.split(half, dim=dim)
+    s1, s3 = scale.split(half, dim=dim)
+
+    return (
+        torch.cat([w3, w1], dim=dim).contiguous(),
+        torch.cat([s3, s1], dim=dim).contiguous(),
+    )
+
+
 def build_flashinfer_fp4_cutlass_moe_prepare_finalize(
     moe: FusedMoEConfig,
 ) -> mk.FusedMoEPrepareAndFinalize:
@@ -177,23 +194,6 @@ def select_nvfp4_gemm_impl(
     raise ValueError(
         "CutlassExpertsFp4 doesn't support DP. Use flashinfer CUTLASS "
         "Fused MoE backend instead (set VLLM_USE_FLASHINFER_MOE_FP4=1)"
-    )
-
-
-def reorder_w1w3_to_w3w1(
-    weight: torch.Tensor, scale: torch.Tensor, dim: int = -2
-) -> tuple[torch.Tensor, torch.Tensor]:
-    """Re-order the concatenated `[w1, w3]` tensors to `[w3, w1]`"""
-    size = weight.size(dim)
-    assert size % 2 == 0, f"Expected even size in dim {dim}, got {size}"
-    half = size // 2
-
-    w1, w3 = weight.split(half, dim=dim)
-    s1, s3 = scale.split(half, dim=dim)
-
-    return (
-        torch.cat([w3, w1], dim=dim).contiguous(),
-        torch.cat([s3, s1], dim=dim).contiguous(),
     )
 
 
