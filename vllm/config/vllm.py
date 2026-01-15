@@ -498,17 +498,15 @@ class VllmConfig:
         Right now, this function reads the offloading settings from
         CacheConfig and configures the KVTransferConfig accordingly.
         """
-        if (kv_offloading_backend := self.cache_config.kv_offloading_backend) is None:
+        # KV offloading is only activated when kv_offloading_size is set.
+        if (kv_offloading_size := self.cache_config.kv_offloading_size) is None:
             return
+
+        kv_offloading_backend = self.cache_config.kv_offloading_backend
 
         # If no KVTransferConfig is provided, create a default one.
         if self.kv_transfer_config is None:
             self.kv_transfer_config = KVTransferConfig()
-
-        if (kv_offloading_size := self.cache_config.kv_offloading_size) is None:
-            raise ValueError(
-                "You must set kv_offloading_size when kv_offloading_backend is set."
-            )
         num_kv_ranks = (
             self.parallel_config.tensor_parallel_size
             * self.parallel_config.pipeline_parallel_size
