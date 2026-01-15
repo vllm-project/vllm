@@ -195,15 +195,19 @@ def get_cudagraph_size(
     cudagraph_sizes: dict[int, int],
     cudagraph_mode: CUDAGraphMode,
 ) -> int | None:
+    if not cudagraph_mode.has_full_cudagraphs():
+        # No full CUDA graph is used.
+        return None
+
     size = cudagraph_sizes.get(num_tokens_after_dp_padding)
     if size is None:
         # No CUDA graph for this size.
         return None
-    if cudagraph_mode == CUDAGraphMode.FULL_DECODE_ONLY:
-        all_decode = all(x == 1 for x in num_tokens_per_request)
-        if not all_decode:
-            # Prefill is included.
-            return None
+
+    is_mixed = any(x > 1 for x in num_tokens_per_request)
+    if is_mixed and cudagraph_mode.mixed_mode() != CUDAGraphMode.FULL:
+        # Prefill is included, and this mode doesn't use CUDA graph for it.
+        return None
     return size
 
 
