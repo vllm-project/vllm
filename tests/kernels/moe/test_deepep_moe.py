@@ -136,6 +136,7 @@ def make_dummy_moe_config() -> FusedMoEConfig:
         intermediate_size_per_partition=1,
         num_local_experts=1,
         moe_parallel_config=FusedMoEParallelConfig.make_no_parallel(),
+        activation="silu",
         in_dtype=torch.bfloat16,
         device="cuda",
     )
