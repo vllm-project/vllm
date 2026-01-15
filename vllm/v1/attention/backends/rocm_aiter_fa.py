@@ -67,8 +67,12 @@ if current_platform.is_rocm():
         head_id = tl.program_id(1)
         col_offsets = tl.arange(0, BLOCK_SIZE)
 
-        key_ptr_offset = key_ptr + token_id * head_size * num_heads
-        value_ptr_offset = value_ptr + token_id * head_size * num_heads
+        key_ptr_offset = (
+            key_ptr + token_id * head_size * num_heads + head_id * head_size
+        )
+        value_ptr_offset = (
+            value_ptr + token_id * head_size * num_heads + head_id * head_size
+        )
         batch_idx = tl.load(token_to_batch_ptr + token_id)
         batch_start = tl.load(seq_start_ptr + batch_idx)
         token_start = tl.load(cu_seqlens_kv_ptr + batch_idx)
