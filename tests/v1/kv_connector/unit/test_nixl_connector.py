@@ -2100,7 +2100,7 @@ def test_compatibility_hash_validation(
         remote_hash = compute_nixl_compatibility_hash(
             remote_vllm_config,
             decode_worker.backend_name,
-            decode_worker.cross_layers_blocks,
+            decode_worker.kv_topo.cross_layers_blocks,
         )
 
     prefill_block_size = config_overrides.get("block_size", 16)
