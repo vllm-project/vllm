@@ -140,7 +140,7 @@ class GptOssReasoningParser(ReasoningParser):
         self,
         model_output: str,
         request: ChatCompletionRequest,
-    ) -> tuple[str | None, str | None]:
+    ) -> tuple[list[str], str | None]:
         raise NotImplementedError(
             "gpt-oss has a special branch for parsing reasoning in non-streaming mode. This method shouldn't be used."  # noqa: E501
         )

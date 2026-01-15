@@ -257,7 +257,7 @@ class Olmo3ReasoningParser(ReasoningParser):
         self,
         model_output: str,
         request: ChatCompletionRequest | ResponsesRequest,
-    ) -> tuple[str | None, str | None]:
+    ) -> tuple[list[str], str | None]:
         """Extract the reasoning content & content sections, respectively.
         If the sequence doesn't match what we expect, i.e., the model generates
         something else, all content is considered non-reasoning content.
@@ -268,18 +268,18 @@ class Olmo3ReasoningParser(ReasoningParser):
                 processed.
 
         Returns:
-            tuple[Optional[str], Optional[str]]: Tuple pair containing the
-            reasoning content and non-reasoning content.
+            tuple[list[str], Optional[str]]: Tuple pair containing the
+            list of reasoning content strings and non-reasoning content.
         """
 
         re_match = self.reasoning_regex.match(model_output)
         if re_match:
             reasoning = re_match.group("reasoning") or None
             content = re_match.group("content") or None
-            return reasoning, content
+            return [reasoning] if reasoning else [], content
 
         # no reasoning content
-        return None, model_output
+        return [], model_output
 
     def extract_reasoning_streaming(
         self,

@@ -145,7 +145,7 @@ class Ernie45ReasoningParser(BaseThinkingReasoningParser):
 
     def extract_reasoning(
         self, model_output: str, request: ChatCompletionRequest
-    ) -> tuple[str | None, str | None]:
+    ) -> tuple[list[str], str | None]:
         """
         Extract reasoning content from the model output.
         The Ernie45 thinking model ouput format is
@@ -154,9 +154,9 @@ class Ernie45ReasoningParser(BaseThinkingReasoningParser):
         - 'abc' goes to reasoning
         - 'def' goes to content
         Returns:
-            tuple[Optional[str], Optional[str]]: reasoning content and content
+            tuple[list[str], Optional[str]]: list of reasoning content and content
         """
-        reasoning, content = super().extract_reasoning(model_output, request)
+        reasoning_list, content = super().extract_reasoning(model_output, request)
         if content:
             start_idx = content.find(self.response_start_token)
             end_idx = content.rfind(self.response_end_token)
@@ -165,4 +165,4 @@ class Ernie45ReasoningParser(BaseThinkingReasoningParser):
                 content = content[start_idx + len(self.response_start_token) : end_idx]
         final_content = content or None
 
-        return reasoning, final_content
+        return reasoning_list, final_content

@@ -91,9 +91,13 @@ def run_reasoning_extraction_nonstreaming(
     request: ChatCompletionRequest | None = None,
 ) -> tuple[str | None, str | None]:
     request = request or ChatCompletionRequest(messages=[], model="test-model")
-    return reasoning_parser.extract_reasoning(
+    reasoning_list, content = reasoning_parser.extract_reasoning(
         model_output="".join(model_output), request=request
     )
+    # Join reasoning list into single string for backwards compatibility
+    # with existing tests
+    reasoning = "\n".join(reasoning_list) if reasoning_list else None
+    return reasoning, content
 
 
 def run_reasoning_extraction_streaming(

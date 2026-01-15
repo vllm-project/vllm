@@ -60,7 +60,7 @@ class IdentityReasoningParser(ReasoningParser):
 
     def extract_reasoning(
         self, model_output: str, request: ChatCompletionRequest
-    ) -> tuple[str | None, str | None]:
-        # No reasoning separation: return None for reasoning,
+    ) -> tuple[list[str], str | None]:
+        # No reasoning separation: return empty list for reasoning,
         # and full model_output as content
-        return None, model_output
+        return [], model_output

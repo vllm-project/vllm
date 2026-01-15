@@ -46,10 +46,10 @@ def test_identity_reasoning_parser_basic(tokenizer):
     # Test extract_content_ids returns all input_ids
     assert parser.extract_content_ids(input_ids) == input_ids
 
-    # Test extract_reasoning returns (None, model_output)
+    # Test extract_reasoning returns ([], model_output)
     request = ChatCompletionRequest(model="test-model", messages=[], temperature=1.0)
-    reasoning, content = parser.extract_reasoning(input_text, request)
-    assert reasoning is None
+    reasoning_list, content = parser.extract_reasoning(input_text, request)
+    assert reasoning_list == []
     assert content == input_text
 
     # Test extract_reasoning_streaming returns DeltaMessage or None

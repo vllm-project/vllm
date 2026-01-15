@@ -152,26 +152,54 @@ class BaseThinkingReasoningParser(ReasoningParser):
 
     def extract_reasoning(
         self, model_output: str, request: ChatCompletionRequest | ResponsesRequest
-    ) -> tuple[str | None, str | None]:
+    ) -> tuple[list[str], str | None]:
         """
         Extract reasoning content from the model output.
 
         This is the base implementation that works for most models.
+        The extraction is recursive - after finding the first reasoning block,
+        it continues to look for additional reasoning blocks in the remaining
+        content.
         Subclasses can override this method for specific behavior.
         """
-        # Check if the start token is present in the model output, remove it
-        # if it is present.
-        model_output_parts = model_output.partition(self.start_token)
-        model_output = (
-            model_output_parts[2] if model_output_parts[1] else model_output_parts[0]
-        )
+        reasoning_list: list[str] = []
+        remaining = model_output
 
-        # For models that may not generate start token,
-        # assume the reasoning content is always at the start.
-        if self.end_token not in model_output:
-            return model_output, None
-        else:
-            reasoning, _, content = model_output.partition(self.end_token)
-            # If generation stops right after end-of-think, return null content
-            final_content = content or None
-            return reasoning, final_content
+        while True:
+            # Check if the start token is present, remove it if present.
+            parts = remaining.partition(self.start_token)
+            remaining = parts[2] if parts[1] else parts[0]
+
+            # Check if end token is present
+            if self.end_token not in remaining:
+                # No end token found
+                if parts[1]:  # start token was found
+                    # Reasoning content without end token - treat as reasoning
+                    if remaining:
+                        reasoning_list.append(remaining)
+                    return reasoning_list, None
+                else:
+                    # No start token was found either
+                    # If we already found some reasoning, remaining is content
+                    # Otherwise, it's just content with no reasoning
+                    final_content = remaining if remaining else None
+                    return reasoning_list, final_content
+            else:
+                # End token found - extract this reasoning block
+                reasoning, _, after_end = remaining.partition(self.end_token)
+                if reasoning:
+                    reasoning_list.append(reasoning)
+
+                # Check if there's more content to process
+                if not after_end:
+                    # Nothing after end token
+                    return reasoning_list, None
+
+                # Check if there's another reasoning block in the remaining
+                if self.start_token in after_end:
+                    # More reasoning blocks to extract
+                    remaining = after_end
+                    continue
+                else:
+                    # No more reasoning blocks - rest is content
+                    return reasoning_list, after_end

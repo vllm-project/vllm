@@ -1485,9 +1485,12 @@ class OpenAIServingChat(OpenAIServing):
                     return self.create_error_response(str(e))
                 # If the reasoning parser is enabled,
                 # tool calls are extracted exclusively from the content.
-                reasoning, content = reasoning_parser.extract_reasoning(
+                reasoning_list, content = reasoning_parser.extract_reasoning(
                     output.text, request=request
                 )
+                # Join multiple reasoning blocks into a single string
+                # for backwards compatibility with ChatMessage
+                reasoning = "\n".join(reasoning_list) if reasoning_list else None
                 if not request.include_reasoning:
                     reasoning = None
             else:

@@ -54,7 +54,7 @@ class GraniteReasoningParser(ReasoningParser):
 
     def extract_reasoning(
         self, model_output: str, request: ChatCompletionRequest
-    ) -> tuple[str | None, str | None]:
+    ) -> tuple[list[str], str | None]:
         """Extract the reasoning content & content sections, respectively.
         If the sequence doesn't match what we expect, i.e., the model generates
         something else, all content is considered non-reasoning content.
@@ -64,16 +64,16 @@ class GraniteReasoningParser(ReasoningParser):
             request (ChatCompletionRequest): Request being processed.
 
         Returns:
-            tuple[Optional[str], Optional[str]]: Tuple pair containing the
-            reasoning content and non-reasoning content.
+            tuple[list[str], Optional[str]]: Tuple pair containing the
+            list of reasoning content strings and non-reasoning content.
         """
         re_match = self.reasoning_regex.findall(model_output)
         if not re_match:
-            return None, model_output
+            return [], model_output
         reasoning, response_content = re_match[0]
         if not response_content:
-            return reasoning, None
-        return reasoning, response_content
+            return [reasoning] if reasoning else [], None
+        return [reasoning] if reasoning else [], response_content
 
     def extract_reasoning_streaming(
         self,

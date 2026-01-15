@@ -202,9 +202,9 @@ class TestBaseThinkingReasoningParserExtraction:
         request = ChatCompletionRequest(messages=[], model="test-model")
 
         model_output = "<test:think>This is reasoning</test:think>This is content"
-        reasoning, content = parser.extract_reasoning(model_output, request)
+        reasoning_list, content = parser.extract_reasoning(model_output, request)
 
-        assert reasoning == "This is reasoning"
+        assert reasoning_list == ["This is reasoning"]
         assert content == "This is content"
 
     def test_extract_reasoning_only_end_token(self, test_tokenizer):
@@ -213,9 +213,9 @@ class TestBaseThinkingReasoningParserExtraction:
         request = ChatCompletionRequest(messages=[], model="test-model")
 
         model_output = "This is reasoning</test:think>This is content"
-        reasoning, content = parser.extract_reasoning(model_output, request)
+        reasoning_list, content = parser.extract_reasoning(model_output, request)
 
-        assert reasoning == "This is reasoning"
+        assert reasoning_list == ["This is reasoning"]
         assert content == "This is content"
 
     def test_extract_reasoning_no_end_token(self, test_tokenizer):
@@ -224,9 +224,9 @@ class TestBaseThinkingReasoningParserExtraction:
         request = ChatCompletionRequest(messages=[], model="test-model")
 
         model_output = "This is just content"
-        reasoning, content = parser.extract_reasoning(model_output, request)
+        reasoning_list, content = parser.extract_reasoning(model_output, request)
 
-        assert reasoning == "This is just content"
+        assert reasoning_list == ["This is just content"]
         assert content is None
 
     def test_extract_reasoning_empty_output(self, test_tokenizer):
@@ -235,9 +235,9 @@ class TestBaseThinkingReasoningParserExtraction:
         request = ChatCompletionRequest(messages=[], model="test-model")
 
         model_output = ""
-        reasoning, content = parser.extract_reasoning(model_output, request)
+        reasoning_list, content = parser.extract_reasoning(model_output, request)
 
-        assert reasoning == ""
+        assert reasoning_list == []
         assert content is None
 
     def test_extract_reasoning_only_tokens(self, test_tokenizer):
@@ -246,9 +246,9 @@ class TestBaseThinkingReasoningParserExtraction:
         request = ChatCompletionRequest(messages=[], model="test-model")
 
         model_output = "<test:think></test:think>"
-        reasoning, content = parser.extract_reasoning(model_output, request)
+        reasoning_list, content = parser.extract_reasoning(model_output, request)
 
-        assert reasoning == ""
+        assert reasoning_list == []
         assert content is None
 
 

@@ -911,11 +911,11 @@ class OpenAIServingResponses(OpenAIServing):
                 logger.exception("Error in reasoning parser creation.")
                 raise e
 
-            reasoning, content = reasoning_parser.extract_reasoning(
+            reasoning_list, content = reasoning_parser.extract_reasoning(
                 final_output.text, request=request
             )
         else:
-            reasoning = None
+            reasoning_list = []
             content = final_output.text
 
         # Log complete response if output logging is enabled
@@ -923,8 +923,8 @@ class OpenAIServingResponses(OpenAIServing):
             output_text = ""
             if content:
                 output_text = content
-            elif reasoning:
-                output_text = f"[reasoning: {reasoning}]"
+            elif reasoning_list:
+                output_text = f"[reasoning: {reasoning_list}]"
 
             if output_text:
                 self.request_logger.log_outputs(
@@ -936,9 +936,9 @@ class OpenAIServingResponses(OpenAIServing):
                     delta=False,
                 )
 
-        reasoning_item = None
-        message_item = None
-        if reasoning:
+        # Create reasoning items for each reasoning block
+        reasoning_items: list[ResponseReasoningItem] = []
+        for reasoning in reasoning_list:
             reasoning_item = ResponseReasoningItem(
                 id=f"rs_{random_uuid()}",
                 summary=[],
@@ -948,6 +948,9 @@ class OpenAIServingResponses(OpenAIServing):
                 ],
                 status=None,  # NOTE: Only the last output item has status.
             )
+            reasoning_items.append(reasoning_item)
+
+        message_item = None
         tool_calls, content = self._parse_tool_calls_from_content(
             request=request,
             tokenizer=tokenizer,
@@ -978,10 +981,10 @@ class OpenAIServingResponses(OpenAIServing):
                 status="completed",
                 type="message",
             )
-        outputs = []
+        outputs: list[ResponseOutputItem] = []
 
-        if reasoning_item:
-            outputs.append(reasoning_item)
+        # Append all reasoning items
+        outputs.extend(reasoning_items)
         if message_item:
             outputs.append(message_item)
         if tool_calls:

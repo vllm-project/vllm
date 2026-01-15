@@ -20,6 +20,9 @@ Example:
     )
 """
 
+# TODO: if I want to pass in an external flag where the tool parser isn't in vLLM
+# how should I do that?
+
 
 _TOOL_PARSERS_TO_REGISTER = {
     "deepseek_v3": (  # name
@@ -70,7 +73,7 @@ _TOOL_PARSERS_TO_REGISTER = {
         "jamba_tool_parser",
         "JambaToolParser",
     ),
-    "kimi_k2": (
+    "kimi_k2": (  # look here
         "kimi_k2_tool_parser",
         "KimiK2ToolParser",
     ),

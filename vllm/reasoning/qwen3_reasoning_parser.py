@@ -33,7 +33,7 @@ class Qwen3ReasoningParser(BaseThinkingReasoningParser):
 
     def extract_reasoning(
         self, model_output: str, request: ChatCompletionRequest | ResponsesRequest
-    ) -> tuple[str | None, str | None]:
+    ) -> tuple[list[str], str | None]:
         """
         Extract reasoning content from the model output.
 
@@ -44,28 +44,41 @@ class Qwen3ReasoningParser(BaseThinkingReasoningParser):
         - 'abc' goes to reasoning
         - 'xyz' goes to content
 
+        The extraction is recursive - after finding the first reasoning block,
+        it continues to look for additional reasoning blocks in the remaining
+        content.
+
         Returns:
-            tuple[Optional[str], Optional[str]]: reasoning content and content
+            tuple[list[str], Optional[str]]: list of reasoning content strings
+            and final content
         """
+        reasoning_list: list[str] = []
+        remaining = model_output
 
-        # Check if the model output contains both <think> and </think> tokens.
-        if self.start_token not in model_output or self.end_token not in model_output:
-            return None, model_output
+        while True:
+            # Check if both start and end tokens are present
+            if self.start_token not in remaining or self.end_token not in remaining:
+                # No complete reasoning block - rest is content
+                final_content = remaining if remaining else None
+                return reasoning_list, final_content
 
-        # Check if the <think> is present in the model output, remove it
-        # if it is present.
-        model_output_parts = model_output.partition(self.start_token)
-        model_output = (
-            model_output_parts[2] if model_output_parts[1] else model_output_parts[0]
-        )
+            # Extract reasoning block
+            parts = remaining.partition(self.start_token)
+            after_start = parts[2]
 
-        # Check if the model output contains the </think> tokens.
-        # If the end token is not found, return the model output as is.
-        if self.end_token not in model_output:
-            return None, model_output
+            # Get the reasoning content
+            reasoning, _, after_end = after_start.partition(self.end_token)
+            if reasoning:
+                reasoning_list.append(reasoning)
 
-        # Extract reasoning content from the model output.
-        reasoning, _, content = model_output.partition(self.end_token)
+            # Check if there's more content to process
+            if not after_end:
+                return reasoning_list, None
 
-        final_content = content or None
-        return reasoning, final_content
+            # Check for more reasoning blocks
+            if self.start_token in after_end and self.end_token in after_end:
+                remaining = after_end
+                continue
+            else:
+                # No more complete reasoning blocks
+                return reasoning_list, after_end if after_end else None

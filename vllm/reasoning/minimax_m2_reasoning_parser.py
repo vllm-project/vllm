@@ -110,5 +110,5 @@ class MiniMaxM2AppendThinkReasoningParser(ReasoningParser):
 
     def extract_reasoning(
         self, model_output: str, request: ChatCompletionRequest | ResponsesRequest
-    ) -> tuple[str | None, str | None]:
-        return None, "<think>" + model_output
+    ) -> tuple[list[str], str | None]:
+        return [], "<think>" + model_output

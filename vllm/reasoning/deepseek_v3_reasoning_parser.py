@@ -50,7 +50,7 @@ class DeepSeekV3ReasoningParser(ReasoningParser):
 
     def extract_reasoning(
         self, model_output: str, request: ChatCompletionRequest
-    ) -> tuple[str | None, str | None]:
+    ) -> tuple[list[str], str | None]:
         return self._parser.extract_reasoning(model_output, request)
 
     def extract_reasoning_streaming(

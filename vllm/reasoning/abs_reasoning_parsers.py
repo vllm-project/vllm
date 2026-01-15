@@ -109,12 +109,15 @@ class ReasoningParser:
         self,
         model_output: str,
         request: ChatCompletionRequest | ResponsesRequest,
-    ) -> tuple[str | None, str | None]:
+    ) -> tuple[list[str], str | None]:
         """
         Extract reasoning content from a complete model-generated string.
 
         Used for non-streaming responses where we have the entire model response
         available before sending to the client.
+
+        The extraction is recursive - after finding the first reasoning block,
+        it looks inside the remaining content to find additional reasoning blocks.
 
         Parameters:
         model_output: str
@@ -124,8 +127,9 @@ class ReasoningParser:
             The request object that was used to generate the model_output.
 
         Returns:
-        tuple[Optional[str], Optional[str]]
-            A tuple containing the reasoning content and the content.
+        tuple[list[str], Optional[str]]
+            A tuple containing a list of reasoning content strings and the
+            final content. The list may be empty if no reasoning was found.
         """
 
     @abstractmethod

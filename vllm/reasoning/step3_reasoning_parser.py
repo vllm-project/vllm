@@ -82,11 +82,11 @@ class Step3ReasoningParser(ReasoningParser):
 
     def extract_reasoning(
         self, model_output: str, request: ChatCompletionRequest
-    ) -> tuple[str | None, str | None]:
+    ) -> tuple[list[str], str | None]:
         # Check if the model output contains the </think> token
         if self.think_end_token not in model_output:
             # If no </think> token, everything is reasoning content
-            return model_output, None
+            return [model_output] if model_output else [], None
         else:
             # Find the first occurrence of </think>
             end_index = model_output.find(self.think_end_token)
@@ -95,10 +95,9 @@ class Step3ReasoningParser(ReasoningParser):
             # Content after </think> token
             content = model_output[end_index + len(self.think_end_token) :]
 
-            if len(content) == 0:
-                content = None
+            final_content = content if content else None
 
-            return reasoning, content
+            return [reasoning] if reasoning else [], final_content
 
     def is_reasoning_end(self, input_ids: list[int]) -> bool:
         return self.think_end_token_id in input_ids
