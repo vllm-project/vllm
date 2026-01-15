@@ -113,7 +113,6 @@ def create_cross_attention_backend(
                 self.kv_cache_spec,
                 self.device,
             )
-            print("build slot_mapping", slot_mapping)
             attn_metadata = super().build(common_prefix_len, new_metadata, fast_build)
             attn_metadata.slot_mapping = slot_mapping
             return attn_metadata
