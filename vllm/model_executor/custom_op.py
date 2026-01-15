@@ -11,6 +11,15 @@ from vllm.platforms import current_platform
 logger = init_logger(__name__)
 
 
+# Dictionary of all custom ops (classes, indexed by registered name).
+# To check if an op with a name is enabled, call .enabled() on the class.
+# Examples:
+# - MyOp.enabled()
+# - op_registry["my_op"].enabled()
+op_registry: dict[str, type["CustomOp"]] = {}
+op_registry_oot: dict[str, type["CustomOp"]] = {}
+
+
 class PluggableLayer(nn.Module):
     """
     Base class for pluggable layers.
@@ -36,19 +45,16 @@ class PluggableLayer(nn.Module):
                 f"@PluggableLayer.register, or it's the PluggableLayer base class itself."
             ) from None
 
-        if layer_class_name not in cls.layer_registry_oot:
+        if layer_class_name not in op_registry_oot:
             layer_cls_to_instantiate = cls
         else:
-            layer_cls_to_instantiate = cls.layer_registry_oot[layer_class_name]
+            layer_cls_to_instantiate = op_registry_oot[layer_class_name]
             logger.debug(
                 "Instantiating pluggable layer: %s using %s",
                 layer_class_name,
                 str(layer_cls_to_instantiate),
             )
         return super().__new__(layer_cls_to_instantiate)
-
-    # Dictionary of all pluggable layers (classes, indexed by registered name).
-    layer_registry_oot: dict[str, type["PluggableLayer"]] = {}
 
     # Decorator to register out-of-tree(oot) pluggable layers.
     # For OOT pluggable layers:
@@ -58,11 +64,9 @@ class PluggableLayer(nn.Module):
     def register_oot(cls, _decorated_layer_cls=None, name: str | None = None):
         def decorator(layer_cls):
             reg_name = name if name is not None else cls.__name__
-            assert reg_name not in cls.layer_registry_oot, (
-                f"Duplicate layer name: {reg_name}"
-            )
+            assert reg_name not in op_registry_oot, f"Duplicate layer name: {reg_name}"
             layer_cls.name = reg_name
-            cls.layer_registry_oot[reg_name] = layer_cls
+            op_registry_oot[reg_name] = layer_cls
             return layer_cls
 
         if _decorated_layer_cls is None:
@@ -74,6 +78,7 @@ class PluggableLayer(nn.Module):
             return decorator(_decorated_layer_cls)
         else:
             raise TypeError("Decorator can only be applied to classes.")
+
 
 class CustomOp(nn.Module):
     """
@@ -91,10 +96,10 @@ class CustomOp(nn.Module):
                 f"@CustomOp.register, or it's the CustomOp base class itself."
             ) from None
 
-        if op_name not in cls.op_registry_oot:
+        if op_name not in op_registry_oot:
             op_cls_to_instantiate = cls
         else:
-            op_cls_to_instantiate = cls.op_registry_oot[op_name]
+            op_cls_to_instantiate = op_registry_oot[op_name]
             logger.debug(
                 "Instantiating custom op: %s using %s",
                 op_name,
@@ -214,21 +219,13 @@ class CustomOp(nn.Module):
 
         return not count_none > 0 or count_all > 0
 
-    # Dictionary of all custom ops (classes, indexed by registered name).
-    # To check if an op with a name is enabled, call .enabled() on the class.
-    # Examples:
-    # - MyOp.enabled()
-    # - op_registry["my_op"].enabled()
-    op_registry: dict[str, type["CustomOp"]] = {}
-    op_registry_oot: dict[str, type["CustomOp"]] = {}
-
     # Decorator to register custom ops.
     @classmethod
     def register(cls, name: str):
         def decorator(op_cls):
-            assert name not in cls.op_registry, f"Duplicate op name: {name}"
+            assert name not in op_registry, f"Duplicate op name: {name}"
             op_cls.name = name
-            cls.op_registry[name] = op_cls
+            op_registry[name] = op_cls
             return op_cls
 
         return decorator
@@ -246,9 +243,9 @@ class CustomOp(nn.Module):
     def register_oot(cls, _decorated_op_cls=None, name: str | None = None):
         def decorator(op_cls):
             reg_name = name if name is not None else cls.__name__
-            assert reg_name not in cls.op_registry_oot, f"Duplicate op name: {reg_name}"
+            assert reg_name not in op_registry_oot, f"Duplicate op name: {reg_name}"
             op_cls.name = reg_name
-            cls.op_registry_oot[reg_name] = op_cls
+            op_registry_oot[reg_name] = op_cls
             return op_cls
 
         if _decorated_op_cls is None:
