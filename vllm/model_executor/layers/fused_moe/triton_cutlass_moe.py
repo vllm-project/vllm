@@ -7,20 +7,19 @@ import torch
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
-    FusedMoEParallelConfig,
     FusedMoEQuantConfig,
 )
 from vllm.model_executor.layers.fused_moe.cutlass_moe import CutlassExpertsFp8
 from vllm.model_executor.layers.fused_moe.fallback import FallbackExperts
 from vllm.model_executor.layers.fused_moe.fused_moe import TritonExperts
-from vllm.model_executor.layers.quantization.utils.quant_utils import (
-    QuantKey,
-)
 from vllm.platforms import current_platform
 
 
 class TritonOrCutlassExperts(FallbackExperts):
     """Cutlass with fallback to Triton for low latency shapes on SM100."""
+
+    _experts_cls = CutlassExpertsFp8
+    _fallback_cls = TritonExperts
 
     def __init__(
         self,
@@ -32,48 +31,6 @@ class TritonOrCutlassExperts(FallbackExperts):
             experts=CutlassExpertsFp8(moe_config, quant_config),
             fallback_experts=TritonExperts(moe_config, quant_config),
         )
-
-    @staticmethod
-    def activation_format() -> mk.FusedMoEActivationFormat:
-        assert (
-            CutlassExpertsFp8.activation_format() == TritonExperts.activation_format()
-        )
-        return CutlassExpertsFp8.activation_format()
-
-    @staticmethod
-    def _supports_current_device() -> bool:
-        return (
-            CutlassExpertsFp8._supports_current_device()
-            and TritonExperts._supports_current_device()
-        )
-
-    @staticmethod
-    def _supports_no_act_and_mul() -> bool:
-        return (
-            CutlassExpertsFp8._supports_no_act_and_mul()
-            and TritonExperts._supports_no_act_and_mul()
-        )
-
-    @staticmethod
-    def _supports_quant_scheme(
-        weight_key: QuantKey | None,
-        activation_key: QuantKey | None,
-    ) -> bool:
-        return CutlassExpertsFp8._supports_quant_scheme(
-            weight_key, activation_key
-        ) and TritonExperts._supports_quant_scheme(weight_key, activation_key)
-
-    @staticmethod
-    def _supports_activation(activation: str) -> bool:
-        return CutlassExpertsFp8._supports_activation(
-            activation
-        ) and TritonExperts._supports_activation(activation)
-
-    @staticmethod
-    def _supports_parallel_config(moe_parallel_config: FusedMoEParallelConfig) -> bool:
-        return CutlassExpertsFp8._supports_parallel_config(
-            moe_parallel_config
-        ) and TritonExperts._supports_parallel_config(moe_parallel_config)
 
     def workspace_shapes(
         self,

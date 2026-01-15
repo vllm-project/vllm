@@ -6,10 +6,15 @@ from abc import ABC, abstractmethod
 import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
+from vllm.model_executor.layers.fused_moe.config import FusedMoEParallelConfig
+from vllm.model_executor.layers.quantization.utils.quant_utils import QuantKey
 
 
 class FallbackExperts(mk.FusedMoEPermuteExpertsUnpermute, ABC):
     """Base class for runtime dispatching of expert implementations."""
+
+    _experts_cls = mk.FusedMoEPermuteExpertsUnpermute
+    _fallback_cls = mk.FusedMoEPermuteExpertsUnpermute
 
     def __init__(
         self,
@@ -21,6 +26,53 @@ class FallbackExperts(mk.FusedMoEPermuteExpertsUnpermute, ABC):
         )
         self.fallback_experts = fallback_experts
         self.experts = experts
+
+    @staticmethod
+    def activation_format() -> mk.FusedMoEActivationFormat:
+        assert (
+            FallbackExperts._experts_cls.activation_format()
+            == FallbackExperts._fallback_cls.activation_format()
+        )
+        return FallbackExperts._experts_cls.activation_format()
+
+    @staticmethod
+    def _supports_current_device() -> bool:
+        return (
+            FallbackExperts._experts_cls._supports_current_device()
+            and FallbackExperts._fallback_cls._supports_current_device()
+        )
+
+    @staticmethod
+    def _supports_no_act_and_mul() -> bool:
+        return (
+            FallbackExperts._experts_cls._supports_no_act_and_mul()
+            and FallbackExperts._fallback_cls._supports_no_act_and_mul()
+        )
+
+    @staticmethod
+    def _supports_quant_scheme(
+        weight_key: QuantKey | None,
+        activation_key: QuantKey | None,
+    ) -> bool:
+        return FallbackExperts._experts_cls._supports_quant_scheme(
+            weight_key, activation_key
+        ) and FallbackExperts._fallback_cls._supports_quant_scheme(
+            weight_key, activation_key
+        )
+
+    @staticmethod
+    def _supports_activation(activation: str) -> bool:
+        return FallbackExperts._experts_cls._supports_activation(
+            activation
+        ) and FallbackExperts._fallback_cls._supports_activation(activation)
+
+    @staticmethod
+    def _supports_parallel_config(moe_parallel_config: FusedMoEParallelConfig) -> bool:
+        return FallbackExperts._experts_cls._supports_parallel_config(
+            moe_parallel_config
+        ) and FallbackExperts._fallback_cls._supports_parallel_config(
+            moe_parallel_config
+        )
 
     def supports_chunking(self) -> bool:
         assert (

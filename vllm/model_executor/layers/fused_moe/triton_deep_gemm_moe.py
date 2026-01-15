@@ -6,7 +6,6 @@ import torch
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
-    FusedMoEParallelConfig,
     FusedMoEQuantConfig,
 )
 from vllm.model_executor.layers.fused_moe.deep_gemm_moe import (
@@ -16,9 +15,6 @@ from vllm.model_executor.layers.fused_moe.deep_gemm_moe import (
 )
 from vllm.model_executor.layers.fused_moe.fallback import FallbackExperts
 from vllm.model_executor.layers.fused_moe.fused_moe import TritonExperts
-from vllm.model_executor.layers.quantization.utils.quant_utils import (
-    QuantKey,
-)
 from vllm.utils.deep_gemm import (
     is_deep_gemm_e8m0_used,
 )
@@ -27,39 +23,14 @@ from vllm.utils.deep_gemm import (
 class TritonOrDeepGemmExperts(FallbackExperts):
     """DeepGemm with fallback to Triton for low latency shapes."""
 
+    _experts_cls = DeepGemmExperts
+    _fallback_cls = TritonExperts
+
     def __init__(self, moe_config: FusedMoEConfig, quant_config: FusedMoEQuantConfig):
         super().__init__(
             experts=DeepGemmExperts(moe_config, quant_config),
             fallback_experts=TritonExperts(moe_config, quant_config),
         )
-
-    @staticmethod
-    def activation_format() -> mk.FusedMoEActivationFormat:
-        assert DeepGemmExperts.activation_format() == TritonExperts.activation_format()
-        return DeepGemmExperts.activation_format()
-
-    @staticmethod
-    def _supports_current_device() -> bool:
-        return DeepGemmExperts._supports_current_device()
-
-    @staticmethod
-    def _supports_no_act_and_mul() -> bool:
-        return DeepGemmExperts._supports_no_act_and_mul()
-
-    @staticmethod
-    def _supports_quant_scheme(
-        weight_key: QuantKey | None,
-        activation_key: QuantKey | None,
-    ) -> bool:
-        return DeepGemmExperts._supports_quant_scheme(weight_key, activation_key)
-
-    @staticmethod
-    def _supports_activation(activation: str) -> bool:
-        return DeepGemmExperts._supports_activation(activation)
-
-    @staticmethod
-    def _supports_parallel_config(moe_parallel_config: FusedMoEParallelConfig) -> bool:
-        return DeepGemmExperts._supports_parallel_config(moe_parallel_config)
 
     def workspace_shapes(
         self,
