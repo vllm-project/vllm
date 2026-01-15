@@ -37,3 +37,15 @@ class CPULoadStoreSpec(BlockIDsLoadStoreSpec):
     @staticmethod
     def medium() -> str:
         return "CPU"
+
+
+class DRAMLoadStoreSpec(BlockIDsLoadStoreSpec):
+    @staticmethod
+    def medium() -> str:
+        return "DRAM"
+
+
+class CXLLoadStoreSpec(BlockIDsLoadStoreSpec):
+    @staticmethod
+    def medium() -> str:
+        return "CXL"

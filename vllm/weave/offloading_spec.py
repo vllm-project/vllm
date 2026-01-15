@@ -12,12 +12,21 @@ from vllm.platforms import current_platform
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.kv_offload.abstract import LoadStoreSpec, OffloadingManager
 from vllm.v1.kv_offload.arc_manager import ARCOffloadingManager
-from vllm.v1.kv_offload.backends.cpu import CPUBackend
 from vllm.v1.kv_offload.lru_manager import LRUOffloadingManager
-from vllm.v1.kv_offload.mediums import CPULoadStoreSpec, GPULoadStoreSpec
+from vllm.v1.kv_offload.mediums import (
+    CXLLoadStoreSpec,
+    DRAMLoadStoreSpec,
+    GPULoadStoreSpec,
+)
+from vllm.v1.kv_offload.worker.cpu_cpu import CpuCpuOffloadingHandler
 from vllm.v1.kv_offload.spec import OffloadingSpec
 from vllm.v1.kv_offload.worker.cpu_gpu import CpuGpuOffloadingHandlers
 from vllm.v1.kv_offload.worker.worker import OffloadingHandler
+
+from .cxl_backend import WeaveCXLBackend
+from .dram_backend import WeaveDRAMBackend
+from .numa import numa_membind
+from .two_tier_manager import TwoTierOffloadingManager
 
 logger = init_logger(__name__)
 
@@ -130,6 +139,8 @@ class WeaveOffloadingConfig:
     kv_prefetch_blocks: int = 2
     promotion_budget_MBps: int = 256  
     decode_allow_sync_cxl_read: bool = True
+
+    cxl_numa_node: int | None = None
     
 
     @classmethod
@@ -221,6 +232,10 @@ class WeaveOffloadingConfig:
             decode_allow_sync_cxl_read = _coerce_bool(
                 "decode_allow_sync_cxl_read", raw["decode_allow_sync_cxl_read"]
             )
+
+        cxl_numa_node = defaults.cxl_numa_node
+        if "cxl_numa_node" in raw and raw["cxl_numa_node"] is not None:
+            cxl_numa_node = _coerce_int("cxl_numa_node", raw["cxl_numa_node"])
         return cls(
             dram_bytes_to_use=dram_bytes_to_use,
             cxl_bytes_to_use=cxl_bytes_to_use,
@@ -234,6 +249,7 @@ class WeaveOffloadingConfig:
             kv_prefetch_blocks=kv_prefetch_blocks,
             promotion_budget_MBps=promotion_budget_MBps,
             decode_allow_sync_cxl_read=decode_allow_sync_cxl_read,
+            cxl_numa_node=cxl_numa_node,
         )
 
 class WeaveOffloadingSpec(OffloadingSpec):
@@ -260,7 +276,10 @@ class WeaveOffloadingSpec(OffloadingSpec):
         self._manager: OffloadingManager | None = None
 
         # Worker-side
-        self._handlers: CpuGpuOffloadingHandlers | None = None
+        self._dram_handlers: CpuGpuOffloadingHandlers | None = None
+        self._cxl_handlers: CpuGpuOffloadingHandlers | None = None
+        self._cpu_cpu_dram_to_cxl: CpuCpuOffloadingHandler | None = None
+        self._cpu_cpu_cxl_to_dram: CpuCpuOffloadingHandler | None = None
 
         # Optional tuning knobs
         self.eviction_policy: str = (
@@ -293,27 +312,38 @@ class WeaveOffloadingSpec(OffloadingSpec):
         if self._manager is None:
             kv_bytes_per_offloaded_block = self._get_kv_bytes_per_offloaded_block()
             if kv_bytes_per_offloaded_block <= 0:
-                num_blocks = 0
+                num_dram_blocks = 0
+                num_cxl_blocks = 0
             else:
-                num_blocks = self.weave_config.dram_bytes_to_use // kv_bytes_per_offloaded_block
+                num_dram_blocks = (
+                    self.weave_config.dram_bytes_to_use // kv_bytes_per_offloaded_block
+                )
+                num_cxl_blocks = (
+                    self.weave_config.cxl_bytes_to_use // kv_bytes_per_offloaded_block
+                )
 
             kv_events_config = self.vllm_config.kv_events_config
             enable_events = (
                 kv_events_config is not None and kv_events_config.enable_kv_cache_events
             )
 
-            backend = CPUBackend(block_size=self.offloaded_block_size, num_blocks=num_blocks)
+            dram_backend = WeaveDRAMBackend(
+                block_size=self.offloaded_block_size,
+                num_blocks=num_dram_blocks,
+            )
+            cxl_backend = WeaveCXLBackend(
+                block_size=self.offloaded_block_size,
+                num_blocks=num_cxl_blocks,
+                numa_node=self.weave_config.cxl_numa_node,
+            )
 
-            if self.eviction_policy == "lru":
-                self._manager = LRUOffloadingManager(backend=backend, enable_events=enable_events)
-            elif self.eviction_policy == "arc":
-                self._manager = ARCOffloadingManager(backend=backend, enable_events=enable_events)
-            else:
-                raise ValueError(
-                    f"Unknown eviction policy: {self.eviction_policy}. Supported policies: lru, arc"
-                )
+            self._manager = TwoTierOffloadingManager(
+                dram_backend=dram_backend,
+                cxl_backend=cxl_backend,
+                enable_events=enable_events,
+            )
             
-            if num_blocks == 0:
+            if num_dram_blocks == 0:
                 logger.warning(
                     "WeaveOffloadingSpec initialized with 0 DRAM offload blocks. "
                     "Offloading will likely be disabled. "
@@ -333,21 +363,57 @@ class WeaveOffloadingSpec(OffloadingSpec):
                 "WeaveOffloadingSpec (CPU-backed) is currently only supported on CUDA-alike GPUs"
             )
 
-        if self._handlers is None:
+        if self._dram_handlers is None or self._cxl_handlers is None:
             kv_bytes_per_offloaded_block = self._get_kv_bytes_per_offloaded_block()
             if kv_bytes_per_offloaded_block <= 0:
-                num_cpu_blocks = 0
+                num_dram_blocks = 0
+                num_cxl_blocks = 0
             else:
-                num_cpu_blocks = self.weave_config.dram_bytes_to_use // kv_bytes_per_offloaded_block
+                num_dram_blocks = (
+                    self.weave_config.dram_bytes_to_use // kv_bytes_per_offloaded_block
+                )
+                num_cxl_blocks = (
+                    self.weave_config.cxl_bytes_to_use // kv_bytes_per_offloaded_block
+                )
 
-            self._handlers = CpuGpuOffloadingHandlers(
+            self._dram_handlers = CpuGpuOffloadingHandlers(
                 attn_backends=attn_backends,
                 gpu_block_size=self.gpu_block_size,
                 cpu_block_size=self.offloaded_block_size,
-                num_cpu_blocks=num_cpu_blocks,
+                num_cpu_blocks=num_dram_blocks,
                 gpu_caches=kv_caches,
             )
 
-        assert self._handlers is not None
-        yield GPULoadStoreSpec, CPULoadStoreSpec, self._handlers.gpu_to_cpu_handler
-        yield CPULoadStoreSpec, GPULoadStoreSpec, self._handlers.cpu_to_gpu_handler
+            with numa_membind(self.weave_config.cxl_numa_node):
+                self._cxl_handlers = CpuGpuOffloadingHandlers(
+                    attn_backends=attn_backends,
+                    gpu_block_size=self.gpu_block_size,
+                    cpu_block_size=self.offloaded_block_size,
+                    num_cpu_blocks=num_cxl_blocks,
+                    gpu_caches=kv_caches,
+                )
+
+            self._cpu_cpu_dram_to_cxl = CpuCpuOffloadingHandler(
+                src_tensors=self._dram_handlers.cpu_tensors,
+                dst_tensors=self._cxl_handlers.cpu_tensors,
+                kv_dim_before_num_blocks=self._dram_handlers.kv_dim_before_num_blocks,
+                src_block_size_factor=self._dram_handlers.cpu_block_size_factor,
+                dst_block_size_factor=self._cxl_handlers.cpu_block_size_factor,
+            )
+            self._cpu_cpu_cxl_to_dram = CpuCpuOffloadingHandler(
+                src_tensors=self._cxl_handlers.cpu_tensors,
+                dst_tensors=self._dram_handlers.cpu_tensors,
+                kv_dim_before_num_blocks=self._dram_handlers.kv_dim_before_num_blocks,
+                src_block_size_factor=self._cxl_handlers.cpu_block_size_factor,
+                dst_block_size_factor=self._dram_handlers.cpu_block_size_factor,
+            )
+
+        assert self._dram_handlers is not None
+        assert self._cxl_handlers is not None
+        assert self._cpu_cpu_dram_to_cxl is not None
+        assert self._cpu_cpu_cxl_to_dram is not None
+
+        yield GPULoadStoreSpec, DRAMLoadStoreSpec, self._dram_handlers.gpu_to_cpu_handler
+        yield DRAMLoadStoreSpec, GPULoadStoreSpec, self._dram_handlers.cpu_to_gpu_handler
+        yield DRAMLoadStoreSpec, CXLLoadStoreSpec, self._cpu_cpu_dram_to_cxl
+        yield CXLLoadStoreSpec, DRAMLoadStoreSpec, self._cpu_cpu_cxl_to_dram
