@@ -919,6 +919,8 @@ class FlashAttentionImpl(AttentionImpl):
 
         # Apply FP8 output quantization after merging if requested.
         if output_scale is not None:
+            from vllm import _custom_ops as ops
+
             output[:] = ops.scaled_fp8_quant(output, output_scale)[0]
 
     def _forward_encoder_attention(
@@ -1166,4 +1168,6 @@ def cascade_attention(
 
     # Apply FP8 output quantization after merging if requested.
     if output_scale is not None:
+        from vllm import _custom_ops as ops
+
         output[:] = ops.scaled_fp8_quant(output, output_scale)[0]
