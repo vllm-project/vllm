@@ -31,7 +31,7 @@ from vllm.entrypoints.chat_utils import (
     parse_chat_messages_futures,
     resolve_chat_template_content_format,
 )
-from vllm.entrypoints.context import (
+from vllm.entrypoints.openai.responses.context import (
     ConversationContext,
     HarmonyContext,
     ParsableContext,
@@ -85,7 +85,7 @@ from vllm.entrypoints.pooling.score.protocol import (
     ScoreResponse,
 )
 from vllm.entrypoints.renderer import BaseRenderer, CompletionRenderer, RenderConfig
-from vllm.entrypoints.responses_utils import (
+from vllm.entrypoints.openai.responses.utils import (
     construct_input_messages,
 )
 from vllm.entrypoints.serve.disagg.protocol import GenerateRequest, GenerateResponse

@@ -6,7 +6,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 from openai_harmony import Author, Message, Role, StreamState, TextContent
 
-from vllm.entrypoints.context import (
+from vllm.entrypoints.openai.responses.context import (
     HarmonyContext,
     StreamingHarmonyContext,
     TurnMetrics,
