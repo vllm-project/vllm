@@ -575,9 +575,7 @@ class EngineArgs:
     optimization_level: OptimizationLevel = VllmConfig.optimization_level
 
     kv_offloading_size: float | None = CacheConfig.kv_offloading_size
-    kv_offloading_backend: KVOffloadingBackend | None = (
-        CacheConfig.kv_offloading_backend
-    )
+    kv_offloading_backend: KVOffloadingBackend = CacheConfig.kv_offloading_backend
     tokens_only: bool = False
 
     weight_transfer_backend: str = "nccl"
