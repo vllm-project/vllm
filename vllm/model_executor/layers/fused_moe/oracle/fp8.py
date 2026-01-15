@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from enum import Enum
-from typing import TYPE_CHECKING
 
 import torch
 
@@ -36,9 +35,6 @@ from vllm.model_executor.layers.quantization.utils.marlin_utils_fp8 import (
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
 )
-
-if TYPE_CHECKING:
-    from vllm.model_executor.layers.fused_moe.layer import FusedMoE
 
 logger = init_logger(__name__)
 
@@ -419,7 +415,6 @@ def make_fp8_moe_quant_config(
 
 
 def make_fp8_moe_kernel(
-    layer: "FusedMoE",
     moe_quant_config: FusedMoEQuantConfig,
     moe_config: FusedMoEConfig,
     fp8_backend: Fp8MoeBackend,
