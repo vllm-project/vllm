@@ -27,6 +27,7 @@ from vllm.model_executor.layers.fused_moe.oracle.fp8 import (
     Fp8MoeBackend,
     convert_to_fp8_moe_kernel_format,
     make_fp8_moe_kernel,
+    make_fp8_moe_kernel_for_mkm,
     make_fp8_moe_quant_config,
     select_fp8_moe_backend,
 )
@@ -55,6 +56,7 @@ from vllm.model_executor.layers.quantization.utils.flashinfer_fp4_moe import (
 )
 from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
     apply_fi_trtllm_fp8_per_tensor_moe,
+    build_flashinfer_fp8_cutlass_moe_prepare_finalize,
 )
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     W8A8BlockFp8LinearOp,
@@ -752,19 +754,39 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
         self,
         routing_tables: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
     ) -> mk.FusedMoEPrepareAndFinalize | None:
-        raise ValueError(
-            "ModelOptFp8MoEMethod uses the new modular kernel initialization "
-            "logic. This function should not be called."
-        )
+        # TRT LLM not supported with all2all yet.
+        if self.fp8_backend == Fp8MoeBackend.FLASHINFER_TRTLLM:
+            return None
+
+        elif self.fp8_backend == Fp8MoeBackend.FLASHINFER_CUTLASS:
+            # For no EP case, don't use the MKM framework.
+            if (
+                not self.moe.moe_parallel_config.use_all2all_kernels
+                or self.moe.moe_parallel_config.use_naive_all2all_kernels
+            ):
+                return None
+
+            prepare_finalize = build_flashinfer_fp8_cutlass_moe_prepare_finalize(
+                self.moe,
+                use_deepseek_fp8_block_scale=False,
+            )
+            logger.debug_once("%s", prepare_finalize.__class__.__name__)
+            return prepare_finalize
+
+        return super().maybe_make_prepare_finalize(routing_tables)
 
     def select_gemm_impl(
         self,
         prepare_finalize: mk.FusedMoEPrepareAndFinalize,
         layer: torch.nn.Module,
     ) -> mk.FusedMoEPermuteExpertsUnpermute:
-        raise ValueError(
-            "ModelOptFp8MoEMethod uses the new modular kernel initialization "
-            "logic. This function should not be called."
+        assert self.moe_quant_config is not None
+        assert self.experts_cls is not None
+        return make_fp8_moe_kernel_for_mkm(
+            moe_config=self.moe,
+            quant_config=self.moe_quant_config,
+            experts_cls=self.experts_cls,
+            prepare_finalize=prepare_finalize,
         )
 
     def create_weights(

@@ -890,9 +890,14 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         self,
         routing_tables: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
     ) -> mk.FusedMoEPrepareAndFinalize | None:
-        if self.fp8_backend == Fp8MoeBackend.FLASHINFER_CUTLASS:
-            # For no EP case, don't use the MKM framework.
-            if self.moe.moe_parallel_config.use_all2all_kernels:
+        if self.fp8_backend == Fp8MoeBackend.FLASHINFER_TRTLLM:
+            return None
+
+        elif self.fp8_backend == Fp8MoeBackend.FLASHINFER_CUTLASS:
+            if (
+                not self.moe.moe_parallel_config.use_all2all_kernels
+                or self.moe.moe_parallel_config.use_naive_all2all_kernels
+            ):
                 return None
 
             prepare_finalize = build_flashinfer_fp8_cutlass_moe_prepare_finalize(
@@ -901,6 +906,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             )
             logger.debug_once("%s", prepare_finalize.__class__.__name__)
             return prepare_finalize
+
         return super().maybe_make_prepare_finalize(routing_tables)
 
     def select_gemm_impl(
