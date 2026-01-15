@@ -882,6 +882,12 @@ class FusedMoEParallelConfig:
     def use_batched_activation_format(self):
         return self.use_deepep_ll_kernels or self.use_pplx_kernels
 
+    @property
+    def use_naive_all2all_kernels(self):
+        return self.use_all2all_kernels and (
+            self.all2all_backend in ["naive", "allgather_reducescatter"]
+        )
+
     @staticmethod
     def flatten_tp_across_dp_and_pcp(
         tp_size: int, dp_size: int, dp_rank: int, pcp_size: int, pcp_rank: int
