@@ -93,7 +93,7 @@ from .utils import (
     is_pp_missing_parameter,
     make_empty_intermediate_tensors_factory,
     make_layers,
-    maybe_prefix
+    maybe_prefix,
 )
 
 logger = init_logger(__name__)
