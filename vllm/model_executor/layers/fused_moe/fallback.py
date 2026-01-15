@@ -24,58 +24,60 @@ class FallbackExperts(mk.FusedMoEPermuteExpertsUnpermute, ABC):
         self.fallback_experts = fallback_experts
         self.experts = experts
 
-    @classmethod
-    @abstractmethod
-    def get_clss(
-        cls,
-    ) -> tuple[
+    @staticmethod
+    def get_clss() -> tuple[
         type[mk.FusedMoEPermuteExpertsUnpermute],
         type[mk.FusedMoEPermuteExpertsUnpermute],
     ]:
-        raise NotImplementedError
+        raise NotImplementedError(
+            "Subclasses must return the cls for the experts and fallback experts."
+        )
 
-    @staticmethod
-    def activation_format() -> mk.FusedMoEActivationFormat:
-        experts_cls, fallback_cls = FallbackExperts.get_clss()
+    @classmethod
+    def activation_format(cls) -> mk.FusedMoEActivationFormat:
+        experts_cls, fallback_cls = cls.get_clss()
         assert experts_cls.activation_format() == fallback_cls.activation_format()
         return experts_cls.activation_format()
 
-    @staticmethod
-    def _supports_current_device() -> bool:
-        experts_cls, fallback_cls = FallbackExperts.get_clss()
+    @classmethod
+    def _supports_current_device(cls) -> bool:
+        experts_cls, fallback_cls = cls.get_clss()
         return (
             experts_cls._supports_current_device()
             and fallback_cls._supports_current_device()
         )
 
-    @staticmethod
-    def _supports_no_act_and_mul() -> bool:
-        experts_cls, fallback_cls = FallbackExperts.get_clss()
+    @classmethod
+    def _supports_no_act_and_mul(cls) -> bool:
+        experts_cls, fallback_cls = cls.get_clss()
         return (
             experts_cls._supports_no_act_and_mul()
             and fallback_cls._supports_no_act_and_mul()
         )
 
-    @staticmethod
+    @classmethod
     def _supports_quant_scheme(
+        cls,
         weight_key: QuantKey | None,
         activation_key: QuantKey | None,
     ) -> bool:
-        experts_cls, fallback_cls = FallbackExperts.get_clss()
+        experts_cls, fallback_cls = cls.get_clss()
         return experts_cls._supports_quant_scheme(
             weight_key, activation_key
         ) and fallback_cls._supports_quant_scheme(weight_key, activation_key)
 
-    @staticmethod
-    def _supports_activation(activation: str) -> bool:
-        experts_cls, fallback_cls = FallbackExperts.get_clss()
+    @classmethod
+    def _supports_activation(cls, activation: str) -> bool:
+        experts_cls, fallback_cls = cls.get_clss()
         return experts_cls._supports_activation(
             activation
         ) and fallback_cls._supports_activation(activation)
 
-    @staticmethod
-    def _supports_parallel_config(moe_parallel_config: FusedMoEParallelConfig) -> bool:
-        experts_cls, fallback_cls = FallbackExperts.get_clss()
+    @classmethod
+    def _supports_parallel_config(
+        cls, moe_parallel_config: FusedMoEParallelConfig
+    ) -> bool:
+        experts_cls, fallback_cls = cls.get_clss()
         return experts_cls._supports_parallel_config(
             moe_parallel_config
         ) and fallback_cls._supports_parallel_config(moe_parallel_config)

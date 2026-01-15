@@ -50,6 +50,7 @@ from vllm.model_executor.layers.quantization.base_config import (
 from vllm.model_executor.layers.quantization.kv_cache import BaseKVCacheMethod
 from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
     apply_fi_trtllm_fp8_per_tensor_moe,
+    build_flashinfer_fp8_cutlass_moe_prepare_finalize,
 )
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     W8A8BlockFp8LinearOp,
@@ -888,10 +889,14 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         self,
         routing_tables: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
     ) -> mk.FusedMoEPrepareAndFinalize | None:
-        raise ValueError(
-            "Fp8FusedMoE uses the new modular kernel initialization logic. "
-            "This function should not be called."
-        )
+        if self.fp8_backend == Fp8MoeBackend.FLASHINFER_CUTLASS:
+            prepare_finalize = build_flashinfer_fp8_cutlass_moe_prepare_finalize(
+                self.moe,
+                use_deepseek_fp8_block_scale=self.block_quant,
+            )
+            logger.debug_once("%s", prepare_finalize.__class__.__name__)
+            return prepare_finalize
+        return super().maybe_make_prepare_finalize(routing_tables)
 
     def select_gemm_impl(
         self,
