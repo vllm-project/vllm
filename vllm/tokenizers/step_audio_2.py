@@ -148,7 +148,7 @@ class StepAudio2Tokenizer(Qwen2TokenizerFast):
             for i in range(len(result) - 1, -1, -1):
                 if final_message in result[i]:
                     last_index = i
-                    break  # 找到后立即退出循环
+                    break
             result = result[:last_index + 1]
 
         return ''.join(result)
@@ -261,7 +261,7 @@ class StepAudio2Tokenizer(Qwen2TokenizerFast):
             for i in range(len(result) - 1, -1, -1):
                 if final_message in result[i]:
                     last_index = i
-                    break  # 找到后立即退出循环
+                    break
             result = result[:last_index + 1]
         trans_token_ids = self.trans_text_audio_to_ta4(result)
         return trans_token_ids
@@ -278,7 +278,7 @@ class StepAudio2Tokenizer(Qwen2TokenizerFast):
         text_token_ids_pad = text_token_ids + [self.tts_pad_token_id] * (
             chunk_nums - len(text_token_ids))
         audio_token_ids_pad = audio_token_ids + [self.audio_pad_token_id] * (
-            chunk_nums - len(audio_token_ids))
+            chunk_nums * chunk - len(audio_token_ids))
         for idx in range(chunk_nums):
             ta4_content += text_token_ids_pad[idx:(idx + 1)]
             ta4_content += audio_token_ids_pad[idx * chunk:(idx + 1) * chunk]
