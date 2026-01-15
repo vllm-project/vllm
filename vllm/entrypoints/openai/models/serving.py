@@ -3,7 +3,6 @@
 
 from asyncio import Lock
 from collections import defaultdict
-from dataclasses import dataclass
 from http import HTTPStatus
 
 from vllm.engine.protocol import EngineClient
@@ -14,29 +13,18 @@ from vllm.entrypoints.openai.engine.protocol import (
     ModelList,
     ModelPermission,
 )
+from vllm.entrypoints.openai.models.protocol import BaseModelPath, LoRAModulePath
 from vllm.entrypoints.serve.lora.protocol import (
     LoadLoRAAdapterRequest,
     UnloadLoRAAdapterRequest,
 )
+from vllm.entrypoints.utils import sanitize_message
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.lora.resolver import LoRAResolver, LoRAResolverRegistry
 from vllm.utils.counter import AtomicCounter
 
 logger = init_logger(__name__)
-
-
-@dataclass
-class BaseModelPath:
-    name: str
-    model_path: str
-
-
-@dataclass
-class LoRAModulePath:
-    name: str
-    path: str
-    base_model_name: str | None = None
 
 
 class OpenAIServingModels:
@@ -302,5 +290,9 @@ def create_error_response(
     status_code: HTTPStatus = HTTPStatus.BAD_REQUEST,
 ) -> ErrorResponse:
     return ErrorResponse(
-        error=ErrorInfo(message=message, type=err_type, code=status_code.value)
+        error=ErrorInfo(
+            message=sanitize_message(message),
+            type=err_type,
+            code=status_code.value,
+        )
     )

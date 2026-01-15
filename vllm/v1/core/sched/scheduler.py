@@ -283,6 +283,13 @@ class Scheduler(SchedulerInterface):
         while req_index < len(self.running) and token_budget > 0:
             request = self.running[req_index]
 
+            # do not schedule another step for the same request while it still has
+            # output placeholders for PP.
+            # TODO: support PP + async scheduling without this limit
+            if self.use_pp and request.num_output_placeholders > 0:
+                req_index += 1
+                continue
+
             if (
                 request.num_output_placeholders > 0
                 # This is (num_computed_tokens + 1) - (num_output_placeholders - 1).
