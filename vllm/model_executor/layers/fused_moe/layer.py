@@ -43,7 +43,7 @@ from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (
 from vllm.model_executor.layers.fused_moe.routed_experts_capturer import (
     RoutedExpertsCapturer,
 )
-from vllm.model_executor.layers.fused_moe.router_factory import (
+from vllm.model_executor.layers.fused_moe.router.router_factory import (
     create_fused_moe_router,
 )
 from vllm.model_executor.layers.fused_moe.unquantized_fused_moe_method import (
@@ -618,8 +618,7 @@ class FusedMoE(CustomOp):
             # If you plan to add support for more quantization methods,
             # please refer to the implementation in `Fp8MoEMethod`.
             raise NotImplementedError(
-                f"EPLB is not supported {self.quant_method.__class__.__name__}. "
-                "EPLB is only supported for FP8 quantization for now."
+                f"EPLB is not supported {self.quant_method.__class__.__name__}."
             )
 
         # TODO(bnell): in next PR move capture back to layer

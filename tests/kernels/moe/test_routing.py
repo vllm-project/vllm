@@ -7,7 +7,9 @@ import torch
 
 from vllm.distributed.eplb.eplb_state import EplbLayerState
 from vllm.model_executor.layers.fused_moe.config import RoutingMethodType
-from vllm.model_executor.layers.fused_moe.router_factory import create_fused_moe_router
+from vllm.model_executor.layers.fused_moe.router.router_factory import (
+    create_fused_moe_router,
+)
 from vllm.model_executor.models.llama4 import Llama4MoE
 
 # Test parameters

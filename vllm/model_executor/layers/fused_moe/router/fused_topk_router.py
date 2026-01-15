@@ -7,8 +7,8 @@ import torch
 import vllm._custom_ops as ops
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.distributed.eplb.eplb_state import EplbLayerState
-from vllm.model_executor.layers.fused_moe.base_router import BaseRouter
 from vllm.model_executor.layers.fused_moe.config import RoutingMethodType
+from vllm.model_executor.layers.fused_moe.router.base_router import BaseRouter
 
 
 def vllm_topk_softmax(

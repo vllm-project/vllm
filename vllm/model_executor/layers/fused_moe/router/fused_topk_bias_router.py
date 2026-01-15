@@ -8,8 +8,8 @@ from vllm.distributed.eplb.eplb_state import EplbLayerState
 from vllm.model_executor.layers.batch_invariant import (
     vllm_is_batch_invariant,
 )
-from vllm.model_executor.layers.fused_moe.base_router import BaseRouter
 from vllm.model_executor.layers.fused_moe.config import RoutingMethodType
+from vllm.model_executor.layers.fused_moe.router.base_router import BaseRouter
 
 
 def fused_topk_bias(

@@ -6,7 +6,9 @@ from collections.abc import Callable
 import torch
 
 from vllm.distributed.eplb.eplb_state import EplbLayerState
-from vllm.model_executor.layers.fused_moe.fused_moe_router import FusedMoERouter
+from vllm.model_executor.layers.fused_moe.router.fused_moe_router import (
+    FusedMoERouter,
+)
 from vllm.platforms import current_platform
 
 if current_platform.is_cuda_alike():

@@ -6,18 +6,24 @@ import torch
 
 import vllm.envs as envs
 from vllm.distributed.eplb.eplb_state import EplbLayerState
-from vllm.model_executor.layers.fused_moe.base_router import BaseRouter
 from vllm.model_executor.layers.fused_moe.config import RoutingMethodType
-from vllm.model_executor.layers.fused_moe.custom_routing_router import (
+from vllm.model_executor.layers.fused_moe.router.base_router import BaseRouter
+from vllm.model_executor.layers.fused_moe.router.custom_routing_router import (
     CustomRoutingRouter,
 )
-from vllm.model_executor.layers.fused_moe.fused_moe_router import FusedMoERouter
-from vllm.model_executor.layers.fused_moe.fused_topk_bias_router import (
+from vllm.model_executor.layers.fused_moe.router.fused_moe_router import (
+    FusedMoERouter,
+)
+from vllm.model_executor.layers.fused_moe.router.fused_topk_bias_router import (
     FusedTopKBiasRouter,
 )
-from vllm.model_executor.layers.fused_moe.fused_topk_router import FusedTopKRouter
-from vllm.model_executor.layers.fused_moe.grouped_topk_router import GroupedTopKRouter
-from vllm.model_executor.layers.fused_moe.routing_simulator_router import (
+from vllm.model_executor.layers.fused_moe.router.fused_topk_router import (
+    FusedTopKRouter,
+)
+from vllm.model_executor.layers.fused_moe.router.grouped_topk_router import (
+    GroupedTopKRouter,
+)
+from vllm.model_executor.layers.fused_moe.router.routing_simulator_router import (
     RoutingSimulatorRouter,
 )
 
