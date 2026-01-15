@@ -174,6 +174,7 @@ class TopKTopPSampler(nn.Module):
         k: torch.Tensor | None,
         p: torch.Tensor | None,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        # FIXME: Fix aiter_sampler's accuracy issue and remove this flag
         DISABLE_AITER_SAMPLER = True
         """Optimized ROCm/aiter path (same structure as forward_cuda)."""
         if (k is None and p is None) or generators:
