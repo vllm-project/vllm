@@ -375,9 +375,9 @@ class Attention(nn.Module, AttentionLayerBase):
             if value is not None:
                 value = value.view(-1, self.num_kv_heads, self.head_size_v)
             if self.use_direct_call:
-                kv_cache_update_out = None
+                kv_cache_dummy_dep = None
                 if not self.attn_backend.forward_includes_kv_cache:
-                    kv_cache_update_out = unified_kv_cache_update(
+                    kv_cache_dummy_dep = unified_kv_cache_update(
                         key, value, self.layer_name
                     )
                 unified_attention_with_output(
@@ -386,15 +386,15 @@ class Attention(nn.Module, AttentionLayerBase):
                     value,
                     output,
                     self.layer_name,
-                    kv_cache_update_out=kv_cache_update_out,
+                    kv_cache_dummy_dep=kv_cache_dummy_dep,
                 )
             else:
-                kv_cache_update_out = None
+                kv_cache_dummy_dep = None
                 if not self.attn_backend.forward_includes_kv_cache and (
                     # torch can only dispatch custom op if a tensor is passed
                     key is not None or value is not None
                 ):
-                    kv_cache_update_out = torch.ops.vllm.unified_kv_cache_update(
+                    kv_cache_dummy_dep = torch.ops.vllm.unified_kv_cache_update(
                         key, value, self.layer_name
                     )
                 torch.ops.vllm.unified_attention_with_output(
@@ -403,7 +403,7 @@ class Attention(nn.Module, AttentionLayerBase):
                     value,
                     output,
                     self.layer_name,
-                    kv_cache_update_out=kv_cache_update_out,
+                    kv_cache_dummy_dep=kv_cache_dummy_dep,
                 )
             return output.view(-1, hidden_size)
         else:
@@ -810,6 +810,10 @@ def unified_kv_cache_update(
     value: torch.Tensor,
     layer_name: str,
 ) -> torch.Tensor:
+    """
+    Returns a dummy that is passed to unified_attention to signal a side effect and
+    the data dependency between them to ensure torch.compile preserves ordering.
+    """
     forward_context = get_forward_context()
     attn_layer = forward_context.no_compile_layers[layer_name]
     kv_cache = attn_layer.kv_cache[forward_context.virtual_engine]
@@ -859,12 +863,12 @@ def unified_attention_with_output(
     layer_name: str,
     output_scale: torch.Tensor | None = None,
     output_block_scale: torch.Tensor | None = None,
-    kv_cache_update_out: torch.Tensor | None = None,
+    kv_cache_dummy_dep: torch.Tensor | None = None,
 ) -> None:
-    # kv_cache_update_out is not used but accepting it creates a data dependency
+    # kv_cache_dummy_dep is not used but accepting it creates a data dependency
     # that ensures torch.compile preserves ordering between KV cache update and
     # attention forward.
-    del kv_cache_update_out
+    del kv_cache_dummy_dep
     attn_metadata, self, kv_cache = get_attention_context(layer_name)
 
     self.impl.forward(
@@ -888,7 +892,7 @@ def unified_attention_with_output_fake(
     layer_name: str,
     output_scale: torch.Tensor | None = None,
     output_block_scale: torch.Tensor | None = None,
-    kv_cache_update_out: torch.Tensor | None = None,
+    kv_cache_dummy_dep: torch.Tensor | None = None,
 ) -> None:
     return
 
