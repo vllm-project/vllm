@@ -4,8 +4,6 @@
 
 from collections.abc import Callable
 from functools import partial
-from math import pi
-from typing import Literal
 
 import torch
 from einops import rearrange, repeat
@@ -71,7 +69,6 @@ class PerceptionEncoderRope2D(nn.Module):
         max_grid_height: int,
         max_grid_width: int,
         use_cls_token: bool = False,
-        freqs_for: Literal["lang", "pixel", "constant"] = "lang",
         theta=10000,
         max_freq=10,
         num_freqs=1,
@@ -83,23 +80,13 @@ class PerceptionEncoderRope2D(nn.Module):
         self.max_grid_width = max_grid_width
         self.use_cls_token = use_cls_token
         self.theta = theta * theta_rescale_factor ** (dim / (dim - 2))
-        self.freqs_for = freqs_for
         self.max_freq = max_freq
         self.num_freqs = num_freqs
         cache = self._compute_2d_freqs()
         self.register_buffer("freqs_cache", cache, persistent=False)
 
     def _compute_inv_freq(self, base: int | float, dim: int) -> torch.Tensor:
-        if self.freqs_for == "lang":
-            freqs = 1.0 / (
-                base ** (torch.arange(0, dim, 2)[: (dim // 2)].float() / dim)
-            )
-        elif self.freqs_for == "pixel":
-            freqs = torch.linspace(1.0, self.max_freq / 2, dim // 2) * pi
-        elif self.freqs_for == "constant":
-            freqs = torch.ones(self.num_freqs).float()
-        else:
-            raise ValueError(f"Unsupported freqs_for value: {self.freqs_for}")
+        freqs = 1.0 / (base ** (torch.arange(0, dim, 2)[: (dim // 2)].float() / dim))
         return freqs
 
     def _compute_freqs(self, t: torch.Tensor, inv_freq: torch.Tensor):
@@ -358,78 +345,6 @@ class PerceptionEncoderVisionTransformer(nn.Module):
         return x
 
 
-class PerceptionEncoderAttentionPooling(nn.Module):
-    def __init__(
-        self,
-        embed_dim: int,
-        num_heads: int,
-        num_probe: int = 1,
-        mlp_ratio: int = 4,
-        act_layer: Callable = nn.GELU,
-        norm_layer: Callable = nn.LayerNorm,
-        quant_config: QuantizationConfig | None = None,
-        prefix: str = "",
-        use_data_parallel: bool = False,
-    ):
-        super().__init__()
-        assert embed_dim % num_heads == 0, "embed_dim must be divisible by num_heads"
-        self.embed_dim = embed_dim
-        self.total_num_heads = num_heads
-        self.num_probe = num_probe
-        tp_size = 1 if use_data_parallel else get_tensor_model_parallel_world_size()
-        assert self.total_num_heads % tp_size == 0, (
-            "num_heads must be divisible across tensor parallel ranks"
-        )
-        self.num_heads = self.total_num_heads // tp_size
-        self.head_dim = embed_dim // self.total_num_heads
-        self.scale = self.head_dim**-0.5
-
-        self.probe = nn.Parameter(torch.randn(1, num_probe, embed_dim))
-        self.qkv_proj = QKVParallelLinear(
-            embed_dim,
-            self.head_dim,
-            self.total_num_heads,
-            bias=True,
-            quant_config=quant_config,
-            prefix=f"{prefix}.qkv_proj",
-            disable_tp=use_data_parallel,
-        )
-        self.attn = MMEncoderAttention(self.num_heads, self.head_dim, self.scale)
-        self.out_proj = RowParallelLinear(
-            embed_dim,
-            embed_dim,
-            bias=True,
-            quant_config=quant_config,
-            prefix=f"{prefix}.out_proj",
-            disable_tp=use_data_parallel,
-        )
-        self.layernorm = norm_layer(embed_dim)
-        hidden_dim = int(embed_dim * mlp_ratio)
-        self.mlp = PerceptionEncoderMLP(
-            embed_dim,
-            hidden_dim,
-            act_layer,
-            quant_config=quant_config,
-            prefix=f"{prefix}.mlp",
-            use_data_parallel=use_data_parallel,
-        )
-
-    def forward(self, x: torch.Tensor):
-        batch = x.shape[0]
-        probe = self.probe.expand(batch, -1, -1).to(dtype=x.dtype, device=x.device)
-        combined = torch.cat([probe, x], dim=1)
-        qkv, _ = self.qkv_proj(combined)
-        q, k, v = qkv.chunk(3, dim=-1)
-        q = q[:, : self.num_probe, :]
-        k = k[:, self.num_probe :, :]
-        v = v[:, self.num_probe :, :]
-
-        attn_out = self.attn(q, k, v)
-        attn_out, _ = self.out_proj(attn_out)
-        attn_out = attn_out + self.mlp(self.layernorm(attn_out))
-        return attn_out
-
-
 class PerceptionEncoder(nn.Module):
     def __init__(
         self,
@@ -441,8 +356,6 @@ class PerceptionEncoder(nn.Module):
         use_data_parallel: bool = False,
     ):
         super().__init__()
-        assert config.pool_type in ("attn", "tok", "avg", "none")
-        self.pool_type = config.pool_type
         self.patch_size = config.patch_size
 
         self.output_dim = config.output_dim or config.width
@@ -483,19 +396,6 @@ class PerceptionEncoder(nn.Module):
             prefix=f"{prefix}.transformer",
             use_data_parallel=use_data_parallel,
         )
-
-        if config.pool_type == "attn":
-            self.attn_pool = PerceptionEncoderAttentionPooling(
-                embed_dim=config.width,
-                num_heads=config.attn_pooler_heads,
-                act_layer=act_layer,
-                norm_layer=norm_layer,
-                quant_config=quant_config,
-                prefix=f"{prefix}.attn_pool",
-                use_data_parallel=use_data_parallel,
-            )
-        else:
-            self.attn_pool = None
 
         self.vit_downsampler1 = Conv2dLayer(
             config.width, config.width * 2, kernel_size=3, stride=2, padding=1
@@ -542,24 +442,7 @@ class PerceptionEncoder(nn.Module):
 
         return pos_embed[None, ...]
 
-    def pool(self, x: torch.Tensor):
-        if self.pool_type == "tok":
-            return x[:, 0]
-        if self.pool_type == "avg":
-            return x.mean(dim=1)
-        if self.pool_type == "attn":
-            return self.attn_pool(x).squeeze(1)
-        if self.pool_type == "none":
-            return x
-        raise NotImplementedError
-
-    def forward_features(
-        self,
-        x: torch.Tensor,
-        norm: bool = False,
-        layer_idx: int = -1,
-        strip_cls_token: bool = False,
-    ):
+    def forward_features(self, x: torch.Tensor):
         batch, _, h, w = x.shape
         grid_h, grid_w = h // self.patch_size, w // self.patch_size
 
@@ -576,17 +459,15 @@ class PerceptionEncoder(nn.Module):
 
         x = self.ln_pre(x)
         x = self.transformer(x, grid_hw=(grid_h, grid_w))
-        if norm:
-            x = self.ln_post(x)
+        x = self.ln_post(x)
 
-        if strip_cls_token and self.use_cls_token:
+        if self.use_cls_token:
             x = x[:, 1:, :]
 
         return x
 
     def forward(self, x: torch.Tensor):
-        x = self.forward_features(x, norm=True, strip_cls_token=True)
-        x = self.pool(x)
+        x = self.forward_features(x)
         B, P, C = x.shape
         T = int(P**0.5)
         x = x.transpose(2, 1).contiguous()
@@ -606,9 +487,6 @@ class StepVLForConditionalGeneration(Step3VLForConditionalGeneration):
             "lm_head.": "language_model.lm_head.",
         },
         orig_to_new_substr={
-            ".attn_pool.attn.in_proj_weight": ".attn_pool.qkv_proj.weight",
-            ".attn_pool.attn.in_proj_bias": ".attn_pool.qkv_proj.bias",
-            ".attn_pool.attn.out_proj": ".attn_pool.out_proj",
             ".attn.in_proj_weight": ".attn.qkv_proj.weight",
             ".attn.in_proj_bias": ".attn.qkv_proj.bias",
             ".mlp.c_fc": ".mlp.fc1",
