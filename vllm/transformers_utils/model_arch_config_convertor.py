@@ -202,7 +202,13 @@ class ModelArchConfigConvertorBase:
             # underlying architecture
             return (
                 self.hf_text_config.model.model_type
-                in ("AXK1", "deepseek_v2", "deepseek_v3", "deepseek_v32", "deepseek_mtp")
+                in (
+                    "AXK1",
+                    "deepseek_v2",
+                    "deepseek_v3",
+                    "deepseek_v32",
+                    "deepseek_mtp",
+                )
                 and self.hf_text_config.kv_lora_rank is not None
             )
         return False

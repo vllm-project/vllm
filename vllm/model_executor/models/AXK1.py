@@ -81,9 +81,7 @@ from .utils import (
     maybe_prefix,
 )
 
-
 logger = init_logger(__name__)
-
 
 
 class AXK1MLP(DeepseekV2MLP):
@@ -653,9 +651,7 @@ class AXK1DecoderLayer(nn.Module):
         self.post_attention_layernorm = RMSNorm(
             config.hidden_size, eps=config.rms_norm_eps
         )
-        self.post_mlp_layernorm = RMSNorm(
-            config.hidden_size, eps=config.rms_norm_eps
-        )
+        self.post_mlp_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.routed_scaling_factor = config.routed_scaling_factor
 
     def _is_layer_sparse(self) -> bool:
@@ -664,7 +660,7 @@ class AXK1DecoderLayer(nn.Module):
             and self.layer_idx >= self.config.first_k_dense_replace
             and self.layer_idx % self.config.moe_layer_freq == 0
         )
-    
+
     def forward(
         self,
         positions: torch.Tensor,
@@ -1161,7 +1157,9 @@ class AXK1ForCausalLM(
         return loaded_params
 
 
-def get_spec_layer_idx_from_weight_name(config: AXK1Config, weight_name: str) -> int | None:
+def get_spec_layer_idx_from_weight_name(
+    config: AXK1Config, weight_name: str
+) -> int | None:
     if config.num_nextn_predict_layers and config.num_nextn_predict_layers > 0:
         layer_idx = config.num_hidden_layers
         for i in range(config.num_nextn_predict_layers):
