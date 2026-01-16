@@ -30,6 +30,7 @@ import torch
 
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
+from vllm.utils.math_utils import RCP_LN2
 
 
 @triton.jit
@@ -211,7 +212,9 @@ def context_attention_fwd(
     Lq, Lk, _ = q.shape[-1], k.shape[-1], v.shape[-1]
 
     sm_scale = 1.0 / (Lq**0.5) if softmax_scale is None else softmax_scale
-    sm_scale *= 1.4426950408889634
+    # rescale with 1/ln(2) for triton exp2
+    sm_scale *= RCP_LN2
+
     batch, head = b_seq_len.shape[0], q.shape[1]
     kv_group_num = q.shape[1] // k.shape[1]
 
