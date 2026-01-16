@@ -1,0 +1,8 @@
+# This should be updated alongside torch.txt
+
+# Torch core dependency
+-r torch.txt
+
+# Standard torch libraries
+torchaudio==2.9.1
+torchvision==0.24.1

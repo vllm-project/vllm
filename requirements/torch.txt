@@ -1,0 +1,10 @@
+# Some installs depend only on torch and not all torch libraries
+# This should be updated alongside torchlibs.txt
+
+# Standard torch
+torch==2.9.1
+
+# Do we need these? Comment out for now
+# Dependencies for CPU
+# torch==2.9.1+cpu; platform_machine == "x86_64" or platform_machine == "s390x"
+# torch==2.9.1; platform_system == "Darwin" or platform_machine == "ppc64le" or platform_machine == "aarch64"

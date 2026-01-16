@@ -6,7 +6,6 @@ requires = [
     "packaging>=24.2",
     "setuptools>=77.0.3,<81.0.0",
     "setuptools-scm>=8.0",
-    "torch == 2.9.1",
     "wheel",
     "jinja2",
     "grpcio-tools>=1.76.0",
@@ -306,6 +305,3 @@ extend-ignore-re = []
 windo = "windo"
 
 [tool.typos.type.vimscript.extend-words]
-
-[tool.uv]
-no-build-isolation-package = ["torch"]

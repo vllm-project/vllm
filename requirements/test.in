@@ -8,6 +8,10 @@ pytest-shard
 pytest-timeout
 pytest-cov
 
+# common dependencies
+-r common.txt
+-r torchlibs.txt
+
 # testing utils
 albumentations # required for Nemotron Parse in test_common.py
 backoff # required for phi4mm test
@@ -25,9 +29,6 @@ soundfile # required for audio tests
 jiwer # required for audio tests
 tblib # for pickling test exceptions
 timm==1.0.17 # required for internvl and gemma3n-mm test
-torch==2.9.1
-torchaudio==2.9.1
-torchvision==0.24.1
 transformers_stream_generator # required for qwen-vl test
 matplotlib # required for qwen-vl test
 mistral_common[image,audio] >= 1.8.8 # required for voxtral test
