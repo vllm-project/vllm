@@ -248,7 +248,7 @@ class SparseAttnIndexer(CustomOp):
         self.max_total_seq_len = max_total_seq_len
         self.topk_indices_buffer = topk_indices_buffer
 
-    def forwrad_native(
+    def forward_native(
         self,
         hidden_states: torch.Tensor,
         q_fp8: torch.Tensor,
@@ -274,7 +274,7 @@ class SparseAttnIndexer(CustomOp):
     ):
         return torch.ops.vllm.sparse_attn_indexer(
             hidden_states,
-            self.k_cache.layer_prefix,
+            self.k_cache.prefix,
             self.k_cache.kv_cache[0],
             q_fp8,
             k,
