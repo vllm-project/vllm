@@ -1108,7 +1108,7 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
                     routed_scaling=layer.routed_scaling_factor,
                 )
             else:
-                result = apply_fi_trtllm_fp8_per_tensor_moe(
+                return apply_fi_trtllm_fp8_per_tensor_moe(
                     layer=layer,
                     hidden_states=x,
                     router_logits=router_logits,
@@ -1119,6 +1119,7 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
                     topk_group=layer.topk_group,
                     apply_router_weight_on_input=layer.apply_router_weight_on_input,
                 )
+
         topk_weights, topk_ids = router.select_experts(
             hidden_states=x,
             router_logits=router_logits,
