@@ -537,7 +537,9 @@ class OpenPanguEmbeddedAttention(nn.Module):
             is_neox_style = False
 
         rope_parameters = config.rope_parameters or {}
-        if rope_parameters is not None and rope_parameters.get("mrope_interleaved", False):
+        if rope_parameters is not None and rope_parameters.get(
+            "mrope_interleaved", False
+        ):
             rope_parameters["rope_type"] = "openpangu"
 
         self.rotary_emb = get_rope(
