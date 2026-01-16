@@ -44,8 +44,8 @@ class NvFp4MoeBackend(Enum):
 
 
 FLASHINFER_NVFP4_MOE_BACKENDS = [
-    NvFp4MoeBackend.FLASHINFER_CUTLASS,
     NvFp4MoeBackend.FLASHINFER_TRTLLM,
+    NvFp4MoeBackend.FLASHINFER_CUTLASS,
     NvFp4MoeBackend.FLASHINFER_CUTEDSL,
 ]
 
@@ -196,15 +196,29 @@ def select_nvfp4_moe_backend(
         else:
             # If the user is not explicit about the backend, try each.
             for backend in FLASHINFER_NVFP4_MOE_BACKENDS:
-                # TODO: this is wrong
-                k_cls = backend_2_kernel_cls(backend)
-                if k_cls.is_supported_config(
-                    k_cls, config, weight_key, activation_key, activation_format
-                ):
+                if backend == NvFp4MoeBackend.FLASHINFER_TRTLLM:
+                    k_cls = None
+                    supported, reason = is_supported_config_trtllm(
+                        config,
+                        weight_key,
+                        activation_key,
+                        activation_format,
+                    )
+                else:
+                    k_cls = backend_2_kernel_cls(backend)
+                    supported, reason = k_cls.is_supported_config(
+                        config,
+                        weight_key,
+                        activation_key,
+                        activation_format,
+                    )
+                if supported:
                     logger.info_once(_make_log_backend(backend))
-                    return backend, k_cls
+                    return backend, None
+                else:
+                    raise ValueError(_make_log_unsupported(backend, reason))
 
-            raise NotImplementedError(
+            raise ValueError(
                 "Found VLLM_USE_FLASHINFER_MOE_FP4=1, but no "
                 "FlashInfer NVFP4 MoE backend supports the configuration."
             )
@@ -228,7 +242,6 @@ def select_nvfp4_moe_backend(
         else:
             k_cls = backend_2_kernel_cls(backend)
             supported, reason = k_cls.is_supported_config(
-                k_cls,
                 config,
                 weight_key,
                 activation_key,

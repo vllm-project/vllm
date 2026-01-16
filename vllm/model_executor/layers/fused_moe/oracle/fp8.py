@@ -166,14 +166,14 @@ def select_fp8_moe_backend(
     def _make_log_backend(backend: Fp8MoeBackend):
         available_backend_strs = [b.value for b in AVAILABLE_BACKENDS]
         return (
-            f"Using '{backend.value}' Fp8 MoE backend out "
+            f"Using {backend.value} Fp8 MoE backend out "
             f"of potential backends: {available_backend_strs}."
         )
 
     def _make_log_unsupported(backend: Fp8MoeBackend, reason: str | None) -> str:
         if reason:
             return (
-                f"FP8 MoE backend '{backend.value}' does not support the "
+                f"FP8 MoE backend {backend.value} does not support the "
                 f"deployment configuration since {reason}."
             )
         else:
