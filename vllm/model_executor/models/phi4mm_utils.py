@@ -39,7 +39,10 @@ def get_activation(name: str = "relu") -> torch.nn.Module:
         return nn.SiLU()
     if name == "sigmoid":
         return nn.Sigmoid()
-    return nn.Identity()
+    if name == "identity":
+        return nn.Identity()
+
+    raise NotImplementedError(name)
 
 
 def adaptive_enc_mask(
