@@ -32,6 +32,7 @@ class UnquantizedMoeBackend(Enum):
     TRITON = "TRITON"
     CPU = "CPU"
     XPU = "XPU"
+    TPU = "TPU"
 
 
 # NOTE(zyongye): Unsupported backend means backend
@@ -91,6 +92,8 @@ def select_unquantized_moe_backend(
         backend = UnquantizedMoeBackend.XPU
     if current_platform.is_cpu():
         backend = UnquantizedMoeBackend.CPU
+    if current_platform.is_tpu():
+        backend = UnquantizedMoeBackend.TPU
 
     logger.info_once(_make_log_backend(backend), scope="local")
     return backend
