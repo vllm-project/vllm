@@ -17,8 +17,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import List, Optional
 import torch
+
 from .mrope import MRotaryEmbedding
 
 
@@ -34,7 +34,7 @@ class MRotaryEmbeddingInterleaved(MRotaryEmbedding):
         base: float,
         is_neox_style: bool,
         dtype: torch.dtype,
-        mrope_section: Optional[List[int]] = None,
+        mrope_section: list[int] | None = None,
         mrope_interleaved: bool = True,
     ) -> None:
         # Enlarge max_position_embeddings for video inputs
@@ -56,7 +56,9 @@ class MRotaryEmbeddingInterleaved(MRotaryEmbedding):
         if sum(self.mrope_section) != rotary_dim // 2:
             raise ValueError("Sum of mrope_section must equal rotary_dim // 2.")
         if not self.mrope_interleaved:
-            raise ValueError("mrope_interleaved must be True when mrope_section is provided.")
+            raise ValueError(
+                "mrope_interleaved must be True when mrope_section is provided."
+            )
 
         # Generate interleaved indices
         if len(mrope_section) == 2:
@@ -64,9 +66,13 @@ class MRotaryEmbeddingInterleaved(MRotaryEmbedding):
             mrope_dim = self.get_mrope_interleaved_id_list(h_num, w_num, 0)
         elif len(mrope_section) == 3:
             t_num, h_num, w_num = mrope_section[0], mrope_section[1], mrope_section[2]
-            mrope_dim = self.get_mrope_interleaved_id_list(t_num, h_num, w_num, force_last=True)
+            mrope_dim = self.get_mrope_interleaved_id_list(
+                t_num, h_num, w_num, force_last=True
+            )
         else:
-            raise AssertionError("Cannot support the length of mrope section is not 2 or 3.")
+            raise AssertionError(
+                "Cannot support the length of mrope section is not 2 or 3."
+            )
 
         mrope_dim = mrope_dim * 2
         self.mrope_dim = mrope_dim
@@ -82,7 +88,10 @@ class MRotaryEmbeddingInterleaved(MRotaryEmbedding):
         mrope_section_3d = [1] * len(self.mrope_dim)
         mrope_dim = self.mrope_dim
         cos_sin = torch.cat(
-            [m[mrope_dim[i]] for i, m in enumerate(cos_sin.split(mrope_section_3d, dim=-1))],
+            [
+                m[mrope_dim[i]]
+                for i, m in enumerate(cos_sin.split(mrope_section_3d, dim=-1))
+            ],
             dim=-1,
         )
         return cos_sin, torch.arange(cos_sin.shape[0], device=positions.device)
@@ -91,8 +100,8 @@ class MRotaryEmbeddingInterleaved(MRotaryEmbedding):
         self,
         positions: torch.Tensor,
         query: torch.Tensor,
-        key: Optional[torch.Tensor] = None
-    ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
+        key: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
         """Forward pass with interleaved rotary embedding."""
         cos_sin, positions = self._rebuild_pos_emb(positions)
         cos, sin = cos_sin.chunk(2, dim=-1)
@@ -101,8 +110,8 @@ class MRotaryEmbeddingInterleaved(MRotaryEmbedding):
         positions = positions.flatten()
         num_tokens = positions.shape[0]
         query = query.view(num_tokens, -1, self.head_size)
-        query_rot = query[..., :self.rotary_dim]
-        query_pass = query[..., self.rotary_dim:]
+        query_rot = query[..., : self.rotary_dim]
+        query_pass = query[..., self.rotary_dim :]
         query_rot = self.apply_rotary_emb.forward_native(
             query_rot,
             cos,
@@ -114,8 +123,8 @@ class MRotaryEmbeddingInterleaved(MRotaryEmbedding):
         if key is not None:
             key_shape = key.shape
             key = key.view(num_tokens, -1, self.head_size)
-            key_rot = key[..., :self.rotary_dim]
-            key_pass = key[..., self.rotary_dim:]
+            key_rot = key[..., : self.rotary_dim]
+            key_pass = key[..., self.rotary_dim :]
             key_rot = self.apply_rotary_emb.forward_native(
                 key_rot,
                 cos,
@@ -125,7 +134,9 @@ class MRotaryEmbeddingInterleaved(MRotaryEmbedding):
         return query, key
 
     @staticmethod
-    def get_mrope_interleaved_id_list(a: int, b: int, c: int, force_last: bool = False) -> List[int]:
+    def get_mrope_interleaved_id_list(
+        a: int, b: int, c: int, force_last: bool = False
+    ) -> List[int]:
         """
         Generate an interleaved list of indices for multi-modal rotary embedding.
 
@@ -144,7 +155,7 @@ class MRotaryEmbeddingInterleaved(MRotaryEmbedding):
         counts = {0: a, 1: b, 2: c}
         placed = {k: 0 for k in counts}
         rem = counts.copy()
-        seq: List[int] = []
+        seq: list[int] = []
         last = None
 
         total = a + b + c
