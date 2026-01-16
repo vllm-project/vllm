@@ -82,7 +82,10 @@ async def serve_http(
 
     loop = asyncio.get_running_loop()
 
-    watchdog_task = loop.create_task(watchdog_loop(server, app.state.engine_client))
+    args = getattr(app.state, "args", None)
+    engine_client: EngineClient = app.state.engine_client
+
+    watchdog_task = loop.create_task(watchdog_loop(server, engine_client))
     server_task = loop.create_task(server.serve(sockets=[sock] if sock else None))
 
     ssl_cert_refresher = (
@@ -98,9 +101,6 @@ async def serve_http(
 
     async def graceful_drain() -> None:
         """Perform graceful drain before shutdown."""
-        args = getattr(app.state, "args", None)
-        engine_client: EngineClient = app.state.engine_client
-
         enable_graceful = getattr(args, "enable_graceful_shutdown", False)
         drain_timeout = getattr(args, "drain_timeout", 120)
 
@@ -170,7 +170,6 @@ async def serve_http(
 
     def on_signal() -> None:
         """Signal callback that spawns the graceful shutdown task."""
-        args = getattr(app.state, "args", None)
         if getattr(args, "enable_graceful_shutdown", False):
             loop.create_task(graceful_signal_handler())
         else:
