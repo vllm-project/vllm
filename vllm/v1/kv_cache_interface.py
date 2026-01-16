@@ -232,16 +232,30 @@ class MLAAttentionSpec(FullAttentionSpec):
 
     @property
     def real_page_size_bytes(self) -> int:
+        """Calculate the real page size in bytes based on cache dtype."""
+        # Special case for fp8_ds_mla: fixed size per token (656 bytes)
+        # Each token's KV cache is 656 bytes, structured as:
+        # - 512 bytes: quantized NoPE part (512 float8_e4m3 values)
+        # - 16 bytes: scale factors (4 float32 values, 4 bytes each)
+        # - 128 bytes: RoPE part (64 bfloat16 values, 2 bytes each)
+        # Total: 512 + 16 + 128 = 656 bytes per token
+        # See `vllm/v1/attention/backends/mla/flashmla_sparse.py` for details.
         if self.cache_dtype_str == "fp8_ds_mla":
-            # See `vllm/v1/attention/backends/mla/flashmla_sparse.py`
-            #  for details.
             return self.block_size * 656
-        return (
-            self.block_size
-            * self.num_kv_heads
-            * self.head_size
-            * get_dtype_size(self.dtype)
-        )
+
+        # Special case for NVFP4: packed data + scales
+        # - Data is packed: 2 FP4 values per uint8, so head_size/2
+        # - Scales are stored in kv_cache itself (as float32), one per 16 elements
+        # - MLA stores a single vector (kv_c + k_pe concatenated), not separate K and V
+        if self.cache_dtype_str == "nvfp4":
+            packed_data_size = (self.head_size // 2) * get_dtype_size(self.dtype)
+            scale_size = (self.head_size // 16) * 4  # float32 = 4 bytes
+            element_size = packed_data_size + scale_size
+            return self.block_size * self.num_kv_heads * element_size
+
+        # Default case: standard calculation
+        element_size = self.head_size * get_dtype_size(self.dtype)
+        return self.block_size * self.num_kv_heads * element_size
 
     @classmethod
     def merge(cls, specs: list[Self]) -> Self:
