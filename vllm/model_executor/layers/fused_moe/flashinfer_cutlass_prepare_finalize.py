@@ -41,8 +41,8 @@ class FlashInferCutlassMoEPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         # not quantized here and weight block scales are consumed by the kernel.
         self.use_deepseek_fp8_block_scale = use_deepseek_fp8_block_scale
 
-    @staticmethod
-    def activation_format() -> mk.FusedMoEActivationFormat:
+    @property
+    def activation_format(self) -> mk.FusedMoEActivationFormat:
         return mk.FusedMoEActivationFormat.Standard
 
     def max_num_tokens_per_rank(self) -> int | None:

@@ -566,8 +566,9 @@ class FusedMoE(CustomOp):
             )
 
         # ToDo: Better logic to determine the routing method type
+        self.routing_method_type = RoutingMethodType.Unspecified
         if routing_method_type is not None:
-            self.routing_method_type: RoutingMethodType = routing_method_type
+            self.routing_method_type = routing_method_type
         else:
             if custom_routing_function:
                 from vllm.model_executor.models.llama4 import Llama4MoE
