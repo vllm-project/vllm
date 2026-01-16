@@ -4,7 +4,7 @@
 from typing import Any
 
 import torch
-from vllm import _custom_ops as ops
+
 import vllm.envs as envs
 from vllm import _custom_ops as ops
 from vllm._aiter_ops import rocm_aiter_ops
@@ -66,7 +66,12 @@ class QuarkMoEMethod(FusedMoEMethodBase):
         if quant_config._is_fp8_w4a8(weight_config, input_config):
             return QuarkW4A8Fp8MoEMethod(weight_config, input_config, module.moe_config)
         elif quant_config._is_fp8_w8a8(weight_config, input_config):
-            return QuarkW8A8Fp8MoEMethod(weight_config, input_config, module.moe_config)
+            return QuarkW8A8Fp8MoEMethod(
+                weight_config,
+                input_config,
+                module.moe_config,
+                quant_config.quant_config.get("is_online_quant", False),
+            )
         elif quant_config._is_ocp_mx(weight_config, input_config):
             return QuarkOCP_MX_MoEMethod(weight_config, input_config, module.moe_config)
         else:
@@ -79,6 +84,7 @@ class QuarkW8A8Fp8MoEMethod(QuarkMoEMethod):
         weight_config: dict[str, Any],
         input_config: dict[str, Any],
         moe: FusedMoEConfig,
+        is_online_quant: bool = False,
     ):
         super().__init__(moe)
         self.weight_quant = weight_config
@@ -238,10 +244,14 @@ class QuarkW8A8Fp8MoEMethod(QuarkMoEMethod):
         # We take the max of all the scales in case they differ.
         if self.is_online_quant:
             if self.weight_qscheme == "per_channel":
-                w13_weight, w13_weight_scale = self.quant_per_channel(layer.w13_weight.data)
+                w13_weight, w13_weight_scale = self.quant_per_channel(
+                    layer.w13_weight.data
+                )
                 layer.w13_weight.data = w13_weight
                 layer.w13_weight_scale.data = w13_weight_scale
-                w2_weight, w2_weight_scale = self.quant_per_channel(layer.w2_weight.data)
+                w2_weight, w2_weight_scale = self.quant_per_channel(
+                    layer.w2_weight.data
+                )
                 layer.w2_weight.data = w2_weight
                 layer.w2_weight_scale.data = w2_weight_scale
         if self.static_input_scales:
