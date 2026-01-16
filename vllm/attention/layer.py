@@ -170,6 +170,7 @@ class Attention(nn.Module, AttentionLayerBase):
         attn_type: str = AttentionType.DECODER,
         kv_sharing_target_layer_name: str | None = None,
         attn_backend: type[AttentionBackend] | None = None,
+        use_alibi_sqrt: bool | None = None,
         head_size_v: int | None = None,
         **extra_impl_args,
     ) -> None:
@@ -178,6 +179,14 @@ class Attention(nn.Module, AttentionLayerBase):
         `self.kv_cache`.
         """
         super().__init__()
+        extra_impl_args = dict(extra_impl_args)
+        if "use_alibi_sqrt" in extra_impl_args:
+            if use_alibi_sqrt is not None:
+                raise ValueError(
+                    "use_alibi_sqrt is specified both explicitly and via "
+                    "extra_impl_args."
+                )
+            use_alibi_sqrt = extra_impl_args.pop("use_alibi_sqrt")
         if per_layer_sliding_window is not None:
             # per-layer sliding window
             sliding_window = per_layer_sliding_window
@@ -242,8 +251,21 @@ class Attention(nn.Module, AttentionLayerBase):
                 attn_type=attn_type,
             )
         else:
-            self.attn_backend = attn_backend
-
+            self.attn_backend = attn_backend 
+        backend_supports_alibi_sqrt = self.attn_backend.supports_alibi_sqrt()
+        if use_alibi_sqrt is None:
+            if backend_supports_alibi_sqrt:
+                use_alibi_sqrt = self.attn_backend.default_use_alibi_sqrt()
+            else:
+                use_alibi_sqrt = False
+        if use_alibi_sqrt and not backend_supports_alibi_sqrt:
+            raise ValueError(
+                f"use_alibi_sqrt is not supported by backend "
+                f"{self.attn_backend.get_name()}."
+            )
+        self.use_alibi_sqrt = bool(use_alibi_sqrt)
+        if backend_supports_alibi_sqrt:
+            extra_impl_args["use_alibi_sqrt"] = self.use_alibi_sqrt
         # prefix caching + batch invariance is currently not supported for
         # FLASHINFER and TRITON_MLA.
         if (
