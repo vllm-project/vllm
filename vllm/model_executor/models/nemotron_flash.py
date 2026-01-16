@@ -24,12 +24,12 @@ import torch
 from einops import rearrange
 from torch import nn
 
-from vllm.attention.backends.abstract import AttentionMetadata
 from vllm.attention.layer import Attention
+from vllm.v1.attention.backend import AttentionMetadata
 from vllm.v1.kv_cache_interface import KVCacheSpec
 
 if TYPE_CHECKING:
-    from vllm.attention.backends.abstract import AttentionBackend
+    from vllm.v1.attention.backend import AttentionBackend
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, ModelConfig, VllmConfig, get_current_vllm_config
 from vllm.distributed import get_tensor_model_parallel_world_size
@@ -163,6 +163,7 @@ class NemotronFlashMoE(nn.Module):
 
         # Experts
         expert_mapping = FusedMoE.make_expert_params_mapping(
+            self,
             ckpt_gate_proj_name="gate_proj",
             ckpt_down_proj_name="down_proj",
             ckpt_up_proj_name="up_proj",
@@ -409,9 +410,10 @@ class NemotronDeltaNet(MambaBase, CustomOp):
         has_decode = num_decodes > 0
 
         key_dim = self.key_head_dim * self.num_k_heads
-        q_conv_state = combined_conv_state[:, :key_dim, :]
-        k_conv_state = combined_conv_state[:, key_dim : key_dim * 2, :]
-        v_conv_state = combined_conv_state[:, key_dim * 2 :, :]
+        # Make conv_states contiguous so stride(1) == 1 for causal_conv1d_fn
+        q_conv_state = combined_conv_state[:, :key_dim, :].contiguous()
+        k_conv_state = combined_conv_state[:, key_dim : key_dim * 2, :].contiguous()
+        v_conv_state = combined_conv_state[:, key_dim * 2 :, :].contiguous()
 
         q_out_list = []
         k_out_list = []
@@ -1296,6 +1298,7 @@ class NemotronFlashForCausalLM(
     def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:
         """Return expert parameter mapping for FusedMoE weight loading."""
         return FusedMoE.make_expert_params_mapping(
+            self,
             ckpt_gate_proj_name="gate_proj",
             ckpt_down_proj_name="down_proj",
             ckpt_up_proj_name="up_proj",
