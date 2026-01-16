@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import time
-from typing import Annotated, Any, TypeAlias
+from typing import Any, TypeAlias
 
 from pydantic import (
     Field,
@@ -12,39 +12,15 @@ from vllm import PoolingParams
 from vllm.config.pooler import get_use_activation
 from vllm.entrypoints.chat_utils import ChatCompletionMessageParam
 from vllm.entrypoints.openai.engine.protocol import OpenAIBaseModel, UsageInfo
+from vllm.entrypoints.pooling.base.protocol import (
+    CompletionRequestMixin,
+    PoolingBasicRequestMixin,
+)
 from vllm.utils import random_uuid
 
 
-class ClassificationCompletionRequest(OpenAIBaseModel):
-    model: str | None = None
-    input: list[str] | str
-    truncate_prompt_tokens: Annotated[int, Field(ge=-1)] | None = None
-    user: str | None = None
-
+class ClassificationCompletionRequest(PoolingBasicRequestMixin, CompletionRequestMixin):
     # --8<-- [start:classification-extra-params]
-    priority: int = Field(
-        default=0,
-        description=(
-            "The priority of the request (lower means earlier handling; "
-            "default: 0). Any priority other than 0 will raise an error "
-            "if the served model does not use priority scheduling."
-        ),
-    )
-    add_special_tokens: bool = Field(
-        default=True,
-        description=(
-            "If true (the default), special tokens (e.g. BOS) will be added to "
-            "the prompt."
-        ),
-    )
-    request_id: str = Field(
-        default_factory=random_uuid,
-        description=(
-            "The request_id related to this request. If the caller does "
-            "not set it, a random_uuid will be generated. This id is used "
-            "through out the inference process and return in response."
-        ),
-    )
     softmax: bool | None = Field(
         default=None,
         description="softmax will be deprecated, please use use_activation instead.",
@@ -69,11 +45,8 @@ class ClassificationCompletionRequest(OpenAIBaseModel):
         )
 
 
-class ClassificationChatRequest(OpenAIBaseModel):
-    model: str | None = None
+class ClassificationChatRequest(PoolingBasicRequestMixin):
     messages: list[ChatCompletionMessageParam]
-    truncate_prompt_tokens: Annotated[int, Field(ge=-1)] | None = None
-    user: str | None = None
 
     # --8<-- [start:chat-classification-extra-params]
     add_generation_prompt: bool = Field(
@@ -119,23 +92,6 @@ class ClassificationChatRequest(OpenAIBaseModel):
         description=("Additional kwargs to pass to the HF processor."),
     )
 
-    priority: int = Field(
-        default=0,
-        description=(
-            "The priority of the request (lower means earlier handling; "
-            "default: 0). Any priority other than 0 will raise an error "
-            "if the served model does not use priority scheduling."
-        ),
-    )
-
-    request_id: str = Field(
-        default_factory=random_uuid,
-        description=(
-            "The request_id related to this request. If the caller does "
-            "not set it, a random_uuid will be generated. This id is used "
-            "through out the inference process and return in response."
-        ),
-    )
     softmax: bool | None = Field(
         default=None,
         description="softmax will be deprecated, please use use_activation instead.",
