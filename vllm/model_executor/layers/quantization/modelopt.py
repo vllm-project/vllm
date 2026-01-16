@@ -748,10 +748,6 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
             return self.kernel.prepare_finalize.topk_indices_dtype()
         return None
 
-    @property
-    def supports_mk_interally(self) -> bool:
-        return True
-
     def maybe_make_prepare_finalize(
         self,
         routing_tables: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
@@ -1372,10 +1368,6 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
         if self.kernel is not None:
             return self.kernel.prepare_finalize.topk_indices_dtype()
         return None
-
-    @property
-    def supports_mk_interally(self) -> bool:
-        return True
 
     def maybe_make_prepare_finalize(
         self,

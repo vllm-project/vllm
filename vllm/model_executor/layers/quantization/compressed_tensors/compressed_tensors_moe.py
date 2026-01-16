@@ -403,10 +403,6 @@ class CompressedTensorsW4A4Nvfp4MoEMethod(CompressedTensorsMoEMethod):
             return self.kernel.prepare_finalize.topk_indices_dtype()
         return None
 
-    @property
-    def supports_mk_interally(self) -> bool:
-        return True
-
     def create_weights(
         self,
         layer: torch.nn.Module,
@@ -775,10 +771,6 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
         if self.kernel is not None:
             return self.kernel.prepare_finalize.topk_indices_dtype()
         return None
-
-    @property
-    def supports_mk_interally(self) -> bool:
-        return True
 
     def create_weights(
         self,

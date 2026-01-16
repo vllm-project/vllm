@@ -665,10 +665,6 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             return self.kernel.prepare_finalize.topk_indices_dtype()
         return None
 
-    @property
-    def supports_mk_interally(self) -> bool:
-        return True
-
     def create_weights(
         self,
         layer: Module,
