@@ -12,7 +12,7 @@ from vllm.config import VllmConfig
 from vllm.config.compilation import CUDAGraphMode
 from vllm.distributed.parallel_state import graph_capture, is_global_first_rank
 from vllm.forward_context import set_forward_context
-from vllm.v1.attention.backends.utils import AttentionMetadataBuilder
+from vllm.v1.attention.backend import AttentionMetadataBuilder
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.worker.gpu.attn_utils import build_attn_metadata
@@ -195,15 +195,19 @@ def get_cudagraph_size(
     cudagraph_sizes: dict[int, int],
     cudagraph_mode: CUDAGraphMode,
 ) -> int | None:
+    if not cudagraph_mode.has_full_cudagraphs():
+        # No full CUDA graph is used.
+        return None
+
     size = cudagraph_sizes.get(num_tokens_after_dp_padding)
     if size is None:
         # No CUDA graph for this size.
         return None
-    if cudagraph_mode == CUDAGraphMode.FULL_DECODE_ONLY:
-        all_decode = all(x == 1 for x in num_tokens_per_request)
-        if not all_decode:
-            # Prefill is included.
-            return None
+
+    is_mixed = any(x > 1 for x in num_tokens_per_request)
+    if is_mixed and cudagraph_mode.mixed_mode() != CUDAGraphMode.FULL:
+        # Prefill is included, and this mode doesn't use CUDA graph for it.
+        return None
     return size
 
 

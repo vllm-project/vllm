@@ -44,14 +44,14 @@ class TokenPoolerHead(nn.Module, ABC):
 class TokenEmbeddingPoolerHead(TokenPoolerHead):
     def __init__(
         self,
-        projector: ProjectorFn | None = None,
         head_dtype: torch.dtype | str | None = None,
+        projector: ProjectorFn | None = None,
         activation: ActivationFn | None = None,
     ) -> None:
         super().__init__()
 
-        self.projector = projector
         self.head_dtype = head_dtype
+        self.projector = projector
         self.activation = activation
 
     def get_supported_tasks(self) -> Set[PoolingTask]:
@@ -79,7 +79,7 @@ class TokenEmbeddingPoolerHead(TokenPoolerHead):
         pooled_data = pooled_data[..., : pooling_param.dimensions]
 
         # for normalize
-        if self.activation is not None and pooling_param.normalize:
+        if self.activation is not None and pooling_param.use_activation:
             pooled_data = self.activation(pooled_data)
 
         # pooled_data shape: [n_tokens, embedding_dimension]
