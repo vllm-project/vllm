@@ -29,10 +29,7 @@ def to_meta_tensor(tensor: torch.Tensor) -> torch.Tensor:
 def materialize_meta_tensor(meta_tensor: torch.Tensor) -> torch.Tensor:
     """
     Materialize a meta tensor into an actual tensor on the current device.
-
-    Note: Should be called within a torch device context.
-
-    TODO: Need a way of reconstructing vLLMBaseParameters on the meta device.
+    Should be called within the torch device context for the given rank.
     """
     tensor = torch.empty_strided(
         size=tuple(meta_tensor.size()),
@@ -46,6 +43,7 @@ def materialize_meta_tensor(meta_tensor: torch.Tensor) -> torch.Tensor:
 
 
 def restore_layer_on_meta(layer: torch.nn.Module, info: LayerReloadingInfo):
+    """Restore a layer to model format with tensors on the meta device"""
     for name in get_layer_tensors(layer):
         delattr(layer, name)
 

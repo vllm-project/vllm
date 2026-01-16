@@ -14,6 +14,7 @@ def get_layer_tensors(layer: torch.nn.Module) -> dict[str, torch.Tensor]:
 
 
 def get_layer_params_buffers(layer: torch.nn.Module) -> LayerTensors:
+    """Get all parameters and buffers of a module as a tuple of dicts."""
     return (
         {name: param for name, param in layer._parameters.items() if param is not None},
         {name: buffer for name, buffer in layer._buffers.items() if buffer is not None},
