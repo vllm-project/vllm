@@ -25,20 +25,29 @@ from vllm.utils.deep_gemm import per_block_cast_to_fp8
 from vllm.utils.math_utils import round_up
 
 
-def make_dummy_moe_config() -> FusedMoEConfig:
+def make_dummy_moe_config(
+    num_experts: int = 1,
+    experts_per_token: int = 1,
+    hidden_dim: int = 1,
+    intermediate_size_per_partition: int = 1,
+    in_dtype: torch.dtype = torch.bfloat16,
+) -> FusedMoEConfig:
     """
-    This is a dummy config for the mk constructor interface as
-    DeepGEMM and Triton do not actually use this config.
+    This is a dummy config for the mk constructor interface
+    as most kernels like DeepGEMM, CUTLASSFp4, Triton, MARLIN
+    do not actually use this config.
+
+    CUTLASSFp8 needs to set some params for workshapes.
     """
     return FusedMoEConfig(
-        num_experts=1,
-        experts_per_token=1,
-        hidden_dim=1,
-        intermediate_size_per_partition=1,
-        num_local_experts=1,
+        num_experts=num_experts,
+        experts_per_token=experts_per_token,
+        hidden_dim=hidden_dim,
+        intermediate_size_per_partition=intermediate_size_per_partition,
+        num_local_experts=num_experts,
         moe_parallel_config=FusedMoEParallelConfig.make_no_parallel(),
         activation="silu",
-        in_dtype=torch.bfloat16,
+        in_dtype=in_dtype,
         device="cuda",
         routing_method=RoutingMethodType.TopK,
     )
