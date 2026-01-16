@@ -207,6 +207,7 @@ def select_nvfp4_moe_backend(
                 else:
                     k_cls = backend_2_kernel_cls(backend)
                     supported, reason = k_cls.is_supported_config(
+                        k_cls,
                         config,
                         weight_key,
                         activation_key,
@@ -242,6 +243,7 @@ def select_nvfp4_moe_backend(
         else:
             k_cls = backend_2_kernel_cls(backend)
             supported, reason = k_cls.is_supported_config(
+                k_cls,
                 config,
                 weight_key,
                 activation_key,
