@@ -231,9 +231,6 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "                 Tensor cos_sin_cache, bool is_neox) -> ()");
   ops.impl("rotary_embedding", torch::kCUDA, &rotary_embedding);
 
-  ops.def("permute_cols(Tensor A, Tensor perm) -> Tensor");
-  ops.impl("permute_cols", torch::kCUDA, &permute_cols);
-
   // Quantization ops
 #ifndef USE_ROCM
   // Quantized GEMM for AWQ.
@@ -303,6 +300,8 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       ") -> Tensor");
   // conditionally compiled so impl registration is in source file
 
+  ops.def("permute_cols(Tensor A, Tensor perm) -> Tensor");
+  ops.impl("permute_cols", torch::kCUDA, &permute_cols);
 
   // gptq_marlin Optimized Quantized GEMM for GPTQ.
   ops.def(
