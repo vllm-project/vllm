@@ -1,16 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from collections.abc import Sequence
-from typing import Callable, Union
+from collections.abc import Callable, Sequence
+from typing import TypeAlias
 
 import torch
 
-from vllm.transformers_utils.tokenizer import AnyTokenizer
+from vllm.tokenizers import TokenizerLike
 
-LogitsProcessor = Union[
-    Callable[[list[int], torch.Tensor], torch.Tensor],
-    Callable[[list[int], list[int], torch.Tensor], torch.Tensor],
-]
+LogitsProcessor: TypeAlias = (
+    Callable[[list[int], torch.Tensor], torch.Tensor]
+    | Callable[[list[int], list[int], torch.Tensor], torch.Tensor]
+)
 """LogitsProcessor is a function that takes a list
 of previously generated tokens, the logits tensor
 for the next token and, optionally, prompt tokens as a
@@ -19,7 +19,7 @@ to sample from."""
 
 
 def get_bad_words_logits_processors(
-    bad_words: list[str], tokenizer: AnyTokenizer
+    bad_words: list[str], tokenizer: TokenizerLike
 ) -> list[LogitsProcessor]:
     bad_words_ids: list[list[int]] = list()
 

@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from typing import Optional
 
 import torch
 from packaging import version
@@ -29,7 +28,7 @@ BITBLAS_SUPPORTED_SYM = [False, True]
 # Determines the supported quantization types for BitBLAS based on the
 # device's capability and whether zero-point (zp) is used.
 def query_bitblas_supported_quant_types(
-    has_zp: bool, device_capability: Optional[int] = None
+    has_zp: bool, device_capability: int | None = None
 ):
     if device_capability is None:
         capability_tuple = current_platform.get_device_capability()
@@ -52,10 +51,10 @@ def query_bitblas_supported_quant_types(
 
 def _check_bitblas_supported(
     quant_type: ScalarType,
-    group_size: Optional[int],
+    group_size: int | None,
     has_zp: bool,
-    device_capability: Optional[int] = None,
-) -> tuple[bool, Optional[str]]:
+    device_capability: int | None = None,
+) -> tuple[bool, str | None]:
     if device_capability is None:
         capability_tuple = current_platform.get_device_capability()
         device_capability = (
@@ -99,7 +98,7 @@ def check_bitblas_supported(
     quant_type: ScalarType,
     group_size: int,
     has_zp: bool = False,
-    device_capability: Optional[int] = None,
+    device_capability: int | None = None,
 ) -> bool:
     cond, _ = _check_bitblas_supported(
         quant_type, group_size, has_zp, device_capability
@@ -156,7 +155,7 @@ def check_bitblas_supports_shape(
     input_size_per_partition: int,
     input_size: int,
     group_size: int,
-) -> tuple[bool, Optional[str]]:
+) -> tuple[bool, str | None]:
     try:
         verify_bitblas_supports_shape(
             output_size_per_partition, input_size_per_partition, input_size, group_size

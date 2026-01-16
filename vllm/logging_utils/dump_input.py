@@ -4,7 +4,6 @@
 import contextlib
 import enum
 import json
-from typing import Optional
 
 import torch
 
@@ -57,7 +56,7 @@ def prepare_object_to_dump(obj) -> str:
 def dump_engine_exception(
     config: VllmConfig,
     scheduler_output: SchedulerOutput,
-    scheduler_stats: Optional[SchedulerStats],
+    scheduler_stats: SchedulerStats | None,
 ):
     # NOTE: ensure we can log extra info without risking raises
     # unexpected errors during logging
@@ -68,7 +67,7 @@ def dump_engine_exception(
 def _dump_engine_exception(
     config: VllmConfig,
     scheduler_output: SchedulerOutput,
-    scheduler_stats: Optional[SchedulerStats],
+    scheduler_stats: SchedulerStats | None,
 ):
     logger.error(
         "Dumping input data for V1 LLM engine (v%s) with config: %s, ",

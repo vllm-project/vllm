@@ -4,7 +4,6 @@
 import json
 import os
 from dataclasses import dataclass
-from typing import Optional, Union
 
 import torch
 from safetensors.torch import save_file
@@ -29,7 +28,6 @@ class DummyLoRAManager:
         module_name: str,
         weight: torch.Tensor,
         rank: int = 8,
-        generate_embeddings_tensor: int = 0,
     ):
         lora = LoRALayerWeights(
             module_name,
@@ -42,13 +40,6 @@ class DummyLoRAManager:
                 [weight.shape[0], rank], dtype=weight.dtype, device=self._device
             ),
         )
-        if generate_embeddings_tensor:
-            lora.embeddings_tensor = torch.rand(
-                5,
-                generate_embeddings_tensor,
-                dtype=weight.dtype,
-                device=self._device,
-            )
         self.set_module_lora(module_name, lora)
 
         return lora
@@ -81,7 +72,7 @@ class DummyLoRAManager:
         module_name: str,
         input_dim: int,
         output_dims: list[int],
-        noop_lora_index: Optional[list[int]] = None,
+        noop_lora_index: list[int] | None = None,
         rank: int = 8,
     ):
         base_loras: list[LoRALayerWeights] = []
@@ -113,7 +104,7 @@ def assert_close(a, b):
 @dataclass
 class PunicaTensors:
     inputs_tensor: torch.Tensor
-    lora_weights: Union[torch.Tensor, list[torch.Tensor]]
+    lora_weights: torch.Tensor | list[torch.Tensor]
     our_out_tensor: torch.Tensor
     ref_out_tensor: torch.Tensor
     b_seq_start_loc: torch.Tensor

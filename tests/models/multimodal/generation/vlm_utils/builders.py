@@ -2,10 +2,11 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Helpers for building inputs that can be leveraged for different test types."""
 
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from pathlib import PosixPath
-from typing import Callable, Optional, Union
+from typing import Any
 
+import numpy.typing as npt
 import torch
 
 from vllm.multimodal.audio import AudioResampler
@@ -47,9 +48,9 @@ def replace_test_placeholder(
 
 def get_model_prompts(
     base_prompts: Iterable[str],
-    img_idx_to_prompt: Optional[Callable[[int], str]],
-    video_idx_to_prompt: Optional[Callable[[int], str]],
-    audio_idx_to_prompt: Optional[Callable[[int], str]],
+    img_idx_to_prompt: Callable[[int], str] | None,
+    video_idx_to_prompt: Callable[[int], str] | None,
+    audio_idx_to_prompt: Callable[[int], str] | None,
     prompt_formatter: Callable[[str], str],
 ) -> list[str]:
     """Given a model-agnostic base prompt and test configuration for a model(s)
@@ -93,7 +94,7 @@ def build_single_image_inputs_from_test_info(
     test_info: VLMTestInfo,
     image_assets: ImageTestAssets,
     size_wrapper: ImageSizeWrapper,
-    tmp_path: Optional[PosixPath] = None,
+    tmp_path: PosixPath | None = None,
 ) -> list[PromptWithMultiModalInput]:
     if test_info.prompt_formatter is None:
         raise ValueError("Prompt formatter must be set to build single image inputs")
@@ -147,7 +148,7 @@ def build_multi_image_inputs_from_test_info(
     test_info: VLMTestInfo,
     image_assets: ImageTestAssets,
     size_wrapper: ImageSizeWrapper,
-    tmp_path: Optional[PosixPath] = None,
+    tmp_path: PosixPath | None = None,
 ) -> list[PromptWithMultiModalInput]:
     if test_info.prompt_formatter is None:
         raise ValueError("Prompt formatter must be set to build multi image inputs")
@@ -237,6 +238,7 @@ def build_video_inputs_from_test_info(
     video_assets: VideoTestAssets,
     size_wrapper: ImageSizeWrapper,
     num_frames: int,
+    needs_video_metadata: bool,
 ) -> list[PromptWithMultiModalInput]:
     if test_info.prompt_formatter is None:
         raise ValueError("Prompt formatter must be set to build video inputs")
@@ -249,7 +251,10 @@ def build_video_inputs_from_test_info(
     )
 
     sampled_vids = [
-        sample_frames_from_video(asset.np_ndarrays, num_frames)
+        sample_frames_with_video_metadata(
+            (asset.np_ndarrays, asset.metadata),
+            num_frames,
+        )
         for asset in video_assets
     ]
 
@@ -260,15 +265,34 @@ def build_video_inputs_from_test_info(
     return [
         PromptWithMultiModalInput(
             prompts=[prompt for _ in size_wrapper.data],
-            video_data=[video_scaler(video, size) for size in size_wrapper.data],
+            video_data=[
+                (
+                    video_scaler(video, size)
+                    if not needs_video_metadata
+                    else (video_scaler(video, size), meta)
+                )
+                for size in size_wrapper.data
+            ],
         )
-        for video, prompt in zip(sampled_vids, model_prompts)
+        for (video, meta), prompt in zip(sampled_vids, model_prompts)
     ]
 
 
-def apply_image_size_scaling(
-    image, size: Union[float, tuple[int, int]], size_type: SizeType
-):
+def sample_frames_with_video_metadata(
+    video_with_meta: tuple[npt.NDArray, dict[str, Any]],
+    num_frames: int,
+) -> tuple[npt.NDArray, dict[str, Any]]:
+    video, meta = video_with_meta
+    video = sample_frames_from_video(video, num_frames)
+
+    meta["do_sample_frames"] = meta["total_num_frames"] == num_frames
+    meta["total_num_frames"] = num_frames
+    meta["fps"] = meta["duration"] / num_frames
+    meta["frames_indices"] = list(range(num_frames))
+    return video, meta
+
+
+def apply_image_size_scaling(image, size: float | tuple[int, int], size_type: SizeType):
     """Applies a size scaler to one image; this can be an image size factor,
     which scales the image while maintaining the aspect ratio"""
     # Special case for embeddings; if it's a tensor, it's only valid if we

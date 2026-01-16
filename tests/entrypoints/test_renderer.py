@@ -3,7 +3,6 @@
 
 import io
 from dataclasses import dataclass
-from typing import Optional
 from unittest.mock import AsyncMock, MagicMock
 
 import pybase64
@@ -17,7 +16,8 @@ from vllm.inputs.data import is_embeds_prompt
 @dataclass
 class MockModelConfig:
     max_model_len: int = 100
-    encoder_config: Optional[dict] = None
+    encoder_config: dict | None = None
+    enable_prompt_embeds: bool = True
 
 
 class MockTokenizerResult:

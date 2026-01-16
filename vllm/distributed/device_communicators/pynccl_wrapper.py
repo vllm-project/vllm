@@ -25,7 +25,7 @@
 import ctypes
 import platform
 from dataclasses import dataclass
-from typing import Any, Optional
+from typing import Any
 
 import torch
 from torch.distributed import ReduceOp
@@ -33,7 +33,7 @@ from torch.distributed import ReduceOp
 from vllm import envs
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
-from vllm.utils import find_nccl_library
+from vllm.utils.nccl import find_nccl_library
 
 logger = init_logger(__name__)
 
@@ -92,7 +92,10 @@ class ncclDataTypeEnum:
             return cls.ncclFloat64
         if dtype == torch.bfloat16:
             return cls.ncclBfloat16
-        raise ValueError(f"Unsupported dtype: {dtype}")
+        raise ValueError(
+            f"Unsupported dtype {dtype}: should be one of "
+            f"int8, uint8, int32, int64, float16, float32, float64, bfloat16."
+        )
 
 
 ncclRedOp_t = ctypes.c_int
@@ -305,7 +308,7 @@ class NCCLLibrary:
     #  to the corresponding dictionary
     path_to_dict_mapping: dict[str, dict[str, Any]] = {}
 
-    def __init__(self, so_file: Optional[str] = None):
+    def __init__(self, so_file: str | None = None):
         so_file = so_file or find_nccl_library()
 
         try:

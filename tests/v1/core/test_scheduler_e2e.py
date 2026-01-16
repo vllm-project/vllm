@@ -5,7 +5,7 @@ import pytest
 
 from vllm import LLM
 
-MODEL = "meta-llama/Llama-3.2-1B"
+MODEL = "hmellor/tiny-random-LlamaForCausalLM"
 PROMPT = "Hello my name is Robert and I"
 
 

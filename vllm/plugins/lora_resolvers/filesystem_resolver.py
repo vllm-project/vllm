@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import json
 import os
-from typing import Optional
 
 import vllm.envs as envs
 from vllm.lora.request import LoRARequest
@@ -15,7 +14,7 @@ class FilesystemResolver(LoRAResolver):
 
     async def resolve_lora(
         self, base_model_name: str, lora_name: str
-    ) -> Optional[LoRARequest]:
+    ) -> LoRARequest | None:
         lora_path = os.path.join(self.lora_cache_dir, lora_name)
         if os.path.exists(lora_path):
             adapter_config_path = os.path.join(

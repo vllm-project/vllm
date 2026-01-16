@@ -5,12 +5,12 @@ import json
 
 import pytest
 
-from vllm.entrypoints.openai.tool_parsers.mistral_tool_parser import (
+from vllm.sampling_params import SamplingParams
+from vllm.tokenizers.mistral import MistralTokenizer
+from vllm.tool_parsers.mistral_tool_parser import (
     MistralToolCall,
     MistralToolParser,
 )
-from vllm.sampling_params import SamplingParams
-from vllm.transformers_utils.tokenizer import MistralTokenizer
 
 from ...utils import check_logprobs_close
 
@@ -208,7 +208,7 @@ def test_mistral_format(
     with vllm_runner(
         model,
         dtype=dtype,
-        tokenizer_mode="auto",
+        tokenizer_mode="hf",
         load_format="safetensors",
         config_format="hf",
     ) as hf_format_model:
@@ -315,3 +315,38 @@ def test_mistral_function_call_nested_json():
     assert json.loads(parsed.tool_calls[0].function.arguments) == args_dict
     # No additional content outside the tool call should be returned.
     assert parsed.content is None
+
+    # multiple calls
+    multiple_args_dict = [
+        {
+            "city": "Dallas",
+            "state": "TX",
+            "unit": "fahrenheit",
+            "sub_dict": {"foo": "bar", "inner": {"x": 1, "y": 2}},
+        },
+        {},
+        {"a": 0},
+        {"a": 1, "b": "c"},
+    ]
+    names = ["get_current_weather", "get_current_weather_2", "random", "random_2"]
+
+    model_output = "".join(
+        [
+            f"{parser.bot_token}{name}{json.dumps(args)}"
+            for name, args in zip(names, multiple_args_dict)
+        ]
+    )
+
+    parsed = parser.extract_tool_calls(model_output, None)
+
+    # Assertions: the tool call is detected and the full nested JSON is parsed
+    # without truncation.
+    assert parsed.tools_called
+    assert len(parsed.tool_calls) == len(multiple_args_dict)
+
+    for i, tool_call in enumerate(parsed.tool_calls):
+        assert MistralToolCall.is_valid_id(tool_call.id)
+        assert tool_call.function.name == names[i]
+        assert json.loads(tool_call.function.arguments) == multiple_args_dict[i]
+        # No additional content outside the tool call should be returned.
+        assert parsed.content is None

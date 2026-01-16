@@ -2,13 +2,14 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Core test implementation to be shared across modalities."""
 
-from typing import Any, Callable, Optional
+from collections.abc import Callable
+from typing import Any
 
 import torch
 from transformers.models.auto.auto_factory import _BaseAutoModelClass
 
 from vllm.config.model import RunnerOption
-from vllm.transformers_utils.tokenizer import AnyTokenizer
+from vllm.tokenizers import TokenizerLike
 
 from .....conftest import HfRunner, VllmRunner
 from ....registry import HF_EXAMPLE_MODELS
@@ -27,21 +28,21 @@ def run_test(
     enforce_eager: bool,
     max_model_len: int,
     max_num_seqs: int,
-    hf_output_post_proc: Optional[Callable[[RunnerOutput, str], Any]],
-    vllm_output_post_proc: Optional[Callable[[RunnerOutput, str], Any]],
+    hf_output_post_proc: Callable[[RunnerOutput, str], Any] | None,
+    vllm_output_post_proc: Callable[[RunnerOutput, str], Any] | None,
     auto_cls: type[_BaseAutoModelClass],
     use_tokenizer_eos: bool,
     comparator: Callable[..., None],
-    get_stop_token_ids: Optional[Callable[[AnyTokenizer], list[int]]],
-    stop_str: Optional[list[str]],
+    get_stop_token_ids: Callable[[TokenizerLike], list[int]] | None,
+    stop_str: list[str] | None,
     limit_mm_per_prompt: dict[str, int],
-    vllm_runner_kwargs: Optional[dict[str, Any]],
-    hf_model_kwargs: Optional[dict[str, Any]],
-    patch_hf_runner: Optional[Callable[[HfRunner], HfRunner]],
+    vllm_runner_kwargs: dict[str, Any] | None,
+    hf_model_kwargs: dict[str, Any] | None,
+    patch_hf_runner: Callable[[HfRunner], HfRunner] | None,
     runner: RunnerOption = "auto",
-    distributed_executor_backend: Optional[str] = None,
+    distributed_executor_backend: str | None = None,
     tensor_parallel_size: int = 1,
-    vllm_embeddings: Optional[torch.Tensor] = None,
+    vllm_embeddings: torch.Tensor | None = None,
 ):
     """Modality agnostic test executor for comparing HF/vLLM outputs."""
     # In the case of embeddings, vLLM takes separate input tensors
@@ -70,8 +71,9 @@ def run_test(
         vllm_runner_kwargs_["tokenizer_mode"] = model_info.tokenizer_mode
     if model_info.hf_overrides:
         vllm_runner_kwargs_["hf_overrides"] = model_info.hf_overrides
-    if model_info.skip_tokenizer_init:
-        vllm_runner_kwargs_["skip_tokenizer_init"] = model_info.skip_tokenizer_init
+    if model_info.require_embed_inputs:
+        for k in ("skip_tokenizer_init", "enable_prompt_embeds", "enable_mm_embeds"):
+            vllm_runner_kwargs_[k] = model_info.require_embed_inputs
 
     if vllm_runner_kwargs:
         vllm_runner_kwargs_.update(vllm_runner_kwargs)

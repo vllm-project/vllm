@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from typing import Optional
 
 import torch
 from packaging import version
@@ -44,9 +43,9 @@ class BitBLASLinearKernel(MPLinearKernel):
         c: MPLinearLayerConfig,
         w_q_param_name: str,
         w_s_param_name: str,
-        w_zp_param_name: Optional[str] = None,
-        w_gidx_param_name: Optional[str] = None,
-        bitblas_quant_config: Optional[QuantizationConfig] = None,
+        w_zp_param_name: str | None = None,
+        w_gidx_param_name: str | None = None,
+        bitblas_quant_config: QuantizationConfig | None = None,
     ):
         self.quant_config = bitblas_quant_config
         super().__init__(
@@ -57,7 +56,7 @@ class BitBLASLinearKernel(MPLinearKernel):
         self,
         b_q_weight: torch.Tensor,
         scales: torch.Tensor,
-        qzeros: Optional[torch.Tensor] = None,
+        qzeros: torch.Tensor | None = None,
     ):
         from bitblas.quantization.utils import general_compress
 
@@ -82,7 +81,7 @@ class BitBLASLinearKernel(MPLinearKernel):
         # qzeros should be de-quantized to int zeros.
         weight_bits = quant_config.weight_bits  # type: ignore[union-attr]
         intzeros = unpack_gptq_qzeros(qzeros, weight_bits).T.contiguous()
-        zeros: Optional[torch.Tensor] = None
+        zeros: torch.Tensor | None = None
         zeros_mode = self.bitblas_matmul.config.zeros_mode  # type: ignore[attr-defined]
         if zeros_mode == "original":
             zeros = intzeros.to(torch.float16).contiguous()
@@ -113,7 +112,7 @@ class BitBLASLinearKernel(MPLinearKernel):
         return 70
 
     @classmethod
-    def can_implement(cls, c: MPLinearLayerConfig) -> tuple[bool, Optional[str]]:
+    def can_implement(cls, c: MPLinearLayerConfig) -> tuple[bool, str | None]:
         is_bitblas_installed = True
 
         try:

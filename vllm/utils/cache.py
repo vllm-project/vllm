@@ -1,11 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from __future__ import annotations
-
 from collections import UserDict
-from collections.abc import Hashable, Iterator, KeysView, Mapping
+from collections.abc import Callable, Hashable, Iterator, KeysView, Mapping
 from types import MappingProxyType
-from typing import Callable, Generic, NamedTuple, TypeVar, Union, cast, overload
+from typing import NamedTuple, TypeVar, cast, overload
 
 import cachetools
 
@@ -43,14 +41,14 @@ class CacheInfo(NamedTuple):
 
         return self.hits / self.total
 
-    def __sub__(self, other: CacheInfo):
+    def __sub__(self, other: "CacheInfo"):
         return CacheInfo(
             hits=self.hits - other.hits,
             total=self.total - other.total,
         )
 
 
-class LRUCache(cachetools.LRUCache[_K, _V], Generic[_K, _V]):
+class LRUCache(cachetools.LRUCache[_K, _V]):
     def __init__(self, capacity: float, getsizeof: Callable[[_V], float] | None = None):
         super().__init__(capacity, getsizeof)
 
@@ -129,12 +127,10 @@ class LRUCache(cachetools.LRUCache[_K, _V], Generic[_K, _V]):
     def get(self, key: _K, /) -> _V | None: ...
 
     @overload
-    def get(self, key: _K, /, default: Union[_V, _T]) -> Union[_V, _T]: ...
+    def get(self, key: _K, /, default: _V | _T) -> _V | _T: ...
 
-    def get(
-        self, key: _K, /, default: Union[_V, _T] | None = None
-    ) -> Union[_V, _T] | None:
-        value: Union[_V, _T] | None
+    def get(self, key: _K, /, default: _V | _T | None = None) -> _V | _T | None:
+        value: _V | _T | None
         if key in self:
             value = self.__getitem__(key, update_info=False)  # type: ignore[call-arg]
 
@@ -149,12 +145,10 @@ class LRUCache(cachetools.LRUCache[_K, _V], Generic[_K, _V]):
     def pop(self, key: _K) -> _V: ...
 
     @overload
-    def pop(self, key: _K, default: Union[_V, _T]) -> Union[_V, _T]: ...
+    def pop(self, key: _K, default: _V | _T) -> _V | _T: ...
 
-    def pop(
-        self, key: _K, default: Union[_V, _T] | None = None
-    ) -> Union[_V, _T] | None:
-        value: Union[_V, _T] | None
+    def pop(self, key: _K, default: _V | _T | None = None) -> _V | _T | None:
+        value: _V | _T | None
         if key not in self:
             return default
 

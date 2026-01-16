@@ -3,8 +3,9 @@
 
 import random
 from dataclasses import dataclass
-from typing import Optional, Union
+from typing import TypeAlias
 
+import numpy as np
 import torch
 from transformers import PreTrainedTokenizer, PreTrainedTokenizerFast
 
@@ -12,7 +13,7 @@ from vllm.engine.arg_utils import EngineArgs
 from vllm.v1.engine import EngineCoreOutput, FinishReason
 from vllm.v1.outputs import LogprobsLists, LogprobsTensors
 
-GeneralTokenizerType = Union[PreTrainedTokenizer, PreTrainedTokenizerFast]
+GeneralTokenizerType: TypeAlias = PreTrainedTokenizer | PreTrainedTokenizerFast
 
 # Number of sample logprobs to request when testing sample logprobs
 NUM_SAMPLE_LOGPROBS_UNDER_TEST = 5
@@ -332,17 +333,17 @@ class MockEngineCore:
         # For each request, for each sampled token offset,
         # a tuple of
         # (list of topk token ids, list of sample logprob vals, rank)
-        generated_logprobs_raw: Optional[
-            list[list[tuple[list[int], list[float], int]]]
-        ] = None,
+        generated_logprobs_raw: list[list[tuple[list[int], list[float], int]]]
+        | None = None,
         # For each request, a tuple of
         # (prompt logprob val matrix, prompt logprob tok id matrix);
         # each matrix has dimensions
         # (num prompt toks) x (num prompt logprobs+1)
-        prompt_logprobs_raw: Optional[list[LogprobsTensors]] = None,
-        eos_token_id: Optional[int] = None,
-        stop_token_ids: Optional[list[int]] = None,
+        prompt_logprobs_raw: list[LogprobsTensors] | None = None,
+        eos_token_id: int | None = None,
+        stop_token_ids: list[int] | None = None,
         ignore_eos: bool = False,
+        request_ids: list[str] | None = None,
     ) -> None:
         self.num_requests = len(tokens_list)
         self.tokens_list = tokens_list
@@ -355,6 +356,11 @@ class MockEngineCore:
         self.eos_token_id = eos_token_id
         self.stop_token_ids = stop_token_ids
         self.ignore_eos = ignore_eos
+        self.request_ids = (
+            request_ids
+            if request_ids is not None
+            else [f"request-{i}" for i in range(self.num_requests)]
+        )
 
     def get_outputs(self) -> list[EngineCoreOutput]:
         do_logprobs = self.do_logprobs
@@ -370,9 +376,9 @@ class MockEngineCore:
                         self.generated_logprobs_raw[req_idx][token_idx]
                     )
                     logprobs = LogprobsLists(
-                        [logprobs_token_ids_],
-                        [logprobs_],
-                        [sampled_token_ranks_],
+                        np.array([logprobs_token_ids_]),
+                        np.array([logprobs_]),
+                        np.array([sampled_token_ranks_]),
                     )
                 else:
                     logprobs = None
@@ -386,7 +392,7 @@ class MockEngineCore:
                     prompt_logprobs = None
                 new_token_id = token_ids[token_idx]
                 output = EngineCoreOutput(
-                    request_id=f"request-{req_idx}",
+                    request_id=self.request_ids[req_idx],
                     new_token_ids=[new_token_id],
                     new_logprobs=logprobs,
                     new_prompt_logprobs_tensors=prompt_logprobs,

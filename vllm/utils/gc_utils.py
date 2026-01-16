@@ -5,9 +5,9 @@ import json
 import time
 from collections import Counter
 from contextlib import suppress
-from typing import Any, Optional
+from typing import Any
 
-from vllm.envs import VLLM_GC_DEBUG
+import vllm.envs as envs
 from vllm.logger import init_logger
 
 logger = init_logger(__name__)
@@ -17,11 +17,11 @@ class GCDebugConfig:
     """
     Config for GC Debugger.
     - 0: disable GC debugger
-    - 1: enable GC debugger with gc.collect elpased times
+    - 1: enable GC debugger with gc.collect elapsed times
     - '{"top_objects":5}': enable GC debugger with top 5 collected objects
     """
 
-    def __init__(self, gc_debug_conf: Optional[str] = None) -> None:
+    def __init__(self, gc_debug_conf: str | None = None) -> None:
         self.enabled: bool = False
         self.top_objects: int = -1
 
@@ -36,8 +36,8 @@ class GCDebugConfig:
                 self.top_objects = json_conf.get("top_objects", -1)
             except Exception:
                 self.enabled = False
-                logger.error("Failed to parse VLLM_GC_DEBUG(%s)", VLLM_GC_DEBUG)
-        logger.info("GC Debug Config. %s", str(self))
+                logger.error("Failed to parse VLLM_GC_DEBUG(%s)", envs.VLLM_GC_DEBUG)
+        logger.debug("GC Debug Config. %s", str(self))
 
     def __repr__(self) -> str:
         return f"enabled:{self.enabled},top_objects:{self.top_objects}"
@@ -53,6 +53,7 @@ class GCDebugger:
         self.config = config
         # Start time in micro second of this GC cycle
         self.start_time_ns: int = time.monotonic_ns()
+        self.num_objects: int = 0
         # If config.top_objects is positive,
         # compute top collected objects by object types
         self.gc_top_collected_objects: str = ""
@@ -68,8 +69,10 @@ class GCDebugger:
             # Before GC started, record GC start time
             # and top collected objects
             self.start_time_ns = time.monotonic_ns()
+            objects = gc.get_objects(generation)
+            self.num_objects = len(objects)
             self.gc_top_collected_objects = _compute_top_gc_collected_objects(
-                gc.get_objects(generation), self.config.top_objects
+                objects, self.config.top_objects
             )
         elif phase == "stop":
             # After GC finished, Record GC elapsed time and
@@ -77,9 +80,10 @@ class GCDebugger:
             elpased_ms = (time.monotonic_ns() - self.start_time_ns) / 1e6
             logger.info(
                 "GC took %.3fms to complete. "
-                "Collected %s objects in GC generation %d.%s",
+                "Collected %s objects (out of %d) in GC generation %d.%s",
                 elpased_ms,
                 str(info.get("collected", "?")),
+                self.num_objects,
                 generation,
                 (
                     f" Top collected objects: \n{self.gc_top_collected_objects}"
@@ -89,11 +93,26 @@ class GCDebugger:
             )
 
 
+def freeze_gc_heap() -> None:
+    """
+    Freeze all objects tracked by the garbage collector. It should be invoked
+    after server init / warmup, to reduce GC overhead from static objects
+    during serving time.
+    """
+    # Ensure all static objects are pushed down to the oldest generation for
+    # freeze
+    gc.collect(0)
+    gc.collect(1)
+    gc.collect(2)
+    # Freeze all GC tracked objects
+    gc.freeze()
+
+
 def maybe_attach_gc_debug_callback() -> None:
     """
     Attached a callback for GC debug when VLLM_GC_DEBUG is enabled.
     """
-    config = GCDebugConfig(VLLM_GC_DEBUG)
+    config = GCDebugConfig(envs.VLLM_GC_DEBUG)
     if config.enabled:
         debugger: GCDebugger = GCDebugger(config)
 

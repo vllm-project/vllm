@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from functools import partial
-from typing import Optional
 
 import torch
 
@@ -28,7 +27,7 @@ class MacheteLinearKernel(MPLinearKernel):
         return 90
 
     @classmethod
-    def can_implement(cls, c: MPLinearLayerConfig) -> tuple[bool, Optional[str]]:
+    def can_implement(cls, c: MPLinearLayerConfig) -> tuple[bool, str | None]:
         # Machete uses CUTLASS, so it can only be compatible with Nvidia
         if not current_platform.is_cuda():
             return False, "Machete only supported on CUDA"
@@ -129,7 +128,7 @@ class MacheteLinearKernel(MPLinearKernel):
         self,
         layer: torch.nn.Module,
         x: torch.Tensor,
-        bias: Optional[torch.Tensor] = None,
+        bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
         c = self.config
         w_q, w_s, w_zp, _ = self._get_weight_params(layer)

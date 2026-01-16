@@ -2,12 +2,20 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from contextlib import contextmanager
-from typing import Any, Optional
+from typing import Any
 
-from vllm.model_executor.layers.fused_moe.config import FusedMoEConfig
+from vllm.model_executor.layers.fused_moe.config import (
+    FusedMoEConfig,
+    RoutingMethodType,
+)
+from vllm.model_executor.layers.fused_moe.fused_moe_method_base import (
+    FusedMoEMethodBase,
+)
+from vllm.model_executor.layers.fused_moe.fused_moe_router import (
+    FusedMoERouter,
+)
 from vllm.model_executor.layers.fused_moe.layer import (
     FusedMoE,
-    FusedMoEMethodBase,
     FusedMoeWeightScaleSupported,
 )
 from vllm.model_executor.layers.fused_moe.modular_kernel import (
@@ -16,10 +24,16 @@ from vllm.model_executor.layers.fused_moe.modular_kernel import (
     FusedMoEPrepareAndFinalize,
 )
 from vllm.model_executor.layers.fused_moe.shared_fused_moe import SharedFusedMoE
+from vllm.model_executor.layers.fused_moe.unquantized_fused_moe_method import (
+    UnquantizedFusedMoEMethod,
+)
 from vllm.model_executor.layers.fused_moe.utils import activation_without_mul
+from vllm.model_executor.layers.fused_moe.zero_expert_fused_moe import (
+    ZeroExpertFusedMoE,
+)
 from vllm.triton_utils import HAS_TRITON
 
-_config: Optional[dict[str, Any]] = None
+_config: dict[str, Any] | None = None
 
 
 @contextmanager
@@ -31,19 +45,23 @@ def override_config(config):
     _config = old_config
 
 
-def get_config() -> Optional[dict[str, Any]]:
+def get_config() -> dict[str, Any] | None:
     return _config
 
 
 __all__ = [
     "FusedMoE",
+    "FusedMoERouter",
     "FusedMoEConfig",
     "FusedMoEMethodBase",
+    "UnquantizedFusedMoEMethod",
     "FusedMoeWeightScaleSupported",
     "FusedMoEPermuteExpertsUnpermute",
     "FusedMoEActivationFormat",
     "FusedMoEPrepareAndFinalize",
+    "RoutingMethodType",
     "SharedFusedMoE",
+    "ZeroExpertFusedMoE",
     "activation_without_mul",
     "override_config",
     "get_config",
@@ -51,29 +69,26 @@ __all__ = [
 
 if HAS_TRITON:
     # import to register the custom ops
-    import vllm.model_executor.layers.fused_moe.fused_marlin_moe  # noqa
     from vllm.model_executor.layers.fused_moe.batched_deep_gemm_moe import (
         BatchedDeepGemmExperts,
-    )
-    from vllm.model_executor.layers.fused_moe.batched_triton_or_deep_gemm_moe import (  # noqa: E501
-        BatchedTritonOrDeepGemmExperts,
     )
     from vllm.model_executor.layers.fused_moe.cutlass_moe import (
         CutlassBatchedExpertsFp8,
         CutlassExpertsFp8,
-        cutlass_moe_fp4,
-        cutlass_moe_fp8,
+        CutlassExpertsW4A8Fp8,
+        cutlass_moe_w4a8_fp8,
     )
     from vllm.model_executor.layers.fused_moe.deep_gemm_moe import DeepGemmExperts
     from vllm.model_executor.layers.fused_moe.fused_batched_moe import (
         BatchedTritonExperts,
     )
     from vllm.model_executor.layers.fused_moe.fused_moe import (
+        GroupedTopk,
         TritonExperts,
+        TritonWNA16Experts,
         fused_experts,
         fused_topk,
         get_config_file_name,
-        grouped_topk,
     )
     from vllm.model_executor.layers.fused_moe.triton_deep_gemm_moe import (
         TritonOrDeepGemmExperts,
@@ -83,17 +98,17 @@ if HAS_TRITON:
         "fused_topk",
         "fused_experts",
         "get_config_file_name",
-        "grouped_topk",
-        "cutlass_moe_fp8",
-        "cutlass_moe_fp4",
+        "GroupedTopk",
+        "cutlass_moe_w4a8_fp8",
         "CutlassExpertsFp8",
         "CutlassBatchedExpertsFp8",
+        "CutlassExpertsW4A8Fp8",
         "TritonExperts",
+        "TritonWNA16Experts",
         "BatchedTritonExperts",
         "DeepGemmExperts",
         "BatchedDeepGemmExperts",
         "TritonOrDeepGemmExperts",
-        "BatchedTritonOrDeepGemmExperts",
     ]
 else:
     # Some model classes directly use the custom ops. Add placeholders

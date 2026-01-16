@@ -5,7 +5,7 @@ import glob
 import os
 import time
 from collections.abc import Generator, Iterable
-from typing import Optional, cast
+from typing import cast
 
 import torch
 from torch import nn
@@ -22,6 +22,7 @@ from vllm.model_executor.model_loader.weight_utils import (
     fastsafetensors_weights_iterator,
     filter_duplicate_safetensors_files,
     filter_files_not_needed_for_inference,
+    get_quant_config,
     maybe_download_from_modelscope,
     multi_thread_pt_weights_iterator,
     multi_thread_safetensors_weights_iterator,
@@ -29,7 +30,7 @@ from vllm.model_executor.model_loader.weight_utils import (
     pt_weights_iterator,
     safetensors_weights_iterator,
 )
-from vllm.platforms import current_platform
+from vllm.transformers_utils.repo_utils import list_filtered_repo_files
 
 logger = init_logger(__name__)
 
@@ -47,7 +48,7 @@ class DefaultModelLoader(BaseModelLoader):
         model_or_path: str
         """The model ID or path."""
 
-        revision: Optional[str]
+        revision: str | None
         """The optional model revision."""
 
         prefix: str = ""
@@ -56,7 +57,7 @@ class DefaultModelLoader(BaseModelLoader):
         fall_back_to_pt: bool = True
         """Whether .pt weights can be used."""
 
-        allow_patterns_overrides: Optional[list[str]] = None
+        allow_patterns_overrides: list[str] | None = None
         """If defined, weights will load exclusively using these patterns."""
 
     counter_before_loading_weights: float = 0.0
@@ -79,9 +80,9 @@ class DefaultModelLoader(BaseModelLoader):
     def _prepare_weights(
         self,
         model_name_or_path: str,
-        revision: Optional[str],
+        revision: str | None,
         fall_back_to_pt: bool,
-        allow_patterns_overrides: Optional[list[str]],
+        allow_patterns_overrides: list[str] | None,
     ) -> tuple[str, list[str], bool]:
         """Prepare weights for the model.
 
@@ -95,8 +96,25 @@ class DefaultModelLoader(BaseModelLoader):
         load_format = self.load_config.load_format
         use_safetensors = False
         index_file = SAFE_WEIGHTS_INDEX_NAME
-        # Some quantized models use .pt files for storing the weights.
+
+        # First check for 'auto' format that mistral files format are present.
+        # This is to load mistral models with official format by default.
         if load_format == "auto":
+            load_format = (
+                "mistral"
+                if len(
+                    list_filtered_repo_files(
+                        model_name_or_path=model_name_or_path,
+                        allow_patterns=["consolidated*.safetensors"],
+                        revision=revision,
+                    )
+                )
+                > 0
+                else "hf"
+            )
+
+        # Some quantized models use .pt files for storing the weights.
+        if load_format == "hf":
             allow_patterns = ["*.safetensors", "*.bin"]
         elif load_format == "safetensors" or load_format == "fastsafetensors":
             use_safetensors = True
@@ -222,22 +240,6 @@ class DefaultModelLoader(BaseModelLoader):
                     self.load_config.pt_load_map_location,
                 )
 
-        if current_platform.is_tpu():
-            from vllm.platforms.tpu import USE_TPU_INFERENCE
-
-            if not USE_TPU_INFERENCE:
-                # In PyTorch XLA, we should call `torch_xla.sync`
-                # frequently so that not too many ops are accumulated
-                # in the XLA program.
-                import torch_xla
-
-                def _xla_weights_iterator(iterator: Generator):
-                    for weights in iterator:
-                        yield weights
-                        torch_xla.sync(wait=False)
-
-                weights_iterator = _xla_weights_iterator(weights_iterator)
-
         if self.counter_before_loading_weights == 0.0:
             self.counter_before_loading_weights = time.perf_counter()
         # Apply the prefix.
@@ -273,47 +275,23 @@ class DefaultModelLoader(BaseModelLoader):
         )
 
     def load_weights(self, model: nn.Module, model_config: ModelConfig) -> None:
-        if model_config.quantization == "torchao" and torchao_version_at_least(
-            "0.14.0"
-        ):
-            self.load_config.safetensors_load_strategy = "torchao"
+        if model_config.quantization == "torchao":
+            quant_config = get_quant_config(model_config, self.load_config)
+            if (
+                hasattr(quant_config, "is_checkpoint_torchao_serialized")
+                and quant_config.is_checkpoint_torchao_serialized
+                and torchao_version_at_least("0.15.0")
+            ):
+                self.load_config.safetensors_load_strategy = "torchao"
+
         weights_to_load = {name for name, _ in model.named_parameters()}
-
-        # if we don't have `model.weight_metadata_and_attr_saved` defined and
-        # set to True, it means that this is either offline quantization case
-        # or the first run of online quantization
-        # see online_quantization.py for detailed notes
-        offline_quantization_or_first_run_of_online_quantization = not getattr(
-            model, "weight_metadata_and_attr_saved", False
-        )
-
-        if model_config.quantization is None:
-            # model is not quantized
-            loaded_weights = model.load_weights(
-                self.get_all_weights(model_config, model)
-            )
-        elif offline_quantization_or_first_run_of_online_quantization:
-            # case 1: offline quantized checkpoint
-            # case 2: Step I1 first run of weight loading with
-            # online quantization
-            # see online_quantization.py for detailed notes
-            loaded_weights = model.load_weights(
-                self.get_all_weights(model_config, model)
-            )
-        else:
-            # to avoid circular dependency
-            from vllm.model_executor.model_loader.online_quantization import (
-                load_weights_and_online_quantize,
-            )
-
-            # subsequent runs of weight loading with online
-            # quantization
-            loaded_weights = load_weights_and_online_quantize(self, model, model_config)
+        loaded_weights = model.load_weights(self.get_all_weights(model_config, model))
 
         self.counter_after_loading_weights = time.perf_counter()
-        logger.info(
+        logger.info_once(
             "Loading weights took %.2f seconds",
             self.counter_after_loading_weights - self.counter_before_loading_weights,
+            scope="local",
         )
         # We only enable strict check for non-quantized models
         # that have loaded weights tracking currently.

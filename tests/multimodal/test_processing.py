@@ -1,28 +1,27 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import time
 from contextlib import nullcontext
-from typing import Optional, cast
 
 import numpy as np
 import pytest
 
 from vllm.config import ModelConfig
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.processing import (
-    InputProcessingContext,
+from vllm.multimodal.processing.context import InputProcessingContext
+from vllm.multimodal.processing.processor import (
     PlaceholderFeaturesInfo,
     PromptIndexTargets,
     PromptInsertion,
     PromptReplacement,
+    _apply_matches,
     apply_text_matches,
     apply_token_matches,
     find_mm_placeholders,
     iter_token_matches,
     replace_token_matches,
 )
-from vllm.multimodal.profiling import MultiModalProfiler
-from vllm.transformers_utils.tokenizer import AnyTokenizer
 
 from .utils import random_image
 
@@ -236,15 +235,12 @@ def test_find_token_matches(
     expected_by_key,
     update_type,
 ):
-    # Should not be used since there is nothing to convert to token IDs
-    mock_tokenizer = cast(AnyTokenizer, object())
-
     prompt_updates = {
         key: update_type(key, target, []).resolve(0)
         for key, target in target_by_key.items()
     }
     result = {
-        key: list(update.iter_token_matches(prompt, mock_tokenizer))
+        key: list(update.iter_token_matches(prompt, tokenizer=None))
         for key, update in prompt_updates.items()
     }
 
@@ -383,15 +379,12 @@ def test_find_text_matches(
     expected_by_key,
     update_type,
 ):
-    # Should not be used since there is nothing to convert to text
-    mock_tokenizer = cast(AnyTokenizer, object())
-
     prompt_updates = {
         key: update_type(key, target, []).resolve(0)
         for key, target in target_by_key.items()
     }
     result = {
-        key: list(update.iter_text_matches(prompt, mock_tokenizer))
+        key: list(update.iter_text_matches(prompt, tokenizer=None))
         for key, update in prompt_updates.items()
     }
 
@@ -543,9 +536,6 @@ def test_find_update_text(
     repl_by_key,
     expected_by_update_type_mm_count,
 ):
-    # Should not be used since there is nothing to convert to text
-    mock_tokenizer = cast(AnyTokenizer, object())
-
     for (
         update_type,
         expected_by_mm_count,
@@ -562,7 +552,7 @@ def test_find_update_text(
             new_prompt, result = apply_text_matches(
                 prompt,
                 mm_prompt_updates,
-                mock_tokenizer,
+                tokenizer=None,
             )
 
             # Only displayed on error
@@ -748,9 +738,6 @@ def test_find_update_tokens(
     repl_by_key,
     expected_by_update_type_mm_count,
 ):
-    # Should not be used since there is nothing to convert to tokens
-    mock_tokenizer = cast(AnyTokenizer, object())
-
     for (
         update_type,
         expected_by_mm_count,
@@ -767,7 +754,7 @@ def test_find_update_tokens(
             new_prompt, result = apply_token_matches(
                 prompt,
                 mm_prompt_updates,
-                mock_tokenizer,
+                tokenizer=None,
             )
 
             # Only displayed on error
@@ -898,15 +885,12 @@ def test_find_mm_placeholders(
     expected,
     update_type,
 ):
-    # Should not be used since there is nothing to convert to tokens
-    mock_tokenizer = cast(AnyTokenizer, object())
-
     mm_prompt_updates = {
         key: [[update_type(key, [], repl).resolve(i)] for i in range(3)]
         for key, repl in repl_by_key.items()
     }
 
-    result = find_mm_placeholders(prompt, mm_prompt_updates, mock_tokenizer)
+    result = find_mm_placeholders(prompt, mm_prompt_updates, tokenizer=None)
 
     # Only displayed on error
     print("result:", result)
@@ -939,14 +923,13 @@ def test_limit_mm_per_prompt_dummy(model_id, limit, num_supported, is_valid):
     processor = MULTIMODAL_REGISTRY.create_processor(model_config)
     processor._supported_mm_limits = {"image": num_supported}
 
-    profiler = MultiModalProfiler(processor)
-
     exc_ctx = nullcontext() if is_valid else pytest.raises(ValueError, match="At most")
 
     with exc_ctx:
-        profiler.get_decoder_dummy_data(
-            model_config.max_model_len,
+        MULTIMODAL_REGISTRY.get_dummy_mm_inputs(
+            model_config,
             mm_counts=limit_mm_per_prompt,
+            processor=processor,
         )
 
 
@@ -1003,7 +986,7 @@ class DummyProcessor:
         self,
         a: int = 0,
         c: int = 0,
-        return_tensors: Optional[str] = None,
+        return_tensors: str | None = None,
     ) -> dict[str, int]:
         return dict(a=a, c=c)
 
@@ -1027,21 +1010,17 @@ def test_hf_processor_init_kwargs(
     inference_kwargs,
     expected_kwargs,
 ):
-    # Should not be used since there is nothing to convert to tokens
-    mock_tokenizer = cast(AnyTokenizer, object())
-
     ctx = InputProcessingContext(
         model_config=ModelConfig(model_id, mm_processor_kwargs=config_kwargs),
-        tokenizer=mock_tokenizer,
+        tokenizer=None,
     )
 
     processor = ctx.get_hf_processor(
         DummyProcessor,  # type: ignore[arg-type]
         **inference_kwargs,
     )
-
-    for k, v in expected_kwargs.items():
-        assert getattr(processor, k) == v
+    assert processor.a == expected_kwargs["a"]
+    assert processor.b == expected_kwargs["b"]
 
 
 @pytest.mark.parametrize("model_id", ["Qwen/Qwen2-VL-2B-Instruct"])  # Dummy
@@ -1063,15 +1042,43 @@ def test_hf_processor_call_kwargs(
     inference_kwargs,
     expected_kwargs,
 ):
-    # Should not be used since there is nothing to convert to tokens
-    mock_tokenizer = cast(AnyTokenizer, object())
-
     ctx = InputProcessingContext(
         model_config=ModelConfig(model_id, mm_processor_kwargs=config_kwargs),
-        tokenizer=mock_tokenizer,
+        tokenizer=None,
     )
 
     processor = ctx.get_hf_processor(DummyProcessor)  # type: ignore[arg-type]
 
     result = ctx.call_hf_processor(processor, {}, inference_kwargs)
     assert result == expected_kwargs
+
+
+def test_apply_matches_no_match_exits_quickly():
+    """
+    Test that _apply_matches exits quickly when no matches are found.
+
+    Previously, _apply_matches had O(n²) behavior when no match was found
+    because it would increment start_idx by 1 each iteration while
+    re-scanning the entire prompt from prev_end_idx=0.
+
+    With the fix, it should exit immediately when no match is found.
+    """
+    # Create a long prompt with no placeholder
+    long_prompt = "x" * 10000
+
+    # Create update looking for a placeholder that doesn't exist
+    mm_prompt_updates = {
+        "image": [[PromptReplacement("image", "<image>", "REPLACED").resolve(0)]]
+    }
+
+    start = time.perf_counter()
+    result, _ = _apply_matches(
+        long_prompt,
+        mm_prompt_updates,
+        tokenizer=None,
+    )
+    elapsed = time.perf_counter() - start
+
+    # Should complete in < 100ms (was taking seconds before the fix)
+    assert elapsed < 0.1, f"_apply_matches took {elapsed:.2f}s, expected < 0.1s"
+    assert "".join(result) == long_prompt

@@ -32,28 +32,28 @@ This is the easiest way to get started with vLLM on Hugging Face Inference Endpo
     import os
 
     client = OpenAI(
-        base_url = DEPLOYMENT_URL,
-        api_key = os.environ["HF_TOKEN"] # https://huggingface.co/settings/tokens
+        base_url=DEPLOYMENT_URL,
+        api_key=os.environ["HF_TOKEN"],  # https://huggingface.co/settings/tokens
     )
 
     chat_completion = client.chat.completions.create(
-        model = "HuggingFaceTB/SmolLM3-3B",
-        messages = [
+        model="HuggingFaceTB/SmolLM3-3B",
+        messages=[
             {
                 "role": "user",
                 "content": [
                     {
                         "type": "text",
-                        "text": "Give me a brief explanation of gravity in simple terms."
+                        "text": "Give me a brief explanation of gravity in simple terms.",
                     }
-                ]
+                ],
             }
         ],
-        stream = True
+        stream=True,
     )
 
     for message in chat_completion:
-        print(message.choices[0].delta.content, end = "")
+        print(message.choices[0].delta.content, end="")
     ```
 
 !!! note
@@ -70,7 +70,7 @@ This method applies to models with the [`transformers` library tag](https://hugg
 
     ![Locate deploy button](../../assets/deployment/hf-inference-endpoints-locate-deploy-button.png)
 
-3. Click to **Deploy** button > **HF Inference Endpoints**. You will be taken to the Inference Endpoints interface to configure the deployment.
+3. Click the **Deploy** button > **HF Inference Endpoints**. You will be taken to the Inference Endpoints interface to configure the deployment.
 
     ![Click deploy button](../../assets/deployment/hf-inference-endpoints-click-deploy-button.png)
 
@@ -86,34 +86,34 @@ This method applies to models with the [`transformers` library tag](https://hugg
     import os
 
     client = OpenAI(
-        base_url = DEPLOYMENT_URL,
-        api_key = os.environ["HF_TOKEN"] # https://huggingface.co/settings/tokens
+        base_url=DEPLOYMENT_URL,
+        api_key=os.environ["HF_TOKEN"],  # https://huggingface.co/settings/tokens
     )
 
     chat_completion = client.chat.completions.create(
-        model = "ibm-granite/granite-docling-258M",
-        messages = [
+        model="ibm-granite/granite-docling-258M",
+        messages=[
             {
                 "role": "user",
                 "content": [
                     {
                         "type": "image_url",
                         "image_url": {
-                            "url": "https://huggingface.co/ibm-granite/granite-docling-258M/resolve/main/assets/new_arxiv.png"
-                        }
+                            "url": "https://huggingface.co/ibm-granite/granite-docling-258M/resolve/main/assets/new_arxiv.png",
+                        },
                     },
                     {
                         "type": "text",
-                        "text": "Convert this page to docling."
-                    }
+                        "text": "Convert this page to docling.",
+                    },
                 ]
             }
         ],
-        stream = True
+        stream=True,
     )
 
     for message in chat_completion:
-        print(message.choices[0].delta.content, end = "")
+        print(message.choices[0].delta.content, end="")
     ```
 
 !!! note
@@ -156,7 +156,7 @@ In this guide, we demonstrate manual deployment using the [`rednote-hilab/dots.o
 
 ## Advanced Deployment Details
 
-With the [transformers backend integration](https://blog.vllm.ai/2025/04/11/transformers-backend.html), vLLM now offers Day 0 support for any model compatible with `transformers`. This means you can deploy such models immediately, leveraging vLLM’s optimized inference without additional backend modifications.
+With the [Transformers modeling backend integration](https://blog.vllm.ai/2025/04/11/transformers-backend.html), vLLM now offers Day 0 support for any model compatible with `transformers`. This means you can deploy such models immediately, leveraging vLLM’s optimized inference without additional backend modifications.
 
 Hugging Face Inference Endpoints provides a fully managed environment for serving models via vLLM. You can deploy models without configuring servers, installing dependencies, or managing clusters. Endpoints also support deployment across multiple cloud providers (AWS, Azure, GCP) without the need for separate accounts.
 
@@ -167,4 +167,4 @@ The platform integrates seamlessly with the Hugging Face Hub, allowing you to de
 - Explore the [Inference Endpoints](https://endpoints.huggingface.co/catalog) model catalog
 - Read the Inference Endpoints [documentation](https://huggingface.co/docs/inference-endpoints/en/index)
 - Learn about [Inference Endpoints engines](https://huggingface.co/docs/inference-endpoints/en/engines/vllm)
-- Understand the [transformers backend integration](https://blog.vllm.ai/2025/04/11/transformers-backend.html)
+- Understand the [Transformers modeling backend integration](https://blog.vllm.ai/2025/04/11/transformers-backend.html)

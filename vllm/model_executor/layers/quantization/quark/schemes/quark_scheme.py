@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from abc import ABC, abstractmethod
-from typing import Optional
 
 import torch
 
@@ -33,7 +32,7 @@ class QuarkScheme(ABC):
 
     @abstractmethod
     def apply_weights(
-        self, layer: torch.nn.Module, x: torch.Tensor, bias: Optional[torch.Tensor]
+        self, layer: torch.nn.Module, x: torch.Tensor, bias: torch.Tensor | None
     ):
         """
         Run the forward pass for the particular scheme. This is where

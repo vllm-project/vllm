@@ -23,7 +23,7 @@ pip install llmcompressor
 Additionally, install `vllm` and `lm-evaluation-harness` for evaluation:
 
 ```bash
-pip install vllm git+https://github.com/EleutherAI/lm-evaluation-harness.git@206b7722158f58c35b7ffcd53b035fdbdda5126d#egg=lm-eval[api]
+pip install vllm "lm-eval[api]>=0.4.9.2"
 ```
 
 ## Quantization Process
@@ -44,7 +44,9 @@ from transformers import AutoTokenizer, AutoModelForCausalLM
 
 MODEL_ID = "meta-llama/Meta-Llama-3-8B-Instruct"
 model = AutoModelForCausalLM.from_pretrained(
-    MODEL_ID, device_map="auto", torch_dtype="auto",
+    MODEL_ID,
+    device_map="auto",
+    dtype="auto",
 )
 tokenizer = AutoTokenizer.from_pretrained(MODEL_ID)
 ```
@@ -85,7 +87,7 @@ Now, apply the quantization algorithms:
 ??? code
 
     ```python
-    from llmcompressor.transformers import oneshot
+    from llmcompressor import oneshot
     from llmcompressor.modifiers.quantization import GPTQModifier
     from llmcompressor.modifiers.smoothquant import SmoothQuantModifier
 

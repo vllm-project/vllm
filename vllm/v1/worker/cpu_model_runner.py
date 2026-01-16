@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from contextlib import contextmanager
-from typing import TYPE_CHECKING, Any, Optional
+from typing import Any
 
 import torch
 import torch.nn as nn
@@ -11,9 +11,6 @@ from vllm.logger import init_logger
 from vllm.model_executor.model_loader import get_model
 from vllm.v1.utils import CpuGpuBuffer
 from vllm.v1.worker.gpu_model_runner import GPUModelRunner
-
-if TYPE_CHECKING:
-    from vllm.v1.core.sched.output import SchedulerOutput
 
 logger = init_logger(__name__)
 
@@ -30,15 +27,6 @@ class CPUModelRunner(GPUModelRunner):
         self.cascade_attn_enabled = False
 
         self._postprocess_tensors()
-
-    # Note: Remove the override after new attention backend finished
-    def _may_reorder_batch(self, scheduler_output: "SchedulerOutput") -> None:
-        if len(self.kv_cache_config.kv_cache_groups) > 1:
-            raise ValueError(
-                "Multiple KVCacheGroups is not"
-                "currently supported with CPU model runner."
-            )
-        super()._may_reorder_batch(scheduler_output)
 
     def _postprocess_tensors(self) -> None:
         # Note: replace device tensors with cpu tensors
@@ -92,10 +80,7 @@ class CPUModelRunner(GPUModelRunner):
     def _sync_device(self) -> None:
         pass
 
-    def _to_list(self, sampled_token_ids: torch.Tensor) -> list[list[int]]:
-        return sampled_token_ids.tolist()
-
-    def get_dp_padding(self, num_tokens: int) -> tuple[int, Optional[torch.Tensor]]:
+    def get_dp_padding(self, num_tokens: int) -> tuple[int, torch.Tensor | None]:
         # Note: For CPU backend, dp padding is not required for now.
         return 0, None
 
@@ -111,14 +96,14 @@ def _torch_cuda_wrapper():
         def __init__(self, *args, **kwargs) -> None:
             pass
 
-    cuda_event = torch.cuda.Event
+    cuda_event = torch.Event
     cuda_stream = torch.cuda.Stream
     try:
-        torch.cuda.Event = _EventPlaceholder
+        torch.Event = _EventPlaceholder
         torch.cuda.Stream = _StreamPlaceholder
         yield
     finally:
-        torch.cuda.Event = cuda_event
+        torch.Event = cuda_event
         torch.cuda.Stream = cuda_stream
 
 

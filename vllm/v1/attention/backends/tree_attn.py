@@ -4,26 +4,25 @@
 
 import ast
 from dataclasses import dataclass
-from typing import Optional, Union
+from typing import ClassVar, Optional
 
 import torch
 
 from vllm import _custom_ops as ops
-from vllm.attention.backends.abstract import (
-    AttentionBackend,
-    AttentionImpl,
-    AttentionMetadata,
-    AttentionType,
-    MultipleOf,
-)
-from vllm.attention.ops.triton_unified_attention import unified_attention
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
-from vllm.v1.attention.backends.utils import (
+from vllm.v1.attention.backend import (
+    AttentionBackend,
+    AttentionImpl,
     AttentionMetadataBuilder,
+    AttentionType,
     CommonAttentionMetadata,
+    MultipleOf,
+)
+from vllm.v1.attention.backends.utils import (
     split_decodes_and_prefills,
 )
+from vllm.v1.attention.ops.triton_unified_attention import unified_attention
 from vllm.v1.kv_cache_interface import AttentionSpec
 
 logger = init_logger(__name__)
@@ -31,30 +30,15 @@ logger = init_logger(__name__)
 
 class TreeAttentionBackend(AttentionBackend):
     accept_output_buffer: bool = True
+    supported_dtypes: ClassVar[list[torch.dtype]] = [torch.float16, torch.bfloat16]
 
-    @classmethod
-    def get_supported_dtypes(cls) -> list[torch.dtype]:
-        return [torch.float16, torch.bfloat16]
+    @staticmethod
+    def get_supported_kernel_block_sizes() -> list[int | MultipleOf]:
+        return [MultipleOf(16)]
 
     @classmethod
     def get_supported_head_sizes(cls) -> list[int]:
         return [32, 64, 96, 128, 160, 192, 224, 256]
-
-    @staticmethod
-    def get_supported_kernel_block_size() -> list[Union[int, MultipleOf]]:
-        return [MultipleOf(16)]
-
-    @classmethod
-    def validate_head_size(cls, head_size: int) -> None:
-        supported_head_sizes = cls.get_supported_head_sizes()
-        if head_size not in supported_head_sizes:
-            attn_type = cls.__name__.removesuffix("Backend")
-            raise ValueError(
-                f"Head size {head_size} is not supported by {attn_type}. "
-                f"Supported head sizes are: {supported_head_sizes}. "
-                "Set VLLM_ATTENTION_BACKEND=FLEX_ATTENTION to use "
-                "FlexAttention backend which supports all head sizes."
-            )
 
     @staticmethod
     def get_name() -> str:
@@ -63,10 +47,6 @@ class TreeAttentionBackend(AttentionBackend):
     @staticmethod
     def get_impl_cls() -> type["TreeAttentionImpl"]:
         return TreeAttentionImpl
-
-    @staticmethod
-    def get_metadata_cls() -> type["AttentionMetadata"]:
-        return TreeAttentionMetadata
 
     @staticmethod
     def get_kv_cache_shape(
@@ -104,7 +84,7 @@ class TreeAttentionMetadata:
     num_prefills: int = 0
     num_decodes: int = 0
 
-    tree_attn_bias: Optional[torch.Tensor] = None
+    tree_attn_bias: torch.Tensor | None = None
 
     # Cached Prefill/decode metadata.
     _cached_prefill_metadata: Optional["TreeAttentionMetadata"] = None
@@ -175,7 +155,9 @@ class TreeAttentionMetadataBuilder(AttentionMetadataBuilder[TreeAttentionMetadat
         self.block_size = kv_cache_spec.block_size
 
         spec_config = vllm_config.speculative_config
-        spec_token_tree = (spec := spec_config) and spec.speculative_token_tree
+        spec_token_tree: str | None = None
+        if spec := spec_config:
+            spec_token_tree = spec.speculative_token_tree
         tree_choices: list[tuple[int, ...]] = (
             ast.literal_eval(spec_token_tree) if spec_token_tree is not None else [(0,)]
         )
@@ -267,8 +249,8 @@ def _get_depth_counts(sorted_tree_choices: list[tuple[int, ...]]) -> list[int]:
 def _prepare_tree_attn_bias(
     sorted_tree_choices: list[tuple[int, ...]],
     depth_counts: list[int],
-    dtype: Optional[torch.dtype],
-    device: Optional[torch.device],
+    dtype: torch.dtype | None,
+    device: torch.device | None,
 ) -> torch.Tensor:
     # +1 comes from the additional root node.
     tree_len = len(sorted_tree_choices) + 1
@@ -310,12 +292,12 @@ class TreeAttentionImpl(AttentionImpl):
         head_size: int,
         scale: float,
         num_kv_heads: int,
-        alibi_slopes: Optional[list[float]],
-        sliding_window: Optional[int],
+        alibi_slopes: list[float] | None,
+        sliding_window: int | None,
         kv_cache_dtype: str,
-        logits_soft_cap: Optional[float] = None,
+        logits_soft_cap: float | None = None,
         attn_type: AttentionType = AttentionType.DECODER,
-        kv_sharing_target_layer_name: Optional[str] = None,
+        kv_sharing_target_layer_name: str | None = None,
     ) -> None:
         self.num_heads = num_heads
         self.head_size = head_size
@@ -336,8 +318,6 @@ class TreeAttentionImpl(AttentionImpl):
         else:
             self.sliding_window = (sliding_window - 1, 0)
 
-        TreeAttentionBackend.validate_head_size(head_size)
-
         if attn_type != AttentionType.DECODER:
             raise NotImplementedError(
                 "Encoder self-attention and "
@@ -354,9 +334,9 @@ class TreeAttentionImpl(AttentionImpl):
         value: torch.Tensor,
         kv_cache: torch.Tensor,
         attn_metadata: TreeAttentionMetadata,
-        output: Optional[torch.Tensor] = None,
-        output_scale: Optional[torch.Tensor] = None,
-        output_block_scale: Optional[torch.Tensor] = None,
+        output: torch.Tensor | None = None,
+        output_scale: torch.Tensor | None = None,
+        output_block_scale: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """Forward pass with TreeAttention.
 
@@ -379,7 +359,7 @@ class TreeAttentionImpl(AttentionImpl):
 
         if attn_metadata is None:
             # Profiling run.
-            return output
+            return output.fill_(0)
 
         # Cache the input KVs.
         key_cache, value_cache = kv_cache.unbind(0)

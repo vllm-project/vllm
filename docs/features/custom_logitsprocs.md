@@ -18,6 +18,11 @@ In vLLM, logits processors operate at batch granularity. During a given engine s
 
 Custom logits processors must subclass `vllm.v1.sample.logits_processor.LogitsProcessor` and define (at minimum) the following methods:
 
+* `validate_params(cls, sampling_params: SamplingParams)`:
+    * Raise `ValueError` if `SamplingParams` has invalid arguments (especially custom arguments) used by logits processor.
+    * When request is sent to entrypoint, `validate_params()` will validate `SamplingParams` and refuse request with invalid arguments.
+    * **Note:** it's important to implement `validate_params()` to prevent invalid parameters for custom logits processor. Otherwise requests with invalid parameters can cause unexpected behaviour in custom logits processor.
+
 * `__init__(self, vllm_config: VllmConfig, device: torch.device, is_pin_memory: bool)`
     * `vllm_config`: engine configuration data structure
     * `device`: hardware accelerator device info
@@ -66,7 +71,7 @@ Logits processor `update_state()` implementations should assume the following mo
 
         * **"Condense" the batch to be contiguous:** starting with the lowest-index empty slot (which was caused by a Remove), apply a Unidirectional Move from the current highest non-empty slot in the batch to fill the empty slot. Proceed with additional Unidirectional Move operations in order of increasing empty slot destination index and decreasing non-empty slot source index until the batch is contiguous
 
-        * **Shrink the batch:** a side-effect of condensing the batch is that empty slots resulting from Remove operations are grouped in a contiguous block at the end of the batch array. Thus, after condensing, update `BatchUpdate.batch_size` to reflect the number of non-empty slots
+        * **Shrink the batch:** a side effect of condensing the batch is that empty slots resulting from Remove operations are grouped in a contiguous block at the end of the batch array. Thus, after condensing, update `BatchUpdate.batch_size` to reflect the number of non-empty slots
 
 5. Reorder the batch for improved efficiency. Depending on the attention backend implementation and the current characteristics of the batch, zero or more Swap Move operations may be applied to reorder the batch
 
@@ -93,7 +98,6 @@ The contrived example below implements a custom logits processor which consumes 
 ??? code "Example custom logits processor definition"
 
     ``` python
-    from typing import Optional
     import torch
     from vllm.config import VllmConfig
     from vllm.sampling_params import SamplingParams
@@ -104,6 +108,14 @@ The contrived example below implements a custom logits processor which consumes 
     class DummyLogitsProcessor(LogitsProcessor):
         """Fake logit processor to support unit testing and examples"""
 
+        @classmethod
+        def validate_params(cls, params: SamplingParams):
+            target_token: int | None = params.extra_args and params.extra_args.get(
+                "target_token"
+            )
+            if target_token is not None and not isinstance(target_token, int):
+                raise ValueError(f"target_token value {target_token} is not int")
+
         def __init__(self, vllm_config: "VllmConfig", device: torch.device,
                     is_pin_memory: bool):
             self.req_info: dict[int, int] = {}
@@ -112,13 +124,14 @@ The contrived example below implements a custom logits processor which consumes 
             """Never impacts greedy sampling"""
             return False
 
-        def update_state(self, batch_update: Optional[BatchUpdate]):
+        def update_state(self, batch_update: BatchUpdate | None):
             if not batch_update:
                 return
 
             # Process added requests.
             for index, params, _, _ in batch_update.added:
                 assert params is not None
+                self.validate_params(params)
                 if params.extra_args and (target_token :=
                                         params.extra_args.get("target_token")):
                     self.req_info[index] = target_token
@@ -158,6 +171,7 @@ The contrived example below implements a custom logits processor which consumes 
             logits[rows, cols] = values_to_keep
 
             return logits
+
     ```
 
 In the rest of this document, we will use `DummyLogitsProcessor` as an example of a custom logits processor.
@@ -166,7 +180,7 @@ The `DummyLogitsProcessor.update_state()` implementation maintains a "sparse" re
 
 ### Wrapping an Existing Request-Level Logits Processor
 
-Although the vLLM engine applies logits processors at batch granularity, some users may want to use vLLM with a "request-level" logits processor implementation - an implementation which operates on individual requests. This will be especially true if your logits processor was developed for vLLM version 0, which required it to be a `Callable` (as described [here](https://docs.vllm.ai/en/v0.10.1.1/api/vllm/logits_process.html)) conforming to the following type annotation:
+Although the vLLM engine applies logits processors at batch granularity, some users may want to use vLLM with a "request-level" logits processor implementation - an implementation which operates on individual requests. This will be especially true if your logits processor was developed for vLLM version 0, which required it to be a `Callable` (as described [here][vllm.logits_process]) conforming to the following type annotation:
 
 ``` python
 RequestLogitsProcessor = Union[
@@ -181,7 +195,13 @@ RequestLogitsProcessor = Union[
 
 While request-level logits processors are explicitly *not* supported in the vLLM engine, vLLM *does* provide a convenient process to wrap an existing `Callable` request-level logits processor and create a batch-level logits processor that is compatible with vLLM. The `Callable` must conform to the type annotation above; if your request-level logits processor has a different interface, then in order to wrap it, you may need to modify it or implement an additional wrapper layer to comply with the interface specification above.
 
-You can wrap the request-level logits processor by subclassing `AdapterLogitsProcessor` as shown in the example below (in this example, `DummyPerReqLogitsProcessor` is a stand-in for your request-level logits processor which needs to be wrapped.) Override `AdapterLogitsProcessor.is_argmax_invariant(self)` to accurately reflect whether your request-level logits processor may impact which token has the highest-value logit. Override `AdapterLogitsProcessor.new_req_logits_processor(self,params)` to create a new request-level logits processor instance from a `SamplingParams` instance:
+You can wrap the request-level logits processor by subclassing `AdapterLogitsProcessor` as shown in the example below (in this example, `DummyPerReqLogitsProcessor` is a stand-in for your request-level logits processor which needs to be wrapped.):
+
+* Override `AdapterLogitsProcessor.validate_params(cls,params)` to validate request's sampling parameters.
+
+* Override `AdapterLogitsProcessor.is_argmax_invariant(self)` to accurately reflect whether your request-level logits processor may impact which token has the highest-value logit.
+
+* Override `AdapterLogitsProcessor.new_req_logits_processor(self,params)` to create a new request-level logits processor instance from a `SamplingParams` instance:
 
 ??? code "Example of Wrapping a Request-Level Logits Processor"
 
@@ -221,6 +241,16 @@ You can wrap the request-level logits processor by subclassing `AdapterLogitsPro
         """Example of wrapping a fake request-level logit processor to create a
         batch-level logits processor"""
 
+        @classmethod
+        def validate_params(cls, params: SamplingParams):
+            target_token: Any | None = params.extra_args and params.extra_args.get(
+                "target_token"
+            )
+            if target_token is not None and not isinstance(target_token, int):
+                raise ValueError(
+                    f"target_token value {target_token} is not int"
+                )
+
         def is_argmax_invariant(self) -> bool:
             return False
 
@@ -241,17 +271,10 @@ You can wrap the request-level logits processor by subclassing `AdapterLogitsPro
             Returns:
             `Callable` request logits processor, or None
             """
-            target_token: Optional[Any] = params.extra_args and params.extra_args.get(
+            target_token: Any | None = params.extra_args and params.extra_args.get(
                 "target_token"
             )
             if target_token is None:
-                return None
-            if not isinstance(target_token, int):
-                logger.warning(
-                    "target_token value %s is not int; not applying logits"
-                    " processor to request.",
-                    target_token,
-                )
                 return None
             return DummyPerReqLogitsProcessor(target_token)
     ```
@@ -263,7 +286,7 @@ Once you have created a custom subclass (like `WrappedPerReqLogitsProcessor`) wh
 
 ## Ways to Load Your Custom Logits Processor in vLLM
 
-Logits processors are loaded at initialization. Critically, the set of loaded logits processors cannot be modified after the vLLM engine finishes loading, and new logits logits processors cannot be loaded on-demand for individual requests.
+Logits processors are loaded at initialization. Critically, the set of loaded logits processors cannot be modified after the vLLM engine finishes loading, and new logits processors cannot be loaded on-demand for individual requests.
 
 This section details different ways of making your logits processor visible to vLLM and triggering vLLM to load your logits processor.
 
@@ -415,7 +438,7 @@ The examples below show how a user would pass a custom argument (`target_token`)
 
 ## Best Practices for Writing Custom Logits Processors
 
-Once vLLM loads a logits processor during initialization, then vLLM will invoke `update_state()` and `apply()` against that logits processor in every engine step. Both methods operate on all requests which currently reside in the vLLM persistent batch. Thus it is important to implement these methods efficiently.
+Once vLLM loads a logits processor during initialization, then vLLM will invoke `update_state()` and `apply()` against that logits processor in every engine step. Both methods operate on all requests which currently reside in the vLLM persistent batch. Thus, it is important to implement these methods efficiently.
 
 * Write efficient `apply()` and `update_state()` implementations in light of the fact that logits processors operate at batch granularity
     * For example, you may be able to use efficient vectorized operations to implement `apply()` or update internal state vectors in `update_state()`
@@ -442,4 +465,4 @@ Once vLLM loads a logits processor during initialization, then vLLM will invoke 
 
     * **Note:** for wrapped per-request logits processors, the `AdapterLogitsProcessor` base-class handles this by default
 
-* `is_argmax_invariant()` can be hard-coded to `True` or `False` if the logits processor has consistent behavior. However the argmax invariance may also be determined programmatically (i.e. if your logits processor is user-customizable in some way that impacts whether the logits processor is argmax invariant). For this reason, `is_argmax_invariant()` is not a class method
+* `is_argmax_invariant()` can be hard-coded to `True` or `False` if the logits processor has consistent behavior. However, the argmax invariance may also be determined programmatically (i.e. if your logits processor is user-customizable in some way that impacts whether the logits processor is argmax invariant). For this reason, `is_argmax_invariant()` is not a class method

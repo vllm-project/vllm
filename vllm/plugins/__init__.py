@@ -2,13 +2,24 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import logging
-from typing import Any, Callable
+from collections.abc import Callable
+from typing import Any
 
 import vllm.envs as envs
 
 logger = logging.getLogger(__name__)
 
+# Default plugins group will be loaded in all processes(process0, engine core
+# process and worker processes)
 DEFAULT_PLUGINS_GROUP = "vllm.general_plugins"
+# IO processor plugins group will be loaded in process0 only
+IO_PROCESSOR_PLUGINS_GROUP = "vllm.io_processor_plugins"
+# Platform plugins group will be loaded in all processes when
+# `vllm.platforms.current_platform` is called and the value not initialized,
+PLATFORM_PLUGINS_GROUP = "vllm.platform_plugins"
+# Stat logger plugins group will be loaded in process0 only when serve vLLM with
+# async mode.
+STAT_LOGGER_PLUGINS_GROUP = "vllm.stat_logger_plugins"
 
 # make sure one process only loads plugins once
 plugins_loaded = False

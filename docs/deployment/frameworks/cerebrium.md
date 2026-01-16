@@ -59,11 +59,11 @@ Then, run the following code to deploy it to the cloud:
 cerebrium deploy
 ```
 
-If successful, you should be returned a CURL command that you can call inference against. Just remember to end the url with the function name you are calling (in our case`/run`)
+If successful, you should be returned a CURL command that you can call inference against. Just remember to end the url with the function name you are calling (in our case `/run`)
 
 ??? console "Command"
 
-    ```python
+    ```bash
     curl -X POST https://api.cortex.cerebrium.ai/v4/p-xxxxxx/vllm/run \
     -H 'Content-Type: application/json' \
     -H 'Authorization: <JWT TOKEN>' \
@@ -81,7 +81,7 @@ You should get a response like:
 
 ??? console "Response"
 
-    ```python
+    ```json
     {
         "run_id": "52911756-3066-9ae8-bcc9-d9129d1bd262",
         "result": {

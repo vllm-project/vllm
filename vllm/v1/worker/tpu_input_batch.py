@@ -2,14 +2,15 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 # Datastructures defining a TPU input batch
 
-from typing import Optional, cast
+from typing import cast
 
 import numpy as np
 import torch
 
 from vllm.lora.request import LoRARequest
 from vllm.sampling_params import SamplingType
-from vllm.utils import length_from_prompt_token_ids_or_embeds, swap_dict_values
+from vllm.utils import length_from_prompt_token_ids_or_embeds
+from vllm.utils.collection_utils import swap_dict_values
 from vllm.v1.outputs import LogprobsTensors
 from vllm.v1.worker.block_table import MultiGroupBlockTable
 from vllm.v1.worker.gpu_input_batch import CachedRequestState
@@ -36,7 +37,7 @@ class InputBatch:
         self.pin_memory = pin_memory
         self.vocab_size = vocab_size
 
-        self._req_ids: list[Optional[str]] = []
+        self._req_ids: list[str | None] = []
         self.req_id_to_index: dict[str, int] = {}
 
         # TODO(woosuk): This buffer could be too large if max_model_len is big.
@@ -50,7 +51,6 @@ class InputBatch:
             pin_memory=False,
         )
         self.token_ids_cpu = self.token_ids_cpu_tensor.numpy()
-        self.num_tokens = np.zeros(max_num_reqs, dtype=np.int32)
         self.num_tokens_no_spec = np.zeros(max_num_reqs, dtype=np.int32)
         self.num_prompt_tokens = np.zeros(max_num_reqs, dtype=np.int32)
         self.num_computed_tokens_cpu_tensor = torch.zeros(
@@ -138,7 +138,7 @@ class InputBatch:
         self.min_tokens: dict[int, tuple[int, set[int]]] = {}
 
         # lora related
-        self.request_lora_mapping = np.zeros((self.max_num_reqs,), dtype=np.int32)
+        self.request_lora_mapping = np.zeros((self.max_num_reqs,), dtype=np.int64)
         self.lora_id_to_request_ids: dict[int, set[str]] = {}
         self.lora_id_to_lora_request: dict[int, LoRARequest] = {}
 
@@ -148,24 +148,21 @@ class InputBatch:
         self.generators: dict[int, torch.Generator] = {}
 
         self.num_logprobs: dict[str, int] = {}
-        # NOTE(rob): num_prompt_logprobs only includes reqs
-        # that are currently in the prefill phase.
-        self.num_prompt_logprobs: dict[str, int] = {}
 
         # To accumulate prompt logprobs tensor chunks across prefill steps.
         self.in_progress_prompt_logprobs_cpu: dict[str, LogprobsTensors] = {}
 
-        self.logit_bias: list[Optional[dict[int, float]]] = [None] * max_num_reqs
+        self.logit_bias: list[dict[int, float] | None] = [None] * max_num_reqs
         self.has_allowed_token_ids: set[str] = set()
         # NOTE(lufang): In the mask tensor, if the corresponding token allowed,
         # the value is False. Since we use masked_fill_ to set -inf.
-        self.allowed_token_ids_mask: Optional[torch.Tensor] = None
-        self.allowed_token_ids_mask_cpu_tensor: Optional[torch.Tensor] = None
+        self.allowed_token_ids_mask: torch.Tensor | None = None
+        self.allowed_token_ids_mask_cpu_tensor: torch.Tensor | None = None
 
         # req_index -> bad_words_token_ids
         self.bad_words_token_ids: dict[int, list[list[int]]] = {}
 
-        self.req_output_token_ids: list[Optional[list[int]]] = []
+        self.req_output_token_ids: list[list[int] | None] = []
 
     @property
     def req_ids(self) -> list[str]:
@@ -176,7 +173,7 @@ class InputBatch:
     def add_request(
         self,
         request: "CachedRequestState",
-        req_index: Optional[int] = None,
+        req_index: int | None = None,
     ) -> None:
         if req_index is None:
             req_index = self.num_reqs
@@ -202,9 +199,6 @@ class InputBatch:
         start_idx = num_prompt_tokens
         end_idx = start_idx + len(request.output_token_ids)
         self.token_ids_cpu[req_index, start_idx:end_idx] = request.output_token_ids
-        # Number of token ids in token_ids_cpu.
-        # NOTE(woosuk): This may include spec decode tokens.
-        self.num_tokens[req_index] = request.num_tokens
         # Number of tokens without spec decode tokens.
         self.num_tokens_no_spec[req_index] = request.num_tokens
 
@@ -214,8 +208,8 @@ class InputBatch:
         sampling_params = request.sampling_params
         assert sampling_params is not None, "pooling requests not supported yet"
         if sampling_params.sampling_type == SamplingType.GREEDY:
-            # Avoid later division by zero.
-            self.temperature_cpu[req_index] = -1.0
+            # Should avoid division by zero later when apply_temperature.
+            self.temperature_cpu[req_index] = 0.0
             self.greedy_reqs.add(req_id)
         else:
             self.temperature_cpu[req_index] = sampling_params.temperature
@@ -255,8 +249,6 @@ class InputBatch:
 
         if sampling_params.logprobs is not None:
             self.num_logprobs[req_id] = sampling_params.logprobs
-        if sampling_params.prompt_logprobs is not None:
-            self.num_prompt_logprobs[req_id] = sampling_params.prompt_logprobs
         if sampling_params.logit_bias is not None:
             self.logit_bias[req_index] = sampling_params.logit_bias
 
@@ -296,7 +288,7 @@ class InputBatch:
             # No LoRA
             self.request_lora_mapping[req_index] = 0
 
-    def remove_request(self, req_id: str) -> Optional[int]:
+    def remove_request(self, req_id: str) -> int | None:
         """This method must always be followed by a call to condense()."""
 
         req_index = self.req_id_to_index.pop(req_id, None)
@@ -316,7 +308,6 @@ class InputBatch:
         self.repetition_penalties_reqs.discard(req_id)
         self.generators.pop(req_index, None)
         self.num_logprobs.pop(req_id, None)
-        self.num_prompt_logprobs.pop(req_id, None)
         self.in_progress_prompt_logprobs_cpu.pop(req_id, None)
 
         # LoRA
@@ -348,10 +339,6 @@ class InputBatch:
         self.req_id_to_index[old_id_i1], self.req_id_to_index[old_id_i2] = (
             self.req_id_to_index[old_id_i2],
             self.req_id_to_index[old_id_i1],
-        )
-        self.num_tokens[i1], self.num_tokens[i2] = (
-            self.num_tokens[i2],
-            self.num_tokens[i1],
         )
         self.num_tokens_no_spec[i1], self.num_tokens_no_spec[i2] = (
             self.num_tokens_no_spec[i2],
@@ -453,11 +440,10 @@ class InputBatch:
             self.req_output_token_ids[last_req_index] = None
             self.req_id_to_index[req_id] = empty_index
 
-            num_tokens = self.num_tokens[last_req_index]
+            num_tokens = self.num_tokens_no_spec[last_req_index]
             self.token_ids_cpu[empty_index, :num_tokens] = self.token_ids_cpu[
                 last_req_index, :num_tokens
             ]
-            self.num_tokens[empty_index] = num_tokens
             self.num_tokens_no_spec[empty_index] = self.num_tokens_no_spec[
                 last_req_index
             ]
@@ -525,7 +511,7 @@ class InputBatch:
         return prompt_token_ids_cpu_tensor.to(device=self.device, non_blocking=True)
 
     def make_lora_inputs(
-        self, num_scheduled_tokens: np.ndarray
+        self, num_scheduled_tokens: np.ndarray, num_sampled_tokens: np.ndarray
     ) -> tuple[tuple[int, ...], tuple[int, ...], set[LoRARequest]]:
         """
         Given the num_scheduled_tokens for each request in the batch, return
@@ -580,12 +566,8 @@ class InputBatch:
         )
 
     @property
-    def max_num_logprobs(self) -> Optional[int]:
+    def max_num_logprobs(self) -> int | None:
         return max(self.num_logprobs.values()) if self.num_logprobs else None
-
-    @property
-    def no_prompt_logprob(self) -> bool:
-        return not self.num_prompt_logprobs
 
     @property
     def no_allowed_token_ids(self) -> bool:

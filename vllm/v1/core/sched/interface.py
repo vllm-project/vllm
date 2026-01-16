@@ -2,18 +2,36 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from abc import ABC, abstractmethod
 from collections.abc import Iterable
-from typing import TYPE_CHECKING, Optional, Union
+from typing import TYPE_CHECKING, Optional
+
+from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
 
 if TYPE_CHECKING:
+    from vllm.config import VllmConfig
     from vllm.distributed.kv_transfer.kv_connector.v1 import KVConnectorBase_V1
-    from vllm.v1.core.sched.output import SchedulerOutput
+    from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
     from vllm.v1.engine import EngineCoreOutputs
+    from vllm.v1.kv_cache_interface import KVCacheConfig
     from vllm.v1.metrics.stats import SchedulerStats
     from vllm.v1.outputs import DraftTokenIds, ModelRunnerOutput
     from vllm.v1.request import Request, RequestStatus
+    from vllm.v1.structured_output import StructuredOutputManager
 
 
 class SchedulerInterface(ABC):
+    @abstractmethod
+    def __init__(
+        self,
+        vllm_config: "VllmConfig",
+        kv_cache_config: "KVCacheConfig",
+        structured_output_manager: "StructuredOutputManager",
+        block_size: int,
+        mm_registry: MultiModalRegistry = MULTIMODAL_REGISTRY,
+        include_finished_set: bool = False,
+        log_stats: bool = False,
+    ) -> None:
+        raise NotImplementedError
+
     @abstractmethod
     def schedule(self) -> "SchedulerOutput":
         """Schedule the requests to process in this scheduling step.
@@ -41,6 +59,12 @@ class SchedulerInterface(ABC):
         raise NotImplementedError
 
     @abstractmethod
+    def get_grammar_bitmask(
+        self, scheduler_output: "SchedulerOutput"
+    ) -> "GrammarOutput | None":
+        raise NotImplementedError
+
+    @abstractmethod
     def update_from_output(
         self,
         scheduler_output: "SchedulerOutput",
@@ -61,11 +85,27 @@ class SchedulerInterface(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    def update_draft_token_ids(
-        self,
-        draft_token_ids: "DraftTokenIds",
+    def update_draft_token_ids(self, draft_token_ids: "DraftTokenIds") -> None:
+        """Update requests with newly generated draft token ids, applying
+        structured output grammar validation if needed.
+
+        Args:
+            draft_token_ids: The input draft token ids for each request.
+        """
+        raise NotImplementedError
+
+    @abstractmethod
+    def update_draft_token_ids_in_output(
+        self, draft_token_ids: "DraftTokenIds", scheduler_output: "SchedulerOutput"
     ) -> None:
-        """Update the draft token ids for the scheduled requests."""
+        """Update scheduler output with newly generated draft token ids, applying
+        structured output grammar validation if needed.
+
+        Args:
+            draft_token_ids: The input draft token ids for each request.
+            scheduler_output: Update the given scheduler_output
+                with the corresponding draft token ids.
+        """
         raise NotImplementedError
 
     @abstractmethod
@@ -80,7 +120,7 @@ class SchedulerInterface(ABC):
     @abstractmethod
     def finish_requests(
         self,
-        request_ids: Union[str, Iterable[str]],
+        request_ids: str | Iterable[str],
         finished_status: "RequestStatus",
     ) -> None:
         """Finish the requests in the scheduler's internal queue. If the request
@@ -128,10 +168,18 @@ class SchedulerInterface(ABC):
         return self.has_unfinished_requests() or self.has_finished_requests()
 
     @abstractmethod
-    def reset_prefix_cache(self) -> bool:
+    def reset_prefix_cache(
+        self, reset_running_requests: bool = False, reset_connector: bool = False
+    ) -> bool:
         """Reset the prefix cache for KV cache.
 
         This is particularly required when the model weights are live-updated.
+
+        Args:
+            reset_running_requests: If True, all the running requests will be
+                preempted and moved to the waiting queue. Otherwise, this method
+                will only reset the KV prefix cache when there is no running request
+                taking KV cache.
         """
         raise NotImplementedError
 

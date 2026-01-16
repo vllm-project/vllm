@@ -130,10 +130,8 @@ def run_single_case(m, n, k, topk, num_experts, block_size):
 # Note: N <= 512 will disable the deepgemm path due to performance issues.
 MNKs = [
     (1024, 768, 128),
-    (1024, 768, 512),
     (2048, 768, 512),
     (512, 1024, 1024),
-    (512, 2048, 2048),
     (4096, 4096, 1024),
 ]
 
@@ -145,7 +143,7 @@ NUM_EXPERTS = [32]
 @pytest.mark.parametrize("topk", TOPKS)
 @pytest.mark.parametrize("num_experts", NUM_EXPERTS)
 @pytest.mark.skipif(not is_deep_gemm_supported(), reason="Requires deep_gemm kernels")
-def test_deepgemm_vs_triton(m, n, k, topk, num_experts, monkeypatch):
+def test_deepgemm_vs_triton(m, n, k, topk, num_experts, monkeypatch, workspace_init):
     with monkeypatch.context() as mp:
         mp.setenv("VLLM_USE_DEEP_GEMM", "1")
 

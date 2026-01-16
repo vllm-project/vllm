@@ -1,20 +1,22 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from typing import Union
 
 import torch
 
 from vllm.config.cache import MambaDType
 from vllm.config.model import ModelDType
 from vllm.distributed import divide
-from vllm.utils import STR_DTYPE_TO_TORCH_DTYPE, get_kv_cache_torch_dtype
+from vllm.utils.torch_utils import (
+    STR_DTYPE_TO_TORCH_DTYPE,
+    get_kv_cache_torch_dtype,
+)
 
 
 class MambaStateDtypeCalculator:
     @classmethod
     def linear_attention_state_dtype(
         cls,
-        model_dtype: Union[ModelDType, torch.dtype],
+        model_dtype: ModelDType | torch.dtype,
         mamba_cache_dtype: MambaDType,
     ) -> tuple[torch.dtype, ...]:
         # TODO (tdoublep) requires testing
@@ -26,7 +28,7 @@ class MambaStateDtypeCalculator:
     @classmethod
     def mamba1_state_dtype(
         cls,
-        model_dtype: Union[ModelDType, torch.dtype],
+        model_dtype: ModelDType | torch.dtype,
         mamba_cache_dtype: MambaDType,
         mamba_ssm_cache_dtype: MambaDType,
     ) -> tuple[torch.dtype, ...]:
@@ -37,7 +39,7 @@ class MambaStateDtypeCalculator:
     @classmethod
     def mamba2_state_dtype(
         cls,
-        model_dtype: Union[ModelDType, torch.dtype],
+        model_dtype: ModelDType | torch.dtype,
         mamba_cache_dtype: MambaDType,
         mamba_ssm_cache_dtype: MambaDType,
     ) -> tuple[torch.dtype, ...]:
@@ -48,7 +50,7 @@ class MambaStateDtypeCalculator:
     @classmethod
     def _mamba_state_dtype(
         cls,
-        model_dtype: Union[ModelDType, torch.dtype],
+        model_dtype: ModelDType | torch.dtype,
         mamba_cache_dtype: MambaDType,
         mamba_ssm_cache_dtype: MambaDType,
     ) -> tuple[torch.dtype, ...]:
@@ -63,7 +65,7 @@ class MambaStateDtypeCalculator:
     @classmethod
     def short_conv_state_dtype(
         cls,
-        model_dtype: Union[ModelDType, torch.dtype],
+        model_dtype: ModelDType | torch.dtype,
         mamba_cache_dtype: MambaDType,
     ) -> tuple[torch.dtype, ...]:
         conv_state_dtype = get_kv_cache_torch_dtype(mamba_cache_dtype, model_dtype)
@@ -72,11 +74,20 @@ class MambaStateDtypeCalculator:
     @classmethod
     def gated_delta_net_state_dtype(
         cls,
-        model_dtype: Union[ModelDType, torch.dtype],
+        model_dtype: ModelDType | torch.dtype,
         mamba_cache_dtype: MambaDType,
     ) -> tuple[torch.dtype, torch.dtype]:
         state_dtype = get_kv_cache_torch_dtype(mamba_cache_dtype, model_dtype)
         return (state_dtype, state_dtype)
+
+    @classmethod
+    def kda_state_dtype(
+        cls,
+        model_dtype: ModelDType | torch.dtype,
+        mamba_cache_dtype: MambaDType,
+    ):
+        state_dtype = get_kv_cache_torch_dtype(mamba_cache_dtype, model_dtype)
+        return (state_dtype, state_dtype, state_dtype, torch.float32)
 
 
 class MambaStateShapeCalculator:
@@ -180,3 +191,35 @@ class MambaStateShapeCalculator:
             head_v_dim,
         )
         return conv_state_shape, temporal_state_shape
+
+    @classmethod
+    def kda_state_shape(
+        cls,
+        tp_world_size: int,
+        num_heads: int,
+        head_dim: int,
+        num_k_heads: int | None = None,
+        head_k_dim: int | None = None,
+        conv_kernel_size: int = 4,
+        num_spec: int = 0,
+    ) -> tuple[tuple[int, int], tuple[int, int], tuple[int, int], tuple[int, int, int]]:
+        if num_k_heads is None:
+            num_k_heads = num_heads
+        if head_k_dim is None:
+            head_k_dim = head_dim
+
+        proj_size = num_heads * head_dim
+        proj_k_size = num_k_heads * head_k_dim
+
+        conv_state_shape = (divide(proj_size, tp_world_size), conv_kernel_size - 1)
+        conv_state_k_shape = (divide(proj_k_size, tp_world_size), conv_kernel_size - 1)
+        recurrent_state_shape = (divide(num_heads, tp_world_size), head_dim, head_dim)
+
+        conv_state_shape = conv_state_shape[1], conv_state_shape[0]
+        conv_state_k_shape = conv_state_k_shape[1], conv_state_k_shape[0]
+        return (
+            conv_state_shape,
+            conv_state_k_shape,
+            conv_state_k_shape,
+            recurrent_state_shape,
+        )

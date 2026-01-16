@@ -5,24 +5,13 @@ Taken from https://github.com/ModelTC/LightLLM/blob/8ed97c74c18f11505b048b1ba00b
 and updated to fit vllm needs and terminology.
 """
 
-import functools
-from typing import Optional
-
 import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.model_executor.layers.fused_moe.utils import count_expert_num_tokens
 from vllm.triton_utils import tl, triton
-from vllm.utils import round_up
-
-
-@functools.cache
-def deep_gemm_block_shape() -> list[int]:
-    # Lazy import to avoid CUDA initialization problems.
-    import deep_gemm as dg
-
-    block = dg.get_m_alignment_for_contiguous_layout()
-    return [block, block]
+from vllm.utils.deep_gemm import get_mk_alignment_for_contiguous_layout
+from vllm.utils.math_utils import round_up
 
 
 def expert_num_tokens_round_up_and_sum(
@@ -39,7 +28,7 @@ def compute_aligned_M(
     num_topk: int,
     local_num_experts: int,
     alignment: int,
-    expert_tokens_meta: Optional[mk.ExpertTokensMetadata],
+    expert_tokens_meta: mk.ExpertTokensMetadata | None,
 ):
     if (expert_tokens_meta is not None) and (
         expert_tokens_meta.expert_num_tokens_cpu is not None
@@ -95,10 +84,16 @@ def _fwd_kernel_ep_scatter_1(
     m_indices_start_ptr = m_indices + cur_expert_start
     off_expert = tl.arange(0, BLOCK_E)
 
+    # any rows in the per-expert aligned region that do not correspond to
+    # real tokens are left untouched here and should remain initialized to
+    # -1 so DeepGEMM can skip them
     for start_m in tl.range(0, cur_expert_token_num, BLOCK_E, num_stages=4):
+        offs = start_m + off_expert
+        mask = offs < cur_expert_token_num
         tl.store(
-            m_indices_start_ptr + start_m + off_expert,
+            m_indices_start_ptr + offs,
             cur_expert,
+            mask=mask,
         )
 
 
@@ -175,7 +170,7 @@ def ep_scatter(
     recv_x_scale: torch.Tensor,
     recv_topk: torch.Tensor,
     num_recv_tokens_per_expert: torch.Tensor,
-    expert_map: Optional[torch.Tensor],
+    expert_map: torch.Tensor | None,
     expert_start_loc: torch.Tensor,
     output_tensor: torch.Tensor,
     output_tensor_scale: torch.Tensor,
@@ -305,7 +300,7 @@ def ep_gather(
     recv_topk_ids: torch.Tensor,
     recv_topk_weight: torch.Tensor,
     input_index: torch.Tensor,
-    expert_map: Optional[torch.Tensor],
+    expert_map: torch.Tensor | None,
     output_tensor: torch.Tensor,
 ):
     num_warps = 2
@@ -346,17 +341,16 @@ def deepgemm_moe_permute(
     aq_scale: torch.Tensor,
     topk_ids: torch.Tensor,
     local_num_experts: int,
-    expert_map: Optional[torch.Tensor],
-    expert_tokens_meta: Optional[mk.ExpertTokensMetadata],
-    aq_out: Optional[torch.Tensor] = None,
+    expert_map: torch.Tensor | None,
+    expert_tokens_meta: mk.ExpertTokensMetadata | None,
+    aq_out: torch.Tensor | None = None,
 ):
     assert aq.ndim == 2
     assert topk_ids.dtype.is_signed, "The kernel uses -1 to represent invalid topk_ids"
     H = aq.size(1)
     device = aq.device
 
-    block_m = deep_gemm_block_shape()[0]
-    block_k = deep_gemm_block_shape()[1]
+    block_m, block_k = get_mk_alignment_for_contiguous_layout()
 
     M_sum = compute_aligned_M(
         M=topk_ids.size(0),
@@ -378,12 +372,17 @@ def deepgemm_moe_permute(
         (M_sum, H // block_k), device=device, dtype=torch.float32
     )
 
-    maybe_has_empty_blocks = (expert_tokens_meta is None) or (
-        expert_tokens_meta.expert_num_tokens_cpu is None
+    # DeepGEMM uses negative values in m_indices (here expert_ids) to mark
+    # completely invalid / padded blocks that should be skipped. We always
+    # initialize expert_ids to -1 so any row that is not explicitly written
+    # by the scatter kernel will be treated as invalid and skipped by
+    # DeepGEMM's scheduler.
+    expert_ids = torch.full(
+        (M_sum,),
+        fill_value=-1,
+        device=device,
+        dtype=torch.int32,
     )
-    expert_ids_init = torch.zeros if maybe_has_empty_blocks else torch.empty
-
-    expert_ids = expert_ids_init((M_sum), device=device, dtype=torch.int32)
     inv_perm = torch.empty(topk_ids.shape, device=device, dtype=torch.int32)
 
     expert_num_tokens = None
@@ -415,7 +414,7 @@ def deepgemm_unpermute_and_reduce(
     topk_ids: torch.Tensor,
     topk_weights: torch.Tensor,
     inv_perm: torch.Tensor,
-    expert_map: Optional[torch.Tensor],
+    expert_map: torch.Tensor | None,
     output: torch.Tensor,
 ):
     return ep_gather(

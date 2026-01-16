@@ -8,7 +8,6 @@
 # Licensed under Apache 2.0 License [see LICENSE for details]
 # --------------------------------------------------------
 from collections.abc import Mapping, Sequence
-from typing import Optional
 
 import torch
 import torch.nn as nn
@@ -49,7 +48,7 @@ class NVLMProcessor(BaseInternVLProcessor):
     def get_image_repl(
         self,
         feature_size: int,
-        num_patches: Optional[int],
+        num_patches: int | None,
     ) -> PromptUpdateDetails[str]:
         if num_patches is None:
             raise NotImplementedError("Embedding inputs are not supported")
@@ -93,7 +92,7 @@ class NVLMDummyInputsBuilder(BaseInternVLDummyInputsBuilder[NVLMProcessingInfo])
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-        mm_options: Optional[Mapping[str, BaseDummyOptions]] = None,
+        mm_options: Mapping[str, BaseDummyOptions] | None = None,
     ) -> MultiModalDataDict:
         target_width, target_height = self.info.get_image_size_with_most_features()
         num_images = mm_counts.get("image", 0)
@@ -189,7 +188,7 @@ class NVLM_D_Model(InternVLChatModel):
     def _init_vision_model(
         self,
         config: PretrainedConfig,
-        quant_config: Optional[QuantizationConfig],
+        quant_config: QuantizationConfig | None,
         *,
         is_mono: bool,
         prefix: str,

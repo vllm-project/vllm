@@ -3,6 +3,7 @@
 """Test that we handle an Error in model forward and shutdown."""
 
 import asyncio
+import inspect
 
 import pytest
 
@@ -14,11 +15,11 @@ from tests.v1.shutdown.utils import (
 from vllm import LLM, AsyncEngineArgs, SamplingParams
 from vllm.distributed import get_tensor_model_parallel_rank
 from vllm.model_executor.models.llama import LlamaForCausalLM
-from vllm.utils import cuda_device_count_stateless
+from vllm.utils.torch_utils import cuda_device_count_stateless
 from vllm.v1.engine.async_llm import AsyncLLM
 from vllm.v1.engine.exceptions import EngineDeadError
 
-MODELS = ["meta-llama/Llama-3.2-1B"]
+MODELS = ["hmellor/tiny-random-LlamaForCausalLM"]
 
 
 def evil_forward(self, *args, **kwargs):
@@ -38,11 +39,22 @@ def evil_forward(self, *args, **kwargs):
     return self.model(*args, **kwargs)
 
 
+@pytest.fixture
+def rocm_evil_forward(rocm_sitecustomize_factory):
+    lines = [
+        "from vllm.distributed import get_tensor_model_parallel_rank",
+        "from vllm.model_executor.models.llama import LlamaForCausalLM",
+        inspect.getsource(evil_forward),
+        f"LlamaForCausalLM.forward = {evil_forward.__name__}",
+    ]
+    rocm_sitecustomize_factory(lines)
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("tensor_parallel_size", [2, 1])
 @pytest.mark.parametrize("model", MODELS)
 async def test_async_llm_model_error(
-    monkeypatch, tensor_parallel_size: int, model: str
+    monkeypatch, rocm_evil_forward, tensor_parallel_size: int, model: str
 ) -> None:
     """Test that AsyncLLM propagates a forward pass error and frees memory.
 
@@ -104,7 +116,11 @@ async def test_async_llm_model_error(
 @pytest.mark.parametrize("tensor_parallel_size", [2, 1])
 @pytest.mark.parametrize("model", MODELS)
 def test_llm_model_error(
-    monkeypatch, tensor_parallel_size: int, enable_multiprocessing: bool, model: str
+    monkeypatch,
+    rocm_evil_forward,
+    tensor_parallel_size: int,
+    enable_multiprocessing: bool,
+    model: str,
 ) -> None:
     """Test that LLM propagates a forward pass error and frees memory.
     TODO(andy) - LLM without multiprocessing; LLM with multiprocessing

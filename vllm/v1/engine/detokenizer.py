@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from abc import ABC, abstractmethod
-from typing import Optional
 
 import tokenizers
 from packaging import version
@@ -10,8 +9,8 @@ from tokenizers.decoders import DecodeStream
 from transformers import PreTrainedTokenizerFast
 
 from vllm.logger import init_logger
-from vllm.transformers_utils.detokenizer_utils import (
-    AnyTokenizer,
+from vllm.tokenizers import TokenizerLike
+from vllm.tokenizers.detokenizer_utils import (
     convert_prompt_ids_to_tokens,
     detokenize_incrementally,
 )
@@ -36,7 +35,7 @@ class IncrementalDetokenizer:
     def output_token_ids(self) -> list[int]:
         return self.token_ids
 
-    def update(self, new_token_ids: list[int], stop_terminated: bool) -> Optional[str]:
+    def update(self, new_token_ids: list[int], stop_terminated: bool) -> str | None:
         self.token_ids.extend(new_token_ids)
         return None
 
@@ -46,7 +45,7 @@ class IncrementalDetokenizer:
     @classmethod
     def from_new_request(
         cls,
-        tokenizer: Optional[AnyTokenizer],
+        tokenizer: TokenizerLike | None,
         request: EngineCoreRequest,
     ) -> "IncrementalDetokenizer":
         assert request.sampling_params is not None
@@ -70,14 +69,21 @@ class BaseIncrementalDetokenizer(IncrementalDetokenizer, ABC):
         # Stop strings
         params = request.sampling_params
         assert params is not None
-        self.stop = stop = params.stop
+        stop_list: list[str]
+        if params.stop is None:
+            stop_list = []
+        elif isinstance(params.stop, str):
+            stop_list = [params.stop]
+        else:
+            stop_list = params.stop
+        self.stop = stop_list
         self.min_tokens = params.min_tokens
         self.include_stop_str_in_output = params.include_stop_str_in_output
 
         # Number of chars to hold back when stop strings are to be excluded
         # from streamed output.
-        if stop and not self.include_stop_str_in_output:
-            self.stop_buffer_length = max(len(s) for s in stop) - 1
+        if self.stop and not self.include_stop_str_in_output:
+            self.stop_buffer_length = max(len(s) for s in self.stop) - 1
         else:
             self.stop_buffer_length = 0
         self._last_output_text_offset: int = 0
@@ -85,7 +91,7 @@ class BaseIncrementalDetokenizer(IncrementalDetokenizer, ABC):
         # Generation data
         self.output_text = ""
 
-    def update(self, new_token_ids: list[int], stop_terminated: bool) -> Optional[str]:
+    def update(self, new_token_ids: list[int], stop_terminated: bool) -> str | None:
         """
         Update RequestState for the request_id by:
             1) Detokenize the new token ids incrementally.
@@ -224,7 +230,7 @@ class FastIncrementalDetokenizer(BaseIncrementalDetokenizer):
 
         return token or ""
 
-    def _protected_step(self, next_token_id: int) -> Optional[str]:
+    def _protected_step(self, next_token_id: int) -> str | None:
         try:
             token = self.stream.step(self.tokenizer, next_token_id)
         except (OverflowError, TypeError):
@@ -250,7 +256,7 @@ class FastIncrementalDetokenizer(BaseIncrementalDetokenizer):
 
 
 class SlowIncrementalDetokenizer(BaseIncrementalDetokenizer):
-    def __init__(self, tokenizer: AnyTokenizer, request: EngineCoreRequest):
+    def __init__(self, tokenizer: TokenizerLike, request: EngineCoreRequest):
         super().__init__(request)
 
         self.tokenizer = tokenizer
@@ -312,7 +318,7 @@ def check_stop_strings(
     new_char_count: int,
     stop: list[str],
     include_in_output: bool,
-) -> Optional[tuple[str, int]]:
+) -> tuple[str, int] | None:
     """Check if any stop strings are matched and truncate sequence
     output text accordingly.
 

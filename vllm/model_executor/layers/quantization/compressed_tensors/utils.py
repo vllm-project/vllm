@@ -3,7 +3,6 @@
 
 from collections.abc import Iterable, Mapping
 from types import MappingProxyType
-from typing import Optional
 
 import regex as re
 from compressed_tensors import CompressionFormat
@@ -21,7 +20,7 @@ def is_activation_quantization_format(format: str) -> bool:
 
 
 def should_ignore_layer(
-    layer_name: Optional[str],
+    layer_name: str | None,
     ignore: Iterable[str] = tuple(),
     fused_mapping: Mapping[str, list[str]] = MappingProxyType({}),
 ) -> bool:
@@ -84,7 +83,7 @@ def check_equal_or_regex_match(layer_name: str, targets: Iterable[str]) -> bool:
 
 
 def find_matched_target(
-    layer_name: Optional[str],
+    layer_name: str | None,
     module: Module,
     targets: Iterable[str],
     fused_mapping: Mapping[str, list[str]] = MappingProxyType({}),
@@ -134,7 +133,7 @@ def find_matched_target(
 
 def _find_first_match(
     value: str, targets: Iterable[str], check_contains: bool = False
-) -> Optional[str]:
+) -> str | None:
     """
     Returns first element of target that matches value either
     exactly or as a regex after 're:'. If check_contains is set to True,
@@ -176,7 +175,7 @@ def _match_fused_layer(
     layer_name: str,
     target_layers: Iterable[str],
     fused_mapping: Mapping[str, list[str]],
-) -> Optional[str]:
+) -> str | None:
     """
     Match a fused layer name to its corresponding individual layer in
     target_layers. Returns first value in fused_mapping which matches targets
@@ -205,7 +204,7 @@ def _match_fused_layer(
     ]
 
     # for each unfused component, find a match in targets
-    unfused_matches: list[Optional[str]] = []
+    unfused_matches: list[str | None] = []
     for unfused in unfused_paths:
         for target in target_layers:
             if _is_equal_or_regex_match(unfused, target):

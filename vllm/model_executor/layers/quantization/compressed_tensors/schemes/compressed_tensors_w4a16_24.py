@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from typing import Callable, Optional
+from collections.abc import Callable
 
 import torch
 from torch.nn import Parameter
@@ -30,7 +30,7 @@ W4A16SPARSE24_SUPPORTED_BITS = list(W4A16SPARSE24_SUPPORTED_TYPES_MAP.keys())
 
 
 class CompressedTensorsW4A16Sparse24(CompressedTensorsScheme):
-    def __init__(self, strategy: str, num_bits: int, group_size: Optional[int] = None):
+    def __init__(self, strategy: str, num_bits: int, group_size: int | None = None):
         self.strategy = strategy
         self.group_size = group_size
         self.tile_size = 16
@@ -143,7 +143,7 @@ class CompressedTensorsW4A16Sparse24(CompressedTensorsScheme):
         layer.workspace = workspace
 
     def apply_weights(
-        self, layer: torch.nn.Module, x: torch.Tensor, bias: Optional[torch.Tensor]
+        self, layer: torch.nn.Module, x: torch.Tensor, bias: torch.Tensor | None
     ) -> torch.Tensor:
         qweight = layer.weight_packed
         meta = layer.meta

@@ -2,10 +2,10 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from collections.abc import Iterable
-from typing import Union
 
 import torch.fx
 from torch import SymInt
+from torch.fx.experimental.symbolic_shapes import statically_known_true
 
 from vllm.logger import init_logger
 
@@ -65,7 +65,7 @@ class NoOpEliminationPass(VllmInductorPass):
     """
 
     @VllmInductorPass.time_and_log
-    def __call__(self, graph: torch.fx.Graph):
+    def __call__(self, graph: torch.fx.Graph) -> None:
         count = 0
         # Remove no-op reshapes/views:
         for node in graph.nodes:
@@ -105,9 +105,7 @@ class NoOpEliminationPass(VllmInductorPass):
         logger.debug("Removed %s no-op reshapes and slices", count)
 
     # ---------------------- Shape comparison helpers ----------------------
-    def dims_equivalent(
-        self, dim: Union[int, SymInt], i_dim: Union[int, SymInt]
-    ) -> bool:
+    def dims_equivalent(self, dim: int | SymInt, i_dim: int | SymInt) -> bool:
         """
         This function checks if two dimensions are equivalent.
         :param dim: The dimension arg to reshape/slice
@@ -119,15 +117,10 @@ class NoOpEliminationPass(VllmInductorPass):
         2. The dimensions both correspond to the same SymInt
         """
         # Case 1
-        if isinstance(i_dim, int) and isinstance(dim, int):
-            return dim == i_dim
-        # Case 2
-        if isinstance(i_dim, SymInt) and isinstance(dim, SymInt):
-            return dim == i_dim
-        return False
+        return statically_known_true(dim == i_dim)  # type: ignore[no-any-return]
 
     def all_dims_equivalent(
-        self, dims: Iterable[Union[int, SymInt]], i_dims: Iterable[Union[int, SymInt]]
+        self, dims: Iterable[int | SymInt], i_dims: Iterable[int | SymInt]
     ) -> bool:
         dims_ = list(dims)
         i_dims_ = list(i_dims)

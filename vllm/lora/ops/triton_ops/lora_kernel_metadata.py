@@ -5,7 +5,6 @@ LoRA kernels metadata preparation utilities.
 """
 
 from dataclasses import dataclass
-from typing import Union
 
 import torch
 
@@ -31,7 +30,7 @@ class LoRAKernelMeta:
 
     @staticmethod
     def make(
-        max_loras: int, max_num_tokens: int, device: Union[torch.device, str]
+        max_loras: int, max_num_tokens: int, device: torch.device | str
     ) -> "LoRAKernelMeta":
         token_lora_mapping = torch.empty(
             max_num_tokens, dtype=torch.int32, device=device

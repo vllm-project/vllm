@@ -23,13 +23,13 @@ ACTIVE_MM_LORA_RESPONSE = "Spoken text: The first words I spoke in the original 
 
 
 @pytest.fixture(scope="module")
-def multimodal_server():  # noqa: F811
+def multimodal_server():
     args = [
         # use half precision for speed and memory savings in CI environment
         "--dtype",
         "half",
         "--max-model-len",
-        "12800",
+        "4096",
         "--enforce-eager",
         # lora config below
         "--enable-lora",

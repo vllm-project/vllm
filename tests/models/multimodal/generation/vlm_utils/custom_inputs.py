@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Custom input builders for edge-cases in different models."""
 
-from typing import Callable
+from collections.abc import Callable
 
 from vllm.assets.image import ImageAsset
 from vllm.multimodal.image import rescale_image_size
@@ -140,7 +140,7 @@ def video_with_metadata_glm4_1v():
     metadata = VIDEO_ASSETS[0].metadata
     question = "Describe the video."
     video_prompt = "<|begin_of_video|><|video|><|end_of_video|>"
-    formatted_prompt = f"<|user|>\n{video_prompt}{question}<|assistant|>\n"
+    formatted_prompt = f"[gMASK]<|user|>\n{video_prompt}{question}<|assistant|>\n"
 
     scales = [0.1, 0.2, 0.25]
     video_input = [

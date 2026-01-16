@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from typing import Optional
 
 import torch
 
@@ -21,7 +20,7 @@ class NTKScalingRotaryEmbedding(RotaryEmbedding):
         is_neox_style: bool,
         scaling_factor: float,
         dtype: torch.dtype,
-        mixed_b: Optional[float] = None,
+        mixed_b: float | None = None,
     ) -> None:
         self.scaling_factor = scaling_factor
         self.mixed_b = mixed_b

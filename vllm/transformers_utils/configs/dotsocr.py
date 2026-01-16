@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from typing import Any, Optional
+from typing import Any
 
 from transformers.configuration_utils import PretrainedConfig
 from transformers.models.qwen2 import Qwen2Config
@@ -57,7 +57,7 @@ class DotsOCRConfig(Qwen2Config):
         self,
         image_token_id=151665,
         video_token_id=151656,
-        vision_config: Optional[dict] = None,
+        vision_config: dict | None = None,
         *args,
         **kwargs,
     ):

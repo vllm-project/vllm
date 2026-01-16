@@ -45,7 +45,7 @@ class HQQMarlinConfig(QuantizationConfig):
         self,
         weight_bits: int,
         group_size: int,
-        skip_modules: Optional[list[str]] = None,
+        skip_modules: list[str] | None = None,
     ) -> None:
         super().__init__()
         assert group_size == 64, "The only supported HQQ group size is currently 64."
@@ -327,7 +327,7 @@ class HQQMarlinMethod(LinearMethodBase):
         self,
         layer: torch.nn.Module,
         x: torch.Tensor,
-        bias: Optional[torch.Tensor] = None,
+        bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
         workspace = MarlinWorkspace(
             self.output_size_per_partition,
@@ -350,6 +350,7 @@ class HQQMarlinMethod(LinearMethodBase):
             layer.marlin_qweight,
             bias,
             scales,
+            None,
             None,
             zeros,
             layer.g_idx,

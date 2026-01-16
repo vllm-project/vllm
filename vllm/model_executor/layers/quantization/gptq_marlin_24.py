@@ -114,7 +114,7 @@ class GPTQMarlin24Config(QuantizationConfig):
     @classmethod
     def override_quantization_method(
         cls, hf_quant_cfg, user_quant
-    ) -> Optional[QuantizationMethods]:
+    ) -> QuantizationMethods | None:
         is_marlin_24_format = hf_quant_cfg.get("checkpoint_format") == "marlin_24"
 
         is_valid_user_quant = (
@@ -287,7 +287,7 @@ class GPTQMarlin24LinearMethod(LinearMethodBase):
         self,
         layer: torch.nn.Module,
         x: torch.Tensor,
-        bias: Optional[torch.Tensor] = None,
+        bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
         qweight = layer.B_24
         meta = layer.B_meta

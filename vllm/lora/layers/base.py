@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from typing import TYPE_CHECKING, Optional, Union
+from typing import TYPE_CHECKING
 
 import torch
 import torch.nn as nn
@@ -15,14 +15,14 @@ if TYPE_CHECKING:
 
 class BaseLayerWithLoRA(nn.Module):
     def slice_lora_a(
-        self, lora_a: Union[torch.Tensor, list[Union[torch.Tensor, None]]]
-    ) -> Union[torch.Tensor, list[Union[torch.Tensor, None]]]:
+        self, lora_a: torch.Tensor | list[torch.Tensor | None]
+    ) -> torch.Tensor | list[torch.Tensor | None]:
         """Slice lora a if splitting for tensor parallelism."""
         ...
 
     def slice_lora_b(
-        self, lora_b: Union[torch.Tensor, list[Union[torch.Tensor, None]]]
-    ) -> Union[torch.Tensor, list[Union[torch.Tensor, None]]]:
+        self, lora_b: torch.Tensor | list[torch.Tensor | None]
+    ) -> torch.Tensor | list[torch.Tensor | None]:
         """Slice lora b if splitting with tensor parallelism."""
         ...
 
@@ -30,7 +30,7 @@ class BaseLayerWithLoRA(nn.Module):
         self,
         max_loras: int,
         lora_config: LoRAConfig,
-        model_config: Optional[PretrainedConfig] = None,
+        model_config: PretrainedConfig | None = None,
     ) -> None:
         """Initializes lora matrices."""
         ...
@@ -42,9 +42,8 @@ class BaseLayerWithLoRA(nn.Module):
     def set_lora(
         self,
         index: int,
-        lora_a: torch.Tensor,
-        lora_b: torch.Tensor,
-        embeddings_tensor: Optional[torch.Tensor],
+        lora_a: torch.Tensor | list[torch.Tensor],
+        lora_b: torch.Tensor | list[torch.Tensor],
     ):
         """Overwrites lora tensors at index."""
         ...
@@ -61,7 +60,7 @@ class BaseLayerWithLoRA(nn.Module):
         source_layer: nn.Module,
         lora_config: LoRAConfig,
         packed_modules_list: list,
-        model_config: Optional[PretrainedConfig],
+        model_config: PretrainedConfig | None = None,
     ) -> bool:
         """Returns True if the layer can be replaced by this LoRA layer."""
         raise NotImplementedError

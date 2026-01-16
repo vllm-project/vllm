@@ -4,7 +4,6 @@
 import importlib.metadata
 from dataclasses import dataclass
 from importlib.util import find_spec
-from typing import Optional
 
 import pytest
 import torch
@@ -18,7 +17,7 @@ QUARK_MXFP4_AVAILABLE = find_spec("quark") is not None and version.parse(
 ) >= version.parse("0.8.99")
 
 TRTLLM_GEN_MXFP4_AVAILABLE = (
-    current_platform.is_cuda() and current_platform.is_device_capability(100)
+    current_platform.is_cuda() and current_platform.is_device_capability_family(100)
 )
 
 HOPPER_MXFP4_BF16_AVAILABLE = (
@@ -38,7 +37,7 @@ if TRTLLM_GEN_MXFP4_AVAILABLE:
         trtllm_fp4_block_scale_moe,
     )
     from flashinfer.fp4_quantization import nvfp4_block_scale_interleave
-    from flashinfer.fused_moe.core import _maybe_get_cached_w2_permute_indices
+    from flashinfer.fused_moe.core import get_w2_permute_indices_with_cache
 
 
 @dataclass
@@ -71,12 +70,12 @@ def test_mxfp4_loading_and_execution_moe(vllm_runner, model_case: ModelCase):
             f"{torch.cuda.device_count()}"
         )
 
-    # `cuda_graph_sizes=[16]` to reduce load time.
+    # `cudagraph_capture_sizes=[16]` to reduce load time.
     with vllm_runner(
         model_case.model_id,
         tensor_parallel_size=model_case.tp,
         load_format="dummy",
-        cuda_graph_sizes=[16],
+        cudagraph_capture_sizes=[16],
     ) as llm:
         # Disabled as check_model is broken: https://github.com/vllm-project/vllm/pull/18465#issuecomment-3329880562
         # def check_model(model):
@@ -103,7 +102,7 @@ def test_mxfp4_loading_and_execution_moe(vllm_runner, model_case: ModelCase):
         assert output
 
 
-def swiglu(x, alpha: float = 1.702, beta: float = 1.0, limit: Optional[float] = None):
+def swiglu(x, alpha: float = 1.702, beta: float = 1.0, limit: float | None = None):
     # Note we add an extra bias of 1 to the linear layer
     x_glu, x_linear = torch.chunk(x, 2, dim=-1)
     if limit is not None:
@@ -320,7 +319,7 @@ def tg_mxfp4_moe(
     if transpose_optimized:
         for i in range(num_experts):
             # w13 weight shuffling
-            permute_indices = _maybe_get_cached_w2_permute_indices(
+            permute_indices = get_w2_permute_indices_with_cache(
                 _cache_permute_indices,
                 w13_weight[i].view(torch.uint8),
                 epilogue_tile_m,
@@ -331,7 +330,7 @@ def tg_mxfp4_moe(
                 .contiguous()
             )
             # w13 scale shuffling
-            permute_sf_indices = _maybe_get_cached_w2_permute_indices(
+            permute_sf_indices = get_w2_permute_indices_with_cache(
                 _cache_permute_indices,
                 w13_weight_scale[i].view(torch.uint8),
                 epilogue_tile_m,
@@ -345,7 +344,7 @@ def tg_mxfp4_moe(
                 )
             )
             # w13 bias shuffling
-            permute_bias_indices = _maybe_get_cached_w2_permute_indices(
+            permute_bias_indices = get_w2_permute_indices_with_cache(
                 _cache_permute_indices,
                 w13_bias[i].clone().reshape(-1, 1),
                 epilogue_tile_m,
@@ -357,7 +356,7 @@ def tg_mxfp4_moe(
                 .contiguous()
             )
             # w2 weight shuffling
-            permute_indices = _maybe_get_cached_w2_permute_indices(
+            permute_indices = get_w2_permute_indices_with_cache(
                 _cache_permute_indices,
                 w2_weight[i].view(torch.uint8),
                 epilogue_tile_m,
@@ -368,7 +367,7 @@ def tg_mxfp4_moe(
                 .contiguous()
             )
             # w2 scale shuffling
-            permute_sf_indices = _maybe_get_cached_w2_permute_indices(
+            permute_sf_indices = get_w2_permute_indices_with_cache(
                 _cache_permute_indices,
                 w2_weight_scale[i].view(torch.uint8),
                 epilogue_tile_m,
@@ -382,7 +381,7 @@ def tg_mxfp4_moe(
                 )
             )
             # w2 bias shuffling
-            permute_indices = _maybe_get_cached_w2_permute_indices(
+            permute_indices = get_w2_permute_indices_with_cache(
                 _cache_permute_indices,
                 w2_bias[i].clone().reshape(-1, 1),
                 epilogue_tile_m,
@@ -510,7 +509,7 @@ def test_trtllm_gen_mxfp4_fused_moe(
     hidden_size: int,
     alpha: float,
     beta: float,
-    limit: Optional[float],
+    limit: float | None,
     act_type: str,
     transpose_optimized: bool,
 ):
@@ -660,7 +659,7 @@ def test_flashinfer_cutlass_mxfp4_fused_moe(
     hidden_size: int,
     alpha: float,
     beta: float,
-    limit: Optional[float],
+    limit: float | None,
 ):
     torch.manual_seed(42)
     device = "cuda:0"
@@ -800,7 +799,7 @@ def test_flashinfer_cutlass_mxfp4_fused_moe(
 @pytest.mark.skipif(
     not (
         current_platform.is_cuda()
-        and current_platform.is_device_capability(100)
+        and current_platform.is_device_capability_family(100)
         and has_flashinfer()
     ),
     reason="NVIDIA GPU sm100 and flashinfer are required for this test",
@@ -811,9 +810,9 @@ def test_flashinfer_cutlass_mxfp4_mxfp8_fused_moe(
     num_tokens: int,
     intermediate_size: int,
     hidden_size: int,
-    alpha: Optional[float],
-    beta: Optional[float],
-    limit: Optional[float],
+    alpha: float | None,
+    beta: float | None,
+    limit: float | None,
 ):
     torch.manual_seed(42)
     device = "cuda:0"

@@ -9,7 +9,6 @@ from collections.abc import Iterable
 from copy import deepcopy
 from dataclasses import dataclass, fields
 from functools import reduce
-from typing import Optional, Union
 
 import jinja2
 from vllm_cutlass_library_extension import (
@@ -259,7 +258,7 @@ class ScheduleConfig:
 @dataclass(frozen=True)
 class TypeConfig:
     a: DataType
-    b: Union[DataType, VLLMDataType]
+    b: DataType | VLLMDataType
     b_group_scale: DataType
     b_group_zeropoint: DataType
     b_channel_scale: DataType
@@ -280,7 +279,7 @@ class PrepackTypeConfig:
 class ImplConfig:
     types: TypeConfig
     schedules: list[ScheduleConfig]
-    heuristic: list[tuple[Optional[str], ScheduleConfig]]
+    heuristic: list[tuple[str | None, ScheduleConfig]]
 
 
 def generate_sch_sig(schedule_config: ScheduleConfig) -> str:

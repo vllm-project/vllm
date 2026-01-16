@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from typing import Optional
 
 import torch
 
@@ -10,9 +9,12 @@ from vllm.model_executor.custom_op import CustomOp
 from .common import rotate_gptj, rotate_neox
 
 
+# --8<-- [start:dual_chunk_rotary_embedding]
 @CustomOp.register("dual_chunk_rotary_embedding")
 class DualChunkRotaryEmbedding(CustomOp):
     """Rotary positional embedding for Dual Chunk Attention."""
+
+    # --8<-- [end:dual_chunk_rotary_embedding]
 
     def __init__(
         self,
@@ -121,7 +123,7 @@ class DualChunkRotaryEmbedding(CustomOp):
         positions: torch.Tensor,
         query: torch.Tensor,
         key: torch.Tensor,
-        offsets: Optional[torch.Tensor] = None,
+        offsets: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         query = query.view(*query.shape[:-1], -1, self.head_size)
         key = key.view(*key.shape[:-1], -1, self.head_size)
@@ -185,7 +187,7 @@ class DualChunkRotaryEmbedding(CustomOp):
         positions: torch.Tensor,
         query: torch.Tensor,
         key: torch.Tensor,
-        offsets: Optional[torch.Tensor] = None,
+        offsets: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         return self.forward_native(positions, query, key, offsets)
 

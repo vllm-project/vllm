@@ -7,7 +7,7 @@ import json
 import math
 import os
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
 import matplotlib.pyplot as plt
 import pandas as pd
@@ -141,7 +141,7 @@ def attempt_to_make_names_unique(entries_and_traces):
 """
 
 
-def group_trace_by_operations(trace_df: pd.DataFrame) -> pd.DataFrame:
+def group_trace_by_operations(trace_df: "pd.DataFrame") -> "pd.DataFrame":
     def is_rms_norm(op_name: str):
         if "rms_norm_kernel" in op_name:
             return True
@@ -370,12 +370,12 @@ def group_trace_by_operations(trace_df: pd.DataFrame) -> pd.DataFrame:
 
 
 def plot_trace_df(
-    traces_df: pd.DataFrame,
+    traces_df: "pd.DataFrame",
     plot_metric: str,
     plot_title: str,
-    output: Optional[Path] = None,
+    output: Path | None = None,
 ):
-    def get_phase_description(traces_df: pd.DataFrame, phase: str) -> str:
+    def get_phase_description(traces_df: "pd.DataFrame", phase: str) -> str:
         phase_df = traces_df.query(f'phase == "{phase}"')
         descs = phase_df["phase_desc"].to_list()
         assert all([desc == descs[0] for desc in descs])
@@ -438,7 +438,7 @@ def main(
     top_k: int,
     json_nodes_to_fold: list[str],
 ):
-    def prepare_data(profile_json: dict, step_keys: list[str]) -> pd.DataFrame:
+    def prepare_data(profile_json: dict, step_keys: list[str]) -> "pd.DataFrame":
         def get_entries_and_traces(key: str):
             entries_and_traces: list[tuple[Any, Any]] = []
             for root in profile_json[key]["summary_stats"]:
@@ -449,8 +449,8 @@ def main(
             return entries_and_traces
 
         def keep_only_top_entries(
-            df: pd.DataFrame, metric: str, top_k: int = 9
-        ) -> pd.DataFrame:
+            df: "pd.DataFrame", metric: str, top_k: int = 9
+        ) -> "pd.DataFrame":
             df.loc[df.nsmallest(len(df) - top_k + 1, metric).index, ["name"]] = "others"
             return df
 

@@ -3,7 +3,6 @@
 
 import os
 import tempfile
-from typing import Optional
 
 from prometheus_client import REGISTRY, CollectorRegistry, multiprocess
 
@@ -12,7 +11,7 @@ from vllm.logger import init_logger
 logger = init_logger(__name__)
 
 # Global temporary directory for prometheus multiprocessing
-_prometheus_multiproc_dir: Optional[tempfile.TemporaryDirectory] = None
+_prometheus_multiproc_dir: tempfile.TemporaryDirectory | None = None
 
 
 def setup_multiprocess_prometheus():

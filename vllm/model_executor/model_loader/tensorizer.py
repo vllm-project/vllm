@@ -12,7 +12,7 @@ import threading
 import time
 from collections.abc import Generator, MutableMapping
 from dataclasses import asdict, dataclass, field, fields
-from typing import TYPE_CHECKING, Any, ClassVar, Optional, Union
+from typing import TYPE_CHECKING, Any, ClassVar, Optional
 
 import regex as re
 import torch
@@ -26,7 +26,8 @@ from vllm.config import ModelConfig, ParallelConfig, VllmConfig, set_current_vll
 from vllm.logger import init_logger
 from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmbedding
 from vllm.platforms import current_platform
-from vllm.utils import FlexibleArgumentParser, PlaceholderModule
+from vllm.utils.argparse_utils import FlexibleArgumentParser
+from vllm.utils.import_utils import PlaceholderModule
 
 if TYPE_CHECKING:
     from vllm.engine.arg_utils import EngineArgs
@@ -67,7 +68,7 @@ __all__ = [
 logger = init_logger(__name__)
 
 
-def is_valid_deserialization_uri(uri: Optional[str]) -> bool:
+def is_valid_deserialization_uri(uri: str | None) -> bool:
     if uri:
         scheme = uri.lower().split("://")[0]
         return scheme in {"s3", "http", "https"} or os.path.exists(uri)
@@ -156,25 +157,23 @@ class _NoInitOrTensorImpl:
 
 @dataclass
 class TensorizerConfig(MutableMapping):
-    tensorizer_uri: Optional[str] = None
-    tensorizer_dir: Optional[str] = None
-    vllm_tensorized: Optional[bool] = None
-    verify_hash: Optional[bool] = None
-    num_readers: Optional[int] = None
-    encryption_keyfile: Optional[str] = None
-    s3_access_key_id: Optional[str] = None
-    s3_secret_access_key: Optional[str] = None
-    s3_endpoint: Optional[str] = None
-    lora_dir: Optional[str] = None
-    stream_kwargs: Optional[dict[str, Any]] = None
-    serialization_kwargs: Optional[dict[str, Any]] = None
-    deserialization_kwargs: Optional[dict[str, Any]] = None
-    _extra_serialization_attrs: Optional[dict[str, Any]] = field(
-        init=False, default=None
-    )
-    model_class: Optional[type[torch.nn.Module]] = field(init=False, default=None)
-    hf_config: Optional[PretrainedConfig] = field(init=False, default=None)
-    dtype: Optional[Union[str, torch.dtype]] = field(init=False, default=None)
+    tensorizer_uri: str | None = None
+    tensorizer_dir: str | None = None
+    vllm_tensorized: bool | None = None
+    verify_hash: bool | None = None
+    num_readers: int | None = None
+    encryption_keyfile: str | None = None
+    s3_access_key_id: str | None = None
+    s3_secret_access_key: str | None = None
+    s3_endpoint: str | None = None
+    lora_dir: str | None = None
+    stream_kwargs: dict[str, Any] | None = None
+    serialization_kwargs: dict[str, Any] | None = None
+    deserialization_kwargs: dict[str, Any] | None = None
+    _extra_serialization_attrs: dict[str, Any] | None = field(init=False, default=None)
+    model_class: type[torch.nn.Module] | None = field(init=False, default=None)
+    hf_config: PretrainedConfig | None = field(init=False, default=None)
+    dtype: str | torch.dtype | None = field(init=False, default=None)
     _is_sharded: bool = field(init=False, default=False)
     _fields: ClassVar[tuple[str, ...]]
     _keys: ClassVar[frozenset[str]]
@@ -362,9 +361,9 @@ TensorizerConfig._keys = frozenset(TensorizerConfig._fields)
 
 @dataclass
 class TensorizerArgs:
-    tensorizer_uri: Optional[str] = None
-    tensorizer_dir: Optional[str] = None
-    encryption_keyfile: Optional[str] = None
+    tensorizer_uri: str | None = None
+    tensorizer_dir: str | None = None
+    encryption_keyfile: str | None = None
 
     def __init__(self, tensorizer_config: TensorizerConfig):
         for k, v in tensorizer_config.items():
@@ -520,7 +519,7 @@ def init_tensorizer_model(
 ) -> nn.Module:
     assert tensorizer_config.hf_config is not None
     model_args = tensorizer_config.hf_config
-    model_args.torch_dtype = tensorizer_config.dtype
+    model_args.dtype = tensorizer_config.dtype
     assert tensorizer_config.model_class is not None
     # TODO: Do we need to consider old-style model class?
     with meta_tensor_mode(), set_current_vllm_config(vllm_config, check_compile=True):
@@ -621,7 +620,7 @@ def is_vllm_tensorized(tensorizer_config: "TensorizerConfig") -> bool:
 
 
 def serialize_extra_artifacts(
-    tensorizer_args: TensorizerArgs, served_model_name: Union[str, list[str], None]
+    tensorizer_args: TensorizerArgs, served_model_name: str | list[str] | None
 ) -> None:
     if not isinstance(served_model_name, str):
         raise ValueError(
@@ -727,8 +726,6 @@ def tensorize_vllm_model(
         ) as stream:
             stream.write(encryption_params.key)
 
-    assert envs.VLLM_USE_V1
-
     from vllm.v1.engine.llm_engine import LLMEngine
 
     engine = LLMEngine.from_vllm_config(engine_config)
@@ -765,9 +762,12 @@ def tensorize_lora_adapter(lora_path: str, tensorizer_config: TensorizerConfig):
     if tensor_path.endswith(".safetensors"):
         tensors = safetensors.torch.load_file(tensor_path)
     elif tensor_path.endswith(".bin"):
-        tensors = torch.load(tensor_path)
+        tensors = torch.load(tensor_path, weights_only=True)
     else:
-        raise ValueError("Unsupported file: %s", tensor_path)
+        raise ValueError(
+            f"Unsupported adapter model file: {tensor_path}. "
+            f"Must be a .safetensors or .bin file."
+        )
 
     with open(config_path) as f:
         config = json.load(f)

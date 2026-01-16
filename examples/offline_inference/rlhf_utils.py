@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import gc
-from typing import Callable, Optional, TypedDict
+from collections.abc import Callable
+from typing import TypedDict
 
 import torch
 import zmq
@@ -29,8 +30,8 @@ class WorkerExtension:
     """
     The class for vLLM's worker to inherit from.
     By defining an extension class, the code can work no matter what is
-    the underlying worker class. This way, the code can be compatible
-    with both vLLM V0 and V1.
+    the underlying worker class.
+
     NOTE: we define this class in a separate module, and the main module
     should pass the full qualified name as `worker_extension_cls` argument.
     """
@@ -71,7 +72,7 @@ class WorkerExtension:
 
 
 def rebuild_ipc(
-    handle: tuple[Callable, tuple], device_id: Optional[int] = None
+    handle: tuple[Callable, tuple], device_id: int | None = None
 ) -> torch.Tensor:
     func, args = handle
     list_args = list(args)
@@ -95,8 +96,8 @@ class ColocateWorkerExtension:
     """
     The class for vLLM's worker to inherit from, in the colocate setting.
     By defining an extension class, the code can work no matter what is
-    the underlying worker class. This way, the code can be compatible
-    with both vLLM V0 and V1.
+    the underlying worker class.
+
     NOTE: we define this class in a separate module, and the main module
     should pass the full qualified name as `worker_extension_cls` argument.
     """
@@ -109,7 +110,7 @@ class ColocateWorkerExtension:
             self._zmq_ctx = zmq.Context()
         socket = self._zmq_ctx.socket(zmq.REP)
         socket.connect(zmq_handles[self.report_device_id()])
-        buffer: Optional[torch.Tensor] = None
+        buffer: torch.Tensor | None = None
         while True:
             payload: tuple[Callable, tuple] | list[FlattenedTensorMetadata] | None = (
                 socket.recv_pyobj()

@@ -4,14 +4,13 @@
 import copy
 from enum import Enum
 from itertools import product
-from typing import Optional
 
 import torch
 from tqdm import tqdm
 
 from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.model_executor.layers.fused_moe.config import FUSED_MOE_UNQUANTIZED_CONFIG
-from vllm.platforms import current_platform
+from vllm.utils.torch_utils import set_random_seed
 
 from .common import (
     Config,
@@ -41,7 +40,7 @@ def rank_worker(
     config: Config,
     weights: WeightTensors,
 ):
-    current_platform.seed_everything(pgi.rank)
+    set_random_seed(pgi.rank)
 
     # sanity check
     from vllm import envs
@@ -82,7 +81,7 @@ def make_feature_matrix(csv_file_path: str):
     import pandas as pd
 
     def add_to_results(
-        config: Config, success: Result, results_df: Optional[pd.DataFrame] = None
+        config: Config, success: Result, results_df: pd.DataFrame | None = None
     ):
         config_dict = asdict(config)
         config_dict["prepare_finalize_type"] = config_dict[
@@ -121,7 +120,7 @@ def make_feature_matrix(csv_file_path: str):
         product(Ms, Ks, Ns, Es, TOPKs, DTYPEs, PF_TYPES, FE_TYPES, Q_TYPES)
     )
 
-    results_df: Optional[pd.DataFrame] = None
+    results_df: pd.DataFrame | None = None
     for m, k, n, e, topks, dtype, pf_type, experts_type, quant_config in tqdm(
         combinations
     ):

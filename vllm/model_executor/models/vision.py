@@ -4,12 +4,13 @@
 import itertools
 import math
 from abc import ABC, abstractmethod
-from typing import Callable, Final, Generic, Literal, Optional, Protocol, TypeVar, Union
+from collections.abc import Callable
+from typing import Final, Generic, Literal, Protocol, TypeAlias, TypeVar
 
 import torch
 from transformers import PretrainedConfig
 
-from vllm.attention.backends.registry import _Backend
+from vllm.config import VllmConfig
 from vllm.distributed import (
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
@@ -17,6 +18,7 @@ from vllm.distributed import (
 )
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
+from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 logger = init_logger(__name__)
 
@@ -77,30 +79,36 @@ def get_vision_encoder_info(hf_config: VisionLanguageConfig) -> VisionEncoderInf
     raise NotImplementedError(msg)
 
 
-def get_vit_attn_backend(head_size: int, dtype: torch.dtype) -> _Backend:
+def get_vit_attn_backend(
+    head_size: int,
+    dtype: torch.dtype,
+    *,
+    attn_backend_override: AttentionBackendEnum | None = None,
+) -> AttentionBackendEnum:
     """
     Get the available attention backend for Vision Transformer.
     """
-    # Lazy import to avoid circular dependency
-    from vllm.attention.selector import get_env_variable_attn_backend
+    return current_platform.get_vit_attn_backend(
+        head_size,
+        dtype,
+        backend=attn_backend_override,
+    )
 
-    selected_backend: Optional[_Backend] = get_env_variable_attn_backend()
-    if selected_backend is not None:
-        return selected_backend
 
-    return current_platform.get_vit_attn_backend(head_size, dtype)
+def should_torch_compile_mm_vit(vllm_config: VllmConfig) -> bool:
+    """Callable to be passed to `@support_torch_compile`'s `enable_if` argument."""
+    return vllm_config.compilation_config.compile_mm_encoder
 
 
 VisionFeatureSelectStrategyStr = Literal["class", "default", "full"]
 
-VisionFeatureSelectStrategy = Union[
-    VisionFeatureSelectStrategyStr,
-    Callable[[torch.Tensor], torch.Tensor],
-]
+VisionFeatureSelectStrategy: TypeAlias = (
+    VisionFeatureSelectStrategyStr | Callable[[torch.Tensor], torch.Tensor]
+)
 
 
 def _get_vision_feature_selector(
-    strategy: Union[VisionFeatureSelectStrategy, str],
+    strategy: VisionFeatureSelectStrategy | str,
 ) -> Callable[[torch.Tensor], torch.Tensor]:
     if callable(strategy):
         return strategy
@@ -121,7 +129,7 @@ def _get_vision_feature_selector(
 
 def get_num_selected_vision_tokens(
     num_vision_tokens: int,
-    strategy: Union[VisionFeatureSelectStrategy, str],
+    strategy: VisionFeatureSelectStrategy | str,
 ) -> int:
     if callable(strategy):
         dummy_features = torch.empty(1, num_vision_tokens, 64)  # [B, L, D]
@@ -141,12 +149,12 @@ def get_num_selected_vision_tokens(
 
 
 def resolve_visual_encoder_outputs(
-    encoder_outputs: Union[torch.Tensor, list[torch.Tensor]],
-    post_layer_norm: Optional[torch.nn.LayerNorm],
+    encoder_outputs: torch.Tensor | list[torch.Tensor],
+    post_layer_norm: torch.nn.LayerNorm | None,
     *,
-    select_layers: Optional[list[int]] = None,
-    max_possible_layers: Optional[int] = None,
-    feature_select_strategy: Optional[VisionFeatureSelectStrategy] = None,
+    select_layers: list[int] | None = None,
+    max_possible_layers: int | None = None,
+    feature_select_strategy: VisionFeatureSelectStrategy | None = None,
 ) -> torch.Tensor:
     """Given the outputs a visual encoder module that may correspond to the
     output of the last layer, or a list of hidden states to be stacked,

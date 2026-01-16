@@ -3,7 +3,7 @@
 
 from abc import abstractmethod
 from collections.abc import Iterable, Mapping, Sequence
-from typing import Annotated, Final, Literal, Optional, Protocol, TypeVar, Union
+from typing import Annotated, Final, Literal, Protocol, TypeVar
 
 import torch
 import torch.nn as nn
@@ -16,7 +16,7 @@ from transformers import (
 from transformers.models.pixtral import PixtralProcessor
 
 from vllm.config import VllmConfig
-from vllm.config.multimodal import BaseDummyOptions
+from vllm.config.multimodal import BaseDummyOptions, MultiModalConfig
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import ColumnParallelLinear, RowParallelLinear
@@ -31,6 +31,7 @@ from vllm.multimodal.inputs import (
 )
 from vllm.multimodal.parse import ImageProcessorItems, ImageSize, MultiModalDataItems
 from vllm.multimodal.processing import (
+    BaseDummyInputsBuilder,
     BaseMultiModalProcessor,
     BaseProcessingInfo,
     InputProcessingContext,
@@ -38,7 +39,6 @@ from vllm.multimodal.processing import (
     PromptUpdate,
     PromptUpdateDetails,
 )
-from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from vllm.sequence import IntermediateTensors
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
@@ -72,7 +72,7 @@ class Mistral3ImagePixelInputs(TensorSchema):
     # Note that `height` or `width` may be different per batch and image,
     # in which case the data is passed as a list instead of a batched tensor.
     pixel_values: Annotated[
-        Union[torch.Tensor, list[torch.Tensor]],
+        torch.Tensor | list[torch.Tensor],
         TensorShape("bn", 3, "h", "w", dynamic_dims={"h", "w"}),
     ]
 
@@ -136,7 +136,7 @@ class Mistral3MultiModalProjector(nn.Module):
         patch_size: int,
         projector_hidden_act: str,
         multimodal_projector_bias: bool,
-        quant_config: Optional[QuantizationConfig] = None,
+        quant_config: QuantizationConfig | None = None,
         prefix: str = "",
     ):
         super().__init__()
@@ -179,7 +179,7 @@ class LlavaLikeConfig(Protocol):
     vision_config: Final[PretrainedConfig]
     image_token_index: Final[int]
     vision_feature_select_strategy: Final[str]
-    vision_feature_layer: Final[Union[int, list[int]]]
+    vision_feature_layer: Final[int | list[int]]
 
 
 class LlavaLikeProcessor(Protocol):
@@ -197,7 +197,7 @@ class BaseLlavaProcessingInfo(BaseProcessingInfo):
     def get_hf_processor(self, **kwargs: object) -> LlavaLikeProcessor:
         raise NotImplementedError
 
-    def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
+    def get_supported_mm_limits(self) -> Mapping[str, int | None]:
         return {"image": None}
 
     def get_num_image_tokens(
@@ -234,7 +234,7 @@ class Mistral3DummyInputsBuilder(BaseDummyInputsBuilder[_I]):
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-        mm_options: Optional[Mapping[str, BaseDummyOptions]] = None,
+        mm_options: Mapping[str, BaseDummyOptions] | None = None,
     ) -> MultiModalDataDict:
         num_images = mm_counts.get("image", 0)
 
@@ -348,7 +348,7 @@ def _build_mistral3_processor(
     info: _I,
     dummy_inputs: BaseDummyInputsBuilder[_I],
     *,
-    cache: Optional[BaseMultiModalProcessorCache] = None,
+    cache: BaseMultiModalProcessorCache | None = None,
 ) -> BaseMultiModalProcessor:
     assert isinstance(info, Mistral3ProcessingInfo)
     return Mistral3MultiModalProcessor(
@@ -394,9 +394,10 @@ def _get_layer_index(feature_layer_index: int, num_hidden_layers: int) -> int:
 
 def init_vision_tower_for_llava(
     hf_config: LlavaLikeConfig,
-    quant_config: Optional[QuantizationConfig],
+    quant_config: QuantizationConfig | None,
+    multimodal_config: MultiModalConfig | None,
     *,
-    require_post_norm: Optional[bool] = None,
+    require_post_norm: bool | None = None,
     prefix: str = "",
 ) -> PixtralHFVisionModel:
     vision_config = hf_config.vision_config
@@ -409,6 +410,7 @@ def init_vision_tower_for_llava(
     return PixtralHFVisionModel(
         vision_config,
         quant_config=quant_config,
+        multimodal_config=multimodal_config,
         num_hidden_layers_override=num_hidden_layers,
         require_post_norm=require_post_norm,
         prefix=prefix,
@@ -423,8 +425,6 @@ def init_vision_tower_for_llava(
 class Mistral3ForConditionalGeneration(
     nn.Module, SupportsLoRA, SupportsMultiModal, SupportsPP
 ):
-    merge_by_field_config = True
-
     packed_modules_mapping = {
         "qkv_proj": ["q_proj", "k_proj", "v_proj"],
         "gate_up_proj": ["gate_proj", "up_proj"],
@@ -441,7 +441,7 @@ class Mistral3ForConditionalGeneration(
     )
 
     @classmethod
-    def get_placeholder_str(cls, modality: str, i: int) -> Optional[str]:
+    def get_placeholder_str(cls, modality: str, i: int) -> str | None:
         if modality.startswith("image"):
             return None
 
@@ -474,7 +474,8 @@ class Mistral3ForConditionalGeneration(
         if multimodal_config.get_limit_per_prompt("image"):
             self.vision_tower = init_vision_tower_for_llava(
                 config,
-                quant_config,
+                quant_config=quant_config,
+                multimodal_config=multimodal_config,
                 require_post_norm=False,
                 prefix=maybe_prefix(prefix, "vision_tower"),
             )
@@ -504,7 +505,7 @@ class Mistral3ForConditionalGeneration(
 
     def _parse_and_validate_image_input(
         self, **kwargs: object
-    ) -> Optional[Mistral3ImagePixelInputs]:
+    ) -> Mistral3ImagePixelInputs | None:
         pixel_values = kwargs.pop("pixel_values", None)
         image_embeds = kwargs.pop("image_embeds", None)
 
@@ -519,7 +520,7 @@ class Mistral3ForConditionalGeneration(
     def _process_image_input(
         self,
         image_input: Mistral3ImagePixelInputs,
-    ) -> Union[torch.Tensor, tuple[torch.Tensor, ...]]:
+    ) -> torch.Tensor | tuple[torch.Tensor, ...]:
         if image_input["type"] == "image_embeds":
             return image_input["data"]
 
@@ -549,7 +550,7 @@ class Mistral3ForConditionalGeneration(
     def get_language_model(self) -> torch.nn.Module:
         return self.language_model
 
-    def get_multimodal_embeddings(self, **kwargs: object) -> MultiModalEmbeddings:
+    def embed_multimodal(self, **kwargs: object) -> MultiModalEmbeddings:
         image_input = self._parse_and_validate_image_input(**kwargs)
         if image_input is None:
             return []
@@ -562,10 +563,10 @@ class Mistral3ForConditionalGeneration(
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
-        intermediate_tensors: Optional[IntermediateTensors] = None,
-        inputs_embeds: Optional[torch.Tensor] = None,
+        intermediate_tensors: IntermediateTensors | None = None,
+        inputs_embeds: torch.Tensor | None = None,
         **kwargs: object,
-    ) -> Union[torch.Tensor, IntermediateTensors]:
+    ) -> torch.Tensor | IntermediateTensors:
         """Run forward pass for Mistral3.
 
         One key thing to understand is the `input_ids` already accounts for the
@@ -615,7 +616,7 @@ class Mistral3ForConditionalGeneration(
     def compute_logits(
         self,
         hidden_states: torch.Tensor,
-    ) -> Optional[torch.Tensor]:
+    ) -> torch.Tensor | None:
         return self.language_model.compute_logits(hidden_states)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:

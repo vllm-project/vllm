@@ -59,7 +59,7 @@ while true; do
         fi
 done
 
-echo "--- Pulling container" 
+echo "--- Pulling container"
 image_name="rocm/vllm-ci:${BUILDKITE_COMMIT}"
 container_name="rocm_${BUILDKITE_COMMIT}_$(tr -dc A-Za-z0-9 < /dev/urandom | head -c 10; echo)"
 docker pull "${image_name}"
@@ -78,17 +78,13 @@ HF_MOUNT="/root/.cache/huggingface"
 commands=$@
 echo "Commands:$commands"
 
-if [[ $commands == *"pytest -v -s basic_correctness/test_basic_correctness.py"* ]]; then
-  commands=${commands//"pytest -v -s basic_correctness/test_basic_correctness.py"/"VLLM_USE_TRITON_FLASH_ATTN=0 pytest -v -s basic_correctness/test_basic_correctness.py"}
-fi
+commands=${commands//"pytest -v -s basic_correctness/test_basic_correctness.py"/"pytest -v -s basic_correctness/test_basic_correctness.py"}
 
 if [[ $commands == *"pytest -v -s models/test_registry.py"* ]]; then
   commands=${commands//"pytest -v -s models/test_registry.py"/"pytest -v -s models/test_registry.py -k 'not BambaForCausalLM and not GritLM and not Mamba2ForCausalLM and not Zamba2ForCausalLM'"}
 fi
 
-if [[ $commands == *"pytest -v -s compile/test_basic_correctness.py"* ]]; then
-  commands=${commands//"pytest -v -s compile/test_basic_correctness.py"/"VLLM_USE_TRITON_FLASH_ATTN=0 pytest -v -s compile/test_basic_correctness.py"}
-fi
+commands=${commands//"pytest -v -s compile/test_basic_correctness.py"/"pytest -v -s compile/test_basic_correctness.py"}
 
 if [[ $commands == *"pytest -v -s lora"* ]]; then
   commands=${commands//"pytest -v -s lora"/"VLLM_ROCM_CUSTOM_PAGED_ATTN=0 pytest -v -s lora"}
@@ -145,7 +141,6 @@ if [[ $commands == *" entrypoints/openai "* ]]; then
   --ignore=entrypoints/openai/test_audio.py \
   --ignore=entrypoints/openai/test_shutdown.py \
   --ignore=entrypoints/openai/test_completion.py \
-  --ignore=entrypoints/openai/test_sleep.py \
   --ignore=entrypoints/openai/test_models.py \
   --ignore=entrypoints/openai/test_lora_adapters.py \
   --ignore=entrypoints/openai/test_return_tokens_as_ids.py \
@@ -173,19 +168,28 @@ fi
 PARALLEL_JOB_COUNT=8
 MYPYTHONPATH=".."
 
-# check if the command contains shard flag, we will run all shards in parallel because the host have 8 GPUs. 
+# Test that we're launching on the machine that has
+# proper access to GPUs
+render_gid=$(getent group render | cut -d: -f3)
+if [[ -z "$render_gid" ]]; then
+  echo "Error: 'render' group not found. This is required for GPU access." >&2
+  exit 1
+fi
+
+# check if the command contains shard flag, we will run all shards in parallel because the host have 8 GPUs.
 if [[ $commands == *"--shard-id="* ]]; then
-  # assign job count as the number of shards used   
-  commands=${commands//"--num-shards= "/"--num-shards=${PARALLEL_JOB_COUNT} "}
+  # assign job count as the number of shards used
+  commands=$(echo "$commands" | sed -E "s/--num-shards[[:blank:]]*=[[:blank:]]*[0-9]*/--num-shards=${PARALLEL_JOB_COUNT} /g" | sed 's/ \\ / /g')
   for GPU in $(seq 0 $(($PARALLEL_JOB_COUNT-1))); do
     # assign shard-id for each shard
-    commands_gpu=${commands//"--shard-id= "/"--shard-id=${GPU} "}
+    commands_gpu=$(echo "$commands" | sed -E "s/--shard-id[[:blank:]]*=[[:blank:]]*[0-9]*/--shard-id=${GPU} /g" | sed 's/ \\ / /g')
     echo "Shard ${GPU} commands:$commands_gpu"
     echo "Render devices: $BUILDKITE_AGENT_META_DATA_RENDER_DEVICES"
     docker run \
         --device /dev/kfd $BUILDKITE_AGENT_META_DATA_RENDER_DEVICES \
         --network=host \
         --shm-size=16gb \
+        --group-add "$render_gid" \
         --rm \
         -e HIP_VISIBLE_DEVICES="${GPU}" \
         -e HF_TOKEN \
@@ -205,20 +209,29 @@ if [[ $commands == *"--shard-id="* ]]; then
     wait "${pid}"
     STATUS+=($?)
   done
+  at_least_one_shard_with_tests=0
   for st in "${STATUS[@]}"; do
-    if [[ ${st} -ne 0 ]]; then
+    if [[ ${st} -ne 0 ]] && [[ ${st} -ne 5 ]]; then
       echo "One of the processes failed with $st"
       exit "${st}"
+    elif [[ ${st} -eq 5 ]]; then
+      echo "Shard exited with status 5 (no tests collected) - treating as success"
+    else # This means st is 0
+      at_least_one_shard_with_tests=1
     fi
   done
+  if [[ ${#STATUS[@]} -gt 0 && ${at_least_one_shard_with_tests} -eq 0 ]]; then
+    echo "All shards reported no tests collected. Failing the build."
+    exit 1
+  fi
 else
   echo "Render devices: $BUILDKITE_AGENT_META_DATA_RENDER_DEVICES"
   docker run \
           --device /dev/kfd $BUILDKITE_AGENT_META_DATA_RENDER_DEVICES \
           --network=host \
           --shm-size=16gb \
+          --group-add "$render_gid" \
           --rm \
-          -e HIP_VISIBLE_DEVICES=0 \
           -e HF_TOKEN \
           -e AWS_ACCESS_KEY_ID \
           -e AWS_SECRET_ACCESS_KEY \

@@ -1,14 +1,17 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 # Adapted from https://huggingface.co/docs/transformers/perplexity
-from typing import Optional, cast
+from typing import cast
 
-import pytest
 import torch
 from datasets import load_dataset
 
 import tests.ci_envs as ci_envs
-from tests.models.utils import GenerateModelInfo, TokensTextLogprobsPromptLogprobs
+from tests.models.utils import (
+    GenerateModelInfo,
+    TokensTextLogprobsPromptLogprobs,
+    get_vllm_extra_kwargs,
+)
 from vllm.logprobs import Logprob
 
 # See #24485
@@ -25,26 +28,9 @@ def wikitext_ppl_test(
     vllm_extra_kwargs=None,
     atol=PPL_TOL,
 ):
-    # A model family has many models with the same architecture,
-    # and we don't need to test each one.
-    if not ci_envs.VLLM_CI_NO_SKIP and not model_info.enable_test:
-        pytest.skip("Skipping test.")
+    vllm_extra_kwargs = get_vllm_extra_kwargs(model_info, vllm_extra_kwargs)
 
     dataset = load_dataset("wikitext", "wikitext-2-raw-v1", split="test")
-
-    # Allow vllm to test using the given dtype, such as float32
-    vllm_extra_kwargs = vllm_extra_kwargs or {}
-    vllm_extra_kwargs["dtype"] = ci_envs.VLLM_CI_DTYPE or model_info.dtype
-
-    # Allow vllm to test using hf_overrides
-    if model_info.hf_overrides is not None:
-        vllm_extra_kwargs["hf_overrides"] = model_info.hf_overrides
-
-    # Allow changing the head dtype used by vllm in tests
-    if ci_envs.VLLM_CI_HEAD_DTYPE is not None:
-        if "hf_overrides" not in vllm_extra_kwargs:
-            vllm_extra_kwargs["hf_overrides"] = {}
-        vllm_extra_kwargs["hf_overrides"]["head_dtype"] = ci_envs.VLLM_CI_HEAD_DTYPE
 
     with vllm_runner(
         model_info.name,
@@ -85,7 +71,7 @@ def wikitext_ppl_test(
         n_tokens = 0
         for output in outputs:
             output = cast(TokensTextLogprobsPromptLogprobs, output)
-            token_datas = cast(list[Optional[dict[int, Logprob]]], output[3])
+            token_datas = cast(list[dict[int, Logprob] | None], output[3])
 
             assert token_datas[0] is None
             token_log_probs = []
