@@ -569,12 +569,14 @@ class FusedMoE(CustomOp):
         if routing_method_type is not None:
             self.routing_method_type: RoutingMethodType = routing_method_type
         else:
-            if scoring_func == "sigmoid":
-                if self.use_grouped_topk:
-                    self.routing_method_type = RoutingMethodType.DeepSeekV3
-                elif self.top_k == 1:
+            if custom_routing_function:
+                from vllm.model_executor.models.llama4 import Llama4MoE
+
+                if custom_routing_function == Llama4MoE.custom_routing_function:
                     self.routing_method_type = RoutingMethodType.Llama4
-            elif self.scoring_func == "softmax":
+            elif scoring_func == "sigmoid" and self.use_grouped_topk:
+                self.routing_method_type = RoutingMethodType.DeepSeekV3
+            elif self.scoring_func == "softmax" and self.renormalize:
                 self.routing_method_type = (
                     RoutingMethodType.Renormalize
                     if not self.renormalize
