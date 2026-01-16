@@ -56,7 +56,7 @@ def test_gsm8k_correctness(config_filename):
     eval_config = yaml.safe_load(config_filename.read_text(encoding="utf-8"))
 
     if (
-        current_platform.is_rocm()
+        not current_platform.is_cuda()
         and "Qwen3-30B-A3B-MXFP4A16" in eval_config["model_name"]
     ):
         pytest.skip(
