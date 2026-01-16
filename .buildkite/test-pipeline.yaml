@@ -636,8 +636,6 @@ steps:
     - pytest -v -s kernels/moe/test_gpt_oss_triton_kernels.py
     - pytest -v -s kernels/moe/test_modular_oai_triton_moe.py
     - pytest -v -s kernels/moe/test_moe.py
-    - pytest -v -s kernels/moe/test_triton_no_act_mul.py
-    - pytest -v -s kernels/moe/test_triton_moe_ptpc_fp8.py
     # - pytest -v -s kernels/moe/test_block_fp8.py - failing on main
     - pytest -v -s kernels/moe/test_block_int8.py
 
@@ -650,6 +648,8 @@ steps:
     - pytest -v -s kernels/moe/test_deepep_deepgemm_moe.py
     - pytest -v -s kernels/moe/test_deepep_moe.py
     - pytest -v -s kernels/moe/test_pplx_cutlass_moe.py
+    - pytest -v -s kernels/moe/test_triton_no_act_mul.py
+    - pytest -v -s kernels/moe/test_triton_moe_ptpc_fp8.py
     # - pytest -v -s kernels/moe/test_pplx_moe.py - failing on main
     # - pytest -v -s tests/kernels/moe/test_modular_kernel_combinations.py - failing on main
   

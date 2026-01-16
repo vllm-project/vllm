@@ -508,8 +508,8 @@ class BatchedPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         self.rank = rank
         self.num_dispatchers_ = num_dispatchers
 
-    @property
-    def activation_format(self) -> mk.FusedMoEActivationFormat:
+    @staticmethod
+    def activation_format() -> mk.FusedMoEActivationFormat:
         return mk.FusedMoEActivationFormat.BatchedExperts
 
     def max_num_tokens_per_rank(self) -> int | None:

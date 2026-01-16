@@ -143,8 +143,8 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
     def output_is_reduced(self) -> bool:
         return True
 
-    @property
-    def activation_format(self) -> mk.FusedMoEActivationFormat:
+    @staticmethod
+    def activation_format() -> mk.FusedMoEActivationFormat:
         return mk.FusedMoEActivationFormat.BatchedExperts
 
     def max_num_tokens_per_rank(self) -> int | None:

@@ -34,7 +34,9 @@ class FallbackExperts(mk.FusedMoEPermuteExpertsUnpermute, ABC):
         )
 
     @classmethod
-    def activation_format(cls) -> mk.FusedMoEActivationFormat:
+    def activation_format(
+        cls: type[mk.FusedMoEActivationFormat],
+    ) -> mk.FusedMoEActivationFormat:
         experts_cls, fallback_cls = cls.get_clss()
         assert experts_cls.activation_format() == fallback_cls.activation_format()
         return experts_cls.activation_format()
