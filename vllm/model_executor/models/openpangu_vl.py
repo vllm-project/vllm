@@ -670,23 +670,12 @@ class OpenPanguVLProcessingInfo(Qwen2_5_VLProcessingInfo):
     ):
         if fps is not None:
             kwargs["fps"] = fps
-        if False:
-            return self.ctx.get_hf_processor(
-                OpenPanguVLProcessor,
-                image_processor=self.get_image_processor(
-                    min_pixels=min_pixels,
-                    max_pixels=max_pixels,
-                    size=size,
-                    use_fast=kwargs.get("use_fast", True),
-                ),
-                **kwargs,
-            )
-        else:
-            return self.ctx.get_hf_processor(
-                OpenPanguVLProcessor,
-                use_fast=kwargs.pop("use_fast", True),
-                **kwargs,
-            )
+
+        return self.ctx.get_hf_processor(
+            OpenPanguVLProcessor,
+            use_fast=kwargs.pop("use_fast", True),
+            **kwargs,
+        )
 
 def get_load_balance_assignment(
     sizes: list[int],
