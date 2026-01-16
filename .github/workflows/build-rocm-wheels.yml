@@ -61,10 +61,8 @@ jobs:
           restore-keys: |
             pip-rocm-${{ runner.os }}-
 
-      # Commented out sccache - GitHub Actions cache service is unreliable
-      # Uncomment when service is stable:
-      # - name: Install and configure sccache
-      #   uses: mozilla-actions/sccache-action@v0.0.6
+      - name: Install and configure sccache
+        uses: mozilla-actions/sccache-action@v0.0.9
 
       - name: Install build dependencies
         run: |
@@ -132,14 +130,24 @@ jobs:
           PYTORCH_ROCM_ARCH: ${{ env.PYTORCH_ROCM_ARCH }}
           VLLM_TARGET_DEVICE: rocm
           MAX_JOBS: 4
+          # Enable sccache for faster rebuilds
+          SCCACHE_GHA_ENABLED: "true"
+          CMAKE_C_COMPILER_LAUNCHER: sccache
+          CMAKE_CXX_COMPILER_LAUNCHER: sccache
+          CMAKE_HIP_COMPILER_LAUNCHER: sccache
         run: |
           echo "=== Environment ==="
           echo "ROCM_PATH=$ROCM_PATH"
           echo "PYTORCH_ROCM_ARCH=$PYTORCH_ROCM_ARCH"
           echo "VLLM_TARGET_DEVICE=$VLLM_TARGET_DEVICE"
+          echo "sccache stats before build:"
+          sccache --show-stats || true
           echo ""
           echo "=== Building wheel ==="
           python setup.py bdist_wheel --dist-dir=dist
+          echo ""
+          echo "sccache stats after build:"
+          sccache --show-stats || true
           ls -la dist/
 
       - name: Rename wheel for manylinux compliance
