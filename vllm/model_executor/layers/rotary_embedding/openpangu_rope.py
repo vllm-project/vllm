@@ -20,7 +20,6 @@
 from typing import List, Optional
 import torch
 from .mrope import MRotaryEmbedding
-from .common import apply_rotary_emb_torch
 
 
 # MRotaryEmbedding with interleaved
@@ -104,8 +103,11 @@ class MRotaryEmbeddingInterleaved(MRotaryEmbedding):
         query = query.view(num_tokens, -1, self.head_size)
         query_rot = query[..., :self.rotary_dim]
         query_pass = query[..., self.rotary_dim:]
-        query_rot = apply_rotary_emb_torch(query_rot, cos, sin,
-                                           self.is_neox_style)
+        query_rot = self.apply_rotary_emb.forward_native(
+            query_rot,
+            cos,
+            sin,
+        )
         query = torch.cat((query_rot, query_pass), dim=-1).reshape(query_shape)
 
         # key may be None in some cases, e.g. cross-layer KV sharing
@@ -114,8 +116,11 @@ class MRotaryEmbeddingInterleaved(MRotaryEmbedding):
             key = key.view(num_tokens, -1, self.head_size)
             key_rot = key[..., :self.rotary_dim]
             key_pass = key[..., self.rotary_dim:]
-            key_rot = apply_rotary_emb_torch(key_rot, cos, sin,
-                                             self.is_neox_style)
+            key_rot = self.apply_rotary_emb.forward_native(
+                key_rot,
+                cos,
+                sin,
+            )
             key = torch.cat((key_rot, key_pass), dim=-1).reshape(key_shape)
         return query, key
 

@@ -79,7 +79,6 @@ class OpenPanguVLProcessor(Qwen2_5_VLProcessor):
         image_inputs = {}
         videos_inputs = {}
         if images is not None:
-            print(f"self.image_processor:{self.image_processor}")
             image_inputs = self.image_processor(images=images, **output_kwargs["images_kwargs"])
             self._process_vision_placeholders(
                 text=text,

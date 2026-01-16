@@ -18,7 +18,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from functools import partial
+from functools import partial, lru_cache
 from typing import Callable, Literal, Optional, TypedDict, Union
 from collections.abc import Iterable, Mapping, Sequence
 import math
@@ -28,6 +28,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from einops import rearrange
+from torchvision.transforms import v2
 
 from vllm.config import VllmConfig
 from vllm.distributed import parallel_state, tensor_model_parallel_all_gather
@@ -49,17 +50,18 @@ from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                MergedColumnParallelLinear)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader 
 from vllm.model_executor.models.utils import (AutoWeightsLoader, WeightsMapper,
-                    init_vllm_registered_model, maybe_prefix,
-                    merge_multimodal_embeddings)
+                    init_vllm_registered_model, maybe_prefix)
 from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.multimodal.parse import MultiModalDataItems
-from vllm.multimodal.inputs import MultiModalKwargs
+from vllm.multimodal.inputs import (
+    MultiModalFeatureSpec,
+    MultiModalKwargsItems,
+)
 from vllm.multimodal.processing import PromptUpdate, PromptReplacement, PromptUpdateDetails
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.sequence import IntermediateTensors
 
 from transformers.utils import logging
-from transformers import PretrainedConfig
 
 from vllm.model_executor.models.openpangu_processor_vl import OpenPanguVLProcessor
 from vllm.model_executor.models.openpangu import PanguEmbeddedForCausalLM
@@ -890,7 +892,7 @@ class OpenPanguVLMultiModalProcessor(Qwen2_5_VLMultiModalProcessor):
         self,
         mm_items: MultiModalDataItems,
         hf_processor_mm_kwargs: Mapping[str, any],
-        out_mm_kwargs: MultiModalKwargs,
+        out_mm_kwargs: MultiModalKwargsItems,
     ) -> Sequence[PromptUpdate]:
         hf_processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
         image_processor = self.info.get_image_processor(
@@ -976,6 +978,7 @@ class OpenPanguVLForConditionalGeneration(nn.Module, SupportsMultiModal,
         multimodal_config = vllm_config.model_config.multimodal_config
         self.use_data_parallel = getattr(vllm_config.parallel_config, 'enable_multimodal_encoder_data_parallel', False)
         self.config = config
+        self.vllm_config = vllm_config
         self.multimodal_config = multimodal_config
         quant_config = vllm_config.quant_config
         self.visual = OpenPanguVisionTransformer(
@@ -993,6 +996,18 @@ class OpenPanguVLForConditionalGeneration(nn.Module, SupportsMultiModal,
             architectures=["PanguEmbeddedForCausalLM"],
         )
         self.make_empty_intermediate_tensors = self.language_model.make_empty_intermediate_tensors
+        self._parse_preprocess_params(config.vision_config)
+
+    def _parse_preprocess_params(self, vision_config):
+        self.channel = vision_config.in_channels
+        self.patch_size = vision_config.patch_size
+        from vllm.multimodal import MULTIMODAL_REGISTRY
+        processor = MULTIMODAL_REGISTRY.create_processor(self.vllm_config.model_config)
+        self.do_rescale = processor.info.get_hf_processor().image_processor.do_rescale
+        self.rescale_factor = processor.info.get_hf_processor().image_processor.rescale_factor
+        self.do_normalize = processor.info.get_hf_processor().image_processor.do_normalize
+        self.image_mean = tuple(processor.info.get_hf_processor().image_processor.image_mean)
+        self.image_std = tuple(processor.info.get_hf_processor().image_processor.image_std)
 
     def _maybe_ignore_quant_config(self, quant_config: QuantizationConfig):
             if isinstance(quant_config, (GPTQConfig, GPTQMarlinConfig)):
@@ -1103,7 +1118,7 @@ class OpenPanguVLForConditionalGeneration(nn.Module, SupportsMultiModal,
     def get_language_model(self) -> torch.nn.Module:
         return self.language_model
     
-    def get_multimodal_embeddings(
+    def embed_multimodal(
             self, **kwargs: object) -> Optional[MultiModalEmbeddings]:
 
         mm_input_by_modality = self._parse_and_validate_multimodal_inputs(
@@ -1130,7 +1145,7 @@ class OpenPanguVLForConditionalGeneration(nn.Module, SupportsMultiModal,
     ) -> torch.Tensor:
         inputs_embeds = self.language_model.embed_input_ids(input_ids)
         if multimodal_embeddings is not None:
-            inputs_embeds = merge_multimodal_embeddings(
+            inputs_embeds = self.embed_input_ids(
                 input_ids, inputs_embeds, multimodal_embeddings,
                 [self.config.image_token_id, self.config.video_token_id])
         return inputs_embeds
@@ -1144,7 +1159,7 @@ class OpenPanguVLForConditionalGeneration(nn.Module, SupportsMultiModal,
         inputs_embeds = self.get_input_embeddings(input_ids)
         if image_input is not None:
             image_embeds = self._process_image_input(image_input)
-            inputs_embeds = merge_multimodal_embeddings(
+            inputs_embeds = self.embed_input_ids(
                 input_ids,
                 inputs_embeds,
                 image_embeds,
@@ -1153,7 +1168,7 @@ class OpenPanguVLForConditionalGeneration(nn.Module, SupportsMultiModal,
 
         if video_input is not None:
             video_embeds = self._process_video_input(video_input)
-            inputs_embeds = merge_multimodal_embeddings(
+            inputs_embeds = self.embed_input_ids(
                 input_ids,
                 inputs_embeds,
                 video_embeds,
@@ -1170,6 +1185,11 @@ class OpenPanguVLForConditionalGeneration(nn.Module, SupportsMultiModal,
             image_embeds = image_input["image_embeds"].type(self.visual.dtype)
         else:
             pixel_values = image_input["pixel_values"].type(self.visual.dtype)
+            # rescale and normalize
+            pixel_values = pixel_values.reshape(-1, self.channel, self.patch_size, self.patch_size)
+            pixel_values = rescale_and_normalize(pixel_values, self.do_rescale, self.rescale_factor, self.do_normalize,
+                                                 self.image_mean, self.image_std)
+            pixel_values = pixel_values.reshape(-1, self.channel * self.patch_size * self.patch_size)
             if self.use_data_parallel:
                 image_embeds = run_dp_sharded_mrope_vision_model(
                     self.visual, pixel_values, grid_thw, rope_type="rope_3d"
@@ -1247,8 +1267,7 @@ class OpenPanguVLForConditionalGeneration(nn.Module, SupportsMultiModal,
         hidden_states: torch.Tensor,
         sampling_metadata=None,
     ) -> Optional[torch.Tensor]:
-        return self.language_model.compute_logits(hidden_states,
-                                                  sampling_metadata)
+        return self.language_model.compute_logits(hidden_states)
 
     def load_weights(self, weights: Iterable[tuple[str,
                                                    torch.Tensor]]) -> set[str]:
@@ -1275,20 +1294,21 @@ class OpenPanguVLForConditionalGeneration(nn.Module, SupportsMultiModal,
 
         raise ValueError("Only image or video modality is supported")
 
-    @classmethod
     def get_mrope_input_positions(
-        cls,
+        self,
         input_tokens: list[int],
-        hf_config: PretrainedConfig,
-        image_grid_thw: Union[list[list[int]], torch.Tensor],
-        video_grid_thw: Union[list[list[int]], torch.Tensor],
-        second_per_grid_ts: Optional[list[float]] = None,
-        context_len: int = 0,
-        seq_len: Optional[int] = None,
-        audio_feature_lengths: Optional[torch.Tensor] = None,
-        use_audio_in_video: bool = False,
+        mm_features: list[MultiModalFeatureSpec],
     ) -> tuple[torch.Tensor, int]:
         """Get mrope input positions and delta value."""
+        kwargs = MultiModalFeatureSpec.gather_kwargs(
+            mm_features,
+            {"image_grid_thw", "video_grid_thw", "second_per_grid_ts"},
+        )
+        image_grid_thw = [item.tolist() for item in kwargs.get("image_grid_thw", [])]
+        video_grid_thw = [item.tolist() for item in kwargs.get("video_grid_thw", [])]
+        second_per_grid_ts = kwargs.get("second_per_grid_ts", [])
+
+        hf_config = self.config
         image_token_id = hf_config.image_token_id
         video_token_id = hf_config.video_token_id
         vision_start_token_id = hf_config.vision_start_token_id
@@ -1326,7 +1346,7 @@ class OpenPanguVLForConditionalGeneration(nn.Module, SupportsMultiModal,
                 grid_hs = image_grid_thw[:, 1]
                 grid_ws = image_grid_thw[:, 2]
                 t_index = (torch.arange(grid_t) * 1 * tokens_per_second).long()
-                llm_pos_ids = cls._get_llm_pos_ids_for_vision(
+                llm_pos_ids = self._get_llm_pos_ids_for_vision(
                     start_idx, image_idx, spatial_merge_size, t_index, grid_hs, grid_ws
                 )
                 llm_pos_ids_list.append(llm_pos_ids)
@@ -1383,12 +1403,11 @@ class OpenPanguVLForConditionalGeneration(nn.Module, SupportsMultiModal,
 
         llm_positions = torch.cat(llm_pos_ids_list, dim=1)
         mrope_position_delta = torch.cat(llm_pos_ids_list, dim=1).max() + 1 - len(src_item)
-        llm_positions = llm_positions[:, context_len:seq_len]
 
         return llm_positions, mrope_position_delta
 
-    @staticmethod
     def _get_llm_pos_ids_for_vision(
+        self,
         start_idx: int,
         vision_idx: int,
         spatial_merge_size: int,
@@ -1409,3 +1428,57 @@ class OpenPanguVLForConditionalGeneration(nn.Module, SupportsMultiModal,
         llm_pos_ids_list.append(_llm_pos_ids + start_idx)
         llm_pos_ids = torch.cat(llm_pos_ids_list, dim=1)
         return llm_pos_ids
+
+
+def rescale(image, scale):
+    return image * scale
+
+
+def normalize(image, mean, std):
+    return v2.functional.normalize(image, mean, std)
+
+
+@lru_cache(maxsize=10)
+def _fuse_mean_std_and_rescale_factor(
+    do_normalize: Optional[bool] = None,
+    image_mean: Optional[Union[float, list[float]]] = None,
+    image_std: Optional[Union[float, list[float]]] = None,
+    do_rescale: Optional[bool] = None,
+    rescale_factor: Optional[float] = None,
+    device: Optional["torch.device"] = None,
+) -> tuple:
+    if do_rescale and do_normalize:
+        # Fused rescale and normalize
+        image_mean = torch.tensor(image_mean, device=device) * (1.0 / rescale_factor)
+        image_std = torch.tensor(image_std, device=device) * (1.0 / rescale_factor)
+        do_rescale = False
+    return image_mean, image_std, do_rescale
+
+
+def rescale_and_normalize(
+    images: "torch.Tensor",
+    do_rescale: bool,
+    rescale_factor: float,
+    do_normalize: bool,
+    image_mean: Union[float, list[float]],
+    image_std: Union[float, list[float]],
+) -> "torch.Tensor":
+    """
+    Rescale and normalize images.
+    """
+    image_mean, image_std, do_rescale = _fuse_mean_std_and_rescale_factor(
+        do_normalize=do_normalize,
+        image_mean=image_mean,
+        image_std=image_std,
+        do_rescale=do_rescale,
+        rescale_factor=rescale_factor,
+        device=images.device,
+    )
+    # if/elif as we use fused rescale and normalize if both are set to True
+    if do_normalize:
+        images = normalize(images.to(dtype=torch.float32), image_mean, image_std)
+    elif do_rescale:
+        images = rescale(images, rescale_factor)
+    images = images.to(torch.bfloat16)
+
+    return images

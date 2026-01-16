@@ -285,8 +285,8 @@ def get_rope(
             **extra_kwargs,
         )
     elif scaling_type == "openpangu":
-        mrope_interleaved=rope_scaling.get("mrope_interleaved", False)
-        if "mrope_section" in rope_scaling and mrope_interleaved:
+        mrope_interleaved = rope_parameters.get("mrope_interleaved", False)
+        if "mrope_section" in rope_parameters and mrope_interleaved:
             rotary_emb = MRotaryEmbeddingInterleaved(
                 head_size,
                 rotary_dim,
@@ -294,7 +294,7 @@ def get_rope(
                 base,
                 is_neox_style,
                 dtype,
-                mrope_section=rope_scaling["mrope_section"],
+                mrope_section=rope_parameters["mrope_section"],
                 mrope_interleaved=mrope_interleaved,
             )
     else:
