@@ -24,9 +24,9 @@ fi
 collect() {
   find . -path ./.git -prune -o -name "*.sh" \
     -not -path "./.buildkite/scripts/hardware_ci/run-amd-test.sh" -print0 | \
-    xargs -0 -I {} sh -c 'git check-ignore -q "{}" || shellcheck -s bash -f gcc "{}" || true' | \
+    xargs -0 sh -c 'for f in "$@"; do git check-ignore -q "$f" || shellcheck -s bash -f gcc "$f" || true; done' -- | \
     sed -nE 's|^\./||; s|^([^:]+):[0-9]+:[0-9]+:.*\[(SC[0-9]+)\]$|\1:\2|p' | \
-    sort -u || true
+    sort -u
 }
 
 if [[ "${1:-}" == "--generate-baseline" ]]; then
