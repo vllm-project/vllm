@@ -638,7 +638,7 @@ steps:
     - pytest -v -s kernels/moe/test_moe.py
     # - pytest -v -s kernels/moe/test_block_fp8.py - failing on main
     - pytest -v -s kernels/moe/test_block_int8.py
-    - pytest -v -s kernels/moe/test_triton_no_act_mul.py
+    - pytest -v -s kernels/moe/test_triton_moe_no_act_mul.py
     - pytest -v -s kernels/moe/test_triton_moe_ptpc_fp8.py
 
 - label: Kernels FP8 MoE Test (2 H100s)
