@@ -172,6 +172,7 @@ class ResponsesRequest(OpenAIBaseModel):
     truncation: Literal["auto", "disabled"] | None = "disabled"
     user: str | None = None
     skip_special_tokens: bool = True
+    include_stop_str_in_output: bool = False
 
     # --8<-- [start:responses-extra-params]
     request_id: str = Field(
@@ -281,6 +282,7 @@ class ResponsesRequest(OpenAIBaseModel):
             logit_bias=self.logit_bias,
             skip_clone=True,  # Created fresh per request, safe to skip clone
             skip_special_tokens=self.skip_special_tokens,
+            include_stop_str_in_output=self.include_stop_str_in_output,
         )
 
     def is_include_output_logprobs(self) -> bool:
