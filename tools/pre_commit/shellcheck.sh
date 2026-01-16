@@ -1,7 +1,8 @@
 #!/bin/bash
-set -e
+set -euo pipefail
 
 scversion="stable"
+baseline="tools/pre_commit/shellcheck.baseline"
 
 if [ -d "shellcheck-${scversion}" ]; then
     export PATH="$PATH:$(pwd)/shellcheck-${scversion}"
@@ -19,4 +20,37 @@ if ! [ -x "$(command -v shellcheck)" ]; then
 fi
 
 # TODO - fix warnings in .buildkite/scripts/hardware_ci/run-amd-test.sh
-find . -name "*.sh" ".git" -prune -not -path "./.buildkite/scripts/hardware_ci/run-amd-test.sh" -print0 | xargs -0 -I {} sh -c 'git check-ignore -q "{}" || shellcheck -s bash "{}"'
+# collects warnings as "file:SCcode" pairs for baseline comparison.
+collect() {
+  find . -path ./.git -prune -o -name "*.sh" \
+    -not -path "./.buildkite/scripts/hardware_ci/run-amd-test.sh" -print0 | \
+    xargs -0 -I {} sh -c 'git check-ignore -q "{}" || shellcheck -s bash -f gcc "{}" || true' | \
+    sed -nE 's|^\./||; s|^([^:]+):[0-9]+:[0-9]+:.*\[(SC[0-9]+)\]$|\1:\2|p' | \
+    sort -u || true
+}
+
+if [[ "${1:-}" == "--generate-baseline" ]]; then
+  collect > "$baseline"
+  echo "Wrote baseline to $baseline"
+  exit 0
+fi
+
+if [[ ! -f "$baseline" ]]; then
+  echo "Baseline not found: $baseline (run: $0 --generate-baseline)"
+  exit 1
+fi
+
+current="$(mktemp)"
+trap 'rm -f "$current"' EXIT
+collect > "$current"
+
+# finds new warnings not in baseline
+new_errors="$(comm -23 "$current" <(sort -u "$baseline") || true)"
+if [ -n "$new_errors" ]; then
+  echo "$new_errors" | cut -d: -f1 | sort -u | while IFS= read -r file; do
+    if [[ -f "$file" ]]; then
+      shellcheck -s bash "$file" 2>&1 || true
+    fi
+  done
+  exit 1
+fi
