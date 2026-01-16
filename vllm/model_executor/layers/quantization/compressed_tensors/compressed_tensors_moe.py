@@ -1867,7 +1867,9 @@ class CompressedTensorsWNA16MoEMethod(CompressedTensorsMoEMethod):
 
                 layer.w13_weight = layer.w13_weight_packed
                 layer.w2_weight = layer.w2_weight_packed
-                return TritonWNA16Experts(quant_config=self.moe_quant_config)
+                return TritonWNA16Experts(
+                    moe_config=self.moe, quant_config=self.moe_quant_config
+                )
             else:
                 raise NotImplementedError(
                     "TritonExperts requires Triton. "
@@ -2480,6 +2482,7 @@ class CompressedTensorsW4A8Fp8MoEMethod(CompressedTensorsMoEMethod):
             c_strides2=self.a_strides1_c_strides2,
             s_strides1=self.s_strides1,
             s_strides2=self.s_strides2,
+            moe_config=self.moe,
             quant_config=self.moe_quant_config,
             group_size=self.group_size,
         )

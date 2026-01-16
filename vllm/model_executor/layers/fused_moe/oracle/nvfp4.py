@@ -175,8 +175,8 @@ def select_nvfp4_moe_backend(
     if envs.is_set("VLLM_USE_FLASHINFER_MOE_FP4"):
         if not envs.VLLM_USE_FLASHINFER_MOE_FP4:
             # If the user rejects FlashInfer remove those backends.
-            for fi_backend in FLASHINFER_NVFP4_MOE_BACKENDS:
-                AVAILABLE_BACKENDS.remove(fi_backend)
+            for b in FLASHINFER_NVFP4_MOE_BACKENDS:
+                AVAILABLE_BACKENDS.remove(b)
 
         elif envs.is_set("VLLM_FLASHINFER_MOE_BACKEND"):
             # If user is explicit about backend, validate it.
