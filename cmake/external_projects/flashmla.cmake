@@ -19,7 +19,7 @@ else()
   FetchContent_Declare(
         flashmla
         GIT_REPOSITORY https://github.com/vllm-project/FlashMLA
-        GIT_TAG 526781394b33d9888e4c41952e692266267dd8bf
+        GIT_TAG 44f263c0a543894e4f8a1b5fad34743ff56b2454
         GIT_PROGRESS TRUE
         CONFIGURE_COMMAND ""
         BUILD_COMMAND ""
@@ -111,6 +111,8 @@ if(FLASH_MLA_ARCHS)
 
     set(FlashMLA_Extension_INCLUDES
         ${flashmla_SOURCE_DIR}/csrc
+        ${flashmla_SOURCE_DIR}/csrc/kerutils/include
+        ${flashmla_SOURCE_DIR}/csrc/sm90
         ${flashmla_SOURCE_DIR}/csrc/extension/sm90/dense_fp8/
         ${flashmla_SOURCE_DIR}/csrc/cutlass/include
         ${flashmla_SOURCE_DIR}/csrc/cutlass/tools/util/include
