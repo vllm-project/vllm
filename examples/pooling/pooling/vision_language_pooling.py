@@ -16,7 +16,7 @@ from typing import Literal, NamedTuple, TypeAlias, TypedDict, get_args
 from PIL.Image import Image
 
 from vllm import LLM, EngineArgs
-from vllm.entrypoints.score_utils import ScoreMultiModalParam
+from vllm.entrypoints.pooling.score.utils import ScoreMultiModalParam
 from vllm.multimodal.utils import fetch_image
 from vllm.utils.argparse_utils import FlexibleArgumentParser
 
