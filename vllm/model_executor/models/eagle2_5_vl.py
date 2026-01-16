@@ -3,7 +3,6 @@
 # Adapted from NVIDIA Eagle2.5-VL model
 # https://huggingface.co/nvidia/Eagle2.5-8B
 
-from abc import abstractmethod
 from collections.abc import Iterable, Mapping, Sequence
 from typing import Annotated, Literal, TypeAlias
 
@@ -11,7 +10,7 @@ import torch
 import torch.nn as nn
 import torchvision.transforms as T
 from PIL import Image
-from transformers import BatchFeature, PretrainedConfig, SiglipVisionConfig, TensorType
+from transformers import BatchFeature, PretrainedConfig, TensorType
 
 from vllm.config import VllmConfig
 from vllm.config.multimodal import BaseDummyOptions
@@ -52,9 +51,9 @@ from .interfaces import (
 from .utils import AutoWeightsLoader, init_vllm_registered_model, maybe_prefix
 
 # Eagle2.5 specific tokens (from tokenizer vocabulary)
-IMG_START = "<img>"           # Token ID: 151665
-IMG_END = "</img>"            # Token ID: 151666
-IMG_CONTEXT = "<IMG_CONTEXT>" # Token ID: 151667
+IMG_START = "<img>"  # Token ID: 151665
+IMG_END = "</img>"  # Token ID: 151666
+IMG_CONTEXT = "<IMG_CONTEXT>"  # Token ID: 151667
 
 IMAGENET_MEAN = (0.485, 0.456, 0.406)
 IMAGENET_STD = (0.229, 0.224, 0.225)
@@ -552,9 +551,7 @@ class Eagle2_5_VLProcessingInfo(BaseProcessingInfo):
         )
 
 
-class Eagle2_5_VLDummyInputsBuilder(
-    BaseDummyInputsBuilder[Eagle2_5_VLProcessingInfo]
-):
+class Eagle2_5_VLDummyInputsBuilder(BaseDummyInputsBuilder[Eagle2_5_VLProcessingInfo]):
     """Dummy inputs builder for Eagle2.5-VL model."""
 
     def get_dummy_text(self, mm_counts: Mapping[str, int]) -> str:
@@ -710,7 +707,9 @@ class Eagle2_5_VLForConditionalGeneration(
         self.use_data_parallel = multimodal_config.mm_encoder_tp_mode == "data"
 
         # Image configuration
-        image_size = getattr(config, "force_image_size", None) or config.vision_config.image_size
+        image_size = (
+            getattr(config, "force_image_size", None) or config.vision_config.image_size
+        )
         patch_size = config.vision_config.patch_size
         self.patch_size = patch_size
         self.downsample_ratio = getattr(config, "downsample_ratio", 0.5)

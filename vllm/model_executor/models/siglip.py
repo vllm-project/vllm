@@ -903,10 +903,7 @@ class SiglipVisionModel(nn.Module):
                 continue
 
             # head is optional in SiglipVisionModel (e.g., Eagle2.5 doesn't use it)
-            if (
-                name.startswith("vision_model.head")
-                and not self.vision_model.use_head
-            ):
+            if name.startswith("vision_model.head") and not self.vision_model.use_head:
                 continue
 
             # omit layers when num_hidden_layers_override is set
