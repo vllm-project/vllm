@@ -285,7 +285,7 @@ class OpenPanguVisionRotaryEmbedding(nn.Module):
 
     def forward(self, seqlen: int) -> torch.Tensor:
         self.update_freqs_cache(seqlen)
-        return self._freqs_cached[:seqlen]
+        return self._freqs_cached[:seqlen] if self._freqs_cached is not None else self._freqs_cached
 
 
 class OpenPanguVisionPatchEmbed(nn.Module):
