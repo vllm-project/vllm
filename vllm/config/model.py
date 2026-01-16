@@ -29,6 +29,7 @@ from vllm.transformers_utils.config import (
     get_hf_text_config,
     get_pooling_config,
     get_sentence_transformer_tokenizer_config,
+    get_sentence_transformer_v6_config,
     is_encoder_decoder,
     is_rope_parameters_nested,
     try_get_dense_modules,
@@ -490,6 +491,9 @@ class ModelConfig:
             self.hf_text_config, "attention_chunk_size", None
         )
         self.encoder_config = self._get_encoder_config()
+        self.st_v6_config = get_sentence_transformer_v6_config(
+            self.model, self.revision
+        )
         self.hf_image_processor_config = get_hf_image_processor_config(
             self.model, hf_token=self.hf_token, revision=self.revision
         )

@@ -126,6 +126,10 @@ def main(args: Namespace):
     # Get the overrides for the specified model
     args.hf_overrides = get_hf_overrides(args.model)
 
+    # Load the appropriate chat template for the selected model
+    # The template formats query-document pairs for the reranking model
+    args.chat_template = get_chat_template(args.model)
+
     # Initialize the LLM with all provided arguments
     llm = LLM(**vars(args))
 
@@ -139,13 +143,9 @@ def main(args: Namespace):
         "Calorie intake should not fall below 1,200 a day in women or 1,500 a day in men, except under the supervision of a health professional.",
     ]
 
-    # Load the appropriate chat template for the selected model
-    # The template formats query-document pairs for the reranking model
-    chat_template = get_chat_template(args.model)
-
     # Score documents based on relevance to the query
     # The score method returns relevance scores for each document
-    outputs = llm.score(query, documents, chat_template=chat_template)
+    outputs = llm.score(query, documents)
 
     # Display the relevance scores
     # Higher scores indicate more relevant documents

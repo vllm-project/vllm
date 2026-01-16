@@ -58,7 +58,6 @@ class VllmMtebCrossEncoder(MtebCrossEncoderMixin):
     def __init__(self, vllm_model):
         self.llm = vllm_model
         self.rng = np.random.default_rng(seed=42)
-        self.chat_template: str | None = getattr(vllm_model, "chat_template", None)
 
     def predict(
         self,
@@ -77,11 +76,7 @@ class VllmMtebCrossEncoder(MtebCrossEncoderMixin):
         corpus = [corpus[i] for i in r]
 
         outputs = self.llm.score(
-            queries,
-            corpus,
-            truncate_prompt_tokens=-1,
-            use_tqdm=False,
-            chat_template=self.chat_template,
+            queries, corpus, truncate_prompt_tokens=-1, use_tqdm=False
         )
         scores = np.array(outputs)
         scores = scores[np.argsort(r)]
@@ -235,6 +230,7 @@ def mteb_test_rerank_models(
     chat_template: str | None = None
     if model_info.chat_template_name is not None:
         chat_template = (template_home / model_info.chat_template_name).read_text()
+        vllm_extra_kwargs["chat_template"] = chat_template
 
     with vllm_runner(
         model_info.name,
@@ -244,7 +240,6 @@ def mteb_test_rerank_models(
         **vllm_extra_kwargs,
     ) as vllm_model:
         model_config = vllm_model.llm.llm_engine.model_config
-        vllm_model.chat_template = chat_template
 
         # Confirm whether vllm is using the correct architecture
         if model_info.architecture:
