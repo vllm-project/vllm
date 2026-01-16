@@ -11,11 +11,11 @@ from vllm import _custom_ops as ops
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
-from vllm.triton_utils import tl, triton
 from vllm.model_executor.layers.attention.mla_attention import (
     MLACommonBaseImpl,
     get_mla_dims,
 )
+from vllm.triton_utils import tl, triton
 from vllm.v1.attention.backend import (
     AttentionBackend,
     AttentionCGSupport,
@@ -324,24 +324,24 @@ class ROCMAiterMLASparseImpl(MLACommonBaseImpl[ROCMAiterMLASparseMetadata]):
         seq_len = (topk_indices != -1).sum(dim=-1)
         torch.cumsum(seq_len, dim=0, out=attn_metadata.paged_kv_indptr[1:])
         attn_metadata.paged_kv_indptr_rest.fill_(attn_metadata.paged_kv_indptr[-1])
-        # fetch_id_to_ragged_triton(
-        #     topk_indices,
-        #     attn_metadata.paged_kv_indptr,
-        #     attn_metadata.paged_kv_indices,
-        #     attn_metadata.topk_tokens,
-        # )
+        fetch_id_to_ragged_triton(
+            topk_indices,
+            attn_metadata.paged_kv_indptr,
+            attn_metadata.paged_kv_indices,
+            attn_metadata.topk_tokens,
+        )
 
-        # rocm_aiter_ops.mla_decode_fwd(
-        #     q,
-        #     kv_c_and_k_pe_cache,
-        #     output,
-        #     self.scale,
-        #     attn_metadata.qo_indptr,
-        #     1,
-        #     attn_metadata.paged_kv_indptr,
-        #     attn_metadata.paged_kv_indices,
-        #     attn_metadata.paged_kv_last_page_len,
-        # )
+        rocm_aiter_ops.mla_decode_fwd(
+            q,
+            kv_c_and_k_pe_cache,
+            output,
+            self.scale,
+            attn_metadata.qo_indptr,
+            1,
+            attn_metadata.paged_kv_indptr,
+            attn_metadata.paged_kv_indices,
+            attn_metadata.paged_kv_last_page_len,
+        )
 
         return output[:, : self.num_heads, :]
 
