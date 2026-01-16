@@ -244,12 +244,13 @@ class MLAAttentionSpec(FullAttentionSpec):
             return self.block_size * 656
 
         # Special case for NVFP4: packed data + scales
-        # - Data is packed: 2 FP4 values per uint8, so head_size/2
+        # - Data is packed: 2 FP4 values per uint8, so head_size/2 uint8 bytes
         # - Scales are stored in kv_cache itself (as float32), one per 16 elements
         # - MLA stores a single vector (kv_c + k_pe concatenated), not separate K and V
         if self.cache_dtype_str == "nvfp4":
-            packed_data_size = (self.head_size // 2) * get_dtype_size(self.dtype)
-            scale_size = (self.head_size // 16) * 4  # float32 = 4 bytes
+            # NVFP4 packs 2 FP4 values into 1 uint8, so packed data is head_size/2 bytes
+            packed_data_size = self.head_size // 2  # uint8 = 1 byte per packed element
+            scale_size = (self.head_size // 16) * 4  # float32 = 4 bytes per scale
             element_size = packed_data_size + scale_size
             return self.block_size * self.num_kv_heads * element_size
 
