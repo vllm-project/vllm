@@ -8,6 +8,7 @@ from torch.nn import Module
 
 import vllm.envs as envs
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
+from vllm._aiter_ops import rocm_aiter_ops
 from vllm.logger import init_logger
 from vllm.model_executor.custom_op import CustomOp
 from vllm.model_executor.layers.fused_moe.config import (
@@ -55,6 +56,12 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
         self.unquantized_backend = select_unquantized_moe_backend(
             use_ep=self.moe.moe_parallel_config.use_ep,
             use_dp=self.moe.moe_parallel_config.dp_size > 1,
+        )
+
+        # AITER only supports gated activations (silu/gelu), so disable it
+        # for non-gated MoE (is_act_and_mul=False)
+        self.rocm_aiter_moe_enabled = (
+            rocm_aiter_ops.is_fused_moe_enabled() and moe.is_act_and_mul
         )
         self.kernel: mk.FusedMoEModularKernel | None = None
 
