@@ -323,6 +323,7 @@ _MULTIMODAL_MODELS = {
         "hunyuan_vision",
         "HunYuanVLForConditionalGeneration",
     ),
+    "StepVLForConditionalGeneration": ("step_vl", "StepVLForConditionalGeneration"),
     "InternVLChatModel": ("internvl", "InternVLChatModel"),
     "NemotronH_Nano_VL_V2": ("nano_nemotron_vl", "NemotronH_Nano_VL_V2"),
     "OpenCUAForConditionalGeneration": (
@@ -384,6 +385,7 @@ _MULTIMODAL_MODELS = {
         "Mistral3ForConditionalGeneration",
     ),
     "MolmoForCausalLM": ("molmo", "MolmoForCausalLM"),
+    "Molmo2ForConditionalGeneration": ("molmo2", "Molmo2ForConditionalGeneration"),
     "NVLM_D": ("nvlm_d", "NVLM_D_Model"),
     "Ovis": ("ovis", "Ovis"),
     "Ovis2_5": ("ovis2_5", "Ovis2_5"),
