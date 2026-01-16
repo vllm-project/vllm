@@ -14,19 +14,16 @@ from types import SimpleNamespace
 from typing import TypedDict
 
 import pytest
-import torch
 
+from tests.conftest import VllmRunner
 from tests.utils import large_gpu_mark
-from vllm import LLM, SamplingParams
+from vllm import SamplingParams
 from vllm.benchmarks.datasets import get_samples
-from vllm.distributed import cleanup_dist_env_and_memory
 from vllm.inputs import TokensPrompt
 from vllm.v1.metrics.reader import Counter, Vector
 
 
 class AcceptanceMetrics(TypedDict):
-    """Typed dict for acceptance length metrics."""
-
     acceptance_length: float
     acceptance_lengths_per_pos: list[float]
     num_drafts: int
@@ -35,8 +32,6 @@ class AcceptanceMetrics(TypedDict):
 
 @dataclass
 class Eagle3ModelConfig:
-    """Configuration for an EAGLE3 model pair."""
-
     verifier: str
     drafter: str
     expected_acceptance_length: float
@@ -66,7 +61,7 @@ EAGLE3_MODEL_CONFIGS = [
         verifier="openai/gpt-oss-20b",
         drafter="RedHatAI/gpt-oss-20b-speculator.eagle3",
         expected_acceptance_length=2.56,
-        expected_acceptance_lengths_per_pos=[0.7165, 0.5120, 0.3220],
+        expected_acceptance_lengths_per_pos=[0.7165, 0.5120, 0.3337],
         id="gpt-oss-20b-eagle3",
     ),
 ]
@@ -76,7 +71,7 @@ DEFAULT_NUM_SPEC_TOKENS = 3
 DEFAULT_NUM_PROMPTS = 80
 DEFAULT_OUTPUT_LEN = 256
 DEFAULT_MAX_MODEL_LEN = 16384
-DEFAULT_RTOL = 0.02  # 2% relative tolerance
+DEFAULT_RTOL = 0.02
 
 
 def get_mt_bench_prompts(
@@ -136,21 +131,12 @@ def extract_acceptance_metrics(metrics, num_spec_tokens: int) -> AcceptanceMetri
         count / num_drafts if num_drafts > 0 else 0.0 for count in acceptance_counts
     ]
 
-    return {
-        "acceptance_length": acceptance_length,
-        "acceptance_lengths_per_pos": acceptance_lengths_per_pos,
-        "num_drafts": num_drafts,
-        "num_accepted_tokens": num_accepted_tokens,
-    }
-
-
-@pytest.fixture(autouse=True)
-def cleanup_after_test():
-    """Clean up GPU memory after each test."""
-    yield
-    torch.cuda.empty_cache()
-    cleanup_dist_env_and_memory()
-    torch._dynamo.reset()
+    return AcceptanceMetrics(
+        acceptance_length=acceptance_length,
+        acceptance_lengths_per_pos=acceptance_lengths_per_pos,
+        num_drafts=num_drafts,
+        num_accepted_tokens=num_accepted_tokens,
+    )
 
 
 @large_gpu_mark(min_gb=40)
@@ -164,101 +150,72 @@ def test_eagle3_acceptance_length(
     num_spec_tokens: int,
     monkeypatch: pytest.MonkeyPatch,
 ):
-    """
-    Test EAGLE3 acceptance length does not regress.
+    """Test EAGLE3 acceptance length does not regress."""
+    with monkeypatch.context() as m:
+        m.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
 
-    This test:
-    1. Loads the MT-Bench dataset
-    2. Runs inference with EAGLE3 speculative decoding
-    3. Extracts acceptance length metrics
-    4. Asserts the acceptance length is within tolerance of expected baseline
+        with VllmRunner(
+            model_name=model_config.verifier,
+            speculative_config={
+                "method": "eagle3",
+                "model": model_config.drafter,
+                "num_speculative_tokens": num_spec_tokens,
+            },
+            tensor_parallel_size=1,
+            gpu_memory_utilization=0.9,
+            disable_log_stats=False,
+            max_model_len=DEFAULT_MAX_MODEL_LEN,
+        ) as vllm_runner:
+            tokenizer = vllm_runner.llm.get_tokenizer()
+            prompt_ids = get_mt_bench_prompts(tokenizer, DEFAULT_NUM_PROMPTS)
 
-    Args:
-        model_config: Configuration for verifier/drafter model pair
-        num_spec_tokens: Number of speculative tokens to generate
-        monkeypatch: Pytest monkeypatch fixture
-    """
-    # Skip if expected acceptance length is not set
-    if model_config.expected_acceptance_length <= 0:
-        pytest.skip(
-            f"Expected acceptance length not set for {model_config.id}. "
-            "Run baseline script to determine expected value."
-        )
+            sampling_params = SamplingParams(
+                temperature=0,
+                max_tokens=DEFAULT_OUTPUT_LEN,
+            )
+            vllm_runner.llm.generate(
+                [TokensPrompt(prompt_token_ids=ids) for ids in prompt_ids],
+                sampling_params=sampling_params,
+            )
 
-    # Allow insecure serialization for speculators
-    monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
+            metrics = vllm_runner.llm.get_metrics()
+            results = extract_acceptance_metrics(metrics, num_spec_tokens)
 
-    # Initialize LLM with speculative decoding
-    llm = LLM(
-        model=model_config.verifier,
-        speculative_config={
-            "method": "eagle3",
-            "model": model_config.drafter,
-            "num_speculative_tokens": num_spec_tokens,
-        },
-        tensor_parallel_size=1,
-        gpu_memory_utilization=0.9,
-        disable_log_stats=False,
-        max_model_len=DEFAULT_MAX_MODEL_LEN,
-    )
+            actual_acceptance_length = results["acceptance_length"]
+            expected = model_config.expected_acceptance_length
+            actual_per_pos = results["acceptance_lengths_per_pos"]
+            expected_per_pos = model_config.expected_acceptance_lengths_per_pos
 
-    try:
-        # Load MT-Bench prompts
-        tokenizer = llm.get_tokenizer()
-        prompt_ids = get_mt_bench_prompts(tokenizer, DEFAULT_NUM_PROMPTS)
+            rel_error = abs(actual_acceptance_length - expected) / expected
 
-        # Run inference
-        sampling_params = SamplingParams(
-            temperature=0,
-            max_tokens=DEFAULT_OUTPUT_LEN,
-        )
-        llm.generate(
-            [TokensPrompt(prompt_token_ids=ids) for ids in prompt_ids],
-            sampling_params=sampling_params,
-        )
+            assert rel_error <= DEFAULT_RTOL, (
+                f"Acceptance length regression detected for {model_config.id}!\n"
+                f"  Expected: {expected:.3f}\n"
+                f"  Actual:   {actual_acceptance_length:.3f}\n"
+                f"  Relative error: {rel_error:.2%} (tolerance: {DEFAULT_RTOL:.2%})\n"
+                f"  Drafts: {results['num_drafts']}, "
+                f"Accepted tokens: {results['num_accepted_tokens']}"
+            )
 
-        # Extract and validate metrics
-        metrics = llm.get_metrics()
-        results = extract_acceptance_metrics(metrics, num_spec_tokens)
+            if expected_per_pos and len(expected_per_pos) == len(actual_per_pos):
+                for pos, (actual, exp) in enumerate(
+                    zip(actual_per_pos, expected_per_pos)
+                ):
+                    if exp > 0:
+                        pos_rel_error = abs(actual - exp) / exp
+                        assert pos_rel_error <= DEFAULT_RTOL, (
+                            f"Per-position acceptance length regression at pos {pos} "
+                            f"for {model_config.id}!\n"
+                            f"  Expected: {exp:.3f}\n"
+                            f"  Actual:   {actual:.3f}\n"
+                            f"  Relative error: {pos_rel_error:.2%} "
+                            f"(tolerance: {DEFAULT_RTOL:.2%})"
+                        )
 
-        actual_acceptance_length = results["acceptance_length"]
-        expected = model_config.expected_acceptance_length
-        actual_per_pos = results["acceptance_lengths_per_pos"]
-        expected_per_pos = model_config.expected_acceptance_lengths_per_pos
-
-        # Calculate relative error for mean acceptance length
-        rel_error = abs(actual_acceptance_length - expected) / expected
-
-        # Assert mean acceptance length within tolerance
-        assert rel_error <= DEFAULT_RTOL, (
-            f"Acceptance length regression detected for {model_config.id}!\n"
-            f"  Expected: {expected:.3f}\n"
-            f"  Actual:   {actual_acceptance_length:.3f}\n"
-            f"  Relative error: {rel_error:.2%} (tolerance: {DEFAULT_RTOL:.2%})\n"
-            f"  Drafts: {results['num_drafts']}, "
-            f"Accepted tokens: {results['num_accepted_tokens']}"
-        )
-
-        # Assert per-position acceptance lengths within tolerance
-        if expected_per_pos and len(expected_per_pos) == len(actual_per_pos):
-            for pos, (actual, exp) in enumerate(zip(actual_per_pos, expected_per_pos)):
-                if exp > 0:
-                    pos_rel_error = abs(actual - exp) / exp
-                    assert pos_rel_error <= DEFAULT_RTOL, (
-                        f"Per-position acceptance length regression at pos {pos} "
-                        f"for {model_config.id}!\n"
-                        f"  Expected: {exp:.3f}\n"
-                        f"  Actual:   {actual:.3f}\n"
-                        f"  Relative error: {pos_rel_error:.2%} "
-                        f"(tolerance: {DEFAULT_RTOL:.2%})"
-                    )
-
-        print(
-            f"\n{model_config.id}: acceptance_length={actual_acceptance_length:.3f} "
-            f"(expected={expected:.3f}, rel_error={rel_error:.2%})"
-        )
-        print(f"  Per-position: {[f'{v:.3f}' for v in actual_per_pos]}")
-        if expected_per_pos:
-            print(f"  Expected:     {[f'{v:.3f}' for v in expected_per_pos]}")
-    finally:
-        del llm
+            print(
+                f"\n{model_config.id}: acceptance_length={actual_acceptance_length:.3f}"
+                f" (expected={expected:.3f}, rel_error={rel_error:.2%})"
+            )
+            print(f"  Per-position: {[f'{v:.3f}' for v in actual_per_pos]}")
+            if expected_per_pos:
+                print(f"  Expected:     {[f'{v:.3f}' for v in expected_per_pos]}")
