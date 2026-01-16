@@ -883,7 +883,7 @@ class BatchedTritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
     ) -> bool:
         p = current_platform
         device_supports_fp8 = (p.is_rocm() and p.rocm.on_gfx9()) or (
-            p.is_cuda() and p.has_device_capability((9, 0))
+            p.is_cuda() and p.has_device_capability((8, 9))
         )
 
         SUPPORTED_W_A_FP8 = [

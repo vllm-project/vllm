@@ -2297,8 +2297,8 @@ class TritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
         activation_key: QuantKey | None,
     ) -> bool:
         p = current_platform
-        device_supports_fp8 = p.is_rocm() or (
-            p.is_cuda() and p.has_device_capability((9, 0))
+        device_supports_fp8 = (p.is_rocm() and p.rocm.on_gfx9()) or (
+            p.is_cuda() and p.has_device_capability((8, 9))
         )
 
         if not device_supports_fp8:
