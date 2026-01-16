@@ -448,8 +448,8 @@ scaled_vec_conversion<uint32_t, uint16_t>(const uint16_t& a, float scale) {
     uint32_t ui32;
   } tmp;
   tmp.h2r = __hip_cvt_fp8x2_to_halfraw2(a, fp8_type::__default_interpret);
-  tmp.h2r.x.data = __float2half(__half2float(tmp.h2r.x.data) * scale) ;
-  tmp.h2r.y.data = __float2half(__half2float(tmp.h2r.y.data) * scale) ;
+  tmp.h2r.x.data = __float2half(__half2float(tmp.h2r.x.data) * scale);
+  tmp.h2r.y.data = __float2half(__half2float(tmp.h2r.y.data) * scale);
   return tmp.ui32;
 }
 
