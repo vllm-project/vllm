@@ -41,6 +41,7 @@ class FlashInferMLABackend(MLACommonBackend):
         "bfloat16",
         "fp8",
         "fp8_e4m3",
+        "nvfp4",
     ]
 
     @staticmethod
