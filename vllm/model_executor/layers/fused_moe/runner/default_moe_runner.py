@@ -44,7 +44,7 @@ logger = init_logger(__name__)
 class DefaultMoERunner(MoERunner):
     def __init__(
         self,
-        layer: torch.nn.Module,  # TODO: turn into runtime parameter?
+        layer: torch.nn.Module,
         moe_config: FusedMoEConfig,
         moe_quant_config: FusedMoEQuantConfig | None,
         router: FusedMoERouter,
@@ -112,10 +112,15 @@ class DefaultMoERunner(MoERunner):
             tags=(torch.Tag.needs_fixed_stride_order,),
         )
 
-        self.moe_forward = _moe_forward
-        self.moe_forward_shared = _moe_forward_shared
-        self.moe_forward_op = eval(f"torch.ops.vllm.moe_forward{lname}")
-        self.moe_forward_shared_op = eval(f"torch.ops.vllm.moe_forward_shared{lname}")
+        if current_platform.is_tpu() or current_platform.is_cpu():
+            # TODO: Once the OOM issue for the TPU backend is resolved, we
+            # will switch to using the moe_forward custom op.
+            # Note: CPU doesn't require wrapped forward_impl.
+            self.moe_forward = _moe_forward
+            self.moe_forward_shared = _moe_forward_shared
+        else:
+            self.moe_forward = eval(f"torch.ops.vllm.moe_forward{lname}")
+            self.moe_forward_shared = eval(f"torch.ops.vllm.moe_forward_shared{lname}")
 
         self.moe_config_use_flashinfer_cutlass_kernels = (
             self.moe_config.use_flashinfer_cutlass_kernels
@@ -276,27 +281,13 @@ class DefaultMoERunner(MoERunner):
             return states
 
         if self.shared_experts is None:
-            if current_platform.is_tpu() or current_platform.is_cpu():
-                # TODO: Once the OOM issue for the TPU backend is resolved, we
-                # will switch to using the moe_forward custom op.
-                # Note: CPU doesn't require wrapped forward_impl.
-                fused_output = self.moe_forward(hidden_states, router_logits)
-                assert not isinstance(fused_output, tuple)
-            else:
-                fused_output = self.moe_forward_op(hidden_states, router_logits)
+            fused_output = self.moe_forward(hidden_states, router_logits)
+            assert not isinstance(fused_output, tuple)
             return reduce_output(fused_output)[..., :og_hidden_states]
         else:
-            if current_platform.is_tpu() or current_platform.is_cpu():
-                # TODO: Once the OOM issue for the TPU backend is resolved, we
-                # will switch to using the moe_forward custom op.
-                # Note: CPU doesn't require wrapped forward_impl.
-                shared_output, fused_output = self.moe_forward_shared(
-                    hidden_states, router_logits
-                )
-            else:
-                shared_output, fused_output = self.moe_forward_shared_op(
-                    hidden_states, router_logits
-                )
+            shared_output, fused_output = self.moe_forward_shared(
+                hidden_states, router_logits
+            )
             return (
                 reduce_output(shared_output)[..., :og_hidden_states],
                 reduce_output(fused_output)[..., :og_hidden_states],
