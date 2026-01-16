@@ -2217,7 +2217,6 @@ class GPUModelRunner(
                 req_idx = self.input_batch.req_id_to_index[req_id]
                 lora_id = int(self.input_batch.request_lora_mapping[req_idx])
 
-                # Prefer pos_info.get_num_embeds to count precise MM embedding tokens.
                 num_tokens = self.model.get_num_mm_encoder_tokens(  # type: ignore[attr-defined]
                     pos_info.get_num_embeds
                 )
@@ -2230,14 +2229,22 @@ class GPUModelRunner(
                     if lora_request is not None:
                         lora_requests.add(lora_request)
 
-            # Set tower adapter mapping
-            tower_mapping = LoRAMapping(
-                tuple(token_lora_mapping),
-                tuple(prompt_lora_mapping),
-                is_prefill=True,
-                type=LoRAMappingType.TOWER,
+            # Set tower adapter mapping for each tower prefix
+            mm_mapping = getattr(
+                self.lora_manager._adapter_manager, "mm_mapping", None
             )
-            self.lora_manager.set_active_adapters(lora_requests, tower_mapping)
+            tower_prefixes = (
+                mm_mapping.tower_model if mm_mapping else [None]
+            )
+            for prefix in tower_prefixes:
+                tower_mapping = LoRAMapping(
+                    tuple(token_lora_mapping),
+                    tuple(prompt_lora_mapping),
+                    is_prefill=True,
+                    type=LoRAMappingType.TOWER,
+                    target_prefix=prefix,
+                )
+                self.lora_manager.set_active_adapters(lora_requests, tower_mapping)
 
             if hasattr(self.model, "get_num_mm_connector_tokens"):
                 post_op_counts = [
