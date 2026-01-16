@@ -217,9 +217,11 @@ def select_nvfp4_moe_backend(
                     logger.info_once(_make_log_backend(backend))
                     return backend, None
                 else:
-                    raise ValueError(_make_log_unsupported(backend, reason))
+                    logger.debug_once(
+                        _make_log_unsupported(backend, reason), scope="local"
+                    )
 
-            raise ValueError(
+            raise NotImplementedError(
                 "Found VLLM_USE_FLASHINFER_MOE_FP4=1, but no "
                 "FlashInfer NVFP4 MoE backend supports the configuration."
             )
