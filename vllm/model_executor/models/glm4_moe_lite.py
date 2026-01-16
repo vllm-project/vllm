@@ -109,7 +109,6 @@ class Glm4MoeLiteDecoderLayer(nn.Module):
         model_config = vllm_config.model_config
         cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config
-        parallel_config = vllm_config.parallel_config
 
         self.hidden_size = config.hidden_size
         max_position_embeddings = getattr(config, "max_position_embeddings", 8192)
@@ -154,7 +153,6 @@ class Glm4MoeLiteDecoderLayer(nn.Module):
         ):
             self.mlp = Glm4MoeLite(
                 config=config,
-                parallel_config=parallel_config,
                 quant_config=quant_config,
                 prefix=f"{prefix}.mlp",
             )
