@@ -13,15 +13,18 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-
+ 
 #pragma once
 
 #include <cuda_runtime.h>
 #include <cuda_fp8.h>
 
 #define ELTS_PER_THREAD 8
-
 constexpr int CVT_FP4_ELTS_PER_THREAD = 8;
+
+#define ELTS_PER_THREAD_256b 16
+constexpr int CVT_FP4_ELTS_PER_THREAD_256b = 16;
+
 constexpr int CVT_FP4_SF_VEC_SIZE = 16;
 
 namespace vllm {
@@ -70,14 +73,38 @@ struct TypeConverter<__nv_bfloat16> {
 
 // Define a 16 bytes packed data type.
 template <class Type>
-struct PackedVec {
+struct alignas(16) PackedVec {
   typename TypeConverter<Type>::Type elts[4];
+};
+
+// Define a 32 bytes packed data type.
+template <class Type>
+struct alignas(32) PackedVec_256b {
+  typename TypeConverter<Type>::Type elts[8];
 };
 
 template <>
 struct PackedVec<__nv_fp8_e4m3> {
   __nv_fp8x2_e4m3 elts[8];
 };
+
+template <typename Int>
+__host__ __device__ inline Int round_up(Int x, Int y) {
+  static_assert(std::is_integral_v<Int>,
+                "round_up argument must be integral type");
+  return ((x + y - 1) / y) * y;
+}
+
+template <typename Int>
+__host__ __device__ __forceinline__ Int div_round_up(Int x, Int y) {
+    return (x + y - 1) / y;
+}
+
+// Compute effective rows for grid configuration with swizzled SF layouts.
+inline int computeEffectiveRows(int m) {
+  constexpr int ROW_TILE = 128;
+  return round_up(m, ROW_TILE);
+}
 
 // Convert 8 float32 values into 8 e2m1 values (represented as one uint32_t).
 inline __device__ uint32_t fp32_vec_to_e2m1(float (&array)[8]) {
@@ -101,7 +128,7 @@ inline __device__ uint32_t fp32_vec_to_e2m1(float (&array)[8]) {
 }
 
 // Convert 4 float2 values into 8 e2m1 values (represented as one uint32_t).
-inline __device__ uint32_t fp32_vec_to_e2m1(float2 (&array)[4]) {
+__device__ __forceinline__ uint32_t fp32_vec_to_e2m1(float2 (&array)[4]) {
   uint32_t val;
   asm volatile(
       "{\n"
@@ -114,18 +141,82 @@ inline __device__ uint32_t fp32_vec_to_e2m1(float2 (&array)[4]) {
       "cvt.rn.satfinite.e2m1x2.f32   byte2, %6, %5;\n"
       "cvt.rn.satfinite.e2m1x2.f32   byte3, %8, %7;\n"
       "mov.b32 %0, {byte0, byte1, byte2, byte3};\n"
-      "}"
+      "}\n"
       : "=r"(val)
-      : "f"(array[0].x), "f"(array[0].y), "f"(array[1].x), "f"(array[1].y),
-        "f"(array[2].x), "f"(array[2].y), "f"(array[3].x), "f"(array[3].y));
+      : "f"(array[0].x), "f"(array[0].y),
+        "f"(array[1].x), "f"(array[1].y),
+        "f"(array[2].x), "f"(array[2].y),
+        "f"(array[3].x), "f"(array[3].y));
   return val;
 }
 
 // Fast reciprocal.
-inline __device__ float reciprocal_approximate_ftz(float a) {
+__device__ __forceinline__ float reciprocal_approximate_ftz(float a) {
   float b;
-  asm volatile("rcp.approx.ftz.f32 %0, %1;\n" : "=f"(b) : "f"(a));
+  asm volatile("rcp.approx.ftz.f32 %0, %1;" : "=f"(b) : "f"(a));
   return b;
+}
+
+__device__ __forceinline__ void ld256_or_zero_cg_u32(uint32_t out[8], const void* ptr, bool pred)
+{
+    asm volatile(
+        "{\n"
+        "  .reg .pred pr;\n"
+        "  setp.ne.u32 pr, %8, 0;\n"
+        
+        "  mov.u32 %0, 0;\n"
+        "  mov.u32 %1, 0;\n"
+        "  mov.u32 %2, 0;\n"
+        "  mov.u32 %3, 0;\n"
+        "  mov.u32 %4, 0;\n"
+        "  mov.u32 %5, 0;\n"
+        "  mov.u32 %6, 0;\n"
+        "  mov.u32 %7, 0;\n"
+
+        "  @pr ld.global.cg.v8.u32 {%0,%1,%2,%3,%4,%5,%6,%7}, [%9];\n"
+        "}\n"
+        : "=r"(out[0]), "=r"(out[1]), "=r"(out[2]), "=r"(out[3]),
+          "=r"(out[4]), "=r"(out[5]), "=r"(out[6]), "=r"(out[7])
+        : "r"((int)pred), "l"(ptr)
+    );
+}
+
+struct u32x2 { uint32_t lo, hi; };
+
+__device__ __forceinline__ u32x2 fp32_vec16_to_e2m1(float2 (&array)[8]) {
+  u32x2 out;
+  asm volatile(
+      "{\n"
+      ".reg .b8 b0;\n"
+      ".reg .b8 b1;\n"
+      ".reg .b8 b2;\n"
+      ".reg .b8 b3;\n"
+      ".reg .b8 b4;\n"
+      ".reg .b8 b5;\n"
+      ".reg .b8 b6;\n"
+      ".reg .b8 b7;\n"
+      "cvt.rn.satfinite.e2m1x2.f32   b0,  %3,  %2;\n"
+      "cvt.rn.satfinite.e2m1x2.f32   b1,  %5,  %4;\n"
+      "cvt.rn.satfinite.e2m1x2.f32   b2,  %7,  %6;\n"
+      "cvt.rn.satfinite.e2m1x2.f32   b3,  %9,  %8;\n"
+      "cvt.rn.satfinite.e2m1x2.f32   b4, %11, %10;\n"
+      "cvt.rn.satfinite.e2m1x2.f32   b5, %13, %12;\n"
+      "cvt.rn.satfinite.e2m1x2.f32   b6, %15, %14;\n"
+      "cvt.rn.satfinite.e2m1x2.f32   b7, %17, %16;\n"
+      "mov.b32 %0, {b0, b1, b2, b3};\n"
+      "mov.b32 %1, {b4, b5, b6, b7};\n"
+      "}\n"
+      : "=r"(out.lo), "=r"(out.hi)
+      : "f"(array[0].x), "f"(array[0].y),
+        "f"(array[1].x), "f"(array[1].y),
+        "f"(array[2].x), "f"(array[2].y),
+        "f"(array[3].x), "f"(array[3].y),
+        "f"(array[4].x), "f"(array[4].y),
+        "f"(array[5].x), "f"(array[5].y),
+        "f"(array[6].x), "f"(array[6].y),
+        "f"(array[7].x), "f"(array[7].y)
+  );
+  return out;
 }
 
 // Compute SF output offset for swizzled tensor core layout.
@@ -134,7 +225,7 @@ inline __device__ float reciprocal_approximate_ftz(float a) {
 template <class SFType, int CVT_FP4_NUM_THREADS_PER_SF>
 __device__ __forceinline__ uint8_t* cvt_quant_to_fp4_get_sf_out_offset(
     int rowIdx, int colIdx, int32_t numKTiles, SFType* SFout) {
-  static_assert(CVT_FP4_NUM_THREADS_PER_SF == 1 ||
+  static_assert(CVT_FP4_NUM_THREADS_PER_SF == 1 || 
                 CVT_FP4_NUM_THREADS_PER_SF == 2);
 
   // One pair of threads write one SF to global memory.
@@ -159,11 +250,82 @@ __device__ __forceinline__ uint8_t* cvt_quant_to_fp4_get_sf_out_offset(
   // Compute global SF offset: mTileIdx * (numKTiles * 512) + kTileIdx * 512 +
   //                           outerMIdx * 16 + innerMIdx * 4 + innerKIdx
   // Use bitwise OR for non-overlapping lower bits.
-  int64_t SFOffset = (static_cast<int64_t>(mTileIdx) * numKTiles + kTileIdx)
-                         << 9 |
-                     (outerMIdx << 4) | (innerMIdx << 2) | innerKIdx;
+  int64_t SFOffset =
+      (static_cast<int64_t>(mTileIdx) * numKTiles + kTileIdx) << 9 |
+      (outerMIdx << 4) | (innerMIdx << 2) | innerKIdx;
 
   return reinterpret_cast<uint8_t*>(SFout) + SFOffset;
+}
+
+// Quantizes the provided PackedVec into the uint32_t output
+template <class Type, int CVT_FP4_NUM_THREADS_PER_SF, bool UE8M0_SF = false>
+__device__ __forceinline__ u32x2 cvt_warp_fp16_to_fp4_256b(PackedVec_256b<Type>& vec, float SFScaleVal, uint8_t* SFout) {
+  // Get absolute maximum values among the local 8 values.
+  auto localMax = __habs2(vec.elts[0]);
+
+  // Local maximum value.
+#pragma unroll
+  for (int i = 1; i < CVT_FP4_ELTS_PER_THREAD_256b / 2; i++) {
+    localMax = __hmax2(localMax, __habs2(vec.elts[i]));
+  }
+  
+  // Get the absolute maximum among all 16 values (two threads).
+
+  if constexpr (CVT_FP4_NUM_THREADS_PER_SF == 2) {
+    localMax = __hmax2(__shfl_xor_sync(0xffffffffu, localMax, 1), localMax);
+  }
+  // Get the final absolute maximum values.
+  float vecMax = float(__hmax(localMax.x, localMax.y));
+
+  // Get the SF (max value of the vector / max value of e2m1).
+  // maximum value of e2m1 = 6.0.
+  // TODO: use half as compute data type.
+  float SFValue = SFScaleVal * (vecMax * reciprocal_approximate_ftz(6.0f));
+  // 8 bits representation of the SF.
+  uint8_t fp8SFVal;
+  // Write the SF to global memory (STG.8).
+  if constexpr (UE8M0_SF) {
+    // Extract the 8 exponent bits from float32.
+    // float 32bits = 1 sign bit + 8 exponent bits + 23 mantissa bits.
+    uint32_t tmp = reinterpret_cast<uint32_t&>(SFValue) >> 23;
+    fp8SFVal = tmp & 0xff;
+    // Convert back to fp32.
+    reinterpret_cast<uint32_t&>(SFValue) = tmp << 23;
+  } else {
+    // Here SFValue is always positive, so E4M3 is the same as UE4M3.
+    __nv_fp8_e4m3 tmp = __nv_fp8_e4m3(SFValue);
+    reinterpret_cast<__nv_fp8_e4m3&>(fp8SFVal) = tmp;
+    // Convert back to fp32.
+    SFValue = float(tmp);
+  }
+  
+  // Write the SF to global memory (STG.8).
+  if (SFout) *SFout = fp8SFVal;
+
+  // Get the output scale.
+  // Recipe: final_scale = reciprocal(fp32(fp8(SFValue * SFScaleVal))) *
+  //                       reciprocal(SFScaleVal))
+  float outputScale =
+      SFValue != 0.0f
+          ? reciprocal_approximate_ftz(SFValue * reciprocal_approximate_ftz(SFScaleVal))
+          : 0.0f;
+
+  // Convert the input to float.
+  float2 fp2Vals[CVT_FP4_ELTS_PER_THREAD_256b / 2];
+  
+#pragma unroll
+  for (int i = 0; i < CVT_FP4_ELTS_PER_THREAD_256b / 2; i++) {
+    if constexpr (std::is_same_v<Type, half>) {
+      fp2Vals[i] = __half22float2(vec.elts[i]);
+    } else {
+      fp2Vals[i] = __bfloat1622float2(vec.elts[i]);
+    }
+    fp2Vals[i].x *= outputScale;
+    fp2Vals[i].y *= outputScale;
+  }
+
+  // Convert to e2m1 values.
+  return fp32_vec16_to_e2m1(fp2Vals);
 }
 
 // Quantizes the provided PackedVec into the uint32_t output
