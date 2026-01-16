@@ -428,6 +428,9 @@ steps:
   timeout_in_minutes: 30
   gpu: h100
   source_file_dependencies:
+    - vllm/config/attention
+    - vllm/model_executor/layers/attention
+    - vllm/platforms
     - vllm/v1/attention
     - tests/v1/attention
   commands:
@@ -452,6 +455,9 @@ steps:
   timeout_in_minutes: 30
   gpu: b200
   source_file_dependencies:
+    - vllm/config/attention
+    - vllm/model_executor/layers/attention
+    - vllm/platforms
     - vllm/v1/attention
     - tests/v1/attention
   commands:
