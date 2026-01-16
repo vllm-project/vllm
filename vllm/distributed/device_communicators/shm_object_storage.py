@@ -4,7 +4,7 @@
 import pickle
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Iterable
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from dataclasses import dataclass
 from itertools import chain
 from multiprocessing import shared_memory
@@ -173,12 +173,10 @@ class SingleWriterShmRingBuffer:
     def close(self) -> None:
         """Close the shared memory."""
         if hasattr(self, "shared_memory"):
-            try:
-                self.shared_memory.close()
-                if self.is_writer:
+            self.shared_memory.close()
+            if self.is_writer:
+                with suppress(FileNotFoundError):
                     self.shared_memory.unlink()
-            except Exception as e:
-                logger.warning("Error closing shared memory: %s", e)
 
     def __del__(self):
         self.close()
