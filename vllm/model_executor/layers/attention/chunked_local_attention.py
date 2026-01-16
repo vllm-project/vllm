@@ -9,16 +9,15 @@ from vllm.config import CacheConfig
 from vllm.config.vllm import VllmConfig
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.quantization import QuantizationConfig
+from vllm.triton_utils import tl, triton
+from vllm.utils.torch_utils import current_stream
 from vllm.v1.attention.backend import (
+    AttentionBackend,
     AttentionCGSupport,
     AttentionMetadataBuilder,
     CommonAttentionMetadata,
 )
-from vllm.triton_utils import tl, triton
-from vllm.v1.attention.backends.utils import (
-    make_lazy_sync_tensor_property,
-    subclass_attention_backend,
-)
+from vllm.v1.attention.backends.utils import subclass_attention_backend
 from vllm.v1.attention.selector import get_attn_backend
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
@@ -82,7 +81,10 @@ def _compute_virtual_query_start_locs(
     space_in_first_chunk = chunk - context_lens % chunk
     q_in_first_chunk = torch.minimum(space_in_first_chunk, q_seqlens)
     q_in_remaining_chunks = q_seqlens - q_in_first_chunk
-    num_vb_per_req = 1 + (q_in_remaining_chunks + chunk - 1) // chunk
+    # Padding requests (q_seqlen=0) produce 0 VBs; others get at least 1
+    num_vb_per_req = (q_seqlens > 0) * (
+        1 + (q_in_remaining_chunks + chunk - 1) // chunk
+    )
     # Prepend 0 and compute cumsum for output offsets
     virtual_query_start_locs = torch.zeros(
         seq_lens.shape[0] + 1, dtype=torch.int32, device=seq_lens.device
@@ -322,7 +324,10 @@ def create_chunked_local_attention_backend(
             # calls (kernel uses masked writes, stale data may remain)
             self._virtual_batch_to_batch_mapping[:num_vb_ub].zero_()
             self._virtual_batch_block_indices[:num_vb_ub, :pages_per_vb].zero_()
-            # Kernel writes positions 1..num_vb_ub; ensure position 0 is 0
+            # Pre-fill query_start_loc with total_tokens for monotonicity;
+            # kernel will overwrite positions 1..actual_num_vb
+            total_tokens = int(query_start_loc_cpu[-1])
+            self._virtual_query_start_loc[: num_vb_ub + 1].fill_(total_tokens)
             self._virtual_query_start_loc[0] = 0
 
             _compute_virtual_batches_attn_metadata_kernel[(bs,)](
@@ -343,8 +348,7 @@ def create_chunked_local_attention_backend(
                 MAX_VIRTUAL_BATCHES=max_vb_per_req,
             )
 
-            # Pad cu_virtual_seqlens_q for FULL CG (must be monotonic)
-            total_tokens = int(query_start_loc_cpu[-1])
+            # Pad remaining positions for FULL CG (must be monotonic)
             self._virtual_query_start_loc[num_vb_ub + 1 :].fill_(total_tokens)
 
             # Record event after kernel + padding for lazy D2H sync
