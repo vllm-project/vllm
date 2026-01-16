@@ -122,8 +122,8 @@ jobs:
 
       - name: Install vLLM build requirements
         run: |
-          pip install -r requirements/build.txt || true
-          pip install -r requirements/common.txt || true
+          pip install -r requirements/build.txt
+          pip install -r requirements/common.txt
 
       - name: Build wheel
         env:
