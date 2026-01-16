@@ -168,8 +168,16 @@ async def serve_http(
         await graceful_drain()
         signal_handler()
 
+    shutting_down = False
+
     def on_signal() -> None:
         """Signal callback that spawns the graceful shutdown task."""
+        nonlocal shutting_down
+        if shutting_down:
+            logger.debug("Ignoring duplicate shutdown signal")
+            return
+        shutting_down = True
+
         if enable_graceful:
             loop.create_task(graceful_signal_handler())
         else:
