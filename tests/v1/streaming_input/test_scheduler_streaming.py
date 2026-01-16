@@ -55,6 +55,7 @@ def create_scheduler() -> Scheduler:
     vllm_config.model_config.skip_tokenizer_init = True
     vllm_config.model_config.is_multimodal_model = False
     vllm_config.model_config.max_model_len = 1024
+    vllm_config.model_config.enable_return_routed_experts = False
     vllm_config.cache_config = MagicMock()
     vllm_config.cache_config.num_gpu_blocks = 1000
     vllm_config.cache_config.enable_prefix_caching = False
@@ -63,7 +64,10 @@ def create_scheduler() -> Scheduler:
         kv_cache_tensors=[],
         kv_cache_groups=[
             KVCacheGroupSpec(
-                ["layer"], FullAttentionSpec(16, 1, 1, torch.float32, False)
+                ["layer"],
+                FullAttentionSpec(
+                    block_size=16, num_kv_heads=1, head_size=1, dtype=torch.float32
+                ),
             )
         ],
     )
@@ -118,8 +122,8 @@ class TestStreamingScheduler(unittest.TestCase):
         new_request.sampling_params = SamplingParams(max_tokens=10)
         new_request.max_tokens = 10  # Additional max_tokens from new request
 
-        session.streaming_queue.append(StreamingUpdate.from_request(new_request))
-        scheduler._update_request_as_session(session)
+        update = StreamingUpdate.from_request(new_request)
+        scheduler._update_request_as_session(session, update)
 
         assert session.sampling_params.max_tokens == 10
         assert session.max_tokens == 20  # 10 + 10
@@ -134,8 +138,8 @@ class TestStreamingScheduler(unittest.TestCase):
         )
         new_request2.sampling_params = SamplingParams(max_tokens=10)
         new_request2.max_tokens = 10
-        session.streaming_queue.append(StreamingUpdate.from_request(new_request2))
-        scheduler._update_request_as_session(session)
+        update2 = StreamingUpdate.from_request(new_request2)
+        scheduler._update_request_as_session(session, update2)
 
         assert session.sampling_params.max_tokens == 10
         assert session.max_tokens == 25  # 15 + 10
@@ -155,8 +159,8 @@ class TestStreamingScheduler(unittest.TestCase):
         )
         new_request.sampling_params = SamplingParams(max_tokens=10)
 
-        session.streaming_queue.append(StreamingUpdate.from_request(new_request))
-        scheduler._update_request_as_session(session)
+        update = StreamingUpdate.from_request(new_request)
+        scheduler._update_request_as_session(session, update)
 
         assert session.prompt_token_ids == [1, 2, 3, 4, 5, 6]
         assert session._all_token_ids == [1, 2, 3, 4, 5, 6]
@@ -190,8 +194,8 @@ class TestStreamingScheduler(unittest.TestCase):
             prompt_token_ids=[4, 5, 6, 7],
             mm_features=[mm_feature],
         )
-        session.streaming_queue.append(StreamingUpdate.from_request(new_request))
-        scheduler._update_request_as_session(session)
+        update = StreamingUpdate.from_request(new_request)
+        scheduler._update_request_as_session(session, update)
 
         assert len(session.mm_features) == 2
         assert session.mm_features[0].mm_position.offset == 1
@@ -199,6 +203,13 @@ class TestStreamingScheduler(unittest.TestCase):
         assert session.mm_features[1].mm_position.offset == 5
 
     def test_process_streaming_requests_with_finish_session(self):
+        """Test that a non-resumable request signals stream completion.
+
+        With the new streaming API, completion is signaled by closing/finishing
+        the input generator. When a non-resumable request is added to a session
+        in WAITING_FOR_STREAMING_REQ state, the session is finished immediately
+        with FINISHED_ABORTED status.
+        """
         scheduler = create_scheduler()
 
         session = DummyRequest(
@@ -210,6 +221,7 @@ class TestStreamingScheduler(unittest.TestCase):
         session.status = RequestStatus.WAITING_FOR_STREAMING_REQ
         session.num_computed_tokens = len(session.prompt_token_ids)
 
+        # A non-resumable request signals stream completion
         close_request = DummyRequest(
             request_id="session",
             prompt_token_ids=[0],
@@ -217,30 +229,25 @@ class TestStreamingScheduler(unittest.TestCase):
             max_tokens=1,
         )
         scheduler.add_request(close_request)
-        assert close_request.status == RequestStatus.WAITING
-        assert len(session.streaming_queue) == 1
 
-        sout = scheduler.schedule()
-        mro = ModelRunnerOutput(
-            req_ids=[session.request_id],
-            req_id_to_index={session.request_id: 0},
-            sampled_token_ids=[[0]],
-            logprobs=None,
-            prompt_logprobs_dict={session.request_id: None},
-            pooler_output=None,
-        )
-        out = scheduler.update_from_output(sout, mro)
-        assert session.status == RequestStatus.FINISHED_LENGTH_CAPPED
-        assert len(out) == 1
-        assert out[0].outputs[0].request_id == session.request_id
-        assert out[0].outputs[0].resumable is False
+        # The session should be immediately finished (stream completed)
+        assert session.status == RequestStatus.FINISHED_ABORTED
+        # The session should be removed from the scheduler
+        assert session.request_id not in scheduler.requests
 
     def test_streaming_request_session_update(self):
+        """Test that a resumable request updates a waiting session directly.
+
+        When a session is in WAITING_FOR_STREAMING_REQ state and a new resumable
+        request arrives, the update is applied directly via _update_request_as_session,
+        not queued.
+        """
         scheduler = create_scheduler()
 
         session = DummyRequest(
             request_id="session",
             prompt_token_ids=[1, 2, 3],
+            resumable=True,
         )
         scheduler.add_request(session)
         session.status = RequestStatus.WAITING_FOR_STREAMING_REQ
@@ -253,13 +260,16 @@ class TestStreamingScheduler(unittest.TestCase):
         )
 
         scheduler.add_request(next_request)
-        assert next_request.status == RequestStatus.WAITING
-        assert len(session.streaming_queue) == 1
+
+        # With the new behavior, when session is in WAITING_FOR_STREAMING_REQ,
+        # the update is applied directly (not queued), and session status
+        # becomes WAITING
+        assert session.status == RequestStatus.WAITING
+        assert session.prompt_token_ids == [1, 2, 3, 4, 5]
 
         _ = scheduler.schedule()
 
         assert session.status == RequestStatus.RUNNING
-        assert session.prompt_token_ids == [1, 2, 3, 4, 5]
 
     def test_update_request_as_session_with_output_tokens(self):
         scheduler = create_scheduler()
@@ -280,8 +290,8 @@ class TestStreamingScheduler(unittest.TestCase):
             prompt_token_ids=[4, 5],
         )
 
-        session.streaming_queue.append(StreamingUpdate.from_request(new_request))
-        scheduler._update_request_as_session(session)
+        update = StreamingUpdate.from_request(new_request)
+        scheduler._update_request_as_session(session, update)
 
         # Verify the last output token (11) was removed, and new prompt tokens added
         assert session._all_token_ids == [1, 2, 3, 10, 4, 5]
@@ -369,9 +379,13 @@ class TestStreamingScheduler(unittest.TestCase):
 
         # Step 3: Simulate model runner caching the prompt_token_ids
         # This simulates gpu_model_runner.py:706-720 CachedRequestState creation
+        # The model runner makes a copy of prompt_token_ids when creating
+        # CachedRequestState
         cached_state_cycle1 = {
             "req_id": session.request_id,
-            "prompt_token_ids": new_req_data_cycle1.prompt_token_ids,  # Must be a copy!
+            "prompt_token_ids": list(
+                new_req_data_cycle1.prompt_token_ids
+            ),  # Explicit copy
             "output_token_ids": [],
             "num_computed_tokens": 0,
         }
@@ -495,17 +509,20 @@ class TestStreamingScheduler(unittest.TestCase):
             prompt_token_ids=[4, 5],
         )
         scheduler.add_request(new_request)
-        assert new_request.status == RequestStatus.WAITING
-        assert len(session.streaming_queue) == 1
 
-        # Step 13: Scheduler merges new request into session and schedules
+        # With the new streaming API, when session is in WAITING_FOR_STREAMING_REQ,
+        # the update is applied directly via _update_request_as_session (not queued).
+        # The session status becomes WAITING after the update is applied.
+        assert session.status == RequestStatus.WAITING
+
+        # Step 13: Scheduler schedules the updated session
         scheduler_output_cycle3 = scheduler.schedule()
 
-        # Verify scheduler created NewRequestData with merged _all_token_ids
+        # Verify scheduler created NewRequestData with merged prompt_token_ids
         assert len(scheduler_output_cycle3.scheduled_new_reqs) == 1
         assert (
             scheduler_output_cycle3.scheduled_new_reqs[0].prompt_token_ids
-            == session._all_token_ids
+            == session.prompt_token_ids
         )
         assert (
             scheduler_output_cycle3.num_scheduled_tokens[session.request_id] == 2
@@ -516,10 +533,14 @@ class TestStreamingScheduler(unittest.TestCase):
         assert session._output_token_ids == [10, STOP_TOKEN]
 
         # Step 14: Model runner caches NEW prompt_token_ids reference
+        # The model runner makes a copy of prompt_token_ids when creating
+        # CachedRequestState
         new_req_data_cycle3 = scheduler_output_cycle3.scheduled_new_reqs[0]
         cached_state_cycle3 = {
             "req_id": session.request_id,
-            "prompt_token_ids": new_req_data_cycle3.prompt_token_ids,
+            "prompt_token_ids": list(
+                new_req_data_cycle3.prompt_token_ids
+            ),  # Explicit copy
             "output_token_ids": [],
             "num_computed_tokens": session.num_computed_tokens,
         }
