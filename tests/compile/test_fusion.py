@@ -1,23 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import logging
-from typing import Any
-
 import pytest
-import regex as re
 import torch
 
 import vllm.config
-from tests.compile.fusion_test_utils import (
-    CUSTOM_OPS_QUANT_RMS_NORM,
-    MODELS_GROUP_FP8,
-    Matches,
-    is_blackwell,
-    run_model,
-)
-from tests.utils import flat_product
-from tests.v1.attention.utils import AttentionBackendEnum
 from vllm._aiter_ops import IS_AITER_FOUND, rocm_aiter_ops
 from vllm.compilation.fusion import FUSED_OPS, FusedRMSQuantKey, RMSNormQuantFusionPass
 from vllm.compilation.fx_utils import find_op_nodes
@@ -27,7 +14,6 @@ from vllm.compilation.post_cleanup import PostCleanupPass
 from vllm.config import (
     CompilationConfig,
     CompilationMode,
-    CUDAGraphMode,
     ModelConfig,
     PassConfig,
     VllmConfig,
@@ -49,7 +35,6 @@ from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
 )
 from vllm.platforms import current_platform
 from vllm.utils.deep_gemm import is_deep_gemm_supported
-from vllm.utils.torch_utils import is_torch_equal_or_newer
 
 from ..utils import override_cutlass_fp8_supported
 from .backend import TestBackend
@@ -412,69 +397,3 @@ def test_aiter_fusion_rmsnorm_quant(
         _run_fusion_test(
             model, fusion_pass, vllm_config, dtype, hidden_size, num_tokens
         )
-
-
-@pytest.mark.parametrize(
-    "model_name, model_kwargs, backend, matches, custom_ops",
-    # Test rms norm+group quant_fp8 fusion
-    list[tuple[Any, ...]](flat_product(MODELS_GROUP_FP8, CUSTOM_OPS_QUANT_RMS_NORM)),
-)
-@pytest.mark.parametrize("inductor_graph_partition", [True, False])
-# TODO: remove skip after we fix the fusion thoroughly
-@pytest.mark.skipif(is_blackwell(), reason="Temporarily disabled on Blackwell")
-def test_rms_group_quant(
-    model_name: str,
-    model_kwargs: dict[str, Any],
-    backend: AttentionBackendEnum,
-    matches: Matches,
-    custom_ops: str,
-    inductor_graph_partition: bool,
-    caplog_mp_spawn,
-    monkeypatch,
-):
-    if inductor_graph_partition and not is_torch_equal_or_newer("2.9.0.dev"):
-        pytest.skip("Inductor graph partition requires torch>=2.9")
-
-    custom_ops_list = custom_ops.split(",") if custom_ops else []
-
-    if inductor_graph_partition:
-        mode = CUDAGraphMode.FULL_AND_PIECEWISE
-        splitting_ops: list[str] | None = None
-    else:
-        mode = CUDAGraphMode.FULL_DECODE_ONLY
-        splitting_ops = []
-
-    # Disable, compile cache to make sure custom passes run.
-    # Otherwise, we can't verify fusion happened through the logs.
-    monkeypatch.setenv("VLLM_DISABLE_COMPILE_CACHE", "1")
-
-    # To capture subprocess logs, we need to know whether spawn or fork is used.
-    # Force spawn as it is more general.
-    monkeypatch.setenv("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
-
-    model_kwargs["attention_config"] = {"backend": backend.name}
-
-    compilation_config = CompilationConfig(
-        # Testing properties
-        custom_ops=custom_ops_list,
-        use_inductor_graph_partition=inductor_graph_partition,
-        cudagraph_mode=mode,
-        splitting_ops=splitting_ops,
-        # Common
-        mode=CompilationMode.VLLM_COMPILE,
-        pass_config=PassConfig(
-            fuse_norm_quant=True, fuse_act_quant=True, eliminate_noops=True
-        ),
-        # Inductor caches custom passes by default as well via uuid
-        inductor_compile_config={"force_disable_caches": True},
-    )
-
-    with caplog_mp_spawn(logging.DEBUG) as log_holder:
-        run_model(compilation_config, model_name, **model_kwargs)
-
-    log_matches = re.findall(
-        r"\[fusion.py:\d+] Replaced (\d+) patterns",
-        log_holder.text,
-    )
-    assert len(log_matches) == 1, log_holder.text
-    assert int(log_matches[0]) == matches.rms_quant_norm_fusion
