@@ -963,13 +963,11 @@ class OpenAIServingChat(OpenAIServing):
                         fn_name_returned = function_name_returned[i]
                         output_token_ids = as_list(output.token_ids)
 
-                        if (
-                            self.reasoning_parser is not None
-                            and not reasoning_end_arr[i]
-                            and res.prompt_token_ids
-                            and reasoning_parser.is_reasoning_end(res.prompt_token_ids)
-                        ):
-                            reasoning_end_arr[i] = True
+                        # NOTE: Removed check for is_reasoning_end(res.prompt_token_ids)
+                        # That check incorrectly set reasoning_end when conversation
+                        # history contained </think> from previous assistant messages,
+                        # causing new <think> blocks to be treated as content.
+                        # Reasoning state should only be based on current response tokens.
 
                         if self.reasoning_parser and not reasoning_end_arr[i]:
                             delta_message = (
@@ -1021,46 +1019,38 @@ class OpenAIServingChat(OpenAIServing):
                         assert reasoning_end_arr is not None
                         output_token_ids = as_list(output.token_ids)
                         if not reasoning_end_arr[i]:
-                            # When encountering think end id in prompt_token_ids
-                            # i.e {"enable_thinking": False},
-                            # set reasoning status to end.
-                            if (
-                                res.prompt_token_ids
-                                and reasoning_parser.is_reasoning_end(
-                                    res.prompt_token_ids
+                            # NOTE: Removed check for is_reasoning_end(res.prompt_token_ids)
+                            # That check incorrectly set reasoning_end when conversation
+                            # history contained </think> from previous assistant messages,
+                            # causing new <think> blocks to be treated as content.
+                            # Reasoning state should only be based on current response tokens.
+                            delta_message = (
+                                reasoning_parser.extract_reasoning_streaming(
+                                    previous_text,
+                                    current_text,
+                                    delta_text,
+                                    previous_token_ids,
+                                    current_token_ids,
+                                    output_token_ids,
                                 )
-                            ):
-                                reasoning_end_arr[i] = True
-                                current_token_ids = output_token_ids
-                                # Don't update current_text, keep it as is from delta
-                            else:
-                                delta_message = (
-                                    reasoning_parser.extract_reasoning_streaming(
-                                        previous_text,
-                                        current_text,
-                                        delta_text,
-                                        previous_token_ids,
-                                        current_token_ids,
-                                        output_token_ids,
-                                    )
-                                )
+                            )
 
-                                # When encountering think end id in delta_token_ids,
-                                # set reasoning status to end.
-                                # Remove the text and token ids related
-                                # to 'reasoning'.
-                                if reasoning_parser.is_reasoning_end(output_token_ids):
-                                    reasoning_end_arr[i] = True
-                                    current_token_ids = (
-                                        reasoning_parser.extract_content_ids(
-                                            output_token_ids
-                                        )
+                            # When encountering think end id in delta_token_ids,
+                            # set reasoning status to end.
+                            # Remove the text and token ids related
+                            # to 'reasoning'.
+                            if reasoning_parser.is_reasoning_end(output_token_ids):
+                                reasoning_end_arr[i] = True
+                                current_token_ids = (
+                                    reasoning_parser.extract_content_ids(
+                                        output_token_ids
                                     )
-                                    if delta_message and delta_message.content:
-                                        current_text = delta_message.content
-                                        delta_message.content = None
-                                    else:
-                                        current_text = ""
+                                )
+                                if delta_message and delta_message.content:
+                                    current_text = delta_message.content
+                                    delta_message.content = None
+                                else:
+                                    current_text = ""
 
                         # handle tool calls only after reasoning is done,
                         if reasoning_end_arr[i]:
