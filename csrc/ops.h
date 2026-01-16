@@ -197,9 +197,8 @@ torch::Tensor awq_dequantize(torch::Tensor _kernel,
                              torch::Tensor _zeros, int64_t split_k_iters,
                              int64_t thx, int64_t thy);
 
-#endif
-
 torch::Tensor permute_cols(torch::Tensor const& A, torch::Tensor const& perm);
+#endif
 
 torch::Tensor ggml_dequantize(torch::Tensor W, int64_t type, int64_t m,
                               int64_t n,

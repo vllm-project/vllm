@@ -287,7 +287,6 @@ set(VLLM_EXT_SRC
   "csrc/attention/paged_attention_v2.cu"
   "csrc/attention/merge_attn_states.cu"
   "csrc/attention/vertical_slash_index.cu"
-  "csrc/permute_cols.cu"
   "csrc/pos_encoding_kernels.cu"
   "csrc/activation_kernels.cu"
   "csrc/layernorm_kernels.cu"
@@ -340,6 +339,7 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
 
   list(APPEND VLLM_EXT_SRC
     "csrc/quantization/awq/gemm_kernels.cu"
+    "csrc/permute_cols.cu"
     "csrc/quantization/w8a8/cutlass/scaled_mm_entry.cu"
     "csrc/quantization/fp4/nvfp4_quant_entry.cu"
     "csrc/quantization/fp4/nvfp4_scaled_mm_entry.cu"
