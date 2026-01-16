@@ -375,9 +375,6 @@ class DefaultMoERunner(MoERunner):
                     router_logits=staged_router_logits,
                 )
             else:
-                # TODO(bnell): deal with fp4 flashinfer tuple hidden states
-                # hack (#30014)
-
                 topk_weights, topk_ids = self.router.select_experts(
                     hidden_states=staged_hidden_states,
                     router_logits=staged_router_logits,
@@ -523,15 +520,18 @@ class DefaultMoERunner(MoERunner):
                     extra_tensors=extra_tensors,
                 )
                 if extra_tensors is not None:
-                    hidden_states_combined, router_logits, extra_tensors_combined = (
-                        dispatch_res
-                    )
+                    (
+                        orig_hidden_states_combined,
+                        router_logits,
+                        extra_tensors_combined,
+                    ) = dispatch_res
                     hidden_states_combined = (
-                        hidden_states_combined,
+                        orig_hidden_states_combined,
                         extra_tensors_combined[0],
                     )
                 else:
                     hidden_states_combined, router_logits = dispatch_res
+                    orig_hidden_states = hidden_states_combined
 
             # Run shared experts before matrix multiply.
             # because matrix multiply maybe modify the hidden_states.
@@ -554,6 +554,9 @@ class DefaultMoERunner(MoERunner):
 
             # Matrix multiply.
             x = hidden_states_combined if do_naive_dispatch_combine else hidden_states
+            # TODO(bnell): deal with fp4 flashinfer tuple hidden states hack (#30014)
+            # Figure out nicer way to do this.
+            x_orig = orig_hidden_states if do_naive_dispatch_combine else hidden_states
 
             if self.quant_method.is_monolithic:
                 final_hidden_states = self.quant_method.apply_monolithic(
@@ -562,11 +565,8 @@ class DefaultMoERunner(MoERunner):
                     router_logits=router_logits,
                 )
             else:
-                # TODO(bnell): deal with fp4 flashinfer tuple hidden states
-                # hack (#30014)
-
                 topk_weights, topk_ids = self.router.select_experts(
-                    hidden_states=x,
+                    hidden_states=x_orig,
                     router_logits=router_logits,
                 )
 
@@ -575,7 +575,7 @@ class DefaultMoERunner(MoERunner):
 
                 final_hidden_states = self.quant_method.apply(
                     layer=layer,
-                    x=x,
+                    x=x,  # The type signture of this is wrong due to the hack.
                     topk_weights=topk_weights,
                     topk_ids=topk_ids,
                 )
