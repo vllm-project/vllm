@@ -13,6 +13,7 @@ from tests.kernels.allclose_default import get_default_atol, get_default_rtol
 from tests.kernels.utils import DEFAULT_OPCHECK_TEST_UTILS, opcheck
 from vllm import _custom_ops as ops
 from vllm.model_executor.layers.rotary_embedding import RotaryEmbedding
+from vllm.platforms import current_platform
 from vllm.utils.torch_utils import set_random_seed
 
 
@@ -151,18 +152,22 @@ def test_concat_and_cache_mla_rope_fused(
     )
 
     if kv_cache_dtype == "fp8":
-        result_temp = torch.zeros_like(kv_cache, dtype=torch.float16)
+        result_temp = torch.zeros_like(kv_cache, dtype=current_platform.fp8_dtype())
         ops.convert_fp8(
             result_temp,
             kv_cache.contiguous(),
             kv_cache_scale.item(),
             kv_dtype=kv_cache_dtype,
         )
-        expected_temp = torch.zeros_like(ref_kv_cache, dtype=torch.float16)
+        result_temp = result_temp.to(torch.float16)
+        expected_temp = torch.zeros_like(
+            ref_kv_cache, dtype=current_platform.fp8_dtype()
+        )
         ops.convert_fp8(
             expected_temp, ref_kv_cache, kv_cache_scale.item(), kv_dtype=kv_cache_dtype
         )
-        torch.testing.assert_close(result_temp, expected_temp, atol=1e-1, rtol=1e-1)
+        expected_temp = expected_temp.to(torch.float16)
+        torch.testing.assert_close(result_temp, expected_temp, atol=0.001, rtol=0.1)
     else:
         torch.testing.assert_close(
             kv_cache,
