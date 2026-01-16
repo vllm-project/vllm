@@ -72,18 +72,22 @@ async def serve_http(
     if h11_max_header_count is None:
         h11_max_header_count = H11_MAX_HEADER_COUNT_DEFAULT
 
+    args = getattr(app.state, "args", None)
+    engine_client: EngineClient = app.state.engine_client
+    enable_graceful = args is not None and getattr(
+        args, "enable_graceful_shutdown", False
+    )
+
     config = uvicorn.Config(app, **uvicorn_kwargs)
-    # Set header limits
     config.h11_max_incomplete_event_size = h11_max_incomplete_event_size
     config.h11_max_header_count = h11_max_header_count
+    if enable_graceful:
+        config.install_signal_handlers = False
     config.load()
     server = uvicorn.Server(config)
     _add_shutdown_handlers(app, server)
 
     loop = asyncio.get_running_loop()
-
-    args = getattr(app.state, "args", None)
-    engine_client: EngineClient = app.state.engine_client
 
     watchdog_task = loop.create_task(watchdog_loop(server, engine_client))
     server_task = loop.create_task(server.serve(sockets=[sock] if sock else None))
@@ -101,11 +105,7 @@ async def serve_http(
 
     async def graceful_drain() -> None:
         """Perform graceful drain before shutdown."""
-        enable_graceful = getattr(args, "enable_graceful_shutdown", False)
         drain_timeout = getattr(args, "drain_timeout", 120)
-
-        if not enable_graceful:
-            return
 
         served_name = engine_client.model_config.served_model_name
         if isinstance(served_name, list):
@@ -170,7 +170,7 @@ async def serve_http(
 
     def on_signal() -> None:
         """Signal callback that spawns the graceful shutdown task."""
-        if getattr(args, "enable_graceful_shutdown", False):
+        if enable_graceful:
             loop.create_task(graceful_signal_handler())
         else:
             signal_handler()
