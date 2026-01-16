@@ -9,6 +9,7 @@ from typing import Any, cast
 
 import numpy as np
 import torch
+from opentelemetry.trace import SpanKind, Tracer
 
 from vllm.lora.request import LoRARequest
 from vllm.outputs import (
@@ -20,7 +21,8 @@ from vllm.outputs import (
 )
 from vllm.sampling_params import RequestOutputKind
 from vllm.tokenizers import TokenizerLike
-from vllm.tracing import SpanAttributes, SpanKind, Tracer, extract_trace_context
+from vllm.tracing.otel import extract_trace_context
+from vllm.tracing.utils import SpanAttributes
 from vllm.utils import length_from_prompt_token_ids_or_embeds
 from vllm.v1.engine import EngineCoreOutput, EngineCoreRequest, FinishReason
 from vllm.v1.engine.detokenizer import IncrementalDetokenizer

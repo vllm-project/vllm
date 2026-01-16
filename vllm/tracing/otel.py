@@ -6,14 +6,12 @@ import functools
 import inspect
 import os
 import traceback
-from collections.abc import Callable, Mapping
+from collections.abc import Mapping
 from contextlib import contextmanager
 from typing import Any
 
 from vllm.logger import init_logger
-from vllm.utils.func_utils import run_once
-
-TRACE_HEADERS = ["traceparent", "tracestate"]
+from vllm.tracing.utils import TRACE_HEADERS, LoadingSpanAttributes
 
 logger = init_logger(__name__)
 
@@ -104,32 +102,28 @@ def get_span_exporter(endpoint):
     return exporter
 
 
-_worker_tracer_initialized = False
-
-
-def maybe_init_worker_tracer(
-    instrumenting_module_name: str = "vllm.worker",
-    process_kind: str = "worker",
-    process_name: str = "",
-) -> Tracer | None:
-    """Initialize tracer in sub-processes (workers) if context exists."""
-    global _worker_tracer_initialized
-
-    if _worker_tracer_initialized or not _IS_OTEL_AVAILABLE:
+def init_otel_worker(
+    instrumenting_module_name: str,
+    process_kind: str,
+    process_name: str,
+) -> Any | None:
+    """
+    Backend-specific initialization for OpenTelemetry in a worker process.
+    """
+    if not _IS_OTEL_AVAILABLE:
         return None
 
-    # Initialize worker tracer if an OTLP endpoint is configured.
+    # Initialize the tracer if an OTLP endpoint is configured.
     # The endpoint is propagated via environment variable from the main process.
     otlp_endpoint = os.environ.get("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT")
-
     if not otlp_endpoint:
         return None
 
-    extra_attrs = {}
-    extra_attrs["vllm.process_kind"] = process_kind
-    extra_attrs["vllm.process_name"] = process_name
+    extra_attrs = {
+        "vllm.process_kind": process_kind,
+        "vllm.process_name": process_name,
+    }
 
-    _worker_tracer_initialized = True
     return init_tracer(instrumenting_module_name, otlp_endpoint, extra_attrs)
 
 
@@ -140,86 +134,7 @@ def extract_trace_context(headers: Mapping[str, str] | None) -> Context | None:
     return None
 
 
-def extract_trace_headers(headers: Mapping[str, str]) -> Mapping[str, str]:
-    return {h: headers[h] for h in TRACE_HEADERS if h in headers}
-
-
-class SpanAttributes:
-    # Attribute names copied from here to avoid version conflicts:
-    # https://github.com/open-telemetry/semantic-conventions/blob/main/docs/gen-ai/gen-ai-spans.md
-    GEN_AI_USAGE_COMPLETION_TOKENS = "gen_ai.usage.completion_tokens"
-    GEN_AI_USAGE_PROMPT_TOKENS = "gen_ai.usage.prompt_tokens"
-    GEN_AI_REQUEST_MAX_TOKENS = "gen_ai.request.max_tokens"
-    GEN_AI_REQUEST_TOP_P = "gen_ai.request.top_p"
-    GEN_AI_REQUEST_TEMPERATURE = "gen_ai.request.temperature"
-    GEN_AI_RESPONSE_MODEL = "gen_ai.response.model"
-    # Attribute names added until they are added to the semantic conventions:
-    GEN_AI_REQUEST_ID = "gen_ai.request.id"
-    GEN_AI_REQUEST_N = "gen_ai.request.n"
-    GEN_AI_USAGE_NUM_SEQUENCES = "gen_ai.usage.num_sequences"
-    GEN_AI_LATENCY_TIME_IN_QUEUE = "gen_ai.latency.time_in_queue"
-    GEN_AI_LATENCY_TIME_TO_FIRST_TOKEN = "gen_ai.latency.time_to_first_token"
-    GEN_AI_LATENCY_E2E = "gen_ai.latency.e2e"
-    GEN_AI_LATENCY_TIME_IN_SCHEDULER = "gen_ai.latency.time_in_scheduler"
-    # Time taken in the forward pass for this across all workers
-    GEN_AI_LATENCY_TIME_IN_MODEL_FORWARD = "gen_ai.latency.time_in_model_forward"
-    # Time taken in the model execute function. This will include model
-    # forward, block/sync across workers, cpu-gpu sync time and sampling time.
-    GEN_AI_LATENCY_TIME_IN_MODEL_EXECUTE = "gen_ai.latency.time_in_model_execute"
-    GEN_AI_LATENCY_TIME_IN_MODEL_PREFILL = "gen_ai.latency.time_in_model_prefill"
-    GEN_AI_LATENCY_TIME_IN_MODEL_DECODE = "gen_ai.latency.time_in_model_decode"
-    GEN_AI_LATENCY_TIME_IN_MODEL_INFERENCE = "gen_ai.latency.time_in_model_inference"
-
-
-def contains_trace_headers(headers: Mapping[str, str]) -> bool:
-    return any(h in headers for h in TRACE_HEADERS)
-
-
-class LoadingSpanAttributes:
-    """Custom attributes for code-level tracing."""
-
-    CODE_NAMESPACE = "code.namespace"
-    CODE_FUNCTION = "code.function"
-    CODE_FILEPATH = "code.filepath"
-    CODE_LINENO = "code.lineno"
-
-
-def instrument(
-    obj: Callable | None = None,
-    *,
-    span_name: str = "",
-    attributes: dict[str, str] | None = None,
-    record_exception: bool = True,
-):
-    """
-    Decorator to instrument functions with OTel spans.
-
-    Usage:
-        @instrument
-        def my_func(): ...
-
-        @instrument(span_name="custom_name")
-        def my_func(): ...
-    """
-    # If OTel is not available, return the original object immediately.
-    if not _IS_OTEL_AVAILABLE:
-        if obj is not None:
-            return obj
-        return lambda x: x
-
-    # Handle factory usage: @instrument(span_name="foo")
-    if obj is None:
-        return functools.partial(
-            instrument,
-            span_name=span_name,
-            attributes=attributes,
-            record_exception=record_exception,
-        )
-
-    return _instrument_function(obj, span_name, attributes, record_exception)
-
-
-def _instrument_function(func, span_name_fmt, user_attrs, record_exception):
+def instrument_otel(func, span_name, attributes, record_exception):
     """Internal wrapper logic for sync and async functions."""
 
     # Pre-calculate static code attributes once (these don't change)
@@ -229,10 +144,10 @@ def _instrument_function(func, span_name_fmt, user_attrs, record_exception):
         LoadingSpanAttributes.CODE_FILEPATH: func.__code__.co_filename,
         LoadingSpanAttributes.CODE_LINENO: str(func.__code__.co_firstlineno),
     }
-    if user_attrs:
-        code_attrs.update(user_attrs)
+    if attributes:
+        code_attrs.update(attributes)
 
-    final_span_name = span_name_fmt or func.__qualname__
+    final_span_name = span_name or func.__qualname__
     module_name = func.__module__
 
     @functools.wraps(func)
@@ -304,8 +219,7 @@ def propagate_trace_to_env():
         return
 
     # Capture original state of relevant keys
-    keys_to_manage = ["traceparent", "tracestate"]
-    original_state = {k: os.environ.get(k) for k in keys_to_manage}
+    original_state = {k: os.environ.get(k) for k in TRACE_HEADERS}
 
     try:
         # inject() writes 'traceparent' and 'tracestate' to os.environ
@@ -319,8 +233,3 @@ def propagate_trace_to_env():
                 os.environ.pop(key, None)
             else:
                 os.environ[key] = original_value
-
-
-@run_once
-def log_tracing_disabled_warning() -> None:
-    logger.warning("Received a request with trace context but tracing is disabled")
