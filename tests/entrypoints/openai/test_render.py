@@ -211,7 +211,7 @@ async def test_completion_render_no_generation(client):
     # This test verifies that calling render is fast (no generation)
     import time
 
-    start = time.time()
+    start = time.perf_counter()
     response = await client.post(
         "/v1/completions/render",
         json={
@@ -219,7 +219,7 @@ async def test_completion_render_no_generation(client):
             "prompt": "Tell me a very long story about " * 10,
         },
     )
-    elapsed = time.time() - start
+    elapsed = time.perf_counter() - start
 
     assert response.status_code == 200
     # Render should be fast (< 1 second) since no generation
