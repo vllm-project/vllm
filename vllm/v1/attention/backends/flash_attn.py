@@ -308,14 +308,17 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
             self.compilation_config.cudagraph_mode.has_full_cudagraphs()
         )
         self.max_cudagraph_size = self.compilation_config.max_cudagraph_capture_size
+        max_num_seqs = vllm_config.scheduler_config.max_num_seqs
 
         if self.use_full_cuda_graph and self.aot_schedule:
             # Times 4 due to:
             #  https://github.com/vllm-project/flash-attention/blob/3223650ccabe622a0fcae65eec706a50186a89f7/hopper/flash_api.cpp#L650-L653
-            # Use max_cudagraph_size (not max_num_seqs) because during cuda
-            # graph capture the batch size can be up to max_cudagraph_size.
+            # For some tests max_cudagraph_size > max_num_seqs,
+            #   so we need to use the larger one.
+            assert self.max_cudagraph_size is not None
+            buffer_size = max(self.max_cudagraph_size, max_num_seqs) * 4 + 1
             self.scheduler_metadata = torch.zeros(
-                self.max_cudagraph_size * 4 + 1,
+                buffer_size,
                 dtype=torch.int32,
                 device=self.device,
             )
