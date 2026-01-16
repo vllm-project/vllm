@@ -858,6 +858,7 @@ class FusedMoEParallelConfig:
 
     use_ep: bool  # whether to use EP or not
     all2all_backend: str  # all2all backend for MoE communication
+    enable_eplb: bool  # whether to enable expert load balancing
 
     @property
     def use_all2all_kernels(self):
@@ -1005,6 +1006,7 @@ class FusedMoEParallelConfig:
                 ep_rank=0,
                 use_ep=False,
                 all2all_backend=vllm_parallel_config.all2all_backend,
+                enable_eplb=vllm_parallel_config.enable_eplb,
             )
         # DP + EP / TP + EP / DP + TP + EP
         assert use_ep
@@ -1023,6 +1025,7 @@ class FusedMoEParallelConfig:
             ep_rank=ep_rank,
             use_ep=True,
             all2all_backend=vllm_parallel_config.all2all_backend,
+            enable_eplb=vllm_parallel_config.enable_eplb,
         )
 
     @classmethod
@@ -1039,6 +1042,7 @@ class FusedMoEParallelConfig:
             ep_rank=0,
             use_ep=False,
             all2all_backend="naive",
+            enable_eplb=False,
         )
 
 
@@ -1052,6 +1056,7 @@ class FusedMoEConfig:
     num_local_experts: int
     activation: str
     device: torch.dtype
+    routing_method: RoutingMethodType
     moe_parallel_config: FusedMoEParallelConfig
 
     # The activation type.

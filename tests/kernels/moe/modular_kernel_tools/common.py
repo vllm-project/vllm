@@ -25,6 +25,7 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
     FusedMoEParallelConfig,
     FusedMoEQuantConfig,
+    RoutingMethodType,
 )
 from vllm.model_executor.layers.fused_moe.fused_moe import fused_topk
 from vllm.utils.import_utils import has_deep_ep, has_deep_gemm, has_pplx
@@ -581,6 +582,7 @@ def make_modular_kernel(
         max_num_tokens=next_power_of_2(config.M),
         activation="silu",
         device=vllm_config.device_config.device,
+        routing_method=RoutingMethodType.DeepSeekV3,
     )
 
     # make modular kernel

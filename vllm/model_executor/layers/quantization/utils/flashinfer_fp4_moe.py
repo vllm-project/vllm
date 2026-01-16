@@ -77,7 +77,7 @@ def _supports_activation(activation: str) -> bool:
     return activation in ["silu"]
 
 
-def _supports_moe_parallel_config(moe_parallel_config: FusedMoEParallelConfig) -> bool:
+def _supports_parallel_config(moe_parallel_config: FusedMoEParallelConfig) -> bool:
     """Supports EP."""
     return True
 
@@ -103,7 +103,7 @@ def is_supported_config_trtllm(
         return False, _make_reason(f"{moe_config.activation} activation")
     elif not _supports_quant_scheme(weight_key, activation_key):
         return False, _make_reason("quantization scheme")
-    elif not _supports_moe_parallel_config(moe_config.moe_parallel_config):
+    elif not _supports_parallel_config(moe_config.moe_parallel_config):
         return False, _make_reason("parallel config")
     elif activation_format != mk.FusedMoEActivationFormat.Standard:
         return False, _make_reason("activation format")

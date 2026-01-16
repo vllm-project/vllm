@@ -15,6 +15,7 @@ from vllm.config import ParallelConfig, VllmConfig, set_current_vllm_config
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
     FusedMoEParallelConfig,
+    RoutingMethodType,
 )
 from vllm.model_executor.layers.fused_moe.flashinfer_cutlass_moe import (
     FlashInferExperts,
@@ -101,6 +102,7 @@ def test_flashinfer_fp4_moe_no_graph(
             moe_parallel_config=FusedMoEParallelConfig.make_no_parallel(),
             in_dtype=dtype,
             is_act_and_mul=is_gated_act,
+            routing_method=RoutingMethodType.TopK,
         )
 
         flashinfer_experts = FusedMoEModularKernel(

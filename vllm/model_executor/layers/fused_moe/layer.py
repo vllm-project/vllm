@@ -598,6 +598,7 @@ class FusedMoE(CustomOp):
             is_lora_enabled=vllm_config.lora_config is not None,
             activation=activation,
             device=vllm_config.device_config.device,
+            routing_method=self.routing_method_type,
         )
         self.moe_config_use_flashinfer_cutlass_kernels = (
             self.moe_config.use_flashinfer_cutlass_kernels

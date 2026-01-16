@@ -11,6 +11,7 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
     FusedMoEParallelConfig,
     FusedMoEQuantConfig,
+    RoutingMethodType,
     fp8_w8a8_moe_quant_config,
 )
 from vllm.model_executor.layers.fused_moe.flashinfer_cutlass_moe import (
@@ -118,18 +119,7 @@ class TestData:
         layer.w13_weight_scale = w13_weight_scale
         layer.w2_weight_scale = w2_weight_scale
         # Setup dummy config.
-        layer.moe_parallel_config = mk.FusedMoEParallelConfig(
-            tp_size=1,
-            pcp_size=1,
-            dp_size=1,
-            ep_size=1,
-            tp_rank=0,
-            pcp_rank=0,
-            dp_rank=0,
-            ep_rank=0,
-            use_ep=False,
-            all2all_backend="naive",
-        )
+        layer.moe_parallel_config = mk.FusedMoEParallelConfig.make_no_parallel()
 
         # flashinfer expects swapped rows for w13
         layer.w13_weight.data = swap_w13_to_w31(layer.w13_weight.data)
@@ -300,6 +290,7 @@ def test_flashinfer_cutlass_moe_fp8_no_graph(
             moe_parallel_config=FusedMoEParallelConfig.make_no_parallel(),
             in_dtype=torch.bfloat16,
             is_act_and_mul=is_gated_act,
+            routing_method=RoutingMethodType.TopK,
         )
 
         kernel = mk.FusedMoEModularKernel(

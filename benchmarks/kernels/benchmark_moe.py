@@ -19,6 +19,7 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
     FusedMoEParallelConfig,
     FusedMoEQuantConfig,
+    RoutingMethodType,
     _get_config_dtype_str,
 )
 from vllm.model_executor.layers.fused_moe.fused_moe import *
@@ -211,6 +212,7 @@ def benchmark_config(
                     activation="silu",
                     parallel_config=FusedMoEParallelConfig.make_no_parallel(),
                     in_dtype=init_dtype,
+                    routing_method=RoutingMethodType.TopK,
                 ),
                 quant_config=quant_config,
             ),

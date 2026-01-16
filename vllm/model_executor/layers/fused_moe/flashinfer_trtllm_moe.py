@@ -59,9 +59,29 @@ def _supports_activation(activation: str) -> bool:
     return activation in ["silu"]
 
 
-def _supports_moe_parallel_config(moe_parallel_config: FusedMoEParallelConfig) -> bool:
-    """Supports EP."""
-    return True
+def _supports_routing_method(
+    weight_key: QuantKey | None,
+    activation_key: QuantKey | None,
+    routing_method: RoutingMethodType,
+) -> bool:
+    """Monolithic kernels need to express router support."""
+    if (weight_key, activation_key) == (kFp8Static128BlockSym, kFp8Dynamic128Sym):
+        # NOTE(rob): potentially allow others here. This is a conservative list.
+        return routing_method in [
+            RoutingMethodType.DeepSeekV3,  # DeepSeekV3
+            RoutingMethodType.Renormalize,  # Qwen3 MoE
+        ]
+    elif (weight_key, activation_key) == (kFp8StaticTensorSym, kFp8StaticTensorSym):
+        # NOTE(rob): kernel requires Llama4.
+        return routing_method == RoutingMethodType.Llama4
+
+    else:
+        raise ValueError("Unsupported quantization scheme.")
+
+
+def _supports_parallel_config(moe_parallel_config: FusedMoEParallelConfig) -> bool:
+    """Supports TRTLLM Kernel does not support EPLB."""
+    return not moe_parallel_config.enable_eplb
 
 
 def is_supported_config_trtllm(
@@ -85,8 +105,12 @@ def is_supported_config_trtllm(
         return False, _make_reason(f"{moe_config.activation} activation")
     elif not _supports_quant_scheme(weight_key, activation_key):
         return False, _make_reason("quantization scheme")
-    elif not _supports_moe_parallel_config(moe_config.moe_parallel_config):
+    elif not _supports_parallel_config(moe_config.moe_parallel_config):
         return False, _make_reason("parallel config")
+    elif not _supports_routing_method(
+        weight_key, activation_key, moe_config.routing_method
+    ):
+        return False, _make_reason("routing method")
     elif activation_format != mk.FusedMoEActivationFormat.Standard:
         return False, _make_reason("activation format")
 

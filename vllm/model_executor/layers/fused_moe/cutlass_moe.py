@@ -297,7 +297,7 @@ class CutlassExpertsFp8Base(mk.FusedMoEPermuteExpertsUnpermute):
 
     @staticmethod
     def _supports_activation(activation: str) -> bool:
-        return activation in ["silu"]
+        return activation in ["silu", "gelu", "swigluoai"]
 
     def finalize_weight_and_reduce_impl(self) -> mk.TopKWeightAndReduce:
         # Let PrepareAndFinalize::finalize() decide the impl.
@@ -378,7 +378,7 @@ class CutlassExpertsFp8(CutlassExpertsFp8Base):
         return True
 
     def supports_expert_map(self) -> bool:
-        return True
+        return False
 
     def finalize_weight_and_reduce_impl(self) -> mk.TopKWeightAndReduce:
         # topk weights and reduction are fused in moe_unpermute cuda kernel
@@ -651,7 +651,7 @@ class CutlassExpertsFp4(mk.FusedMoEPermuteExpertsUnpermute):
 
     @staticmethod
     def _supports_activation(activation: str) -> bool:
-        return activation in ["silu"]
+        return activation in ["silu", "gelu", "swigluoai"]
 
     @staticmethod
     def _supports_parallel_config(moe_parallel_config: FusedMoEParallelConfig) -> bool:

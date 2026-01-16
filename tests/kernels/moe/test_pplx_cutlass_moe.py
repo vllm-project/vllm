@@ -11,6 +11,7 @@ from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
     FusedMoEParallelConfig,
+    RoutingMethodType,
     fp8_w8a8_moe_quant_config,
 )
 from vllm.model_executor.layers.fused_moe.cutlass_moe import CutlassBatchedExpertsFp8
@@ -150,6 +151,7 @@ def pplx_cutlass_moe(
             activation="silu",
             in_dtype=torch.bfloat16,
             device="cuda",
+            routing_method=RoutingMethodType.Llama4,
         )
 
     experts = CutlassBatchedExpertsFp8.make_batched_experts(

@@ -12,6 +12,7 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
     FusedMoEParallelConfig,
     FusedMoEQuantConfig,
+    RoutingMethodType,
 )
 from vllm.model_executor.layers.fused_moe.fused_batched_moe import (
     BatchedPrepareAndFinalize,
@@ -39,6 +40,7 @@ def make_dummy_moe_config() -> FusedMoEConfig:
         activation="silu",
         in_dtype=torch.bfloat16,
         device="cuda",
+        routing_method=RoutingMethodType.TopK,
     )
 
 

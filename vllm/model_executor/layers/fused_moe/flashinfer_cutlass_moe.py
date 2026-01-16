@@ -93,14 +93,16 @@ class FlashInferExperts(mk.FusedMoEPermuteExpertsUnpermute):
     def _supports_current_device() -> bool:
         return (
             current_platform.is_cuda()
-            # Is this right? Or 9.0+10.0 only?
-            and current_platform.has_device_capability((9, 0))
+            and (
+                current_platform.is_device_capability((9, 0))
+                or current_platform.is_device_capability_family((10, 0))
+            )
             and has_flashinfer_cutlass_fused_moe()
         )
 
     @staticmethod
     def _supports_no_act_and_mul() -> bool:
-        return False
+        return True
 
     @staticmethod
     def _supports_quant_scheme(
