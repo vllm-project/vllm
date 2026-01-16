@@ -18,7 +18,7 @@ from vllm.v1.kv_offload.worker.worker import TransferSpec
 from vllm.v1.outputs import KVConnectorOutput
 from vllm.v1.request import Request
 
-from .metadata import ReqId, WeaveConnectorMetadata
+from .metadata import ReqId, RequestPhase, WeaveConnectorMetadata
 from .policy import WeavePolicy
 
 logger = init_logger(__name__)
@@ -51,6 +51,27 @@ class WeaveConnectorScheduler:
         # request ID -> set(block hashes being stored/load)
         self._reqs_being_stored = defaultdict[ReqId, set[BlockHash]](set)
         self._reqs_being_loaded = defaultdict[ReqId, set[BlockHash]](set)
+
+        self._request_phases: dict[ReqId, RequestPhase] = {}
+
+    def _refresh_request_phases(self) -> None:
+        for req_id, req in self._requests.items():
+            new_phase = (
+                RequestPhase.PREFILL
+                if req.num_computed_tokens < req.num_prompt_tokens
+                else RequestPhase.DECODE
+            )
+            old_phase = self._request_phases.get(req_id)
+            if old_phase is not None and old_phase != new_phase:
+                logger.debug(
+                    "Request %s phase %s -> %s (num_computed_tokens=%d, num_prompt_tokens=%d)",
+                    req_id,
+                    old_phase,
+                    new_phase,
+                    req.num_computed_tokens,
+                    req.num_prompt_tokens,
+                )
+            self._request_phases[req_id] = new_phase
 
     def _get_block_hashes(
         self,
@@ -121,6 +142,7 @@ class WeaveConnectorScheduler:
         self, request: Request, blocks: KVCacheBlocks, num_external_tokens: int
     ):
         self._requests[request.request_id] = request
+        self._request_phases[request.request_id] = RequestPhase.PREFILL
         # the block ids are updated in _get_reqs_to_store
         self._request_block_ids[request.request_id] = []
 
@@ -162,6 +184,23 @@ class WeaveConnectorScheduler:
     def build_connector_meta(
         self, scheduler_output: SchedulerOutput
     ) -> WeaveConnectorMetadata:
+        self._refresh_request_phases()
+        num_prefill = 0
+        num_decode = 0
+        for req_id in scheduler_output.num_scheduled_tokens:
+            phase = self._request_phases.get(req_id)
+            if phase == RequestPhase.DECODE:
+                num_decode += 1
+            else:
+                num_prefill += 1
+        if scheduler_output.num_scheduled_tokens:
+            logger.debug(
+                "Weave request phase stats: prefill=%d decode=%d total=%d",
+                num_prefill,
+                num_decode,
+                num_prefill + num_decode,
+            )
+
         meta = WeaveConnectorMetadata(
             reqs_to_load=self._reqs_to_load,
             reqs_to_store=self.policy.get_reqs_to_store(
@@ -171,6 +210,7 @@ class WeaveConnectorScheduler:
                 next_stored_block_idx=self._next_stored_block_idx,
                 reqs_being_stored=self._reqs_being_stored,
                 get_block_hashes=self._get_block_hashes,
+                request_phases=self._request_phases,
             ),
         )
         self._reqs_to_load = {}
@@ -220,6 +260,7 @@ class WeaveConnectorScheduler:
         """
         req_id = request.request_id
         self._requests.pop(req_id, None)
+        self._request_phases.pop(req_id, None)
         self._request_block_ids.pop(req_id, None)
         self._next_stored_block_idx.pop(req_id, None)
 

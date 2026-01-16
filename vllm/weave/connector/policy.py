@@ -14,7 +14,7 @@ from vllm.v1.kv_offload.mediums import GPULoadStoreSpec
 from vllm.v1.kv_offload.worker.worker import TransferSpec
 from vllm.v1.request import Request
 
-from .metadata import ReqId
+from .metadata import ReqId, RequestPhase
 
 logger = init_logger(__name__)
 
@@ -51,6 +51,7 @@ class WeavePolicy:
         next_stored_block_idx: dict[ReqId, int],
         reqs_being_stored: dict[ReqId, set[BlockHash]],
         get_block_hashes: Callable[[Request, int, int | None], Iterable[BlockHash]],
+        request_phases: dict[ReqId, RequestPhase],
     ) -> dict[ReqId, TransferSpec]: # 本轮step需要的store的计划集合
         reqs_to_store: dict[ReqId, TransferSpec] = {}
 
@@ -65,6 +66,7 @@ class WeavePolicy:
 
             block_ids = request_block_ids[req_id]
             req = requests[req_id]
+            _ = request_phases.get(req_id)
 
             new_tokens = scheduler_output.num_scheduled_tokens[req_id]
             total_tokens = req.num_computed_tokens + new_tokens
