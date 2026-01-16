@@ -539,14 +539,14 @@ class T5Gemma2EncoderLayer(nn.Module):
         residual = hidden_states
         hidden_states = self.pre_self_attn_layernorm(hidden_states)
         hidden_states = self.self_attn(hidden_states=hidden_states)
-        hidden_states = self.post_self_attn_layernorm(hidden_states)
         hidden_states = residual + hidden_states
+        hidden_states = self.post_self_attn_layernorm(hidden_states)
 
         residual = hidden_states
         hidden_states = self.pre_feedforward_layernorm(hidden_states)
         hidden_states = self.mlp(hidden_states)
-        hidden_states = self.post_feedforward_layernorm(hidden_states)
         hidden_states = residual + hidden_states
+        hidden_states = self.post_feedforward_layernorm(hidden_states)
         return hidden_states
 
 
