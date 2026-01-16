@@ -16,10 +16,10 @@ from .llama3_rope import Llama3RotaryEmbedding
 from .llama4_vision_rope import Llama4VisionRotaryEmbedding
 from .mrope import MRotaryEmbedding
 from .ntk_scaling_rope import NTKScalingRotaryEmbedding
+from .openpangu_rope import MRotaryEmbeddingInterleaved
 from .phi3_long_rope_scaled_rope import Phi3LongRoPEScaledRotaryEmbedding
 from .xdrope import XDRotaryEmbedding
 from .yarn_scaling_rope import YaRNScalingRotaryEmbedding
-from .openpangu_rope import MRotaryEmbeddingInterleaved
 
 _ROPE_DICT: dict[tuple, RotaryEmbedding] = {}
 
