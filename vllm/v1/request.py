@@ -37,7 +37,6 @@ class StreamingUpdate:
     with new input data.
     """
 
-    resumable: bool
     mm_features: list[MultiModalFeatureSpec] | None
     prompt_token_ids: list[int] | None
     prompt_embeds: torch.Tensor | None
@@ -46,9 +45,10 @@ class StreamingUpdate:
     sampling_params: SamplingParams | None
 
     @classmethod
-    def from_request(cls, request: "Request") -> "StreamingUpdate":
+    def from_request(cls, request: "Request") -> "StreamingUpdate | None":
+        if not request.resumable:
+            return None
         return cls(
-            resumable=request.resumable,
             mm_features=request.mm_features,
             prompt_token_ids=request.prompt_token_ids,
             prompt_embeds=request.prompt_embeds,
@@ -116,6 +116,9 @@ class Request:
 
         self.prompt_token_ids = prompt_token_ids
         self.prompt_embeds = prompt_embeds
+        self.num_prompt_tokens = length_from_prompt_token_ids_or_embeds(
+            prompt_token_ids, prompt_embeds
+        )
         self._output_token_ids: list[int] = []
         self._all_token_ids: list[int] = (
             self.prompt_token_ids.copy()
@@ -166,9 +169,8 @@ class Request:
 
         # Used for streaming
         self.resumable = resumable
-        self.streaming_queue: deque[StreamingUpdate] | None = (
-            deque() if resumable else None
-        )
+        # None entry in the queue means finished.
+        self.streaming_queue: deque[StreamingUpdate | None] | None = None
 
     @classmethod
     def from_engine_core_request(
@@ -191,7 +193,6 @@ class Request:
             priority=request.priority,
             trace_headers=request.trace_headers,
             block_hasher=block_hasher,
-            resumable=request.resumable,
         )
 
     def append_output_token_ids(
@@ -223,12 +224,6 @@ class Request:
     @property
     def num_output_tokens(self) -> int:
         return len(self._output_token_ids)
-
-    @property
-    def num_prompt_tokens(self) -> int:
-        return length_from_prompt_token_ids_or_embeds(
-            self.prompt_token_ids, self.prompt_embeds
-        )
 
     @property
     def num_encoder_inputs(self) -> int:

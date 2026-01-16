@@ -1142,6 +1142,9 @@ class GPUModelRunner(
         req_state.pooling_params = new_req_data.pooling_params
         req_state.block_ids = new_req_data.block_ids
         req_state.num_computed_tokens = new_req_data.num_computed_tokens
+        req_state.num_prompt_tokens = length_from_prompt_token_ids_or_embeds(
+            req_state.prompt_token_ids, req_state.prompt_embeds
+        )
 
         # Clear `output_token_ids` as previous output tokens are now part of
         # `prompt_token_ids`.
