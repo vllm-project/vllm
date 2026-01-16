@@ -54,7 +54,7 @@ from vllm.model_executor.models.deepseek_v2 import (
     DeepseekV2MLAAttention,
     DeepseekV2MoE,
 )
-from vllm.model_executor.models.glm4_moe import Glm4MixtureOfExperts
+from vllm.model_executor.models.glm4_moe import Glm4MixtureOfExperts, Glm4MoeMLP
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 
@@ -69,6 +69,10 @@ from .utils import (
 )
 
 logger = init_logger(__name__)
+
+
+class Glm4MoeLiteMLP(Glm4MoeMLP):
+    pass
 
 
 class Glm4MoeLite(DeepseekV2MoE):
@@ -297,6 +301,7 @@ class Glm4MoeLiteModel(nn.Module):
         # Params for weights, fp8 weight scales, fp8 activation scales
         # (param_name, weight_name, expert_id, shard_id)
         return SharedFusedMoE.make_expert_params_mapping(
+            self,
             ckpt_gate_proj_name="gate_proj",
             ckpt_down_proj_name="down_proj",
             ckpt_up_proj_name="up_proj",
@@ -322,6 +327,7 @@ class Glm4MoeLiteModel(nn.Module):
         # Params for weights, fp8 weight scales, fp8 activation scales
         # (param_name, weight_name, expert_id, shard_id)
         expert_params_mapping = SharedFusedMoE.make_expert_params_mapping(
+            self,
             ckpt_gate_proj_name="gate_proj",
             ckpt_down_proj_name="down_proj",
             ckpt_up_proj_name="up_proj",
