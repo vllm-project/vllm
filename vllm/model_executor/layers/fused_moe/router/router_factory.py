@@ -167,6 +167,7 @@ def create_fused_moe_router(
         global_num_experts=global_num_experts,
         eplb_state=eplb_state,
         renormalize=renormalize,
+        scoring_func=scoring_func,
         enable_eplb=enable_eplb,
         indices_type_getter=indices_type_getter,
     )

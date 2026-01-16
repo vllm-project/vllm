@@ -77,10 +77,12 @@ class FusedTopKRouter(BaseRouter):
         top_k: int,
         global_num_experts: int,
         eplb_state: EplbLayerState,
+        scoring_func: str = "softmax",
         renormalize: bool = True,
         enable_eplb: bool = False,
         indices_type_getter: Callable[[], torch.dtype | None] | None = None,
     ):
+        assert scoring_func == "softmax", "FusedTopKRouter only supports softmax."
         super().__init__(
             top_k=top_k,
             global_num_experts=global_num_experts,
