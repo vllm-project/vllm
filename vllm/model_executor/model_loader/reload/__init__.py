@@ -7,28 +7,33 @@ This module provides functionality to reload model weights layer-by-layer,
 which is useful for weight updates without full model reconstruction.
 
 Limitations:
-    - Does not compose with CPU offloading. This is because `device_loading_context`
-      doesn't work in all cases (e.g., when parameter is renamed).
-    - Does not handle layers where only some weight elements are loaded, but some
-      weights aren't. For example, only loading q_scale, but not k_scale or v_scale
-    - Unties weights during loading, but not on cuda graph
+    - Composition with CPU offloading has not been implemented
+    - Cannot handle layers where only some weight elements are loaded, but some
+      weights aren't (for example, only loading up_proj, but not gate_proj)
+    - Reloading Attention/MLA weights (q_scale, k_scale, v_scale) has not been
+      implemented
+    - Tied weights will remain tied, but will only reflect processing from one of the
+      parent modules (for example, only processing from lm_head will have an effect)
 
-TODO:
+TODO(@ksayers):
     - Decide on reloading interface, back-compat with reload_weights
-    - Do Attention/MLA processing
     - Check composability with EPLB
 """
 
 __all__ = [
-    "supports_reloading",
     "finalize_layerwise_restore_and_process",
     "layerwise_restore_and_process",
     "record_metadata_for_reloading",
+    "set_torchao_reload_attrs",
+    "support_quantized_model_reload_from_hp_weights",
 ]
 
-from .decorator import supports_reloading
 from .layerwise import (
     finalize_layerwise_restore_and_process,
     layerwise_restore_and_process,
     record_metadata_for_reloading,
+)
+from .torchao_decorator import (
+    set_torchao_reload_attrs,
+    support_quantized_model_reload_from_hp_weights,
 )

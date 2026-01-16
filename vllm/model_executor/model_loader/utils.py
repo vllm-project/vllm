@@ -19,6 +19,9 @@ from vllm.model_executor.layers.quantization.base_config import (
     QuantizeMethodBase,
 )
 from vllm.model_executor.model_loader.reload import record_metadata_for_reloading
+from vllm.model_executor.model_loader.reload.torchao_decorator import (
+    set_torchao_reload_attrs,
+)
 from vllm.model_executor.models.interfaces import SupportsQuant
 from vllm.utils.platform_utils import is_pin_memory_available
 
@@ -107,6 +110,11 @@ def process_weights_after_loading(
             # TODO(lucas): see if there is a way to unify the signatures
             # of process_weights_after_loading
             module.process_weights_after_loading(model_config.dtype)
+
+    # Needed for torchao model reloading via model.reload_weights
+    # @ksayers @jerryzh168 this can be removed if callers move to `reload_weights`
+    if model_config.quantization == "torchao":
+        set_torchao_reload_attrs(model)
 
 
 @contextmanager

@@ -121,11 +121,10 @@ def finalize_layerwise_restore_and_process(layer: torch.nn.Module) -> None:
     """
     Remove the outermost layer of weight loading wrappers.
 
-    This function should be called after `layerwise_restore_and_process` to
-    unwrap the layerwise weight loaders and restore original functionality.
+    This function should be applied after `layerwise_restore_and_process` is applied
+    unwrap the layerwise weight loaders.
 
-    Also handles cleanup for modules (like Attention) that have kernel tensors
-    but don't load module tensors (e.g., when model is not quantized).
+    Also processes Attention/MLA layers, which must be processed after all other layers
     """
     for param in get_layer_tensors(layer).values():
         if hasattr(param, "weight_loader"):
@@ -201,6 +200,7 @@ def _finalize_process_layer(
 
 
 def _unwrap_loader(loader: Callable) -> Callable:
+    """Return the weight loader with any layerwise wrappers removed"""
     while loader.__name__ == "restore_and_process_loader":
         loader = loader.__wrapped__  # type: ignore[attr-defined]
 
