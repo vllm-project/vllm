@@ -51,9 +51,9 @@ class EmbeddingCompletionRequest(PoolingBasicRequestMixin, CompletionRequestMixi
 
     def to_pooling_params(self):
         return PoolingParams(
-            truncate_prompt_tokens=self.truncate_prompt_tokens,
+            dimensions=self.dimensions,
             use_activation=self.normalize,
-            normalize=self.normalize,
+            truncate_prompt_tokens=self.truncate_prompt_tokens
         )
 
 
