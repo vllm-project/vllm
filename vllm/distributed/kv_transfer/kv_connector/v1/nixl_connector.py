@@ -30,6 +30,7 @@ from vllm.distributed.kv_transfer.kv_connector.utils import (
     kv_postprocess_blksize_and_layout_on_receive,
     kv_postprocess_blksize_on_receive,
     kv_postprocess_layout_on_receive,
+    reserve_numa_cores_for_kv_start_load,
     yield_req_data,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
@@ -896,52 +897,7 @@ class NixlConnectorWorker:
             self.use_host_buffer = self.kv_buffer_device == "cpu"
 
         if self.device_type == "cpu":
-            """
-            Discover NUMA topology and keep the last physical core of each numa
-            into one core group list for nixl start_kv_load()
-            """
-            SYS_NODE = "/sys/devices/system/node"
-            SYS_CPU = "/sys/devices/system/cpu"
-
-            self.core_rsv_for_kv = []
-            for node in os.listdir(SYS_NODE):
-                if not node.startswith("node") or not node[4:].isdigit():
-                    continue
-                node_path = f"{SYS_NODE}/{node}"
-
-                seen_phys = set()
-                for cpu in os.listdir(node_path):
-                    if not cpu.startswith("cpu") or not cpu[3:].isdigit():
-                        continue
-
-                    cpu_id = int(cpu[3:])
-                    # thread_siblings based on cpu_id
-                    path = f"{SYS_CPU}/cpu{cpu_id}/topology/thread_siblings_list"
-
-                    if os.path.exists(path):
-                        try:
-                            with open(path) as f:
-                                s = f.read()
-                            cpus: list[int] = []
-                            for part in s.strip().split(","):
-                                if "-" in part:
-                                    a, b = map(int, part.split("-"))
-                                    cpus.extend(range(a, b + 1))
-                                else:
-                                    cpus.append(int(part))
-                            siblings = cpus if cpus else [cpu_id]
-                        except (OSError, ValueError):
-                            siblings = [cpu_id]
-                    else:
-                        siblings = [cpu_id]
-
-                    phys = min(siblings)
-
-                    if phys not in seen_phys:
-                        seen_phys.add(phys)
-
-                if len(seen_phys) > 0:
-                    self.core_rsv_for_kv.append(max(seen_phys))
+            self.flag_for_cpu_core_binding = 0
 
         # support for oot platform which can't register nixl memory
         # type based on kv_buffer_device
@@ -2102,8 +2058,13 @@ class NixlConnectorWorker:
         Start loading by triggering non-blocking nixl_xfer.
         We check for these trnxs to complete in each step().
         """
-        if self.device_type == "cpu" and self.core_rsv_for_kv:
-            os.sched_setaffinity(0, self.core_rsv_for_kv)
+        # use the different numa cores from model_forward() for start_load_kv()
+        if self.device_type == "cpu" and self.flag_for_cpu_core_binding == 0:
+            self.flag_for_cpu_core_binding = 1
+
+            rsv_cores_for_kv = reserve_numa_cores_for_kv_start_load()
+            if rsv_cores_for_kv:
+                os.sched_setaffinity(0, rsv_cores_for_kv)
 
         for req_id, meta in metadata.reqs_to_recv.items():
             meta.local_physical_block_ids = self._logical_to_kernel_block_ids(
