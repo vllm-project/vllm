@@ -26,9 +26,9 @@ import torch.nn as nn
 import torch.nn.functional as F
 from transformers import T5Gemma2Config
 
-from vllm.attention.backends.abstract import AttentionType
+from vllm.v1.attention.backend import AttentionBackend, AttentionMetadata, AttentionType
 from vllm.attention.layer import Attention
-from vllm.attention.layers.mm_encoder_attention import MMEncoderAttention
+
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
@@ -288,11 +288,12 @@ class T5Gemma2Attention(nn.Module):
 
         # Use MMEncoderAttention for encoder (no KV cache), Attention for decoder
         if is_encoder:
-            self.attn = MMEncoderAttention(
+            self.attn = Attention(
                 self.num_heads,
                 self.head_dim,
                 self.head_dim**-0.5,
                 num_kv_heads=self.num_kv_heads,
+                prefix=prefix,
             )
         else:
             self.attn = Attention(
