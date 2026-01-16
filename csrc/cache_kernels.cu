@@ -331,6 +331,111 @@ __global__ void concat_and_cache_mla_kernel(
   copy(k_pe, kv_cache, k_pe_stride, block_stride, pe_dim, kv_lora_rank);
 }
 
+#ifndef USE_ROCM
+template <typename scalar_t>
+__global__ void concat_and_cache_mla_nvfp4_kernel(
+    const scalar_t* __restrict__ kv_c,  // [num_tokens, kv_lora_rank]
+    const scalar_t* __restrict__ k_pe,  // [num_tokens, pe_dim]
+    uint8_t* __restrict__ kv_cache,  // [num_blocks, block_size, cache_stride]
+    const int64_t* __restrict__ slot_mapping,  // [num_tokens]
+    const int block_stride,                    //
+    const int entry_stride,                    //
+    const int kv_c_stride,                     //
+    const int k_pe_stride,                     //
+    const int kv_lora_rank,                    //
+    const int pe_dim,                          //
+    const int block_size                       //
+) {
+  constexpr int NVFP4_BLOCK_SIZE = 16;
+  const int64_t token_idx = blockIdx.x;
+  const int64_t slot_idx = slot_mapping[token_idx];
+  // NOTE: slot_idx can be -1 if the token is padded
+  if (slot_idx < 0) {
+    return;
+  }
+  const int64_t block_idx = slot_idx / block_size;
+  const int64_t block_offset = slot_idx % block_size;
+  const int head_dim = kv_lora_rank + pe_dim;
+  const int num_blocks = head_dim / NVFP4_BLOCK_SIZE;
+  const int64_t token_base_offset =
+      block_idx * block_stride + block_offset * entry_stride;
+  uint8_t* token_ptr = kv_cache + token_base_offset;
+
+  const int packed_data_size = head_dim / 2;
+  float* scale_ptr = reinterpret_cast<float*>(token_ptr + packed_data_size);
+
+  for (int block_id = threadIdx.x; block_id < num_blocks;
+       block_id += blockDim.x) {
+    const int block_start_idx = block_id * NVFP4_BLOCK_SIZE;
+
+    float values[NVFP4_BLOCK_SIZE];
+    float amax = 0.0f;
+  #pragma unroll
+    for (int i = 0; i < NVFP4_BLOCK_SIZE; i++) {
+      const int elem_idx = block_start_idx + i;
+      float val = 0.0f;
+      if (elem_idx < kv_lora_rank) {
+        const int64_t src_idx = token_idx * kv_c_stride + elem_idx;
+        if constexpr (std::is_same_v<scalar_t, half>) {
+          val = __half2float(kv_c[src_idx]);
+        } else if constexpr (std::is_same_v<scalar_t, __nv_bfloat16>) {
+          val = __bfloat162float(kv_c[src_idx]);
+        } else {
+          val = float(kv_c[src_idx]);
+        }
+      } else {
+        const int64_t src_idx =
+            token_idx * k_pe_stride + (elem_idx - kv_lora_rank);
+        if constexpr (std::is_same_v<scalar_t, half>) {
+          val = __half2float(k_pe[src_idx]);
+        } else if constexpr (std::is_same_v<scalar_t, __nv_bfloat16>) {
+          val = __bfloat162float(k_pe[src_idx]);
+        } else {
+          val = float(k_pe[src_idx]);
+        }
+      }
+      values[i] = val;
+      amax = fmaxf(amax, fabsf(val));
+    }
+
+    constexpr float E2M1_MAX = 6.0f;
+    float block_scale = amax * (1.0f / E2M1_MAX);
+    block_scale = fmaxf(block_scale, FLT_MIN);
+
+    __nv_fp8_e4m3 fp8_scale = __nv_fp8_e4m3(block_scale);
+    float quantized_scale = float(fp8_scale);
+    float output_scale =
+        (quantized_scale != 0.0f) ? (1.0f / quantized_scale) : 0.0f;
+
+    float scaled_values[NVFP4_BLOCK_SIZE];
+  #pragma unroll
+    for (int i = 0; i < NVFP4_BLOCK_SIZE; i++) {
+      float scaled = values[i] * output_scale;
+      scaled = fmaxf(-6.0f, fminf(6.0f, scaled));
+      scaled_values[i] = scaled;
+    }
+
+    float2 vec1[4];
+    float2 vec2[4];
+  #pragma unroll
+    for (int i = 0; i < 4; i++) {
+      vec1[i] = make_float2(scaled_values[i * 2], scaled_values[i * 2 + 1]);
+      vec2[i] =
+          make_float2(scaled_values[8 + i * 2], scaled_values[8 + i * 2 + 1]);
+    }
+
+    const uint32_t packed1 = vllm::fp32_vec_to_e2m1(vec1);
+    const uint32_t packed2 = vllm::fp32_vec_to_e2m1(vec2);
+    const int packed_offset = block_start_idx / 2;
+
+    *reinterpret_cast<uint32_t*>(token_ptr + packed_offset) = packed1;
+    *reinterpret_cast<uint32_t*>(token_ptr + packed_offset + 4) = packed2;
+
+    scale_ptr[block_id] = quantized_scale;
+  }
+}
+#endif  // USE_ROCM
+
 template <typename scalar_t, typename cache_t, Fp8KVCacheDataType kv_dt>
 __global__ void concat_and_cache_ds_mla_kernel(
     const scalar_t* __restrict__ kv_c,  // [num_tokens, kv_lora_rank]
@@ -858,6 +963,7 @@ void concat_and_cache_mla(
   int num_tokens = slot_mapping.size(0);
   int kv_lora_rank = kv_c.size(1);
   int pe_dim = k_pe.size(1);
+  int head_dim = kv_lora_rank + pe_dim;
   int block_size = kv_cache.size(1);
 
   if (kv_cache_dtype == "fp8_ds_mla") {
@@ -869,8 +975,17 @@ void concat_and_cache_mla(
                 "kv_c.itemsize() must be 2 for fp8_ds_mla");
     TORCH_CHECK(k_pe.itemsize() == 2,
                 "k_pe.itemsize() must be 2 for fp8_ds_mla");
+  } else if (kv_cache_dtype == "nvfp4") {
+    TORCH_CHECK(head_dim % 16 == 0,
+                "head_dim must be divisible by 16 for nvfp4");
+    const int packed_data_size = head_dim / 2;
+    const int scale_size = (head_dim / 16) * 4;
+    TORCH_CHECK(kv_cache.size(2) == packed_data_size + scale_size,
+                "kv_cache.size(2) must match packed nvfp4 layout");
+    TORCH_CHECK(kv_cache.scalar_type() == at::ScalarType::Byte,
+                "kv_cache must be uint8 for nvfp4");
   } else {
-    TORCH_CHECK(kv_cache.size(2) == kv_lora_rank + pe_dim);
+    TORCH_CHECK(kv_cache.size(2) == head_dim);
   }
 
   int kv_c_stride = kv_c.stride(0);
@@ -891,6 +1006,41 @@ void concat_and_cache_mla(
     dim3 block(96);
     DISPATCH_BY_KV_CACHE_DTYPE(kv_c.dtype(), kv_cache_dtype,
                                CALL_CONCAT_AND_CACHE_DS_MLA);
+  } else if (kv_cache_dtype == "nvfp4") {
+#ifdef USE_ROCM
+    TORCH_CHECK(false, "nvfp4 kv cache is not supported on ROCm");
+#else
+    dim3 grid(num_tokens);
+    const int nvfp4_blocks = head_dim / 16;
+    const int threads = std::min(std::max(nvfp4_blocks, 1), 256);
+    dim3 block(threads);
+    if (kv_c.dtype() == torch::kFloat32) {
+      vllm::concat_and_cache_mla_nvfp4_kernel<float>
+          <<<grid, block, 0, stream>>>(
+              kv_c.data_ptr<float>(), k_pe.data_ptr<float>(),
+              kv_cache.data_ptr<uint8_t>(), slot_mapping.data_ptr<int64_t>(),
+              block_stride, entry_stride, kv_c_stride, k_pe_stride,
+              kv_lora_rank, pe_dim, block_size);
+    } else if (kv_c.dtype() == torch::kFloat16) {
+      vllm::concat_and_cache_mla_nvfp4_kernel<half><<<grid, block, 0, stream>>>(
+          reinterpret_cast<half*>(kv_c.data_ptr()),
+          reinterpret_cast<half*>(k_pe.data_ptr()),
+          kv_cache.data_ptr<uint8_t>(), slot_mapping.data_ptr<int64_t>(),
+          block_stride, entry_stride, kv_c_stride, k_pe_stride, kv_lora_rank,
+          pe_dim, block_size);
+    } else if (kv_c.dtype() == torch::kBFloat16) {
+      vllm::concat_and_cache_mla_nvfp4_kernel<__nv_bfloat16>
+          <<<grid, block, 0, stream>>>(
+              reinterpret_cast<__nv_bfloat16*>(kv_c.data_ptr()),
+              reinterpret_cast<__nv_bfloat16*>(k_pe.data_ptr()),
+              kv_cache.data_ptr<uint8_t>(), slot_mapping.data_ptr<int64_t>(),
+              block_stride, entry_stride, kv_c_stride, k_pe_stride,
+              kv_lora_rank, pe_dim, block_size);
+    } else {
+      TORCH_CHECK(false,
+                  "Unsupported input dtype for nvfp4 kv cache: ", kv_c.dtype());
+    }
+#endif
   } else {
     dim3 grid(num_tokens);
     dim3 block(std::min(kv_lora_rank, 512));
