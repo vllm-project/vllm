@@ -14,7 +14,7 @@ from vllm.entrypoints.openai.engine.protocol import (
     UsageInfo,
 )
 from vllm.entrypoints.openai.engine.serving import OpenAIServing
-from vllm.entrypoints.openai.serving_models import OpenAIServingModels
+from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.entrypoints.pooling.score.protocol import (
     RerankDocument,
     RerankRequest,
@@ -25,7 +25,7 @@ from vllm.entrypoints.pooling.score.protocol import (
     ScoreResponse,
     ScoreResponseData,
 )
-from vllm.entrypoints.score_utils import (
+from vllm.entrypoints.pooling.score.utils import (
     ScoreContentPartParam,
     ScoreMultiModalParam,
     _cosine_similarity,
