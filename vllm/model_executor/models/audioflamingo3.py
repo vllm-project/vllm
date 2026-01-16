@@ -47,13 +47,13 @@ from vllm.multimodal.parse import (
     MultiModalDataParser,
 )
 from vllm.multimodal.processing import (
+    BaseDummyInputsBuilder,
     BaseMultiModalProcessor,
     BaseProcessingInfo,
     PromptReplacement,
     PromptUpdate,
     PromptUpdateDetails,
 )
-from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from vllm.sequence import IntermediateTensors
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
@@ -111,7 +111,7 @@ class AudioFlamingo3EmbeddingInputs(TensorSchema):
 
     audio_embeds: Annotated[
         list[torch.Tensor],
-        TensorShape("bn", "naf", "hs"),
+        TensorShape("bn", "naf", "hs", dynamic_dims={"naf"}),
     ]
 
 

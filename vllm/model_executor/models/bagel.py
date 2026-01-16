@@ -30,11 +30,11 @@ from vllm.multimodal.inputs import (
 )
 from vllm.multimodal.parse import MultiModalDataItems
 from vllm.multimodal.processing import (
+    BaseDummyInputsBuilder,
     BaseMultiModalProcessor,
     BaseProcessingInfo,
     PromptReplacement,
 )
-from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.processors.bagel import BagelProcessor
 from vllm.utils.tensor_schema import TensorSchema
@@ -346,6 +346,13 @@ class BagelForConditionalGeneration(
         }
     )
 
+    @classmethod
+    def get_placeholder_str(cls, modality: str, i: int) -> str | None:
+        if modality.startswith("image"):
+            return "<|image_pad|>"
+
+        raise ValueError("Only image modality is supported")
+
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
 
@@ -487,7 +494,7 @@ class BagelForConditionalGeneration(
         # Split by image
         return tuple(vision_embeds)
 
-    def get_multimodal_embeddings(self, **kwargs: object) -> MultiModalEmbeddings:
+    def embed_multimodal(self, **kwargs: object) -> MultiModalEmbeddings:
         """Get multimodal embeddings from input."""
         image_input = self._parse_and_validate_image_input(**kwargs)
         if image_input is None:

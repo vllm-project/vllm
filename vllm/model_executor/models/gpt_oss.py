@@ -8,7 +8,6 @@ import torch.distributed as dist
 from torch import nn
 from transformers import GptOssConfig
 
-from vllm.attention.backends.abstract import AttentionType
 from vllm.attention.layer import Attention
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
@@ -38,6 +37,7 @@ from vllm.model_executor.models.utils import sequence_parallel_chunk
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.utils.math_utils import cdiv
+from vllm.v1.attention.backend import AttentionType
 
 from .interfaces import SupportsEagle3, SupportsLoRA, SupportsPP
 from .utils import (
@@ -771,6 +771,7 @@ class GptOssModel(nn.Module):
         # Params for weights, fp8 weight scales, fp8 activation scales
         # (param_name, weight_name, expert_id, shard_id)
         return FusedMoE.make_expert_params_mapping(
+            self,
             ckpt_gate_proj_name="gate_proj",
             ckpt_down_proj_name="down_proj",
             ckpt_up_proj_name="up_proj",
@@ -1029,6 +1030,7 @@ class GptOssForCausalLM(nn.Module, SupportsPP, SupportsEagle3, SupportsLoRA):
         # Params for weights, weight scales, activation scales
         # (param_name, weight_name, expert_id, shard_id)
         return FusedMoE.make_expert_params_mapping(
+            self,
             ckpt_gate_proj_name="gate_proj",
             ckpt_down_proj_name="down_proj",
             ckpt_up_proj_name="up_proj",

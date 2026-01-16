@@ -32,13 +32,14 @@ import torch
 from torch import nn
 from transformers import ApertusConfig
 
-from vllm.attention.backends.abstract import AttentionType
 from vllm.attention.layer import Attention
-from vllm.attention.layers.encoder_only_attention import EncoderOnlyAttention
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.activation import XIELU
+from vllm.model_executor.layers.attention.encoder_only_attention import (
+    EncoderOnlyAttention,
+)
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
@@ -57,6 +58,7 @@ from vllm.model_executor.model_loader.weight_utils import (
     maybe_remap_kv_scale_name,
 )
 from vllm.sequence import IntermediateTensors
+from vllm.v1.attention.backend import AttentionType
 
 from .interfaces import SupportsLoRA, SupportsPP
 from .utils import (
