@@ -416,7 +416,7 @@ class TRTLLMPrefill:
 
     max_q_len: int
     """
-    The maximum query length *among prefill requests*. 
+    The maximum query length *among prefill requests*.
     """
 
     max_seq_len: int
@@ -1497,7 +1497,7 @@ class FlashInferImpl(AttentionImpl):
             else:
                 # decode_query may be non-contiguous
                 assert isinstance(attn_metadata.decode, TRTLLMDecode)
-                decode_query = decode_query.contiguous()
+                decode_query = decode_query.contiguous().reshape(decode_query.shape)
                 workspace_buffer = _get_trtllm_gen_workspace_buffer()
                 block_tables_decode = attn_metadata.decode.block_tables
                 seq_lens_decode = attn_metadata.decode.seq_lens
