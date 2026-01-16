@@ -52,7 +52,6 @@ __all__ = [
 def _supports_current_device() -> bool:
     """Supports only Blackwell-family GPUs."""
     p = current_platform
-    # Add check flashinfer trtllm is available
     return p.is_cuda() and p.is_device_capability_family(100)
 
 
@@ -75,6 +74,18 @@ def _supports_quant_scheme(
 def _supports_activation(activation: str) -> bool:
     """Supports silu activation only."""
     return activation in ["silu"]
+
+
+def _supports_routing_method(
+    routing_method: RoutingMethodType,
+) -> bool:
+    """Monolithic kernels need to express router support."""
+    # NOTE(rob): potentially allow others here. This is a conservative list.
+    return routing_method in [
+        RoutingMethodType.DeepSeekV3,
+        RoutingMethodType.Renormalize,
+        routing_method == RoutingMethodType.Llama4,
+    ]
 
 
 def _supports_parallel_config(moe_parallel_config: FusedMoEParallelConfig) -> bool:
@@ -105,6 +116,8 @@ def is_supported_config_trtllm(
         return False, _make_reason("quantization scheme")
     elif not _supports_parallel_config(moe_config.moe_parallel_config):
         return False, _make_reason("parallel config")
+    elif not _supports_routing_method(moe_config.routing_method):
+        return False, _make_reason("routing method")
     elif activation_format != mk.FusedMoEActivationFormat.Standard:
         return False, _make_reason("activation format")
 

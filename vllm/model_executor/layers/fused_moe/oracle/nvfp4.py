@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from enum import Enum
-from typing import TYPE_CHECKING
 
 import torch
 
@@ -32,9 +31,6 @@ from vllm.model_executor.layers.quantization.utils.marlin_utils_fp4 import (
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
 )
-
-if TYPE_CHECKING:
-    pass
 
 logger = init_logger(__name__)
 
