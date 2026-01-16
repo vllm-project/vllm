@@ -206,7 +206,7 @@ def test_tp2_attn_quant_async_tp(
         custom_ops=custom_ops_list,
         splitting_ops=splitting_ops,
         # Common
-        level=CompilationMode.VLLM_COMPILE,
+        mode=CompilationMode.VLLM_COMPILE,
         pass_config=PassConfig(
             fuse_attn_quant=True,
             eliminate_noops=True,
