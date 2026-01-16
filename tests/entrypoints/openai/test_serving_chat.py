@@ -743,7 +743,9 @@ async def test_serving_chat_mistral_token_ids_prompt_is_validated(monkeypatch_mo
     # rendering can return a list[int] (token IDs).
     import vllm.entrypoints.openai.engine.serving as engine_serving
 
-    monkeypatch_module.setattr(engine_serving, "MistralTokenizer", DummyMistralTokenizer)
+    monkeypatch_module.setattr(
+        engine_serving, "MistralTokenizer", DummyMistralTokenizer
+    )
 
     serving_chat = _build_serving_chat(mock_engine)
 
@@ -788,7 +790,9 @@ async def test_serving_chat_mistral_token_ids_prompt_too_long_is_rejected(
 
     import vllm.entrypoints.openai.engine.serving as engine_serving
 
-    monkeypatch_module.setattr(engine_serving, "MistralTokenizer", DummyMistralTokenizer)
+    monkeypatch_module.setattr(
+        engine_serving, "MistralTokenizer", DummyMistralTokenizer
+    )
 
     serving_chat = _build_serving_chat(mock_engine)
 
