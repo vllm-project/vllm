@@ -801,7 +801,7 @@ def get_pooling_config(
 
         logger.info("Found pooling configuration.")
 
-        config: dict[str, Any] = {"normalize": normalize}
+        config: dict[str, Any] = {"use_activation": normalize}
         for key, val in pooling_dict.items():
             if val is True:
                 pooling_type = parse_pooling_type(key)
