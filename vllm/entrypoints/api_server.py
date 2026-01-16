@@ -69,12 +69,21 @@ async def _generate(request_dict: dict, raw_request: Request) -> Response:
 
     # Streaming case
     async def stream_results() -> AsyncGenerator[bytes, None]:
-        async for request_output in results_generator:
-            prompt = request_output.prompt
-            assert prompt is not None
-            text_outputs = [prompt + output.text for output in request_output.outputs]
-            ret = {"text": text_outputs}
-            yield (json.dumps(ret) + "\n").encode("utf-8")
+        aborted = False
+        try:
+            async for request_output in results_generator:
+                prompt = request_output.prompt
+                assert prompt is not None
+                text_outputs = [prompt + output.text for output in request_output.outputs]
+                ret = {"text": text_outputs}
+                yield (json.dumps(ret) + "\n").encode("utf-8")
+        except asyncio.CancelledError:
+            aborted = True
+            raise
+        finally:
+            if aborted:
+                # Client disconnected, abort the request in the engine to free resources.
+                await engine.abort(request_id)
 
     if stream:
         return StreamingResponse(stream_results())
@@ -85,6 +94,8 @@ async def _generate(request_dict: dict, raw_request: Request) -> Response:
         async for request_output in results_generator:
             final_output = request_output
     except asyncio.CancelledError:
+        # Client disconnected, abort the request in the engine to free resources.
+        await engine.abort(request_id)
         return Response(status_code=499)
 
     assert final_output is not None
