@@ -7,9 +7,9 @@ import logging
 import os
 import sys
 import tempfile
+import uuid
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any, Literal
-import uuid
 
 if TYPE_CHECKING:
     VLLM_HOST_IP: str = ""
@@ -454,6 +454,27 @@ def get_vllm_port() -> int | None:
                 "check the warning in: https://docs.vllm.ai/en/stable/serving/env_vars.html"
             ) from None
         raise ValueError(f"VLLM_PORT '{port}' must be a valid integer") from err
+
+
+def get_env_or_set_default(
+    env_name: str,
+    default_factory: Callable[[], str],
+) -> Callable[[], str]:
+    """
+    Create a lambda that returns an environment variable value if set,
+    or generates and sets a default value using the provided factory function.
+    """
+
+    def _get_or_set_default() -> str:
+        value = os.getenv(env_name)
+        if value is not None:
+            return value
+
+        default_value = default_factory()
+        os.environ[env_name] = default_value
+        return default_value
+
+    return _get_or_set_default
 
 
 # The start-* and end* here are used by the documentation generator
@@ -1541,11 +1562,9 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Only effective when mm_config.mm_processor_cache_type == "shm".
     # Automatically generates a unique UUID-based name per process tree
     # if not explicitly set.
-    "VLLM_OBJECT_STORAGE_SHM_BUFFER_NAME": lambda: (
-        os.getenv("VLLM_OBJECT_STORAGE_SHM_BUFFER_NAME")
-        or (name := f"VLLM_OBJECT_STORAGE_SHM_BUFFER_{uuid.uuid4().hex}")
-        and not os.environ.__setitem__("VLLM_OBJECT_STORAGE_SHM_BUFFER_NAME", name)
-        and name
+    "VLLM_OBJECT_STORAGE_SHM_BUFFER_NAME": get_env_or_set_default(
+        "VLLM_OBJECT_STORAGE_SHM_BUFFER_NAME",
+        lambda: f"VLLM_OBJECT_STORAGE_SHM_BUFFER_{uuid.uuid4().hex}",
     ),
     # The size in MB of the buffers (NVL and RDMA) used by DeepEP
     "VLLM_DEEPEP_BUFFER_SIZE_MB": lambda: int(
