@@ -609,7 +609,6 @@ steps:
   timeout_in_minutes: 45
   gpu: h100
   num_gpus: 1
-  optional: true
   source_file_dependencies:
   - tools/install_deepgemm.sh
   - vllm/utils/deep_gemm.py

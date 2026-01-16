@@ -15,7 +15,6 @@ from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
 )
-from vllm.platforms import current_platform
 
 
 class TrtLlmGenExperts(mk.FusedMoEPermuteExpertsUnpermute):
@@ -35,32 +34,42 @@ class TrtLlmGenExperts(mk.FusedMoEPermuteExpertsUnpermute):
         self.max_capture_size = max_capture_size
 
     @staticmethod
-    def activation_format() -> mk.FusedMoEActivationFormat:
-        return mk.FusedMoEActivationFormat.Standard
-
-    @staticmethod
     def _supports_current_device() -> bool:
-        return current_platform.has_device_capability((10, 0))
+        raise NotImplementedError(
+            "TrtLlmGenExperts is not yet used by an Oracle. "
+            "This method should not be called."
+        )
 
     @staticmethod
     def _supports_no_act_and_mul() -> bool:
-        return False
+        raise NotImplementedError(
+            "TrtLlmGenExperts is not yet used by an Oracle. "
+            "This method should not be called."
+        )
 
     @staticmethod
     def _supports_quant_scheme(
         weight_key: QuantKey | None,
         activation_key: QuantKey | None,
     ) -> bool:
-        # return quant_scheme.is_mxfp4_w4a16 or quant_scheme.is_mxfp4_w4a8
-        return False
+        raise NotImplementedError(
+            "TrtLlmGenExperts is not yet used by an Oracle. "
+            "This method should not be called."
+        )
 
     @staticmethod
     def _supports_activation(activation: str) -> bool:
-        return activation in ["swigluoai"]
+        raise NotImplementedError(
+            "TrtLlmGenExperts is not yet used by an Oracle. "
+            "This method should not be called."
+        )
 
     @staticmethod
     def _supports_parallel_config(moe_parallel_config: FusedMoEParallelConfig) -> bool:
-        return True
+        raise NotImplementedError(
+            "TrtLlmGenExperts is not yet used by an Oracle. "
+            "This method should not be called."
+        )
 
     def supports_chunking(self) -> bool:
         return True
