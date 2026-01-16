@@ -748,7 +748,6 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             prefill_q,
             k,
             v,
-            kv_cache,
             prefill_output,
             self.layer_name,
         )
@@ -807,7 +806,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             decode_q_final = get_dcp_group().all_gather(decode_q_final, dim=1)
 
         attn_out, lse = torch.ops.vllm.mla_attention_decode(
-            decode_q_final, kv_cache, self.layer_name
+            decode_q_final, self.layer_name
         )
 
         if self.dcp_world_size > 1:
@@ -1835,7 +1834,6 @@ direct_register_custom_op(
 
 def mla_attention_decode(
     decode_q: torch.Tensor,
-    kv_cache: torch.Tensor,
     layer_name: str,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """MLA decode attention kernel.
@@ -1851,9 +1849,9 @@ def mla_attention_decode(
         attn_metadata = attn_metadata[layer_name]
     attn_layer: MLAAttention = forward_context.no_compile_layers[layer_name]
 
-    # kv_cache = attn_layer.kv_cache[forward_context.virtual_engine]
-    # if attn_layer.kv_cache_dtype.startswith("fp8"):
-    #     kv_cache = kv_cache.view(current_platform.fp8_dtype())
+    kv_cache = attn_layer.kv_cache[forward_context.virtual_engine]
+    if attn_layer.kv_cache_dtype.startswith("fp8"):
+        kv_cache = kv_cache.view(current_platform.fp8_dtype())
 
     # Handle empty input (no decode tokens in this batch)
     if decode_q.shape[0] == 0:
@@ -1874,7 +1872,6 @@ def mla_attention_decode(
 
 def mla_attention_decode_fake(
     decode_q: torch.Tensor,
-    kv_cache: torch.Tensor,
     layer_name: str,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Fake implementation for torch.compile."""
@@ -1926,7 +1923,6 @@ def mla_attention_prefill_with_output(
     q: torch.Tensor,
     k: torch.Tensor,
     v: torch.Tensor,
-    dummy_tensor: torch.Tensor,
     output: torch.Tensor,
     layer_name: str,
 ) -> None:
@@ -2011,7 +2007,6 @@ def mla_attention_prefill_with_output_fake(
     q: torch.Tensor,
     k: torch.Tensor,
     v: torch.Tensor,
-    kv_cache: torch.Tensor,
     output: torch.Tensor,
     layer_name: str,
 ) -> None:
