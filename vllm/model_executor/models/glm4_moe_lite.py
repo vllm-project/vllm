@@ -52,9 +52,12 @@ from vllm.model_executor.model_loader.weight_utils import (
 from vllm.model_executor.models.deepseek_v2 import (
     DeepseekV2Attention,
     DeepseekV2MLAAttention,
-    DeepseekV2MoE,
 )
-from vllm.model_executor.models.glm4_moe import Glm4MixtureOfExperts, Glm4MoeMLP
+from vllm.model_executor.models.glm4_moe import (
+    Glm4MixtureOfExperts,
+    Glm4MoE,
+    Glm4MoeMLP,
+)
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 
@@ -75,7 +78,11 @@ class Glm4MoeLiteMLP(Glm4MoeMLP):
     pass
 
 
-class Glm4MoeLite(DeepseekV2MoE):
+class Glm4MoeLite(Glm4MoE):
+    pass
+
+
+class Glm4LiteMixtureOfExperts(Glm4MixtureOfExperts):
     pass
 
 
@@ -504,7 +511,9 @@ class Glm4MoeLiteModel(nn.Module):
         return loaded_params
 
 
-class Glm4MoeLiteForCausalLM(nn.Module, SupportsPP, SupportsLoRA, Glm4MixtureOfExperts):
+class Glm4MoeLiteForCausalLM(
+    nn.Module, SupportsPP, SupportsLoRA, Glm4LiteMixtureOfExperts
+):
     packed_modules_mapping = {
         "gate_up_proj": ["gate_proj", "up_proj"],
     }
