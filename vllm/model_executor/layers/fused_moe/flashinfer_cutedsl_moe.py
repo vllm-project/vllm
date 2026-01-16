@@ -47,8 +47,7 @@ class FlashInferCuteDSLExperts(mk.FusedMoEPermuteExpertsUnpermute):
 
     @staticmethod
     def _supports_current_device() -> bool:
-        # TODO: add check cutedsl support?
-        return current_platform.has_device_capability((10, 0))
+        return current_platform.is_device_capability_family((10, 0))
 
     @staticmethod
     def _supports_no_act_and_mul() -> bool:
