@@ -566,7 +566,6 @@ class InternS1ProForConditionalGeneration(
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super(Qwen3VLForConditionalGeneration, self).__init__()
         config: PretrainedConfig = vllm_config.model_config.hf_config
-        quant_config = vllm_config.quant_config
         multimodal_config = vllm_config.model_config.multimodal_config
 
         self.config = config
@@ -585,7 +584,6 @@ class InternS1ProForConditionalGeneration(
             self.visual = Qwen3_VisionTransformer(
                 config.vision_config,
                 norm_eps=getattr(config, "rms_norm_eps", 1e-6),
-                quant_config=quant_config,
                 multimodal_config=multimodal_config,
                 prefix=maybe_prefix(prefix, "visual"),
             )
