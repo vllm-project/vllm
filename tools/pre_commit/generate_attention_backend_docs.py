@@ -188,16 +188,80 @@ def parse_compute_capability(node: ast.ClassDef) -> str:
     if method is None:
         return "Any"
 
-    source = ast.unparse(method)
-    if "8, 0" in source or "(8," in source:
-        return "≥8.0"
-    if "9, 0" in source or "9," in source:
-        return "9.x-10.x" if "10" in source else "≥9.0"
-    if "7, 5" in source or "7," in source:
-        return "≥7.5"
-    if ".major in" in source:
-        return "Specific"
+    min_cap: tuple[int, int] | None = None
+    max_cap: tuple[int, int] | None = None
+    major_in_list: list[int] = []
+    exact_major: int | None = None
+
+    for sub_node in ast.walk(method):
+        if not isinstance(sub_node, ast.Compare):
+            continue
+
+        # Handle `capability >= DeviceCapability(major, minor)`
+        for op, comparator in zip(sub_node.ops, sub_node.comparators):
+            cap = _extract_device_capability(comparator)
+            if cap is not None:
+                if isinstance(op, ast.GtE):
+                    min_cap = cap
+                elif isinstance(op, ast.LtE):
+                    max_cap = cap
+
+        # Handle `capability.major == N`
+        if (
+            isinstance(sub_node.left, ast.Attribute)
+            and sub_node.left.attr == "major"
+            and len(sub_node.ops) == 1
+            and isinstance(sub_node.ops[0], ast.Eq)
+            and len(sub_node.comparators) == 1
+            and isinstance(sub_node.comparators[0], ast.Constant)
+        ):
+            exact_major = sub_node.comparators[0].value
+
+        # Handle `capability.major in [9, 10]`
+        if (
+            isinstance(sub_node.left, ast.Attribute)
+            and sub_node.left.attr == "major"
+            and len(sub_node.ops) == 1
+            and isinstance(sub_node.ops[0], ast.In)
+            and len(sub_node.comparators) == 1
+            and isinstance(sub_node.comparators[0], ast.List)
+        ):
+            for elt in sub_node.comparators[0].elts:
+                if isinstance(elt, ast.Constant) and isinstance(elt.value, int):
+                    major_in_list.append(elt.value)
+
+    # Format the result
+    if major_in_list:
+        major_in_list.sort()
+        if len(major_in_list) == 1:
+            return f"{major_in_list[0]}.x"
+        return f"{major_in_list[0]}.x-{major_in_list[-1]}.x"
+
+    if exact_major is not None:
+        return f"{exact_major}.x"
+
+    if min_cap is not None:
+        major, minor = min_cap
+        if max_cap is not None:
+            return f"{major}.x-{max_cap[0]}.x"
+        return f"≥{major}.{minor}"
+
     return "Any"
+
+
+def _extract_device_capability(node: ast.expr) -> tuple[int, int] | None:
+    """Extract (major, minor) from a DeviceCapability(...) call."""
+    if not isinstance(node, ast.Call):
+        return None
+    if not (isinstance(node.func, ast.Name) and node.func.id == "DeviceCapability"):
+        return None
+    if len(node.args) < 1 or not isinstance(node.args[0], ast.Constant):
+        return None
+    major = node.args[0].value
+    minor = 0
+    if len(node.args) > 1 and isinstance(node.args[1], ast.Constant):
+        minor = node.args[1].value
+    return (major, minor)
 
 
 def parse_attention_types(node: ast.ClassDef) -> str:
@@ -206,24 +270,39 @@ def parse_attention_types(node: ast.ClassDef) -> str:
     if method is None:
         return "Decoder"  # Default
 
-    source = ast.unparse(method)
-    types = []
-    if "DECODER" in source:
-        types.append("Decoder")
-    if "ENCODER_ONLY" in source:
-        types.append("Encoder Only")
-    if "ENCODER_DECODER" in source:
-        types.append("Enc-Dec")
-    # Check for ENCODER without the others
-    enc_only = "ENCODER_ONLY" not in source and "ENCODER_DECODER" not in source
-    if "ENCODER" in source and enc_only:
-        types.append("Encoder")
+    type_map = {
+        "DECODER": "Decoder",
+        "ENCODER": "Encoder",
+        "ENCODER_ONLY": "Encoder Only",
+        "ENCODER_DECODER": "Enc-Dec",
+    }
+    types: set[str] = set()
+
+    for sub_node in ast.walk(method):
+        # Handle `attn_type in (AttentionType.DECODER, ...)`
+        if not isinstance(sub_node, ast.Compare):
+            continue
+        if not (len(sub_node.ops) == 1 and isinstance(sub_node.ops[0], ast.In)):
+            continue
+        if len(sub_node.comparators) != 1:
+            continue
+
+        comparator = sub_node.comparators[0]
+        # Handle both tuple and set expressions
+        if isinstance(comparator, ast.Tuple | ast.Set):
+            elts = comparator.elts
+        else:
+            continue
+
+        for elt in elts:
+            if isinstance(elt, ast.Attribute) and elt.attr in type_map:
+                types.add(type_map[elt.attr])
 
     if not types:
         return "Decoder"
     if len(types) >= 3:
         return "All"
-    return ", ".join(types)
+    return ", ".join(sorted(types))
 
 
 def check_method_overrides(node: ast.ClassDef, method_name: str) -> bool:
@@ -393,9 +472,8 @@ def _extract_priority_from_if(
     """Extract priority list from if statement body."""
     for stmt in body:
         if isinstance(stmt, ast.If):
-            # Check for device_capability.major == 10
-            test_src = ast.unparse(stmt.test)
-            is_sm100 = "major == 10" in test_src or ".major == 10" in test_src
+            # Check for device_capability.major == 10 using AST inspection
+            is_sm100 = _is_major_equals_check(stmt.test, 10)
 
             # Get the return list from the if body
             for sub in stmt.body:
@@ -418,6 +496,22 @@ def _extract_priority_from_if(
         elif isinstance(stmt, ast.Return) and isinstance(stmt.value, ast.List):
             backends = _extract_backend_names(stmt.value)
             priorities[f"{prefix}_default"] = backends
+
+
+def _is_major_equals_check(test: ast.expr, value: int) -> bool:
+    """Check if the AST expression is `something.major == value`."""
+    if not isinstance(test, ast.Compare):
+        return False
+    if not isinstance(test.left, ast.Attribute):
+        return False
+    if test.left.attr != "major":
+        return False
+    if len(test.ops) != 1 or not isinstance(test.ops[0], ast.Eq):
+        return False
+    if len(test.comparators) != 1:
+        return False
+    comparator = test.comparators[0]
+    return isinstance(comparator, ast.Constant) and comparator.value == value
 
 
 def _extract_priority_from_else(
