@@ -436,7 +436,7 @@ class OpenPanguVisionTransformer(nn.Module):
 
     @property
     def device(self) -> torch.device:
-        return self.patch_embed.proj.weight.devic
+        return self.patch_embed.proj.weight.device
 
     def cal_cos_sin(self, rotary_pos_emb):
         cos = rotary_pos_emb.cos()
