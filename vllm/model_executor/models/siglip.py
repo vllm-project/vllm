@@ -809,6 +809,10 @@ class SiglipVisionTransformer(nn.Module):
             if name.startswith("post_layernorm") and self.post_layernorm is None:
                 continue
 
+            # head is optional (e.g., Eagle2.5 doesn't use it)
+            if name.startswith("head") and not self.use_head:
+                continue
+
             # omit layers when num_hidden_layers_override is set
             if name.startswith("encoder.layers"):
                 layer_idx = int(name.split(".")[2])
@@ -895,6 +899,13 @@ class SiglipVisionModel(nn.Module):
             if (
                 name.startswith("vision_model.post_layernorm")
                 and self.vision_model.post_layernorm is None
+            ):
+                continue
+
+            # head is optional in SiglipVisionModel (e.g., Eagle2.5 doesn't use it)
+            if (
+                name.startswith("vision_model.head")
+                and not self.vision_model.use_head
             ):
                 continue
 
