@@ -344,7 +344,7 @@ def convert_to_fp8_moe_kernel_format(
     w2_input_scale: torch.Tensor | None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     block_quant = hasattr(layer, "weight_block_size")
-    if fp8_backend == Fp8MoeBackend.DEEPGEMM:
+    if fp8_backend in [Fp8MoeBackend.DEEPGEMM, Fp8MoeBackend.BATCHED_DEEPGEMM]:
         assert block_quant
         w13, w2, w13_scale, w2_scale = prepare_fp8_moe_layer_for_deepgemm(
             w13,
@@ -377,6 +377,14 @@ def convert_to_fp8_moe_kernel_format(
             w2_input_scale=w2_input_scale,
             is_trtllm=(fp8_backend == Fp8MoeBackend.FLASHINFER_TRTLLM),
         )
+    else:
+        if fp8_backend not in [
+            Fp8MoeBackend.TRITON,
+            Fp8MoeBackend.BATCHED_TRITON,
+            Fp8MoeBackend.VLLM_CUTLASS,
+            Fp8MoeBackend.BATCHED_VLLM_CUTLASS,
+        ]:
+            raise ValueError(f"Unsupported FP8 MoE backend: {fp8_backend.value}")
 
     return w13, w2, w13_scale, w2_scale
 
