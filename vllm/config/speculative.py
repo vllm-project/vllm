@@ -12,6 +12,7 @@ from vllm.config.model import ModelConfig
 from vllm.config.parallel import ParallelConfig
 from vllm.config.utils import config
 from vllm.logger import init_logger
+from vllm.transformers_utils.config import get_hf_text_config
 from vllm.utils.hashing import safe_hash
 from vllm.utils.import_utils import LazyLoader, has_arctic_inference
 
@@ -33,6 +34,7 @@ MTPModelTypes = Literal[
     "mimo_mtp",
     "glm4_moe_mtp",
     "ernie_mtp",
+    "exaone_moe_mtp",
     "qwen3_next_mtp",
     "longcat_flash_mtp",
     "mtp",
@@ -199,7 +201,6 @@ class SpeculativeConfig:
             n_predict = getattr(hf_config, "num_nextn_predict_layers", None)
             hf_config.update(
                 {
-                    "num_hidden_layers": 0,
                     "n_predict": n_predict,
                     "architectures": ["Glm4MoeMTPModel"],
                 }
@@ -220,6 +221,15 @@ class SpeculativeConfig:
             hf_config.update(
                 {"n_predict": n_predict, "architectures": ["Qwen3NextMTP"]}
             )
+
+        if hf_config.model_type == "exaone_moe":
+            hf_config.model_type = "exaone_moe_mtp"
+        if hf_config.model_type == "exaone_moe_mtp":
+            n_predict = getattr(hf_config, "num_nextn_predict_layers", None)
+            hf_config.update(
+                {"n_predict": n_predict, "architectures": ["ExaoneMoeMTP"]}
+            )
+
         if hf_config.model_type == "longcat_flash":
             hf_config.model_type = "longcat_flash_mtp"
             n_predict = getattr(hf_config, "num_nextn_predict_layers", 1)
@@ -400,10 +410,23 @@ class SpeculativeConfig:
                             method=self.method,
                             model_type="eagle",
                         )
+                        # EAGLEConfig primarily updates architectures, so update
+                        # all architectures-related fields in draft_model_config
                         self.draft_model_config.hf_config = eagle_config
+                        self.draft_model_config.hf_text_config = get_hf_text_config(
+                            self.draft_model_config.hf_config
+                        )
                         self.draft_model_config.model_arch_config = (
                             self.draft_model_config.get_model_arch_config()
                         )
+                        model_info, arch = (
+                            self.draft_model_config.registry.inspect_model_cls(
+                                self.draft_model_config.architectures,
+                                self.draft_model_config,
+                            )
+                        )
+                        self.draft_model_config._model_info = model_info
+                        self.draft_model_config._architecture = arch
 
                 if self.num_speculative_tokens is not None and hasattr(
                     self.draft_model_config.hf_config, "num_lookahead_tokens"

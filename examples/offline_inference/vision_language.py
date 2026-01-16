@@ -15,7 +15,7 @@ from dataclasses import asdict
 from typing import NamedTuple
 
 from huggingface_hub import snapshot_download
-from transformers import AutoTokenizer
+from transformers import AutoProcessor, AutoTokenizer
 
 from vllm import LLM, EngineArgs, SamplingParams
 from vllm.assets.image import ImageAsset
@@ -769,6 +769,33 @@ def run_internvl(questions: list[str], modality: str) -> ModelRequestData:
     )
 
 
+# Kanana-V
+def run_kanana_v(questions: list[str], modality: str) -> ModelRequestData:
+    assert modality == "image"
+
+    model_name = "kakaocorp/kanana-1.5-v-3b-instruct"
+
+    engine_args = EngineArgs(
+        model=model_name,
+        max_model_len=8192,
+        trust_remote_code=True,
+        limit_mm_per_prompt={modality: 1},
+    )
+
+    tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
+    messages = [
+        [{"role": "user", "content": f"<image>\n{question}"}] for question in questions
+    ]
+    prompts = tokenizer.apply_chat_template(
+        messages, tokenize=False, add_generation_prompt=True
+    )
+
+    return ModelRequestData(
+        engine_args=engine_args,
+        prompts=prompts,
+    )
+
+
 # Keye-VL
 def run_keye_vl(questions: list[str], modality: str) -> ModelRequestData:
     model_name = "Kwai-Keye/Keye-VL-8B-Preview"
@@ -867,6 +894,37 @@ def run_lightonocr(questions: list[str], modality: str) -> ModelRequestData:
     engine_args = EngineArgs(
         model="lightonai/LightOnOCR-1B",
         limit_mm_per_prompt={modality: 1},
+    )
+
+    return ModelRequestData(
+        engine_args=engine_args,
+        prompts=prompts,
+    )
+
+
+def run_lfm2_vl(questions: list[str], modality: str) -> ModelRequestData:
+    assert modality == "image"
+
+    model_name = "LiquidAI/LFM2-VL-450M"
+
+    engine_args = EngineArgs(
+        model=model_name,
+        max_model_len=4096,
+        limit_mm_per_prompt={modality: 1},
+    )
+
+    processor = AutoProcessor.from_pretrained(model_name)
+    messages = [
+        [
+            {
+                "role": "user",
+                "content": [{"type": "image"}, {"type": "text", "text": question}],
+            }
+        ]
+        for question in questions
+    ]
+    prompts = processor.apply_chat_template(
+        messages, tokenize=False, add_generation_prompt=True
     )
 
     return ModelRequestData(
@@ -1160,6 +1218,36 @@ def run_molmo(questions: list[str], modality: str) -> ModelRequestData:
 
     prompts = [
         f"<|im_start|>user <image>\n{question}<|im_end|><|im_start|>assistant\n"
+        for question in questions
+    ]
+
+    return ModelRequestData(
+        engine_args=engine_args,
+        prompts=prompts,
+    )
+
+
+# Molmo2
+def run_molmo2(questions: list[str], modality: str) -> ModelRequestData:
+    model_name = "allenai/Molmo2-8B"
+
+    engine_args = EngineArgs(
+        model=model_name,
+        trust_remote_code=True,
+        dtype="bfloat16",
+        limit_mm_per_prompt={modality: 1},
+        max_num_batched_tokens=36864,
+    )
+
+    if modality == "image":
+        placeholder = "<|image|>"
+    elif modality == "video":
+        placeholder = "<|video|>"
+    else:
+        raise ValueError(f"Unsupported modality for molmo2: {modality}")
+
+    prompts = [
+        f"{placeholder}<|im_start|>user\n{question}<|im_end|>\n<|im_start|>assistant\n"
         for question in questions
     ]
 
@@ -1845,10 +1933,12 @@ model_example_map = {
     "idefics3": run_idefics3,
     "interns1": run_interns1,
     "internvl_chat": run_internvl,
+    "kanana_v": run_kanana_v,
     "keye_vl": run_keye_vl,
     "keye_vl1_5": run_keye_vl1_5,
     "kimi_vl": run_kimi_vl,
     "lightonocr": run_lightonocr,
+    "lfm2_vl": run_lfm2_vl,
     "llama4": run_llama4,
     "llava": run_llava,
     "llava-next": run_llava_next,
@@ -1860,6 +1950,7 @@ model_example_map = {
     "minimax_vl_01": run_minimax_vl_01,
     "mistral3": run_mistral3,
     "molmo": run_molmo,
+    "molmo2": run_molmo2,
     "nemotron_vl": run_nemotron_vl,
     "NVLM_D": run_nvlm_d,
     "ovis": run_ovis,
@@ -1889,6 +1980,7 @@ MODELS_NEED_VIDEO_METADATA = [
     "glm4_1v",
     "glm4_5v",
     "glm4_5v_fp8",
+    "molmo2",
     "qwen3_vl",
     "qwen3_vl_moe",
 ]

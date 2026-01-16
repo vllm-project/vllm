@@ -145,18 +145,18 @@ def initialize_dummy_model(
     model_config: ModelConfig,
 ):
     temp_file = tempfile.mkstemp()[1]
-    init_distributed_environment(
-        world_size=1,
-        rank=0,
-        distributed_init_method=f"file://{temp_file}",
-        local_rank=0,
-        backend="nccl",
-    )
-    initialize_model_parallel(tensor_model_parallel_size=1)
-
     current_device = torch.get_default_device()
     vllm_config = VllmConfig(model_config=model_config)
     with set_current_vllm_config(vllm_config=vllm_config):
+        init_distributed_environment(
+            world_size=1,
+            rank=0,
+            distributed_init_method=f"file://{temp_file}",
+            local_rank=0,
+            backend="nccl",
+        )
+        initialize_model_parallel(tensor_model_parallel_size=1)
+
         with set_default_torch_dtype(model_config.dtype):
             torch.set_default_device(current_platform.device_type)
             model = model_cls(vllm_config=vllm_config)

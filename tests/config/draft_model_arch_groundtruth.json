@@ -38,7 +38,7 @@
             "EagleDeepSeekMTPModel"
         ],
         "model_type": "eagle",
-        "text_model_type": "deepseek_mtp",
+        "text_model_type": "eagle",
         "hidden_size": 2560,
         "total_num_hidden_layers": 1,
         "total_num_attention_heads": 32,
@@ -55,7 +55,7 @@
             "EagleLlamaForCausalLM"
         ],
         "model_type": "eagle",
-        "text_model_type": "llama",
+        "text_model_type": "eagle",
         "hidden_size": 4096,
         "total_num_hidden_layers": 1,
         "total_num_attention_heads": 32,
@@ -72,7 +72,7 @@
             "Eagle3LlamaForCausalLM"
         ],
         "model_type": "eagle",
-        "text_model_type": "llama",
+        "text_model_type": "eagle",
         "hidden_size": 4096,
         "total_num_hidden_layers": 1,
         "total_num_attention_heads": 32,
