@@ -87,7 +87,6 @@ When no backend is specified (the default):
 4. If no backend is compatible, an error is raised listing all backends and
    their incompatibility reasons
 
-
 ## Backend Priority (CUDA)
 
 When no backend is explicitly selected, vLLM chooses the first
@@ -156,7 +155,6 @@ Priority is **1 = highest** (tried first).
 | **Compute Cap.** | Required CUDA compute capability |
 
 **Symbols:** ✓ = Supported, ✗ = Not supported
-
 
 ## Standard Attention Backends
 

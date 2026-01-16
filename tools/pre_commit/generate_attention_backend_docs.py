@@ -518,7 +518,6 @@ When no backend is specified (the default):
 3. The **first compatible backend** is selected
 4. If no backend is compatible, an error is raised listing all backends and
    their incompatibility reasons
-
 """
 
 
@@ -605,7 +604,6 @@ def generate_legend() -> str:
 | **Compute Cap.** | Required CUDA compute capability |
 
 **Symbols:** ✓ = Supported, ✗ = Not supported
-
 """
 
 
