@@ -98,7 +98,9 @@ class QuantFP8(CustomOp):
             num_token_padding=self.num_token_padding,
             scale_ub=scale_ub,
             use_per_token_if_dynamic=self.use_per_token_if_dynamic,
-            group_shape=self.group_shape if self.static else None,
+            group_shape=(self.group_shape.row, self.group_shape.col)
+            if self.static
+            else None,
         )
 
     def forward_hip(
