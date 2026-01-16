@@ -1418,49 +1418,8 @@ class GPUModelRunner(
         are accepted in update_states to avoid cpu sync, and will adjust the
         inputs correctly based on the actual accepted token count in GPU."""
 
-        if self.valid_sampled_token_count_gpu is None:
+        if not self.async_spec_zero_bubble_mode:
             return
-
-        prev_req_id_to_index = self.input_batch.prev_req_id_to_index
-        if not prev_req_id_to_index or not self.async_spec_reqs_to_fix:
-            return
-
-        req_indices_to_correct = []
-        prev_req_indices = []
-        prev_num_draft_lens = []
-        for i, req_id in enumerate(self.input_batch.req_ids):
-            if req_id not in self.async_spec_reqs_to_fix:
-                continue
-            num_draft_len = self.async_spec_reqs_to_fix[req_id]
-            prev_index = prev_req_id_to_index.get(req_id)
-            assert prev_index is not None
-            req_indices_to_correct.append(i)
-            prev_req_indices.append(prev_index)
-            prev_num_draft_lens.append(num_draft_len)
-
-        if not req_indices_to_correct:
-            return
-
-        req_indices_tensor = torch.tensor(
-            req_indices_to_correct, dtype=torch.int64, pin_memory=self.pin_memory
-        ).to(self.device, non_blocking=True)
-        prev_req_indices_tensor = torch.tensor(
-            prev_req_indices, dtype=torch.int64, pin_memory=self.pin_memory
-        ).to(self.device, non_blocking=True)
-
-        # Compute the diff between optimistic and actual valid tokens cnt.
-        prev_num_draft_len_tensor = torch.tensor(
-            prev_num_draft_lens, dtype=torch.int64, pin_memory=self.pin_memory
-        ).to(self.device, non_blocking=True)
-
-        diff = (
-            prev_num_draft_len_tensor
-            + 1
-            - self.valid_sampled_token_count_gpu[prev_req_indices_tensor].to(
-                torch.int64
-            )
-        )
-        self.seq_lens.gpu[req_indices_tensor] -= diff.int()
 
         num_reqs = self.input_batch.num_reqs
         req_indices_flat_cpu = np.repeat(
@@ -1470,23 +1429,66 @@ class GPUModelRunner(
             self.device, non_blocking=True
         )
 
-        diff_all_reqs = torch.zeros(num_reqs, dtype=torch.int64, device=self.device)
-        diff_all_reqs[req_indices_tensor] = diff
+        req_indices_to_correct = []
+        prev_req_indices = []
+        prev_num_draft_lens = []
+        prev_req_id_to_index = self.input_batch.prev_req_id_to_index
+        if (
+            self.valid_sampled_token_count_gpu is not None
+            and prev_req_id_to_index
+            and self.async_spec_reqs_to_fix
+        ):
+            for i, req_id in enumerate(self.input_batch.req_ids):
+                if req_id not in self.async_spec_reqs_to_fix:
+                    continue
+                num_draft_len = self.async_spec_reqs_to_fix[req_id]
+                prev_index = prev_req_id_to_index.get(req_id)
+                assert prev_index is not None
+                req_indices_to_correct.append(i)
+                prev_req_indices.append(prev_index)
+                prev_num_draft_lens.append(num_draft_len)
 
-        diff_per_token = diff_all_reqs[req_indices_flat_gpu]
-        self.positions.gpu[: req_indices_flat_gpu.shape[0]] -= diff_per_token
+        if req_indices_to_correct:
+            assert self.valid_sampled_token_count_gpu is not None
+            req_indices_tensor = torch.tensor(
+                req_indices_to_correct, dtype=torch.int64, pin_memory=self.pin_memory
+            ).to(self.device, non_blocking=True)
+            prev_req_indices_tensor = torch.tensor(
+                prev_req_indices, dtype=torch.int64, pin_memory=self.pin_memory
+            ).to(self.device, non_blocking=True)
 
-        if self.uses_mrope:
-            for dim in range(3):
-                self.mrope_positions.gpu[dim, : req_indices_flat_gpu.shape[0]] -= (
-                    diff_per_token
+            # Compute the diff between optimistic and actual valid tokens cnt.
+            prev_num_draft_len_tensor = torch.tensor(
+                prev_num_draft_lens, dtype=torch.int64, pin_memory=self.pin_memory
+            ).to(self.device, non_blocking=True)
+
+            # fix seq_lens on gpu
+            diff = (
+                prev_num_draft_len_tensor
+                + 1
+                - self.valid_sampled_token_count_gpu[prev_req_indices_tensor].to(
+                    torch.int64
                 )
-        if self.uses_xdrope_dim > 0:
-            for dim in range(self.uses_xdrope_dim):
-                self.xdrope_positions.gpu[dim, : req_indices_flat_gpu.shape[0]] -= (
-                    diff_per_token
-                )
+            )
+            self.seq_lens.gpu[req_indices_tensor] -= diff.int()
 
+            # fix positions on gpu
+            diff_all_reqs = torch.zeros(num_reqs, dtype=torch.int64, device=self.device)
+            diff_all_reqs[req_indices_tensor] = diff
+            diff_per_token = diff_all_reqs[req_indices_flat_gpu]
+            self.positions.gpu[: req_indices_flat_gpu.shape[0]] -= diff_per_token
+            if self.uses_mrope:
+                for dim in range(3):
+                    self.mrope_positions.gpu[dim, : req_indices_flat_gpu.shape[0]] -= (
+                        diff_per_token
+                    )
+            if self.uses_xdrope_dim > 0:
+                for dim in range(self.uses_xdrope_dim):
+                    self.xdrope_positions.gpu[dim, : req_indices_flat_gpu.shape[0]] -= (
+                        diff_per_token
+                    )
+
+        # Compute slot mapping only on GPU in async_spec_zero_bubble_mode
         self.input_batch.block_table.compute_slot_mapping_gpu(
             req_indices_flat_gpu, self.positions.gpu[: req_indices_flat_gpu.shape[0]]
         )
@@ -1604,8 +1606,9 @@ class GPUModelRunner(
 
                 output_idx += num_sched
 
-        self.input_batch.block_table.compute_slot_mapping(req_indices, positions_np)
-        self.input_batch.block_table.commit_slot_mapping(total_num_scheduled_tokens)
+        if not self.async_spec_zero_bubble_mode:
+            self.input_batch.block_table.compute_slot_mapping(req_indices, positions_np)
+            self.input_batch.block_table.commit_slot_mapping(total_num_scheduled_tokens)
 
         # Prepare the attention metadata.
         self.query_start_loc.np[0] = 0
