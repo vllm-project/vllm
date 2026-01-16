@@ -1597,6 +1597,8 @@ class CompressedTensorsWNA16MarlinMoEMethod(CompressedTensorsMoEMethod):
             return BatchedMarlinExperts(
                 moe_config=self.moe,
                 quant_config=self.moe_quant_config,
+                max_num_tokens=max_num_tokens_per_rank,
+                num_dispatchers=prepare_finalize.num_dispatchers(),
                 w13_g_idx=layer.w13_weight_g_idx,
                 w2_g_idx=layer.w2_weight_g_idx,
                 w13_g_idx_sort_indices=layer.w13_g_idx_sort_indices,
