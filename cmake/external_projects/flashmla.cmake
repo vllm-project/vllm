@@ -111,8 +111,6 @@ if(FLASH_MLA_ARCHS)
 
     set(FlashMLA_Extension_INCLUDES
         ${flashmla_SOURCE_DIR}/csrc
-        ${flashmla_SOURCE_DIR}/csrc/kerutils/include
-        ${flashmla_SOURCE_DIR}/csrc/sm90
         ${flashmla_SOURCE_DIR}/csrc/extension/sm90/dense_fp8/
         ${flashmla_SOURCE_DIR}/csrc/cutlass/include
         ${flashmla_SOURCE_DIR}/csrc/cutlass/tools/util/include
