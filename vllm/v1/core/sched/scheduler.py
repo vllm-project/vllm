@@ -239,9 +239,10 @@ class Scheduler(SchedulerInterface):
             assert len(kv_cache_config.kv_cache_groups) > 0, (
                 "enable_return_routed_experts requires at least one kv cache group"
             )
-            self.max_num_kv_tokens = (
-                kv_cache_config.num_blocks // len(kv_cache_config.kv_cache_groups) + 1
-            ) * self.block_size
+            num_gpu_blocks = self.cache_config.num_gpu_blocks
+            if num_gpu_blocks is None:
+                num_gpu_blocks = kv_cache_config.num_blocks
+            self.max_num_kv_tokens = (num_gpu_blocks + 1) * self.block_size
 
             self.routed_experts_reader.attach_buffer(
                 max_num_kv_tokens=self.max_num_kv_tokens,
