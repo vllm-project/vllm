@@ -80,4 +80,5 @@ tools/flashinfer-build.sh:SC2086
 tools/flashinfer-build.sh:SC2269
 tools/install_deepgemm.sh:SC2035
 tools/install_deepgemm.sh:SC2295
+tools/pre_commit/shellcheck.sh:SC2016
 tools/vllm-tpu/build.sh:SC2145
