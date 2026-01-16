@@ -44,8 +44,9 @@ logger = init_logger(__name__)
 class DefaultMoERunner(MoERunner):
     def __init__(
         self,
-        layer: torch.nn.Module,  # TODO: turn into generic module/parameter blob
+        layer: torch.nn.Module,  # TODO: turn into runtime parameter?
         moe_config: FusedMoEConfig,
+        moe_quant_config: FusedMoEQuantConfig | None,
         router: FusedMoERouter,
         gate: torch.nn.Module | None,
         shared_experts: torch.nn.Module | None,
@@ -55,8 +56,8 @@ class DefaultMoERunner(MoERunner):
         capture: Callable[[torch.Tensor], None] | None = None,
     ):
         super().__init__()
-        self.layer = layer  # TODO: get rid of this
         self.moe_config = moe_config
+        self.moe_quant_config = moe_quant_config
         self.router = router
         self.gate = gate
         self.shared_experts = shared_experts
@@ -139,18 +140,6 @@ class DefaultMoERunner(MoERunner):
         shared_out = torch.empty_like(hidden_states)
         fused_out = torch.empty_like(hidden_states)
         return shared_out, fused_out
-
-    def ensure_moe_quant_config_init(self, layer: torch.nn.Module):
-        if self.quant_method.moe_quant_config is None:
-            # Note: the moe_quant_config can't be constructed until after
-            # weight loading post processing.
-            self.quant_method.moe_quant_config = (
-                self.quant_method.get_fused_moe_quant_config(layer)
-            )
-
-    @property
-    def moe_quant_config(self) -> FusedMoEQuantConfig | None:
-        return self.quant_method.moe_quant_config
 
     @property
     def use_flashinfer_cutlass_kernels(self):
@@ -457,7 +446,6 @@ class DefaultMoERunner(MoERunner):
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         assert self.quant_method is not None
 
-        self.ensure_moe_quant_config_init(layer)
         self.ensure_dp_chunking_init()
 
         has_separate_shared_experts = (

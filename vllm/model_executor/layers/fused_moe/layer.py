@@ -387,6 +387,7 @@ class FusedMoE(CustomOp):
         self.layer_name = prefix
 
         self.enable_eplb = enable_eplb
+        # TODO(bnell): should this be owned by router?
         self.eplb_state = EplbLayerState()
         self.expert_placement_strategy: ExpertPlacementStrategy = (
             vllm_config.parallel_config.expert_placement_strategy
@@ -552,7 +553,7 @@ class FusedMoE(CustomOp):
 
         def _get_quant_method() -> FusedMoEMethodBase:
             """
-            Helper method to ensure quant_method is never None and
+            Helper method to ensure self.quant_method is never None and
             of the proper type.
             """
             quant_method = None
@@ -565,7 +566,7 @@ class FusedMoE(CustomOp):
 
         # Note: get_quant_method will look at the layer's local_num_experts
         # for heuristic purposes, so it must be initialized first.
-        quant_method: FusedMoEMethodBase = _get_quant_method()
+        self.quant_method: FusedMoEMethodBase = _get_quant_method()
 
         if not self.moe_config.is_act_and_mul and not current_platform.is_cuda_alike():
             raise NotImplementedError(
@@ -593,27 +594,14 @@ class FusedMoE(CustomOp):
             "global_num_experts": self.global_num_experts,
         }
         # need full intermediate size pre-sharding for WNA16 act order
-        if quant_method.__class__.__name__ in (
+        if self.quant_method.__class__.__name__ in (
             "GPTQMarlinMoEMethod",
             "CompressedTensorsWNA16MarlinMoEMethod",
             "CompressedTensorsWNA16MoEMethod",
         ):
             moe_quant_params["intermediate_size_full"] = intermediate_size
 
-        quant_method.create_weights(layer=self, **moe_quant_params)
-
-        if self.enable_eplb and not quant_method.supports_eplb:
-            # TODO: Add support for additional quantization methods.
-            # The implementation for other quantization methods does not
-            # contain essential differences, but the current quant API
-            # design causes duplicated work when extending to new
-            # quantization methods, so I'm leaving it for now.
-            # If you plan to add support for more quantization methods,
-            # please refer to the implementation in `Fp8MoEMethod`.
-            raise NotImplementedError(
-                f"EPLB is not supported {quant_method.__class__.__name__}. "
-                "EPLB is only supported for FP8 quantization for now."
-            )
+        self.quant_method.create_weights(layer=self, **moe_quant_params)
 
         self.capture: Callable[[torch.Tensor], None] | None = None
         if (
@@ -627,26 +615,30 @@ class FusedMoE(CustomOp):
                     self.layer_id, topk_ids
                 )
 
-        self._quant_method = quant_method
         self._runner: MoERunner | None = None
 
-    @property
-    def runner(self) -> MoERunner:
-        if self._runner is not None:
-            return self._runner
+    def init_runner(self, reconstruct=False):
+        if not reconstruct and self._runner is not None:
+            return
 
-        # TODO: this is hacky
+        self.ensure_moe_quant_config_init()
         self._runner = DefaultMoERunner(
             layer=self,
             moe_config=self.moe_config,
+            moe_quant_config=self.moe_quant_config,
             router=self.router,
             gate=self.gate,
             shared_experts=self.shared_experts,
-            quant_method=self._quant_method,
+            quant_method=self.quant_method,
             reduce_results=self.reduce_results,
             enable_dbo=self.vllm_config.parallel_config.enable_dbo,
             capture=self.capture,
         )
+
+    @property
+    def runner(self) -> MoERunner:
+        self.init_runner()
+        assert self._runner is not None
         return self._runner
 
     # Note: maybe_init_modular_kernel should only be called by
@@ -659,24 +651,30 @@ class FusedMoE(CustomOp):
         if self.quant_method.supports_internal_mk or self.quant_method.is_monolithic:
             return None
 
-        self.runner.ensure_moe_quant_config_init()
+        self.ensure_moe_quant_config_init()
         # routing_tables only needed for round-robin expert placement with
         # DeepEP all2all backend.
         routing_tables = self._maybe_init_expert_routing_tables()
-        prepare_finalize = self.runner.quant_method.maybe_make_prepare_finalize(
+        prepare_finalize = self.quant_method.maybe_make_prepare_finalize(
             routing_tables=routing_tables
         )
         if prepare_finalize is not None:
             logger.debug(
                 "%s for %s(%s)", prepare_finalize.__class__.__name__, self, id(self)
             )
-            self.runner.quant_method = FusedMoEModularMethod.make(
+            self.quant_method = FusedMoEModularMethod.make(
                 self,
-                self.runner.quant_method,
+                self.quant_method,
                 prepare_finalize,
                 self.shared_experts,
                 inplace=not self.moe_config.disable_inplace,
             )
+            # force reconstruction of runner
+            self.init_runner(reconstruct=True)
+
+    @property
+    def shared_experts(self) -> torch.nn.Module | None:
+        return None
 
     @property
     def layer_id(self):
@@ -684,14 +682,6 @@ class FusedMoE(CustomOp):
         from vllm.model_executor.models.utils import extract_layer_index
 
         return extract_layer_index(self.layer_name)
-
-    @property
-    def quant_method(self) -> FusedMoEMethodBase:
-        return self.runner.quant_method
-
-    @property
-    def shared_experts(self) -> torch.nn.Module | None:
-        return None
 
     @property
     def gate(self) -> torch.nn.Module | None:
@@ -1143,12 +1133,12 @@ class FusedMoE(CustomOp):
                 param.data[:, :dim1, :dim2].copy_(loaded_weight)
             return True if return_success else None
 
-        quant_method_name = self._quant_method.__class__.__name__
+        quant_method_name = self.quant_method.__class__.__name__
         global_expert_id = expert_id
         expert_id = self._map_global_expert_id_to_local_expert_id(global_expert_id)
 
         use_global_sf = (
-            getattr(self._quant_method, "use_global_sf", False)
+            getattr(self.quant_method, "use_global_sf", False)
             and "input_scale" in weight_name
         )
 
@@ -1270,7 +1260,7 @@ class FusedMoE(CustomOp):
         if "ModelOpt" in quant_method_name:
             # Determine per-tensor weight scale patterns based on variant
             # Use the dedicated method instead of brittle string matching
-            uses_weight_scale_2 = self._quant_method.uses_weight_scale_2_pattern()
+            uses_weight_scale_2 = self.quant_method.uses_weight_scale_2_pattern()
 
             # Call _load_per_tensor_weight_scale() to load per-tensor (scalar)
             # weights scales.
@@ -1462,7 +1452,7 @@ class FusedMoE(CustomOp):
         assert all(
             weight.is_contiguous()
             for name, weight in weights
-            if not name.startswith("_shared_experts.")
+            if not (name.startswith("_shared_experts.") or name.startswith("_gate"))
         )
 
         # Filter out the non-expert weights.
@@ -1499,9 +1489,18 @@ class FusedMoE(CustomOp):
         self.eplb_state.logical_to_physical_map = logical_to_physical_map[moe_layer_idx]
         self.eplb_state.logical_replica_count = logical_replica_count[moe_layer_idx]
 
+    def ensure_moe_quant_config_init(self):
+        if self.quant_method.moe_quant_config is None:
+            # Note: the moe_quant_config can't be constructed until after
+            # weight loading post processing.
+            self.quant_method.moe_quant_config = (
+                self.quant_method.get_fused_moe_quant_config(self)
+            )
+
     @property
     def moe_quant_config(self) -> FusedMoEQuantConfig | None:
-        return self.runner.moe_quant_config
+        self.ensure_moe_quant_config_init()
+        return self.quant_method.moe_quant_config
 
     def must_reduce_shared_expert_outputs(self) -> bool:
         """
