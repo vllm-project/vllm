@@ -5675,12 +5675,10 @@ class GPUModelRunner(
             self.kv_cache_config.num_blocks // len(self.kv_cache_config.kv_cache_groups)
             + 1
         ) * block_size
-
         routed_experts_capturer.init_buffer(
             max_num_batched_tokens=self.scheduler_config.max_num_batched_tokens,
             max_num_kv_tokens=self.max_num_kv_tokens,
-            model_config=self.model_config,
-            instance_id=self.vllm_config.instance_id,
+            vllm_config=self.vllm_config,
         )
 
     def may_add_encoder_only_layers_to_kv_cache_config(self) -> None:
