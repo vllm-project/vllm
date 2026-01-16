@@ -41,6 +41,7 @@ class UnquantizedMoeBackend(Enum):
 UNSUPPORTED_BACKEND = [
     UnquantizedMoeBackend.CPU,
     UnquantizedMoeBackend.XPU,
+    UnquantizedMoeBackend.TPU,
 ]
 
 
