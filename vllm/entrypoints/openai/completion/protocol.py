@@ -5,6 +5,7 @@
 # https://github.com/lm-sys/FastChat/blob/168ccc29d3f7edc50823016105c024fe2282732a/fastchat/protocol/openai_api_protocol.py
 import json
 import time
+from dataclasses import replace
 from typing import Annotated, Any, Literal
 
 import torch
@@ -247,18 +248,15 @@ class CompletionRequest(OpenAIBaseModel):
 
         response_format = self.response_format
         if response_format is not None:
-            # If structured outputs wasn't already enabled,
-            # we must enable it for these features to work
-            if self.structured_outputs is None:
-                self.structured_outputs = StructuredOutputsParams()
+            structured_outputs_kwargs = dict[str, Any]()
 
             # Set structured output params for response format
             if response_format.type == "json_object":
-                self.structured_outputs.json_object = True
+                structured_outputs_kwargs["json_object"] = True
             elif response_format.type == "json_schema":
                 json_schema = response_format.json_schema
                 assert json_schema is not None
-                self.structured_outputs.json = json_schema.json_schema
+                structured_outputs_kwargs["json"] = json_schema.json_schema
             elif response_format.type == "structural_tag":
                 structural_tag = response_format
                 assert structural_tag is not None and isinstance(
@@ -269,7 +267,16 @@ class CompletionRequest(OpenAIBaseModel):
                     ),
                 )
                 s_tag_obj = structural_tag.model_dump(by_alias=True)
-                self.structured_outputs.structural_tag = json.dumps(s_tag_obj)
+                structured_outputs_kwargs["structural_tag"] = json.dumps(s_tag_obj)
+
+            # If structured outputs wasn't already enabled,
+            # we must enable it for these features to work
+            if len(structured_outputs_kwargs) > 0:
+                self.structured_outputs = (
+                    StructuredOutputsParams(**structured_outputs_kwargs)
+                    if self.structured_outputs is None
+                    else replace(self.structured_outputs, **structured_outputs_kwargs)
+                )
 
         extra_args: dict[str, Any] = self.vllm_xargs if self.vllm_xargs else {}
         if self.kv_transfer_params:
