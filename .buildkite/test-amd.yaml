@@ -711,7 +711,7 @@ steps:
   - vllm/utils/import_utils.py
   - tests/kernels/helion/
   commands:
-    - pip install .[helion]
+    - pip install helion
     - pytest -v -s kernels/helion/
 
 - label: Model Executor Test # 23min
