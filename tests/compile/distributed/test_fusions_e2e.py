@@ -10,10 +10,12 @@ import regex as re
 
 from tests.compile.fusion_test_utils import (
     CUSTOM_OPS_FP8,
+    CUSTOM_OPS_QUANT_RMS_NORM,
     CUSTOM_OPS_RMS_NORM,
     MODELS,
     MODELS_FP4,
     MODELS_FP8,
+    MODELS_GROUP_FP8,
     Matches,
     custom_ops_product,
     is_blackwell,
@@ -247,3 +249,69 @@ def test_tp2_attn_quant_async_tp(
 
     assert int(log_matches[0]) == matches.async_tp
     assert int(log_matches[1]) == matches.async_tp
+
+
+@pytest.mark.parametrize(
+    "model_name, model_kwargs, backend, matches, custom_ops",
+    # Test rms norm+group quant_fp8 fusion
+    list[tuple](flat_product(MODELS_GROUP_FP8, CUSTOM_OPS_QUANT_RMS_NORM)),
+)
+@pytest.mark.parametrize("inductor_graph_partition", [True, False])
+# TODO: remove skip after we fix the fusion thoroughly
+@pytest.mark.skipif(is_blackwell(), reason="Temporarily disabled on Blackwell")
+def test_rms_group_quant(
+    model_name: str,
+    model_kwargs: dict,
+    backend: AttentionBackendEnum,
+    matches: Matches,
+    custom_ops: str,
+    inductor_graph_partition: bool,
+    caplog_mp_spawn,
+    monkeypatch,
+):
+    if inductor_graph_partition and not is_torch_equal_or_newer("2.9.0.dev"):
+        pytest.skip("Inductor graph partition requires torch>=2.9")
+
+    custom_ops_list = custom_ops.split(",") if custom_ops else []
+
+    if inductor_graph_partition:
+        mode = CUDAGraphMode.FULL_AND_PIECEWISE
+        splitting_ops: list[str] | None = None
+    else:
+        mode = CUDAGraphMode.FULL_DECODE_ONLY
+        splitting_ops = []
+
+    # Disable, compile cache to make sure custom passes run.
+    # Otherwise, we can't verify fusion happened through the logs.
+    monkeypatch.setenv("VLLM_DISABLE_COMPILE_CACHE", "1")
+
+    # To capture subprocess logs, we need to know whether spawn or fork is used.
+    # Force spawn as it is more general.
+    monkeypatch.setenv("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
+
+    model_kwargs["attention_config"] = {"backend": backend.name}
+
+    compilation_config = CompilationConfig(
+        # Testing properties
+        custom_ops=custom_ops_list,
+        use_inductor_graph_partition=inductor_graph_partition,
+        cudagraph_mode=mode,
+        splitting_ops=splitting_ops,
+        # Common
+        mode=CompilationMode.VLLM_COMPILE,
+        pass_config=PassConfig(
+            fuse_norm_quant=True, fuse_act_quant=True, eliminate_noops=True
+        ),
+        # Inductor caches custom passes by default as well via uuid
+        inductor_compile_config={"force_disable_caches": True},
+    )
+
+    with caplog_mp_spawn(logging.DEBUG) as log_holder:
+        run_model(compilation_config, model_name, **model_kwargs)
+
+    log_matches = re.findall(
+        r"\[fusion.py:\d+] Replaced (\d+) patterns",
+        log_holder.text,
+    )
+    assert len(log_matches) == 1, log_holder.text
+    assert int(log_matches[0]) == matches.rms_quant_norm_fusion
