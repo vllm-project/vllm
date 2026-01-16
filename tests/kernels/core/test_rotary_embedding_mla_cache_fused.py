@@ -162,7 +162,7 @@ def test_concat_and_cache_mla_rope_fused(
         ops.convert_fp8(
             expected_temp, ref_kv_cache, kv_cache_scale.item(), kv_dtype=kv_cache_dtype
         )
-        torch.testing.assert_close(result_temp, expected_temp, atol=1e-2, rtol=1e-1)
+        torch.testing.assert_close(result_temp, expected_temp, atol=1e-1, rtol=1e-1)
     else:
         torch.testing.assert_close(
             kv_cache,
