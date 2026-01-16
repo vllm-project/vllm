@@ -367,7 +367,7 @@ class OpenAIServingChat(OpenAIServing):
             model_name = self.models.model_name(lora_request)
 
             tokenizer = await self.engine_client.get_tokenizer()
-        except (ValueError, TypeError, RuntimeError, jinja2.TemplateError) as e:
+        except (ValueError, TypeError, RuntimeError) as e:
             logger.exception("Error in preprocessing prompt inputs")
             return self.create_error_response(f"{e} {e.__cause__}")
 
