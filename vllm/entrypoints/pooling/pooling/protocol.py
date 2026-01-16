@@ -41,7 +41,6 @@ class PoolingCompletionRequest(EmbeddingCompletionRequest):
         return PoolingParams(
             truncate_prompt_tokens=self.truncate_prompt_tokens,
             dimensions=self.dimensions,
-            normalize=self.normalize,
             use_activation=get_use_activation(self),
         )
 
@@ -67,7 +66,6 @@ class PoolingChatRequest(EmbeddingChatRequest):
         return PoolingParams(
             truncate_prompt_tokens=self.truncate_prompt_tokens,
             dimensions=self.dimensions,
-            normalize=self.normalize,
             use_activation=get_use_activation(self),
         )
 
