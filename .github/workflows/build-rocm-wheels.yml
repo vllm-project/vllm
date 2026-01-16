@@ -32,7 +32,13 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 0  # Full history for setuptools-scm versioning
-          fetch-tags: true  # Fetch all tags for proper version calculation
+          fetch-tags: true
+
+      - name: Fetch upstream tags for versioning
+        run: |
+          git remote add upstream https://github.com/vllm-project/vllm.git || true
+          git fetch upstream --tags
+          echo "Git describe: $(git describe --tags --always)"
 
       - name: Free disk space
         run: |
@@ -46,6 +52,29 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: '3.12'
+
+      - name: Cache pip packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: pip-rocm-${{ runner.os }}-${{ hashFiles('requirements/*.txt') }}
+          restore-keys: |
+            pip-rocm-${{ runner.os }}-
+
+      - name: Install and configure sccache
+        id: sccache
+        uses: mozilla-actions/sccache-action@v0.0.6
+        continue-on-error: true  # Don't fail build if sccache is unavailable
+
+      - name: Test sccache availability
+        id: sccache-test
+        run: |
+          if sccache --version && sccache --show-stats; then
+            echo "available=true" >> $GITHUB_OUTPUT
+          else
+            echo "available=false" >> $GITHUB_OUTPUT
+          fi
+        continue-on-error: true
 
       - name: Install build dependencies
         run: |
@@ -113,23 +142,34 @@ jobs:
           PYTORCH_ROCM_ARCH: ${{ env.PYTORCH_ROCM_ARCH }}
           VLLM_TARGET_DEVICE: rocm
           MAX_JOBS: 4
+          # Enable sccache for faster rebuilds (only if available)
+          SCCACHE_GHA_ENABLED: ${{ steps.sccache-test.outputs.available == 'true' && 'true' || 'false' }}
         run: |
           echo "=== Environment ==="
           echo "ROCM_PATH=$ROCM_PATH"
-          echo "HIP_DEVICE_LIB_PATH=$HIP_DEVICE_LIB_PATH"
           echo "PYTORCH_ROCM_ARCH=$PYTORCH_ROCM_ARCH"
           echo "VLLM_TARGET_DEVICE=$VLLM_TARGET_DEVICE"
-          echo "PATH=$PATH"
-          echo ""
-          echo "=== PyTorch Info ==="
-          python -c "import torch; print(f'torch.version.hip={torch.version.hip}'); print(f'torch.version.cuda={torch.version.cuda}')"
-          echo ""
-          echo "=== ROCm Tools ==="
-          which hipcc || echo "hipcc not found"
-          hipcc --version || echo "hipcc version failed"
+          
+          # Conditionally enable sccache
+          if [ "$SCCACHE_GHA_ENABLED" = "true" ]; then
+            echo "sccache is available, enabling compiler caching"
+            export CMAKE_C_COMPILER_LAUNCHER=sccache
+            export CMAKE_CXX_COMPILER_LAUNCHER=sccache
+            export CMAKE_HIP_COMPILER_LAUNCHER=sccache
+            sccache --show-stats || true
+          else
+            echo "sccache is NOT available, building without compiler cache"
+          fi
+          
           echo ""
           echo "=== Building wheel ==="
           python setup.py bdist_wheel --dist-dir=dist
+          
+          if [ "$SCCACHE_GHA_ENABLED" = "true" ]; then
+            echo ""
+            echo "sccache stats after build:"
+            sccache --show-stats || true
+          fi
           ls -la dist/
 
       - name: Rename wheel for manylinux compliance
