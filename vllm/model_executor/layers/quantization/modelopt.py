@@ -733,6 +733,7 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
             block_quant=False,
             tp_size=moe_config.moe_parallel_config.tp_size,
             with_lora_support=self.moe.is_lora_enabled,
+            is_act_and_mul=self.moe.is_act_and_mul,
         )
         self.kernel: mk.FusedMoEModularKernel | None = None
 
@@ -789,15 +790,12 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
         )
         weight_loader = extra_weight_attrs.get("weight_loader")
 
-        if self.moe.is_act_and_mul:
-            w13_up_dim = 2 * intermediate_size_per_partition
-        else:
-            w13_up_dim = intermediate_size_per_partition
+        w13_num_shards = 2 if self.moe.is_act_and_mul else 1
 
         w13_weight = ModelWeightParameter(
             data=torch.empty(
                 num_experts,
-                w13_up_dim,
+                w13_num_shards * intermediate_size_per_partition,
                 hidden_size,
                 dtype=weight_dtype,
             ),
@@ -826,7 +824,7 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
         # For non-gated MoE, allocate 1 scale for w13.
         w13_weight_scale = PerTensorScaleParameter(
             data=torch.full(
-                (num_experts, 2 if self.moe.is_act_and_mul else 1),
+                (num_experts, w13_num_shards),
                 1.0,
                 dtype=torch.float32,
             ),
@@ -1132,6 +1130,9 @@ class ModelOptNvFp4LinearMethod(LinearMethodBase):
         elif envs.VLLM_NVFP4_GEMM_BACKEND == "cutlass":
             self.backend = "cutlass"
             assert cutlass_fp4_supported(), f"Cutlass is required for {self.backend}"
+        elif envs.VLLM_NVFP4_GEMM_BACKEND == "marlin":
+            self.backend = "marlin"
+            assert is_fp4_marlin_supported(), f"Marlin is required for {self.backend}"
 
         if self.backend == "none":
             raise ValueError(
@@ -1337,13 +1338,13 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
         self.quant_config = quant_config
         self.nvfp4_backend = select_nvfp4_moe_backend()
         # TODO: move this type of check into the oracle.
-        if (
-            not self.moe.is_act_and_mul
-            and not self.nvfp4_backend == NvFp4MoeBackend.FLASHINFER_CUTLASS
-        ):
+        if not self.moe.is_act_and_mul and self.nvfp4_backend not in [
+            NvFp4MoeBackend.FLASHINFER_CUTLASS,
+            NvFp4MoeBackend.MARLIN,
+        ]:
             raise NotImplementedError(
                 "Non-gated activations are only supported by FlashInfer "
-                "CUTLASS NvFP4 MoE backend."
+                f"CUTLASS and Marlin NvFP4 MoE backends, not {self.nvfp4_backend}."
             )
 
         self.use_global_sf = is_global_sf_supported_for_nvfp4_backend(
@@ -1409,11 +1410,12 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
         weight_scale_dtype = torch.float8_e4m3fn
         weight_loader = extra_weight_attrs.get("weight_loader")
         global_num_experts = extra_weight_attrs.get("global_num_experts")
+        w13_num_shards = 2 if self.moe.is_act_and_mul else 1
         # GEMM 1
         w13_weight = ModelWeightParameter(
             data=torch.empty(
                 num_experts,
-                (2 if self.moe.is_act_and_mul else 1) * intermediate_size_per_partition,
+                w13_num_shards * intermediate_size_per_partition,
                 # 2 fp4 items are packed in the input dimension
                 hidden_size // 2,
                 dtype=weight_dtype,
@@ -1442,7 +1444,7 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
         w13_weight_scale = ModelWeightParameter(
             data=torch.empty(
                 num_experts,
-                (2 if self.moe.is_act_and_mul else 1) * intermediate_size_per_partition,
+                w13_num_shards * intermediate_size_per_partition,
                 # 2 fp4 items are packed in the input dimension
                 hidden_size // self.quant_config.group_size,
                 dtype=weight_scale_dtype,
@@ -1472,9 +1474,7 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
         )
 
         w13_weight_scale_2 = PerTensorScaleParameter(
-            data=torch.empty(
-                num_experts, 2 if self.moe.is_act_and_mul else 1, dtype=torch.float32
-            ),
+            data=torch.empty(num_experts, w13_num_shards, dtype=torch.float32),
             weight_loader=weight_loader,
         )
         layer.register_parameter("w13_weight_scale_2", w13_weight_scale_2)
@@ -1495,7 +1495,7 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
         w13_input_scale = PerTensorScaleParameter(
             data=torch.empty(
                 global_sf_num_experts,
-                2 if self.moe.is_act_and_mul else 1,
+                w13_num_shards,
                 dtype=torch.float32,
             ),
             weight_loader=weight_loader,
@@ -1616,6 +1616,7 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
                 x=x,
                 router_logits=router_logits,
                 top_k=layer.top_k,
+                activation=layer.activation,
                 global_num_experts=layer.global_num_experts,
                 num_expert_group=layer.num_expert_group,
                 topk_group=layer.topk_group,
@@ -1642,6 +1643,7 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
                 topk_ids=topk_ids,
                 topk_weights=topk_weights,
                 top_k=layer.top_k,
+                activation=layer.activation,
                 global_num_experts=layer.global_num_experts,
             )
         else:
