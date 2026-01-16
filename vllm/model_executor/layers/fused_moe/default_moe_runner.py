@@ -24,10 +24,10 @@ from vllm.model_executor.layers.fused_moe.fused_moe_method_base import (
 from vllm.model_executor.layers.fused_moe.fused_moe_modular_method import (
     FusedMoEModularMethod,
 )
-from vllm.model_executor.layers.fused_moe.fused_moe_router import (
+from vllm.model_executor.layers.fused_moe.moe_runner import MoERunner
+from vllm.model_executor.layers.fused_moe.router.fused_moe_router import (
     FusedMoERouter,
 )
-from vllm.model_executor.layers.fused_moe.moe_runner import MoERunner
 from vllm.platforms import current_platform
 from vllm.utils.flashinfer import has_flashinfer_trtllm_fused_moe
 from vllm.utils.math_utils import cdiv
@@ -41,9 +41,6 @@ from vllm.v1.worker.ubatching import dbo_current_ubatch_id
 logger = init_logger(__name__)
 
 
-# TODO
-# make gate, shared_experts into properties instead of methods
-#
 class DefaultMoERunner(MoERunner):
     def __init__(
         self,
@@ -51,7 +48,7 @@ class DefaultMoERunner(MoERunner):
         moe_config: FusedMoEConfig,
         router: FusedMoERouter,
         gate: torch.nn.Module | None,
-        # shared_experts: torch.nn.Module | None,
+        shared_experts: torch.nn.Module | None,
         quant_method: FusedMoEMethodBase,
         reduce_results: bool,
         enable_dbo: bool,
@@ -62,7 +59,7 @@ class DefaultMoERunner(MoERunner):
         self.moe_config = moe_config
         self.router = router
         self.gate = gate
-        # self.shared_experts = shared_experts
+        self.shared_experts = shared_experts
         self.quant_method = quant_method
         self.reduce_results = reduce_results
         self.enable_dbo = enable_dbo
@@ -143,22 +140,16 @@ class DefaultMoERunner(MoERunner):
         fused_out = torch.empty_like(hidden_states)
         return shared_out, fused_out
 
-    # TBD
-    @property
-    def shared_experts(self) -> torch.nn.Module | None:
-        return self.layer.shared_experts
-
-    def ensure_moe_quant_config_init(self):
+    def ensure_moe_quant_config_init(self, layer: torch.nn.Module):
         if self.quant_method.moe_quant_config is None:
             # Note: the moe_quant_config can't be constructed until after
             # weight loading post processing.
             self.quant_method.moe_quant_config = (
-                self.quant_method.get_fused_moe_quant_config(self)
+                self.quant_method.get_fused_moe_quant_config(layer)
             )
 
     @property
     def moe_quant_config(self) -> FusedMoEQuantConfig | None:
-        self.ensure_moe_quant_config_init()
         return self.quant_method.moe_quant_config
 
     @property
@@ -469,7 +460,7 @@ class DefaultMoERunner(MoERunner):
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         assert self.quant_method is not None
 
-        self.ensure_moe_quant_config_init()
+        self.ensure_moe_quant_config_init(layer)
         self.ensure_dp_chunking_init()
 
         has_separate_shared_experts = (
