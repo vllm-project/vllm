@@ -14,10 +14,9 @@ from vllm.inputs.preprocess import InputPreprocessor
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
-from vllm.multimodal.cache import processor_cache_from_config
 from vllm.multimodal.inputs import MultiModalFeatureSpec, MultiModalUUIDDict
 from vllm.multimodal.parse import MultiModalDataParser
-from vllm.multimodal.processing import EncDecMultiModalProcessor, set_request_id
+from vllm.multimodal.processing.context import set_request_id
 from vllm.multimodal.utils import argsort_mm_positions
 from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import _SAMPLING_EPS, SamplingParams
@@ -58,7 +57,7 @@ class InputProcessor:
         self.generation_config_fields = self.model_config.try_get_generation_config()
 
         self.mm_registry = mm_registry
-        self.mm_processor_cache = processor_cache_from_config(vllm_config, mm_registry)
+        self.mm_processor_cache = mm_registry.processor_cache_from_config(vllm_config)
 
         self.input_preprocessor = InputPreprocessor(
             self.model_config,
@@ -370,6 +369,10 @@ class InputProcessor:
             # Remember that this backend was set automatically
             params.structured_outputs._backend_was_auto = True
 
+        # Run post-init validation. This is also important to ensure subsequent
+        # roundtrip serialization/deserialization won't fail.
+        params.structured_outputs.__post_init__()
+
     def _maybe_build_mm_uuids(
         self,
         request_id: str,
@@ -454,13 +457,14 @@ class InputProcessor:
         self._validate_lora(lora_request)
         self._validate_params(params)
 
-        data_parallel_size = self.vllm_config.parallel_config.data_parallel_size
-        if data_parallel_rank is not None and not (
-            0 <= data_parallel_rank < data_parallel_size
-        ):
+        parallel_config = self.vllm_config.parallel_config
+        dp_size = parallel_config.data_parallel_size
+        dp_local_size = parallel_config.data_parallel_size_local
+        num_ranks = dp_local_size if parallel_config.local_engines_only else dp_size
+        if data_parallel_rank is not None and not (0 <= data_parallel_rank < num_ranks):
             raise ValueError(
                 f"data_parallel_rank {data_parallel_rank} "
-                f"is out of range [0, {data_parallel_size})."
+                f"is out of range [0, {num_ranks})."
             )
 
         if arrival_time is None:
@@ -651,17 +655,18 @@ class InputProcessor:
 
         max_prompt_len = self.model_config.max_model_len
         if prompt_len > max_prompt_len:
-            if prompt_type == "encoder" and model_config.is_multimodal_model:
+            if model_config.is_multimodal_model:
                 mm_registry = self.input_preprocessor.mm_registry
-                mm_processor = mm_registry.create_processor(
+                model_cls = mm_registry._get_model_cls(model_config)
+                factories = model_cls._processor_factory
+                ctx = mm_registry._create_processing_ctx(
                     model_config,
-                    self.vllm_config.observability_config,
                     tokenizer=tokenizer,
                 )
-                assert isinstance(mm_processor, EncDecMultiModalProcessor)
+                mm_info = factories.info(ctx)
 
-                if mm_processor.pad_dummy_encoder_prompt:
-                    return  # Skip encoder length check for Whisper
+                if mm_info.skip_prompt_length_check:
+                    return
 
             if model_config.is_multimodal_model:
                 suggestion = (

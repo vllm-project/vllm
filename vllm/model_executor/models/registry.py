@@ -323,6 +323,7 @@ _MULTIMODAL_MODELS = {
         "hunyuan_vision",
         "HunYuanVLForConditionalGeneration",
     ),
+    "StepVLForConditionalGeneration": ("step_vl", "StepVLForConditionalGeneration"),
     "InternVLChatModel": ("internvl", "InternVLChatModel"),
     "NemotronH_Nano_VL_V2": ("nano_nemotron_vl", "NemotronH_Nano_VL_V2"),
     "OpenCUAForConditionalGeneration": (
@@ -384,6 +385,7 @@ _MULTIMODAL_MODELS = {
         "Mistral3ForConditionalGeneration",
     ),
     "MolmoForCausalLM": ("molmo", "MolmoForCausalLM"),
+    "Molmo2ForConditionalGeneration": ("molmo2", "Molmo2ForConditionalGeneration"),
     "NVLM_D": ("nvlm_d", "NVLM_D_Model"),
     "Ovis": ("ovis", "Ovis"),
     "Ovis2_5": ("ovis2_5", "Ovis2_5"),
@@ -887,6 +889,7 @@ class _ModelRegistry:
                         module,
                         model_config.model,
                         revision=model_config.revision,
+                        trust_remote_code=model_config.trust_remote_code,
                         warn_on_fail=False,
                     )
 
@@ -899,6 +902,7 @@ class _ModelRegistry:
                         module,
                         model_config.model,
                         revision=model_config.revision,
+                        trust_remote_code=model_config.trust_remote_code,
                         warn_on_fail=True,
                     )
                     if model_module is not None:

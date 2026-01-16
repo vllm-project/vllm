@@ -92,6 +92,11 @@ class _HfExamplesInfo:
     length that is too large to fit into memory in CI.
     """
 
+    max_num_batched_tokens: int | None = None
+    """
+    The maximum number of tokens to be processed in a single batch.
+    """
+
     revision: str | None = None
     """
     The specific revision (commit hash, tag, or branch) to use for the model.
@@ -817,6 +822,14 @@ _MULTIMODAL_EXAMPLE_MODELS = {
         extras={"olmo": "allenai/Molmo-7B-O-0924"},
         trust_remote_code=True,
     ),
+    "Molmo2ForConditionalGeneration": _HfExamplesInfo(
+        "allenai/Molmo2-8B",
+        extras={"olmo": "allenai/Molmo2-O-7B"},
+        min_transformers_version="4.51",
+        trust_remote_code=True,
+        # required by current PrefixLM implementation
+        max_num_batched_tokens=31872,
+    ),
     "NVLM_D": _HfExamplesInfo("nvidia/NVLM-D-72B", trust_remote_code=True),
     "Llama_Nemotron_Nano_VL": _HfExamplesInfo(
         "nvidia/Llama-3.1-Nemotron-Nano-VL-8B-V1",
@@ -911,6 +924,9 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     ),
     "Step3VLForConditionalGeneration": _HfExamplesInfo(
         "stepfun-ai/step3", trust_remote_code=True
+    ),
+    "StepVLForConditionalGeneration": _HfExamplesInfo(
+        "stepfun-ai/Step3-VL-10B", trust_remote_code=True
     ),
     "UltravoxModel": _HfExamplesInfo(
         "fixie-ai/ultravox-v0_5-llama-3_2-1b",

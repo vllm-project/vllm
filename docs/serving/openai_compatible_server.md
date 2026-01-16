@@ -559,7 +559,7 @@ Our Classification API directly supports Hugging Face sequence-classification mo
 
 We automatically wrap any other transformer via `as_seq_cls_model()`, which pools on the last token, attaches a `RowParallelLinear` head, and applies a softmax to produce per-class probabilities.
 
-Code example: [examples/pooling/classify/openai_classification_client.py](../../examples/pooling/classify/openai_classification_client.py)
+Code example: [examples/pooling/classify/classification_online.py](../../examples/pooling/classify/classification_online.py)
 
 #### Example Requests
 
@@ -874,7 +874,7 @@ You can pass multi-modal inputs to scoring models by passing `content` including
 Full example:
 
 - [examples/pooling/score/vision_score_api_online.py](../../examples/pooling/score/vision_score_api_online.py)
-- examples/pooling/score/vision_rerank_api_online.py](../../examples/pooling/score/vision_rerank_api_online.py)
+- [examples/pooling/score/vision_rerank_api_online.py](../../examples/pooling/score/vision_rerank_api_online.py)
 
 #### Extra parameters
 

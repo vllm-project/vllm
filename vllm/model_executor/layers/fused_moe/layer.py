@@ -448,9 +448,13 @@ class FusedMoE(CustomOp):
         )
 
         # ROCm aiter shared experts fusion
-        self.rocm_aiter_fmoe_enabled = rocm_aiter_ops.is_fused_moe_enabled()
+        # AITER only supports gated activations (silu/gelu), so disable it
+        # for non-gated MoE (is_act_and_mul=False)
+        self.rocm_aiter_fmoe_enabled = (
+            rocm_aiter_ops.is_fused_moe_enabled() and is_act_and_mul
+        )
         self.aiter_fmoe_shared_expert_enabled = (
-            rocm_aiter_ops.is_fusion_moe_shared_experts_enabled()
+            rocm_aiter_ops.is_fusion_moe_shared_experts_enabled() and is_act_and_mul
         )
 
         self.num_fused_shared_experts = (
@@ -619,29 +623,10 @@ class FusedMoE(CustomOp):
         # for heuristic purposes, so it must be initialized first.
         self.quant_method: FusedMoEMethodBase = _get_quant_method()
 
-        if not self.moe_config.is_act_and_mul:
-            # Avoid circular import
-            from vllm.model_executor.layers.quantization.modelopt import (
-                ModelOptFp8MoEMethod,
-                ModelOptNvFp4FusedMoE,
+        if not self.moe_config.is_act_and_mul and not current_platform.is_cuda_alike():
+            raise NotImplementedError(
+                "is_act_and_mul=False is supported only for CUDA and ROCm for now"
             )
-
-            if not isinstance(
-                self.quant_method,
-                (
-                    UnquantizedFusedMoEMethod,
-                    ModelOptFp8MoEMethod,
-                    ModelOptNvFp4FusedMoE,
-                ),
-            ):
-                raise NotImplementedError(
-                    "is_act_and_mul=False is supported only for unquantized "
-                    ", ModelOpt FP8, and ModelOpt NvFp4 checkpoints"
-                )
-            if not current_platform.is_cuda():
-                raise NotImplementedError(
-                    "is_act_and_mul=False is supported only for CUDA for now"
-                )
 
         if self.enable_eplb and not self.quant_method.supports_eplb:
             # TODO: Add support for additional quantization methods.
