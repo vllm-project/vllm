@@ -98,6 +98,7 @@ _TEXT_GENERATION_MODELS = {
     "Ernie4_5_MoeForCausalLM": ("ernie45_moe", "Ernie4_5_MoeForCausalLM"),
     "ExaoneForCausalLM": ("exaone", "ExaoneForCausalLM"),
     "Exaone4ForCausalLM": ("exaone4", "Exaone4ForCausalLM"),
+    "ExaoneMoEForCausalLM": ("exaone_moe", "ExaoneMoeForCausalLM"),
     "Fairseq2LlamaForCausalLM": ("fairseq2_llama", "Fairseq2LlamaForCausalLM"),
     "FalconForCausalLM": ("falcon", "FalconForCausalLM"),
     "FalconMambaForCausalLM": ("mamba", "MambaForCausalLM"),
@@ -322,6 +323,7 @@ _MULTIMODAL_MODELS = {
         "hunyuan_vision",
         "HunYuanVLForConditionalGeneration",
     ),
+    "StepVLForConditionalGeneration": ("step_vl", "StepVLForConditionalGeneration"),
     "InternVLChatModel": ("internvl", "InternVLChatModel"),
     "NemotronH_Nano_VL_V2": ("nano_nemotron_vl", "NemotronH_Nano_VL_V2"),
     "OpenCUAForConditionalGeneration": (
@@ -342,6 +344,7 @@ _MULTIMODAL_MODELS = {
     ),
     "IsaacForConditionalGeneration": ("isaac", "IsaacForConditionalGeneration"),
     "SmolVLMForConditionalGeneration": ("smolvlm", "SmolVLMForConditionalGeneration"),  # noqa: E501
+    "KananaVForConditionalGeneration": ("kanana_v", "KananaVForConditionalGeneration"),
     "KeyeForConditionalGeneration": ("keye", "KeyeForConditionalGeneration"),
     "KeyeVL1_5ForConditionalGeneration": (
         "keye_vl1_5",
@@ -382,6 +385,7 @@ _MULTIMODAL_MODELS = {
         "Mistral3ForConditionalGeneration",
     ),
     "MolmoForCausalLM": ("molmo", "MolmoForCausalLM"),
+    "Molmo2ForConditionalGeneration": ("molmo2", "Molmo2ForConditionalGeneration"),
     "NVLM_D": ("nvlm_d", "NVLM_D_Model"),
     "Ovis": ("ovis", "Ovis"),
     "Ovis2_5": ("ovis2_5", "Ovis2_5"),
@@ -457,6 +461,7 @@ _SPECULATIVE_DECODING_MODELS = {
     "EagleDeepSeekMTPModel": ("deepseek_eagle", "EagleDeepseekV3ForCausalLM"),
     "DeepSeekMTPModel": ("deepseek_mtp", "DeepSeekMTP"),
     "ErnieMTPModel": ("ernie_mtp", "ErnieMTP"),
+    "ExaoneMoeMTP": ("exaone_moe_mtp", "ExaoneMoeMTP"),
     "LongCatFlashMTPModel": ("longcat_flash_mtp", "LongCatFlashMTP"),
     "Glm4MoeMTPModel": ("glm4_moe_mtp", "Glm4MoeMTP"),
     "MedusaModel": ("medusa", "Medusa"),
@@ -884,6 +889,7 @@ class _ModelRegistry:
                         module,
                         model_config.model,
                         revision=model_config.revision,
+                        trust_remote_code=model_config.trust_remote_code,
                         warn_on_fail=False,
                     )
 
@@ -896,6 +902,7 @@ class _ModelRegistry:
                         module,
                         model_config.model,
                         revision=model_config.revision,
+                        trust_remote_code=model_config.trust_remote_code,
                         warn_on_fail=True,
                     )
                     if model_module is not None:

@@ -26,6 +26,7 @@ from vllm.v1.core.kv_cache_utils import (
     init_none_hash,
 )
 from vllm.v1.core.sched.scheduler import Scheduler
+from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.kv_offload.abstract import (
     LoadStoreSpec,
     OffloadingEvent,
@@ -93,8 +94,8 @@ class MockOffloadingHandler(OffloadingHandler):
 
 
 class MockOffloadingSpec(OffloadingSpec):
-    def __init__(self, vllm_config: VllmConfig):
-        super().__init__(vllm_config)
+    def __init__(self, vllm_config: VllmConfig, kv_cache_config: KVCacheConfig):
+        super().__init__(vllm_config, kv_cache_config)
 
         self.manager = MagicMock(spec=OffloadingManager)
         self.manager.lookup.return_value = 0

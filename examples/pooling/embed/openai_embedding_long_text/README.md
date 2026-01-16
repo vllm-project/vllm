@@ -47,7 +47,7 @@ The key parameters for chunked processing are in the `--pooler-config`:
 ```json
 {
   "pooling_type": "auto",
-  "normalize": true,
+  "use_activation": true,
   "enable_chunked_processing": true,
   "max_embed_len": 3072000
 }

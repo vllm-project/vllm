@@ -223,10 +223,6 @@ def get_type_hints(type_hint: TypeHint) -> set[TypeHint]:
     return type_hints
 
 
-def is_online_quantization(quantization: Any) -> bool:
-    return quantization in ["inc"]
-
-
 NEEDS_HELP = (
     any("--help" in arg for arg in sys.argv)  # vllm SUBCOMMAND --help
     or (argv0 := sys.argv[0]).endswith("mkdocs")  # mkdocs SUBCOMMAND
@@ -354,6 +350,7 @@ class EngineArgs:
     """Arguments for vLLM engine."""
 
     model: str = ModelConfig.model
+    enable_return_routed_experts: bool = ModelConfig.enable_return_routed_experts
     model_weights: str = ModelConfig.model_weights
     served_model_name: str | list[str] | None = ModelConfig.served_model_name
     tokenizer: str | None = ModelConfig.tokenizer
@@ -412,7 +409,7 @@ class EngineArgs:
     ubatch_size: int = ParallelConfig.ubatch_size
     dbo_decode_token_threshold: int = ParallelConfig.dbo_decode_token_threshold
     dbo_prefill_token_threshold: int = ParallelConfig.dbo_prefill_token_threshold
-    disable_nccl_for_dp_synchronization: bool = (
+    disable_nccl_for_dp_synchronization: bool | None = (
         ParallelConfig.disable_nccl_for_dp_synchronization
     )
     eplb_config: EPLBConfig = get_field(ParallelConfig, "eplb_config")
@@ -577,9 +574,7 @@ class EngineArgs:
     optimization_level: OptimizationLevel = VllmConfig.optimization_level
 
     kv_offloading_size: float | None = CacheConfig.kv_offloading_size
-    kv_offloading_backend: KVOffloadingBackend | None = (
-        CacheConfig.kv_offloading_backend
-    )
+    kv_offloading_backend: KVOffloadingBackend = CacheConfig.kv_offloading_backend
     tokens_only: bool = False
 
     def __post_init__(self):
@@ -657,6 +652,10 @@ class EngineArgs:
             **model_kwargs["allow_deprecated_quantization"],
         )
         model_group.add_argument("--enforce-eager", **model_kwargs["enforce_eager"])
+        model_group.add_argument(
+            "--enable-return-routed-experts",
+            **model_kwargs["enable_return_routed_experts"],
+        )
         model_group.add_argument("--max-logprobs", **model_kwargs["max_logprobs"])
         model_group.add_argument("--logprobs-mode", **model_kwargs["logprobs_mode"])
         model_group.add_argument(
@@ -1239,6 +1238,7 @@ class EngineArgs:
             quantization=self.quantization,
             allow_deprecated_quantization=self.allow_deprecated_quantization,
             enforce_eager=self.enforce_eager,
+            enable_return_routed_experts=self.enable_return_routed_experts,
             max_logprobs=self.max_logprobs,
             logprobs_mode=self.logprobs_mode,
             disable_sliding_window=self.disable_sliding_window,
@@ -1298,7 +1298,6 @@ class EngineArgs:
             load_format=self.load_format,
             download_dir=self.download_dir,
             safetensors_load_strategy=self.safetensors_load_strategy,
-            device="cpu" if is_online_quantization(self.quantization) else None,
             model_loader_extra_config=self.model_loader_extra_config,
             ignore_patterns=self.ignore_patterns,
             use_tqdm_on_load=self.use_tqdm_on_load,

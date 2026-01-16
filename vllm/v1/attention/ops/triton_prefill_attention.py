@@ -211,16 +211,17 @@ def get_block_size(dtype: torch.dtype) -> int:
 
 
 def context_attention_fwd(
-    q,
-    k,
-    v,
-    o,
-    b_start_loc,
-    b_seq_len,
-    max_input_len,
-    is_causal=True,
-    sliding_window_q=None,
-    sliding_window_k=None,
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    o: torch.Tensor,
+    b_start_loc: torch.Tensor,
+    b_seq_len: torch.Tensor,
+    max_input_len: int,
+    is_causal: bool = True,
+    softmax_scale: float | None = None,
+    sliding_window_q: int | None = None,
+    sliding_window_k: int | None = None,
 ):
     """
     q, k, v: [b * s, head, head_dim]
@@ -232,7 +233,7 @@ def context_attention_fwd(
 
     Lq, Lk, _ = q.shape[-1], k.shape[-1], v.shape[-1]
 
-    sm_scale = 1.0 / (Lq**0.5)
+    sm_scale = 1.0 / (Lq**0.5) if softmax_scale is None else softmax_scale
     batch, head = b_seq_len.shape[0], q.shape[1]
     kv_group_num = q.shape[1] // k.shape[1]
 

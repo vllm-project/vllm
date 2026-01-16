@@ -32,12 +32,10 @@ from vllm.utils.torch_utils import is_torch_equal_or_newer
 from vllm.v1.attention.backend import (
     AttentionBackend,
     AttentionImpl,
-    AttentionType,
-    is_quantized_kv_cache,
-)
-from vllm.v1.attention.backends.utils import (
     AttentionMetadataBuilder,
+    AttentionType,
     CommonAttentionMetadata,
+    is_quantized_kv_cache,
 )
 from vllm.v1.kv_cache_interface import AttentionSpec
 

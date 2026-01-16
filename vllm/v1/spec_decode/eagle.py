@@ -26,16 +26,16 @@ from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.platforms import current_platform
 from vllm.triton_utils import triton
 from vllm.utils.platform_utils import is_pin_memory_available
+from vllm.v1.attention.backend import (
+    AttentionMetadataBuilder,
+    CommonAttentionMetadata,
+)
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 from vllm.v1.attention.backends.tree_attn import (
     TreeAttentionMetadata,
     TreeAttentionMetadataBuilder,
 )
 from vllm.v1.attention.backends.triton_attn import TritonAttentionMetadata
-from vllm.v1.attention.backends.utils import (
-    AttentionMetadataBuilder,
-    CommonAttentionMetadata,
-)
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.sample.sampler import _SAMPLING_EPS
@@ -183,7 +183,9 @@ class EagleProposer:
                 rocm_types.append(AiterFlashAttentionMetadata)
 
             # TRITON_MLA backend support for MLA models (e.g., DeepSeek)
-            from vllm.v1.attention.backends.mla.common import MLACommonMetadata
+            from vllm.model_executor.layers.attention.mla_attention import (
+                MLACommonMetadata,
+            )
 
             rocm_types.append(MLACommonMetadata)
 
@@ -464,6 +466,12 @@ class EagleProposer:
             # For the requests that exceed the max model length, we set the
             # sequence length to 1 to minimize their overheads in attention.
             common_attn_metadata.seq_lens.masked_fill_(exceeds_max_model_len, 1)
+            # Increment the maximum sequence length. We increment max_seq_len
+            # unconditionally even though some seq_lens may have been capped above,
+            # as max_seq_len serves as an upper bound for sequence lengths.
+            common_attn_metadata.max_seq_len = min(
+                common_attn_metadata.max_seq_len + 1, self.max_model_len
+            )
 
             # Also update the CPU-side shadow; NOTE: this is hacky and should be
             # removed in when common_attn_metadata.seq_lens_cpu is deprecated.
