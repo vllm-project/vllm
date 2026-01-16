@@ -131,8 +131,10 @@ class FlashAttnMLAMetadataBuilder(MLACommonMetadataBuilder[FlashAttnMLAMetadata]
         if self.use_full_cuda_graph and self.fa_aot_schedule:
             # Times 4 due to:
             #  https://github.com/vllm-project/flash-attention/blob/3223650ccabe622a0fcae65eec706a50186a89f7/hopper/flash_api.cpp#L650-L653
+            # Use max_cudagraph_size (not max_num_seqs) because during cuda
+            # graph capture the batch size can be up to max_cudagraph_size.
             self.scheduler_metadata = torch.zeros(
-                vllm_config.scheduler_config.max_num_seqs * 4 + 1,
+                self.max_cudagraph_size * 4 + 1,
                 dtype=torch.int32,
                 device=self.device,
             )
