@@ -117,20 +117,15 @@ class PrismaticVisionBackbone(nn.Module):
                     img_size=img_size,
                 )
 
-        # Convert to default dtype
-        self.featurizer = self.featurizer.to(dtype=torch.get_default_dtype())
+        # Convert to default dtype and move to device immediately
+        device = current_platform.device_type
+        self.featurizer = self.featurizer.to(
+            device=device, dtype=torch.get_default_dtype()
+        )
         if self.fused_featurizer is not None:
             self.fused_featurizer = self.fused_featurizer.to(
-                dtype=torch.get_default_dtype()
+                device=device, dtype=torch.get_default_dtype()
             )
-
-    def _move_timm_to_device(self):
-        """Move timm models to the appropriate device after weight loading."""
-        device = current_platform.device_type
-        if self.featurizer is not None:
-            self.featurizer = self.featurizer.to(device=device)
-        if self.fused_featurizer is not None:
-            self.fused_featurizer = self.fused_featurizer.to(device=device)
 
     def forward(self, pixel_values: torch.Tensor) -> torch.Tensor:
         """Extract and fuse features from both vision encoders.
@@ -736,13 +731,7 @@ class OpenVLAForActionPrediction(nn.Module, SupportsMultiModal, SupportsPP):
 
         # Use AutoWeightsLoader for proper handling of packed modules
         loader = AutoWeightsLoader(self)
-        loaded = loader.load_weights(transform_weights(), mapper=self.hf_to_vllm_mapper)
-
-        # Move timm models to device after weights are loaded
-        if self.vision_backbone is not None:
-            self.vision_backbone._move_timm_to_device()
-
-        return loaded
+        return loader.load_weights(transform_weights(), mapper=self.hf_to_vllm_mapper)
 
     def get_mm_mapping(self):
         """Get the module prefix in multimodal models."""
