@@ -48,8 +48,7 @@ from vllm.distributed.weight_transfer.nccl_engine import (
 )
 from vllm.utils.network_utils import get_ip, get_open_port
 
-MODEL_NAME = "Qwen/Qwen3-30B-A3B-Thinking-2507"
-# MODEL_NAME = "facebook/opt-125m"
+MODEL_NAME = "facebook/opt-125m"
 
 
 class MyLLM(LLM):

@@ -61,8 +61,7 @@ def get_physical_gpu_id():
 
 # Load the OPT-125M model onto GPU 0 for the training workload.
 
-# MODEL_NAME = "facebook/opt-125m"
-MODEL_NAME = "Qwen/Qwen2.5-0.5B-Instruct"
+MODEL_NAME = "facebook/opt-125m"
 
 
 @ray.remote

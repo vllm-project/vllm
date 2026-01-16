@@ -18,9 +18,8 @@ The following open-source RL libraries use vLLM for fast rollouts (sorted alphab
 
 See the following basic examples to get started if you don't want to use an existing library:
 
-- [Training and inference processes are located on separate GPUs (inspired by OpenRLHF)](../examples/offline_inference/rlhf.md)
-- [Training and inference processes are colocated on the same GPUs using Ray](../examples/offline_inference/rlhf_colocate.md)
-- [Utilities for performing RLHF with vLLM](../examples/offline_inference/rlhf_utils.md)
+- [Training and inference processes are located on separate GPUs](../examples/offline_inference/weight_syncing/rlhf.md)
+- [Training and inference processes communicate via IPC](../examples/offline_inference/weight_syncing/rlhf_ipc.md)
 
 See the following notebooks showing how to use vLLM for GRPO:
 
