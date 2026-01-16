@@ -644,6 +644,10 @@ def kernel_unified_attention_3d(
     RCP_LN2 = 1.4426950408889634
     qk_scale = scale * RCP_LN2
 
+    # The 3D kernel is only used for decode-only execution in vLLM (no prefill).
+    # Use global-cache hinting for KV cache loads on ROCm.
+    KV_cache_modifier: tl.constexpr = ".cg"
+
     seq_idx = find_seq_idx(
         query_start_len_ptr, q_block_global_idx, num_seqs, BLOCK_Q, True
     )
@@ -1176,20 +1180,11 @@ def unified_attention(
     #    = floor(q.shape[0] / BLOCK_Q) + num_seqs
     total_num_q_blocks = q.shape[0] // BLOCK_Q + num_seqs
 
-    # Tile sizes for prefill and decode. Gemma3 models use optimized values.
-    # Note: tile size must be at least 32 for fp8 (element_size == 1).
-    sliding_window_val = 1 + window_size[0] if window_size[0] >= 0 else 0
-    TILE_SIZE_PREFILL = _get_tile_size(
-        head_size,
-        sliding_window_val,
-        q.element_size(),
-        is_prefill=True,
-    )
-    TILE_SIZE_DECODE = _get_tile_size(
-        head_size,
-        sliding_window_val,
-        q.element_size(),
-        is_prefill=False,
+    # 3D kernel launch configs (used when running decode-only and the caller
+    # provided segmented softmax buffers).
+    num_2d_prgms = total_num_q_blocks * num_kv_heads
+    attn_config_3d, reduce_config_3d = select_3d_config(
+        head_size, block_size, max_seqlen_k, num_2d_prgms, kv_element_size
     )
 
     # Launch the 2D kernel if
@@ -1205,6 +1200,20 @@ def unified_attention(
         or max_seqlen_q > 1
         or num_seqs > seq_threshold_3D
     ):
+        ALL_DECODE = max_seqlen_q == 1
+        config = select_2d_config(
+            block_size,
+            head_size,
+            SLIDING_WINDOW,
+            ALL_DECODE,
+            max_seqlen_q,
+            max_seqlen_k,
+            num_queries_per_kv,
+            total_num_q_blocks * num_kv_heads,
+            kv_element_size,
+        )
+        assert config["BLOCK_Q"] >= 1
+        total_num_q_blocks = q.shape[0] // config["BLOCK_Q"] + num_seqs
         kernel_unified_attention_2d[
             (
                 num_kv_heads,
@@ -1255,9 +1264,19 @@ def unified_attention(
             query_start_len_ptr=cu_seqlens_q,
             num_seqs=num_seqs,
             USE_FP8=output_scale is not None,
+            ALL_DECODE=ALL_DECODE,
             **config,
         )
     else:
+        # When using the 3D path, the caller provides the segmented softmax
+        # buffers and the number of segments. Ensure they match the launch
+        # configuration chosen here.
+        expected_segments = attn_config_3d["NUM_SEGMENTS_PER_SEQ"]
+        assert num_par_softmax_segments == expected_segments, (
+            f"num_par_softmax_segments={num_par_softmax_segments} "
+            f"!= {expected_segments}"
+        )
+
         kernel_unified_attention_3d[
             (total_num_q_blocks, num_kv_heads, num_par_softmax_segments)
         ](
@@ -1305,7 +1324,7 @@ def unified_attention(
             BLOCK_Q=BLOCK_Q,
             num_seqs=num_seqs,
             BLOCK_M=BLOCK_M,
-            NUM_SEGMENTS_PER_SEQ=num_par_softmax_segments,
+            **attn_config_3d,
         )
         reduce_segments[(q.shape[0], num_query_heads)](
             output_ptr=out,
@@ -1323,7 +1342,6 @@ def unified_attention(
             HEAD_SIZE_PADDED=triton.next_power_of_2(head_size),
             query_start_len_ptr=cu_seqlens_q,
             BLOCK_Q=BLOCK_Q,
-            NUM_SEGMENTS_PER_SEQ=num_par_softmax_segments,
             USE_FP8=output_scale is not None,
-            **reduce_config,
+            **reduce_config_3d,
         )
