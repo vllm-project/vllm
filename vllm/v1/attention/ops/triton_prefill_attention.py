@@ -110,15 +110,7 @@ def _fwd_kernel(
     end_n_limit = block_mask * end_n
 
     for start_n in range(start_n_limit, end_n_limit, BLOCK_N):
-        start_n = tl.multiple_of(start_n, BLOCK_N)
-        # -- compute qk ----
-        k = tl.load(
-            k_ptrs + (cur_batch_in_all_start_index + start_n) * stride_kbs,
-            mask=((start_n + offs_n[None, :]) < cur_batch_seq_len) & (mask_d[:, None]),
-            other=0.0,
-        )
-
-        # Apply attention mask (causal + bidirectional sliding window)
+        # -- prepare attention mask ----
         # Position indices in the sequence
         pos_q = offs_m[:, None]  # Query positions [BLOCK_M, 1]
         pos_k = start_n + offs_n[None, :]  # Key positions [1, BLOCK_N]
@@ -141,44 +133,38 @@ def _fwd_kernel(
         if sliding_mask_k is not None:
             mask &= sliding_mask_k
 
+        start_n = tl.multiple_of(start_n, BLOCK_N)
+        # -- compute qk ----
+        k = tl.load(
+            k_ptrs + (cur_batch_in_all_start_index + start_n) * stride_kbs,
+            mask=(pos_k < cur_batch_seq_len) & (mask_d[:, None]),
+            other=0.0,
+        )
+
         qk = tl.dot(q, k)
         qk = tl.where(mask, qk * sm_scale, -1.0e8)
-
-        # -- compute m_ij, p, l_ij
-        m_ij = tl.max(qk, 1)
-        # For sliding window there's a chance the max is -inf due to masking of
-        # the entire row. In this case we need to set m_j 0 to avoid NaN
-        # -- compute p and l_ij --
-        p = tl.exp2(qk - m_ij[:, None])
+        m_ij = tl.maximum(m_i, tl.max(qk, 1))
+        qk -= m_ij[:, None]
+        p = tl.math.exp2(qk)
         l_ij = tl.sum(p, 1)
+
         # -- update m_i and l_i
-        m_i_new = tl.maximum(m_i, m_ij)
-        alpha = tl.exp2(m_i - m_i_new)
-        beta = tl.exp2(m_ij - m_i_new)
-        # mask alpha and beta for sliding window
-        l_i_new = alpha * l_i + beta * l_ij
+        alpha = tl.math.exp2(m_i - m_ij)
+        l_i = l_i * alpha + l_ij
         # -- update output accumulator --
-        # scale p
-        # For sliding window there's a chance the l_i_new is 0 due to masking
-        # the entire row. We need to set l_i_new 1 to avoid zero division
-        p_scale = beta / l_i_new
-        p = p * p_scale[:, None]
-        # scale acc
-        acc_scale = l_i / l_i_new * alpha
-        acc = acc * acc_scale[:, None]
+        acc = acc * alpha[:, None]
         # update acc
         v = tl.load(
             v_ptrs + (cur_batch_in_all_start_index + start_n) * stride_vbs,
             mask=((start_n + offs_n[:, None]) < cur_batch_seq_len) & (mask_d[None, :]),
             other=0.0,
         )
-
         p = p.to(v.dtype)
-        acc += tl.dot(p, v)
-        # update m_i and l_i
-        l_i = l_i_new
-        m_i = m_i_new
-    # initialize pointers to output
+        acc = tl.dot(p, v, acc)
+        # update m_i
+        m_i = m_ij
+
+    acc = acc / l_i[:, None]
     off_o = (
         (cur_batch_in_all_start_index + offs_m[:, None]) * stride_obs
         + cur_head * stride_oh
