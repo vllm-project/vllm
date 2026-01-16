@@ -44,13 +44,13 @@ class ModelBackendTestCase(NamedTuple):
 
 
 # E2E model test cases
-DUMMY_MODELS_FP8: list[ModelBackendTestCase] = []
-DUMMY_MODELS_FP4: list[ModelBackendTestCase] = []
-DUMMY_MODELS: list[ModelBackendTestCase] = []  # tp-only (unquantized)
+MODELS_FP8: list[ModelBackendTestCase] = []
+MODELS_FP4: list[ModelBackendTestCase] = []
+MODELS: list[ModelBackendTestCase] = []  # tp-only (unquantized)
 MODELS_GROUP_FP8: list[ModelBackendTestCase] = []
 
 if current_platform.is_cuda():
-    DUMMY_MODELS_FP8 = [
+    MODELS_FP8 = [
         ModelBackendTestCase(
             # Use smaller model for L40s in CI
             model_name="RedHatAI/Meta-Llama-3.1-8B-Instruct-FP8",
@@ -90,7 +90,7 @@ if current_platform.is_cuda():
         ),
     ]
 
-    DUMMY_MODELS_FP4 = [
+    MODELS_FP4 = [
         ModelBackendTestCase(
             model_name="nvidia/Llama-3.1-8B-Instruct-FP4",
             model_kwargs=dict(
@@ -110,7 +110,7 @@ if current_platform.is_cuda():
     ]
 
     # TP only
-    DUMMY_MODELS = [
+    MODELS = [
         ModelBackendTestCase(
             model_name="meta-llama/Llama-3.1-8B-Instruct",
             model_kwargs=dict(
@@ -155,7 +155,7 @@ if current_platform.is_cuda():
     ]
 
 elif current_platform.is_rocm():
-    DUMMY_MODELS_FP8 = [
+    MODELS_FP8 = [
         ModelBackendTestCase(
             model_name="amd/Llama-3.1-8B-Instruct-FP8-KV",
             model_kwargs=dict(
