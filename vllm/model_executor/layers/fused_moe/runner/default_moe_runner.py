@@ -265,24 +265,26 @@ class DefaultMoERunner(MoERunner):
         states: torch.Tensor | tuple[torch.Tensor, torch.Tensor],
         trunc_dim: int,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+        def trunc(x: torch.Tensor) -> torch.Tensor:
+            return x[..., :trunc_dim]
+
+        def reduce_and_trunc(x: torch.Tensor) -> torch.Tensor:
+            return trunc(self.maybe_all_reduce_tensor_model_parallel(x))
+
         if (
             not self.moe_config.is_sequence_parallel
             and not self.use_dp_chunking
             and self.reduce_results
             and (self.moe_config.tp_size > 1 or self.moe_config.ep_size > 1)
         ):
-            if isinstance(states, tuple):
-                states = tuple(
-                    [
-                        self.maybe_all_reduce_tensor_model_parallel(s)[..., :trunc_dim]
-                        for s in states
-                    ]
-                )
-            else:
-                states = self.maybe_all_reduce_tensor_model_parallel(states)[
-                    ..., :trunc_dim
-                ]
-        return states
+            func = reduce_and_trunc
+        else:
+            func = trunc
+
+        if isinstance(states, tuple):
+            return tuple([func(s) for s in states])
+        else:
+            return func(states)
 
     def forward(
         self,
