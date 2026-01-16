@@ -89,9 +89,6 @@ from .utils import (
     maybe_prefix,
 )
 
-if current_platform.is_cuda_alike() or current_platform.is_xpu():
-    pass
-
 logger = init_logger(__name__)
 
 
