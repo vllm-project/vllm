@@ -131,7 +131,7 @@ class FlashInferExperts(mk.FusedMoEPermuteExpertsUnpermute):
             )
             or (
                 (scheme == (kNvfp4Static, kNvfp4Dynamic))
-                and (p.is_device_capability((10, 0)))  # GB?
+                and (p.is_device_capability_family((10, 0)))
             )
         )
 
