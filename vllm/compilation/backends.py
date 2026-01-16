@@ -941,7 +941,10 @@ class VllmBackend:
         # Record Dynamo time in tracing if available
         if is_otel_available():
             tracer = trace.get_tracer(__name__)
-            with tracer.start_as_current_span("Dynamo bytecode transform") as span:
+            with tracer.start_as_current_span(
+                "Dynamo bytecode transform",
+                start_time=int(torch_compile_start_time * 1e9),
+            ) as span:
                 span.set_attribute("dynamo.time_seconds", dynamo_time)
 
         # we control the compilation process, each instance can only be
