@@ -24,7 +24,6 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8StaticChannelSym,
     kFp8StaticTensorSym,
 )
-from vllm.platforms import current_platform
 
 
 class QuantMethod(IntEnum):
@@ -293,11 +292,7 @@ class AiterExperts(mk.FusedMoEPermuteExpertsUnpermute):
 
     @staticmethod
     def _supports_current_device() -> bool:
-        return (
-            current_platform.is_rocm()
-            and current_platform.on_gfx9()
-            and rocm_aiter_ops.is_fused_moe_enabled()
-        )
+        return rocm_aiter_ops.is_fused_moe_enabled()
 
     @staticmethod
     def _supports_no_act_and_mul() -> bool:
