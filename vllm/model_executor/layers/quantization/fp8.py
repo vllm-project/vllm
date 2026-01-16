@@ -76,6 +76,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     GroupShape,
     is_layer_skipped,
     kFp8Dynamic128Sym,
+    kFp8DynamicTensorSym,
     kFp8Static128BlockSym,
     kFp8StaticTensorSym,
 )
@@ -645,7 +646,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             activation_key = (
                 kFp8StaticTensorSym
                 if self.quant_config.activation_scheme == "static"
-                else kFp8Dynamic128Sym
+                else kFp8DynamicTensorSym
             )
 
         # Select Fp8 MoE backend
