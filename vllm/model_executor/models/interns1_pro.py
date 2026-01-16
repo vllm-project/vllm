@@ -33,7 +33,7 @@ from torch import nn
 from transformers import AutoProcessor, PretrainedConfig
 
 from vllm.attention.layer import Attention
-from vllm.config import CacheConfig, VllmConfig, get_current_vllm_config
+from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import (
     get_ep_group,
     get_tensor_model_parallel_world_size,
@@ -160,7 +160,6 @@ class InternS1ProMoeSparseMoeBlock(nn.Module):
             )
 
         # Load balancing settings.
-        vllm_config = get_current_vllm_config()
         eplb_config = vllm_config.parallel_config.eplb_config
         self.enable_eplb = parallel_config.enable_eplb
 
