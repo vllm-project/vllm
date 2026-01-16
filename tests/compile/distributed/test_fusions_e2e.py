@@ -250,6 +250,8 @@ def test_tp2_attn_quant_async_tp(
 
     assert int(log_matches[0]) == matches.async_tp
     assert int(log_matches[1]) == matches.async_tp
+
+
 @pytest.mark.parametrize(
     "model_name, model_kwargs, backend, matches, custom_ops",
     # Test rms norm+group quant_fp8 fusion
