@@ -17,7 +17,14 @@ from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
+    kFp8Dynamic128Sym,
+    kFp8DynamicTensorSym,
+    kFp8DynamicTokenSym,
+    kFp8Static128BlockSym,
+    kFp8StaticChannelSym,
+    kFp8StaticTensorSym,
 )
+from vllm.platforms import current_platform
 
 
 class QuantMethod(IntEnum):
@@ -281,14 +288,16 @@ class AiterExperts(mk.FusedMoEPermuteExpertsUnpermute):
     def should_pf_defer_input_quant(
         fused_moe_config: mk.FusedMoEConfig, quant_config: FusedMoEQuantConfig
     ) -> bool:
-        """
-        AITER Fused MoE kernels handle input quantization.
-        """
+        # AITER fused MoE kernels handle input quantization internally.
         return True
 
     @staticmethod
     def _supports_current_device() -> bool:
-        return rocm_aiter_ops.is_fused_moe_enabled()
+        return (
+            current_platform.is_rocm()
+            and current_platform.on_gfx9()
+            and rocm_aiter_ops.is_fused_moe_enabled()
+        )
 
     @staticmethod
     def _supports_no_act_and_mul() -> bool:
@@ -299,12 +308,17 @@ class AiterExperts(mk.FusedMoEPermuteExpertsUnpermute):
         weight_key: QuantKey | None,
         activation_key: QuantKey | None,
     ) -> bool:
-        # return (
-        #     quant_scheme.is_unquantized
-        #     or quant_scheme.is_fp8_w8a8
-        #     or quant_scheme.is_mxfp4_w4a4
-        # )
-        return False
+        # TODO(rob): AITER also supports MXFP4, which is not
+        # yet supported via an Oracle. Once it is, we will add
+        # MXFP4 to this list.
+        SUPPORTED_W_A = [
+            (None, None),
+            (kFp8Static128BlockSym, kFp8Dynamic128Sym),
+            (kFp8StaticTensorSym, kFp8StaticTensorSym),
+            (kFp8StaticTensorSym, kFp8DynamicTensorSym),
+            (kFp8StaticChannelSym, kFp8DynamicTokenSym),
+        ]
+        return (weight_key, activation_key) in SUPPORTED_W_A
 
     @staticmethod
     def _supports_activation(activation: str) -> bool:

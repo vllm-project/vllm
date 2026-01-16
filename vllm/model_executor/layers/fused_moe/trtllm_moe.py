@@ -34,6 +34,10 @@ class TrtLlmGenExperts(mk.FusedMoEPermuteExpertsUnpermute):
         self.max_capture_size = max_capture_size
 
     @staticmethod
+    def activation_format() -> mk.FusedMoEActivationFormat:
+        return mk.FusedMoEActivationFormat.Standard
+
+    @staticmethod
     def _supports_current_device() -> bool:
         raise NotImplementedError(
             "TrtLlmGenExperts is not yet used by an Oracle. "
