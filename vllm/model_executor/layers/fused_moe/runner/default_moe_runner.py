@@ -116,11 +116,15 @@ class DefaultMoERunner(MoERunner):
             # TODO: Once the OOM issue for the TPU backend is resolved, we
             # will switch to using the moe_forward custom op.
             # Note: CPU doesn't require wrapped forward_impl.
-            self.moe_forward = _moe_forward
-            self.moe_forward_shared = _moe_forward_shared
+            if self.shared_experts is None:
+                self.moe_forward = _moe_forward
+            else:
+                self.moe_forward = _moe_forward_shared
         else:
-            self.moe_forward = eval(f"torch.ops.vllm.moe_forward{lname}")
-            self.moe_forward_shared = eval(f"torch.ops.vllm.moe_forward_shared{lname}")
+            if self.shared_experts is None:
+                self.moe_forward = eval(f"torch.ops.vllm.moe_forward{lname}")
+            else:
+                self.moe_forward = eval(f"torch.ops.vllm.moe_forward_shared{lname}")
 
         self.moe_config_use_flashinfer_cutlass_kernels = (
             self.moe_config.use_flashinfer_cutlass_kernels
@@ -256,6 +260,30 @@ class DefaultMoERunner(MoERunner):
         else:
             return tensor_model_parallel_all_reduce(final_hidden_states)
 
+    def _reduce_output(
+        self,
+        states: torch.Tensor | tuple[torch.Tensor, torch.Tensor],
+        trunc_dim: int,
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+        if (
+            not self.moe_config.is_sequence_parallel
+            and not self.use_dp_chunking
+            and self.reduce_results
+            and (self.moe_config.tp_size > 1 or self.moe_config.ep_size > 1)
+        ):
+            if isinstance(states, tuple):
+                states = tuple(
+                    [
+                        self.maybe_all_reduce_tensor_model_parallel(s)[..., :trunc_dim]
+                        for s in states
+                    ]
+                )
+            else:
+                states = self.maybe_all_reduce_tensor_model_parallel(states)[
+                    ..., :trunc_dim
+                ]
+        return states
+
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -270,28 +298,8 @@ class DefaultMoERunner(MoERunner):
                 value=0.0,
             )
 
-        def reduce_output(states: torch.Tensor) -> torch.Tensor:
-            if (
-                not self.moe_config.is_sequence_parallel
-                and not self.use_dp_chunking
-                and self.reduce_results
-                and (self.moe_config.tp_size > 1 or self.moe_config.ep_size > 1)
-            ):
-                states = self.maybe_all_reduce_tensor_model_parallel(states)
-            return states
-
-        if self.shared_experts is None:
-            fused_output = self.moe_forward(hidden_states, router_logits)
-            assert not isinstance(fused_output, tuple)
-            return reduce_output(fused_output)[..., :og_hidden_states]
-        else:
-            shared_output, fused_output = self.moe_forward_shared(
-                hidden_states, router_logits
-            )
-            return (
-                reduce_output(shared_output)[..., :og_hidden_states],
-                reduce_output(fused_output)[..., :og_hidden_states],
-            )
+        fused_output = self.moe_forward(hidden_states, router_logits)
+        return self._reduce_output(fused_output, og_hidden_states)
 
     def forward_impl_chunked(
         self,
