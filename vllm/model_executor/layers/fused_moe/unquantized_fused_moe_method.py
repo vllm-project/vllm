@@ -55,6 +55,8 @@ logger = init_logger(__name__)
 class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
     """MoE method without quantization."""
 
+    # --8<-- [end:unquantized_fused_moe]
+
     def __init__(self, moe: FusedMoEConfig):
         super().__init__(moe)
         self.unquantized_backend = select_unquantized_moe_backend(
