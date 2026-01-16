@@ -84,7 +84,7 @@ def _supports_routing_method(
     return routing_method in [
         RoutingMethodType.DeepSeekV3,
         RoutingMethodType.Renormalize,
-        routing_method == RoutingMethodType.Llama4,
+        RoutingMethodType.Llama4,
     ]
 
 
