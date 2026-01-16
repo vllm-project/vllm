@@ -7,7 +7,6 @@ from typing import Any
 import pytest
 import regex as re
 import torch
-from vllm.attention.backends.registry import AttentionBackendEnum
 
 import vllm.config
 from tests.compile.fusion_test_utils import (
@@ -18,6 +17,7 @@ from tests.compile.fusion_test_utils import (
     run_model,
 )
 from tests.utils import flat_product
+from tests.v1.attention.utils import AttentionBackendEnum
 from vllm._aiter_ops import IS_AITER_FOUND, rocm_aiter_ops
 from vllm.compilation.fusion import FUSED_OPS, FusedRMSQuantKey, RMSNormQuantFusionPass
 from vllm.compilation.fx_utils import find_op_nodes
