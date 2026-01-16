@@ -29,7 +29,10 @@ from vllm.attention.layer import Attention
 from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
 from vllm.logger import init_logger
-from vllm.model_executor.layers.activation import GeluAndMul, get_act_fn
+from vllm.model_executor.layers.activation import (
+    GeluAndMul,
+    get_act_and_mul_fn,
+)
 from vllm.model_executor.layers.layernorm import GemmaRMSNorm
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
@@ -206,7 +209,7 @@ class T5Gemma2MLP(nn.Module):
         if hidden_act == "gelu_pytorch_tanh":
             self.act_fn = GeluAndMul(approximate="tanh")
         else:
-            self.act_fn = get_act_fn(hidden_act)
+            self.act_fn = get_act_and_mul_fn(hidden_act)
 
         self.dropout = nn.Dropout(dropout_rate)
 
@@ -536,6 +539,7 @@ class T5Gemma2EncoderLayer(nn.Module):
         residual = hidden_states
         hidden_states = self.pre_self_attn_layernorm(hidden_states)
         hidden_states = self.self_attn(hidden_states=hidden_states)
+        hidden_states = self.post_self_attn_layernorm(hidden_states)
         hidden_states = residual + hidden_states
 
         residual = hidden_states
@@ -576,7 +580,8 @@ class T5Gemma2VisionEncoder(nn.Module):
         # mm_tokens_per_image represents the number of image tokens,
         # derived from patches
         self.mm_tokens_per_image = int(self.patches_per_image**0.5) ** 2
-        self.kernel_size = self.patches_per_image // self.mm_tokens_per_image
+        self.tokens_per_side = int(self.mm_tokens_per_image**0.5)
+        self.kernel_size = self.patches_per_image // self.tokens_per_side
         self.avg_pool = nn.AvgPool2d(
             kernel_size=self.kernel_size, stride=self.kernel_size
         )
@@ -1119,7 +1124,12 @@ class T5Gemma2Model(nn.Module):
         return self.encoder(input_ids, pixel_values=pixel_values)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        # Strip prefixes from weight names before passing to encoder/decoder
+        # Strip "model." prefix if it exists
+        weights = [
+            (name[len("model.") :] if name.startswith("model.") else name, weight)
+            for name, weight in weights
+        ]
+
         # The checkpoint weights have names like "encoder.embed_tokens.weight"
         # but the encoder/decoder modules expect names like "embed_tokens.weight"
         encoder_weights = [
@@ -1132,6 +1142,14 @@ class T5Gemma2Model(nn.Module):
             for name, weight in weights
             if name.startswith("decoder.")
         ]
+
+        if not encoder_weights and not decoder_weights:
+            raise ValueError(
+                "No weights were loaded for the T5Gemma2 model. "
+                "This is likely due to a prefix mismatch in the weight names. "
+                "Please check the checkpoint and the model's load_weights "
+                "implementation."
+            )
         loaded_params = set()
 
         # Load encoder weights and add "encoder." prefix back
