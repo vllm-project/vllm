@@ -162,5 +162,8 @@ class SchedulerOutput:
     # the bitmask for the whole batch
     grammar_bitmask: Optional[npt.NDArray[np.int32]]
 
+    # Requests for querying the cache details
+    scheduled_cache_query_reqs: list[str]
+
     # KV Cache Connector metadata.
     kv_connector_metadata: Optional[KVConnectorMetadata] = None

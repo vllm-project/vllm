@@ -305,11 +305,28 @@ class NixlConnectorScheduler:
             "num_computed_tokens=%s, kv_transfer_params=%s",
             num_computed_tokens, params)
 
+        if params is not None and params.get("do_remote_decode") and params.get("do_remote_prefill"):
+            # This is a special case where no decode or prefill is required.
+            # The request is mainly to query the cached blocks. For such requests
+            # the scheduler will exit early, so, update the connector state here
+            # Only trigger 1 KV transfer per request.
+            params["do_remote_prefill"] = False
+            return None, False
+
         if params is not None and params.get("do_remote_prefill"):
             # Remote prefill: get all prompt blocks from remote.
             count = len(request.prompt_token_ids) - num_computed_tokens
             if count > 0:
                 return count, True
+
+        if params.get("remote_block_ids"):
+            if all(p in params for p in ("remote_engine_id", "remote_host",
+                                         "remote_port")):
+                # D or cache worker sent the remote block ids, so, use them
+                # TODO: replace the hardcoded 16 with the block size parameter
+                count = len(params.get("remote_block_ids")) * 16 - num_computed_tokens
+                if count > 0:
+                    return count, True
 
         # No remote prefill for this request.
         return 0, False
@@ -343,27 +360,26 @@ class NixlConnectorScheduler:
             if block_ids:
                 self._reqs_need_save[request.request_id] = \
                     (request, block_ids)
-        elif params.get("do_remote_prefill"):
-            if params.get("remote_block_ids"):
-                if all(p in params for p in ("remote_engine_id", "remote_host",
-                                             "remote_port")):
-                    # If remote_blocks and num_external_tokens = 0, we have
-                    # a full prefix cache hit on the D worker. We need to call
-                    # send_notif in _read_blocks to free the memory on the P.
-                    local_block_ids = (blocks.get_unhashed_block_ids()
-                                       if num_external_tokens > 0 else [])
-                    # Get unhashed blocks to pull from remote.
-                    self._reqs_need_recv[request.request_id] = (
-                        request, local_block_ids)
+        if params.get("remote_block_ids"):
+            if all(p in params for p in ("remote_engine_id", "remote_host",
+                                         "remote_port")):
+                # If remote_blocks and num_external_tokens = 0, we have
+                # a full prefix cache hit on the D worker. We need to call
+                # send_notif in _read_blocks to free the memory on the P.
+                local_block_ids = (blocks.get_unhashed_block_ids()
+                                    if num_external_tokens > 0 else [])
+                # Get unhashed blocks to pull from remote.
+                self._reqs_need_recv[request.request_id] = (
+                    request, local_block_ids)
 
-                else:
-                    logger.warning(
-                        "Got invalid KVTransferParams: %s. This "
-                        "request will not utilize KVTransfer", params)
             else:
-                assert num_external_tokens == 0
-            # Only trigger 1 KV transfer per request.
-            params["do_remote_prefill"] = False
+                logger.warning(
+                    "Got invalid KVTransferParams: %s. This "
+                    "request will not utilize KVTransfer", params)
+        else:
+            assert num_external_tokens == 0
+        # Only trigger 1 KV transfer per request.
+        params["do_remote_prefill"] = False
 
     def build_connector_meta(
         self,

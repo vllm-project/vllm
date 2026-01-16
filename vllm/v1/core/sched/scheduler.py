@@ -192,6 +192,7 @@ class Scheduler(SchedulerInterface):
         scheduled_resumed_reqs: list[Request] = []
         scheduled_running_reqs: list[Request] = []
         preempted_reqs: list[Request] = []
+        cache_query_reqs: list[str] = []
 
         req_to_new_blocks: dict[str, KVCacheBlocks] = {}
         num_scheduled_tokens: dict[str, int] = {}
@@ -394,7 +395,11 @@ class Scheduler(SchedulerInterface):
                             # the KVConnector couldn't determine
                             # the number of matched tokens.
                             self.waiting.pop_request()
-                            skipped_waiting_requests.prepend_request(request)
+                            # skipped_waiting_requests.prepend_request(request)
+
+                            # Logic for cache query only request handling
+                            request.status = RequestStatus.FINISHED_LENGTH_CAPPED
+                            cache_query_reqs.append(request.request_id)
                             continue
 
                     # Total computed tokens (local + external).
@@ -596,6 +601,7 @@ class Scheduler(SchedulerInterface):
             get_freed_mm_hashes(),
             structured_output_request_ids=structured_output_request_ids,
             grammar_bitmask=grammar_bitmask,
+            scheduled_cache_query_reqs=cache_query_reqs,
         )
 
         # NOTE(Kuntai): this function is designed for multiple purposes:
@@ -876,6 +882,8 @@ class Scheduler(SchedulerInterface):
         kv_connector_stats = (kv_connector_output.kv_connector_stats
                               if kv_connector_output else None)
 
+        cache_query_reqs = scheduler_output.scheduled_cache_query_reqs
+
         # NOTE(woosuk): As len(num_scheduled_tokens) can be up to 1K or more,
         # the below loop can be a performance bottleneck. We should do our best
         # to avoid expensive operations inside the loop.
@@ -977,6 +985,43 @@ class Scheduler(SchedulerInterface):
             else:
                 # Invariant: EngineCore returns no partial prefill outputs.
                 assert not prompt_logprobs_tensors
+
+        for req_id in cache_query_reqs:
+            request = self.requests.get(req_id)
+            if request is None:
+                # The request is already finished. This can happen if the
+                # request is aborted while the model is executing it (e.g.,
+                # in pipeline parallelism).
+                continue
+
+            # Free the request to populate kv transfer params.
+            kv_transfer_params = self._free_request(request)
+
+            if kv_transfer_params:
+                # Get the computed (cached) blocks availble for this request and
+                # update kv transfer parameters
+                cached_computed_blocks, cached_computed_tokens = \
+                            self.kv_cache_manager.get_computed_blocks(
+                                request)
+
+                kv_transfer_params["remote_block_ids"] = \
+                        cached_computed_blocks.get_block_ids()[0]
+
+                # Add EngineCoreOutput for this Request.
+                outputs[request.client_index].append(
+                    EngineCoreOutput(
+                        request_id=req_id,
+                        new_token_ids=[],
+                        finish_reason=request.get_finished_reason(),
+                        new_logprobs=None,
+                        new_prompt_logprobs_tensors=None,
+                        pooling_output=None,
+                        stop_reason=request.stop_reason,
+                        events=request.take_events(),
+                        kv_transfer_params=kv_transfer_params,
+                        trace_headers=request.trace_headers,
+                        num_cached_tokens=request.num_cached_tokens,
+                    ))
 
         # Remove the stopped requests from the running and waiting queues.
         if stopped_running_reqs:
