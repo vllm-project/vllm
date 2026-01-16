@@ -306,6 +306,8 @@ class OpenAIServingCompletion(OpenAIServing):
                 request_metadata,
             )
         except asyncio.CancelledError:
+            # Client disconnected, abort request to free resources.
+            await self.engine_client.abort(request_id)
             return self.create_error_response("Client disconnected")
         except GenerationError as e:
             return self._convert_generation_error_to_response(e)
@@ -508,6 +510,10 @@ class OpenAIServingCompletion(OpenAIServing):
             # report to FastAPI middleware aggregate usage across all choices
             request_metadata.final_usage_info = final_usage_info
 
+        except asyncio.CancelledError:
+            # Client disconnected, abort request to free resources.
+            await self.engine_client.abort(request_id)
+            return
         except GenerationError as e:
             yield f"data: {self._convert_generation_error_to_streaming_response(e)}\n\n"
         except Exception as e:

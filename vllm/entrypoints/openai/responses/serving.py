@@ -573,6 +573,10 @@ class OpenAIServingResponses(OpenAIServing):
                 tokenizer,
                 request_metadata,
             )
+        except asyncio.CancelledError:
+            # Client disconnected, abort request to free resources.
+            await self.engine_client.abort(request.request_id)
+            return self.create_error_response("Client disconnected")
         except GenerationError as e:
             return self._convert_generation_error_to_response(e)
         except Exception as e:
@@ -674,6 +678,8 @@ class OpenAIServingResponses(OpenAIServing):
                 async for _ in result_generator:
                     pass
             except asyncio.CancelledError:
+                # Client disconnected, abort request to free resources.
+                await self.engine_client.abort(request.request_id)
                 return self.create_error_response("Client disconnected")
             except ValueError as e:
                 return self.create_error_response(e)
@@ -2467,9 +2473,6 @@ class OpenAIServingResponses(OpenAIServing):
         request_metadata: RequestResponseMetadata,
         created_time: int | None = None,
     ) -> AsyncGenerator[StreamingResponsesResponse, None]:
-        # TODO:
-        # 1. Handle disconnect
-
         created_time = created_time or int(time.time())
 
         sequence_number = 0
@@ -2531,6 +2534,10 @@ class OpenAIServingResponses(OpenAIServing):
                     _increment_sequence_number_and_return,
                 ):
                     yield event_data
+            except asyncio.CancelledError:
+                # Client disconnected, abort request to free resources.
+                await self.engine_client.abort(request.request_id)
+                return
             except GenerationError as e:
                 error_json = self._convert_generation_error_to_streaming_response(e)
                 yield _increment_sequence_number_and_return(

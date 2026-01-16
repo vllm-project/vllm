@@ -1354,6 +1354,10 @@ class OpenAIServingChat(OpenAIServing):
                         delta=False,
                     )
 
+        except asyncio.CancelledError:
+            # Client disconnected, abort request to free resources.
+            await self.engine_client.abort(request_id)
+            return
         except GenerationError as e:
             yield f"data: {self._convert_generation_error_to_streaming_response(e)}\n\n"
         except Exception as e:
@@ -1380,6 +1384,8 @@ class OpenAIServingChat(OpenAIServing):
             async for res in result_generator:
                 final_res = res
         except asyncio.CancelledError:
+            # Client disconnected, abort request to free resources.
+            await self.engine_client.abort(request_id)
             return self.create_error_response("Client disconnected")
         except ValueError as e:
             return self.create_error_response(e)

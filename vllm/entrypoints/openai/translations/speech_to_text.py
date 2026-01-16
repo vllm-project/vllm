@@ -542,6 +542,8 @@ class OpenAISpeechToText(OpenAIServing):
                     )
             return final_response
         except asyncio.CancelledError:
+            # Client disconnected, abort request to free resources.
+            await self.engine_client.abort(request_id)
             return self.create_error_response("Client disconnected")
         except ValueError as e:
             return self.create_error_response(e)
@@ -653,6 +655,10 @@ class OpenAISpeechToText(OpenAIServing):
                 total_tokens=num_prompt_tokens + completion_tokens,
             )
 
+        except asyncio.CancelledError:
+            # Client disconnected, abort request to free resources.
+            await self.engine_client.abort(request_id)
+            return
         except Exception as e:
             logger.exception("Error in %s stream generator.", self.task_type)
             data = self.create_streaming_error_response(e)
