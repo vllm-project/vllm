@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import contextlib
 import copy
+import importlib.util
 import logging
 import math
 import os
@@ -11,10 +12,11 @@ import threading
 import time
 import uuid
 from collections import defaultdict
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Optional
+from pathlib import Path
+from typing import TYPE_CHECKING, Any, Optional, Protocol
 
 import msgspec
 import numpy as np
@@ -64,6 +66,14 @@ if TYPE_CHECKING:
     from vllm.v1.kv_cache_interface import KVCacheConfig
     from vllm.v1.request import Request
 
+
+class NixlXferTelemetry(Protocol):
+    xferDuration: float
+    postDuration: float
+    totalBytes: int
+    descCount: int
+
+
 TransferHandle = int
 ReqId = str
 
@@ -87,45 +97,128 @@ GET_META_MSG = b"get_meta_msg"
 
 logger = init_logger(__name__)
 
-# Lazy import nixl_wrapper to avoid loading nixl_bindings if nixl is not used
-try:
-    if "UCX_RCACHE_MAX_UNRELEASED" not in os.environ:
-        # avoid a memory leak in UCX when using NIXL on some models
-        # see: https://github.com/vllm-project/vllm/issues/24264
-        if "nixl" in sys.modules or "rixl" in sys.modules:
-            logger.warning(
-                "NIXL was already imported, we can't reset UCX_RCACHE_MAX_UNRELEASED. "
-                "Please set it to '1024' manually."
-            )
-        else:
-            logger.info(
-                "Setting UCX_RCACHE_MAX_UNRELEASED to '1024' to avoid a rare "
-                "memory leak in UCX when using NIXL."
-            )
-            os.environ["UCX_RCACHE_MAX_UNRELEASED"] = "1024"
-
-    if not current_platform.is_rocm():
-        from nixl._api import nixl_agent as NixlWrapper
-        from nixl._bindings import nixlXferTelemetry
-    else:
-        from rixl._api import nixl_agent as NixlWrapper
-        from rixl._bindings import nixlXferTelemetry
-
-    logger.info("NIXL is available")
-except ImportError:
-    logger.warning("NIXL is not available")
-    NixlWrapper = None
-    nixlXferTelemetry = None
+# Lazy import nixl_wrapper to avoid loading nixl_bindings if nixl is not used.
+NixlWrapper: Any = None
+nixlXferTelemetry: Any = None
+nixl_agent_config: Callable[..., Any] | None = None
+_NIXL_LOADED = False
+_NIXL_IMPORT_ERROR: Exception | None = None
+_NIXL_IMPORT_LOCK = threading.Lock()
 
 
-try:
-    if not current_platform.is_rocm():
-        from nixl._api import nixl_agent_config
-    else:
-        from rixl._api import nixl_agent_config
-except ImportError:
-    nixl_agent_config = None
-    logger.warning("NIXL agent config is not available")
+def _nixl_uses_wheel_libs() -> bool:
+    spec = importlib.util.find_spec("nixl")
+    if spec is None:
+        return False
+    package_root: Path | None = None
+    if spec.submodule_search_locations:
+        package_root = Path(next(iter(spec.submodule_search_locations)))
+    elif spec.origin:
+        package_root = Path(spec.origin).parent
+    if package_root is None:
+        return False
+    site_root = package_root.parent
+    if not site_root.is_dir():
+        return False
+    for pattern in ("nixl_cu*.libs", ".nixl_cu*.mesonpy.libs"):
+        for _ in site_root.glob(pattern):
+            return True
+    return False
+
+
+def _fail_if_ucx_mixing_detected() -> None:
+    if os.environ.get("VLLM_ALLOW_UCX_MIXING", "").lower() in ("1", "true", "yes"):
+        return
+    for env_name in ("HPCX_UCX_DIR", "UCX_HOME", "UCX_DIR"):
+        ucx_root = os.environ.get(env_name)
+        if ucx_root:
+            if _nixl_uses_wheel_libs():
+                raise RuntimeError(
+                    f"{env_name}={ucx_root} is set while using the NIXL wheel. "
+                    "This can mix UCX core and modules and cause segfaults. "
+                    "Unset this environment variable or rebuild NIXL against "
+                    "your system UCX. Set VLLM_ALLOW_UCX_MIXING=1 to bypass."
+                )
+            return
+
+
+def _lazy_load_nixl() -> bool:
+    global NixlWrapper, nixlXferTelemetry, nixl_agent_config
+    global _NIXL_LOADED, _NIXL_IMPORT_ERROR
+
+    if _NIXL_LOADED:
+        return NixlWrapper is not None
+
+    with _NIXL_IMPORT_LOCK:
+        if _NIXL_LOADED:
+            return NixlWrapper is not None
+        if NixlWrapper is not None:
+            _NIXL_LOADED = True
+            return True
+
+        _fail_if_ucx_mixing_detected()
+
+        if "UCX_RCACHE_MAX_UNRELEASED" not in os.environ:
+            # avoid a memory leak in UCX when using NIXL on some models
+            # see: https://github.com/vllm-project/vllm/issues/24264
+            if "nixl" in sys.modules or "rixl" in sys.modules:
+                logger.warning(
+                    "NIXL was already imported, we can't reset "
+                    "UCX_RCACHE_MAX_UNRELEASED. Please set it to '1024' "
+                    "manually."
+                )
+            else:
+                logger.info(
+                    "Setting UCX_RCACHE_MAX_UNRELEASED to '1024' to avoid a "
+                    "rare memory leak in UCX when using NIXL."
+                )
+                os.environ["UCX_RCACHE_MAX_UNRELEASED"] = "1024"
+
+        if "UCX_MEM_MMAP_HOOK_MODE" not in os.environ:
+            # avoid a memory leak in UCX when using NIXL on some models
+            # see: https://github.com/vllm-project/vllm/issues/24264
+            if "nixl" in sys.modules or "rixl" in sys.modules:
+                logger.warning(
+                    "NIXL was already imported, we can't disable UCX mmap hooks. "
+                    "Please set UCX_MEM_MMAP_HOOK_MODE to 'none' manually."
+                )
+            else:
+                logger.info(
+                    "Setting UCX_MEM_MMAP_HOOK_MODE to 'none' to avoid a rare "
+                    "memory leak in UCX when using NIXL."
+                )
+                os.environ["UCX_MEM_MMAP_HOOK_MODE"] = "none"
+
+        try:
+            if not current_platform.is_rocm():
+                from nixl._api import nixl_agent as NixlWrapper
+                from nixl._bindings import nixlXferTelemetry
+
+                try:
+                    from nixl._api import nixl_agent_config
+                except ImportError:
+                    nixl_agent_config = None
+            else:
+                from rixl._api import nixl_agent as NixlWrapper
+                from rixl._bindings import nixlXferTelemetry
+
+                try:
+                    from rixl._api import nixl_agent_config
+                except ImportError:
+                    nixl_agent_config = None
+
+            if nixl_agent_config is None:
+                logger.warning("NIXL agent config is not available")
+            logger.info("NIXL is available")
+        except ImportError as exc:
+            _NIXL_IMPORT_ERROR = exc
+            NixlWrapper = None
+            nixlXferTelemetry = None
+            nixl_agent_config = None
+            logger.warning("NIXL is not available")
+        _NIXL_LOADED = True
+        return NixlWrapper is not None
+
 
 # Supported platforms and types of kv transfer buffer.
 # {device: tuple of supported kv buffer types}
@@ -824,9 +917,9 @@ class NixlConnectorWorker:
     """Implementation of Worker side methods"""
 
     def __init__(self, vllm_config: VllmConfig, engine_id: str):
-        if NixlWrapper is None:
+        if not _lazy_load_nixl():
             logger.error("NIXL is not available")
-            raise RuntimeError("NIXL is not available")
+            raise RuntimeError("NIXL is not available") from _NIXL_IMPORT_ERROR
         logger.info("Initializing NIXL wrapper")
         logger.info("Initializing NIXL worker %s", engine_id)
 
@@ -853,6 +946,19 @@ class NixlConnectorWorker:
         num_threads = vllm_config.kv_transfer_config.get_from_extra_config(
             "num_threads", 4
         )
+        ucx_proto_enable = os.environ.get("UCX_PROTO_ENABLE")
+        if (
+            "UCX" in self.nixl_backends
+            and ucx_proto_enable is not None
+            and ucx_proto_enable.strip().lower() in ("n", "no", "0", "false")
+        ):
+            logger.warning(
+                "UCX_PROTO_ENABLE=%s disables UCX new protocols. NIXL GPU "
+                "transfers require new protocols; unsetting to avoid UCX "
+                "crashes.",
+                ucx_proto_enable,
+            )
+            os.environ.pop("UCX_PROTO_ENABLE", None)
         if nixl_agent_config is None:
             config = None
         else:
@@ -2510,7 +2616,7 @@ class NixlKVConnectorStats(KVConnectorStats):
             "num_kv_expired_reqs": [],
         }
 
-    def record_transfer(self, res: nixlXferTelemetry):
+    def record_transfer(self, res: NixlXferTelemetry):
         # Keep metrics units consistent with rest of the code: time us->s
         self.data["transfer_duration"].append(res.xferDuration / 1e6)
         self.data["post_duration"].append(res.postDuration / 1e6)
