@@ -6,6 +6,7 @@ from typing import ClassVar
 import torch
 from flashinfer.decode import trtllm_batch_decode_with_kv_cache_mla
 
+import vllm._custom_ops as ops
 from vllm.config.cache import CacheDType
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention.mla_attention import (
@@ -150,6 +151,56 @@ class FlashInferMLAImpl(MLACommonImpl[MLACommonMetadata]):
         self._workspace_buffer = g_fi_workspace
         self.bmm1_scale: float | None = None
         self.bmm2_scale: float | None = None
+        self._nvfp4_decode_cache: torch.Tensor | None = None
+        self._nvfp4_compact_block_table: torch.Tensor | None = None
+
+    def _get_nvfp4_decode_cache(
+        self,
+        kv_cache: torch.Tensor,
+        block_table: torch.Tensor,
+        q_dtype: torch.dtype,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        batch_size, max_blocks = block_table.shape
+        num_blocks = batch_size * max_blocks
+        block_size = kv_cache.size(1)
+        head_dim = self.head_size
+
+        if (
+            self._nvfp4_decode_cache is None
+            or self._nvfp4_decode_cache.dtype != q_dtype
+            or self._nvfp4_decode_cache.device != kv_cache.device
+            or self._nvfp4_decode_cache.size(1) != block_size
+            or self._nvfp4_decode_cache.size(2) != head_dim
+            or self._nvfp4_decode_cache.size(0) < num_blocks
+        ):
+            self._nvfp4_decode_cache = torch.empty(
+                (num_blocks, block_size, head_dim),
+                dtype=q_dtype,
+                device=kv_cache.device,
+            )
+
+        if (
+            self._nvfp4_compact_block_table is None
+            or self._nvfp4_compact_block_table.shape != (batch_size, max_blocks)
+            or self._nvfp4_compact_block_table.device != block_table.device
+        ):
+            self._nvfp4_compact_block_table = torch.empty(
+                (batch_size, max_blocks),
+                dtype=torch.int32,
+                device=block_table.device,
+            )
+
+        base = (
+            torch.arange(batch_size, device=block_table.device, dtype=torch.int32)
+            * max_blocks
+        )
+        offsets = torch.arange(max_blocks, device=block_table.device, dtype=torch.int32)
+        self._nvfp4_compact_block_table.copy_(base[:, None] + offsets[None, :])
+
+        return (
+            self._nvfp4_decode_cache[:num_blocks],
+            self._nvfp4_compact_block_table,
+        )
 
     def forward_mqa(
         self,
@@ -181,14 +232,29 @@ class FlashInferMLAImpl(MLACommonImpl[MLACommonMetadata]):
         if self.bmm2_scale is None:
             self.bmm2_scale = layer._v_scale_float
 
+        block_table = attn_metadata.decode.block_table
+        kv_cache = kv_c_and_k_pe_cache
+        if self.kv_cache_dtype == "nvfp4":
+            kv_cache, block_table = self._get_nvfp4_decode_cache(
+                kv_c_and_k_pe_cache,
+                block_table,
+                q.dtype,
+            )
+            ops.dequantize_mla_kv_cache_nvfp4(
+                kv_c_and_k_pe_cache,
+                kv_cache,
+                attn_metadata.decode.block_table,
+                attn_metadata.decode.seq_lens,
+            )
+
         o = trtllm_batch_decode_with_kv_cache_mla(
             query=q,
-            kv_cache=kv_c_and_k_pe_cache.unsqueeze(1),
+            kv_cache=kv_cache.unsqueeze(1),
             workspace_buffer=self._workspace_buffer,
             qk_nope_head_dim=self.qk_nope_head_dim,
             kv_lora_rank=self.kv_lora_rank,
             qk_rope_head_dim=self.qk_rope_head_dim,
-            block_tables=attn_metadata.decode.block_table,
+            block_tables=block_table,
             seq_lens=attn_metadata.decode.seq_lens,
             max_seq_len=attn_metadata.max_seq_len,
             bmm1_scale=self.bmm1_scale,

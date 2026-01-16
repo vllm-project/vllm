@@ -49,6 +49,14 @@ void gather_and_maybe_dequant_cache(
     torch::Tensor const& scale,
     std::optional<torch::Tensor> seq_starts = std::nullopt);
 
+// Dequantize packed NVFP4 MLA KV cache into a compact, unpacked KV cache.
+// dst_cache layout: [batch_size * max_blocks, block_size, head_dim]
+void dequantize_mla_kv_cache_nvfp4(
+    torch::Tensor const& src_cache,    // [NUM_BLOCKS, BLOCK_SIZE, 432]
+    torch::Tensor const& dst_cache,    // [BATCH*MAX_BLOCKS, BLOCK_SIZE, 576]
+    torch::Tensor const& block_table,  // [BATCH, MAX_BLOCKS]
+    torch::Tensor const& seq_lens);    // [BATCH]
+
 // TODO(hc): cp_gather_cache need support scaled kvcahe in the future.
 void cp_gather_cache(
     torch::Tensor const& src_cache,    // [NUM_BLOCKS, BLOCK_SIZE, ENTRIES...]

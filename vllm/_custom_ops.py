@@ -2513,6 +2513,17 @@ def gather_and_maybe_dequant_cache(
     )
 
 
+def dequantize_mla_kv_cache_nvfp4(
+    src_cache: torch.Tensor,
+    dst_cache: torch.Tensor,
+    block_table: torch.Tensor,
+    seq_lens: torch.Tensor,
+) -> None:
+    torch.ops._C_cache_ops.dequantize_mla_kv_cache_nvfp4(
+        src_cache, dst_cache, block_table, seq_lens
+    )
+
+
 def cp_gather_cache(
     src_cache: torch.Tensor,
     dst: torch.Tensor,

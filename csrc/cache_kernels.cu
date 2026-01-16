@@ -1376,6 +1376,149 @@ void gather_and_maybe_dequant_cache(
   DISPATCH_BY_KV_CACHE_DTYPE(dst.dtype(), kv_cache_dtype, CALL_GATHER_CACHE);
 }
 
+#ifndef USE_ROCM
+namespace vllm {
+
+template <typename scalar_t>
+__global__ void dequantize_mla_kv_cache_nvfp4_kernel(
+    const uint8_t* __restrict__ src_cache, scalar_t* __restrict__ dst_cache,
+    const int32_t* __restrict__ block_table,
+    const int32_t* __restrict__ seq_lens, const int32_t batch_size,
+    const int32_t max_blocks, const int32_t block_size, const int32_t head_dim,
+    const int64_t block_table_stride, const int64_t src_block_stride,
+    const int64_t src_entry_stride, const int64_t dst_block_stride,
+    const int64_t dst_entry_stride) {
+  const int32_t linear_block = blockIdx.x;
+  if (linear_block >= batch_size * max_blocks) return;
+
+  const int32_t batch_id = linear_block / max_blocks;
+  const int32_t block_idx = linear_block - batch_id * max_blocks;
+  const int32_t seq_len = seq_lens[batch_id];
+  if (seq_len <= 0) return;
+
+  const int32_t num_blocks = (seq_len + block_size - 1) / block_size;
+  if (block_idx >= num_blocks) return;
+
+  const int32_t src_block_id =
+      block_table[batch_id * block_table_stride + block_idx];
+  if (src_block_id < 0) return;
+
+  constexpr int32_t nvfp4_block = 16;
+  const int32_t packed_data_size = head_dim / 2;
+  const int32_t elements_per_block = block_size * head_dim;
+  const int32_t dst_block_id = linear_block;
+
+  for (int32_t idx = threadIdx.x; idx < elements_per_block; idx += blockDim.x) {
+    const int32_t token_idx = idx / head_dim;
+    const int32_t elem_idx = idx - token_idx * head_dim;
+
+    const uint8_t* token_ptr = src_cache + src_block_id * src_block_stride +
+                               token_idx * src_entry_stride;
+    const uint8_t* packed_data = token_ptr;
+    const float* scales =
+        reinterpret_cast<const float*>(token_ptr + packed_data_size);
+
+    const int32_t packed_idx = elem_idx >> 1;
+    const int32_t nibble_idx = elem_idx & 1;
+    const uint8_t packed_byte = packed_data[packed_idx];
+    const uint8_t fp4_val =
+        (nibble_idx == 0) ? (packed_byte & 0x0F) : ((packed_byte >> 4) & 0x0F);
+
+    const bool sign = (fp4_val & 0x08) != 0;
+    const uint8_t magnitude = fp4_val & 0x07;
+    float e2m1_val = nvfp4_e2m1_lut[magnitude];
+    if (sign) e2m1_val = -e2m1_val;
+
+    const float block_scale = scales[elem_idx / nvfp4_block];
+    const float dequantized_val = e2m1_val * block_scale;
+
+    scalar_t* dst_ptr = dst_cache + dst_block_id * dst_block_stride +
+                        token_idx * dst_entry_stride;
+    if constexpr (std::is_same_v<scalar_t, half>) {
+      dst_ptr[elem_idx] = __float2half(dequantized_val);
+    } else if constexpr (std::is_same_v<scalar_t, __nv_bfloat16>) {
+      dst_ptr[elem_idx] = __float2bfloat16(dequantized_val);
+    } else {
+      dst_ptr[elem_idx] = scalar_t(dequantized_val);
+    }
+  }
+}
+
+}  // namespace vllm
+#endif
+
+void dequantize_mla_kv_cache_nvfp4(
+    torch::Tensor const& src_cache,    // [NUM_BLOCKS, BLOCK_SIZE, 432]
+    torch::Tensor const& dst_cache,    // [BATCH*MAX_BLOCKS, BLOCK_SIZE, 576]
+    torch::Tensor const& block_table,  // [BATCH, MAX_BLOCKS]
+    torch::Tensor const& seq_lens) {   // [BATCH]
+#ifdef USE_ROCM
+  TORCH_CHECK(false, "dequantize_mla_kv_cache_nvfp4 is not supported on ROCm");
+#else
+  at::cuda::OptionalCUDAGuard device_guard(src_cache.device());
+  const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
+
+  TORCH_CHECK(src_cache.is_cuda(), "src_cache must be on CUDA");
+  TORCH_CHECK(dst_cache.is_cuda(), "dst_cache must be on CUDA");
+  TORCH_CHECK(block_table.is_cuda(), "block_table must be on CUDA");
+  TORCH_CHECK(seq_lens.is_cuda(), "seq_lens must be on CUDA");
+
+  TORCH_CHECK(block_table.dtype() == torch::kInt32,
+              "block_table must be int32");
+  TORCH_CHECK(seq_lens.dtype() == torch::kInt32, "seq_lens must be int32");
+  TORCH_CHECK(src_cache.dtype() == torch::kUInt8, "src_cache must be uint8");
+  TORCH_CHECK(dst_cache.dtype() == torch::kFloat16 ||
+                  dst_cache.dtype() == torch::kBFloat16,
+              "dst_cache must be float16 or bfloat16");
+
+  const int32_t batch_size = block_table.size(0);
+  const int32_t max_blocks = block_table.size(1);
+  const int32_t block_size = src_cache.size(1);
+  const int32_t head_dim = dst_cache.size(2);
+
+  TORCH_CHECK(dst_cache.size(0) == batch_size * max_blocks,
+              "dst_cache.size(0) must be batch_size * max_blocks");
+  TORCH_CHECK(dst_cache.size(1) == block_size, "dst_cache block_size mismatch");
+  TORCH_CHECK(head_dim == 576, "head_dim must be 576 for MLA");
+  TORCH_CHECK(head_dim % 16 == 0, "head_dim must be divisible by 16 for NVFP4");
+
+  const int32_t packed_data_size = head_dim / 2;
+  const int32_t scale_size = (head_dim / 16) * 4;
+  TORCH_CHECK(src_cache.size(2) == packed_data_size + scale_size,
+              "src_cache head_dim mismatch for NVFP4 MLA cache");
+
+  const int64_t block_table_stride = block_table.stride(0);
+  const int64_t src_block_stride = src_cache.stride(0);
+  const int64_t src_entry_stride = src_cache.stride(1);
+  const int64_t dst_block_stride = dst_cache.stride(0);
+  const int64_t dst_entry_stride = dst_cache.stride(1);
+
+  constexpr int32_t threads = 256;
+  dim3 grid(batch_size * max_blocks);
+  dim3 block(threads);
+
+  if (dst_cache.dtype() == torch::kFloat16) {
+    vllm::dequantize_mla_kv_cache_nvfp4_kernel<half>
+        <<<grid, block, 0, stream>>>(
+            src_cache.data_ptr<uint8_t>(),
+            reinterpret_cast<half*>(dst_cache.data_ptr()),
+            block_table.data_ptr<int32_t>(), seq_lens.data_ptr<int32_t>(),
+            batch_size, max_blocks, block_size, head_dim, block_table_stride,
+            src_block_stride, src_entry_stride, dst_block_stride,
+            dst_entry_stride);
+  } else {
+    vllm::dequantize_mla_kv_cache_nvfp4_kernel<__nv_bfloat16>
+        <<<grid, block, 0, stream>>>(
+            src_cache.data_ptr<uint8_t>(),
+            reinterpret_cast<__nv_bfloat16*>(dst_cache.data_ptr()),
+            block_table.data_ptr<int32_t>(), seq_lens.data_ptr<int32_t>(),
+            batch_size, max_blocks, block_size, head_dim, block_table_stride,
+            src_block_stride, src_entry_stride, dst_block_stride,
+            dst_entry_stride);
+  }
+#endif
+}
+
 namespace vllm {
 
 // Gather and upconvert FP8 KV cache tokens to BF16 workspace
