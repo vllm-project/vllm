@@ -136,7 +136,7 @@ class MRotaryEmbeddingInterleaved(MRotaryEmbedding):
     @staticmethod
     def get_mrope_interleaved_id_list(
         a: int, b: int, c: int, force_last: bool = False
-    ) -> List[int]:
+    ) -> list[int]:
         """
         Generate an interleaved list of indices for multi-modal rotary embedding.
 
