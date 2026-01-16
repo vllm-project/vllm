@@ -1,0 +1,99 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import inspect
+from collections.abc import Callable
+
+import torch
+from torch.utils._python_dispatch import TorchDispatchMode
+
+from .helpers import get_layer_tensors
+from .types import LayerReloadingInfo
+
+__all__ = [
+    "to_meta_tensor",
+    "materialize_meta_tensor",
+    "restore_layer_on_meta",
+    "materialize_layer",
+    "get_numel_loaded",
+]
+
+
+def to_meta_tensor(tensor: torch.Tensor) -> torch.Tensor:
+    """Convert a tensor to a meta tensor while preserving class and attributes."""
+    meta_tensor = tensor.data.to("meta")
+    meta_tensor.__class__ = tensor.__class__
+    meta_tensor.__dict__ = tensor.__dict__
+    return meta_tensor
+
+
+def materialize_meta_tensor(meta_tensor: torch.Tensor) -> torch.Tensor:
+    """
+    Materialize a meta tensor into an actual tensor on the current device.
+
+    Note: Should be called within a torch device context.
+
+    TODO: Need a way of reconstructing vLLMBaseParameters on the meta device.
+    """
+    tensor = torch.empty_strided(
+        size=tuple(meta_tensor.size()),
+        stride=tuple(meta_tensor.stride()),
+        dtype=meta_tensor.dtype,
+        requires_grad=False,
+    )
+    tensor.__class__ = meta_tensor.__class__
+    tensor.__dict__ = meta_tensor.__dict__
+    return tensor
+
+
+def restore_layer_on_meta(layer: torch.nn.Module, info: LayerReloadingInfo):
+    for name in get_layer_tensors(layer):
+        delattr(layer, name)
+
+    restore_params, restore_buffers = info.restore_metadata
+    for name, param in restore_params.items():
+        layer.register_parameter(name, param)
+    for name, buffer in restore_buffers.items():
+        layer.register_buffer(name, buffer)
+
+
+def materialize_layer(layer: torch.nn.Module) -> None:
+    """Materialize all meta tensors in a layer to actual tensors."""
+    for name, tensor in get_layer_tensors(layer).items():
+        setattr(layer, name, materialize_meta_tensor(tensor))
+
+
+class MetaCopyCounter(TorchDispatchMode):
+    """
+    Tracks total number of elements modified with `copy_`.
+
+    Useful for keeping track of weight loading where underlying weights can be
+    arbitrarily transformed (such as with `narrow`) before calling copy.
+
+    Note: Assumes that copy kwargs are not used.
+    """
+
+    def __init__(self):
+        super().__init__()
+        self.copied_numel = 0
+
+    def __torch_dispatch__(self, func, types, args=(), kwargs=None):
+        if kwargs is None:
+            kwargs = {}
+
+        if func is torch.ops.aten.copy_.default and args[0].device.type == "meta":
+            assert args[0].numel() == args[1].numel()
+            self.copied_numel += args[0].numel()
+
+        return func(*args, **kwargs)
+
+
+def get_numel_loaded(weight_loader: Callable, args: inspect.BoundArguments) -> int:
+    """
+    Determine how many elements would be loaded by a weight loader call.
+
+    Runs the weight loader with a CopyNumelCounter to track copy operations.
+    """
+    assert args.arguments["param"].device.type == "meta"
+    with MetaCopyCounter() as counter:
+        weight_loader(*args.args, **args.kwargs)
+    return counter.copied_numel

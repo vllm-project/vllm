@@ -59,9 +59,9 @@ from vllm.model_executor.layers.rotary_embedding import (
     XDRotaryEmbedding,
 )
 from vllm.model_executor.model_loader import TensorizerLoader, get_model_loader
-from vllm.model_executor.model_loader.reload_utils import (
-    layerwise_restore_and_process,
+from vllm.model_executor.model_loader.reload import (
     finalize_layerwise_restore_and_process,
+    layerwise_restore_and_process,
 )
 from vllm.model_executor.models.interfaces import (
     MultiModalEmbeddings,
@@ -4234,11 +4234,13 @@ class GPUModelRunner(
         if weights_iterator is None:
             if self.model_config.model == "meta-llama/Llama-3.2-1B-Instruct":
                 print("use counter")
-                self.model_config.model = "nm-testing/Llama-3.2-1B-Instruct-DEBUG-COUNTER"
+                self.model_config.model = (
+                    "nm-testing/Llama-3.2-1B-Instruct-DEBUG-COUNTER"
+                )
             else:
                 print("use language")
                 self.model_config.model = "meta-llama/Llama-3.2-1B-Instruct"
-            #self.load_config.download_dir = 
+            # self.load_config.download_dir =
             model_loader = get_model_loader(self.load_config)
             weights_iterator = model_loader.get_all_weights(self.model_config, model)
             weights_iterator = cast(
