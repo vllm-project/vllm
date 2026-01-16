@@ -402,24 +402,29 @@ RUN echo 'tzdata tzdata/Areas select America' | debconf-set-selections \
         libsm6 \
         libxext6 \
         libgl1 \
-        gnupg \
-    && apt-get install -y --no-install-recommends debian-archive-keyring \
-    && echo "deb [signed-by=/usr/share/keyrings/debian-archive-keyring.gpg] http://deb.debian.org/debian bullseye main" > /etc/apt/sources.list.d/debian-bullseye.list \
-    && echo "deb [signed-by=/usr/share/keyrings/debian-archive-keyring.gpg] http://deb.debian.org/debian-security bullseye-security main" >> /etc/apt/sources.list.d/debian-bullseye.list \
-    && apt-get update -y \
-    && apt-get install -y --no-install-recommends \
-        ffmpeg=7:4.3.9-0+deb11u1 \
-        libavcodec58=7:4.3.9-0+deb11u1 \
-        libavdevice58=7:4.3.9-0+deb11u1 \
-        libavfilter7=7:4.3.9-0+deb11u1 \
-        libavformat58=7:4.3.9-0+deb11u1 \
-        libavresample4=7:4.3.9-0+deb11u1 \
-        libavutil56=7:4.3.9-0+deb11u1 \
-        libpostproc55=7:4.3.9-0+deb11u1 \
-        libswresample3=7:4.3.9-0+deb11u1 \
-        libswscale5=7:4.3.9-0+deb11u1 \
-        libchromaprint1=1.5.0-2 \
-    && rm -f /etc/apt/sources.list.d/debian-bullseye.list \
+    && if [ "$(lsb_release -c -s)" = "jammy" ]; then \
+        apt-get install -y --no-install-recommends \
+            gnupg \
+            debian-archive-keyring; \
+        echo "deb [signed-by=/usr/share/keyrings/debian-archive-keyring.gpg] http://deb.debian.org/debian bullseye main" > /etc/apt/sources.list.d/debian-bullseye.list; \
+        echo "deb [signed-by=/usr/share/keyrings/debian-archive-keyring.gpg] http://deb.debian.org/debian-security bullseye-security main" >> /etc/apt/sources.list.d/debian-bullseye.list; \
+        apt-get update -y; \
+        apt-get install -y --no-install-recommends \
+            ffmpeg=7:4.3.9-0+deb11u1 \
+            libavcodec58=7:4.3.9-0+deb11u1 \
+            libavdevice58=7:4.3.9-0+deb11u1 \
+            libavfilter7=7:4.3.9-0+deb11u1 \
+            libavformat58=7:4.3.9-0+deb11u1 \
+            libavresample4=7:4.3.9-0+deb11u1 \
+            libavutil56=7:4.3.9-0+deb11u1 \
+            libpostproc55=7:4.3.9-0+deb11u1 \
+            libswresample3=7:4.3.9-0+deb11u1 \
+            libswscale5=7:4.3.9-0+deb11u1 \
+            libchromaprint1=1.5.0-2; \
+        rm -f /etc/apt/sources.list.d/debian-bullseye.list; \
+    else \
+        apt-get install -y --no-install-recommends ffmpeg; \
+    fi \
     && if [ ! -z ${DEADSNAKES_MIRROR_URL} ] ; then \
         if [ ! -z "${DEADSNAKES_GPGKEY_URL}" ] ; then \
             mkdir -p -m 0755 /etc/apt/keyrings ; \
