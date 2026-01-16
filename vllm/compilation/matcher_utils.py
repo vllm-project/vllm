@@ -452,3 +452,89 @@ class MatcherSiluAndMul(MatcherCustomOp):
         x: torch.Tensor,
     ) -> torch.Tensor:
         return SiluAndMul.forward_native(x)
+
+class MatcherSiluAndMulBlockQuant(MatcherCustomOp):
+    """Matcher for SiLU+Mul+Block Quantization pattern."""
+    
+    def __init__(
+        self,
+        quant_key: QuantKey,
+        enabled: bool | None = None,
+        has_col_major_scales: bool = False,
+    ) -> None:
+        if enabled is None:
+            # Enable if both SiluAndMul and QuantFP8 are enabled
+            enabled = SiluAndMul.enabled() and QuantFP8.enabled()
+        
+        super().__init__(enabled)
+        self.quant_key = quant_key
+        self.has_col_major_scales = has_col_major_scales
+        
+        # Use the fused op
+        self.FUSED_OP = torch.ops._C.silu_and_mul_per_block_quant.default
+        
+        # Create matcher for quantization part
+        self.quant_matcher = MatcherQuantFP8(
+            quant_key,
+            enabled=enabled,
+            has_col_major_scales=has_col_major_scales,
+        )
+        
+        # Create matcher for SiLU+Mul part
+        self.silu_mul_matcher = MatcherSiluAndMul(enabled=enabled)
+    
+    def inputs(self) -> list[torch.Tensor]:
+        # Input is [batch, hidden_size * 2] for [gate || up]
+        input = self.empty(5, 32)  # 32 = 16*2
+        return [input]
+    
+    def forward_custom(
+        self,
+        x: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Fused SiLU+Mul+Block Quant using custom kernel."""
+        hidden_size = x.shape[-1] // 2
+        
+        # Output tensors
+        result = torch.empty(
+            x.shape[:-1] + (hidden_size,),
+            dtype=self.quant_key.dtype,
+            device=x.device,
+        )
+        
+        # Scale tensor
+        group_size = self.quant_key.scale.group_shape[1]
+        num_groups = hidden_size // group_size
+        
+        if self.has_col_major_scales:
+            scale_shape = (num_groups, x.shape[0])
+        else:
+            scale_shape = (x.shape[0], num_groups)
+        
+        scale = torch.empty(scale_shape, dtype=torch.float32, device=x.device)
+        
+        # Call fused kernel
+        _, result, scale = auto_functionalized(
+            self.FUSED_OP,
+            result=result,
+            input=x,
+            scale=scale,
+            group_size=group_size,
+            scale_ub=None,
+            is_scale_transposed=self.has_col_major_scales,
+        )
+        
+        return result, scale
+    
+    def forward_native(
+        self,
+        x: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Unfused: SiLU+Mul then quantize separately."""
+        # First apply SiLU+Mul
+        silu_out = self.silu_mul_matcher.forward_native(x)
+        
+        # Then quantize
+        result, scale = self.quant_matcher.forward_native(silu_out)
+        
+        return result, scale
