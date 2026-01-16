@@ -16,13 +16,18 @@ from vllm.model_executor.layers.fused_moe.modular_kernel import (
     FusedMoEPrepareAndFinalize,
 )
 from vllm.platforms import current_platform
-from vllm.utils.import_utils import has_deep_ep, has_pplx
+from vllm.utils.import_utils import has_deep_ep, has_pplx, has_pplx_garden
 
 if current_platform.is_cuda_alike():
     if has_pplx():
         from .pplx_prepare_finalize import (
             PplxPrepareAndFinalize,
             pplx_hidden_dim_scale_bytes,
+        )
+    if has_pplx_garden():
+        from .pplx_garden_prepare_finalize import (
+            PplxGardenPrepareAndFinalize,
+            pplx_garden_hidden_dim_scale,
         )
     if has_deep_ep():
         from .deepep_ht_prepare_finalize import DeepEPHTPrepareAndFinalize
@@ -118,6 +123,47 @@ def maybe_make_prepare_finalize(
         handle = all2all_manager.get_handle(all_to_all_args)
 
         prepare_finalize = PplxPrepareAndFinalize(
+            handle,
+            max_num_tokens=moe.max_num_tokens,
+            num_local_experts=moe.num_local_experts,
+            num_dispatchers=num_dispatchers,
+        )
+    elif moe.use_pplx_garden_kernels:
+        assert quant_config is not None
+
+        hidden_dim_scale = pplx_garden_hidden_dim_scale(
+            moe.hidden_dim,
+            quant_config.quant_dtype,
+            per_act_token_quant=quant_config.per_act_token_quant,
+            block_shape=quant_config.block_shape,
+        )
+
+        in_dtype = (
+            quant_config.quant_dtype
+            if quant_config.quant_dtype is not None
+            else moe.in_dtype
+        )
+
+        all_to_all_args = dict(
+            max_num_tokens=moe.max_num_tokens,
+            num_experts=moe.num_experts,
+            num_experts_per_token=moe.experts_per_token,
+            expert_padding=1,  # TODO: tests use 1 or 16
+            hidden_dim=moe.hidden_dim,
+            hidden_dim_scale=hidden_dim_scale,
+            in_dtype=in_dtype,
+            out_dtype=in_dtype,
+            scale_dtype=torch.float32 if quant_config.quant_dtype is not None else None,
+            max_private_tokens=None,  # For tuning
+        )
+
+        num_dispatchers = (
+            all2all_manager.world_size // all2all_manager.tp_group.world_size
+        )
+
+        handle = all2all_manager.get_handle(all_to_all_args)
+
+        prepare_finalize = PplxGardenPrepareAndFinalize(
             handle,
             max_num_tokens=moe.max_num_tokens,
             num_local_experts=moe.num_local_experts,
