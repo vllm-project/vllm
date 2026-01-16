@@ -255,7 +255,6 @@ class TestAttentionNvfp4QuantPatternModel(AttentionQuantPatternModel):
         )
 
 
-# Unit test model configurations (model_name, model_class tuples)
 PATTERN_TEST_MODELS_FP8: list[tuple[str, type]] = []
 PATTERN_TEST_MODELS_FP4: list[tuple[str, type]] = []
 HEADS: list[tuple[int, int]] = []

@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import logging
+from typing import Any
 
 import pytest
 import regex as re
@@ -254,14 +255,14 @@ def test_tp2_attn_quant_async_tp(
 @pytest.mark.parametrize(
     "model_name, model_kwargs, backend, matches, custom_ops",
     # Test rms norm+group quant_fp8 fusion
-    list[tuple](flat_product(MODELS_GROUP_FP8, CUSTOM_OPS_QUANT_RMS_NORM)),
+    list[tuple[Any, ...]](flat_product(MODELS_GROUP_FP8, CUSTOM_OPS_QUANT_RMS_NORM)),
 )
 @pytest.mark.parametrize("inductor_graph_partition", [True, False])
 # TODO: remove skip after we fix the fusion thoroughly
 @pytest.mark.skipif(is_blackwell(), reason="Temporarily disabled on Blackwell")
 def test_rms_group_quant(
     model_name: str,
-    model_kwargs: dict,
+    model_kwargs: dict[str, Any],
     backend: AttentionBackendEnum,
     matches: Matches,
     custom_ops: str,
