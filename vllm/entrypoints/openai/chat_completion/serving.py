@@ -385,7 +385,15 @@ class OpenAIServingChat(OpenAIServing):
                         self.logits_processors,
                         sampling_params,
                     )
-
+                # Ensure the model's EOS token is always treated as a stop token.
+                # This fixes infinite generation for models (like Qwen3) that rely on 
+                # specific EOS tokens not explicitly passed by the client.
+                if tokenizer is not None and tokenizer.eos_token_id is not None:
+                    if not sampling_params.stop_token_ids:
+                        sampling_params.stop_token_ids = []
+                    if tokenizer.eos_token_id not in sampling_params.stop_token_ids:
+                        sampling_params.stop_token_ids.append(tokenizer.eos_token_id)
+                
                 self._log_inputs(
                     sub_request_id,
                     engine_prompt,
