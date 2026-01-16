@@ -259,7 +259,8 @@ class RequestState:
             )
 
         output = self._new_completion_output(
-            new_token_ids, finish_reason, stop_reason, routed_experts
+            new_token_ids, finish_reason, stop_reason, routed_experts,
+            num_preempted=self.num_preempted
         )
 
         if self.parent_req is None:
@@ -271,7 +272,8 @@ class RequestState:
             external_req_id = self.parent_req.external_req_id
 
         return self._new_request_output(
-            external_req_id, outputs, finished, kv_transfer_params
+            external_req_id, outputs, finished, kv_transfer_params,
+            num_preempted=self.num_preempted
         )
 
     def _new_request_output(
@@ -280,6 +282,7 @@ class RequestState:
         outputs: list[CompletionOutput] | list[PoolingOutput],
         finished: bool,
         kv_transfer_params: dict[str, Any] | None = None,
+        num_preempted: int = 0,
     ) -> RequestOutput | PoolingRequestOutput:
         first_output = outputs[0]
         if isinstance(first_output, PoolingOutput):
@@ -292,6 +295,7 @@ class RequestState:
                 num_cached_tokens=self.num_cached_tokens,
                 prompt_token_ids=self.prompt_token_ids,
                 finished=finished,
+                num_preempted=num_preempted,
             )
         assert self.logprobs_processor is not None
         if self.output_kind == RequestOutputKind.DELTA:
@@ -316,6 +320,7 @@ class RequestState:
             kv_transfer_params=kv_transfer_params,
             num_cached_tokens=self.num_cached_tokens,
             metrics=self.stats,
+            num_preempted=num_preempted,
         )
 
     def _new_completion_output(
