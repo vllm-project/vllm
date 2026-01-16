@@ -85,6 +85,8 @@ ONBUILD COPY ./ vllm/
 FROM base AS fetch_vllm_1
 ARG VLLM_REPO="https://github.com/vllm-project/vllm.git"
 ARG VLLM_BRANCH="main"
+ENV VLLM_REPO=${VLLM_REPO}
+ENV VLLM_BRANCH=${VLLM_BRANCH}
 ONBUILD RUN git clone ${VLLM_REPO} \
 	    && cd vllm \
 	    && git fetch -v --prune -- origin ${VLLM_BRANCH} \
@@ -300,6 +302,10 @@ RUN --mount=type=bind,from=export_vllm,src=/,target=/install \
     && uv pip install --system -r requirements/rocm-test.txt \
     && pip uninstall -y vllm \
     && uv pip install --system *.whl
+
+# Install RIXL wheel
+RUN --mount=type=bind,from=build_rixl,src=/app/install,target=/rixl_install \
+    uv pip install --system /rixl_install/*.whl
 
 WORKDIR /vllm-workspace
 ARG COMMON_WORKDIR
