@@ -369,10 +369,10 @@ class CutlassExpertsFp8(CutlassExpertsFp8Base):
     @staticmethod
     def _supports_parallel_config(moe_parallel_config: FusedMoEParallelConfig) -> bool:
         # CutlassExpertsFp8 does not support expert map, which is
-        # needed for STANDARD activation format kernels in EP mode.
+        # needed for STANDARD activation format kernels in DP/EP mode.
         # Note that the BATCHED activation format does not use
         # the expert map for identifying experts.
-        return moe_parallel_config.ep_size == 1
+        return not moe_parallel_config.use_all2all_kernels
 
     def supports_chunking(self) -> bool:
         return True

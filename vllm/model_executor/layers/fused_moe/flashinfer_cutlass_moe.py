@@ -141,7 +141,13 @@ class FlashInferExperts(mk.FusedMoEPermuteExpertsUnpermute):
 
     @staticmethod
     def _supports_parallel_config(moe_parallel_config: FusedMoEParallelConfig) -> bool:
-        return True
+        # FLASHINFER_CUTLASS currently uses its down P/F, which does not
+        # work with SP. This will be removed in follow up after we get
+        # rid of the FlashInfer specific P/F function.
+        return (
+            moe_parallel_config.dp_size == 1
+            or moe_parallel_config.dp_size == moe_parallel_config.ep_size
+        )
 
     @staticmethod
     def activation_format() -> mk.FusedMoEActivationFormat:
