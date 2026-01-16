@@ -236,12 +236,22 @@ def select_fp8_moe_backend(
                 Fp8MoeBackend.FLASHINFER_TRTLLM,
                 Fp8MoeBackend.FLASHINFER_CUTLASS,
             ]:
-                k_cls = backend_2_kernel_cls(backend)
-                if k_cls.is_supported_config(
-                    k_cls, config, weight_key, activation_key, activation_format
-                ):
-                    logger.info_once(_make_log_backend(backend))
-                    return backend, k_cls
+                if backend == Fp8MoeBackend.FLASHINFER_TRTLLM:
+                    k_cls = None
+                    supported, reason = is_supported_config_trtllm(
+                        config,
+                        weight_key,
+                        activation_key,
+                        activation_format,
+                    )
+                else:
+                    k_cls = backend_2_kernel_cls(backend)
+                    supported, reason = k_cls.is_supported_config(
+                        config,
+                        weight_key,
+                        activation_key,
+                        activation_format,
+                    )
 
             raise NotImplementedError(
                 "Found VLLM_USE_FLASHINFER_MOE_FP8=1, but no "
