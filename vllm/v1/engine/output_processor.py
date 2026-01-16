@@ -259,8 +259,11 @@ class RequestState:
             )
 
         output = self._new_completion_output(
-            new_token_ids, finish_reason, stop_reason, routed_experts,
-            num_preempted=self.num_preempted
+            new_token_ids,
+            finish_reason,
+            stop_reason,
+            routed_experts,
+            num_preempted=self.num_preempted,
         )
 
         if self.parent_req is None:
@@ -272,8 +275,11 @@ class RequestState:
             external_req_id = self.parent_req.external_req_id
 
         return self._new_request_output(
-            external_req_id, outputs, finished, kv_transfer_params,
-            num_preempted=self.num_preempted
+            external_req_id,
+            outputs,
+            finished,
+            kv_transfer_params,
+            num_preempted=self.num_preempted,
         )
 
     def _new_request_output(

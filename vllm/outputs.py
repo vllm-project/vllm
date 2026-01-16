@@ -226,6 +226,7 @@ class PoolingRequestOutput(Generic[_O]):
         self.finished = finished
         self.outputs = outputs
         self.num_preempted = num_preempted
+
     def __repr__(self):
         return (
             f"{type(self).__name__}(request_id={self.request_id!r}, "
