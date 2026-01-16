@@ -146,6 +146,10 @@ _TOOL_PARSERS_TO_REGISTER = {
         "functiongemma_tool_parser",
         "FunctionGemmaToolParser",
     ),
+    "pangu": (
+        "pangu_tool_parser",
+        "PanguToolParser",
+    ),
 }
 
 
