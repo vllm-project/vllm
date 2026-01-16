@@ -906,18 +906,14 @@ class OpenAIServingChat(OpenAIServing):
                                     output.token_ids,
                                 )
                             )
-                            # When encountering think end id in delta_token_ids
-                            # or think end id in prompt_token_ids
-                            # i.e {"enable_thinking": False},
+                            # When encountering think end id in delta_token_ids,
                             # set reasoning status to end.
                             # Only keep 'content', remove 'reasoning'.
+                            # NOTE: Removed is_reasoning_end(res.prompt_token_ids)
+                            # check - it incorrectly set reasoning_end when
+                            # history contained </think> from prior messages.
                             if reasoning_parser.is_reasoning_end(
                                 as_list(output.token_ids)
-                            ) or (
-                                res.prompt_token_ids
-                                and reasoning_parser.is_reasoning_end(
-                                    res.prompt_token_ids
-                                )
                             ):
                                 reasoning_end_arr[i] = True
                                 if delta_message and delta_message.content:
@@ -963,11 +959,9 @@ class OpenAIServingChat(OpenAIServing):
                         fn_name_returned = function_name_returned[i]
                         output_token_ids = as_list(output.token_ids)
 
-                        # NOTE: Removed check for is_reasoning_end(res.prompt_token_ids)
-                        # That check incorrectly set reasoning_end when conversation
-                        # history contained </think> from previous assistant messages,
-                        # causing new <think> blocks to be treated as content.
-                        # Reasoning state should only be based on current response tokens.
+                        # NOTE: Removed is_reasoning_end(res.prompt_token_ids)
+                        # check - it incorrectly set reasoning_end when history
+                        # contained </think> from prior assistant messages.
 
                         if self.reasoning_parser and not reasoning_end_arr[i]:
                             delta_message = (
@@ -1019,11 +1013,9 @@ class OpenAIServingChat(OpenAIServing):
                         assert reasoning_end_arr is not None
                         output_token_ids = as_list(output.token_ids)
                         if not reasoning_end_arr[i]:
-                            # NOTE: Removed check for is_reasoning_end(res.prompt_token_ids)
-                            # That check incorrectly set reasoning_end when conversation
-                            # history contained </think> from previous assistant messages,
-                            # causing new <think> blocks to be treated as content.
-                            # Reasoning state should only be based on current response tokens.
+                            # NOTE: Removed is_reasoning_end(res.prompt_token_ids)
+                            # check - it incorrectly set reasoning_end when
+                            # history contained </think> from prior messages.
                             delta_message = (
                                 reasoning_parser.extract_reasoning_streaming(
                                     previous_text,
