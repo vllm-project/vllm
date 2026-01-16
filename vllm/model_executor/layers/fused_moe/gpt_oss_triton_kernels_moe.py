@@ -520,6 +520,9 @@ class OAITritonExperts(BaseOAITritonExperts):
         expert_tokens_meta: mk.ExpertTokensMetadata | None,
         apply_router_weight_on_input: bool,
     ):
+        if self.quant_config is None:
+            self.quant_config: FusedMoEQuantConfig = FUSED_MOE_UNQUANTIZED_CONFIG
+
         if expert_map is not None:
             topk_ids = expert_map[topk_ids]
 
