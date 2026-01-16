@@ -643,7 +643,7 @@ class FusedMoE(CustomOp):
                 is_act_and_mul=is_act_and_mul,
                 is_lora_enabled=vllm_config.lora_config is not None,
             )
-        
+
         if not self.moe_config.is_act_and_mul and not current_platform.is_cuda():
             raise NotImplementedError(
                 "is_act_and_mul=False is supported only for CUDA for now"
