@@ -367,7 +367,8 @@ def apply_moe_activation(
     elif activation == GELU_NO_MUL:
         output.copy_(F.gelu(input))
     elif activation == RELU2_NO_MUL:
-        torch.square(F.relu(input), out=output)
+        F.relu(input, inplace=True)
+        torch.square(input, out=output)
     else:
         raise ValueError(f"Unsupported FusedMoe activation: {activation}")
 
