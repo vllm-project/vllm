@@ -10,6 +10,7 @@ import pytest
 import pytest_asyncio
 from openai import OpenAI
 
+from vllm._aiter_ops import is_aiter_found_and_supported
 from vllm.config.multimodal import MultiModalConfig
 from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionRequest,
@@ -106,9 +107,21 @@ def gptoss_speculative_server(default_server_args: list[str]):
         "--speculative-config",
         f'{{"model": "{GPT_OSS_SPECULATOR_NAME}", '
         f'"method": "eagle3", "num_speculative_tokens": 3}}',
-        "--attention-backend=TRITON_ATTN",
+        f"--attention-backend={
+            'TRITON_ATTN'
+            if not is_aiter_found_and_supported()
+            else 'ROCM_AITER_UNIFIED_ATTN'
+        }",
     ]
-    with RemoteOpenAIServer(GPT_OSS_MODEL_NAME, server_args) as remote_server:
+    # gpt-oss requires AITER unified attention on ROCm
+    # TODO: Remove after fixing TRITON_ATTN issue on ROCm
+    # https://github.com/vllm-project/vllm/issues/32434
+    env_dict = None
+    if is_aiter_found_and_supported():
+        env_dict = {"VLLM_ROCM_USE_AITER": "1"}
+    with RemoteOpenAIServer(
+        GPT_OSS_MODEL_NAME, server_args, env_dict=env_dict
+    ) as remote_server:
         yield remote_server
 
 
