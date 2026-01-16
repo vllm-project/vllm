@@ -60,8 +60,8 @@ def test_gsm8k_correctness(config_filename):
         and "Qwen3-30B-A3B-MXFP4A16" in eval_config["model_name"]
     ):
         pytest.skip(
-            "Skipping Qwen3-30B-A3B-MXFP4A16 on ROCm. "
-            "Marlin kernels are not supported on ROCm."
+            "Skipping Qwen3-30B-A3B-MXFP4A16 on non-CUDA platforms. "
+            "Marlin kernels are not supported."
         )
 
     # Parse server arguments from config (use shlex to handle quoted strings)
