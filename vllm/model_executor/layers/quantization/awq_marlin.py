@@ -764,8 +764,6 @@ class AWQMarlinMoEMethod(FusedMoEMethodBase):
         x: torch.Tensor,
         router_logits: torch.Tensor,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        assert layer.activation == "silu", "Only SiLU activation is supported."
-
         topk_weights, topk_ids = router.select_experts(
             hidden_states=x,
             router_logits=router_logits,
