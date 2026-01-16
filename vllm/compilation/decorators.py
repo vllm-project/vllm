@@ -29,7 +29,7 @@ from vllm.config.utils import hash_factors
 from vllm.logger import init_logger
 from vllm.sequence import IntermediateTensors
 from vllm.utils.import_utils import resolve_obj_by_qualname
-from vllm.utils.torch_utils import is_torch_equal_or_newer, supports_dynamo
+from vllm.utils.torch_utils import is_torch_equal_or_newer
 
 from .caching import compute_env_and_config_hashes
 from .monitor import start_monitoring_torch_compile
@@ -314,7 +314,6 @@ def _support_torch_compile(
         self.do_not_compile = (
             self.compilation_config.mode
             in [CompilationMode.NONE, CompilationMode.STOCK_TORCH_COMPILE]
-            or not supports_dynamo()
             or _should_ignore_torch_compile(self.__class__)
             or not enable_compile
         )

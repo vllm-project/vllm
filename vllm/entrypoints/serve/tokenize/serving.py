@@ -13,7 +13,7 @@ from vllm.entrypoints.openai.engine.protocol import (
     ErrorResponse,
 )
 from vllm.entrypoints.openai.engine.serving import OpenAIServing
-from vllm.entrypoints.openai.serving_models import OpenAIServingModels
+from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.entrypoints.renderer import RenderConfig
 from vllm.entrypoints.serve.tokenize.protocol import (
     DetokenizeRequest,
@@ -62,7 +62,7 @@ class OpenAIServingTokenization(OpenAIServing):
         if error_check_ret is not None:
             return error_check_ret
 
-        request_id = f"tokn-{self._base_request_id(raw_request)}"
+        request_id = f"tokenize-{self._base_request_id(raw_request)}"
 
         try:
             lora_request = self._maybe_get_adapters(request)
@@ -134,7 +134,7 @@ class OpenAIServingTokenization(OpenAIServing):
         if error_check_ret is not None:
             return error_check_ret
 
-        request_id = f"tokn-{self._base_request_id(raw_request)}"
+        request_id = f"tokenize-{self._base_request_id(raw_request)}"
 
         lora_request = self._maybe_get_adapters(request)
 

@@ -96,7 +96,6 @@ from vllm.utils.platform_utils import is_pin_memory_available
 from vllm.utils.torch_utils import (
     get_dtype_size,
     kv_cache_dtype_str_to_dtype,
-    supports_dynamo,
 )
 from vllm.v1.attention.backend import (
     AttentionBackend,
@@ -624,11 +623,7 @@ class GPUModelRunner(
         self.cudagraph_dispatcher = CudagraphDispatcher(self.vllm_config)
 
         self.mm_budget = (
-            MultiModalBudget(
-                self.model_config,
-                self.scheduler_config,
-                self.mm_registry,
-            )
+            MultiModalBudget(self.vllm_config, self.mm_registry)
             if self.supports_mm_inputs
             else None
         )
@@ -3944,7 +3939,6 @@ class GPUModelRunner(
         if (
             self.vllm_config.compilation_config.mode
             == CompilationMode.STOCK_TORCH_COMPILE
-            and supports_dynamo()
         ):
             backend = self.vllm_config.compilation_config.init_backend(self.vllm_config)
             compilation_counter.stock_torch_compile_count += 1
@@ -4194,16 +4188,18 @@ class GPUModelRunner(
         """Dummy data for profiling and precompiling multimodal models."""
         assert self.mm_budget is not None
 
-        dummy_decoder_data = self.mm_registry.get_decoder_dummy_data(
-            model_config=self.model_config,
-            seq_len=self.max_model_len,
+        # Don't use `max_items_per_batch` here to avoid redundant computation
+        dummy_mm_inputs = self.mm_registry.get_dummy_mm_inputs(
+            self.model_config,
             mm_counts={modality: 1},
             cache=self.mm_budget.cache,
         )
-        dummy_mm_data = dummy_decoder_data.multi_modal_data
+        dummy_mm_item = dummy_mm_inputs["mm_kwargs"][modality][0]
 
-        # Result in the maximum GPU consumption of the model
-        dummy_mm_item = dummy_mm_data[modality][0]
+        # We use the cache so that the item is saved to the cache,
+        # but not read from the cache
+        assert dummy_mm_item is not None, "Item should not already be cached"
+
         dummy_mm_items = [dummy_mm_item] * max_items_per_batch
 
         return next(
@@ -5679,12 +5675,10 @@ class GPUModelRunner(
             self.kv_cache_config.num_blocks // len(self.kv_cache_config.kv_cache_groups)
             + 1
         ) * block_size
-
         routed_experts_capturer.init_buffer(
             max_num_batched_tokens=self.scheduler_config.max_num_batched_tokens,
             max_num_kv_tokens=self.max_num_kv_tokens,
-            model_config=self.model_config,
-            instance_id=self.vllm_config.instance_id,
+            vllm_config=self.vllm_config,
         )
 
     def may_add_encoder_only_layers_to_kv_cache_config(self) -> None:
