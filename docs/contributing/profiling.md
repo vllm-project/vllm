@@ -8,6 +8,10 @@
 We support tracing vLLM workers using the `torch.profiler` module. You can enable the torch profiler by setting `--profiler-config`
 when launching the server, and setting the entries `profiler` to `'torch'` and `torch_profiler_dir` to the directory where you want to save the traces. Additionally, you can control the profiling content by specifying the following additional arguments in the config:
 
+
+!!! note
+    The `--profiler-config` flag is available in vLLM v0.13.0 and later. If you are using an earlier version, please upgrade to use this feature.
+
 - `torch_profiler_record_shapes` to enable recording Tensor Shapes, off by default
 - `torch_profiler_with_memory` to record memory, off by default
 - `torch_profiler_with_stack` to enable recording stack information, on by default
