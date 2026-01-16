@@ -1386,7 +1386,9 @@ class FlashInferImpl(AttentionImpl):
             else:
                 assert isinstance(attn_metadata.prefill, TRTLLMPrefill)
                 # prefill_query may be non-contiguous
-                prefill_query = prefill_query.contiguous()
+                # Use .reshape() to guarantee canonical strides for
+                # is_strictly_contiguous assertion
+                prefill_query = prefill_query.contiguous().reshape(prefill_query.shape)
                 workspace_buffer = _get_trtllm_gen_workspace_buffer()
                 block_tables_prefill = attn_metadata.prefill.block_tables
                 seq_lens_prefill = attn_metadata.prefill.seq_lens
