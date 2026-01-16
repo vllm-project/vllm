@@ -536,7 +536,7 @@ class OpenPanguEmbeddedAttention(nn.Module):
         if is_gguf and config.model_type == "PanguEmbedded":
             is_neox_style = False
 
-        rope_parameters = config.rope_parameters
+        rope_parameters = config.rope_parameters or {}
         if rope_parameters is not None and rope_parameters.get("mrope_interleaved", False):
             rope_parameters["rope_type"] = "openpangu"
 
