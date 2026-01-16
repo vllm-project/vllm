@@ -169,8 +169,8 @@ class FP8ScaledMMLinearKernel(
     ) -> torch.Tensor:
         raise NotImplementedError
 
-    def get_output_padding(self) -> int:
-        return 0
+    def get_output_padding(self) -> int | None:
+        return None
 
 
 class Int8ScaledMMLinearKernel(
