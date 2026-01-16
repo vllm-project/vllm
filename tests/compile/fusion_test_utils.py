@@ -13,7 +13,7 @@ from vllm import LLM, SamplingParams
 from vllm.config import CompilationConfig, CUDAGraphMode
 from vllm.platforms import current_platform
 
-is_blackwell = lambda: current_platform.is_device_capability(100)
+is_blackwell = lambda: current_platform.is_device_capability_family(100)
 """Are we running on Blackwell, a lot of tests depend on it"""
 
 
@@ -47,6 +47,7 @@ class ModelBackendTestCase(NamedTuple):
 MODELS_FP8: list[ModelBackendTestCase] = []
 MODELS_FP4: list[ModelBackendTestCase] = []
 MODELS: list[ModelBackendTestCase] = []  # tp-only (unquantized)
+MODELS_GROUP_FP8: list[ModelBackendTestCase] = []
 
 if current_platform.is_cuda():
     MODELS_FP8 = [
