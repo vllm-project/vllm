@@ -749,6 +749,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             k,
             v,
             prefill_output,
+            dummy_tensor,
             self.layer_name,
         )
 
@@ -806,7 +807,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             decode_q_final = get_dcp_group().all_gather(decode_q_final, dim=1)
 
         attn_out, lse = torch.ops.vllm.mla_attention_decode(
-            decode_q_final, self.layer_name
+            decode_q_final, dummy_tensor, self.layer_name
         )
 
         if self.dcp_world_size > 1:
@@ -1794,10 +1795,7 @@ def mla_write_kv_cache(
     kv_cache = attn_layer.kv_cache[forward_context.virtual_engine]
 
     if attn_metadata is None or kv_cache.numel() == 0:
-        # Return dummy tensor even when no work is done
-        return kv_c_normed[:1].detach()
-
-    
+        return kv_c_normed.sum().unsqueeze(0)
 
     ops.concat_and_cache_mla(
         kv_c_normed,
@@ -1808,8 +1806,8 @@ def mla_write_kv_cache(
         scale=attn_layer._k_scale,
     )
 
-    # Return dummy tensor to maintain ordering dependencies
-    return kv_c_normed[:1].detach()
+    # using sum() to create a scalar dependency
+    return kv_c_normed.sum().unsqueeze(0)
 
 def mla_write_kv_cache_fake(
     kv_c_normed: torch.Tensor,
@@ -1818,8 +1816,8 @@ def mla_write_kv_cache_fake(
     layer_name: str,
 ) -> torch.Tensor:
     """Fake implementation for torch.compile."""
-    # Return slice of input tensor to maintain device/type consistency
-    return kv_c_normed[:1].detach()
+    # Return a scalar tensor that depends on input for ordering
+    return kv_c_normed.sum().unsqueeze(0)
 
 
 direct_register_custom_op(
@@ -1834,15 +1832,18 @@ direct_register_custom_op(
 
 def mla_attention_decode(
     decode_q: torch.Tensor,
+    dummy_tensor: torch.Tensor,
     layer_name: str,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """MLA decode attention kernel.
 
     This wraps only the decode attention kernel call, allowing the surrounding
     GEMMs (W_UK_T transformation, v_up_proj) to be visible to torch.compile.
-
     Handles empty inputs gracefully (returns empty tensors when no decode tokens).
     """
+    # Use dummy_tensor to establish ordering dependency (adds zero)
+    _ = dummy_tensor.sum() * 0
+    
     forward_context: ForwardContext = get_forward_context()
     attn_metadata = forward_context.attn_metadata
     if isinstance(attn_metadata, dict):
@@ -1872,6 +1873,7 @@ def mla_attention_decode(
 
 def mla_attention_decode_fake(
     decode_q: torch.Tensor,
+    dummy_tensor: torch.Tensor,
     layer_name: str,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Fake implementation for torch.compile."""
@@ -1924,14 +1926,17 @@ def mla_attention_prefill_with_output(
     k: torch.Tensor,
     v: torch.Tensor,
     output: torch.Tensor,
+    dummy_tensor: torch.Tensor,
     layer_name: str,
 ) -> None:
     """MLA prefill attention kernel with output buffer.
 
     kv_b_proj should be done outside this op to be visible to torch.compile.
 
-    Handles empty inputs gracefully (returns zeros when no prefill tokens).
     """
+    # Use dummy_tensor to establish ordering dependency (adds zero)
+    _ = dummy_tensor.sum() * 0
+    
     forward_context: ForwardContext = get_forward_context()
     attn_metadata = forward_context.attn_metadata
     if isinstance(attn_metadata, dict):
@@ -2002,12 +2007,12 @@ def mla_attention_prefill_with_output(
         output_prefill = output_prefill[..., : v.shape[-1]].flatten(start_dim=-2)
         output.copy_(output_prefill)
 
-
 def mla_attention_prefill_with_output_fake(
     q: torch.Tensor,
     k: torch.Tensor,
     v: torch.Tensor,
     output: torch.Tensor,
+    dummy_tensor: torch.Tensor,
     layer_name: str,
 ) -> None:
     """Fake implementation for torch.compile."""

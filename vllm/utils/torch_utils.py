@@ -565,10 +565,15 @@ def weak_ref_tensor(tensor: Any) -> Any:
     The new tensor will share the same data as the original tensor,
     but will not keep the original tensor alive.
     """
-    if isinstance(tensor, torch.Tensor):
-        return torch.ops._C.weak_ref_tensor(tensor)
-    else:
+    if not isinstance(tensor, torch.Tensor) or tensor.numel() == 0:
         return tensor
+
+    # NOTE: `_C::weak_ref_tensor` is not implemented for CPU.
+    # It is only available for CUDA and Meta (plus various dispatcher fallbacks).
+    if tensor.is_cuda or tensor.device.type == "meta":
+        return torch.ops._C.weak_ref_tensor(tensor)
+
+    return tensor
 
 
 def weak_ref_tensors(
