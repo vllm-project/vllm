@@ -882,8 +882,7 @@ class BatchedTritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
         activation_key: QuantKey | None,
     ) -> bool:
         p = current_platform
-        p = current_platform
-        device_supports_fp8 = p.is_rocm() or (
+        device_supports_fp8 = (p.is_rocm() and p.on_gfx9()) or (
             p.is_cuda() and p.has_device_capability((9, 0))
         )
 
