@@ -1001,7 +1001,13 @@ class MLACommonBackend(AttentionBackend):
         head_size: int,
         cache_dtype_str: str = "auto",
     ) -> tuple[int, ...]:
-        return (num_blocks, block_size, head_size)
+        if cache_dtype_str == "nvfp4":
+            cache_head_size = head_size // 2 + (head_size // 16) * 4
+        elif cache_dtype_str == "fp8_ds_mla":
+            cache_head_size = 656
+        else:
+            cache_head_size = head_size
+        return (num_blocks, block_size, cache_head_size)
 
     @staticmethod
     def get_kv_cache_stride_order(
