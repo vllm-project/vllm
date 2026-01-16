@@ -143,22 +143,15 @@ class PrismaticVisionBackbone(nn.Module):
                 "Vision backbone not initialized. Call _init_timm_models first."
             )
 
-        # Get model dtype from featurizer weights
-        model_dtype = next(self.featurizer.parameters()).dtype
-        device = next(self.featurizer.parameters()).device
-
         # Input must be 6-channel (preprocessed by OpenVLAMultiModalProcessor)
         if pixel_values.shape[1] != 6:
             raise ValueError(
                 f"Expected 6-channel input from processor, got {pixel_values.shape[1]}"
             )
 
+        # Split 6-channel input into DINOv2 and SigLIP normalized images
         dinov2_pixels = pixel_values[:, :3, :, :]
         siglip_pixels = pixel_values[:, 3:, :, :]
-
-        # Convert to model dtype and device
-        dinov2_pixels = dinov2_pixels.to(device=device, dtype=model_dtype)
-        siglip_pixels = siglip_pixels.to(device=device, dtype=model_dtype)
 
         # Get features from DINOv2 using second-to-last layer
         n_blocks = len(self.featurizer.blocks)
