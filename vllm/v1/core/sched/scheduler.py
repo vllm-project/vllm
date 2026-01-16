@@ -245,8 +245,7 @@ class Scheduler(SchedulerInterface):
 
             self.routed_experts_reader.attach_buffer(
                 max_num_kv_tokens=self.max_num_kv_tokens,
-                model_config=self.vllm_config.model_config,
-                instance_id=self.vllm_config.instance_id,
+                vllm_config=self.vllm_config,
             )
 
     def schedule(self) -> SchedulerOutput:
