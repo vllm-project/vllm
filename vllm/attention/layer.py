@@ -706,8 +706,6 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         split point comes from a custom op, and slicing stays traceable
         by using torch.narrow.
         """
-        forward_context: ForwardContext = get_forward_context()
-        kv_cache = self.kv_cache[forward_context.virtual_engine]
 
         if self.dcp_world_size is None:
             self.dcp_world_size = get_dcp_group().world_size
@@ -733,7 +731,6 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         dummy_tensor = torch.ops.vllm.mla_write_kv_cache(
             kv_c_normed,
             k_pe,
-            self.kv_cache[0],
             self.layer_name,
         )
 
@@ -1776,7 +1773,6 @@ direct_register_custom_op(
 def mla_write_kv_cache(
     kv_c_normed: torch.Tensor,
     k_pe: torch.Tensor,
-    kv_cache: torch.Tensor,
     layer_name: str,
 ) -> torch.Tensor:
     """Write KV data to cache.
@@ -1812,7 +1808,6 @@ def mla_write_kv_cache(
 def mla_write_kv_cache_fake(
     kv_c_normed: torch.Tensor,
     k_pe: torch.Tensor,
-    kv_cache: torch.Tensor,
     layer_name: str,
 ) -> torch.Tensor:
     """Fake implementation for torch.compile."""
@@ -1823,7 +1818,7 @@ def mla_write_kv_cache_fake(
 direct_register_custom_op(
     op_name="mla_write_kv_cache",
     op_func=mla_write_kv_cache,
-    mutates_args=["kv_cache"],
+    mutates_args=[],
     fake_impl=mla_write_kv_cache_fake,
     dispatch_key=current_platform.dispatch_key,
     tags=(torch._C.Tag.cudagraph_unsafe,),
