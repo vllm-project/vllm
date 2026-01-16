@@ -157,7 +157,6 @@ class ROCMAiterMLASparseMetadataBuilder(
         parallel_config = vllm_config.parallel_config
         self.device = device
         max_num_batched_tokens = vllm_config.scheduler_config.max_num_batched_tokens
-        max_num_seqs = vllm_config.scheduler_config.max_num_seqs
 
         self.num_heads = self.model_config.get_num_attention_heads(parallel_config)
         self.mla_dims = get_mla_dims(self.model_config)
@@ -179,10 +178,10 @@ class ROCMAiterMLASparseMetadataBuilder(
             device=device,
         )
         self.qo_indptr = torch.arange(
-            0, max_num_seqs + 1, dtype=torch.int32, device=device
+            0, max_num_batched_tokens + 1, dtype=torch.int32, device=device
         )
         self.paged_kv_last_page_len = torch.ones(
-            max_num_seqs, dtype=torch.int32, device=device
+            max_num_batched_tokens, dtype=torch.int32, device=device
         )
 
         # These two needs to be calculated in runtime,
@@ -193,7 +192,7 @@ class ROCMAiterMLASparseMetadataBuilder(
             device=device,
         )
         self.paged_kv_indptr = torch.zeros(
-            [max_num_seqs + 1], dtype=torch.int32, device=device
+            [max_num_batched_tokens + 1], dtype=torch.int32, device=device
         )
 
     def build(
@@ -203,7 +202,6 @@ class ROCMAiterMLASparseMetadataBuilder(
         fast_build: bool = False,
     ) -> ROCMAiterMLASparseMetadata:
         num_tokens = common_attn_metadata.num_actual_tokens
-        num_reqs = common_attn_metadata.num_reqs
         starts = np.asarray(common_attn_metadata.query_start_loc_cpu, dtype=np.int32)
         seg_lengths = np.diff(starts)
         req_id_per_token = np.repeat(
@@ -218,11 +216,11 @@ class ROCMAiterMLASparseMetadataBuilder(
         self.paged_kv_indptr.fill_(0)
 
         req_id_per_token = self.req_id_per_token_buffer[:num_tokens]
-        qo_indptr = self.qo_indptr[: num_reqs + 1]
-        paged_kv_last_page_len = self.paged_kv_last_page_len[:num_reqs]
+        qo_indptr = self.qo_indptr[: num_tokens + 1]
+        paged_kv_last_page_len = self.paged_kv_last_page_len[:num_tokens]
         paged_kv_indices = self.paged_kv_indices[: num_tokens * self.topk_tokens]
-        paged_kv_indptr = self.paged_kv_indptr[: num_reqs + 1]
-        paged_kv_indptr_rest = self.paged_kv_indptr[num_reqs + 1 :]
+        paged_kv_indptr = self.paged_kv_indptr[: num_tokens + 1]
+        paged_kv_indptr_rest = self.paged_kv_indptr[num_tokens + 1 :]
 
         metadata = ROCMAiterMLASparseMetadata(
             num_reqs=common_attn_metadata.num_reqs,
