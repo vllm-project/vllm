@@ -6,9 +6,8 @@ import torch
 
 from tests.kernels.utils import opcheck
 from vllm._custom_ops import permute_cols
-from vllm.platforms import current_platform
 
-if current_platform.is_rocm():
+if not hasattr(torch.ops._C, "permute_cols"):
     pytest.skip(reason="permute_cols is not supported on ROCm", allow_module_level=True)
 
 
