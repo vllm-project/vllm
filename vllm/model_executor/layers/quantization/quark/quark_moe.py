@@ -820,6 +820,7 @@ class QuarkW4MXFp4MoEMethod(QuarkW4MXFp4MoEMethodBase):
     def apply(
         self,
         layer: torch.nn.Module,
+        router: FusedMoERouter,
         x: torch.Tensor,
         router_logits: torch.Tensor,
         expert_map: torch.Tensor | None = None,
@@ -829,7 +830,7 @@ class QuarkW4MXFp4MoEMethod(QuarkW4MXFp4MoEMethodBase):
                 "EPLB not supported for `QuarkW4MXFp4MoEMethod` yet."
             )
 
-        topk_weights, topk_ids, _ = layer.select_experts(
+        topk_weights, topk_ids = router.select_experts(
             hidden_states=x,
             router_logits=router_logits,
         )
@@ -1154,6 +1155,7 @@ class QuarkW4MXFp4MoEMethod_OSS(QuarkW4MXFp4MoEMethodBase):
     def apply(
         self,
         layer: torch.nn.Module,
+        router: FusedMoERouter,
         x: torch.Tensor,
         router_logits: torch.Tensor,
         expert_map: torch.Tensor | None = None,
