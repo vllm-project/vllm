@@ -11,6 +11,135 @@ regenerate it:
 python tools/pre_commit/generate_attention_backend_docs.py
 ```
 
+## Setting the Attention Backend
+
+### Command Line
+
+There are two ways to specify the backend from the command line:
+
+**Option 1: Using `--attention-backend` (simple)**
+
+```bash
+vllm serve <model> --attention-backend FLASH_ATTN
+```
+
+**Option 2: Using `--attention-config.backend` (structured config)**
+
+```bash
+# Dot notation
+vllm serve <model> --attention-config.backend FLASH_ATTN
+
+# JSON format with -ac shorthand
+vllm serve <model> -ac '{"backend": "FLASH_ATTN"}'
+```
+
+> **Note:** `--attention-backend` and `--attention-config.backend` are mutually
+> exclusive. Use one or the other, not both.
+
+### Python API
+
+Use `AttentionConfig` with the `LLM` class:
+
+```python
+from vllm import LLM
+from vllm.config import AttentionConfig
+from vllm.v1.attention.backends.registry import AttentionBackendEnum
+
+# Method 1: Using AttentionConfig with enum
+llm = LLM(
+    model="meta-llama/Llama-2-7b-hf",
+    attention_config=AttentionConfig(backend=AttentionBackendEnum.FLASH_ATTN),
+)
+
+# Method 2: Using attention_backend parameter with string
+llm = LLM(
+    model="meta-llama/Llama-2-7b-hf",
+    attention_backend="FLASH_ATTN",
+)
+```
+
+## Backend Selection Behavior
+
+### Manual Selection
+
+When you explicitly set a backend via `--attention-backend` or `AttentionConfig`:
+
+1. The backend is **validated** against your configuration (model dtype, head
+   size, compute capability, etc.)
+2. If the backend **doesn't support** your configuration, an error is raised
+   with the specific reason
+3. If valid, the backend is used
+
+Example error when selecting an incompatible backend:
+
+```text
+ValueError: Selected backend FLASHMLA is not valid for this configuration.
+Reason: ['compute capability not supported']
+```
+
+### Automatic Selection
+
+When no backend is specified (the default):
+
+1. vLLM iterates through backends in **priority order** (see tables below)
+2. Each backend is validated against your configuration
+3. The **first compatible backend** is selected
+4. If no backend is compatible, an error is raised listing all backends and
+   their incompatibility reasons
+
+
+## Backend Priority (CUDA)
+
+When no backend is explicitly selected, vLLM chooses the first
+compatible backend from these priority-ordered lists.
+
+Priority is **1 = highest** (tried first).
+
+### Standard Attention (non-MLA)
+
+**Blackwell (SM 10.x):**
+
+| Priority | Backend |
+|----------|---------|
+| 1 | FLASHINFER |
+| 2 | FLASH_ATTN |
+| 3 | TRITON_ATTN |
+| 4 | FLEX_ATTENTION |
+
+**Ampere/Hopper (SM 8.x-9.x):**
+
+| Priority | Backend |
+|----------|---------|
+| 1 | FLASH_ATTN |
+| 2 | FLASHINFER |
+| 3 | TRITON_ATTN |
+| 4 | FLEX_ATTENTION |
+
+### MLA Attention (DeepSeek-style)
+
+**Blackwell (SM 10.x):**
+
+| Priority | Backend |
+|----------|---------|
+| 1 | FLASHINFER_MLA |
+| 2 | CUTLASS_MLA |
+| 3 | FLASH_ATTN_MLA |
+| 4 | FLASHMLA |
+| 5 | TRITON_MLA |
+| 6 | FLASHMLA_SPARSE |
+
+**Ampere/Hopper (SM 8.x-9.x):**
+
+| Priority | Backend |
+|----------|---------|
+| 1 | FLASH_ATTN_MLA |
+| 2 | FLASHMLA |
+| 3 | FLASHINFER_MLA |
+| 4 | TRITON_MLA |
+| 5 | FLASHMLA_SPARSE |
+
+> **Note:** ROCm and CPU platforms have their own selection logic. See the platform-specific documentation for details.
+
 ## Legend
 
 | Column | Description |

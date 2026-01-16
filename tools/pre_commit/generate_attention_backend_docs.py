@@ -12,7 +12,6 @@ This approach avoids requiring CUDA/ROCm/GPU libraries to be installed.
 
 import argparse
 import ast
-import contextlib
 import sys
 from pathlib import Path
 from typing import Any
@@ -23,6 +22,7 @@ MLA_COMMON_FILE = (
     REPO_ROOT / "vllm" / "model_executor" / "layers" / "attention" / "mla_attention.py"
 )
 REGISTRY_FILE = BACKENDS_DIR / "registry.py"
+CUDA_PLATFORM_FILE = REPO_ROOT / "vllm" / "platforms" / "cuda.py"
 
 
 def parse_registry() -> tuple[dict[str, str], dict[str, str]]:
@@ -332,6 +332,261 @@ def generate_markdown_table(backends: list[dict[str, Any]], title: str) -> str:
     return "\n".join(lines)
 
 
+def parse_cuda_priority_lists() -> dict[str, list[str]]:
+    """Parse priority lists from cuda.py using AST.
+
+    The structure of _get_backend_priorities is:
+        if use_mla:
+            if device_capability.major == 10:
+                return [MLA list for SM100]
+            else:
+                return [MLA list for default]
+        else:
+            if device_capability.major == 10:
+                return [Standard list for SM100]
+            else:
+                return [Standard list for default]
+    """
+    if not CUDA_PLATFORM_FILE.exists():
+        return {}
+
+    try:
+        source = CUDA_PLATFORM_FILE.read_text()
+        tree = ast.parse(source)
+    except Exception:
+        return {}
+
+    priorities: dict[str, list[str]] = {}
+
+    # Find the _get_backend_priorities function
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.FunctionDef):
+            continue
+        if node.name != "_get_backend_priorities":
+            continue
+
+        # Process the function body directly
+        for stmt in node.body:
+            if not isinstance(stmt, ast.If):
+                continue
+
+            # Check if this is the "if use_mla:" branch
+            is_mla_branch = (
+                isinstance(stmt.test, ast.Name) and stmt.test.id == "use_mla"
+            )
+
+            if is_mla_branch:
+                # Process MLA branches
+                _extract_priority_from_if(stmt.body, priorities, "mla")
+                if stmt.orelse:
+                    _extract_priority_from_else(stmt.orelse, priorities, "standard")
+            else:
+                # Process standard branches directly
+                _extract_priority_from_if([stmt], priorities, "standard")
+
+    return priorities
+
+
+def _extract_priority_from_if(
+    body: list, priorities: dict[str, list[str]], prefix: str
+) -> None:
+    """Extract priority list from if statement body."""
+    for stmt in body:
+        if isinstance(stmt, ast.If):
+            # Check for device_capability.major == 10
+            test_src = ast.unparse(stmt.test)
+            is_sm100 = "major == 10" in test_src or ".major == 10" in test_src
+
+            # Get the return list from the if body
+            for sub in stmt.body:
+                if isinstance(sub, ast.Return) and isinstance(sub.value, ast.List):
+                    backends = _extract_backend_names(sub.value)
+                    if is_sm100:
+                        priorities[f"{prefix}_sm100"] = backends
+                    else:
+                        priorities[f"{prefix}_default"] = backends
+
+            # Get the return list from the else body
+            for sub in stmt.orelse:
+                if isinstance(sub, ast.Return) and isinstance(sub.value, ast.List):
+                    backends = _extract_backend_names(sub.value)
+                    if is_sm100:
+                        priorities[f"{prefix}_default"] = backends
+                    else:
+                        priorities[f"{prefix}_sm100"] = backends
+
+        elif isinstance(stmt, ast.Return) and isinstance(stmt.value, ast.List):
+            backends = _extract_backend_names(stmt.value)
+            priorities[f"{prefix}_default"] = backends
+
+
+def _extract_priority_from_else(
+    orelse: list, priorities: dict[str, list[str]], prefix: str
+) -> None:
+    """Extract priority list from else clause."""
+    for stmt in orelse:
+        if isinstance(stmt, ast.If):
+            _extract_priority_from_if([stmt], priorities, prefix)
+        elif isinstance(stmt, ast.Return) and isinstance(stmt.value, ast.List):
+            backends = _extract_backend_names(stmt.value)
+            priorities[f"{prefix}_default"] = backends
+
+
+def _extract_backend_names(list_node: ast.List) -> list[str]:
+    """Extract backend enum names from an AST List node."""
+    backends = []
+    for elt in list_node.elts:
+        if isinstance(elt, ast.Attribute):
+            backends.append(elt.attr)
+    return backends
+
+
+def generate_usage_section() -> str:
+    """Generate the usage documentation section."""
+    return """## Setting the Attention Backend
+
+### Command Line
+
+There are two ways to specify the backend from the command line:
+
+**Option 1: Using `--attention-backend` (simple)**
+
+```bash
+vllm serve <model> --attention-backend FLASH_ATTN
+```
+
+**Option 2: Using `--attention-config.backend` (structured config)**
+
+```bash
+# Dot notation
+vllm serve <model> --attention-config.backend FLASH_ATTN
+
+# JSON format with -ac shorthand
+vllm serve <model> -ac '{"backend": "FLASH_ATTN"}'
+```
+
+> **Note:** `--attention-backend` and `--attention-config.backend` are mutually
+> exclusive. Use one or the other, not both.
+
+### Python API
+
+Use `AttentionConfig` with the `LLM` class:
+
+```python
+from vllm import LLM
+from vllm.config import AttentionConfig
+from vllm.v1.attention.backends.registry import AttentionBackendEnum
+
+# Method 1: Using AttentionConfig with enum
+llm = LLM(
+    model="meta-llama/Llama-2-7b-hf",
+    attention_config=AttentionConfig(backend=AttentionBackendEnum.FLASH_ATTN),
+)
+
+# Method 2: Using attention_backend parameter with string
+llm = LLM(
+    model="meta-llama/Llama-2-7b-hf",
+    attention_backend="FLASH_ATTN",
+)
+```
+
+## Backend Selection Behavior
+
+### Manual Selection
+
+When you explicitly set a backend via `--attention-backend` or `AttentionConfig`:
+
+1. The backend is **validated** against your configuration (model dtype, head
+   size, compute capability, etc.)
+2. If the backend **doesn't support** your configuration, an error is raised
+   with the specific reason
+3. If valid, the backend is used
+
+Example error when selecting an incompatible backend:
+
+```text
+ValueError: Selected backend FLASHMLA is not valid for this configuration.
+Reason: ['compute capability not supported']
+```
+
+### Automatic Selection
+
+When no backend is specified (the default):
+
+1. vLLM iterates through backends in **priority order** (see tables below)
+2. Each backend is validated against your configuration
+3. The **first compatible backend** is selected
+4. If no backend is compatible, an error is raised listing all backends and
+   their incompatibility reasons
+
+"""
+
+
+def generate_priority_section(priorities: dict[str, list[str]]) -> str:
+    """Generate the priority ranking section."""
+    lines = [
+        "## Backend Priority (CUDA)",
+        "",
+        "When no backend is explicitly selected, vLLM chooses the first",
+        "compatible backend from these priority-ordered lists.",
+        "",
+        "Priority is **1 = highest** (tried first).",
+        "",
+    ]
+
+    # Standard backends
+    lines.append("### Standard Attention (non-MLA)")
+    lines.append("")
+
+    if "standard_sm100" in priorities:
+        lines.append("**Blackwell (SM 10.x):**")
+        lines.append("")
+        lines.append("| Priority | Backend |")
+        lines.append("|----------|---------|")
+        for i, backend in enumerate(priorities["standard_sm100"], 1):
+            lines.append(f"| {i} | {backend} |")
+        lines.append("")
+
+    if "standard_default" in priorities:
+        lines.append("**Ampere/Hopper (SM 8.x-9.x):**")
+        lines.append("")
+        lines.append("| Priority | Backend |")
+        lines.append("|----------|---------|")
+        for i, backend in enumerate(priorities["standard_default"], 1):
+            lines.append(f"| {i} | {backend} |")
+        lines.append("")
+
+    # MLA backends
+    lines.append("### MLA Attention (DeepSeek-style)")
+    lines.append("")
+
+    if "mla_sm100" in priorities:
+        lines.append("**Blackwell (SM 10.x):**")
+        lines.append("")
+        lines.append("| Priority | Backend |")
+        lines.append("|----------|---------|")
+        for i, backend in enumerate(priorities["mla_sm100"], 1):
+            lines.append(f"| {i} | {backend} |")
+        lines.append("")
+
+    if "mla_default" in priorities:
+        lines.append("**Ampere/Hopper (SM 8.x-9.x):**")
+        lines.append("")
+        lines.append("| Priority | Backend |")
+        lines.append("|----------|---------|")
+        for i, backend in enumerate(priorities["mla_default"], 1):
+            lines.append(f"| {i} | {backend} |")
+        lines.append("")
+
+    lines.append(
+        "> **Note:** ROCm and CPU platforms have their own selection logic. "
+        "See the platform-specific documentation for details."
+    )
+    lines.append("")
+
+    return "\n".join(lines)
+
+
 def generate_legend() -> str:
     """Generate a legend explaining the table columns."""
     return """## Legend
@@ -358,11 +613,8 @@ def generate_docs() -> str:
     """Generate the complete documentation."""
     attention_backends_map, _ = parse_registry()
 
-    # Parse the MLA common backend for default values
-    mla_common_tree = None
-    if MLA_COMMON_FILE.exists():
-        with contextlib.suppress(Exception):
-            mla_common_tree = ast.parse(MLA_COMMON_FILE.read_text())
+    # Parse priority lists from cuda.py
+    priorities = parse_cuda_priority_lists()
 
     # Collect backend info
     all_backends = []
@@ -395,15 +647,19 @@ def generate_docs() -> str:
         "",
     ]
 
+    # Add usage documentation
+    doc_lines.append(generate_usage_section())
+
+    # Add priority section
+    doc_lines.append(generate_priority_section(priorities))
+
+    # Add legend and feature tables
     doc_lines.append(generate_legend())
     doc_lines.append(
         generate_markdown_table(non_mla_backends, "Standard Attention Backends")
     )
     mla_title = "MLA (Multi-head Latent Attention) Backends"
     doc_lines.append(generate_markdown_table(mla_backends, mla_title))
-
-    # Suppress unused variable warning - mla_common_tree reserved for future use
-    _ = mla_common_tree
 
     return "\n".join(doc_lines)
 
