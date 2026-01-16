@@ -566,6 +566,9 @@ def run_dp_sharded_mrope_vision_model(
                 device=image_embeds_local.device,
             )
         image_embeds_local_padded = torch.cat([image_embeds_local, padding], dim=0)
+    # truncate the padded output from CUDA graph execution
+    elif current_len > max_len_per_rank:
+        image_embeds_local_padded = image_embeds_local[:max_len_per_rank]
     else:
         image_embeds_local_padded = image_embeds_local
 
