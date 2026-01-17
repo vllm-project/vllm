@@ -285,7 +285,8 @@ class SpeculativeConfig:
                 if "glm-4.7" in model_name and "fp8" in model_name:
                     raise ValueError(
                         "Speculative decoding method 'mtp' is temporarily disabled "
-                        "for GLM-4.7-FP8 due to a CUDA illegal memory access regression "
+                        "for GLM-4.7-FP8 due to a CUDA illegal memory access "
+                        "regression "
                         "(see vllm-project/vllm#32090). Workaround: disable "
                         "`--speculative-config.method mtp` or pin a last-known-good "
                         "nightly image (e.g. nightly-ef96fa3f...)."
