@@ -515,7 +515,6 @@ class FusedMoE(CustomOp):
         self.scoring_func = scoring_func
         self.routed_scaling_factor = routed_scaling_factor
         self.e_score_correction_bias = e_score_correction_bias
-        self.routing_method_type: RoutingMethodType = self.routing_method_type
         # TODO(bnell): end attributes
 
         self.apply_router_weight_on_input = apply_router_weight_on_input
@@ -627,6 +626,7 @@ class FusedMoE(CustomOp):
             routing_method_type=routing_method_type,
             capture=capture,
         )
+        self.routing_method_type: RoutingMethodType = self.router.routing_method_type
 
     # Note: maybe_init_modular_kernel should only be called by
     # prepare_communication_buffer_for_model.

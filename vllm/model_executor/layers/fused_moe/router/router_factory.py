@@ -109,6 +109,7 @@ def create_fused_moe_router(
         return router
 
     if use_grouped_topk:
+        assert custom_routing_function is None
         if num_expert_group is None or topk_group is None:
             raise ValueError(
                 "num_expert_group and topk_group must be provided when "

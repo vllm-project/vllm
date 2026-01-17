@@ -18,6 +18,10 @@ from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (
     rocm_aiter_grouped_topk,
 )
 from vllm.model_executor.layers.fused_moe.router.base_router import BaseRouter
+from vllm.model_executor.layers.fused_moe.router.fused_topk_bias_router import (
+    fused_topk_bias,
+)
+from vllm.model_executor.layers.fused_moe.router.fused_topk_router import fused_topk
 from vllm.model_executor.utils import maybe_disable_graph_partition
 from vllm.platforms import current_platform
 
@@ -303,10 +307,25 @@ class GroupedTopKRouter(BaseRouter):
             return num_experts % self.num_expert_group == 0
 
         if not valid_grouping():
-            raise ValueError(
-                f"Invalid grouping: num_experts={router_logits.shape[-1]}, "
-                f"num_expert_group={self.num_expert_group}"
-            )
+            if self.e_score_correction_bias is not None:
+                topk_weights, topk_ids = fused_topk_bias(
+                    hidden_states=hidden_states,
+                    gating_output=router_logits,
+                    e_score_correction_bias=self.e_score_correction_bias.data,
+                    topk=self.top_k,
+                    renormalize=self.renormalize,
+                )
+                if self.routed_scaling_factor != 1.0:
+                    topk_weights *= self.routed_scaling_factor
+            else:
+                topk_weights, topk_ids, token_expert_indices = fused_topk(
+                    hidden_states=hidden_states,
+                    gating_output=router_logits,
+                    topk=self.top_k,
+                    renormalize=self.renormalize,
+                    indices_type=indices_type,
+                )
+            return topk_weights, topk_ids
 
         # Select grouped_topk implementation
         if rocm_aiter_ops.is_fused_moe_enabled():
