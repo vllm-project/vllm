@@ -83,6 +83,99 @@ class SampleRequest:
     request_id: str | None = None
 
 
+def serialize_sample_requests(
+    requests: list[SampleRequest],
+    output_path: str,
+) -> None:
+    """
+    Serialize SampleRequest objects to JSON for caching/reuse.
+
+    Args:
+        requests: List of SampleRequest objects to serialize.
+        output_path: Path to write the JSON file.
+    """
+    serializable_requests = []
+    for req in requests:
+        req_dict: dict[str, Any] = {
+            "prompt": req.prompt,
+            "prompt_len": req.prompt_len,
+            "expected_output_len": req.expected_output_len,
+            "request_id": req.request_id,
+        }
+
+        # Handle multi_modal_data (may contain base64 images)
+        if req.multi_modal_data is not None:
+            req_dict["multi_modal_data"] = req.multi_modal_data
+
+        # Handle lora_request
+        if req.lora_request is not None:
+            req_dict["lora_request"] = {
+                "lora_name": req.lora_request.lora_name,
+                "lora_int_id": req.lora_request.lora_int_id,
+                "lora_path": req.lora_request.lora_path,
+            }
+
+        serializable_requests.append(req_dict)
+
+    with open(output_path, "w", encoding="utf-8") as f:
+        json.dump(
+            {
+                "version": "1.0",
+                "num_requests": len(requests),
+                "requests": serializable_requests,
+            },
+            f,
+            indent=2,
+        )
+
+    logger.info("Saved %d sample requests to %s", len(requests), output_path)
+
+
+def deserialize_sample_requests(input_path: str) -> list[SampleRequest]:
+    """
+    Deserialize SampleRequest objects from a JSON cache file.
+
+    Args:
+        input_path: Path to the JSON file to read.
+
+    Returns:
+        List of SampleRequest objects.
+    """
+    with open(input_path, encoding="utf-8") as f:
+        data = json.load(f)
+
+    if data.get("version") != "1.0":
+        logger.warning(
+            "Sample cache version mismatch. Expected 1.0, got %s",
+            data.get("version"),
+        )
+
+    requests = []
+    for req_dict in data["requests"]:
+        lora_request = None
+        if req_dict.get("lora_request"):
+            lora_data = req_dict["lora_request"]
+            lora_request = LoRARequest(
+                lora_name=lora_data["lora_name"],
+                lora_int_id=lora_data["lora_int_id"],
+                lora_path=lora_data["lora_path"],
+            )
+
+        requests.append(
+            SampleRequest(
+                prompt=req_dict["prompt"],
+                prompt_len=req_dict["prompt_len"],
+                expected_output_len=req_dict["expected_output_len"],
+                multi_modal_data=req_dict.get("multi_modal_data"),
+                lora_request=lora_request,
+                request_id=req_dict.get("request_id"),
+            )
+        )
+
+    logger.info("Loaded %d sample requests from %s", len(requests), input_path)
+    return requests
+
+
 # -----------------------------------------------------------------------------
 # Benchmark Dataset Base Class
 # -----------------------------------------------------------------------------
@@ -508,26 +601,52 @@ class RandomDataset(BenchmarkDataset):
 
         requests = []
         token_mismatch_total = 0
-        for i in range(num_requests):
-            prompt, total_input_len, token_mismatch = self.generate_token_sequence(  # noqa: E501
+
+        # Use batch generation for efficiency when num_requests > 10
+        if num_requests > 10:
+            batch_results = self._batch_generate_prompts(
                 tokenizer=tokenizer,
                 prefix_token_ids=prefix_token_ids,
                 prefix_len=prefix_len,
-                vocab_size=vocab_size,
-                input_len=int(input_lens[i]),
-                offset=int(offsets[i]),
-                index=i,
+                input_lens=input_lens,
+                offsets=offsets,
                 allowed_tokens=allowed_tokens,
+                num_requests=num_requests,
             )
-            token_mismatch_total += token_mismatch
-            requests.append(
-                SampleRequest(
-                    prompt=prompt,
-                    prompt_len=total_input_len,
-                    expected_output_len=int(output_lens[i]),
-                    request_id=request_id_prefix + str(i),
+            for i, (prompt, total_input_len, token_mismatch) in enumerate(
+                batch_results
+            ):
+                token_mismatch_total += token_mismatch
+                requests.append(
+                    SampleRequest(
+                        prompt=prompt,
+                        prompt_len=total_input_len,
+                        expected_output_len=int(output_lens[i]),
+                        request_id=request_id_prefix + str(i),
+                    )
                 )
-            )
+        else:
+            # Use sequential generation for small request counts
+            for i in range(num_requests):
+                prompt, total_input_len, token_mismatch = self.generate_token_sequence(
+                    tokenizer=tokenizer,
+                    prefix_token_ids=prefix_token_ids,
+                    prefix_len=prefix_len,
+                    vocab_size=vocab_size,
+                    input_len=int(input_lens[i]),
+                    offset=int(offsets[i]),
+                    index=i,
+                    allowed_tokens=allowed_tokens,
+                )
+                token_mismatch_total += token_mismatch
+                requests.append(
+                    SampleRequest(
+                        prompt=prompt,
+                        prompt_len=total_input_len,
+                        expected_output_len=int(output_lens[i]),
+                        request_id=request_id_prefix + str(i),
+                    )
+                )
         # only used for embeddings benchmark.
         if batchsize > 1:
             batch_requests = []
@@ -666,6 +785,79 @@ class RandomDataset(BenchmarkDataset):
         )
         total_input_len = len(adjusted_token_sequence)
         return prompt, total_input_len, token_mismatch
+
+    def _batch_generate_prompts(
+        self,
+        tokenizer: TokenizerLike,
+        prefix_token_ids: list[int],
+        prefix_len: int,
+        input_lens: np.ndarray,
+        offsets: np.ndarray,
+        allowed_tokens: np.ndarray,
+        num_requests: int,
+    ) -> list[tuple[str, int, int]]:
+        """
+        Batch generate prompts for improved efficiency.
+
+        Uses batch decoding and encoding when available, falling back to
+        per-request processing only for sequences that need adjustment.
+
+        Returns list of (prompt, total_input_len, token_mismatch) tuples.
+        """
+        # Pre-generate all token sequences
+        all_token_sequences: list[list[int]] = []
+        target_lens: list[int] = []
+
+        for i in range(num_requests):
+            input_len_i = int(input_lens[i])
+            inner_seq = allowed_tokens[
+                (int(offsets[i]) + i + np.arange(input_len_i)) % len(allowed_tokens)
+            ].tolist()
+            token_sequence = prefix_token_ids + inner_seq
+            all_token_sequences.append(token_sequence)
+            target_lens.append(prefix_len + input_len_i)
+
+        # Batch decode all sequences
+        if hasattr(tokenizer, "batch_decode"):
+            prompts = tokenizer.batch_decode(
+                all_token_sequences, skip_special_tokens=False
+            )
+        else:
+            prompts = [tokenizer.decode(seq) for seq in all_token_sequences]
+
+        # Batch re-encode for validation
+        try:
+            # Try batch encoding
+            encoded = tokenizer(prompts, add_special_tokens=False)
+            reencoded_sequences = encoded["input_ids"]
+        except Exception:
+            # Fall back to individual encoding
+            reencoded_sequences = [
+                tokenizer.encode(p, add_special_tokens=False) for p in prompts
+            ]
+
+        # Process results, only doing adjustment for mismatches
+        results: list[tuple[str, int, int]] = []
+        for i in range(num_requests):
+            target_len = target_lens[i]
+            prompt = prompts[i]
+            reencoded = reencoded_sequences[i]
+
+            if len(reencoded) == target_len:
+                # Perfect match - no adjustment needed
+                results.append((prompt, len(reencoded), 0))
+            else:
+                # Need adjustment - use the iterative function
+                prompt, adjusted_seq, token_mismatch = gen_prompt_decode_to_target_len(
+                    tokenizer=tokenizer,
+                    token_sequence=all_token_sequences[i],
+                    target_token_len=target_len,
+                    add_special_tokens=False,
+                    rng=self._rng,
+                )
+                results.append((prompt, len(adjusted_seq), token_mismatch))
+
+        return results
 
 
 # -----------------------------------------------------------------------------
