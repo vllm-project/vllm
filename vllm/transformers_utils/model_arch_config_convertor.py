@@ -398,5 +398,6 @@ MODEL_ARCH_CONFIG_CONVERTORS = {
     "glm4_moe_mtp": GLM4MoeMTPModelArchConfigConvertor,
     "ernie_mtp": ErnieMTPModelArchConfigConvertor,
     "pangu_ultra_moe_mtp": PanguUltraMoeMTPModelArchConfigConvertor,
+    "pangu_pro_moe_mtp": PanguUltraMoeMTPModelArchConfigConvertor,
     "longcat_flash_mtp": LongCatFlashMTPModelArchConfigConvertor,
 }
