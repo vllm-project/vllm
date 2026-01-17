@@ -174,11 +174,10 @@ class RocmPlatform(Platform):
         # Required for RCCL in ROCm 7.1+
         "HSA_NO_SCRATCH_RECLAIM",
         # Prevent Ray from overriding ROCm device visibility
+        # This allows CUDA_VISIBLE_DEVICES set by Ray to work correctly
+        # while vLLM manages HIP_VISIBLE_DEVICES internally
         "RAY_EXPERIMENTAL_NOSET_ROCR_VISIBLE_DEVICES",
         "RAY_EXPERIMENTAL_NOSET_HIP_VISIBLE_DEVICES",
-        # ROCm device visibility
-        "HIP_VISIBLE_DEVICES",
-        "ROCR_VISIBLE_DEVICES",
         # RCCL specific settings
         "NCCL_DEBUG",
         "NCCL_IB_DISABLE",
