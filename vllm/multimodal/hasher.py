@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import functools
 import hashlib
 import pickle
 import uuid
@@ -18,6 +19,7 @@ from .media import MediaWithBytes
 logger = init_logger(__name__)
 
 
+@functools.lru_cache(maxsize=1)
 def _get_hasher_factory() -> Callable[[], "hashlib._Hash"]:
     """
     Get the hasher factory based on the configured algorithm.
