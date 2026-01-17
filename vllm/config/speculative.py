@@ -276,8 +276,12 @@ class SpeculativeConfig:
                 # nightlies (CUDA illegal memory access) when using GLM-4.7-FP8
                 # with MTP speculative decoding on H100.
                 # Prefer a deterministic, actionable error over an unsafe CUDA crash.
-                target_id = (self.target_model_config.model or "").lower()
-                if "glm-4.7" in target_id and "fp8" in target_id:
+                # Only match on the model name itself (basename). The full
+                # model string may be a path, and matching on the whole string
+                # risks false positives if parent directories contain tokens
+                # like "glm-4.7" or "fp8".
+                model_name = (self.target_model_config.model or "").split("/")[-1].lower()
+                if "glm-4.7" in model_name and "fp8" in model_name:
                     raise ValueError(
                         "Speculative decoding method 'mtp' is temporarily disabled "
                         "for GLM-4.7-FP8 due to a CUDA illegal memory access regression "
