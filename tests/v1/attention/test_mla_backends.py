@@ -506,6 +506,12 @@ def test_backend_correctness(
     )
     kv_b_proj_weight = torch.cat([W_UK, W_UV], dim=-1)
 
+    # Scale weights to produce realistic magnitude outputs.
+    # Without scaling, projection output has std ~sqrt(kv_lora_rank) ≈ 22.6,
+    # causing extreme attention scores and numerical instability in LSE merging.
+    weight_scale = 1.0 / (kv_lora_rank**0.5)
+    kv_b_proj_weight = kv_b_proj_weight * weight_scale
+
     for i, backend in enumerate(BACKENDS_TO_TEST):
         all_sdpa_outputs.append([])
 
