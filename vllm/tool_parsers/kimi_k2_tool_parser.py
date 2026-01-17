@@ -66,11 +66,15 @@ class KimiK2ToolParser(ToolParser):
             re.DOTALL,
         )
 
+        # Use [^<]+ instead of .+ to prevent greedy matching across tool call
+        # boundaries when multiple tool calls are concatenated without spacing.
+        # This matches the non-streaming regex pattern above (fixes issue #24478).
         self.stream_tool_call_portion_regex = re.compile(
-            r"(?P<tool_call_id>.+:\d+)\s*<\|tool_call_argument_begin\|>\s*(?P<function_arguments>.*)"
+            r"(?P<tool_call_id>[^<]+:\d+)\s*"
+            r"<\|tool_call_argument_begin\|>\s*(?P<function_arguments>.*)"
         )
 
-        self.stream_tool_call_name_regex = re.compile(r"(?P<tool_call_id>.+:\d+)\s*")
+        self.stream_tool_call_name_regex = re.compile(r"(?P<tool_call_id>[^<]+:\d+)\s*")
 
         if not self.model_tokenizer:
             raise ValueError(
