@@ -70,19 +70,6 @@ if "HIP_VISIBLE_DEVICES" in os.environ:
     else:
         os.environ["CUDA_VISIBLE_DEVICES"] = val
 
-# Required for RCCL in ROCm 7.1+ to prevent memory allocation issues
-# This must be set before any RCCL operations
-if "HSA_NO_SCRATCH_RECLAIM" not in os.environ:
-    os.environ["HSA_NO_SCRATCH_RECLAIM"] = "1"
-
-# Ensure Ray doesn't interfere with ROCm device visibility
-# These prevent Ray from automatically setting device visibility env vars
-# which can conflict with vLLM's device management
-if "RAY_EXPERIMENTAL_NOSET_ROCR_VISIBLE_DEVICES" not in os.environ:
-    os.environ["RAY_EXPERIMENTAL_NOSET_ROCR_VISIBLE_DEVICES"] = "1"
-if "RAY_EXPERIMENTAL_NOSET_HIP_VISIBLE_DEVICES" not in os.environ:
-    os.environ["RAY_EXPERIMENTAL_NOSET_HIP_VISIBLE_DEVICES"] = "1"
-
 # AMDSMI utils
 # Note that NVML is not affected by `{CUDA/HIP}_VISIBLE_DEVICES`,
 # all the related functions work on real physical device ids.
@@ -434,6 +421,19 @@ class RocmPlatform(Platform):
 
     @classmethod
     def check_and_update_config(cls, vllm_config: "VllmConfig") -> None:
+        # Required for RCCL in ROCm 7.1+ to prevent memory allocation issues
+        # This must be set before any RCCL operations
+        if "HSA_NO_SCRATCH_RECLAIM" not in os.environ:
+            os.environ["HSA_NO_SCRATCH_RECLAIM"] = "1"
+
+        # Ensure Ray doesn't interfere with ROCm device visibility
+        # These prevent Ray from automatically setting device visibility env vars
+        # which can conflict with vLLM's device management
+        if "RAY_EXPERIMENTAL_NOSET_ROCR_VISIBLE_DEVICES" not in os.environ:
+            os.environ["RAY_EXPERIMENTAL_NOSET_ROCR_VISIBLE_DEVICES"] = "1"
+        if "RAY_EXPERIMENTAL_NOSET_HIP_VISIBLE_DEVICES" not in os.environ:
+            os.environ["RAY_EXPERIMENTAL_NOSET_HIP_VISIBLE_DEVICES"] = "1"
+
         from vllm._aiter_ops import rocm_aiter_ops
         from vllm.config.compilation import CUDAGraphMode
 
