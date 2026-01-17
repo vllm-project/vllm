@@ -165,16 +165,50 @@ class FlashInferExperts(mk.FusedMoEPermuteExpertsUnpermute):
             and not self.use_deepseek_fp8_block_scale
         ):
             # FP8 per-tensor path: use global alphas/scales; do not pass input_sf
+            # === [PATCH START] Fix for Llama 4 FP8 Nullptr Crash ===
+            # FP8 per-tensor path: use global alphas/scales; do not pass input_sf
+            # We must handle cases where attributes are named differently (w1_scale vs g1_alphas)
+            
+            # 1. Get Weight Scales (FC1 / FC2)
+            # Try g1_alphas first (legacy/specific), fallback to w1_scale (standard)
+            w1_s = getattr(self, "g1_alphas", None)
+            if w1_s is None:
+                w1_s = getattr(self, "w1_scale", None)
+            
+            w2_s = getattr(self, "g2_alphas", None)
+            if w2_s is None:
+                w2_s = getattr(self, "w2_scale", None)
+
+            # 2. Get Input Scales
+            # Try a1_scale/a2_gscale attributes, fallback to arguments passed to apply()
+            # Note: a2_gscale is often used for the second GEMM input scale
+            in1_s = getattr(self, "a1_scale", None)
+            if in1_s is None:
+                in1_s = a1q_scale # Use the argument passed to apply
+
+            in2_s = getattr(self, "a2_gscale", None)
+            if in2_s is None:
+                in2_s = a2_scale # Use the argument passed to apply
+
+            # Ensure we don't pass None to C++ kernel which expects tensors
+            if w1_s is None:
+                raise ValueError("FlashInferExperts FP8: Missing w1 scale (checked g1_alphas and w1_scale)")
+            if w2_s is None:
+                 raise ValueError("FlashInferExperts FP8: Missing w2 scale (checked g2_alphas and w2_scale)")
+            
+            # Construct the list expected by FlashInfer
             quant_scales = [
-                self.g1_alphas,  # w13_weight_scale * w13_input_scale
-                self.a2_gscale,  # 1.0 / w2_input_scale
-                self.g2_alphas,  # w2_weight_scale * w2_input_scale
-                self.a1_scale,
+                w1_s,   # w13_weight_scale * w13_input_scale (FC1 Dequant)
+                in2_s,  # 1.0 / w2_input_scale (FC2 Quant - optional depending on kernel)
+                w2_s,   # w2_weight_scale * w2_input_scale (FC2 Dequant)
+                in1_s,  # w1_input_scale (FC1 Quant)
             ]
+            # === [PATCH END] ===
 
             a1q_scale = None  # not passing input_sf in fp8
             fc1_expert_weights = w1
             fc2_expert_weights = w2
+            
         elif self.quant_dtype == "nvfp4":
             # Ensure w1_scale and w2_scale are not None before calling view
             assert self.w1_scale is not None and self.w2_scale is not None, (
