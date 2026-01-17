@@ -474,7 +474,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 # Install FlashInfer pre-compiled kernel cache and binaries
 # This is ~1.1GB and only changes when FlashInfer version bumps
 # https://docs.flashinfer.ai/installation.html
-ARG FLASHINFER_VERSION=0.5.3
+ARG FLASHINFER_VERSION=0.6.0
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv pip install --system flashinfer-cubin==${FLASHINFER_VERSION} \
     && uv pip install --system flashinfer-jit-cache==${FLASHINFER_VERSION} \
