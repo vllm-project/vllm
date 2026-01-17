@@ -672,7 +672,7 @@ _MULTIMODAL_EXAMPLE_MODELS = {
         "rednote-hilab/dots.ocr", trust_remote_code=True
     ),
     "Eagle2_5_VLForConditionalGeneration": _HfExamplesInfo(
-        "nvidia/Eagle2.5-8B", trust_remote_code=True
+        "nvidia/Eagle2.5-8B", trust_remote_code=True, is_available_online=False
     ),
     "Emu3ForConditionalGeneration": _HfExamplesInfo("BAAI/Emu3-Chat-hf"),
     "Ernie4_5_VLMoeForConditionalGeneration": _HfExamplesInfo(
