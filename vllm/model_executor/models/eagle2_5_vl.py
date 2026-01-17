@@ -3,41 +3,19 @@
 # Adapted from NVIDIA Eagle2.5-VL model
 # https://huggingface.co/nvidia/Eagle2.5-8B
 
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Iterable
 from typing import Annotated, Literal, TypeAlias
 
 import torch
 import torch.nn as nn
-import torchvision.transforms as T
-from PIL import Image
-from transformers import BatchFeature, PretrainedConfig, TensorType
+from transformers import PretrainedConfig
 
 from vllm.config import VllmConfig
-from vllm.config.multimodal import BaseDummyOptions
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.model_executor.models.siglip import SiglipVisionModel
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.image import convert_image_mode
-from vllm.multimodal.inputs import (
-    MultiModalDataDict,
-    MultiModalFieldConfig,
-    MultiModalKwargsItems,
-)
-from vllm.multimodal.parse import (
-    ImageEmbeddingItems,
-    ImageProcessorItems,
-    ImageSize,
-    MultiModalDataItems,
-)
-from vllm.multimodal.processing import (
-    BaseDummyInputsBuilder,
-    BaseMultiModalProcessor,
-    BaseProcessingInfo,
-    PromptReplacement,
-    PromptUpdate,
-    PromptUpdateDetails,
-)
+from vllm.multimodal.processing import PromptUpdateDetails
 from vllm.sequence import IntermediateTensors
 from vllm.tokenizers import TokenizerLike
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
@@ -48,15 +26,16 @@ from .interfaces import (
     SupportsMultiModal,
     SupportsPP,
 )
+from .internvl import (
+    IMG_CONTEXT,
+    IMG_END,
+    IMG_START,
+    BaseInternVLDummyInputsBuilder,
+    BaseInternVLMultiModalProcessor,
+    BaseInternVLProcessingInfo,
+    BaseInternVLProcessor,
+)
 from .utils import AutoWeightsLoader, init_vllm_registered_model, maybe_prefix
-
-# Eagle2.5 specific tokens (from tokenizer vocabulary)
-IMG_START = "<img>"  # Token ID: 151665
-IMG_END = "</img>"  # Token ID: 151666
-IMG_CONTEXT = "<IMG_CONTEXT>"  # Token ID: 151667
-
-IMAGENET_MEAN = (0.485, 0.456, 0.406)
-IMAGENET_STD = (0.229, 0.224, 0.225)
 
 
 class Eagle2_5_VLImagePixelInputs(TensorSchema):
@@ -91,172 +70,10 @@ Eagle2_5_VLImageInputs: TypeAlias = (
 )
 
 
-def build_transform(input_size: int):
-    """Build image transformation pipeline."""
-    transform = T.Compose(
-        [
-            T.Lambda(lambda img: convert_image_mode(img, "RGB")),
-            T.Resize(
-                (input_size, input_size), interpolation=T.InterpolationMode.BICUBIC
-            ),
-            T.ToTensor(),
-            T.Normalize(mean=IMAGENET_MEAN, std=IMAGENET_STD),
-        ]
-    )
-    return transform
-
-
-def find_closest_aspect_ratio(
-    aspect_ratio: float,
-    target_ratios: list[tuple[int, int]],
-    *,
-    width: int,
-    height: int,
-    image_size: int,
-) -> tuple[int, int]:
-    """Find the closest aspect ratio from target ratios."""
-    best_ratio_diff = float("inf")
-    best_ratio = (1, 1)
-    area = width * height
-    for ratio in target_ratios:
-        target_aspect_ratio = ratio[0] / ratio[1]
-        ratio_diff = abs(aspect_ratio - target_aspect_ratio)
-        if ratio_diff < best_ratio_diff:
-            best_ratio_diff = ratio_diff
-            best_ratio = ratio
-        elif ratio_diff == best_ratio_diff:
-            if area > 0.5 * image_size * image_size * ratio[0] * ratio[1]:
-                best_ratio = ratio
-    return best_ratio
-
-
-def resolve_eagle_min_max_num(
-    *,
-    min_dynamic_patch: int,
-    max_dynamic_patch: int,
-    dynamic_image_size: bool,
-    use_thumbnail: bool,
-) -> tuple[int, int]:
-    """Resolve min and max number of patches."""
-    min_dynamic_patch = min_dynamic_patch if dynamic_image_size else 1
-    max_dynamic_patch = max_dynamic_patch if dynamic_image_size else 1
-
-    if use_thumbnail and max_dynamic_patch != 1:
-        max_dynamic_patch += 1
-
-    return min_dynamic_patch, max_dynamic_patch
-
-
-def get_eagle_target_ratios(
-    min_num: int,
-    max_num: int,
-) -> list[tuple[int, int]]:
-    """Get target aspect ratios for dynamic image processing."""
-    target_ratios = {
-        (i, j)
-        for n in range(min_num, max_num + 1)
-        for i in range(1, n + 1)
-        for j in range(1, n + 1)
-        if min_num <= i * j <= max_num
-    }
-    return sorted(target_ratios, key=lambda x: x[0] * x[1])
-
-
-def calculate_eagle_targets(
-    *,
-    orig_width: int,
-    orig_height: int,
-    target_ratios: list[tuple[int, int]],
-    image_size: int,
-    use_thumbnail: bool,
-) -> tuple[int, int, int]:
-    """Calculate target dimensions for image tiling."""
-    aspect_ratio = orig_width / orig_height
-
-    target_aspect_ratio = find_closest_aspect_ratio(
-        aspect_ratio,
-        target_ratios,
-        width=orig_width,
-        height=orig_height,
-        image_size=image_size,
-    )
-
-    target_width = image_size * target_aspect_ratio[0]
-    target_height = image_size * target_aspect_ratio[1]
-    blocks = target_aspect_ratio[0] * target_aspect_ratio[1]
-
-    if use_thumbnail and blocks != 1:
-        blocks += 1
-
-    return blocks, target_width, target_height
-
-
-def dynamic_preprocess_eagle(
-    image: Image.Image,
-    *,
-    target_ratios: list[tuple[int, int]],
-    image_size: int,
-    use_thumbnail: bool,
-) -> list[Image.Image]:
-    """Dynamically preprocess image into tiles."""
-    orig_width, orig_height = image.size
-
-    blocks, target_width, target_height = calculate_eagle_targets(
-        orig_width=orig_width,
-        orig_height=orig_height,
-        target_ratios=target_ratios,
-        image_size=image_size,
-        use_thumbnail=False,
-    )
-
-    resized_img = image.resize((target_width, target_height))
-    processed_images = []
-    for i in range(blocks):
-        box = (
-            (i % (target_width // image_size)) * image_size,
-            (i // (target_width // image_size)) * image_size,
-            ((i % (target_width // image_size)) + 1) * image_size,
-            ((i // (target_width // image_size)) + 1) * image_size,
-        )
-        split_img = resized_img.crop(box)
-        processed_images.append(split_img)
-
-    assert len(processed_images) == blocks
-
-    if use_thumbnail and len(processed_images) != 1:
-        thumbnail_img = image.resize((image_size, image_size))
-        processed_images.append(thumbnail_img)
-
-    return processed_images
-
-
-def image_to_pixel_values_eagle(
-    image: Image.Image,
-    *,
-    input_size: int,
-    min_num: int,
-    max_num: int,
-    use_thumbnail: bool,
-) -> torch.Tensor:
-    """Convert image to pixel values with dynamic tiling."""
-    target_ratios = get_eagle_target_ratios(min_num, max_num)
-
-    transform = build_transform(input_size=input_size)
-    images = dynamic_preprocess_eagle(
-        image,
-        target_ratios=target_ratios,
-        image_size=input_size,
-        use_thumbnail=use_thumbnail,
-    )
-
-    pixel_values = torch.stack([transform(image) for image in images])
-    return pixel_values
-
-
-class Eagle2_5_VLProcessor:
+class Eagle2_5_VLProcessor(BaseInternVLProcessor):
     """
     Custom processor for Eagle2.5-VL model.
-    Handles image preprocessing and token insertion.
+    Extends BaseInternVLProcessor with Eagle-specific token handling.
     """
 
     def __init__(
@@ -268,38 +85,41 @@ class Eagle2_5_VLProcessor:
         max_dynamic_patch: int | None = None,
         dynamic_image_size: bool | None = None,
     ) -> None:
-        super().__init__()
-
+        # Skip super().__init__() to avoid config manipulation
+        # Directly initialize all required attributes
         self.config = config
         self.tokenizer = tokenizer
 
+        # Image size with force_image_size override
         image_size: int = config.vision_config.image_size
         if hasattr(config, "force_image_size") and config.force_image_size:
             image_size = config.force_image_size
 
         patch_size: int = config.vision_config.patch_size
+        downsample_ratio: float = getattr(config, "downsample_ratio", 0.5)
 
-        if min_dynamic_patch is None:
-            min_dynamic_patch = getattr(config, "min_dynamic_patch", 1)
-        assert isinstance(min_dynamic_patch, int)
-
-        if max_dynamic_patch is None:
-            max_dynamic_patch = getattr(config, "max_dynamic_patch", 12)
-        assert isinstance(max_dynamic_patch, int)
-
-        if dynamic_image_size is None:
-            dynamic_image_size = getattr(config, "dynamic_image_size", True)
-        assert isinstance(dynamic_image_size, bool)
-
-        downsample_ratio = getattr(config, "downsample_ratio", 0.5)
-
+        # Compute num_image_token
         self.num_image_token = int(
             (image_size // patch_size) ** 2 * (downsample_ratio**2)
         )
         self.image_size = image_size
-        self.min_dynamic_patch = min_dynamic_patch
-        self.max_dynamic_patch = max_dynamic_patch
-        self.dynamic_image_size = dynamic_image_size
+
+        # Dynamic patch settings with defaults
+        self.min_dynamic_patch = (
+            min_dynamic_patch
+            if min_dynamic_patch is not None
+            else getattr(config, "min_dynamic_patch", 1)
+        )
+        self.max_dynamic_patch = (
+            max_dynamic_patch
+            if max_dynamic_patch is not None
+            else getattr(config, "max_dynamic_patch", 12)
+        )
+        self.dynamic_image_size = (
+            dynamic_image_size
+            if dynamic_image_size is not None
+            else getattr(config, "dynamic_image_size", True)
+        )
         self.use_thumbnail: bool = getattr(config, "use_thumbnail", True)
 
     @property
@@ -324,350 +144,33 @@ class Eagle2_5_VLProcessor:
 
         return PromptUpdateDetails.select_text(repl_full, IMG_CONTEXT)
 
-    def resolve_min_max_num(
-        self,
-        *,
-        min_dynamic_patch: int | None = None,
-        max_dynamic_patch: int | None = None,
-        dynamic_image_size: bool | None = None,
-        use_thumbnail: bool | None = None,
-    ) -> tuple[int, int]:
-        """Resolve min and max patch numbers."""
-        min_dynamic_patch = (
-            self.min_dynamic_patch if min_dynamic_patch is None else min_dynamic_patch
-        )
-        max_dynamic_patch = (
-            self.max_dynamic_patch if max_dynamic_patch is None else max_dynamic_patch
-        )
-        dynamic_image_size = (
-            self.dynamic_image_size
-            if dynamic_image_size is None
-            else dynamic_image_size
-        )
-        use_thumbnail = self.use_thumbnail if use_thumbnail is None else use_thumbnail
 
-        return resolve_eagle_min_max_num(
-            min_dynamic_patch=min_dynamic_patch,
-            max_dynamic_patch=max_dynamic_patch,
-            dynamic_image_size=dynamic_image_size,
-            use_thumbnail=use_thumbnail,
-        )
-
-    def resolve_target_ratios(
-        self,
-        *,
-        min_dynamic_patch: int | None = None,
-        max_dynamic_patch: int | None = None,
-        dynamic_image_size: bool | None = None,
-        use_thumbnail: bool | None = None,
-    ) -> list[tuple[int, int]]:
-        """Get target aspect ratios."""
-        min_num, max_num = self.resolve_min_max_num(
-            min_dynamic_patch=min_dynamic_patch,
-            max_dynamic_patch=max_dynamic_patch,
-            dynamic_image_size=dynamic_image_size,
-            use_thumbnail=use_thumbnail,
-        )
-
-        return get_eagle_target_ratios(min_num, max_num)
-
-    def get_num_image_tokens(
-        self,
-        *,
-        image_width: int,
-        image_height: int,
-    ) -> int:
-        """Calculate number of image tokens for given image size."""
-        target_ratios = self.resolve_target_ratios(
-            use_thumbnail=False,
-        )
-
-        num_patches, _, _ = calculate_eagle_targets(
-            orig_width=image_width,
-            orig_height=image_height,
-            image_size=self.image_size,
-            target_ratios=target_ratios,
-            use_thumbnail=self.use_thumbnail,
-        )
-
-        return num_patches * self.num_image_token
-
-    def _images_to_pixel_values_lst(
-        self,
-        images: list[Image.Image],
-        min_dynamic_patch: int | None = None,
-        max_dynamic_patch: int | None = None,
-        dynamic_image_size: bool | None = None,
-    ) -> list[torch.Tensor]:
-        """Convert images to pixel values list."""
-        min_num, max_num = self.resolve_min_max_num(
-            min_dynamic_patch=min_dynamic_patch,
-            max_dynamic_patch=max_dynamic_patch,
-            dynamic_image_size=dynamic_image_size,
-            use_thumbnail=False,
-        )
-
-        return [
-            image_to_pixel_values_eagle(
-                image,
-                input_size=self.image_size,
-                min_num=min_num,
-                max_num=max_num,
-                use_thumbnail=self.use_thumbnail,
-            )
-            for image in images
-        ]
-
-    def _preprocess_image(
-        self,
-        text: list[str],
-        images: list[Image.Image],
-        min_dynamic_patch: int | None = None,
-        max_dynamic_patch: int | None = None,
-        dynamic_image_size: bool | None = None,
-    ) -> tuple[list[str], dict[str, torch.Tensor]]:
-        """Preprocess images and update text prompts."""
-        if len(images) == 0:
-            image_inputs = {}
-        else:
-            pixel_values_lst = self._images_to_pixel_values_lst(
-                images,
-                min_dynamic_patch=min_dynamic_patch,
-                max_dynamic_patch=max_dynamic_patch,
-                dynamic_image_size=dynamic_image_size,
-            )
-            image_inputs = {
-                "pixel_values_flat": torch.cat(pixel_values_lst),
-                "image_num_patches": torch.tensor(
-                    [len(item) for item in pixel_values_lst]
-                ),
-            }
-
-            for pixel_values in pixel_values_lst:
-                num_patches = pixel_values.shape[0]
-                feature_size = num_patches * self.num_image_token
-
-                image_repl = self.get_image_repl(feature_size, num_patches)
-                text = [t.replace("<image>", image_repl.full, 1) for t in text]
-        return text, image_inputs
-
-    def _make_batch_input(self, input_item):
-        if input_item is None:
-            input_item = []
-        if not isinstance(input_item, list):
-            input_item = [input_item]
-        return input_item
-
-    def __call__(
-        self,
-        text: str | list[str] | None = None,
-        images: Image.Image | list[Image.Image] | None = None,
-        min_dynamic_patch: int | None = None,
-        max_dynamic_patch: int | None = None,
-        dynamic_image_size: bool | None = None,
-        return_tensors: str | TensorType | None = None,
-    ) -> BatchFeature:
-        text, images = [self._make_batch_input(x) for x in (text, images)]
-
-        text, image_inputs = self._preprocess_image(
-            text=text,
-            images=images,
-            min_dynamic_patch=min_dynamic_patch,
-            max_dynamic_patch=max_dynamic_patch,
-            dynamic_image_size=dynamic_image_size,
-        )
-
-        text_inputs = self.tokenizer(text)
-
-        combined_outputs = {**text_inputs, **image_inputs}
-
-        return BatchFeature(combined_outputs, tensor_type=return_tensors)
-
-
-class Eagle2_5_VLProcessingInfo(BaseProcessingInfo):
+class Eagle2_5_VLProcessingInfo(BaseInternVLProcessingInfo):
     """Processing info for Eagle2.5-VL model."""
-
-    def get_hf_config(self) -> PretrainedConfig:
-        return self.ctx.get_hf_config()
 
     def get_hf_processor(self, **kwargs) -> Eagle2_5_VLProcessor:
         return self.ctx.init_processor(
             Eagle2_5_VLProcessor,
-            config=self.get_hf_config(),
+            config=self.ctx.get_hf_config(),
             tokenizer=self.get_tokenizer(),
             **kwargs,
         )
 
-    def get_supported_mm_limits(self) -> Mapping[str, int | None]:
-        return {"image": None}
 
-    def get_num_image_tokens(
-        self,
-        *,
-        image_width: int,
-        image_height: int,
-        processor: Eagle2_5_VLProcessor | None = None,
-    ) -> int:
-        if processor is None:
-            processor = self.get_hf_processor()
-
-        return processor.get_num_image_tokens(
-            image_width=image_width,
-            image_height=image_height,
-        )
-
-    def get_image_size_with_most_features(self) -> ImageSize:
-        processor = self.get_hf_processor()
-
-        base_size = processor.image_size
-        target_ratios = processor.resolve_target_ratios()
-
-        largest_feature_size, largest_feature_pinpoint = 0, None
-        for wr, hr in target_ratios:
-            width, height = base_size * wr, base_size * hr
-
-            feat_size = self.get_num_image_tokens(
-                image_width=width,
-                image_height=height,
-                processor=processor,
-            )
-            if feat_size > largest_feature_size:
-                largest_feature_size = feat_size
-                largest_feature_pinpoint = ImageSize(width=width, height=height)
-
-        if largest_feature_size == 0 or largest_feature_pinpoint is None:
-            raise ValueError("Cannot have a largest feature size of 0!")
-
-        return largest_feature_pinpoint
-
-    def get_max_image_tokens(self) -> int:
-        processor = self.get_hf_processor()
-        target_width, target_height = self.get_image_size_with_most_features()
-
-        return self.get_num_image_tokens(
-            image_width=target_width,
-            image_height=target_height,
-            processor=processor,
-        )
-
-
-class Eagle2_5_VLDummyInputsBuilder(BaseDummyInputsBuilder[Eagle2_5_VLProcessingInfo]):
+class Eagle2_5_VLDummyInputsBuilder(
+    BaseInternVLDummyInputsBuilder[Eagle2_5_VLProcessingInfo]
+):
     """Dummy inputs builder for Eagle2.5-VL model."""
 
-    def get_dummy_text(self, mm_counts: Mapping[str, int]) -> str:
-        num_images = mm_counts.get("image", 0)
-        return "<image>" * num_images
-
-    def get_dummy_mm_data(
-        self,
-        seq_len: int,
-        mm_counts: Mapping[str, int],
-        mm_options: Mapping[str, BaseDummyOptions] | None = None,
-    ) -> MultiModalDataDict:
-        target_width, target_height = self.info.get_image_size_with_most_features()
-        num_images = mm_counts.get("image", 0)
-
-        image_overrides = mm_options.get("image") if mm_options else None
-
-        return {
-            "image": self._get_dummy_images(
-                width=target_width,
-                height=target_height,
-                num_images=num_images,
-                overrides=image_overrides,
-            )
-        }
+    pass
 
 
 class Eagle2_5_VLMultiModalProcessor(
-    BaseMultiModalProcessor[Eagle2_5_VLProcessingInfo]
+    BaseInternVLMultiModalProcessor[Eagle2_5_VLProcessingInfo]
 ):
     """Multi-modal processor for Eagle2.5-VL model."""
 
-    def _call_hf_processor(
-        self,
-        prompt: str,
-        mm_data: Mapping[str, object],
-        mm_kwargs: Mapping[str, object],
-        tok_kwargs: Mapping[str, object],
-    ) -> BatchFeature:
-        processed_outputs = super()._call_hf_processor(
-            prompt=prompt,
-            mm_data=mm_data,
-            mm_kwargs=mm_kwargs,
-            tok_kwargs=tok_kwargs,
-        )
-
-        hf_processor = self.info.get_hf_processor(**mm_kwargs)
-        image_token_id = hf_processor.image_token_id
-
-        processed_outputs["image_token_id"] = torch.tensor(image_token_id)
-
-        return processed_outputs
-
-    def _get_mm_fields_config(
-        self,
-        hf_inputs: BatchFeature,
-        hf_processor_mm_kwargs: Mapping[str, object],
-    ) -> Mapping[str, MultiModalFieldConfig]:
-        image_num_patches = hf_inputs.get("image_num_patches", torch.empty(0))
-        num_images = len(image_num_patches)
-
-        return dict(
-            pixel_values_flat=MultiModalFieldConfig.flat_from_sizes(
-                "image", image_num_patches
-            ),
-            image_num_patches=MultiModalFieldConfig.batched("image"),
-            image_embeds=MultiModalFieldConfig.batched("image"),
-            image_token_id=MultiModalFieldConfig.shared("image", num_images),
-        )
-
-    def _get_prompt_updates(
-        self,
-        mm_items: MultiModalDataItems,
-        hf_processor_mm_kwargs: Mapping[str, object],
-        out_mm_kwargs: MultiModalKwargsItems,
-    ) -> Sequence[PromptUpdate]:
-        hf_processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
-
-        out_mm_data = out_mm_kwargs.get_data()
-        if "image_num_patches" in out_mm_data:
-            image_num_patches = out_mm_data["image_num_patches"]
-            assert isinstance(image_num_patches, torch.Tensor)
-            image_num_patches = image_num_patches.tolist()
-        elif "image_embeds" in out_mm_data:
-            image_num_patches = [None] * len(out_mm_data["image_embeds"])
-        else:
-            image_num_patches = []
-
-        def get_replacement_eagle(item_idx: int):
-            images = mm_items.get_items(
-                "image", (ImageEmbeddingItems, ImageProcessorItems)
-            )
-
-            if isinstance(images, ImageEmbeddingItems):
-                feature_size = images.get_feature_size(item_idx)
-            else:
-                image_size = images.get_image_size(item_idx)
-                feature_size = self.info.get_num_image_tokens(
-                    image_width=image_size.width,
-                    image_height=image_size.height,
-                    processor=hf_processor,
-                )
-
-            num_patches = image_num_patches[item_idx]
-            if num_patches is not None:
-                assert isinstance(num_patches, int)
-
-            return hf_processor.get_image_repl(feature_size, num_patches)
-
-        return [
-            PromptReplacement(
-                modality="image",
-                target="<image>",
-                replacement=get_replacement_eagle,
-            )
-        ]
+    pass
 
 
 @MULTIMODAL_REGISTRY.register_processor(
