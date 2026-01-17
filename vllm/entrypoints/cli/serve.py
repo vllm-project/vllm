@@ -57,6 +57,8 @@ class ServeSubcommand(CLISubcommand):
                     "(no API servers are started).",
                     args.api_server_count,
                 )
+            # Default to 0 in headless mode (no API servers)
+            args.api_server_count = 0
             run_headless(args)
             return
 
