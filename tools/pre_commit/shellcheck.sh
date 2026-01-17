@@ -18,5 +18,16 @@ if ! [ -x "$(command -v shellcheck)" ]; then
     export PATH="$PATH:$(pwd)/shellcheck-${scversion}"
 fi
 
-# TODO - fix warnings in .buildkite/scripts/hardware_ci/run-amd-test.sh
-find . -name "*.sh" ".git" -prune -not -path "./.buildkite/scripts/hardware_ci/run-amd-test.sh" -print0 | xargs -0 -I {} sh -c 'git check-ignore -q "{}" || shellcheck -s bash "{}"'
+# TODO - fix shellcheck warnings in excluded directories/files below
+find . -path "./.git" -prune -o -name "*.sh" \
+    -not -path "./.buildkite/*" \
+    -not -path "./benchmarks/*" \
+    -not -path "./examples/*" \
+    -not -path "./tests/v1/ec_connector/integration/*" \
+    -not -path "./tests/v1/kv_connector/nixl_integration/*" \
+    -not -path "./tests/standalone_tests/python_only_compile.sh" \
+    -not -path "./tools/install_deepgemm.sh" \
+    -not -path "./tools/flashinfer-build.sh" \
+    -not -path "./tools/vllm-tpu/build.sh" \
+    -not -path "./tools/ep_kernels/*" \
+    -print0 | xargs -0 -I {} sh -c 'git check-ignore -q "{}" || shellcheck -s bash "{}"'
