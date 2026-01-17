@@ -99,7 +99,7 @@ def _reshape_kv_cache(
                 kv_cache_spec.block_size,
                 kv_cache_spec.num_kv_heads,
                 kv_cache_spec.head_size,
-                cache_dtype_str=kv_cache_spec.cache_dtype_str,
+                cache_dtype_str=kv_cache_spec.cache_dtype_str or "auto",
             )
 
             # FIXME(woosuk): Add kv_cache_stride_order to all attention backends.
