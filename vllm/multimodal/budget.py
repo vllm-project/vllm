@@ -3,10 +3,13 @@
 from collections.abc import Mapping
 
 from vllm.config import ModelConfig, VllmConfig
+from vllm.logger import init_logger
 from vllm.multimodal.processing import BaseMultiModalProcessor
 from vllm.multimodal.registry import MultiModalRegistry
 from vllm.utils.torch_utils import set_default_torch_num_threads
 from vllm.v1.core.encoder_cache_manager import compute_mm_encoder_budget
+
+logger = init_logger(__name__)
 
 
 def get_mm_max_toks_per_item(
@@ -86,6 +89,24 @@ class MultiModalBudget:
             scheduler_config,
             mm_max_toks_per_item,
         )
+
+        # When enable_mm_embeds=True and all limits are 0, we still need
+        # encoder cache space to store pre-computed embeddings. Use the
+        # scheduler's default settings as a minimum.
+        mm_config = model_config.get_multimodal_config()
+        if (mm_config is not None and mm_config.enable_mm_embeds
+                and encoder_compute_budget == 0
+                and encoder_cache_size == 0):
+            encoder_compute_budget = (
+                scheduler_config.max_num_encoder_input_tokens)
+            encoder_cache_size = scheduler_config.encoder_cache_size
+            logger.info(
+                "enable_mm_embeds is True with all modality limits=0. "
+                "Using default encoder cache settings for embeddings: "
+                "compute_budget=%d, cache_size=%d",
+                encoder_compute_budget,
+                encoder_cache_size,
+            )
 
         self.encoder_compute_budget = encoder_compute_budget
         self.encoder_cache_size = encoder_cache_size
