@@ -3,6 +3,7 @@
 import functools
 from dataclasses import replace
 
+import numpy as np
 import torch
 
 from vllm.config import CacheConfig
@@ -81,10 +82,8 @@ def _compute_virtual_query_start_locs(
     space_in_first_chunk = chunk - context_lens % chunk
     q_in_first_chunk = torch.minimum(space_in_first_chunk, q_seqlens)
     q_in_remaining_chunks = q_seqlens - q_in_first_chunk
-    # Padding requests (q_seqlen=0) produce 0 VBs; others get at least 1
-    num_vb_per_req = (q_seqlens > 0) * (
-        1 + (q_in_remaining_chunks + chunk - 1) // chunk
-    )
+    # Padding requests (q_seqlen=0) still produce 1 VB to preserve padded size.
+    num_vb_per_req = 1 + (q_in_remaining_chunks + chunk - 1) // chunk
     # Prepend 0 and compute cumsum for output offsets
     virtual_query_start_locs = torch.zeros(
         seq_lens.shape[0] + 1, dtype=torch.int32, device=seq_lens.device
@@ -301,12 +300,14 @@ def create_chunked_local_attention_backend(
 
             # Compute num_vb from CPU data (no GPU sync needed)
             # N query tokens span at most: 1 + (N + chunk - 2) // chunk
-            # Padding requests (q_seqlen=0) produce 0 VBs
+            # Padding requests (q_seqlen=0) still produce 1 VB to preserve padding.
             query_start_loc_np = query_start_loc_cpu.numpy()
             q_seqlens_np = query_start_loc_np[1 : bs + 1] - query_start_loc_np[:bs]
             # _ub stands for upper bound
-            num_vb_per_req_ub = (q_seqlens_np > 0) * (
-                1 + (q_seqlens_np + chunk - 2) // chunk
+            num_vb_per_req_ub = np.where(
+                q_seqlens_np > 0,
+                1 + (q_seqlens_np + chunk - 2) // chunk,
+                1,
             )
             num_vb_ub = int(num_vb_per_req_ub.sum())
             max_vb_per_req = max(1, int(num_vb_per_req_ub.max()))
