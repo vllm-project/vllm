@@ -6,7 +6,6 @@ from __future__ import annotations
 from collections.abc import Callable, Iterable
 
 from vllm.distributed.kv_transfer.kv_connector.utils import yield_req_data
-from vllm.logger import init_logger
 from vllm.v1.core.kv_cache_utils import BlockHash
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_offload.abstract import OffloadingManager
@@ -15,8 +14,9 @@ from vllm.v1.kv_offload.worker.worker import TransferSpec
 from vllm.v1.request import Request
 
 from .metadata import ReqId, RequestPhase
+from ..weave_logger import get_weave_logger
 
-logger = init_logger(__name__)
+logger = get_weave_logger(__name__)
 
 
 class WeavePolicy:

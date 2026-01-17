@@ -7,7 +7,6 @@ from itertools import islice
 from typing import Any
 
 from vllm.distributed.kv_events import BlockRemoved, BlockStored, KVCacheEvent
-from vllm.logger import init_logger
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks
 from vllm.v1.core.kv_cache_utils import BlockHash
 from vllm.v1.core.sched.output import SchedulerOutput
@@ -20,8 +19,9 @@ from vllm.v1.request import Request
 
 from .metadata import ReqId, RequestPhase, WeaveConnectorMetadata
 from .policy import WeavePolicy
+from ..weave_logger import get_weave_logger
 
-logger = init_logger(__name__)
+logger = get_weave_logger(__name__)
 
 
 class WeaveConnectorScheduler:

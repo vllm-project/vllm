@@ -8,7 +8,6 @@ import numpy as np
 import torch
 
 from vllm import _custom_ops as ops
-from vllm.logger import init_logger
 from vllm.utils.platform_utils import is_pin_memory_available
 from vllm.v1.attention.backend import AttentionBackend
 from vllm.v1.kv_offload.mediums import BlockIDsLoadStoreSpec
@@ -19,8 +18,9 @@ from vllm.v1.kv_offload.worker.worker import (
 )
 
 from ..utils.numa import numa_membind
+from ...weave_logger import get_weave_logger
 
-logger = init_logger(__name__)
+logger = get_weave_logger(__name__)
 
 
 def expand_block_ids(

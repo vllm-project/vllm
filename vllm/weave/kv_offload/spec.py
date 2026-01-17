@@ -7,7 +7,6 @@ from typing import Any, Literal, Mapping
 import torch
 
 from vllm.config import VllmConfig
-from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.kv_offload.abstract import LoadStoreSpec, OffloadingManager
@@ -27,8 +26,9 @@ from .handlers.dram_cxl import WeaveDramCxlOffloadingHandler
 from .handlers.gpu_dram import WeaveGPUDramOffloadingHandlers
 from .utils.numa import numa_membind
 from .two_tier_manager import TwoTierOffloadingManager
+from ..weave_logger import get_weave_logger
 
-logger = init_logger(__name__)
+logger = get_weave_logger(__name__)
 
 
 
