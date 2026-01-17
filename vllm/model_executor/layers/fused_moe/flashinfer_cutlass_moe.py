@@ -194,7 +194,7 @@ class FlashInferExperts(mk.FusedMoEPermuteExpertsUnpermute):
             if w1_s is None:
                 raise ValueError("FlashInferExperts FP8: Missing w1 scale (checked g1_alphas and w1_scale)")
             if w2_s is None:
-                 raise ValueError("FlashInferExperts FP8: Missing w2 scale (checked g2_alphas and w2_scale)")
+                raise ValueError("FlashInferExperts FP8: Missing w2 scale (checked g2_alphas and w2_scale)")
             
             # Construct the list expected by FlashInfer
             quant_scales = [
