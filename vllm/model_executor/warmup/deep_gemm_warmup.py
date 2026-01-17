@@ -130,11 +130,15 @@ def _fp8_linear_may_use_deep_gemm(module: torch.nn.Module) -> bool:
     """
     Return True if the input module/layer could be processed with DeepGEMM.
     """
+
+    # FIXME: this logic is brittle and incorrect - since we
+    # could use DeepGEMM with for than just Fp8LinearMethod
     block_size = get_mk_alignment_for_contiguous_layout()[0]
     if not (
         isinstance(module, LinearBase)
         and isinstance(module.quant_method, Fp8LinearMethod)
         and module.quant_method.block_quant
+        and not module.quant_method.use_marlin
     ):
         return False
 
@@ -212,6 +216,7 @@ def _deepgemm_fp8_gemm_nt_warmup(
     )
     out = torch.empty((max_tokens, n), device=device, dtype=torch.bfloat16)
 
+    print(f"{w.dtype=}")
     m_values = _get_fp8_gemm_nt_m_values(w, max_tokens)
 
     for num_tokens in m_values:

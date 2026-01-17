@@ -64,7 +64,6 @@ def _supports_routing_method(
     activation_key: QuantKey | None,
     routing_method: RoutingMethodType,
 ) -> bool:
-    print(f"{routing_method=}")
     """Monolithic kernels need to express router support."""
     if (weight_key, activation_key) == (kFp8Static128BlockSym, kFp8Dynamic128Sym):
         # NOTE(rob): potentially allow others here. This is a conservative list.
