@@ -205,6 +205,7 @@ def run_headless(args: argparse.Namespace):
         handshake_address=handshake_address,
         executor_class=Executor.get_class(vllm_config),
         log_stats=not engine_args.disable_log_stats,
+        enable_graceful_shutdown=engine_args.enable_graceful_shutdown,
     )
 
     try:
@@ -246,7 +247,11 @@ def run_multi_api_server(args: argparse.Namespace):
     api_server_manager: APIServerProcessManager | None = None
 
     with launch_core_engines(
-        vllm_config, executor_class, log_stats, num_api_servers
+        vllm_config,
+        executor_class,
+        log_stats,
+        num_api_servers,
+        enable_graceful_shutdown=engine_args.enable_graceful_shutdown,
     ) as (local_engine_manager, coordinator, addresses):
         # Construct common args for the APIServerProcessManager up-front.
         api_server_manager_kwargs = dict(

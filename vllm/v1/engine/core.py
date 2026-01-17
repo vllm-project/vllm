@@ -931,15 +931,16 @@ class EngineCoreProc(EngineCore):
         return init_message.addresses
 
     @staticmethod
-    def run_engine_core(*args, dp_rank: int = 0, local_dp_rank: int = 0, **kwargs):
+    def run_engine_core(
+        *args,
+        dp_rank: int = 0,
+        local_dp_rank: int = 0,
+        enable_graceful_shutdown: bool = False,
+        death_pipe=None,
+        **kwargs,
+    ):
         """Launch EngineCore busy loop in background process."""
-
-        # Signal handler used for graceful termination.
-        # SystemExit exception is only raised once to allow this and worker
-        # processes to terminate without error
         shutdown_requested = False
-
-        # Ensure we can serialize transformer config after spawning
         maybe_register_config_serialize_by_value()
 
         def signal_handler(signum, frame):
@@ -948,9 +949,27 @@ class EngineCoreProc(EngineCore):
                 shutdown_requested = True
                 raise SystemExit()
 
-        # Either SIGTERM or SIGINT will terminate the engine_core
-        signal.signal(signal.SIGTERM, signal_handler)
         signal.signal(signal.SIGINT, signal_handler)
+        signal.signal(
+            signal.SIGTERM,
+            signal.SIG_IGN if enable_graceful_shutdown else signal_handler,
+        )
+
+        if death_pipe:
+
+            def monitor():
+                nonlocal shutdown_requested
+                try:
+                    death_pipe.recv()
+                except EOFError:
+                    logger.info("Parent exited, terminating EngineCore")
+                    if not shutdown_requested:
+                        shutdown_requested = True
+                        os.kill(os.getpid(), signal.SIGINT)
+                finally:
+                    death_pipe.close()
+
+            threading.Thread(target=monitor, daemon=True).start()
 
         engine_core: EngineCoreProc | None = None
         try:

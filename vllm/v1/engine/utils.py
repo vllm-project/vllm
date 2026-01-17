@@ -8,6 +8,7 @@ from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from enum import Enum, auto
 from multiprocessing import Process, connection
+from multiprocessing.connection import Connection
 from multiprocessing.process import BaseProcess
 from typing import TYPE_CHECKING
 from unittest.mock import patch
@@ -77,6 +78,14 @@ class EngineHandshakeMetadata:
     parallel_config: dict[str, int | str | list[int]]
 
 
+def _shutdown_engine_procs(
+    procs: list[BaseProcess], death_writers: list[Connection]
+) -> None:
+    for w in death_writers:
+        w.close()
+    shutdown(procs)
+
+
 class CoreEngineProcManager:
     """
     Utility class to handle creation, readiness, and shutdown
@@ -95,6 +104,7 @@ class CoreEngineProcManager:
         executor_class: type[Executor],
         log_stats: bool,
         client_handshake_address: str | None = None,
+        enable_graceful_shutdown: bool = False,
     ):
         context = get_mp_context()
         common_kwargs = {
@@ -103,16 +113,21 @@ class CoreEngineProcManager:
             "handshake_address": handshake_address,
             "executor_class": executor_class,
             "log_stats": log_stats,
+            "enable_graceful_shutdown": enable_graceful_shutdown,
         }
 
         if client_handshake_address:
             common_kwargs["client_handshake_address"] = client_handshake_address
 
         self.processes: list[BaseProcess] = []
+        self.death_writers: list[Connection] = []
         local_dp_ranks = []
         for index in range(local_engine_count):
             local_index = local_start_index + index
             global_index = start_index + index
+
+            death_reader, death_writer = context.Pipe(duplex=False)
+            self.death_writers.append(death_writer)
 
             # Start EngineCore in background process.
             local_dp_ranks.append(local_index)
@@ -124,11 +139,14 @@ class CoreEngineProcManager:
                     | {
                         "dp_rank": global_index,
                         "local_dp_rank": local_index,
+                        "death_pipe": death_reader,
                     },
                 )
             )
 
-        self._finalizer = weakref.finalize(self, shutdown, self.processes)
+        self._finalizer = weakref.finalize(
+            self, _shutdown_engine_procs, self.processes, self.death_writers
+        )
 
         data_parallel = vllm_config.parallel_config.data_parallel_size > 1
         try:
@@ -779,6 +797,7 @@ def launch_core_engines(
     executor_class: type[Executor],
     log_stats: bool,
     num_api_servers: int = 1,
+    enable_graceful_shutdown: bool = False,
 ) -> Iterator[
     tuple[
         CoreEngineProcManager | CoreEngineActorManager | None,
@@ -915,6 +934,7 @@ def launch_core_engines(
                 local_engine_count=local_engine_count,
                 start_index=dp_rank,
                 local_start_index=local_start_index or 0,
+                enable_graceful_shutdown=enable_graceful_shutdown,
             )
         else:
             local_engine_manager = None
