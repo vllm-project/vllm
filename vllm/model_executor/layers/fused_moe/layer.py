@@ -620,6 +620,8 @@ class FusedMoE(CustomOp):
             e_score_correction_bias=e_score_correction_bias,
             num_fused_shared_experts=self.num_fused_shared_experts,
             enable_eplb=enable_eplb,
+            # TODO(bnell): once we can construct the MK at init time, we
+            # can make this a value.
             indices_type_getter=lambda: self.quant_method.topk_indices_dtype,
             routing_method_type=routing_method_type,
             capture=capture,

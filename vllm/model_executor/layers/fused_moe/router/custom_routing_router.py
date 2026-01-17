@@ -50,4 +50,4 @@ class CustomRoutingRouter(BaseRouter):
             renormalize=self.renormalize,
         )
 
-        return topk_weights, topk_ids
+        return topk_weights.to(torch.float32), topk_ids

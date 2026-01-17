@@ -103,6 +103,8 @@ def create_fused_moe_router(
             enable_eplb=enable_eplb,
             indices_type_getter=indices_type_getter,
         )
+        # TODO(bnell): this is temporary until select_experts is
+        # separated from apply.
         router.capture = capture
         return router
 
