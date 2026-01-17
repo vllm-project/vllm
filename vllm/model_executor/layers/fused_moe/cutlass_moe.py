@@ -635,6 +635,12 @@ def run_cutlass_moe_fp4(
 
 class CutlassExpertsFp4(mk.FusedMoEPermuteExpertsUnpermute):
     @staticmethod
+    def should_pf_defer_input_quant(
+        moe_config: FusedMoEConfig, quant_config: FusedMoEQuantConfig
+    ) -> bool:
+        return True
+
+    @staticmethod
     def _supports_current_device() -> bool:
         return current_platform.has_device_capability((10, 0))
 
