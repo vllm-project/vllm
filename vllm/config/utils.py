@@ -63,7 +63,13 @@ def config(cls: ConfigT) -> ConfigT:
                     for sub_key, sub_value in value.metrics_info().items():
                         metrics_info_dict[f"{key}_{sub_key}"] = str(sub_value)
                 else:
-                    metrics_info_dict[key] = str(value)
+                    # Using `repr()` handles objects likeQuantizationConfig that
+                    # implement __repr__ but not metrics_info
+                    metrics_info_dict[key] = (
+                        repr(value)
+                        if not isinstance(value, (str, int, float, bool))
+                        else str(value)
+                    )
             return metrics_info_dict
 
         cls.metrics_info = metrics_info
