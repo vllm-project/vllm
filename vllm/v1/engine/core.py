@@ -208,6 +208,11 @@ class EngineCore:
         self.async_scheduling = vllm_config.scheduler_config.async_scheduling
 
         self.aborts_queue = queue.Queue[list[str]]()
+
+        # Slowdown for benchmarking P/D disaggregation
+        # (sleep before each forward pass)
+        self.forward_sleep_time: float | None = None
+
         # Mark the startup heap as static so that it's ignored by GC.
         # Reduces pause times of oldest generation collections.
         freeze_gc_heap()
@@ -378,6 +383,7 @@ class EngineCore:
         if not self.scheduler.has_requests():
             return {}, False
         scheduler_output = self.scheduler.schedule()
+
         future = self.model_executor.execute_model(scheduler_output, non_block=True)
         grammar_output = self.scheduler.get_grammar_bitmask(scheduler_output)
         with (
@@ -435,6 +441,7 @@ class EngineCore:
         deferred_scheduler_output = None
         if self.scheduler.has_requests():
             scheduler_output = self.scheduler.schedule()
+
             exec_future = self.model_executor.execute_model(
                 scheduler_output, non_block=True
             )
@@ -542,6 +549,18 @@ class EngineCore:
 
     def profile(self, is_start: bool = True):
         self.model_executor.profile(is_start)
+
+    def set_forward_sleep_time(self, t: float | None) -> None:
+        """Set forward sleep time for benchmarking P/D disaggregation.
+
+        Args:
+            t: Sleep time in seconds before each forward pass.
+               Set to None or <= 0 to disable.
+        """
+        if t is not None and t <= 0:
+            t = None
+        self.forward_sleep_time = t
+        logger.info("Forward sleep time set to: %s", t)
 
     def reset_mm_cache(self):
         # NOTE: Since this is mainly for debugging, we don't attempt to
@@ -983,6 +1002,25 @@ class EngineCoreProc(EngineCore):
 
     def _process_engine_step(self) -> bool:
         """Called only when there are unfinished local requests."""
+
+        # Apply slowdown if configured (for benchmarking P/D disaggregation).
+        # During slowdown, periodically process input queue so new requests
+        # continue to be received and KV transfers can be triggered.
+        if self.forward_sleep_time is not None:
+            sleep_interval = 0.1  # Wake up every 100ms to process new requests
+            remaining = self.forward_sleep_time
+            logger.info(
+                "Slowdown: sleeping %ss while processing incoming requests",
+                self.forward_sleep_time,
+            )
+            while remaining > 0:
+                sleep_time = min(sleep_interval, remaining)
+                time.sleep(sleep_time)
+                remaining -= sleep_time
+                # Process any new requests that arrived during sleep
+                while not self.input_queue.empty():
+                    req = self.input_queue.get_nowait()
+                    self._handle_client_request(*req)
 
         # Step the engine core.
         outputs, model_executed = self.step_fn()
