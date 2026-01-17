@@ -5,7 +5,7 @@ set -ex
 # Clean up old nightly builds from DockerHub, keeping only the last 14 builds
 # This script uses DockerHub API to list and delete old tags with specified prefix
 # Usage: cleanup-nightly-builds.sh [TAG_PREFIX]
-# Example: cleanup-nightly-builds.sh "nightly-" or cleanup-nightly-builds.sh "nightly-cuda13-"
+# Example: cleanup-nightly-builds.sh "nightly-" or cleanup-nightly-builds.sh "cu130-nightly-"
 
 # Get tag prefix from argument, default to "nightly-" if not provided
 TAG_PREFIX="${1:-nightly-}"

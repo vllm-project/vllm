@@ -2,7 +2,7 @@
 
 set -ex
 
-# Get tag variant from argument, default to empty if not provided, shoule be something like "cu130".
+# Get tag variant from argument, default to empty if not provided, should be something like "cu130".
 # Due to limits in cleanup script, we must move variants to use separate tags like "cu130-nightly",
 # otherwise they will be cleaned up together with the main "nightly" tags.
 

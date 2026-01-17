@@ -252,7 +252,7 @@ steps:
     agents:
       queue: small_cpu_queue_postmerge
     commands:
-      - "bash .buildkite/push-nightly-builds.sh"
+      - "bash .buildkite/scripts/push-nightly-builds.sh"
       # Clean up old nightly builds (keep only last 14)
       - "bash .buildkite/scripts/cleanup-nightly-builds.sh"
     plugins:
@@ -270,7 +270,7 @@ steps:
     agents:
       queue: small_cpu_queue_postmerge
     commands:
-      - "bash .buildkite/push-nightly-builds.sh cu130"
+      - "bash .buildkite/scripts/push-nightly-builds.sh cu130"
       # Clean up old nightly builds (keep only last 14)
       - "bash .buildkite/scripts/cleanup-nightly-builds.sh cu130-nightly-"
     plugins:
