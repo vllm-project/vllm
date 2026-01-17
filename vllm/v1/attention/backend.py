@@ -583,6 +583,11 @@ class AttentionImpl(ABC, Generic[T]):
     head_size: int
     scale: float
 
+    # Whether the forward method includes KV cache update.
+    # When False, the KV cache update is handled separately via do_kv_cache_update().
+    # This allows for better performance optimizations and independent scheduling.
+    forward_includes_kv_cache: bool = True
+
     # Whether the attention impl can return the softmax lse for decode.
     # Some features like decode context parallelism require the softmax lse.
     can_return_lse_for_decode: bool = False
@@ -674,6 +679,35 @@ class AttentionImpl(ABC, Generic[T]):
         output_block_scale: torch.Tensor | None = None,
     ) -> torch.Tensor:
         raise NotImplementedError
+
+    def do_kv_cache_update(
+        self,
+        layer: AttentionLayer,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        kv_cache: torch.Tensor,
+        attn_metadata: T,
+    ) -> torch.Tensor:
+        """Perform KV cache update separately from attention forward pass.
+
+        This method should be implemented by backends that set
+        forward_includes_kv_cache = False. It updates the KV cache with the
+        new key and value tensors.
+
+        Args:
+            layer: The attention layer instance.
+            key: Key tensor with shape [num_tokens, num_kv_heads, head_size].
+            value: Value tensor with shape [num_tokens, num_kv_heads, head_size].
+            kv_cache: The KV cache tensor.
+            attn_metadata: Attention metadata containing slot_mapping.
+
+        Returns:
+            The KV cache tensor (possibly with dtype changed for FP8).
+        """
+        raise NotImplementedError(
+            f"{self.__class__.__name__} does not implement do_kv_cache_update. "
+            "Either implement this method or set forward_includes_kv_cache = True."
+        )
 
     def fused_output_quant_supported(self, quant_key: "QuantKey"):
         """
