@@ -171,24 +171,16 @@ class FlashInferExperts(mk.FusedMoEPermuteExpertsUnpermute):
             
             # 1. Get Weight Scales (FC1 / FC2)
             # Try g1_alphas first (legacy/specific), fallback to w1_scale (standard)
-            w1_s = getattr(self, "g1_alphas", None)
-            if w1_s is None:
-                w1_s = getattr(self, "w1_scale", None)
+            w1_s = getattr(self, "g1_alphas", None) or getattr(self, "w1_scale", None)
             
-            w2_s = getattr(self, "g2_alphas", None)
-            if w2_s is None:
-                w2_s = getattr(self, "w2_scale", None)
+            w2_s = getattr(self, "g2_alphas", None) or getattr(self, "w2_scale", None)
 
             # 2. Get Input Scales
             # Try a1_scale/a2_gscale attributes, fallback to arguments passed to apply()
             # Note: a2_gscale is often used for the second GEMM input scale
-            in1_s = getattr(self, "a1_scale", None)
-            if in1_s is None:
-                in1_s = a1q_scale # Use the argument passed to apply
+            in1_s = getattr(self, "a1_scale", None) or a1q_scale # Use the argument passed to apply
 
-            in2_s = getattr(self, "a2_gscale", None)
-            if in2_s is None:
-                in2_s = a2_scale # Use the argument passed to apply
+            in2_s = getattr(self, "a2_gscale", None) or a2_scale # Use the argument passed to apply
 
             # Ensure we don't pass None to C++ kernel which expects tensors
             if w1_s is None:
