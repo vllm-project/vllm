@@ -166,8 +166,9 @@ class FlashInferExperts(mk.FusedMoEPermuteExpertsUnpermute):
         ):
             # FP8 per-tensor path: use global alphas/scales; do not pass input_sf
             # === [PATCH START] Fix for Llama 4 FP8 Nullptr Crash ===
-            # FP8 per-tensor path: use global alphas/scales; do not pass input_sf
-            # We must handle cases where attributes are named differently (w1_scale vs g1_alphas)
+            # FP8 per-tensor path: use global alphas/scales; do not pass
+            # input_sf. We must handle cases where attributes are named
+            # differently (w1_scale vs g1_alphas).
 
             # 1. Get Weight Scales (FC1 / FC2)
             # Try g1_alphas first (legacy/specific), fallback to w1_scale (standard)
@@ -189,17 +190,19 @@ class FlashInferExperts(mk.FusedMoEPermuteExpertsUnpermute):
             # Ensure we don't pass None to C++ kernel which expects tensors
             if w1_s is None:
                 raise ValueError(
-                    "FlashInferExperts FP8: Missing w1 scale (checked g1_alphas and w1_scale)"
+                    "FlashInferExperts FP8: Missing w1 scale "
+                    "(checked g1_alphas and w1_scale)"
                 )
             if w2_s is None:
                 raise ValueError(
-                    "FlashInferExperts FP8: Missing w2 scale (checked g2_alphas and w2_scale)"
+                    "FlashInferExperts FP8: Missing w2 scale "
+                    "(checked g2_alphas and w2_scale)"
                 )
 
             # Construct the list expected by FlashInfer
             quant_scales = [
                 w1_s,  # w13_weight_scale * w13_input_scale (FC1 Dequant)
-                in2_s,  # 1.0 / w2_input_scale (FC2 Quant - optional depending on kernel)
+                in2_s,  # 1.0 / w2_input_scale (FC2 Quant)
                 w2_s,  # w2_weight_scale * w2_input_scale (FC2 Dequant)
                 in1_s,  # w1_input_scale (FC1 Quant)
             ]
