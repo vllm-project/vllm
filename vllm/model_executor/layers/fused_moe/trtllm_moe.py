@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import torch
+from flashinfer import trtllm_fp4_block_scale_moe, trtllm_fp4_block_scale_routed_moe
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.model_executor.layers.fused_moe.config import (
@@ -11,6 +12,7 @@ from vllm.model_executor.layers.fused_moe.config import (
 from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceNoOP,
 )
+from vllm.utils.flashinfer import autotune
 
 
 class TrtLlmGenExperts(mk.FusedMoEPermuteExpertsUnpermute):
@@ -83,7 +85,6 @@ class TrtLlmGenExperts(mk.FusedMoEPermuteExpertsUnpermute):
         expert_tokens_meta: mk.ExpertTokensMetadata | None,
         apply_router_weight_on_input: bool,
     ):
-        topk = topk_ids.size(-1)
         local_num_experts = w1.size(0)
         intermediate_size = w2.size(1)
         local_expert_offset = self.moe.ep_rank * local_num_experts
@@ -116,8 +117,8 @@ class TrtLlmGenExperts(mk.FusedMoEPermuteExpertsUnpermute):
             "output1_scale_scalar": None,
             "output1_scale_gate_scalar": None,
             "output2_scale_scalar": None,
-            "num_experts": global_num_experts,
-            "top_k": topk,
+            "num_experts": global_num_experts,  # is this right?
+            "top_k": self.moe.experts_per_token,
             "n_group": None,
             "topk_group": None,
             "intermediate_size": intermediate_size,
@@ -125,15 +126,11 @@ class TrtLlmGenExperts(mk.FusedMoEPermuteExpertsUnpermute):
             "local_num_experts": local_num_experts,
             "routed_scaling_factor": None,
             "tile_tokens_dim": None,
-            "routing_method_type": 1,
+            "routing_method_type": 1,  # renormalize
             "do_finalize": True,
             "output": output,
             "tune_max_num_tokens": max(self.max_capture_size, 1),
         }
-
-        from flashinfer import trtllm_fp4_block_scale_routed_moe
-
-        from vllm.utils.flashinfer import autotune
 
         with autotune(False):
             # Enable autotune when,
@@ -142,3 +139,64 @@ class TrtLlmGenExperts(mk.FusedMoEPermuteExpertsUnpermute):
             trtllm_fp4_block_scale_routed_moe(**kwargs)
 
         return output
+
+    def apply_monolithic(
+        self,
+        output: torch.Tensor,
+        hidden_states: torch.Tensor,
+        w1: torch.Tensor,
+        w2: torch.Tensor,
+        router_logits: torch.Tensor,
+        activation: str,
+        global_num_experts: int,
+        expert_map: torch.Tensor | None,
+        a1q_scale: torch.Tensor | None,
+        a2_scale: torch.Tensor | None,
+        workspace13: torch.Tensor,
+        workspace2: torch.Tensor,
+        expert_tokens_meta: mk.ExpertTokensMetadata | None,
+        apply_router_weight_on_input: bool,
+    ) -> None:
+        """Apply monolithic TRT-LLM FP4 block scale MoE."""
+        local_num_experts = w1.size(0)
+        intermediate_size = w2.size(1)
+        local_expert_offset = self.moe.ep_rank * local_num_experts
+
+        # If the input is MXFP8 quantized, get the proper view
+        # of the scale for the kernel interface.
+        if a1q_scale is not None:
+            a1q_scale = a1q_scale.view(torch.float8_e4m3fn).reshape(
+                *hidden_states.shape[:-1], -1
+            )
+
+        trtllm_fp4_block_scale_moe(
+            routing_logits=router_logits.to(torch.bfloat16),
+            routing_bias=None,
+            hidden_states=hidden_states,
+            hidden_states_scale=a1q_scale,
+            gemm1_weights=w1,
+            gemm1_weights_scale=self.quant_config.w1_scale,
+            gemm1_bias=self.quant_config.w1_bias,
+            gemm1_alpha=self.gemm1_alpha,
+            gemm1_beta=self.gemm1_beta,
+            gemm1_clamp_limit=self.gemm1_clamp_limit,
+            gemm2_weights=w2,
+            gemm2_weights_scale=self.quant_config.w2_scale,
+            gemm2_bias=self.quant_config.w2_bias,
+            output1_scale_scalar=None,
+            output1_scale_gate_scalar=None,
+            output2_scale_scalar=None,
+            num_experts=global_num_experts,
+            topk=self.moe.experts_per_token,
+            n_group=None,
+            topk_group=None,
+            intermediate_size=intermediate_size,  # padded to multiple of 256
+            local_expert_offset=local_expert_offset,
+            local_num_experts=local_num_experts,
+            routed_scaling_factor=None,
+            tile_tokens_dim=None,
+            routing_method_type=1,  # renormalize
+            do_finalize=True,
+            tune_max_num_tokens=max(self.max_capture_size, 1),
+            output=output,
+        )[0]

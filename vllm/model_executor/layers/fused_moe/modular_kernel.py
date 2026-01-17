@@ -664,6 +664,31 @@ class FusedMoEPermuteExpertsUnpermute(ABC):
         """
         raise NotImplementedError
 
+    def apply_monolithic(
+        self,
+        output: torch.Tensor,
+        hidden_states: torch.Tensor,
+        w1: torch.Tensor,
+        w2: torch.Tensor,
+        router_logits: torch.Tensor,
+        activation: str,
+        global_num_experts: int,
+        expert_map: torch.Tensor | None,
+        a1q_scale: torch.Tensor | None,
+        a2_scale: torch.Tensor | None,
+        workspace13: torch.Tensor,
+        workspace2: torch.Tensor,
+        expert_tokens_meta: ExpertTokensMetadata | None,
+        apply_router_weight_on_input: bool,
+    ) -> None:
+        """
+        Same as apply(), but takes router_logits instead of
+        topk_weights and topk_ids. This is used for monolithic
+        kernels like those from TRTLLM which have the router
+        and the experts launched by a single API.
+        """
+        raise NotImplementedError
+
 
 def _slice_scales(
     scales: torch.Tensor | None, start: int, end: int
