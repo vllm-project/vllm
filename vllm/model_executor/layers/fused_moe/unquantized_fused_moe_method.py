@@ -61,6 +61,8 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
             moe_config=self.moe,
             use_ep=self.moe.moe_parallel_config.use_ep,
             use_dp=self.moe.moe_parallel_config.dp_size > 1,
+            is_act_and_mul=self.moe.is_act_and_mul,
+            has_bias=self.moe.has_bias,
         )
 
         # AITER only supports gated activations (silu/gelu), so disable it
@@ -96,33 +98,6 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
     @property
     def is_monolithic(self) -> bool:
         return self._is_monolithic
-
-        sonic_supported = is_sonic_moe_supported()
-        sonic_requested = envs.VLLM_USE_SONIC_MOE
-        self.sonic_moe_enabled = (
-            sonic_supported
-            and sonic_requested
-            and current_platform.is_device_capability(90)
-            and self.moe.is_act_and_mul
-            and not self.moe.has_bias
-            and not self.moe.moe_parallel_config.use_ep
-            and not self.flashinfer_cutlass_moe_enabled
-        )
-        if self.sonic_moe_enabled:
-            logger.info_once("Enabling Sonic MoE for UnquantizedFusedMoEMethod")
-        elif sonic_requested and sonic_supported:
-            if self.flashinfer_cutlass_moe_enabled:
-                logger.debug_once(
-                    "Sonic MoE disabled because FlashInfer CUTLASS MoE is enabled."
-                )
-            elif self.moe.has_bias:
-                logger.debug_once("Sonic MoE disabled because MoE biases are enabled.")
-            elif self.moe.moe_parallel_config.use_ep:
-                logger.debug_once(
-                    "Sonic MoE disabled because expert parallelism is enabled."
-                )
-            elif not self.moe.is_act_and_mul:
-                logger.debug_once("Sonic MoE disabled because is_act_and_mul is False.")
 
     @property
     def supports_eplb(self) -> bool:
