@@ -960,33 +960,17 @@ def unified_mla_attention_with_output(
     output_block_scale: torch.Tensor | None = None,
 ) -> None:
     attn_metadata, self, kv_cache = get_attention_context(layer_name)
-    from vllm.v1.attention.backends.mla.rocm_aiter_mla import AiterMLAImpl
-
-    if isinstance(self.impl, AiterMLAImpl):
-        self.impl.forward(
-            self,
-            q,
-            kv_c_normed,
-            k_pe,
-            kv_cache,
-            attn_metadata,
-            output=output,
-            output_scale=output_scale,
-            output_block_scale=output_block_scale,
-            positions=positions,
-        )
-    else:
-        self.impl.forward(
-            self,
-            q,
-            kv_c_normed,
-            k_pe,
-            kv_cache,
-            attn_metadata,
-            output=output,
-            output_scale=output_scale,
-            output_block_scale=output_block_scale,
-        )
+    self.impl.forward(
+        self,
+        q,
+        kv_c_normed,
+        k_pe,
+        kv_cache,
+        attn_metadata,
+        output=output,
+        output_scale=output_scale,
+        output_block_scale=output_block_scale,
+    )
 
 
 def unified_mla_attention_with_output_fake(
