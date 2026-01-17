@@ -1377,21 +1377,6 @@ class VllmConfig:
             )
         return self
 
-    def metrics_info(self):
-        """
-        Convert VllmConfig to dict(key: str, value: str) for prometheus metrics info.
-        If a config is missing a metrics_info method, all of its fields will be
-        converted to strings automatically.
-        """
-        metrics_info = {}
-        for key, value in self.__dict__.items():
-            if hasattr(value, "metrics_info"):
-                for sub_key, sub_value in value.metrics_info().items():
-                    metrics_info[f"{key}_{sub_key}"] = str(sub_value)
-            else:
-                metrics_info[key] = str(value)
-        return metrics_info
-
 
 _current_vllm_config: VllmConfig | None = None
 _current_prefix: str | None = None
