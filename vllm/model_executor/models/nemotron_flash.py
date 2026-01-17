@@ -24,12 +24,12 @@ import torch
 from einops import rearrange
 from torch import nn
 
+from vllm.attention.backends.abstract import AttentionMetadata
 from vllm.attention.layer import Attention
-from vllm.v1.attention.backend import AttentionMetadata
 from vllm.v1.kv_cache_interface import KVCacheSpec
 
 if TYPE_CHECKING:
-    from vllm.v1.attention.backend import AttentionBackend
+    from vllm.attention.backends.abstract import AttentionBackend
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, ModelConfig, VllmConfig, get_current_vllm_config
 from vllm.distributed import get_tensor_model_parallel_world_size
@@ -163,7 +163,6 @@ class NemotronFlashMoE(nn.Module):
 
         # Experts
         expert_mapping = FusedMoE.make_expert_params_mapping(
-            self,
             ckpt_gate_proj_name="gate_proj",
             ckpt_down_proj_name="down_proj",
             ckpt_up_proj_name="up_proj",
@@ -330,9 +329,6 @@ class NemotronDeltaNet(MambaBase, CustomOp):
             compilation_config.static_forward_context[prefix] = self
         self.kv_cache = (torch.tensor([]),)
 
-        self._prefill_state_buffer: torch.Tensor | None = None
-        self._prefill_state_max_batch = 0
-
     def forward_native(
         self,
         hidden_states: torch.Tensor,
@@ -410,10 +406,14 @@ class NemotronDeltaNet(MambaBase, CustomOp):
         has_decode = num_decodes > 0
 
         key_dim = self.key_head_dim * self.num_k_heads
-        # Make conv_states contiguous so stride(1) == 1 for causal_conv1d_fn
-        q_conv_state = combined_conv_state[:, :key_dim, :].contiguous()
-        k_conv_state = combined_conv_state[:, key_dim : key_dim * 2, :].contiguous()
-        v_conv_state = combined_conv_state[:, key_dim * 2 :, :].contiguous()
+        q_slice = combined_conv_state[:, :key_dim, :]
+        k_slice = combined_conv_state[:, key_dim : key_dim * 2, :]
+        v_slice = combined_conv_state[:, key_dim * 2 :, :]
+
+        # Create contiguous copies for conv operations
+        q_conv_state = q_slice.transpose(1, 2).contiguous().transpose(1, 2)
+        k_conv_state = k_slice.transpose(1, 2).contiguous().transpose(1, 2)
+        v_conv_state = v_slice.transpose(1, 2).contiguous().transpose(1, 2)
 
         q_out_list = []
         k_out_list = []
@@ -629,20 +629,11 @@ class NemotronDeltaNet(MambaBase, CustomOp):
             v_p = v_p.unsqueeze(0)
             beta_p = beta_p.unsqueeze(0)
 
-            state_tail_shape = ssm_state.shape[1:]
-            if (
-                self._prefill_state_buffer is None
-                or self._prefill_state_max_batch < num_prefills
-                or self._prefill_state_buffer.shape[1:] != state_tail_shape
-            ):
-                new_max_batch = max(num_prefills, self._prefill_state_max_batch * 2, 8)
-                self._prefill_state_buffer = torch.zeros(
-                    (new_max_batch,) + state_tail_shape,
-                    dtype=ssm_state.dtype,
-                    device=ssm_state.device,
-                )
-                self._prefill_state_max_batch = new_max_batch
-            initial_state_p = self._prefill_state_buffer[:num_prefills]
+            # start with zero initial state to avoid garbage from CUDA graph warmup
+            state_shape = (num_prefills,) + ssm_state.shape[1:]
+            initial_state_p = torch.zeros(
+                state_shape, dtype=ssm_state.dtype, device=ssm_state.device
+            )
 
             prefill_output_batch, final_state_p = chunk_delta_rule(
                 q=q_p,
@@ -1079,35 +1070,25 @@ class NemotronFlashModel(nn.Module):
         if query_start_loc is None or len(query_start_loc) <= 1:
             return hidden_states
 
-        seq_starts = query_start_loc[:-1]  # [num_seqs]
-        seq_ends = query_start_loc[1:]  # [num_seqs]
-        seq_lens = seq_ends - seq_starts  # [num_seqs]
-
-        # Check which sequences start at position 0 (new prefills)
-        # Clamp indices to valid range to avoid out-of-bounds access
-        valid_starts = seq_starts.clamp(max=len(positions) - 1)
-        first_positions = positions[valid_starts]  # [num_seqs]
-        is_new_prefill = first_positions == 0  # [num_seqs] bool mask
-
-        # Early exit if no sequences need meta token replacement
-        if not is_new_prefill.any():
-            return hidden_states
-
+        # Clone to avoid in-place modification
         result = hidden_states.clone()
 
-        # replace up to num_meta tokens at the start of each new prefill
-        tokens_to_replace = torch.minimum(
-            seq_lens, torch.tensor(num_meta, device=seq_lens.device)
-        )
-        tokens_to_replace = tokens_to_replace * is_new_prefill.long()
+        # For each sequence, check if it starts at position 0 (new prefill)
+        # and replace its first num_meta embeddings
+        num_seqs = len(query_start_loc) - 1
 
-        for i in range(num_meta):
-            mask = tokens_to_replace > i
-            if not mask.any():
-                break
-            write_indices = seq_starts[mask] + i
-            result[write_indices] = self.memory_tokens[i]
+        for i in range(num_seqs):
+            seq_start = query_start_loc[i].item()
+            seq_end = query_start_loc[i + 1].item()
+            seq_len = seq_end - seq_start
 
+            if seq_start < len(positions) and positions[seq_start].item() == 0:
+                # Replace first num_meta embeddings with memory_tokens
+                tokens_to_replace = min(num_meta, seq_len)
+                if tokens_to_replace > 0:
+                    result[seq_start : seq_start + tokens_to_replace] = (
+                        self.memory_tokens[:tokens_to_replace]
+                    )
         return result
 
 
@@ -1298,7 +1279,6 @@ class NemotronFlashForCausalLM(
     def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:
         """Return expert parameter mapping for FusedMoE weight loading."""
         return FusedMoE.make_expert_params_mapping(
-            self,
             ckpt_gate_proj_name="gate_proj",
             ckpt_down_proj_name="down_proj",
             ckpt_up_proj_name="up_proj",
