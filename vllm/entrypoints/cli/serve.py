@@ -50,14 +50,32 @@ class ServeSubcommand(CLISubcommand):
         if hasattr(args, "model_tag") and args.model_tag is not None:
             args.model = args.model_tag
 
-        if args.headless or args.api_server_count < 1:
+        if args.headless:
+            if args.api_server_count is not None and args.api_server_count > 0:
+                logger.warning(
+                    "Ignoring --api-server-count=%d in headless mode "
+                    "(no API servers are started).",
+                    args.api_server_count,
+                )
             run_headless(args)
-        else:
+            return
+
+        # Default api_server_count to data_parallel_size if not explicitly set
+        if args.api_server_count is None:
+            args.api_server_count = args.data_parallel_size
             if args.api_server_count > 1:
-                run_multi_api_server(args)
-            else:
-                # Single API server (this process).
-                uvloop.run(run_server(args))
+                logger.debug(
+                    "Defaulting api_server_count to data_parallel_size (%d).",
+                    args.api_server_count,
+                )
+
+        if args.api_server_count < 1:
+            run_headless(args)
+        elif args.api_server_count > 1:
+            run_multi_api_server(args)
+        else:
+            # Single API server (this process).
+            uvloop.run(run_server(args))
 
     def validate(self, args: argparse.Namespace) -> None:
         validate_parsed_serve_args(args)

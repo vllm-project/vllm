@@ -283,8 +283,9 @@ def make_arg_parser(parser: FlexibleArgumentParser) -> FlexibleArgumentParser:
         "--api-server-count",
         "-asc",
         type=int,
-        default=1,
-        help="How many API server processes to run.",
+        default=None,
+        help="How many API server processes to run. "
+        "Defaults to data_parallel_size if not specified.",
     )
     parser.add_argument(
         "--config",
