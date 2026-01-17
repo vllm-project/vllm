@@ -38,15 +38,11 @@ class Hermes2ProToolParser(ToolParser):
             logger.error("Detected Mistral tokenizer when using a Hermes model")
             self.model_tokenizer = tokenizer.tokenizer
 
-        self.current_tool_name_sent: bool = False
-        self.prev_tool_call_arr: list[dict] = []
-        self.current_tool_id: int = -1
-        self.streamed_args_for_tool: list[
-            str
-        ] = []  # map what has been streamed for each tool so far to a list
-
         self.tool_call_start_token: str = "<tool_call>"
         self.tool_call_end_token: str = "</tool_call>"
+
+        # Initialize streaming state
+        self._reset_streaming_state()
 
         self.tool_call_regex = re.compile(
             r"<tool_call>(.*?)</tool_call>|<tool_call>(.*)", re.DOTALL
@@ -77,7 +73,13 @@ class Hermes2ProToolParser(ToolParser):
             for token_id in self.tool_call_end_token_ids
         ]
 
-        self.buffered_delta_text = ""
+    def _reset_streaming_state(self):
+        """Reset all streaming state for a new request."""
+        self.current_tool_name_sent: bool = False
+        self.prev_tool_call_arr: list[dict] = []
+        self.current_tool_id: int = -1
+        self.streamed_args_for_tool: list[str] = []
+        self.buffered_delta_text: str = ""
 
     # Very simple idea: when encountering tokens like <, tool, _call, >,
     # <, /, tool, _call, >, store them in a buffer.
@@ -186,6 +188,10 @@ class Hermes2ProToolParser(ToolParser):
         # 1. All tokens are parsed based on _text, not token_ids.
         # 2. All incoming text data is processed by the tool_call_delta_buffer
         #    function for buffering before being used for parsing.
+
+        # Reset streaming state at the start of a new request
+        if not previous_text:
+            self._reset_streaming_state()
 
         delta_text = self.tool_call_delta_buffer(delta_text)
         # If the last characters of previous_text
@@ -337,6 +343,19 @@ class Hermes2ProToolParser(ToolParser):
                 function_name: str | None = current_tool_call.get("name")
                 if function_name:
                     self.current_tool_name_sent = True
+
+                    # IMPORTANT: Populate prev_tool_call_arr immediately when
+                    # we detect a tool call. This ensures finish_reason="tool_calls"
+                    # is set correctly even if parsing isn't complete.
+                    # This is critical for the streaming protocol to work properly.
+                    if len(self.prev_tool_call_arr) <= self.current_tool_id:
+                        self.prev_tool_call_arr.append(
+                            {
+                                "name": function_name,
+                                "arguments": "{}",  # Placeholder, updated later
+                            }
+                        )
+
                     return DeltaMessage(
                         tool_calls=[
                             DeltaToolCall(
