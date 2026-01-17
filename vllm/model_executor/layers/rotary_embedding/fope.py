@@ -4,6 +4,11 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
+from vllm.distributed import (
+    get_tensor_model_parallel_rank,
+    get_tensor_model_parallel_world_size,
+)
+
 from .base import RotaryEmbedding
 from .common import rotate_neox
 
@@ -56,6 +61,8 @@ class FourierRotaryEmbedding(RotaryEmbedding):
             torch.empty(num_key_value_heads, self.input_dim, self.output_dim),
             requires_grad=False,
         )
+        self.sin_coef.weight_loader = self.weight_loader
+        self.cos_coef.weight_loader = self.weight_loader
 
         self.cos_sin_cache: torch.Tensor
         cache = self._compute_cos_sin_cache().to(dtype)
@@ -176,3 +183,17 @@ class FourierRotaryEmbedding(RotaryEmbedding):
             key = key.view(key_shape)
 
         return query, key
+
+    def weight_loader(self, param: nn.Parameter, loaded_weight: torch.Tensor):
+        """load fope weights"""
+        world_size = get_tensor_model_parallel_world_size()
+        rank = get_tensor_model_parallel_rank()
+        num_key_value_heads = loaded_weight.size(0)
+
+        if num_key_value_heads < world_size:
+            n_replicate = world_size // num_key_value_heads
+            world_size = num_key_value_heads
+            rank = rank // n_replicate
+
+        loaded_weight = loaded_weight.chunk(world_size, dim=0)[rank]
+        param.data.copy_(loaded_weight)

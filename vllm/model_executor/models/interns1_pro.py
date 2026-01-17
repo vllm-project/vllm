@@ -36,7 +36,6 @@ from vllm.attention.layer import Attention
 from vllm.config import CacheConfig, VllmConfig, get_current_vllm_config
 from vllm.distributed import (
     get_ep_group,
-    get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
     tensor_model_parallel_all_gather,
 )
@@ -57,9 +56,6 @@ from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
 )
-from vllm.model_executor.model_loader.weight_utils import (
-    default_weight_loader,
-)
 from vllm.model_executor.models.utils import sequence_parallel_chunk
 from vllm.multimodal import MULTIMODAL_REGISTRY
 
@@ -76,6 +72,8 @@ from .qwen3_vl import (
 )
 from .qwen3_vl_moe import Qwen3MoeLLMModel
 from .utils import (
+    AutoWeightsLoader,
+    WeightsMapper,
     extract_layer_index,
     maybe_prefix,
 )
@@ -563,6 +561,20 @@ class InternS1ProForConditionalGeneration(
         ],
     }
 
+    # To ensure correct weight loading and mapping.
+    hf_to_vllm_mapper = WeightsMapper(
+        orig_to_new_prefix={
+            "model.visual.": "visual.",
+            "lm_head.": "language_model.lm_head.",
+            "model.language_model.": "language_model.model.",
+        },
+        orig_to_new_suffix={
+            # Handle FOPE rotary embeddings
+            ".rotary_emb.sin_coef": ".layers.0.self_attn.rotary_emb.sin_coef",
+            ".rotary_emb.cos_coef": ".layers.0.self_attn.rotary_emb.cos_coef",
+        },
+    )
+
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super(Qwen3VLForConditionalGeneration, self).__init__()
         config: PretrainedConfig = vllm_config.model_config.hf_config
@@ -613,39 +625,10 @@ class InternS1ProForConditionalGeneration(
         # Set MoE hyperparameters
         self.set_moe_parameters()
 
-    def _load_fope_weights(self, name: str, loaded_weight: torch.Tensor, params_dict):
-        """load fope weights"""
-        world_size = get_tensor_model_parallel_world_size()
-        rank = get_tensor_model_parallel_rank()
-        num_key_value_heads = loaded_weight.size(0)
-
-        if num_key_value_heads < world_size:
-            n_replicate = world_size // num_key_value_heads
-            world_size = num_key_value_heads
-            rank = rank // n_replicate
-
-        loaded_weight = loaded_weight.chunk(world_size, dim=0)[rank]
-
-        # rotary_emb is shared across all layers
-        param_name = name.replace(".rotary_emb.", ".layers.0.self_attn.rotary_emb.")
-        assert param_name in params_dict, f"{param_name} not in model parameters"
-        param = params_dict[param_name]
-
-        weight_loader = getattr(param, "weight_loader", default_weight_loader)
-        weight_loader(param, loaded_weight)
-
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
         """load weights"""
-        # Cache params_dict to avoid repeated expensive traversal of model parameters
-        if not hasattr(self, "_cached_params_dict"):
-            self._cached_params_dict = dict(self.named_parameters())
-        params_dict = self._cached_params_dict
-        other_weights = dict()
-        for name, loaded_weight in weights:
-            if "sin_coef" in name or "cos_coef" in name:
-                name = name.replace(r"model.language_model.", r"language_model.model.")
-                self._load_fope_weights(name, loaded_weight, params_dict)
-            else:
-                other_weights[name] = loaded_weight
-
-        super().load_weights(other_weights.items())
+        skip_prefixes = ["model.time_series."]
+        if self.visual is None:
+            skip_prefixes.append("visual.")
+        loader = AutoWeightsLoader(self, skip_prefixes=skip_prefixes)
+        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
