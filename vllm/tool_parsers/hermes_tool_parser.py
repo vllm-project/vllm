@@ -387,13 +387,15 @@ class Hermes2ProToolParser(ToolParser):
             logger.debug("against new ones: %s", cur_arguments)
 
             # case -- no arguments have been created yet. skip sending a delta.
-            if not cur_arguments and not prev_arguments:
+            # Note: Use 'is None' checks instead of truthiness to correctly
+            # handle empty dicts {} for parameterless tools (issue #28806)
+            if cur_arguments is None and prev_arguments is None:
                 logger.debug("Skipping text %s - no arguments", delta_text)
                 delta = None
 
-            # case -- prev arguments are defined, but non are now.
+            # case -- prev arguments are defined, but none are now.
             #   probably impossible, but not a fatal error - just keep going
-            elif not cur_arguments and prev_arguments:
+            elif cur_arguments is None and prev_arguments is not None:
                 logger.error(
                     "should be impossible to have arguments reset "
                     "mid-call. skipping streaming anything."
@@ -402,7 +404,7 @@ class Hermes2ProToolParser(ToolParser):
 
             # case -- we now have the first info about arguments available from
             #   autocompleting the JSON
-            elif cur_arguments and not prev_arguments:
+            elif cur_arguments is not None and prev_arguments is None:
                 # extract the content after {"name": ..., "arguments":
                 #   directly from tool_call_portion as cur_arguments_json,
                 #   since cur_arguments may differ from the original text
@@ -450,7 +452,7 @@ class Hermes2ProToolParser(ToolParser):
                 self.streamed_args_for_tool[self.current_tool_id] += arguments_delta
 
             # last case -- we have an update to existing arguments.
-            elif cur_arguments and prev_arguments:
+            elif cur_arguments is not None and prev_arguments is not None:
                 # judge whether the tool_call_portion is a complete JSON
                 try:
                     json.loads(tool_call_portion)
