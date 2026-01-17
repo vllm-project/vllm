@@ -60,7 +60,7 @@ __global__ void __launch_bounds__(512, VLLM_BLOCKS_PER_SM(512))
 
   // Iterate over all rows and cols including padded ones -
   //  ensures we visit every single scale factor address to initialize it.
-  for (int rowIdx = blockIdx.x; rowIdx < sf_m; rowIdx += gridDim.x) { //FIXME: not needed
+  for (int rowIdx = blockIdx.x; rowIdx < sf_m; rowIdx += gridDim.x) {
     if (colIdx < num_padded_cols) {      
       PackedVec in_vec;
       int64_t inOffset = rowIdx * (numCols / CVT_FP4_ELTS_PER_THREAD_256b) + colIdx;
