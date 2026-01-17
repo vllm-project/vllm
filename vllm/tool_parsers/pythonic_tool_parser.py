@@ -48,8 +48,12 @@ class PythonicToolParser(ToolParser):
     # Neither of these are necessary for e.g. ToolACE, but both would help make
     # Llama3.2 models more reliable.
 
+    # Simplified pattern that detects tool call structure without parsing
+    # individual parameters. This handles nested structures like arrays
+    # and dicts in parameter values. Actual validation is done by ast.parse().
+    # Matches: [funcname(...)] with optional multiple function calls
     TOOL_CALL_REGEX = re.compile(
-        r"\[([a-zA-Z]+\w*\(([a-zA-Z]+\w*=.*,\s*)*([a-zA-Z]+\w*=.*\s)?\),\s*)*([a-zA-Z]+\w*\(([a-zA-Z]+\w*=.*,\s*)*([a-zA-Z]+\w*=.*\s*)?\)\s*)+\]",
+        r"^\s*\[\s*[a-zA-Z_]\w*\s*\(.*\)\s*\]\s*$",
         re.DOTALL,
     )
 
