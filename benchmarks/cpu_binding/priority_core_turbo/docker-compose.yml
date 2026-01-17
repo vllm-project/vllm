@@ -1,0 +1,27 @@
+version: "3.9"
+
+services:
+  intel-speed-select:
+    image: intel-speed-select:6.8
+    build:
+      context: .
+      dockerfile: Dockerfile.sst
+      args:
+        KERNEL_TAG: v6.8
+        http_proxy: ${http_proxy}
+        https_proxy: ${https_proxy}
+        no_proxy: ${no_proxy}
+
+    privileged: true
+    tty: true
+    stdin_open: true
+
+    volumes:
+      - /dev/cpu:/dev/cpu
+      - /sys:/sys:ro
+
+    environment:
+      http_proxy: ${http_proxy}
+      https_proxy: ${https_proxy}
+      no_proxy: ${no_proxy}
+
