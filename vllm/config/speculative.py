@@ -280,7 +280,8 @@ class SpeculativeConfig:
                 # model string may be a path, and matching on the whole string
                 # risks false positives if parent directories contain tokens
                 # like "glm-4.7" or "fp8".
-                model_name = (self.target_model_config.model or "").split("/")[-1].lower()
+                model_str = self.target_model_config.model or ""
+                model_name = model_str.split("/")[-1].lower()
                 if "glm-4.7" in model_name and "fp8" in model_name:
                     raise ValueError(
                         "Speculative decoding method 'mtp' is temporarily disabled "
