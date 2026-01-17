@@ -340,6 +340,7 @@ async def test_function_calling_with_streaming_types(client: OpenAI, model_name:
         "response.reasoning_text.done": "response.reasoning_text.delta",
         "response.reasoning_part.done": "response.reasoning_part.added",
         "response.function_call_arguments.done": "response.function_call_arguments.delta",  # noqa
+        "response.mcp_call_arguments.done": ("response.mcp_call_arguments.delta"),
     }
 
     tools = [GET_WEATHER_SCHEMA]
