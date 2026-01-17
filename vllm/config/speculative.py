@@ -271,6 +271,20 @@ class SpeculativeConfig:
                 # --quantization fp8 with a bf16 checkpoint.
                 if not self.quantization:
                     self.quantization = self.target_model_config.quantization
+
+                # Hard guardrail: known crashy combination reported in vLLM
+                # nightlies (CUDA illegal memory access) when using GLM-4.7-FP8
+                # with MTP speculative decoding on H100.
+                # Prefer a deterministic, actionable error over an unsafe CUDA crash.
+                target_id = (self.target_model_config.model or "").lower()
+                if "glm-4.7" in target_id and "fp8" in target_id:
+                    raise ValueError(
+                        "Speculative decoding method 'mtp' is temporarily disabled "
+                        "for GLM-4.7-FP8 due to a CUDA illegal memory access regression "
+                        "(see vllm-project/vllm#32090). Workaround: disable "
+                        "`--speculative-config.method mtp` or pin a last-known-good "
+                        "nightly image (e.g. nightly-ef96fa3f...)."
+                    )
             elif self.method in ("ngram", "[ngram]"):
                 self.model = "ngram"
             elif self.method == "suffix":
