@@ -85,10 +85,6 @@ async def test_load(
     if async_scheduling and data_parallel_backend == "ray":
         # TODO(NickLucche) Re-enable when async scheduling is supported
         pytest.skip("Async scheduling is not supported with ray")
-    elif data_parallel_backend == "ray" and current_platform.is_rocm():
-        pytest.skip(
-            "Ray as the distributed executor backend is not supported with ROCm."
-        )
     stats_loggers = {}
 
     @dataclass

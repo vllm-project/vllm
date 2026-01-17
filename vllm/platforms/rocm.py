@@ -70,6 +70,19 @@ if "HIP_VISIBLE_DEVICES" in os.environ:
     else:
         os.environ["CUDA_VISIBLE_DEVICES"] = val
 
+# Required for RCCL in ROCm 7.1+ to prevent memory allocation issues
+# This must be set before any RCCL operations
+if "HSA_NO_SCRATCH_RECLAIM" not in os.environ:
+    os.environ["HSA_NO_SCRATCH_RECLAIM"] = "1"
+
+# Ensure Ray doesn't interfere with ROCm device visibility
+# These prevent Ray from automatically setting device visibility env vars
+# which can conflict with vLLM's device management
+if "RAY_EXPERIMENTAL_NOSET_ROCR_VISIBLE_DEVICES" not in os.environ:
+    os.environ["RAY_EXPERIMENTAL_NOSET_ROCR_VISIBLE_DEVICES"] = "1"
+if "RAY_EXPERIMENTAL_NOSET_HIP_VISIBLE_DEVICES" not in os.environ:
+    os.environ["RAY_EXPERIMENTAL_NOSET_HIP_VISIBLE_DEVICES"] = "1"
+
 # AMDSMI utils
 # Note that NVML is not affected by `{CUDA/HIP}_VISIBLE_DEVICES`,
 # all the related functions work on real physical device ids.
@@ -167,6 +180,23 @@ class RocmPlatform(Platform):
     dist_backend: str = "nccl"
     # rocm shares the same device control env var as CUDA
     device_control_env_var: str = "CUDA_VISIBLE_DEVICES"
+
+    # ROCm-specific environment variables that need to be passed to Ray actors
+    # for proper RCCL initialization and GPU visibility handling
+    additional_env_vars: list[str] = [
+        # Required for RCCL in ROCm 7.1+
+        "HSA_NO_SCRATCH_RECLAIM",
+        # Prevent Ray from overriding ROCm device visibility
+        "RAY_EXPERIMENTAL_NOSET_ROCR_VISIBLE_DEVICES",
+        "RAY_EXPERIMENTAL_NOSET_HIP_VISIBLE_DEVICES",
+        # ROCm device visibility
+        "HIP_VISIBLE_DEVICES",
+        "ROCR_VISIBLE_DEVICES",
+        # RCCL specific settings
+        "NCCL_DEBUG",
+        "NCCL_IB_DISABLE",
+        "NCCL_NET_GDR_LEVEL",
+    ]
 
     supported_quantization: list[str] = [
         "awq",
