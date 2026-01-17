@@ -214,7 +214,7 @@ def select_nvfp4_moe_backend(
                         activation_format,
                     )
                 if supported:
-                    logger.info_once(_make_log_backend(backend))
+                    logger.info_once(_make_log_backend(backend), scope="local")
                     return backend, None
                 else:
                     logger.debug_once(
@@ -256,7 +256,7 @@ def select_nvfp4_moe_backend(
             logger.info_once(_make_log_backend(backend), scope="local")
             return backend, k_cls
         else:
-            logger.info_once(_make_log_unsupported(backend, reason), scope="local")
+            logger.debug_once(_make_log_unsupported(backend, reason), scope="local")
 
     raise NotImplementedError(
         "No NvFp4 MoE backend supports the deployment configuration."

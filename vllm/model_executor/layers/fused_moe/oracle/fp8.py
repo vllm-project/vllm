@@ -194,7 +194,7 @@ def select_fp8_moe_backend(
             k_cls, config, weight_key, activation_key, activation_format
         )
         if supported:
-            logger.info_once(_make_log_backend(backend))
+            logger.info_once(_make_log_backend(backend), scope="local")
             return backend, k_cls
         raise ValueError(_make_log_unsupported(backend, reason))
 
