@@ -607,6 +607,11 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
         input_ids = self.input_buffers.input_ids[:num_tokens_after_padding]
         positions = self.input_buffers.positions[:num_tokens_after_padding]
+        mrope_positions = None
+        if self.uses_mrope:
+            mrope_positions = self.mrope_states.mrope_positions[
+                :, :num_tokens_after_padding
+            ]
         return InputBatch(
             req_ids=req_ids,
             num_reqs=num_reqs,
@@ -622,6 +627,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             seq_lens=seq_lens,
             input_ids=input_ids,
             positions=positions,
+            mrope_positions=mrope_positions,
             attn_metadata=attn_metadata,
             logits_indices=logits_indices,
             cu_num_logits=cu_num_logits,
@@ -950,9 +956,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             # TODO(woosuk): Support piecewise CUDA graph.
             positions = input_batch.positions
             if self.uses_mrope:
-                positions = self.mrope_states.mrope_positions[
-                    :, : input_batch.num_tokens_after_padding
-                ]
+                assert input_batch.mrope_positions is not None
+                positions = input_batch.mrope_positions
             with set_forward_context(
                 input_batch.attn_metadata,
                 self.vllm_config,

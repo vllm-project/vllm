@@ -62,6 +62,8 @@ class InputBatch:
     input_ids: torch.Tensor
     # [num_tokens_after_padding]
     positions: torch.Tensor
+    # [3, num_tokens_after_padding]
+    mrope_positions: torch.Tensor | None
 
     # layer_name -> Metadata
     attn_metadata: dict[str, Any]
@@ -129,6 +131,7 @@ class InputBatch:
             seq_lens=seq_lens,
             input_ids=input_ids,
             positions=positions,
+            mrope_positions=None,
             attn_metadata=None,  # type: ignore
             logits_indices=logits_indices,
             cu_num_logits=cu_num_logits,
