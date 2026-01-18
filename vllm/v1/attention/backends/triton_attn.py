@@ -340,6 +340,10 @@ class TritonAttentionBackend(AttentionBackend):
         )
 
     @classmethod
+    def supports_alibi_sqrt(cls) -> bool:
+        return True
+
+    @classmethod
     def supports_compute_capability(cls, capability: DeviceCapability) -> bool:
         return True
 
@@ -523,6 +527,7 @@ class TritonAttentionImpl(AttentionImpl):
             softmax_scale=self.scale,
             causal=True,
             alibi_slopes=self.alibi_slopes,
+            use_alibi_sqrt=self.use_alibi_sqrt,
             window_size=self.sliding_window,
             block_table=block_table,
             softcap=self.logits_soft_cap,

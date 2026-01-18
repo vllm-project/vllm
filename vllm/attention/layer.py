@@ -162,6 +162,7 @@ class Attention(nn.Module, AttentionLayerBase):
         scale: float,
         num_kv_heads: int | None = None,
         alibi_slopes: list[float] | None = None,
+        use_alibi_sqrt: bool | None = None,
         cache_config: CacheConfig | None = None,
         quant_config: QuantizationConfig | None = None,
         logits_soft_cap: float | None = None,
