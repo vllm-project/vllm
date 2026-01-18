@@ -278,44 +278,14 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         skip_attn: bool = True,
         **kwargs,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        num_reqs = min(num_tokens, self.max_num_reqs)
-        input_batch = InputBatch.make_dummy(
-            num_reqs=num_reqs,
-            num_tokens=num_tokens,
-            input_buffers=self.input_buffers,
-            device=self.device,
+        dummy_scheduler_output = SchedulerOutput.make_empty()
+        dummy_scheduler_output.total_num_scheduled_tokens = num_tokens
+        self.execute_model(
+            dummy_scheduler_output, dummy_run=True, skip_attn_for_dummy_run=skip_attn
         )
-        if self.uses_mrope:
-            input_batch.mrope_positions = self.mrope_states.mrope_positions[
-                :, :num_tokens
-            ]
-        if not skip_attn:
-            self.prepare_dummy_attn_metadata(input_batch)
-
-        dp_size = self.parallel_config.data_parallel_size
-        num_tokens_across_dp = make_num_tokens_across_dp(dp_size, num_tokens)
-        num_sampled_tokens = np.ones(input_batch.num_reqs, dtype=np.int32)
-        positions = input_batch.positions
-        if self.uses_mrope:
-            positions = input_batch.mrope_positions
-        with (
-            self.maybe_dummy_run_with_lora(
-                self.lora_config,
-                input_batch.num_scheduled_tokens,
-                num_sampled_tokens,
-            ),
-            set_forward_context(
-                input_batch.attn_metadata,
-                self.vllm_config,
-                num_tokens=num_tokens,
-                num_tokens_across_dp=num_tokens_across_dp,
-            ),
-        ):
-            hidden_states = self.model(
-                input_ids=input_batch.input_ids,
-                positions=positions,
-            )
-            sample_hidden_states = hidden_states[input_batch.logits_indices]
+        assert self.execute_model_state is not None
+        hidden_states, input_batch = self.execute_model_state
+        sample_hidden_states = hidden_states[input_batch.logits_indices]
         return hidden_states, sample_hidden_states
 
     @torch.inference_mode()
@@ -408,14 +378,14 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             self._dummy_run(self.max_num_tokens, skip_attn=False)
             torch.cuda.synchronize()
 
-    def update_states(self, scheduler_output: SchedulerOutput) -> None:
+    def finish_requests(self, scheduler_output: SchedulerOutput) -> None:
         if scheduler_output.preempted_req_ids is not None:
             for req_id in scheduler_output.preempted_req_ids:
                 self.req_states.remove_request(req_id)
         for req_id in scheduler_output.finished_req_ids:
             self.req_states.remove_request(req_id)
 
-        # Add new requests.
+    def add_requests(self, scheduler_output: SchedulerOutput) -> None:
         for new_req_data in scheduler_output.scheduled_new_reqs:
             assert new_req_data.prompt_token_ids is not None
             assert new_req_data.prefill_token_ids is not None
@@ -448,6 +418,17 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 req_index, prompt_len, new_req_data.sampling_params
             )
 
+        if scheduler_output.scheduled_new_reqs:
+            self.req_states.apply_staged_writes()
+            self.sampler.apply_staged_writes(
+                self.req_states.prefill_token_ids.gpu,
+                self.req_states.prefill_len.np,
+                self.req_states.prompt_len,
+            )
+            if self.uses_mrope:
+                self.mrope_states.apply_staged_writes()
+
+    def update_requests(self, scheduler_output: SchedulerOutput) -> None:
         # Add new blocks for the existing requests.
         cached_reqs = scheduler_output.scheduled_cached_reqs
         for i, req_id in enumerate(cached_reqs.req_ids):
@@ -457,16 +438,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 self.block_tables.append_block_ids(
                     req_index, req_new_block_ids, overwrite=False
                 )
-
-        self.req_states.apply_staged_writes()
-        self.block_tables.apply_staged_writes()
-        self.sampler.apply_staged_writes(
-            self.req_states.prefill_token_ids.gpu,
-            self.req_states.prefill_len.np,
-            self.req_states.prompt_len,
-        )
-        if self.uses_mrope:
-            self.mrope_states.apply_staged_writes()
 
     def prepare_inputs(
         self,
@@ -906,17 +877,22 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         scheduler_output: SchedulerOutput,
         intermediate_tensors: Any | None = None,
         dummy_run: bool = False,
+        skip_attn_for_dummy_run: bool = False,
     ) -> ModelRunnerOutput | None:
         assert intermediate_tensors is None
-        if scheduler_output.total_num_scheduled_tokens == 0 and not dummy_run:
-            # No need to run the model.
-            self.update_states(scheduler_output)
-            return EMPTY_MODEL_RUNNER_OUTPUT
+        if not dummy_run:
+            # Update the request states.
+            self.finish_requests(scheduler_output)
+            self.add_requests(scheduler_output)
+            self.update_requests(scheduler_output)
+            self.block_tables.apply_staged_writes()
+            if scheduler_output.total_num_scheduled_tokens == 0:
+                # No need to run the model.
+                return EMPTY_MODEL_RUNNER_OUTPUT
 
         cudagraph_mode, num_tokens_after_padding, num_tokens_across_dp = (
             self.get_cudagraph_and_dp_padding(scheduler_output)
         )
-        self.update_states(scheduler_output)
         if num_tokens_after_padding == 0:
             # All DP ranks have zero tokens to run.
             return EMPTY_MODEL_RUNNER_OUTPUT
@@ -949,7 +925,9 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 input_batch.mrope_positions = self.mrope_states.mrope_positions[
                     :, :num_tokens_after_padding
                 ]
-            self.prepare_dummy_attn_metadata(input_batch)
+            if not skip_attn_for_dummy_run:
+                self.prepare_dummy_attn_metadata(input_batch)
+            # FIXME(woosuk): Fix warmup for LoRA.
 
         # Run model.
         if cudagraph_mode == CUDAGraphMode.FULL:
