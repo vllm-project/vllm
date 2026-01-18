@@ -24,6 +24,9 @@ from vllm._aiter_ops import rocm_aiter_ops
 from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.distributed.parallel_state import init_distributed_environment
 from vllm.forward_context import set_forward_context
+from vllm.model_executor.layers.fused_moe import (
+    fused_topk,
+)
 from vllm.model_executor.layers.fused_moe.config import (
     FUSED_MOE_UNQUANTIZED_CONFIG,
     int4_w4a16_moe_quant_config,
@@ -34,7 +37,6 @@ from vllm.model_executor.layers.fused_moe.fused_marlin_moe import (
     fused_marlin_moe,
 )
 from vllm.model_executor.layers.fused_moe.fused_moe import (
-    fused_topk,
     modular_triton_fused_moe,
 )
 from vllm.model_executor.layers.quantization.utils.marlin_utils import (
