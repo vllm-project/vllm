@@ -162,6 +162,7 @@ class Attention(nn.Module, AttentionLayerBase):
         scale: float,
         num_kv_heads: int | None = None,
         alibi_slopes: list[float] | None = None,
+        use_alibi_sqrt: bool | None = None,
         cache_config: CacheConfig | None = None,
         quant_config: QuantizationConfig | None = None,
         logits_soft_cap: float | None = None,
@@ -243,7 +244,16 @@ class Attention(nn.Module, AttentionLayerBase):
             )
         else:
             self.attn_backend = attn_backend
-
+        backend_supports_alibi_sqrt = self.attn_backend.supports_alibi_sqrt()
+        use_alibi_sqrt = use_alibi_sqrt if use_alibi_sqrt else False
+        if use_alibi_sqrt and not backend_supports_alibi_sqrt:
+            raise ValueError(
+                f"use_alibi_sqrt is not supported by backend "
+                f"{self.attn_backend.get_name()}."
+            )
+        self.use_alibi_sqrt = bool(use_alibi_sqrt)
+        if backend_supports_alibi_sqrt:
+            extra_impl_args["use_alibi_sqrt"] = self.use_alibi_sqrt
         # prefix caching + batch invariance is currently not supported for
         # FLASHINFER and TRITON_MLA.
         if (
