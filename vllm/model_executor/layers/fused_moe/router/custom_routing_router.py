@@ -36,7 +36,7 @@ class CustomRoutingRouter(BaseRouter):
     def routing_method_type(self) -> RoutingMethodType:
         from vllm.model_executor.models.llama4 import Llama4MoE
 
-        # NOTE: Flashinfer
+        # NOTE: FLASHINFER_TRTLLM support the Llama4 router.
         if self.custom_routing_function == Llama4MoE.custom_routing_function:
             return RoutingMethodType.Llama4
         return RoutingMethodType.Custom
