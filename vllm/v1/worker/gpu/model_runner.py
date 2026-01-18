@@ -827,20 +827,14 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         num_rejected: torch.Tensor,
     ) -> torch.Tensor:
         assert self.speculator is not None
-        last_sampled_tokens = self.req_states.last_sampled_tokens[
-            input_batch.idx_mapping
-        ]
-        next_prefill_tokens = self.req_states.next_prefill_tokens[
-            input_batch.idx_mapping
-        ]
         draft_tokens = self.speculator.propose(
             input_batch,
             last_hidden_states,
             aux_hidden_states,
             num_sampled,
             num_rejected,
-            last_sampled_tokens,
-            next_prefill_tokens,
+            self.req_states.last_sampled_tokens,
+            self.req_states.next_prefill_tokens,
             self.sampler.sampling_states.temperature.gpu,
             self.sampler.sampling_states.seeds.gpu,
         )
