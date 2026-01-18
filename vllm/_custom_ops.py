@@ -12,6 +12,7 @@ from vllm.scalar_type import ScalarType
 from vllm.utils.flashinfer import (
     flashinfer_quant_nvfp4_8x4_sf_layout,
 )
+from vllm.utils.math_utils import cdiv
 
 logger = init_logger(__name__)
 
@@ -2072,6 +2073,12 @@ def wvSplitK(
     return torch.ops._rocm_C.wvSplitK(a, b, bias, cu_count)
 
 
+def wvSplitKrc(
+    a: torch.Tensor, b: torch.Tensor, cu_count: int, bias: torch.Tensor = None
+) -> torch.Tensor:
+    return torch.ops._rocm_C.wvSplitKrc(a, b, bias, cu_count)
+
+
 def wvSplitKQ(
     a: torch.Tensor,
     b: torch.Tensor,
@@ -3105,10 +3112,6 @@ def matmul_ada_mxf4_bf16_tn(
     return torch.ops._qutlass_C.matmul_ada_mxf4_bf16_tn(a, b, a_sf, b_sf, alpha)
 
 
-def ceil_div(a, b):
-    return (a + b - 1) // b
-
-
 if hasattr(torch.ops._qutlass_C, "fusedQuantizeMxQuest"):
 
     @register_fake("_qutlass_C::fusedQuantizeMxQuest")
@@ -3142,8 +3145,8 @@ def fusedQuantizeMx(
     )
 
     rows, cols = a.numel() // a.size(-1), a.size(-1) // 32
-    n_row_blocks = ceil_div(rows, 128)
-    n_col_blocks = ceil_div(cols, 4)
+    n_row_blocks = cdiv(rows, 128)
+    n_col_blocks = cdiv(cols, 4)
     padded_rows = n_row_blocks * 128
     padded_cols = n_col_blocks * 4
 
@@ -3186,8 +3189,8 @@ def fusedQuantizeNv(
     )
 
     rows, cols = a.numel() // a.size(-1), a.size(-1) // 16
-    n_row_blocks = ceil_div(rows, 128)
-    n_col_blocks = ceil_div(cols, 4)
+    n_row_blocks = cdiv(rows, 128)
+    n_col_blocks = cdiv(cols, 4)
     padded_rows = n_row_blocks * 128
     padded_cols = n_col_blocks * 4
     xh_e4m3 = torch.empty(
