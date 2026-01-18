@@ -53,10 +53,10 @@ from vllm.utils.tensor_schema import TensorSchema, TensorShape
 from .clip import CLIPVisionModel
 from .interfaces import (
     MultiModalEmbeddings,
+    SupportsEagle3,
     SupportsLoRA,
     SupportsMultiModal,
     SupportsPP,
-    SupportsEagle3
 )
 from .module_mapping import MultiModelKeys
 from .pixtral import PixtralHFEncoderInfo, PixtralHFVisionModel
@@ -544,7 +544,7 @@ class LlavaForConditionalGeneration(
     def set_aux_hidden_state_layers(self, layers: tuple[int, ...]) -> None:
         self.get_language_model().model.aux_hidden_state_layers = layers
 
-    def get_eagle3_aux_hidden_state_layers(self) -> tuple[int, ...]:        
+    def get_eagle3_aux_hidden_state_layers(self) -> tuple[int, ...]:
         num_layers = len(self.get_language_model().model.layers)
         return (2, num_layers // 2, num_layers - 3)
 
