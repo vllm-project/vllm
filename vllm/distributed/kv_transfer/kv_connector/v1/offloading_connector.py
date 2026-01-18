@@ -434,7 +434,7 @@ class OffloadingConnectorWorker:
 
         self._job_counter = 0
 
-        # req_id -> (job_id, store)
+        # job_id -> (req_id, store)
         self._jobs: dict[int, tuple[ReqId, bool]] = {}
         # req_id -> active job IDs
         self._load_job: dict[ReqId, int] = {}
