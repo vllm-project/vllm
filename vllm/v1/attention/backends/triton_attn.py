@@ -340,10 +340,6 @@ class TritonAttentionBackend(AttentionBackend):
         )
 
     @classmethod
-    def supports_alibi_sqrt(cls) -> bool:
-        return True
-
-    @classmethod
     def supports_compute_capability(cls, capability: DeviceCapability) -> bool:
         return True
 
@@ -542,7 +538,6 @@ class TritonAttentionImpl(AttentionImpl):
             sinks=self.sinks,
             output_scale=output_scale,
             mm_prefix_range=mm_prefix_range_tensor,
-            use_alibi_sqrt=self.use_alibi_sqrt,
         )
 
         return output
