@@ -520,6 +520,39 @@ class FusedMoE(CustomOp):
         self.apply_router_weight_on_input = apply_router_weight_on_input
         self.activation = activation
 
+        # TODO(bnell): in next PR move capture back to layer
+        capture: Callable[[torch.Tensor], None] | None = None
+        if (
+            self.vllm_config.model_config is not None
+            and self.vllm_config.model_config.enable_return_routed_experts
+        ):
+            # In dummy runs, the capturer is not initialized.
+            capturer = RoutedExpertsCapturer.get_instance()
+            if capturer is not None:
+                capture = lambda topk_ids: capturer.capture(self.layer_id, topk_ids)
+
+        self.router = create_fused_moe_router(
+            top_k=top_k,
+            global_num_experts=self.global_num_experts,
+            eplb_state=self.eplb_state,
+            renormalize=renormalize,
+            use_grouped_topk=use_grouped_topk,
+            num_expert_group=num_expert_group,
+            topk_group=topk_group,
+            custom_routing_function=custom_routing_function,
+            scoring_func=scoring_func,
+            routed_scaling_factor=routed_scaling_factor,
+            e_score_correction_bias=e_score_correction_bias,
+            num_fused_shared_experts=self.num_fused_shared_experts,
+            enable_eplb=enable_eplb,
+            # TODO(bnell): once we can construct the MK at init time, we
+            # can make this a value.
+            indices_type_getter=lambda: self.quant_method.topk_indices_dtype,
+            routing_method_type=routing_method_type,
+            capture=capture,
+        )
+        self.routing_method_type: RoutingMethodType = self.router.routing_method_type
+
         self.moe_config: FusedMoEConfig = FusedMoEConfig(
             num_experts=self.global_num_experts,
             experts_per_token=top_k,
@@ -598,39 +631,6 @@ class FusedMoE(CustomOp):
         # Chunked all2all staging tensor
         self.batched_hidden_states: torch.Tensor | None = None
         self.batched_router_logits: torch.Tensor | None = None
-
-        # TODO(bnell): in next PR move capture back to layer
-        capture: Callable[[torch.Tensor], None] | None = None
-        if (
-            self.vllm_config.model_config is not None
-            and self.vllm_config.model_config.enable_return_routed_experts
-        ):
-            # In dummy runs, the capturer is not initialized.
-            capturer = RoutedExpertsCapturer.get_instance()
-            if capturer is not None:
-                capture = lambda topk_ids: capturer.capture(self.layer_id, topk_ids)
-
-        self.router = create_fused_moe_router(
-            top_k=top_k,
-            global_num_experts=self.global_num_experts,
-            eplb_state=self.eplb_state,
-            renormalize=renormalize,
-            use_grouped_topk=use_grouped_topk,
-            num_expert_group=num_expert_group,
-            topk_group=topk_group,
-            custom_routing_function=custom_routing_function,
-            scoring_func=scoring_func,
-            routed_scaling_factor=routed_scaling_factor,
-            e_score_correction_bias=e_score_correction_bias,
-            num_fused_shared_experts=self.num_fused_shared_experts,
-            enable_eplb=enable_eplb,
-            # TODO(bnell): once we can construct the MK at init time, we
-            # can make this a value.
-            indices_type_getter=lambda: self.quant_method.topk_indices_dtype,
-            routing_method_type=routing_method_type,
-            capture=capture,
-        )
-        self.routing_method_type: RoutingMethodType = self.router.routing_method_type
 
     # Note: maybe_init_modular_kernel should only be called by
     # prepare_communication_buffer_for_model.

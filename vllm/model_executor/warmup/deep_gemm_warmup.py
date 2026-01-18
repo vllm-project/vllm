@@ -214,7 +214,6 @@ def _deepgemm_fp8_gemm_nt_warmup(
     )
     out = torch.empty((max_tokens, n), device=device, dtype=torch.bfloat16)
 
-    print(f"{w.dtype=}")
     m_values = _get_fp8_gemm_nt_m_values(w, max_tokens)
 
     for num_tokens in m_values:

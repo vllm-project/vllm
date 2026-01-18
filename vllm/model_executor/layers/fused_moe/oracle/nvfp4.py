@@ -143,12 +143,12 @@ def select_nvfp4_moe_backend(
     def _make_log_unsupported(backend: NvFp4MoeBackend, reason: str | None) -> str:
         if reason:
             return (
-                f"NvFP4 MoE backend '{backend.value}' does not support the "
+                f"NvFp4 MoE backend '{backend.value}' does not support the "
                 f"deployment configuration since {reason}."
             )
         else:
             return (
-                f"NvFP4 MoE backend '{backend.value}' does not support the "
+                f"NvFp4 MoE backend '{backend.value}' does not support the "
                 "deployment configuration."
             )
 
