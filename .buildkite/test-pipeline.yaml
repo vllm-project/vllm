@@ -1400,17 +1400,18 @@ steps:
     - pytest -v -s tests/distributed/test_sequence_parallel.py
     - pytest -v -s tests/compile/distributed/test_sequence_parallelism.py
 
-##### H200 test #####
-- label: Distributed Tests (H200) # optional
-  gpu: h200
+- label: Distributed Tests (H100) # optional
+  gpu: h100
   optional: true
   working_dir: "/vllm-workspace/"
   num_gpus: 2
   commands:
     - VLLM_TEST_CLEAN_GPU_MEMORY=1 pytest -v -s tests/compile/distributed/test_async_tp.py
     - pytest -v -s tests/distributed/test_context_parallel.py
-    - CUDA_VISIBLE_DEVICES=1,2 VLLM_USE_DEEP_GEMM=1 VLLM_LOGGING_LEVEL=DEBUG python3 examples/offline_inference/data_parallel.py --model=Qwen/Qwen1.5-MoE-A2.7B -tp=1 -dp=2 --max-model-len=2048 --all2all-backend=deepep_high_throughput
+    - VLLM_USE_DEEP_GEMM=1 VLLM_LOGGING_LEVEL=DEBUG python3 examples/offline_inference/data_parallel.py --model=Qwen/Qwen1.5-MoE-A2.7B -tp=1 -dp=2 --max-model-len=2048 --all2all-backend=deepep_high_throughput
     - pytest -v -s tests/v1/distributed/test_dbo.py
+
+##### H200 test #####
 
 - label: LM Eval Large Models (H200) # optional
   timeout_in_minutes: 60
