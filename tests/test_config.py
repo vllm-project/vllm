@@ -301,6 +301,37 @@ def test_rope_customization():
     assert longchat_model_config.max_model_len == 4096
 
 
+def test_nested_rope_parameters():
+    """Test that nested rope_parameters (e.g., TranslateGemma) are handled correctly."""
+    # Simulate TranslateGemma's nested rope_parameters structure
+    NESTED_ROPE_PARAMETERS = {
+        "full_attention": {
+            "rope_type": "linear",
+            "factor": 8.0,
+        },
+        "sliding_attention": {
+            "rope_type": "default",
+        },
+    }
+
+    # Test with a non-gated model using nested rope_parameters override
+    model_config = ModelConfig(
+        "facebook/opt-125m",
+        hf_overrides={
+            "rope_parameters": NESTED_ROPE_PARAMETERS,
+            "layer_types": ["full_attention", "sliding_attention"] * 6,
+        },
+    )
+
+    # Verify the nested structure is preserved
+    rope_params = model_config.hf_config.rope_parameters
+    assert "full_attention" in rope_params
+    assert "sliding_attention" in rope_params
+    assert rope_params["full_attention"]["rope_type"] == "linear"
+    assert rope_params["full_attention"]["factor"] == 8.0
+    assert rope_params["sliding_attention"]["rope_type"] == "default"
+
+
 def test_nested_hf_overrides():
     """Test that nested hf_overrides work correctly."""
     # Test with a model that has text_config

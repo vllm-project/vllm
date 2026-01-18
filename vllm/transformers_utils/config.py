@@ -358,8 +358,13 @@ def patch_rope_parameters(config: PretrainedConfig) -> None:
         if partial_rotary_factor is not None:
             config.partial_rotary_factor = partial_rotary_factor
         # Standardize and validate RoPE parameters
-        config.standardize_rope_params()
-        config.validate_rope()
+        # Skip validation for nested rope_parameters (e.g., TranslateGemma)
+        # as vLLM handles validation in patch_rope_parameters_dict()
+        if not is_rope_parameters_nested(
+            getattr(config, "rope_parameters", {})
+        ):
+            config.standardize_rope_params()
+            config.validate_rope()
 
     # No RoPE parameters to patch
     if getattr(config, "rope_parameters", None) is None:
