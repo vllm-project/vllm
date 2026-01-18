@@ -830,3 +830,16 @@ def process_eagle_weight(
         model.has_own_lm_head = True
     if "embed_tokens" in name:
         model.has_own_embed_tokens = True
+
+
+def get_layer_index(feature_layer_index: int, num_hidden_layers: int) -> int:
+    """Given a signed vision feature layer, get the number of hidden layers
+       needed to leverage it.
+
+    Args:
+        feature_layer_index: Index of a required layer in the visual encoder.
+        num_hidden_layers: The total number of hidden layers in the visual encoder.
+    """
+    if feature_layer_index < 0:
+        return num_hidden_layers + feature_layer_index + 1
+    return feature_layer_index
