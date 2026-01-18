@@ -25,6 +25,7 @@ from vllm.utils.deep_gemm import (
     get_mk_alignment_for_contiguous_layout,
     m_grouped_fp8_gemm_nt_contiguous,
 )
+from vllm.utils.math_utils import cdiv
 
 
 def _generate_optimal_warmup_m_values(
@@ -39,9 +40,6 @@ def _generate_optimal_warmup_m_values(
         n: The actual N dimension from the weight tensor
         device: The torch device to get properties from.
     """
-
-    def ceil_div(a: int, b: int) -> int:
-        return (a + b - 1) // b
 
     # DeepGEMM's possible block sizes
     block_ms = [64, 128, 256]
@@ -63,7 +61,7 @@ def _generate_optimal_warmup_m_values(
             for wave in range(1, 11):  # Up to 10 waves
                 # M where this block config transitions to next wave
                 target_blocks = wave * num_sms
-                m = target_blocks * block_m // ceil_div(n, block_n)
+                m = target_blocks * block_m // cdiv(n, block_n)
                 if 1 <= m <= max_tokens:
                     m_values.add(m)
 
