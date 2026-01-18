@@ -73,6 +73,7 @@ if TYPE_CHECKING:
     VLLM_MAX_AUDIO_CLIP_FILESIZE_MB: int = 25
     VLLM_VIDEO_LOADER_BACKEND: str = "opencv"
     VLLM_MEDIA_CONNECTOR: str = "http"
+    VLLM_MM_HASHER_ALGORITHM: str = "blake3"
     VLLM_TARGET_DEVICE: str = "cuda"
     VLLM_MAIN_CUDA_VERSION: str = "12.9"
     VLLM_FLOAT32_MATMUL_PRECISION: Literal["highest", "high", "medium"] = "highest"
@@ -121,6 +122,7 @@ if TYPE_CHECKING:
     VLLM_ROCM_USE_AITER_FP4_ASM_GEMM: bool = False
     VLLM_ROCM_USE_AITER_TRITON_ROPE: bool = False
     VLLM_ROCM_USE_AITER_FP8BMM: bool = True
+    VLLM_ROCM_USE_AITER_FP4BMM: bool = True
     VLLM_ROCM_USE_AITER_UNIFIED_ATTENTION: bool = False
     VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS: bool = False
     VLLM_ROCM_USE_AITER_TRITON_GEMM: bool = True
@@ -128,6 +130,7 @@ if TYPE_CHECKING:
     VLLM_ROCM_FP8_PADDING: bool = True
     VLLM_ROCM_MOE_PADDING: bool = True
     VLLM_ROCM_CUSTOM_PAGED_ATTN: bool = True
+    VLLM_ROCM_SHUFFLE_KV_CACHE_LAYOUT: bool = False
     VLLM_ENABLE_V1_MULTIPROCESSING: bool = True
     VLLM_LOG_BATCHSIZE_INTERVAL: float = -1
     VLLM_DISABLE_COMPILE_CACHE: bool = False
@@ -288,11 +291,16 @@ def use_aot_compile() -> bool:
     from vllm.model_executor.layers.batch_invariant import (
         vllm_is_batch_invariant,
     )
+    from vllm.platforms import current_platform
     from vllm.utils.torch_utils import is_torch_equal_or_newer
 
     default_value = (
         "1"
-        if is_torch_equal_or_newer("2.10.0.dev") and not disable_compile_cache()
+        if is_torch_equal_or_newer("2.10.0.dev")
+        and not disable_compile_cache()
+        # Disabling AOT_COMPILE for CPU
+        # See: https://github.com/vllm-project/vllm/issues/32033
+        and not current_platform.is_cpu()
         else "0"
     )
 
@@ -799,6 +807,17 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # imported at runtime.
     # If a non-existing backend is used, an AssertionError will be thrown.
     "VLLM_MEDIA_CONNECTOR": lambda: os.getenv("VLLM_MEDIA_CONNECTOR", "http"),
+    # Hash algorithm for multimodal content hashing.
+    # - "blake3": Default, fast cryptographic hash (not FIPS 140-3 compliant)
+    # - "sha256": FIPS 140-3 compliant, widely supported
+    # - "sha512": FIPS 140-3 compliant, faster on 64-bit systems
+    # Use sha256 or sha512 for FIPS compliance in government/enterprise deployments
+    "VLLM_MM_HASHER_ALGORITHM": env_with_choices(
+        "VLLM_MM_HASHER_ALGORITHM",
+        "blake3",
+        ["blake3", "sha256", "sha512"],
+        case_sensitive=False,
+    ),
     # Path to the XLA persistent cache directory.
     # Only used for XLA devices such as TPUs.
     "VLLM_XLA_CACHE_PATH": lambda: os.path.expanduser(
@@ -985,6 +1004,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_ROCM_USE_AITER_FP8BMM": lambda: (
         os.getenv("VLLM_ROCM_USE_AITER_FP8BMM", "True").lower() in ("true", "1")
     ),
+    # Whether to use aiter triton fp4 bmm kernel
+    # By default is enabled.
+    "VLLM_ROCM_USE_AITER_FP4BMM": lambda: (
+        os.getenv("VLLM_ROCM_USE_AITER_FP4BMM", "True").lower() in ("true", "1")
+    ),
     # Use AITER triton unified attention for V1 attention
     "VLLM_ROCM_USE_AITER_UNIFIED_ATTENTION": lambda: (
         os.getenv("VLLM_ROCM_USE_AITER_UNIFIED_ATTENTION", "False").lower()
@@ -1012,6 +1036,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # custom paged attention kernel for MI3* cards
     "VLLM_ROCM_CUSTOM_PAGED_ATTN": lambda: (
         os.getenv("VLLM_ROCM_CUSTOM_PAGED_ATTN", "True").lower() in ("true", "1")
+    ),
+    # Whether to use the shuffled kv cache layout
+    "VLLM_ROCM_SHUFFLE_KV_CACHE_LAYOUT": lambda: (
+        os.getenv("VLLM_ROCM_SHUFFLE_KV_CACHE_LAYOUT", "False").lower() in ("true", "1")
     ),
     # Custom quick allreduce kernel for MI3* cards
     # Choice of quantization level: FP, INT8, INT6, INT4 or NONE
@@ -1435,11 +1463,18 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # - "flashinfer-cudnn": use flashinfer cudnn GEMM backend
     # - "flashinfer-trtllm": use flashinfer trtllm GEMM backend
     # - "flashinfer-cutlass": use flashinfer cutlass GEMM backend
+    # - "marlin": use marlin GEMM backend (for GPUs without native FP4 support)
     # - <none>: automatically pick an available backend
     "VLLM_NVFP4_GEMM_BACKEND": env_with_choices(
         "VLLM_NVFP4_GEMM_BACKEND",
         None,
-        ["flashinfer-cudnn", "flashinfer-trtllm", "flashinfer-cutlass", "cutlass"],
+        [
+            "flashinfer-cudnn",
+            "flashinfer-trtllm",
+            "flashinfer-cutlass",
+            "cutlass",
+            "marlin",
+        ],
     ),
     # Controls garbage collection during CUDA graph capture.
     # If set to 0 (default), enables GC freezing to speed up capture time.

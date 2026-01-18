@@ -92,6 +92,11 @@ class _HfExamplesInfo:
     length that is too large to fit into memory in CI.
     """
 
+    max_num_batched_tokens: int | None = None
+    """
+    The maximum number of tokens to be processed in a single batch.
+    """
+
     revision: str | None = None
     """
     The specific revision (commit hash, tag, or branch) to use for the model.
@@ -250,6 +255,9 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
         "LGAI-EXAONE/EXAONE-3.0-7.8B-Instruct", trust_remote_code=True
     ),
     "Exaone4ForCausalLM": _HfExamplesInfo("LGAI-EXAONE/EXAONE-4.0-32B"),
+    "ExaoneMoEForCausalLM": _HfExamplesInfo(
+        "LGAI-EXAONE/K-EXAONE-236B-A23B", min_transformers_version="5.0.0"
+    ),
     "Fairseq2LlamaForCausalLM": _HfExamplesInfo("mgleize/fairseq2-dummy-Llama-3.2-1B"),
     "FalconForCausalLM": _HfExamplesInfo("tiiuae/falcon-7b"),
     "FalconH1ForCausalLM": _HfExamplesInfo("tiiuae/Falcon-H1-0.5B-Base"),
@@ -463,6 +471,9 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
     "SeedOssForCausalLM": _HfExamplesInfo(
         "ByteDance-Seed/Seed-OSS-36B-Instruct",
         trust_remote_code=True,
+    ),
+    "Step1ForCausalLM": _HfExamplesInfo(
+        "stepfun-ai/Step-Audio-EditX", trust_remote_code=True
     ),
     "SmolLM3ForCausalLM": _HfExamplesInfo("HuggingFaceTB/SmolLM3-3B"),
     "StableLMEpochForCausalLM": _HfExamplesInfo("stabilityai/stablelm-zephyr-3b"),
@@ -725,6 +736,10 @@ _MULTIMODAL_EXAMPLE_MODELS = {
         trust_remote_code=True,
     ),
     "InternVLForConditionalGeneration": _HfExamplesInfo("OpenGVLab/InternVL3-1B-hf"),
+    "KananaVForConditionalGeneration": _HfExamplesInfo(
+        "kakaocorp/kanana-1.5-v-3b-instruct",
+        trust_remote_code=True,
+    ),
     "KeyeForConditionalGeneration": _HfExamplesInfo(
         "Kwai-Keye/Keye-VL-8B-Preview",
         trust_remote_code=True,
@@ -809,6 +824,14 @@ _MULTIMODAL_EXAMPLE_MODELS = {
         },
         extras={"olmo": "allenai/Molmo-7B-O-0924"},
         trust_remote_code=True,
+    ),
+    "Molmo2ForConditionalGeneration": _HfExamplesInfo(
+        "allenai/Molmo2-8B",
+        extras={"olmo": "allenai/Molmo2-O-7B"},
+        min_transformers_version="4.51",
+        trust_remote_code=True,
+        # required by current PrefixLM implementation
+        max_num_batched_tokens=31872,
     ),
     "NVLM_D": _HfExamplesInfo("nvidia/NVLM-D-72B", trust_remote_code=True),
     "Llama_Nemotron_Nano_VL": _HfExamplesInfo(
@@ -904,6 +927,9 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     ),
     "Step3VLForConditionalGeneration": _HfExamplesInfo(
         "stepfun-ai/step3", trust_remote_code=True
+    ),
+    "StepVLForConditionalGeneration": _HfExamplesInfo(
+        "stepfun-ai/Step3-VL-10B", trust_remote_code=True
     ),
     "UltravoxModel": _HfExamplesInfo(
         "fixie-ai/ultravox-v0_5-llama-3_2-1b",
@@ -1004,6 +1030,11 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
         "baidu/ERNIE-4.5-21B-A3B-PT",
         trust_remote_code=True,
         speculative_model="baidu/ERNIE-4.5-21B-A3B-PT",
+    ),
+    "ExaoneMoeMTP": _HfExamplesInfo(
+        "LGAI-EXAONE/K-EXAONE-236B-A23B",
+        speculative_model="LGAI-EXAONE/K-EXAONE-236B-A23B",
+        min_transformers_version="5.0.0",
     ),
     "Glm4MoeMTPModel": _HfExamplesInfo(
         "zai-org/GLM-4.5",
