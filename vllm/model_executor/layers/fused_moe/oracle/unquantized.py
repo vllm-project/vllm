@@ -33,6 +33,7 @@ class UnquantizedMoeBackend(Enum):
     CPU = "CPU"
     XPU = "XPU"
     TPU = "TPU"
+    OOT = "OOT"
 
 
 # NOTE(zyongye): Unsupported backend means backend
@@ -42,6 +43,7 @@ UNSUPPORTED_BACKEND = [
     UnquantizedMoeBackend.CPU,
     UnquantizedMoeBackend.XPU,
     UnquantizedMoeBackend.TPU,
+    UnquantizedMoeBackend.OOT,
 ]
 
 
@@ -95,6 +97,8 @@ def select_unquantized_moe_backend(
         backend = UnquantizedMoeBackend.CPU
     if current_platform.is_tpu():
         backend = UnquantizedMoeBackend.TPU
+    if current_platform.is_out_of_tree():
+        backend = UnquantizedMoeBackend.OOT
 
     logger.info_once(_make_log_backend(backend), scope="local")
     return backend
