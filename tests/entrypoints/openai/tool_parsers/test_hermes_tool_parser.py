@@ -548,6 +548,75 @@ def test_hermes_parser_streaming_different_intervals_tool_2(
         assert tool_call_args == '{"dir": "/src"}'
 
 
+def test_hermes_parser_streaming_different_intervals_bug_30229(
+    qwen_tokenizer: TokenizerLike,
+    hermes_parser: Hermes2ProToolParser,
+    any_chat_request: ChatCompletionRequest,
+) -> None:
+    text = """<tool_call>
+{"name": "get_nums", "arguments": {"grade": ["一年级", "二年级", "三年级"]}}
+</tool_call>"""
+    tokens = qwen_tokenizer.encode(text)
+
+    for interval in range(1, 21):
+        # The first token is processed separately to simulate server behavior
+        previous_text = ""
+        delta_messages = []
+
+        # Process first token separately
+        first_token = tokens[0:1]
+        text = qwen_tokenizer.decode(first_token)
+        current_text = text
+
+        delta = hermes_parser.extract_tool_calls_streaming(
+            previous_text=previous_text,
+            current_text=current_text,
+            delta_text=text,
+            previous_token_ids=[],
+            current_token_ids=[],
+            delta_token_ids=[],
+            request=any_chat_request,
+        )
+        previous_text = current_text
+        if delta is not None:
+            delta_messages.append(delta)
+
+        # Process remaining tokens in chunks based on interval
+        remaining_tokens = tokens[1:]
+        for i in range(0, len(remaining_tokens), interval):
+            # Get chunk of tokens (up to 'interval' tokens, or whatever's left)
+            token_chunk = remaining_tokens[i : i + interval]
+
+            # Decode the chunk
+            text = qwen_tokenizer.decode(token_chunk)
+            current_text = previous_text + text
+
+            delta = hermes_parser.extract_tool_calls_streaming(
+                previous_text=previous_text,
+                current_text=current_text,
+                delta_text=text,
+                previous_token_ids=[],
+                current_token_ids=[],
+                delta_token_ids=[],
+                request=any_chat_request,
+            )
+            previous_text = current_text
+            if delta is not None:
+                delta_messages.append(delta)
+
+        print(f"Interval: {interval}")
+        for delta in delta_messages:
+            print(delta)
+        assert delta_messages[0].tool_calls[0].function.name == "get_nums"
+        tool_call_args = "".join(
+            delta.tool_calls[0].function.arguments or ""
+            for delta in delta_messages
+            if delta.tool_calls  # Skips if None or empty list
+        )
+        print(f"Reconstructed Args: {tool_call_args}")
+        assert tool_call_args == '{"grade": ["一年级", "二年级", "三年级"]}'
+
+
 def test_hermes_parser_non_streaming_no_tool_call(
     hermes_parser: Hermes2ProToolParser,
     any_chat_request: ChatCompletionRequest,
