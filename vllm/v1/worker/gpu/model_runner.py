@@ -459,7 +459,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     req_index,
                     self.model,  # type: ignore
                     new_req_data.prefill_token_ids,
-                    mm_features=[],  # TODO
+                    mm_features=new_req_data.mm_features,
                 )
 
             self.block_tables.append_block_ids(
