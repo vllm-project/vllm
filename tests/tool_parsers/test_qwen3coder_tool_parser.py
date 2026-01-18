@@ -1047,6 +1047,7 @@ TX
     assert len(tool_states) == 1
     state = tool_states[0]
     assert state["name"] == "get_current_weather"
+    assert state["arguments"] is not None
     args = json.loads(state["arguments"])
     assert args["city"] == "Dallas"
     assert args["state"] == "TX"
