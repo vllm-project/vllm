@@ -11,6 +11,7 @@ from typing import Annotated, Any
 import msgspec
 from pydantic.dataclasses import dataclass
 
+from vllm.exceptions import VLLMValidationError
 from vllm.logger import init_logger
 from vllm.logits_process import LogitsProcessor
 from vllm.tokenizers import TokenizerLike
@@ -65,6 +66,11 @@ class StructuredOutputsParams:
             raise ValueError(
                 "You can only use one kind of structured outputs constraint "
                 f"but multiple are specified: {self.__dict__}"
+            )
+        if count < 1:
+            raise ValueError(
+                "You must use one kind of structured outputs constraint "
+                f"but none are specified: {self.__dict__}"
             )
 
     def all_constraints_none(self) -> bool:
@@ -393,11 +399,17 @@ class SamplingParams(
                 f"{self.repetition_penalty}."
             )
         if self.temperature < 0.0:
-            raise ValueError(
-                f"temperature must be non-negative, got {self.temperature}."
+            raise VLLMValidationError(
+                f"temperature must be non-negative, got {self.temperature}.",
+                parameter="temperature",
+                value=self.temperature,
             )
         if not 0.0 < self.top_p <= 1.0:
-            raise ValueError(f"top_p must be in (0, 1], got {self.top_p}.")
+            raise VLLMValidationError(
+                f"top_p must be in (0, 1], got {self.top_p}.",
+                parameter="top_p",
+                value=self.top_p,
+            )
         # quietly accept -1 as disabled, but prefer 0
         if self.top_k < -1:
             raise ValueError(
@@ -410,7 +422,11 @@ class SamplingParams(
         if not 0.0 <= self.min_p <= 1.0:
             raise ValueError(f"min_p must be in [0, 1], got {self.min_p}.")
         if self.max_tokens is not None and self.max_tokens < 1:
-            raise ValueError(f"max_tokens must be at least 1, got {self.max_tokens}.")
+            raise VLLMValidationError(
+                f"max_tokens must be at least 1, got {self.max_tokens}.",
+                parameter="max_tokens",
+                value=self.max_tokens,
+            )
         if self.min_tokens < 0:
             raise ValueError(
                 f"min_tokens must be greater than or equal to 0, got {self.min_tokens}."
@@ -421,24 +437,30 @@ class SamplingParams(
                 f"max_tokens={self.max_tokens}, got {self.min_tokens}."
             )
         if self.logprobs is not None and self.logprobs != -1 and self.logprobs < 0:
-            raise ValueError(
-                f"logprobs must be non-negative or -1, got {self.logprobs}."
+            raise VLLMValidationError(
+                f"logprobs must be non-negative or -1, got {self.logprobs}.",
+                parameter="logprobs",
+                value=self.logprobs,
             )
         if (
             self.prompt_logprobs is not None
             and self.prompt_logprobs != -1
             and self.prompt_logprobs < 0
         ):
-            raise ValueError(
+            raise VLLMValidationError(
                 f"prompt_logprobs must be non-negative or -1, got "
-                f"{self.prompt_logprobs}."
+                f"{self.prompt_logprobs}.",
+                parameter="prompt_logprobs",
+                value=self.prompt_logprobs,
             )
         if self.truncate_prompt_tokens is not None and (
             self.truncate_prompt_tokens == 0 or self.truncate_prompt_tokens < -1
         ):
-            raise ValueError(
+            raise VLLMValidationError(
                 f"truncate_prompt_tokens must be an integer >= 1 or -1, "
-                f"got {self.truncate_prompt_tokens}"
+                f"got {self.truncate_prompt_tokens}",
+                parameter="truncate_prompt_tokens",
+                value=self.truncate_prompt_tokens,
             )
         assert isinstance(self.stop_token_ids, list)
         if not all(isinstance(st_id, int) for st_id in self.stop_token_ids):
@@ -516,12 +538,14 @@ class SamplingParams(
             if token_id < 0 or token_id > tokenizer.max_token_id
         ]
         if len(invalid_token_ids) > 0:
-            raise ValueError(
+            raise VLLMValidationError(
                 f"The model vocabulary size is {tokenizer.max_token_id + 1},"
                 f" but the following tokens"
                 f" were specified as bad: {invalid_token_ids}."
                 f" All token id values should be integers satisfying:"
-                f" 0 <= token_id <= {tokenizer.max_token_id}."
+                f" 0 <= token_id <= {tokenizer.max_token_id}.",
+                parameter="bad_words",
+                value=self.bad_words,
             )
 
     @cached_property

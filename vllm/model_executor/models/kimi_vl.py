@@ -82,12 +82,12 @@ from vllm.multimodal.parse import (
     MultiModalDataItems,
 )
 from vllm.multimodal.processing import (
+    BaseDummyInputsBuilder,
     BaseMultiModalProcessor,
     BaseProcessingInfo,
     PromptReplacement,
     PromptUpdate,
 )
-from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.configs import KimiVLConfig, MoonViTConfig
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
@@ -325,7 +325,7 @@ class KimiVLForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP):
         self.hidden_size = config.text_config.hidden_size
         self.vision_tower = MoonVitPretrainedModel(
             config.vision_config,
-            self.use_data_parallel,
+            multimodal_config=model_config.multimodal_config,
             prefix=maybe_prefix(prefix, "vision_tower"),
         )
 
@@ -462,6 +462,7 @@ class KimiVLForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP):
             # Params for weights, fp8 weight scales, fp8 activation scales
             # (param_name, weight_name, expert_id, shard_id)
             expert_params_mapping = FusedMoE.make_expert_params_mapping(
+                self,
                 ckpt_gate_proj_name="gate_proj",
                 ckpt_down_proj_name="down_proj",
                 ckpt_up_proj_name="up_proj",

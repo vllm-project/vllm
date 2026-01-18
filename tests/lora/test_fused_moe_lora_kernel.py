@@ -18,8 +18,8 @@ from vllm.distributed.parallel_state import (
     get_tensor_model_parallel_world_size,
 )
 from vllm.lora.ops.triton_ops import fused_moe_lora
-from vllm.platforms import current_platform
 from vllm.utils.network_utils import get_open_port
+from vllm.utils.torch_utils import set_random_seed
 
 
 @pytest.fixture(autouse=True)
@@ -265,7 +265,7 @@ def test_fused_moe_lora_kernel(
     seed,
 ):
     torch.set_default_device(device)
-    current_platform.seed_everything(seed)
+    set_random_seed(seed)
     # the number of randomly generated sentences.
     num_sequences = 10
     # generate data
@@ -358,7 +358,7 @@ def test_fused_moe_lora_kernel_fully_sharded(
     seed,
     column_parallel,
 ):
-    current_platform.seed_everything(seed)
+    set_random_seed(seed)
     # the number of randomly generated sentences.
     num_sequences = 10
     # generate data
@@ -415,7 +415,7 @@ def use_fused_moe_lora_kernel_tensor_parallel(
     def _get_shard_slice(shard_size):
         return slice(local_rank * shard_size, (local_rank + 1) * shard_size)
 
-    current_platform.seed_everything(seed)
+    set_random_seed(seed)
 
     device = torch.device(f"cuda:{local_rank}")
     torch.cuda.set_device(device)

@@ -15,7 +15,11 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEQuantConfig,
 )
 from vllm.model_executor.layers.fused_moe.fused_marlin_moe import fused_marlin_moe
-from vllm.model_executor.layers.fused_moe.layer import FusedMoE, FusedMoEMethodBase
+from vllm.model_executor.layers.fused_moe.fused_moe_router import FusedMoERouter
+from vllm.model_executor.layers.fused_moe.layer import (
+    FusedMoE,
+    FusedMoEMethodBase,
+)
 from vllm.model_executor.layers.linear import (
     LinearBase,
     LinearMethodBase,
@@ -356,10 +360,11 @@ class RTNMoEMethod(FusedMoEMethodBase):
     def apply(
         self,
         layer: FusedMoE,
+        router: FusedMoERouter,
         x: torch.Tensor,
         router_logits: torch.Tensor,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        topk_weights, topk_ids = layer.select_experts(
+        topk_weights, topk_ids = router.select_experts(
             hidden_states=x,
             router_logits=router_logits,
         )

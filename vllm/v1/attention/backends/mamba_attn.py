@@ -10,11 +10,13 @@ import torch
 
 from vllm.config import VllmConfig
 from vllm.utils.math_utils import cdiv
-from vllm.v1.attention.backends.utils import (
-    PAD_SLOT_ID,
+from vllm.v1.attention.backend import (
     AttentionCGSupport,
     AttentionMetadataBuilder,
     CommonAttentionMetadata,
+)
+from vllm.v1.attention.backends.utils import (
+    PAD_SLOT_ID,
     compute_causal_conv1d_metadata,
     mamba_get_block_table_tensor,
     split_decodes_and_prefills,
@@ -74,10 +76,12 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
 
         assert isinstance(kv_cache_spec, MambaSpec)
         self.compilation_config = vllm_config.compilation_config
-        self.decode_cudagraph_max_bs = min(
-            self.vllm_config.scheduler_config.max_num_seqs,
-            self.compilation_config.max_cudagraph_capture_size,
-        )
+        self.decode_cudagraph_max_bs = self.vllm_config.scheduler_config.max_num_seqs
+        if self.compilation_config.max_cudagraph_capture_size is not None:
+            self.decode_cudagraph_max_bs = min(
+                self.decode_cudagraph_max_bs,
+                self.compilation_config.max_cudagraph_capture_size,
+            )
 
         if self.vllm_config.cache_config.mamba_cache_mode == "all":
             self.state_indices_tensor = torch.empty(
@@ -143,9 +147,7 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
         common_attn_metadata: CommonAttentionMetadata,
         mamba_block_size: int,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        num_computed_tokens = common_attn_metadata.num_computed_tokens_cpu.to(
-            self.device
-        )
+        num_computed_tokens = common_attn_metadata.compute_num_computed_tokens()
         # Block index of the last computed token
         block_idx_last_computed_token = cdiv(num_computed_tokens, mamba_block_size) - 1
         # which is <= block index for the first scheduled token
@@ -157,9 +159,13 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
             cdiv(common_attn_metadata.seq_lens, mamba_block_size) - 1
         )
         # -1 in case it's non-computed and causes later issues with indexing
-        block_idx_last_computed_token = block_idx_last_computed_token.clamp(min=0)
+        block_idx_last_computed_token = torch.clamp(
+            block_idx_last_computed_token, min=0
+        )
         # -1 in the case we have a padded request (0 seq-len)
-        block_idx_last_scheduled_token = block_idx_last_scheduled_token.clamp(min=0)
+        block_idx_last_scheduled_token = torch.clamp(
+            block_idx_last_scheduled_token, min=0
+        )
 
         return (
             block_idx_last_computed_token,
@@ -198,13 +204,12 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
         nums_dict, batch_ptr, token_chunk_offset_ptr = None, None, None
 
         if self.vllm_config.cache_config.mamba_cache_mode == "all":
+            num_computed_tokens = common_attn_metadata.compute_num_computed_tokens()
+
             # Return a tensor of shape (#requests, #max blocks)
             state_indices_tensor = common_attn_metadata.block_table_tensor
             # Additional cache-related varaiables:
             mamba_block_size = self.kv_cache_spec.block_size
-            num_computed_tokens = common_attn_metadata.num_computed_tokens_cpu.to(
-                self.device
-            )
             (
                 block_idx_last_computed_token,
                 block_idx_first_scheduled_token,
@@ -222,15 +227,16 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
             )[:, 0]
 
         if num_prefills > 0:
+            if num_computed_tokens is None:
+                num_computed_tokens = common_attn_metadata.compute_num_computed_tokens()
+            num_computed_tokens_cpu = num_computed_tokens.cpu()
+
             query_start_loc_p = (
                 common_attn_metadata.query_start_loc[-num_prefills - 1 :]
                 - num_decode_tokens
             )
             has_initial_states_cpu = (
-                common_attn_metadata.num_computed_tokens_cpu[
-                    num_reqs - num_prefills : num_reqs
-                ]
-                > 0
+                num_computed_tokens_cpu[num_reqs - num_prefills : num_reqs] > 0
             )
             has_initial_states_p = has_initial_states_cpu.to(
                 common_attn_metadata.query_start_loc.device

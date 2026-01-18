@@ -10,9 +10,12 @@ from vllm.model_executor.custom_op import CustomOp
 from .common import ApplyRotaryEmb
 
 
+# --8<-- [start:rotary_embedding]
 @CustomOp.register("rotary_embedding")
 class RotaryEmbeddingBase(CustomOp):
     """Original rotary positional embedding."""
+
+    # --8<-- [end:rotary_embedding]
 
     def __init__(
         self,
@@ -248,6 +251,28 @@ class RotaryEmbedding(RotaryEmbeddingBase):
                 self.cos_sin_cache,
                 self.is_neox_style,
             )
+        return query, key
+
+    def forward_cpu(
+        self,
+        positions: torch.Tensor,
+        query: torch.Tensor,
+        key: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        from vllm import _custom_ops as ops
+
+        self._match_cos_sin_cache_dtype(query)
+
+        # ops.rotary_embedding() is an in-place operation
+        # that updates the query and key tensors.
+        ops.rotary_embedding(
+            positions,
+            query,
+            key,
+            self.head_size,
+            self.cos_sin_cache,
+            self.is_neox_style,
+        )
         return query, key
 
     def extra_repr(self) -> str:
