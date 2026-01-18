@@ -317,6 +317,7 @@ class TpKVTopology:
     engine_id: EngineId
     remote_block_size: dict[EngineId, int]
     tensor_shape: torch.Size | None = None
+    device_type: str = "cuda"
 
     def __post_init__(self):
         # Figure out whether the first dimension of the cache is K/V
@@ -366,7 +367,11 @@ class TpKVTopology:
 
     @property
     def block_size_position(self) -> int:
-        return -2 if self.is_mla or self._cross_layers_blocks else -3
+        return (
+            -2
+            if self.device_type == "cpu" or self.is_mla or self._cross_layers_blocks
+            else -3
+        )
 
     def tp_ratio(
         self,
