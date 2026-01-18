@@ -9,8 +9,10 @@ vLLM uses an **oracle pattern** for backend selection: a centralized module deci
 Backend code lives in:
 
 - `vllm/model_executor/layers/fused_moe/` — MoE backends
-- `vllm/attention/backends/` — Attention backends
+- `vllm/v1/attention/backends/` — Attention backends
 - `vllm/model_executor/layers/quantization/` — Quantization backends
+
+Attention backend selection lives in `vllm/v1/attention/selector.py`.
 
 ## When to Add a New Backend
 
@@ -27,7 +29,10 @@ Do **not** add a new backend for:
 
 ## MoE Backends
 
-MoE backends are selected via the oracle at `vllm/model_executor/layers/fused_moe/oracle/unquantized.py`.
+Unquantized MoE backends are selected via the oracle at
+`vllm/model_executor/layers/fused_moe/oracle/unquantized.py`. Quantized MoE
+backends use `vllm/model_executor/layers/fused_moe/oracle/fp8.py` and
+`vllm/model_executor/layers/fused_moe/oracle/nvfp4.py`.
 
 ### Step 1: Add to the Backend Enum
 
@@ -36,28 +41,37 @@ MoE backends are selected via the oracle at `vllm/model_executor/layers/fused_mo
 
 class UnquantizedMoeBackend(Enum):
     FLASHINFER_CUTLASS = "FlashInfer CUTLASS"
+    SONIC = "Sonic MoE"  # Add your backend
     AITER = "ROCm AITER"
     TRITON = "TRITON"
-    SONIC = "Sonic MoE"  # Add your backend
     # ...
 ```
 
 ### Step 2: Implement Selection Logic
 
-Update `select_unquantized_moe_backend()` to select your backend when appropriate:
+Update `select_unquantized_moe_backend()` to select your backend when
+appropriate:
 
 ```python
 def select_unquantized_moe_backend(
     use_ep: bool,
     use_dp: bool,
+    is_act_and_mul: bool,
+    has_bias: bool,
 ) -> UnquantizedMoeBackend:
-    # Add selection logic for your backend
-    if (
-        envs.VLLM_USE_SONIC_MOE
-        and current_platform.is_device_capability(90)  # Hopper
-        and not use_ep
-    ):
-        return UnquantizedMoeBackend.SONIC
+    # Add selection logic for your backend.
+    if envs.VLLM_USE_SONIC_MOE:
+        from vllm.model_executor.layers.fused_moe.sonic_moe import (
+            is_sonic_moe_supported,
+        )
+
+        if (
+            is_sonic_moe_supported()
+            and is_act_and_mul
+            and not has_bias
+            and not use_ep
+        ):
+            return UnquantizedMoeBackend.SONIC
     # ... existing logic
 ```
 
@@ -65,11 +79,13 @@ Consider:
 
 - Hardware requirements (GPU architecture, platform)
 - Configuration constraints (expert parallelism, data parallelism)
+- External package availability (use a support check and lazy import)
 - Environment variables for opt-in/opt-out
 
 ### Step 3: Implement Weight Conversion
 
-If your backend requires a different weight layout, add conversion logic to `convert_to_unquantized_kernel_format()`:
+If your backend requires a different weight layout, add conversion logic to
+`convert_to_unquantized_kernel_format()`:
 
 ```python
 def convert_to_unquantized_kernel_format(
@@ -108,6 +124,7 @@ def make_unquantized_moe_kernel(
             MoEPrepareAndFinalizeNoEP(),
             SonicMoeExperts(
                 out_dtype=layer.params_dtype,
+                quant_config=quant_config,
                 weights_prepermuted=True,
             ),
         )
@@ -118,34 +135,61 @@ def make_unquantized_moe_kernel(
 
 ### Step 5: Implement the Experts Class
 
-Create your experts class following the `FusedMoEPermuteExpertsUnpermute` interface:
+Create your experts class following the `FusedMoEPermuteExpertsUnpermute`
+interface:
 
 ```python
 # vllm/model_executor/layers/fused_moe/your_backend.py
 
 class YourExperts(mk.FusedMoEPermuteExpertsUnpermute):
-    def __init__(self, out_dtype: torch.dtype, **kwargs):
+    def __init__(
+        self,
+        out_dtype: torch.dtype,
+        quant_config: FusedMoEQuantConfig = FUSED_MOE_UNQUANTIZED_CONFIG,
+        **kwargs,
+    ):
+        super().__init__(quant_config)
         self.out_dtype = out_dtype
 
     def workspace_shapes(
-        self, M, N, K, topk, global_num_experts,
-        local_num_experts, expert_tokens_meta, activation
+        self,
+        M,
+        N,
+        K,
+        topk,
+        global_num_experts,
+        local_num_experts,
+        expert_tokens_meta,
+        activation,
     ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...]]:
         # Return (workspace1_shape, workspace2_shape, output_shape)
         ...
 
     def apply(
         self,
-        hidden_states, w1, w2, topk_ids, activation,
-        global_num_experts, expert_map, w1_scale, w2_scale,
-        w1_zp, w2_zp, a1q_scale, a2_scale, workspace1,
-        workspace2, expert_tokens_meta,
-    ) -> torch.Tensor:
+        output: torch.Tensor,
+        hidden_states: torch.Tensor,
+        w1: torch.Tensor,
+        w2: torch.Tensor,
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
+        activation: str,
+        global_num_experts: int,
+        expert_map: torch.Tensor | None,
+        a1q_scale: torch.Tensor | None,
+        a2_scale: torch.Tensor | None,
+        workspace13: torch.Tensor,
+        workspace2: torch.Tensor,
+        expert_tokens_meta: mk.ExpertTokensMetadata | None,
+        apply_router_weight_on_input: bool,
+    ) -> None:
         # Run your kernel
         ...
 ```
 
-See `fused_moe/modular_kernel.py` for the full interface and existing implementations like `TritonExperts` or `FlashInferExperts` for reference.
+See `vllm/model_executor/layers/fused_moe/modular_kernel.py` for the full
+interface and existing implementations like `TritonExperts` or
+`FlashInferExperts` for reference.
 
 ### Step 6: Export Public APIs
 
@@ -206,12 +250,17 @@ Add a CI job in `.buildkite/test_areas/kernels.yaml`:
 
 ## Environment Variables
 
-Register any new environment variables in `vllm/envs.py`:
+Register any new environment variables in `vllm/envs.py` by adding them to the
+`environment_variables` mapping (and, if desired, add a type hint under
+`TYPE_CHECKING` for docs tooling):
 
 ```python
-VLLM_USE_YOUR_BACKEND: bool = bool(
-    os.getenv("VLLM_USE_YOUR_BACKEND", "0") == "1"
-)
+environment_variables: dict[str, Callable[[], Any]] = {
+    # ...
+    "VLLM_USE_YOUR_BACKEND": lambda: bool(
+        int(os.getenv("VLLM_USE_YOUR_BACKEND", "0"))
+    ),
+}
 ```
 
 ## Checklist
