@@ -131,8 +131,8 @@ class BOSEOSFilter(Pooler):
     def __init__(
         self,
         pooler: Pooler,
-        bos_token_id: int,
-        eos_token_id: int,
+        bos_token_id: int = -1,  # -1 disables the filtering
+        eos_token_id: int = -1,
     ) -> None:
         super().__init__()
 

@@ -194,26 +194,36 @@ class BgeM3EmbeddingModel(RobertaEmbeddingModel):
         self.eos_token_id = model_config.hf_config.eos_token_id
 
         super().__init__(vllm_config=vllm_config, prefix=prefix)
-        self.secondary_weight_prefix = "sparse_linear."
+        self.secondary_weight_prefixes = ["sparse_linear.", "colbert_linear."]
+        self.secondary_weight_files = [
+            prefix + "pt" for prefix in self.secondary_weight_prefixes
+        ]
 
         self.secondary_weights = [
             DefaultModelLoader.Source(
                 model_or_path=vllm_config.model_config.model,
                 revision=None,
-                prefix=self.secondary_weight_prefix,
-                allow_patterns_overrides=["sparse_linear.pt"],
+                prefix=prefix,
+                allow_patterns_overrides=[filename],
+            )
+            for filename, prefix in zip(
+                self.secondary_weight_files, self.secondary_weight_prefixes
             )
         ]
 
     def _build_pooler(self, pooler_config: PoolerConfig) -> Pooler:
         self.sparse_linear = nn.Linear(self.hidden_size, 1, dtype=self.head_dtype)
+        self.colbert_linear = nn.Linear(
+            self.hidden_size, self.hidden_size, dtype=self.head_dtype
+        )
+
         return DispatchPooler(
             {
                 "embed": pooler_for_embed(pooler_config),
                 "token_embed": BOSEOSFilter(
-                    pooler_for_token_embed(pooler_config),
+                    pooler_for_token_embed(pooler_config, self.colbert_linear),
                     self.bos_token_id,
-                    self.eos_token_id,
+                    # for some reason m3 only filters the bos for colbert vectors
                 ),
                 "token_classify": BOSEOSFilter(
                     pooler_for_token_classify(
@@ -230,7 +240,7 @@ class BgeM3EmbeddingModel(RobertaEmbeddingModel):
 
     def load_weights(self, all_weights: Iterable[tuple[str, torch.Tensor]]):
         secondary, weights = filter_secondary_weights(
-            all_weights, [self.secondary_weight_prefix]
+            all_weights, self.secondary_weight_prefixes
         )
 
         super().load_weights(weights)
@@ -238,7 +248,9 @@ class BgeM3EmbeddingModel(RobertaEmbeddingModel):
         params_dict = dict(self.named_parameters())
 
         for name, loaded_weight in secondary:
-            if name.startswith(self.secondary_weight_prefix):
+            if any(
+                name.startswith(prefix) for prefix in self.secondary_weight_prefixes
+            ):
                 param = params_dict[name]
                 weight_loader = getattr(param, "weight_loader", default_weight_loader)
                 weight_loader(param, loaded_weight)
