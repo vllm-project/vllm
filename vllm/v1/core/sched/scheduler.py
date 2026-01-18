@@ -332,23 +332,11 @@ class Scheduler(SchedulerInterface):
                 req_index += 1
                 continue
 
-            # TODO: merge PR#30618
-            num_tokens_to_compute = (
-                request.num_tokens_with_spec + request.num_output_placeholders
+            num_new_tokens = (
+                request.num_tokens_with_spec
+                + request.num_output_placeholders
+                - request.num_computed_tokens
             )
-            # Ensure new tokens for a request in the prefill phase do not contain
-            # draft tokens, especially in the last prefill chunk. For a hybrid-model,
-            # extra draft tokens would corrupt the generated Mamba state.
-            # TODO: This logic does not yet handle resumed requests.
-            if (
-                self.has_mamba_layers
-                and request.num_computed_tokens < request.num_prompt_tokens
-            ):
-                num_tokens_to_compute = min(
-                    num_tokens_to_compute, request.num_prompt_tokens
-                )
-            num_new_tokens = num_tokens_to_compute - request.num_computed_tokens
-
             if 0 < self.scheduler_config.long_prefill_token_threshold < num_new_tokens:
                 num_new_tokens = self.scheduler_config.long_prefill_token_threshold
             num_new_tokens = min(num_new_tokens, token_budget)
