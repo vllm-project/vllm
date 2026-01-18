@@ -89,7 +89,6 @@ class FusedMoEModularMethod(FusedMoEMethodBase, CustomOp):
     ) -> FusedMoEQuantConfig | None:
         return self.moe_quant_config
 
-    # TODO: rename x -> hidden_states
     def apply(
         self,
         layer: "FusedMoE",  # type: ignore[name-defined] # noqa: F821
