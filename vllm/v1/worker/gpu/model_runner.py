@@ -285,6 +285,10 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             input_buffers=self.input_buffers,
             device=self.device,
         )
+        if self.uses_mrope:
+            input_batch.mrope_positions = self.mrope_states.mrope_positions[
+                :, :num_tokens
+            ]
         if not skip_attn:
             self.prepare_dummy_attn_metadata(input_batch)
 
@@ -293,7 +297,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         num_sampled_tokens = np.ones(input_batch.num_reqs, dtype=np.int32)
         positions = input_batch.positions
         if self.uses_mrope:
-            positions = self.mrope_states.mrope_positions[:, :num_tokens]
+            positions = input_batch.mrope_positions
         with (
             self.maybe_dummy_run_with_lora(
                 self.lora_config,
@@ -941,6 +945,10 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 input_buffers=self.input_buffers,
                 device=self.device,
             )
+            if self.uses_mrope:
+                input_batch.mrope_positions = self.mrope_states.mrope_positions[
+                    :, :num_tokens_after_padding
+                ]
             self.prepare_dummy_attn_metadata(input_batch)
 
         # Run model.
