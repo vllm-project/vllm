@@ -181,7 +181,11 @@ class GlmAsrEncoderAttention(nn.Module):
 
         # Use vLLM's ApplyRotaryEmb CustomOp
         # enforce_enable=True ensures the op is always enabled (important for ViT)
-        partial_rotary_factor = getattr(config, "partial_rotary_factor", 0.5)
+        rope_params = getattr(config, "rope_parameters", None)
+        if rope_params:
+            partial_rotary_factor = rope_params.get("partial_rotary_factor", 0.5)
+        else:
+            partial_rotary_factor = getattr(config, "partial_rotary_factor", 0.5)
         self.rotary_dim = int(self.head_dim * partial_rotary_factor)
         self.apply_rotary_emb = ApplyRotaryEmb(enforce_enable=True)
 
