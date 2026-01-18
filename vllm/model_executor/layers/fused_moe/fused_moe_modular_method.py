@@ -12,10 +12,12 @@ from vllm.model_executor.layers.fused_moe.config import (
 from vllm.model_executor.layers.fused_moe.fused_moe_method_base import (
     FusedMoEMethodBase,
 )
-from vllm.model_executor.layers.fused_moe.fused_moe_router import FusedMoERouter
 from vllm.model_executor.layers.fused_moe.modular_kernel import (
     FusedMoEModularKernel,
     FusedMoEPrepareAndFinalize,
+)
+from vllm.model_executor.layers.fused_moe.router.fused_moe_router import (
+    FusedMoERouter,
 )
 
 logger = init_logger(__name__)

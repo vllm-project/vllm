@@ -8,6 +8,7 @@ from torch.nn import Module
 
 import vllm.envs as envs
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
+from vllm._aiter_ops import rocm_aiter_ops
 from vllm.logger import init_logger
 from vllm.model_executor.custom_op import CustomOp
 from vllm.model_executor.layers.fused_moe.config import (
@@ -19,7 +20,6 @@ from vllm.model_executor.layers.fused_moe.config import (
 from vllm.model_executor.layers.fused_moe.fused_moe_method_base import (
     FusedMoEMethodBase,
 )
-from vllm.model_executor.layers.fused_moe.fused_moe_router import FusedMoERouter
 from vllm.model_executor.layers.fused_moe.modular_kernel import (
     FusedMoEActivationFormat,
     FusedMoEPermuteExpertsUnpermute,
@@ -30,6 +30,9 @@ from vllm.model_executor.layers.fused_moe.oracle.unquantized import (
     convert_to_unquantized_kernel_format,
     make_unquantized_moe_kernel,
     select_unquantized_moe_backend,
+)
+from vllm.model_executor.layers.fused_moe.router.fused_moe_router import (
+    FusedMoERouter,
 )
 from vllm.model_executor.utils import replace_parameter, set_weight_attrs
 from vllm.platforms import current_platform
@@ -56,6 +59,12 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
         self.unquantized_backend = select_unquantized_moe_backend(
             use_ep=self.moe.moe_parallel_config.use_ep,
             use_dp=self.moe.moe_parallel_config.dp_size > 1,
+        )
+
+        # AITER only supports gated activations (silu/gelu), so disable it
+        # for non-gated MoE (is_act_and_mul=False)
+        self.rocm_aiter_moe_enabled = (
+            rocm_aiter_ops.is_fused_moe_enabled() and moe.is_act_and_mul
         )
         self.kernel: mk.FusedMoEModularKernel | None = None
 
@@ -321,9 +330,9 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         if (
             layer.enable_eplb is not False
-            or layer.expert_load_view is not None
-            or layer.logical_to_physical_map is not None
-            or layer.logical_replica_count is not None
+            or layer.eplb_state.expert_load_view is not None
+            or layer.eplb_state.logical_to_physical_map is not None
+            or layer.eplb_state.logical_replica_count is not None
         ):
             raise NotImplementedError("Expert load balancing is not supported for CPU.")
 
@@ -355,9 +364,9 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         if (
             layer.enable_eplb is not False
-            or layer.expert_load_view is not None
-            or layer.logical_to_physical_map is not None
-            or layer.logical_replica_count is not None
+            or layer.eplb_state.expert_load_view is not None
+            or layer.eplb_state.logical_to_physical_map is not None
+            or layer.eplb_state.logical_replica_count is not None
         ):
             raise NotImplementedError("Expert load balancing is not supported for XPU.")
         return layer.ipex_fusion(
