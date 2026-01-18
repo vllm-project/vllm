@@ -1,8 +1,6 @@
-import os
-from typing import Optional
-
-from transformers import PretrainedConfig
-from transformers import Qwen2Config
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from transformers import PretrainedConfig, Qwen2Config
 
 
 class FireRedAudioEncoderConfig(PretrainedConfig):
