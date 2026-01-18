@@ -331,7 +331,6 @@ class FusedMoE(CustomOp):
         is_sequence_parallel=False,
         expert_mapping: list[tuple[str, str, int, str]] | None = None,
         n_shared_experts: int | None = None,
-        routing_method_type: RoutingMethodType | None = None,
         router_logits_dtype: torch.dtype | None = None,
     ):
         super().__init__()
@@ -548,7 +547,6 @@ class FusedMoE(CustomOp):
             # TODO(bnell): once we can construct the MK at init time, we
             # can make this a value.
             indices_type_getter=lambda: self.quant_method.topk_indices_dtype,
-            routing_method_type=routing_method_type,
             capture=capture,
         )
         self.routing_method_type: RoutingMethodType = self.router.routing_method_type

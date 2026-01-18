@@ -68,9 +68,9 @@ def _supports_routing_method(
     if (weight_key, activation_key) == (kFp8Static128BlockSym, kFp8Dynamic128Sym):
         # NOTE(rob): potentially allow others here. This is a conservative list.
         return routing_method in [
-            RoutingMethodType.DeepSeekV3,  # DeepSeekV3
-            RoutingMethodType.Renormalize,  # Qwen3 MoE
-            RoutingMethodType.RenormalizeNaive,  # Qwen3 MoE
+            RoutingMethodType.DeepSeekV3,
+            RoutingMethodType.Renormalize,
+            RoutingMethodType.RenormalizeNaive,
         ]
     elif (weight_key, activation_key) == (kFp8StaticTensorSym, kFp8StaticTensorSym):
         # NOTE(rob): kernel requires Llama4.
