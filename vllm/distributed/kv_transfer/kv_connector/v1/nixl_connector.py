@@ -1295,7 +1295,6 @@ class NixlConnectorWorker:
             attn_backend=self.attn_backend,
             tensor_shape=next(iter(kv_caches.values())).shape,
         )
-
         self.compat_hash = compute_nixl_compatibility_hash(
             self.vllm_config, self.backend_name, self.kv_topo.cross_layers_blocks
         )

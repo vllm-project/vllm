@@ -331,16 +331,11 @@ class TpKVTopology:
             len(kv_cache_shape) == 5 and kv_cache_shape[0] == 1
         )
 
-        test_shape = self.attn_backend.get_kv_cache_shape(
-            num_blocks=1234, block_size=16, num_kv_heads=8, head_size=256
-        )
-
         self._cross_layers_blocks = False
         if self.tensor_shape is not None:
-            self._cross_layers_blocks = len(self.tensor_shape) != len(test_shape)
-            if self._cross_layers_blocks:
-                # expect one additional dimension (num_layers)
-                assert len(self.tensor_shape) == len(test_shape) + 1
+            self._cross_layers_blocks = (
+                len(self.tensor_shape) == len(kv_cache_shape) + 1
+            )
 
     @property
     def is_kv_layout_blocks_first(self) -> bool:
