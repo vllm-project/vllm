@@ -130,7 +130,7 @@ class OpenAIServingCompletion(OpenAIServing):
             )
         except (ValueError, TypeError, RuntimeError, jinja2.TemplateError) as e:
             logger.exception("Error in preprocessing prompt inputs")
-            return self.create_error_response(f"{e} {e.__cause__}")
+            return self.create_error_response(e)
 
         return engine_prompts
 
@@ -169,8 +169,8 @@ class OpenAIServingCompletion(OpenAIServing):
             else:
                 tokenizer = await self.engine_client.get_tokenizer()
         except (ValueError, TypeError, RuntimeError) as e:
-            logger.exception("Error in preprocessing prompt inputs")
-            return self.create_error_response(f"{e} {e.__cause__}")
+            logger.exception("Error preparing request components")
+            return self.create_error_response(e)
 
         # Extract data_parallel_rank from header (router can inject it)
         data_parallel_rank = self._get_data_parallel_rank(raw_request)
