@@ -167,7 +167,7 @@ class EncoderRunner:
         return mm_embeds, is_mm_embed
 
     @torch.inference_mode()
-    def get_mm_embedding(
+    def get_inputs_embeds(
         self,
         model: SupportsMultiModal,
         input_ids: torch.Tensor,
