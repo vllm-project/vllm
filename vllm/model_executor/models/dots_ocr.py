@@ -60,7 +60,7 @@ from vllm.transformers_utils.configs.dotsocr import DotsOCRConfig, DotsVisionCon
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
-from .vision import run_dp_sharded_mrope_vision_model
+from .vision import is_vit_use_data_parallel, run_dp_sharded_mrope_vision_model
 
 IMAGE_TOKEN = "<|imgpad|>"
 
@@ -183,9 +183,9 @@ class PatchMerger(nn.Module):
         spatial_merge_size: int = 2,
         pre_norm="layernorm",
         prefix: str = "",
-        use_data_parallel: bool = False,
     ) -> None:
         super().__init__()
+        use_data_parallel = is_vit_use_data_parallel()
         self.hidden_size = context_dim * (spatial_merge_size**2)
         self.pre_norm = pre_norm
         if self.pre_norm == "layernorm":
@@ -230,15 +230,10 @@ class DotsVisionAttention(nn.Module):
         bias: bool = True,
         *,
         quant_config: QuantizationConfig | None = None,
-        multimodal_config: MultiModalConfig | None = None,
         prefix: str = "",
     ) -> None:
         super().__init__()
-        use_data_parallel = (
-            multimodal_config.mm_encoder_tp_mode == "data"
-            if multimodal_config
-            else False
-        )
+        use_data_parallel = is_vit_use_data_parallel()
 
         self.embed_dim = dim
         self.tp_size = (
@@ -328,7 +323,6 @@ class DotsSwiGLUFFN(nn.Module):
         config,
         *,
         quant_config: QuantizationConfig | None = None,
-        multimodal_config: MultiModalConfig | None = None,
         prefix: str = "",
     ):
         super().__init__()
@@ -336,11 +330,7 @@ class DotsSwiGLUFFN(nn.Module):
         in_features = config.embed_dim
         bias = config.use_bias
 
-        use_data_parallel = (
-            multimodal_config.mm_encoder_tp_mode == "data"
-            if multimodal_config
-            else False
-        )
+        use_data_parallel = is_vit_use_data_parallel()
         # Referenced aimv2.py AIMv2SwiGLUFFN
         self.fc13 = MergedColumnParallelLinear(
             in_features,
@@ -541,16 +531,10 @@ class DotsVisionTransformer(nn.Module):
         else:
             self.post_trunk_norm = None
 
-        use_data_parallel = (
-            multimodal_config.mm_encoder_tp_mode == "data"
-            if multimodal_config
-            else False
-        )
         self.merger = PatchMerger(
             dim=config.hidden_size,
             context_dim=config.embed_dim,
             spatial_merge_size=config.spatial_merge_size,
-            use_data_parallel=use_data_parallel,
         )
 
     @property
