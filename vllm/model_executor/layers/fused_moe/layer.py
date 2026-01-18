@@ -39,21 +39,21 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEQuantConfig,
     RoutingMethodType,
 )
-from vllm.model_executor.layers.fused_moe.fused_moe import GroupedTopk
 from vllm.model_executor.layers.fused_moe.fused_moe_method_base import (
     FusedMoEMethodBase,
 )
 from vllm.model_executor.layers.fused_moe.fused_moe_modular_method import (
     FusedMoEModularMethod,
 )
-from vllm.model_executor.layers.fused_moe.fused_moe_router import FusedMoERouter
 from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (
     init_aiter_topK_meta_data,
 )
 from vllm.model_executor.layers.fused_moe.routed_experts_capturer import (
     RoutedExpertsCapturer,
 )
-from vllm.model_executor.layers.fused_moe.routing_simulator import RoutingSimulator
+from vllm.model_executor.layers.fused_moe.router.router_factory import (
+    create_fused_moe_router,
+)
 from vllm.model_executor.layers.fused_moe.unquantized_fused_moe_method import (
     UnquantizedFusedMoEMethod,
 )
@@ -83,23 +83,11 @@ NaiveEPDPPrepareAndFinalizeCls: TypeAlias = type[_NaiveEPDPPrepareAndFinalizeTyp
 NaiveEPDPPrepareAndFinalize: NaiveEPDPPrepareAndFinalizeCls | None = None
 
 if current_platform.is_cuda_alike():
-    from .fused_moe import eplb_map_to_physical_and_record
     from .naive_epdp_prepare_finalize import (
         NaiveEPDPPrepareAndFinalize as _NaiveEPDPPrepareAndFinalizeClass,
     )
 
     NaiveEPDPPrepareAndFinalize = _NaiveEPDPPrepareAndFinalizeClass
-else:
-
-    def eplb_map_to_physical_and_record(
-        topk_ids: torch.Tensor,
-        _expert_load_view: torch.Tensor,
-        _logical_to_physical_map: torch.Tensor,
-        _logical_replica_count: torch.Tensor,
-        _indices_type: torch.dtype | None,
-    ) -> torch.Tensor:
-        # CPU fallback: no EPLB so just return as is
-        return topk_ids
 
 
 logger = init_logger(__name__)
