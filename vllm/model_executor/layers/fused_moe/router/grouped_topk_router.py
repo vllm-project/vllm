@@ -261,7 +261,6 @@ class GroupedTopKRouter(BaseRouter):
         num_fused_shared_experts: int = 0,
         enable_eplb: bool = False,
         indices_type_getter: Callable[[], torch.dtype | None] | None = None,
-        routing_method_type: RoutingMethodType | None = None,
     ):
         super().__init__(
             top_k=top_k,
