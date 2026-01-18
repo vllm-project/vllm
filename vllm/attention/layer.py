@@ -172,7 +172,6 @@ class Attention(nn.Module, AttentionLayerBase):
         kv_sharing_target_layer_name: str | None = None,
         attn_backend: type[AttentionBackend] | None = None,
         head_size_v: int | None = None,
-        use_alibi_sqrt: bool | None = None,
         **extra_impl_args,
     ) -> None:
         """
