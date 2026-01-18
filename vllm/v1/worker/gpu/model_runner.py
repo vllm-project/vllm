@@ -983,8 +983,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             if self.supports_mm_inputs:
                 # Execute the multimodal encoder.
                 mm_embeds, is_mm_embed = self.get_mm_embeddings(
-                    scheduler_output.scheduled_encoder_inputs,
-                    input_batch,
+                    scheduler_output.scheduled_encoder_inputs, input_batch
                 )
                 inputs_embeds = self.encoder_runner.get_inputs_embeds(
                     self.model, input_batch.input_ids, mm_embeds, is_mm_embed
