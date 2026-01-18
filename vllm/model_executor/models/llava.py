@@ -19,7 +19,7 @@ from transformers.models.llava import LlavaProcessor
 from transformers.models.pixtral import PixtralProcessor
 
 from vllm.config import VllmConfig
-from vllm.config.multimodal import BaseDummyOptions
+from vllm.config.multimodal import BaseDummyOptions, MultiModalConfig
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.linear import ColumnParallelLinear, RowParallelLinear
 from vllm.model_executor.layers.quantization import QuantizationConfig
@@ -39,6 +39,7 @@ from vllm.multimodal.parse import (
     MultiModalDataItems,
 )
 from vllm.multimodal.processing import (
+    BaseDummyInputsBuilder,
     BaseMultiModalProcessor,
     BaseProcessingInfo,
     InputProcessingContext,
@@ -46,17 +47,23 @@ from vllm.multimodal.processing import (
     PromptUpdate,
     PromptUpdateDetails,
 )
-from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from vllm.sequence import IntermediateTensors
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
 from .clip import CLIPVisionModel
-from .interfaces import MultiModalEmbeddings, SupportsMultiModal, SupportsPP
+from .interfaces import (
+    MultiModalEmbeddings,
+    SupportsLoRA,
+    SupportsMultiModal,
+    SupportsPP,
+)
+from .module_mapping import MultiModelKeys
 from .pixtral import PixtralHFEncoderInfo, PixtralHFVisionModel
 from .siglip import SiglipVisionModel
 from .utils import (
     AutoWeightsLoader,
     WeightsMapper,
+    get_layer_index,
     init_vllm_registered_model,
     maybe_prefix,
 )
@@ -436,32 +443,19 @@ def _get_num_hidden_layers(hf_config: LlavaLikeConfig) -> int:
     num_hidden_layers = hf_config.vision_config.num_hidden_layers
     # If we have one feature layer, initialize up to that layer
     if isinstance(feature_layers, int):
-        return _get_layer_index(feature_layers, num_hidden_layers)
+        return get_layer_index(feature_layers, num_hidden_layers)
     # If we have multiple feature layers, initialize up to the deepest one
     elif isinstance(feature_layers, (list, tuple)):
-        return max(_get_layer_index(idx, num_hidden_layers) for idx in feature_layers)
+        return max(get_layer_index(idx, num_hidden_layers) for idx in feature_layers)
     raise TypeError(
         f"vision_layer_feature type: {type(feature_layers)} is not supported"
     )
 
 
-def _get_layer_index(feature_layer_index: int, num_hidden_layers: int) -> int:
-    """Given a signed vision feature layer, get the number of hidden layers
-    needed to leverage it.
-
-    Args:
-        feature_layer_index: Index of a required layer in the visual encoder.
-        num_hidden_layers: The total number of hidden layers in the visual
-            encoder.
-    """
-    if feature_layer_index < 0:
-        return num_hidden_layers + feature_layer_index + 1
-    return feature_layer_index
-
-
 def init_vision_tower_for_llava(
     hf_config: LlavaLikeConfig,
     quant_config: QuantizationConfig | None,
+    multimodal_config: MultiModalConfig | None,
     *,
     require_post_norm: bool | None = None,
     prefix: str = "",
@@ -475,6 +469,7 @@ def init_vision_tower_for_llava(
         return CLIPVisionModel(
             vision_config,
             quant_config=quant_config,
+            multimodal_config=multimodal_config,
             num_hidden_layers_override=num_hidden_layers,
             require_post_norm=require_post_norm,
             prefix=prefix,
@@ -483,6 +478,7 @@ def init_vision_tower_for_llava(
         return SiglipVisionModel(
             vision_config,
             quant_config=quant_config,
+            multimodal_config=multimodal_config,
             num_hidden_layers_override=num_hidden_layers,
             require_post_norm=require_post_norm,
             prefix=prefix,
@@ -491,6 +487,7 @@ def init_vision_tower_for_llava(
         return PixtralHFVisionModel(
             vision_config,
             quant_config=quant_config,
+            multimodal_config=multimodal_config,
             num_hidden_layers_override=num_hidden_layers,
             require_post_norm=require_post_norm,
             prefix=prefix,
@@ -505,7 +502,9 @@ def init_vision_tower_for_llava(
     info=_build_llava_or_pixtral_hf_info,
     dummy_inputs=LlavaDummyInputsBuilder,
 )
-class LlavaForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP):
+class LlavaForConditionalGeneration(
+    nn.Module, SupportsLoRA, SupportsMultiModal, SupportsPP
+):
     packed_modules_mapping = {
         "qkv_proj": ["q_proj", "k_proj", "v_proj"],
         "gate_up_proj": ["gate_proj", "up_proj"],
@@ -555,7 +554,8 @@ class LlavaForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP):
         if multimodal_config.get_limit_per_prompt("image"):
             self.vision_tower = init_vision_tower_for_llava(
                 config,
-                quant_config,
+                quant_config=quant_config,
+                multimodal_config=multimodal_config,
                 require_post_norm=False,
                 prefix=maybe_prefix(prefix, "vision_tower"),
             )
@@ -733,6 +733,32 @@ class LlavaForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP):
 
         loader = AutoWeightsLoader(self, skip_prefixes=skip_prefixes)
         return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
+
+    def get_mm_mapping(self) -> MultiModelKeys:
+        """
+        Get the module prefix in multimodal models
+        """
+        return MultiModelKeys.from_string_field(
+            language_model="language_model",
+            connector="multi_modal_projector",
+            tower_model="vision_tower",
+        )
+
+    def get_num_mm_encoder_tokens(
+        self,
+        num_image_tokens: int,
+    ) -> int:
+        # LLaVA's vision encoder outputs one token per patch without
+        # spatial merging or pixel shuffle
+        return num_image_tokens
+
+    def get_num_mm_connector_tokens(
+        self,
+        num_vision_tokens: int,
+    ) -> int:
+        # LLaVA's MLP projector outputs the same number of tokens
+        # as it receives from the vision encoder (1:1 mapping)
+        return num_vision_tokens
 
 
 class MantisProcessingInfo(LlavaProcessingInfo):

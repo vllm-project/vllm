@@ -67,7 +67,7 @@ where `scale_factor * multiplier` can be computed at weight loading.
 
 namespace MARLIN_NAMESPACE_NAME {
 
-#if !defined(__CUDA_ARCH__) || __CUDA_ARCH__ >= 800
+#if !defined(__CUDA_ARCH__) || __CUDA_ARCH__ >= 750
 // Lookup-table based 3-input logical operation; explicitly used for
 // dequantization as the compiler does not seem to automatically recognize it in
 // all cases.

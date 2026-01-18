@@ -349,7 +349,7 @@ class Lfm2MoeShortConvDecoderLayer(nn.Module):
     ) -> None:
         super().__init__()
         self.layer_idx = layer_idx
-        self.conv = ShortConv(
+        self.short_conv = ShortConv(
             config=config,
             dim=config.hidden_size,
             layer_idx=layer_idx,
@@ -388,7 +388,7 @@ class Lfm2MoeShortConvDecoderLayer(nn.Module):
         else:
             hidden_states, residual = self.operator_norm(hidden_states, residual)
         output = torch.empty_like(hidden_states)
-        self.conv(
+        self.short_conv(
             hidden_states,
             output,
         )
@@ -486,6 +486,7 @@ class Lfm2MoeModel(nn.Module):
 
     def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:
         return FusedMoE.make_expert_params_mapping(
+            self,
             ckpt_gate_proj_name="w1",
             ckpt_down_proj_name="w2",
             ckpt_up_proj_name="w3",
@@ -507,6 +508,9 @@ class Lfm2MoeModel(nn.Module):
         for name, loaded_weight in weights:
             if "expert_bias" in name:
                 name = name.replace("expert_bias", "gate.e_score_correction_bias")
+
+            if ".conv." in name:
+                name = name.replace(".conv.", ".short_conv.", 1)
 
             for param_name, weight_name, shard_id in stacked_params_mapping:
                 # Skip non-stacked layers and experts (experts handled below).
@@ -594,6 +598,7 @@ class Lfm2MoeForCausalLM(
             "w1",
             "w3",
         ],
+        "in_proj": ["in_proj"],
     }
 
     # LoRA specific attributes

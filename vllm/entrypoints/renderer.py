@@ -12,6 +12,7 @@ import torch
 from pydantic import Field
 
 from vllm.config import ModelConfig
+from vllm.exceptions import VLLMValidationError
 from vllm.inputs.data import EmbedsPrompt, TextPrompt, TokensPrompt
 from vllm.inputs.parse import get_prompt_components, parse_raw_prompts
 from vllm.tokenizers import TokenizerLike
@@ -43,11 +44,8 @@ class RenderConfig:
     def verify_truncate_prompt_tokens(self, model_config: ModelConfig) -> int | None:
         """Validate and normalize `truncate_prompt_tokens` parameter."""
         truncate_prompt_tokens = self.truncate_prompt_tokens
-        if truncate_prompt_tokens is None:
-            return None
-
-        if truncate_prompt_tokens == 0:
-            return 0
+        if truncate_prompt_tokens is None or truncate_prompt_tokens == 0:
+            return truncate_prompt_tokens
 
         if truncate_prompt_tokens < 0:
             truncate_prompt_tokens = model_config.max_model_len
@@ -162,22 +160,26 @@ class BaseRenderer(ABC):
     ) -> list[EmbedsPrompt]:
         """Load and validate base64-encoded embeddings into prompt objects."""
         if not self.model_config.enable_prompt_embeds:
-            raise ValueError(
-                "You must set `--enable-prompt-embeds` to input `prompt_embeds`."
+            raise VLLMValidationError(
+                "You must set `--enable-prompt-embeds` to input `prompt_embeds`.",
+                parameter="prompt_embeds",
             )
 
         def _load_and_validate_embed(embed: bytes) -> EmbedsPrompt:
-            tensor = torch.load(
-                io.BytesIO(pybase64.b64decode(embed, validate=True)),
-                weights_only=True,
-                map_location=torch.device("cpu"),
-            )
-            assert isinstance(tensor, torch.Tensor) and tensor.dtype in (
-                torch.float32,
-                torch.bfloat16,
-                torch.float16,
-            )
-            tensor = tensor.to_dense()
+            # Enable sparse tensor integrity checks to prevent out-of-bounds
+            # writes from maliciously crafted tensors
+            with torch.sparse.check_sparse_tensor_invariants():
+                tensor = torch.load(
+                    io.BytesIO(pybase64.b64decode(embed, validate=True)),
+                    weights_only=True,
+                    map_location=torch.device("cpu"),
+                )
+                assert isinstance(tensor, torch.Tensor) and tensor.dtype in (
+                    torch.float32,
+                    torch.bfloat16,
+                    torch.float16,
+                )
+                tensor = tensor.to_dense()
             if tensor.dim() > 2:
                 tensor = tensor.squeeze(0)
                 assert tensor.dim() == 2
@@ -393,10 +395,12 @@ class CompletionRenderer(BaseRenderer):
     ) -> TokensPrompt:
         """Create validated TokensPrompt."""
         if max_length is not None and len(token_ids) > max_length:
-            raise ValueError(
+            raise VLLMValidationError(
                 f"This model's maximum context length is {max_length} tokens. "
                 f"However, your request has {len(token_ids)} input tokens. "
-                "Please reduce the length of the input messages."
+                "Please reduce the length of the input messages.",
+                parameter="input_tokens",
+                value=len(token_ids),
             )
 
         tokens_prompt = TokensPrompt(prompt_token_ids=token_ids)

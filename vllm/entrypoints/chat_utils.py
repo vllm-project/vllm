@@ -24,6 +24,7 @@ from openai.types.chat import (
     ChatCompletionContentPartInputAudioParam,
     ChatCompletionContentPartRefusalParam,
     ChatCompletionContentPartTextParam,
+    ChatCompletionFunctionToolParam,
     ChatCompletionMessageToolCallParam,
     ChatCompletionToolMessageParam,
 )
@@ -65,6 +66,15 @@ else:
     torch = LazyLoader("torch", globals(), "torch")
 
 logger = init_logger(__name__)
+
+
+class ChatTemplateResolutionError(ValueError):
+    """Raised when chat template resolution fails.
+
+    This is a subclass of ValueError for backward compatibility with
+    existing exception handlers.
+    """
+
 
 MODALITY_PLACEHOLDERS_MAP = {
     "image": "<##IMAGE##>",
@@ -269,6 +279,9 @@ class CustomChatCompletionMessageParam(TypedDict, total=False):
     reasoning: str | None
     """The reasoning content for interleaved thinking."""
 
+    tools: list[ChatCompletionFunctionToolParam] | None
+    """The tools for developer role."""
+
 
 ChatCompletionMessageParam: TypeAlias = (
     OpenAIChatCompletionMessageParam
@@ -299,6 +312,9 @@ class ConversationMessage(TypedDict, total=False):
 
     reasoning_content: str | None
     """Deprecated: The reasoning content for interleaved thinking."""
+
+    tools: list[ChatCompletionFunctionToolParam] | None
+    """The tools for developer role."""
 
 
 # Passed in by user
@@ -1619,6 +1635,8 @@ def _parse_chat_message_content(
         if "name" in message and isinstance(message["name"], str):
             result_msg["name"] = message["name"]
 
+        if role == "developer":
+            result_msg["tools"] = message.get("tools", None)
     return result
 
 
@@ -1629,12 +1647,17 @@ def _postprocess_messages(messages: list[ConversationMessage]) -> None:
     # so, for messages that have tool_calls, parse the string (which we get
     # from openAI format) to dict
     for message in messages:
-        if (
-            message["role"] == "assistant"
-            and "tool_calls" in message
-            and isinstance(message["tool_calls"], list)
-        ):
-            for item in message["tool_calls"]:
+        if message["role"] == "assistant" and "tool_calls" in message:
+            tool_calls = message.get("tool_calls")
+            if not isinstance(tool_calls, list):
+                continue
+
+            if len(tool_calls) == 0:
+                # Drop empty tool_calls to keep templates on the normal assistant path.
+                message.pop("tool_calls", None)
+                continue
+
+            for item in tool_calls:
                 # if arguments is None or empty string, set to {}
                 if content := item["function"].get("arguments"):
                     if not isinstance(content, (dict, list)):
@@ -1800,7 +1823,7 @@ def apply_hf_chat_template(
     )
 
     if hf_chat_template is None:
-        raise ValueError(
+        raise ChatTemplateResolutionError(
             "As of transformers v4.44, default chat template is no longer "
             "allowed, so you must provide a chat template if the tokenizer "
             "does not define one."
