@@ -38,7 +38,7 @@ from vllm.entrypoints.chat_utils import (
     ChatCompletionMessageParam,
     ChatTemplateContentFormatOption,
 )
-from vllm.entrypoints.score_utils import (
+from vllm.entrypoints.pooling.score.utils import (
     ScoreContentPartParam,
     ScoreMultiModalParam,
     _cosine_similarity,

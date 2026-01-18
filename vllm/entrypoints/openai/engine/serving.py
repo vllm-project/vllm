@@ -1213,6 +1213,12 @@ class OpenAIServing:
             )
             # Fill in other keys like MM data
             engine_prompt.update(extra_data)  # type: ignore
+        else:
+            self._validate_input(
+                request=request,
+                input_ids=engine_prompt["prompt_token_ids"],
+                input_text="",
+            )
 
         engine_prompt = cast(TokensPrompt, engine_prompt)
 
