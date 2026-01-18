@@ -181,6 +181,12 @@ class GlmAsrEncoderAttention(nn.Module):
 
         # Use vLLM's ApplyRotaryEmb CustomOp
         # enforce_enable=True ensures the op is always enabled (important for ViT)
+        rope_params = getattr(config, "rope_parameters", None)
+        if rope_params:
+            partial_rotary_factor = rope_params.get("partial_rotary_factor", 0.5)
+        else:
+            partial_rotary_factor = getattr(config, "partial_rotary_factor", 0.5)
+        self.rotary_dim = int(self.head_dim * partial_rotary_factor)
         self.apply_rotary_emb = ApplyRotaryEmb(enforce_enable=True)
 
         # Use vLLM's MMEncoderAttention for hardware-optimized attention
@@ -226,8 +232,12 @@ class GlmAsrEncoderAttention(nn.Module):
         # Apply rotary position embeddings using vLLM's ApplyRotaryEmb
         # ApplyRotaryEmb expects x: [batch, seq, heads, head_dim]
         # cos/sin: [seq_len, rotary_dim/2]
-        q = self.apply_rotary_emb(q, rotary_pos_emb_cos, rotary_pos_emb_sin)
-        k = self.apply_rotary_emb(k, rotary_pos_emb_cos, rotary_pos_emb_sin)
+        q[..., : self.rotary_dim] = self.apply_rotary_emb(
+            q[..., : self.rotary_dim], rotary_pos_emb_cos, rotary_pos_emb_sin
+        )
+        k[..., : self.rotary_dim] = self.apply_rotary_emb(
+            k[..., : self.rotary_dim], rotary_pos_emb_cos, rotary_pos_emb_sin
+        )
 
         # MMEncoderAttention expects [batch, seq, num_heads, head_dim]
         # It handles GQA internally via repeat_interleave
