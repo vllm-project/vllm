@@ -482,7 +482,6 @@ class DotsVisionTransformer(nn.Module):
         self,
         config: DotsVisionConfig,
         quant_config: QuantizationConfig | None = None,
-        multimodal_config: MultiModalConfig | None = None,
         *,
         num_hidden_layers_override: int | None = None,
         require_post_norm: bool | None = None,
@@ -496,15 +495,9 @@ class DotsVisionTransformer(nn.Module):
 
         head_dim = config.embed_dim // config.num_attention_heads
         self.rotary_pos_emb = VisionRotaryEmbedding(head_dim // 2)
-        attn_backend_override = (
-            multimodal_config.mm_encoder_attn_backend
-            if multimodal_config is not None
-            else None
-        )
         self.attn_backend = get_vit_attn_backend(
             head_size=head_dim,
             dtype=torch.get_default_dtype(),
-            attn_backend_override=attn_backend_override,
         )
         self.out_hidden_size = config.hidden_size
         # Keep blocks for compatibility with other vision towers
@@ -518,7 +511,6 @@ class DotsVisionTransformer(nn.Module):
                 DotsVisionBlock(
                     config,
                     quant_config=quant_config,
-                    multimodal_config=multimodal_config,
                     prefix=f"{prefix}.blocks.{i}",
                 )
                 for i in range(num_layers)
@@ -675,7 +667,6 @@ class DotsOCRForCausalLM(nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA
         self.vision_tower = DotsVisionTransformer(
             vision_config,
             quant_config=self.quant_config,
-            multimodal_config=multimodal_config,
             prefix=maybe_prefix(prefix, "vision_tower"),
         )
         self.language_model: Qwen2ForCausalLM = init_vllm_registered_model(
