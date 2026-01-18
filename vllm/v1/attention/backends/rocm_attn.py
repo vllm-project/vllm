@@ -23,7 +23,6 @@ from vllm.v1.attention.backend import (
     CommonAttentionMetadata,
     MultipleOf,
 )
-
 from vllm.v1.attention.ops.chunked_prefill_paged_decode import (
     chunked_prefill_paged_decode,
 )
@@ -383,7 +382,14 @@ class RocmAttentionImpl(AttentionImpl):
         if self.kv_sharing_target_layer_name is None:
             # Reshape the input keys and values and store them in the cache
             # Skip if sharing KV cache with an earlier attention layer
-            self.do_kv_cache_update(layer, key, value, key_cache, value_cache, attn_metadata)
+            self.do_kv_cache_update(
+                layer,
+                key,
+                value,
+                key_cache,
+                value_cache,
+                attn_metadata,
+            )
 
         if self.kv_cache_dtype.startswith("fp8"):
             key_cache = key_cache.view(self.fp8_dtype)
