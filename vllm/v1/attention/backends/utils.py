@@ -17,7 +17,7 @@ from typing_extensions import runtime_checkable
 
 from vllm.config import VllmConfig, get_layers_from_vllm_config
 from vllm.utils.math_utils import cdiv
-from vllm.v1.kv_cache_interface import MambaSpec
+from vllm.v1.kv_cache_interface import KVCacheSpec, MambaSpec
 
 if TYPE_CHECKING:
     from vllm.v1.core.sched.output import SchedulerOutput
@@ -824,7 +824,7 @@ def get_dcp_local_seq_lens(
 def mamba_get_block_table_tensor(
     block_table: torch.Tensor,
     seq_lens: torch.Tensor,
-    kv_cache_spec: MambaSpec,
+    kv_cache_spec: KVCacheSpec,
     mamba_cache_mode: str,
 ) -> torch.Tensor:
     """
