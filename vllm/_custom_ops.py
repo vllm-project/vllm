@@ -1044,41 +1044,6 @@ def get_cutlass_moe_mm_data(
     )
 
 
-def get_cutlass_moe_mm_problem_sizes(
-    topk_ids: torch.Tensor,
-    problem_sizes1: torch.Tensor,
-    problem_sizes2: torch.Tensor,
-    num_experts: int,
-    n: int,
-    k: int,
-    blockscale_offsets: torch.Tensor | None = None,
-    force_swap_ab: bool | None = None,
-):
-    """
-    Compute only the per-expert problem sizes needed by the two grouped matrix
-    multiplications used in CUTLASS-based fused MoE.
-
-    The function takes in topk_ids (token→expert mapping) and computes:
-    - problem_sizes1, problem_sizes2: M×N×K sizes of each expert's
-                                    multiplication for the two grouped MMs
-                                    used in the fused MoE operation.
-    Optional:
-    - force_swap_ab: If set to True or False, explicitly enable or disable the
-                     A/B input swap optimization. If None (default), the swap
-                     is selected automatically based on tensor sizes.
-    """
-    return torch.ops._C.get_cutlass_moe_mm_problem_sizes(
-        topk_ids,
-        problem_sizes1,
-        problem_sizes2,
-        num_experts,
-        n,
-        k,
-        blockscale_offsets,
-        force_swap_ab,
-    )
-
-
 def get_cutlass_moe_mm_problem_sizes_from_expert_offsets(
     expert_first_token_offset: torch.Tensor,
     problem_sizes1: torch.Tensor,
