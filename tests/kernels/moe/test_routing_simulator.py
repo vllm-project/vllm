@@ -19,7 +19,7 @@ from vllm.distributed import (
     init_distributed_environment,
     initialize_model_parallel,
 )
-from vllm.model_executor.layers.fused_moe.routing_simulator import (
+from vllm.model_executor.layers.fused_moe.router.routing_simulator_router import (
     DistributionBasedRouting,
     RoutingSimulator,
 )
@@ -109,40 +109,44 @@ def test_routing_strategy_integration(monkeypatch, device):
             tensor_model_parallel_size=1,
             pipeline_model_parallel_size=1,
         )
-        fused_moe = FusedMoE(
-            num_experts=num_experts,
-            top_k=top_k,
-            hidden_size=hidden_size,
-            intermediate_size=0,
-            use_grouped_topk=False,
-            renormalize=True,
-        )
 
-    for strategy in strategies:
-        # Set environment variable
-        env_name = "VLLM_MOE_ROUTING_SIMULATION_STRATEGY"
-        monkeypatch.setenv(env_name, strategy)
+        for strategy in strategies:
+            fused_moe = FusedMoE(
+                num_experts=num_experts,
+                top_k=top_k,
+                hidden_size=hidden_size,
+                intermediate_size=0,
+                use_grouped_topk=False,
+                renormalize=True,
+                prefix=strategy,
+            )
 
-        # Force reload of environment variable
-        envs.environment_variables[env_name] = lambda s=strategy: s
+            # Set environment variable
+            env_name = "VLLM_MOE_ROUTING_SIMULATION_STRATEGY"
+            monkeypatch.setenv(env_name, strategy)
 
-        # Test the select_experts method
-        topk_weights, topk_ids = fused_moe.router.select_experts(
-            hidden_states=hidden_states,
-            router_logits=router_logits,
-        )
+            # Force reload of environment variable
+            envs.environment_variables[env_name] = lambda s=strategy: s
 
-        # Verify output shapes
-        assert topk_weights.shape == (num_tokens, top_k), (
-            f"Wrong weights shape for {strategy}"
-        )
-        assert topk_ids.shape == (num_tokens, top_k), f"Wrong ids shape for {strategy}"
+            # Test the select_experts method
+            topk_weights, topk_ids = fused_moe.router.select_experts(
+                hidden_states=hidden_states,
+                router_logits=router_logits,
+            )
 
-        # Verify expert IDs are valid
-        assert topk_ids.min() >= 0, f"Invalid expert ID (negative) for {strategy}"
-        assert topk_ids.max() < num_experts, (
-            f"Invalid expert ID (too large) for {strategy}"
-        )
+            # Verify output shapes
+            assert topk_weights.shape == (num_tokens, top_k), (
+                f"Wrong weights shape for {strategy}"
+            )
+            assert topk_ids.shape == (num_tokens, top_k), (
+                f"Wrong ids shape for {strategy}"
+            )
+
+            # Verify expert IDs are valid
+            assert topk_ids.min() >= 0, f"Invalid expert ID (negative) for {strategy}"
+            assert topk_ids.max() < num_experts, (
+                f"Invalid expert ID (too large) for {strategy}"
+            )
 
 
 def test_distribution_based_routing_with_custom_strategy():

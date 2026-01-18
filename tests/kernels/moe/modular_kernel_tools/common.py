@@ -21,12 +21,12 @@ from vllm.distributed import (
     get_tensor_model_parallel_world_size,
 )
 from vllm.forward_context import set_forward_context
+from vllm.model_executor.layers.fused_moe import fused_topk
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
     FusedMoEParallelConfig,
     FusedMoEQuantConfig,
 )
-from vllm.model_executor.layers.fused_moe.fused_moe import fused_topk
 from vllm.utils.import_utils import has_deep_ep, has_deep_gemm, has_pplx
 
 from .mk_objects import (

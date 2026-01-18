@@ -269,6 +269,7 @@ class Ernie4_5_VLMoeMoE(nn.Module):
                 quant_config=quant_config,
                 e_score_correction_bias=self.e_score_correction_bias[0],
                 prefix=f"{prefix}.text_experts",
+                router_logits_dtype=torch.float32,
             )
         else:
             self.text_experts = Ernie4_5_VLMoeMLP(
@@ -306,6 +307,7 @@ class Ernie4_5_VLMoeMoE(nn.Module):
                 quant_config=quant_config,
                 e_score_correction_bias=self.e_score_correction_bias[1],
                 prefix=f"{prefix}.vision_experts",
+                router_logits_dtype=torch.float32,
             )
         else:
             self.vision_experts = Ernie4_5_VLMoeMLP(

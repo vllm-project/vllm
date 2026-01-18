@@ -23,13 +23,13 @@ from vllm.model_executor.layers.fused_moe import (
     FusedMoEMethodBase,
     FusedMoEPermuteExpertsUnpermute,
     FusedMoEPrepareAndFinalize,
+    FusedMoERouter,
     FusedMoeWeightScaleSupported,
 )
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEQuantConfig,
     RoutingMethodType,
 )
-from vllm.model_executor.layers.fused_moe.fused_moe_router import FusedMoERouter
 from vllm.model_executor.layers.fused_moe.layer import UnquantizedFusedMoEMethod
 from vllm.model_executor.layers.fused_moe.oracle.fp8 import (
     Fp8MoeBackend,

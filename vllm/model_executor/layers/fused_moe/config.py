@@ -117,8 +117,12 @@ class RoutingMethodType(IntEnum):
     RenormalizeNaive = (4,)
     # TopK: TopK (no softmax)
     TopK = (5,)
+    # Custom
+    Custom = (6,)
+    # Simulated
+    Simulated = (7,)
     # Unspecified
-    Unspecified = 6.0
+    Unspecified = 8.0
 
 
 @dataclass

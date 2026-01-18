@@ -6,11 +6,11 @@ from typing import Any, Union
 import torch
 from packaging import version
 
+from vllm.model_executor.layers.fused_moe import FusedMoERouter
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
     FusedMoEQuantConfig,
 )
-from vllm.model_executor.layers.fused_moe.fused_moe_router import FusedMoERouter
 from vllm.model_executor.layers.fused_moe.layer import (
     FusedMoE,
     FusedMoEMethodBase,

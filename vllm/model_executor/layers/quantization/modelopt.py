@@ -13,11 +13,11 @@ import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm._custom_ops import cutlass_scaled_fp4_mm, scaled_fp4_quant
 from vllm.attention.layer import Attention
 from vllm.logger import init_logger
+from vllm.model_executor.layers.fused_moe import FusedMoERouter
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
     FusedMoEQuantConfig,
 )
-from vllm.model_executor.layers.fused_moe.fused_moe_router import FusedMoERouter
 from vllm.model_executor.layers.fused_moe.layer import (
     FusedMoE,
     FusedMoEMethodBase,
