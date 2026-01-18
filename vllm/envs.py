@@ -73,6 +73,7 @@ if TYPE_CHECKING:
     VLLM_MAX_AUDIO_CLIP_FILESIZE_MB: int = 25
     VLLM_VIDEO_LOADER_BACKEND: str = "opencv"
     VLLM_MEDIA_CONNECTOR: str = "http"
+    VLLM_MM_HASHER_ALGORITHM: str = "blake3"
     VLLM_TARGET_DEVICE: str = "cuda"
     VLLM_MAIN_CUDA_VERSION: str = "12.9"
     VLLM_FLOAT32_MATMUL_PRECISION: Literal["highest", "high", "medium"] = "highest"
@@ -806,6 +807,17 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # imported at runtime.
     # If a non-existing backend is used, an AssertionError will be thrown.
     "VLLM_MEDIA_CONNECTOR": lambda: os.getenv("VLLM_MEDIA_CONNECTOR", "http"),
+    # Hash algorithm for multimodal content hashing.
+    # - "blake3": Default, fast cryptographic hash (not FIPS 140-3 compliant)
+    # - "sha256": FIPS 140-3 compliant, widely supported
+    # - "sha512": FIPS 140-3 compliant, faster on 64-bit systems
+    # Use sha256 or sha512 for FIPS compliance in government/enterprise deployments
+    "VLLM_MM_HASHER_ALGORITHM": env_with_choices(
+        "VLLM_MM_HASHER_ALGORITHM",
+        "blake3",
+        ["blake3", "sha256", "sha512"],
+        case_sensitive=False,
+    ),
     # Path to the XLA persistent cache directory.
     # Only used for XLA devices such as TPUs.
     "VLLM_XLA_CACHE_PATH": lambda: os.path.expanduser(
