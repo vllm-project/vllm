@@ -23,7 +23,7 @@ from vllm.v1.attention.backend import (
     CommonAttentionMetadata,
     MultipleOf,
 )
-from vllm.v1.attention.backends.flash_attn import FlashAttentionMetadata
+
 from vllm.v1.attention.ops.chunked_prefill_paged_decode import (
     chunked_prefill_paged_decode,
 )
@@ -282,7 +282,8 @@ class RocmAttentionImpl(AttentionImpl):
         layer: torch.nn.Module,
         key: torch.Tensor,
         value: torch.Tensor,
-        kv_cache: torch.Tensor,
+        key_cache: torch.Tensor,
+        value_cache: torch.Tensor,
         attn_metadata: RocmAttentionMetadata,
     ) -> None:
         """Update KV cache with new key and value tensors.
@@ -291,13 +292,10 @@ class RocmAttentionImpl(AttentionImpl):
             layer: attention layer containing scale factors.
             key: shape = [num_tokens, num_kv_heads, head_size]
             value: shape = [num_tokens, num_kv_heads, head_size]
-            kv_cache: shape = [2, num_blocks, block_size, num_kv_heads, head_size]
+            key_cache: shape = [num_blocks, num_heads, head_size, block_size]
+            value_cache: shape = [num_blocks, num_heads, head_size, block_size]
             attn_metadata: metadata for attention containing slot_mapping.
         """
-        key_cache, value_cache = PagedAttention.split_kv_cache(
-            kv_cache, self.num_kv_heads, self.head_size
-        )
-
         # Get actual block_size from value_cache
         # value_cache shape: [num_blocks, num_heads, head_size, block_size]
         block_size = value_cache.shape[3]
@@ -336,7 +334,7 @@ class RocmAttentionImpl(AttentionImpl):
         key: torch.Tensor,
         value: torch.Tensor,
         kv_cache: torch.Tensor,
-        attn_metadata: FlashAttentionMetadata,
+        attn_metadata: RocmAttentionMetadata,
         output: torch.Tensor | None = None,
         output_scale: torch.Tensor | None = None,
         output_block_scale: torch.Tensor | None = None,
@@ -385,7 +383,7 @@ class RocmAttentionImpl(AttentionImpl):
         if self.kv_sharing_target_layer_name is None:
             # Reshape the input keys and values and store them in the cache
             # Skip if sharing KV cache with an earlier attention layer
-            self.do_kv_cache_update(layer, key, value, kv_cache, attn_metadata)
+            self.do_kv_cache_update(layer, key, value, key_cache, value_cache, attn_metadata)
 
         if self.kv_cache_dtype.startswith("fp8"):
             key_cache = key_cache.view(self.fp8_dtype)
