@@ -100,6 +100,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         if self.uses_mrope:
             self.mrope_states = MRopeState(
                 max_num_reqs=self.max_num_reqs,
+                max_num_tokens=self.max_num_tokens,
                 max_model_len=self.max_model_len,
                 device=self.device,
             )
@@ -285,15 +286,18 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             input_buffers=self.input_buffers,
             device=self.device,
         )
+        if self.uses_mrope:
+            input_batch.mrope_positions = self.mrope_states.mrope_positions[
+                :, :num_tokens
+            ]
         if not skip_attn:
             self.prepare_dummy_attn_metadata(input_batch)
 
         dp_size = self.parallel_config.data_parallel_size
         num_tokens_across_dp = make_num_tokens_across_dp(dp_size, num_tokens)
         num_sampled_tokens = np.ones(input_batch.num_reqs, dtype=np.int32)
-        if not self.uses_mrope:
-            positions = input_batch.positions
-        else:
+        positions = input_batch.positions
+        if self.uses_mrope:
             positions = input_batch.mrope_positions
 
         slot_mappings = self.block_tables.get_dummy_slot_mappings(num_tokens)
@@ -379,9 +383,13 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         start_free_gpu_memory = torch.cuda.mem_get_info()[0]
 
         with self.maybe_setup_dummy_loras(self.lora_config):
+            mrope_positions = None
+            if self.uses_mrope:
+                mrope_positions = self.mrope_states.mrope_positions
             self.cudagraph_manager.capture(
                 model=self.model,
                 input_buffers=self.input_buffers,
+                mrope_positions=mrope_positions,
                 block_tables=self.block_tables,
                 attn_metadata_builders=self.attn_metadata_builders,
                 kv_cache_config=self.kv_cache_config,
@@ -574,7 +582,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 query_start_loc,
                 self.req_states.prefill_len.gpu,
                 self.req_states.num_computed_tokens.gpu,
-                self.input_buffers.mrope_positions,
             )
 
         # Some input token ids are directly read from the last sampled tokens
@@ -612,9 +619,11 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
         input_ids = self.input_buffers.input_ids[:num_tokens_after_padding]
         positions = self.input_buffers.positions[:num_tokens_after_padding]
-        mrope_positions = self.input_buffers.mrope_positions[
-            :, :num_tokens_after_padding
-        ]
+        mrope_positions = None
+        if self.uses_mrope:
+            mrope_positions = self.mrope_states.mrope_positions[
+                :, :num_tokens_after_padding
+            ]
         return InputBatch(
             req_ids=req_ids,
             num_reqs=num_reqs,
@@ -826,20 +835,14 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         num_rejected: torch.Tensor,
     ) -> torch.Tensor:
         assert self.speculator is not None
-        last_sampled_tokens = self.req_states.last_sampled_tokens[
-            input_batch.idx_mapping
-        ]
-        next_prefill_tokens = self.req_states.next_prefill_tokens[
-            input_batch.idx_mapping
-        ]
         draft_tokens = self.speculator.propose(
             input_batch,
             last_hidden_states,
             aux_hidden_states,
             num_sampled,
             num_rejected,
-            last_sampled_tokens,
-            next_prefill_tokens,
+            self.req_states.last_sampled_tokens,
+            self.req_states.next_prefill_tokens,
             self.sampler.sampling_states.temperature.gpu,
             self.sampler.sampling_states.seeds.gpu,
         )
@@ -944,6 +947,10 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 input_buffers=self.input_buffers,
                 device=self.device,
             )
+            if self.uses_mrope:
+                input_batch.mrope_positions = self.mrope_states.mrope_positions[
+                    :, :num_tokens_after_padding
+                ]
             self.prepare_dummy_attn_metadata(input_batch)
 
         # Run model.
@@ -957,9 +964,9 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         else:
             # Run PyTorch model in eager mode.
             # TODO(woosuk): Support piecewise CUDA graph.
-            if not self.uses_mrope:
-                positions = input_batch.positions
-            else:
+            positions = input_batch.positions
+            if self.uses_mrope:
+                assert input_batch.mrope_positions is not None
                 positions = input_batch.mrope_positions
             slot_mappings = self.block_tables.compute_slot_mappings(
                 input_batch.query_start_loc,
