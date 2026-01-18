@@ -976,3 +976,77 @@ fahrenheit
     assert args["city"] == "Dallas"
     assert args["state"] == "TX"
     assert args["unit"] == "fahrenheit"
+
+
+def test_streaming_no_whitespace_content_before_tool_call(
+    qwen3_tool_parser_parametrized, qwen3_tokenizer, sample_tools
+):
+    """Test that whitespace-only content before tool_call is not emitted.
+
+    This tests the fix for GitHub issue #29562 where "\n\n" content
+    was being emitted between reasoning and tool_call content when
+    streaming was enabled. The whitespace should be discarded to match
+    the non-streaming behavior.
+    """
+    # Simulate output that has newlines between text and tool_call
+    model_output = """\n\n<tool_call>
+<function=get_current_weather>
+<parameter=city>
+Dallas
+</parameter>
+<parameter=state>
+TX
+</parameter>
+</function>
+</tool_call>"""
+
+    request = ChatCompletionRequest(model=MODEL, messages=[], tools=sample_tools)
+
+    other_content = ""
+    tool_states = {}
+
+    for delta_message in stream_delta_message_generator(
+        qwen3_tool_parser_parametrized, qwen3_tokenizer, model_output, request
+    ):
+        if delta_message.content:
+            other_content += delta_message.content
+
+        if delta_message.tool_calls:
+            for tool_call in delta_message.tool_calls:
+                idx = tool_call.index
+
+                if idx not in tool_states:
+                    tool_states[idx] = {
+                        "id": None,
+                        "name": None,
+                        "arguments": "",
+                        "type": None,
+                    }
+
+                if tool_call.id:
+                    tool_states[idx]["id"] = tool_call.id
+
+                if tool_call.type:
+                    tool_states[idx]["type"] = tool_call.type
+
+                if tool_call.function:
+                    if tool_call.function.name:
+                        tool_states[idx]["name"] = tool_call.function.name
+
+                    if tool_call.function.arguments is not None:
+                        tool_states[idx]["arguments"] += tool_call.function.arguments
+
+    # The key assertion: whitespace-only content should NOT be emitted
+    # This verifies the fix for issue #29562
+    assert other_content == "", (
+        f"Expected no content to be emitted for whitespace-only text, "
+        f"but got: {repr(other_content)}"
+    )
+
+    # Verify the tool call was still parsed correctly
+    assert len(tool_states) == 1
+    state = tool_states[0]
+    assert state["name"] == "get_current_weather"
+    args = json.loads(state["arguments"])
+    assert args["city"] == "Dallas"
+    assert args["state"] == "TX"
