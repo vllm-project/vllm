@@ -79,8 +79,8 @@ class CompressedTensorsWNA16(CompressedTensorsScheme):
 
     @classmethod
     def get_min_capability(cls) -> int:
-        # Turing and up
-        return 75
+        # Volta and up (Volta uses Triton fallback, >=75 uses existing kernels)
+        return 70
 
     def create_weights(
         self,

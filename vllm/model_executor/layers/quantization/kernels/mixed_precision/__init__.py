@@ -33,6 +33,9 @@ from vllm.model_executor.layers.quantization.kernels.mixed_precision.MPLinearKer
     MPLinearKernel,
     MPLinearLayerConfig,
 )
+from vllm.model_executor.layers.quantization.kernels.mixed_precision.triton import (  # noqa: E501
+    TritonLinearKernel,
+)
 from vllm.model_executor.layers.quantization.kernels.mixed_precision.xpu import (  # noqa: E501
     XPUwNa16LinearKernel,
 )
@@ -47,6 +50,7 @@ _POSSIBLE_KERNELS: list[type[MPLinearKernel]] = [
     Dynamic4bitLinearKernel,
     BitBLASLinearKernel,
     ConchLinearKernel,
+    TritonLinearKernel,
     ExllamaLinearKernel,
     XPUwNa16LinearKernel,
     CPUWNA16LinearKernel,
