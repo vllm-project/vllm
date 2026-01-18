@@ -81,6 +81,25 @@ class ModelArchConfigConvertorBase:
             self.hf_text_config, attributes, default_factory=default_factory
         )
 
+    def get_num_experts_from_block_configs(self) -> int:
+        """Check block_configs for heterogeneous models (e.g., NemotronH)."""
+        block_configs = getattr(self.hf_text_config, "block_configs", None)
+        if block_configs:
+            for block in block_configs:
+                # Handle both dict (raw JSON) and object (HF parsed config)
+                if isinstance(block, dict):
+                    block_type = block.get("block_type", "")
+                    if block_type == "moe":
+                        return block.get("n_routed_experts", 0)
+                else:
+                    # HF converts dicts to objects with attributes
+                    block_type = getattr(block, "block_type", "")
+                    if block_type == "moe":
+                        return getattr(block, "n_routed_experts", 0)
+
+        # Coerce to 0 if explicitly set to None
+        return 0
+
     def get_num_experts(self) -> int:
         """Returns the number of experts in the model."""
         num_expert_names = [
@@ -89,13 +108,16 @@ class ModelArchConfigConvertorBase:
             "n_routed_experts",  # DeepSeek
             "num_local_experts",  # Mixtral
         ]
+
         num_experts = getattr_iter(self.hf_text_config, num_expert_names, 0)
         if isinstance(num_experts, list):
             # Ernie VL's remote code uses list[int]...
             # The values are always the same so we just take the first one.
             return num_experts[0]
-        # Coerce to 0 if explicitly set to None
-        return num_experts or 0
+
+        if not num_experts:
+            num_experts = self.get_num_experts_from_block_configs()
+        return num_experts
 
     @final
     @classmethod
