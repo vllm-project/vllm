@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import gc
 import time
+from collections.abc import Iterable
 from copy import deepcopy
 from typing import Any
 
@@ -278,8 +279,19 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         skip_attn: bool = True,
         **kwargs,
     ) -> tuple[torch.Tensor, torch.Tensor]:
+        # Create a dummy scheduler output.
+        num_reqs = min(num_tokens, self.max_num_reqs)
+        num_tokens_per_request = [num_tokens // num_reqs] * num_reqs
+        num_tokens_per_request[-1] += num_tokens % num_reqs
+        assert sum(num_tokens_per_request) == num_tokens
+        num_scheduled_tokens = {
+            f"_dummy_req_{i}": num_tokens_per_request[i] for i in range(num_reqs)
+        }
         dummy_scheduler_output = SchedulerOutput.make_empty()
         dummy_scheduler_output.total_num_scheduled_tokens = num_tokens
+        dummy_scheduler_output.num_scheduled_tokens = num_scheduled_tokens
+
+        # Execute the model.
         self.execute_model(
             dummy_scheduler_output, dummy_run=True, skip_attn_for_dummy_run=skip_attn
         )
@@ -819,9 +831,9 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
     def get_cudagraph_and_dp_padding(
         self,
-        scheduler_output: SchedulerOutput,
+        total_num_scheduled_tokens: int,
+        num_tokens_per_request: Iterable[int],
     ) -> tuple[CUDAGraphMode, int, torch.Tensor | None]:
-        total_num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
         dp_size = self.parallel_config.data_parallel_size
         if dp_size == 1:
             # No DP. Only consider CUDA graphs.
@@ -830,7 +842,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 return CUDAGraphMode.NONE, 0, None
 
             cudagraph_size = self.cudagraph_manager.get_cudagraph_size(
-                scheduler_output, total_num_scheduled_tokens
+                total_num_scheduled_tokens, num_tokens_per_request
             )
             if cudagraph_size is not None:
                 # Use full CUDA graph.
@@ -845,7 +857,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             cudagraph_size_before_dp: int | None = 0
         else:
             cudagraph_size_before_dp = self.cudagraph_manager.get_cudagraph_size(
-                scheduler_output, total_num_scheduled_tokens
+                total_num_scheduled_tokens, num_tokens_per_request
             )
             if cudagraph_size_before_dp is None:
                 cudagraph_size_before_dp = -1
@@ -891,7 +903,10 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 return EMPTY_MODEL_RUNNER_OUTPUT
 
         cudagraph_mode, num_tokens_after_padding, num_tokens_across_dp = (
-            self.get_cudagraph_and_dp_padding(scheduler_output)
+            self.get_cudagraph_and_dp_padding(
+                scheduler_output.total_num_scheduled_tokens,
+                scheduler_output.num_scheduled_tokens.values(),
+            )
         )
         if num_tokens_after_padding == 0:
             # All DP ranks have zero tokens to run.
@@ -913,7 +928,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 )
                 self._set_active_loras(*lora_inputs)
         else:
-            # No actual tokens to run. A dummy run for DP.
+            # No actual tokens to run. A dummy run for DP or memory profiling.
             num_reqs = min(num_tokens_after_padding, self.max_num_reqs)
             input_batch = InputBatch.make_dummy(
                 num_reqs=num_reqs,
