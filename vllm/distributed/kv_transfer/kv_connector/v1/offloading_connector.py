@@ -637,9 +637,10 @@ class OffloadingConnectorWorker:
             )
             assert success
             req_id, store = self._jobs.pop(job_id)
-            self.kv_connector_stats.record_transfer(
-                num_bytes, transfer_time, transfer_type
-            )
+            if transfer_time > 0:
+                self.kv_connector_stats.record_transfer(
+                    num_bytes, transfer_time, transfer_type
+                )
             if store:
                 req_jobs = self._store_jobs[req_id]
                 req_jobs.remove(job_id)
@@ -685,7 +686,11 @@ class OffloadPromMetrics(KVConnectorPromMetrics):
         per_engine_labelvalues: dict[int, list[object]],
     ):
         super().__init__(vllm_config, metric_types, labelnames, per_engine_labelvalues)
-        self.per_engine_labelvalues: dict[tuple[int, str], list[object]] = {}
+        # (engine_idx, transfer_tupe) -> (metric with bounded labels)
+        self.histogram_transfer_size: dict[tuple[int, str], PromMetricT] = {}
+        self.counter_kv_bytes: dict[tuple[int, str], PromMetricT] = {}
+        self.counter_kv_transfer_time: dict[tuple[int, str], PromMetricT] = {}
+        self.counter_kv_transfers: dict[tuple[int, str], PromMetricT] = {}
         buckets = [  # In bytes
             1e6,
             5e6,
@@ -699,34 +704,26 @@ class OffloadPromMetrics(KVConnectorPromMetrics):
             200e6,
         ]
 
-        buckets_throughput = [  # In Bytes/sec
-            100e6,
-            500e6,
-            1e9,
-            5e9,
-            10e9,
-            20e9,
-            30e9,
-            40e9,
-            50e9,
-            70e9,
-        ]
-
-        self.histogram_transfer_throughput = self._histogram_cls(
-            name="vllm:kv_offload_throughput",
-            documentation="Histogram of KV offload transfer throughput, in bytes/sec.",
-            buckets=buckets_throughput[:],
+        self._counter_kv_bytes = self._counter_cls(
+            name="vllm:kv_offload_total_bytes",
+            documentation="Number of bytes offloaded by KV connector",
             labelnames=labelnames + ["transfer_type"],
         )
 
-        self.histogram_transfer_size = self._histogram_cls(
+        self._counter_kv_transfer_time = self._counter_cls(
+            name="vllm:kv_offload_total_time",
+            documentation="Total time measured by all KV offloading operations",
+            labelnames=labelnames + ["transfer_type"],
+        )
+
+        self._histogram_transfer_size = self._histogram_cls(
             name="vllm:kv_offload_size",
             documentation="Histogram of KV offload transfer size, in bytes.",
             buckets=buckets[:],
             labelnames=labelnames + ["transfer_type"],
         )
 
-        self.counter_kv_transfers = self._counter_cls(
+        self._counter_kv_transfers = self._counter_cls(
             name="vllm:kv_offload_num_transfers",
             documentation="Number of KV offload transfers done",
             labelnames=labelnames + ["transfer_type"],
@@ -742,25 +739,41 @@ class OffloadPromMetrics(KVConnectorPromMetrics):
 
         for transfer_type, ops in transfer_stats_data.items():
             # Cache:
-            if (engine_idx, transfer_type) not in self.per_engine_labelvalues:
-                self.per_engine_labelvalues[engine_idx, transfer_type] = (
-                    self._per_engine_labelvalues[engine_idx] + [transfer_type]
+            if (engine_idx, transfer_type) not in self.histogram_transfer_size:
+                self.histogram_transfer_size[(engine_idx, transfer_type)] = (
+                    self._histogram_transfer_size.labels(
+                        *(self.per_engine_labelvalues[engine_idx] + [transfer_type])
+                    )
+                )
+                self.counter_kv_bytes[(engine_idx, transfer_type)] = (
+                    self._counter_kv_bytes.labels(
+                        *(self.per_engine_labelvalues[engine_idx] + [transfer_type])
+                    )
+                )
+                self.counter_kv_transfer_time[(engine_idx, transfer_type)] = (
+                    self._counter_kv_transfer_time.labels(
+                        *(self.per_engine_labelvalues[engine_idx] + [transfer_type])
+                    )
+                )
+                self.counter_kv_transfers[(engine_idx, transfer_type)] = (
+                    self._counter_kv_transfers.labels(
+                        *(self.per_engine_labelvalues[engine_idx] + [transfer_type])
+                    )
                 )
 
+            # Process ops:
             for op in ops:
                 # Observe size histogram
-                self.histogram_transfer_size.labels(
-                    *self.per_engine_labelvalues[engine_idx, transfer_type]
-                ).observe(op["op_size"])
+                self.histogram_transfer_size[(engine_idx, transfer_type)].observe(
+                    op["op_size"]
+                )
 
-                # Observe throughput histogram
-                if op["op_time"] != 0:
-                    throughput = op["op_size"] / op["op_time"]
-                    self.histogram_transfer_throughput.labels(
-                        *self.per_engine_labelvalues[engine_idx, transfer_type]
-                    ).observe(throughput)
+                # Increment byte and time counters
+                self.counter_kv_bytes[(engine_idx, transfer_type)].inc(op["op_size"])
 
-            # Update counter
-            self.counter_kv_transfers.labels(
-                *self.per_engine_labelvalues[engine_idx, transfer_type]
-            ).inc(len(ops))
+                self.counter_kv_transfer_time[(engine_idx, transfer_type)].inc(
+                    op["op_time"]
+                )
+
+                # Update transfer counter
+                self.counter_kv_transfers[(engine_idx, transfer_type)].inc(1)
