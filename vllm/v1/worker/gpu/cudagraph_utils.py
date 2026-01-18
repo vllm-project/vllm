@@ -12,7 +12,7 @@ from vllm.config import VllmConfig
 from vllm.config.compilation import CUDAGraphMode
 from vllm.distributed.parallel_state import graph_capture, is_global_first_rank
 from vllm.forward_context import set_forward_context
-from vllm.v1.attention.backends.utils import AttentionMetadataBuilder
+from vllm.v1.attention.backend import AttentionMetadataBuilder
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.worker.gpu.attn_utils import build_attn_metadata
@@ -25,10 +25,12 @@ class CudaGraphManager:
     def __init__(
         self,
         vllm_config: VllmConfig,
+        uses_mrope: bool,
         device: torch.device,
     ):
         self.vllm_config = vllm_config
         self.scheduler_config = vllm_config.scheduler_config
+        self.uses_mrope = uses_mrope
         self.device = device
 
         self.max_model_len = vllm_config.model_config.max_model_len
@@ -73,6 +75,7 @@ class CudaGraphManager:
         num_tokens: int,
         model: nn.Module,
         input_buffers: InputBuffers,
+        mrope_positions: torch.Tensor | None,
         block_tables: BlockTables,
         attn_metadata_builders: list[AttentionMetadataBuilder],
         kv_cache_config: KVCacheConfig,
@@ -80,6 +83,9 @@ class CudaGraphManager:
         num_reqs = min(num_tokens, self.max_num_reqs)
         input_ids = input_buffers.input_ids[:num_tokens]
         positions = input_buffers.positions[:num_tokens]
+        if self.uses_mrope:
+            assert mrope_positions is not None
+            positions = mrope_positions[:, :num_tokens]
         attn_metadata = prepare_inputs_to_capture(
             num_reqs,
             num_tokens,
@@ -131,6 +137,7 @@ class CudaGraphManager:
         self,
         model: nn.Module,
         input_buffers: InputBuffers,
+        mrope_positions: torch.Tensor | None,
         block_tables: BlockTables,
         attn_metadata_builders: list[AttentionMetadataBuilder],
         kv_cache_config: KVCacheConfig,
@@ -141,6 +148,7 @@ class CudaGraphManager:
             self.capture_graph,
             model=model,
             input_buffers=input_buffers,
+            mrope_positions=mrope_positions,
             block_tables=block_tables,
             attn_metadata_builders=attn_metadata_builders,
             kv_cache_config=kv_cache_config,
@@ -190,15 +198,19 @@ def get_cudagraph_size(
     cudagraph_sizes: dict[int, int],
     cudagraph_mode: CUDAGraphMode,
 ) -> int | None:
+    if not cudagraph_mode.has_full_cudagraphs():
+        # No full CUDA graph is used.
+        return None
+
     size = cudagraph_sizes.get(num_tokens_after_dp_padding)
     if size is None:
         # No CUDA graph for this size.
         return None
-    if cudagraph_mode == CUDAGraphMode.FULL_DECODE_ONLY:
-        all_decode = all(x == 1 for x in num_tokens_per_request)
-        if not all_decode:
-            # Prefill is included.
-            return None
+
+    is_mixed = any(x > 1 for x in num_tokens_per_request)
+    if is_mixed and cudagraph_mode.mixed_mode() != CUDAGraphMode.FULL:
+        # Prefill is included, and this mode doesn't use CUDA graph for it.
+        return None
     return size
 
 

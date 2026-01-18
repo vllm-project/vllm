@@ -2,10 +2,11 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import os
+from collections.abc import Callable
 from typing import TYPE_CHECKING, Any, Literal
 
 import torch
-from pydantic import Field, model_validator
+from pydantic import Field, field_validator, model_validator
 from pydantic.dataclasses import dataclass
 from torch.distributed import ProcessGroup, ReduceOp
 from typing_extensions import Self
@@ -182,9 +183,12 @@ class ParallelConfig:
     threshold, microbatching will be used. Otherwise, the request will be
     processed in a single batch."""
 
-    disable_nccl_for_dp_synchronization: bool = False
+    disable_nccl_for_dp_synchronization: bool = Field(default=None)
     """Forces the dp synchronization logic in vllm/v1/worker/dp_utils.py 
-    to use Gloo instead of NCCL for its all reduce"""
+    to use Gloo instead of NCCL for its all reduce.
+
+    Defaults to True when async scheduling is enabled, False otherwise.
+    """
 
     ray_workers_use_nsight: bool = False
     """Whether to profile Ray workers with nsight, see https://docs.ray.io/en/latest/ray-observability/user-guides/profiling.html#profiling-nsight-profiler."""
@@ -292,6 +296,12 @@ class ParallelConfig:
         should only be set by API server scale-out.
     """
 
+    @field_validator("disable_nccl_for_dp_synchronization", mode="wrap")
+    @classmethod
+    def _skip_none_validation(cls, value: Any, handler: Callable) -> Any:
+        """Skip validation if the value is `None` when initialisation is delayed."""
+        return None if value is None else handler(value)
+
     @model_validator(mode="after")
     def _validate_parallel_config(self) -> Self:
         if self._api_process_rank >= self._api_process_count:
@@ -350,6 +360,14 @@ class ParallelConfig:
     @property
     def num_ubatches(self) -> int:
         return 2 if self.enable_dbo else self.ubatch_size
+
+    @property
+    def local_engines_only(self) -> bool:
+        """
+        Client manages local+remote EngineCores in pure internal LB case.
+        Client manages local EngineCores in hybrid and external LB case.
+        """
+        return self.data_parallel_external_lb or self.data_parallel_hybrid_lb
 
     def get_next_dp_init_port(self) -> int:
         """
