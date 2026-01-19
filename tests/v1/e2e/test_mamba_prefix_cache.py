@@ -473,6 +473,10 @@ def apply_patch(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(mamba_utils, "do_mamba_copy_block", fake_copy_fn)
 
 
+@pytest.skip(
+    reason="Skipping test_mamba_prefix_cache because it is based on spec "
+    "decode which is not allowed now."
+)
 def test_mamba_prefix_cache(monkeypatch: pytest.MonkeyPatch):
     run_ref_mamba_state_in_subprocess()
     apply_patch(monkeypatch)
