@@ -915,7 +915,7 @@ class VllmConfig:
             self.model_config.disable_cascade_attn = True
             logger.warning_once(
                 "Disabling cascade attention when VLLM_BATCH_INVARIANT is enabled.",
-                scope="local"
+                scope="local",
             )
 
         if self.parallel_config.use_ubatching:
