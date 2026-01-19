@@ -3606,10 +3606,10 @@ class GPUModelRunner(
         if self.valid_sampled_token_count_event is None:
             return
 
-        default_stream = torch.current_stream()
+        default_stream = current_platform.current_stream()  # type: ignore[attr-defined]
         # Initialize a new stream to overlap the copy operation with
         # prepare_input of draft model.
-        with torch.stream(self.valid_sampled_token_count_copy_stream):
+        with current_platform.stream(self.valid_sampled_token_count_copy_stream):  # type: ignore[attr-defined]
             self.valid_sampled_token_count_copy_stream.wait_stream(default_stream)  # type: ignore
             counts = valid_sampled_tokens_count
             counts_cpu = self.valid_sampled_token_count_cpu
