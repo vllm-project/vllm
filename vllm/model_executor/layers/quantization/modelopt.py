@@ -1623,8 +1623,12 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
                 apply_router_weight_on_input=layer.apply_router_weight_on_input,
             )
         else:
+            if isinstance(x, tuple):
+                x_routing, _ = x
+            else:
+                x_routing = x
             topk_weights, topk_ids = router.select_experts(
-                hidden_states=x,
+                hidden_states=x_routing,
                 router_logits=router_logits,
             )
 

@@ -63,8 +63,6 @@ from vllm.model_executor.layers.quantization.compressed_tensors.schemes.compress
 )
 from vllm.model_executor.layers.quantization.utils.flashinfer_fp4_moe import (
     build_flashinfer_fp4_cutlass_moe_prepare_finalize,
-    flashinfer_trtllm_fp4_moe,
-    flashinfer_trtllm_fp4_routed_moe,
     select_nvfp4_gemm_impl,
 )
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
@@ -574,12 +572,17 @@ class CompressedTensorsW4A4Nvfp4MoEMethod(CompressedTensorsMoEMethod):
         # Initialize the kernel that will be called in apply().
         self.moe_quant_config = self.get_fused_moe_quant_config(layer)
         use_dp = self.moe.dp_size > 1
-        if self.moe_quant_config is not None and not use_dp:
+        if not use_dp:
             self.kernel = make_nvfp4_moe_kernel(
                 backend=self.nvfp4_backend,
                 quant_config=self.moe_quant_config,
                 moe_config=self.moe,
             )
+
+        self.use_monolithic = (
+            not layer.enable_eplb
+            and self.nvfp4_backend == NvFp4MoeBackend.FLASHINFER_TRTLLM
+        )
 
     def maybe_make_prepare_finalize(
         self,
@@ -616,9 +619,7 @@ class CompressedTensorsW4A4Nvfp4MoEMethod(CompressedTensorsMoEMethod):
         logger.debug_once("Using %s", experts.__class__.__name__)
         return experts
 
-    def get_fused_moe_quant_config(
-        self, layer: torch.nn.Module
-    ) -> FusedMoEQuantConfig | None:
+    def get_fused_moe_quant_config(self, layer: torch.nn.Module) -> FusedMoEQuantConfig:
         return make_nvfp4_moe_quant_config(
             backend=self.nvfp4_backend,
             w13_scale=layer.w13_weight_scale,
@@ -637,49 +638,32 @@ class CompressedTensorsW4A4Nvfp4MoEMethod(CompressedTensorsMoEMethod):
         router_logits: torch.Tensor,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         assert layer.activation == "silu", "Only SiLU activation is supported."
+        assert self.kernel is not None
 
-        if (
-            self.nvfp4_backend == NvFp4MoeBackend.FLASHINFER_TRTLLM
-            and not layer.enable_eplb
-        ):
-            return flashinfer_trtllm_fp4_moe(
-                layer=layer,
-                x=x,
+        if self.use_monolithic:
+            # In monolithic case, router is fused with expert.
+            out = self.kernel.forward_monolithic(
+                x,
+                layer.w13_weight,
+                layer.w2_weight,
+                router_logits,
+                activation=layer.activation,
+                global_num_experts=layer.global_num_experts,
+                expert_map=layer.expert_map,
+                apply_router_weight_on_input=layer.apply_router_weight_on_input,
+            )
+        else:
+            # Hidden_states in select_experts is only used to extract metadata
+            if isinstance(x, tuple):
+                x_routing, _ = x
+            else:
+                x_routing = x
+            topk_weights, topk_ids = router.select_experts(
+                hidden_states=x_routing,
                 router_logits=router_logits,
-                top_k=layer.top_k,
-                activation=layer.activation,
-                global_num_experts=layer.global_num_experts,
-                num_expert_group=layer.num_expert_group,
-                topk_group=layer.topk_group,
-                custom_routing_function=layer.custom_routing_function,
-                e_score_correction_bias=layer.e_score_correction_bias,
             )
 
-        # Hidden_states in select_experts is only used to extract metadata
-        if isinstance(x, tuple):
-            x_routing, _ = x
-        else:
-            x_routing = x
-        topk_weights, topk_ids = router.select_experts(
-            hidden_states=x_routing,
-            router_logits=router_logits,
-        )
-
-        # EPLB path
-        if self.nvfp4_backend == NvFp4MoeBackend.FLASHINFER_TRTLLM:
-            assert layer.enable_eplb
-            return flashinfer_trtllm_fp4_routed_moe(
-                layer=layer,
-                x=x,
-                topk_ids=topk_ids,
-                topk_weights=topk_weights,
-                top_k=layer.top_k,
-                activation=layer.activation,
-                global_num_experts=layer.global_num_experts,
-            )
-        else:
-            assert self.kernel is not None
-            return self.kernel(
+            out = self.kernel(
                 x,
                 layer.w13_weight,
                 layer.w2_weight,
@@ -691,6 +675,8 @@ class CompressedTensorsW4A4Nvfp4MoEMethod(CompressedTensorsMoEMethod):
                 expert_map=layer.expert_map,
                 apply_router_weight_on_input=layer.apply_router_weight_on_input,
             )
+
+        return out
 
 
 class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
