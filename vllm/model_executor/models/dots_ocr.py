@@ -8,7 +8,7 @@ import torch.nn as nn
 from torch.nn import LayerNorm
 from transformers.models.qwen2_vl import Qwen2VLProcessor
 
-from vllm.config import MultiModalConfig, VllmConfig
+from vllm.config import VllmConfig
 from vllm.config.multimodal import BaseDummyOptions
 from vllm.distributed import utils as dist_utils
 from vllm.distributed.parallel_state import (
@@ -436,7 +436,6 @@ class DotsVisionBlock(nn.Module):
         config,
         *,
         quant_config: QuantizationConfig | None = None,
-        multimodal_config: MultiModalConfig | None = None,
         prefix: str = "",
     ):
         super().__init__()
@@ -447,14 +446,12 @@ class DotsVisionBlock(nn.Module):
             num_heads=config.num_attention_heads,
             bias=config.use_bias,
             quant_config=quant_config,
-            multimodal_config=multimodal_config,
             prefix=f"{prefix}.attn",
         )
         self.norm1 = RMSNorm(config.embed_dim, eps=config.rms_norm_eps)
         self.mlp = DotsSwiGLUFFN(
             config,
             quant_config=quant_config,
-            multimodal_config=multimodal_config,
             prefix=f"{prefix}.mlp",
         )
         self.norm2 = RMSNorm(config.embed_dim, eps=config.rms_norm_eps)

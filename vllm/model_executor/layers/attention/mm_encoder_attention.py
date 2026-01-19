@@ -40,7 +40,6 @@ class MMEncoderAttention(CustomOp):
             num_kv_heads: number of kv heads.
             prefix: This has no effect, it is only here to make it easier to
                     swap between Attention and MultiHeadAttention
-            multimodal_config: configs for multi-modal.
         """
         super().__init__()
 
