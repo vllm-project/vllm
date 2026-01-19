@@ -299,17 +299,6 @@ class FlashInferTrtLlmNvFp4Experts(mk.FusedMoEPermuteExpertsUnpermute):
             torch.bfloat16
         ).view(torch.int16)
 
-        
-        
-        # print(f"{w1[-1,-1]=}")
-        # print(f"{self.quant_config.w1_scale[-1,-1]=}")
-        # print(f"{w2[-1,-1]=}")
-        # print(f"{self.quant_config.w2_scale[-1,-1]=}")
-        # print(f"{hidden_states[-1,-1]=}")
-        # print(f"{packed_tensor[-1,-1]=}")
-        # print(f"{a1q_scale[-1,-1]=}")
-
-
         # Invoke kernel.
         # TODO(avoid the copy).
         out = flashinfer.fused_moe.trtllm_fp4_block_scale_routed_moe(
@@ -342,7 +331,8 @@ class FlashInferTrtLlmNvFp4Experts(mk.FusedMoEPermuteExpertsUnpermute):
             do_finalize=True,
         )[0]
 
-        output.copy_(out[0])
+        assert output.shape == out.shape
+        output.copy_(out)
 
     def apply_monolthic(
         self,
