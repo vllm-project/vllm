@@ -147,14 +147,6 @@ def test_sparse_backend_decode_correctness(
     # Compute per-rank heads for simulated TP
     num_heads = max(1, total_num_heads // tensor_parallel_size)
 
-    # FlashMLA sparse FP8 decode kernel only supports h_q = 64 or 128
-    # Skip tests with unsupported head counts
-    if kv_cache_dtype == "fp8_ds_mla" and num_heads < 64:
-        pytest.skip(
-            f"FlashMLA sparse FP8 decode kernel requires num_heads >= 64, "
-            f"got {num_heads} (TP={tensor_parallel_size})"
-        )
-
     kv_lora_rank = 512
     qk_nope_head_dim = 128
     qk_rope_head_dim = 64
