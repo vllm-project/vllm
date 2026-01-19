@@ -664,7 +664,7 @@ class FusedMoEPermuteExpertsUnpermute(ABC):
         """
         raise NotImplementedError
 
-    def apply_monolthic(
+    def apply_monolithic(
         self,
         hidden_states: torch.Tensor,
         w1: torch.Tensor,
@@ -1287,7 +1287,7 @@ class FusedMoEModularKernel(torch.nn.Module):
         that have fused router + experts (e.g. FLASHINFER_TRTLLM).
         """
 
-        return self.fused_experts.apply_monolthic(
+        return self.fused_experts.apply_monolithic(
             hidden_states=hidden_states,
             w1=w1,
             w2=w2,

@@ -228,7 +228,9 @@ class FlashInferTrtLlmNvFp4Experts(mk.FusedMoEPermuteExpertsUnpermute):
         self.local_num_experts = moe_config.num_local_experts
         self.ep_rank = moe_config.moe_parallel_config.ep_rank
 
-        # a13_scale * w13_scale_2 / a2_scale
+        # g1_alpha_s = a13_scale * w13_scale_2
+        # a2_gscale = (1 / a2_scale)
+        # g1_scale_c = a13_scale * w13_scale_2 / a2_scale
         self.g1_scale_c = self.quant_config.g1_alphas * self.quant_config.a2_gscale
 
     @property
@@ -264,7 +266,8 @@ class FlashInferTrtLlmNvFp4Experts(mk.FusedMoEPermuteExpertsUnpermute):
         workspace1 = (0,)
         workspace2 = (0,)
 
-        # Hidden states are Nvfp4, packed into int8 dtype.
+        # Hidden states are Nvfp4, packed into int8 dtype, so we
+        # need to multiply K by 2 to get the output shape right.
         assert self.hidden_dim == K * 2
         output = (M, self.hidden_dim)
 

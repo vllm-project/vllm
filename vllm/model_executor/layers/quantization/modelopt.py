@@ -1349,10 +1349,6 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
             self.nvfp4_backend
         )
         self.kernel: mk.FusedMoEModularKernel | None = None
-        self.use_monolithic = (
-            self.nvfp4_backend == NvFp4MoeBackend.FLASHINFER_TRTLLM
-            and not moe_config.moe_parallel_config.use_all2all_kernels
-        )
 
     def maybe_make_prepare_finalize(
         self,
@@ -1566,6 +1562,11 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
                 moe_config=self.moe,
             )
 
+        self.use_monolithic = (
+            layer.enable_eplb
+            and self.nvfp4_backend == NvFp4MoeBackend.FLASHINFER_TRTLLM
+        )
+
     def prepare_dp_allgather_tensor(
         self,
         layer: FusedMoE,
@@ -1609,6 +1610,7 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         assert self.kernel is not None
 
+        logger.info_once(f"{self.use_monolithic=}", scope="local")
         if self.use_monolithic:
             # In monolithic case, router is fused with expert.
             out = self.kernel.forward_monolithic(
