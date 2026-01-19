@@ -36,8 +36,8 @@ def encode_base64_content_from_url(content_url: str) -> dict[str:str]:
 
 headers = {"accept": "application/json", "Content-Type": "application/json"}
 
-text_1 = "slm markdown"
-text_2 = {
+queries = "slm markdown"
+documents = {
     "content": [
         {
             "type": "image_url",
@@ -76,9 +76,9 @@ def main(args):
     response = requests.get(models_url, headers=headers)
     model = response.json()["data"][0]["id"]
 
-    prompt = {"model": model, "text_1": text_1, "text_2": text_2}
+    prompt = {"model": model, "queries": queries, "documents": documents}
     response = requests.post(score_url, headers=headers, json=prompt)
-    print("\nPrompt when text_1 is string and text_2 is a image list:")
+    print("\nPrompt when queries is string and documents is a image list:")
     pprint.pprint(prompt)
     print("\nScore Response:")
     print(json.dumps(response.json(), indent=2))
