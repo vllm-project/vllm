@@ -79,6 +79,7 @@ class CudaGraphManager:
         model: nn.Module,
         input_buffers: InputBuffers,
         mrope_positions: torch.Tensor | None,
+        inputs_embeds: torch.Tensor | None,
         block_tables: BlockTables,
         attn_metadata_builders: list[AttentionMetadataBuilder],
         kv_cache_config: KVCacheConfig,
@@ -89,6 +90,8 @@ class CudaGraphManager:
         if self.uses_mrope:
             assert mrope_positions is not None
             positions = mrope_positions[:, :num_tokens]
+        if inputs_embeds is not None:
+            inputs_embeds = inputs_embeds[:num_tokens]
         attn_metadata, slot_mappings = prepare_inputs_to_capture(
             num_reqs,
             num_tokens,
@@ -115,6 +118,7 @@ class CudaGraphManager:
             hidden_states = model(
                 input_ids=input_ids,
                 positions=positions,
+                inputs_embeds=inputs_embeds,
             )
             if self.hidden_states is None:
                 self.hidden_states = torch.empty_like(hidden_states)
@@ -136,6 +140,7 @@ class CudaGraphManager:
             hidden_states = model(
                 input_ids=input_ids,
                 positions=positions,
+                inputs_embeds=inputs_embeds,
             )
             self.hidden_states[:num_tokens] = hidden_states
         self.graphs[num_tokens] = graph
@@ -146,6 +151,7 @@ class CudaGraphManager:
         model: nn.Module,
         input_buffers: InputBuffers,
         mrope_positions: torch.Tensor | None,
+        inputs_embeds: torch.Tensor | None,
         block_tables: BlockTables,
         attn_metadata_builders: list[AttentionMetadataBuilder],
         kv_cache_config: KVCacheConfig,
@@ -157,6 +163,7 @@ class CudaGraphManager:
             model=model,
             input_buffers=input_buffers,
             mrope_positions=mrope_positions,
+            inputs_embeds=inputs_embeds,
             block_tables=block_tables,
             attn_metadata_builders=attn_metadata_builders,
             kv_cache_config=kv_cache_config,
