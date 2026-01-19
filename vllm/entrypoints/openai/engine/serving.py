@@ -1216,7 +1216,7 @@ class OpenAIServing:
         else:
             self._validate_input(
                 request=request,
-                input_ids=engine_prompt["prompt_token_ids"],
+                input_ids=engine_prompt["prompt_token_ids"],  # type: ignore
                 input_text="",
             )
 
