@@ -72,8 +72,8 @@ def get_mla_prefill_backend(
     attention_config = vllm_config.attention_config
 
     # Check for explicit backend selection (includes migrated deprecated flags)
-    if attention_config.mla.prefill_backend is not None:
-        backend_enum = attention_config.mla.prefill_backend
+    if attention_config.mla_prefill_backend is not None:
+        backend_enum = attention_config.mla_prefill_backend
         try:
             backend_cls = backend_enum.get_class()
             invalid_reasons = backend_cls.validate_configuration(
