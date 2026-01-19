@@ -31,12 +31,6 @@ from vllm.entrypoints.chat_utils import (
     parse_chat_messages_futures,
     resolve_chat_template_content_format,
 )
-from vllm.entrypoints.context import (
-    ConversationContext,
-    HarmonyContext,
-    ParsableContext,
-    StreamingHarmonyContext,
-)
 from vllm.entrypoints.logger import RequestLogger
 from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionNamedToolChoiceParam,
@@ -54,9 +48,18 @@ from vllm.entrypoints.openai.engine.protocol import (
     FunctionDefinition,
 )
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
+from vllm.entrypoints.openai.responses.context import (
+    ConversationContext,
+    HarmonyContext,
+    ParsableContext,
+    StreamingHarmonyContext,
+)
 from vllm.entrypoints.openai.responses.protocol import (
     ResponseInputOutputItem,
     ResponsesRequest,
+)
+from vllm.entrypoints.openai.responses.utils import (
+    construct_input_messages,
 )
 from vllm.entrypoints.openai.translations.protocol import (
     TranscriptionRequest,
@@ -85,9 +88,6 @@ from vllm.entrypoints.pooling.score.protocol import (
     ScoreResponse,
 )
 from vllm.entrypoints.renderer import BaseRenderer, CompletionRenderer, RenderConfig
-from vllm.entrypoints.responses_utils import (
-    construct_input_messages,
-)
 from vllm.entrypoints.serve.disagg.protocol import GenerateRequest, GenerateResponse
 from vllm.entrypoints.serve.tokenize.protocol import (
     DetokenizeRequest,
@@ -1277,9 +1277,11 @@ class OpenAIServing:
             assert is_list_of(request_prompt, int), (
                 "Prompt has to be either a string or a list of token ids"
             )
-            prompt_inputs = TokensPrompt(
-                prompt=tokenizer.decode(request_prompt),
-                prompt_token_ids=request_prompt,
+            input_text = tokenizer.decode(request_prompt)
+            prompt_inputs = self._validate_input(
+                request=request,
+                input_ids=request_prompt,
+                input_text=input_text,
             )
 
         engine_prompt = TokensPrompt(prompt_token_ids=prompt_inputs["prompt_token_ids"])
