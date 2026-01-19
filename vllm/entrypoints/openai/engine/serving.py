@@ -84,8 +84,11 @@ from vllm.entrypoints.pooling.pooling.protocol import (
 )
 from vllm.entrypoints.pooling.score.protocol import (
     RerankRequest,
+    ScoreDataRequest,
+    ScoreQueriesDocumentsRequest,
     ScoreRequest,
     ScoreResponse,
+    ScoreTextRequest,
 )
 from vllm.entrypoints.renderer import BaseRenderer, CompletionRenderer, RenderConfig
 from vllm.entrypoints.serve.disagg.protocol import GenerateRequest, GenerateResponse
@@ -1032,7 +1035,9 @@ class OpenAIServing:
             (
                 EmbeddingChatRequest,
                 EmbeddingCompletionRequest,
-                ScoreRequest,
+                ScoreDataRequest,
+                ScoreTextRequest,
+                ScoreQueriesDocumentsRequest,
                 RerankRequest,
                 ClassificationCompletionRequest,
                 ClassificationChatRequest,
@@ -1042,7 +1047,9 @@ class OpenAIServing:
             # since these requests don't generate tokens.
             if token_num > self.max_model_len:
                 operations: dict[type[AnyRequest], str] = {
-                    ScoreRequest: "score",
+                    ScoreDataRequest: "score",
+                    ScoreTextRequest: "score",
+                    ScoreQueriesDocumentsRequest: "score",
                     ClassificationCompletionRequest: "classification",
                     ClassificationChatRequest: "classification",
                 }
