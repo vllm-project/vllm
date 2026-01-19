@@ -504,7 +504,8 @@ class RadioParallelAttention(InternParallelAttention):
 
 
 class RadioVisionEncoderLayer(InternVisionEncoderLayer):
-    attn_cls = RadioParallelAttention
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, attn_cls=RadioParallelAttention, **kwargs)
 
     def forward(
         self,
@@ -522,7 +523,8 @@ class RadioVisionEncoderLayer(InternVisionEncoderLayer):
 
 
 class RadioVisionEncoder(InternVisionEncoder):
-    layer_cls = RadioVisionEncoderLayer
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, layer_cls=RadioVisionEncoderLayer, **kwargs)
 
     def forward(
         self,
