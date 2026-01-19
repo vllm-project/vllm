@@ -1845,6 +1845,8 @@ class FusedMoE(CustomOp):
                 else:
                     hidden_states_combined, router_logits = dispatch_res
                     orig_hidden_states = hidden_states_combined
+            else:
+                orig_hidden_states = hidden_states
 
             # Run shared experts before matrix multiply.
             # because matrix multiply maybe modify the hidden_states.

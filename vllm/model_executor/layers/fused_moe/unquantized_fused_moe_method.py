@@ -67,6 +67,10 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
         self._is_monolithic = current_platform.is_cpu() or current_platform.is_xpu()
 
     @property
+    def is_monolithic(self) -> bool:
+        return self._is_monolithic
+
+    @property
     def supports_eplb(self) -> bool:
         return True
 
