@@ -210,6 +210,7 @@ class FlashInferTrtLlmNvFp4Experts(mk.FusedMoEPermuteExpertsUnpermute):
 
         import flashinfer
 
+        self.moe_config = moe_config
         # TODO: set this via the constructor
         self.routing_method_type = flashinfer.RoutingMethodType.Renormalize
         # self.routing_method_type = flashinfer.RoutingMethodType.Llama4
@@ -297,6 +298,13 @@ class FlashInferTrtLlmNvFp4Experts(mk.FusedMoEPermuteExpertsUnpermute):
         packed_tensor = (topk_ids.to(torch.int32) << 16) | topk_weights.to(
             torch.bfloat16
         ).view(torch.int16)
+
+        self.x = 0 if not hasattr(self, "x") else self.x + 1
+        if self.x == 0 and self.moe_config.tp_rank == 0:
+            print(f"{a1q_scale=}")
+            print(f"{self.g1_scale_c=}")
+            print(f"{self.quant_config.g1_alphas=}")
+            print(f"{self.quant_config.g2_alphas=}")
 
         # Invoke kernel.
         # TODO(avoid the copy).
