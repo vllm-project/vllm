@@ -837,6 +837,7 @@ class rocm_aiter_ops:
     _TRITON_UNIFIED_ATTN_ENABLED = envs.VLLM_ROCM_USE_AITER_UNIFIED_ATTENTION
     # TODO: Consolidate under _LINEAR_ENABLED
     _FP8BMM_ENABLED = envs.VLLM_ROCM_USE_AITER_FP8BMM
+    _FP4BMM_ENABLED = envs.VLLM_ROCM_USE_AITER_FP4BMM
     # TODO: Consolidate under _LINEAR_ENABLED
     _FP4_GEMM_DYNAMIC_QUANT_ASM = envs.VLLM_ROCM_USE_AITER_FP4_ASM_GEMM
     # TODO: Consolidate under VLLM_ROCM_USE_AITER_ROPE
@@ -863,6 +864,7 @@ class rocm_aiter_ops:
         cls._SHUFFLE_KV_CACHE_ENABLED = envs.VLLM_ROCM_SHUFFLE_KV_CACHE_LAYOUT
         cls._TRITON_UNIFIED_ATTN_ENABLED = envs.VLLM_ROCM_USE_AITER_UNIFIED_ATTENTION
         cls._FP8BMM_ENABLED = envs.VLLM_ROCM_USE_AITER_FP8BMM
+        cls._FP4BMM_ENABLED = envs.VLLM_ROCM_USE_AITER_FP4BMM
         cls._FP4_GEMM_DYNAMIC_QUANT_ASM = envs.VLLM_ROCM_USE_AITER_FP4_ASM_GEMM
         cls._TRITON_ROTARY_EMBED = envs.VLLM_ROCM_USE_AITER_TRITON_ROPE
         cls._MOE_SHARED_EXPERTS_ENABLED = envs.VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS
@@ -922,6 +924,11 @@ class rocm_aiter_ops:
     @if_aiter_supported
     def is_fp8bmm_enabled(cls) -> bool:
         return cls._AITER_ENABLED and cls._FP8BMM_ENABLED
+
+    @classmethod
+    @if_aiter_supported
+    def is_fp4bmm_enabled(cls) -> bool:
+        return cls._AITER_ENABLED and cls._FP4BMM_ENABLED
 
     @classmethod
     @if_aiter_supported
@@ -1402,6 +1409,29 @@ class rocm_aiter_ops:
         )
         query = query.view(query_shape)
         key = key.view(key_shape)
+
+    @staticmethod
+    def batched_gemm_a16wfp4(
+        X: torch.Tensor,
+        W: torch.Tensor,
+        w_scale: torch.Tensor,
+        Y: torch.Tensor,
+        transpose_bm: bool | None = False,
+        prequant: bool | None = False,
+        y_scale: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        # ruff: noqa: E501 # isort: skip
+        from aiter.ops.triton.batched_gemm_a16wfp4 import batched_gemm_a16wfp4
+
+        return batched_gemm_a16wfp4(
+            X,
+            W,
+            w_scale,
+            y=Y,
+            transpose_bm=transpose_bm,
+            prequant=prequant,
+            y_scale=y_scale,
+        )
 
     @staticmethod
     def triton_fp8_bmm(
