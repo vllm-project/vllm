@@ -56,13 +56,19 @@ def make_test_data(
 
 
 def make_e_score_correction_bias(
-    e_score_correction_bias_val: float,
+    e_score_correction_bias_val: float | None,
     num_experts: int,
-) -> torch.Tensor:
-    # return torch.randn(num_experts, device="cuda") * e_score_correction_bias_val
-    return torch.full(
-        (num_experts,), e_score_correction_bias_val, device="cuda", dtype=torch.float32
-    )
+) -> torch.Tensor | None:
+    if e_score_correction_bias_val is not None:
+        return torch.randn(num_experts, device="cuda") * e_score_correction_bias_val
+        # return torch.full(
+        #    (num_experts,),
+        #     e_score_correction_bias_val,
+        #     device="cuda",
+        #     dtype=torch.float32
+        # )
+    else:
+        return None
 
 
 def assert_routing_results_close(
@@ -190,6 +196,26 @@ def baseline_grouped_topk(
         scores = torch.sigmoid(router_logits.float())
     else:
         raise ValueError(f"Unsupported scoring function: {scoring_func}")
+
+    num_experts = router_logits.shape[-1]
+    if num_expert_group == num_experts:
+        if e_score_correction_bias is not None:
+            scores_for_choice = scores.view(
+                -1, num_experts
+            ) + e_score_correction_bias.unsqueeze(0)
+        else:
+            scores_for_choice = scores
+
+        topk_indices = torch.topk(scores_for_choice, k=top_k, dim=-1, sorted=False)[1]
+        topk_weights = scores.gather(1, topk_indices)
+
+        if renormalize:
+            topk_weights = topk_weights / topk_weights.sum(dim=-1, keepdim=True)
+
+        if routed_scaling_factor != 1.0:
+            topk_weights = topk_weights * routed_scaling_factor
+
+        return topk_weights.to(torch.float32), topk_indices.to(torch.int32)
 
     # Handle bias correction
     if e_score_correction_bias is not None:
@@ -354,13 +380,15 @@ def test_fused_topk_bias(
     [
         (64, 8, 4),  # 8 groups of 8 experts, select 4 groups
         (32, 4, 2),  # 4 groups of 8 experts, select 2 groups
+        (8, 8, 4),  # 8 groups of 8 experts, select 4 groups
     ],
 )
 @pytest.mark.parametrize("renormalize", [False, True])
 @pytest.mark.parametrize("enable_eplb", [False, True])
-@pytest.mark.parametrize("e_score_correction_bias_val", [0.9])
+@pytest.mark.parametrize("e_score_correction_bias_val", [None, 0.9])
 @pytest.mark.parametrize("routed_scaling_factor", [1.0, 1.1])
 @pytest.mark.parametrize("scoring_func", ["sigmoid", "softmax"])
+@pytest.mark.parametrize("use_custom_op", [True, False])
 def test_grouped_topk(
     m: int,
     k: int,
@@ -371,11 +399,15 @@ def test_grouped_topk(
     num_expert_group: int,
     topk_group: int,
     scoring_func: str,
-    e_score_correction_bias_val: float,
+    e_score_correction_bias_val: float | None,
     routed_scaling_factor: float,
+    use_custom_op: bool,
+    monkeypatch,
 ):
     if top_k > global_num_experts:
         pytest.skip(f"top_k ({top_k}) > global_num_experts ({global_num_experts})")
+
+    monkeypatch.setenv("VLLM_USE_FUSED_MOE_GROUPED_TOPK", "1" if use_custom_op else "0")
 
     eplb_state = setup_eplb_state(enable_eplb, global_num_experts)
 
@@ -458,35 +490,3 @@ def test_custom(
 
     # Compare results
     assert_routing_results_close(topk_weights, topk_ids, baseline_weights, baseline_ids)
-
-
-# TODO: is other test sufficient?
-# # See tests/test_routing_simulatator.py
-# @pytest.mark.parametrize("m,k", MK_S)
-# @pytest.mark.parametrize("top_k", TOP_KS)
-# @pytest.mark.parametrize("global_num_experts", NUM_EXPERTS)
-# @pytest.mark.parametrize("renormalize", [False, True])
-# @pytest.mark.parametrize("enable_eplb", [False, True])
-# @pytest.mark.parameterize("strategy", ["uniform_random", "normal_routing"])
-# def test_simulated(
-#     m: int,
-#     k: int,
-#     top_k: int,
-#     global_num_experts: int,
-#     renormalize: bool,
-#     enable_eplb: bool,
-#     strategy: str,
-#     monkeypatch,
-# ):
-#     eplb_state = setup_eplb_state(enable_eplb)
-
-#     monkeypatch.setenv("VLLM_MOE_ROUTING_SIMULATION_STRATEGY", strategy)
-#     router = create_fused_moe_router(
-#         top_k=top_k,
-#         global_num_experts=global_num_experts,
-#         enable_eplb=enable_eplb,
-#         eplb_state=eplb_state,
-#     )
-
-#     hidden_states, router_logits = make_test_data(m, k, global_num_experts)
-#     topk_weights, topk_ids = router.select_experts(hidden_states, router_logits)

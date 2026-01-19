@@ -18,10 +18,6 @@ from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (
     rocm_aiter_grouped_topk,
 )
 from vllm.model_executor.layers.fused_moe.router.base_router import BaseRouter
-from vllm.model_executor.layers.fused_moe.router.fused_topk_bias_router import (
-    fused_topk_bias,
-)
-from vllm.model_executor.layers.fused_moe.router.fused_topk_router import fused_topk
 from vllm.model_executor.utils import maybe_disable_graph_partition
 from vllm.platforms import current_platform
 
@@ -117,6 +113,29 @@ def grouped_topk(
     else:
         raise ValueError(f"Unsupported scoring function: {scoring_func}")
 
+    num_experts = gating_output.shape[-1]
+    if num_expert_group == num_experts:
+        if e_score_correction_bias is not None:
+            scores_for_choice = scores.view(
+                -1, num_experts
+            ) + e_score_correction_bias.unsqueeze(0)
+        else:
+            scores_for_choice = scores
+
+        use_sorted = vllm_is_batch_invariant()
+        topk_indices = torch.topk(scores_for_choice, k=topk, dim=-1, sorted=use_sorted)[
+            1
+        ]
+        topk_weights = scores.gather(1, topk_indices)
+
+        if renormalize:
+            topk_weights = topk_weights / topk_weights.sum(dim=-1, keepdim=True)
+
+        if routed_scaling_factor != 1.0:
+            topk_weights = topk_weights * routed_scaling_factor
+
+        return topk_weights.to(torch.float32), topk_indices.to(torch.int32)
+
     num_token = scores.size(0)
     if e_score_correction_bias is not None:
         # Store original scores before applying correction bias. We use biased
@@ -159,6 +178,7 @@ def grouped_topk(
 
     if routed_scaling_factor != 1.0:
         topk_weights = topk_weights * routed_scaling_factor
+
     return topk_weights.to(torch.float32), topk_ids.to(torch.int32)
 
 
@@ -296,34 +316,10 @@ class GroupedTopKRouter(BaseRouter):
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Compute routing using grouped top-k."""
 
-        def valid_grouping() -> bool:
-            # Check if num_experts is greater than num_expert_group
-            # and is divisible by num_expert_group
-            num_experts = router_logits.shape[-1]
-            if num_experts <= self.num_expert_group:
-                return False
-            return num_experts % self.num_expert_group == 0
-
-        if not valid_grouping():
-            if self.e_score_correction_bias is not None:
-                topk_weights, topk_ids = fused_topk_bias(
-                    hidden_states=hidden_states,
-                    gating_output=router_logits,
-                    e_score_correction_bias=self.e_score_correction_bias.data,
-                    topk=self.top_k,
-                    renormalize=self.renormalize,
-                )
-                if self.routed_scaling_factor != 1.0:
-                    topk_weights *= self.routed_scaling_factor
-            else:
-                topk_weights, topk_ids, token_expert_indices = fused_topk(
-                    hidden_states=hidden_states,
-                    gating_output=router_logits,
-                    topk=self.top_k,
-                    renormalize=self.renormalize,
-                    indices_type=indices_type,
-                )
-            return topk_weights, topk_ids
+        assert self.global_num_experts == router_logits.shape[-1], (
+            f"{self.global_num_experts} == {router_logits.shape[-1]}"
+        )
+        assert self.global_num_experts % self.num_expert_group == 0
 
         # Select grouped_topk implementation
         if rocm_aiter_ops.is_fused_moe_enabled():
