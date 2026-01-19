@@ -20,7 +20,7 @@ from vllm.model_executor.layers.fused_moe.cutlass_moe import (
 from vllm.model_executor.layers.fused_moe.flashinfer_cutlass_moe import (
     FlashInferExperts,
 )
-from vllm.model_executor.layers.fused_moe.flashinfer_trtllm_moe import (
+from vllm.model_executor.layers.fused_moe.flashinfer_trtllm_nvfp4_moe import (
     FlashInferTrtLlmNvFp4Experts,
 )
 from vllm.model_executor.layers.fused_moe.fused_marlin_moe import (
