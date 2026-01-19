@@ -145,13 +145,13 @@ class FlashInferTrtLlmFp8Experts(mk.FusedMoEPermuteExpertsUnpermute):
             make_fp8_moe_alpha_scales_for_fi,
         )
 
-        self.g1_alphas, self.g2_alphas = make_fp8_moe_alpha_scales_for_fi(
+        self._g1_alphas, self._g2_alphas = make_fp8_moe_alpha_scales_for_fi(
             w13_scale=self.quant_config.w1_scale,
             w13_input_scale=self.quant_config.a1_scale,
             w2_scale=self.quant_config.w2_scale,
             w2_input_scale=self.quant_config.a2_scale,
         )
-        self.g1_scale_c = self.g1_alphas / self.quant_config.a2_scale
+        self.g1_scale_c = self._g1_alphas / self.quant_config.a2_scale
 
     @property
     def activation_formats(
@@ -294,10 +294,10 @@ class FlashInferTrtLlmFp8Experts(mk.FusedMoEPermuteExpertsUnpermute):
             routing_bias=self.e_score_correction_bias,
             hidden_states=a1q,
             gemm1_weights=w1,
-            output1_scales_scalar=self.g1_alphas,
+            output1_scales_scalar=self._g1_alphas,
             output1_scales_gate_scalar=self.g1_scale_c,
             gemm2_weights=w2,
-            output2_scales_scalar=self.g2_alphas,
+            output2_scales_scalar=self._g2_alphas,
             num_experts=global_num_experts,
             top_k=self.topk,
             num_expert_group=self.num_expert_group,
