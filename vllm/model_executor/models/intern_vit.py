@@ -223,9 +223,7 @@ class InternParallelAttention(nn.Module):
             k = splitter(k)[self.tp_rank]
         return q, k
 
-    def forward(
-        self, x: torch.Tensor, attn_mask: torch.Tensor | None = None
-    ) -> torch.Tensor:
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
         B, N, _ = x.shape
         qkv, _ = self.qkv(x)
         q, k, v = qkv.chunk(3, dim=-1)
@@ -233,18 +231,7 @@ class InternParallelAttention(nn.Module):
         if self.qk_normalization:
             q, k = self._apply_qk_norm(q, k)
 
-        if attn_mask is not None:
-            # Use SDPA directly with attention mask
-            q = q.view(B, N, self.num_heads_per_partition, self.head_dim)
-            k = k.view(B, N, self.num_heads_per_partition, self.head_dim)
-            v = v.view(B, N, self.num_heads_per_partition, self.head_dim)
-            q, k, v = (t.transpose(1, 2) for t in (q, k, v))
-            out = F.scaled_dot_product_attention(
-                q, k, v, attn_mask=attn_mask, scale=self.scale
-            )
-            out = out.transpose(1, 2).reshape(B, N, -1)
-        else:
-            out = self.attn(q, k, v)
+        out = self.attn(q, k, v)
         out, _ = self.proj(out)
         return out
 
@@ -287,6 +274,8 @@ class InternMLP(nn.Module):
 
 
 class InternVisionEncoderLayer(nn.Module):
+    attn_cls: InternParallelAttention = InternParallelAttention
+
     def __init__(
         self,
         config: PretrainedConfig,
@@ -340,7 +329,7 @@ class InternVisionEncoderLayer(nn.Module):
         use_data_parallel = (
             use_data_parallel or (num_heads + num_dummy_heads) % tp_size != 0
         )
-        return InternParallelAttention(
+        return self.attn_cls(
             config,
             quant_config=quant_config,
             num_dummy_heads=num_dummy_heads,
@@ -351,12 +340,8 @@ class InternVisionEncoderLayer(nn.Module):
     def forward(
         self,
         hidden_states: torch.Tensor,
-        attn_mask: torch.Tensor | None = None,
     ):
-        hidden_states = (
-            hidden_states
-            + self.attn(self.norm1(hidden_states), attn_mask=attn_mask) * self.ls1
-        )
+        hidden_states = hidden_states + self.attn(self.norm1(hidden_states)) * self.ls1
 
         hidden_states = hidden_states + self.mlp(self.norm2(hidden_states)) * self.ls2
 
@@ -364,6 +349,8 @@ class InternVisionEncoderLayer(nn.Module):
 
 
 class InternVisionEncoder(nn.Module):
+    layer_cls: InternVisionEncoderLayer = InternVisionEncoderLayer
+
     def __init__(
         self,
         config: PretrainedConfig,
@@ -385,7 +372,7 @@ class InternVisionEncoder(nn.Module):
 
         self.layers = nn.ModuleList(
             [
-                InternVisionEncoderLayer(
+                self.layer_cls(
                     config,
                     quant_config,
                     num_dummy_heads=num_dummy_heads,
@@ -396,14 +383,10 @@ class InternVisionEncoder(nn.Module):
             ]
         )
 
-    def forward(
-        self,
-        inputs_embeds: torch.Tensor,
-        attn_mask: torch.Tensor | None = None,
-    ):
+    def forward(self, inputs_embeds: torch.Tensor):
         hidden_states = inputs_embeds
         for encoder_layer in self.layers:
-            hidden_states = encoder_layer(hidden_states, attn_mask=attn_mask)
+            hidden_states = encoder_layer(hidden_states)
 
         return hidden_states
 

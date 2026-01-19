@@ -21,7 +21,11 @@ from transformers import PretrainedConfig
 
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
-from vllm.model_executor.models.intern_vit import InternVisionEncoder
+from vllm.model_executor.models.intern_vit import (
+    InternParallelAttention,
+    InternVisionEncoder,
+    InternVisionEncoderLayer,
+)
 
 input_dim_t: TypeAlias = int | tuple[int, int]
 norm_t: TypeAlias = tuple[float, float, float] | torch.Tensor
@@ -473,6 +477,64 @@ class ViTPatchLinear(nn.Linear):
         self.patch_size = patch_size
 
 
+class RadioParallelAttention(InternParallelAttention):
+    def forward(
+        self, x: torch.Tensor, attn_mask: torch.Tensor | None = None
+    ) -> torch.Tensor:
+        if attn_mask is None:
+            return super().forward(x)
+
+        B, N, _ = x.shape
+        qkv, _ = self.qkv(x)
+        q, k, v = qkv.chunk(3, dim=-1)
+
+        if self.qk_normalization:
+            q, k = self._apply_qk_norm(q, k)
+
+        q = q.view(B, N, self.num_heads_per_partition, self.head_dim)
+        k = k.view(B, N, self.num_heads_per_partition, self.head_dim)
+        v = v.view(B, N, self.num_heads_per_partition, self.head_dim)
+        q, k, v = (t.transpose(1, 2) for t in (q, k, v))
+        out = F.scaled_dot_product_attention(
+            q, k, v, attn_mask=attn_mask, scale=self.scale
+        )
+        out = out.transpose(1, 2).reshape(B, N, -1)
+        out, _ = self.proj(out)
+        return out
+
+
+class RadioVisionEncoderLayer(InternVisionEncoderLayer):
+    attn_cls = RadioParallelAttention
+
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        attn_mask: torch.Tensor | None = None,
+    ):
+        hidden_states = (
+            hidden_states
+            + self.attn(self.norm1(hidden_states), attn_mask=attn_mask) * self.ls1
+        )
+
+        hidden_states = hidden_states + self.mlp(self.norm2(hidden_states)) * self.ls2
+
+        return hidden_states
+
+
+class RadioVisionEncoder(InternVisionEncoder):
+    layer_cls = RadioVisionEncoderLayer
+
+    def forward(
+        self,
+        inputs_embeds: torch.Tensor,
+        attn_mask: torch.Tensor | None = None,
+    ):
+        hidden_states = inputs_embeds
+        for encoder_layer in self.layers:
+            hidden_states = encoder_layer(hidden_states, attn_mask=attn_mask)
+        return hidden_states
+
+
 class RadioInternVisionModel(nn.Module):
     packed_modules_mapping = {
         "qkv": ["qkv"],
@@ -507,7 +569,7 @@ class RadioInternVisionModel(nn.Module):
             register_multiple=config.register_multiple,
         )
 
-        self.encoder = InternVisionEncoder(
+        self.encoder = RadioVisionEncoder(
             config=config,
             quant_config=quant_config,
             num_hidden_layers_override=num_hidden_layers_override,
