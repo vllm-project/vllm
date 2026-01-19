@@ -210,19 +210,11 @@ class TestMCPEnabled:
     @pytest.mark.asyncio
     @pytest.mark.parametrize("model_name", [MODEL_NAME])
     async def test_mcp_tool_calling_streaming_types(
-        self, mcp_enabled_client: OpenAI, model_name: str
+        self,
+        pairs_of_event_types: dict[str, str],
+        mcp_enabled_client: OpenAI,
+        model_name: str,
     ):
-        pairs_of_event_types = {
-            "response.completed": "response.created",
-            "response.output_item.done": "response.output_item.added",
-            "response.content_part.done": "response.content_part.added",
-            "response.output_text.done": "response.output_text.delta",
-            "response.reasoning_text.done": "response.reasoning_text.delta",
-            "response.reasoning_part.done": "response.reasoning_part.added",
-            "response.mcp_call_arguments.done": ("response.mcp_call_arguments.delta"),
-            "response.mcp_call.completed": "response.mcp_call.in_progress",
-        }
-
         tools = [
             {
                 "type": "mcp",
