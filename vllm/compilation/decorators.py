@@ -390,6 +390,12 @@ def _support_torch_compile(
         if self.do_not_compile or torch.compiler.is_compiling():
             return self.forward(*args, **kwargs)
 
+        # If skip_compiled is set, bypass compiled model call. This is used e.g. for
+        # enc-dec models where tensor shapes/types vary across invocations, preventing
+        # the capture of a single computational graph.
+        if is_forward_context_available() and get_forward_context().skip_compiled:
+            return self.forward(*args, **kwargs)
+
         # if aot_compiled_fn is set, call it with partition wrapper context.
         # The partition wrapper must be active at runtime for CUDA graph
         # capture to work correctly with inductor graph partitioning.
