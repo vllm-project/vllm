@@ -11,7 +11,6 @@ the expected baseline.
 
 from dataclasses import dataclass, field
 from types import SimpleNamespace
-from typing import TypedDict
 
 import pytest
 import torch
@@ -22,15 +21,9 @@ from vllm import SamplingParams
 from vllm.benchmarks.datasets import get_samples
 from vllm.inputs import TokensPrompt
 from vllm.platforms import current_platform
+from vllm.v1.attention.backends.registry import AttentionBackendEnum
 from vllm.v1.attention.selector import AttentionSelectorConfig
 from vllm.v1.metrics.reader import Counter, Vector
-
-
-class AcceptanceMetrics(TypedDict):
-    acceptance_length: float
-    acceptance_lengths_per_pos: list[float]
-    num_drafts: int
-    num_accepted_tokens: int
 
 
 @dataclass
@@ -40,6 +33,8 @@ class Eagle3ModelConfig:
     expected_acceptance_length: float
     expected_acceptance_lengths_per_pos: list[float] = field(default_factory=list)
     id: str = ""
+    # Backends that are incompatible with this model (will be skipped)
+    excluded_backends: set[AttentionBackendEnum] = field(default_factory=set)
 
 
 # Model configurations for EAGLE3 acceptance length tests.
@@ -66,6 +61,9 @@ EAGLE3_MODEL_CONFIGS = [
         expected_acceptance_length=2.56,
         expected_acceptance_lengths_per_pos=[0.7165, 0.5120, 0.3337],
         id="gpt-oss-20b-eagle3",
+        # FLASHINFER incompatible: gpt-oss-20b uses sink attention which
+        # FLASHINFER does not support ("sink setting not supported")
+        excluded_backends={AttentionBackendEnum.FLASHINFER},
     ),
 ]
 
@@ -81,11 +79,10 @@ TP_SIZES = [1, 2, 4]
 
 
 # Backends excluded from testing due to significantly different behavior
-EXCLUDED_BACKENDS = {"FLEX_ATTENTION"}
+EXCLUDED_BACKENDS = {AttentionBackendEnum.FLEX_ATTENTION}
 
 
 def get_available_attention_backends() -> list[str]:
-    """Get list of available attention backends for the current platform."""
     if not hasattr(current_platform, "get_valid_backends"):
         return ["FLASH_ATTN"]
 
@@ -112,18 +109,15 @@ def get_available_attention_backends() -> list[str]:
     return [
         backend.name
         for backend, _ in valid_backends
-        if backend.name not in EXCLUDED_BACKENDS
+        if backend not in EXCLUDED_BACKENDS
     ]
 
 
-def get_attention_backend_params() -> list[pytest.param]:
-    """Generate pytest params for available attention backends."""
-    available = get_available_attention_backends()
-    return [pytest.param(backend, id=backend.lower()) for backend in available]
+def get_attention_backend_params() -> list[str]:
+    return get_available_attention_backends()
 
 
 def get_tp_size_params() -> list[pytest.param]:
-    """Generate pytest params for TP sizes based on available GPUs."""
     num_gpus = torch.cuda.device_count() if torch.cuda.is_available() else 1
     return [pytest.param(tp, id=f"tp{tp}") for tp in TP_SIZES if tp <= num_gpus]
 
@@ -157,8 +151,7 @@ def get_mt_bench_prompts(
     return prompt_ids
 
 
-def extract_acceptance_metrics(metrics, num_spec_tokens: int) -> AcceptanceMetrics:
-    """Extract acceptance length metrics from LLM metrics."""
+def extract_acceptance_metrics(metrics, num_spec_tokens: int) -> dict:
     num_drafts = 0
     num_accepted_tokens = 0
     acceptance_counts = [0] * num_spec_tokens
@@ -185,12 +178,12 @@ def extract_acceptance_metrics(metrics, num_spec_tokens: int) -> AcceptanceMetri
         count / num_drafts if num_drafts > 0 else 0.0 for count in acceptance_counts
     ]
 
-    return AcceptanceMetrics(
-        acceptance_length=acceptance_length,
-        acceptance_lengths_per_pos=acceptance_lengths_per_pos,
-        num_drafts=num_drafts,
-        num_accepted_tokens=num_accepted_tokens,
-    )
+    return {
+        "acceptance_length": acceptance_length,
+        "acceptance_lengths_per_pos": acceptance_lengths_per_pos,
+        "num_drafts": num_drafts,
+        "num_accepted_tokens": num_accepted_tokens,
+    }
 
 
 @large_gpu_mark(min_gb=40)
@@ -208,7 +201,11 @@ def test_eagle3_acceptance_length(
     attention_backend: str,
     monkeypatch: pytest.MonkeyPatch,
 ):
-    """Test EAGLE3 acceptance length does not regress."""
+    # Skip if this backend is incompatible with the model
+    backend_enum = AttentionBackendEnum[attention_backend]
+    if backend_enum in model_config.excluded_backends:
+        pytest.skip(f"{attention_backend} is incompatible with {model_config.id}")
+
     with monkeypatch.context() as m:
         m.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
         m.setenv("VLLM_ATTENTION_BACKEND", attention_backend)
