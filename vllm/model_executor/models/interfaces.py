@@ -95,8 +95,8 @@ class TowerMissingLayer(nn.Module):
 @contextmanager
 def _no_init_weights(module: nn.Module, placeholder: Callable[[], nn.Module]):
     """
-    Prevents weight initialization from taking up memory and replaces all
-    direct child assignments to `module` with the result of `placeholder()`.
+    Within this context, prevent weight initialization from using device memory and
+    replace direct child assignments to `module` with the result of `placeholder()`.
     """
 
     def callback(module_, name, submodule):
