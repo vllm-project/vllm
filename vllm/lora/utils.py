@@ -5,7 +5,6 @@ import os
 from typing import TYPE_CHECKING, Optional
 
 import huggingface_hub
-import regex as re
 from huggingface_hub.utils import (
     EntryNotFoundError,
     HfHubHTTPError,
@@ -26,6 +25,7 @@ from vllm.lora.layers import (
     FusedMoE3DWithLoRA,
     FusedMoEWithLoRA,
     LogitsProcessorWithLoRA,
+    MergedColumnParallelLinearVariableSliceWithLoRA,
     MergedColumnParallelLinearWithLoRA,
     MergedColumnParallelLinearWithShardedLoRA,
     MergedQKVParallelLinearWithLoRA,
@@ -69,6 +69,7 @@ _all_lora_classes: set[type[BaseLayerWithLoRA]] = {
     ColumnParallelLinearWithShardedLoRA,
     QKVParallelLinearWithShardedLoRA,
     MergedColumnParallelLinearWithShardedLoRA,
+    MergedColumnParallelLinearVariableSliceWithLoRA,
     MergedQKVParallelLinearWithShardedLoRA,
     RowParallelLinearWithShardedLoRA,
     FusedMoEWithLoRA,
@@ -186,39 +187,6 @@ def is_base_embeddding_weights(name: str) -> bool:
     return name.endswith(embedding_suffixes)
 
 
-def is_regex_target_modules(
-    load_modules: str | list[str], expected_lora_modules: set[str]
-) -> bool:
-    """
-    PEFT supports passing `target_modules` in the form of regular expressions,
-    such as `model.*(q_proj|k_proj|v_proj)$`. This function is mainly used to
-    determine whether the suffix in the regular expression is present in the
-    `expected_lora_modules`.
-    """
-
-    def is_valid_regex(pattern):
-        try:
-            re.compile(pattern)
-            return True
-        except re.error:
-            return False
-
-    def is_subset(sub_list, full_set):
-        return set(sub_list).issubset(full_set)
-
-    # Similar to PEFT's processing logic, regex-related operations are only
-    #  executed when the load_modules is a `str`.
-    if not isinstance(load_modules, str):
-        return False
-
-    if is_valid_regex(load_modules):
-        match = re.search(r"\((.*?)\)\$?$", load_modules)
-        if match:
-            suffix = match.group(1).split("|")
-            return is_subset(suffix, expected_lora_modules)
-    return False
-
-
 def get_supported_lora_modules(model: nn.Module) -> list[str]:
     """
     In vLLM, all linear layers support LoRA.
@@ -300,9 +268,13 @@ def process_packed_modules_mapping(model: nn.Module) -> dict[str, list[str]]:
             packed_modules_mapping = get_packed_modules_mapping(model)
             if not model.is_3d_moe_weight:
                 # 3D MoE LoRA does not need `packed_modules_mapping`
+                # Filter out malformed entries: non-gated MoE has empty
+                # ckpt_up_proj_name which results in weight_name containing ".."
+                # (e.g., "experts.0.." instead of "experts.0.layer_name.")
                 packed_modules_mapping["experts"] = [
                     weight_name.rstrip(".")
                     for _, weight_name, _, _ in moe_packed_mapping
+                    if ".." not in weight_name
                 ]
 
             return packed_modules_mapping

@@ -19,9 +19,6 @@ from vllm.model_executor.layers.quantization.kernels.scaled_mm.ScaledMMLinearKer
 from vllm.model_executor.layers.quantization.kernels.scaled_mm.triton import (
     TritonScaledMMLinearKernel,
 )
-from vllm.model_executor.layers.quantization.kernels.scaled_mm.xla import (
-    XLAScaledMMLinearKernel,
-)
 from vllm.platforms import PlatformEnum, current_platform
 
 # in priority/performance order (when available)
@@ -29,7 +26,6 @@ _POSSIBLE_KERNELS: dict[PlatformEnum, list[type[ScaledMMLinearKernel]]] = {
     PlatformEnum.CPU: [CPUScaledMMLinearKernel],
     PlatformEnum.CUDA: [CutlassScaledMMLinearKernel, TritonScaledMMLinearKernel],
     PlatformEnum.ROCM: [AiterScaledMMLinearKernel, TritonScaledMMLinearKernel],
-    PlatformEnum.TPU: [XLAScaledMMLinearKernel],
 }
 
 
@@ -62,7 +58,7 @@ def choose_scaled_mm_linear_kernel(
             continue
 
         # If the current platform uses compute_capability,
-        # make sure the kernel supports the compute cability.
+        # make sure the kernel supports the compute capability.
         is_supported, reason = kernel.is_supported(compute_capability)
         if not is_supported:
             failure_reasons.append(f"{kernel.__name__}: {reason}")

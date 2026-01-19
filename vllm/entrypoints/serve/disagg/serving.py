@@ -11,23 +11,25 @@ from fastapi import Request
 
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.logger import RequestLogger
-from vllm.entrypoints.openai.protocol import (
+from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionLogProb,
     ChatCompletionLogProbs,
     ChatCompletionLogProbsContent,
+)
+from vllm.entrypoints.openai.engine.protocol import (
     ErrorResponse,
     PromptTokenUsageInfo,
     RequestResponseMetadata,
     UsageInfo,
 )
-from vllm.entrypoints.openai.serving_engine import OpenAIServing, clamp_prompt_logprobs
-from vllm.entrypoints.openai.serving_models import OpenAIServingModels
+from vllm.entrypoints.openai.engine.serving import OpenAIServing, clamp_prompt_logprobs
+from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.entrypoints.serve.disagg.protocol import (
     GenerateRequest,
     GenerateResponse,
     GenerateResponseChoice,
 )
-from vllm.inputs.data import TokensPrompt as EngineTokensPrompt
+from vllm.inputs.data import TokensPrompt
 from vllm.logger import init_logger
 from vllm.logprobs import Logprob
 from vllm.outputs import RequestOutput
@@ -99,7 +101,7 @@ class ServingTokens(OpenAIServing):
 
         # TODO(NickLucche): Change to EngineCoreRequest once Renderer work is
         # completed
-        engine_prompt = EngineTokensPrompt(prompt_token_ids=request.token_ids)
+        engine_prompt = TokensPrompt(prompt_token_ids=request.token_ids)
         if request.features is not None:
             engine_prompt["multi_modal_data"] = None
 
@@ -115,7 +117,7 @@ class ServingTokens(OpenAIServing):
 
             self._log_inputs(
                 request_id,
-                request.token_ids,
+                TokensPrompt(prompt_token_ids=request.token_ids),
                 params=sampling_params,
                 lora_request=lora_request,
             )

@@ -10,6 +10,7 @@ from safetensors.torch import _TYPES as _SAFETENSORS_TO_TORCH_DTYPE
 import vllm.model_executor.layers.fused_moe  # noqa
 from vllm import _custom_ops as ops
 from vllm.logger import init_logger
+from vllm.model_executor.layers.fused_moe import FusedMoERouter
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
     FusedMoEQuantConfig,
@@ -181,7 +182,7 @@ class GPTQMarlinConfig(QuantizationConfig):
 
     @classmethod
     def get_min_capability(cls) -> int:
-        return 80
+        return 75
 
     @classmethod
     def get_config_filenames(cls) -> list[str]:
@@ -276,7 +277,7 @@ class GPTQMarlinConfig(QuantizationConfig):
         sym = quant_config.get("sym")
         desc_act = quant_config.get("desc_act")
 
-        if not current_platform.is_cuda():
+        if not (current_platform.is_cuda() or current_platform.is_cpu()):
             return False
 
         if quant_method != "gptq":
@@ -895,12 +896,11 @@ class GPTQMarlinMoEMethod(FusedMoEMethodBase):
     def apply(
         self,
         layer: FusedMoE,
+        router: FusedMoERouter,
         x: torch.Tensor,
         router_logits: torch.Tensor,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        assert layer.activation == "silu", "Only SiLU activation is supported."
-
-        topk_weights, topk_ids, _ = layer.select_experts(
+        topk_weights, topk_ids = router.select_experts(
             hidden_states=x,
             router_logits=router_logits,
         )

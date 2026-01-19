@@ -4,7 +4,6 @@
 import numpy as np
 import torch
 
-from .common import apply_rotary_emb_dispatch
 from .dynamic_ntk_alpha_rope import DynamicNTKAlphaRotaryEmbedding
 
 
@@ -36,7 +35,7 @@ class XDRotaryEmbedding(DynamicNTKAlphaRotaryEmbedding):
             dtype,
         )
 
-    def forward(
+    def forward_native(
         self,
         positions: torch.Tensor,
         query: torch.Tensor,
@@ -68,14 +67,73 @@ class XDRotaryEmbedding(DynamicNTKAlphaRotaryEmbedding):
         query = query.view(num_tokens, -1, self.head_size)
         query_rot = query[..., : self.rotary_dim]
         query_pass = query[..., self.rotary_dim :]
-        query_rot = apply_rotary_emb_dispatch(query_rot, cos, sin, self.is_neox_style)
+        query_rot = self.apply_rotary_emb.forward_native(
+            query_rot,
+            cos,
+            sin,
+        )
         query = torch.cat((query_rot, query_pass), dim=-1).reshape(query_shape)
 
         key_shape = key.shape
         key = key.view(num_tokens, -1, self.head_size)
         key_rot = key[..., : self.rotary_dim]
         key_pass = key[..., self.rotary_dim :]
-        key_rot = apply_rotary_emb_dispatch(key_rot, cos, sin, self.is_neox_style)
+        key_rot = self.apply_rotary_emb.forward_native(
+            key_rot,
+            cos,
+            sin,
+        )
+        key = torch.cat((key_rot, key_pass), dim=-1).reshape(key_shape)
+        return query, key
+
+    def forward_cuda(
+        self,
+        positions: torch.Tensor,
+        query: torch.Tensor,
+        key: torch.Tensor | None = None,
+        offsets: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        """PyTorch-native implementation equivalent to forward().
+
+        Args:
+            positions:
+                [4, num_tokens] (P/W/H/T positions with multimodal inputs)
+            query: [num_tokens, num_heads * head_size]
+            key: [num_tokens, num_kv_heads * head_size]
+        """
+        assert positions.ndim == 2
+        assert key is not None
+
+        num_tokens = positions.shape[-1]
+        cos_sin = self.cos_sin_cache[positions]
+        cos, sin = cos_sin.chunk(2, dim=-1)
+        cos = torch.cat(
+            [m[i] for i, m in enumerate(cos.split(self.xdrope_section, dim=-1))], dim=-1
+        )
+        sin = torch.cat(
+            [m[i] for i, m in enumerate(sin.split(self.xdrope_section, dim=-1))], dim=-1
+        )
+
+        query_shape = query.shape
+        query = query.view(num_tokens, -1, self.head_size)
+        query_rot = query[..., : self.rotary_dim]
+        query_pass = query[..., self.rotary_dim :]
+        query_rot = self.apply_rotary_emb(
+            query_rot,
+            cos,
+            sin,
+        )
+        query = torch.cat((query_rot, query_pass), dim=-1).reshape(query_shape)
+
+        key_shape = key.shape
+        key = key.view(num_tokens, -1, self.head_size)
+        key_rot = key[..., : self.rotary_dim]
+        key_pass = key[..., self.rotary_dim :]
+        key_rot = self.apply_rotary_emb(
+            key_rot,
+            cos,
+            sin,
+        )
         key = torch.cat((key_rot, key_pass), dim=-1).reshape(key_shape)
         return query, key
 

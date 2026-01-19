@@ -8,7 +8,6 @@ import torch
 from vllm.triton_utils import tl, triton
 
 from .base import RotaryEmbeddingBase
-from .common import apply_rotary_emb_dispatch
 from .yarn_scaling_rope import YaRNScalingRotaryEmbedding, yarn_get_mscale
 
 
@@ -301,14 +300,22 @@ class MRotaryEmbedding(RotaryEmbeddingBase):
         query = query.view(num_tokens, -1, self.head_size)
         query_rot = query[..., : self.rotary_dim]
         query_pass = query[..., self.rotary_dim :]
-        query_rot = apply_rotary_emb_dispatch(query_rot, cos, sin, self.is_neox_style)
+        query_rot = self.apply_rotary_emb.forward_native(
+            query_rot,
+            cos,
+            sin,
+        )
         query = torch.cat((query_rot, query_pass), dim=-1).reshape(query_shape)
 
         key_shape = key.shape
         key = key.view(num_tokens, -1, self.head_size)
         key_rot = key[..., : self.rotary_dim]
         key_pass = key[..., self.rotary_dim :]
-        key_rot = apply_rotary_emb_dispatch(key_rot, cos, sin, self.is_neox_style)
+        key_rot = self.apply_rotary_emb.forward_native(
+            key_rot,
+            cos,
+            sin,
+        )
         key = torch.cat((key_rot, key_pass), dim=-1).reshape(key_shape)
         return query, key
 
@@ -347,13 +354,21 @@ class MRotaryEmbedding(RotaryEmbeddingBase):
         query = query.view(num_tokens, -1, self.head_size)
         query_rot = query[..., : self.rotary_dim]
         query_pass = query[..., self.rotary_dim :]
-        query_rot = apply_rotary_emb_dispatch(query_rot, cos, sin, self.is_neox_style)
+        query_rot = self.apply_rotary_emb(
+            query_rot,
+            cos,
+            sin,
+        )
         query = torch.cat((query_rot, query_pass), dim=-1).reshape(query_shape)
 
         key = key.view(num_tokens, -1, self.head_size)
         key_rot = key[..., : self.rotary_dim]
         key_pass = key[..., self.rotary_dim :]
-        key_rot = apply_rotary_emb_dispatch(key_rot, cos, sin, self.is_neox_style)
+        key_rot = self.apply_rotary_emb(
+            key_rot,
+            cos,
+            sin,
+        )
         key = torch.cat((key_rot, key_pass), dim=-1).reshape(key_shape)
         return query, key
 

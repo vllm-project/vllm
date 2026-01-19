@@ -317,6 +317,15 @@ Supported models:
 
 Flags: `--tool-call-parser deepseek_v31 --chat-template {see_above}`
 
+### OpenAI OSS Models ('openai`)
+
+Supported models:
+
+* `openai/gpt-oss-20b`
+* `openai/gpt-oss-120b`
+
+Flags: `--tool-call-parser openai`
+
 ### Kimi-K2 Models (`kimi_k2`)
 
 Supported models:
@@ -352,15 +361,47 @@ Supported models:
 * `zai-org/GLM-4.5`
 * `zai-org/GLM-4.5-Air`
 * `zai-org/GLM-4.6`
-* `zai-org/GLM-4.6-Air`
 
 Flags: `--tool-call-parser glm45`
+
+### GLM-4.7 Models (`glm47`)
+
+Supported models:
+
+* `zai-org/GLM-4.7`
+* `zai-org/GLM-4.7-Flash`
+
+Flags: `--tool-call-parser glm47`
+
+### FunctionGemma Models (`functiongemma`)
+
+Google's FunctionGemma is a lightweight (270M parameter) model specifically designed for function calling.
+It's built on Gemma 3 and optimized for edge deployment on devices like laptops and phones.
+
+Supported models:
+
+* `google/functiongemma-270m-it`
+
+FunctionGemma uses a unique output format with `<start_function_call>` and `<end_function_call>` tags:
+
+```text
+<start_function_call>call:get_weather{location:<escape>London<escape>}<end_function_call>
+```
+
+The model is designed to be fine-tuned for specific function-calling tasks for best results.
+
+Flags: `--tool-call-parser functiongemma --chat-template examples/tool_chat_template_functiongemma.jinja`
+
+!!! note
+    FunctionGemma is intended to be fine-tuned for your specific function-calling task.
+    The base model provides general function calling capabilities, but best results
+    are achieved with task-specific fine-tuning. See Google's [FunctionGemma documentation](https://ai.google.dev/gemma/docs/functiongemma) for fine-tuning guides.
 
 ### Qwen3-Coder Models (`qwen3_xml`)
 
 Supported models:
 
-* `Qwen/Qwen3-480B-A35B-Instruct`
+* `Qwen/Qwen3-Coder-480B-A35B-Instruct`
 * `Qwen/Qwen3-Coder-30B-A3B-Instruct`
 
 Flags: `--tool-call-parser qwen3_xml`
@@ -420,7 +461,7 @@ Flags: `--tool-call-parser pythonic --chat-template {see_above}`
 
 ## How to Write a Tool Parser Plugin
 
-A tool parser plugin is a Python file containing one or more ToolParser implementations. You can write a ToolParser similar to the `Hermes2ProToolParser` in [vllm/entrypoints/openai/tool_parsers/hermes_tool_parser.py](../../vllm/entrypoints/openai/tool_parsers/hermes_tool_parser.py).
+A tool parser plugin is a Python file containing one or more ToolParser implementations. You can write a ToolParser similar to the `Hermes2ProToolParser` in [vllm/tool_parsers/hermes_tool_parser.py](../../vllm/tool_parsers/hermes_tool_parser.py).
 
 Here is a summary of a plugin file:
 
@@ -468,7 +509,7 @@ Here is a summary of a plugin file:
     # register the tool parser to ToolParserManager
     ToolParserManager.register_lazy_module(
         name="example",
-        module_path="vllm.entrypoints.openai.tool_parsers.example",
+        module_path="vllm.tool_parsers.example",
         class_name="ExampleToolParser",
     )
 

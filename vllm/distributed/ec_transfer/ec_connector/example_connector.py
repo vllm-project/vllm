@@ -73,6 +73,7 @@ class ECExampleConnector(ECConnectorBase):
                 data hashes (`mm_hash`) to encoder cache tensors.
             kwargs (dict): Additional keyword arguments for the connector.
         """
+        from vllm.platforms import current_platform
 
         # Get the metadata
         metadata: ECConnectorMetadata = self._get_connector_metadata()
@@ -80,10 +81,7 @@ class ECExampleConnector(ECConnectorBase):
         assert encoder_cache is not None
         if metadata is None:
             logger.warning(
-                (
-                    "In connector.start_load_caches, ",
-                    "but the connector metadata is None",
-                )
+                "In connector.start_load_caches, but the connector metadata is None"
             )
             return
         # Load the EC for each mm data
@@ -91,7 +89,9 @@ class ECExampleConnector(ECConnectorBase):
             if mm_data.mm_hash in encoder_cache:
                 continue
             filename = self._generate_filename_debug(mm_data.mm_hash)
-            ec_cache = safetensors.torch.load_file(filename)["ec_cache"].cuda()
+            ec_cache = safetensors.torch.load_file(
+                filename, device=current_platform.device_type
+            )["ec_cache"]
             encoder_cache[mm_data.mm_hash] = ec_cache
             logger.debug("Success load encoder cache for hash %s", mm_data.mm_hash)
 
@@ -144,7 +144,7 @@ class ECExampleConnector(ECConnectorBase):
         Update ECConnector state after encoder cache allocation.
         """
         mm_hash = request.mm_features[index].identifier
-        num_encoder_token = request.get_num_encoder_tokens(index)
+        num_encoder_token = request.get_num_encoder_embeds(index)
         # Insert mm_hash only if this block has not been recorded yet.
         self._mm_datas_need_loads[mm_hash] = num_encoder_token
 

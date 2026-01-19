@@ -3,14 +3,16 @@
 
 from functools import cached_property
 
-from vllm.entrypoints.openai.protocol import (
+from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionRequest,
+)
+from vllm.entrypoints.openai.responses.protocol import (
     ResponsesRequest,
 )
 from vllm.logger import init_logger
 from vllm.reasoning import ReasoningParser
 from vllm.reasoning.basic_parsers import BaseThinkingReasoningParser
-from vllm.tokenizers import MistralTokenizer
+from vllm.tokenizers.mistral import MistralTokenizer
 
 logger = init_logger(__name__)
 
@@ -104,7 +106,7 @@ class MistralReasoningParser(BaseThinkingReasoningParser):
         # 3. Both BOT and EOT have been outputted.
         elif has_bot_token and has_eot_token:
             return input_ids[:bot_token_index] + input_ids[eot_token_index + 1 :]
-        # 4. Only EOT has been outputted => this should not have occured for a model
+        # 4. Only EOT has been outputted => this should not have occurred for a model
         #    well prompted and trained.
         else:
             return input_ids[:eot_token_index] + input_ids[eot_token_index + 1 :]

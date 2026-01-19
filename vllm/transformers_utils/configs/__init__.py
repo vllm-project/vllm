@@ -16,6 +16,7 @@ import importlib
 
 _CLASS_TO_MODULE: dict[str, str] = {
     "AfmoeConfig": "vllm.transformers_utils.configs.afmoe",
+    "BagelConfig": "vllm.transformers_utils.configs.bagel",
     "ChatGLMConfig": "vllm.transformers_utils.configs.chatglm",
     "DeepseekVLV2Config": "vllm.transformers_utils.configs.deepseek_vl2",
     "DotsOCRConfig": "vllm.transformers_utils.configs.dotsocr",
@@ -24,6 +25,7 @@ _CLASS_TO_MODULE: dict[str, str] = {
     "HunYuanVLConfig": "vllm.transformers_utils.configs.hunyuan_vl",
     "HunYuanVLTextConfig": "vllm.transformers_utils.configs.hunyuan_vl",
     "HunYuanVLVisionConfig": "vllm.transformers_utils.configs.hunyuan_vl",
+    "IsaacConfig": "vllm.transformers_utils.configs.isaac",
     # RWConfig is for the original tiiuae/falcon-40b(-instruct) and
     # tiiuae/falcon-7b(-instruct) models. Newer Falcon models will use the
     # `FalconConfig` class from the official HuggingFace transformers library.
@@ -40,6 +42,7 @@ _CLASS_TO_MODULE: dict[str, str] = {
     "NemotronHConfig": "vllm.transformers_utils.configs.nemotron_h",
     "Olmo3Config": "vllm.transformers_utils.configs.olmo3",
     "OvisConfig": "vllm.transformers_utils.configs.ovis",
+    "PixelShuffleSiglip2VisionConfig": "vllm.transformers_utils.configs.isaac",
     "RadioConfig": "vllm.transformers_utils.configs.radio",
     "SpeculatorsConfig": "vllm.transformers_utils.configs.speculators.base",
     "UltravoxConfig": "vllm.transformers_utils.configs.ultravox",
@@ -54,6 +57,7 @@ _CLASS_TO_MODULE: dict[str, str] = {
 
 __all__ = [
     "AfmoeConfig",
+    "BagelConfig",
     "ChatGLMConfig",
     "DeepseekVLV2Config",
     "DeepseekV3Config",
@@ -63,6 +67,7 @@ __all__ = [
     "HunYuanVLConfig",
     "HunYuanVLTextConfig",
     "HunYuanVLVisionConfig",
+    "IsaacConfig",
     "RWConfig",
     "JAISConfig",
     "Lfm2MoeConfig",
@@ -76,6 +81,7 @@ __all__ = [
     "NemotronHConfig",
     "Olmo3Config",
     "OvisConfig",
+    "PixelShuffleSiglip2VisionConfig",
     "RadioConfig",
     "SpeculatorsConfig",
     "UltravoxConfig",
