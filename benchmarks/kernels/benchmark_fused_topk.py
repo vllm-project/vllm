@@ -5,7 +5,7 @@ import itertools
 
 import torch
 
-from vllm.model_executor.layers.fused_moe.fused_moe import fused_topk
+from vllm.model_executor.layers.fused_moe.router.fused_topk_router import fused_topk
 from vllm.triton_utils import triton
 from vllm.utils.argparse_utils import FlexibleArgumentParser
 

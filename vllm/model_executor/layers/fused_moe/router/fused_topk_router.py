@@ -17,7 +17,6 @@ def vllm_topk_softmax(
     token_expert_indices: torch.Tensor,
     gating_output: torch.Tensor,
     renormalize: bool = False,
-    e_score_correction_bias: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, ...]:
     ops.topk_softmax(
         topk_weights,
@@ -25,7 +24,6 @@ def vllm_topk_softmax(
         token_expert_indices,
         gating_output,
         renormalize,
-        e_score_correction_bias,
     )
 
     return topk_weights, topk_indices
@@ -37,7 +35,6 @@ def vllm_topk_sigmoid(
     token_expert_indices: torch.Tensor,
     gating_output: torch.Tensor,
     renormalize: bool = False,
-    e_score_correction_bias: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, ...]:
     ops.topk_sigmoid(
         topk_weights,
@@ -45,7 +42,6 @@ def vllm_topk_sigmoid(
         token_expert_indices,
         gating_output,
         renormalize,
-        e_score_correction_bias,
     )
 
     return topk_weights, topk_indices
@@ -72,8 +68,8 @@ def fused_topk(
     gating_output: torch.Tensor,
     topk: int,
     renormalize: bool,
-    scoring_func: str = "softmax",
     indices_type: torch.dtype | None = None,
+    scoring_func: str = "softmax",
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     assert hidden_states.size(0) == gating_output.size(0), "Number of tokens mismatch"
 
@@ -127,7 +123,6 @@ class FusedTopKRouter(BaseRouter):
         enable_eplb: bool = False,
         indices_type_getter: Callable[[], torch.dtype | None] | None = None,
     ):
-        assert scoring_func == "softmax", "FusedTopKRouter only supports softmax."
         super().__init__(
             top_k=top_k,
             global_num_experts=global_num_experts,
@@ -136,6 +131,7 @@ class FusedTopKRouter(BaseRouter):
             indices_type_getter=indices_type_getter,
         )
         self.renormalize = renormalize
+        self.scoring_func = scoring_func
 
     @property
     def routing_method_type(self) -> RoutingMethodType:
@@ -158,6 +154,7 @@ class FusedTopKRouter(BaseRouter):
             topk=self.top_k,
             renormalize=self.renormalize,
             indices_type=indices_type,
+            scoring_func=self.scoring_func,
         )
 
         return topk_weights, topk_ids

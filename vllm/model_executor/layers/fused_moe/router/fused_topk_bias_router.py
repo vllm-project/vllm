@@ -4,14 +4,15 @@ from collections.abc import Callable
 
 import torch
 
-from vllm._aiter_ops import rocm_aiter_ops
 import vllm._custom_ops as ops
+from vllm._aiter_ops import rocm_aiter_ops
 from vllm.distributed.eplb.eplb_state import EplbLayerState
 from vllm.model_executor.layers.batch_invariant import (
     vllm_is_batch_invariant,
 )
 from vllm.model_executor.layers.fused_moe.config import RoutingMethodType
 from vllm.model_executor.layers.fused_moe.router.base_router import BaseRouter
+
 
 def vllm_topk_softmax(
     topk_weights: torch.Tensor,
@@ -51,6 +52,7 @@ def vllm_topk_sigmoid(
     )
 
     return topk_weights, topk_indices
+
 
 def fused_topk_bias(
     hidden_states: torch.Tensor,
@@ -129,6 +131,7 @@ class FusedTopKBiasRouter(BaseRouter):
         eplb_state: EplbLayerState,
         e_score_correction_bias: torch.Tensor,
         renormalize: bool = True,
+        scoring_func: str = "softmax",
         routed_scaling_factor: float = 1.0,
         enable_eplb: bool = False,
         indices_type_getter: Callable[[], torch.dtype | None] | None = None,
@@ -142,6 +145,7 @@ class FusedTopKBiasRouter(BaseRouter):
         )
         self.e_score_correction_bias = e_score_correction_bias
         self.renormalize = renormalize
+        self.scoring_func = scoring_func
         self.routed_scaling_factor = routed_scaling_factor
 
     @property
@@ -165,6 +169,7 @@ class FusedTopKBiasRouter(BaseRouter):
             e_score_correction_bias=self.e_score_correction_bias.data,
             topk=self.top_k,
             renormalize=self.renormalize,
+            scoring_func=self.scoring_func,
         )
 
         if self.routed_scaling_factor != 1.0:

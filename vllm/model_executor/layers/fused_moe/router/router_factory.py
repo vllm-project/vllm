@@ -146,11 +146,6 @@ def create_fused_moe_router(
         router.capture = capture
         return router
 
-    if scoring_func != "softmax":
-        raise ValueError(
-            "Only softmax scoring function is supported for non-grouped topk."
-        )
-
     if e_score_correction_bias is not None:
         router = FusedTopKBiasRouter(
             top_k=top_k,
@@ -158,6 +153,7 @@ def create_fused_moe_router(
             eplb_state=eplb_state,
             e_score_correction_bias=e_score_correction_bias,
             renormalize=renormalize,
+            scoring_func=scoring_func,
             routed_scaling_factor=routed_scaling_factor,
             enable_eplb=enable_eplb,
             indices_type_getter=indices_type_getter,

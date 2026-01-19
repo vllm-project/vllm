@@ -8,10 +8,10 @@ Run `pytest tests/kernels/moe/test_fused_topk.py`.
 import pytest
 import torch
 
-from vllm.model_executor.layers.fused_moe.fused_moe import (
-    fused_topk,
+from vllm.model_executor.layers.fused_moe.router.fused_topk_bias_router import (
     fused_topk_bias,
 )
+from vllm.model_executor.layers.fused_moe.router.fused_topk_router import fused_topk
 from vllm.platforms import current_platform
 
 
@@ -62,7 +62,7 @@ def test_fused_topk(
     scoring_func: str,
     dtype: torch.dtype,
 ):
-    current_platform.seed_everything(0)
+    torch.manual_seed(0)
     hidden_states = torch.randn((num_tokens, hidden_size), dtype=dtype, device="cuda")
     gating_output = torch.randn((num_tokens, num_experts), dtype=dtype, device="cuda")
 
@@ -106,7 +106,7 @@ def test_fused_topk_bias(
     scoring_func: str,
     dtype: torch.dtype,
 ):
-    current_platform.seed_everything(0)
+    torch.manual_seed(0)
     hidden_states = torch.randn((num_tokens, hidden_size), dtype=dtype, device="cuda")
     gating_output = torch.randn((num_tokens, num_experts), dtype=dtype, device="cuda")
     e_score_correction_bias = torch.randn(
