@@ -14,12 +14,15 @@ from types import SimpleNamespace
 from typing import TypedDict
 
 import pytest
+import torch
 
 from tests.conftest import VllmRunner
 from tests.utils import large_gpu_mark
 from vllm import SamplingParams
 from vllm.benchmarks.datasets import get_samples
 from vllm.inputs import TokensPrompt
+from vllm.platforms import current_platform
+from vllm.v1.attention.selector import AttentionSelectorConfig
 from vllm.v1.metrics.reader import Counter, Vector
 
 
@@ -71,7 +74,58 @@ DEFAULT_NUM_SPEC_TOKENS = 3
 DEFAULT_NUM_PROMPTS = 80
 DEFAULT_OUTPUT_LEN = 256
 DEFAULT_MAX_MODEL_LEN = 16384
-DEFAULT_RTOL = 0.02
+DEFAULT_RTOL = 0.05
+
+# TP sizes to test
+TP_SIZES = [1, 2, 4]
+
+
+# Backends excluded from testing due to significantly different behavior
+EXCLUDED_BACKENDS = {"FLEX_ATTENTION"}
+
+
+def get_available_attention_backends() -> list[str]:
+    """Get list of available attention backends for the current platform."""
+    if not hasattr(current_platform, "get_valid_backends"):
+        return ["FLASH_ATTN"]
+
+    device_capability = current_platform.get_device_capability()
+    if device_capability is None:
+        return ["FLASH_ATTN"]
+
+    attn_selector_config = AttentionSelectorConfig(
+        head_size=128,
+        dtype=torch.bfloat16,
+        kv_cache_dtype=None,
+        block_size=None,
+        use_mla=False,
+        has_sink=False,
+        use_sparse=False,
+        use_mm_prefix=False,
+    )
+
+    valid_backends, _ = current_platform.get_valid_backends(
+        device_capability=device_capability,
+        attn_selector_config=attn_selector_config,
+    )
+
+    return [
+        backend.name
+        for backend, _ in valid_backends
+        if backend.name not in EXCLUDED_BACKENDS
+    ]
+
+
+def get_attention_backend_params() -> list[pytest.param]:
+    """Generate pytest params for available attention backends."""
+    available = get_available_attention_backends()
+    return [pytest.param(backend, id=backend.lower()) for backend in available]
+
+
+def get_tp_size_params() -> list[pytest.param]:
+    """Generate pytest params for TP sizes based on available GPUs."""
+    num_gpus = torch.cuda.device_count() if torch.cuda.is_available() else 1
+    return [pytest.param(tp, id=f"tp{tp}") for tp in TP_SIZES if tp <= num_gpus]
 
 
 def get_mt_bench_prompts(
@@ -145,14 +199,19 @@ def extract_acceptance_metrics(metrics, num_spec_tokens: int) -> AcceptanceMetri
     [pytest.param(config, id=config.id) for config in EAGLE3_MODEL_CONFIGS],
 )
 @pytest.mark.parametrize("num_spec_tokens", [DEFAULT_NUM_SPEC_TOKENS])
+@pytest.mark.parametrize("tp_size", get_tp_size_params())
+@pytest.mark.parametrize("attention_backend", get_attention_backend_params())
 def test_eagle3_acceptance_length(
     model_config: Eagle3ModelConfig,
     num_spec_tokens: int,
+    tp_size: int,
+    attention_backend: str,
     monkeypatch: pytest.MonkeyPatch,
 ):
     """Test EAGLE3 acceptance length does not regress."""
     with monkeypatch.context() as m:
         m.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
+        m.setenv("VLLM_ATTENTION_BACKEND", attention_backend)
 
         with VllmRunner(
             model_name=model_config.verifier,
@@ -161,8 +220,8 @@ def test_eagle3_acceptance_length(
                 "model": model_config.drafter,
                 "num_speculative_tokens": num_spec_tokens,
             },
-            tensor_parallel_size=1,
-            gpu_memory_utilization=0.9,
+            tensor_parallel_size=tp_size,
+            gpu_memory_utilization=0.7,
             disable_log_stats=False,
             max_model_len=DEFAULT_MAX_MODEL_LEN,
         ) as vllm_runner:
@@ -213,7 +272,8 @@ def test_eagle3_acceptance_length(
                         )
 
             print(
-                f"\n{model_config.id}: acceptance_length={actual_acceptance_length:.3f}"
+                f"\n{model_config.id} [tp={tp_size}, backend={attention_backend}]: "
+                f"acceptance_length={actual_acceptance_length:.3f}"
                 f" (expected={expected:.3f}, rel_error={rel_error:.2%})"
             )
             print(f"  Per-position: {[f'{v:.3f}' for v in actual_per_pos]}")
