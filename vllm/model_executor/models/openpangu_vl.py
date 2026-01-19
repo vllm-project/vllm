@@ -760,7 +760,7 @@ def get_load_balance_assignment(
     num_gpus: int = 2,
 ) -> tuple[list[int], list[int], list[int]]:
     """
-    see https://github.com/vllm-project/vllm/blob/main/vllm/model_executor/models/vision.py#L253 for details.
+    see https://github.com/vllm-project/vllm/blob/main/vllm/model_executor/models/vision.py#L253 for details. # noqa: E501
     """
 
     n_samples = len(sizes)
@@ -802,7 +802,7 @@ def run_dp_sharded_mrope_vision_model(
     rope_type: Literal["rope_3d", "rope_2d"],
 ) -> tuple[torch.Tensor, ...]:
     """
-    https://github.com/vllm-project/vllm/blob/main/vllm/model_executor/models/vision.py#L322 for details.
+    https://github.com/vllm-project/vllm/blob/main/vllm/model_executor/models/vision.py#L322 for details. # noqa: E501
     """
     grid_thw_list = grid_thw_list.tolist()
     tp_size = parallel_state.get_tensor_model_parallel_world_size()
@@ -1516,8 +1516,6 @@ class OpenPanguVLForConditionalGeneration(
                 llm_H = H // spatial_merge_size
                 llm_W = W // spatial_merge_size
                 tokens_per_frame = llm_H * llm_W
-                # Get timestamps (one t value per frame)
-                t_index_all = (torch.arange(T)).long()
                 # Calculate the current starting position
                 start_pos = (
                     llm_pos_ids_list[-1].max().item() + 1 if llm_pos_ids_list else 0
@@ -1526,7 +1524,7 @@ class OpenPanguVLForConditionalGeneration(
                 # frame by frame processing
                 final_frame_time = T - 1  # Record the order of the last frame
                 for t in range(T):
-                    # 1. Calculate the left placeholder position of the first frame, skip
+                    # 1. Calculate the left placeholder position of the first frame, skip # noqa: E501
                     if t != 0:
                         new_src_item.append(vision_start_token_id)  # For looping, count
                         bot_pos = torch.full((3, 1), current_pos, dtype=torch.long)
@@ -1536,7 +1534,7 @@ class OpenPanguVLForConditionalGeneration(
                     # Construct a single frame of (t, h, w)
                     grid_h = torch.arange(llm_H).view(-1, 1).expand(-1, llm_W).flatten()
                     grid_w = torch.arange(llm_W).view(1, -1).expand(llm_H, -1).flatten()
-                    # Here we don't add current_pos to h/w, just keep the original (t, h, w)
+                    # Here we don't add current_pos to h/w, just keep the original (t, h, w) # noqa: E501
                     frame_pos = torch.stack(
                         [
                             torch.full_like(grid_h, 0, dtype=torch.long),  # t
@@ -1552,7 +1550,7 @@ class OpenPanguVLForConditionalGeneration(
                     )  # For looping, count
                     llm_pos_ids_list.append(frame_pos_with_offset)
                     current_pos += max(llm_H, llm_W)
-                    # 3. Calculate the right placeholder position of the last frame and skip it
+                    # 3. Calculate the right placeholder position of the last frame and skip it # noqa: E501
                     if t != final_frame_time:
                         new_src_item.append(vision_end_token_id)  # For looping, count
                         eot_pos = torch.full((3, 1), current_pos, dtype=torch.long)
