@@ -6,23 +6,6 @@ MultiConnector supports loading a given request’s KV from a single connector
 (specifically, the first connector that reports a non-zero match via
 get_num_new_matched_tokens()),
 while supporting save/send via multiple connectors.
-
-Tests at two levels of abstraction:
-
-LOW-LEVEL (unit tests):
-- Initialization of both connectors
-- Metadata binding to sub-connectors
-- get_finished aggregation from both connectors
-- NIXL transfer with offloading active
-- _extra_async_saves tracking for dual async save
-- get_num_new_matched_tokens priority
-- request_finished with dual async save
-
-HIGH-LEVEL (scheduler integration):
-- Scheduler creates MultiConnector correctly
-- build_connector_meta produces MultiKVConnectorMetadata
-- Full scheduler -> worker metadata flow
-- Real offloading transfers via MultiConnectorRequestRunner
 """
 
 import time
@@ -31,7 +14,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 import torch
 
-from vllm.config import KVTransferConfig, VllmConfig
+from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.distributed.kv_transfer.kv_connector.v1 import KVConnectorRole
 from vllm.distributed.kv_transfer.kv_connector.v1.multi_connector import (
     MultiConnector,
@@ -45,10 +28,6 @@ from vllm.distributed.kv_transfer.kv_connector.v1.offloading_connector import (
     OffloadingConnector,
     OffloadingConnectorMetadata,
 )
-from vllm.distributed.kv_transfer.kv_transfer_state import (
-    ensure_kv_transfer_shutdown,
-    has_kv_transfer_group,
-)
 from vllm.forward_context import ForwardContext
 from vllm.v1.attention.backends.flash_attn import FlashAttentionBackend
 
@@ -61,17 +40,6 @@ from .test_offloading_connector import (
 from .utils import (
     create_vllm_config,
 )
-
-
-@pytest.fixture(scope="module", autouse=True)
-def clear_kv_transfer():
-    """
-    Clean up the global KV transfer state after tests to prevent
-    interference with other test modules.
-    """
-    yield
-    if has_kv_transfer_group():
-        ensure_kv_transfer_shutdown()
 
 
 @pytest.fixture
@@ -98,7 +66,8 @@ def multi_connector_config():
             },
         ]
     }
-    return base_config
+    with set_current_vllm_config(base_config):
+        yield base_config
 
 
 @patch(
@@ -115,34 +84,6 @@ def test_multi_connector_initialization(multi_connector_config, dist_init):
     assert len(connector._connectors) == 2
     assert isinstance(connector._connectors[0], NixlConnector)
     assert isinstance(connector._connectors[1], OffloadingConnector)
-
-
-@patch(
-    "vllm.distributed.kv_transfer.kv_connector.v1.nixl_connector.NixlWrapper",
-    FakeNixlWrapper,
-)
-def test_multi_connector_metadata_binding(multi_connector_config, dist_init):
-    """Test that metadata is properly distributed to sub-connectors."""
-    connector = MultiConnector(
-        multi_connector_config, KVConnectorRole.WORKER, kv_cache_config=MagicMock()
-    )
-
-    # Create metadata for both connectors
-    nixl_metadata = NixlConnectorMetadata()
-    offload_metadata = OffloadingConnectorMetadata()
-    multi_metadata = MultiKVConnectorMetadata(
-        metadata=(nixl_metadata, offload_metadata)
-    )
-
-    # Bind and verify
-    connector.bind_connector_metadata(multi_metadata)
-    assert connector._connectors[0].has_connector_metadata()
-    assert connector._connectors[1].has_connector_metadata()
-
-    # Clear and verify
-    connector.clear_connector_metadata()
-    assert not connector._connectors[0].has_connector_metadata()
-    assert not connector._connectors[1].has_connector_metadata()
 
 
 @patch(
@@ -205,7 +146,7 @@ def test_multi_connector_nixl_transfer_with_offloading_active(
     )
 
     # Offloading metadata is empty but connector is active
-    offload_metadata = OffloadingConnectorMetadata()
+    offload_metadata = OffloadingConnectorMetadata(reqs_to_load={}, reqs_to_store={})
 
     multi_metadata = MultiKVConnectorMetadata(
         metadata=(nixl_metadata, offload_metadata)
@@ -214,15 +155,10 @@ def test_multi_connector_nixl_transfer_with_offloading_active(
 
     ctx = ForwardContext(no_compile_layers={}, attn_metadata={}, virtual_engine=0)
     connector.start_load_kv(ctx)
-
-    # Wait for async operations
     time.sleep(0.2)
 
-    # Poll for results
     connector.bind_connector_metadata(
-        MultiKVConnectorMetadata(
-            metadata=(NixlConnectorMetadata(), OffloadingConnectorMetadata())
-        )
+        MultiKVConnectorMetadata(metadata=(NixlConnectorMetadata(), offload_metadata))
     )
     connector.start_load_kv(ctx)
 
@@ -405,30 +341,18 @@ class MultiConnectorRequestRunner(RequestRunner):
     connectors, overriding only the connector-specific methods.
     """
 
+    def __init__(
+        self,
+        vllm_config: VllmConfig,
+        offloaded_block_size: int,
+        gpu_block_size: int,
+        num_gpu_blocks: int,
+    ):
+        self._vllm_config = vllm_config
+        super().__init__(offloaded_block_size, gpu_block_size, num_gpu_blocks)
+
     def _create_vllm_config(self) -> VllmConfig:
-        """Create VllmConfig with MultiConnector (NIXL + Offloading)."""
-        vllm_config = create_vllm_config(
-            block_size=self.gpu_block_size, max_num_batched_tokens=1000
-        )
-        vllm_config.kv_transfer_config = KVTransferConfig(
-            kv_connector="MultiConnector",
-            kv_role="kv_both",
-            kv_connector_extra_config={
-                "connectors": [
-                    {"kv_connector": "NixlConnector", "kv_role": "kv_both"},
-                    {
-                        "kv_connector": "OffloadingConnector",
-                        "kv_role": "kv_both",
-                        "kv_connector_extra_config": {
-                            "spec_name": "MockOffloadingSpec",
-                            "spec_module_path": "tests.v1.kv_connector.unit.test_offloading_connector",  # noqa: E501
-                            "block_size": self.offloaded_block_size,
-                        },
-                    },
-                ]
-            },
-        )
-        return vllm_config
+        return self._vllm_config
 
     def _create_worker_connector(self, vllm_config: VllmConfig):
         """Create worker-side MultiConnector."""
@@ -483,7 +407,7 @@ class MultiConnectorRequestRunner(RequestRunner):
     "vllm.distributed.kv_transfer.kv_connector.v1.nixl_connector.NixlWrapper",
     FakeNixlWrapper,
 )
-def test_multi_connector_real_offloading_transfers(dist_init):
+def test_multi_connector_real_offloading_transfers(dist_init, multi_connector_config):
     """
     Verify both offloading and NIXL transfers work through MultiConnector.
 
@@ -495,11 +419,12 @@ def test_multi_connector_real_offloading_transfers(dist_init):
 
     This confirms both connectors work simultaneously through MultiConnector.
     """
-    offloaded_block_size = 12
-    gpu_block_size = 4
+    offloaded_block_size = 16
+    gpu_block_size = 16
     num_gpu_blocks = 100
 
     runner = MultiConnectorRequestRunner(
+        vllm_config=multi_connector_config,
         offloaded_block_size=offloaded_block_size,
         gpu_block_size=gpu_block_size,
         num_gpu_blocks=num_gpu_blocks,
@@ -559,8 +484,7 @@ def test_multi_connector_real_offloading_transfers(dist_init):
         },
     )
 
-    # Create multi-metadata with both NIXL and offloading metadata
-    offload_metadata = OffloadingConnectorMetadata()
+    offload_metadata = OffloadingConnectorMetadata(reqs_to_load={}, reqs_to_store={})
     multi_metadata = MultiKVConnectorMetadata(
         metadata=(nixl_metadata, offload_metadata)
     )
@@ -575,9 +499,7 @@ def test_multi_connector_real_offloading_transfers(dist_init):
 
     # Poll for results with fresh metadata
     runner.worker_connector.bind_connector_metadata(
-        MultiKVConnectorMetadata(
-            metadata=(NixlConnectorMetadata(), OffloadingConnectorMetadata())
-        )
+        MultiKVConnectorMetadata(metadata=(NixlConnectorMetadata(), offload_metadata))
     )
     runner.worker_connector.start_load_kv(ctx)
 

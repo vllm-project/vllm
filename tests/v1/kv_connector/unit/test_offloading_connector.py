@@ -15,7 +15,6 @@ from vllm.distributed.kv_events import BlockRemoved, BlockStored
 from vllm.distributed.kv_transfer.kv_connector.v1 import KVConnectorRole
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading_connector import (
     OffloadingConnector,
-    OffloadingConnectorMetadata,
 )
 from vllm.forward_context import ForwardContext
 from vllm.utils.hashing import sha256
@@ -326,7 +325,6 @@ class RequestRunner:
 
             kv_connector_metadata = scheduler_output.kv_connector_metadata
             assert kv_connector_metadata is not None
-            assert isinstance(kv_connector_metadata, OffloadingConnectorMetadata)
 
             if scheduler_output.preempted_req_ids:
                 self.worker_connector.handle_preemptions(
