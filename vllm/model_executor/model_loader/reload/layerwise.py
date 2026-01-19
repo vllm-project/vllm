@@ -82,6 +82,8 @@ def initialize_layerwise_reload(layer: torch.nn.Module) -> None:
     info.load_numel = 0
     info.load_numel_total = get_layer_size(layer)
 
+    print(f"Initialize {layer.__class__.__name__}")
+
     # Wrap each parameter's weight loader
     # Note that nested wrapping will occur for shared tensors
     for param_name, param in get_layer_tensors(layer).items():
@@ -107,11 +109,15 @@ def initialize_layerwise_reload(layer: torch.nn.Module) -> None:
                 info.loaded_weights.append((param_name, bound_args))
                 info.load_numel += get_numel_loaded(weight_loader, bound_args)
 
+                print(
+                    f"{layer.__class__.__name__}: {info.load_numel} / {info.load_numel_total}"
+                )
+
                 # Process and copy when all weights are loaded
                 if info.load_numel >= info.load_numel_total and not isinstance(
                     layer, (Attention, MLAAttention)
                 ):
-                    _layerwise_process(layer)
+                    _layerwise_process(layer, info)
 
             return restore_and_process_loader
 
@@ -129,14 +135,15 @@ def finalize_layerwise_reload(layer: torch.nn.Module) -> None:
     """
     info = LAYER_RELOADING_INFO[layer]
 
-    # Cannot process a layer if only some elements are loaded
-    if info.load_numel > 0 and info.load_numel < info.load_numel_total:
-        raise ValueError("Only some weights loaded")
-
     # Attention/MLA layers are processed after all other layers
-    elif isinstance(layer, (Attention, MLAAttention)) and info.load_numel > 0:
+    if isinstance(layer, (Attention, MLAAttention)) and info.load_numel > 0:
         # when implementing, remember to unwrap layerwise loaders
         raise NotImplementedError("Layerwise reloading of Q/K/V scale weights")
+
+    # Process non-attention layers which did not load all elements due to (padding)
+    # Having too many of these delayed layers can lead to execess memory usage
+    if info.load_numel > 0 and info.load_numel < info.load_numel_total:
+        _layerwise_process(layer, info)
 
     # No weights were loaded, place kernel tensors back
     elif info.is_initialized():
@@ -152,7 +159,7 @@ def finalize_layerwise_reload(layer: torch.nn.Module) -> None:
     info.reset()
 
 
-def _layerwise_process(layer: torch.nn.Module):
+def _layerwise_process(layer: torch.nn.Module, info: LayerReloadingInfo):
     """
     Finalize layer loading after all weights have been cached.
 
@@ -162,9 +169,6 @@ def _layerwise_process(layer: torch.nn.Module):
     3. Runs quantization processing if applicable
     4. Copies processed values back to original tensor storage
     """
-    # Get info related to reloading
-    info = LAYER_RELOADING_INFO[layer]
-
     # Materialize layer onto device
     materialize_layer(layer)
 
@@ -195,6 +199,8 @@ def _layerwise_process(layer: torch.nn.Module):
         layer.register_buffer(name, buffer)
 
     info.reset()
+
+    print(f"process: {layer.__class__.__name__}")
 
 
 def _unwrap_loader(loader: Callable) -> Callable:
