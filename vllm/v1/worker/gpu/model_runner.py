@@ -288,7 +288,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         skip_attn: bool = True,
         **kwargs,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        # Create a dummy scheduler output.
         num_reqs = min(num_tokens, self.max_num_reqs)
         input_batch = InputBatch.make_dummy(
             num_reqs=num_reqs,
