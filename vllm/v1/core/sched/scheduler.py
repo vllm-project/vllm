@@ -208,6 +208,8 @@ class Scheduler(SchedulerInterface):
             if speculative_config.use_eagle():
                 self.use_eagle = True
                 self.num_lookahead_tokens = self.num_spec_tokens
+            if speculative_config.uses_draft_model():
+                self.num_lookahead_tokens = self.num_spec_tokens
 
         # Create the KV cache manager.
         self.kv_cache_manager = KVCacheManager(
@@ -245,8 +247,7 @@ class Scheduler(SchedulerInterface):
 
             self.routed_experts_reader.attach_buffer(
                 max_num_kv_tokens=self.max_num_kv_tokens,
-                model_config=self.vllm_config.model_config,
-                instance_id=self.vllm_config.instance_id,
+                vllm_config=self.vllm_config,
             )
 
     def schedule(self) -> SchedulerOutput:

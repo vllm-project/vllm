@@ -747,6 +747,9 @@ class NemotronHForCausalLM(
     MixtureOfExperts,
     SupportsMambaPrefixCaching,
 ):
+    # Relevant only if self.has_moe is True
+    is_non_gated_moe: bool = True
+
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_prefix={"backbone": "model"},
         orig_to_new_substr={"A_log": "A", "embeddings": "embed_tokens"},
