@@ -20,6 +20,9 @@ from vllm.model_executor.layers.fused_moe.cutlass_moe import (
 from vllm.model_executor.layers.fused_moe.flashinfer_cutlass_moe import (
     FlashInferExperts,
 )
+from vllm.model_executor.layers.fused_moe.flashinfer_trtllm_moe import (
+    FlashInferTrtLlmNvFp4Experts,
+)
 from vllm.model_executor.layers.fused_moe.fused_marlin_moe import (
     MarlinExperts,
 )
@@ -246,8 +249,6 @@ def make_nvfp4_moe_kernel(
     assert moe_config.dp_size == 1
 
     UNSUPPORTED_BACKENDS = [
-        # TRTLLM does not use the modular kernl abstraction.
-        NvFp4MoeBackend.FLASHINFER_TRTLLM,
         # CUTEDSL is used with BATCHED (masked) format only.
         # TODO: add here once we support dp/ep via the oracle.
         NvFp4MoeBackend.FLASHINFER_CUTEDSL,
@@ -255,6 +256,15 @@ def make_nvfp4_moe_kernel(
 
     if backend in UNSUPPORTED_BACKENDS:
         return None
+
+    elif backend == NvFp4MoeBackend.FLASHINFER_TRTLLM:
+        return mk.FusedMoEModularKernel(
+            MoEPrepareAndFinalizeNoEP(defer_input_quant=False),
+            FlashInferTrtLlmNvFp4Experts(
+                moe_config=moe_config,
+                quant_config=quant_config,
+            ),
+        )
 
     elif backend == NvFp4MoeBackend.FLASHINFER_CUTLASS:
         return mk.FusedMoEModularKernel(
