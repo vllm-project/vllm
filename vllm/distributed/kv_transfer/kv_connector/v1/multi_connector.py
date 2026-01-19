@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import copy
+import dataclasses
 from collections.abc import Iterable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
@@ -109,6 +110,16 @@ class MultiConnectorKVEvents(KVConnectorKVEvents):
     def __init__(self, data: dict[str, KVConnectorKVEvents] | None = None):
         self._data = data or {}
 
+    def get_connector_events(self, connector_name: str) -> KVConnectorKVEvents:
+        return self._data[connector_name]
+
+    def get_all_connector_events(self) -> dict[str, KVConnectorKVEvents]:
+        return self._data
+
+    """ The following methods are not implemented for MultiConnectorKVEvents because
+    the specific connector `KVConnectorKVEvents` methods are called instead.
+    """
+
     def add_events(self, events: list[KVCacheEvent]) -> None:
         raise NotImplementedError
 
@@ -126,17 +137,6 @@ class MultiConnectorKVEvents(KVConnectorKVEvents):
 
     def clear_events(self) -> None:
         raise NotImplementedError
-
-    def get_connector_events(self, connector_name: str) -> KVConnectorKVEvents:
-        return self._data[connector_name]
-
-    def get_all_connector_events(self) -> dict[str, KVConnectorKVEvents]:
-        return self._data
-
-    def add_connector_events(
-        self, connector_name: str, connector_kv_cache_events: KVConnectorKVEvents
-    ):
-        self._data[connector_name] = connector_kv_cache_events
 
 
 class MultiConnector(KVConnectorBase_V1):
@@ -394,26 +394,25 @@ class MultiConnector(KVConnectorBase_V1):
         return metadata
 
     def update_connector_output(self, connector_output: KVConnectorOutput):
-        import dataclasses
-
         original_kv_cache_events = connector_output.kv_cache_events
-        if not isinstance(original_kv_cache_events, MultiConnectorKVEvents):
-            for c in self._connectors:
-                c.update_connector_output(connector_output)
+        if original_kv_cache_events is None:
             return
 
-        for c in self._connectors:
-            try:
-                kv_cache_events_per_connector = (
-                    original_kv_cache_events.get_connector_events(c.__class__.__name__)
-                )
-            except KeyError:
-                kv_cache_events_per_connector = None
+        if isinstance(original_kv_cache_events, MultiConnectorKVEvents):
+            for c in self._connectors:
+                try:
+                    kv_cache_events_per_connector = (
+                        original_kv_cache_events.get_connector_events(
+                            c.__class__.__name__
+                        )
+                    )
+                except KeyError:
+                    kv_cache_events_per_connector = None
 
-            connector_output_per_connector = dataclasses.replace(
-                connector_output, kv_cache_events=kv_cache_events_per_connector
-            )
-            c.update_connector_output(connector_output_per_connector)
+                connector_output_per_connector = dataclasses.replace(
+                    connector_output, kv_cache_events=kv_cache_events_per_connector
+                )
+                c.update_connector_output(connector_output_per_connector)
 
     def get_handshake_metadata(self) -> KVConnectorHandshakeMetadata | None:
         """
