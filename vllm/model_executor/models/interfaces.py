@@ -166,8 +166,8 @@ class SupportsMultiModal(Protocol):
         Returns:
             torch.nn.Module: The core language model component.
         """
-        if self._language_module_names:
-            return getattr(self, self._language_module_names[0])
+        if self._language_model_names:
+            return getattr(self, self._language_model_names[0])
 
         raise NotImplementedError(
             f"No language model found in {type(self).__name__}! "
