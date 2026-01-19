@@ -65,8 +65,6 @@ class MoEPrepareAndFinalizeNoEP(mk.FusedMoEPrepareAndFinalize):
         a1q, a1q_scale = moe_kernel_quantize_input(
             a1,
             a1_scale,
-            # quant_config.a1_scale,
-            quant_config.a1_gscale,
             quant_config.quant_dtype,
             quant_config.per_act_token_quant,
             quant_config.block_shape,
