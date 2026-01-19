@@ -45,6 +45,8 @@ class FlashInferTrtLlmNvFp4Experts(mk.FusedMoEPermuteExpertsUnpermute):
         # g1_alpha_s = a13_scale * w13_scale_2
         # a2_gscale = (1 / a2_scale)
         # g1_scale_c = a13_scale * w13_scale_2 / a2_scale
+        assert self.quant_config.g1_alphas is not None
+        assert self.quant_config.a2_gscale is not None
         self.g1_scale_c = self.quant_config.g1_alphas * self.quant_config.a2_gscale
 
     @property
