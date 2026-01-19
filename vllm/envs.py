@@ -1255,7 +1255,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
     ),
     # Allow use of FlashInfer CUTLASS kernels for fused moe ops.
     "VLLM_USE_FLASHINFER_MOE_FP4": lambda: bool(
-        int(os.getenv("VLLM_USE_FLASHINFER_MOE_FP4", "0"))
+        int(os.getenv("VLLM_USE_FLASHINFER_MOE_FP4", "1"))
     ),
     # If set to 1, use the FlashInfer
     # MXFP8 (activation) x MXFP4 (weight) MoE backend.
