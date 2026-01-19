@@ -14,6 +14,7 @@ from vllm.model_executor.layers.attention.mla_attention import (
     MLACommonImpl,
     MLACommonMetadata,
     MLACommonMetadataBuilder,
+    MLACommonPrefillMetadata,
     QueryLenSupport,
 )
 from vllm.v1.attention.backend import AttentionCGSupport, AttentionLayer, MultipleOf
@@ -55,7 +56,9 @@ class AiterMLADecodeMetadata(MLACommonDecodeMetadata):
     max_qo_len: int | None = None
 
 
-class AiterMLAMetadata(MLACommonMetadata[AiterMLADecodeMetadata]):
+class AiterMLAMetadata(
+    MLACommonMetadata[MLACommonPrefillMetadata, AiterMLADecodeMetadata]
+):
     pass
 
 
