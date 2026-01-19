@@ -224,14 +224,25 @@ if [[ $commands == *"--shard-id="* ]]; then
     echo "All shards reported no tests collected. Failing the build."
     exit 1
   fi
-elif [[ $VLLM_TEST_GROUP_NAME == *"mi325_4-2-node-tests-4-gpus-in-total"* ]]; then
-## INVOCATION OF MULTI-NODE TESTS
-  export DCKR_VER=$(docker --version)
-  export commands="curl -fsSL https://get.docker.com -o get-docker.sh && sh get-docker.sh --version $(DCKR_VER) && rm get-docker.sh"
 
-  echo " ### Multi-node docker ($DCKR_VER) \n ### Render devices: $BUILDKITE_AGENT_META_DATA_RENDER_DEVICES"
-  docker run \
-          --device /dev/kfd $BUILDKITE_AGENT_META_DATA_RENDER_DEVICES \
+elif [[ $commands == *"VLLM_TEST_GROUP_NAME=mi325_4-2-node-tests-4-gpus-in-total"* ]]; then
+
+  export DCKR_VER=$(docker --version | sed 's/Docker version \(.*\), build .*/\1/')
+
+  if [[ "$commands" =~ ^(.*)"["(.*)"] && ["(.*)"]"$ ]]; then
+      prefix=$( echo "${BASH_REMATCH[1]}" | sed 's/;//g')
+      myIFS=$IFS
+      IFS=','
+      read -ra node0 <<< ${BASH_REMATCH[2]}
+      read -ra node1 <<< ${BASH_REMATCH[3]}
+      IFS=$myIFS
+      for i in "${!node0[@]}";do 
+        command_node_0=${node0[i]}
+        command_node_1=${node1[i]}
+        export commands="curl -fsSL https://get.docker.com -o get-docker.sh && sh get-docker.sh --version ${DCKR_VER} && rm get-docker.sh && nohup bash -c 'dockerd &' && sleep 5 && ${prefix} && ../.buildkite/scripts/run-multi-node-test.sh ./tests 2 2 ${image_name} ${command_node_0} ${command_node_1}"
+        docker run \
+          --privileged \
+          --device /dev/kfd \
           --network=host \
           --shm-size=16gb \
           --group-add "$render_gid" \
@@ -246,7 +257,11 @@ elif [[ $VLLM_TEST_GROUP_NAME == *"mi325_4-2-node-tests-4-gpus-in-total"* ]]; th
           --name "${container_name}" \
           "${image_name}" \
           /bin/bash -c "${commands}"  
-
+      done
+  else
+      echo "Failed to parse node commands! Exiting."
+      exit 111
+  fi
 else
   echo "Render devices: $BUILDKITE_AGENT_META_DATA_RENDER_DEVICES"
   docker run \
