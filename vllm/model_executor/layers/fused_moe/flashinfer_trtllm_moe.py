@@ -290,8 +290,10 @@ class FlashInferTrtLlmNvFp4Experts(mk.FusedMoEPermuteExpertsUnpermute):
     ):
         assert activation == "silu"
         assert a1q_scale is not None
+        assert self.quant_config.w1_scale is not None
+        assert self.quant_config.w2_scale is not None
 
-        # Pack topk_ids and topk_weights into format expected by the kernel.
+        # Pack topk ids and weights into format expected by the kernel.
         packed_tensor = (topk_ids.to(torch.int32) << 16) | topk_weights.to(
             torch.bfloat16
         ).view(torch.int16)
@@ -346,7 +348,7 @@ class FlashInferTrtLlmNvFp4Experts(mk.FusedMoEPermuteExpertsUnpermute):
     ) -> torch.Tensor:
         assert activation == "silu"
 
-        # Quantize input to FP4
+        # Quantize input.
         if isinstance(hidden_states, tuple):
             a1q, a1q_scale = hidden_states
         else:
@@ -356,19 +358,18 @@ class FlashInferTrtLlmNvFp4Experts(mk.FusedMoEPermuteExpertsUnpermute):
                 is_sf_swizzled_layout=False,
             )
 
-        # Prepare routing bias
+        # Prepare routing bias into kernel format.
         routing_bias = self.e_score_correction_bias
         if routing_bias is not None:
             routing_bias = routing_bias.to(torch.bfloat16)
-
         router_logits = (
             router_logits.to(torch.float32)
             if self.routing_method_type == RoutingMethodType.DeepSeekV3
             else router_logits
         )
 
-        # Call TRT-LLM FP4 block-scale MoE kernel
-        out = flashinfer.fused_moe.trtllm_fp4_block_scale_moe(
+        # Invoke kernel.
+        return flashinfer.fused_moe.trtllm_fp4_block_scale_moe(
             routing_logits=router_logits,
             routing_bias=routing_bias,
             hidden_states=a1q,
@@ -397,5 +398,3 @@ class FlashInferTrtLlmNvFp4Experts(mk.FusedMoEPermuteExpertsUnpermute):
             routing_method_type=self.routing_method_type,
             do_finalize=True,
         )[0]
-
-        return out

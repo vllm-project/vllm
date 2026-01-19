@@ -1349,6 +1349,11 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
             self.nvfp4_backend
         )
         self.kernel: mk.FusedMoEModularKernel | None = None
+        self.experts: mk.FusedMoEPermuteExpertsUnpermute | None = None
+        self.use_monolithic = (
+            self.nvfp4_backend == NvFp4MoeBackend.FLASHINFER_TRTLLM
+            and not moe_config.moe_parallel_config.use_all2all_kernels
+        )
 
     def maybe_make_prepare_finalize(
         self,
@@ -1605,6 +1610,20 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
         x: torch.Tensor,
         router_logits: torch.Tensor,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+        if self.use_monolithic:
+            assert self.experts is not None
+            out = self.experts.apply_monolithic(
+                x,
+                layer.w13_weight,
+                layer.w2_weight,
+                router_logits,
+                inplace=False,
+                activation=layer.activation,
+                global_num_experts=layer.global_num_experts,
+                expert_map=layer.expert_map,
+                apply_router_weight_on_input=layer.apply_router_weight_on_input,
+            )
+
         topk_weights, topk_ids = router.select_experts(
             hidden_states=x,
             router_logits=router_logits,
