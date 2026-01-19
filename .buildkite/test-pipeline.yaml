@@ -624,6 +624,16 @@ steps:
     - pytest -v -s kernels/moe/test_batched_deepgemm.py
     - pytest -v -s kernels/attention/test_deepgemm_attention.py
 
+- label: Kernels Helion Test
+  timeout_in_minutes: 30
+  gpu: h100
+  source_file_dependencies:
+  - vllm/utils/import_utils.py
+  - tests/kernels/helion/
+  commands:
+    - pip install helion
+    - pytest -v -s kernels/helion/
+
 - label: Model Executor Test # 23min
   timeout_in_minutes: 35
   torch_nightly: true
