@@ -2,7 +2,13 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Inference-only Moondream3 model implementation."""
 
+import logging
 import math
+import os
+
+# Debug flag for verbose logging
+_DEBUG_MOONDREAM3 = os.environ.get("DEBUG_MOONDREAM3", "0") == "1"
+_debug_logger = logging.getLogger("moondream3_debug")
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from functools import cached_property
@@ -19,7 +25,6 @@ from vllm.attention.layer import Attention
 from vllm.config import VllmConfig
 from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.activation import get_act_fn
-from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
     QKVParallelLinear,
@@ -52,6 +57,7 @@ from vllm.sequence import IntermediateTensors
 
 from .interfaces import MultiModalEmbeddings, SupportsMultiModal, SupportsPP
 from .utils import (
+    _merge_multimodal_embeddings,
     extract_layer_index,
     make_empty_intermediate_tensors_factory,
     make_layers,
@@ -593,10 +599,15 @@ class Moondream3TextMLP(nn.Module):
 
 
 class Moondream3TextMoE(nn.Module):
-    """Mixture of Experts layer for layers 4+ using FusedMoE.
+    """Mixture of Experts layer for layers 4+ with expert parallelism.
 
-    Uses FusedMoE for efficient expert parallelism across GPUs.
-    Moondream3 checkpoint format:
+    Moondream3 uses a custom GeGLU activation: gelu(h) * (g + 1)
+    where fc1 outputs [gate, up] and the activation is gelu(gate) * (up + 1).
+
+    Uses expert parallelism where each GPU stores num_experts/tp_size experts.
+    Routing and communication handled via all-to-all or replicated computation.
+
+    Checkpoint format:
     - fc1.weight: [num_experts, expert_inner_dim * 2, hidden_size] (gate+up)
     - fc2.weight: [num_experts, hidden_size, expert_inner_dim] (down)
     - router.weight: [num_experts, hidden_size]
@@ -618,6 +629,11 @@ class Moondream3TextMoE(nn.Module):
         self.num_experts = num_experts
         self.experts_per_token = experts_per_token
 
+        # Expert parallelism: each GPU stores a subset of experts
+        self.tp_size = get_tensor_model_parallel_world_size()
+        self.experts_per_rank = num_experts // self.tp_size
+        self.num_local_experts = self.experts_per_rank
+
         # Router (gate) - use ReplicatedLinear for compatibility
         self.gate = ReplicatedLinear(
             hidden_size,
@@ -627,29 +643,83 @@ class Moondream3TextMoE(nn.Module):
             prefix=f"{prefix}.gate",
         )
 
-        # Use FusedMoE for expert parallelism
-        self.experts = FusedMoE(
-            num_experts=num_experts,
-            top_k=experts_per_token,
-            hidden_size=hidden_size,
-            intermediate_size=expert_inner_dim,
-            reduce_results=True,
-            renormalize=True,
-            quant_config=quant_config,
-            prefix=f"{prefix}.experts",
-            activation="gelu_pytorch_tanh",
+        # Local expert weights (only store experts_per_rank experts)
+        # fc1: [experts_per_rank, expert_inner_dim * 2, hidden_size]
+        # fc2: [experts_per_rank, hidden_size, expert_inner_dim]
+        self.fc1_weight = nn.Parameter(
+            torch.empty(self.num_local_experts, expert_inner_dim * 2, hidden_size)
+        )
+        self.fc2_weight = nn.Parameter(
+            torch.empty(self.num_local_experts, hidden_size, expert_inner_dim)
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # Get router logits
-        router_logits, _ = self.gate(x)  # [num_tokens, num_experts]
+        """Forward pass with expert parallelism and custom GeGLU activation."""
+        from vllm.distributed import (
+            get_tensor_model_parallel_rank,
+            tensor_model_parallel_all_reduce,
+        )
 
-        # Use FusedMoE forward
-        return self.experts(hidden_states=x, router_logits=router_logits)
+        tp_rank = get_tensor_model_parallel_rank()
+        num_tokens = x.shape[0]
+
+        # Get router logits and compute top-k
+        router_logits, _ = self.gate(x)  # [num_tokens, num_experts]
+        topk_logits, topk_idxs = torch.topk(
+            router_logits, self.experts_per_token, dim=-1
+        )
+        # Softmax over selected experts
+        topk_weights = F.softmax(topk_logits, dim=-1, dtype=torch.float32).to(x.dtype)
+
+        # Compute local expert range
+        local_expert_start = tp_rank * self.experts_per_rank
+        local_expert_end = local_expert_start + self.experts_per_rank
+
+        # Compute MoE output using loop over local experts
+        out = x.new_zeros(x.shape)
+
+        for local_expert_idx in range(self.num_local_experts):
+            global_expert_id = local_expert_start + local_expert_idx
+
+            # Find tokens assigned to this expert
+            token_pos, which_k = (topk_idxs == global_expert_id).nonzero(as_tuple=True)
+            if token_pos.numel() == 0:
+                continue
+
+            # Get tokens and their routing weights
+            x_tok = x.index_select(0, token_pos)  # [n_tokens, hidden_size]
+            gate_tok = topk_weights[token_pos, which_k]  # [n_tokens]
+
+            # fc1: [expert_inner_dim * 2, hidden_size]
+            # h_full: [n_tokens, expert_inner_dim * 2]
+            h_full = F.linear(x_tok, self.fc1_weight[local_expert_idx])
+
+            # GeGLU with (g + 1): h, g = split; output = gelu(h) * (g + 1)
+            h, g = h_full.chunk(2, dim=-1)  # Each [n_tokens, expert_inner_dim]
+            h = F.gelu(h, approximate="tanh") * (g + 1.0)
+
+            # fc2: [hidden_size, expert_inner_dim]
+            # y: [n_tokens, hidden_size]
+            y = F.linear(h, self.fc2_weight[local_expert_idx])
+
+            # Apply routing weight
+            y = y * gate_tok.unsqueeze(-1)
+
+            # Accumulate output
+            out.index_add_(0, token_pos, y)
+
+        # All-reduce to combine results from all experts across GPUs
+        out = tensor_model_parallel_all_reduce(out)
+
+        return out
 
 
 class Moondream3Attention(nn.Module):
-    """Decoder attention with RoPE."""
+    """Decoder attention with RoPE and tau scaling.
+
+    Moondream3 uses a tau attention mechanism that scales Q and V
+    based on both token content and position.
+    """
 
     def __init__(
         self,
@@ -688,6 +758,8 @@ class Moondream3Attention(nn.Module):
         )
 
         # Moondream uses 32-dim rotation out of 64-dim head (partial_rotary_factor=0.5)
+        # HF Moondream uses non-interleaved RoPE (split by half, first half real, second half imag)
+        # In vLLM, is_neox_style=True means split by half (GPT-NeoX style)
         rope_parameters = {
             "rope_theta": config.rope_theta,
             "partial_rotary_factor": 32 / self.head_dim,  # 32/64 = 0.5
@@ -696,7 +768,7 @@ class Moondream3Attention(nn.Module):
             head_size=self.head_dim,
             max_position=config.max_context,
             rope_parameters=rope_parameters,
-            is_neox_style=False,  # Moondream uses interleaved RoPE
+            is_neox_style=True,  # Moondream uses split-by-half (GPT-NeoX) style
         )
 
         self.scaling = self.head_dim**-0.5
@@ -710,12 +782,23 @@ class Moondream3Attention(nn.Module):
             prefix=f"{prefix}.attn",
         )
 
+        # Tau scaling parameters for position-dependent attention
+        # These are learned during training to modulate attention based on position
+        # tau_wq and tau_wv need full qkv_dim for correct computation
+        # Only heads are partitioned, qkv dimension is kept full for all-gather
+        qkv_dim = self.hidden_size * 3  # Q + K + V dimension (full)
+        self.tau_alpha = nn.Parameter(torch.zeros(self.num_heads_per_partition))
+        self.tau_wq = nn.Parameter(torch.zeros(self.num_heads_per_partition, qkv_dim))
+        self.tau_wv = nn.Parameter(torch.zeros(self.num_heads_per_partition, qkv_dim))
+        self.tp_size = tp_size
+
     def forward(
         self,
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
     ) -> torch.Tensor:
         qkv, _ = self.qkv_proj(hidden_states)
+
         q, k, v = qkv.split(
             [
                 self.num_heads_per_partition * self.head_dim,
@@ -724,6 +807,69 @@ class Moondream3Attention(nn.Module):
             ],
             dim=-1,
         )
+
+        # Apply tau scaling to Q and V
+        # Tau scaling has two components:
+        # 1. Token-based: tok_q = tanh(gelu(qkv) @ tau_wq.T)
+        # 2. Position-based: tau_pos = 1 + (sigmoid(alpha * log(pos+1)) - 0.5)
+        # Final: tau = tok + tau_pos
+        #
+        # For TP, tau weights are sharded by head, but qkv_dim is kept full
+
+        # Get full qkv for tau computation (before splitting)
+        # Shape: [num_tokens, qkv_dim_per_partition]
+        # We need to all-gather to get full qkv for tau weights that expect full qkv_dim
+        if self.tp_size > 1:
+            from vllm.distributed import tensor_model_parallel_all_gather
+
+            # qkv is [num_tokens, qkv_dim_per_partition]
+            # All-gather to get [num_tokens, qkv_dim_full]
+            qkv_full = tensor_model_parallel_all_gather(qkv)
+        else:
+            qkv_full = qkv
+
+        # Compute tau scaling factors matching HF implementation exactly:
+        # tok_feat = gelu(qkv)
+        # tok_q = tanh(tok_feat @ tau_wq.T)  # [num_tokens, num_heads]
+        # tau_pos = 1 + (sigmoid(alpha * log(pos+1)) - 0.5)  # [num_heads, num_tokens]
+        # tau = (tok_q.T + tau_pos).T  # [num_tokens, num_heads]
+        num_tokens = qkv_full.shape[0]
+        orig_dtype = q.dtype
+
+        # Debug: Option to disable tau for testing
+        _disable_tau = os.environ.get("DISABLE_TAU", "0") == "1"
+        if not _disable_tau:
+            # Token-based component
+            tok_feat = F.gelu(qkv_full)  # Apply GELU activation
+            tok_q = torch.tanh(tok_feat @ self.tau_wq.t())  # [N, H_per_partition]
+            tok_v = torch.tanh(tok_feat @ self.tau_wv.t())  # [N, H_per_partition]
+
+            # Position-based component
+            # tau_pos = 1 + (sigmoid(alpha * log(pos+1)) - 0.5)
+            # positions is [num_tokens], need to compute for each head
+            # tau_alpha: [num_heads_per_partition]
+            pos_float = (positions.to(orig_dtype) + 1.0).clamp(min=1e-6)
+            pos_log = pos_float.log()  # [num_tokens]
+            # alpha[:, None] * pos_log[None, :] -> [num_heads, num_tokens]
+            tau_pos = 1.0 + (
+                torch.sigmoid(self.tau_alpha[:, None] * pos_log[None, :]) - 0.5
+            )  # [H_per_partition, N]
+
+            # Combine token and position components
+            tau_q = (tok_q + tau_pos.t()).to(orig_dtype)  # [N, H_per_partition]
+            tau_v = (tok_v + tau_pos.t()).to(orig_dtype)  # [N, H_per_partition]
+
+            # Reshape q and v to apply per-head tau scaling
+            q = q.view(num_tokens, self.num_heads_per_partition, self.head_dim)
+            v = v.view(num_tokens, self.num_kv_heads_per_partition, self.head_dim)
+
+            # Apply tau scaling
+            q = q * tau_q.unsqueeze(-1)
+            v = v * tau_v[:, : self.num_kv_heads_per_partition].unsqueeze(-1)
+
+            # Reshape back
+            q = q.view(num_tokens, -1)
+            v = v.view(num_tokens, -1)
 
         q, k = self.rotary_emb(positions, q, k)
         attn_output = self.attn(q, k, v)
@@ -808,11 +954,11 @@ class Moondream3TextModel(nn.Module):
         blocks_prefix = maybe_prefix(prefix, "blocks")
         self.start_layer, self.end_layer, self.blocks = make_layers(
             config.n_layers,
-            lambda layer_prefix: Moondream3DecoderLayer(
+            lambda prefix: Moondream3DecoderLayer(
                 config=config,
                 cache_config=cache_config,
                 quant_config=quant_config,
-                prefix=layer_prefix,
+                prefix=prefix,
             ),
             prefix=blocks_prefix,
         )
@@ -836,20 +982,49 @@ class Moondream3TextModel(nn.Module):
         if pp_group.is_first_rank:
             if inputs_embeds is not None:
                 hidden_states = inputs_embeds
+                if _DEBUG_MOONDREAM3:
+                    _debug_logger.warning(
+                        f"[Text] Using inputs_embeds: shape={hidden_states.shape}, "
+                        f"mean={hidden_states.float().mean():.4f}, "
+                        f"std={hidden_states.float().std():.4f}"
+                    )
             else:
                 assert input_ids is not None
                 hidden_states = self.embed_input_ids(input_ids)
+                if _DEBUG_MOONDREAM3:
+                    _debug_logger.warning(
+                        f"[Text] Embedded input_ids: shape={hidden_states.shape}, "
+                        f"mean={hidden_states.float().mean():.4f}, "
+                        f"std={hidden_states.float().std():.4f}"
+                    )
         else:
             assert intermediate_tensors is not None
             hidden_states = intermediate_tensors["hidden_states"]
 
-        for layer in islice(self.blocks, self.start_layer, self.end_layer):
+        for i, layer in enumerate(
+            islice(self.blocks, self.start_layer, self.end_layer)
+        ):
             hidden_states = layer(positions, hidden_states)
+            if _DEBUG_MOONDREAM3 and i < 3:
+                _debug_logger.warning(
+                    f"[Text] After layer {self.start_layer + i}: "
+                    f"mean={hidden_states.float().mean():.4f}, "
+                    f"std={hidden_states.float().std():.4f}"
+                )
 
         if not pp_group.is_last_rank:
             return IntermediateTensors({"hidden_states": hidden_states})
 
         hidden_states = self.post_ln(hidden_states)
+        if _DEBUG_MOONDREAM3:
+            # Only log if not a dummy/warmup run (check for non-trivial std)
+            if hidden_states.float().std() > 0.1:
+                _debug_logger.warning(
+                    f"[Text] After post_ln: shape={hidden_states.shape}, "
+                    f"mean={hidden_states.float().mean():.4f}, "
+                    f"std={hidden_states.float().std():.4f}, "
+                    f"last_token_mean={hidden_states[-1].float().mean():.4f}"
+                )
         return hidden_states
 
 
@@ -900,7 +1075,10 @@ class Moondream3DummyInputsBuilder(BaseDummyInputsBuilder[Moondream3ProcessingIn
     """Dummy inputs builder for profiling."""
 
     def get_dummy_text(self, mm_counts: Mapping[str, int]) -> str:
-        return "<image>\n\nQuestion: What is this?\n\nAnswer:"
+        # Use space after <image> to ensure tokenization preserves the
+        # placeholder pattern [<, image, >] separately from following tokens
+        # Start with BOS token (<|endoftext|> = token ID 0)
+        return "<|endoftext|><image> \n\nQuestion: What is this?\n\nAnswer:"
 
     def get_dummy_mm_data(
         self,
@@ -946,6 +1124,17 @@ class Moondream3MultiModalProcessor(BaseMultiModalProcessor[Moondream3Processing
             "tilings": MultiModalFieldConfig.batched("image", keep_on_cpu=True),
         }
 
+    def _hf_processor_applies_updates(
+        self,
+        prompt_text: str,
+        mm_items: MultiModalDataItems,
+        hf_processor_mm_kwargs: Mapping[str, object],
+        tokenization_kwargs: Mapping[str, object],
+    ) -> bool:
+        # Moondream3 HF processor does NOT expand placeholder tokens.
+        # vLLM should apply prompt updates to expand <image> to 729 tokens.
+        return False
+
     def _get_prompt_updates(
         self,
         mm_items: MultiModalDataItems,
@@ -957,11 +1146,15 @@ class Moondream3MultiModalProcessor(BaseMultiModalProcessor[Moondream3Processing
             image_width=image_size.width,
             image_height=image_size.height,
         )
+        # Use a single token repeated num_tokens times as the replacement.
+        # Each position corresponds to one vision embedding.
+        # We use the first token of the placeholder pattern as the replacement token.
+        replacement_token = self.image_placeholder_tokens[0]
         return [
             PromptReplacement(
                 modality="image",
                 target=self.image_placeholder_tokens,
-                replacement=self.image_placeholder_tokens * num_tokens,
+                replacement=[replacement_token] * num_tokens,
             ),
         ]
 
@@ -1025,11 +1218,11 @@ class Moondream3ForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
             prefix=maybe_prefix(prefix, "text"),
         )
 
-        # LM head
+        # LM head (with bias - Moondream3 has lm_head bias)
         self.lm_head = ParallelLMHead(
             self.config.text.vocab_size,
             self.config.text.dim,
-            bias=False,
+            bias=True,
             quant_config=quant_config,
             prefix=maybe_prefix(prefix, "lm_head"),
         )
@@ -1051,6 +1244,81 @@ class Moondream3ForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
 
     def get_num_mm_connector_tokens(self, num_vision_tokens: int) -> int:
         return num_vision_tokens
+
+    def embed_input_ids(
+        self,
+        input_ids: torch.Tensor,
+        multimodal_embeddings: MultiModalEmbeddings | None = None,
+        *,
+        is_multimodal: torch.Tensor | None = None,
+        handle_oov_mm_token: bool = False,
+    ) -> torch.Tensor:
+        """Embed input IDs with multimodal embedding merging.
+
+        This method handles both text-only and multimodal inputs:
+        - For text-only: Simply embed the input IDs using the text embedding layer
+        - For multimodal: Embed text tokens and merge with vision embeddings
+
+        Args:
+            input_ids: Token IDs to embed
+            multimodal_embeddings: Vision embeddings from embed_multimodal()
+            is_multimodal: Boolean mask indicating which positions are multimodal
+            handle_oov_mm_token: Whether to handle out-of-vocabulary MM tokens
+
+        Returns:
+            Combined embeddings tensor
+        """
+        # Get text embeddings using the text model's embedding layer
+        inputs_embeds = self._embed_text_input_ids(
+            input_ids,
+            self.text.wte,  # Use text embedding layer
+            is_multimodal=is_multimodal,
+            handle_oov_mm_token=handle_oov_mm_token,
+        )
+
+        if _DEBUG_MOONDREAM3:
+            _debug_logger.warning(
+                f"[embed_input_ids] inputs_embeds: shape={inputs_embeds.shape}, "
+                f"mean={inputs_embeds.float().mean():.4f}, "
+                f"std={inputs_embeds.float().std():.4f}"
+            )
+
+        # If no multimodal embeddings, return text embeddings only
+        if multimodal_embeddings is None or len(multimodal_embeddings) == 0:
+            return inputs_embeds
+
+        if _DEBUG_MOONDREAM3:
+            for i, mm_emb in enumerate(multimodal_embeddings):
+                _debug_logger.warning(
+                    f"[embed_input_ids] mm_embed[{i}]: shape={mm_emb.shape}, "
+                    f"mean={mm_emb.float().mean():.4f}, "
+                    f"std={mm_emb.float().std():.4f}"
+                )
+            # Debug is_multimodal
+            if is_multimodal is None:
+                _debug_logger.warning("[embed_input_ids] is_multimodal is NONE!")
+            else:
+                mm_sum = is_multimodal.sum().item()
+                _debug_logger.warning(
+                    f"[embed_input_ids] is_multimodal: shape={is_multimodal.shape}, "
+                    f"sum={mm_sum}, expected={len(multimodal_embeddings[0])}"
+                )
+
+        # Merge multimodal embeddings with text embeddings
+        merged = _merge_multimodal_embeddings(
+            inputs_embeds=inputs_embeds,
+            multimodal_embeddings=multimodal_embeddings,
+            is_multimodal=is_multimodal,
+        )
+
+        if _DEBUG_MOONDREAM3:
+            _debug_logger.warning(
+                f"[embed_input_ids] merged: shape={merged.shape}, "
+                f"mean={merged.float().mean():.4f}, "
+                f"std={merged.float().std():.4f}"
+            )
+
+        return merged
 
     def _split_pixel_values(
         self,
@@ -1157,7 +1425,20 @@ class Moondream3ForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
         dtype = self.vision.patch_emb.weight.dtype
         pixel_values = pixel_values.to(device=device, dtype=dtype)
 
+        if _DEBUG_MOONDREAM3:
+            _debug_logger.warning(
+                f"[_encode_image_input] pixel_values: shape={pixel_values.shape}, "
+                f"mean={pixel_values.float().mean():.4f}, std={pixel_values.float().std():.4f}"
+            )
+
         features = self.vision(pixel_values)
+
+        if _DEBUG_MOONDREAM3:
+            _debug_logger.warning(
+                f"[_encode_image_input] vision features: shape={features.shape}, "
+                f"mean={features.float().mean():.4f}, std={features.float().std():.4f}"
+            )
+
         grid_size = self.config.vision.enc_n_layers
         enc_dim = self.config.vision.enc_dim
         global_features = features[0]
@@ -1183,15 +1464,33 @@ class Moondream3ForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
 
         combined = torch.cat([global_features, recon], dim=-1).unsqueeze(0)
         projected = self.vision_proj(combined).squeeze(0)
+
+        if _DEBUG_MOONDREAM3:
+            _debug_logger.warning(
+                f"[_encode_image_input] projected: shape={projected.shape}, "
+                f"mean={projected.float().mean():.4f}, std={projected.float().std():.4f}"
+            )
+
         return projected
 
     def embed_multimodal(self, **kwargs: object) -> MultiModalEmbeddings:
         """Generate embeddings from multimodal inputs."""
         image_inputs = self._parse_image_inputs(**kwargs)
         if not image_inputs:
+            if _DEBUG_MOONDREAM3:
+                _debug_logger.warning("[embed_multimodal] No image inputs found")
             return []
 
-        return [self._encode_image_input(image_input) for image_input in image_inputs]
+        results = [
+            self._encode_image_input(image_input) for image_input in image_inputs
+        ]
+        if _DEBUG_MOONDREAM3:
+            for i, r in enumerate(results):
+                _debug_logger.warning(
+                    f"[embed_multimodal] Output {i}: shape={r.shape}, "
+                    f"mean={r.float().mean():.4f}, std={r.float().std():.4f}"
+                )
+        return results
 
     def forward(
         self,
@@ -1212,9 +1511,25 @@ class Moondream3ForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
     def compute_logits(
         self,
         hidden_states: torch.Tensor,
-        sampling_metadata,
     ) -> torch.Tensor | None:
-        logits = self.logits_processor(self.lm_head, hidden_states, sampling_metadata)
+        if _DEBUG_MOONDREAM3:
+            _debug_logger.warning(
+                f"[compute_logits] hidden_states: shape={hidden_states.shape}, "
+                f"mean={hidden_states.float().mean():.4f}, "
+                f"std={hidden_states.float().std():.4f}"
+            )
+        logits = self.logits_processor(self.lm_head, hidden_states)
+        if _DEBUG_MOONDREAM3 and logits is not None:
+            top_probs, top_ids = logits.softmax(dim=-1).topk(5, dim=-1)
+            _debug_logger.warning(
+                f"[compute_logits] logits shape={logits.shape}, "
+                f"mean={logits.float().mean():.4f}, "
+                f"std={logits.float().std():.4f}"
+            )
+            _debug_logger.warning(
+                f"[compute_logits] top5 token ids: {top_ids[0].tolist()}, "
+                f"probs: {top_probs[0].tolist()}"
+            )
         return logits
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
@@ -1227,10 +1542,6 @@ class Moondream3ForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
         expert_inner_dim = self.config.text.moe_expert_inner_dim
 
         for name, loaded_weight in weights:
-            # Skip tau weights (not implemented in MVP)
-            if ".tau." in name:
-                continue
-
             # Skip region weights (not implemented in MVP)
             if ".region." in name:
                 continue
@@ -1256,80 +1567,92 @@ class Moondream3ForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
             name = name.replace(".attn.qkv.", ".attn.qkv_proj.")
             name = name.replace(".attn.proj.", ".attn.out_proj.")
 
+            # Tau attention scaling weights
+            # HF format: .attn.tau.alpha -> .attn.tau_alpha
+            name = name.replace(".attn.tau.alpha", ".attn.tau_alpha")
+            name = name.replace(".attn.tau.wq", ".attn.tau_wq")
+            name = name.replace(".attn.tau.wv", ".attn.tau_wv")
+
             # MoE router mapping: mlp.router -> mlp.gate
             name = name.replace(".mlp.router.", ".mlp.gate.")
 
-            # Handle MoE expert weights for layers 4+ (FusedMoE format)
-            # fc1.weight: [n_experts, gate_up_dim, hidden] -> w13 (split gate/up)
-            # fc2.weight: [n_experts, hidden, expert_dim] -> w2
+            # Handle MoE expert weights for layers 4+ with expert parallelism
+            # fc1.weight: [n_experts, expert_inner_dim * 2, hidden_size] (gate+up)
+            # fc2.weight: [n_experts, hidden_size, expert_inner_dim] (down)
+            # Each GPU stores n_experts/tp_size experts
             # Note: Only 3D weights are MoE, 2D weights are standard MLP
             if ".mlp.fc1.weight" in name and loaded_weight.dim() == 3:
-                # fc1 is combined gate+up, need to split and load via FusedMoE
-                # Shape: [n_experts, expert_inner_dim * 2, hidden_size]
-                layer_name = name.replace(".mlp.fc1.weight", "")
-                experts_name = f"{layer_name}.mlp.experts"
+                from vllm.distributed import get_tensor_model_parallel_rank
 
-                # Find the FusedMoE module
-                module = self
-                for part in experts_name.split("."):
-                    if part:
-                        module = getattr(module, part)
-
-                # Split fc1 into gate (w1) and up (w3)
-                # fc1[:, :expert_inner_dim, :] is gate
-                # fc1[:, expert_inner_dim:, :] is up
-                gate_weight = loaded_weight[:, :expert_inner_dim, :]
-                up_weight = loaded_weight[:, expert_inner_dim:, :]
-
-                # Load gate (w1) for each expert
-                for expert_id in range(loaded_weight.shape[0]):
-                    module.weight_loader(
-                        module.w13_weight,
-                        gate_weight[expert_id],
-                        f"{experts_name}.w13_weight",
-                        "w1",
-                        expert_id,
-                    )
-                    module.weight_loader(
-                        module.w13_weight,
-                        up_weight[expert_id],
-                        f"{experts_name}.w13_weight",
-                        "w3",
-                        expert_id,
-                    )
-
-                loaded_params.add(f"{layer_name}.mlp.experts.w13_weight")
-                continue
+                tp_size = get_tensor_model_parallel_world_size()
+                tp_rank = get_tensor_model_parallel_rank()
+                num_experts = loaded_weight.shape[0]
+                experts_per_rank = num_experts // tp_size
+                expert_start = tp_rank * experts_per_rank
+                expert_end = expert_start + experts_per_rank
+                # Shard by expert dimension
+                loaded_weight = loaded_weight[expert_start:expert_end].contiguous()
+                # Map to our custom MoE format: mlp.fc1_weight
+                name = name.replace(".mlp.fc1.weight", ".mlp.fc1_weight")
 
             if ".mlp.fc2.weight" in name and loaded_weight.dim() == 3:
-                # fc2 is down projection
-                # Shape: [n_experts, hidden_size, expert_inner_dim]
-                layer_name = name.replace(".mlp.fc2.weight", "")
-                experts_name = f"{layer_name}.mlp.experts"
+                from vllm.distributed import get_tensor_model_parallel_rank
 
-                # Find the FusedMoE module
-                module = self
-                for part in experts_name.split("."):
-                    if part:
-                        module = getattr(module, part)
+                tp_size = get_tensor_model_parallel_world_size()
+                tp_rank = get_tensor_model_parallel_rank()
+                num_experts = loaded_weight.shape[0]
+                experts_per_rank = num_experts // tp_size
+                expert_start = tp_rank * experts_per_rank
+                expert_end = expert_start + experts_per_rank
+                # Shard by expert dimension
+                loaded_weight = loaded_weight[expert_start:expert_end].contiguous()
+                # Map to our custom MoE format: mlp.fc2_weight
+                name = name.replace(".mlp.fc2.weight", ".mlp.fc2_weight")
 
-                # Load w2 for each expert
-                for expert_id in range(loaded_weight.shape[0]):
-                    module.weight_loader(
-                        module.w2_weight,
-                        loaded_weight[expert_id],
-                        f"{experts_name}.w2_weight",
-                        "w2",
-                        expert_id,
-                    )
+            # Handle tau weights with tensor parallelism
+            # tau_alpha: [num_heads] -> [num_heads/tp]
+            # tau_wq: [num_heads, qkv_dim] -> [num_heads/tp, qkv_dim/tp]
+            # tau_wv: [num_heads, qkv_dim] -> [num_heads/tp, qkv_dim/tp]
+            if ".tau_alpha" in name:
+                from vllm.distributed import get_tensor_model_parallel_rank
 
-                loaded_params.add(f"{layer_name}.mlp.experts.w2_weight")
-                continue
+                tp_size = get_tensor_model_parallel_world_size()
+                tp_rank = get_tensor_model_parallel_rank()
+                num_heads = loaded_weight.shape[0]
+                heads_per_partition = num_heads // tp_size
+                start = tp_rank * heads_per_partition
+                end = start + heads_per_partition
+                loaded_weight = loaded_weight[start:end].contiguous()
+
+            if ".tau_wq" in name or ".tau_wv" in name:
+                from vllm.distributed import get_tensor_model_parallel_rank
+
+                tp_size = get_tensor_model_parallel_world_size()
+                tp_rank = get_tensor_model_parallel_rank()
+                num_heads, qkv_dim = loaded_weight.shape
+                heads_per_partition = num_heads // tp_size
+                # Only shard by head dimension, keep full qkv_dim for all-gather
+                head_start = tp_rank * heads_per_partition
+                head_end = head_start + heads_per_partition
+                loaded_weight = loaded_weight[head_start:head_end, :].contiguous()
 
             if name in params_dict:
                 param = params_dict[name]
                 weight_loader = getattr(param, "weight_loader", default_weight_loader)
                 weight_loader(param, loaded_weight)
                 loaded_params.add(name)
+            elif _DEBUG_MOONDREAM3:
+                _debug_logger.warning(f"[load_weights] Skipped: {name}")
+
+        # Debug: Print stats for some critical weights
+        if _DEBUG_MOONDREAM3:
+            _debug_logger.warning(f"[load_weights] Loaded {len(loaded_params)} params")
+            # Check for missing critical weights
+            expected_critical = ["text.wte.weight", "lm_head.weight", "lm_head.bias"]
+            for ec in expected_critical:
+                if ec in loaded_params:
+                    _debug_logger.warning(f"[load_weights] {ec}: LOADED")
+                else:
+                    _debug_logger.warning(f"[load_weights] {ec}: MISSING!")
 
         return loaded_params
