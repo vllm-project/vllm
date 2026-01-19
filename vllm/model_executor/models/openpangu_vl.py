@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 #
 # Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
 # Adapted from vllm/model_executor/models/qwen2_5_vl.py
@@ -117,10 +119,10 @@ class OpenPanguVisionAttention(nn.Module):
             prefix=f"{prefix}.qkv",
         )
         self.proj = RowParallelLinear(
-          input_size=projection_size,
-          output_size=embed_dim,
-          quant_config=quant_config,
-          prefix=f"{prefix}.proj",
+            input_size=projection_size,
+            output_size=embed_dim,
+            quant_config=quant_config,
+            prefix=f"{prefix}.proj",
         )
         self.scale_value = self.hidden_size_per_attention_head**-0.5
 
@@ -130,12 +132,10 @@ class OpenPanguVisionAttention(nn.Module):
         x2 = x[..., x.shape[-1] // 2 :]
         return torch.cat((-x2, x1), dim=-1)
 
-
     def apply_rotary_pos_emb(self, q, k, cos, sin, offset: int = 0):
         q_embed = (q * cos) + (self.rotate_half(q) * sin)
         k_embed = (k * cos) + (self.rotate_half(k) * sin)
         return q_embed.to(torch.bfloat16), k_embed.to(torch.bfloat16)
-
 
     def forward(
         self,
@@ -256,7 +256,6 @@ class OpenPanguVisionMLP(nn.Module):
 
 
 class OpenPanguVisionBlock(nn.Module):
-
     def __init__(
         self,
         dim: int,
@@ -325,11 +324,14 @@ class OpenPanguVisionRotaryEmbedding(nn.Module):
 
     def forward(self, seqlen: int) -> torch.Tensor:
         self.update_freqs_cache(seqlen)
-        return self._freqs_cached[:seqlen] if self._freqs_cached is not None else self._freqs_cached
+        return (
+            self._freqs_cached[:seqlen]
+            if self._freqs_cached is not None
+            else self._freqs_cached
+        )
 
 
 class OpenPanguVisionPatchEmbed(nn.Module):
-
     def __init__(
         self,
         patch_size: int = 14,
@@ -368,7 +370,6 @@ class OpenPanguVisionPatchEmbed(nn.Module):
 
 
 class OpenPanguVisionPatchMerger(nn.Module):
-
     def __init__(
         self,
         d_model: int,
@@ -469,7 +470,7 @@ class OpenPanguVisionTransformer(nn.Module):
             self.select_index = [vision_config.depth + i for i in self.select_layer]
             self.select_index = self.select_index[::-1]
             self.select_layer = [-1 * (i + 1) for i in range(len(self.select_index))]
-            
+
             self.take_indices = self.select_index
 
             self.final_layernorm = RMSNorm(self.hidden_size, eps=norm_eps)
@@ -486,6 +487,7 @@ class OpenPanguVisionTransformer(nn.Module):
                     for i in range(len(self.select_layer))
                 ]
             )
+
     @property
     def dtype(self) -> torch.dtype:
         return self.patch_embed.proj.weight.dtype
@@ -757,6 +759,7 @@ class OpenPanguVLProcessingInfo(Qwen2_5_VLProcessingInfo):
             **kwargs,
         )
 
+
 def get_load_balance_assignment(
     sizes: list[int],
     num_gpus: int = 2,
@@ -979,7 +982,6 @@ class OpenPanguVLVideoEmbeddingInputs(TypedDict):
 
 
 class OpenPanguVLMultiModalProcessor(Qwen2_5_VLMultiModalProcessor):
-
     def _get_prompt_updates(
         self,
         mm_items: MultiModalDataItems,
@@ -1070,6 +1072,7 @@ class OpenPanguVLForConditionalGeneration(
         "qkv_proj": ["q_proj", "k_proj", "v_proj"],
         "gate_up_proj": ["gate_proj", "up_proj"],
     }
+
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
         config = vllm_config.model_config.hf_config
@@ -1146,7 +1149,7 @@ class OpenPanguVLForConditionalGeneration(
             return torch.concat(list(mm_input))
         else:
             return torch.concat(mm_input)
-        
+
     def _parse_and_validate_image_input(self, **kwargs: object):
         pixel_values = kwargs.pop("pixel_values", None)
         image_embeds = kwargs.pop("image_embeds", None)
@@ -1193,7 +1196,7 @@ class OpenPanguVLForConditionalGeneration(
                 image_embeds=image_embeds,
                 image_grid_thw=image_grid_thw,
             )
-        
+
     def _parse_and_validate_video_input(self, **kwargs: object):
         pixel_values_videos = kwargs.pop("pixel_values_videos", None)
         video_embeds = kwargs.pop("video_embeds", None)
@@ -1236,7 +1239,7 @@ class OpenPanguVLForConditionalGeneration(
                 video_embeds=video_embeds,
                 video_grid_thw=video_grid_thw,
             )
-        
+
     def _parse_and_validate_multimodal_inputs(self, **kwargs: object) -> dict:
         mm_input_by_modality = {}
         for input_key in kwargs:
@@ -1258,7 +1261,7 @@ class OpenPanguVLForConditionalGeneration(
 
     def get_language_model(self) -> torch.nn.Module:
         return self.language_model
-    
+
     def embed_multimodal(self, **kwargs: object) -> MultiModalEmbeddings | None:
         mm_input_by_modality = self._parse_and_validate_multimodal_inputs(**kwargs)
         if not mm_input_by_modality:
@@ -1270,12 +1273,20 @@ class OpenPanguVLForConditionalGeneration(
             multimodal_input = mm_input_by_modality[modality]
             if modality == "image":
                 vision_embeddings = self._process_image_input(multimodal_input)
-                multimodal_embeddings = multimodal_embeddings if not vision_embeddings else (multimodal_embeddings + vision_embeddings)
+                multimodal_embeddings = (
+                    multimodal_embeddings
+                    if not vision_embeddings
+                    else (multimodal_embeddings + vision_embeddings)
+                )
             if modality == "video":
                 video_embeddings = self._process_video_input(multimodal_input)
-                multimodal_embeddings = multimodal_embeddings if not video_embeddings else (multimodal_embeddings + video_embeddings)
+                multimodal_embeddings = (
+                    multimodal_embeddings
+                    if not video_embeddings
+                    else (multimodal_embeddings + video_embeddings)
+                )
         return multimodal_embeddings
-    
+
     def get_input_embeddings(
         self,
         input_ids: torch.Tensor,
@@ -1403,7 +1414,7 @@ class OpenPanguVLForConditionalGeneration(
                     input_ids, image_input=image_input, video_input=video_input
                 )
                 input_ids = None
-        
+
         hidden_states = self.language_model.model(
             input_ids=input_ids,
             positions=positions,
@@ -1419,7 +1430,7 @@ class OpenPanguVLForConditionalGeneration(
     ) -> torch.Tensor | None:
         return self.language_model.compute_logits(hidden_states)
 
-    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]: 
+    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         loader = AutoWeightsLoader(self)
         return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
