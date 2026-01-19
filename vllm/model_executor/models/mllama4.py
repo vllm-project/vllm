@@ -1130,10 +1130,6 @@ class Llama4ForConditionalGeneration(
             weights
         )
 
-        # Skip loading vision model and projector if they're not initialized.
-        if self.vision_model is None and self.multi_modal_projector is None:
-            other_weights = []
-
         # Handle expert scale parameters
         regular_weights, expert_scale_weights, updated_params_from_experts = (
             self._handle_expert_scale_broadcasting(language_model_weights, params_dict)

@@ -1126,15 +1126,5 @@ class Step3VLForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP)
         return self.language_model.compute_logits(hidden_states)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
-        skip_prefixes = []
-        if self.vision_model is None and self.vit_large_projector is None:
-            skip_prefixes = [
-                "vision_model.",
-                "vit_downsampler.",
-                "vit_downsampler2.",
-                "vit_large_projector.",
-            ]
-
-        loader = AutoWeightsLoader(self, skip_prefixes=skip_prefixes)
-        loaded_weights = loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
-        return loaded_weights
+        loader = AutoWeightsLoader(self)
+        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
