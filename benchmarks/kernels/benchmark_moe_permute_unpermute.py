@@ -330,6 +330,7 @@ def main(args: argparse.Namespace):
         config.architectures[0] == "DeepseekV3ForCausalLM"
         or config.architectures[0] == "DeepseekV2ForCausalLM"
         or config.architectures[0] == "Glm4MoeForCausalLM"
+        or config.architectures[0] == "Glm4MoeLiteForCausalLM"
     ):
         E = config.n_routed_experts
         topk = config.num_experts_per_tok
