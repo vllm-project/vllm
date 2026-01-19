@@ -448,10 +448,32 @@ def _merge_multimodal_embeddings(
     Note:
         This updates `inputs_embeds` in place.
     """
+    import os
+
+    _DEBUG = os.environ.get("DEBUG_MOONDREAM3", "0") == "1"
+    if _DEBUG:
+        import logging
+
+        _logger = logging.getLogger("merge_mm_debug")
+        _logger.warning(
+            f"[_merge_multimodal_embeddings] inputs_embeds: {inputs_embeds.shape}, "
+            f"num_mm_embeds: {len(multimodal_embeddings)}, "
+            f"is_multimodal sum: {is_multimodal.sum().item()}"
+        )
+
     if len(multimodal_embeddings) == 0:
+        if _DEBUG:
+            _logger.warning(
+                "[_merge_multimodal_embeddings] No mm embeddings, returning early"
+            )
         return inputs_embeds
 
     mm_embeds_flat = _flatten_embeddings(multimodal_embeddings)
+    if _DEBUG:
+        _logger.warning(
+            f"[_merge_multimodal_embeddings] mm_embeds_flat: {mm_embeds_flat.shape}, "
+            f"mean={mm_embeds_flat.float().mean():.4f}, std={mm_embeds_flat.float().std():.4f}"
+        )
     input_dtype = inputs_embeds.dtype
 
     try:

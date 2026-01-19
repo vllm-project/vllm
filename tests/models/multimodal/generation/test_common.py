@@ -708,6 +708,18 @@ VLM_TEST_SETTINGS = {
         max_num_seqs=2,
         patch_hf_runner=model_utils.molmo_patch_hf_runner,
     ),
+    "moondream3": VLMTestInfo(
+        models=["moondream/moondream3-preview"],
+        test_type=VLMTestType.IMAGE,
+        prompt_formatter=lambda img_prompt: f"<|endoftext|>{img_prompt}",
+        # Note: space after <image> is required for correct tokenization
+        img_idx_to_prompt=lambda idx: "<image> \n\n",
+        max_model_len=2048,
+        max_num_seqs=2,
+        dtype="bfloat16",
+        # Moondream3 is 9B params with MoE, needs significant GPU memory
+        marks=[large_gpu_mark(min_gb=48)],
+    ),
     "ovis1_6-gemma2": VLMTestInfo(
         models=["AIDC-AI/Ovis1.6-Gemma2-9B"],
         test_type=(VLMTestType.IMAGE, VLMTestType.MULTI_IMAGE),

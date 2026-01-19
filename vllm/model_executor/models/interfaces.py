@@ -215,6 +215,23 @@ class SupportsMultiModal(Protocol):
         on those tokens. Note however that doing so increases memory usage
         as an additional buffer is needed to hold the input embeddings.
         """
+        import os
+
+        _DEBUG = os.environ.get("DEBUG_MOONDREAM3", "0") == "1"
+        if _DEBUG:
+            import logging
+
+            _logger = logging.getLogger("embed_input_ids_debug")
+            mm_len = (
+                len(multimodal_embeddings) if multimodal_embeddings is not None else 0
+            )
+            is_mm_sum = is_multimodal.sum().item() if is_multimodal is not None else 0
+            _logger.warning(
+                f"[embed_input_ids] input_ids: {input_ids.shape}, "
+                f"mm_embeddings len: {mm_len}, "
+                f"is_multimodal sum: {is_mm_sum}"
+            )
+
         from .utils import _merge_multimodal_embeddings
 
         inputs_embeds = self._embed_text_input_ids(
@@ -225,6 +242,10 @@ class SupportsMultiModal(Protocol):
         )
 
         if multimodal_embeddings is None or len(multimodal_embeddings) == 0:
+            if _DEBUG:
+                _logger.warning(
+                    "[embed_input_ids] Skipping merge - mm_embeddings is None or empty"
+                )
             return inputs_embeds
 
         return _merge_multimodal_embeddings(
