@@ -41,8 +41,10 @@ from vllm.model_executor.layers.linear import (
 )
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
+from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
-from vllm.model_executor.models.interfaces import SupportsLoRA, SupportsPP
+from vllm.model_executor.models.interfaces import (SupportsLoRA,
+                                                  SupportsMultiModal, SupportsPP)
 from vllm.model_executor.models.siglip import SiglipVisionModel
 from vllm.sequence import IntermediateTensors
 from vllm.v1.attention.backend import AttentionType
@@ -239,6 +241,7 @@ class T5Gemma2Attention(nn.Module):
         cache_config: CacheConfig | None = None,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
+        rope_parameters: dict | None = None,
     ):
         super().__init__()
         self.hidden_size = hidden_size
@@ -287,6 +290,17 @@ class T5Gemma2Attention(nn.Module):
         # Add q_norm and k_norm for attention head normalization (matches transformers)
         self.q_norm = GemmaRMSNorm(self.head_dim, eps=1e-6)
         self.k_norm = GemmaRMSNorm(self.head_dim, eps=1e-6)
+        
+        if rope_parameters:
+            self.rotary_emb = get_rope(
+                self.head_dim,
+                rotary_dim=self.head_dim,
+                max_position=max_position_embeddings,
+                base=rope_parameters["rope_theta"],
+                is_neox_style=True,
+                rope_scaling=None,
+        )
+
 
         # Use MMEncoderAttention for encoder (no KV cache), Attention for decoder
         if is_encoder:
@@ -312,6 +326,7 @@ class T5Gemma2Attention(nn.Module):
 
     def forward(
         self,
+        positions: torch.Tensor,
         hidden_states: torch.Tensor,
     ) -> torch.Tensor:
         q, _ = self.q_proj(hidden_states)
@@ -329,6 +344,8 @@ class T5Gemma2Attention(nn.Module):
         # Add unsqueeze(2) to make it 4D for norm, then squeeze back
         q = self.q_norm(q.unsqueeze(2)).squeeze(2)
         k = self.k_norm(k.unsqueeze(2)).squeeze(2)
+        
+        q, k = self.rotary_emb(positions, q, k)
 
         # vLLM attention expects 3D tensors: (num_tokens, num_heads, head_dim)
         attn_output = self.attn(q, k, v)
@@ -360,6 +377,7 @@ class T5Gemma2MergedAttention(nn.Module):
         cache_config: CacheConfig | None = None,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
+        rope_parameters: dict | None = None,
     ):
         super().__init__()
         self.hidden_size = hidden_size
@@ -404,6 +422,16 @@ class T5Gemma2MergedAttention(nn.Module):
         # Add q_norm and k_norm for attention head normalization (matches transformers)
         self.q_norm = GemmaRMSNorm(self.head_dim, eps=1e-6)
         self.k_norm = GemmaRMSNorm(self.head_dim, eps=1e-6)
+        
+        if rope_parameters:
+            self.rotary_emb = get_rope(
+                self.head_dim,
+                rotary_dim=self.head_dim,
+                max_position=max_position_embeddings,
+                base=rope_parameters["rope_theta"],
+                is_neox_style=True,
+                rope_scaling=None,
+        )
 
         # Merged attention uses DECODER attention type
         self.attn = Attention(
@@ -442,6 +470,8 @@ class T5Gemma2MergedAttention(nn.Module):
         # Add unsqueeze(2) to make it 4D for norm, then squeeze back
         q = self.q_norm(q.unsqueeze(2)).squeeze(2)
         k_self = self.k_norm(k_self.unsqueeze(2)).squeeze(2)
+
+        q, k_self = self.rotary_emb(positions, q, k_self)
 
         # Cross-attention: K/V from encoder_hidden_states
         if encoder_hidden_states is not None:
@@ -499,6 +529,7 @@ class T5Gemma2EncoderLayer(nn.Module):
             cache_config=cache_config,
             quant_config=quant_config,
             prefix=f"{prefix}.self_attn",
+            rope_parameters=config.get("rope_parameters"),
         )
         self.mlp = T5Gemma2MLP(
             hidden_size=self.hidden_size,
@@ -524,11 +555,12 @@ class T5Gemma2EncoderLayer(nn.Module):
 
     def forward(
         self,
+        positions: torch.Tensor,
         hidden_states: torch.Tensor,
     ) -> torch.Tensor:
         residual = hidden_states
         hidden_states = self.pre_self_attn_layernorm(hidden_states)
-        hidden_states = self.self_attn(hidden_states=hidden_states)
+        hidden_states = self.self_attn(positions, hidden_states)
         hidden_states = residual + hidden_states
         hidden_states = self.post_self_attn_layernorm(hidden_states)
 
@@ -711,6 +743,7 @@ class T5Gemma2Encoder(nn.Module):
 
     def forward(
         self,
+        positions: torch.Tensor,
         input_ids: torch.Tensor,
         pixel_values: torch.Tensor | None = None,
     ) -> torch.Tensor:
@@ -732,15 +765,17 @@ class T5Gemma2Encoder(nn.Module):
 
             if image_mask.any():
                 # Flatten image features
-                flat_image_features = image_features.view(-1, image_features.size(-1))
+                flat_image_features = image_features.view(
+                    -1, image_features.size(-1))
 
                 # Scatter image features into hidden states
                 hidden_states = hidden_states.clone()
-                hidden_states[image_mask] = flat_image_features.to(hidden_states.dtype)
+                hidden_states[image_mask] = flat_image_features.to(
+                    hidden_states.dtype)
 
         # Pass through encoder layers
         for layer in islice(self.layers, self.start_layer, self.end_layer):
-            hidden_states = layer(hidden_states)
+            hidden_states = layer(positions, hidden_states)
 
         hidden_states = self.norm(hidden_states)
         return hidden_states
@@ -867,6 +902,7 @@ class T5Gemma2DecoderLayer(nn.Module):
             cache_config=cache_config,
             quant_config=quant_config,
             prefix=f"{prefix}.self_attn",
+            rope_parameters=config.get("rope_parameters"),
         )
 
         self.mlp = T5Gemma2MLP(
@@ -1099,11 +1135,12 @@ class T5Gemma2Model(nn.Module):
     def get_encoder_outputs(
         self,
         input_ids: torch.Tensor | None,
+        positions: torch.Tensor,
         pixel_values: torch.Tensor | None = None,
     ) -> torch.Tensor | None:
         if input_ids is None:
             return None
-        return self.encoder(input_ids, pixel_values=pixel_values)
+        return self.encoder(positions, input_ids, pixel_values=pixel_values)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         # Strip "model." prefix if it exists
@@ -1147,7 +1184,8 @@ class T5Gemma2Model(nn.Module):
         return loaded_params
 
 
-class T5Gemma2ForConditionalGeneration(nn.Module, SupportsLoRA, SupportsPP):
+class T5Gemma2ForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsLoRA,
+                                     SupportsPP):
     """T5Gemma2 for conditional generation (seq2seq)."""
 
     packed_modules_mapping = {
@@ -1181,10 +1219,12 @@ class T5Gemma2ForConditionalGeneration(nn.Module, SupportsLoRA, SupportsPP):
     def get_encoder_outputs(
         self,
         input_ids: torch.Tensor,
+        positions: torch.Tensor,
         pixel_values: torch.Tensor | None = None,
     ) -> torch.Tensor:
         return self.model.get_encoder_outputs(
             input_ids=input_ids,
+            positions=positions,
             pixel_values=pixel_values,
         )
 
@@ -1202,9 +1242,10 @@ class T5Gemma2ForConditionalGeneration(nn.Module, SupportsLoRA, SupportsPP):
         **kwargs,
     ) -> torch.Tensor | IntermediateTensors:
         if encoder_outputs is None:
+            encoder_input_ids = kwargs.get("encoder_input_ids")
+            encoder_positions = kwargs.get("encoder_positions")
             encoder_outputs = self.model.get_encoder_outputs(
-                kwargs.get("encoder_input_ids"), pixel_values
-            )
+                encoder_input_ids, encoder_positions, pixel_values)
 
         decoder_outputs = self.model(
             input_ids=input_ids,
