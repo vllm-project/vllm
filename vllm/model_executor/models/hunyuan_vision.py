@@ -160,9 +160,9 @@ class HunYuanVisionMLP(nn.Module):
         act_fn: Callable[[torch.Tensor], torch.Tensor] = F.gelu,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
-        use_data_parallel: bool = False,
     ):
         super().__init__()
+        use_data_parallel = is_vit_use_data_parallel()
         self.dense_h_to_4h = ColumnParallelLinear(
             in_features,
             hidden_features,
@@ -195,10 +195,10 @@ class HunYuanVisionAttention(nn.Module):
         projection_size: int,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
-        use_data_parallel: bool = False,
     ) -> None:
         super().__init__()
         # Per attention head and per partition values.
+        use_data_parallel = is_vit_use_data_parallel()
         self.tp_size = (
             1
             if use_data_parallel
@@ -259,7 +259,6 @@ class HunYuanVisionBlock(nn.Module):
         norm_layer: Callable[[int], nn.Module] | None = None,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
-        use_data_parallel: bool = False,
     ) -> None:
         super().__init__()
         if norm_layer is None:
@@ -272,7 +271,6 @@ class HunYuanVisionBlock(nn.Module):
             projection_size=dim,
             quant_config=quant_config,
             prefix=f"{prefix}.self_attn",
-            use_data_parallel=use_data_parallel,
         )
         self.mlp = HunYuanVisionMLP(
             dim,
@@ -281,7 +279,6 @@ class HunYuanVisionBlock(nn.Module):
             bias=True,
             quant_config=quant_config,
             prefix=f"{prefix}.mlp",
-            use_data_parallel=use_data_parallel,
         )
 
     def forward(
@@ -435,7 +432,6 @@ class HunYuanVisionTransformer(nn.Module):
         vision_config: HunYuanVLVisionConfig,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
-        use_data_parallel: bool = False,
     ) -> None:
         super().__init__()
 
@@ -462,7 +458,6 @@ class HunYuanVisionTransformer(nn.Module):
                         norm_layer=norm_layer,
                         quant_config=quant_config,
                         prefix=f"{prefix}.layers.{layer_idx}",
-                        use_data_parallel=use_data_parallel,
                     )
                     for layer_idx in range(num_hidden_layers)
                 ]
@@ -874,7 +869,6 @@ class HunYuanVLForConditionalGeneration(
                 config.vision_config,
                 quant_config=vllm_config.quant_config,
                 prefix=maybe_prefix(prefix, "visual"),
-                use_data_parallel=is_vit_use_data_parallel(),
             )
         else:
             self.visual = None
