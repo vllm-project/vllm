@@ -356,16 +356,18 @@ class LLM:
         # FIXME: This should be in score render.
         self.chat_template = chat_template
         if self.chat_template is None:
-            if chat_template_path := self.model_config.st_v6_config.get(
+            chat_template_path = self.model_config.st_v6_config.get(
                 "chat_template_path", None
-            ):
+            )
+            if chat_template_path is not None:
                 chat_template_file = try_get_local_file(
                     model=self.model_config.model,
                     revision=self.model_config.revision,
                     file_name=chat_template_path,
                 )
                 if chat_template_file is not None:
-                    self.chat_template = open(chat_template_file).read()
+                    with open(chat_template_file) as f:
+                        self.chat_template = f.read()
         # Cache for __repr__ to avoid repeated collective_rpc calls
         self._cached_repr: str | None = None
 

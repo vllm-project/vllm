@@ -896,7 +896,7 @@ def get_sentence_transformer_tokenizer_config(
 @cache
 def get_sentence_transformer_v6_config(
     model: str | Path, revision: str | None = "main"
-) -> dict[str:Any]:
+) -> dict[str, Any]:
     sentence_transformer_config_files = [
         "config_sentence_transformers.json",
     ]
