@@ -11,6 +11,7 @@ from torch import nn
 
 from vllm.config import VllmConfig
 from vllm.config.lora import LoRAConfig, ModelConfig
+from vllm.envs import SLAB_OPTIMIZATION
 from vllm.logger import init_logger
 from vllm.lora.layers import (
     BaseLayerWithLoRA,
@@ -21,6 +22,11 @@ from vllm.lora.layers import (
 from vllm.lora.lora_model import LoRAModel
 from vllm.lora.lora_weights import LoRALayerWeights, PackedLoRALayerWeights
 from vllm.lora.punica_wrapper import PunicaWrapperBase, get_punica_wrapper
+from vllm.lora.slab_helper import (
+    clear_lora_model_cache_for_lora,
+    clear_slab_cache_for_lora,
+    process_slab_activation_loop,
+)
 from vllm.lora.utils import (
     from_layer,
     from_layer_logits_processor,
@@ -251,30 +257,84 @@ class LoRAModelManager:
             "Activating LoRA. int id: %d, slot index: %d", lora_model.id, index
         )
         self.lora_index_to_id[index] = lora_model.id
-        for module_name, module in self.modules.items():
-            module_lora = self._get_lora_layer_weights(lora_model, module_name)
-            if not module_lora:
-                module.reset_lora(index)
-                continue
 
-            module.set_lora(
+        if SLAB_OPTIMIZATION:
+            # Check for cached CPU slab and metadata from LoRAModel
+            has_cpu_slab = hasattr(lora_model, "_cached_cpu_slab")
+            has_gpu_slab = hasattr(lora_model, "_cached_gpu_slab")
+            has_metadata = hasattr(lora_model, "_cached_metadata")
+
+            if has_cpu_slab and has_metadata:
+                # MEMORY EFFICIENT: Create GPU slab only during activation
+                cpu_slab = lora_model._cached_cpu_slab  # type: ignore[attr-defined]
+                metadata = lora_model._cached_metadata  # type: ignore[attr-defined]
+
+                # Transfer to GPU only when activated
+                gpu_slab = cpu_slab.to(device="cuda", non_blocking=True)
+
+                # Cache GPU slab for this activation
+                lora_model._cached_gpu_slab = gpu_slab  # type: ignore[attr-defined]
+
+            elif has_gpu_slab and has_metadata:
+                gpu_slab = lora_model._cached_gpu_slab  # type: ignore[attr-defined]
+                metadata = lora_model._cached_metadata  # type: ignore[attr-defined]
+
+            else:
+                return False
+            # Use helper function for the full activation loop with all optimizations
+            process_slab_activation_loop(
+                self.modules,
+                lora_model,
+                self._get_lora_layer_weights,
+                self.lora_config,
+                gpu_slab,
+                metadata,
                 index,
-                module_lora.lora_a,
-                module_lora.lora_b,
             )
 
-        return True
+            return True
+        else:
+            for module_name, module in self.modules.items():
+                module_lora = self._get_lora_layer_weights(lora_model, module_name)
+                if not module_lora:
+                    module.reset_lora(index)
+                    continue
+                module.set_lora(
+                    index,
+                    module_lora.lora_a,
+                    module_lora.lora_b,
+                )
+            return True
 
     def _deactivate_adapter(self, lora_id: int):
         try:
             index = self.lora_index_to_id.index(lora_id)
             self.lora_index_to_id[index] = None
+
+            # Free GPU slab when deactivating to respect max_loras constraint
+            if SLAB_OPTIMIZATION and lora_id in self._registered_adapters:
+                lora_model = self._registered_adapters[lora_id]
+                if hasattr(lora_model, "_cached_gpu_slab"):
+                    # Free GPU slab to make room for other LoRAs
+                    del lora_model._cached_gpu_slab
+                    torch.cuda.empty_cache()  # Force GPU memory cleanup
+
         except ValueError:
             pass
 
     def _add_adapter(self, lora: LoRAModel):
-        self._create_merged_loras_inplace(lora)
-        self._registered_adapters[lora.id] = lora
+        if not SLAB_OPTIMIZATION:
+            # Traditional approach: use CPU packing for packed modules
+            self._create_merged_loras_inplace(lora)
+            self._registered_adapters[lora.id] = lora
+        else:
+            # Slab optimization: slab already built with target modules
+            logger.debug(
+                "[SLAB_OPTIMIZATION] Registering LoRA %d - "
+                "slab already built with target modules",
+                lora.id,
+            )
+            self._registered_adapters[lora.id] = lora
 
     def pin_adapter(self, lora_id: int) -> bool:
         """Pin a LoRAModel in the manager cache."""
@@ -560,7 +620,8 @@ class LoRAModelManager:
                     module_name = replaced_module_name
             if module_name.endswith(".experts"):
                 lora_model.loras[module_name] = PackedLoRALayerWeights.pack_moe(
-                    replacement_loras, module_name
+                    replacement_loras,
+                    module_name,
                 )
             else:
                 lora_model.loras[module_name] = PackedLoRALayerWeights.pack(
@@ -589,19 +650,19 @@ class LoRAModelManager:
         # overhead is significant.
         # 2. The weight packing above (e.g., pack_moe) may invalidate the
         # pin_memory allocation, so we execute it after packing.
-
-        pin_memory = str(lora_device) == "cpu" and is_pin_memory_available()
-        if pin_memory:
-            for lora in lora_model.loras.values():
-                if isinstance(lora.lora_a, list):
-                    for index in range(len(lora.lora_a)):
-                        if lora.lora_a[index] is None:
-                            continue
-                        lora.lora_a[index] = lora.lora_a[index].pin_memory()
-                        lora.lora_b[index] = lora.lora_b[index].pin_memory()
-                else:
-                    lora.lora_a = lora.lora_a.pin_memory()
-                    lora.lora_b = lora.lora_b.pin_memory()
+        if not SLAB_OPTIMIZATION:
+            pin_memory = str(lora_device) == "cpu" and is_pin_memory_available()
+            if pin_memory:
+                for lora in lora_model.loras.values():
+                    if isinstance(lora.lora_a, list):
+                        for index in range(len(lora.lora_a)):
+                            if lora.lora_a[index] is None:
+                                continue
+                            lora.lora_a[index] = lora.lora_a[index].pin_memory()
+                            lora.lora_b[index] = lora.lora_b[index].pin_memory()
+                    else:
+                        lora.lora_a = lora.lora_a.pin_memory()
+                        lora.lora_b = lora.lora_b.pin_memory()
 
     def _stack_moe_lora_weights(
         self, lora_model: LoRAModel, module: FusedMoE3DWithLoRA, module_name: str
@@ -729,7 +790,15 @@ class LoRAModelManager:
         self.deactivate_adapter(adapter_id)
         if adapter_id not in self._registered_adapters:
             return False
-        self._registered_adapters.pop(adapter_id, None)
+
+        # Clean up global slab caches for this adapter to free pinned memory
+        adapter = self._registered_adapters.pop(adapter_id, None)
+        if adapter and SLAB_OPTIMIZATION:
+            lora_dir = getattr(adapter, "_lora_dir", None)
+            if lora_dir:
+                clear_slab_cache_for_lora(lora_dir)
+                clear_lora_model_cache_for_lora(lora_dir)
+
         return True
 
     def list_adapters(self) -> dict[int, LoRAModel]:
