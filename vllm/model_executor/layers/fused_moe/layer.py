@@ -335,7 +335,6 @@ class FusedMoE(CustomOp):
         router_logits_dtype: torch.dtype | None = None,
     ):
         super().__init__()
-        self.prefix = prefix
 
         # Allow disabling of the separate shared experts stream for
         # debug purposes.
