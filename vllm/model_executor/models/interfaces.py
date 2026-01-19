@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from collections.abc import Callable, Iterable, Mapping, MutableSequence
+from contextlib import contextmanager, nullcontext
 from typing import (
     TYPE_CHECKING,
     ClassVar,
@@ -69,6 +70,32 @@ def _require_is_multimodal(is_multimodal: Tensor | None) -> Tensor:
     return is_multimodal
 
 
+class LMMissingLayer(nn.Module):
+    def make_empty_intermediate_tensors(self, *args, **kwargs):
+        raise RuntimeError("This module should not be called in MM encoder-only mode")
+
+    def __call__(self, *args, **kwargs):
+        raise RuntimeError("This module should not be called in MM encoder-only mode")
+
+
+@contextmanager
+def _no_init_weights(module: nn.Module, placeholder_cls: type[nn.Module]):
+    """
+    Prevents weight initialization from taking up memory and replaces all
+    direct child assignments to `module` with an instance of `placeholder_cls`.
+    """
+
+    def callback(module_, name, submodule):
+        if module_ is module:
+            return placeholder_cls()
+
+        return submodule
+
+    with torch.nn.modules.module.register_module_module_registration_hook(callback):  # noqa: E501,SIM117
+        with torch.device("meta"):
+            yield
+
+
 @runtime_checkable
 class SupportsMultiModal(Protocol):
     """The interface required for all multi-modal models."""
@@ -105,6 +132,11 @@ class SupportsMultiModal(Protocol):
     Set internally by `MultiModalRegistry.register_processor`.
     """
 
+    _language_module_names: list[str] = []
+    """
+    Set internally by `mark_language_model`.
+    """
+
     @classmethod
     def get_placeholder_str(cls, modality: str, i: int) -> str | None:
         """
@@ -134,7 +166,35 @@ class SupportsMultiModal(Protocol):
         Returns:
             torch.nn.Module: The core language model component.
         """
-        ...
+        if self._language_module_names:
+            return getattr(self, self._language_module_names[0])
+
+        raise NotImplementedError(
+            f"No language model found in {type(self).__name__}! "
+            "You should initialize it inside `_mark_language_model`"
+        )
+
+    @contextmanager
+    def _mark_language_model(self, vllm_config: VllmConfig):
+        """
+        Mark each child module that was assigned to this model
+        during this context as a language model component.
+        """
+        children_names = list[str]()
+
+        def callback(module_, name, submodule):
+            if module_ is self:
+                children_names.append(name)
+
+        with torch.nn.modules.module.register_module_module_registration_hook(callback):  # noqa: E501,SIM117
+            with (
+                _no_init_weights(self, LMMissingLayer)
+                if vllm_config.model_config.multimodal_config.mm_encoder_only
+                else nullcontext()
+            ):
+                yield
+
+        self._language_module_names = children_names
 
     def get_num_mm_encoder_tokens(self, num_image_tokens: int) -> int:
         """
@@ -153,14 +213,6 @@ class SupportsMultiModal(Protocol):
         multi-modal connector tokens.
         """
         ...
-
-    @classmethod
-    def get_language_model_spec(cls) -> tuple[nn.Module | None, str | None]:
-        """
-        Return the language model spec:
-        (language model class, language model attr)
-        """
-        return None, None
 
     @overload
     def embed_input_ids(self, input_ids: Tensor) -> Tensor: ...
@@ -297,10 +349,6 @@ def requires_raw_input_tokens(model: type[object] | object) -> bool:
 
 def supports_multimodal_encoder_tp_data(model: type[object] | object) -> bool:
     return getattr(model, "supports_encoder_tp_data", False)
-
-
-def supports_mm_encoder_only(model: type[object] | object) -> bool:
-    return getattr(model, "is_mm_encoder_only_model", False)
 
 
 @overload

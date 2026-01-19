@@ -1290,9 +1290,10 @@ class Qwen3VLForConditionalGeneration(
                 prefix=maybe_prefix(prefix, "visual"),
             )
 
-        self.language_model = Qwen3LLMForCausalLM(
-            vllm_config=vllm_config, prefix=maybe_prefix(prefix, "language_model")
-        )
+        with self._mark_language_model(vllm_config):
+            self.language_model = Qwen3LLMForCausalLM(
+                vllm_config=vllm_config, prefix=maybe_prefix(prefix, "language_model")
+            )
 
         self.make_empty_intermediate_tensors = (
             self.language_model.make_empty_intermediate_tensors
@@ -1893,9 +1894,6 @@ class Qwen3VLForConditionalGeneration(
 
         return torch.from_numpy(llm_positions), mrope_position_delta
 
-    def get_language_model(self) -> torch.nn.Module:
-        return self.language_model
-
     def embed_multimodal(self, **kwargs: object) -> MultiModalEmbeddings | None:
         mm_input_by_modality = self._parse_and_validate_multimodal_inputs(**kwargs)
         if not mm_input_by_modality:
@@ -2110,11 +2108,3 @@ class Qwen3VLForConditionalGeneration(
         vision_config = hf_config.vision_config
         merge_size = vision_config.spatial_merge_size
         return num_vision_tokens // merge_size**2
-
-    @classmethod
-    def get_language_model_spec(cls) -> tuple[nn.Module | None, str | None]:
-        """
-        Return the language model spec:
-        (language model class, language model attr)
-        """
-        return Qwen3LLMForCausalLM, "language_model"
