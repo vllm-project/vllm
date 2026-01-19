@@ -6,7 +6,9 @@ import os
 from typing import TYPE_CHECKING, Optional
 
 import torch
-import vllm_xpu_kernels._xpu_C  # noqa
+
+with contextlib.suppress(ImportError):
+    import vllm_xpu_kernels._xpu_C  # noqa
 
 from vllm.logger import init_logger
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
