@@ -6,6 +6,7 @@
 import time
 from typing import Any, Literal, TypeAlias
 
+import torch
 from openai.types.responses import (
     ResponseCodeInterpreterCallCodeDeltaEvent,
     ResponseCodeInterpreterCallCodeDoneEvent,
@@ -73,6 +74,8 @@ from vllm.sampling_params import (
 from vllm.utils import random_uuid
 
 logger = init_logger(__name__)
+
+_LONG_INFO = torch.iinfo(torch.long)
 
 
 class InputTokensDetails(OpenAIBaseModel):
@@ -228,6 +231,18 @@ class ResponsesRequest(OpenAIBaseModel):
     # this cannot be used in conjunction with previous_response_id
     # TODO: consider supporting non harmony messages as well
     previous_input_messages: list[OpenAIHarmonyMessage | dict] | None = None
+
+    repetition_penalty: float | None = None
+    seed: int | None = Field(None, ge=_LONG_INFO.min, le=_LONG_INFO.max)
+    stop: str | list[str] | None = []
+    ignore_eos: bool = False
+    vllm_xargs: dict[str, str | int | float | list[str | int | float]] | None = Field(
+        default=None,
+        description=(
+            "Additional request parameters with (list of) string or "
+            "numeric values, used by custom extensions."
+        ),
+    )
     # --8<-- [end:responses-extra-params]
 
     _DEFAULT_SAMPLING_PARAMS = {
@@ -259,6 +274,10 @@ class ResponsesRequest(OpenAIBaseModel):
             top_k = default_sampling_params.get(
                 "top_k", self._DEFAULT_SAMPLING_PARAMS["top_k"]
             )
+
+        if (repetition_penalty := self.repetition_penalty) is None:
+            repetition_penalty = default_sampling_params.get("repetition_penalty", 1.0)
+
         stop_token_ids = default_sampling_params.get("stop_token_ids")
 
         # Structured output
@@ -275,7 +294,10 @@ class ResponsesRequest(OpenAIBaseModel):
             elif response_format.type == "json_object":
                 raise NotImplementedError("json_object is not supported")
 
-        # TODO: add more parameters
+        stop = self.stop if self.stop else []
+        if isinstance(stop, str):
+            stop = [stop]
+
         return SamplingParams.from_optional(
             temperature=temperature,
             top_p=top_p,
@@ -283,11 +305,16 @@ class ResponsesRequest(OpenAIBaseModel):
             max_tokens=max_tokens,
             logprobs=self.top_logprobs if self.is_include_output_logprobs() else None,
             stop_token_ids=stop_token_ids,
+            stop=stop,
+            repetition_penalty=repetition_penalty,
+            seed=self.seed,
+            ignore_eos=self.ignore_eos,
             output_kind=(
                 RequestOutputKind.DELTA if self.stream else RequestOutputKind.FINAL_ONLY
             ),
             structured_outputs=structured_outputs,
             logit_bias=self.logit_bias,
+            extra_args=self.vllm_xargs or {},
             skip_clone=True,  # Created fresh per request, safe to skip clone
             skip_special_tokens=self.skip_special_tokens,
             include_stop_str_in_output=self.include_stop_str_in_output,
