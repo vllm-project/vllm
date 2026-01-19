@@ -39,6 +39,10 @@ class TorchFP8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
         # This could change in the future.
         # We also don't pad when using torch.compile,
         # as it breaks with dynamic shapes.
+        #
+        # The perf gain is still relevant as of 16/1/2026
+        # torch version == 2.9.0. More details in the link below:
+        # https://github.com/vllm-project/vllm/issues/32269
         vllm_config = get_current_vllm_config().compilation_config
         pad_output = vllm_config.mode < CompilationMode.VLLM_COMPILE
         return 17 if pad_output else None
