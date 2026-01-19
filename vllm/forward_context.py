@@ -4,15 +4,16 @@
 import time
 from collections import defaultdict
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, NamedTuple
 
 import torch
 
 import vllm.envs as envs
-from vllm.attention.backends.abstract import AttentionMetadata
 from vllm.config import CUDAGraphMode, ParallelConfig, VllmConfig
 from vllm.logger import init_logger
+from vllm.platforms import current_platform
+from vllm.v1.attention.backend import AttentionMetadata
 from vllm.v1.worker.dp_utils import coordinate_batch_across_dp
 from vllm.v1.worker.ubatch_utils import UBatchSlices
 
@@ -206,6 +207,11 @@ class ForwardContext:
 
     ubatch_slices: UBatchSlices | None = None
 
+    # If True, bypass the compiled model call, e.g. by using .forward() directly
+    skip_compiled: bool = False
+
+    additional_kwargs: dict[str, Any] = field(default_factory=dict)
+
     def __post_init__(self):
         assert self.cudagraph_runtime_mode.valid_runtime_modes(), (
             f"Invalid cudagraph runtime mode: {self.cudagraph_runtime_mode}"
@@ -236,6 +242,8 @@ def create_forward_context(
     cudagraph_runtime_mode: CUDAGraphMode = CUDAGraphMode.NONE,
     batch_descriptor: BatchDescriptor | None = None,
     ubatch_slices: UBatchSlices | None = None,
+    additional_kwargs: dict[str, Any] | None = None,
+    skip_compiled: bool = False,
 ):
     return ForwardContext(
         no_compile_layers=vllm_config.compilation_config.static_forward_context,
@@ -245,6 +253,8 @@ def create_forward_context(
         cudagraph_runtime_mode=cudagraph_runtime_mode,
         batch_descriptor=batch_descriptor,
         ubatch_slices=ubatch_slices,
+        skip_compiled=skip_compiled,
+        additional_kwargs=additional_kwargs or {},
     )
 
 
@@ -273,6 +283,7 @@ def set_forward_context(
     cudagraph_runtime_mode: CUDAGraphMode = CUDAGraphMode.NONE,
     batch_descriptor: BatchDescriptor | None = None,
     ubatch_slices: UBatchSlices | None = None,
+    skip_compiled: bool = False,
 ):
     """A context manager that stores the current forward context,
     can be attention metadata, etc.
@@ -310,6 +321,18 @@ def set_forward_context(
     if cudagraph_runtime_mode != CUDAGraphMode.NONE and num_tokens is not None:
         batch_descriptor = batch_descriptor or BatchDescriptor(num_tokens=num_tokens)
 
+    additional_kwargs = current_platform.set_additional_forward_context(
+        attn_metadata=attn_metadata,
+        vllm_config=vllm_config,
+        virtual_engine=virtual_engine,
+        dp_metadata=dp_metadata,
+        num_tokens=num_tokens,
+        num_tokens_across_dp=num_tokens_across_dp,
+        cudagraph_runtime_mode=cudagraph_runtime_mode,
+        batch_descriptor=batch_descriptor,
+        ubatch_slices=ubatch_slices,
+    )
+
     forward_context = create_forward_context(
         attn_metadata,
         vllm_config,
@@ -318,6 +341,8 @@ def set_forward_context(
         cudagraph_runtime_mode,
         batch_descriptor,
         ubatch_slices,
+        additional_kwargs,
+        skip_compiled,
     )
 
     try:
@@ -330,8 +355,6 @@ def set_forward_context(
             # we use synchronous scheduling right now,
             # adding a sync point here should not affect
             # scheduling of the next batch
-            from vllm.platforms import current_platform
-
             synchronize = current_platform.synchronize
             if synchronize is not None:
                 synchronize()

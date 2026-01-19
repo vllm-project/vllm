@@ -6,8 +6,8 @@ import hashlib
 import inspect
 import os
 import sys
-from collections.abc import Callable
-from typing import TypeVar, overload
+from collections.abc import Callable, Generator
+from typing import TYPE_CHECKING, Any, Literal, TypeVar, overload
 from unittest.mock import patch
 
 import torch
@@ -25,12 +25,21 @@ from vllm.config import (
     set_current_vllm_config,
 )
 from vllm.config.compilation import DynamicShapesType
+from vllm.forward_context import get_forward_context, is_forward_context_available
 from vllm.logger import init_logger
 from vllm.sequence import IntermediateTensors
 from vllm.utils.import_utils import resolve_obj_by_qualname
-from vllm.utils.torch_utils import is_torch_equal_or_newer, supports_dynamo
+from vllm.utils.torch_utils import is_torch_equal_or_newer
 
 from .monitor import start_monitoring_torch_compile
+
+if TYPE_CHECKING:
+    # Only added on nightly/2.10 so wrap
+    try:
+        from torch._dynamo.package import SourceInfo
+    except ImportError:
+        # Fallback for old versions not supporting
+        SourceInfo = Any
 
 logger = init_logger(__name__)
 
@@ -59,7 +68,7 @@ def ignore_torch_compile(cls: _T) -> _T:
     return cls
 
 
-def _should_ignore_torch_compile(cls) -> bool:
+def _should_ignore_torch_compile(cls: _T) -> bool:
     """
     Check if the class should be ignored for torch.compile.
     """
@@ -224,7 +233,7 @@ def support_torch_compile(
     return cls_decorator_helper
 
 
-def _model_hash_key(fn) -> str:
+def _model_hash_key(fn: Callable[..., Any]) -> str:
     import vllm
 
     sha256_hash = hashlib.sha256()
@@ -234,7 +243,9 @@ def _model_hash_key(fn) -> str:
     return sha256_hash.hexdigest()
 
 
-def _verify_source_unchanged(source_info, vllm_config) -> None:
+def _verify_source_unchanged(
+    source_info: "SourceInfo", vllm_config: VllmConfig
+) -> None:
     from .caching import _compute_code_hash, _compute_code_hash_with_content
 
     file_contents = {}
@@ -275,8 +286,12 @@ def _support_torch_compile(
     setattr(cls, IGNORE_COMPILE_KEY, False)
 
     def __init__(
-        self, *, vllm_config: VllmConfig | None = None, prefix: str = "", **kwargs
-    ):
+        self: _T,
+        *,
+        vllm_config: VllmConfig | None = None,
+        prefix: str = "",
+        **kwargs: Any,
+    ) -> None:
         if vllm_config is None:
             vllm_config = get_current_vllm_config()
 
@@ -298,7 +313,6 @@ def _support_torch_compile(
         self.do_not_compile = (
             self.compilation_config.mode
             in [CompilationMode.NONE, CompilationMode.STOCK_TORCH_COMPILE]
-            or not supports_dynamo()
             or _should_ignore_torch_compile(self.__class__)
             or not enable_compile
         )
@@ -309,13 +323,17 @@ def _support_torch_compile(
 
         compilation_counter.num_models_seen += 1
         self.compiled = False
-        TorchCompileWithNoGuardsWrapper.__init__(self)
+
+        # Handled by monkeypatching `TorchCompileWithNoGuardsWrapper` into base class
+        TorchCompileWithNoGuardsWrapper.__init__(self)  # type: ignore[arg-type]
 
     cls.__init__ = __init__
 
-    def _mark_dynamic_inputs(mod, type, *args, **kwargs):
-        def mark_dynamic(arg, dims):
-            if type == DynamicShapesType.UNBACKED:
+    def _mark_dynamic_inputs(
+        mod: _T, ds_type: DynamicShapesType, *args: Any, **kwargs: Any
+    ) -> None:
+        def mark_dynamic(arg: torch.Tensor, dims: list[int]) -> None:
+            if ds_type == DynamicShapesType.UNBACKED:
                 if is_torch_equal_or_newer("2.10.0.dev"):
                     for dim in dims:
                         torch._dynamo.decorators.mark_unbacked(
@@ -326,7 +344,7 @@ def _support_torch_compile(
             else:
                 torch._dynamo.mark_dynamic(arg, dims)
 
-        sig = inspect.signature(mod.__class__.forward)
+        sig = inspect.signature(mod.__class__.forward)  # type: ignore[attr-defined]
         bound_args = sig.bind(mod, *args, **kwargs)
         bound_args.apply_defaults()
         for k, dims in dynamic_arg_dims.items():
@@ -364,16 +382,25 @@ def _support_torch_compile(
                         else:
                             torch._dynamo.decorators.mark_unbacked(arg, dims)
 
-    def __call__(self, *args, **kwargs):
+    def __call__(self: _T, *args: Any, **kwargs: Any) -> Any:
         # torch.compiler.is_compiling() means we are inside the compilation
         # e.g. TPU has the compilation logic in model runner, so we don't
         # need to compile the model inside.
         if self.do_not_compile or torch.compiler.is_compiling():
             return self.forward(*args, **kwargs)
 
-        # if aot_compiled_fn is set, just call it.
+        # If skip_compiled is set, bypass compiled model call. This is used e.g. for
+        # enc-dec models where tensor shapes/types vary across invocations, preventing
+        # the capture of a single computational graph.
+        if is_forward_context_available() and get_forward_context().skip_compiled:
+            return self.forward(*args, **kwargs)
+
+        # if aot_compiled_fn is set, call it with partition wrapper context.
+        # The partition wrapper must be active at runtime for CUDA graph
+        # capture to work correctly with inductor graph partitioning.
         if getattr(self, "aot_compiled_fn", None) is not None:
-            return self.aot_compiled_fn(self, *args, **kwargs)
+            with maybe_use_cudagraph_partition_wrapper(self.vllm_config):
+                return self.aot_compiled_fn(self, *args, **kwargs)
 
         ds_type = self.compilation_config.dynamic_shapes_config.type
         cache_dir = None
@@ -432,14 +459,16 @@ def _support_torch_compile(
                 logger.info(
                     "Directly load AOT compilation from path %s", aot_compilation_path
                 )
-                return self.aot_compiled_fn(self, *args, **kwargs)
+                # Apply partition wrapper context for proper CUDA graph capture
+                with maybe_use_cudagraph_partition_wrapper(self.vllm_config):
+                    return self.aot_compiled_fn(self, *args, **kwargs)
 
         if self.compiled:
             assert (
                 not envs.VLLM_USE_AOT_COMPILE
                 or self.vllm_config.compilation_config.backend == "eager"
             )
-            return TorchCompileWithNoGuardsWrapper.__call__(self, *args, **kwargs)
+            return TorchCompileWithNoGuardsWrapper.__call__(self, *args, **kwargs)  # type: ignore[arg-type]
 
         # This is the path for the first compilation.
         # the first compilation needs to have dynamic shapes marked
@@ -472,7 +501,7 @@ def _support_torch_compile(
         # during Dynamo tracing, and their corresponding files
         inline_call = InliningInstructionTranslator.inline_call_
 
-        def patched_inline_call(self_):
+        def patched_inline_call(self_: Any) -> Any:
             code = self_.f_code
             self.compilation_config.traced_files.add(code.co_filename)
             return inline_call(self_)
@@ -499,7 +528,9 @@ def _support_torch_compile(
         # assume_32bit_indexing is only available in torch 2.10.0.dev+
         inductor_config_patches = {}
         if is_torch_equal_or_newer("2.10.0.dev"):
-            inductor_config_patches["assume_32bit_indexing"] = True
+            inductor_config_patches["assume_32bit_indexing"] = (
+                self.compilation_config.dynamic_shapes_config.assume_32_bit_indexing
+            )
 
         with (
             patch.object(
@@ -530,7 +561,7 @@ def _support_torch_compile(
                         str(e),
                     )
             else:
-                output = TorchCompileWithNoGuardsWrapper.__call__(self, *args, **kwargs)
+                output = TorchCompileWithNoGuardsWrapper.__call__(self, *args, **kwargs)  # type: ignore[arg-type]
 
         self.compiled = True
         return output
@@ -540,7 +571,9 @@ def _support_torch_compile(
 
 
 @contextlib.contextmanager
-def maybe_use_cudagraph_partition_wrapper(vllm_config: VllmConfig):
+def maybe_use_cudagraph_partition_wrapper(
+    vllm_config: VllmConfig,
+) -> Generator[None, None, None]:
     """
     Context manager to set/unset customized cudagraph partition wrappers.
 
@@ -567,7 +600,9 @@ def maybe_use_cudagraph_partition_wrapper(vllm_config: VllmConfig):
             current_platform.get_static_graph_wrapper_cls()
         )
 
-        def customized_cudagraph_wrapper(f, metadata: CUDAGraphWrapperMetadata):
+        def customized_cudagraph_wrapper(
+            f: Callable[..., Any], metadata: CUDAGraphWrapperMetadata
+        ) -> Any:
             partition_id = metadata.partition_index
             num_partitions = metadata.num_partitions
             return static_graph_wrapper_class(
@@ -595,7 +630,7 @@ def maybe_use_cudagraph_partition_wrapper(vllm_config: VllmConfig):
 
 
 @contextlib.contextmanager
-def _torch27_patch_tensor_subclasses():
+def _torch27_patch_tensor_subclasses() -> Generator[None, None, None]:
     """
     Add support for using tensor subclasses (ie `BasevLLMParameter`, ect) when
     using torch 2.7.0. This enables using weight_loader_v2 and the use of
@@ -609,7 +644,7 @@ def _torch27_patch_tensor_subclasses():
         _ColumnvLLMParameter,
     )
 
-    def return_false(*args, **kwargs):
+    def return_false(*args: Any, **kwargs: Any) -> Literal[False]:
         return False
 
     if version.parse("2.7") <= version.parse(torch.__version__) < version.parse("2.8"):
