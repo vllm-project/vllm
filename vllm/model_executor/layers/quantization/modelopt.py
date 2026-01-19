@@ -732,6 +732,12 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
         )
         self.kernel: mk.FusedMoEModularKernel | None = None
 
+    @property
+    def topk_indices_dtype(self) -> torch.dtype | None:
+        if self.kernel is None:
+            return None
+        return self.kernel.prepare_finalize.topk_indices_dtype()
+
     def maybe_make_prepare_finalize(
         self,
         routing_tables: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
@@ -1332,6 +1338,12 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
             self.nvfp4_backend
         )
         self.kernel: mk.FusedMoEModularKernel | None = None
+
+    @property
+    def topk_indices_dtype(self) -> torch.dtype | None:
+        if self.kernel is None:
+            return None
+        return self.kernel.prepare_finalize.topk_indices_dtype()
 
     def maybe_make_prepare_finalize(
         self,

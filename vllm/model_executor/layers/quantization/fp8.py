@@ -872,6 +872,12 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             layer, w13, w2, w13_scale, w2_scale, w13_input_scale, w2_input_scale
         )
 
+    @property
+    def topk_indices_dtype(self) -> torch.dtype | None:
+        if self.kernel is None:
+            return None
+        return self.kernel.prepare_finalize.topk_indices_dtype()
+
     def maybe_make_prepare_finalize(
         self,
         routing_tables: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,

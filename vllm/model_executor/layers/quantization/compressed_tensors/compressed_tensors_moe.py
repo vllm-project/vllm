@@ -578,6 +578,12 @@ class CompressedTensorsW4A4Nvfp4MoEMethod(CompressedTensorsMoEMethod):
                 moe_config=self.moe,
             )
 
+    @property
+    def topk_indices_dtype(self) -> torch.dtype | None:
+        if self.kernel is None:
+            return None
+        return self.kernel.prepare_finalize.topk_indices_dtype()
+
     def maybe_make_prepare_finalize(
         self,
         routing_tables: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
@@ -959,6 +965,12 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
                 moe_config=self.moe,
                 fp8_backend=self.fp8_backend,
             )
+
+    @property
+    def topk_indices_dtype(self) -> torch.dtype | None:
+        if self.kernel is None:
+            return None
+        return self.kernel.prepare_finalize.topk_indices_dtype()
 
     def maybe_make_prepare_finalize(
         self,
