@@ -6,6 +6,9 @@ import torch
 
 from vllm import _custom_ops as ops
 from vllm.model_executor.layers.quantization.input_quant_fp8 import QuantFP8
+from vllm.model_executor.layers.quantization.utils import (
+    is_compute_capability_supported,
+)
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     GroupShape,
     convert_bf16_scales_to_fp8,
@@ -25,17 +28,18 @@ class CutlassW4A8LinearKernel(MPLinearKernel):
         self.quant_fp8 = QuantFP8(static=False, group_shape=GroupShape.PER_TOKEN)
 
     @classmethod
-    def get_min_capability(cls) -> int:
-        return 90
+    def is_supported(
+        cls, compute_capability: int | None = None
+    ) -> tuple[bool, str | None]:
+        if not current_platform.is_cuda():
+            return False, "requires CUDA"
+
+        return is_compute_capability_supported(
+            min_capability=90, compute_capability=compute_capability, max_capability=90
+        )
 
     @classmethod
     def can_implement(cls, c: MPLinearLayerConfig) -> tuple[bool, str | None]:
-        if not current_platform.is_cuda():
-            return False, "CUTLASS only supported on CUDA"
-
-        if not current_platform.is_device_capability(90):
-            return False, "CUTLASS W4A8 requires compute capability of 90 (Hopper)"
-
         if c.act_type != torch.float8_e4m3fn:
             return False, "CUTLASS W4A8 only supports FP8 (e4m3) activations"
 

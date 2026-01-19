@@ -6,6 +6,9 @@ from typing import Final
 
 import torch
 
+from vllm.model_executor.layers.quantization.utils import (
+    is_compute_capability_supported,
+)
 from vllm.model_executor.parameter import BasevLLMParameter, permute_param_layout_
 from vllm.scalar_type import scalar_types
 
@@ -22,8 +25,12 @@ _CONCH_SUPPORTED_GROUP_SIZES: Final = [-1, 128]
 
 class ConchLinearKernel(MPLinearKernel):
     @classmethod
-    def get_min_capability(cls) -> int:
-        return 80
+    def is_supported(
+        cls, compute_capability: int | None = None
+    ) -> tuple[bool, str | None]:
+        return is_compute_capability_supported(
+            min_capability=80, compute_capability=compute_capability
+        )
 
     @classmethod
     def can_implement(cls, c: MPLinearLayerConfig) -> tuple[bool, str | None]:

@@ -7,7 +7,10 @@ from packaging import version
 
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization import QuantizationConfig
-from vllm.model_executor.layers.quantization.utils import replace_parameter
+from vllm.model_executor.layers.quantization.utils import (
+    is_compute_capability_supported,
+    replace_parameter,
+)
 from vllm.model_executor.layers.quantization.utils.bitblas_utils import (
     BITBLAS_OPTIMIZE_FEATURES,
     BITBLAS_SUPPORTED_GROUP_SIZES,
@@ -108,13 +111,17 @@ class BitBLASLinearKernel(MPLinearKernel):
         return qweight, scales, zeros
 
     @classmethod
-    def get_min_capability(cls) -> int:
-        return 70
+    def is_supported(
+        cls, compute_capability: int | None = None
+    ) -> tuple[bool, str | None]:
+        res, err = is_compute_capability_supported(
+            min_capability=70, compute_capability=compute_capability
+        )
 
-    @classmethod
-    def can_implement(cls, c: MPLinearLayerConfig) -> tuple[bool, str | None]:
+        if not res:
+            return res, err
+
         is_bitblas_installed = True
-
         try:
             import bitblas
 
@@ -136,6 +143,10 @@ class BitBLASLinearKernel(MPLinearKernel):
                 f"{MINIMUM_BITBLAS_VERSION}`",
             )
 
+        return True, None
+
+    @classmethod
+    def can_implement(cls, c: MPLinearLayerConfig) -> tuple[bool, str | None]:
         quant_types = query_bitblas_supported_quant_types(c.zero_points)
         if c.weight_type not in quant_types:
             return False, (

@@ -5,7 +5,10 @@
 import torch
 
 from vllm import _custom_ops as ops
-from vllm.model_executor.layers.quantization.utils import replace_parameter
+from vllm.model_executor.layers.quantization.utils import (
+    is_compute_capability_supported,
+    replace_parameter,
+)
 from vllm.model_executor.layers.quantization.utils.allspark_utils import (
     ALLSPARK_AMPERE_M_CUBLAS_THRESHOLD,
     check_allspark_supported_dtype_shape,
@@ -17,8 +20,12 @@ from .MPLinearKernel import MPLinearKernel, MPLinearLayerConfig
 
 class AllSparkLinearKernel(MPLinearKernel):
     @classmethod
-    def get_min_capability(cls) -> int:
-        return 80
+    def is_supported(
+        cls, compute_capability: int | None = None
+    ) -> tuple[bool, str | None]:
+        return is_compute_capability_supported(
+            min_capability=80, compute_capability=compute_capability
+        )
 
     @classmethod
     def can_implement(cls, c: MPLinearLayerConfig) -> tuple[bool, str | None]:

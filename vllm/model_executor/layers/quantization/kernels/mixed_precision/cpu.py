@@ -18,14 +18,15 @@ _CPUWNA16_SUPPORTED_QUANT_TYPES = (scalar_types.uint4, scalar_types.uint4b8)
 
 class CPUWNA16LinearKernel(MPLinearKernel):
     @classmethod
-    def get_min_capability(cls) -> int:
-        return -1
+    def is_supported(
+        cls, compute_capability: int | None = None
+    ) -> tuple[bool, str | None]:
+        if not current_platform.is_cpu():
+            return False, "requires CPU"
+        return True, None
 
     @classmethod
     def can_implement(cls, c: MPLinearLayerConfig) -> tuple[bool, str | None]:
-        if not current_platform.is_cpu():
-            return False, "CPUWNA16 only supported on CPU"
-
         if c.weight_type not in _CPUWNA16_SUPPORTED_QUANT_TYPES:
             return (
                 False,

@@ -15,13 +15,15 @@ class Dynamic4bitLinearKernel(MPLinearKernel):
     SUPPORTED_QUANT_TYPES = [scalar_types.int4]
 
     @classmethod
-    def get_min_capability(cls) -> int:
-        return 1
+    def is_supported(
+        cls, compute_capability: int | None = None
+    ) -> tuple[bool, str | None]:
+        if not current_platform.is_cpu():
+            return False, "requires CPU"
+        return True, None
 
     @classmethod
     def can_implement(cls, c: MPLinearLayerConfig) -> tuple[bool, str | None]:
-        if not current_platform.is_cpu():
-            return False, "Only CPU is supported"
         if c.weight_type not in cls.SUPPORTED_QUANT_TYPES:
             return False, f"Unsupported quant type {c.weight_type}"
         if (

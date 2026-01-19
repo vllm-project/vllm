@@ -23,18 +23,28 @@ from .MPLinearKernel import MPLinearKernel, MPLinearLayerConfig
 
 class MacheteLinearKernel(MPLinearKernel):
     @classmethod
-    def get_min_capability(cls) -> int:
-        return 90
+    def is_supported(
+        cls, compute_capability: int | None = None
+    ) -> tuple[bool, str | None]:
+        # Machete uses CUTLASS, so it can only be compatible with Nvidia
+        if not current_platform.is_cuda():
+            return False, "requires CUDA"
+
+        if compute_capability is None:
+            _cc = current_platform.get_device_capability()
+            if _cc is not None:
+                compute_capability = _cc.major * 10 + _cc.minor
+
+        if compute_capability is not None and compute_capability != 90:
+            return (
+                False,
+                f"requires capability == 90, got {compute_capability}",
+            )
+
+        return True, None
 
     @classmethod
     def can_implement(cls, c: MPLinearLayerConfig) -> tuple[bool, str | None]:
-        # Machete uses CUTLASS, so it can only be compatible with Nvidia
-        if not current_platform.is_cuda():
-            return False, "Machete only supported on CUDA"
-
-        if not current_platform.is_device_capability(90):
-            return False, "Machete requires compute capability of 90 (Hopper)"
-
         if c.has_g_idx and c.partition_weight_shape[0] != c.full_weight_shape[0]:
             return (
                 False,
