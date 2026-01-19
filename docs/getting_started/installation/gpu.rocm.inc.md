@@ -16,7 +16,7 @@ vLLM supports AMD GPUs with ROCm 6.3 or above, and torch 2.8.0 and above.
 !!! note
     The PyTorch and other dependencies are shipped together with vLLM wheels. Please use only the PyTorch that is shipped through vLLM.
 
-In order to ship the best performance with validate software stacks, vLLM has to compile many ROCm kernels. The compilation unfortunately introduces binary incompatibility with other ROCm versions and PyTorch versions, even for the same PyTorch version with different building configurations.
+In order to ship the best performance with validated software stacks, vLLM has to compile many ROCm kernels. The compilation unfortunately introduces binary incompatibility with other ROCm versions and PyTorch versions, even for the same PyTorch version with different building configurations.
 
 Therefore, it is recommended to install vLLM with a **fresh new** environment without PyTorch. The PyTorch and other dependencies are shipped together with vLLM wheels. Please use only the PyTorch that is shipped through vLLM. If either you have a different ROCm version or you want to use an existing PyTorch installation, you need to build vLLM from source. See [below](#build-wheel-from-source) for more details.
 
