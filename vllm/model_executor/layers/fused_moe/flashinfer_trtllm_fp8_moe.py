@@ -122,8 +122,8 @@ class FlashInferTrtLlmFp8Experts(mk.FusedMoEPermuteExpertsUnpermute):
 
         self.moe_config = moe_config
         # TODO: set this via the constructor
-        self.routing_method_type = flashinfer.RoutingMethodType.Renormalize
-        # self.routing_method_type = flashinfer.RoutingMethodType.Llama4
+        # self.routing_method_type = flashinfer.RoutingMethodType.Renormalize
+        self.routing_method_type = flashinfer.RoutingMethodType.Llama4
         # self.routing_method_type = flashinfer.RoutingMethodType.DeepSeekV3
 
         self.routing_bias = None
@@ -140,6 +140,18 @@ class FlashInferTrtLlmFp8Experts(mk.FusedMoEPermuteExpertsUnpermute):
         self.hidden_dim = moe_config.hidden_dim
         self.local_num_experts = moe_config.num_local_experts
         self.ep_rank = moe_config.moe_parallel_config.ep_rank
+
+        from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
+            make_fp8_moe_alpha_scales_for_fi,
+        )
+
+        self.g1_alphas, self.g2_alphas = make_fp8_moe_alpha_scales_for_fi(
+            w13_scale=self.quant_config.w1_scale,
+            w13_input_scale=self.quant_config.a1_scale,
+            w2_scale=self.quant_config.w2_scale,
+            w2_input_scale=self.quant_config.a2_scale,
+        )
+        self.g1_scale_c = self.g1_alphas / self.quant_config.a2_scale
 
     @property
     def activation_formats(
@@ -198,7 +210,7 @@ class FlashInferTrtLlmFp8Experts(mk.FusedMoEPermuteExpertsUnpermute):
             f"{self.__class__.__name__} only supports the apply_monolithic interface."
         )
 
-    def apply_monolithic(
+    def _apply_per_block_monolithic(
         self,
         hidden_states: torch.Tensor,
         w1: torch.Tensor,
@@ -231,7 +243,7 @@ class FlashInferTrtLlmFp8Experts(mk.FusedMoEPermuteExpertsUnpermute):
             hidden_states, self.quant_config.block_shape[1]
         )
         # Kernel requires transposed hidden state scales
-        # TODO: can we avoid this transpose in the kernel?
+        # TODO: fuse into the quant kernel.
         a1q_scale_t = a1q_scale.t().contiguous()
 
         return flashinfer.fused_moe.trtllm_fp8_block_scale_moe(
@@ -255,3 +267,87 @@ class FlashInferTrtLlmFp8Experts(mk.FusedMoEPermuteExpertsUnpermute):
             routing_method_type=self.routing_method_type,
             use_shuffled_weight=False,
         )
+
+    def _apply_per_tensor_monolithic(
+        self,
+        hidden_states: torch.Tensor,
+        w1: torch.Tensor,
+        w2: torch.Tensor,
+        router_logits: torch.Tensor,
+        activation: str,
+        global_num_experts: int,
+        expert_map: torch.Tensor | None,
+        apply_router_weight_on_input: bool,
+    ) -> torch.Tensor:
+        assert self.routing_method_type == RoutingMethodType.Llama4
+        assert apply_router_weight_on_input
+
+        a1q, _ = moe_kernel_quantize_input(
+            hidden_states,
+            self.quant_config.a1_scale,
+            quant_dtype=self.quant_config.quant_dtype,
+            per_act_token_quant=self.quant_config.per_act_token_quant,
+        )
+
+        return flashinfer.fused_moe.trtllm_fp8_per_tensor_scale_moe(
+            routing_logits=router_logits,
+            routing_bias=self.e_score_correction_bias,
+            hidden_states=a1q,
+            gemm1_weights=w1,
+            output1_scales_scalar=self.g1_alphas,
+            output1_scales_gate_scalar=self.g1_scale_c,
+            gemm2_weights=w2,
+            output2_scales_scalar=self.g2_alphas,
+            num_experts=global_num_experts,
+            top_k=self.topk,
+            num_expert_group=self.num_expert_group,
+            topk_group=self.topk_group,
+            intermediate_size=self.intermediate_size_per_partition,
+            local_expert_offset=self.ep_rank * self.local_num_experts,
+            local_num_experts=self.local_num_experts,
+            routed_scaling_factor=self.routing_scaling_factor,
+            use_routing_scales_on_input=apply_router_weight_on_input,
+            tile_tokens_dim=calculate_tile_tokens_dim(
+                hidden_states.shape[0], self.topk, self.local_num_experts
+            ),
+            routing_method_type=self.routing_method_type,
+        )
+
+    def apply_monolithic(
+        self,
+        hidden_states: torch.Tensor,
+        w1: torch.Tensor,
+        w2: torch.Tensor,
+        router_logits: torch.Tensor,
+        activation: str,
+        global_num_experts: int,
+        expert_map: torch.Tensor | None,
+        apply_router_weight_on_input: bool,
+    ) -> torch.Tensor:
+        if self.quant_config.block_shape is not None:
+            return self._apply_per_block_monolithic(
+                hidden_states,
+                w1,
+                w2,
+                router_logits,
+                activation,
+                global_num_experts,
+                expert_map,
+                apply_router_weight_on_input,
+            )
+        elif self.quant_config.is_per_tensor:
+            return self._apply_per_tensor_monolithic(
+                hidden_states,
+                w1,
+                w2,
+                router_logits,
+                activation,
+                global_num_experts,
+                expert_map,
+                apply_router_weight_on_input,
+            )
+        else:
+            raise NotImplementedError(
+                "Only per-block and per-tensor quantization are supported in "
+                f"{self.__class__.__name__}."
+            )
