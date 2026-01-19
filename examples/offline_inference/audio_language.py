@@ -89,6 +89,34 @@ def run_gemma3n(question: str, audio_count: int) -> ModelRequestData:
     )
 
 
+# GLM-ASR
+def run_glmasr(question: str, audio_count: int) -> ModelRequestData:
+    model_name = "zai-org/GLM-ASR-Nano-2512"
+
+    tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
+
+    # GLM-ASR uses <|pad|> token for audio
+    audio_placeholder = "<|pad|>" * audio_count
+
+    messages = [{"role": "user", "content": f"{audio_placeholder}{question}"}]
+    prompt = tokenizer.apply_chat_template(
+        messages, tokenize=False, add_generation_prompt=True
+    )
+
+    engine_args = EngineArgs(
+        model=model_name,
+        trust_remote_code=True,
+        max_model_len=4096,
+        max_num_seqs=2,
+        limit_mm_per_prompt={"audio": audio_count},
+    )
+
+    return ModelRequestData(
+        engine_args=engine_args,
+        prompt=prompt,
+    )
+
+
 # Granite Speech
 def run_granite_speech(question: str, audio_count: int) -> ModelRequestData:
     # NOTE - the setting in this example are somewhat different from what is
@@ -355,34 +383,6 @@ def run_voxtral(question: str, audio_count: int) -> ModelRequestData:
         engine_args=engine_args,
         prompt_token_ids=prompt_ids,
         multi_modal_data=multi_modal_data,
-    )
-
-
-# GLM-ASR
-def run_glmasr(question: str, audio_count: int) -> ModelRequestData:
-    model_name = "zai-org/GLM-ASR-Nano-2512"
-
-    tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
-
-    # GLM-ASR uses <|pad|> token for audio
-    audio_placeholder = "<|pad|>" * audio_count
-
-    messages = [{"role": "user", "content": f"{audio_placeholder}{question}"}]
-    prompt = tokenizer.apply_chat_template(
-        messages, tokenize=False, add_generation_prompt=True
-    )
-
-    engine_args = EngineArgs(
-        model=model_name,
-        trust_remote_code=True,
-        max_model_len=4096,
-        max_num_seqs=2,
-        limit_mm_per_prompt={"audio": audio_count},
-    )
-
-    return ModelRequestData(
-        engine_args=engine_args,
-        prompt=prompt,
     )
 
 
