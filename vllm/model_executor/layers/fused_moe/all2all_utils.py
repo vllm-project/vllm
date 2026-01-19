@@ -12,8 +12,15 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEParallelConfig,
     FusedMoEQuantConfig,
 )
+from vllm.model_executor.layers.fused_moe.flashinfer_cutlass_prepare_finalize import (
+    FlashInferAllToAllMoEPrepareAndFinalize,
+)
 from vllm.model_executor.layers.fused_moe.modular_kernel import (
     FusedMoEPrepareAndFinalize,
+)
+from vllm.model_executor.layers.fused_moe.prepare_finalize import (
+    MoEPrepareAndFinalizeNaiveEP,
+    MoEPrepareAndFinalizeNoEP,
 )
 from vllm.platforms import current_platform
 from vllm.utils.import_utils import has_deep_ep, has_pplx
@@ -68,19 +75,22 @@ def maybe_make_prepare_finalize(
     moe: FusedMoEConfig,
     quant_config: FusedMoEQuantConfig | None,
     routing_tables: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
+    defer_input_quant: bool = False,
+    allow_new_interface: bool = False,
 ) -> FusedMoEPrepareAndFinalize | None:
+    # TODO
+    # A) what is DP>1 and EP=1?
+    # B) what if defer_input_quant=True, but we have a special A2A kernel?
     if not moe.moe_parallel_config.use_all2all_kernels:
-        return None
+        if allow_new_interface:
+            return MoEPrepareAndFinalizeNoEP(defer_input_quant)
+        else:
+            return None
 
     all2all_manager = get_ep_group().device_communicator.all2all_manager
     assert all2all_manager is not None
 
     prepare_finalize: FusedMoEPrepareAndFinalize | None = None
-
-    # TODO(rob): update this as part of the MoE refactor.
-    assert not moe.use_flashinfer_cutlass_kernels, (
-        "Must be created in modelopt.py or fp8.py"
-    )
 
     if moe.use_pplx_kernels:
         assert quant_config is not None
@@ -168,6 +178,22 @@ def maybe_make_prepare_finalize(
             global_to_physical=global_to_physical,
             physical_to_global=physical_to_global,
             local_expert_global_ids=local_expert_global_ids,
+        )
+
+    elif moe.use_fi_all2allv_kernels:
+        assert quant_config is not None
+        # TODO: audit if this supports all cases.
+        prepare_finalize = FlashInferAllToAllMoEPrepareAndFinalize(
+            use_dp=True,
+            num_dispatchers=all2all_manager.world_size,
+            use_deepseek_fp8_block_scale=quant_config.is_block_quantized,
+        )
+
+    elif moe.use_naive_kernels and allow_new_interface:
+        prepare_finalize = MoEPrepareAndFinalizeNaiveEP(
+            defer_input_quant,
+            is_sequence_parallel=(moe.moe_parallel_config.is_sequence_parallel),
+            num_dispatchers=all2all_manager.world_size,
         )
 
     return prepare_finalize

@@ -33,11 +33,11 @@ class FusedMoEModularMethod(FusedMoEMethodBase, CustomOp):
     ):
         super().__init__(old_quant_method.moe)
         self.moe_quant_config = old_quant_method.moe_quant_config
-        self.fused_experts = experts
+        self.kernel = experts
         self.disable_expert_map = getattr(
             old_quant_method,
             "disable_expert_map",
-            not self.fused_experts.supports_expert_map(),
+            not self.kernel.supports_expert_map(),
         )
         self.old_quant_method = old_quant_method
         logger.debug("Swapping out %s", self.old_quant_method.__class__.__name__)
@@ -61,7 +61,7 @@ class FusedMoEModularMethod(FusedMoEMethodBase, CustomOp):
 
     @property
     def topk_indices_dtype(self) -> torch.dtype | None:
-        return self.fused_experts.prepare_finalize.topk_indices_dtype()
+        return self.kernel.prepare_finalize.topk_indices_dtype()
 
     @property
     def supports_eplb(self) -> bool:
@@ -103,7 +103,7 @@ class FusedMoEModularMethod(FusedMoEMethodBase, CustomOp):
             router_logits=router_logits,
         )
 
-        result = self.fused_experts(
+        result = self.kernel(
             hidden_states=x,
             w1=layer.w13_weight,
             w2=layer.w2_weight,

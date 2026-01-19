@@ -328,7 +328,7 @@ class FusedMoE(CustomOp):
         enable_eplb: bool = False,
         num_redundant_experts: int = 0,
         has_bias: bool = False,
-        is_sequence_parallel=False,
+        is_sequence_parallel: bool = False,
         expert_mapping: list[tuple[str, str, int, str]] | None = None,
         n_shared_experts: int | None = None,
         routing_method_type: RoutingMethodType | None = None,
@@ -524,6 +524,7 @@ class FusedMoE(CustomOp):
             num_experts=self.global_num_experts,
             experts_per_token=top_k,
             hidden_dim=hidden_size,
+            intermediate_size_per_partition=self.intermediate_size_per_partition,
             num_local_experts=self.local_num_experts,
             moe_parallel_config=self.moe_parallel_config,
             in_dtype=moe_in_dtype,
@@ -532,9 +533,6 @@ class FusedMoE(CustomOp):
             has_bias=has_bias,
             is_act_and_mul=is_act_and_mul,
             is_lora_enabled=vllm_config.lora_config is not None,
-        )
-        self.moe_config_use_flashinfer_cutlass_kernels = (
-            self.moe_config.use_flashinfer_cutlass_kernels
         )
 
         self.quant_config = quant_config
@@ -633,6 +631,11 @@ class FusedMoE(CustomOp):
     # This is called after all weight loading and post-processing, so it
     # should be safe to swap out the quant_method.
     def maybe_init_modular_kernel(self) -> None:
+        # DEBUG
+        if self.quant_method.supports_mk_interally:
+            logger.info_once("DEBUG: SKIPPING MK INIT: Handled Internally!!!!")
+            return
+
         self.ensure_moe_quant_config_init()
         # routing_tables only needed for round-robin expert placement with
         # DeepEP all2all backend.
@@ -712,14 +715,6 @@ class FusedMoE(CustomOp):
         return self.moe_parallel_config.use_deepep_ll_kernels
 
     @property
-    def use_flashinfer_cutlass_kernels(self):
-        return (
-            self.moe_quant_config is not None
-            and self.moe_quant_config.quant_dtype == "nvfp4"
-            and self.moe_config_use_flashinfer_cutlass_kernels
-        )
-
-    @property
     def use_marlin_kernels(self):
         return getattr(self.quant_method, "use_marlin", False)
 
@@ -728,7 +723,7 @@ class FusedMoE(CustomOp):
         return (
             self.moe_parallel_config.use_pplx_kernels
             or self.moe_parallel_config.use_deepep_ll_kernels
-            or (self.dp_size > 1 and self.use_flashinfer_cutlass_kernels)
+            or self.moe_parallel_config.use_fi_all2allv_kernels
         ) and envs.VLLM_ENABLE_MOE_DP_CHUNK
 
     @property
@@ -1722,9 +1717,16 @@ class FusedMoE(CustomOp):
         self.ensure_moe_quant_config_init()
         self.ensure_dp_chunking_init()
 
+        is_mk = hasattr(self.quant_method, "kernel") and isinstance(
+            self.quant_method.kernel, FusedMoEModularMethod
+        )
+        mk_has_shared_expert = (
+            is_mk
+            and getattr(self.quant_method.kernel, "shared_experts", None) is not None
+        )
+
         has_separate_shared_experts = (
-            not isinstance(self.quant_method, FusedMoEModularMethod)
-            and self.shared_experts is not None
+            not mk_has_shared_expert and self.shared_experts is not None
         )
 
         use_chunked_impl = self.use_dp_chunking
@@ -1747,9 +1749,7 @@ class FusedMoE(CustomOp):
                 hidden_states, router_logits, has_separate_shared_experts
             )
 
-        do_naive_dispatch_combine: bool = self.dp_size > 1 and not isinstance(
-            self.quant_method, FusedMoEModularMethod
-        )
+        do_naive_dispatch_combine = self.dp_size > 1 and not is_mk
 
         ctx = get_forward_context()
         sp_ctx = (
