@@ -262,6 +262,9 @@ class EngineCoreClient(ABC):
     ) -> list[_R]:
         raise NotImplementedError
 
+    async def call_utility_async(self, method: str, *args) -> Any:
+        raise NotImplementedError
+
 
 class InprocClient(EngineCoreClient):
     """

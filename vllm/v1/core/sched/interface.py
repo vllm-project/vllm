@@ -212,3 +212,7 @@ class SchedulerInterface(ABC):
 
     def get_kv_connector(self) -> "KVConnectorBase_V1 | None":
         return None
+
+    def get_num_pending_kv_transfers(self) -> int:
+        """Count requests with pending async KV transfers."""
+        return 0
