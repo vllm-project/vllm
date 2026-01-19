@@ -125,7 +125,6 @@ def get_tp_size_params() -> list[pytest.param]:
 def get_mt_bench_prompts(
     tokenizer, num_prompts: int = DEFAULT_NUM_PROMPTS
 ) -> list[list[int]]:
-    """Load prompts from MT-Bench dataset."""
     args = SimpleNamespace(
         dataset_name="hf",
         dataset_path="philschmid/mt-bench",
