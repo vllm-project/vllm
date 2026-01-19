@@ -1103,6 +1103,7 @@ class FusedMoEModularKernel(torch.nn.Module):
             c_fused_out = self._slice_output_tensor(
                 fused_out, chunk_idx, num_chunks, CHUNK_SIZE, M_full
             )
+
             self.fused_experts.apply(
                 output=c_fused_out,
                 hidden_states=a1q[s:e],
