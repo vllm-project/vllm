@@ -312,8 +312,6 @@ class FlashInferTrtLlmNvFp4Experts(mk.FusedMoEPermuteExpertsUnpermute):
 
         # Invoke kernel.
         # TODO(avoid the copy).
-        print(f"{self.ep_rank=}, {self.local_num_experts=}")
-        print(f"{self.ep_rank=}, {self.local_num_experts=}")
         out = flashinfer.fused_moe.trtllm_fp4_block_scale_routed_moe(
             topk_ids=packed_tensor,
             routing_bias=None,

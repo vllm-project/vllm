@@ -1624,7 +1624,11 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
             apply_router_weight_on_input=layer.apply_router_weight_on_input,
         )
 
-        print(f"{out[-1,-1]=}")
+        if layer.prefix in [
+            "model.layers.0.mlp.experts",
+            "model.layers.47.mlp.experts"
+        ]:
+            print(f"{layer.prefix=} | {x.shape=}: {x[-1,-1]=}, {out[-1,-1]=}")
         return out
 
 
