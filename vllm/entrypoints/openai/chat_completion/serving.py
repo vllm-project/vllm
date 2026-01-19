@@ -365,8 +365,6 @@ class OpenAIServingChat(OpenAIServing):
             )
 
             model_name = self.models.model_name(lora_request)
-
-            tokenizer = await self.engine_client.get_tokenizer()
         except (ValueError, TypeError, RuntimeError) as e:
             logger.exception("Error preparing request components")
             return self.create_error_response(e)
@@ -463,6 +461,8 @@ class OpenAIServingChat(OpenAIServing):
         (result_generator,) = generators
 
         # Streaming response
+        tokenizer = self.renderer.tokenizer
+
         if request.stream:
             return self.chat_completion_stream_generator(
                 request,
