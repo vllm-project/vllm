@@ -298,9 +298,7 @@ def get_rope(
                 mrope_interleaved=mrope_interleaved,
             )
         else:
-            raise ValueError(
-                "Pangu mrope interleaved lacks necessary parameters."
-            )
+            raise ValueError("Pangu mrope lacks necessary parameters.")
     else:
         raise ValueError(f"Unknown RoPE scaling type {scaling_type}")
     _ROPE_DICT[key] = rotary_emb
