@@ -2,8 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """CUTLASS based Fused MoE kernels."""
 
-from collections.abc import Callable
-
 import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
@@ -21,7 +19,10 @@ from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceDelegate,
     TopKWeightAndReduceNoOP,
 )
-from vllm.model_executor.layers.fused_moe.utils import _resize_cache
+from vllm.model_executor.layers.fused_moe.utils import (
+    _resize_cache,
+    apply_moe_activation,
+)
 from vllm.scalar_type import scalar_types
 
 logger = init_logger(__name__)
@@ -33,7 +34,7 @@ def run_cutlass_moe_fp8(
     w1: torch.Tensor,
     w2: torch.Tensor,
     topk_ids: torch.Tensor,
-    activation_callable: Callable,
+    activation: str,
     global_num_experts: int,
     expert_map: torch.Tensor | None,
     w1_scale: torch.Tensor | None,
@@ -55,6 +56,7 @@ def run_cutlass_moe_fp8(
 ):
     a1q = hidden_states
 
+    assert not activation.endswith("_no_mul"), "Only gated activation is supported"
     assert w1_scale is not None
     assert w2_scale is not None
     assert w1.dtype == torch.float8_e4m3fn
@@ -108,15 +110,7 @@ def run_cutlass_moe_fp8(
     assert global_num_experts != -1
     assert a1q_scale is not None
 
-    if expert_map is not None:
-        "Translate info from expert_map to topk_ids"
-        local_topk_ids = torch.where(
-            expert_map[topk_ids] != -1, expert_map[topk_ids], -1
-        )
-    else:
-        local_topk_ids = topk_ids
-
-    topk = local_topk_ids.size(1)
+    topk = topk_ids.size(1)
     local_E = w1.size(0)
 
     if use_batched_format:
@@ -164,12 +158,8 @@ def run_cutlass_moe_fp8(
         # during offset calculations
         expert_offsets = expert_offsets.to(torch.int64)
     else:
-        problem_sizes1 = torch.empty(
-            (global_num_experts, 3), dtype=torch.int32, device=device
-        )
-        problem_sizes2 = torch.empty(
-            (global_num_experts, 3), dtype=torch.int32, device=device
-        )
+        problem_sizes1 = torch.empty((local_E, 3), dtype=torch.int32, device=device)
+        problem_sizes2 = torch.empty((local_E, 3), dtype=torch.int32, device=device)
 
         num_expert = global_num_experts if expert_map is None else expert_map.size(0)
         # permuted a1q reuses workspace2
@@ -182,11 +172,12 @@ def run_cutlass_moe_fp8(
             expert_map,
             permuted_hidden_states=a1q_perm,
         )
-        expert_offsets = expert_first_token_offset[:-1]
-
-        ops.get_cutlass_moe_mm_problem_sizes(
-            local_topk_ids, problem_sizes1, problem_sizes2, global_num_experts, N, K
+        # swap_ab is a CUTLASS grouped-GEMM optimization (M <= 64 reduces padding).
+        swap_ab = a1q.size(0) <= 64
+        ops.get_cutlass_moe_mm_problem_sizes_from_expert_offsets(
+            expert_first_token_offset, problem_sizes1, problem_sizes2, N, K, swap_ab
         )
+        expert_offsets = expert_first_token_offset[:-1]
 
     if not per_act_token and (expert_map is not None or use_batched_format):
         # this is necessary to avoid imprecise scale calculation caused by
@@ -209,7 +200,7 @@ def run_cutlass_moe_fp8(
         per_out_ch,
     )
 
-    activation_callable(act_out, mm1_out)
+    apply_moe_activation(activation, act_out, mm1_out)
 
     a2q, a2q_scale = ops.scaled_fp8_quant(
         act_out, a2_scale, use_per_token_if_dynamic=per_act_token, output=quant_out
@@ -240,9 +231,7 @@ def run_cutlass_moe_fp8(
             permuted_hidden_states=mm2_out,
             topk_weights=topk_weights,
             inv_permuted_idx=inv_perm,
-            expert_first_token_offset=(
-                expert_first_token_offset if expert_map is not None else None
-            ),
+            expert_first_token_offset=expert_first_token_offset,
         )
 
 
@@ -301,8 +290,6 @@ class CutlassExpertsFp8Base(mk.FusedMoEPermuteExpertsUnpermute):
         if expert_tokens_meta is not None:
             expert_num_tokens = expert_tokens_meta.expert_num_tokens
 
-        activation_callable = lambda o, i: self.activation(activation, o, i)
-
         use_batched_format = (
             self.activation_formats[0] == mk.FusedMoEActivationFormat.BatchedExperts
         )
@@ -314,7 +301,7 @@ class CutlassExpertsFp8Base(mk.FusedMoEPermuteExpertsUnpermute):
             w1,
             w2,
             topk_ids,
-            activation_callable,
+            activation,
             global_num_experts,
             expert_map,
             self.w1_scale,
@@ -368,9 +355,11 @@ class CutlassExpertsFp8(CutlassExpertsFp8Base):
         global_num_experts: int,
         local_num_experts: int,
         expert_tokens_meta: mk.ExpertTokensMetadata | None,
+        activation: str,
     ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...]]:
+        activation_out_dim = self.adjust_N_for_activation(N, activation)
         workspace1 = (M * topk, max(N, K))
-        workspace2 = (M * topk, max(N // 2, K))
+        workspace2 = (M * topk, max(activation_out_dim, K))
         output = (M, K)
         return (workspace1, workspace2, output)
 
@@ -415,11 +404,17 @@ class CutlassBatchedExpertsFp8(CutlassExpertsFp8Base):
         global_num_experts: int,
         local_num_experts: int,
         expert_tokens_meta: mk.ExpertTokensMetadata | None,
+        activation: str,
     ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...]]:
         num_dp = self.num_dispatchers
         assert num_dp is not None
+        activation_out_dim = self.adjust_N_for_activation(N, activation)
         workspace1 = (self.max_experts_per_worker, M * num_dp, max(N, K))
-        workspace2 = (self.max_experts_per_worker, M * num_dp, max(N // 2, K))
+        workspace2 = (
+            self.max_experts_per_worker,
+            M * num_dp,
+            max(activation_out_dim, K),
+        )
         output = (self.max_experts_per_worker, M, K)
         return (workspace1, workspace2, output)
 
@@ -441,6 +436,7 @@ def run_cutlass_moe_fp4(
     w2_alphas: torch.Tensor,
     topk_weights: torch.Tensor,
     topk_ids: torch.Tensor,
+    activation: str,
     workspace13: torch.Tensor,
     workspace2: torch.Tensor,
     m: int,
@@ -563,10 +559,18 @@ def run_cutlass_moe_fp4(
         blockscale_offsets[:-1],
     )
     del rep_a_fp4, rep_a_blockscale
-    torch.ops._C.silu_and_mul(c2, c1)
-    int_fp4, int_blockscale = ops.scaled_fp4_experts_quant(
-        c2, a2_gscale, expert_offsets, blockscale_offsets, num_topk
-    )
+    if activation == "silu":
+        # Fused SiLU+Mul+NVFP4 quantization
+        # Note: c2 workspace is no longer needed since SiLU is fused with quantization.
+        # c3 reuses workspace13 after c1 is consumed.
+        int_fp4, int_blockscale = ops.silu_and_mul_scaled_fp4_experts_quant(
+            c1, a2_gscale, expert_offsets, blockscale_offsets, num_topk
+        )
+    else:
+        apply_moe_activation(activation, c2, c1)
+        int_fp4, int_blockscale = ops.scaled_fp4_experts_quant(
+            c2, a2_gscale, expert_offsets, blockscale_offsets, num_topk
+        )
 
     ops.cutlass_fp4_moe_mm(
         c3,
@@ -647,13 +651,15 @@ class CutlassExpertsFp4(mk.FusedMoEPermuteExpertsUnpermute):
         global_num_experts: int,
         local_num_experts: int,
         expert_tokens_meta: mk.ExpertTokensMetadata | None,
+        activation: str,
     ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...]]:
+        activation_out_dim = self.adjust_N_for_activation(N, activation)
         workspace1: tuple[int, ...] = ()
         workspace2: tuple[int, ...] = ()
         output: tuple[int, ...] = ()
         if self.use_batched_format:
             workspace1 = (self.max_experts_per_worker, M, max(N, K))
-            workspace2 = (self.max_experts_per_worker, M, (N // 2))
+            workspace2 = (self.max_experts_per_worker, M, activation_out_dim)
             output = (self.max_experts_per_worker, M, K)
         else:
             workspace1 = (M * topk, max(2 * N, K))
@@ -695,6 +701,7 @@ class CutlassExpertsFp4(mk.FusedMoEPermuteExpertsUnpermute):
             w2_alphas=self.g2_alphas,
             topk_weights=topk_weights,
             topk_ids=topk_ids,
+            activation=activation,
             workspace13=workspace13,
             workspace2=workspace2,
             m=m,
@@ -713,7 +720,7 @@ def run_cutlass_moe_w4a8_fp8(
     w1: torch.Tensor,
     w2: torch.Tensor,
     topk_ids: torch.Tensor,
-    activation_callable: Callable,
+    activation: str,
     global_num_experts: int,
     expert_map: torch.Tensor | None,
     w1_scale: torch.Tensor | None,
@@ -771,15 +778,7 @@ def run_cutlass_moe_w4a8_fp8(
         f"w1 hidden size mismatch: got {w1.size(2) * 8}, expected {K=}"
     )
 
-    # Translate info from expert_map to topk_ids
-    if expert_map is not None:
-        local_topk_ids = torch.where(
-            expert_map[topk_ids] != -1, expert_map[topk_ids], -1
-        )
-    else:
-        local_topk_ids = topk_ids
-
-    topk = local_topk_ids.size(1)
+    topk = topk_ids.size(1)
     a1q_perm = _resize_cache(workspace2.view(dtype=torch.float8_e4m3fn), (M * topk, K))
     mm1_out = _resize_cache(workspace13, (M * topk, N * 2))
     act_out = _resize_cache(workspace2, (M * topk, N))
@@ -789,12 +788,8 @@ def run_cutlass_moe_w4a8_fp8(
     )
     mm2_out = _resize_cache(workspace2, (M * topk, K))
 
-    problem_sizes1 = torch.empty(
-        (global_num_experts, 3), dtype=torch.int32, device=device
-    )
-    problem_sizes2 = torch.empty(
-        (global_num_experts, 3), dtype=torch.int32, device=device
-    )
+    problem_sizes1 = torch.empty((local_E, 3), dtype=torch.int32, device=device)
+    problem_sizes2 = torch.empty((local_E, 3), dtype=torch.int32, device=device)
 
     num_expert = global_num_experts if expert_map is None else expert_map.size(0)
     # permuted a1q reuses workspace2
@@ -807,18 +802,11 @@ def run_cutlass_moe_w4a8_fp8(
         expert_map,
         permuted_hidden_states=a1q_perm,
     )
-    expert_offsets = expert_first_token_offset[:-1]
-
-    # For RS gemm SwapAB is always enabled (swap logical M, N in the problem shape)
-    ops.get_cutlass_moe_mm_problem_sizes(
-        local_topk_ids,
-        problem_sizes1,
-        problem_sizes2,
-        global_num_experts,
-        N,
-        K,
-        force_swap_ab=True,
+    # for RS gemm SwapAB is always enabled (swap logical M, N in the problem shape).
+    ops.get_cutlass_moe_mm_problem_sizes_from_expert_offsets(
+        expert_first_token_offset, problem_sizes1, problem_sizes2, N, K, True
     )
+    expert_offsets = expert_first_token_offset[:-1]
 
     ops.cutlass_w4a8_moe_mm(
         mm1_out,
@@ -836,7 +824,7 @@ def run_cutlass_moe_w4a8_fp8(
         s_strides1,
     )
 
-    activation_callable(act_out, mm1_out)
+    apply_moe_activation(activation, act_out, mm1_out)
 
     a2q, a2q_scale = ops.scaled_fp8_quant(
         act_out, a2_scale, use_per_token_if_dynamic=per_act_token, output=quant_out
@@ -865,9 +853,7 @@ def run_cutlass_moe_w4a8_fp8(
         permuted_hidden_states=mm2_out,
         topk_weights=topk_weights,
         inv_permuted_idx=inv_perm,
-        expert_first_token_offset=(
-            expert_first_token_offset if expert_map is not None else None
-        ),
+        expert_first_token_offset=expert_first_token_offset,
     )
 
 
@@ -929,9 +915,11 @@ class CutlassExpertsW4A8Fp8(mk.FusedMoEPermuteExpertsUnpermute):
         global_num_experts: int,
         local_num_experts: int,
         expert_tokens_meta: mk.ExpertTokensMetadata | None,
+        activation: str,
     ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...]]:
+        activation_out_dim = self.adjust_N_for_activation(N, activation)
         workspace1 = (M * topk, max(N, K))
-        workspace2 = (M * topk, max(N // 2, K))
+        workspace2 = (M * topk, max(activation_out_dim, K))
         output = (M, K)
         return (workspace1, workspace2, output)
 
@@ -957,7 +945,6 @@ class CutlassExpertsW4A8Fp8(mk.FusedMoEPermuteExpertsUnpermute):
         assert self.w2_zp is None, "w2_zp is not supported in CUTLASS MoE"
 
         expert_num_tokens = None
-        activation_callable = lambda o, i: self.activation(activation, o, i)
 
         use_batched_format = (
             self.activation_formats[0] == mk.FusedMoEActivationFormat.BatchedExperts
@@ -972,7 +959,7 @@ class CutlassExpertsW4A8Fp8(mk.FusedMoEPermuteExpertsUnpermute):
             w1,
             w2,
             topk_ids,
-            activation_callable,
+            activation,
             global_num_experts,
             expert_map,
             self.w1_scale,

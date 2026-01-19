@@ -147,6 +147,13 @@ repos:
     entry: python tools/pre_commit/validate_config.py
     language: python
     additional_dependencies: [regex]
+  - id: validate-docker-versions
+    name: Validate docker/versions.json matches Dockerfile
+    entry: python tools/generate_versions_json.py --check
+    language: python
+    files: ^docker/(Dockerfile|versions\.json)$
+    pass_filenames: false
+    additional_dependencies: [dockerfile-parse]
   # Keep `suggestion` last
   - id: suggestion
     name: Suggestion
