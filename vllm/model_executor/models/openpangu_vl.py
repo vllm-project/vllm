@@ -133,9 +133,10 @@ class OpenPanguVisionAttention(nn.Module):
         return torch.cat((-x2, x1), dim=-1)
 
     def apply_rotary_pos_emb(self, q, k, cos, sin, offset: int = 0):
+        target_dtype = q.dtype
         q_embed = (q * cos) + (self.rotate_half(q) * sin)
         k_embed = (k * cos) + (self.rotate_half(k) * sin)
-        return q_embed.to(torch.bfloat16), k_embed.to(torch.bfloat16)
+        return q_embed.to(target_dtype), k_embed.to(target_dtype)
 
     def forward(
         self,
@@ -515,10 +516,7 @@ class OpenPanguVisionTransformer(nn.Module):
         return cos_new, sin_new
 
     def rot_pos_emb(self, grid_thw: torch.Tensor) -> torch.Tensor:
-        """
-        see https://github.com/huggingface/transformers/blob/main/src/transformers/models/qwen2_5_vl/modular_qwen2_5_vl.py#L209 # noqa: E501
-        for details.
-        """
+        # see https://github.com/huggingface/transformers/blob/main/src/transformers/models/qwen2_5_vl/modular_qwen2_5_vl.py for details. #L209 # noqa: E501
         pos_ids = []
         for t, h, w in grid_thw:
             hpos_ids = torch.arange(h).unsqueeze(1).expand(-1, w)
@@ -551,10 +549,7 @@ class OpenPanguVisionTransformer(nn.Module):
         return rotary_pos_emb
 
     def get_window_index(self, grid_thw):
-        """
-        see https://github.com/huggingface/transformers/blob/main/src/transformers/models/qwen2_5_vl/modular_qwen2_5_vl.py#L238 # noqa: E501
-        for details.
-        """
+        # see https://github.com/huggingface/transformers/blob/main/src/transformers/models/qwen2_5_vl/modular_qwen2_5_vl.py for details. #L238 # noqa: E501
         window_index: list = []
         cu_window_seqlens: list = [0]
         window_index_id = 0
@@ -1029,7 +1024,7 @@ class OpenPanguVLMultiModalProcessor(Qwen2_5_VLMultiModalProcessor):
                     + [video_token_id] * video_seq_length_per_time
                     + [vision_end_token_id]
                 )
-                video_token_id_total = video_token_id_per_time * grid_t
+                video_token_id_total = video_token_id_per_time * grid_t.item()
                 video_token_id_middle = video_token_id_total[1:-1]
                 return PromptUpdateDetails.select_token_id(
                     video_token_id_middle,
@@ -1644,6 +1639,7 @@ def rescale_and_normalize(
     do_normalize: bool,
     image_mean: float | list[float],
     image_std: float | list[float],
+    target_dtype: str = "torch.bfloat16",
 ) -> "torch.Tensor":
     """
     Rescale and normalize images.
@@ -1661,6 +1657,6 @@ def rescale_and_normalize(
         images = normalize(images.to(dtype=torch.float32), image_mean, image_std)
     elif do_rescale:
         images = rescale(images, rescale_factor)
-    images = images.to(torch.bfloat16)
+    images = images.to(target_dtype)
 
     return images
