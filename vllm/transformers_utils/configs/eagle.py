@@ -60,9 +60,20 @@ class EAGLEConfig(PretrainedConfig):
                 else f"Eagle3{arch}"
                 for arch in self.model.architectures
             ]
+        elif method == "dflash":
+            assert self.model is not None, (
+                "model should not be None when method is dflash"
+            )
+            kwargs["architectures"] = [
+                arch
+                if arch.startswith("DFlash") or arch.endswith("DFlash")
+                else f"DFlash{arch}"
+                for arch in self.model.architectures
+            ]
         else:
             raise ValueError(
-                f"Invalid method {method}. Supported methods are eagle and eagle3."
+                f"Invalid method {method}. Supported methods are eagle, eagle3, "
+                " and dflash."
             )
 
         super().__init__(**kwargs)

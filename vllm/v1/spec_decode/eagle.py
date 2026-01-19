@@ -22,6 +22,7 @@ from vllm.model_executor.model_loader import get_model
 from vllm.model_executor.models import supports_multimodal
 from vllm.model_executor.models.deepseek_v2 import DeepseekV32IndexerCache
 from vllm.model_executor.models.llama_eagle3 import Eagle3LlamaForCausalLM
+from vllm.model_executor.models.qwen3_dflash import DFlashQwen3ForCausalLM
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.platforms import current_platform
 from vllm.triton_utils import triton
@@ -130,12 +131,12 @@ class EagleProposer:
             # 1D-RoPE.
             # See page 5 of https://arxiv.org/abs/2409.12191
             self.mrope_positions = torch.zeros(
-                (3, self.max_num_tokens + 1), dtype=torch.int64, device=device
+                (3, 2 * (self.max_num_tokens + 1)), dtype=torch.int64, device=device
             )
         else:
             # RoPE need (max_num_tokens,)
             self.positions = torch.zeros(
-                self.max_num_tokens, dtype=torch.int64, device=device
+                2 * self.max_num_tokens, dtype=torch.int64, device=device
             )
         self.hidden_states = torch.zeros(
             (self.max_num_tokens, self.hidden_size), dtype=self.dtype, device=device
@@ -245,14 +246,158 @@ class EagleProposer:
         mm_embed_inputs: tuple[list[torch.Tensor], torch.Tensor] | None = None,
         num_rejected_tokens_gpu: torch.Tensor | None = None,
     ) -> torch.Tensor:
+        """Propose using the DFlash model of parallel drafting with the target
+        hidden states as context (KV) and the next token ids as the queries."""
+        # For now, assume batch_size == 1 and num_speculative_tokens == 1
+        batch_size = common_attn_metadata.num_reqs
+        # num_speculative_tokens = self.num_speculative_tokens
+        # assert num_speculative_tokens == 1
+        assert batch_size == 1
+
+        # sampled token embedding plus one mask embedding per spec token
+        num_query_tokens = 1 + self.num_speculative_tokens
+
+        num_context_tokens = target_hidden_states.shape[0]
+        num_kv_tokens = num_context_tokens + num_query_tokens
+
+        MASK_TOKEN_ID = 151669
+
+        assert self.runner is not None
+
+        if self.attn_metadata_builder is None:
+            attn_metadata_builder = self._get_attention_metadata_builder()
+        else:
+            attn_metadata_builder = self.attn_metadata_builder
+
+        target_hidden_states = self.model.combine_hidden_states(target_hidden_states)
+        assert target_hidden_states.shape[-1] == self.hidden_size
+
+        # Concatenate an additional slot to the position ids
+        last_position = target_positions[-1]
+        position_ids = torch.cat(
+            [
+                target_positions,
+                torch.arange(
+                    num_query_tokens,
+                    device=target_positions.device,
+                    dtype=target_positions.dtype,
+                ),
+            ],
+            dim=0,
+        )
+        position_ids[-num_query_tokens:] += 1 + last_position
+        assert position_ids.shape[0] == num_kv_tokens
+        # Recompute the slot mapping
+        block_size = attn_metadata_builder.kv_cache_spec.block_size
+        block_numbers = position_ids // block_size
+        block_ids = common_attn_metadata.block_table_tensor.gather(
+            dim=1, index=block_numbers.unsqueeze(0)
+        ).view(-1)
+        common_attn_metadata.slot_mapping = (
+            block_ids * block_size + position_ids % block_size
+        )
+        # Update the common attention metadata
+        common_attn_metadata.num_actual_tokens = num_query_tokens
+        common_attn_metadata.max_query_len = num_query_tokens
+        common_attn_metadata.query_start_loc = (
+            self.arange[: batch_size + 1] * num_query_tokens
+        )
+        common_attn_metadata.query_start_loc_cpu = (
+            torch.from_numpy(self.token_arange_np[: batch_size + 1]).clone()
+            * num_query_tokens
+        )
+        common_attn_metadata.max_seq_len += num_query_tokens
+        common_attn_metadata.seq_lens += num_query_tokens
+        common_attn_metadata._seq_lens_cpu = None
+        common_attn_metadata.causal = False
+
+        attn_metadata = attn_metadata_builder.build_for_drafting(
+            common_attn_metadata=common_attn_metadata, draft_index=0
+        )
+        if hasattr(attn_metadata, "causal"):
+            assert not attn_metadata.causal, (
+                "DFlash proposer requires non-causal attention. "
+                "Choose a different attention backend."
+            )
+        per_layer_attn_metadata = {}
+        for layer_name in self.attn_layer_names:
+            per_layer_attn_metadata[layer_name] = attn_metadata
+
+        self._set_positions(num_kv_tokens, position_ids)
+        self.input_ids[:num_query_tokens] = MASK_TOKEN_ID
+        self.input_ids[:1] = next_token_ids
+        self.hidden_states[:num_context_tokens] = target_hidden_states
+
+        # Determine CUDA graph usage and padding
+        num_query_tokens_dp_padded, num_tokens_across_dp = self._pad_batch_across_dp(
+            num_tokens_unpadded=num_query_tokens, num_tokens_padded=num_query_tokens
+        )
+
+        if (
+            self.use_cuda_graph
+            and num_query_tokens_dp_padded
+            <= self.compilation_config.max_cudagraph_capture_size
+        ):
+            num_input_tokens = self.vllm_config.pad_for_cudagraph(
+                num_query_tokens_dp_padded
+            )
+            cudagraph_runtime_mode = CUDAGraphMode.PIECEWISE
+        else:
+            num_input_tokens = num_query_tokens_dp_padded
+            cudagraph_runtime_mode = CUDAGraphMode.NONE
+
+        if num_tokens_across_dp is not None:
+            num_tokens_across_dp[self.dp_rank] = num_input_tokens
+
+        input_ids = self.input_ids[:num_input_tokens]
+        hidden_states = self.hidden_states[:num_context_tokens]
+
+        with set_forward_context(
+            per_layer_attn_metadata,
+            self.vllm_config,
+            num_tokens=num_input_tokens,
+            num_tokens_across_dp=num_tokens_across_dp,
+            cudagraph_runtime_mode=cudagraph_runtime_mode,
+        ):
+            ret_hidden_states = self.model(
+                input_ids=input_ids,
+                positions=self._get_positions(num_kv_tokens),
+                hidden_states=hidden_states,
+                inputs_embeds=None,
+            )
+        # Only take the valid (non-padded) hidden states before computing logits
+        # Skip the first token (sampled token) and take the rest (mask tokens)
+        valid_hidden_states = ret_hidden_states[1:num_query_tokens]
+        logits = self.model.compute_logits(valid_hidden_states)
+        draft_token_ids = logits.argmax(dim=-1)
+        return draft_token_ids.view(1, self.num_speculative_tokens)
+
+    def propose_eagle3(
+        self,
+        # [num_tokens]
+        target_token_ids: torch.Tensor,
+        # [num_tokens] or [3, num_tokens] when M-RoPE is enabled
+        target_positions: torch.Tensor,
+        # [num_tokens, hidden_size]
+        target_hidden_states: torch.Tensor,
+        # [batch_size]
+        next_token_ids: torch.Tensor,
+        last_token_indices: torch.Tensor | None,
+        common_attn_metadata: CommonAttentionMetadata,
+        sampling_metadata: SamplingMetadata,
+        mm_embed_inputs: tuple[list[torch.Tensor], torch.Tensor] | None = None,
+        num_rejected_tokens_gpu: torch.Tensor | None = None,
+    ) -> torch.Tensor:
         num_tokens = target_token_ids.shape[0]
         batch_size = next_token_ids.shape[0]
 
         if last_token_indices is None:
             last_token_indices = common_attn_metadata.query_start_loc[1:] - 1
 
-        if self.method == "eagle3":
-            assert isinstance(self.model, Eagle3LlamaForCausalLM)
+        if self.method in ["eagle3", "dflash"]:
+            assert isinstance(
+                self.model, (Eagle3LlamaForCausalLM, DFlashQwen3ForCausalLM)
+            )
             target_hidden_states = self.model.combine_hidden_states(
                 target_hidden_states
             )
@@ -1175,12 +1320,18 @@ class EagleProposer:
     ) -> None:
         # Determine if CUDA graphs should be used for this run.
         cudagraphs_enabled = use_cudagraphs and self.use_cuda_graph
+        cudagraph_mode = (
+            CUDAGraphMode.PIECEWISE if cudagraphs_enabled else CUDAGraphMode.NONE
+        )
 
         # FIXME: when using tree-based specdec, adjust number of forward-passes
         # according to the depth of the tree.
-        for fwd_idx in range(
+        num_iters_to_capture = (
             self.num_speculative_tokens if not is_graph_capturing else 1
-        ):
+        )
+        if self.method == "dflash":
+            num_iters_to_capture = 1
+        for fwd_idx in range(num_iters_to_capture):
             if fwd_idx <= 1:
                 num_tokens_dp_padded, num_tokens_across_dp = self._pad_batch_across_dp(
                     num_tokens_unpadded=num_tokens, num_tokens_padded=num_tokens
@@ -1203,9 +1354,7 @@ class EagleProposer:
                 self.vllm_config,
                 num_tokens=num_input_tokens,
                 num_tokens_across_dp=num_tokens_across_dp,
-                cudagraph_runtime_mode=CUDAGraphMode.PIECEWISE
-                if cudagraphs_enabled
-                else CUDAGraphMode.NONE,
+                cudagraph_runtime_mode=cudagraph_mode,
             ):
                 if self.supports_mm_inputs:
                     input_ids = None
@@ -1214,9 +1363,14 @@ class EagleProposer:
                     input_ids = self.input_ids[:num_input_tokens]
                     inputs_embeds = None
 
+                positions = (
+                    self._get_positions(num_input_tokens)
+                    if self.method != "dflash"
+                    else self._get_positions(2 * num_input_tokens)
+                )
                 self.model(
                     input_ids=input_ids,
-                    positions=self._get_positions(num_input_tokens),
+                    positions=positions,
                     hidden_states=self.hidden_states[:num_input_tokens],
                     inputs_embeds=inputs_embeds,
                 )
@@ -1253,13 +1407,20 @@ class EagleProposer:
         They might indicate this by setting "use_aux_hidden_state" to False
         inside the "eagle_config" dict of their hf_config.
         """
-        if self.method != "eagle3":
+        if self.method not in ["eagle3", "dflash"]:
             return False
         # Assume that eagle3 heads use aux hidden states by default
         use_aux_hidden_state = True
         eagle_config = getattr(self.draft_model_config.hf_config, "eagle_config", None)
+        dflash_config = getattr(
+            self.draft_model_config.hf_config, "dflash_config", None
+        )
         if eagle_config is not None:
             use_aux_hidden_state = eagle_config.get("use_aux_hidden_state", True)
+        if dflash_config is not None:
+            # Prefer to read settings from DFlash config if available, since all
+            # DFlash are EAGLEs but not all EAGLEs are DFlash
+            use_aux_hidden_state = dflash_config.get("use_aux_hidden_state", True)
         return use_aux_hidden_state
 
     def validate_same_kv_cache_group(self, kv_cache_config: KVCacheConfig) -> None:

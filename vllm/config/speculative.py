@@ -41,7 +41,8 @@ MTPModelTypes = Literal[
     "mtp",
     "pangu_ultra_moe_mtp",
 ]
-EagleModelTypes = Literal["eagle", "eagle3", MTPModelTypes]
+DFlashModelTypes = Literal["dflash"]
+EagleModelTypes = Literal["eagle", "eagle3", MTPModelTypes, DFlashModelTypes]
 SpeculativeMethod = Literal[
     "ngram",
     "medusa",
@@ -164,7 +165,7 @@ class SpeculativeConfig:
         factors: list[Any] = []
         # Eagle3 affects the computation graph because it returns intermediate
         # hidden states in addition to the final hidden state.
-        factors.append(self.method == "eagle3")
+        factors.append(self.method == "eagle3" or self.method == "dflash")
         hash_str = safe_hash(str(factors).encode(), usedforsecurity=False).hexdigest()
         return hash_str
 
@@ -363,7 +364,7 @@ class SpeculativeConfig:
                 )
 
                 # Automatically detect the method
-                if self.method in ("eagle", "eagle3"):
+                if self.method in ("eagle", "eagle3", "dflash"):
                     pass
                 # examples:
                 # yuhuili/EAGLE-LLaMA3-Instruct-8B
@@ -373,6 +374,8 @@ class SpeculativeConfig:
                     self.method = "eagle"
                 elif "eagle3" in self.draft_model_config.model.lower():
                     self.method = "eagle3"
+                elif "dflash" in self.draft_model_config.model.lower():
+                    self.method = "dflash"
                 elif self.draft_model_config.hf_config.model_type == "medusa":
                     self.method = "medusa"
                 elif self.draft_model_config.hf_config.model_type == "mlp_speculator":
@@ -658,7 +661,7 @@ class SpeculativeConfig:
 
         eagle3_target_supported = ["llama", "qwen", "minicpm", "gpt_oss"]
         if (
-            self.method == "eagle3"
+            self.method in ["eagle3", "dflash"]
             and self.target_model_config
             and not any(
                 supported_model in self.target_model_config.hf_text_config.model_type
@@ -673,7 +676,7 @@ class SpeculativeConfig:
         return self
 
     def use_eagle(self) -> bool:
-        return self.method in ("eagle", "eagle3", "mtp")
+        return self.method in ("eagle", "eagle3", "mtp", "dflash")
 
     def __repr__(self) -> str:
         method = self.method
