@@ -102,7 +102,7 @@ class Glm4MoeLiteDecoderLayer(nn.Module):
         self,
         vllm_config: VllmConfig,
         prefix: str,
-        config: "Glm4MoeLiteConfig" | None = None,
+        config: "Glm4MoeLiteConfig | None" = None,
         topk_indices_buffer: torch.Tensor | None = None,
     ) -> None:
         super().__init__()
