@@ -1215,8 +1215,19 @@ class VllmConfig:
         computed_compile_ranges_split_points = []
 
         # The upper bound of the compile ranges is the max_num_batched_tokens
+        # extended by the number of potential speculative tokens.
         max_num_batched_tokens = self.scheduler_config.max_num_batched_tokens
         if max_num_batched_tokens is not None:
+            do_extend: bool = (
+                self.speculative_config is not None
+                and self.speculative_config.num_speculative_tokens is not None
+            )
+            if do_extend:
+                max_num_batched_tokens += (
+                    self.scheduler_config.max_num_seqs
+                    * self.speculative_config.num_speculative_tokens
+                )
+
             computed_compile_ranges_split_points.append(max_num_batched_tokens)
 
         # Add the compile ranges for flashinfer
