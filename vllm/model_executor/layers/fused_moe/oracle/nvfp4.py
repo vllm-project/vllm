@@ -7,6 +7,9 @@ import torch
 import vllm.envs as envs
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.logger import init_logger
+from vllm.model_executor.layers.fused_moe.all2all_utils import (
+    maybe_make_prepare_finalize,
+)
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
     FusedMoEQuantConfig,
@@ -17,14 +20,14 @@ from vllm.model_executor.layers.fused_moe.config import (
 from vllm.model_executor.layers.fused_moe.cutlass_moe import (
     CutlassExpertsFp4,
 )
+from vllm.model_executor.layers.fused_moe.flashinfer_cutedsl_moe import (
+    FlashInferCuteDSLExperts,
+)
 from vllm.model_executor.layers.fused_moe.flashinfer_cutlass_moe import (
     FlashInferExperts,
 )
 from vllm.model_executor.layers.fused_moe.fused_marlin_moe import (
     MarlinExperts,
-)
-from vllm.model_executor.layers.fused_moe.prepare_finalize import (
-    MoEPrepareAndFinalizeNoEP,
 )
 from vllm.model_executor.layers.quantization.utils.flashinfer_fp4_moe import (
     is_flashinfer_fp4_cutedsl_moe_available,
@@ -243,22 +246,44 @@ def make_nvfp4_moe_kernel(
     quant_config: FusedMoEQuantConfig,
     moe_config: FusedMoEConfig,
 ) -> mk.FusedMoEModularKernel | None:
-    assert moe_config.dp_size == 1
-
     UNSUPPORTED_BACKENDS = [
-        # TRTLLM does not use the modular kernl abstraction.
         NvFp4MoeBackend.FLASHINFER_TRTLLM,
-        # CUTEDSL is used with BATCHED (masked) format only.
-        # TODO: add here once we support dp/ep via the oracle.
-        NvFp4MoeBackend.FLASHINFER_CUTEDSL,
     ]
 
     if backend in UNSUPPORTED_BACKENDS:
         return None
 
+    # Create Prepare/Finalize.
+    # TODO: init routing tables here?
+    prepare_finalize = maybe_make_prepare_finalize(
+        moe=moe_config,
+        quant_config=quant_config,
+        routing_tables=None,
+        defer_input_quant=(
+            backend
+            in [
+                NvFp4MoeBackend.FLASHINFER_CUTLASS,
+                NvFp4MoeBackend.VLLM_CUTLASS,
+            ]
+        ),
+        allow_new_interface=True,
+    )
+    assert prepare_finalize is not None
+
+    logger.info_once("Using %s", prepare_finalize.__class__.__name__)
+
+    if backend == NvFp4MoeBackend.FLASHINFER_CUTEDSL:
+        return mk.FusedMoEModularKernel(
+            prepare_finalize,
+            FlashInferCuteDSLExperts(
+                out_dtype=moe_config.in_dtype,
+                quant_config=quant_config,
+            ),
+        )
+
     elif backend == NvFp4MoeBackend.FLASHINFER_CUTLASS:
         return mk.FusedMoEModularKernel(
-            MoEPrepareAndFinalizeNoEP(defer_input_quant=True),
+            prepare_finalize,
             FlashInferExperts(
                 out_dtype=moe_config.in_dtype,
                 quant_config=quant_config,
@@ -273,7 +298,7 @@ def make_nvfp4_moe_kernel(
 
     elif backend == NvFp4MoeBackend.VLLM_CUTLASS:
         return mk.FusedMoEModularKernel(
-            MoEPrepareAndFinalizeNoEP(defer_input_quant=True),
+            prepare_finalize,
             CutlassExpertsFp4(
                 out_dtype=moe_config.in_dtype,
                 # TODO(rob): see what impact this has on expert map?
@@ -284,7 +309,7 @@ def make_nvfp4_moe_kernel(
 
     elif backend == NvFp4MoeBackend.MARLIN:
         return mk.FusedMoEModularKernel(
-            MoEPrepareAndFinalizeNoEP(),
+            prepare_finalize,
             MarlinExperts(quant_config=quant_config),
         )
 
