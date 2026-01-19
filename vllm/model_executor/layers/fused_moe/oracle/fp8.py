@@ -8,6 +8,9 @@ import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm import envs
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.logger import init_logger
+from vllm.model_executor.layers.fused_moe.all2all_utils import (
+    maybe_make_prepare_finalize,
+)
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
     FusedMoEQuantConfig,
@@ -274,9 +277,23 @@ def make_fp8_moe_kernel(
     # Delayed import is required since the oracle is imported
     # by CPU backends which cannot import all of these experts.
     # TODO: update the experts to make this not happen.
-    from vllm.model_executor.layers.fused_moe.prepare_finalize import (
-        MoEPrepareAndFinalizeNoEP,
+
+    defer_input_quant = fp8_backend == Fp8MoeBackend.AITER or (
+        fp8_backend == Fp8MoeBackend.FLASHINFER_CUTLASS
+        and moe_quant_config.is_block_quantized
     )
+
+    # Create Prepare/Finalize.
+    prepare_finalize = maybe_make_prepare_finalize(
+        moe=moe_config,
+        quant_config=moe_quant_config,
+        routing_tables=None,
+        defer_input_quant=defer_input_quant,
+        allow_new_interface=True,
+    )
+    assert prepare_finalize is not None
+
+    logger.info_once("Using %s", prepare_finalize.__class__.__name__)
 
     # NOTE(rob): this is a WIP refactor. We are first migrating
     # all of the kernels in the TP case to use mk. Once this is
@@ -290,11 +307,9 @@ def make_fp8_moe_kernel(
         )
 
         kernel = mk.FusedMoEModularKernel(
-            MoEPrepareAndFinalizeNoEP(
-                defer_input_quant=moe_quant_config.is_block_quantized
-            ),
+            prepare_finalize,
             FlashInferExperts(
-                out_dtype=layer.orig_dtype,
+                out_dtype=moe_config.in_dtype,
                 quant_config=moe_quant_config,
                 ep_rank=moe_config.ep_rank,
                 ep_size=moe_config.ep_size,
@@ -312,8 +327,7 @@ def make_fp8_moe_kernel(
         )
 
         kernel = mk.FusedMoEModularKernel(
-            # TODO: make defer_input_quant an attr of the AiterExperts
-            MoEPrepareAndFinalizeNoEP(defer_input_quant=True),
+            prepare_finalize,
             AiterExperts(quant_config=moe_quant_config),
         )
     elif fp8_backend == Fp8MoeBackend.MARLIN:
@@ -322,7 +336,7 @@ def make_fp8_moe_kernel(
         )
 
         kernel = mk.FusedMoEModularKernel(
-            MoEPrepareAndFinalizeNoEP(),
+            prepare_finalize,
             MarlinExperts(quant_config=moe_quant_config),
         )
     elif fp8_backend == Fp8MoeBackend.VLLM_CUTLASS:
@@ -331,7 +345,7 @@ def make_fp8_moe_kernel(
         )
 
         kernel = mk.FusedMoEModularKernel(
-            MoEPrepareAndFinalizeNoEP(),
+            prepare_finalize,
             TritonOrCutlassExperts(
                 out_dtype=moe_config.in_dtype,
                 e=layer.local_num_experts,
@@ -343,21 +357,56 @@ def make_fp8_moe_kernel(
         )
     elif fp8_backend == Fp8MoeBackend.DEEPGEMM:
         from vllm.model_executor.layers.fused_moe import (
+            BatchedDeepGemmExperts,
             TritonOrDeepGemmExperts,
         )
 
-        kernel = mk.FusedMoEModularKernel(
-            MoEPrepareAndFinalizeNoEP(),
-            TritonOrDeepGemmExperts(quant_config=moe_quant_config),
-        )
+        if (
+            prepare_finalize.activation_format
+            == mk.FusedMoEActivationFormat.BatchedExperts
+        ):
+            max_num_tokens_per_rank = prepare_finalize.max_num_tokens_per_rank()
+            assert max_num_tokens_per_rank is not None
+            kernel = mk.FusedMoEModularKernel(
+                prepare_finalize,
+                BatchedDeepGemmExperts(
+                    max_num_tokens=max_num_tokens_per_rank,
+                    num_dispatchers=prepare_finalize.num_dispatchers(),
+                    quant_config=moe_quant_config,
+                ),
+            )
+        else:
+            kernel = mk.FusedMoEModularKernel(
+                prepare_finalize,
+                TritonOrDeepGemmExperts(quant_config=moe_quant_config),
+            )
     else:
+        from vllm.model_executor.layers.fused_moe.fused_batched_moe import (
+            BatchedTritonExperts,
+        )
         from vllm.model_executor.layers.fused_moe.fused_moe import (
             TritonExperts,
         )
 
         assert fp8_backend == Fp8MoeBackend.TRITON
-        kernel = mk.FusedMoEModularKernel(
-            MoEPrepareAndFinalizeNoEP(),
-            TritonExperts(quant_config=moe_quant_config),
-        )
+        if (
+            prepare_finalize.activation_format
+            == mk.FusedMoEActivationFormat.BatchedExperts
+        ):
+            max_num_tokens_per_rank = prepare_finalize.max_num_tokens_per_rank()
+            assert max_num_tokens_per_rank is not None
+            kernel = mk.FusedMoEModularKernel(
+                prepare_finalize,
+                BatchedTritonExperts(
+                    max_num_tokens=max_num_tokens_per_rank,
+                    num_dispatchers=prepare_finalize.num_dispatchers(),
+                    quant_config=moe_quant_config,
+                ),
+            )
+        else:
+            kernel = mk.FusedMoEModularKernel(
+                prepare_finalize,
+                TritonExperts(quant_config=moe_quant_config),
+            )
+
     return kernel, use_inplace

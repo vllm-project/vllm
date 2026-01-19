@@ -241,6 +241,8 @@ def make_nvfp4_moe_quant_config(
     )
 
 
+# TODO: shared expert!!!!
+# TODO: routing tables!!!
 def make_nvfp4_moe_kernel(
     backend: NvFp4MoeBackend,
     quant_config: FusedMoEQuantConfig,
@@ -254,7 +256,6 @@ def make_nvfp4_moe_kernel(
         return None
 
     # Create Prepare/Finalize.
-    # TODO: init routing tables here?
     prepare_finalize = maybe_make_prepare_finalize(
         moe=moe_config,
         quant_config=quant_config,
@@ -291,7 +292,7 @@ def make_nvfp4_moe_kernel(
                 ep_size=moe_config.ep_size,
                 tp_rank=moe_config.tp_rank,
                 tp_size=moe_config.tp_size,
-                use_dp=False,
+                use_dp=moe_config.dp_size > 1,
                 use_deepseek_fp8_block_scale=False,
             ),
         )
