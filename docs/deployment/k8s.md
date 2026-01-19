@@ -4,6 +4,7 @@ Deploying vLLM on Kubernetes is a scalable and efficient way to serve machine le
 
 - [Deployment with CPUs](#deployment-with-cpus)
 - [Deployment with GPUs](#deployment-with-gpus)
+- [Graceful Shutdown](#graceful-shutdown)
 - [Troubleshooting](#troubleshooting)
     - [Startup Probe or Readiness Probe Failure, container log contains "KeyboardInterrupt: terminated"](#startup-probe-or-readiness-probe-failure-container-log-contains-keyboardinterrupt-terminated)
 - [Conclusion](#conclusion)
@@ -385,6 +386,101 @@ INFO:     Uvicorn running on http://0.0.0.0:8000 (Press CTRL+C to quit)
       ```
 
       If the service is correctly deployed, you should receive a response from the vLLM model.
+
+## Graceful Shutdown
+
+For production deployments, vLLM supports graceful shutdown to enable zero-downtime rolling updates. When enabled, the server drains in-flight requests before terminating instead of abruptly closing connections.
+
+### How It Works
+
+When vLLM receives a `SIGTERM` signal (sent by Kubernetes during pod termination):
+
+1. The server stops accepting new requests (returns `503 Service Unavailable`)
+2. In-flight requests continue processing until completion or timeout
+3. If using async KV transfer connectors, pending transfers complete before shutdown
+4. The `/live` and `/metrics` endpoints remain accessible during drain
+5. A `vllm:server_draining` Prometheus metric is set to `1.0` to signal drain state
+
+### Configuration
+
+Enable graceful shutdown with the following CLI arguments:
+
+| Argument | Default | Description |
+|----------|---------|-------------|
+| `--enable-graceful-shutdown` | `false` | Enable graceful shutdown with request draining on SIGTERM |
+| `--drain-timeout` | `120` | Seconds to wait for in-flight requests to complete |
+
+### Example Deployment
+
+<details>
+<summary>Yaml</summary>
+
+```yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vllm-server
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: vllm
+  template:
+    metadata:
+      labels:
+        app: vllm
+    spec:
+      # should be >= drain-timeout to allow graceful drain
+      terminationGracePeriodSeconds: 150
+      containers:
+      - name: vllm
+        image: vllm/vllm-openai:latest
+        command: ["/bin/sh", "-c"]
+        args: [
+          "vllm serve mistralai/Mistral-7B-Instruct-v0.3 --enable-graceful-shutdown --drain-timeout 120"
+        ]
+        ports:
+        - containerPort: 8000
+        livenessProbe:
+          httpGet:
+            path: /live
+            port: 8000
+          initialDelaySeconds: 60
+          periodSeconds: 10
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 8000
+          initialDelaySeconds: 60
+          periodSeconds: 5
+        resources:
+          limits:
+            nvidia.com/gpu: "1"
+```
+
+</details>
+
+### Key Considerations
+
+- **`terminationGracePeriodSeconds`**: Set this to at least `drain-timeout` plus a buffer (e.g., 30 seconds) to ensure Kubernetes doesn't force-kill the pod before draining completes.
+
+- **Load Balancer Integration**: External load balancers can query the `/metrics` endpoint and check the `vllm:server_draining` metric to detect pods that are draining and stop routing new traffic to them.
+
+- **Readiness vs Liveness**: The `/health` endpoint returns `503` during drain (good for readiness probes to remove the pod from service), while `/live` remains accessible (good for liveness probes to avoid restarts during drain).
+
+### Monitoring Drain State
+
+You can query the draining metric via Prometheus:
+
+```promql
+vllm:server_draining{model_name="mistralai/Mistral-7B-Instruct-v0.3"} == 1
+```
+
+Or directly via curl during a rolling update:
+
+```bash
+curl -s http://<pod-ip>:8000/metrics | grep server_draining
+```
 
 ## Troubleshooting
 
