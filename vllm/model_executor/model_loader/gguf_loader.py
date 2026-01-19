@@ -335,7 +335,7 @@ class GGUFModelLoader(BaseModelLoader):
         )
 
     def load_model(
-        self, vllm_config: VllmConfig, model_config: ModelConfig
+        self, vllm_config: VllmConfig, model_config: ModelConfig, prefix: str = ""
     ) -> nn.Module:
         device_config = vllm_config.device_config
         local_model_path = self._prepare_weights(model_config)
@@ -364,7 +364,7 @@ class GGUFModelLoader(BaseModelLoader):
         target_device = torch.device(device_config.device)
         with set_default_torch_dtype(model_config.dtype):
             with target_device:
-                model = initialize_model(vllm_config=vllm_config)
+                model = initialize_model(vllm_config=vllm_config, prefix=prefix)
             self.load_weights(model, model_config)
 
             process_weights_after_loading(model, model_config, target_device)
