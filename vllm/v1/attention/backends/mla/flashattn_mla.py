@@ -6,24 +6,10 @@ from typing import ClassVar
 
 import torch
 
-from vllm.attention.backends.abstract import (
-    AttentionLayer,
-    AttentionType,
-    MultipleOf,
-    is_quantized_kv_cache,
-)
-from vllm.attention.utils.fa_utils import (
-    flash_attn_supports_mla,
-    get_flash_attn_version,
-)
 from vllm.config import VllmConfig
 from vllm.config.cache import CacheDType
 from vllm.logger import init_logger
-from vllm.model_executor.layers.batch_invariant import (
-    vllm_is_batch_invariant,
-)
-from vllm.platforms.interface import DeviceCapability
-from vllm.v1.attention.backends.mla.common import (
+from vllm.model_executor.layers.attention.mla_attention import (
     MLACommonBackend,
     MLACommonDecodeMetadata,
     MLACommonImpl,
@@ -31,7 +17,21 @@ from vllm.v1.attention.backends.mla.common import (
     MLACommonMetadataBuilder,
     QueryLenSupport,
 )
-from vllm.v1.attention.backends.utils import AttentionCGSupport
+from vllm.model_executor.layers.batch_invariant import (
+    vllm_is_batch_invariant,
+)
+from vllm.platforms.interface import DeviceCapability
+from vllm.v1.attention.backend import (
+    AttentionCGSupport,
+    AttentionLayer,
+    AttentionType,
+    MultipleOf,
+    is_quantized_kv_cache,
+)
+from vllm.v1.attention.backends.fa_utils import (
+    flash_attn_supports_mla,
+    get_flash_attn_version,
+)
 from vllm.v1.kv_cache_interface import AttentionSpec
 from vllm.vllm_flash_attn import (  # type: ignore[attr-defined]
     flash_attn_varlen_func,

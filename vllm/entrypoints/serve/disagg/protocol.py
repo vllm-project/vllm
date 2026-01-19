@@ -4,12 +4,12 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
-from vllm.entrypoints.openai.protocol import (
-    ChatCompletionLogProbs,
-    Logprob,
+from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionLogProbs
+from vllm.entrypoints.openai.engine.protocol import (
     SamplingParams,
     StreamOptions,
 )
+from vllm.logprobs import Logprob
 from vllm.utils import random_uuid
 
 

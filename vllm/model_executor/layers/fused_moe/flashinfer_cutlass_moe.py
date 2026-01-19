@@ -103,6 +103,7 @@ class FlashInferExperts(mk.FusedMoEPermuteExpertsUnpermute):
         global_num_experts: int,
         local_num_experts: int,
         expert_tokens_meta: mk.ExpertTokensMetadata | None,
+        activation: str,
     ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...]]:
         # We use global_num_experts due to how moe_align_block_size handles
         # expert_maps.
@@ -225,6 +226,11 @@ class FlashInferExperts(mk.FusedMoEPermuteExpertsUnpermute):
             # Informs FlashInfer to use the block-scale decoding path when True
             use_deepseek_fp8_block_scale=self.use_deepseek_fp8_block_scale,
         )
+
+    def moe_sum(self, input: torch.Tensor, output: torch.Tensor) -> None:
+        # No support for LoRA in flashinfer_cutlass_fused_moe.
+        # See TODOs in flashinfer functions runMoe and runMoeMinLantency.
+        raise NotImplementedError("LoRA is not supported for flashinfer_cutlass_moe")
 
 
 def flashinfer_cutlass_moe_fp4(
