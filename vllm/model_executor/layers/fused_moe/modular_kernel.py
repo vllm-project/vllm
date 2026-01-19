@@ -669,15 +669,10 @@ class FusedMoEPermuteExpertsUnpermute(ABC):
         hidden_states: torch.Tensor,
         w1: torch.Tensor,
         w2: torch.Tensor,
-        routing_logits: torch.Tensor,
+        router_logits: torch.Tensor,
         activation: str,
         global_num_experts: int,
         expert_map: torch.Tensor | None,
-        a1q_scale: torch.Tensor | None,
-        a2_scale: torch.Tensor | None,
-        workspace13: torch.Tensor,
-        workspace2: torch.Tensor,
-        expert_tokens_meta: ExpertTokensMetadata | None,
         apply_router_weight_on_input: bool,
     ) -> torch.Tensor:
         """
@@ -1273,4 +1268,32 @@ class FusedMoEModularKernel(torch.nn.Module):
             topk_weights,
             topk_ids,
             apply_router_weight_on_input,
+        )
+
+    def forward_monolithic(
+        self,
+        hidden_states: torch.Tensor,
+        w1: torch.Tensor,
+        w2: torch.Tensor,
+        router_logits: torch.Tensor,
+        activation: str,
+        global_num_experts: int,
+        expert_map: torch.Tensor | None,
+        apply_router_weight_on_input: bool,
+    ) -> torch.Tensor:
+        """
+        Same as forward(), except uses routing_logits as opposed
+        to the topk_ids and topk_weights. This is used for kernels
+        that have fused router + experts (e.g. FLASHINFER_TRTLLM).
+        """
+
+        return self.fused_experts.apply_monolthic(
+            hidden_states=hidden_states,
+            w1=w1,
+            w2=w2,
+            router_logits=router_logits,
+            activation=activation,
+            global_num_experts=global_num_experts,
+            expert_map=expert_map,
+            apply_router_weight_on_input=apply_router_weight_on_input,
         )

@@ -1610,7 +1610,8 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
         assert self.kernel is not None
 
         if self.use_monolithic:
-            out = self.kernel.fused_experts.apply_monolithic(
+            # In monolithic case, router is fused with expert.
+            out = self.kernel.forward_monolithic(
                 x,
                 layer.w13_weight,
                 layer.w2_weight,
@@ -1618,28 +1619,27 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
                 activation=layer.activation,
                 global_num_experts=layer.global_num_experts,
                 expert_map=layer.expert_map,
-                a1q_scale=None,
-                a2_scale=None,
                 apply_router_weight_on_input=layer.apply_router_weight_on_input,
             )
+        else:
+            # Otherwise, expert selection is separate.
+            topk_weights, topk_ids = router.select_experts(
+                hidden_states=x,
+                router_logits=router_logits,
+            )
 
-        topk_weights, topk_ids = router.select_experts(
-            hidden_states=x,
-            router_logits=router_logits,
-        )
-
-        out = self.kernel(
-            x,
-            layer.w13_weight,
-            layer.w2_weight,
-            topk_weights,
-            topk_ids,
-            inplace=False,
-            activation=layer.activation,
-            global_num_experts=layer.global_num_experts,
-            expert_map=layer.expert_map,
-            apply_router_weight_on_input=layer.apply_router_weight_on_input,
-        )
+            out = self.kernel(
+                x,
+                layer.w13_weight,
+                layer.w2_weight,
+                topk_weights,
+                topk_ids,
+                inplace=False,
+                activation=layer.activation,
+                global_num_experts=layer.global_num_experts,
+                expert_map=layer.expert_map,
+                apply_router_weight_on_input=layer.apply_router_weight_on_input,
+            )
 
         return out
 

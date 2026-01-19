@@ -339,8 +339,6 @@ class FlashInferTrtLlmNvFp4Experts(mk.FusedMoEPermuteExpertsUnpermute):
         activation: str,
         global_num_experts: int,
         expert_map: torch.Tensor | None,
-        a1q_scale: torch.Tensor | None,
-        a2_scale: torch.Tensor | None,
         apply_router_weight_on_input: bool,
     ) -> torch.Tensor:
         assert activation == "silu"
