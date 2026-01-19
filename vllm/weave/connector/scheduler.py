@@ -58,19 +58,15 @@ class WeaveConnectorScheduler:
         # MVP-0: request-level recompute (token_ids-only seed).
         # If a request is marked for recompute, we will return 0 external
         # tokens so vLLM falls back to local compute.
-        recompute_ratio_raw: object = 0.0
-        disable_store_raw: object = False
-        # Prefer spec-level config if this is a WeaveOffloadingSpec.
         weave_cfg = getattr(spec, "weave_config", None)
-        if weave_cfg is not None:
-            recompute_ratio_raw = getattr(weave_cfg, "loom_recompute_ratio", 0.0)
-            disable_store_raw = getattr(weave_cfg, "loom_disable_store_for_recompute", False)
-            log_every_raw: object = getattr(weave_cfg, "loom_recompute_log_every_steps", 50)
-        else:
-            kv_extra = spec.vllm_config.kv_transfer_config.kv_connector_extra_config
-            recompute_ratio_raw = kv_extra.get("loom_recompute_ratio", 0.0)
-            disable_store_raw = kv_extra.get("loom_disable_store_for_recompute", False)
-            log_every_raw = kv_extra.get("loom_recompute_log_every_steps", 50)
+        if weave_cfg is None:
+            raise ValueError(
+                "WeaveConnectorScheduler requires WeaveOffloadingSpec (missing spec.weave_config)"
+            )
+
+        recompute_ratio_raw: object = getattr(weave_cfg, "loom_recompute_ratio", 0.0)
+        disable_store_raw: object = getattr(weave_cfg, "loom_disable_store_for_recompute", False)
+        log_every_raw: object = 50
 
         self._loom_recompute_auto: bool = False
         if isinstance(recompute_ratio_raw, str):

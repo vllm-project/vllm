@@ -137,7 +137,7 @@ class WeaveOffloadingConfig:
             eviction_policy=eviction_policy,
         )
 
-class WeaveOffloadingSpec(OffloadingSpec):
+class LoomOffloadingSpec(OffloadingSpec):
     def __init__(self, config: VllmConfig, kv_cache_config: KVCacheConfig | None):
         super().__init__(config, kv_cache_config)
         extra = self.extra_config
@@ -269,7 +269,7 @@ class WeaveOffloadingSpec(OffloadingSpec):
                 cpu_block_size=self.offloaded_block_size,
                 num_cpu_blocks=num_dram_blocks,
                 gpu_caches=kv_caches,
-                numa_node=0,
+                numa_node=1,
             )
 
             self._cxl_handlers = WeaveGPUDramOffloadingHandlers(

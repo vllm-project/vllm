@@ -208,3 +208,9 @@ KVConnectorFactory.register_connector(
     "vllm.weave.connector.connector",
     "WeaveConnector",
 )
+
+KVConnectorFactory.register_connector(
+    "LoomConnector",
+    "vllm.loom.connector.connector",
+    "LoomConnector",
+)

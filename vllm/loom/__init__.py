@@ -17,31 +17,31 @@ from importlib import import_module
 from typing import TYPE_CHECKING
 
 __all__ = [
-    "WeaveConnector",
+    "LoomConnector",
     "WeaveConnectorMetadata",
     "WeaveConnectorScheduler",
     "WeaveConnectorWorker",
-    "WeaveOffloadingSpec",
+    "LoomOffloadingSpec",
 ]
 
 
 def __getattr__(name: str):
-    if name == "WeaveConnector":
-        return import_module(".connector.connector", __name__).WeaveConnector
+    if name == "LoomConnector":
+        return import_module(".connector.connector", __name__).LoomConnector
     if name == "WeaveConnectorMetadata":
         return import_module(".connector.metadata", __name__).WeaveConnectorMetadata
     if name == "WeaveConnectorScheduler":
         return import_module(".connector.scheduler", __name__).WeaveConnectorScheduler
     if name == "WeaveConnectorWorker":
         return import_module(".connector.worker", __name__).WeaveConnectorWorker
-    if name == "WeaveOffloadingSpec":
-        return import_module(".kv_offload.spec", __name__).WeaveOffloadingSpec
+    if name == "LoomOffloadingSpec":
+        return import_module(".kv_offload.spec", __name__).LoomOffloadingSpec
     raise AttributeError(name)
 
 
 if TYPE_CHECKING:
-    from .connector.connector import WeaveConnector as WeaveConnector
+    from .connector.connector import LoomConnector as LoomConnector
     from .connector.metadata import WeaveConnectorMetadata as WeaveConnectorMetadata
     from .connector.scheduler import WeaveConnectorScheduler as WeaveConnectorScheduler
     from .connector.worker import WeaveConnectorWorker as WeaveConnectorWorker
-    from .kv_offload.spec import WeaveOffloadingSpec as WeaveOffloadingSpec
+    from .kv_offload.spec import LoomOffloadingSpec as LoomOffloadingSpec
