@@ -1025,7 +1025,8 @@ class Llama4ForConditionalGeneration(
             if renamed.startswith("language_model."):
                 language_model_weights.append((renamed, weight))
             else:
-                if isinstance(getattr(self, renamed), TowerMissingLayer):
+                attr = renamed.split(".", 1)[0]
+                if isinstance(getattr(self, attr), TowerMissingLayer):
                     continue
 
                 other_weights.append((renamed, weight))
