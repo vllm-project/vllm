@@ -8,6 +8,7 @@ import torch
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.config import ParallelConfig, VllmConfig, set_current_vllm_config
 from vllm.model_executor.layers.fused_moe.config import (
+    FusedMoEConfig,
     FusedMoEQuantConfig,
     fp8_w8a8_moe_quant_config,
 )
@@ -89,7 +90,13 @@ class TestData:
 
     @staticmethod
     def make_moe_tensors_8bit(
-        m: int, k: int, n: int, e: int, is_trtllm: bool, activation: str = "silu"
+        m: int,
+        k: int,
+        n: int,
+        e: int,
+        is_trtllm: bool,
+        activation: str = "silu",
+        topk: int = 1,
     ) -> "TestData":
         is_gated = activation != "relu2_no_mul"
 
@@ -145,6 +152,17 @@ class TestData:
         layer.intermediate_size_per_partition = n
         layer.ep_rank = 0
         layer.local_num_experts = e
+
+        layer.moe = FusedMoEConfig(
+            num_experts=e,
+            experts_per_token=topk,
+            hidden_dim=k,
+            intermediate_size_per_partition=n,
+            num_local_experts=e,
+            moe_parallel_config=layer.moe_parallel_config,
+            in_dtype=hidden_states.dtype,
+            is_act_and_mul=is_gated,
+        )
 
         return TestData(
             hidden_states=hidden_states,
@@ -218,7 +236,7 @@ def test_flashinfer_per_tensor_moe_fp8_no_graph(
             ),
         )
 
-        flashinfer_output = kernel.apply_monolithic(
+        flashinfer_output = kernel.forward_monolithic(
             hidden_states=td.hidden_states,
             w1=td.layer.w13_weight,
             w2=td.layer.w2_weight,
