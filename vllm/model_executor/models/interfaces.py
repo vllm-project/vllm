@@ -236,7 +236,7 @@ class SupportsMultiModal(Protocol):
 
         with torch.nn.modules.module.register_module_module_registration_hook(callback):  # noqa: E501,SIM117
             with (
-                _no_init_weights(self, lambda: TowerMissingLayer(modalities=modalities))
+                _no_init_weights(self, lambda: TowerMissingLayer(modalities))
                 if all(mm_config.get_limit_per_prompt(m) == 0 for m in modalities)
                 else nullcontext()
             ):
