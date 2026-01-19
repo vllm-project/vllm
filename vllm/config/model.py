@@ -503,7 +503,7 @@ class ModelConfig:
             logger.warning_once(
                 "`--convert mm_encoder_only` is deprecated and "
                 "will be removed in v0.15. "
-                "Please use --mm_encoder-only` instead."
+                "Please use --mm-encoder-only` instead."
             )
             mm_encoder_only = True
             self.convert = "none"
