@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 #
 # Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
 # Copyright 2025 The HuggingFace Inc. team
@@ -15,7 +17,6 @@
 # limitations under the License.
 
 import numpy as np
-
 from transformers.feature_extraction_utils import BatchFeature
 from transformers.image_utils import ImageInput
 from transformers.models.qwen2_5_vl.processing_qwen2_5_vl import (
