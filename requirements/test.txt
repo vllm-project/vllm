@@ -32,6 +32,8 @@ albumentations==1.4.6
     #   terratorch
 alembic==1.16.4
     # via mlflow
+annotated-doc==0.0.4
+    # via fastapi
 annotated-types==0.7.0
     # via pydantic
 antlr4-python3-runtime==4.9.3
@@ -206,7 +208,7 @@ encodec==0.1.1
     # via vocos
 evaluate==0.4.3
     # via lm-eval
-fastapi==0.116.1
+fastapi==0.128.0
     # via
     #   gpt-oss
     #   mlflow-skinny
@@ -1077,7 +1079,7 @@ sqlitedict==2.1.0
     # via lm-eval
 sqlparse==0.5.3
     # via mlflow-skinny
-starlette==0.46.2
+starlette==0.50.0
     # via
     #   fastapi
     #   schemathesis
@@ -1267,6 +1269,7 @@ typing-extensions==4.15.0
     #   pytorch-lightning
     #   sentence-transformers
     #   sqlalchemy
+    #   starlette
     #   torch
     #   torchgeo
     #   typer
