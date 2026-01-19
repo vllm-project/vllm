@@ -307,9 +307,10 @@ class UBatchWrapper:
     ) -> list[UbatchMetadata]:
         # Create one forward context per ubatch
         forward_contexts = []
+        # slot_mapping can be None, an empty dict (from create_forward_context
+        # converting None to {}), or a list of dicts (one per ubatch)
+        has_slot_mapping = slot_mapping and isinstance(slot_mapping, list)
         for i, ubatch_slice in enumerate(ubatch_slices):
-            assert slot_mapping is None or isinstance(slot_mapping, list)
-
             forward_contexts.append(
                 create_forward_context(
                     attn_metadata[i] if attn_metadata is not None else None,
@@ -317,7 +318,7 @@ class UBatchWrapper:
                     dp_metadata=dp_metadata[i],
                     batch_descriptor=batch_descriptor,
                     cudagraph_runtime_mode=cudagraph_runtime_mode,
-                    slot_mapping=slot_mapping[i] if slot_mapping is not None else None,
+                    slot_mapping=slot_mapping[i] if has_slot_mapping else None,
                 )
             )
 
