@@ -62,20 +62,31 @@ class ServeSubcommand(CLISubcommand):
             run_headless(args)
             return
 
+        # Detect LB mode for defaulting api_server_count.
+        # External LB: --data-parallel-external-lb or --data-parallel-rank
+        # Hybrid LB: --data-parallel-hybrid-lb or --data-parallel-start-rank
+        is_external_lb = (
+            args.data_parallel_external_lb or args.data_parallel_rank is not None
+        )
+        is_hybrid_lb = (
+            args.data_parallel_hybrid_lb
+            or args.data_parallel_start_rank is not None
+        )
+
+        if is_external_lb and is_hybrid_lb:
+            raise ValueError(
+                "Cannot use both external and hybrid data parallel load "
+                "balancing modes. External LB is enabled via "
+                "--data-parallel-external-lb or --data-parallel-rank. "
+                "Hybrid LB is enabled via --data-parallel-hybrid-lb or "
+                "--data-parallel-start-rank. Use one mode or the other."
+            )
+
         # Default api_server_count if not explicitly set.
-        # - External LB: Leave as 1
-        # - Hybrid LB: Use local DP size
+        # - External LB: Leave as 1 (external LB handles distribution)
+        # - Hybrid LB: Use local DP size (internal LB for local ranks only)
         # - Internal LB: Use full DP size
         if args.api_server_count is None:
-            # External LB is inferred when data_parallel_rank is explicitly set
-            is_external_lb = (
-                args.data_parallel_external_lb or args.data_parallel_rank is not None
-            )
-            # Hybrid LB is inferred when data_parallel_start_rank is set
-            is_hybrid_lb = (
-                args.data_parallel_hybrid_lb
-                or args.data_parallel_start_rank is not None
-            )
             if is_external_lb:
                 args.api_server_count = 1
             elif is_hybrid_lb:
