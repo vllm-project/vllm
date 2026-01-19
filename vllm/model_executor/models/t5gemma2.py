@@ -43,8 +43,11 @@ from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
-from vllm.model_executor.models.interfaces import (SupportsLoRA,
-                                                  SupportsMultiModal, SupportsPP)
+from vllm.model_executor.models.interfaces import (
+    SupportsLoRA,
+    SupportsMultiModal,
+    SupportsPP,
+)
 from vllm.model_executor.models.siglip import SiglipVisionModel
 from vllm.sequence import IntermediateTensors
 from vllm.v1.attention.backend import AttentionType
@@ -290,7 +293,7 @@ class T5Gemma2Attention(nn.Module):
         # Add q_norm and k_norm for attention head normalization (matches transformers)
         self.q_norm = GemmaRMSNorm(self.head_dim, eps=1e-6)
         self.k_norm = GemmaRMSNorm(self.head_dim, eps=1e-6)
-        
+
         if rope_parameters:
             self.rotary_emb = get_rope(
                 self.head_dim,
@@ -299,8 +302,7 @@ class T5Gemma2Attention(nn.Module):
                 base=rope_parameters["rope_theta"],
                 is_neox_style=True,
                 rope_scaling=None,
-        )
-
+            )
 
         # Use MMEncoderAttention for encoder (no KV cache), Attention for decoder
         if is_encoder:
@@ -344,7 +346,7 @@ class T5Gemma2Attention(nn.Module):
         # Add unsqueeze(2) to make it 4D for norm, then squeeze back
         q = self.q_norm(q.unsqueeze(2)).squeeze(2)
         k = self.k_norm(k.unsqueeze(2)).squeeze(2)
-        
+
         q, k = self.rotary_emb(positions, q, k)
 
         # vLLM attention expects 3D tensors: (num_tokens, num_heads, head_dim)
@@ -422,7 +424,7 @@ class T5Gemma2MergedAttention(nn.Module):
         # Add q_norm and k_norm for attention head normalization (matches transformers)
         self.q_norm = GemmaRMSNorm(self.head_dim, eps=1e-6)
         self.k_norm = GemmaRMSNorm(self.head_dim, eps=1e-6)
-        
+
         if rope_parameters:
             self.rotary_emb = get_rope(
                 self.head_dim,
@@ -431,7 +433,7 @@ class T5Gemma2MergedAttention(nn.Module):
                 base=rope_parameters["rope_theta"],
                 is_neox_style=True,
                 rope_scaling=None,
-        )
+            )
 
         # Merged attention uses DECODER attention type
         self.attn = Attention(
@@ -765,13 +767,11 @@ class T5Gemma2Encoder(nn.Module):
 
             if image_mask.any():
                 # Flatten image features
-                flat_image_features = image_features.view(
-                    -1, image_features.size(-1))
+                flat_image_features = image_features.view(-1, image_features.size(-1))
 
                 # Scatter image features into hidden states
                 hidden_states = hidden_states.clone()
-                hidden_states[image_mask] = flat_image_features.to(
-                    hidden_states.dtype)
+                hidden_states[image_mask] = flat_image_features.to(hidden_states.dtype)
 
         # Pass through encoder layers
         for layer in islice(self.layers, self.start_layer, self.end_layer):
@@ -1184,8 +1184,9 @@ class T5Gemma2Model(nn.Module):
         return loaded_params
 
 
-class T5Gemma2ForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsLoRA,
-                                     SupportsPP):
+class T5Gemma2ForConditionalGeneration(
+    nn.Module, SupportsMultiModal, SupportsLoRA, SupportsPP
+):
     """T5Gemma2 for conditional generation (seq2seq)."""
 
     packed_modules_mapping = {
@@ -1245,7 +1246,8 @@ class T5Gemma2ForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsLo
             encoder_input_ids = kwargs.get("encoder_input_ids")
             encoder_positions = kwargs.get("encoder_positions")
             encoder_outputs = self.model.get_encoder_outputs(
-                encoder_input_ids, encoder_positions, pixel_values)
+                encoder_input_ids, encoder_positions, pixel_values
+            )
 
         decoder_outputs = self.model(
             input_ids=input_ids,
