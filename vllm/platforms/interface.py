@@ -200,6 +200,31 @@ class Platform:
 
     @classmethod
     def device_id_to_physical_device_id(cls, device_id: int):
+        """Convert logical device ID to physical device ID.
+
+        Maps a logical device ID (index into the device control environment
+        variable list) to the actual physical device ID used by the hardware.
+
+        For CUDA platforms with NVML support, this method supports both integer
+        indices and UUID formats (GPU-xxx, MIG-xxx) in CUDA_VISIBLE_DEVICES.
+
+        Examples:
+            CUDA_VISIBLE_DEVICES="0,1" -> device_id=0 returns 0
+            CUDA_VISIBLE_DEVICES="2,3" -> device_id=0 returns 2
+            CUDA_VISIBLE_DEVICES="GPU-abc...,GPU-def..." -> device_id=0 returns
+                the physical index of GPU with UUID "GPU-abc..."
+            CUDA_VISIBLE_DEVICES="0,GPU-abc,2" -> Mixed format supported
+
+        Args:
+            device_id: Logical device ID (0-indexed position in the device list)
+
+        Returns:
+            Physical device ID for hardware queries
+
+        Raises:
+            IndexError: If device_id is out of range
+            ValueError: If device ID format is invalid (CUDA platforms only)
+        """
         # Treat empty device control env var as unset. This is a valid
         # configuration in Ray setups where the engine is launched in
         # a CPU-only placement group located on a GPU node.
