@@ -76,8 +76,8 @@ async def create_chat_completion(request: ChatCompletionRequest, raw_request: Re
 @router.post(
     "/v1/chat/completions/render",
     dependencies=[Depends(validate_json_request)],
+    response_model=list,
     responses={
-        HTTPStatus.OK.value: {"model": dict},
         HTTPStatus.BAD_REQUEST.value: {"model": ErrorResponse},
         HTTPStatus.NOT_FOUND.value: {"model": ErrorResponse},
         HTTPStatus.INTERNAL_SERVER_ERROR.value: {"model": ErrorResponse},
