@@ -415,6 +415,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             if self.supports_mm_inputs:
                 self.encoder_runner.remove_request(req_id)
 
+    def free_states(self, scheduler_output: SchedulerOutput) -> None:
         if self.supports_mm_inputs:
             for mm_hash in scheduler_output.free_encoder_mm_hashes:
                 self.encoder_runner.free_encoder_cache(mm_hash)
@@ -935,6 +936,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         if not dummy_run:
             # Update the request states.
             self.finish_requests(scheduler_output)
+            self.free_states(scheduler_output)
             self.add_requests(scheduler_output)
             self.update_requests(scheduler_output)
             self.block_tables.apply_staged_writes()
