@@ -36,7 +36,7 @@ class CompressedTensorsW8A16Fp8(CompressedTensorsScheme):
     @classmethod
     def get_min_capability(cls) -> int:
         if current_platform.is_xpu():
-            return True
+            return 0
         # ampere and up
         return 80
 
@@ -75,24 +75,23 @@ class CompressedTensorsW8A16Fp8(CompressedTensorsScheme):
             device = layer.weight.device
             # Get the max scale on the weight's device
             max_scale = torch.max(layer.weight_scale.data.to(device))
-            # Dequantize the weights based on the layer.logical_widths
-            weight_fp32 = torch.empty(
-                layer.weight.size(0),
-                layer.weight.size(1),
-                dtype=torch.float32,
-                device=device,
-            )
+            orig_dtype = layer.weight.dtype
             start_idx = 0
             for index, width in enumerate(layer.logical_widths):
                 end_idx = start_idx + width
-                scale = layer.weight_scale.data[index].to(device)
-                weight_fp32[start_idx:end_idx, :] = (
-                    layer.weight.data[start_idx:end_idx, :].to(torch.float32) * scale
-                )
+                if width == 0:
+                    continue
+
+                shard_weight = layer.weight.data[start_idx:end_idx, :]
+                shard_scale = layer.weight_scale.data[index].to(device)
+
+                # Dequantize and then requantize with max_scale
+                dequantized_shard = shard_weight.to(torch.float32) * shard_scale
+                requantized_shard = (dequantized_shard / max_scale).to(orig_dtype)
+
+                layer.weight.data[start_idx:end_idx, :] = requantized_shard
                 start_idx = end_idx
 
-            # Requantize the weights w/ max scale
-            layer.weight.data = (weight_fp32 / max_scale).to(torch.float8_e4m3fn)
             layer.weight_scale = torch.nn.Parameter(max_scale, requires_grad=False).to(
                 device
             )
