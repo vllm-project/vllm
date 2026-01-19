@@ -5,7 +5,7 @@ from collections.abc import Callable
 
 import torch
 from compressed_tensors.quantization import QuantizationStrategy
-from vllm.platforms import current_platform
+
 from vllm.model_executor.layers.quantization.compressed_tensors.schemes import (
     CompressedTensorsScheme,
 )
@@ -21,13 +21,12 @@ from vllm.model_executor.parameter import (
     ModelWeightParameter,
     PerTensorScaleParameter,
 )
+from vllm.platforms import current_platform
 
 __all__ = ["CompressedTensorsW8A16Fp8"]
 
 SUPPORTED_STRATEGIES = [QuantizationStrategy.CHANNEL, QuantizationStrategy.TENSOR]
 
-# import vllm_xpu_kernels._C  # noqa: F401
-# import vllm_xpu_kernels._xpu_C  # noqa: F401
 
 class CompressedTensorsW8A16Fp8(CompressedTensorsScheme):
     def __init__(self, strategy: str, is_static_input_scheme: bool):
@@ -69,7 +68,6 @@ class CompressedTensorsW8A16Fp8(CompressedTensorsScheme):
         prepare_fp8_layer_for_marlin(layer)
 
     def process_weights_after_loading_xpu(self, layer) -> None:
-
         # Give xpu only support to per-tensor strategy for now
         # So if we have a fused module (QKV, MLP) with per tensor scales,
         # requantize the weights w/ max scale
@@ -79,25 +77,32 @@ class CompressedTensorsW8A16Fp8(CompressedTensorsScheme):
             max_scale = torch.max(layer.weight_scale.data.to(device))
             # Dequantize the weights based on the layer.logical_widths
             weight_fp32 = torch.empty(
-                layer.weight.size(0), layer.weight.size(1), dtype=torch.float32, device=device
+                layer.weight.size(0),
+                layer.weight.size(1),
+                dtype=torch.float32,
+                device=device,
             )
             start_idx = 0
             for index, width in enumerate(layer.logical_widths):
                 end_idx = start_idx + width
                 scale = layer.weight_scale.data[index].to(device)
                 weight_fp32[start_idx:end_idx, :] = (
-                    layer.weight.data[start_idx:end_idx, :].to(torch.float32)
-                    * scale
+                    layer.weight.data[start_idx:end_idx, :].to(torch.float32) * scale
                 )
                 start_idx = end_idx
 
             # Requantize the weights w/ max scale
             layer.weight.data = (weight_fp32 / max_scale).to(torch.float8_e4m3fn)
-            layer.weight_scale = torch.nn.Parameter(max_scale, requires_grad=False).to(device)
-        if self.strategy == QuantizationStrategy.TENSOR and len(layer.logical_widths) > 1:
+            layer.weight_scale = torch.nn.Parameter(max_scale, requires_grad=False).to(
+                device
+            )
+
+        if (
+            self.strategy == QuantizationStrategy.TENSOR
+            and len(layer.logical_widths) > 1
+        ):
             requant_weight_per_tensor(layer)
         layer.weight = torch.nn.Parameter(layer.weight.data.t(), requires_grad=False)
-
 
     def create_weights(
         self,
@@ -165,7 +170,9 @@ class CompressedTensorsW8A16Fp8(CompressedTensorsScheme):
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
         if current_platform.is_xpu():
-            return torch.ops._xpu_C.fp8_gemm_w8a16(x, layer.weight, layer.weight_scale, bias)
+            return torch.ops._xpu_C.fp8_gemm_w8a16(
+                x, layer.weight, layer.weight_scale, bias
+            )
         return apply_fp8_marlin_linear(
             input=x,
             weight=layer.weight,

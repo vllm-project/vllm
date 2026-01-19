@@ -6,6 +6,7 @@ import os
 from typing import TYPE_CHECKING, Optional
 
 import torch
+import vllm_xpu_kernels._xpu_C  # noqa
 
 from vllm.attention.backends.registry import AttentionBackendEnum
 from vllm.logger import init_logger
