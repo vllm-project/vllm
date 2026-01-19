@@ -70,6 +70,7 @@ from vllm.sequence import IntermediateTensors
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
 from .interfaces import (
+    LMMissingLayer,
     MixtureOfExperts,
     MultiModalEmbeddings,
     SupportsEagle3,
@@ -1022,13 +1023,13 @@ class Llama4ForConditionalGeneration(
         for name, weight in weights:
             renamed = self._rename_weight_for_modelopt_checkpoint(name)
 
+            attr = renamed.split(".", 1)[0]
+            if isinstance(getattr(self, attr), (LMMissingLayer, TowerMissingLayer)):
+                continue
+
             if renamed.startswith("language_model."):
                 language_model_weights.append((renamed, weight))
             else:
-                attr = renamed.split(".", 1)[0]
-                if isinstance(getattr(self, attr), TowerMissingLayer):
-                    continue
-
                 other_weights.append((renamed, weight))
 
         return language_model_weights, other_weights
