@@ -330,7 +330,7 @@ class FlashInferTrtLlmNvFp4Experts(mk.FusedMoEPermuteExpertsUnpermute):
             output=output,
         )
 
-    def apply_monolthic(
+    def apply_monolithic(
         self,
         hidden_states: torch.Tensor,
         w1: torch.Tensor,
@@ -341,9 +341,6 @@ class FlashInferTrtLlmNvFp4Experts(mk.FusedMoEPermuteExpertsUnpermute):
         expert_map: torch.Tensor | None,
         a1q_scale: torch.Tensor | None,
         a2_scale: torch.Tensor | None,
-        workspace13: torch.Tensor,
-        workspace2: torch.Tensor,
-        expert_tokens_meta: mk.ExpertTokensMetadata | None,
         apply_router_weight_on_input: bool,
     ) -> torch.Tensor:
         assert activation == "silu"

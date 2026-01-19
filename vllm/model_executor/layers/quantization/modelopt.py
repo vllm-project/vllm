@@ -1349,7 +1349,6 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
             self.nvfp4_backend
         )
         self.kernel: mk.FusedMoEModularKernel | None = None
-        self.experts: mk.FusedMoEPermuteExpertsUnpermute | None = None
         self.use_monolithic = (
             self.nvfp4_backend == NvFp4MoeBackend.FLASHINFER_TRTLLM
             and not moe_config.moe_parallel_config.use_all2all_kernels
@@ -1560,7 +1559,7 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
 
         self.moe_quant_config = self.get_fused_moe_quant_config(layer)
         use_dp = self.moe.dp_size > 1
-        if self.moe_quant_config is not None and not use_dp:
+        if not use_dp:
             self.kernel = make_nvfp4_moe_kernel(
                 backend=self.nvfp4_backend,
                 quant_config=self.moe_quant_config,
@@ -1586,9 +1585,7 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
         extra_tensors: list[torch.Tensor] = [hidden_states_sf]
         return hidden_states_fp4, extra_tensors
 
-    def get_fused_moe_quant_config(
-        self, layer: torch.nn.Module
-    ) -> FusedMoEQuantConfig | None:
+    def get_fused_moe_quant_config(self, layer: torch.nn.Module) -> FusedMoEQuantConfig:
         return make_nvfp4_moe_quant_config(
             backend=self.nvfp4_backend,
             w13_scale=layer.w13_weight_scale,
@@ -1610,17 +1607,19 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
         x: torch.Tensor,
         router_logits: torch.Tensor,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+        assert self.kernel is not None
+
         if self.use_monolithic:
-            assert self.experts is not None
-            out = self.experts.apply_monolithic(
+            out = self.kernel.fused_experts.apply_monolithic(
                 x,
                 layer.w13_weight,
                 layer.w2_weight,
                 router_logits,
-                inplace=False,
                 activation=layer.activation,
                 global_num_experts=layer.global_num_experts,
                 expert_map=layer.expert_map,
+                a1q_scale=None,
+                a2_scale=None,
                 apply_router_weight_on_input=layer.apply_router_weight_on_input,
             )
 
@@ -1629,7 +1628,6 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
             router_logits=router_logits,
         )
 
-        assert self.kernel is not None
         out = self.kernel(
             x,
             layer.w13_weight,
