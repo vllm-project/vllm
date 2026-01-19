@@ -15,6 +15,7 @@ from vllm.config.compilation import CUDAGraphMode
 from vllm.forward_context import set_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.model_loader import get_model_loader
+from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.utils.mem_utils import DeviceMemoryProfiler, format_gib
 from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
 from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
@@ -48,6 +49,7 @@ from vllm.v1.worker.gpu.input_batch import (
     prepare_pos_seq_lens,
     prepare_prefill_inputs,
 )
+from vllm.v1.worker.gpu.mm.encoder_runner import EncoderRunner
 from vllm.v1.worker.gpu.mm.mrope_utils import MRopeState
 from vllm.v1.worker.gpu.sample.logprob import compute_prompt_logprobs
 from vllm.v1.worker.gpu.sample.output import SamplerOutput
@@ -96,6 +98,17 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         self.inputs_embeds_size = self.model_config.get_inputs_embeds_size()
 
         # Multimodal
+        self.mm_registry = MULTIMODAL_REGISTRY
+        self.supports_mm_inputs = self.mm_registry.supports_multimodal_inputs(
+            self.model_config
+        )
+        if self.supports_mm_inputs:
+            self.encoder_runner = EncoderRunner(
+                max_num_tokens=self.max_num_tokens,
+                hidden_size=self.inputs_embeds_size,
+                dtype=self.dtype,
+                device=self.device,
+            )
         self.uses_mrope = self.model_config.uses_mrope
         if self.uses_mrope:
             self.mrope_states = MRopeState(
@@ -135,9 +148,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         self.input_buffers = InputBuffers(
             max_num_reqs=self.max_num_reqs,
             max_num_tokens=self.max_num_tokens,
-            inputs_embeds_size=self.inputs_embeds_size,
-            vocab_size=self.vocab_size,
-            dtype=self.dtype,
             device=self.device,
         )
         self.sampler = Sampler(
@@ -360,10 +370,14 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             mrope_positions = None
             if self.uses_mrope:
                 mrope_positions = self.mrope_states.mrope_positions
+            inputs_embeds = None
+            if self.supports_mm_inputs:
+                inputs_embeds = self.encoder_runner.inputs_embeds
             self.cudagraph_manager.capture(
                 model=self.model,
                 input_buffers=self.input_buffers,
                 mrope_positions=mrope_positions,
+                inputs_embeds=inputs_embeds,
                 block_tables=self.block_tables,
                 attn_metadata_builders=self.attn_metadata_builders,
                 kv_cache_config=self.kv_cache_config,
@@ -394,8 +408,16 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         if scheduler_output.preempted_req_ids is not None:
             for req_id in scheduler_output.preempted_req_ids:
                 self.req_states.remove_request(req_id)
+                if self.supports_mm_inputs:
+                    self.encoder_runner.remove_request(req_id)
         for req_id in scheduler_output.finished_req_ids:
             self.req_states.remove_request(req_id)
+            if self.supports_mm_inputs:
+                self.encoder_runner.remove_request(req_id)
+
+        if self.supports_mm_inputs:
+            for mm_hash in scheduler_output.free_encoder_mm_hashes:
+                self.encoder_runner.free_encoder_cache(mm_hash)
 
     def add_requests(self, scheduler_output: SchedulerOutput) -> None:
         for new_req_data in scheduler_output.scheduled_new_reqs:
@@ -414,13 +436,16 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             )
             req_index = self.req_states.req_id_to_index[req_id]
 
+            if self.supports_mm_inputs:
+                self.encoder_runner.add_request(req_id, new_req_data.mm_features)
+
             # Pre-compute M-RoPE positions for prefill.
             if self.uses_mrope:
                 self.mrope_states.init_prefill_mrope_positions(
                     req_index,
                     self.model,  # type: ignore
                     new_req_data.prefill_token_ids,
-                    mm_features=[],  # TODO
+                    mm_features=new_req_data.mm_features,
                 )
 
             self.block_tables.append_block_ids(
@@ -615,11 +640,32 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             input_ids=input_ids,
             positions=positions,
             mrope_positions=mrope_positions,
+            inputs_embeds=None,
             attn_metadata=attn_metadata,
             logits_indices=logits_indices,
             cu_num_logits=cu_num_logits,
             cu_num_logits_np=cu_num_logits_np,
         )
+
+    @torch.inference_mode()
+    def get_mm_embeddings(
+        self,
+        scheduled_encoder_inputs: dict[str, list[int]],
+        input_batch: InputBatch,
+    ) -> tuple[list[torch.Tensor], torch.Tensor]:
+        mm_hashes, mm_kwargs = self.encoder_runner.prepare_mm_inputs(
+            scheduled_encoder_inputs
+        )
+        self.encoder_runner.execute_mm_encoder(self.model, mm_hashes, mm_kwargs)
+        mm_embeds, is_mm_embed = self.encoder_runner.gather_mm_embeddings(
+            input_batch.req_ids,
+            input_batch.num_tokens,
+            input_batch.num_scheduled_tokens,
+            input_batch.query_start_loc_np,
+            self.req_states.prefill_len.np[input_batch.idx_mapping_np],
+            self.req_states.num_computed_prefill_tokens[input_batch.idx_mapping_np],
+        )
+        return mm_embeds, is_mm_embed
 
     def sample(
         self,
@@ -810,20 +856,14 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         num_rejected: torch.Tensor,
     ) -> torch.Tensor:
         assert self.speculator is not None
-        last_sampled_tokens = self.req_states.last_sampled_tokens[
-            input_batch.idx_mapping
-        ]
-        next_prefill_tokens = self.req_states.next_prefill_tokens[
-            input_batch.idx_mapping
-        ]
         draft_tokens = self.speculator.propose(
             input_batch,
             last_hidden_states,
             aux_hidden_states,
             num_sampled,
             num_rejected,
-            last_sampled_tokens,
-            next_prefill_tokens,
+            self.req_states.last_sampled_tokens,
+            self.req_states.next_prefill_tokens,
             self.sampler.sampling_states.temperature.gpu,
             self.sampler.sampling_states.seeds.gpu,
         )
@@ -927,6 +967,18 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     input_batch.num_scheduled_tokens,
                 )
                 self._set_active_loras(*lora_inputs)
+
+            if self.supports_mm_inputs:
+                # Execute the multimodal encoder.
+                mm_embeds, is_mm_embed = self.get_mm_embeddings(
+                    scheduler_output.scheduled_encoder_inputs, input_batch
+                )
+                inputs_embeds = self.encoder_runner.get_inputs_embeds(
+                    self.model, input_batch.input_ids, mm_embeds, is_mm_embed
+                )
+                input_batch.inputs_embeds = inputs_embeds[
+                    : input_batch.num_tokens_after_padding
+                ]
         else:
             # No actual tokens to run. A dummy run for DP or memory profiling.
             num_reqs = min(num_tokens_after_padding, self.max_num_reqs)
@@ -969,6 +1021,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 hidden_states = self.model(
                     input_ids=input_batch.input_ids,
                     positions=positions,
+                    inputs_embeds=input_batch.inputs_embeds,
                 )
 
         self.execute_model_state = hidden_states, input_batch
