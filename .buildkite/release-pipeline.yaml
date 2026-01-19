@@ -141,7 +141,7 @@ steps:
       queue: cpu_queue_postmerge
     commands:
       - "aws ecr-public get-login-password --region us-east-1 | docker login --username AWS --password-stdin public.ecr.aws/q9t5s3a7"
-      - "DOCKER_BUILDKIT=1 docker build --build-arg max_jobs=16 --build-arg USE_SCCACHE=1 --build-arg GIT_REPO_CHECK=1 --build-arg CUDA_VERSION=13.0.2 --build-arg FLASHINFER_AOT_COMPILE=true --build-arg INSTALL_KV_CONNECTORS=true --build-arg BUILD_BASE_IMAGE=nvidia/cuda:13.0.2-devel-ubuntu22.04 --tag public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-$(uname -m)-cu130 --target vllm-openai --progress plain -f docker/Dockerfile ."
+      - "DOCKER_BUILDKIT=1 docker build --build-arg max_jobs=16 --build-arg USE_SCCACHE=1 --build-arg GIT_REPO_CHECK=1 --build-arg CUDA_VERSION=13.0.1 --build-arg INSTALL_KV_CONNECTORS=true --build-arg BUILD_BASE_IMAGE=nvidia/cuda:13.0.1-devel-ubuntu22.04 --tag public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-$(uname -m)-cu130 --target vllm-openai --progress plain -f docker/Dockerfile ."
       - "docker push public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-$(uname -m)-cu130"
       # re-tag to default image tag and push, just in case arm64 build fails
       - "docker tag public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-$(uname -m)-cu130 public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-cu130"
@@ -154,7 +154,8 @@ steps:
       queue: arm64_cpu_queue_postmerge
     commands:
       - "aws ecr-public get-login-password --region us-east-1 | docker login --username AWS --password-stdin public.ecr.aws/q9t5s3a7"
-      - "DOCKER_BUILDKIT=1 docker build --build-arg max_jobs=16 --build-arg USE_SCCACHE=1 --build-arg GIT_REPO_CHECK=1 --build-arg CUDA_VERSION=13.0.2 --build-arg FLASHINFER_AOT_COMPILE=true --build-arg torch_cuda_arch_list='8.7 8.9 9.0 10.0+PTX 12.0' --build-arg INSTALL_KV_CONNECTORS=true --build-arg BUILD_BASE_IMAGE=nvidia/cuda:13.0.2-devel-ubuntu22.04 --tag public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-$(uname -m)-cu130 --target vllm-openai --progress plain -f docker/Dockerfile ."
+      # compute capability 12.0 for RTX-50 series / RTX PRO 6000 Blackwell, 12.1 for DGX Spark
+      - "DOCKER_BUILDKIT=1 docker build --build-arg max_jobs=16 --build-arg USE_SCCACHE=1 --build-arg GIT_REPO_CHECK=1 --build-arg CUDA_VERSION=13.0.1 --build-arg torch_cuda_arch_list='8.7 8.9 9.0 10.0+PTX 12.0 12.1' --build-arg INSTALL_KV_CONNECTORS=true --build-arg BUILD_BASE_IMAGE=nvidia/cuda:13.0.1-devel-ubuntu22.04 --tag public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-$(uname -m)-cu130 --target vllm-openai --progress plain -f docker/Dockerfile ."
       - "docker push public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-$(uname -m)-cu130"
 
   - label: "Create multi-arch manifest - CUDA 13.0"
@@ -243,7 +244,6 @@ steps:
       # Build vLLM ROCm image using the base
       - "DOCKER_BUILDKIT=1 docker build --build-arg max_jobs=16 --build-arg BASE_IMAGE=rocm/vllm-dev:base-$BUILDKITE_COMMIT --tag public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-rocm --target vllm-openai --progress plain -f docker/Dockerfile.rocm ."
       - "docker push public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-rocm"
-
   
   - label: "Build and publish nightly multi-arch image to DockerHub"
     depends_on:
@@ -252,17 +252,7 @@ steps:
     agents:
       queue: small_cpu_queue_postmerge
     commands:
-      - "aws ecr-public get-login-password --region us-east-1 | docker login --username AWS --password-stdin public.ecr.aws/q9t5s3a7"
-      - "docker pull public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-x86_64"
-      - "docker pull public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-aarch64"
-      - "docker tag public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-x86_64 vllm/vllm-openai:nightly-x86_64"
-      - "docker tag public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-aarch64 vllm/vllm-openai:nightly-aarch64"
-      - "docker push vllm/vllm-openai:nightly-x86_64"
-      - "docker push vllm/vllm-openai:nightly-aarch64"
-      - "docker manifest create vllm/vllm-openai:nightly vllm/vllm-openai:nightly-x86_64 vllm/vllm-openai:nightly-aarch64 --amend"
-      - "docker manifest create vllm/vllm-openai:nightly-$BUILDKITE_COMMIT vllm/vllm-openai:nightly-x86_64 vllm/vllm-openai:nightly-aarch64 --amend"
-      - "docker manifest push vllm/vllm-openai:nightly"
-      - "docker manifest push vllm/vllm-openai:nightly-$BUILDKITE_COMMIT"
+      - "bash .buildkite/scripts/push-nightly-builds.sh"
       # Clean up old nightly builds (keep only last 14)
       - "bash .buildkite/scripts/cleanup-nightly-builds.sh"
     plugins:
@@ -272,6 +262,25 @@ steps:
     env:
       DOCKER_BUILDKIT: "1"
       DOCKERHUB_USERNAME: "vllmbot"
+
+  - label: "Build and publish nightly multi-arch image to DockerHub - CUDA 13.0"
+    depends_on:
+      - create-multi-arch-manifest-cuda-13-0
+    if: build.env("NIGHTLY") == "1"
+    agents:
+      queue: small_cpu_queue_postmerge
+    commands:
+      - "bash .buildkite/scripts/push-nightly-builds.sh cu130"
+      # Clean up old nightly builds (keep only last 14)
+      - "bash .buildkite/scripts/cleanup-nightly-builds.sh cu130-nightly-"
+    plugins:
+      - docker-login#v3.0.0:
+          username: vllmbot
+          password-env: DOCKERHUB_TOKEN
+    env:
+      DOCKER_BUILDKIT: "1"
+      DOCKERHUB_USERNAME: "vllmbot"
+
 
   # =============================================================================
   # ROCm Release Pipeline (x86_64 only)
