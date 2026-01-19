@@ -282,12 +282,14 @@ class InternVisionEncoderLayer(nn.Module):
         num_dummy_heads: int = 0,
         prefix: str = "",
         use_data_parallel: bool = False,
+        attn_cls: type[InternParallelAttention] = InternParallelAttention,
     ) -> None:
         super().__init__()
 
         self.embed_dim = config.hidden_size
         self.intermediate_size = config.intermediate_size
         self.norm_type = config.norm_type
+        self.attn_cls = attn_cls
 
         self.attn = self._init_attn(
             config,
@@ -327,7 +329,7 @@ class InternVisionEncoderLayer(nn.Module):
         use_data_parallel = (
             use_data_parallel or (num_heads + num_dummy_heads) % tp_size != 0
         )
-        return InternParallelAttention(
+        return self.attn_cls(
             config,
             quant_config=quant_config,
             num_dummy_heads=num_dummy_heads,
@@ -356,10 +358,12 @@ class InternVisionEncoder(nn.Module):
         num_dummy_heads: int = 0,
         prefix: str = "",
         use_data_parallel: bool = False,
+        layer_cls: type[InternVisionEncoderLayer] = InternVisionEncoderLayer,
     ):
         super().__init__()
 
         self.config = config
+        self.layer_cls = layer_cls
 
         if num_hidden_layers_override is None:
             num_hidden_layers = config.num_hidden_layers
@@ -368,7 +372,7 @@ class InternVisionEncoder(nn.Module):
 
         self.layers = nn.ModuleList(
             [
-                InternVisionEncoderLayer(
+                self.layer_cls(
                     config,
                     quant_config,
                     num_dummy_heads=num_dummy_heads,
