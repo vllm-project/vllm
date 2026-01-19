@@ -134,21 +134,20 @@ def finalize_layerwise_reload(layer: torch.nn.Module) -> None:
         raise ValueError("Only some weights loaded")
 
     # Attention/MLA layers are processed after all other layers
-    if isinstance(layer, (Attention, MLAAttention)):
-        if info.load_numel > 0:
-            # when implementing, remember to unwrap layerwise loaders
-            raise NotImplementedError("Layerwise reloading of Q/K/V scale weights")
+    elif isinstance(layer, (Attention, MLAAttention)) and info.load_numel > 0:
+        # when implementing, remember to unwrap layerwise loaders
+        raise NotImplementedError("Layerwise reloading of Q/K/V scale weights")
 
-        # No processing: place kernel tensors back
-        else:
-            for name in get_layer_tensors(layer):
-                delattr(layer, name)
+    # No weights were loaded, place kernel tensors back
+    elif info.is_initialized():
+        for name in get_layer_tensors(layer):
+            delattr(layer, name)
 
-            parameters, buffers = LAYER_RELOADING_INFO[layer].kernel_tensors
-            for name, param in parameters.items():
-                layer.register_parameter(name, param)
-            for name, buffer in buffers.items():
-                layer.register_buffer(name, buffer)
+        parameters, buffers = LAYER_RELOADING_INFO[layer].kernel_tensors
+        for name, param in parameters.items():
+            layer.register_parameter(name, param)
+        for name, buffer in buffers.items():
+            layer.register_buffer(name, buffer)
 
     info.reset()
 
