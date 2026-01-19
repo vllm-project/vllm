@@ -17,7 +17,6 @@ from vllm.model_executor.layers.attention.mla_attention import (
 from vllm.platforms import current_platform
 from vllm.platforms.interface import DeviceCapability
 from vllm.triton_utils import tl, triton
-from vllm.utils.math_utils import cdiv
 from vllm.v1.attention.backend import (
     AttentionBackend,
     AttentionCGSupport,
@@ -417,14 +416,19 @@ class FlashMLASparseMetadataBuilder(AttentionMetadataBuilder[FlashMLASparseMetad
             (max_num_seqs, 1), dtype=torch.int32, device=self.device
         )
 
-        # Equation taken from FlashMLA/csrc/pybind.cpp
-        h_q, h_k = self.num_heads, 1
-        s_q = 1  # inversely proportional to s_q, so s_q = 1 is the largest
-        max_num_sm_parts = int(
-            max((sm_count // 2) / h_k // (cdiv(h_q // h_k, 2 * 64) * s_q), 1)
-        )
+        # Equation taken from FlashMLA/csrc/api/sparse_decode.h
+        # For sparse FP8 decode, the formula depends on architecture:
+        # - SM90 (Hopper): num_sm_parts = num_sms / s_q / (h_q/64)
+        # - SM100 (Blackwell head64/head64x2): num_sm_parts = num_sms / s_q
+        # - SM100 (Blackwell head128): num_sm_parts = num_sms / s_q / 2
+        # For max buffer size, use s_q = 1 (the case that produces largest output)
+        h_q = self.num_heads
         if current_platform.is_device_capability_family(100):
-            max_num_sm_parts *= 2
+            # SM100 head64 or head64x2 uses full SM count
+            max_num_sm_parts = sm_count
+        else:
+            # SM90 uses h_q/64 divisor
+            max_num_sm_parts = sm_count // max(1, h_q // 64)
         self.tile_scheduler_metadata_buffer = torch.empty(
             # TileSchedulerMetaDataSize = 8
             # see: FlashMLA/csrc/params.h
