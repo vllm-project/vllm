@@ -1045,7 +1045,7 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
         "zai-org/GLM-4.5",
         speculative_model="zai-org/GLM-4.5",
     ),
-    "Glm4MoeMTPLiteModel": _HfExamplesInfo(
+    "Glm4MoeLiteMTPModel": _HfExamplesInfo(
         "zai-org/GLM-4.7-Flash",
         speculative_model="zai-org/GLM-4.7-Flash",
         is_available_online=False,
