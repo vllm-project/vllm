@@ -85,7 +85,9 @@ from vllm.entrypoints.pooling.pooling.protocol import (
 from vllm.entrypoints.pooling.score.protocol import (
     RerankRequest,
     ScoreRequest,
-    ScoreDataRequest, ScoreTextRequest, ScoreQueriesDocumentsRequest,
+    ScoreDataRequest,
+    ScoreTextRequest,
+    ScoreQueriesDocumentsRequest,
     ScoreResponse,
 )
 from vllm.entrypoints.renderer import BaseRenderer, CompletionRenderer, RenderConfig
