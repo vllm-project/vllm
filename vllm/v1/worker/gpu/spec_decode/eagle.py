@@ -48,9 +48,6 @@ class EagleSpeculator:
         self.input_buffers = InputBuffers(
             max_num_reqs=self.max_num_reqs,
             max_num_tokens=self.max_num_tokens,
-            inputs_embeds_size=self.inputs_embeds_size,
-            vocab_size=self.vocab_size,
-            dtype=self.dtype,
             device=device,
         )
         self.hidden_states = torch.zeros(

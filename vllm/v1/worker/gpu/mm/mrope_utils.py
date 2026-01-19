@@ -23,7 +23,7 @@ class MRopeState:
         # NOTE(woosuk): This tensor can be extremely large (e.g., several GBs)
         # wasting a lot of CPU memory.
         self.prefill_mrope_positions = StagedWriteTensor(
-            (max_num_reqs, 3 * max_model_len),
+            (max_num_reqs * 3, max_model_len),
             dtype=torch.int32,
             device=device,
             uva_instead_of_gpu=True,
@@ -58,9 +58,7 @@ class MRopeState:
         )
         for i in range(3):
             pos = prefill_mrope_positions[i].tolist()
-            self.prefill_mrope_positions.stage_write(
-                req_idx, i * self.max_model_len, pos
-            )
+            self.prefill_mrope_positions.stage_write(3 * req_idx + i, 0, pos)
         self.prefill_mrope_delta.np[req_idx] = prefill_mrope_delta
 
     def apply_staged_writes(self) -> None:
@@ -79,7 +77,7 @@ class MRopeState:
             self.mrope_positions,
             self.mrope_positions.stride(0),
             self.prefill_mrope_positions.gpu,
-            self.prefill_mrope_positions.gpu.stride(0),
+            3 * self.max_model_len,
             self.max_model_len,
             self.prefill_mrope_delta.gpu,
             idx_mapping,
