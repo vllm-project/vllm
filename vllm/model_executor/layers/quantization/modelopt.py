@@ -31,7 +31,6 @@ from vllm.model_executor.layers.fused_moe.oracle.fp8 import (
     select_fp8_moe_backend,
 )
 from vllm.model_executor.layers.fused_moe.oracle.nvfp4 import (
-    FLASHINFER_NVFP4_MOE_BACKENDS,
     NvFp4MoeBackend,
     convert_to_nvfp4_moe_kernel_format,
     is_global_sf_supported_for_nvfp4_backend,
@@ -51,15 +50,11 @@ from vllm.model_executor.layers.quantization.base_config import (
 )
 from vllm.model_executor.layers.quantization.kv_cache import BaseKVCacheMethod
 from vllm.model_executor.layers.quantization.utils.flashinfer_fp4_moe import (
-    build_flashinfer_fp4_cutlass_moe_prepare_finalize,
     flashinfer_trtllm_fp4_moe,
     flashinfer_trtllm_fp4_routed_moe,
-    select_nvfp4_gemm_impl,
 )
 from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
     apply_fi_trtllm_fp8_per_tensor_moe,
-    build_flashinfer_fp8_cutlass_moe_prepare_finalize,
-    select_cutlass_fp8_gemm_impl,
 )
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     W8A8BlockFp8LinearOp,
@@ -741,34 +736,20 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
         self,
         routing_tables: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
     ) -> mk.FusedMoEPrepareAndFinalize | None:
-        # TRT LLM not supported with all2all yet.
-        if self.fp8_backend == Fp8MoeBackend.FLASHINFER_TRTLLM:
-            return None
-        elif self.fp8_backend == Fp8MoeBackend.FLASHINFER_CUTLASS:
-            # TP case: avoid convert to ModularKernelMethod - to be refactored.
-            if self.moe.dp_size == 1:
-                return None
-
-            prepare_finalize = build_flashinfer_fp8_cutlass_moe_prepare_finalize(
-                self.moe,
-                use_deepseek_fp8_block_scale=False,
-            )
-            logger.debug_once("%s", prepare_finalize.__class__.__name__)
-            return prepare_finalize
-        return super().maybe_make_prepare_finalize(routing_tables)
+        raise ValueError(
+            f"{self.__class__.__name__} uses the new modular kernel initialization "
+            "logic. This function should not be called."
+        )
 
     def select_gemm_impl(
         self,
         prepare_finalize: mk.FusedMoEPrepareAndFinalize,
         layer: torch.nn.Module,
     ) -> mk.FusedMoEPermuteExpertsUnpermute:
-        assert self.moe_quant_config is not None
-        experts = select_cutlass_fp8_gemm_impl(
-            self.moe,
-            self.moe_quant_config,
+        raise ValueError(
+            f"{self.__class__.__name__} uses the new modular kernel initialization "
+            "logic. This function should not be called."
         )
-        logger.debug_once("Using %s", experts.__class__.__name__)
-        return experts
 
     def create_weights(
         self,
@@ -1356,35 +1337,20 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
         self,
         routing_tables: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
     ) -> mk.FusedMoEPrepareAndFinalize | None:
-        UNSUPPORTED = [NvFp4MoeBackend.MARLIN, NvFp4MoeBackend.FLASHINFER_TRTLLM]
-        if self.nvfp4_backend in UNSUPPORTED:
-            return None
-        elif self.nvfp4_backend == NvFp4MoeBackend.FLASHINFER_CUTLASS:
-            # TP case: avoid convert to ModularKernelMethod - to be refactored.
-            if self.moe.dp_size == 1:
-                return None
-            # For now, fp4 moe only works with the flashinfer dispatcher.
-            prepare_finalize = build_flashinfer_fp4_cutlass_moe_prepare_finalize(
-                self.moe
-            )
-            logger.debug_once("%s", prepare_finalize.__class__.__name__)
-            return prepare_finalize
-        else:
-            return super().maybe_make_prepare_finalize(routing_tables)
+        raise ValueError(
+            f"{self.__class__.__name__} uses the new modular kernel initialization "
+            "logic. This function should not be called."
+        )
 
     def select_gemm_impl(
         self,
         prepare_finalize: mk.FusedMoEPrepareAndFinalize,
         layer: torch.nn.Module,
     ) -> mk.FusedMoEPermuteExpertsUnpermute:
-        assert self.moe_quant_config is not None
-        experts = select_nvfp4_gemm_impl(
-            self.moe,
-            self.moe_quant_config,
-            allow_flashinfer=self.nvfp4_backend in FLASHINFER_NVFP4_MOE_BACKENDS,
+        raise ValueError(
+            f"{self.__class__.__name__} uses the new modular kernel initialization "
+            "logic. This function should not be called."
         )
-        logger.debug_once("Using %s", experts.__class__.__name__)
-        return experts
 
     def uses_weight_scale_2_pattern(self) -> bool:
         """

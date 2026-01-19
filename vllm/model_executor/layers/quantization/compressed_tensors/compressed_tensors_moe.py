@@ -48,7 +48,6 @@ from vllm.model_executor.layers.fused_moe.oracle.fp8 import (
     select_fp8_moe_backend,
 )
 from vllm.model_executor.layers.fused_moe.oracle.nvfp4 import (
-    FLASHINFER_NVFP4_MOE_BACKENDS,
     NvFp4MoeBackend,
     convert_to_nvfp4_moe_kernel_format,
     is_global_sf_supported_for_nvfp4_backend,
@@ -62,10 +61,8 @@ from vllm.model_executor.layers.quantization.compressed_tensors.schemes.compress
     WNA16_SUPPORTED_TYPES_MAP,
 )
 from vllm.model_executor.layers.quantization.utils.flashinfer_fp4_moe import (
-    build_flashinfer_fp4_cutlass_moe_prepare_finalize,
     flashinfer_trtllm_fp4_moe,
     flashinfer_trtllm_fp4_routed_moe,
-    select_nvfp4_gemm_impl,
 )
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     process_fp8_input_tensor_strategy_moe,
@@ -585,36 +582,20 @@ class CompressedTensorsW4A4Nvfp4MoEMethod(CompressedTensorsMoEMethod):
         self,
         routing_tables: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
     ) -> mk.FusedMoEPrepareAndFinalize | None:
-        UNSUPPORTED = [NvFp4MoeBackend.MARLIN, NvFp4MoeBackend.FLASHINFER_TRTLLM]
-        if self.nvfp4_backend in UNSUPPORTED:
-            return None
-        elif self.nvfp4_backend == NvFp4MoeBackend.FLASHINFER_CUTLASS:
-            # TP case: avoid convert to ModularKernelMethod - to be refactored.
-            if self.moe.dp_size == 1:
-                return None
-            # For now, fp4 moe only works with the flashinfer dispatcher.
-            prepare_finalize = build_flashinfer_fp4_cutlass_moe_prepare_finalize(
-                self.moe
-            )
-            logger.debug_once("%s", prepare_finalize.__class__.__name__)
-            return prepare_finalize
-        else:
-            return super().maybe_make_prepare_finalize(routing_tables)
+        raise ValueError(
+            f"{self.__class__.__name__} uses the new modular kernel initialization "
+            "logic. This function should not be called."
+        )
 
     def select_gemm_impl(
         self,
         prepare_finalize: mk.FusedMoEPrepareAndFinalize,
         layer: torch.nn.Module,
     ) -> mk.FusedMoEPermuteExpertsUnpermute:
-        assert self.moe_quant_config is not None
-        """Return the appropriate GEMM experts implementation."""
-        experts = select_nvfp4_gemm_impl(
-            self.moe,
-            self.moe_quant_config,
-            allow_flashinfer=(self.nvfp4_backend in FLASHINFER_NVFP4_MOE_BACKENDS),
+        raise ValueError(
+            f"{self.__class__.__name__} uses the new modular kernel initialization "
+            "logic. This function should not be called."
         )
-        logger.debug_once("Using %s", experts.__class__.__name__)
-        return experts
 
     def get_fused_moe_quant_config(
         self, layer: torch.nn.Module
@@ -983,105 +964,20 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
         self,
         routing_tables: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
     ) -> mk.FusedMoEPrepareAndFinalize | None:
-        if self.fp8_backend in [Fp8MoeBackend.MARLIN, Fp8MoeBackend.AITER]:
-            return None
-        else:
-            return super().maybe_make_prepare_finalize(routing_tables)
+        raise ValueError(
+            f"{self.__class__.__name__} uses the new modular kernel initialization "
+            "logic. This function should not be called."
+        )
 
     def select_gemm_impl(
         self,
         prepare_finalize: mk.FusedMoEPrepareAndFinalize,
         layer: torch.nn.Module,
-    ) -> FusedMoEPermuteExpertsUnpermute:
-        # cutlass path
-        assert self.moe_quant_config is not None
-        if self.fp8_backend == Fp8MoeBackend.VLLM_CUTLASS:
-            from vllm.model_executor.layers.fused_moe import (
-                CutlassBatchedExpertsFp8,
-                CutlassExpertsFp8,
-            )
-
-            experts: FusedMoEPermuteExpertsUnpermute
-
-            num_dispatchers = prepare_finalize.num_dispatchers()
-
-            if (
-                prepare_finalize.activation_format
-                == FusedMoEActivationFormat.BatchedExperts
-            ):
-                logger.debug("CutlassBatchedExpertsFp8(%s)", self.__class__.__name__)
-                experts = CutlassBatchedExpertsFp8(
-                    max_experts_per_worker=self.moe.num_local_experts,
-                    num_dispatchers=num_dispatchers,
-                    out_dtype=self.moe.in_dtype,
-                    e=layer.local_num_experts,
-                    n=layer.intermediate_size_per_partition,
-                    k=layer.hidden_size,
-                    device=layer.w13_weight.device,
-                    quant_config=self.moe_quant_config,
-                )
-            else:
-                logger.debug("CutlassExpertsFp8(%s)", self.__class__.__name__)
-                experts = CutlassExpertsFp8(
-                    out_dtype=self.moe.in_dtype,
-                    e=layer.local_num_experts,
-                    n=layer.intermediate_size_per_partition,
-                    k=layer.hidden_size,
-                    device=layer.w13_weight.device,
-                    quant_config=self.moe_quant_config,
-                )
-
-            # TODO(rob): investigate disable_expert_map
-            self.disable_expert_map = (
-                num_dispatchers > 1 or not experts.supports_expert_map()
-            )
-
-            return experts
-
-        from vllm.model_executor.layers.fused_moe.batched_deep_gemm_moe import (
-            BatchedDeepGemmExperts,
+    ) -> mk.FusedMoEPermuteExpertsUnpermute:
+        raise ValueError(
+            f"{self.__class__.__name__} uses the new modular kernel initialization "
+            "logic. This function should not be called."
         )
-        from vllm.model_executor.layers.fused_moe.fused_batched_moe import (
-            BatchedTritonExperts,
-        )
-        from vllm.model_executor.layers.fused_moe.fused_moe import (
-            TritonExperts,
-        )
-        from vllm.model_executor.layers.fused_moe.triton_deep_gemm_moe import (
-            TritonOrDeepGemmExperts,
-        )
-
-        assert self.fp8_backend not in [Fp8MoeBackend.AITER, Fp8MoeBackend.MARLIN]
-
-        if (
-            prepare_finalize.activation_format
-            == FusedMoEActivationFormat.BatchedExperts
-        ):
-            max_num_tokens_per_rank = prepare_finalize.max_num_tokens_per_rank()
-            assert max_num_tokens_per_rank is not None
-
-            if self.fp8_backend == Fp8MoeBackend.DEEPGEMM:
-                logger.debug("BatchedDeepGemmExperts(%s)", self.__class__.__name__)
-                return BatchedDeepGemmExperts(
-                    max_num_tokens=max_num_tokens_per_rank,
-                    num_dispatchers=prepare_finalize.num_dispatchers(),
-                    quant_config=self.moe_quant_config,
-                )
-            else:
-                logger.debug("BatchedTritonExperts(%s)", self.__class__.__name__)
-                return BatchedTritonExperts(
-                    max_num_tokens=max_num_tokens_per_rank,
-                    num_dispatchers=prepare_finalize.num_dispatchers(),
-                    quant_config=self.moe_quant_config,
-                )
-
-        else:
-            if self.fp8_backend == Fp8MoeBackend.DEEPGEMM:
-                logger.debug("TritonOrDeepGemmExperts(%s)", self.__class__.__name__)
-                return TritonOrDeepGemmExperts(self.moe_quant_config)
-            else:
-                logger.debug("TritonExperts(%s)", self.__class__.__name__)
-                return TritonExperts(self.moe_quant_config)
 
     def get_fused_moe_quant_config(
         self, layer: torch.nn.Module

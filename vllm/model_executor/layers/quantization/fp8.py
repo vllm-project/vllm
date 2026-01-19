@@ -19,7 +19,6 @@ from vllm.model_executor.layers.batch_invariant import (
 )
 from vllm.model_executor.layers.fused_moe import (
     FusedMoE,
-    FusedMoEActivationFormat,
     FusedMoEMethodBase,
     FusedMoEPermuteExpertsUnpermute,
     FusedMoEPrepareAndFinalize,
@@ -51,8 +50,6 @@ from vllm.model_executor.layers.quantization.base_config import (
 from vllm.model_executor.layers.quantization.kv_cache import BaseKVCacheMethod
 from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
     apply_fi_trtllm_fp8_per_tensor_moe,
-    build_flashinfer_fp8_cutlass_moe_prepare_finalize,
-    select_cutlass_fp8_gemm_impl,
 )
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     W8A8BlockFp8LinearOp,
@@ -879,93 +876,20 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         self,
         routing_tables: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
     ) -> mk.FusedMoEPrepareAndFinalize | None:
-        if self.fp8_backend in [
-            Fp8MoeBackend.AITER,
-            Fp8MoeBackend.MARLIN,
-            Fp8MoeBackend.FLASHINFER_TRTLLM,
-        ]:
-            return None
-        elif self.fp8_backend == Fp8MoeBackend.FLASHINFER_CUTLASS:
-            prepare_finalize = build_flashinfer_fp8_cutlass_moe_prepare_finalize(
-                self.moe,
-                use_deepseek_fp8_block_scale=self.block_quant,
-            )
-            logger.debug_once("%s", prepare_finalize.__class__.__name__)
-            return prepare_finalize
-        return super().maybe_make_prepare_finalize(routing_tables)
+        raise ValueError(
+            f"{self.__class__.__name__} uses the new modular kernel initialization "
+            "logic. This function should not be called."
+        )
 
     def select_gemm_impl(
         self,
         prepare_finalize: FusedMoEPrepareAndFinalize,
         layer: torch.nn.Module,
     ) -> FusedMoEPermuteExpertsUnpermute:
-        from vllm.model_executor.layers.fused_moe import (
-            BatchedDeepGemmExperts,
-            BatchedTritonExperts,
-            TritonExperts,
-            TritonOrDeepGemmExperts,
+        raise ValueError(
+            f"{self.__class__.__name__} uses the new modular kernel initialization "
+            "logic. This function should not be called."
         )
-
-        if self.fp8_backend in [Fp8MoeBackend.MARLIN, Fp8MoeBackend.AITER]:
-            raise NotImplementedError(
-                "Marlin and ROCm AITER are not supported with all2all yet."
-            )
-
-        assert self.moe_quant_config is not None
-
-        if (
-            prepare_finalize.activation_format
-            == FusedMoEActivationFormat.BatchedExperts
-        ):
-            max_num_tokens_per_rank = prepare_finalize.max_num_tokens_per_rank()
-            assert max_num_tokens_per_rank is not None
-
-            experts_impl = (
-                BatchedDeepGemmExperts
-                if self.fp8_backend == Fp8MoeBackend.DEEPGEMM
-                else BatchedTritonExperts
-            )
-            logger.debug(
-                "%s(%s): max_tokens_per_rank=%s, block_size=%s, per_act_token=%s",
-                experts_impl.__name__,
-                self.__class__.__name__,
-                max_num_tokens_per_rank,
-                self.weight_block_size,
-                False,
-            )
-            return experts_impl(
-                max_num_tokens=max_num_tokens_per_rank,
-                num_dispatchers=prepare_finalize.num_dispatchers(),
-                quant_config=self.moe_quant_config,
-            )
-        elif self.moe.is_lora_enabled:
-            return TritonExperts(quant_config=self.moe_quant_config)
-        elif self.fp8_backend == Fp8MoeBackend.FLASHINFER_CUTLASS:
-            # Select GEMM experts with block-scale when weights are block-quantized
-            experts = select_cutlass_fp8_gemm_impl(
-                self.moe,
-                self.moe_quant_config,
-                use_deepseek_fp8_block_scale=self.block_quant,
-            )
-            logger.debug_once("Using %s", experts.__class__.__name__)
-            return experts
-        elif self.fp8_backend == Fp8MoeBackend.DEEPGEMM:
-            logger.debug(
-                "TritonOrDeepGemmExperts(%s): block_size=%s, per_act_token=%s",
-                self.__class__.__name__,
-                self.weight_block_size,
-                False,
-            )
-            return TritonOrDeepGemmExperts(self.moe_quant_config)
-        else:
-            assert self.fp8_backend == Fp8MoeBackend.TRITON
-            logger.debug(
-                "TritonExperts(%s): block_size=%s, per_act_token=%s",
-                self.__class__.__name__,
-                self.weight_block_size,
-                False,
-            )
-            return TritonExperts(self.moe_quant_config)
 
     def get_fused_moe_quant_config(
         self, layer: torch.nn.Module
