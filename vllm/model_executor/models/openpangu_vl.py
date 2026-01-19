@@ -759,10 +759,7 @@ def get_load_balance_assignment(
     sizes: list[int],
     num_gpus: int = 2,
 ) -> tuple[list[int], list[int], list[int]]:
-    """
-    see https://github.com/vllm-project/vllm/blob/main/vllm/model_executor/models/vision.py#L253 for details. # noqa: E501
-    """
-
+    # see https://github.com/vllm-project/vllm/blob/main/vllm/model_executor/models/vision.py#L253 for details. # noqa: E501
     n_samples = len(sizes)
 
     # Handle edge cases
@@ -801,9 +798,7 @@ def run_dp_sharded_mrope_vision_model(
     *,
     rope_type: Literal["rope_3d", "rope_2d"],
 ) -> tuple[torch.Tensor, ...]:
-    """
-    https://github.com/vllm-project/vllm/blob/main/vllm/model_executor/models/vision.py#L322 for details. # noqa: E501
-    """
+    # https://github.com/vllm-project/vllm/blob/main/vllm/model_executor/models/vision.py#L322 for details. # noqa: E501
     grid_thw_list = grid_thw_list.tolist()
     tp_size = parallel_state.get_tensor_model_parallel_world_size()
 
