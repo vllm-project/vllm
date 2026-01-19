@@ -653,7 +653,6 @@ class CompressedTensorsW4A4Nvfp4MoEMethod(CompressedTensorsMoEMethod):
                 apply_router_weight_on_input=layer.apply_router_weight_on_input,
             )
         else:
-            # Hidden_states in select_experts is only used to extract metadata
             if isinstance(x, tuple):
                 x_routing, _ = x
             else:
