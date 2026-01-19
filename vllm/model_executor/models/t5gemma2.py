@@ -330,18 +330,8 @@ class T5Gemma2Attention(nn.Module):
         q = self.q_norm(q.unsqueeze(2)).squeeze(2)
         k = self.k_norm(k.unsqueeze(2)).squeeze(2)
 
-        # Reshape back to 2D for MMEncoderAttention: (num_tokens, hidden_size)
-        # MMEncoderAttention expects (batch, seq_len, hidden_size) format
-        # Since we flattened to (num_tokens, hidden_size), we need to reshape to
-        # (1, num_tokens, hidden_size)
-        q = q.reshape(num_tokens, self.num_heads * self.head_dim).unsqueeze(0)
-        k = k.reshape(num_tokens, self.num_kv_heads * self.head_dim).unsqueeze(0)
-        v = v.reshape(num_tokens, self.num_kv_heads * self.head_dim).unsqueeze(0)
-
-        # MMEncoderAttention expects (batch, seq_len, hidden_size)
+        # vLLM attention expects 3D tensors: (num_tokens, num_heads, head_dim)
         attn_output = self.attn(q, k, v)
-        # Flatten back to (num_tokens, hidden_size)
-        attn_output = attn_output.squeeze(0)
         output, _ = self.o_proj(attn_output)
         return output
 
@@ -907,15 +897,9 @@ class T5Gemma2DecoderLayer(nn.Module):
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
         encoder_hidden_states: torch.Tensor | None,
-        residual: torch.Tensor | None,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        if residual is None:
-            residual = hidden_states
-            hidden_states = self.pre_self_attn_layernorm(hidden_states)
-        else:
-            hidden_states, residual = self.pre_self_attn_layernorm(
-                hidden_states, residual
-            )
+    ) -> torch.Tensor:
+        residual = hidden_states
+        hidden_states = self.pre_self_attn_layernorm(hidden_states)
 
         # Merged attention (self + cross)
         hidden_states = self.self_attn(
@@ -924,14 +908,15 @@ class T5Gemma2DecoderLayer(nn.Module):
             positions=positions,
         )
 
+        hidden_states = residual + hidden_states
         hidden_states = self.post_self_attn_layernorm(hidden_states)
 
-        hidden_states, residual = self.pre_feedforward_layernorm(
-            hidden_states, residual
-        )
+        residual = hidden_states
+        hidden_states = self.pre_feedforward_layernorm(hidden_states)
         hidden_states = self.mlp(hidden_states)
+        hidden_states = residual + hidden_states
         hidden_states = self.post_feedforward_layernorm(hidden_states)
-        return hidden_states, residual
+        return hidden_states
 
 
 class T5Gemma2Decoder(nn.Module):
@@ -995,26 +980,23 @@ class T5Gemma2Decoder(nn.Module):
             else:
                 hidden_states = self.embed_input_ids(input_ids)
             hidden_states *= self.normalizer
-            residual = None
         else:
             assert intermediate_tensors is not None
             hidden_states = intermediate_tensors["hidden_states"]
-            residual = intermediate_tensors["residual"]
 
         for layer in islice(self.layers, self.start_layer, self.end_layer):
-            hidden_states, residual = layer(
+            hidden_states = layer(
                 positions,
                 hidden_states,
                 encoder_hidden_states,
-                residual,
             )
 
         if not get_pp_group().is_last_rank:
             return IntermediateTensors(
-                {"hidden_states": hidden_states, "residual": residual}
+                {"hidden_states": hidden_states, "residual": None}
             )
 
-        hidden_states, _ = self.norm(hidden_states, residual)
+        hidden_states = self.norm(hidden_states)
         return hidden_states
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
