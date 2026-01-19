@@ -7,7 +7,6 @@ import random
 
 import pytest
 import torch
-
 from utils import (
     BACKENDS,
     _extract_step_logprobs,
@@ -54,9 +53,10 @@ def test_v1_generation_is_deterministic_across_batch_sizes_with_needle(
         max_tokens=int(os.getenv("VLLM_NEEDLE_MAX_TOKENS", "128")),
         seed=20240919,
     )
-
+   
+    min_random_prompt = 1
+    max_random_prompt = 8
     needle_prompt = _random_prompt(min_random_prompt, max_random_prompt)
-
 
     llm_bs1 = None
     llm_bsN = None
