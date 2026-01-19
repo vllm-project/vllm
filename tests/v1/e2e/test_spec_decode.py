@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import random
+from collections.abc import Iterable
 from dataclasses import dataclass
 from typing import Any
 
@@ -11,6 +12,7 @@ from tests.utils import get_attn_backend_list_based_on_platform, large_gpu_mark
 from vllm import LLM, SamplingParams
 from vllm.assets.base import VLLM_S3_BUCKET_URL
 from vllm.assets.image import VLM_IMAGES_DIR
+from vllm.benchmarks.datasets import InstructCoderDataset
 from vllm.config.vllm import VllmConfig
 from vllm.distributed import cleanup_dist_env_and_memory
 from vllm.engine.arg_utils import EngineArgs
@@ -33,11 +35,15 @@ def _skip_if_insufficient_gpus_for_tp(tp_size: int):
         )
 
 
-def get_test_prompts(mm_enabled: bool, quiet: bool = False):
+Messages = list[dict[str, Any]]
+
+
+def get_test_prompts(
+    mm_enabled: bool, quiet: bool = False, num_prompts: int = 100
+) -> list[Messages]:
     prompt_types = ["repeat", "sentence"]
     if mm_enabled:
         prompt_types.append("mm")
-    num_prompts = 100
     prompts = []
 
     random.seed(0)
@@ -82,6 +88,14 @@ def get_test_prompts(mm_enabled: bool, quiet: bool = False):
         prompts.append([{"role": "user", "content": prompt}])
 
     return prompts
+
+
+def get_instruct_coder_messages(n: int) -> list[Messages]:
+    dataset = InstructCoderDataset(
+        dataset_path="likaixin/InstructCoder", dataset_split="train"
+    )
+    prompts: Iterable[str] = dataset.sample_prompts(n=n)
+    return [[{"role": "user", "content": prompt}] for prompt in prompts]
 
 
 @pytest.fixture
@@ -615,6 +629,8 @@ class ArgsTest:
     draft_tensor_parallel_size: int = 1
     max_model_len: int = 1024
     gpu_memory_utilization: float = 0.5
+    dataset: str = "test_prompts"
+    num_prompts: int = 100
 
 
 cases = [
@@ -643,6 +659,20 @@ cases = [
 @pytest.mark.parametrize("enforce_eager", [True, False])
 def test_draft_model_correctness(args: ArgsTest, enforce_eager: bool):
     assert_draft_model_correctness(args, enforce_eager)
+
+
+def test_draft_model_realistic_example():
+    args = ArgsTest(
+        target_model="Qwen/Qwen3-1.7B",
+        draft_model="Qwen/Qwen3-0.6B",
+        dataset="likaixin/InstructCoder",
+        num_speculative_tokens=3,
+        sampling_config=greedy_sampling(),
+        # values below are not derived, but just prevent a regression
+        expected_acceptance_len=2.8,
+        expected_acceptance_rate=0.55,
+    )
+    assert_draft_model_correctness(args, enforce_eager=False)
 
 
 @pytest.mark.parametrize(
@@ -723,7 +753,9 @@ def test_draft_model_engine_args_rejects_invalid_tp_argname():
 def assert_draft_model_correctness(args: ArgsTest, enforce_eager: bool):
     """Compare the outputs using and not using speculative decoding.
     In the greedy decoding case, the outputs must match EXACTLY."""
-    test_prompts = get_test_prompts(mm_enabled=False, quiet=True)
+    test_prompts: list[Messages] = get_messages(
+        dataset=args.dataset, n=args.num_prompts
+    )
 
     spec_llm = LLM(
         model=args.target_model,
@@ -752,15 +784,24 @@ def assert_draft_model_correctness(args: ArgsTest, enforce_eager: bool):
     torch.cuda.empty_cache()
     cleanup_dist_env_and_memory()
 
-    assert acceptance_rate >= args.expected_acceptance_rate
-    assert acceptance_len >= args.expected_acceptance_len
-
     print(
         f"spec-decode: target={args.target_model}, draft={args.draft_model}, "
         f"temperature={args.sampling_config.temperature:.2f}, "
         f"acceptance_rate={acceptance_rate:.2f}, "
         f"acceptance_len={acceptance_len:.2f}, "
     )
+
+    assert acceptance_rate >= args.expected_acceptance_rate
+    assert acceptance_len >= args.expected_acceptance_len
+
+
+def get_messages(dataset: str, n: int) -> list[Messages]:
+    if dataset == "test_prompts":
+        return get_test_prompts(mm_enabled=False, quiet=True, num_prompts=n)
+    elif dataset == "likaixin/InstructCoder":
+        return get_instruct_coder_messages(n=n)
+    else:
+        raise NotImplementedError(f"Dataset '{dataset}' not implemented")
 
 
 def some_high_acceptance_metrics() -> dict:
