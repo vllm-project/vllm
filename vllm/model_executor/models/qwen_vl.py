@@ -731,6 +731,8 @@ class QwenVLForConditionalGeneration(
         ],
     }
 
+    embed_input_ids = SupportsMultiModal.embed_input_ids
+
     def get_mm_mapping(self) -> MultiModelKeys:
         """
         Get the module prefix in multimodal models
