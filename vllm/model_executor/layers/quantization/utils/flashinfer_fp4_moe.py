@@ -2,8 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Utility helpers for NVFP4 + FlashInfer fused-MoE path"""
 
-from typing import TYPE_CHECKING
-
 import torch
 
 import vllm.envs as envs
@@ -27,9 +25,6 @@ from vllm.utils.flashinfer import (
     has_flashinfer_cutedsl_grouped_gemm_nt_masked,
     has_flashinfer_cutlass_fused_moe,
 )
-
-if TYPE_CHECKING:
-    pass
 
 logger = init_logger(__name__)
 
