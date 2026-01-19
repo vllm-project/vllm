@@ -88,6 +88,43 @@ class Moondream3Processor(ProcessorMixin):
     # Use separate tokenizer repo
     _tokenizer_repo = "moondream/starmie-v1"
 
+    # Default chat template for Moondream3
+    # Moondream uses special tokens for prompting:
+    # - Token 0 (<|endoftext|>): BOS token (ALWAYS present at position 0)
+    # - Token 1 (<|md_reserved_0|>): Start of instruction
+    # - Token 2 (<|md_reserved_1|>): Separator before question
+    # - Token 3 (<|md_reserved_2|>): End of question / start of answer
+    # - Token 15381 (query): Task type indicator
+    #
+    # IMPORTANT: BOS token must ALWAYS come first, even with images!
+    # HF implementation: BOS + image_embeds + prompt
+    # prefix_attn=730 means first 730 tokens (1 BOS + 729 vision) have bidirectional attention
+    #
+    # Format with image: <|endoftext|><image><|md_reserved_0|>query<|md_reserved_1|>{question}<|md_reserved_2|>
+    # Format without image: <|endoftext|><|md_reserved_0|>query<|md_reserved_1|>{question}<|md_reserved_2|>
+    _default_chat_template = (
+        "{% for message in messages %}"
+        "{% if message['role'] == 'user' %}"
+        "{% if message['content'] is string %}"
+        # Simple string content (with image assumed) - BOS + image + prompt
+        "<|endoftext|><image><|md_reserved_0|>query<|md_reserved_1|>{{ message['content'] }}<|md_reserved_2|>"
+        "{% else %}"
+        # List content - always start with BOS
+        "<|endoftext|>"
+        "{% for content in message['content'] %}"
+        "{% if content['type'] == 'image' or content['type'] == 'image_url' %}"
+        "<image>"
+        "{% elif content['type'] == 'text' %}"
+        "<|md_reserved_0|>query<|md_reserved_1|>{{ content['text'] }}<|md_reserved_2|>"
+        "{% endif %}"
+        "{% endfor %}"
+        "{% endif %}"
+        "{% elif message['role'] == 'assistant' %}"
+        "{{ message['content'] }}"
+        "{% endif %}"
+        "{% endfor %}"
+    )
+
     def __init__(
         self,
         tokenizer=None,
@@ -106,6 +143,10 @@ class Moondream3Processor(ProcessorMixin):
 
         # Number of patches per crop (27x27 = 729 for 378/14)
         self.patches_per_crop = (crop_size // patch_size) ** 2
+
+        # Use default chat template if none provided
+        if chat_template is None:
+            chat_template = self._default_chat_template
 
         super().__init__(tokenizer, chat_template=chat_template)
 
@@ -129,12 +170,25 @@ class Moondream3Processor(ProcessorMixin):
             trust_remote_code=kwargs.get("trust_remote_code", False),
         )
 
+        # Configure special tokens for Moondream3
+        # BOS=0 (<|endoftext|>), EOS=1 (<|md_reserved_0|>)
+        tokenizer.bos_token = "<|endoftext|>"
+        tokenizer.bos_token_id = 0
+        tokenizer.eos_token = "<|md_reserved_0|>"
+        tokenizer.eos_token_id = 1
+
         # Extract processor-specific kwargs
         crop_size = kwargs.pop("crop_size", 378)
         max_crops = kwargs.pop("max_crops", 12)
         overlap_margin = kwargs.pop("overlap_margin", 4)
         patch_size = kwargs.pop("patch_size", 14)
         chat_template = kwargs.pop("chat_template", None)
+
+        # Set default chat template on tokenizer if not already set
+        if chat_template is None:
+            chat_template = cls._default_chat_template
+        if tokenizer.chat_template is None:
+            tokenizer.chat_template = chat_template
 
         return cls(
             tokenizer=tokenizer,

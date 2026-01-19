@@ -879,6 +879,11 @@ _MULTIMODAL_EXAMPLE_MODELS = {
         extras={"olmo": "allenai/Molmo-7B-O-0924"},
         trust_remote_code=True,
     ),
+    "Moondream3ForCausalLM": _HfExamplesInfo(
+        "moondream/moondream3-preview",
+        tokenizer="moondream/starmie-v1",
+        trust_remote_code=True,
+    ),
     "Molmo2ForConditionalGeneration": _HfExamplesInfo(
         "allenai/Molmo2-8B",
         extras={"olmo": "allenai/Molmo2-O-7B"},
