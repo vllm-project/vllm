@@ -357,11 +357,10 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
   # are not supported by Machete yet.
 
   # marlin arches for fp16 output
-  cuda_archs_loose_intersection(MARLIN_ARCHS "8.0+PTX" "${CUDA_ARCHS}")
-  # marlin has limited support for turing
+  cuda_archs_loose_intersection(MARLIN_ARCHS "8.0;9.0a;10.0f;11.0a;12.0f+PTX" "${CUDA_ARCHS}")
   cuda_archs_loose_intersection(MARLIN_SM75_ARCHS "7.5" "${CUDA_ARCHS}")
   # marlin arches for bf16 output (we need 9.0 for bf16 atomicAdd PTX)
-  cuda_archs_loose_intersection(MARLIN_BF16_ARCHS "8.0+PTX;9.0+PTX" "${CUDA_ARCHS}")
+  cuda_archs_loose_intersection(MARLIN_BF16_ARCHS "8.0;9.0a;10.0f;11.0a;12.0f+PTX" "${CUDA_ARCHS}")
   # marlin arches for fp8 input
   # - sm80 doesn't support fp8 computation
   # - sm90 and sm100 don't support QMMA.16832.F32.E4M3.E4M3 SAAS instruction
@@ -980,8 +979,7 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
   # moe marlin arches
   # note that we always set `use_atomic_add=False` for moe marlin now,
   # so we don't need 9.0 for bf16 atomicAdd PTX
-  cuda_archs_loose_intersection(MARLIN_MOE_ARCHS "8.0+PTX" "${CUDA_ARCHS}")
-  # moe marlin has limited support for turing
+  cuda_archs_loose_intersection(MARLIN_MOE_ARCHS "8.0;9.0a;10.0f;11.0a;12.0f+PTX" "${CUDA_ARCHS}")
   cuda_archs_loose_intersection(MARLIN_MOE_SM75_ARCHS "7.5" "${CUDA_ARCHS}")
   # moe marlin arches for fp8 input
   # - sm80 doesn't support fp8 computation
