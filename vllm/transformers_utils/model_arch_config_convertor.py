@@ -82,23 +82,24 @@ class ModelArchConfigConvertorBase:
         )
 
     def get_num_experts_from_block_configs(self) -> int:
-        """Check block_configs for heterogeneous models (e.g., NemotronH)."""
+        """Check block_configs for heterogeneous models (e.g., NemotronH).
+
+        For heterogeneous models with varying expert counts per layer,
+        returns the MAX to ensure all expert weights can be loaded.
+        """
+        max_experts = 0
         block_configs = getattr(self.hf_text_config, "block_configs", None)
         if block_configs:
             for block in block_configs:
-                # Handle both dict (raw JSON) and object (HF parsed config)
                 if isinstance(block, dict):
-                    block_type = block.get("block_type", "")
-                    if block_type == "moe":
-                        return block.get("n_routed_experts", 0)
+                    if block.get("block_type", "") == "moe":
+                        max_experts = max(max_experts, block.get("n_routed_experts", 0))
                 else:
-                    # HF converts dicts to objects with attributes
-                    block_type = getattr(block, "block_type", "")
-                    if block_type == "moe":
-                        return getattr(block, "n_routed_experts", 0)
-
-        # Coerce to 0 if explicitly set to None
-        return 0
+                    if getattr(block, "block_type", "") == "moe":
+                        max_experts = max(
+                            max_experts, getattr(block, "n_routed_experts", 0)
+                        )
+        return max_experts
 
     def get_num_experts(self) -> int:
         """Returns the number of experts in the model."""
