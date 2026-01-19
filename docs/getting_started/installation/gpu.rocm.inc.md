@@ -47,7 +47,7 @@ We recommend leveraging `uv`.
     If you insist on using `pip`, you have to specify the exact vLLM version and full URL of the wheel path `https://wheels.vllm.ai/rocm/<version>/<rocm-variant>` (which can be obtained from the web page).
 
     ```bash
-    pip install vllm==0.14.0 --extra-index-url https://wheels.vllm.ai/rocm/0.14.0/rocm700
+    pip install vllm==0.14.0+rocm700 --extra-index-url https://wheels.vllm.ai/rocm/0.14.0/rocm700
     ```
 
 # --8<-- [end:pre-built-wheels]
