@@ -38,7 +38,8 @@ __global__ void __launch_bounds__(512, VLLM_BLOCKS_PER_SM(512))
                     Type const* __restrict__ in,
                     float const* __restrict__ SFScale, 
                     uint32_t* __restrict__ out,
-                    uint32_t* __restrict__ SFout) {
+                    uint32_t* __restrict__ SFout, 
+                    bool is_sf_swizzled_layout) {
   using PackedVec = PackedVec_256b<Type>;
 
   static constexpr int CVT_FP4_NUM_THREADS_PER_SF =
@@ -71,10 +72,13 @@ __global__ void __launch_bounds__(512, VLLM_BLOCKS_PER_SM(512))
       ld256_or_zero_cg_u32(r, &reinterpret_cast<const uint32_t*>(in)[inOffset * 8], valid);
       memcpy(&in_vec, r, 32);
 
-      auto sf_out =
-          cvt_quant_to_fp4_get_sf_out_offset<uint32_t,
-                                                CVT_FP4_NUM_THREADS_PER_SF>(
-              rowIdx, colIdx, numKTiles, SFout);
+      uint8_t* sf_out = nullptr;
+      if (is_sf_swizzled_layout){
+        sf_out = cvt_quant_to_fp4_get_sf_out_offset<uint32_t,
+                                                CVT_FP4_NUM_THREADS_PER_SF>(rowIdx, colIdx, numKTiles, SFout);
+      } else {
+        sf_out = sf_out_rowmajor_u8<uint32_t>(rowIdx, colIdx, num_padded_cols, SFout);
+      }
 
       auto out_val = 
             cvt_warp_fp16_to_fp4_256b<Type, CVT_FP4_NUM_THREADS_PER_SF, UE8M0_SF>(in_vec, global_scale, sf_out);
@@ -96,7 +100,8 @@ __global__ void __launch_bounds__(512, VLLM_BLOCKS_PER_SM(512))
 void scaled_fp4_quant_sm1xxa(torch::Tensor const& output,
                              torch::Tensor const& input,
                              torch::Tensor const& output_sf,
-                             torch::Tensor const& input_sf) {
+                             torch::Tensor const& input_sf, 
+                             bool is_sf_swizzled_layout) {
   int32_t m = input.size(0);
   int32_t n = input.size(1);
 
@@ -136,6 +141,7 @@ void scaled_fp4_quant_sm1xxa(torch::Tensor const& output,
         m, n, num_padded_cols,
         input_ptr, input_sf_ptr, 
         reinterpret_cast<uint32_t*>(output_ptr),
-        reinterpret_cast<uint32_t*>(sf_out));
+        reinterpret_cast<uint32_t*>(sf_out), 
+        is_sf_swizzled_layout);
   });
 }

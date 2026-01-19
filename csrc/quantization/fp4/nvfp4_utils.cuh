@@ -257,6 +257,20 @@ __device__ __forceinline__ uint8_t* cvt_quant_to_fp4_get_sf_out_offset(
   return reinterpret_cast<uint8_t*>(SFout) + SFOffset;
 }
 
+template <class SFType>
+__device__ __forceinline__ uint8_t* sf_out_rowmajor_u8(
+    int row, int pack, int packs_per_row_sf, SFType* SFout) {
+  constexpr int PACK = CVT_FP4_ELTS_PER_THREAD;
+  constexpr int THREADS_PER_SF = CVT_FP4_SF_VEC_SIZE / PACK; // 1 if PACK=16, 2 else PACK=8
+
+  if (threadIdx.x % THREADS_PER_SF != 0) return nullptr;
+
+  int sf_col = pack / THREADS_PER_SF; // PACK=16 => sf_col=pack; PACK=8 => sf_col=pack/2
+  int64_t off = (int64_t)row * packs_per_row_sf + sf_col;
+
+  return (uint8_t*)SFout + off;
+}
+
 // Quantizes the provided PackedVec into the uint32_t output
 template <class Type, int CVT_FP4_NUM_THREADS_PER_SF, bool UE8M0_SF = false>
 __device__ __forceinline__ u32x2 cvt_warp_fp16_to_fp4_256b(PackedVec_256b<Type>& vec, float SFScaleVal, uint8_t* SFout) {
