@@ -17,10 +17,22 @@ e.g.
 """
 
 import argparse
+import base64
 import json
 import pprint
 
 import requests
+
+
+def encode_base64_content_from_url(content_url: str) -> dict[str:str]:
+    """Encode a content retrieved from a remote url to base64 format."""
+
+    with requests.get(content_url, headers=headers) as response:
+        response.raise_for_status()
+        result = base64.b64encode(response.content).decode("utf-8")
+
+    return {"url": f"data:image/jpeg;base64,{result}"}
+
 
 headers = {"accept": "application/json", "Content-Type": "application/json"}
 
@@ -38,6 +50,12 @@ text_2 = {
             "image_url": {
                 "url": "https://raw.githubusercontent.com/jina-ai/multimodal-reranker-test/main/paper-11.png"
             },
+        },
+        {
+            "type": "image_url",
+            "image_url": encode_base64_content_from_url(
+                "https://raw.githubusercontent.com/jina-ai/multimodal-reranker-test/main/paper-11.png"
+            ),
         },
     ]
 }
