@@ -499,7 +499,7 @@ def make_fp8_moe_kernel(
 
     # Create Prepare/Finalize.
     prepare_finalize = MoEPrepareAndFinalizeNoEP(
-        defer_input_quant=experts_cls.should_pf_defer_input_quant(
+        defer_input_quant=experts_cls.expects_unquantized_inputs(
             moe_config, moe_quant_config
         ),
     )

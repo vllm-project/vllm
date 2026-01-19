@@ -391,7 +391,7 @@ class FusedMoEPermuteExpertsUnpermute(ABC):
         self._num_dispatchers: int | None = None
 
     @staticmethod
-    def should_pf_defer_input_quant(
+    def expects_unquantized_inputs(
         moe_config: FusedMoEConfig, quant_config: FusedMoEQuantConfig
     ) -> bool:
         """

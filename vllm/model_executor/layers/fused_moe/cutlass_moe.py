@@ -635,7 +635,7 @@ def run_cutlass_moe_fp4(
 
 class CutlassExpertsFp4(mk.FusedMoEPermuteExpertsUnpermute):
     @staticmethod
-    def should_pf_defer_input_quant(
+    def expects_unquantized_inputs(
         moe_config: FusedMoEConfig, quant_config: FusedMoEQuantConfig
     ) -> bool:
         return True

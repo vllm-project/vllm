@@ -295,7 +295,7 @@ def test_flashinfer_cutlass_moe_fp8_no_graph(
 
         kernel = mk.FusedMoEModularKernel(
             MoEPrepareAndFinalizeNoEP(
-                defer_input_quant=FlashInferExperts.should_pf_defer_input_quant(
+                defer_input_quant=FlashInferExperts.expects_unquantized_inputs(
                     moe_config=moe_config,
                     quant_config=quant_config,
                 )

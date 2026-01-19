@@ -79,7 +79,7 @@ class FlashInferExperts(mk.FusedMoEPermuteExpertsUnpermute):
         self.use_deepseek_fp8_block_scale = quant_config.is_block_quantized
 
     @staticmethod
-    def should_pf_defer_input_quant(
+    def expects_unquantized_inputs(
         moe_config: mk.FusedMoEConfig, quant_config: FusedMoEQuantConfig
     ) -> bool:
         # NVFP4 TP kernels and FP8 block-quantized kernels apply
