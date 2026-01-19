@@ -229,6 +229,10 @@ class EagleProposer:
         if self.uses_mrope:
             self.mrope_positions[:, :num_tokens] = positions
         else:
+            # Convert M-RoPE positions to 1D if target model uses M-RoPE but draft doesn't
+            # For text inputs, all M-RoPE dimensions are identical
+            if self.vllm_config.model_config.uses_mrope:
+                positions = positions[0]
             self.positions[:num_tokens] = positions
 
     def propose(
@@ -252,11 +256,6 @@ class EagleProposer:
 
         if last_token_indices is None:
             last_token_indices = common_attn_metadata.query_start_loc[1:] - 1
-
-        # Convert M-RoPE positions to 1D if draft model is text-only
-        if not self.uses_mrope and self.vllm_config.model_config.uses_mrope:
-            # For text inputs, all M-RoPE dimensions are identical
-            target_positions = target_positions[0]
 
         if self.method == "eagle3":
             assert isinstance(self.model, Eagle3LlamaForCausalLM)
@@ -337,6 +336,9 @@ class EagleProposer:
             input_ids = self.input_ids[:num_input_tokens]
             inputs_embeds = None
 
+        # Get normalized positions (needed both for model forward pass and later indexing)
+        all_positions = self._get_positions(num_input_tokens)
+
         with set_forward_context(
             per_layer_attn_metadata,
             self.vllm_config,
@@ -346,7 +348,7 @@ class EagleProposer:
         ):
             ret_hidden_states = self.model(
                 input_ids=input_ids,
-                positions=self._get_positions(num_input_tokens),
+                positions=all_positions,
                 hidden_states=self.hidden_states[:num_input_tokens],
                 inputs_embeds=inputs_embeds,
             )
@@ -363,10 +365,11 @@ class EagleProposer:
             draft_token_ids = logits.argmax(dim=-1)
             return draft_token_ids.view(-1, 1)
 
+        # Extract positions at last_token_indices (reuse all_positions from above)
         if self.uses_mrope:
-            positions = target_positions[:, last_token_indices]
+            positions = all_positions[:, last_token_indices]
         else:
-            positions = target_positions[last_token_indices]
+            positions = all_positions[last_token_indices]
         if self.method in (
             "deepseek_mtp",
             "ernie_mtp",
