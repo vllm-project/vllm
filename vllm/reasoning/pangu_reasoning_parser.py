@@ -61,8 +61,7 @@ class PanguReasoningParser(DeepSeekR1ReasoningParser):
             and self.end_token_id not in delta_token_ids
         ):
             # start token in delta with extra tokens
-                start_index = delta_text.find(self.start_token)
-                delta_text = delta_text[start_index + len(self.start_token):]
-                return  DeltaMessage(reasoning=delta_text)
+            delta_text = delta_text.split(self.start_token)[-1]
+            return  DeltaMessage(reasoning=delta_text)
 
         return ret

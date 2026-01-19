@@ -143,7 +143,7 @@ class PanguToolParser(ToolParser):
             self.tool_call_end_token in current_text 
             and self.tool_call_end_token not in delta_text
             ):
-            return DeltaMessage(content=delta_text)
+            return None
 
         if self.tool_call_start_token not in current_text:
             return DeltaMessage(content=delta_text)
@@ -253,7 +253,7 @@ class PanguToolParser(ToolParser):
         argument_diff = None
         if (
             self.is_json_complete 
-            and cur_args_json 
+            and cur_args_json is not None
             and not self.streamed_args_for_tool[-1]
             ):
             argument_diff = cur_args_json
