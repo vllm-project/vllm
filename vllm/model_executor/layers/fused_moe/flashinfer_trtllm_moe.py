@@ -221,7 +221,9 @@ class FlashInferTrtLlmNvFp4Experts(mk.FusedMoEPermuteExpertsUnpermute):
         self.num_expert_group = None
 
         self.topk = moe_config.experts_per_token
-        self.intermediate_dim = moe_config.intermediate_dim
+        self.intermediate_size_per_partition = (
+            moe_config.intermediate_size_per_partition
+        )
         self.hidden_dim = moe_config.hidden_dim
         self.local_num_experts = moe_config.num_local_experts
         self.ep_rank = moe_config.moe_parallel_config.ep_rank
@@ -261,7 +263,11 @@ class FlashInferTrtLlmNvFp4Experts(mk.FusedMoEPermuteExpertsUnpermute):
         # The workspaces for this implementation are managed by flashinfer.
         workspace1 = (0,)
         workspace2 = (0,)
-        output = (M, K)
+
+        # Hidden states are Nvfp4, packed into int8 dtype.
+        assert self.hidden_dim == K * 2
+        output = (M, self.hidden_dim)
+
         return (workspace1, workspace2, output)
 
     def apply(
@@ -315,7 +321,7 @@ class FlashInferTrtLlmNvFp4Experts(mk.FusedMoEPermuteExpertsUnpermute):
             top_k=self.topk,
             n_group=0,
             topk_group=0,
-            intermediate_size=self.intermediate_dim,
+            intermediate_size=self.intermediate_size_per_partition,
             local_expert_offset=self.ep_rank * self.local_num_experts,
             local_num_experts=self.local_num_experts,
             routed_scaling_factor=None,
@@ -324,7 +330,7 @@ class FlashInferTrtLlmNvFp4Experts(mk.FusedMoEPermuteExpertsUnpermute):
             do_finalize=True,
         )[0]
 
-        output.copy_(out)
+        output.copy_(out[0])
 
     def apply_monolthic(
         self,
