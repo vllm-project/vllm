@@ -13,7 +13,6 @@ from vllm.config.compilation import CUDAGraphMode
 from vllm.distributed.parallel_state import graph_capture, is_global_first_rank
 from vllm.forward_context import set_forward_context
 from vllm.v1.attention.backend import AttentionMetadataBuilder
-from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.worker.gpu.attn_utils import build_attn_metadata
 from vllm.v1.worker.gpu.block_table import BlockTables
@@ -60,12 +59,12 @@ class CudaGraphManager:
 
     def get_cudagraph_size(
         self,
-        scheduler_output: SchedulerOutput,
         num_tokens_after_padding: int,
+        num_tokens_per_request: Iterable[int],
     ) -> int | None:
         return get_cudagraph_size(
             num_tokens_after_padding,
-            scheduler_output.num_scheduled_tokens.values(),
+            num_tokens_per_request,
             self.cudagraph_sizes,
             self.cudagraph_mode,
         )

@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import gc
 import time
+from collections.abc import Iterable
 from copy import deepcopy
 from typing import Any
 
@@ -288,47 +289,25 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         skip_attn: bool = True,
         **kwargs,
     ) -> tuple[torch.Tensor, torch.Tensor]:
+        # Create a dummy scheduler output.
         num_reqs = min(num_tokens, self.max_num_reqs)
-        input_batch = InputBatch.make_dummy(
-            num_reqs=num_reqs,
-            num_tokens=num_tokens,
-            input_buffers=self.input_buffers,
-            device=self.device,
-        )
-        if self.uses_mrope:
-            input_batch.mrope_positions = self.mrope_states.mrope_positions[
-                :, :num_tokens
-            ]
-        if self.supports_mm_inputs:
-            input_batch.inputs_embeds = self.encoder_runner.inputs_embeds[:num_tokens]
-        if not skip_attn:
-            self.prepare_dummy_attn_metadata(input_batch)
+        num_tokens_per_request = [num_tokens // num_reqs] * num_reqs
+        num_tokens_per_request[-1] += num_tokens % num_reqs
+        assert sum(num_tokens_per_request) == num_tokens
+        num_scheduled_tokens = {
+            f"_dummy_req_{i}": num_tokens_per_request[i] for i in range(num_reqs)
+        }
+        dummy_scheduler_output = SchedulerOutput.make_empty()
+        dummy_scheduler_output.total_num_scheduled_tokens = num_tokens
+        dummy_scheduler_output.num_scheduled_tokens = num_scheduled_tokens
 
-        dp_size = self.parallel_config.data_parallel_size
-        num_tokens_across_dp = make_num_tokens_across_dp(dp_size, num_tokens)
-        num_sampled_tokens = np.ones(input_batch.num_reqs, dtype=np.int32)
-        positions = input_batch.positions
-        if self.uses_mrope:
-            positions = input_batch.mrope_positions
-        with (
-            self.maybe_dummy_run_with_lora(
-                self.lora_config,
-                input_batch.num_scheduled_tokens,
-                num_sampled_tokens,
-            ),
-            set_forward_context(
-                input_batch.attn_metadata,
-                self.vllm_config,
-                num_tokens=num_tokens,
-                num_tokens_across_dp=num_tokens_across_dp,
-            ),
-        ):
-            hidden_states = self.model(
-                input_ids=input_batch.input_ids,
-                positions=positions,
-                inputs_embeds=input_batch.inputs_embeds,
-            )
-            sample_hidden_states = hidden_states[input_batch.logits_indices]
+        # Execute the model.
+        self.execute_model(
+            dummy_scheduler_output, dummy_run=True, skip_attn_for_dummy_run=skip_attn
+        )
+        assert self.execute_model_state is not None
+        hidden_states, input_batch = self.execute_model_state
+        sample_hidden_states = hidden_states[input_batch.logits_indices]
         return hidden_states, sample_hidden_states
 
     @torch.inference_mode()
@@ -893,9 +872,9 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
     def get_cudagraph_and_dp_padding(
         self,
-        scheduler_output: SchedulerOutput,
+        total_num_scheduled_tokens: int,
+        num_tokens_per_request: Iterable[int],
     ) -> tuple[CUDAGraphMode, int, torch.Tensor | None]:
-        total_num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
         dp_size = self.parallel_config.data_parallel_size
         if dp_size == 1:
             # No DP. Only consider CUDA graphs.
@@ -904,7 +883,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 return CUDAGraphMode.NONE, 0, None
 
             cudagraph_size = self.cudagraph_manager.get_cudagraph_size(
-                scheduler_output, total_num_scheduled_tokens
+                total_num_scheduled_tokens, num_tokens_per_request
             )
             if cudagraph_size is not None:
                 # Use full CUDA graph.
@@ -919,7 +898,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             cudagraph_size_before_dp: int | None = 0
         else:
             cudagraph_size_before_dp = self.cudagraph_manager.get_cudagraph_size(
-                scheduler_output, total_num_scheduled_tokens
+                total_num_scheduled_tokens, num_tokens_per_request
             )
             if cudagraph_size_before_dp is None:
                 cudagraph_size_before_dp = -1
@@ -951,6 +930,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         scheduler_output: SchedulerOutput,
         intermediate_tensors: Any | None = None,
         dummy_run: bool = False,
+        skip_attn_for_dummy_run: bool = False,
     ) -> ModelRunnerOutput | None:
         assert intermediate_tensors is None
         if not dummy_run:
@@ -965,7 +945,10 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 return EMPTY_MODEL_RUNNER_OUTPUT
 
         cudagraph_mode, num_tokens_after_padding, num_tokens_across_dp = (
-            self.get_cudagraph_and_dp_padding(scheduler_output)
+            self.get_cudagraph_and_dp_padding(
+                scheduler_output.total_num_scheduled_tokens,
+                scheduler_output.num_scheduled_tokens.values(),
+            )
         )
         if num_tokens_after_padding == 0:
             # All DP ranks have zero tokens to run.
@@ -999,7 +982,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     : input_batch.num_tokens_after_padding
                 ]
         else:
-            # No actual tokens to run. A dummy run for DP.
+            # No actual tokens to run. A dummy run for DP or memory profiling.
             num_reqs = min(num_tokens_after_padding, self.max_num_reqs)
             input_batch = InputBatch.make_dummy(
                 num_reqs=num_reqs,
@@ -1011,7 +994,9 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 input_batch.mrope_positions = self.mrope_states.mrope_positions[
                     :, :num_tokens_after_padding
                 ]
-            self.prepare_dummy_attn_metadata(input_batch)
+            if not skip_attn_for_dummy_run:
+                self.prepare_dummy_attn_metadata(input_batch)
+            # FIXME(woosuk): Fix warmup for LoRA.
 
         # Run model.
         if cudagraph_mode == CUDAGraphMode.FULL:
