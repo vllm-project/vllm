@@ -73,8 +73,6 @@ class MiMoMultiTokenPredictorLayer(nn.Module):
         spec_step_index: int = 0,
     ) -> torch.Tensor:
         assert inputs_embeds is not None
-        # masking inputs at position 0, as not needed by MTP
-        inputs_embeds[positions == 0] = 0
         inputs_embeds = self.token_layernorm(inputs_embeds)
         previous_hidden_states = self.hidden_layernorm(previous_hidden_states)
 
