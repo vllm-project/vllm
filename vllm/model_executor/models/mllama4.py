@@ -76,6 +76,7 @@ from .interfaces import (
     SupportsLoRA,
     SupportsMultiModal,
     SupportsPP,
+    TowerMissingLayer,
 )
 from .llama4 import Llama4ForCausalLM
 from .utils import (
@@ -1024,6 +1025,9 @@ class Llama4ForConditionalGeneration(
             if renamed.startswith("language_model."):
                 language_model_weights.append((renamed, weight))
             else:
+                if isinstance(getattr(self, renamed), TowerMissingLayer):
+                    continue
+
                 other_weights.append((renamed, weight))
 
         return language_model_weights, other_weights
