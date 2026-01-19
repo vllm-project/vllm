@@ -299,7 +299,7 @@ def get_rope(
             )
         else:
             raise ValueError(
-                "Pangu mrope interleaved lacks necessary parameters mrope_section or mrope_interleaved."
+                "Pangu mrope interleaved lacks necessary parameters."
             )
     else:
         raise ValueError(f"Unknown RoPE scaling type {scaling_type}")
