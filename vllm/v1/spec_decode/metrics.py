@@ -3,12 +3,16 @@
 
 import time
 from dataclasses import dataclass, field
+from typing import TYPE_CHECKING
 
 import numpy as np
-import prometheus_client
 
 from vllm.config import SpeculativeConfig
 from vllm.logger import init_logger
+from vllm.v1.metrics.backends import AbstractCounter, MetricBackend, PrometheusBackend
+
+if TYPE_CHECKING:
+    pass
 
 logger = init_logger(__name__)
 
@@ -138,19 +142,21 @@ class SpecDecodingProm:
       vllm:spec_decode_num_drafts[$interval]
     """
 
-    _counter_cls = prometheus_client.Counter
-
     def __init__(
         self,
         speculative_config: SpeculativeConfig | None,
         labelnames: list[str],
-        per_engine_labelvalues: dict[int, list[object]],
+        per_engine_labelvalues: dict[int, list[str]],
+        backend: MetricBackend | None = None,
     ):
         self.spec_decoding_enabled = speculative_config is not None
         if not self.spec_decoding_enabled:
             return
 
-        counter_drafts = self._counter_cls(
+        # Use provided backend or default to Prometheus
+        self.backend = backend if backend is not None else PrometheusBackend()
+
+        counter_drafts = self.backend.create_counter(
             name="vllm:spec_decode_num_drafts",
             documentation="Number of spec decoding drafts.",
             labelnames=labelnames,
@@ -159,7 +165,7 @@ class SpecDecodingProm:
             counter_drafts, per_engine_labelvalues
         )
 
-        counter_draft_tokens = self._counter_cls(
+        counter_draft_tokens = self.backend.create_counter(
             name="vllm:spec_decode_num_draft_tokens",
             documentation="Number of draft tokens.",
             labelnames=labelnames,
@@ -168,7 +174,7 @@ class SpecDecodingProm:
             counter_draft_tokens, per_engine_labelvalues
         )
 
-        counter_accepted_tokens = self._counter_cls(
+        counter_accepted_tokens = self.backend.create_counter(
             name="vllm:spec_decode_num_accepted_tokens",
             documentation="Number of accepted tokens.",
             labelnames=labelnames,
@@ -184,13 +190,13 @@ class SpecDecodingProm:
             else 0
         )
         pos_labelnames = labelnames + ["position"]
-        base_counter = self._counter_cls(
+        base_counter = self.backend.create_counter(
             name="vllm:spec_decode_num_accepted_tokens_per_pos",
             documentation="Accepted tokens per draft position.",
             labelnames=pos_labelnames,
         )
         self.counter_spec_decode_num_accepted_tokens_per_pos: dict[
-            int, list[prometheus_client.Counter]
+            int, list[AbstractCounter]
         ] = {
             idx: [base_counter.labels(*lv, str(pos)) for pos in range(num_spec_tokens)]
             for idx, lv in per_engine_labelvalues.items()
@@ -215,8 +221,7 @@ class SpecDecodingProm:
 
 
 def make_per_engine(
-    counter: prometheus_client.Counter,
-    per_engine_labelvalues: dict[int, list[object]],
+    counter: AbstractCounter, per_engine_labelvalues: dict[int, list[str]]
 ):
     """Create a counter for each label value."""
     return {
