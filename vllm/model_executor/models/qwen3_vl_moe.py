@@ -46,7 +46,7 @@ from vllm.model_executor.model_loader.weight_utils import (
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.sequence import IntermediateTensors
 
-from .interfaces import MixtureOfExperts
+from .interfaces import MixtureOfExperts, SupportsEagle3
 from .qwen3_moe import (
     Qwen3MoeForCausalLM,
     Qwen3MoeModel,
@@ -91,6 +91,8 @@ class Qwen3MoeLLMModel(Qwen3MoeModel):
                 "start_layer should be greater than or equal to "
                 "len(deepstack_visual_indexes)"
             )
+        # Track layers for auxiliary hidden state outputs (EAGLE3)
+        self.aux_hidden_state_layers: tuple[int, ...] = ()
 
     def forward(
         self,
@@ -110,9 +112,17 @@ class Qwen3MoeLLMModel(Qwen3MoeModel):
             assert intermediate_tensors is not None
             hidden_states = intermediate_tensors["hidden_states"]
             residual = intermediate_tensors["residual"]
+        aux_hidden_states = []
         for layer_idx, layer in islice(
             enumerate(self.layers), self.start_layer, self.end_layer
         ):
+            # Collect auxiliary hidden states if specified
+            if layer_idx in self.aux_hidden_state_layers:
+                aux_hidden_state = (
+                    hidden_states + residual if residual is not None else hidden_states
+                )
+                aux_hidden_states.append(aux_hidden_state)
+
             hidden_states, residual = layer(
                 positions,
                 hidden_states,
@@ -132,6 +142,8 @@ class Qwen3MoeLLMModel(Qwen3MoeModel):
                 {"hidden_states": hidden_states, "residual": residual}
             )
         hidden_states, _ = self.norm(hidden_states, residual)
+        if len(aux_hidden_states) > 0:
+            return hidden_states, aux_hidden_states
         return hidden_states
 
     def load_fused_expert_weights(
@@ -399,7 +411,7 @@ class Qwen3VLMoeMixtureOfExperts(MixtureOfExperts):
     dummy_inputs=Qwen3VLDummyInputsBuilder,
 )
 class Qwen3VLMoeForConditionalGeneration(
-    Qwen3VLForConditionalGeneration, Qwen3VLMoeMixtureOfExperts
+    Qwen3VLForConditionalGeneration, Qwen3VLMoeMixtureOfExperts, SupportsEagle3
 ):
     is_3d_moe_weight: bool = True
     packed_modules_mapping = {
@@ -472,3 +484,10 @@ class Qwen3VLMoeForConditionalGeneration(
 
         # Set MoE hyperparameters
         self.set_moe_parameters()
+
+    def set_aux_hidden_state_layers(self, layers: tuple[int, ...]) -> None:
+        self.language_model.model.aux_hidden_state_layers = layers
+
+    def get_eagle3_aux_hidden_state_layers(self) -> tuple[int, ...]:
+        num_layers = len(self.language_model.model.layers)
+        return (2, num_layers // 2, num_layers - 3)
