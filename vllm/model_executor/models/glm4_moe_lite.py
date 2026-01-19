@@ -26,10 +26,13 @@
 import typing
 from collections.abc import Callable, Iterable
 from itertools import islice
+from typing import TYPE_CHECKING
 
 import torch
 from torch import nn
-from transformers.models.glm4_moe_lite import Glm4MoeLiteConfig
+
+if TYPE_CHECKING:
+    from transformers.models.glm4_moe_lite import Glm4MoeLiteConfig
 
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.compilation.decorators import support_torch_compile
@@ -99,7 +102,7 @@ class Glm4MoeLiteDecoderLayer(nn.Module):
         self,
         vllm_config: VllmConfig,
         prefix: str,
-        config: Glm4MoeLiteConfig | None = None,
+        config: "Glm4MoeLiteConfig" | None = None,
         topk_indices_buffer: torch.Tensor | None = None,
     ) -> None:
         super().__init__()
@@ -627,7 +630,7 @@ class Glm4MoeLiteForCausalLM(
 
 
 def get_spec_layer_idx_from_weight_name(
-    config: Glm4MoeLiteConfig, weight_name: str
+    config: "Glm4MoeLiteConfig", weight_name: str
 ) -> int | None:
     if hasattr(config, "num_nextn_predict_layers") and (
         config.num_nextn_predict_layers > 0
