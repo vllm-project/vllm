@@ -14,7 +14,7 @@ from vllm.config import (
     get_cached_compilation_config,
     set_current_vllm_config,
 )
-from vllm.model_executor.layers.fused_moe.fused_moe import (
+from vllm.model_executor.layers.fused_moe.router.grouped_topk_router import (
     GroupedTopk,
     fused_grouped_topk,
 )
