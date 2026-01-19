@@ -49,7 +49,6 @@ from vllm.model_executor.layers.quantization.base_config import (
 )
 from vllm.model_executor.layers.quantization.kv_cache import BaseKVCacheMethod
 from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
-    apply_fi_trtllm_fp8_per_tensor_moe,
     build_flashinfer_fp8_cutlass_moe_prepare_finalize,
     select_cutlass_fp8_gemm_impl,
 )
@@ -996,34 +995,20 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         router_logits: torch.Tensor,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         if self.fp8_backend == Fp8MoeBackend.FLASHINFER_TRTLLM:
-            # TODO(rob): convert this to MK.
             if layer.enable_eplb:
                 raise NotImplementedError("EPLB not supported for `Fp8MoEMethod` yet.")
 
-            if self.block_quant:
-                assert self.kernel is not None
-                return self.kernel.forward_monolithic(
-                    x,
-                    layer.w13_weight,
-                    layer.w2_weight,
-                    router_logits,
-                    activation=layer.activation,
-                    global_num_experts=layer.global_num_experts,
-                    expert_map=layer.expert_map,
-                    apply_router_weight_on_input=layer.apply_router_weight_on_input,
-                )
-            else:
-                result = apply_fi_trtllm_fp8_per_tensor_moe(
-                    layer=layer,
-                    hidden_states=x,
-                    router_logits=router_logits,
-                    routing_bias=layer.e_score_correction_bias,
-                    global_num_experts=layer.global_num_experts,
-                    top_k=layer.top_k,
-                    num_expert_group=layer.num_expert_group,
-                    topk_group=layer.topk_group,
-                    apply_router_weight_on_input=layer.apply_router_weight_on_input,
-                )
+            assert self.kernel is not None
+            return self.kernel.forward_monolithic(
+                x,
+                layer.w13_weight,
+                layer.w2_weight,
+                router_logits,
+                activation=layer.activation,
+                global_num_experts=layer.global_num_experts,
+                expert_map=layer.expert_map,
+                apply_router_weight_on_input=layer.apply_router_weight_on_input,
+            )
 
         topk_weights, topk_ids = router.select_experts(
             hidden_states=x,

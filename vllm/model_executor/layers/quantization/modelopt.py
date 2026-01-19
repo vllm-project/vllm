@@ -55,7 +55,6 @@ from vllm.model_executor.layers.quantization.utils.flashinfer_fp4_moe import (
     select_nvfp4_gemm_impl,
 )
 from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
-    apply_fi_trtllm_fp8_per_tensor_moe,
     build_flashinfer_fp8_cutlass_moe_prepare_finalize,
     select_cutlass_fp8_gemm_impl,
 )
@@ -877,13 +876,12 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
 
         # Setup modular kernel for TP case.
         self.moe_quant_config = self.get_fused_moe_quant_config(layer)
-        if self.moe_quant_config:
-            self.kernel, self.use_inplace = make_fp8_moe_kernel(
-                layer=layer,
-                moe_quant_config=self.moe_quant_config,
-                moe_config=self.moe,
-                fp8_backend=self.fp8_backend,
-            )
+        self.kernel, self.use_inplace = make_fp8_moe_kernel(
+            layer=layer,
+            moe_quant_config=self.moe_quant_config,
+            moe_config=self.moe,
+            fp8_backend=self.fp8_backend,
+        )
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         w13 = layer.w13_weight
@@ -944,21 +942,15 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
                 raise NotImplementedError(
                     "EPLB not supported for FlashInfer TRTLLM FP8 MoE Backend."
                 )
-            # TODO(rob): this validation should happen at kernel selection
-            # time in the oracle rather than here.
-            assert layer.activation == "silu", (
-                f"Expected 'silu' activation but got {layer.activation}"
-            )
-            assert not layer.renormalize
-            return apply_fi_trtllm_fp8_per_tensor_moe(
-                layer=layer,
-                hidden_states=x,
-                router_logits=router_logits,
-                routing_bias=layer.e_score_correction_bias,
+            assert self.kernel is not None
+            return self.kernel.forward_monolithic(
+                x,
+                layer.w13_weight,
+                layer.w2_weight,
+                router_logits,
+                activation=layer.activation,
                 global_num_experts=layer.global_num_experts,
-                top_k=layer.top_k,
-                num_expert_group=layer.num_expert_group,
-                topk_group=layer.topk_group,
+                expert_map=layer.expert_map,
                 apply_router_weight_on_input=layer.apply_router_weight_on_input,
             )
 

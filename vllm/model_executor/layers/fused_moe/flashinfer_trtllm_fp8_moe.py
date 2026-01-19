@@ -13,6 +13,7 @@ from vllm.model_executor.layers.fused_moe.config import (
 from vllm.model_executor.layers.fused_moe.utils import moe_kernel_quantize_input
 from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
     calculate_tile_tokens_dim,
+    make_fp8_moe_alpha_scales_for_fi,
 )
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     per_token_group_quant_fp8,
@@ -141,10 +142,6 @@ class FlashInferTrtLlmFp8Experts(mk.FusedMoEPermuteExpertsUnpermute):
         self.local_num_experts = moe_config.num_local_experts
         self.ep_rank = moe_config.moe_parallel_config.ep_rank
 
-        from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
-            make_fp8_moe_alpha_scales_for_fi,
-        )
-
         self._g1_alphas, self._g2_alphas = make_fp8_moe_alpha_scales_for_fi(
             w13_scale=self.quant_config.w1_scale,
             w13_input_scale=self.quant_config.a1_scale,
@@ -265,7 +262,6 @@ class FlashInferTrtLlmFp8Experts(mk.FusedMoEPermuteExpertsUnpermute):
             routed_scaling_factor=self.routing_scaling_factor,
             tile_tokens_dim=None,
             routing_method_type=self.routing_method_type,
-            use_shuffled_weight=False,
         )
 
     def _apply_per_tensor_monolithic(
@@ -282,6 +278,8 @@ class FlashInferTrtLlmFp8Experts(mk.FusedMoEPermuteExpertsUnpermute):
         assert self.routing_method_type == RoutingMethodType.Llama4
         assert apply_router_weight_on_input
 
+        topk_group = self.topk_group if self.topk_group is not None else 0
+
         a1q, _ = moe_kernel_quantize_input(
             hidden_states,
             self.quant_config.a1_scale,
@@ -294,14 +292,14 @@ class FlashInferTrtLlmFp8Experts(mk.FusedMoEPermuteExpertsUnpermute):
             routing_bias=self.e_score_correction_bias,
             hidden_states=a1q,
             gemm1_weights=w1,
-            output1_scales_scalar=self._g1_alphas,
-            output1_scales_gate_scalar=self.g1_scale_c,
+            output1_scales_scalar=self.g1_scale_c,
+            output1_scales_gate_scalar=self._g1_alphas,
             gemm2_weights=w2,
             output2_scales_scalar=self._g2_alphas,
             num_experts=global_num_experts,
             top_k=self.topk,
-            num_expert_group=self.num_expert_group,
-            topk_group=self.topk_group,
+            n_group=self.num_expert_group,
+            topk_group=topk_group,
             intermediate_size=self.intermediate_size_per_partition,
             local_expert_offset=self.ep_rank * self.local_num_experts,
             local_num_experts=self.local_num_experts,

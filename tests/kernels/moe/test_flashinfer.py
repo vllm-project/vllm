@@ -19,7 +19,6 @@ from vllm.model_executor.layers.fused_moe.prepare_finalize import (
     MoEPrepareAndFinalizeNoEP,
 )
 from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
-    apply_fi_trtllm_fp8_per_tensor_moe,
     register_scales_for_trtllm_fp8_per_tensor_moe,
     rotate_weights_for_fi_trtllm_fp8_per_tensor_moe,
     swap_w13_to_w31,
@@ -207,15 +206,26 @@ def test_flashinfer_per_tensor_moe_fp8_no_graph(
             quant_config=quant_config,
         )
 
-        flashinfer_output = apply_fi_trtllm_fp8_per_tensor_moe(
-            layer=td.layer,
+        from vllm.model_executor.layers.fused_moe.flashinfer_trtllm_fp8_moe import (
+            FlashInferTrtLlmFp8Experts,
+        )
+
+        kernel = mk.FusedMoEModularKernel(
+            MoEPrepareAndFinalizeNoEP(),
+            FlashInferTrtLlmFp8Experts(
+                moe_config=td.layer.moe,
+                quant_config=quant_config,
+            ),
+        )
+
+        flashinfer_output = kernel.apply_monolithic(
             hidden_states=td.hidden_states,
+            w1=td.layer.w13_weight,
+            w2=td.layer.w2_weight,
             router_logits=score,
-            routing_bias=None,
+            activation="silu",
             global_num_experts=e,
-            top_k=topk,
-            num_expert_group=None,
-            topk_group=None,
+            expert_map=None,
             apply_router_weight_on_input=True,
         )
 
