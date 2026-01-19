@@ -5,6 +5,23 @@
 # docs/contributing/dockerfile/dockerfile.md and
 # docs/assets/contributing/dockerfile-stages-dependency.png
 
+# =============================================================================
+# VERSION MANAGEMENT
+# =============================================================================
+# ARG defaults in this Dockerfile are the source of truth for pinned versions.
+# docker/versions.json is auto-generated for use with docker buildx bake.
+#
+# When updating versions:
+# 1. Edit the ARG defaults below
+# 2. Run: python tools/generate_versions_json.py
+#
+# To query versions programmatically:
+#   jq -r '.variable.CUDA_VERSION.default' docker/versions.json
+#
+# To build with bake:
+#   docker buildx bake -f docker/docker-bake.hcl -f docker/versions.json
+# =============================================================================
+
 ARG CUDA_VERSION=12.9.1
 ARG PYTHON_VERSION=3.12
 
@@ -141,6 +158,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 # CUDA arch list used by torch
 # Explicitly set the list to avoid issues with torch 2.2
 # See https://github.com/pytorch/pytorch/pull/123243
+# From versions.json: .torch.cuda_arch_list
 ARG torch_cuda_arch_list='7.0 7.5 8.0 8.9 9.0 10.0 12.0'
 ENV TORCH_CUDA_ARCH_LIST=${torch_cuda_arch_list}
 #################### BUILD BASE IMAGE ####################
@@ -256,7 +274,8 @@ ENV UV_LINK_MODE=copy
 WORKDIR /workspace
 
 # Build DeepGEMM wheel
-ARG DEEPGEMM_GIT_REF
+# Default moved here from tools/install_deepgemm.sh for centralized version management
+ARG DEEPGEMM_GIT_REF=594953acce41793ae00a1233eb516044d604bcb6
 COPY tools/install_deepgemm.sh /tmp/install_deepgemm.sh
 RUN --mount=type=cache,target=/root/.cache/uv \
     mkdir -p /tmp/deepgemm/dist && \
@@ -271,8 +290,9 @@ RUN mkdir -p /tmp/deepgemm/dist && touch /tmp/deepgemm/dist/.deepgemm_skipped
 
 # Build pplx-kernels and DeepEP wheels
 COPY tools/ep_kernels/install_python_libraries.sh /tmp/install_python_libraries.sh
-ARG PPLX_COMMIT_HASH
-ARG DEEPEP_COMMIT_HASH
+# Defaults moved here from tools/ep_kernels/install_python_libraries.sh for centralized version management
+ARG PPLX_COMMIT_HASH=12cecfd
+ARG DEEPEP_COMMIT_HASH=73b6ea4
 ARG NVSHMEM_VER
 RUN --mount=type=cache,target=/root/.cache/uv \
     mkdir -p /tmp/ep_kernels_workspace/dist && \
@@ -474,6 +494,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 # Install FlashInfer pre-compiled kernel cache and binaries
 # This is ~1.1GB and only changes when FlashInfer version bumps
 # https://docs.flashinfer.ai/installation.html
+# From versions.json: .flashinfer.version
 ARG FLASHINFER_VERSION=0.5.3
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv pip install --system flashinfer-cubin==${FLASHINFER_VERSION} \
@@ -503,14 +524,20 @@ RUN set -eux; \
 
 # Install vllm-openai dependencies (saves ~2.6s per build)
 # These are stable packages that don't depend on vLLM itself
+# From versions.json: .bitsandbytes.x86_64, .bitsandbytes.arm64
+# From versions.json: .openai_server_extras.timm, .openai_server_extras.runai_model_streamer
+ARG BITSANDBYTES_VERSION_X86=0.46.1
+ARG BITSANDBYTES_VERSION_ARM64=0.42.0
+ARG TIMM_VERSION=">=1.0.17"
+ARG RUNAI_MODEL_STREAMER_VERSION=">=0.15.3"
 RUN --mount=type=cache,target=/root/.cache/uv \
     if [ "$TARGETPLATFORM" = "linux/arm64" ]; then \
-        BITSANDBYTES_VERSION="0.42.0"; \
+        BITSANDBYTES_VERSION="${BITSANDBYTES_VERSION_ARM64}"; \
     else \
-        BITSANDBYTES_VERSION="0.46.1"; \
+        BITSANDBYTES_VERSION="${BITSANDBYTES_VERSION_X86}"; \
     fi; \
     uv pip install --system accelerate hf_transfer modelscope \
-        "bitsandbytes>=${BITSANDBYTES_VERSION}" 'timm>=1.0.17' 'runai-model-streamer[s3,gcs]>=0.15.3'
+        "bitsandbytes>=${BITSANDBYTES_VERSION}" "timm${TIMM_VERSION}" "runai-model-streamer[s3,gcs]${RUNAI_MODEL_STREAMER_VERSION}"
 
 # ============================================================
 # VLLM INSTALLATION (depends on build stage)

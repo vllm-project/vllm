@@ -10,12 +10,12 @@ from vllm.model_executor.layers.fused_moe import (
     FusedMoE,
     FusedMoEConfig,
     FusedMoEMethodBase,
+    FusedMoERouter,
 )
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEQuantConfig,
     int8_w8a16_moe_quant_config,
 )
-from vllm.model_executor.layers.fused_moe.fused_moe_router import FusedMoERouter
 from vllm.model_executor.layers.linear import LinearBase, UnquantizedLinearMethod
 from vllm.model_executor.layers.quantization import QuantizationMethods
 from vllm.model_executor.layers.quantization.base_config import (
