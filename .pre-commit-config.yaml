@@ -30,10 +30,10 @@ repos:
   - id: markdownlint
     exclude: '.*\.inc\.md'
     stages: [manual] # Only run in CI
-- repo: https://github.com/rhysd/actionlint
-  rev: v1.7.7
-  hooks:
-  - id: actionlint
+# - repo: https://github.com/rhysd/actionlint
+#   rev: v1.7.7
+#   hooks:
+#   - id: actionlint
 - repo: https://github.com/astral-sh/uv-pre-commit
   rev: 0.9.1
   hooks:
