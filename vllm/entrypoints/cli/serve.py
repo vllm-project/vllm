@@ -52,24 +52,47 @@ class ServeSubcommand(CLISubcommand):
 
         if args.headless:
             if args.api_server_count is not None and args.api_server_count > 0:
-                logger.warning(
-                    "Ignoring --api-server-count=%d in headless mode "
-                    "(no API servers are started).",
-                    args.api_server_count,
+                raise ValueError(
+                    f"--api-server-count={args.api_server_count} cannot be "
+                    "used with --headless (no API servers are started in "
+                    "headless mode)."
                 )
             # Default to 0 in headless mode (no API servers)
             args.api_server_count = 0
             run_headless(args)
             return
 
-        # Default api_server_count to data_parallel_size if not explicitly set
+        # Default api_server_count if not explicitly set.
+        # - External LB: Leave as 1 (external LB handles distribution)
+        # - Hybrid LB: Use local DP size (internal LB for local ranks only)
+        # - Internal LB: Use full DP size
         if args.api_server_count is None:
-            args.api_server_count = args.data_parallel_size
-            if args.api_server_count > 1:
-                logger.debug(
-                    "Defaulting api_server_count to data_parallel_size (%d).",
-                    args.api_server_count,
-                )
+            # External LB is inferred when data_parallel_rank is explicitly set
+            is_external_lb = (
+                args.data_parallel_external_lb or args.data_parallel_rank is not None
+            )
+            # Hybrid LB is inferred when data_parallel_start_rank is set
+            is_hybrid_lb = (
+                args.data_parallel_hybrid_lb
+                or args.data_parallel_start_rank is not None
+            )
+            if is_external_lb:
+                args.api_server_count = 1
+            elif is_hybrid_lb:
+                args.api_server_count = args.data_parallel_size_local or 1
+                if args.api_server_count > 1:
+                    logger.info(
+                        "Defaulting api_server_count to data_parallel_size_local "
+                        "(%d) for hybrid LB mode.",
+                        args.api_server_count,
+                    )
+            else:
+                args.api_server_count = args.data_parallel_size
+                if args.api_server_count > 1:
+                    logger.info(
+                        "Defaulting api_server_count to data_parallel_size (%d).",
+                        args.api_server_count,
+                    )
 
         if args.api_server_count < 1:
             run_headless(args)
