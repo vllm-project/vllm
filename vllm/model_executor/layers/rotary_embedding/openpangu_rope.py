@@ -36,7 +36,7 @@ class MRotaryEmbeddingInterleaved(MRotaryEmbedding):
         base: float,
         is_neox_style: bool,
         dtype: torch.dtype,
-        mrope_section: list[int] = [],
+        mrope_section: list[int],
         mrope_interleaved: bool = True,
     ) -> None:
         # Enlarge max_position_embeddings for video inputs
