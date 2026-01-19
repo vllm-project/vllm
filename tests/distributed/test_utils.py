@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import os
 import socket
 
 import pytest
@@ -10,6 +11,7 @@ import torch
 import vllm.envs as envs
 from vllm.distributed.device_communicators.pynccl import PyNcclCommunicator
 from vllm.distributed.utils import StatelessProcessGroup
+from vllm.platforms import current_platform
 from vllm.utils.network_utils import get_open_port
 from vllm.utils.system_utils import update_environment_variables
 from vllm.utils.torch_utils import cuda_device_count_stateless
@@ -20,12 +22,18 @@ from ..utils import multi_gpu_test
 @ray.remote
 class _CUDADeviceCountStatelessTestActor:
     def get_count(self):
+        if current_platform.is_rocm():
+            os.environ["CUDA_VISIBLE_DEVICES"] = os.getenv("HIP_VISIBLE_DEVICES", "")
         return cuda_device_count_stateless()
 
     def set_cuda_visible_devices(self, cuda_visible_devices: str):
         update_environment_variables({"CUDA_VISIBLE_DEVICES": cuda_visible_devices})
+        if current_platform.is_rocm():
+            os.environ["HIP_VISIBLE_DEVICES"] = os.getenv("CUDA_VISIBLE_DEVICES", "")
 
     def get_cuda_visible_devices(self):
+        if current_platform.is_rocm():
+            os.environ["CUDA_VISIBLE_DEVICES"] = os.getenv("HIP_VISIBLE_DEVICES", "")
         return envs.CUDA_VISIBLE_DEVICES
 
 

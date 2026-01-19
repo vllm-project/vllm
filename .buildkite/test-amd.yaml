@@ -257,7 +257,7 @@ steps:
   - TP_SIZE=1 DP_SIZE=4 pytest -v -s v1/distributed/test_internal_lb_dp.py
   - TP_SIZE=1 DP_SIZE=4 pytest -v -s v1/distributed/test_hybrid_lb_dp.py
   - pytest -v -s v1/engine/test_engine_core_client.py::test_kv_cache_events_dp
-  - pytest -v -s distributed/test_utils.py
+  - RAY_EXPERIMENTAL_NOSET_HIP_VISIBLE_DEVICES="" pytest -v -s distributed/test_utils.py
   - pytest -v -s compile/fullgraph/test_basic_correctness.py
   - pytest -v -s distributed/test_pynccl.py
   - pytest -v -s distributed/test_events.py
