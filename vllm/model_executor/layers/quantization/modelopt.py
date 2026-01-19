@@ -1563,7 +1563,7 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
             )
 
         self.use_monolithic = (
-            layer.enable_eplb
+            not layer.enable_eplb
             and self.nvfp4_backend == NvFp4MoeBackend.FLASHINFER_TRTLLM
         )
 
@@ -1610,7 +1610,6 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         assert self.kernel is not None
 
-        logger.info_once(f"{self.use_monolithic=}", scope="local")
         if self.use_monolithic:
             # In monolithic case, router is fused with expert.
             out = self.kernel.forward_monolithic(
@@ -1624,7 +1623,6 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
                 apply_router_weight_on_input=layer.apply_router_weight_on_input,
             )
         else:
-            # Otherwise, expert selection is separate.
             topk_weights, topk_ids = router.select_experts(
                 hidden_states=x,
                 router_logits=router_logits,
