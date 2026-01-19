@@ -145,7 +145,8 @@ class OpenPanguVLProcessor(Qwen2_5_VLProcessor):
         vision_end_token: str,
     ) -> None:
         """
-        Replace placeholder tokens (e.g., <image> or <video>) in text with structured vision token sequences.
+        Replace placeholder tokens (e.g., <image> or <video>) in text with
+        structured vision token sequences.
         For images:
             - `grid_thw[i] = (1, H, W)` → treated as a single time slice.
         For videos:
@@ -177,7 +178,7 @@ class OpenPanguVLProcessor(Qwen2_5_VLProcessor):
                         f"Expected one (T, H, W) tuple per '{vision_token}' token."
                     )
                 grid_t, grid_h, grid_w = grid_thw[index]
-                # Calculate the sequence length per time slice based on the grid size and merge length.
+                # Calculate the sequence length per time slice based on the grid size and merge length. # noqa: E501
                 seq_length_per_time = (grid_h * grid_w) // (merge_size**2)
                 # Prepare a placeholder string that includes start and end tokens,
                 # and then calculate the number of media tokens to replace.
@@ -187,7 +188,7 @@ class OpenPanguVLProcessor(Qwen2_5_VLProcessor):
                     + vision_end_token
                 )
                 if grid_t > 1:
-                    # For videos only, repeat the placeholder string for each time slice.
+                    # For videos only, repeat the placeholder string for each time slice. # noqa: E501
                     placeholder_string *= grid_t
                 placeholder_string = placeholder_string.removeprefix(vision_start_token)
                 placeholder_string = placeholder_string.removesuffix(vision_end_token)
