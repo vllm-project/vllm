@@ -138,7 +138,7 @@ def test_completion_request_batched(server: RemoteOpenAIServer, model_name: str)
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
-async def test_conversation_pooling(server: RemoteOpenAIServer, model_name: str):
+async def test_chat_request(server: RemoteOpenAIServer, model_name: str):
     messages = [
         {
             "role": "user",
@@ -152,8 +152,14 @@ async def test_conversation_pooling(server: RemoteOpenAIServer, model_name: str)
             "role": "user",
             "content": "Stars twinkle brightly in the night sky.",
         },
+        {
+            "role": "assistant",
+            "content": "",
+        },
     ]
 
+    ###############################
+    # test chat request basic usage
     chat_response = requests.post(
         server.url_for("pooling"),
         json={
@@ -191,6 +197,72 @@ async def test_conversation_pooling(server: RemoteOpenAIServer, model_name: str)
     assert chat_poolings.created <= completion_poolings.created
     assert chat_poolings.model_dump(exclude={"id", "created"}) == (
         completion_poolings.model_dump(exclude={"id", "created"})
+    )
+
+    ###############################
+    # test add_generation_prompt
+    response = requests.post(
+        server.url_for("pooling"),
+        json={"model": model_name, "messages": messages, "add_generation_prompt": True},
+    )
+
+    response.raise_for_status()
+    output = PoolingResponse.model_validate(response.json())
+
+    assert output.object == "list"
+    assert len(output.data) == 1
+    assert output.model == MODEL_NAME
+    assert output.usage.prompt_tokens == 37
+
+    ###############################
+    # test continue_final_message
+    # The continue_final_message parameter doesn't seem to be working with this model.
+    response = requests.post(
+        server.url_for("pooling"),
+        json={
+            "model": model_name,
+            "messages": messages,
+            "continue_final_message": True,
+        },
+    )
+
+    response.raise_for_status()
+    output = PoolingResponse.model_validate(response.json())
+
+    assert output.object == "list"
+    assert len(output.data) == 1
+    assert output.model == MODEL_NAME
+    assert output.usage.prompt_tokens == 37
+
+    ###############################
+    # test add_special_tokens
+    response = requests.post(
+        server.url_for("pooling"),
+        json={"model": model_name, "messages": messages, "add_special_tokens": True},
+    )
+
+    response.raise_for_status()
+    output = PoolingResponse.model_validate(response.json())
+
+    assert output.object == "list"
+    assert len(output.data) == 1
+    assert output.model == MODEL_NAME
+    assert output.usage.prompt_tokens == 38
+
+    ###############################
+    # test continue_final_message with add_generation_prompt
+    response = requests.post(
+        server.url_for("pooling"),
+        json={
+            "model": model_name,
+            "messages": messages,
+            "continue_final_message": True,
+            "add_generation_prompt": True,
+        },
+    )
+    assert (
+        "Cannot set both `continue_final_message` and `add_generation_prompt` to True."
+        in response.json()["error"]["message"]
     )
 
 
