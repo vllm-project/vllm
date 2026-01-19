@@ -671,6 +671,7 @@ def main(args: argparse.Namespace):
         "DeepseekV3ForCausalLM",
         "DeepseekV32ForCausalLM",
         "Glm4MoeForCausalLM",
+        "Glm4MoeLiteForCausalLM",
         "NemotronHForCausalLM",
     ):
         E = config.n_routed_experts
