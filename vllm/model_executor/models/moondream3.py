@@ -661,7 +661,7 @@ class Moondream3TextMoE(nn.Module):
         )
 
         tp_rank = get_tensor_model_parallel_rank()
-        num_tokens = x.shape[0]
+        x.shape[0]
 
         # Get router logits and compute top-k
         router_logits, _ = self.gate(x)  # [num_tokens, num_experts]
@@ -673,7 +673,7 @@ class Moondream3TextMoE(nn.Module):
 
         # Compute local expert range
         local_expert_start = tp_rank * self.experts_per_rank
-        local_expert_end = local_expert_start + self.experts_per_rank
+        local_expert_start + self.experts_per_rank
 
         # Compute MoE output using loop over local experts
         out = x.new_zeros(x.shape)
@@ -1539,7 +1539,6 @@ class Moondream3ForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
         loaded_params: set[str] = set()
 
         # Get expert intermediate size for fc1 splitting
-        expert_inner_dim = self.config.text.moe_expert_inner_dim
 
         for name, loaded_weight in weights:
             # Skip region weights (not implemented in MVP)
