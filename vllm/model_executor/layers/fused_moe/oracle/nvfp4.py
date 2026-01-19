@@ -217,11 +217,7 @@ def make_nvfp4_moe_quant_config(
     a13_scale: torch.Tensor,
     a2_scale: torch.Tensor,
 ) -> FusedMoEQuantConfig | None:
-    UNSUPPORTED = [NvFp4MoeBackend.FLASHINFER_TRTLLM]
-    if backend in UNSUPPORTED:
-        return None
-
-    elif backend == NvFp4MoeBackend.MARLIN:
+    if backend == NvFp4MoeBackend.MARLIN:
         return nvfp4_w4a16_moe_quant_config(
             g1_alphas=w13_scale_2,
             g2_alphas=w2_scale_2,

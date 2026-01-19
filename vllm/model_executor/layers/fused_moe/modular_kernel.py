@@ -867,6 +867,7 @@ class FusedMoEModularKernel(torch.nn.Module):
             expert_tokens_meta,
             activation,
         )
+        print(f"{fused_out_shape=}")
 
         # We can reuse the memory between cache1 and cache3 because by the
         # time we need cache3, we're done with cache1.
