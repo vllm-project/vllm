@@ -3,6 +3,7 @@
 
 from collections import defaultdict
 from collections.abc import Iterable
+import hashlib
 from itertools import islice
 from typing import Any
 
@@ -53,6 +54,75 @@ class WeaveConnectorScheduler:
         self._reqs_being_loaded = defaultdict[ReqId, set[BlockHash]](set)
 
         self._request_phases: dict[ReqId, RequestPhase] = {}
+
+        # MVP-0: request-level recompute (token_ids-only seed).
+        # If a request is marked for recompute, we will return 0 external
+        # tokens so vLLM falls back to local compute.
+        recompute_ratio_raw: object = 0.0
+        disable_store_raw: object = False
+        # Prefer spec-level config if this is a WeaveOffloadingSpec.
+        weave_cfg = getattr(spec, "weave_config", None)
+        if weave_cfg is not None:
+            recompute_ratio_raw = getattr(weave_cfg, "loom_recompute_ratio", 0.0)
+            disable_store_raw = getattr(weave_cfg, "loom_disable_store_for_recompute", False)
+            log_every_raw: object = getattr(weave_cfg, "loom_recompute_log_every_steps", 50)
+        else:
+            kv_extra = spec.vllm_config.kv_transfer_config.kv_connector_extra_config
+            recompute_ratio_raw = kv_extra.get("loom_recompute_ratio", 0.0)
+            disable_store_raw = kv_extra.get("loom_disable_store_for_recompute", False)
+            log_every_raw = kv_extra.get("loom_recompute_log_every_steps", 50)
+
+        self._loom_recompute_auto: bool = False
+        if isinstance(recompute_ratio_raw, str):
+            if recompute_ratio_raw != "auto":
+                raise ValueError(
+                    "loom_recompute_ratio must be a float in [0.0, 1.0] or 'auto'"
+                )
+            self._loom_recompute_auto = True
+            self._loom_recompute_ratio = 0.0
+        else:
+            self._loom_recompute_ratio = float(recompute_ratio_raw)
+            if not (0.0 <= self._loom_recompute_ratio <= 1.0):
+                raise ValueError(
+                    "loom_recompute_ratio must be a float in [0.0, 1.0] or 'auto'"
+                )
+
+        self._loom_disable_store_for_recompute: bool = bool(disable_store_raw)
+        self._loom_force_recompute: dict[ReqId, bool] = {}
+
+        self._loom_step_counter: int = 0
+        try:
+            self._loom_recompute_log_every_steps: int = int(log_every_raw)
+        except (TypeError, ValueError) as e:
+            raise ValueError(
+                "loom_recompute_log_every_steps must be an int (>=0)"
+            ) from e
+        if self._loom_recompute_log_every_steps < 0:
+            raise ValueError("loom_recompute_log_every_steps must be >= 0")
+
+    def _should_force_recompute(self, req_id: ReqId) -> bool:
+        forced = self._loom_force_recompute.get(req_id)
+        if forced is not None:
+            return forced
+
+        if self._loom_recompute_auto:
+            forced = False
+            self._loom_force_recompute[req_id] = forced
+            return forced
+
+        ratio = self._loom_recompute_ratio
+        if ratio <= 0.0:
+            forced = False
+        elif ratio >= 1.0:
+            forced = True
+        else:
+            # Deterministic split by req_id.
+            digest = hashlib.sha256(req_id.encode("utf-8")).digest()
+            val = int.from_bytes(digest[:8], "little", signed=False)
+            forced = (val % 10_000) < int(ratio * 10_000)
+
+        self._loom_force_recompute[req_id] = forced
+        return forced
 
     def _refresh_request_phases(self) -> None:
         for req_id, req in self._requests.items():
@@ -105,6 +175,9 @@ class WeaveConnectorScheduler:
                 - `True` if tokens will be loaded asynchronously
                   (between scheduler steps).
         """
+        if self._should_force_recompute(request.request_id):
+            return 0, False
+
         num_blocks = request.num_tokens // self.offloaded_block_size
 
         assert len(request.block_hashes) // self.block_size_factor == num_blocks
@@ -185,6 +258,23 @@ class WeaveConnectorScheduler:
         self, scheduler_output: SchedulerOutput
     ) -> WeaveConnectorMetadata:
         self._refresh_request_phases()
+
+        # MVP-0 observability: verify forced recompute ratio is taking effect.
+        self._loom_step_counter += 1
+        if self._loom_recompute_log_every_steps > 0 and (
+            self._loom_step_counter % self._loom_recompute_log_every_steps == 0
+        ):
+            req_ids = list(scheduler_output.num_scheduled_tokens)
+            total = len(req_ids)
+            if total > 0:
+                forced = sum(1 for req_id in req_ids if self._should_force_recompute(req_id))
+                logger.info(
+                    "Loom recompute stats: forced=%d total=%d ratio=%.3f (cfg=%r)",
+                    forced,
+                    total,
+                    forced / total,
+                    ("auto" if self._loom_recompute_auto else self._loom_recompute_ratio),
+                )
         num_prefill = 0
         num_decode = 0
         for req_id in scheduler_output.num_scheduled_tokens:
@@ -201,17 +291,26 @@ class WeaveConnectorScheduler:
                 num_prefill + num_decode,
             )
 
+        reqs_to_store = self.policy.get_reqs_to_store(
+            scheduler_output,
+            requests=self._requests,
+            request_block_ids=self._request_block_ids,
+            next_stored_block_idx=self._next_stored_block_idx,
+            reqs_being_stored=self._reqs_being_stored,
+            get_block_hashes=self._get_block_hashes,
+            request_phases=self._request_phases,
+        )
+        if self._loom_disable_store_for_recompute and reqs_to_store:
+            reqs_to_store = {
+                req_id: spec
+                for req_id, spec in reqs_to_store.items()
+                if not self._should_force_recompute(req_id)
+            }
+
         meta = WeaveConnectorMetadata(
             reqs_to_load=self._reqs_to_load,
-            reqs_to_store=self.policy.get_reqs_to_store(
-                scheduler_output,
-                requests=self._requests,
-                request_block_ids=self._request_block_ids,
-                next_stored_block_idx=self._next_stored_block_idx,
-                reqs_being_stored=self._reqs_being_stored,
-                get_block_hashes=self._get_block_hashes,
-                request_phases=self._request_phases,
-            ),
+            reqs_to_store=reqs_to_store,
+            reqs_to_regen={},
         )
         self._reqs_to_load = {}
 
@@ -263,6 +362,7 @@ class WeaveConnectorScheduler:
         self._request_phases.pop(req_id, None)
         self._request_block_ids.pop(req_id, None)
         self._next_stored_block_idx.pop(req_id, None)
+        self._loom_force_recompute.pop(req_id, None)
 
         request_being_stored = req_id in self._reqs_being_stored
         return request_being_stored, None

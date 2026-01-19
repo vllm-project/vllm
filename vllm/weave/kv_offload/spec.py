@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from enum import Enum, auto
 from typing import Any, Literal, Mapping
 
 import torch
@@ -10,21 +9,17 @@ from vllm.config import VllmConfig
 from vllm.platforms import current_platform
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.kv_offload.abstract import LoadStoreSpec, OffloadingManager
-from vllm.v1.kv_offload.arc_manager import ARCOffloadingManager
-from vllm.v1.kv_offload.lru_manager import LRUOffloadingManager
 from vllm.v1.kv_offload.mediums import (
     CXLLoadStoreSpec,
     DRAMLoadStoreSpec,
     GPULoadStoreSpec,
 )
 from vllm.v1.kv_offload.spec import OffloadingSpec
-from vllm.v1.kv_offload.worker.worker import OffloadingHandler
 
 from .backends.cxl_backend import WeaveCXLBackend
 from .backends.dram_backend import WeaveDRAMBackend
 from .handlers.dram_cxl import WeaveDramCxlOffloadingHandler
 from .handlers.gpu_dram import WeaveGPUDramOffloadingHandlers
-from .utils.numa import numa_membind
 from .two_tier_manager import TwoTierOffloadingManager
 from ..weave_logger import get_weave_logger
 
@@ -69,206 +64,77 @@ def _coerce_bool(name: str, value: Any) -> bool:
     raise TypeError(f"{name} must be a bool, got {type(value).__name__}")
 
 
+def _coerce_str(name: str, value: Any) -> str:
+    if not isinstance(value, str):
+        raise TypeError(f"{name} must be a str, got {type(value).__name__}")
+    return value
+
+
 def _parse_ratio_or_auto(name: str, value: Any) -> float | Literal["auto"]:
     if isinstance(value, str) and value.strip().lower() == "auto":
         return "auto"
     return _coerce_fraction(name, value)
 
 
-def _parse_mode(value: Any) -> WeaveOffloadingMode:
-    if isinstance(value, WeaveOffloadingMode):
-        return value
-    if isinstance(value, str):
-        normalized = value.strip().upper().replace("-", "_")
-        # allow a couple of common aliases
-        aliases = {
-            "DRAM": "DRAM_ONLY",
-            "CXL": "CXL_ONLY",
-        }
-        normalized = aliases.get(normalized, normalized)
-        try:
-            return WeaveOffloadingMode[normalized]
-        except KeyError as e:
-            valid = ", ".join(m.name for m in WeaveOffloadingMode)
-            raise ValueError(f"mode must be one of: {valid}; got {value!r}") from e
-    raise TypeError(
-        f"mode must be a str or WeaveOffloadingMode, got {type(value).__name__}"
-    )
-
-
-class WeaveOffloadingMode(Enum):
-    DRAM_ONLY = auto()
-    CXL_ONLY = auto()
-    DEFAULT = auto()
-
-
-def _coerce_bytes(name: str, value: Any) -> int:
-    if value is None:
-        raise TypeError(f"{name} must be a number, got None")
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
-        raise TypeError(f"{name} must be a number, got {type(value).__name__}")
-    int_value = int(value)
-    if int_value < 0:
-        raise ValueError(f"{name} must be >= 0, got {int_value}")
-    return int_value
-
-
-def _gb_to_bytes(gb: Any) -> int:
-    # Accept int/float; treat as GiB for consistency with most tooling.
-    gb_int = _coerce_int("*_pool_size_gb", gb)
-    return gb_int * (1024**3)
-
-
 @dataclass
 class WeaveOffloadingConfig:
-    dram_bytes_to_use: int = 0
-    cxl_bytes_to_use: int = 0
-    mode: WeaveOffloadingMode = WeaveOffloadingMode.DEFAULT
-    
-    # 水位控制
-    dram_high_watermark: float = 0.8
-    dram_low_watermark:  float = 0.6
-    
-    # 写入配置
-    kv_prefill_dram_ratio: float | Literal["auto"] = 0.67
-    flush_batch_size_MB: int = 64
-    flush_budget_MBps: int = 256 
-
-    # decode 
-    kv_hot_window_tokens: int = 512   
-    kv_prefetch_blocks: int = 2
-    promotion_budget_MBps: int = 256  
-    decode_allow_sync_cxl_read: bool = True
-
-    cxl_numa_node: int | None = None
-
+    seed_pool_size_GB: int = 0
+    cxl_kvcache_size_GB: int = 0
+    # Loom (MVP-0): request-level recompute baseline knobs.
+    loom_recompute_ratio: float | Literal["auto"] = 0.0
+    loom_disable_store_for_recompute: bool = False
+    cxl_numa_node: int | None = 1
     eviction_policy: Literal["lru", "arc"] = "lru" 
 
     @classmethod
     def from_dict(cls, raw: Mapping[str, Any]) -> "WeaveOffloadingConfig":
-        # Accept a few aliases so users can start with minimal configs.
-        # Preferred keys:
-        # - dram_bytes_to_use / cxl_bytes_to_use
-        # - dram_pool_size_gb / cxl_pool_size_gb
-        # Back-compat with vLLM CPUOffloadingSpec:
-        # - cpu_bytes_to_use -> dram_bytes_to_use
-
-        if "dram_bytes_to_use" in raw:
-            dram_bytes_to_use = _coerce_bytes("dram_bytes_to_use", raw["dram_bytes_to_use"])
-        elif "seed_dram_bytes_to_use" in raw:
-            dram_bytes_to_use = _coerce_bytes(
-                "seed_dram_bytes_to_use", raw["seed_dram_bytes_to_use"]
-            )
-        elif "cpu_bytes_to_use" in raw:
-            dram_bytes_to_use = _coerce_bytes("cpu_bytes_to_use", raw["cpu_bytes_to_use"])
-        elif "dram_pool_size_gb" in raw:
-            dram_bytes_to_use = _gb_to_bytes(raw["dram_pool_size_gb"])
-        elif "seed_dram_pool_size" in raw:
-            dram_bytes_to_use = _coerce_bytes("seed_dram_pool_size", raw["seed_dram_pool_size"])
-        elif "seed_dram_pool_size_gb" in raw:
-            dram_bytes_to_use = _gb_to_bytes(raw["seed_dram_pool_size_gb"])
-        else:
-            raise ValueError(
-                "weave offloading config must specify one of: "
-                "dram_bytes_to_use, seed_dram_bytes_to_use, cpu_bytes_to_use, "
-                "dram_pool_size_gb, seed_dram_pool_size, seed_dram_pool_size_gb"
-            )
-
-        if "cxl_bytes_to_use" in raw:
-            cxl_bytes_to_use = _coerce_bytes("cxl_bytes_to_use", raw["cxl_bytes_to_use"])
-        elif "cxl_kvpool_size_bytes" in raw:
-            cxl_bytes_to_use = _coerce_bytes("cxl_kvpool_size_bytes", raw["cxl_kvpool_size_bytes"])
-        elif "cxl_kvpool_size_gb" in raw:
-            cxl_bytes_to_use = _gb_to_bytes(raw["cxl_kvpool_size_gb"])
-        elif "cxl_pool_size_gb" in raw:
-            cxl_bytes_to_use = _gb_to_bytes(raw["cxl_pool_size_gb"])
-        else:
-            cxl_bytes_to_use = 0
-
-        mode = _parse_mode(raw.get("mode", WeaveOffloadingMode.DEFAULT))
-
         defaults = cls()
 
-        dram_high_watermark = defaults.dram_high_watermark
-        if "dram_high_watermark" in raw:
-            dram_high_watermark = _coerce_fraction(
-                "dram_high_watermark", raw["dram_high_watermark"]
+        if "seed_pool_size_GB" in raw:
+            seed_pool_size_GB = _coerce_int("seed_pool_size_GB", raw["seed_pool_size_GB"])
+        else:
+            seed_pool_size_GB = defaults.seed_pool_size_GB
+
+        if "cxl_kvcache_size_GB" in raw:
+            cxl_kvcache_size_GB = _coerce_int(
+                "cxl_kvcache_size_GB", raw["cxl_kvcache_size_GB"]
+            )
+        else:
+            cxl_kvcache_size_GB = defaults.cxl_kvcache_size_GB
+
+        loom_recompute_ratio = defaults.loom_recompute_ratio
+        if "loom_recompute_ratio" in raw:
+            loom_recompute_ratio = _parse_ratio_or_auto(
+                "loom_recompute_ratio", raw["loom_recompute_ratio"]
             )
 
-        dram_low_watermark = defaults.dram_low_watermark
-        if "dram_low_watermark" in raw:
-            dram_low_watermark = _coerce_fraction(
-                "dram_low_watermark", raw["dram_low_watermark"]
-            )
-
-        if dram_low_watermark > dram_high_watermark:
-            raise ValueError(
-                "dram_low_watermark must be <= dram_high_watermark, got: "
-                f"{dram_low_watermark} > {dram_high_watermark}"
-            )
-
-        kv_prefill_dram_ratio = defaults.kv_prefill_dram_ratio
-        if "kv_prefill_dram_ratio" in raw:
-            kv_prefill_dram_ratio = _parse_ratio_or_auto(
-                "kv_prefill_dram_ratio", raw["kv_prefill_dram_ratio"]
-            )
-
-        flush_batch_size_MB = defaults.flush_batch_size_MB
-        if "flush_batch_size_MB" in raw:
-            flush_batch_size_MB = _coerce_int(
-                "flush_batch_size_MB", raw["flush_batch_size_MB"]
-            )
-
-        flush_budget_MBps = defaults.flush_budget_MBps
-        if "flush_budget_MBps" in raw:
-            flush_budget_MBps = _coerce_int("flush_budget_MBps", raw["flush_budget_MBps"])
-
-        kv_hot_window_tokens = defaults.kv_hot_window_tokens
-        if "kv_hot_window_tokens" in raw:
-            kv_hot_window_tokens = _coerce_int(
-                "kv_hot_window_tokens", raw["kv_hot_window_tokens"]
-            )
-
-        kv_prefetch_blocks = defaults.kv_prefetch_blocks
-        if "kv_prefetch_blocks" in raw:
-            kv_prefetch_blocks = _coerce_int(
-                "kv_prefetch_blocks", raw["kv_prefetch_blocks"]
-            )
-
-        promotion_budget_MBps = defaults.promotion_budget_MBps
-        if "promotion_budget_MBps" in raw:
-            promotion_budget_MBps = _coerce_int(
-                "promotion_budget_MBps", raw["promotion_budget_MBps"]
-            )
-
-        decode_allow_sync_cxl_read = defaults.decode_allow_sync_cxl_read
-        if "decode_allow_sync_cxl_read" in raw:
-            decode_allow_sync_cxl_read = _coerce_bool(
-                "decode_allow_sync_cxl_read", raw["decode_allow_sync_cxl_read"]
+        loom_disable_store_for_recompute = defaults.loom_disable_store_for_recompute
+        if "loom_disable_store_for_recompute" in raw:
+            loom_disable_store_for_recompute = _coerce_bool(
+                "loom_disable_store_for_recompute",
+                raw["loom_disable_store_for_recompute"],
             )
 
         cxl_numa_node = defaults.cxl_numa_node
-        if "cxl_numa_node" in raw and raw["cxl_numa_node"] is not None:
-            cxl_numa_node = _coerce_int("cxl_numa_node", raw["cxl_numa_node"])
-        
+        if "cxl_numa_node" in raw:
+            if raw["cxl_numa_node"] is None:
+                cxl_numa_node = None
+            else:
+                cxl_numa_node = _coerce_int("cxl_numa_node", raw["cxl_numa_node"])
+
         eviction_policy = defaults.eviction_policy
         if "eviction_policy" in raw:
             eviction_policy = _coerce_str("eviction_policy", raw["eviction_policy"])
+            if eviction_policy not in ("lru", "arc"):
+                raise ValueError("eviction_policy must be one of: lru, arc")
+
         return cls(
-            dram_bytes_to_use=dram_bytes_to_use,
-            cxl_bytes_to_use=cxl_bytes_to_use,
-            mode=mode,
-            dram_high_watermark=dram_high_watermark,
-            dram_low_watermark=dram_low_watermark,
-            kv_prefill_dram_ratio=kv_prefill_dram_ratio,
-            flush_batch_size_MB=flush_batch_size_MB,
-            flush_budget_MBps=flush_budget_MBps,
-            kv_hot_window_tokens=kv_hot_window_tokens,
-            kv_prefetch_blocks=kv_prefetch_blocks,
-            promotion_budget_MBps=promotion_budget_MBps,
-            decode_allow_sync_cxl_read=decode_allow_sync_cxl_read,
+            seed_pool_size_GB=seed_pool_size_GB,
+            cxl_kvcache_size_GB=cxl_kvcache_size_GB,
+            loom_recompute_ratio=loom_recompute_ratio,
+            loom_disable_store_for_recompute=loom_disable_store_for_recompute,
             cxl_numa_node=cxl_numa_node,
-            eviction_policy=eviction_policy
+            eviction_policy=eviction_policy,
         )
 
 class WeaveOffloadingSpec(OffloadingSpec):
@@ -332,11 +198,13 @@ class WeaveOffloadingSpec(OffloadingSpec):
                 num_dram_blocks = 0
                 num_cxl_blocks = 0
             else:
+                dram_bytes_to_use = self.weave_config.seed_pool_size_GB * (1024**3)
+                cxl_bytes_to_use = self.weave_config.cxl_kvcache_size_GB * (1024**3)
                 num_dram_blocks = (
-                    self.weave_config.dram_bytes_to_use // kv_bytes_per_offloaded_block
+                    dram_bytes_to_use // kv_bytes_per_offloaded_block
                 )
                 num_cxl_blocks = (
-                    self.weave_config.cxl_bytes_to_use // kv_bytes_per_offloaded_block
+                    cxl_bytes_to_use // kv_bytes_per_offloaded_block
                 )
 
             kv_events_config = self.vllm_config.kv_events_config
@@ -364,7 +232,7 @@ class WeaveOffloadingSpec(OffloadingSpec):
                 logger.warning(
                     "WeaveOffloadingSpec initialized with 0 DRAM offload blocks. "
                     "Offloading will likely be disabled. "
-                    "Please increase dram_bytes_to_use (or cpu_bytes_to_use)."
+                    "Please increase seed_pool_size_GB."
                 )
 
         return self._manager
@@ -386,11 +254,13 @@ class WeaveOffloadingSpec(OffloadingSpec):
                 num_dram_blocks = 0
                 num_cxl_blocks = 0
             else:
+                dram_bytes_to_use = self.weave_config.seed_pool_size_GB * (1024**3)
+                cxl_bytes_to_use = self.weave_config.cxl_kvcache_size_GB * (1024**3)
                 num_dram_blocks = (
-                    self.weave_config.dram_bytes_to_use // kv_bytes_per_offloaded_block
+                    dram_bytes_to_use // kv_bytes_per_offloaded_block
                 )
                 num_cxl_blocks = (
-                    self.weave_config.cxl_bytes_to_use // kv_bytes_per_offloaded_block
+                    cxl_bytes_to_use // kv_bytes_per_offloaded_block
                 )
 
             self._dram_handlers = WeaveGPUDramOffloadingHandlers(

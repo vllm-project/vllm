@@ -14,6 +14,11 @@ from vllm.v1.kv_offload.worker.worker import OffloadingWorker, TransferSpec
 from .metadata import ReqId, WeaveConnectorMetadata
 
 
+def _get_forward_context_arg(_forward_context: object) -> None:
+    # Avoid importing ForwardContext at runtime.
+    return None
+
+
 class WeaveConnectorWorker:
     """Implementation of Worker side methods"""
 
@@ -79,7 +84,8 @@ class WeaveConnectorWorker:
             if job_ids:
                 self.worker.wait(job_ids)
 
-    def start_kv_transfers(self, metadata: WeaveConnectorMetadata):
+    def start_kv_transfers(self, metadata: WeaveConnectorMetadata, forward_context: object):
+        _get_forward_context_arg(forward_context)
         for job_id, transfer_spec in self._unsubmitted_store_jobs:
             success = self.worker.transfer_async(job_id, transfer_spec)
             assert success

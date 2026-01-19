@@ -67,7 +67,7 @@ class WeaveConnector(KVConnectorBase_V1):
     def start_load_kv(self, forward_context: "ForwardContext", **kwargs) -> None:
         assert self.connector_worker is not None
         assert isinstance(self._connector_metadata, WeaveConnectorMetadata)
-        self.connector_worker.start_kv_transfers(self._connector_metadata)
+        self.connector_worker.start_kv_transfers(self._connector_metadata, forward_context)
 
     def wait_for_layer_load(self, layer_name: str) -> None:
         pass
