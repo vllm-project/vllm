@@ -25,7 +25,6 @@ from torch import nn
 from transformers import Llama4TextConfig
 
 from vllm.attention.layer import Attention
-from vllm.attention.layers.chunked_local_attention import ChunkedLocalAttention
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import (
@@ -34,6 +33,9 @@ from vllm.distributed import (
     tensor_model_parallel_all_gather,
 )
 from vllm.logger import init_logger
+from vllm.model_executor.layers.attention.chunked_local_attention import (
+    ChunkedLocalAttention,
+)
 from vllm.model_executor.layers.fused_moe import SharedFusedMoE
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
@@ -539,6 +541,7 @@ class Llama4Model(LlamaModel):
         # Expert parameter mapping for the case where the expert weights are
         # not fused into a single weight tensor.
         expert_params_mapping = SharedFusedMoE.make_expert_params_mapping(
+            self,
             ckpt_gate_proj_name="gate_proj",
             ckpt_down_proj_name="down_proj",
             ckpt_up_proj_name="up_proj",
@@ -548,6 +551,7 @@ class Llama4Model(LlamaModel):
         # Expert parameter mapping for the case where the expert weights are
         # fused into a single weight tensor.
         expert_params_mapping_fused = SharedFusedMoE.make_expert_params_mapping(
+            self,
             ckpt_gate_proj_name="gate_up_proj",
             ckpt_down_proj_name="down_proj",
             ckpt_up_proj_name="gate_up_proj",

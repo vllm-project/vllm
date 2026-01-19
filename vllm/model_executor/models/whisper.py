@@ -18,18 +18,15 @@ from transformers import (
 )
 from transformers.models.whisper.modeling_whisper import sinusoids
 
-from vllm.attention.backends.abstract import (
-    AttentionType,
-)
 from vllm.attention.layer import Attention
-from vllm.attention.layers.cross_attention import CrossAttention
-from vllm.attention.layers.mm_encoder_attention import MMEncoderAttention
 from vllm.config import CacheConfig, ModelConfig, SpeechToTextConfig, VllmConfig
 from vllm.config.multimodal import BaseDummyOptions
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.inputs.data import PromptType
 from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import get_act_fn
+from vllm.model_executor.layers.attention.cross_attention import CrossAttention
+from vllm.model_executor.layers.attention.mm_encoder_attention import MMEncoderAttention
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
     QKVParallelLinear,
@@ -52,16 +49,19 @@ from vllm.multimodal.inputs import (
 )
 from vllm.multimodal.parse import MultiModalDataItems, MultiModalDataParser
 from vllm.multimodal.processing import (
+    BaseDummyInputsBuilder,
     BaseProcessingInfo,
     EncDecMultiModalProcessor,
     PromptReplacement,
     PromptUpdate,
 )
-from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from vllm.transformers_utils.processor import cached_processor_from_config
 from vllm.utils.jsontree import json_map_leaves
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 from vllm.utils.torch_utils import set_default_torch_dtype
+from vllm.v1.attention.backend import (
+    AttentionType,
+)
 
 from .interfaces import MultiModalEmbeddings, SupportsMultiModal, SupportsTranscription
 from .utils import (
@@ -469,8 +469,10 @@ class WhisperEncoder(nn.Module):
         self.max_source_positions = config.max_source_positions
         self.embed_scale = math.sqrt(embed_dim) if config.scale_embedding else 1.0
 
-        is_causal = getattr(config, "is_causal", False)
-        Conv1d = WhisperCausalConv1d if is_causal else partial(nn.Conv1d, padding=1)
+        self.is_causal = getattr(config, "is_causal", False)
+        Conv1d = (
+            WhisperCausalConv1d if self.is_causal else partial(nn.Conv1d, padding=1)
+        )
 
         self.conv1 = Conv1d(self.num_mel_bins, embed_dim, kernel_size=3)
         self.conv2 = Conv1d(embed_dim, embed_dim, stride=2, kernel_size=3)
@@ -485,7 +487,7 @@ class WhisperEncoder(nn.Module):
         )
         self.layer_norm = nn.LayerNorm(config.d_model)
 
-        if is_causal and self.pos_embed_type != WhisperPosEmbedType.NOPE:
+        if self.is_causal and self.pos_embed_type != WhisperPosEmbedType.NOPE:
             raise ValueError(
                 "Only NOPE position embeddings are supported "
                 f"for causal models, but got {self.pos_embed_type}"
@@ -536,8 +538,11 @@ class WhisperEncoder(nn.Module):
             hidden_states.append(embeds)
             input_is_batched = embeds.ndim > 2
         # Input to MHA must be B x T x D
-        if input_is_batched:
+        if input_is_batched or self.is_causal:
             # Models using WhisperEncoder may handle batching internally.
+            # If WhisperEncoder is causal, sequences
+            # are not padded to have identical seq length (T)
+            # => concat over feature dim
             hidden_states = torch.cat(hidden_states)
         else:
             hidden_states = torch.stack(hidden_states, dim=0)
@@ -676,6 +681,10 @@ class WhisperProcessingInfo(BaseProcessingInfo):
     def get_hf_config(self) -> WhisperConfig:
         return self.ctx.get_hf_config(WhisperConfig)
 
+    @property
+    def skip_prompt_length_check(self) -> bool:
+        return True  # Because the encoder prompt is padded
+
     def get_supported_mm_limits(self) -> Mapping[str, int | None]:
         return {"audio": 1}
 
@@ -684,6 +693,10 @@ class WhisperProcessingInfo(BaseProcessingInfo):
         feature_extractor = hf_processor.feature_extractor  # type: ignore
         assert isinstance(feature_extractor, WhisperFeatureExtractor)
         return feature_extractor
+
+    def get_target_channels(self) -> int:
+        """Return target audio channels for Whisper models (mono)."""
+        return 1
 
     def get_num_audio_tokens(self) -> int:
         return self.get_hf_config().max_source_positions
@@ -719,11 +732,10 @@ class WhisperDummyInputsBuilder(BaseDummyInputsBuilder[WhisperProcessingInfo]):
 class WhisperMultiModalProcessor(EncDecMultiModalProcessor[WhisperProcessingInfo]):
     def _get_data_parser(self) -> MultiModalDataParser:
         feature_extractor = self.info.get_feature_extractor()
-        return MultiModalDataParser(target_sr=feature_extractor.sampling_rate)
-
-    @property
-    def pad_dummy_encoder_prompt(self) -> bool:
-        return True
+        return MultiModalDataParser(
+            target_sr=feature_extractor.sampling_rate,
+            target_channels=self.info.get_target_channels(),
+        )
 
     def create_encoder_prompt(
         self,
