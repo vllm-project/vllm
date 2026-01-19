@@ -227,6 +227,11 @@ class FlashInferExperts(mk.FusedMoEPermuteExpertsUnpermute):
             use_deepseek_fp8_block_scale=self.use_deepseek_fp8_block_scale,
         )
 
+    def moe_sum(self, input: torch.Tensor, output: torch.Tensor) -> None:
+        # No support for LoRA in flashinfer_cutlass_fused_moe.
+        # See TODOs in flashinfer functions runMoe and runMoeMinLantency.
+        raise NotImplementedError("LoRA is not supported for flashinfer_cutlass_moe")
+
 
 def flashinfer_cutlass_moe_fp4(
     hidden_states: torch.Tensor,
