@@ -148,23 +148,12 @@ class RequestRunner:
 
         self.req_id: int = -1
 
-        vllm_config = create_vllm_config(
-            block_size=gpu_block_size, max_num_batched_tokens=1000
-        )
-        vllm_config.kv_transfer_config = KVTransferConfig(
-            kv_connector="OffloadingConnector",
-            kv_role="kv_both",
-            kv_connector_extra_config={
-                "spec_name": "MockOffloadingSpec",
-                "spec_module_path": "tests.v1.kv_connector.unit.test_offloading_connector",  # noqa: E501
-                "block_size": offloaded_block_size,
-            },
-        )
+        vllm_config = self._create_vllm_config()
 
         self.scheduler: Scheduler = create_scheduler(
             vllm_config, num_blocks=num_gpu_blocks
         )
-        self.worker_connector = OffloadingConnector(vllm_config, KVConnectorRole.WORKER)
+        self.worker_connector = self._create_worker_connector(vllm_config)
 
         # register worker kv_caches to enable OffloadingWorker creations
         self.worker_connector.register_cross_layers_kv_cache(
@@ -173,27 +162,11 @@ class RequestRunner:
         )
 
         # extract connector of scheduler
-        scheduler_connector = self.scheduler.connector
-        assert scheduler_connector is not None
-        assert isinstance(scheduler_connector, OffloadingConnector)
-        self.scheduler_connector: OffloadingConnector = scheduler_connector
+        self.scheduler_connector = self.scheduler.connector
+        assert self.scheduler_connector is not None
 
-        # extract mocked OffloadingManager of scheduler connector
-        connector_scheduler = scheduler_connector.connector_scheduler
-        assert connector_scheduler is not None
-        manager = connector_scheduler.manager
-        assert isinstance(manager, MagicMock)
-        self.manager: MagicMock = manager
-
-        assert connector_scheduler.gpu_block_size == gpu_block_size
-        assert connector_scheduler.offloaded_block_size == offloaded_block_size
-
-        # extract OffloadingSpec of worker_connector
-        connector_worker = self.worker_connector.connector_worker
-        assert connector_worker is not None
-        offloading_spec = connector_worker.spec
-        assert isinstance(offloading_spec, MockOffloadingSpec)
-        self.offloading_spec: MockOffloadingSpec = offloading_spec
+        # extract offloading components
+        self.manager, self.offloading_spec = self._extract_offloading_components()
 
         # mapping (offloading address) -> gpu_block_index
         self.offloaded: dict[Any, int] = {}
@@ -211,6 +184,50 @@ class RequestRunner:
         self._dummy_ctx: ForwardContext = ForwardContext(
             no_compile_layers={}, attn_metadata={}, virtual_engine=0
         )
+
+    def _create_vllm_config(self) -> VllmConfig:
+        """Create VllmConfig. Override to customize connector configuration."""
+        vllm_config = create_vllm_config(
+            block_size=self.gpu_block_size, max_num_batched_tokens=1000
+        )
+        vllm_config.kv_transfer_config = KVTransferConfig(
+            kv_connector="OffloadingConnector",
+            kv_role="kv_both",
+            kv_connector_extra_config={
+                "spec_name": "MockOffloadingSpec",
+                "spec_module_path": "tests.v1.kv_connector.unit.test_offloading_connector",  # noqa: E501
+                "block_size": self.offloaded_block_size,
+            },
+        )
+        return vllm_config
+
+    def _create_worker_connector(self, vllm_config: VllmConfig):
+        """Create worker connector. Override for different connector types."""
+        return OffloadingConnector(vllm_config, KVConnectorRole.WORKER)
+
+    def _extract_offloading_components(
+        self,
+    ) -> tuple[MagicMock, MockOffloadingSpec]:
+        """Extract manager and spec from connectors. Override for MultiConnector."""
+        scheduler_connector = self.scheduler_connector
+        assert isinstance(scheduler_connector, OffloadingConnector)
+
+        # extract mocked OffloadingManager of scheduler connector
+        connector_scheduler = scheduler_connector.connector_scheduler
+        assert connector_scheduler is not None
+        manager = connector_scheduler.manager
+        assert isinstance(manager, MagicMock)
+
+        assert connector_scheduler.gpu_block_size == self.gpu_block_size
+        assert connector_scheduler.offloaded_block_size == self.offloaded_block_size
+
+        # extract OffloadingSpec of worker_connector
+        connector_worker = self.worker_connector.connector_worker
+        assert connector_worker is not None
+        offloading_spec = connector_worker.spec
+        assert isinstance(offloading_spec, MockOffloadingSpec)
+
+        return manager, offloading_spec
 
     def new_request(self, token_ids: list[int]):
         assert not self.scheduler.requests
