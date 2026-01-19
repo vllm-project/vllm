@@ -5,15 +5,14 @@ ray>=2.9
 cmake>=3.26.1
 packaging>=24.2
 setuptools-scm>=8
-setuptools>=77.0.3,<80.0.0
+setuptools>=77.0.3,<81.0.0
 wheel
 jinja2>=3.1.6
 datasets # for benchmark scripts
-numba == 0.60.0 # v0.61 doesn't support Python 3.9. Required for N-gram speculative decoding
-nixl==0.3.0 # for PD disaggregation
-torch==2.8.0+xpu
+numba == 0.61.2 # Required for N-gram speculative decoding
+--extra-index-url=https://download.pytorch.org/whl/xpu
+torch==2.9.0+xpu
 torchaudio
 torchvision
---extra-index-url=https://download.pytorch.org/whl/xpu
 
-intel-extension-for-pytorch @ https://intel-extension-for-pytorch.s3.us-east-1.amazonaws.com/ipex_dev/xpu/intel_extension_for_pytorch-2.8.10.post0%2Bxpu-cp312-cp312-linux_x86_64.whl
+intel-extension-for-pytorch @ https://intel-extension-for-pytorch.s3.us-east-1.amazonaws.com/ipex_dev/xpu/intel_extension_for_pytorch-2.9.10.post0%2Bxpu-cp312-cp312-linux_x86_64.whl

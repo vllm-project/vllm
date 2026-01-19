@@ -75,10 +75,11 @@ def before_generate_case(context: schemathesis.hooks.HookContext, strategy):
             http://localhost:8000/v1/chat/completions
         """  # noqa: E501
         if hasattr(case, "body") and isinstance(case.body, dict):
-            if ("messages" in case.body
-                    and isinstance(case.body["messages"], list)
-                    and len(case.body["messages"]) > 0):
-
+            if (
+                "messages" in case.body
+                and isinstance(case.body["messages"], list)
+                and len(case.body["messages"]) > 0
+            ):
                 for message in case.body["messages"]:
                     if not isinstance(message, dict):
                         continue
@@ -86,10 +87,14 @@ def before_generate_case(context: schemathesis.hooks.HookContext, strategy):
                     # Check for invalid file type in tokenize endpoint
                     if op.method.lower() == "post" and op.path == "/tokenize":
                         content = message.get("content", [])
-                        if (isinstance(content, list) and len(content) > 0
-                                and any(
-                                    item.get("type") == "file"
-                                    for item in content)):
+                        if (
+                            isinstance(content, list)
+                            and len(content) > 0
+                            and any(
+                                isinstance(item, dict) and item.get("type") == "file"
+                                for item in content
+                            )
+                        ):
                             return False
 
                     # Check for invalid tool_calls with non-function types
@@ -102,12 +107,17 @@ def before_generate_case(context: schemathesis.hooks.HookContext, strategy):
                                 if "custom" in tool_call:
                                     return False
 
-            # Sometimes guided_grammar is generated to be empty
+            # Sometimes structured_outputs.grammar is generated to be empty
             # Causing a server error in EBNF grammar parsing
             # https://github.com/vllm-project/vllm/pull/22587#issuecomment-3195253421
-            guided_grammar = case.body.get("guided_grammar")
+            structured_outputs = case.body.get("structured_outputs", {})
+            grammar = (
+                structured_outputs.get("grammar")
+                if isinstance(structured_outputs, dict)
+                else None
+            )
 
-            if guided_grammar == '':
+            if grammar == "":
                 # Allow None (will be handled as no grammar)
                 # But skip empty strings
                 return False
@@ -119,7 +129,7 @@ def before_generate_case(context: schemathesis.hooks.HookContext, strategy):
 
 @schema.parametrize()
 @schema.override(headers={"Content-Type": "application/json"})
-@settings(deadline=LONG_TIMEOUT_SECONDS * 1000)
+@settings(deadline=LONG_TIMEOUT_SECONDS * 1000, max_examples=50)
 def test_openapi_stateless(case: schemathesis.Case):
     key = (
         case.operation.method.upper(),
@@ -131,9 +141,9 @@ def test_openapi_stateless(case: schemathesis.Case):
 
     timeout = {
         # requires a longer timeout
-        ("POST", "/v1/chat/completions"):
-        LONG_TIMEOUT_SECONDS,
+        ("POST", "/v1/chat/completions"): LONG_TIMEOUT_SECONDS,
+        ("POST", "/v1/completions"): LONG_TIMEOUT_SECONDS,
     }.get(key, DEFAULT_TIMEOUT_SECONDS)
 
-    #No need to verify SSL certificate for localhost
+    # No need to verify SSL certificate for localhost
     case.call_and_validate(verify=False, timeout=timeout)

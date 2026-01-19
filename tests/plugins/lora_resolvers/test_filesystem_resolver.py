@@ -8,21 +8,20 @@ from huggingface_hub import snapshot_download
 
 from vllm.plugins.lora_resolvers.filesystem_resolver import FilesystemResolver
 
-MODEL_NAME = "mistralai/Mistral-7B-v0.1"
-LORA_NAME = "typeof/zephyr-7b-beta-lora"
+MODEL_NAME = "Qwen/Qwen3-0.6B"
+LORA_NAME = "charent/self_cognition_Alice"
 PA_NAME = "swapnilbp/llama_tweet_ptune"
 
 
-@pytest.fixture(scope='module')
+@pytest.fixture(scope="module")
 def adapter_cache(request, tmpdir_factory):
     # Create dir that mimics the structure of the adapter cache
-    adapter_cache = tmpdir_factory.mktemp(
-        request.module.__name__) / "adapter_cache"
+    adapter_cache = tmpdir_factory.mktemp(request.module.__name__) / "adapter_cache"
     return adapter_cache
 
 
 @pytest.fixture(scope="module")
-def zephyr_lora_files():
+def qwen3_lora_files():
     return snapshot_download(repo_id=LORA_NAME)
 
 
@@ -32,9 +31,9 @@ def pa_files():
 
 
 @pytest.mark.asyncio
-async def test_filesystem_resolver(adapter_cache, zephyr_lora_files):
+async def test_filesystem_resolver(adapter_cache, qwen3_lora_files):
     model_files = adapter_cache / LORA_NAME
-    shutil.copytree(zephyr_lora_files, model_files)
+    shutil.copytree(qwen3_lora_files, model_files)
 
     fs_resolver = FilesystemResolver(adapter_cache)
     assert fs_resolver is not None

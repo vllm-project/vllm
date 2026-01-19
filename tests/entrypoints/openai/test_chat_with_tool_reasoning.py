@@ -12,11 +12,16 @@ MODEL_NAME = "Qwen/QwQ-32B"
 
 
 @pytest.fixture(scope="module")
-def server():  # noqa: F811
+def server():
     args = [
-        "--max-model-len", "8192", "--enforce-eager", "--reasoning-parser",
-        "deepseek_r1", "--enable-auto-tool-choice", "--tool-call-parser",
-        "hermes"
+        "--max-model-len",
+        "8192",
+        "--enforce-eager",
+        "--reasoning-parser",
+        "deepseek_r1",
+        "--enable-auto-tool-choice",
+        "--tool-call-parser",
+        "hermes",
     ]
 
     with RemoteOpenAIServer(MODEL_NAME, args) as remote_server:
@@ -29,57 +34,53 @@ async def client(server):
         yield async_client
 
 
-TOOLS = [{
-    "type": "function",
-    "function": {
-        "name": "get_current_weather",
-        "description": "Get the current weather in a given location",
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "city": {
-                    "type":
-                    "string",
-                    "description":
-                    "The city to find the weather for, e.g. 'San Francisco'"
+TOOLS = [
+    {
+        "type": "function",
+        "function": {
+            "name": "get_current_weather",
+            "description": "Get the current weather in a given location",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "city": {
+                        "type": "string",
+                        "description": "The city to find the weather for, e.g. "
+                        "'San Francisco'",
+                    },
+                    "state": {
+                        "type": "string",
+                        "description": "the two-letter abbreviation for the state that "
+                        "the city is in, e.g. 'CA' which would mean 'California'",
+                    },
+                    "unit": {
+                        "type": "string",
+                        "description": "The unit to fetch the temperature in",
+                        "enum": ["celsius", "fahrenheit"],
+                    },
                 },
-                "state": {
-                    "type":
-                    "string",
-                    "description":
-                    "the two-letter abbreviation for the state that the city is"
-                    " in, e.g. 'CA' which would mean 'California'"
-                },
-                "unit": {
-                    "type": "string",
-                    "description": "The unit to fetch the temperature in",
-                    "enum": ["celsius", "fahrenheit"]
-                }
+                "required": ["city", "state", "unit"],
             },
-            "required": ["city", "state", "unit"]
-        }
+        },
     }
-}]
+]
 
-MESSAGES = [{
-    "role": "user",
-    "content": "Hi! How are you doing today?"
-}, {
-    "role": "assistant",
-    "content": "I'm doing well! How can I help you?"
-}, {
-    "role":
-    "user",
-    "content":
-    "Can you tell me what the temperate will be in Dallas, in fahrenheit?"
-}]
+MESSAGES = [
+    {"role": "user", "content": "Hi! How are you doing today?"},
+    {"role": "assistant", "content": "I'm doing well! How can I help you?"},
+    {
+        "role": "user",
+        "content": "Can you tell me what the temperate will be in Dallas, "
+        "in fahrenheit?",
+    },
+]
 
 FUNC_NAME = "get_current_weather"
 FUNC_ARGS = """{"city": "Dallas", "state": "TX", "unit": "fahrenheit"}"""
 
 
 def extract_reasoning_and_calls(chunks: list):
-    reasoning_content = ""
+    reasoning = ""
     tool_call_idx = -1
     arguments = []
     function_names = []
@@ -98,16 +99,14 @@ def extract_reasoning_and_calls(chunks: list):
                 if tool_call.function.arguments:
                     arguments[tool_call_idx] += tool_call.function.arguments
         else:
-            if hasattr(chunk.choices[0].delta, "reasoning_content"):
-                reasoning_content += chunk.choices[0].delta.reasoning_content
-    return reasoning_content, arguments, function_names
+            if hasattr(chunk.choices[0].delta, "reasoning"):
+                reasoning += chunk.choices[0].delta.reasoning
+    return reasoning, arguments, function_names
 
 
 # test streaming
 @pytest.mark.asyncio
-async def test_chat_streaming_of_tool_and_reasoning(
-        client: openai.AsyncOpenAI):
-
+async def test_chat_streaming_of_tool_and_reasoning(client: openai.AsyncOpenAI):
     stream = await client.chat.completions.create(
         model=MODEL_NAME,
         messages=MESSAGES,
@@ -120,9 +119,8 @@ async def test_chat_streaming_of_tool_and_reasoning(
     async for chunk in stream:
         chunks.append(chunk)
 
-    reasoning_content, arguments, function_names = extract_reasoning_and_calls(
-        chunks)
-    assert len(reasoning_content) > 0
+    reasoning, arguments, function_names = extract_reasoning_and_calls(chunks)
+    assert len(reasoning) > 0
     assert len(function_names) > 0 and function_names[0] == FUNC_NAME
     assert len(arguments) > 0 and arguments[0] == FUNC_ARGS
 
@@ -130,7 +128,6 @@ async def test_chat_streaming_of_tool_and_reasoning(
 # test full generate
 @pytest.mark.asyncio
 async def test_chat_full_of_tool_and_reasoning(client: openai.AsyncOpenAI):
-
     tool_calls = await client.chat.completions.create(
         model=MODEL_NAME,
         messages=MESSAGES,
@@ -139,8 +136,6 @@ async def test_chat_full_of_tool_and_reasoning(client: openai.AsyncOpenAI):
         stream=False,
     )
 
-    assert len(tool_calls.choices[0].message.reasoning_content) > 0
-    assert tool_calls.choices[0].message.tool_calls[0].function.name \
-          == FUNC_NAME
-    assert tool_calls.choices[0].message.tool_calls[0].function.arguments \
-          == FUNC_ARGS
+    assert len(tool_calls.choices[0].message.reasoning) > 0
+    assert tool_calls.choices[0].message.tool_calls[0].function.name == FUNC_NAME
+    assert tool_calls.choices[0].message.tool_calls[0].function.arguments == FUNC_ARGS

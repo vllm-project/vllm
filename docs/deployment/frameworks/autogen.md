@@ -19,8 +19,7 @@ pip install -U "autogen-agentchat" "autogen-ext[openai]"
 1. Start the vLLM server with the supported chat completion model, e.g.
 
     ```bash
-    python -m vllm.entrypoints.openai.api_server \
-        --model mistralai/Mistral-7B-Instruct-v0.2
+    vllm serve mistralai/Mistral-7B-Instruct-v0.2
     ```
 
 1. Call it with AutoGen:

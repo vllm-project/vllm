@@ -1,8 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Tests for InternVL's multimodal preprocessing kwargs."""
+
 from collections.abc import Mapping
-from typing import Optional
 
 import pytest
 from PIL import Image
@@ -24,7 +24,9 @@ def _get_expected_num_patches(
     max_num: int,
 ):
     from vllm.model_executor.models.internvl import (
-        calculate_internvl_targets, get_internvl_target_ratios)
+        calculate_internvl_targets,
+        get_internvl_target_ratios,
+    )
 
     width, height = image.size
 
@@ -61,15 +63,15 @@ def _run_check(
 
     total_expected_num_patches = sum(
         _get_expected_num_patches(config, image, len(images), min_num, max_num)
-        for image in images)
+        for image in images
+    )
 
     processed_inputs = processor.apply(prompt, mm_data, mm_processor_kwargs)
 
     # Ensure we have the right number of placeholders per num_crops size
     image_token_id = tokenizer.convert_tokens_to_ids("<IMG_CONTEXT>")
     img_tok_count = processed_inputs["prompt_token_ids"].count(image_token_id)
-    pixel_shape = processed_inputs["mm_kwargs"].get_data(
-    )["pixel_values_flat"].shape
+    pixel_shape = processed_inputs["mm_kwargs"].get_data()["pixel_values_flat"].shape
 
     assert img_tok_count == 256 * total_expected_num_patches
     assert pixel_shape[0] == total_expected_num_patches
@@ -100,7 +102,7 @@ def test_processor_override(
     size_factors: list[int],
     min_dynamic_patch: int,
     max_dynamic_patch: int,
-    dynamic_image_size: Optional[bool],
+    dynamic_image_size: bool | None,
     kwargs_on_init: bool,
 ):
     mm_processor_kwargs = {
@@ -122,10 +124,7 @@ def test_processor_override(
 
     _run_check(
         processor,
-        [
-            rescale_image_size(image_assets[0].pil_image, f)
-            for f in size_factors
-        ],
+        [rescale_image_size(image_assets[0].pil_image, f) for f in size_factors],
         min_num,
         max_num,
         hf_processor_mm_kwargs,

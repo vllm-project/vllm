@@ -7,102 +7,144 @@ WARNING: This test runs in both single-node (4 GPUs) and multi-node
  all workers in a node other than the head node, which can cause the test
  to fail.
 """
+
 import json
 import os
 from dataclasses import dataclass
-from typing import Literal, NamedTuple, Optional
+from typing import Literal, NamedTuple
 
 import pytest
+import torch
 
-from vllm.config import RunnerOption
+from tests.evals.gsm8k.gsm8k_eval import evaluate_gsm8k
+from tests.utils import RemoteOpenAIServer, create_new_process_for_each_test
+from vllm.config.model import RunnerOption
 from vllm.logger import init_logger
 
 from ..models.registry import HF_EXAMPLE_MODELS
-from ..utils import compare_two_settings, create_new_process_for_each_test
 
 logger = init_logger("test_context_parallel")
 
 VLLM_MULTI_NODE = os.getenv("VLLM_MULTI_NODE", "0") == "1"
+
+CP_TEST_MODELS = [
+    # TODO support other models
+    # [LANGUAGE GENERATION]
+    "deepseek-ai/DeepSeek-V2-Lite-Chat",
+    "Qwen/Qwen2.5-1.5B-Instruct",
+]
+
+# GSM8K eval configuration
+NUM_QUESTIONS = 256  # Fast eval for CI
+NUM_SHOTS = 5  # Few-shot examples
+# tp accuracy with 2% buffer
+MIN_ACCURACY = {
+    # .buildkite/lm-eval-harness/configs/DeepSeek-V2-Lite-Chat.yaml
+    "deepseek-ai/DeepSeek-V2-Lite-Chat": 0.64,
+    # .buildkite/lm-eval-harness/configs/Qwen2.5-1.5B-Instruct.yaml
+    "Qwen/Qwen2.5-1.5B-Instruct": 0.52,
+}
 
 
 class ParallelSetup(NamedTuple):
     tp_size: int
     pp_size: int
     dcp_size: int
+    cp_kv_cache_interleave_size: int
     eager_mode: bool
     chunked_prefill: bool
 
 
 class CPTestOptions(NamedTuple):
     multi_node_only: bool
-    load_format: Optional[str] = None
+    attn_backend: str | None = None
 
 
 @dataclass
 class CPTestSettings:
     parallel_setups: list[ParallelSetup]
-    # NOTE: the length of distributed_backends and
-    # vllm_major_versions should be the same, and they
-    # are first zipped together to iterate over all
-    # test settings.
     distributed_backends: list[str]
-    # vllm major version: "0" for V0, "1" for V1
-    vllm_major_versions: list[str]
     runner: RunnerOption
     test_options: CPTestOptions
-
-    def __post_init__(self):
-        if len(self.distributed_backends) != len(self.vllm_major_versions):
-            raise ValueError(
-                f"Length mismatch: distributed_backends "
-                f"({len(self.distributed_backends)}) != "
-                f"vllm_major_versions ({len(self.vllm_major_versions)})")
 
     @staticmethod
     def detailed(
         *,
         tp_base: int = 4,
         pp_base: int = 1,
-        dcp_base: int = 1,
+        dcp_multipliers: list[float] | None = None,
+        cp_kv_cache_interleave_size: int = 1,
         multi_node_only: bool = False,
         runner: RunnerOption = "auto",
-        load_format: Optional[str] = None,
+        attn_backend: str | None = None,
     ):
         parallel_setups = []
+        if dcp_multipliers is None:
+            dcp_multipliers = [
+                0.5,
+            ]
         for eager_mode_val in [False]:
             for pp_multiplier in [1]:
-                for dcp_multiplier in [2, 4]:
+                for dcp_multiplier in dcp_multipliers:
                     for chunked_prefill_val in [True]:
                         parallel_setups.append(
-                            ParallelSetup(tp_size=tp_base,
-                                          pp_size=pp_multiplier * pp_base,
-                                          dcp_size=dcp_multiplier * dcp_base,
-                                          eager_mode=eager_mode_val,
-                                          chunked_prefill=chunked_prefill_val))
+                            ParallelSetup(
+                                tp_size=tp_base,
+                                pp_size=pp_multiplier * pp_base,
+                                dcp_size=int(dcp_multiplier * tp_base),
+                                cp_kv_cache_interleave_size=cp_kv_cache_interleave_size,
+                                eager_mode=eager_mode_val,
+                                chunked_prefill=chunked_prefill_val,
+                            )
+                        )
         return CPTestSettings(
             parallel_setups=parallel_setups,
             distributed_backends=["mp"],
-            vllm_major_versions=["1"],
             runner=runner,
-            test_options=CPTestOptions(multi_node_only=multi_node_only,
-                                       load_format=load_format),
+            test_options=CPTestOptions(
+                multi_node_only=multi_node_only,
+                attn_backend=attn_backend,
+            ),
         )
 
     def iter_params(self, model_id: str):
         opts = self.test_options
 
         for parallel_setup in self.parallel_setups:
-            for backend, vllm_major_version in zip(self.distributed_backends,
-                                                   self.vllm_major_versions):
-                yield (model_id, parallel_setup, backend, vllm_major_version,
-                       self.runner, opts)
+            for backend in self.distributed_backends:
+                yield (
+                    model_id,
+                    parallel_setup,
+                    backend,
+                    self.runner,
+                    opts,
+                )
 
 
-def _compare_cp_with_tp(
+CP_TEXT_GENERATION_MODELS = {
+    "deepseek-ai/DeepSeek-V2-Lite-Chat": [
+        CPTestSettings.detailed(dcp_multipliers=[1]),
+        CPTestSettings.detailed(
+            dcp_multipliers=[0.5],
+            cp_kv_cache_interleave_size=64,
+            attn_backend="FLASHMLA",
+        ),
+    ],
+    "Qwen/Qwen2.5-1.5B-Instruct": [
+        CPTestSettings.detailed(
+            cp_kv_cache_interleave_size=16, attn_backend="FLASH_ATTN"
+        ),
+        CPTestSettings.detailed(
+            cp_kv_cache_interleave_size=16, attn_backend="FLASHINFER"
+        ),
+    ],
+}
+
+
+def _test_cp_gsm8k(
     model_id: str,
     parallel_setup: ParallelSetup,
     distributed_backend: str,
-    vllm_major_version: str,
     runner: RunnerOption,
     test_options: CPTestOptions,
     num_gpus_available: int,
@@ -114,11 +156,12 @@ def _compare_cp_with_tp(
         tp_size,
         pp_size,
         dcp_size,
+        cp_kv_cache_interleave_size,
         eager_mode,
         chunked_prefill,
     ) = parallel_setup
 
-    multi_node_only, load_format = test_options
+    multi_node_only, attn_backend = test_options
 
     model_info = HF_EXAMPLE_MODELS.find_hf_info(model_id)
     model_info.check_transformers_version(on_fail="skip")
@@ -127,118 +170,95 @@ def _compare_cp_with_tp(
     tokenizer_mode = model_info.tokenizer_mode
     hf_overrides = model_info.hf_overrides
 
-    if load_format == "dummy":
-        # Avoid OOM
-        text_overrides = {
-            "num_hidden_layers": 4,
-            "hidden_size": 512,
-            "intermediate_size": 800,
-            "num_attention_heads": 4,
-            "num_key_value_heads": 1,
-        }
-
-        if is_multimodal:
-            hf_overrides.update({"text_config": text_overrides})
-        else:
-            hf_overrides.update(text_overrides)
-    else:
-        model_info.check_available_online(on_fail="skip")
+    model_info.check_available_online(on_fail="skip")
 
     if num_gpus_available < tp_size * pp_size:
         pytest.skip(f"Need at least {tp_size} x {pp_size} GPUs")
     if VLLM_MULTI_NODE and distributed_backend == "mp":
-        pytest.skip("Skipping multi-node pipeline parallel test for "
-                    "multiprocessing distributed backend")
+        pytest.skip(
+            "Skipping multi-node pipeline parallel test for "
+            "multiprocessing distributed backend"
+        )
     if multi_node_only and not VLLM_MULTI_NODE:
         pytest.skip("Not in multi-node setting")
 
-    common_args = [
+    server_args = [
         # use half precision for speed and memory savings in CI environment
         "--dtype",
         "bfloat16",
         "--max-model-len",
-        "2048",
+        "4096",
         "--max-num-seqs",
-        "8",
+        "64",
     ]
     if chunked_prefill:
-        common_args.append("--enable-chunked-prefill")
+        server_args.append("--enable-chunked-prefill")
     if eager_mode:
-        common_args.append("--enforce-eager")
+        server_args.append("--enforce-eager")
     if runner != "auto":
-        common_args.extend(["--runner", runner])
+        server_args.extend(["--runner", runner])
     if trust_remote_code:
-        common_args.append("--trust-remote-code")
+        server_args.append("--trust-remote-code")
     if tokenizer_mode:
-        common_args.extend(["--tokenizer-mode", tokenizer_mode])
-    if load_format:
-        common_args.extend(["--load-format", load_format])
+        server_args.extend(["--tokenizer-mode", tokenizer_mode])
     if hf_overrides:
-        common_args.extend(["--hf-overrides", json.dumps(hf_overrides)])
+        server_args.extend(["--hf-overrides", json.dumps(hf_overrides)])
 
-    cp_env = tp_env = {
-        "VLLM_USE_V1":
-        vllm_major_version,  # Note(hc): DCP only support V1 engine only
-    }
+    server_args.extend(
+        [
+            "--tensor-parallel-size",
+            str(tp_size),
+            "--pipeline-parallel-size",
+            str(pp_size),
+            "--decode-context-parallel-size",
+            str(dcp_size),
+            "--dcp-kv-cache-interleave-size",
+            str(cp_kv_cache_interleave_size),
+            "--distributed-executor-backend",
+            distributed_backend,
+        ]
+    )
 
-    cp_args = [
-        *common_args,
-        "--tensor-parallel-size",
-        str(tp_size),
-        "--pipeline-parallel-size",
-        str(pp_size),
-        "--decode-context-parallel-size",
-        str(dcp_size),
-        "--distributed-executor-backend",
-        distributed_backend,
-    ]
+    if attn_backend:
+        server_args.append(f"--attention-backend={attn_backend}")
 
-    tp_args = [
-        *common_args,
-        "--tensor-parallel-size",
-        str(tp_size),
-        "--pipeline-parallel-size",
-        str(pp_size),
-        "--distributed-executor-backend",
-        distributed_backend,
-    ]
+    with RemoteOpenAIServer(
+        model_id,
+        server_args,
+        max_wait_seconds=720,
+    ) as remote_server:
+        host = f"http://{remote_server.host}"
+        port = remote_server.port
 
-    try:
-        compare_two_settings(model_id,
-                             cp_args,
-                             tp_args,
-                             cp_env,
-                             tp_env,
-                             method=method,
-                             max_wait_seconds=720)
-    except Exception:
-        testing_ray_compiled_graph = cp_env is not None
-        if testing_ray_compiled_graph and vllm_major_version == "0":
-            # Ray Compiled Graph tests are flaky for V0,
-            # so we don't want to fail the test
-            logger.exception("Ray Compiled Graph tests failed")
-        else:
-            raise
+        # Run GSM8K evaluation
+        results = evaluate_gsm8k(
+            num_questions=NUM_QUESTIONS,
+            num_shots=NUM_SHOTS,
+            host=host,
+            port=port,
+        )
 
-
-CP_TEXT_GENERATION_MODELS = {
-    # [MLA attention only]
-    "deepseek-ai/DeepSeek-V2-Lite-Chat": CPTestSettings.detailed(),
-}
-
-CP_TEST_MODELS = [
-    # TODO support other models
-    # [LANGUAGE GENERATION]
-    "deepseek-ai/DeepSeek-V2-Lite-Chat",
-]
+        # Validate accuracy is reasonable
+        accuracy = results["accuracy"]
+        min_accuracy = MIN_ACCURACY[model_id]
+        assert accuracy >= min_accuracy, (
+            f"TP+DCP accuracy too low: {accuracy:.3f} < {min_accuracy:.3f}"
+        )
 
 
 @pytest.mark.parametrize(
-    ("model_id", "parallel_setup", "distributed_backend", "vllm_major_version",
-     "runner", "test_options"),
+    (
+        "model_id",
+        "parallel_setup",
+        "distributed_backend",
+        "runner",
+        "test_options",
+    ),
     [
-        params for model_id, settings in CP_TEXT_GENERATION_MODELS.items()
-        for params in settings.iter_params(model_id)
+        params
+        for model_id, settings in CP_TEXT_GENERATION_MODELS.items()
+        for setting in settings
+        for params in setting.iter_params(model_id)
         if model_id in CP_TEST_MODELS
     ],
 )
@@ -247,17 +267,28 @@ def test_cp_generation(
     model_id: str,
     parallel_setup: ParallelSetup,
     distributed_backend: str,
-    vllm_major_version: str,
     runner: RunnerOption,
     test_options: CPTestOptions,
     num_gpus_available,
 ):
-    _compare_cp_with_tp(model_id,
-                        parallel_setup,
-                        distributed_backend,
-                        vllm_major_version,
-                        runner,
-                        test_options,
-                        num_gpus_available,
-                        method="generate",
-                        is_multimodal=False)
+    if (
+        model_id == "deepseek-ai/DeepSeek-V2-Lite-Chat"
+        and torch.cuda.get_device_capability() < (9, 0)
+    ):
+        pytest.skip(reason="MLA+DCP requires compute capability of 9.0 or higher")
+    if (
+        model_id == "Qwen/Qwen2.5-1.5B-Instruct"
+        and torch.cuda.get_device_capability() != (9, 0)
+    ):
+        pytest.skip(reason="GQA+DCP currently requires compute capability of 9.0")
+
+    _test_cp_gsm8k(
+        model_id,
+        parallel_setup,
+        distributed_backend,
+        runner,
+        test_options,
+        num_gpus_available,
+        method="generate",
+        is_multimodal=False,
+    )

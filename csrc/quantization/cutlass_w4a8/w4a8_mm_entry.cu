@@ -7,6 +7,7 @@
 #include <c10/cuda/CUDAGuard.h>
 #include <torch/all.h>
 #include "cutlass_extensions/torch_utils.hpp"
+#include "w4a8_utils.cuh"
 
 #include "core/registration.h"
 
@@ -24,6 +25,8 @@
 
 #include "cutlass_extensions/common.hpp"
 #include "cutlass_extensions/epilogue/scaled_mm_epilogues_c3x.hpp"
+
+#include <cuda_runtime.h>
 
 namespace vllm::cutlass_w4a8 {
 
@@ -401,6 +404,7 @@ torch::Tensor encode_and_reorder_int4b(torch::Tensor const& B) {
 
   int k = B.size(0) * PackFactor;  // logical k
   int n = B.size(1);
+  TORCH_CHECK((n * k) % 32 == 0, "need multiples of 32 int4s for 16B chunks");
 
   auto B_ptr = static_cast<QuantType const*>(B.const_data_ptr());
   auto B_packed_ptr = static_cast<QuantType*>(B_packed.data_ptr());
@@ -409,7 +413,9 @@ torch::Tensor encode_and_reorder_int4b(torch::Tensor const& B) {
   LayoutB_Reordered layout_B_reordered =
       cute::tile_to_shape(LayoutAtomQuant{}, shape_B);
 
-  cutlass::unified_encode_int4b(B_ptr, B_packed_ptr, n * k);
+  bool ok = vllm::cutlass_w4a8_utils::unified_encode_int4b(B_ptr, B_packed_ptr,
+                                                           n * k);
+  TORCH_CHECK(ok, "unified_encode_int4b failed");
   cutlass::reorder_tensor(B_packed_ptr, layout_B, layout_B_reordered);
 
   return B_packed;

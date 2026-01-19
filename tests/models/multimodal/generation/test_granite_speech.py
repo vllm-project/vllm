@@ -2,16 +2,15 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from collections.abc import Sequence
-from typing import Optional
 
 import pytest
 from transformers import AutoModelForSpeechSeq2Seq
 
+from vllm.logprobs import SampleLogprobs
 from vllm.lora.request import LoRARequest
-from vllm.sequence import SampleLogprobs
+from vllm.platforms import current_platform
 
-from ....conftest import (AudioTestAssets, HfRunner, PromptAudioInput,
-                          VllmRunner)
+from ....conftest import AudioTestAssets, HfRunner, PromptAudioInput, VllmRunner
 from ...registry import HF_EXAMPLE_MODELS
 from ...utils import check_logprobs_close
 
@@ -19,8 +18,8 @@ HF_AUDIO_PROMPT = "<|start_of_role|>system<|end_of_role|>Knowledge Cutoff Date: 
 
 
 def vllm_to_hf_output(
-    vllm_output: tuple[list[int], str, Optional[SampleLogprobs]],
-) -> tuple[list[int], str, Optional[SampleLogprobs]]:
+    vllm_output: tuple[list[int], str, SampleLogprobs | None],
+) -> tuple[list[int], str, SampleLogprobs | None]:
     """Sanitize hf output to be comparable with vllm output."""
     output_ids, output_str, out_logprobs = vllm_output
 
@@ -36,6 +35,14 @@ audio_lora_path = MODEL_NAME
 models = [MODEL_NAME]
 
 
+@pytest.fixture
+def granite_speech_attention_config():
+    """Return attention config for Granite Speech tests on ROCm."""
+    if current_platform.is_rocm():
+        return {"backend": "ROCM_AITER_FA"}
+    return None
+
+
 def run_test(
     hf_runner: type[HfRunner],
     vllm_runner: type[VllmRunner],
@@ -47,7 +54,8 @@ def run_test(
     max_tokens: int,
     num_logprobs: int,
     tensor_parallel_size: int,
-    distributed_executor_backend: Optional[str] = None,
+    distributed_executor_backend: str | None = None,
+    attention_config: dict | None = None,
 ):
     """Inference result should be the same between hf and vllm.
 
@@ -64,63 +72,75 @@ def run_test(
     # will hurt multiprocessing backend with fork method (the default method).
     # max_model_len should be greater than image_feature_size
     with vllm_runner(
-            model,
-            runner="generate",
-            max_model_len=max_model_len,
-            max_num_seqs=1,
-            dtype=dtype,
-            limit_mm_per_prompt={"audio": 1},
-            tensor_parallel_size=tensor_parallel_size,
-            distributed_executor_backend=distributed_executor_backend,
-            enable_lora=True,
-            max_lora_rank=64,
-            enforce_eager=True,
+        model,
+        runner="generate",
+        max_model_len=max_model_len,
+        max_num_seqs=1,
+        dtype=dtype,
+        limit_mm_per_prompt={"audio": 1},
+        tensor_parallel_size=tensor_parallel_size,
+        distributed_executor_backend=distributed_executor_backend,
+        enable_lora=True,
+        max_lora_rank=64,
+        enforce_eager=True,
+        attention_config=attention_config,
     ) as vllm_model:
         lora_request = LoRARequest("audio", 1, audio_lora_path)
         vllm_outputs_per_case = [
-            vllm_model.generate_greedy_logprobs(prompts,
-                                                max_tokens,
-                                                num_logprobs=num_logprobs,
-                                                audios=audios,
-                                                lora_request=lora_request)
+            vllm_model.generate_greedy_logprobs(
+                prompts,
+                max_tokens,
+                num_logprobs=num_logprobs,
+                audios=audios,
+                lora_request=lora_request,
+            )
             for prompts, audios in inputs
         ]
 
-    with hf_runner(model, dtype=dtype,
-                   auto_cls=AutoModelForSpeechSeq2Seq) as hf_model:
-
+    with hf_runner(model, dtype=dtype, auto_cls=AutoModelForSpeechSeq2Seq) as hf_model:
         hf_processor = hf_model.processor
         eos_token_id = hf_processor.tokenizer.eos_token_id
 
         hf_outputs_per_case = [
-            hf_model.generate_greedy_logprobs_limit(prompts,
-                                                    max_tokens,
-                                                    num_logprobs=num_logprobs,
-                                                    audios=[audios],
-                                                    eos_token_id=eos_token_id)
+            hf_model.generate_greedy_logprobs_limit(
+                prompts,
+                max_tokens,
+                num_logprobs=num_logprobs,
+                audios=[audios],
+                eos_token_id=eos_token_id,
+            )
             for prompts, audios in inputs
         ]
 
-    for hf_outputs, vllm_outputs in zip(hf_outputs_per_case,
-                                        vllm_outputs_per_case):
+    for hf_outputs, vllm_outputs in zip(hf_outputs_per_case, vllm_outputs_per_case):
         check_logprobs_close(
             outputs_0_lst=hf_outputs,
-            outputs_1_lst=[
-                vllm_to_hf_output(output) for output in vllm_outputs
-            ],
+            outputs_1_lst=[vllm_to_hf_output(output) for output in vllm_outputs],
             name_0="hf",
             name_1="vllm",
         )
 
 
 @pytest.mark.parametrize("model", models)
-@pytest.mark.parametrize("dtype", ["bfloat16"])
-@pytest.mark.parametrize("max_model_len", [2048])
+@pytest.mark.parametrize(
+    "dtype", ["float16"] if current_platform.is_rocm() else ["bfloat16"]
+)
+@pytest.mark.parametrize(
+    "max_model_len", [512] if current_platform.is_rocm() else [2048]
+)
 @pytest.mark.parametrize("max_tokens", [128])
 @pytest.mark.parametrize("num_logprobs", [10])
-def test_models(hf_runner, vllm_runner, model: str,
-                audio_assets: AudioTestAssets, dtype: str, max_model_len: int,
-                max_tokens: int, num_logprobs: int) -> None:
+def test_models(
+    hf_runner,
+    vllm_runner,
+    model: str,
+    audio_assets: AudioTestAssets,
+    granite_speech_attention_config,
+    dtype: str,
+    max_model_len: int,
+    max_tokens: int,
+    num_logprobs: int,
+) -> None:
     model_info = HF_EXAMPLE_MODELS.find_hf_info(model)
     model_info.check_available_online(on_fail="skip")
     model_info.check_transformers_version(on_fail="skip")
@@ -142,4 +162,5 @@ def test_models(hf_runner, vllm_runner, model: str,
         max_tokens=max_tokens,
         num_logprobs=num_logprobs,
         tensor_parallel_size=1,
+        attention_config=granite_speech_attention_config,
     )

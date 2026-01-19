@@ -10,6 +10,8 @@ from PIL import Image, ImageDraw
 
 from vllm.multimodal.hasher import MultiModalHasher
 
+pytestmark = pytest.mark.cpu_test
+
 ASSETS_DIR = Path(__file__).parent / "assets"
 assert ASSETS_DIR.exists()
 
@@ -88,8 +90,6 @@ def test_hash_image_exif_id():
 
     hasher = MultiModalHasher
     # first image has UUID in ImageID, so it should hash to that UUID
-    assert hasher.hash_kwargs(image=image1) == hasher.hash_kwargs(
-        image=id.bytes)
+    assert hasher.hash_kwargs(image=image1) == hasher.hash_kwargs(image=id.bytes)
     # second image has non-UUID in ImageID, so it should hash to the image data
-    assert hasher.hash_kwargs(image=image2) == hasher.hash_kwargs(
-        image=image2a)
+    assert hasher.hash_kwargs(image=image2) == hasher.hash_kwargs(image=image2a)

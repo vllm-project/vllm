@@ -10,7 +10,6 @@ AsyncLLMEngine are working correctly.
 """
 
 import lm_eval
-import pytest
 
 from vllm.platforms import current_platform
 
@@ -44,14 +43,15 @@ def run_test(more_args):
     print(f"Running with: {args}")
 
     with RemoteOpenAIServer(
-            MODEL_NAME, args,
-            max_wait_seconds=MAX_WAIT_SECONDS) as remote_server:
+        MODEL_NAME, args, max_wait_seconds=MAX_WAIT_SECONDS
+    ) as remote_server:
         url = f"{remote_server.url_for('v1')}/completions"
 
         model_args = (
             f"model={MODEL_NAME},"
             f"base_url={url},"
-            f"num_concurrent={NUM_CONCURRENT},tokenized_requests=False")
+            f"num_concurrent={NUM_CONCURRENT},tokenized_requests=False"
+        )
 
         results = lm_eval.simple_evaluate(
             model="local-completions",
@@ -60,34 +60,19 @@ def run_test(more_args):
         )
 
         measured_value = results["results"][TASK][FILTER]
-        assert (measured_value - RTOL < EXPECTED_VALUE
-                and measured_value + RTOL > EXPECTED_VALUE
-                ), f"Expected: {EXPECTED_VALUE} |  Measured: {measured_value}"
+        assert (
+            measured_value - RTOL < EXPECTED_VALUE
+            and measured_value + RTOL > EXPECTED_VALUE
+        ), f"Expected: {EXPECTED_VALUE} |  Measured: {measured_value}"
 
 
-@pytest.mark.skipif(not current_platform.is_cuda()
-                    and not current_platform.is_tpu()
-                    and not current_platform.is_xpu(),
-                    reason="V1 currently only supported on CUDA, XPU and TPU")
-def test_lm_eval_accuracy_v1_engine(monkeypatch: pytest.MonkeyPatch):
+def test_lm_eval_accuracy_v1_engine():
     """Run with the V1 Engine."""
 
-    with monkeypatch.context() as m:
-        m.setenv("VLLM_USE_V1", "1")
-        more_args = []
+    more_args = []
 
-        # Limit compilation time for V1
-        if current_platform.is_tpu():
-            more_args = ["--max-num-seqs", "64"]
+    # Limit compilation time for V1
+    if current_platform.is_tpu():
+        more_args = ["--max-num-seqs", "64"]
 
-        run_test(more_args)
-
-
-@pytest.mark.parametrize("more_args", MORE_ARGS_LIST)
-def test_lm_eval_accuracy_v0_engine(monkeypatch: pytest.MonkeyPatch,
-                                    more_args):
-    """Run with the V0 Engine."""
-
-    with monkeypatch.context() as m:
-        m.setenv("VLLM_USE_V1", "0")
-        run_test(more_args)
+    run_test(more_args)

@@ -16,8 +16,13 @@ from uuid import uuid4
 import pytest
 
 from vllm.entrypoints.logger import RequestLogger
-from vllm.logger import (_DATE_FORMAT, _FORMAT, _configure_vllm_root_logger,
-                         enable_trace_function_call, init_logger)
+from vllm.logger import (
+    _DATE_FORMAT,
+    _FORMAT,
+    _configure_vllm_root_logger,
+    enable_trace_function_call,
+    init_logger,
+)
 from vllm.logging_utils import NewLineFormatter
 from vllm.logging_utils.dump_input import prepare_object_to_dump
 
@@ -44,12 +49,15 @@ def test_trace_function_call():
     os.remove(path)
 
 
-def test_default_vllm_root_logger_configuration():
+def test_default_vllm_root_logger_configuration(monkeypatch):
     """This test presumes that VLLM_CONFIGURE_LOGGING (default: True) and
     VLLM_LOGGING_CONFIG_PATH (default: None) are not configured and default
     behavior is activated."""
+    monkeypatch.setenv("VLLM_LOGGING_COLOR", "0")
+    _configure_vllm_root_logger()
+
     logger = logging.getLogger("vllm")
-    assert logger.level == logging.DEBUG
+    assert logger.level == logging.INFO
     assert not logger.propagate
 
     handler = logger.handlers[0]
@@ -65,12 +73,13 @@ def test_default_vllm_root_logger_configuration():
     assert formatter.datefmt == _DATE_FORMAT
 
 
-@patch("vllm.logger.VLLM_CONFIGURE_LOGGING", 1)
-@patch("vllm.logger.VLLM_LOGGING_CONFIG_PATH", None)
-def test_descendent_loggers_depend_on_and_propagate_logs_to_root_logger():
+def test_descendent_loggers_depend_on_and_propagate_logs_to_root_logger(monkeypatch):
     """This test presumes that VLLM_CONFIGURE_LOGGING (default: True) and
     VLLM_LOGGING_CONFIG_PATH (default: None) are not configured and default
     behavior is activated."""
+    monkeypatch.setenv("VLLM_CONFIGURE_LOGGING", "1")
+    monkeypatch.delenv("VLLM_LOGGING_CONFIG_PATH", raising=False)
+
     root_logger = logging.getLogger("vllm")
     root_handler = root_logger.handlers[0]
 
@@ -94,79 +103,83 @@ def test_descendent_loggers_depend_on_and_propagate_logs_to_root_logger():
     assert log_record.levelno == logging.INFO
 
 
-@patch("vllm.logger.VLLM_CONFIGURE_LOGGING", 0)
-@patch("vllm.logger.VLLM_LOGGING_CONFIG_PATH", None)
-def test_logger_configuring_can_be_disabled():
+def test_logger_configuring_can_be_disabled(monkeypatch):
     """This test calls _configure_vllm_root_logger again to test custom logging
     config behavior, however mocks are used to ensure no changes in behavior or
     configuration occur."""
+    monkeypatch.setenv("VLLM_CONFIGURE_LOGGING", "0")
+    monkeypatch.delenv("VLLM_LOGGING_CONFIG_PATH", raising=False)
 
     with patch("vllm.logger.dictConfig") as dict_config_mock:
         _configure_vllm_root_logger()
     dict_config_mock.assert_not_called()
 
 
-@patch("vllm.logger.VLLM_CONFIGURE_LOGGING", 1)
-@patch(
-    "vllm.logger.VLLM_LOGGING_CONFIG_PATH",
-    "/if/there/is/a/file/here/then/you/did/this/to/yourself.json",
-)
-def test_an_error_is_raised_when_custom_logging_config_file_does_not_exist():
+def test_an_error_is_raised_when_custom_logging_config_file_does_not_exist(monkeypatch):
     """This test calls _configure_vllm_root_logger again to test custom logging
     config behavior, however it fails before any change in behavior or
     configuration occurs."""
+    monkeypatch.setenv("VLLM_CONFIGURE_LOGGING", "1")
+    monkeypatch.setenv(
+        "VLLM_LOGGING_CONFIG_PATH",
+        "/if/there/is/a/file/here/then/you/did/this/to/yourself.json",
+    )
+
     with pytest.raises(RuntimeError) as ex_info:
         _configure_vllm_root_logger()
     assert ex_info.type == RuntimeError  # noqa: E721
     assert "File does not exist" in str(ex_info)
 
 
-@patch("vllm.logger.VLLM_CONFIGURE_LOGGING", 1)
-def test_an_error_is_raised_when_custom_logging_config_is_invalid_json():
+def test_an_error_is_raised_when_custom_logging_config_is_invalid_json(monkeypatch):
     """This test calls _configure_vllm_root_logger again to test custom logging
     config behavior, however it fails before any change in behavior or
     configuration occurs."""
+    monkeypatch.setenv("VLLM_CONFIGURE_LOGGING", "1")
+
     with NamedTemporaryFile(encoding="utf-8", mode="w") as logging_config_file:
         logging_config_file.write("---\nloggers: []\nversion: 1")
         logging_config_file.flush()
-        with patch("vllm.logger.VLLM_LOGGING_CONFIG_PATH",
-                   logging_config_file.name):
-            with pytest.raises(JSONDecodeError) as ex_info:
-                _configure_vllm_root_logger()
-            assert ex_info.type == JSONDecodeError
-            assert "Expecting value" in str(ex_info)
+        monkeypatch.setenv("VLLM_LOGGING_CONFIG_PATH", logging_config_file.name)
+        with pytest.raises(JSONDecodeError) as ex_info:
+            _configure_vllm_root_logger()
+        assert ex_info.type == JSONDecodeError
+        assert "Expecting value" in str(ex_info)
 
 
-@patch("vllm.logger.VLLM_CONFIGURE_LOGGING", 1)
-@pytest.mark.parametrize("unexpected_config", (
-    "Invalid string",
-    [{
-        "version": 1,
-        "loggers": []
-    }],
-    0,
-))
+@pytest.mark.parametrize(
+    "unexpected_config",
+    (
+        "Invalid string",
+        [{"version": 1, "loggers": []}],
+        0,
+    ),
+)
 def test_an_error_is_raised_when_custom_logging_config_is_unexpected_json(
-        unexpected_config: Any):
+    monkeypatch,
+    unexpected_config: Any,
+):
     """This test calls _configure_vllm_root_logger again to test custom logging
     config behavior, however it fails before any change in behavior or
     configuration occurs."""
+    monkeypatch.setenv("VLLM_CONFIGURE_LOGGING", "1")
+
     with NamedTemporaryFile(encoding="utf-8", mode="w") as logging_config_file:
         logging_config_file.write(json.dumps(unexpected_config))
         logging_config_file.flush()
-        with patch("vllm.logger.VLLM_LOGGING_CONFIG_PATH",
-                   logging_config_file.name):
-            with pytest.raises(ValueError) as ex_info:
-                _configure_vllm_root_logger()
-            assert ex_info.type == ValueError  # noqa: E721
-            assert "Invalid logging config. Expected dict, got" in str(ex_info)
+        monkeypatch.setenv("VLLM_LOGGING_CONFIG_PATH", logging_config_file.name)
+        with pytest.raises(ValueError) as ex_info:
+            _configure_vllm_root_logger()
+        assert ex_info.type == ValueError  # noqa: E721
+        assert "Invalid logging config. Expected dict, got" in str(ex_info)
 
 
-@patch("vllm.logger.VLLM_CONFIGURE_LOGGING", 1)
-def test_custom_logging_config_is_parsed_and_used_when_provided():
+def test_custom_logging_config_is_parsed_and_used_when_provided(monkeypatch):
     """This test calls _configure_vllm_root_logger again to test custom logging
     config behavior, however mocks are used to ensure no changes in behavior or
     configuration occur."""
+    monkeypatch.setenv("VLLM_CONFIGURE_LOGGING", "1")
+
     valid_logging_config = {
         "loggers": {
             "vllm.test_logger.logger": {
@@ -174,43 +187,43 @@ def test_custom_logging_config_is_parsed_and_used_when_provided():
                 "propagate": False,
             }
         },
-        "version": 1
+        "version": 1,
     }
     with NamedTemporaryFile(encoding="utf-8", mode="w") as logging_config_file:
         logging_config_file.write(json.dumps(valid_logging_config))
         logging_config_file.flush()
-        with patch("vllm.logger.VLLM_LOGGING_CONFIG_PATH",
-                   logging_config_file.name), patch(
-                       "vllm.logger.dictConfig") as dict_config_mock:
+        monkeypatch.setenv("VLLM_LOGGING_CONFIG_PATH", logging_config_file.name)
+        with patch("vllm.logger.dictConfig") as dict_config_mock:
             _configure_vllm_root_logger()
             dict_config_mock.assert_called_with(valid_logging_config)
 
 
-@patch("vllm.logger.VLLM_CONFIGURE_LOGGING", 0)
-def test_custom_logging_config_causes_an_error_if_configure_logging_is_off():
+def test_custom_logging_config_causes_an_error_if_configure_logging_is_off(monkeypatch):
     """This test calls _configure_vllm_root_logger again to test custom logging
     config behavior, however mocks are used to ensure no changes in behavior or
     configuration occur."""
+    monkeypatch.setenv("VLLM_CONFIGURE_LOGGING", "0")
+
     valid_logging_config = {
         "loggers": {
             "vllm.test_logger.logger": {
                 "handlers": [],
             }
         },
-        "version": 1
+        "version": 1,
     }
     with NamedTemporaryFile(encoding="utf-8", mode="w") as logging_config_file:
         logging_config_file.write(json.dumps(valid_logging_config))
         logging_config_file.flush()
-        with patch("vllm.logger.VLLM_LOGGING_CONFIG_PATH",
-                   logging_config_file.name):
-            with pytest.raises(RuntimeError) as ex_info:
-                _configure_vllm_root_logger()
-            assert ex_info.type is RuntimeError
-            expected_message_snippet = (
-                "VLLM_CONFIGURE_LOGGING evaluated to false, but "
-                "VLLM_LOGGING_CONFIG_PATH was given.")
-            assert expected_message_snippet in str(ex_info)
+        monkeypatch.setenv("VLLM_LOGGING_CONFIG_PATH", logging_config_file.name)
+        with pytest.raises(RuntimeError) as ex_info:
+            _configure_vllm_root_logger()
+        assert ex_info.type is RuntimeError
+        expected_message_snippet = (
+            "VLLM_CONFIGURE_LOGGING evaluated to false, but "
+            "VLLM_LOGGING_CONFIG_PATH was given."
+        )
+        assert expected_message_snippet in str(ex_info)
 
         # Remember! The root logger is assumed to have been configured as
         # though VLLM_CONFIGURE_LOGGING=1 and VLLM_LOGGING_CONFIG_PATH=None.
@@ -223,11 +236,11 @@ def test_custom_logging_config_causes_an_error_if_configure_logging_is_off():
 
 
 def test_prepare_object_to_dump():
-    str_obj = 'str'
+    str_obj = "str"
     assert prepare_object_to_dump(str_obj) == "'str'"
 
     list_obj = [1, 2, 3]
-    assert prepare_object_to_dump(list_obj) == '[1, 2, 3]'
+    assert prepare_object_to_dump(list_obj) == "[1, 2, 3]"
 
     dict_obj = {"a": 1, "b": "b"}
     assert prepare_object_to_dump(dict_obj) in [
@@ -236,9 +249,9 @@ def test_prepare_object_to_dump():
     ]
 
     set_obj = {1, 2, 3}
-    assert prepare_object_to_dump(set_obj) == '[1, 2, 3]'
+    assert prepare_object_to_dump(set_obj) == "[1, 2, 3]"
 
-    tuple_obj = ('a', 'b', 'c')
+    tuple_obj = ("a", "b", "c")
     assert prepare_object_to_dump(tuple_obj) == "['a', 'b', 'c']"
 
     class CustomEnum(enum.Enum):
@@ -253,8 +266,7 @@ def test_prepare_object_to_dump():
         a: int
         b: str
 
-    assert (prepare_object_to_dump(CustomClass(
-        1, "b")) == "CustomClass(a=1, b='b')")
+    assert prepare_object_to_dump(CustomClass(1, "b")) == "CustomClass(a=1, b='b')"
 
 
 def test_request_logger_log_outputs():
@@ -467,7 +479,7 @@ def test_request_logger_log_outputs_integration():
 
 def test_streaming_complete_logs_full_text_content():
     """Test that streaming complete logging includes
-      full accumulated text, not just token count."""
+    full accumulated text, not just token count."""
     mock_logger = MagicMock()
 
     with patch("vllm.entrypoints.logger.logger", mock_logger):
@@ -497,3 +509,49 @@ def test_streaming_complete_logs_full_text_content():
         assert call_args[1] == "test-streaming-full-text"
         assert call_args[2] == " (streaming complete)"
         assert call_args[5] == "streaming_complete"
+
+
+# Add vllm prefix to make sure logs go through the vllm logger
+test_logger = init_logger("vllm.test_logger")
+
+
+def mp_function(**kwargs):
+    # This function runs in a subprocess
+
+    test_logger.warning("This is a subprocess: %s", kwargs.get("a"))
+    test_logger.error("This is a subprocess error.")
+    test_logger.debug("This is a subprocess debug message: %s.", kwargs.get("b"))
+
+
+def test_caplog_mp_fork(caplog_vllm, caplog_mp_fork):
+    with caplog_vllm.at_level(logging.DEBUG, logger="vllm"), caplog_mp_fork():
+        import multiprocessing
+
+        ctx = multiprocessing.get_context("fork")
+        p = ctx.Process(
+            target=mp_function,
+            name=f"SubProcess{1}",
+            kwargs={"a": "AAAA", "b": "BBBBB"},
+        )
+        p.start()
+        p.join()
+
+    assert "AAAA" in caplog_vllm.text
+    assert "BBBBB" in caplog_vllm.text
+
+
+def test_caplog_mp_spawn(caplog_mp_spawn):
+    with caplog_mp_spawn(logging.DEBUG) as log_holder:
+        import multiprocessing
+
+        ctx = multiprocessing.get_context("spawn")
+        p = ctx.Process(
+            target=mp_function,
+            name=f"SubProcess{1}",
+            kwargs={"a": "AAAA", "b": "BBBBB"},
+        )
+        p.start()
+        p.join()
+
+    assert "AAAA" in log_holder.text
+    assert "BBBBB" in log_holder.text

@@ -1,8 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Integration tests for FlexAttention backend vs default backend"""
-
-from typing import Optional
 
 import pytest
 import torch
@@ -38,30 +35,33 @@ def ref_int8_scaled_mm(
     b: torch.Tensor,
     scale_a: torch.Tensor,
     scale_b: torch.Tensor,
-    azp: Optional[torch.Tensor],
-    bias: Optional[torch.Tensor],
+    azp: torch.Tensor | None,
+    bias: torch.Tensor | None,
     output_type: torch.dtype,
 ):
     if azp is not None:
         a = a.to(dtype=torch.float32) - azp.to(dtype=torch.float32)
-    output = torch.mm((scale_a * a.to(dtype=torch.float32)),
-                      (scale_b * b.to(dtype=torch.float32)))
+    output = torch.mm(
+        (scale_a * a.to(dtype=torch.float32)), (scale_b * b.to(dtype=torch.float32))
+    )
     if bias is not None:
         output += bias.float()
 
     return output.to(dtype=output_type)
 
 
-def onednn_int8_gemm_test_helper(primitive_cache_size: int,
-                                 m: int,
-                                 n: int,
-                                 k: int,
-                                 per_tensor_a_quant: bool,
-                                 per_tensor_b_quant: bool,
-                                 use_azp: bool,
-                                 use_bias: bool,
-                                 out_dtype: torch.dtype = torch.bfloat16,
-                                 device: str = "cpu"):
+def onednn_int8_gemm_test_helper(
+    primitive_cache_size: int,
+    m: int,
+    n: int,
+    k: int,
+    per_tensor_a_quant: bool,
+    per_tensor_b_quant: bool,
+    use_azp: bool,
+    use_bias: bool,
+    out_dtype: torch.dtype = torch.bfloat16,
+    device: str = "cpu",
+):
     # Test for a oneDNN kernel with per-tensor / per-token activation
     # quantization and per-tensor / per-output channel weight quantization.
     a = to_int8(torch.randn((m, k), device=device) * 5)
@@ -70,8 +70,8 @@ def onednn_int8_gemm_test_helper(primitive_cache_size: int,
     a_scales_shape = (1, 1) if per_tensor_a_quant else (m, 1)
     b_scales_shape = (1, 1) if per_tensor_b_quant else (1, n)
 
-    scale_a = (torch.randn(a_scales_shape, device=device, dtype=torch.float32))
-    scale_b = (torch.randn(b_scales_shape, device=device, dtype=torch.float32))
+    scale_a = torch.randn(a_scales_shape, device=device, dtype=torch.float32)
+    scale_b = torch.randn(b_scales_shape, device=device, dtype=torch.float32)
 
     if use_azp:
         azp = torch.rand(a_scales_shape, dtype=torch.float32) * 10 + 1.5
@@ -81,10 +81,7 @@ def onednn_int8_gemm_test_helper(primitive_cache_size: int,
         azp = None
         azp_adj = None
 
-    if use_bias:
-        bias = torch.rand((n, ), device=device, dtype=out_dtype) * 10
-    else:
-        bias = None
+    bias = torch.rand((n,), device=device, dtype=out_dtype) * 10 if use_bias else None
 
     handler = ops.create_onednn_scaled_mm(
         b,
@@ -105,20 +102,21 @@ def onednn_int8_gemm_test_helper(primitive_cache_size: int,
         # To test runtime bias setting
         out = torch.zeros((m, n), dtype=out_dtype)
         ops.onednn_scaled_mm(handler, a, out, scale_a, azp, azp_adj, None)
-        baseline = ref_int8_scaled_mm(a, b, scale_a, scale_b, azp, None,
-                                      out_dtype)
+        baseline = ref_int8_scaled_mm(a, b, scale_a, scale_b, azp, None, out_dtype)
 
         torch.testing.assert_close(out, baseline, rtol=1e-1, atol=1e0)
 
 
-def onednn_gemm_test_helper(primitive_cache_size: int,
-                            m: int,
-                            n: int,
-                            k: int,
-                            use_bias: bool,
-                            use_stride: bool,
-                            dtype: torch.dtype = torch.bfloat16,
-                            device: str = "cpu"):
+def onednn_gemm_test_helper(
+    primitive_cache_size: int,
+    m: int,
+    n: int,
+    k: int,
+    use_bias: bool,
+    use_stride: bool,
+    dtype: torch.dtype = torch.bfloat16,
+    device: str = "cpu",
+):
     if use_stride:
         a = torch.rand((m, 2 * k), dtype=dtype, device=device) * 1.5
         a = a[:, :k]
@@ -128,7 +126,7 @@ def onednn_gemm_test_helper(primitive_cache_size: int,
     b = torch.rand((n, k), dtype=dtype, device=device) * 1.5
 
     if use_bias:
-        bias = torch.rand((n, ), device=device, dtype=dtype) * 5
+        bias = torch.rand((n,), device=device, dtype=dtype) * 5
         bias_f32 = bias.float()
     else:
         bias = None
@@ -140,16 +138,18 @@ def onednn_gemm_test_helper(primitive_cache_size: int,
     )
 
     out = ops.onednn_mm(handler, a, bias)
-    baseline = torch.nn.functional.linear(a.float(), b.float(),
-                                          bias_f32).to(dtype=a.dtype)
+    baseline = torch.nn.functional.linear(a.float(), b.float(), bias_f32).to(
+        dtype=a.dtype
+    )
 
     torch.testing.assert_close(out, baseline)
 
     if use_bias:
         # To test runtime bias setting
         out = ops.onednn_mm(handler, a, None)
-        baseline = torch.nn.functional.linear(a.float(), b.float(),
-                                              None).to(dtype=a.dtype)
+        baseline = torch.nn.functional.linear(a.float(), b.float(), None).to(
+            dtype=a.dtype
+        )
 
         torch.testing.assert_close(out, baseline)
 
@@ -165,7 +165,7 @@ def onednn_gemm_test_helper(primitive_cache_size: int,
 def test_onednn_int8_scaled_gemm(
     n: int,
     k: int,
-    m_list: tuple[int],
+    m_list: tuple[int, ...],
     per_tensor_a_scale: bool,
     per_tensor_b_scale: bool,
     use_bias: bool,
@@ -196,7 +196,7 @@ def test_onednn_int8_scaled_gemm(
 def test_onednn_gemm(
     n: int,
     k: int,
-    m_list: tuple[int],
+    m_list: tuple[int, ...],
     use_bias: bool,
     use_stride: bool,
     dtype: torch.dtype,
