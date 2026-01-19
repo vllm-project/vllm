@@ -155,18 +155,31 @@ class WeaveOffloadingConfig:
 
         if "dram_bytes_to_use" in raw:
             dram_bytes_to_use = _coerce_bytes("dram_bytes_to_use", raw["dram_bytes_to_use"])
+        elif "seed_dram_bytes_to_use" in raw:
+            dram_bytes_to_use = _coerce_bytes(
+                "seed_dram_bytes_to_use", raw["seed_dram_bytes_to_use"]
+            )
         elif "cpu_bytes_to_use" in raw:
             dram_bytes_to_use = _coerce_bytes("cpu_bytes_to_use", raw["cpu_bytes_to_use"])
         elif "dram_pool_size_gb" in raw:
             dram_bytes_to_use = _gb_to_bytes(raw["dram_pool_size_gb"])
+        elif "seed_dram_pool_size" in raw:
+            dram_bytes_to_use = _coerce_bytes("seed_dram_pool_size", raw["seed_dram_pool_size"])
+        elif "seed_dram_pool_size_gb" in raw:
+            dram_bytes_to_use = _gb_to_bytes(raw["seed_dram_pool_size_gb"])
         else:
             raise ValueError(
                 "weave offloading config must specify one of: "
-                "dram_bytes_to_use, cpu_bytes_to_use, dram_pool_size_gb"
+                "dram_bytes_to_use, seed_dram_bytes_to_use, cpu_bytes_to_use, "
+                "dram_pool_size_gb, seed_dram_pool_size, seed_dram_pool_size_gb"
             )
 
         if "cxl_bytes_to_use" in raw:
             cxl_bytes_to_use = _coerce_bytes("cxl_bytes_to_use", raw["cxl_bytes_to_use"])
+        elif "cxl_kvpool_size_bytes" in raw:
+            cxl_bytes_to_use = _coerce_bytes("cxl_kvpool_size_bytes", raw["cxl_kvpool_size_bytes"])
+        elif "cxl_kvpool_size_gb" in raw:
+            cxl_bytes_to_use = _gb_to_bytes(raw["cxl_kvpool_size_gb"])
         elif "cxl_pool_size_gb" in raw:
             cxl_bytes_to_use = _gb_to_bytes(raw["cxl_pool_size_gb"])
         else:
