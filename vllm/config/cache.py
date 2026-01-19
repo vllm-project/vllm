@@ -128,7 +128,8 @@ class CacheConfig:
     """The cache strategy for Mamba layers.
     - "none": set when prefix caching is disabled.
     - "all": cache the mamba state of all tokens at position i * block_size. This is 
-           the default behavior when prefix caching is enabled.
+           the default behavior (for models that support it) when prefix caching is
+           enabled.
     - "align": only cache the mamba state of the last token of each scheduler step and
            when the token is at position i * block_size.
     """
