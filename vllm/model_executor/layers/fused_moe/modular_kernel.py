@@ -676,7 +676,7 @@ class FusedMoEPermuteExpertsUnpermute(ABC):
         apply_router_weight_on_input: bool,
     ) -> torch.Tensor:
         """
-        Same as apply(), except uses routing_logits as opposed
+        Same as apply(), except uses router_logits as opposed
         to the topk_ids and topk_weights. This is useful for kernels
         with fused router and fused_experts (e.g. FLASHINFER_TRTLLM).
         """
@@ -1282,7 +1282,7 @@ class FusedMoEModularKernel(torch.nn.Module):
         apply_router_weight_on_input: bool,
     ) -> torch.Tensor:
         """
-        Same as forward(), except uses routing_logits as opposed
+        Same as forward(), except uses router_logits as opposed
         to the topk_ids and topk_weights. This is used for kernels
         that have fused router + experts (e.g. FLASHINFER_TRTLLM).
         """
