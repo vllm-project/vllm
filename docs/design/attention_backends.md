@@ -120,8 +120,8 @@ Priority is **1 = highest** (tried first).
 
 | Priority | Backend |
 |----------|---------|
-| 1 | FLASHINFER_MLA |
-| 2 | CUTLASS_MLA |
+| 1 | CUTLASS_MLA |
+| 2 | FLASHINFER_MLA |
 | 3 | FLASH_ATTN_MLA |
 | 4 | FLASHMLA |
 | 5 | TRITON_MLA |
