@@ -79,7 +79,7 @@ class LMMissingLayer(nn.Module):
 
 
 @contextmanager
-def _no_init_weights(module: nn.Module, placeholder_cls: type[nn.Module]):
+def _no_init_weights(module: nn.Module, placeholder_cls: Callable[[], nn.Module]):
     """
     Prevents weight initialization from taking up memory and replaces all
     direct child assignments to `module` with an instance of `placeholder_cls`.
@@ -132,9 +132,9 @@ class SupportsMultiModal(Protocol):
     Set internally by `MultiModalRegistry.register_processor`.
     """
 
-    _language_module_names: list[str] = []
+    _language_model_names: list[str] = []
     """
-    Set internally by `mark_language_model`.
+    Set internally by `_mark_language_model`.
     """
 
     @classmethod
@@ -180,6 +180,8 @@ class SupportsMultiModal(Protocol):
         Mark each child module that was assigned to this model
         during this context as a language model component.
         """
+        mm_config = vllm_config.model_config.multimodal_config
+
         children_names = list[str]()
 
         def callback(module_, name, submodule):
@@ -189,12 +191,12 @@ class SupportsMultiModal(Protocol):
         with torch.nn.modules.module.register_module_module_registration_hook(callback):  # noqa: E501,SIM117
             with (
                 _no_init_weights(self, LMMissingLayer)
-                if vllm_config.model_config.multimodal_config.mm_encoder_only
+                if mm_config.mm_encoder_only
                 else nullcontext()
             ):
                 yield
 
-        self._language_module_names = children_names
+        self._language_model_names = children_names
 
     def get_num_mm_encoder_tokens(self, num_image_tokens: int) -> int:
         """
