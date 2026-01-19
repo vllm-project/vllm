@@ -61,11 +61,11 @@ class MoEPrepareAndFinalizeNaiveEP(mk.FusedMoEPrepareAndFinalize):
             a1 = a1 * topk_weights.to(a1.dtype)
 
         # Defer input quantization to the MoE kernel.
+        use_nvfp4 = quant_config.use_nvfp4_w4a4
         if self.defer_input_quant:
             a1q = a1
             a1q_scale = None
         else:
-            use_nvfp4 = quant_config.use_nvfp4_w4a4
             a1q, a1q_scale = moe_kernel_quantize_input(
                 a1,
                 quant_config.a1_gscale if use_nvfp4 else quant_config.a1_scale,
