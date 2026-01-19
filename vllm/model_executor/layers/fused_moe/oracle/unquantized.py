@@ -59,6 +59,9 @@ def select_unquantized_moe_backend(
     def _make_log_backend(backend: UnquantizedMoeBackend):
         return f"Using {backend.value} backend for Unquantized MoE"
 
+    # Default to TRITON backend if no specific platform matches
+    backend = UnquantizedMoeBackend.TRITON
+
     rocm_aiter_moe_enabled = rocm_aiter_ops.is_fused_moe_enabled()
 
     # FlashInfer CUTLASS MoE is only supported on Hopper and later GPUS
