@@ -63,8 +63,8 @@ class ServeSubcommand(CLISubcommand):
             return
 
         # Default api_server_count if not explicitly set.
-        # - External LB: Leave as 1 (external LB handles distribution)
-        # - Hybrid LB: Use local DP size (internal LB for local ranks only)
+        # - External LB: Leave as 1
+        # - Hybrid LB: Use local DP size
         # - Internal LB: Use full DP size
         if args.api_server_count is None:
             # External LB is inferred when data_parallel_rank is explicitly set
