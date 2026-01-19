@@ -5,7 +5,7 @@ from typing import TypeAlias
 
 import torch
 
-from vllm.transformers_utils.tokenizer import AnyTokenizer
+from vllm.tokenizers import TokenizerLike
 
 LogitsProcessor: TypeAlias = (
     Callable[[list[int], torch.Tensor], torch.Tensor]
@@ -19,7 +19,7 @@ to sample from."""
 
 
 def get_bad_words_logits_processors(
-    bad_words: list[str], tokenizer: AnyTokenizer
+    bad_words: list[str], tokenizer: TokenizerLike
 ) -> list[LogitsProcessor]:
     bad_words_ids: list[list[int]] = list()
 

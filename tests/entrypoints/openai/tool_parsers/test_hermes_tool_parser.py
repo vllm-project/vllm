@@ -5,9 +5,9 @@ import json
 
 import pytest
 
-from vllm.entrypoints.openai.protocol import ChatCompletionRequest
-from vllm.entrypoints.openai.tool_parsers.hermes_tool_parser import Hermes2ProToolParser
-from vllm.transformers_utils.tokenizer import AnyTokenizer
+from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
+from vllm.tokenizers import TokenizerLike
+from vllm.tool_parsers.hermes_tool_parser import Hermes2ProToolParser
 
 from ....utils import RemoteOpenAIServer
 
@@ -270,14 +270,14 @@ async def test_streaming_product_tool_call():
 
 
 @pytest.fixture
-def qwen_tokenizer() -> AnyTokenizer:
-    from vllm.transformers_utils.tokenizer import get_tokenizer
+def qwen_tokenizer() -> TokenizerLike:
+    from vllm.tokenizers import get_tokenizer
 
     return get_tokenizer("Qwen/Qwen3-32B")
 
 
 @pytest.fixture
-def hermes_parser(qwen_tokenizer: AnyTokenizer) -> Hermes2ProToolParser:
+def hermes_parser(qwen_tokenizer: TokenizerLike) -> Hermes2ProToolParser:
     return Hermes2ProToolParser(qwen_tokenizer)
 
 
@@ -291,7 +291,7 @@ def any_chat_request() -> ChatCompletionRequest:
 
 
 def test_hermes_parser_streaming_just_forward_text(
-    qwen_tokenizer: AnyTokenizer,
+    qwen_tokenizer: TokenizerLike,
     hermes_parser: Hermes2ProToolParser,
     any_chat_request: ChatCompletionRequest,
 ) -> None:
@@ -323,7 +323,7 @@ def test_hermes_parser_streaming_just_forward_text(
 
 
 def test_hermes_parser_streaming_failure_case_bug_19056(
-    qwen_tokenizer: AnyTokenizer,
+    qwen_tokenizer: TokenizerLike,
     hermes_parser: Hermes2ProToolParser,
     any_chat_request: ChatCompletionRequest,
 ) -> None:
@@ -357,7 +357,7 @@ def test_hermes_parser_streaming_failure_case_bug_19056(
 
 
 def test_hermes_parser_streaming(
-    qwen_tokenizer: AnyTokenizer,
+    qwen_tokenizer: TokenizerLike,
     hermes_parser: Hermes2ProToolParser,
     any_chat_request: ChatCompletionRequest,
 ) -> None:

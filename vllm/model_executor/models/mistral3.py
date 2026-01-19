@@ -16,7 +16,7 @@ from transformers import (
 from transformers.models.pixtral import PixtralProcessor
 
 from vllm.config import VllmConfig
-from vllm.config.multimodal import BaseDummyOptions
+from vllm.config.multimodal import BaseDummyOptions, MultiModalConfig
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import ColumnParallelLinear, RowParallelLinear
@@ -31,6 +31,7 @@ from vllm.multimodal.inputs import (
 )
 from vllm.multimodal.parse import ImageProcessorItems, ImageSize, MultiModalDataItems
 from vllm.multimodal.processing import (
+    BaseDummyInputsBuilder,
     BaseMultiModalProcessor,
     BaseProcessingInfo,
     InputProcessingContext,
@@ -38,7 +39,6 @@ from vllm.multimodal.processing import (
     PromptUpdate,
     PromptUpdateDetails,
 )
-from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from vllm.sequence import IntermediateTensors
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
@@ -52,6 +52,7 @@ from .pixtral import PixtralHFEncoderInfo, PixtralHFVisionModel
 from .utils import (
     AutoWeightsLoader,
     WeightsMapper,
+    get_layer_index,
     init_vllm_registered_model,
     maybe_prefix,
 )
@@ -369,32 +370,19 @@ def _get_num_hidden_layers(hf_config: LlavaLikeConfig) -> int:
     num_hidden_layers = hf_config.vision_config.num_hidden_layers
     # If we have one feature layer, initialize up to that layer
     if isinstance(feature_layers, int):
-        return _get_layer_index(feature_layers, num_hidden_layers)
+        return get_layer_index(feature_layers, num_hidden_layers)
     # If we have multiple feature layers, initialize up to the deepest one
     elif isinstance(feature_layers, (list, tuple)):
-        return max(_get_layer_index(idx, num_hidden_layers) for idx in feature_layers)
+        return max(get_layer_index(idx, num_hidden_layers) for idx in feature_layers)
     raise TypeError(
         f"vision_layer_feature type: {type(feature_layers)} is not supported"
     )
 
 
-def _get_layer_index(feature_layer_index: int, num_hidden_layers: int) -> int:
-    """Given a signed vision feature layer, get the number of hidden layers
-    needed to leverage it.
-
-    Args:
-        feature_layer_index: Index of a required layer in the visual encoder.
-        num_hidden_layers: The total number of hidden layers in the visual
-            encoder.
-    """
-    if feature_layer_index < 0:
-        return num_hidden_layers + feature_layer_index + 1
-    return feature_layer_index
-
-
 def init_vision_tower_for_llava(
     hf_config: LlavaLikeConfig,
     quant_config: QuantizationConfig | None,
+    multimodal_config: MultiModalConfig | None,
     *,
     require_post_norm: bool | None = None,
     prefix: str = "",
@@ -409,6 +397,7 @@ def init_vision_tower_for_llava(
     return PixtralHFVisionModel(
         vision_config,
         quant_config=quant_config,
+        multimodal_config=multimodal_config,
         num_hidden_layers_override=num_hidden_layers,
         require_post_norm=require_post_norm,
         prefix=prefix,
@@ -423,8 +412,6 @@ def init_vision_tower_for_llava(
 class Mistral3ForConditionalGeneration(
     nn.Module, SupportsLoRA, SupportsMultiModal, SupportsPP
 ):
-    merge_by_field_config = True
-
     packed_modules_mapping = {
         "qkv_proj": ["q_proj", "k_proj", "v_proj"],
         "gate_up_proj": ["gate_proj", "up_proj"],
@@ -474,7 +461,8 @@ class Mistral3ForConditionalGeneration(
         if multimodal_config.get_limit_per_prompt("image"):
             self.vision_tower = init_vision_tower_for_llava(
                 config,
-                quant_config,
+                quant_config=quant_config,
+                multimodal_config=multimodal_config,
                 require_post_norm=False,
                 prefix=maybe_prefix(prefix, "vision_tower"),
             )

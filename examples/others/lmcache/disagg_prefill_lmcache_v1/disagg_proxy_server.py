@@ -26,9 +26,21 @@ async def lifespan(app: FastAPI):
     )
 
     app.state.prefill_client = httpx.AsyncClient(
-        timeout=None, base_url=prefiller_base_url
+        timeout=None,
+        base_url=prefiller_base_url,
+        limits=httpx.Limits(
+            max_connections=None,
+            max_keepalive_connections=None,
+        ),
     )
-    app.state.decode_client = httpx.AsyncClient(timeout=None, base_url=decoder_base_url)
+    app.state.decode_client = httpx.AsyncClient(
+        timeout=None,
+        base_url=decoder_base_url,
+        limits=httpx.Limits(
+            max_connections=None,
+            max_keepalive_connections=None,
+        ),
+    )
 
     yield
 
@@ -105,6 +117,11 @@ async def send_request_to_service(
     headers = {"Authorization": f"Bearer {os.environ.get('OPENAI_API_KEY')}"}
     response = await client.post(endpoint, json=req_data, headers=headers)
     response.raise_for_status()
+
+    # read/consume the response body to release the connection
+    # otherwise, it would http.ReadError
+    await response.aread()
+
     return response
 
 

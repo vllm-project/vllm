@@ -1,0 +1,17 @@
+group: Model Executor
+depends_on: 
+  - image-build
+steps:
+- label: Model Executor
+  timeout_in_minutes: 35
+  source_file_dependencies:
+  - vllm/engine/arg_utils.py
+  - vllm/config/model.py
+  - vllm/model_executor
+  - tests/model_executor
+  - tests/entrypoints/openai/test_tensorizer_entrypoint.py
+  commands:
+    - apt-get update && apt-get install -y curl libsodium23
+    - export VLLM_WORKER_MULTIPROC_METHOD=spawn
+    - pytest -v -s model_executor
+    - pytest -v -s entrypoints/openai/test_tensorizer_entrypoint.py

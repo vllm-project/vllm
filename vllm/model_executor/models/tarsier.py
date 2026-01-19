@@ -19,7 +19,7 @@ from transformers.models.llava import LlavaProcessor
 from transformers.processing_utils import ProcessingKwargs, Unpack
 from transformers.tokenization_utils_base import PreTokenizedInput, TextInput
 
-from vllm.config import VllmConfig
+from vllm.config import MultiModalConfig, VllmConfig
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.linear import ColumnParallelLinear, RowParallelLinear
 from vllm.model_executor.layers.quantization import QuantizationConfig
@@ -34,20 +34,25 @@ from vllm.multimodal.parse import (
     MultiModalDataItems,
 )
 from vllm.multimodal.processing import (
+    BaseDummyInputsBuilder,
     BaseMultiModalProcessor,
     BaseProcessingInfo,
     InputProcessingContext,
     PromptReplacement,
     PromptUpdate,
 )
-from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from vllm.sequence import IntermediateTensors
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
 from .clip import CLIPVisionModel
 from .interfaces import MultiModalEmbeddings, SupportsMultiModal, SupportsPP
 from .siglip import SiglipVisionModel
-from .utils import AutoWeightsLoader, init_vllm_registered_model, maybe_prefix
+from .utils import (
+    AutoWeightsLoader,
+    get_layer_index,
+    init_vllm_registered_model,
+    maybe_prefix,
+)
 from .vision import (
     VisionEncoderInfo,
     get_num_selected_vision_tokens,
@@ -346,6 +351,7 @@ def _build_tarsier_hf_processor(
 def init_vision_tower_for_tarsier(
     hf_config: TarsierHfConfig,  # Use the Tarsier specific config protocol
     quant_config: QuantizationConfig | None,
+    multimodal_config: MultiModalConfig | None,
     *,
     require_post_norm: bool | None = None,
     prefix: str = "",
@@ -355,18 +361,13 @@ def init_vision_tower_for_tarsier(
     feature_layers = hf_config.vision_feature_layer
     base_num_hidden_layers = vision_config.num_hidden_layers
 
-    def _get_layer_index(feature_layer_index: int, num_hidden_layers_total: int) -> int:
-        if feature_layer_index < 0:
-            return num_hidden_layers_total + feature_layer_index + 1
-        return feature_layer_index
-
     if isinstance(feature_layers, int):
-        num_hidden_layers_to_init = _get_layer_index(
+        num_hidden_layers_to_init = get_layer_index(
             feature_layers, base_num_hidden_layers
         )
     elif isinstance(feature_layers, (list, tuple)):
         num_hidden_layers_to_init = max(
-            _get_layer_index(idx, base_num_hidden_layers) for idx in feature_layers
+            get_layer_index(idx, base_num_hidden_layers) for idx in feature_layers
         )
     else:
         raise TypeError(
@@ -377,6 +378,7 @@ def init_vision_tower_for_tarsier(
         return CLIPVisionModel(
             vision_config,
             quant_config=quant_config,
+            multimodal_config=multimodal_config,
             num_hidden_layers_override=num_hidden_layers_to_init,
             require_post_norm=require_post_norm,
             prefix=prefix,
@@ -385,6 +387,7 @@ def init_vision_tower_for_tarsier(
         return SiglipVisionModel(
             vision_config,
             quant_config=quant_config,
+            multimodal_config=multimodal_config,
             num_hidden_layers_override=num_hidden_layers_to_init,
             require_post_norm=require_post_norm,
             prefix=prefix,
@@ -400,8 +403,6 @@ def init_vision_tower_for_tarsier(
     dummy_inputs=TarsierDummyInputsBuilder,
 )
 class TarsierForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP):
-    merge_by_field_config = True
-
     packed_modules_mapping = {
         "qkv_proj": ["q_proj", "k_proj", "v_proj"],
         "gate_up_proj": ["gate_proj", "up_proj"],
@@ -416,12 +417,16 @@ class TarsierForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP)
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
         super().__init__()
+
         config: TarsierHfConfig = vllm_config.model_config.hf_config
         quant_config = vllm_config.quant_config
+        multimodal_config = vllm_config.model_config.multimodal_config
+
         self.config = config  # Storing the Tarsier-specific HF config
         self.vision_tower = init_vision_tower_for_tarsier(
             config,
-            quant_config,
+            quant_config=quant_config,
+            multimodal_config=multimodal_config,
             require_post_norm=False,
             prefix=maybe_prefix(prefix, "vision_tower"),
         )

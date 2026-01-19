@@ -6,9 +6,10 @@ requires = [
     "packaging>=24.2",
     "setuptools>=77.0.3,<81.0.0",
     "setuptools-scm>=8.0",
-    "torch == 2.9.0",
+    "torch == 2.9.1",
     "wheel",
     "jinja2",
+    "grpcio-tools>=1.76.0",
 ]
 build-backend = "setuptools.build_meta"
 
@@ -55,6 +56,10 @@ include = ["vllm*"]
 "vllm/third_party/**" = ["ALL"]
 "vllm/version.py" = ["F401"]
 "vllm/_version.py" = ["ALL"]
+# Exclude generated protobuf files
+"vllm/grpc/*_pb2.py" = ["ALL"]
+"vllm/grpc/*_pb2_grpc.py" = ["ALL"]
+"vllm/grpc/*_pb2.pyi" = ["ALL"]
 
 [tool.ruff.lint]
 select = [
@@ -120,7 +125,7 @@ python = "./.venv"
 # these files may be written in non english words
 extend-exclude = ["tests/models/fixtures/*", "tests/prompts/*",
     "benchmarks/sonnet.txt", "tests/lora/data/*", "build/*",
-    "vllm/third_party/*"]
+    "vllm/third_party/*", "vllm/entrypoints/serve/instrumentator/static/*"]
 ignore-hidden = true
 ignore-files = true
 ignore-dot = true
@@ -162,6 +167,7 @@ depthwise_seperable_CNN = "depthwise_seperable_CNN"
 [tool.typos.default.extend-words]
 iy = "iy"
 tendencias = "tendencias"
+indx = "indx"
 # intel cpu features
 tme = "tme"
 dout = "dout"
