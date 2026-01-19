@@ -84,11 +84,11 @@ from vllm.entrypoints.pooling.pooling.protocol import (
 )
 from vllm.entrypoints.pooling.score.protocol import (
     RerankRequest,
-    ScoreRequest,
     ScoreDataRequest,
-    ScoreTextRequest,
     ScoreQueriesDocumentsRequest,
+    ScoreRequest,
     ScoreResponse,
+    ScoreTextRequest,
 )
 from vllm.entrypoints.renderer import BaseRenderer, CompletionRenderer, RenderConfig
 from vllm.entrypoints.serve.disagg.protocol import GenerateRequest, GenerateResponse
