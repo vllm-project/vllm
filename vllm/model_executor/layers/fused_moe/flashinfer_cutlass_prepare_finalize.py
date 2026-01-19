@@ -11,6 +11,7 @@ from vllm.distributed.device_communicators.base_device_communicator import (
 from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
 from vllm.model_executor.layers.fused_moe.prepare_finalize import (
+    MoEPrepareAndFinalizeNaiveEP,
     MoEPrepareAndFinalizeNoEP,
 )
 from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
@@ -360,10 +361,7 @@ def create_flashinfer_prepare_finalize(
         if enable_alltoallv:
             assert use_nvfp4
             return FlashInferAllToAllMoEPrepareAndFinalize(use_dp)
-        return FlashInferAllGatherMoEPrepareAndFinalize(
-            use_dp=True,
-            use_deepseek_fp8_block_scale=use_deepseek_fp8_block_scale,
-        )
+        return MoEPrepareAndFinalizeNaiveEP()
     else:
         # CUTLASS FP8 BLOCK and CUTLASS NVFP4 apply input quantization
         # in a single call with the MoE experts kernel.

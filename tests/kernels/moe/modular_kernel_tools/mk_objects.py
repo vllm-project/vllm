@@ -237,7 +237,6 @@ if has_flashinfer_cutlass_fused_moe() and current_platform.has_device_capability
     )
     from vllm.model_executor.layers.fused_moe.flashinfer_cutlass_prepare_finalize import (  # noqa: E501
         FlashInferCutlassMoEPrepareAndFinalize,
-        create_flashinfer_prepare_finalize,
     )
 
     register_prepare_and_finalize(
@@ -392,12 +391,8 @@ def make_prepare_finalize(
         prepare_finalize = maybe_make_prepare_finalize(moe, quant_config)
         assert prepare_finalize is not None
         return prepare_finalize
-    elif prepare_finalize_type == FlashInferCutlassMoEPrepareAndFinalize:
-        return create_flashinfer_prepare_finalize(
-            use_dp=moe.moe_parallel_config.dp_size > 1
-        )
     else:
-        return MoEPrepareAndFinalizeNoEP()
+        return MoEPrepareAndFinalizeNoEP()  # defer input quant
 
 
 def _slice(rank: int, num_local_experts: int, t: torch.Tensor) -> torch.Tensor:

@@ -87,7 +87,7 @@ def test_flashinfer_fp4_moe_no_graph(
         assert is_valid_flashinfer_cutlass_fused_moe(a, w1_q, w2_q)
 
         flashinfer_experts = FusedMoEModularKernel(
-            create_flashinfer_prepare_finalize(use_dp=False, use_nvfp4=True),
+            create_flashinfer_prepare_finalize(use_dp=False, nvfp4=True),
             FlashInferExperts(out_dtype=dtype, quant_config=quant_config),
         )
 

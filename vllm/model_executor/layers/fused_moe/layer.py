@@ -631,8 +631,8 @@ class FusedMoE(CustomOp):
     # This is called after all weight loading and post-processing, so it
     # should be safe to swap out the quant_method.
     def maybe_init_modular_kernel(self) -> None:
-        # DEBUG
-        if self.quant_method.supports_mk_interally:
+        # TODO: switch to check if the quant method is holding an MK.
+        if True:
             logger.info_once("DEBUG: SKIPPING MK INIT: Handled Internally!!!!")
             return
 

@@ -6,9 +6,6 @@ import torch
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
-from vllm.model_executor.layers.fused_moe.flashinfer_cutlass_prepare_finalize import (  # noqa: E501
-    create_flashinfer_prepare_finalize,
-)
 from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceNoOP,
 )
@@ -226,85 +223,3 @@ class FlashInferExperts(mk.FusedMoEPermuteExpertsUnpermute):
             # Informs FlashInfer to use the block-scale decoding path when True
             use_deepseek_fp8_block_scale=self.use_deepseek_fp8_block_scale,
         )
-
-
-def flashinfer_cutlass_moe_fp4(
-    hidden_states: torch.Tensor,
-    w1: torch.Tensor,
-    w2: torch.Tensor,
-    topk_weights: torch.Tensor,
-    topk_ids: torch.Tensor,
-    quant_config: FusedMoEQuantConfig,
-    inplace: bool = False,
-    activation: str = "silu",
-    global_num_experts: int = -1,
-    expert_map: torch.Tensor | None = None,
-    apply_router_weight_on_input: bool = False,
-) -> torch.Tensor:
-    fused_experts = mk.FusedMoEModularKernel(
-        create_flashinfer_prepare_finalize(
-            use_dp=False, use_nvfp4=True, enable_alltoallv=False
-        ),
-        FlashInferExperts(
-            out_dtype=hidden_states.dtype,
-            quant_config=quant_config,
-            use_dp=False,
-        ),
-    )
-
-    return fused_experts(
-        hidden_states=hidden_states,
-        w1=w1,
-        w2=w2,
-        topk_weights=topk_weights,
-        topk_ids=topk_ids,
-        inplace=inplace,
-        activation=activation,
-        global_num_experts=global_num_experts,
-        expert_map=expert_map,
-        apply_router_weight_on_input=apply_router_weight_on_input,
-    )
-
-
-def flashinfer_cutlass_moe(
-    hidden_states: torch.Tensor,
-    w1: torch.Tensor,
-    w2: torch.Tensor,
-    topk_weights: torch.Tensor,
-    topk_ids: torch.Tensor,
-    quant_config: FusedMoEQuantConfig,
-    inplace: bool = False,
-    activation: str = "silu",
-    global_num_experts: int = -1,
-    expert_map: torch.Tensor | None = None,
-    apply_router_weight_on_input: bool = False,
-    tp_rank: int = 0,
-    tp_size: int = 1,
-    ep_rank: int = 0,
-    ep_size: int = 1,
-    use_dp: bool = False,
-) -> torch.Tensor:
-    fused_experts = mk.FusedMoEModularKernel(
-        create_flashinfer_prepare_finalize(use_dp=use_dp),
-        FlashInferExperts(
-            out_dtype=hidden_states.dtype,
-            quant_config=quant_config,
-            tp_rank=tp_rank,
-            tp_size=tp_size,
-            ep_rank=ep_rank,
-            ep_size=ep_size,
-        ),
-    )
-
-    return fused_experts(
-        hidden_states=hidden_states,
-        w1=w1,
-        w2=w2,
-        topk_weights=topk_weights,
-        topk_ids=topk_ids,
-        inplace=inplace,
-        activation=activation,
-        global_num_experts=global_num_experts,
-        expert_map=expert_map,
-        apply_router_weight_on_input=apply_router_weight_on_input,
-    )
