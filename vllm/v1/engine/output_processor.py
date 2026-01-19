@@ -12,6 +12,7 @@ import torch
 
 from vllm.lora.request import LoRARequest
 from vllm.outputs import (
+    STREAM_FINISHED,
     CompletionOutput,
     PoolingOutput,
     PoolingRequestOutput,
@@ -465,7 +466,6 @@ class OutputProcessor:
         a parent request, in which case the associated child requests are aborted
         also.
         """
-
         internal_req_ids = []
         for request_id in request_ids:
             if internal:
@@ -553,13 +553,19 @@ class OutputProcessor:
     ) -> None:
         """Queue a streaming update instead of immediately applying it."""
         if not request.resumable:
+            # Final request - just mark completion, don't add its dummy tokens.
             if req_state.input_chunk_queue is None:
+                # Engine already finished - emit final output and clean up.
                 self._finish_request(req_state)
-                return
-            if req_state.input_chunk_queue:
-                req_state.input_chunk_queue[0].final = True
+                if req_state.queue is not None:
+                    # Emit a final output with finished=True
+                    # to unblock the generate() loop.
+                    req_state.queue.put(STREAM_FINISHED)
+            elif req_state.input_chunk_queue:
+                req_state.input_chunk_queue[-1].final = True
             else:
                 req_state.streaming_input = False
+            return
 
         update = StreamingUpdate(
             prompt=prompt,

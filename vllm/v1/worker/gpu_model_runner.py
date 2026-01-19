@@ -1130,9 +1130,7 @@ class GPUModelRunner(
         NOTE: prompt_token_ids includes intermediate output tokens - tokens
         previously generated but now are input context (part of the prompt).
         """
-        if req_id in self.input_batch.req_id_to_index:
-            self.input_batch.remove_request(req_id)
-
+        self.input_batch.remove_request(req_id)
         req_state = self.requests[req_id]
 
         req_state.prompt_token_ids = new_req_data.prompt_token_ids

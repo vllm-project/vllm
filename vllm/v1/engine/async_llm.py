@@ -22,7 +22,7 @@ from vllm.inputs import PromptType
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
-from vllm.outputs import PoolingRequestOutput, RequestOutput
+from vllm.outputs import STREAM_FINISHED, PoolingRequestOutput, RequestOutput
 from vllm.plugins.io_processors import get_io_processor
 from vllm.pooling_params import PoolingParams
 from vllm.renderers import RendererLike
@@ -63,6 +63,18 @@ class StreamingInput:
 
     prompt: PromptType
     sampling_params: SamplingParams | None = None
+
+
+class InputStreamError(Exception):
+    """Wrapper for errors from the input stream generator.
+
+    This is used to propagate errors from the user's input generator
+    without wrapping them in EngineGenerateError.
+    """
+
+    def __init__(self, cause: Exception):
+        self.cause = cause
+        super().__init__(str(cause))
 
 
 class AsyncLLM(EngineClient):
@@ -312,6 +324,20 @@ class AsyncLLM(EngineClient):
             tokenization_kwargs,
         )
 
+        if isinstance(prompt, AsyncGenerator):
+            # Streaming input case.
+            return await self._add_streaming_input_request(
+                request_id,
+                prompt,
+                params,
+                arrival_time,
+                lora_request,
+                tokenization_kwargs,
+                trace_headers,
+                priority,
+                data_parallel_rank,
+            )
+
         # Convert Input --> Request.
         if isinstance(prompt, EngineCoreRequest):
             request = prompt
@@ -338,29 +364,6 @@ class AsyncLLM(EngineClient):
                 data_parallel_rank,
             )
             prompt_text = get_prompt_text(prompt)
-        else:
-            if (
-                is_pooling
-                or params.n > 1
-                or params.output_kind == RequestOutputKind.FINAL_ONLY
-                or params.stop
-            ):
-                raise ValueError(
-                    "Input streaming not currently supported "
-                    "for pooling models, n > 1, request_kind = FINAL_ONLY "
-                    "or with stop strings."
-                )
-            return await self._add_streaming_input_request(
-                request_id,
-                prompt,
-                params,
-                arrival_time,
-                lora_request,
-                tokenization_kwargs,
-                trace_headers,
-                priority,
-                data_parallel_rank,
-            )
 
         self.input_processor.assign_request_id(request)
 
@@ -419,7 +422,7 @@ class AsyncLLM(EngineClient):
         self,
         request_id: str,
         input_stream: AsyncGenerator[StreamingInput, None],
-        sampling_params: SamplingParams,
+        sampling_params: SamplingParams | PoolingParams,
         arrival_time: float | None = None,
         lora_request: LoRARequest | None = None,
         tokenization_kwargs: dict[str, Any] | None = None,
@@ -427,6 +430,18 @@ class AsyncLLM(EngineClient):
         priority: int = 0,
         data_parallel_rank: int | None = None,
     ) -> RequestOutputCollector:
+        if (
+            isinstance(sampling_params, PoolingParams)
+            or sampling_params.n > 1
+            or sampling_params.output_kind == RequestOutputKind.FINAL_ONLY
+            or sampling_params.stop
+        ):
+            raise ValueError(
+                "Input streaming not currently supported "
+                "for pooling models, n > 1, request_kind = FINAL_ONLY "
+                "or with stop strings."
+            )
+
         inputs = dict(
             arrival_time=arrival_time,
             lora_request=lora_request,
@@ -454,6 +469,7 @@ class AsyncLLM(EngineClient):
         queue = RequestOutputCollector(sampling_params.output_kind, internal_req_id)
 
         async def handle_inputs():
+            cancelled = False
             try:
                 async for input_chunk in input_stream:
                     sp = input_chunk.sampling_params or sampling_params
@@ -468,13 +484,20 @@ class AsyncLLM(EngineClient):
                     prompt_text = get_prompt_text(input_chunk.prompt)
                     await self._add_request(req, prompt_text, None, 0, queue)
             except (asyncio.CancelledError, GeneratorExit):
-                pass
+                cancelled = True
             except Exception as error:
-                queue.put(error)  # fail with input processing error
+                # Wrap in InputStreamError so generate() can propagate it
+                # without wrapping in EngineGenerateError.
+                queue.put(InputStreamError(error))
             finally:
-                # Send empty final request to indicate that inputs have finished.
-                await self._add_request(final_req, None, None, 0, queue)
                 queue._input_stream_task = None
+                if not cancelled:
+                    # Send empty final request to indicate that inputs have
+                    # finished. Don't send if cancelled (session was aborted).
+                    await self._add_request(final_req, None, None, 0, queue)
+
+        # Ensure output handler is running.
+        self._run_output_handler()
 
         queue._input_stream_task = asyncio.create_task(handle_inputs())
         return queue
@@ -536,9 +559,10 @@ class AsyncLLM(EngineClient):
 
                 # Note: both OutputProcessor and EngineCore handle their
                 # own request cleanup based on finished.
-                finished = out.finished
                 assert isinstance(out, RequestOutput)
-                yield out
+                finished = out.finished
+                if out is not STREAM_FINISHED:
+                    yield out
 
         # If the request is disconnected by the client, generate()
         # is cancelled or the generator is garbage collected. So,
@@ -561,6 +585,14 @@ class AsyncLLM(EngineClient):
             if self.log_requests:
                 logger.info("Request %s failed (bad request): %s.", request_id, e)
             raise
+
+        # Error from input stream generator - propagate directly.
+        except InputStreamError as e:
+            if q is not None:
+                await self.abort(q.request_id, internal=True)
+            if self.log_requests:
+                logger.info("Request %s failed (input error): %s.", request_id, e)
+            raise e.cause from e
 
         # Unexpected error in the generate() task (possibly recoverable).
         except Exception as e:
