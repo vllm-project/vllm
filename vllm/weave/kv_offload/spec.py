@@ -84,6 +84,7 @@ class WeaveOffloadingConfig:
     loom_recompute_ratio: float | Literal["auto"] = 0.0
     loom_disable_store_for_recompute: bool = False
     cxl_numa_node: int | None = 1
+    dram_numa_node: int | None = 0
     eviction_policy: Literal["lru", "arc"] = "lru" 
 
     @classmethod
@@ -121,6 +122,13 @@ class WeaveOffloadingConfig:
                 cxl_numa_node = None
             else:
                 cxl_numa_node = _coerce_int("cxl_numa_node", raw["cxl_numa_node"])
+        
+        dram_numa_node = defaults.dram_numa_node
+        if "dram_numa_node" in raw:
+            if raw["dram_numa_node"] is None:
+                dram_numa_node = None
+            else:
+                dram_numa_node = _coerce_int("dram_numa_node", raw["dram_numa_node"])
 
         eviction_policy = defaults.eviction_policy
         if "eviction_policy" in raw:
@@ -134,6 +142,7 @@ class WeaveOffloadingConfig:
             loom_recompute_ratio=loom_recompute_ratio,
             loom_disable_store_for_recompute=loom_disable_store_for_recompute,
             cxl_numa_node=cxl_numa_node,
+            dram_numa_node=dram_numa_node,
             eviction_policy=eviction_policy,
         )
 
@@ -269,7 +278,7 @@ class WeaveOffloadingSpec(OffloadingSpec):
                 cpu_block_size=self.offloaded_block_size,
                 num_cpu_blocks=num_dram_blocks,
                 gpu_caches=kv_caches,
-                numa_node=1,
+                numa_node=self.weave_config.dram_numa_node,
             )
 
             self._cxl_handlers = WeaveGPUDramOffloadingHandlers(
