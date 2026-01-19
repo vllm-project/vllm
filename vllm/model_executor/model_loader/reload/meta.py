@@ -44,6 +44,7 @@ def materialize_meta_tensor(meta_tensor: torch.Tensor) -> torch.Tensor:
 
 def restore_layer_on_meta(layer: torch.nn.Module, info: LayerReloadingInfo):
     """Restore a layer to model format with tensors on the meta device"""
+    # print(f"(restore) deleting: {get_layer_tensors(layer).keys()}")
     for name in get_layer_tensors(layer):
         delattr(layer, name)
 
@@ -52,6 +53,8 @@ def restore_layer_on_meta(layer: torch.nn.Module, info: LayerReloadingInfo):
         layer.register_parameter(name, param)
     for name, buffer in restore_buffers.items():
         layer.register_buffer(name, buffer)
+
+    # print(f"(restore) restored: {get_layer_tensors(layer).keys()}")
 
 
 def materialize_layer(layer: torch.nn.Module) -> None:

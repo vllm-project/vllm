@@ -112,9 +112,9 @@ def process_weights_after_loading(
             module.process_weights_after_loading(model_config.dtype)
 
     # Needed for torchao model reloading via model.reload_weights
-    # @ksayers @jerryzh168 this can be removed if callers move to `reload_weights`
+    # @kylesayrs @jerryzh168 this can be removed if callers move to `reload_weights`
     if model_config.quantization == "torchao":
-        set_torchao_reload_attrs(model)
+        model._do_torchao_reload = True
 
 
 @contextmanager

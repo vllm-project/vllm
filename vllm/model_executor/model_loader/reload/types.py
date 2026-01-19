@@ -33,3 +33,6 @@ class LayerReloadingInfo:
         self.load_numel = 0
         self.load_numel_total = float("inf")
         self.loaded_weights = list()
+
+    def is_initialized(self) -> bool:
+        return self.load_numel_total != float("inf")

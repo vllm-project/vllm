@@ -21,19 +21,15 @@ TODO(@ksayers):
 """
 
 __all__ = [
-    "finalize_layerwise_restore_and_process",
-    "layerwise_restore_and_process",
     "record_metadata_for_reloading",
-    "set_torchao_reload_attrs",
+    "initialize_layerwise_reload",
+    "finalize_layerwise_reload",
     "support_quantized_model_reload_from_hp_weights",
 ]
 
 from .layerwise import (
-    finalize_layerwise_restore_and_process,
-    layerwise_restore_and_process,
+    finalize_layerwise_reload,
+    initialize_layerwise_reload,
     record_metadata_for_reloading,
 )
-from .torchao_decorator import (
-    set_torchao_reload_attrs,
-    support_quantized_model_reload_from_hp_weights,
-)
+from .torchao_decorator import support_quantized_model_reload_from_hp_weights

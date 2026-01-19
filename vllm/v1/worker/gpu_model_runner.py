@@ -60,8 +60,8 @@ from vllm.model_executor.layers.rotary_embedding import (
 )
 from vllm.model_executor.model_loader import TensorizerLoader, get_model_loader
 from vllm.model_executor.model_loader.reload import (
-    finalize_layerwise_restore_and_process,
-    layerwise_restore_and_process,
+    finalize_layerwise_reload,
+    initialize_layerwise_reload,
 )
 from vllm.model_executor.models.interfaces import (
     MultiModalEmbeddings,
@@ -4216,8 +4216,14 @@ class GPUModelRunner(
     def reload_weights(
         self,
         weights_iterator: Iterable[tuple[str, torch.Tensor]] | None = None,
+        weights_path: str | None = None,
         checkpoint_format: bool = True,
     ) -> None:
+        """
+
+
+        TODO(@kylesayrs): generalize to all runners and loaders
+        """
         # argument validation
         if weights_iterator is None and not checkpoint_format:
             logger.warning(
@@ -4232,16 +4238,14 @@ class GPUModelRunner(
 
         # load weights from disk if none are provided
         if weights_iterator is None:
-            if self.model_config.model == "meta-llama/Llama-3.2-1B-Instruct":
-                print("use counter")
-                self.model_config.model = (
-                    "nm-testing/Llama-3.2-1B-Instruct-DEBUG-COUNTER"
-                )
-            else:
-                print("use language")
-                self.model_config.model = "meta-llama/Llama-3.2-1B-Instruct"
-            # self.load_config.download_dir =
             model_loader = get_model_loader(self.load_config)
+            if not hasattr(model_loader, "get_all_weights"):
+                raise NotImplementedError(
+                    f"Model reloading with `{self.load_config.load_format}` format"
+                )
+
+            if weights_path is not None:
+                self.model_config.model = weights_path
             weights_iterator = model_loader.get_all_weights(self.model_config, model)
             weights_iterator = cast(
                 Iterable[tuple[str, torch.Tensor]], weights_iterator
@@ -4254,10 +4258,14 @@ class GPUModelRunner(
         )
         with torch.device(load_device):
             if checkpoint_format:
+                # @kylesayrs @jerryzh168: disable torchao reloading
+                # assume `reload_weights` is the target entrypoint
+                model._do_torchao_reload = False
+
                 # load weights from checkpoint/ original model format
-                model.apply(layerwise_restore_and_process)
+                model.apply(initialize_layerwise_reload)
                 loaded_weights = model.load_weights(weights_iterator)
-                model.apply(finalize_layerwise_restore_and_process)
+                model.apply(finalize_layerwise_reload)
 
             else:
                 # load weights from kernel format

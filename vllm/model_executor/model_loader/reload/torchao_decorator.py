@@ -9,19 +9,14 @@ from typing import TYPE_CHECKING
 import torch
 
 from .layerwise import (
-    finalize_layerwise_restore_and_process,
-    layerwise_restore_and_process,
+    finalize_layerwise_reload,
+    initialize_layerwise_reload,
 )
 
 if TYPE_CHECKING:
     from vllm.model_executor.models.utils import AutoWeightsLoader
 
-__all__ = ["set_torchao_reload_attrs", "support_quantized_model_reload_from_hp_weights"]
-
-
-def set_torchao_reload_attrs(model: torch.nn.Module):
-    """Only called when using torchao quantization"""
-    model._do_torchao_reload = True
+__all__ = ["support_quantized_model_reload_from_hp_weights"]
 
 
 def support_quantized_model_reload_from_hp_weights(original_load_weights: FunctionType):
@@ -47,9 +42,9 @@ def support_quantized_model_reload_from_hp_weights(original_load_weights: Functi
         if not getattr(model, "_do_torchao_reload", False):
             return original_load_weights(self, weights, mapper=mapper)
 
-        model.apply(layerwise_restore_and_process)
+        model.apply(initialize_layerwise_reload)
         loaded_weights = original_load_weights(self, weights, mapper=mapper)
-        model.apply(finalize_layerwise_restore_and_process)
+        model.apply(finalize_layerwise_reload)
 
         return loaded_weights
 
