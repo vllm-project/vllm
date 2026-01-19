@@ -703,6 +703,17 @@ steps:
     - pytest -v -s kernels/moe/test_batched_deepgemm.py
     - pytest -v -s kernels/attention/test_deepgemm_attention.py
 
+- label: Kernels Helion Test
+  timeout_in_minutes: 30
+  mirror_hardwares: [amdexperimental, amdproduction]
+  agent_pool: mi325_1
+  source_file_dependencies:
+  - vllm/utils/import_utils.py
+  - tests/kernels/helion/
+  commands:
+    - pip install helion
+    - pytest -v -s kernels/helion/
+
 - label: Model Executor Test # 23min
   timeout_in_minutes: 35
   torch_nightly: true
@@ -1451,7 +1462,7 @@ steps:
     - bash weight_loading/run_model_weight_loading_test.sh -c weight_loading/models-large-amd.txt
 
 - label: NixlConnector PD accuracy tests (Distributed) # 30min
-  mirror_hardwares: [amdexperimental]
+  mirror_hardwares: [amdexperimental, amdproduction]
   agent_pool: mi325_4
   # grade: Blocking
   timeout_in_minutes: 30
@@ -1465,7 +1476,7 @@ steps:
     - VLLM_ATTENTION_BACKEND=ROCM_ATTN bash v1/kv_connector/nixl_integration/config_sweep_accuracy_test.sh
 
 - label: DP EP NixlConnector PD accuracy tests (Distributed) # 15min
-  mirror_hardwares: [amdexperimental]
+  mirror_hardwares: [amdexperimental, amdproduction]
   agent_pool: mi325_4
   # grade: Blocking
   timeout_in_minutes: 15
