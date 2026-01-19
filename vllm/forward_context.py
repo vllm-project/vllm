@@ -207,6 +207,9 @@ class ForwardContext:
 
     ubatch_slices: UBatchSlices | None = None
 
+    # If True, bypass the compiled model call, e.g. by using .forward() directly
+    skip_compiled: bool = False
+
     additional_kwargs: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self):
@@ -240,6 +243,7 @@ def create_forward_context(
     batch_descriptor: BatchDescriptor | None = None,
     ubatch_slices: UBatchSlices | None = None,
     additional_kwargs: dict[str, Any] | None = None,
+    skip_compiled: bool = False,
 ):
     return ForwardContext(
         no_compile_layers=vllm_config.compilation_config.static_forward_context,
@@ -249,6 +253,7 @@ def create_forward_context(
         cudagraph_runtime_mode=cudagraph_runtime_mode,
         batch_descriptor=batch_descriptor,
         ubatch_slices=ubatch_slices,
+        skip_compiled=skip_compiled,
         additional_kwargs=additional_kwargs or {},
     )
 
@@ -278,6 +283,7 @@ def set_forward_context(
     cudagraph_runtime_mode: CUDAGraphMode = CUDAGraphMode.NONE,
     batch_descriptor: BatchDescriptor | None = None,
     ubatch_slices: UBatchSlices | None = None,
+    skip_compiled: bool = False,
 ):
     """A context manager that stores the current forward context,
     can be attention metadata, etc.
@@ -336,6 +342,7 @@ def set_forward_context(
         batch_descriptor,
         ubatch_slices,
         additional_kwargs,
+        skip_compiled,
     )
 
     try:
