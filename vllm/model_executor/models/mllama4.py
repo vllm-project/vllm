@@ -773,7 +773,8 @@ class Llama4ForConditionalGeneration(
         self.config = config
         self.quant_config = quant_config
         self.multimodal_config = multimodal_config
-        if multimodal_config.get_limit_per_prompt("image"):
+
+        with self._mark_tower_model(vllm_config, "image"):
             from vllm.compilation.backends import set_model_tag
 
             with (
@@ -792,16 +793,15 @@ class Llama4ForConditionalGeneration(
                 quant_config=None,
                 prefix=maybe_prefix(prefix, "multi_modal_projector"),
             )
-        else:
-            self.vision_model = None
-            self.multi_modal_projector = None
-        self.language_model = initialize_model(
-            vllm_config=vllm_config.with_hf_config(
-                config.text_config, ["LlamaForCausalLM"]
-            ),
-            prefix=maybe_prefix(prefix, "language_model"),
-            model_class=Llama4ForCausalLM,
-        )
+
+        with self._mark_language_model(vllm_config):
+            self.language_model = initialize_model(
+                vllm_config=vllm_config.with_hf_config(
+                    config.text_config, ["LlamaForCausalLM"]
+                ),
+                prefix=maybe_prefix(prefix, "language_model"),
+                model_class=Llama4ForCausalLM,
+            )
 
         self.make_empty_intermediate_tensors = (
             self.language_model.make_empty_intermediate_tensors
@@ -891,9 +891,6 @@ class Llama4ForConditionalGeneration(
             img.flatten(0, 1)
             for img in vision_embeddings_flat.split(patches_per_image, dim=0)
         ]
-
-    def get_language_model(self) -> torch.nn.Module:
-        return self.language_model
 
     def embed_multimodal(self, **kwargs) -> MultiModalEmbeddings:
         image_input = self._parse_and_validate_image_input(**kwargs)

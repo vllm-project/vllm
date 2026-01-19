@@ -71,11 +71,25 @@ def _require_is_multimodal(is_multimodal: Tensor | None) -> Tensor:
 
 
 class LMMissingLayer(nn.Module):
+    packed_modules_mapping: dict[str, list[str]] = {}
+
     def make_empty_intermediate_tensors(self, *args, **kwargs):
         raise RuntimeError("This module should not be called in MM encoder-only mode")
 
     def __call__(self, *args, **kwargs):
         raise RuntimeError("This module should not be called in MM encoder-only mode")
+
+
+class TowerMissingLayer(nn.Module):
+    packed_modules_mapping: dict[str, list[str]] = {}
+
+    def __init__(self, modalities: set[str]) -> None:
+        super().__init__()
+
+        self.modalities = modalities
+
+    def __call__(self, *args, **kwargs):
+        raise RuntimeError(f"The following modalities are disabled: {self.modalities}")
 
 
 @contextmanager
@@ -135,6 +149,11 @@ class SupportsMultiModal(Protocol):
     _language_model_names: list[str] = []
     """
     Set internally by `_mark_language_model`.
+    """
+
+    _tower_model_names: list[str] = []
+    """
+    Set internally by `_mark_tower_model`.
     """
 
     @classmethod
@@ -197,6 +216,33 @@ class SupportsMultiModal(Protocol):
                 yield
 
         self._language_model_names = children_names
+
+    @contextmanager
+    def _mark_tower_model(self, vllm_config: VllmConfig, modalities: set[str] | str):
+        """
+        Mark each child module that was assigned to this model
+        during this context as a tower model component.
+        """
+        if isinstance(modalities, str):
+            modalities = {modalities}
+
+        mm_config = vllm_config.model_config.multimodal_config
+
+        children_names = list[str]()
+
+        def callback(module_, name, submodule):
+            if module_ is self:
+                children_names.append(name)
+
+        with torch.nn.modules.module.register_module_module_registration_hook(callback):  # noqa: E501,SIM117
+            with (
+                _no_init_weights(self, lambda: TowerMissingLayer(modalities=modalities))
+                if all(mm_config.get_limit_per_prompt(m) == 0 for m in modalities)
+                else nullcontext()
+            ):
+                yield
+
+        self._tower_model_names = children_names
 
     def get_num_mm_encoder_tokens(self, num_image_tokens: int) -> int:
         """

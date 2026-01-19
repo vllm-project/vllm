@@ -1145,9 +1145,7 @@ class Qwen2_5_VLForConditionalGeneration(
             multimodal_config.is_multimodal_pruning_enabled()
         )
 
-        if multimodal_config.get_limit_per_prompt(
-            "image"
-        ) or multimodal_config.get_limit_per_prompt("video"):
+        with self._mark_tower_model(vllm_config, {"image", "video"}):
             self.visual = Qwen2_5_VisionTransformer(
                 vision_config=config.vision_config,
                 norm_eps=getattr(config, "rms_norm_eps", 1e-6),
@@ -1155,8 +1153,6 @@ class Qwen2_5_VLForConditionalGeneration(
                 prefix=maybe_prefix(prefix, "visual"),
                 multimodal_config=multimodal_config,
             )
-        else:
-            self.visual = None
 
         with self._mark_language_model(vllm_config):
             self.language_model = init_vllm_registered_model(
