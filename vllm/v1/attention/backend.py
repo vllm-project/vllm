@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from abc import ABC, abstractmethod
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import Enum
 from typing import TYPE_CHECKING, Any, ClassVar, Generic, Protocol, TypeVar, get_args
 
@@ -328,6 +328,16 @@ class CommonAttentionMetadata:
     _num_computed_tokens_cpu: torch.Tensor | None = None
 
     _num_computed_tokens_cache: torch.Tensor | None = None
+
+    def batch_size(self) -> int:
+        return self.seq_lens.shape[0]
+
+    def naive_query_lens(self) -> torch.Tensor:
+        """Naive because it assumes that query ends where the next query starts."""
+        return self.query_start_loc[1:] - self.query_start_loc[:-1]
+
+    def replace(self, **kwargs) -> "CommonAttentionMetadata":
+        return replace(self, **kwargs)
 
     @property
     @deprecated(
