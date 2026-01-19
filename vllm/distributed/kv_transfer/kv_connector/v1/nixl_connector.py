@@ -2693,7 +2693,8 @@ class NixlPromMetrics(KVConnectorPromMetrics):
 
         counter_nixl_num_kv_expired_reqs = self._counter_cls(
             name="vllm:nixl_num_kv_expired_reqs",
-            documentation="Number of requests that had their KV expire.",
+            documentation="Number of requests that had their KV expire. "
+            "NOTE: This metric is tracked on the P instance.",
             labelnames=labelnames,
         )
         self.counter_nixl_num_kv_expired_reqs = self.make_per_engine(
