@@ -251,8 +251,8 @@ async def test_score(server: RemoteOpenAIServer, model_name: str):
         server.url_for("score"),
         json={
             "model": model_name,
-            "text_1": "ping",
-            "text_2": "pong",
+            "queries": "ping",
+            "documents": "pong",
         },
     )
     assert response.json()["error"]["type"] == "BadRequestError"
