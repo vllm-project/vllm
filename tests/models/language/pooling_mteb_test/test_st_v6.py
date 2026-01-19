@@ -17,6 +17,17 @@ RERANK_MODELS = [
         attn_type="encoder_only",
         is_prefix_caching_supported=False,
         is_chunked_prefill_supported=False,
+        enable_test=False
+    ),
+    RerankModelInfo(
+        "noooop9527/Qwen3-Reranker-0.6B-seq-cls-STv6",
+        architecture="Qwen3ForSequenceClassification",
+        pooling_type="LAST",
+        attn_type="decoder",
+        is_prefix_caching_supported=True,
+        is_chunked_prefill_supported=True,
+        mteb_score=0.33459,
+        enable_test=True,
     ),
 ]
 
