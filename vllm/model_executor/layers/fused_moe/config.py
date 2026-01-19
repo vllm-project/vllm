@@ -1026,7 +1026,7 @@ class FusedMoEConfig:
     num_experts: int
     experts_per_token: int
     hidden_dim: int
-    intermediate_dim: int
+    intermediate_size_per_partition: int
 
     num_local_experts: int
     moe_parallel_config: FusedMoEParallelConfig
