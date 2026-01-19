@@ -1032,9 +1032,7 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
                 )
 
             # TODO(rob): investigate disable_expert_map
-            self.disable_expert_map = (
-                num_dispatchers > 1 or not experts.supports_expert_map()
-            )
+            self.disable_expert_map = not experts.supports_expert_map()
 
             return experts
 
@@ -2471,10 +2469,7 @@ class CompressedTensorsW4A8Fp8MoEMethod(CompressedTensorsMoEMethod):
             group_size=self.group_size,
         )
 
-        num_dispatchers = prepare_finalize.num_dispatchers()
-        self.disable_expert_map = (
-            num_dispatchers > 1 or not experts.supports_expert_map()
-        )
+        self.disable_expert_map = not experts.supports_expert_map()
 
         return experts
 
