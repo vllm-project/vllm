@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import time
-from typing import Any
+from typing import Any, TypeAlias
 
 from pydantic import (
     BaseModel,
@@ -19,10 +19,7 @@ from vllm.entrypoints.pooling.score.utils import (
 from vllm.utils import random_uuid
 
 
-class ScoreRequest(PoolingBasicRequestMixin):
-    text_1: list[str] | str | ScoreMultiModalParam
-    text_2: list[str] | str | ScoreMultiModalParam
-
+class ScoreRequestMixin(PoolingBasicRequestMixin):
     # --8<-- [start:score-extra-params]
     mm_processor_kwargs: dict[str, Any] | None = Field(
         default=None,
@@ -51,6 +48,42 @@ class ScoreRequest(PoolingBasicRequestMixin):
             truncate_prompt_tokens=self.truncate_prompt_tokens,
             use_activation=get_use_activation(self),
         )
+
+
+class ScoreDataRequest(ScoreRequestMixin):
+    data_1: list[str] | str | ScoreMultiModalParam
+    data_2: list[str] | str | ScoreMultiModalParam
+
+
+class ScoreQueriesDocumentsRequest(ScoreRequestMixin):
+    queries: list[str] | str | ScoreMultiModalParam
+    documents: list[str] | str | ScoreMultiModalParam
+
+    @property
+    def data_1(self):
+        return self.queries
+
+    @property
+    def data_2(self):
+        return self.documents
+
+
+class ScoreTextRequest(ScoreRequestMixin):
+    text_1: list[str] | str | ScoreMultiModalParam
+    text_2: list[str] | str | ScoreMultiModalParam
+
+    @property
+    def data_1(self):
+        return self.text_1
+
+    @property
+    def data_2(self):
+        return self.text_2
+
+
+ScoreRequest: TypeAlias = (
+    ScoreQueriesDocumentsRequest | ScoreDataRequest | ScoreTextRequest
+)
 
 
 class RerankRequest(PoolingBasicRequestMixin):

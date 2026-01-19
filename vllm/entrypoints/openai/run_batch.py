@@ -85,7 +85,7 @@ class BatchRequestInput(OpenAIBaseModel):
         if url == "/v1/embeddings":
             return TypeAdapter(EmbeddingRequest).validate_python(value)
         if url.endswith("/score"):
-            return ScoreRequest.model_validate(value)
+            return TypeAdapter(ScoreRequest).validate_python(value)
         if url.endswith("/rerank"):
             return RerankRequest.model_validate(value)
         return TypeAdapter(BatchRequestInputBody).validate_python(value)
