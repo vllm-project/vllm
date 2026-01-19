@@ -21,7 +21,7 @@ def _swap_blocks_cpu(src: torch.Tensor, dst: torch.Tensor,
     dst.index_copy_(0, dst_ids, src.index_select(0, src_ids))
 
 
-class WeaveDramCxlOffloadingHandler(OffloadingHandler):
+class LoomDramCxlOffloadingHandler(OffloadingHandler):
     def __init__(
         self,
         src_tensors: list[torch.Tensor],

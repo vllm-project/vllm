@@ -10,7 +10,7 @@ from vllm.v1.kv_offload.mediums import DRAMLoadStoreSpec
 from collections import deque
 
 
-class WeaveDRAMBlockStatus(BlockStatus):
+class LoomDRAMBlockStatus(BlockStatus):
     _fields_ = BlockStatus._fields_ + [("block_id", ctypes.c_int64)]  # type: ignore
 
     def __init__(self, block_id: int):
@@ -18,7 +18,7 @@ class WeaveDRAMBlockStatus(BlockStatus):
         self.block_id = block_id
 
 
-class WeaveDRAMBackend(Backend):
+class LoomDRAMBackend(Backend):
     def __init__(self, block_size: int, num_blocks: int):
         super().__init__(block_size=block_size, medium=DRAMLoadStoreSpec.medium())
 
@@ -35,12 +35,12 @@ class WeaveDRAMBackend(Backend):
         blocks: list[BlockStatus] = []
         for _ in range(len(block_hashes)):
             block_id = self.allocated_blocks_free_list.pop()
-            blocks.append(WeaveDRAMBlockStatus(block_id))
+            blocks.append(LoomDRAMBlockStatus(block_id))
 
         return blocks
 
     def free(self, block: BlockStatus):
-        assert isinstance(block, WeaveDRAMBlockStatus)
+        assert isinstance(block, LoomDRAMBlockStatus)
         self.allocated_blocks_free_list.append(block.block_id)
 
     def get_load_store_spec(

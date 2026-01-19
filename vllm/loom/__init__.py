@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-"""Weave integration for vLLM.
+"""Loom integration for vLLM.
 
 Keep this package import lightweight.
 
@@ -18,9 +18,9 @@ from typing import TYPE_CHECKING
 
 __all__ = [
     "LoomConnector",
-    "WeaveConnectorMetadata",
-    "WeaveConnectorScheduler",
-    "WeaveConnectorWorker",
+    "LoomConnectorMetadata",
+    "LoomConnectorScheduler",
+    "LoomConnectorWorker",
     "LoomOffloadingSpec",
 ]
 
@@ -28,12 +28,12 @@ __all__ = [
 def __getattr__(name: str):
     if name == "LoomConnector":
         return import_module(".connector.connector", __name__).LoomConnector
-    if name == "WeaveConnectorMetadata":
-        return import_module(".connector.metadata", __name__).WeaveConnectorMetadata
-    if name == "WeaveConnectorScheduler":
-        return import_module(".connector.scheduler", __name__).WeaveConnectorScheduler
-    if name == "WeaveConnectorWorker":
-        return import_module(".connector.worker", __name__).WeaveConnectorWorker
+    if name == "LoomConnectorMetadata":
+        return import_module(".connector.metadata", __name__).LoomConnectorMetadata
+    if name == "LoomConnectorScheduler":
+        return import_module(".connector.scheduler", __name__).LoomConnectorScheduler
+    if name == "LoomConnectorWorker":
+        return import_module(".connector.worker", __name__).LoomConnectorWorker
     if name == "LoomOffloadingSpec":
         return import_module(".kv_offload.spec", __name__).LoomOffloadingSpec
     raise AttributeError(name)
@@ -41,7 +41,7 @@ def __getattr__(name: str):
 
 if TYPE_CHECKING:
     from .connector.connector import LoomConnector as LoomConnector
-    from .connector.metadata import WeaveConnectorMetadata as WeaveConnectorMetadata
-    from .connector.scheduler import WeaveConnectorScheduler as WeaveConnectorScheduler
-    from .connector.worker import WeaveConnectorWorker as WeaveConnectorWorker
+    from .connector.metadata import LoomConnectorMetadata as LoomConnectorMetadata
+    from .connector.scheduler import LoomConnectorScheduler as LoomConnectorScheduler
+    from .connector.worker import LoomConnectorWorker as LoomConnectorWorker
     from .kv_offload.spec import LoomOffloadingSpec as LoomOffloadingSpec

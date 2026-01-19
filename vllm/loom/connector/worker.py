@@ -11,7 +11,7 @@ from vllm.v1.attention.backend import AttentionBackend
 from vllm.v1.kv_offload.spec import OffloadingSpec
 from vllm.v1.kv_offload.worker.worker import OffloadingWorker, TransferSpec
 
-from .metadata import ReqId, WeaveConnectorMetadata
+from .metadata import ReqId, LoomConnectorMetadata
 
 
 def _get_forward_context_arg(_forward_context: object) -> None:
@@ -19,7 +19,7 @@ def _get_forward_context_arg(_forward_context: object) -> None:
     return None
 
 
-class WeaveConnectorWorker:
+class LoomConnectorWorker:
     """Implementation of Worker side methods"""
 
     def __init__(self, spec: OffloadingSpec):
@@ -84,7 +84,7 @@ class WeaveConnectorWorker:
             if job_ids:
                 self.worker.wait(job_ids)
 
-    def start_kv_transfers(self, metadata: WeaveConnectorMetadata, forward_context: object):
+    def start_kv_transfers(self, metadata: LoomConnectorMetadata, forward_context: object):
         _get_forward_context_arg(forward_context)
         for job_id, transfer_spec in self._unsubmitted_store_jobs:
             success = self.worker.transfer_async(job_id, transfer_spec)
@@ -99,7 +99,7 @@ class WeaveConnectorWorker:
             success = self.worker.transfer_async(job_id, transfer_spec)
             assert success
 
-    def prepare_store_kv(self, metadata: WeaveConnectorMetadata):
+    def prepare_store_kv(self, metadata: LoomConnectorMetadata):
         for req_id, transfer_spec in metadata.reqs_to_store.items():
             job_id = self._generate_job_id()
             self._jobs[job_id] = (req_id, True)

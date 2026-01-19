@@ -136,25 +136,25 @@ class SingleDirectionOffloadingHandler(OffloadingHandler):
                 event.synchronize()
 
 
-class LoomGPUDramOffloadingHandlers:
+class LoomGPUCxlOffloadingHandlers:
     def __init__(
         self,
         gpu_block_size: int,
-        cpu_block_size: int,
-        num_cpu_blocks: int,
+        cxl_block_size: int,
+        num_cxl_blocks: int,
         gpu_caches: dict[str, torch.Tensor],
         attn_backends: dict[str, type[AttentionBackend]],
         numa_node: int | None = None,
     ):
         assert gpu_caches
-        assert cpu_block_size % gpu_block_size == 0
-        block_size_factor = cpu_block_size // gpu_block_size
+        assert cxl_block_size % gpu_block_size == 0
+        block_size_factor = cxl_block_size // gpu_block_size
 
         pin_memory = is_pin_memory_available()
 
-        logger.info("Allocating %d CPU tensors...", len(gpu_caches))
+        logger.info("Allocating %d CXL tensors...", len(gpu_caches))
         gpu_tensors: list[torch.Tensor] = []
-        cpu_tensors: list[torch.Tensor] = []
+        cxl_tensors: list[torch.Tensor] = []
         kv_dim_before_num_blocks: list[bool] = []
         kernel_block_size: int | None = None
         with numa_membind(numa_node, strict=True):
@@ -202,12 +202,12 @@ class LoomGPUDramOffloadingHandlers:
                     kernel_block_size = gpu_shape[block_size_idx]
                     assert gpu_block_size % kernel_block_size == 0
 
-                cpu_shape = list(gpu_shape)
-                cpu_shape[num_blocks_idx] = num_cpu_blocks * block_size_factor
+                cxl_shape = list(gpu_shape)
+                cxl_shape[num_blocks_idx] = num_cxl_blocks * block_size_factor
 
-                cpu_tensors.append(
+                cxl_tensors.append(
                     torch.zeros(
-                        cpu_shape,
+                        cxl_shape,
                         dtype=gpu_tensor.dtype,
                         device="cpu",
                         pin_memory=pin_memory,
@@ -216,26 +216,26 @@ class LoomGPUDramOffloadingHandlers:
 
         assert kernel_block_size is not None
         gpu_block_size_factor = gpu_block_size // kernel_block_size
-        cpu_block_size_factor = cpu_block_size // kernel_block_size
+        cxl_block_size_factor = cxl_block_size // kernel_block_size
 
         assert gpu_block_size_factor == 1
 
-        self.cpu_tensors = cpu_tensors
+        self.cxl_tensors = cxl_tensors
         self.kv_dim_before_num_blocks = kv_dim_before_num_blocks
-        self.cpu_block_size_factor = cpu_block_size_factor
+        self.cxl_block_size_factor = cxl_block_size_factor
 
-        self.gpu_to_cpu_handler = SingleDirectionOffloadingHandler(
+        self.gpu_to_cxl_handler = SingleDirectionOffloadingHandler(
             src_tensors=gpu_tensors,
-            dst_tensors=cpu_tensors,
+            dst_tensors=cxl_tensors,
             kv_dim_before_num_blocks=kv_dim_before_num_blocks,
             src_block_size_factor=gpu_block_size_factor,
-            dst_block_size_factor=cpu_block_size_factor,
+            dst_block_size_factor=cxl_block_size_factor,
         )
 
-        self.cpu_to_gpu_handler = SingleDirectionOffloadingHandler(
-            src_tensors=cpu_tensors,
+        self.cxl_to_gpu_handler = SingleDirectionOffloadingHandler(
+            src_tensors=cxl_tensors,
             dst_tensors=gpu_tensors,
             kv_dim_before_num_blocks=kv_dim_before_num_blocks,
-            src_block_size_factor=cpu_block_size_factor,
+            src_block_size_factor=cxl_block_size_factor,
             dst_block_size_factor=gpu_block_size_factor,
         )

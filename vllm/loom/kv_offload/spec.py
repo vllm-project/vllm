@@ -11,21 +11,16 @@ from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.kv_offload.abstract import LoadStoreSpec, OffloadingManager
 from vllm.v1.kv_offload.mediums import (
     CXLLoadStoreSpec,
-    DRAMLoadStoreSpec,
     GPULoadStoreSpec,
 )
 from vllm.v1.kv_offload.spec import OffloadingSpec
 
-from .backends.cxl_backend import WeaveCXLBackend
-from .backends.dram_backend import WeaveDRAMBackend
-from .handlers.dram_cxl import WeaveDramCxlOffloadingHandler
-from .handlers.gpu_dram import WeaveGPUDramOffloadingHandlers
-from .two_tier_manager import TwoTierOffloadingManager
-from ..weave_logger import get_weave_logger
+from .backends.cxl_backend import LoomCXLBackend
+from .handlers.gpu_cxl import LoomGPUCxlOffloadingHandlers
+from .manager import LoomManager
+from ..logger import get_loom_logger
 
-logger = get_weave_logger(__name__)
-
-
+logger = get_loom_logger(__name__)
 
 
 def _coerce_int(name: str, value: Any) -> int:
@@ -77,17 +72,18 @@ def _parse_ratio_or_auto(name: str, value: Any) -> float | Literal["auto"]:
 
 
 @dataclass
-class WeaveOffloadingConfig:
+class LoomOffloadingConfig:
     seed_pool_size_GB: int = 0
     cxl_kvcache_size_GB: int = 0
     # Loom (MVP-0): request-level recompute baseline knobs.
     loom_recompute_ratio: float | Literal["auto"] = 0.0
     loom_disable_store_for_recompute: bool = False
+    loom_recompute_log_every_steps: int = 50
     cxl_numa_node: int | None = 1
-    eviction_policy: Literal["lru", "arc"] = "lru" 
+    eviction_policy: Literal["lru", "arc"] = "lru"
 
     @classmethod
-    def from_dict(cls, raw: Mapping[str, Any]) -> "WeaveOffloadingConfig":
+    def from_dict(cls, raw: Mapping[str, Any]) -> "LoomOffloadingConfig":
         defaults = cls()
 
         if "seed_pool_size_GB" in raw:
@@ -115,6 +111,12 @@ class WeaveOffloadingConfig:
                 raw["loom_disable_store_for_recompute"],
             )
 
+        loom_recompute_log_every_steps = defaults.loom_recompute_log_every_steps
+        if "loom_recompute_log_every_steps" in raw:
+            loom_recompute_log_every_steps = _coerce_int(
+                "loom_recompute_log_every_steps", raw["loom_recompute_log_every_steps"]
+            )
+
         cxl_numa_node = defaults.cxl_numa_node
         if "cxl_numa_node" in raw:
             if raw["cxl_numa_node"] is None:
@@ -133,45 +135,44 @@ class WeaveOffloadingConfig:
             cxl_kvcache_size_GB=cxl_kvcache_size_GB,
             loom_recompute_ratio=loom_recompute_ratio,
             loom_disable_store_for_recompute=loom_disable_store_for_recompute,
+            loom_recompute_log_every_steps=loom_recompute_log_every_steps,
             cxl_numa_node=cxl_numa_node,
             eviction_policy=eviction_policy,
         )
+
 
 class LoomOffloadingSpec(OffloadingSpec):
     def __init__(self, config: VllmConfig, kv_cache_config: KVCacheConfig | None):
         super().__init__(config, kv_cache_config)
         extra = self.extra_config
-        if isinstance(extra, WeaveOffloadingConfig):
-            self.weave_config = extra
+        if isinstance(extra, LoomOffloadingConfig):
+            self.loom_config = extra
         elif isinstance(extra, Mapping):
             try:
-                self.weave_config = WeaveOffloadingConfig.from_dict(extra)
+                self.loom_config = LoomOffloadingConfig.from_dict(extra)
             except KeyError as e:
                 raise ValueError(
-                    "weave offloading config is missing required key: "
+                    "loom offloading config is missing required key: "
                     f"{e.args[0]!r}"
                 ) from e
         else:
             raise TypeError(
-                "weave offloading config must be a dict-like mapping or "
-                f"WeaveOffloadingConfig, got {type(extra).__name__}"
+                "loom offloading config must be a dict-like mapping or "
+                f"LoomOffloadingConfig, got {type(extra).__name__}"
             )
 
         # Scheduler-side
         self._manager: OffloadingManager | None = None
 
         # Worker-side
-        self._dram_handlers: WeaveGPUDramOffloadingHandlers | None = None
-        self._cxl_handlers: WeaveGPUDramOffloadingHandlers | None = None
-        self._dram_cxl_dram_to_cxl: WeaveDramCxlOffloadingHandler | None = None
-        self._dram_cxl_cxl_to_dram: WeaveDramCxlOffloadingHandler | None = None
+        self._cxl_handlers: LoomGPUCxlOffloadingHandlers | None = None
 
         # Optional tuning knobs
-        self.eviction_policy = self.weave_config.eviction_policy
+        self.eviction_policy = self.loom_config.eviction_policy
 
     def _get_kv_bytes_per_offloaded_block(self) -> int:
         if self.kv_cache_config is None:
-            raise ValueError("kv_cache_config must be provided for WeaveOffloadingSpec")
+            raise ValueError("kv_cache_config must be provided for LoomOffloadingSpec")
 
         page_sizes = {
             kv_cache_group.kv_cache_spec.page_size_bytes
@@ -195,14 +196,9 @@ class LoomOffloadingSpec(OffloadingSpec):
         if self._manager is None:
             kv_bytes_per_offloaded_block = self._get_kv_bytes_per_offloaded_block()
             if kv_bytes_per_offloaded_block <= 0:
-                num_dram_blocks = 0
                 num_cxl_blocks = 0
             else:
-                dram_bytes_to_use = self.weave_config.seed_pool_size_GB * (1024**3)
-                cxl_bytes_to_use = self.weave_config.cxl_kvcache_size_GB * (1024**3)
-                num_dram_blocks = (
-                    dram_bytes_to_use // kv_bytes_per_offloaded_block
-                )
+                cxl_bytes_to_use = self.loom_config.cxl_kvcache_size_GB * (1024**3)
                 num_cxl_blocks = (
                     cxl_bytes_to_use // kv_bytes_per_offloaded_block
                 )
@@ -212,28 +208,16 @@ class LoomOffloadingSpec(OffloadingSpec):
                 kv_events_config is not None and kv_events_config.enable_kv_cache_events
             )
 
-            dram_backend = WeaveDRAMBackend(
-                block_size=self.offloaded_block_size,
-                num_blocks=num_dram_blocks,
-            )
-            cxl_backend = WeaveCXLBackend(
+            cxl_backend = LoomCXLBackend(
                 block_size=self.offloaded_block_size,
                 num_blocks=num_cxl_blocks,
-                numa_node=self.weave_config.cxl_numa_node,
+                numa_node=self.loom_config.cxl_numa_node,
             )
 
-            self._manager = TwoTierOffloadingManager(
-                dram_backend=dram_backend,
+            self._manager = LoomManager(
                 cxl_backend=cxl_backend,
                 enable_events=enable_events,
             )
-            
-            if num_dram_blocks == 0:
-                logger.warning(
-                    "WeaveOffloadingSpec initialized with 0 DRAM offload blocks. "
-                    "Offloading will likely be disabled. "
-                    "Please increase seed_pool_size_GB."
-                )
 
         return self._manager
 
@@ -245,63 +229,29 @@ class LoomOffloadingSpec(OffloadingSpec):
         # Keep signature compatible with OffloadingSpec: Iterator[(src_type, dst_type, handler)]
         if not current_platform.is_cuda_alike():
             raise RuntimeError(
-                "WeaveOffloadingSpec (CPU-backed) is currently only supported on CUDA-alike GPUs"
+                "LoomOffloadingSpec (CPU-backed) is currently only supported on CUDA-alike GPUs"
             )
 
-        if self._dram_handlers is None or self._cxl_handlers is None:
+        if self._cxl_handlers is None:
             kv_bytes_per_offloaded_block = self._get_kv_bytes_per_offloaded_block()
             if kv_bytes_per_offloaded_block <= 0:
-                num_dram_blocks = 0
                 num_cxl_blocks = 0
             else:
-                dram_bytes_to_use = self.weave_config.seed_pool_size_GB * (1024**3)
-                cxl_bytes_to_use = self.weave_config.cxl_kvcache_size_GB * (1024**3)
-                num_dram_blocks = (
-                    dram_bytes_to_use // kv_bytes_per_offloaded_block
-                )
+                cxl_bytes_to_use = self.loom_config.cxl_kvcache_size_GB * (1024**3)
                 num_cxl_blocks = (
                     cxl_bytes_to_use // kv_bytes_per_offloaded_block
                 )
 
-            self._dram_handlers = WeaveGPUDramOffloadingHandlers(
+            self._cxl_handlers = LoomGPUCxlOffloadingHandlers(
                 attn_backends=attn_backends,
                 gpu_block_size=self.gpu_block_size,
-                cpu_block_size=self.offloaded_block_size,
-                num_cpu_blocks=num_dram_blocks,
+                cxl_block_size=self.offloaded_block_size,
+                num_cxl_blocks=num_cxl_blocks,
                 gpu_caches=kv_caches,
-                numa_node=1,
+                numa_node=self.loom_config.cxl_numa_node,
             )
 
-            self._cxl_handlers = WeaveGPUDramOffloadingHandlers(
-                attn_backends=attn_backends,
-                gpu_block_size=self.gpu_block_size,
-                cpu_block_size=self.offloaded_block_size,
-                num_cpu_blocks=num_cxl_blocks,
-                gpu_caches=kv_caches,
-                numa_node=self.weave_config.cxl_numa_node,
-            )
-
-            self._dram_cxl_dram_to_cxl = WeaveDramCxlOffloadingHandler(
-                src_tensors=self._dram_handlers.cpu_tensors,
-                dst_tensors=self._cxl_handlers.cpu_tensors,
-                kv_dim_before_num_blocks=self._dram_handlers.kv_dim_before_num_blocks,
-                src_block_size_factor=self._dram_handlers.cpu_block_size_factor,
-                dst_block_size_factor=self._cxl_handlers.cpu_block_size_factor,
-            )
-            self._dram_cxl_cxl_to_dram = WeaveDramCxlOffloadingHandler(
-                src_tensors=self._cxl_handlers.cpu_tensors,
-                dst_tensors=self._dram_handlers.cpu_tensors,
-                kv_dim_before_num_blocks=self._dram_handlers.kv_dim_before_num_blocks,
-                src_block_size_factor=self._cxl_handlers.cpu_block_size_factor,
-                dst_block_size_factor=self._dram_handlers.cpu_block_size_factor,
-            )
-
-        assert self._dram_handlers is not None
         assert self._cxl_handlers is not None
-        assert self._dram_cxl_dram_to_cxl is not None
-        assert self._dram_cxl_cxl_to_dram is not None
 
-        yield GPULoadStoreSpec, DRAMLoadStoreSpec, self._dram_handlers.gpu_to_cpu_handler
-        yield DRAMLoadStoreSpec, GPULoadStoreSpec, self._dram_handlers.cpu_to_gpu_handler
-        yield DRAMLoadStoreSpec, CXLLoadStoreSpec, self._dram_cxl_dram_to_cxl
-        yield CXLLoadStoreSpec, DRAMLoadStoreSpec, self._dram_cxl_cxl_to_dram
+        yield GPULoadStoreSpec, CXLLoadStoreSpec, self._cxl_handlers.gpu_to_cxl_handler
+        yield CXLLoadStoreSpec, GPULoadStoreSpec, self._cxl_handlers.cxl_to_gpu_handler

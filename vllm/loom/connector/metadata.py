@@ -25,7 +25,7 @@ class RegenSpec:
 
 
 @dataclass
-class WeaveConnectorMetadata(KVConnectorMetadata):
+class LoomConnectorMetadata(KVConnectorMetadata):
     reqs_to_load: dict[ReqId, TransferSpec]
     reqs_to_store: dict[ReqId, TransferSpec]
     reqs_to_regen: dict[ReqId, RegenSpec]

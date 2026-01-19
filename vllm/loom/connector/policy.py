@@ -14,12 +14,12 @@ from vllm.v1.kv_offload.worker.worker import TransferSpec
 from vllm.v1.request import Request
 
 from .metadata import ReqId, RequestPhase
-from ..weave_logger import get_weave_logger
+from ..logger import get_loom_logger
 
-logger = get_weave_logger(__name__)
+logger = get_loom_logger(__name__)
 
 
-class WeavePolicy:
+class LoomPolicy:
     """Pure policy for deciding per-step KV transfers.
 
     This layer is intentionally kept independent of the connector's mechanics

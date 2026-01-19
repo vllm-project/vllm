@@ -22,9 +22,9 @@ from vllm.v1.kv_offload.factory import OffloadingSpecFactory
 from vllm.v1.outputs import KVConnectorOutput
 from vllm.v1.request import Request
 
-from .metadata import WeaveConnectorMetadata
-from .scheduler import WeaveConnectorScheduler
-from .worker import WeaveConnectorWorker
+from .metadata import LoomConnectorMetadata
+from .scheduler import LoomConnectorScheduler
+from .worker import LoomConnectorWorker
 
 
 
@@ -43,12 +43,12 @@ class LoomConnector(KVConnectorBase_V1):
 
         spec = OffloadingSpecFactory.create_spec(vllm_config, kv_cache_config)
 
-        self.connector_scheduler: WeaveConnectorScheduler | None = None
-        self.connector_worker: WeaveConnectorWorker | None = None
+        self.connector_scheduler: LoomConnectorScheduler | None = None
+        self.connector_worker: LoomConnectorWorker | None = None
         if role == KVConnectorRole.SCHEDULER:
-            self.connector_scheduler = WeaveConnectorScheduler(spec)
+            self.connector_scheduler = LoomConnectorScheduler(spec)
         elif role == KVConnectorRole.WORKER:
-            self.connector_worker = WeaveConnectorWorker(spec)
+            self.connector_worker = LoomConnectorWorker(spec)
 
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
         assert self.connector_worker is not None
@@ -66,7 +66,7 @@ class LoomConnector(KVConnectorBase_V1):
 
     def start_load_kv(self, forward_context: "ForwardContext", **kwargs) -> None:
         assert self.connector_worker is not None
-        assert isinstance(self._connector_metadata, WeaveConnectorMetadata)
+        assert isinstance(self._connector_metadata, LoomConnectorMetadata)
         self.connector_worker.start_kv_transfers(self._connector_metadata, forward_context)
 
     def wait_for_layer_load(self, layer_name: str) -> None:
@@ -83,7 +83,7 @@ class LoomConnector(KVConnectorBase_V1):
 
     def wait_for_save(self):
         assert self.connector_worker is not None
-        assert isinstance(self._connector_metadata, WeaveConnectorMetadata)
+        assert isinstance(self._connector_metadata, LoomConnectorMetadata)
         self.connector_worker.prepare_store_kv(self._connector_metadata)
 
     def get_finished(self, finished_req_ids: set[str]) -> tuple[set[str], set[str]]:

@@ -18,14 +18,14 @@ from vllm.v1.kv_offload.worker.worker import TransferSpec
 from vllm.v1.outputs import KVConnectorOutput
 from vllm.v1.request import Request
 
-from .metadata import ReqId, RequestPhase, WeaveConnectorMetadata
-from .policy import WeavePolicy
-from ..weave_logger import get_weave_logger
+from .metadata import ReqId, RequestPhase, LoomConnectorMetadata
+from .policy import LoomPolicy
+from ..logger import get_loom_logger
 
-logger = get_weave_logger(__name__)
+logger = get_loom_logger(__name__)
 
 
-class WeaveConnectorScheduler:
+class LoomConnectorScheduler:
     """Implementation of Scheduler side methods"""
 
     def __init__(self, spec: OffloadingSpec):
@@ -34,7 +34,7 @@ class WeaveConnectorScheduler:
         self.block_size_factor = self.offloaded_block_size // self.gpu_block_size
         self.manager: OffloadingManager = spec.get_manager()
 
-        self.policy = WeavePolicy(
+        self.policy = LoomPolicy(
             offloaded_block_size=self.offloaded_block_size,
             block_size_factor=self.block_size_factor,
             manager=self.manager,
@@ -58,15 +58,15 @@ class WeaveConnectorScheduler:
         # MVP-0: request-level recompute (token_ids-only seed).
         # If a request is marked for recompute, we will return 0 external
         # tokens so vLLM falls back to local compute.
-        weave_cfg = getattr(spec, "weave_config", None)
-        if weave_cfg is None:
+        loom_cfg = getattr(spec, "loom_config", None)
+        if loom_cfg is None:
             raise ValueError(
-                "LoomConnectorScheduler requires LoomOffloadingSpec (missing spec.weave_config)"
+                "LoomConnectorScheduler requires LoomOffloadingSpec (missing spec.loom_config)"
             )
 
-        recompute_ratio_raw: object = getattr(weave_cfg, "loom_recompute_ratio", 0.0)
-        disable_store_raw: object = getattr(weave_cfg, "loom_disable_store_for_recompute", False)
-        log_every_raw: object = 50
+        recompute_ratio_raw: object = getattr(loom_cfg, "loom_recompute_ratio", 0.0)
+        disable_store_raw: object = getattr(loom_cfg, "loom_disable_store_for_recompute", False)
+        log_every_raw: object = getattr(loom_cfg, "loom_recompute_log_every_steps", 50)
 
         self._loom_recompute_auto: bool = False
         if isinstance(recompute_ratio_raw, str):
@@ -252,7 +252,7 @@ class WeaveConnectorScheduler:
 
     def build_connector_meta(
         self, scheduler_output: SchedulerOutput
-    ) -> WeaveConnectorMetadata:
+    ) -> LoomConnectorMetadata:
         self._refresh_request_phases()
 
         # MVP-0 observability: verify forced recompute ratio is taking effect.
@@ -281,7 +281,7 @@ class WeaveConnectorScheduler:
                 num_prefill += 1
         if scheduler_output.num_scheduled_tokens:
             logger.debug(
-                "Weave request phase stats: prefill=%d decode=%d total=%d",
+                "Loom request phase stats: prefill=%d decode=%d total=%d",
                 num_prefill,
                 num_decode,
                 num_prefill + num_decode,
@@ -303,7 +303,7 @@ class WeaveConnectorScheduler:
                 if not self._should_force_recompute(req_id)
             }
 
-        meta = WeaveConnectorMetadata(
+        meta = LoomConnectorMetadata(
             reqs_to_load=self._reqs_to_load,
             reqs_to_store=reqs_to_store,
             reqs_to_regen={},

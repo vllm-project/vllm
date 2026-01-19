@@ -24,23 +24,16 @@ def _parse_level(value: Optional[str]) -> int:
     return _LEVEL_NAMES.get(v, logging.WARNING)
 
 
-def get_weave_logger(name: str) -> logging.Logger:
-    """Create/get a dedicated Weave logger.
-
-    - Controlled by env var WEAVE_LOG_LEVEL (default: WARNING)
-    - Does not propagate to the root logger to avoid mixing with vLLM logging
-    - Uses its own StreamHandler (stderr) and formatter
-    """
-
-    logger_name = f"weave.{name}" if not name.startswith("weave.") else name
+def get_loom_logger(name: str) -> logging.Logger:
+    logger_name = f"loom.{name}" if not name.startswith("loom.") else name
     logger = logging.getLogger(logger_name)
 
-    if getattr(logger, "_weave_configured", False):
+    if getattr(logger, "_loom_configured", False):
         return logger
 
     logger.propagate = False
 
-    level = _parse_level(os.getenv("WEAVE_LOG_LEVEL"))
+    level = _parse_level(os.getenv("LOOM_LOG_LEVEL"))
     logger.setLevel(level)
 
     handler = logging.StreamHandler(stream=sys.stderr)
@@ -53,5 +46,5 @@ def get_weave_logger(name: str) -> logging.Logger:
     )
 
     logger.handlers = [handler]
-    logger._weave_configured = True  # type: ignore[attr-defined]
+    logger._loom_configured = True  # type: ignore[attr-defined]
     return logger

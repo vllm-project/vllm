@@ -10,7 +10,7 @@ from vllm.v1.kv_offload.backend import Backend, BlockStatus
 from vllm.v1.kv_offload.mediums import CXLLoadStoreSpec
 
 
-class WeaveCXLBlockStatus(BlockStatus):
+class LoomCXLBlockStatus(BlockStatus):
     _fields_ = BlockStatus._fields_ + [("block_id", ctypes.c_int64)]  # type: ignore
 
     def __init__(self, block_id: int):
@@ -18,7 +18,7 @@ class WeaveCXLBlockStatus(BlockStatus):
         self.block_id = block_id
 
 
-class WeaveCXLBackend(Backend):
+class LoomCXLBackend(Backend):
     def __init__(
         self,
         block_size: int,
@@ -47,12 +47,12 @@ class WeaveCXLBackend(Backend):
         blocks: list[BlockStatus] = []
         for _ in range(len(block_hashes)):
             block_id = self.allocated_blocks_free_list.pop()
-            blocks.append(WeaveCXLBlockStatus(block_id))
+            blocks.append(LoomCXLBlockStatus(block_id))
 
         return blocks
 
     def free(self, block: BlockStatus):
-        assert isinstance(block, WeaveCXLBlockStatus)
+        assert isinstance(block, LoomCXLBlockStatus)
         self.allocated_blocks_free_list.append(block.block_id)
 
     def get_load_store_spec(
