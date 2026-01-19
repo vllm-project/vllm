@@ -1,9 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import flashinfer
 import torch
 
+import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.model_executor.layers.fused_moe.config import (
+    FusedMoEConfig,
+    FusedMoEQuantConfig,
     RoutingMethodType,
 )
 from vllm.model_executor.layers.fused_moe.utils import moe_kernel_quantize_input
@@ -192,3 +196,148 @@ direct_register_custom_op(
     fake_impl=fi_trtllm_fp8_per_tensor_moe_fake,
     tags=(torch.Tag.needs_fixed_stride_order,),
 )
+
+
+class FlashInferTrtLlmFp8Experts(mk.FusedMoEPermuteExpertsUnpermute):
+    def __init__(
+        self,
+        moe_config: FusedMoEConfig,
+        quant_config: FusedMoEQuantConfig,
+    ):
+        super().__init__(quant_config)
+
+        self.moe_config = moe_config
+        # TODO: set this via the constructor
+        self.routing_method_type = flashinfer.RoutingMethodType.Renormalize
+        # self.routing_method_type = flashinfer.RoutingMethodType.Llama4
+        # self.routing_method_type = flashinfer.RoutingMethodType.DeepSeekV3
+
+        self.routing_bias = None
+        # TODO: to: in_dtype.shape
+        self.e_score_correction_bias = None
+        self.topk_group = None
+        self.num_expert_group = None
+        self.routing_scaling_factor = None
+
+        self.topk = moe_config.experts_per_token
+        self.intermediate_size_per_partition = (
+            moe_config.intermediate_size_per_partition
+        )
+        self.hidden_dim = moe_config.hidden_dim
+        self.local_num_experts = moe_config.num_local_experts
+        self.ep_rank = moe_config.moe_parallel_config.ep_rank
+
+    @property
+    def activation_formats(
+        self,
+    ) -> tuple[mk.FusedMoEActivationFormat, mk.FusedMoEActivationFormat]:
+        return (
+            mk.FusedMoEActivationFormat.Standard,
+            mk.FusedMoEActivationFormat.Standard,
+        )
+
+    def supports_chunking(self) -> bool:
+        return False
+
+    def supports_expert_map(self) -> bool:
+        return False
+
+    def finalize_weight_and_reduce_impl(self) -> mk.TopKWeightAndReduce:
+        raise NotImplementedError(
+            f"{self.__class__.__name__} only supports the apply_monolithic interface."
+        )
+
+    def workspace_shapes(
+        self,
+        M: int,
+        N: int,
+        K: int,
+        topk: int,
+        global_num_experts: int,
+        local_num_experts: int,
+        expert_tokens_meta: mk.ExpertTokensMetadata | None,
+        activation: str,
+    ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...]]:
+        raise NotImplementedError(
+            f"{self.__class__.__name__} only supports the apply_monolithic interface."
+        )
+
+    def apply(
+        self,
+        output: torch.Tensor,
+        hidden_states: torch.Tensor,
+        w1: torch.Tensor,
+        w2: torch.Tensor,
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
+        activation: str,
+        global_num_experts: int,
+        expert_map: torch.Tensor | None,
+        a1q_scale: torch.Tensor | None,
+        a2_scale: torch.Tensor | None,
+        workspace13: torch.Tensor,
+        workspace2: torch.Tensor,
+        expert_tokens_meta: mk.ExpertTokensMetadata | None,
+        apply_router_weight_on_input: bool,
+    ):
+        raise NotImplementedError(
+            f"{self.__class__.__name__} only supports the apply_monolithic interface."
+        )
+
+    def apply_monolithic(
+        self,
+        hidden_states: torch.Tensor,
+        w1: torch.Tensor,
+        w2: torch.Tensor,
+        router_logits: torch.Tensor,
+        activation: str,
+        global_num_experts: int,
+        expert_map: torch.Tensor | None,
+        apply_router_weight_on_input: bool,
+    ) -> torch.Tensor:
+        assert activation == "silu"
+        assert (
+            self.e_score_correction_bias is None
+            or self.e_score_correction_bias.dtype == hidden_states.dtype
+        )
+
+        if self.routing_method_type == RoutingMethodType.DeepSeekV3:
+            router_logits = router_logits.to(torch.float32)
+
+        topk_group = self.topk_group if self.topk_group is not None else 0
+
+        assert self.topk <= global_num_experts
+        assert self.topk <= 10
+        assert global_num_experts % 4 == 0
+        assert self.quant_config.block_shape == [128, 128]
+        # Routing kernel expects #experts <= #threads 512
+        assert global_num_experts <= 512
+
+        a1_q, a1q_scale = per_token_group_quant_fp8(
+            hidden_states, self.quant_config.block_shape[1]
+        )
+        # Kernel requires transposed hidden state scales
+        # TODO: can we avoid this transpose in the kernel?
+        a1q_scale_t = a1q_scale.t().contiguous()
+
+        return flashinfer.fused_moe.trtllm_fp8_block_scale_moe(
+            routing_logits=router_logits,
+            routing_bias=self.e_score_correction_bias,
+            hidden_states=a1_q,
+            hidden_states_scale=a1q_scale_t,
+            gemm1_weights=w1,
+            gemm1_weights_scale=self.quant_config.w1_scale,
+            gemm2_weights=w2,
+            gemm2_weights_scale=self.quant_config.w2_scale,
+            num_experts=global_num_experts,
+            top_k=self.topk,
+            n_group=self.num_expert_group,
+            topk_group=topk_group,
+            intermediate_size=self.intermediate_size_per_partition,
+            local_expert_offset=self.ep_rank * self.local_num_experts,
+            local_num_experts=self.local_num_experts,
+            routed_scaling_factor=self.routing_scaling_factor,
+            tile_tokens_dim=None,
+            routing_method_type=self.routing_method_type,
+            use_shuffled_weight=False,
+        )

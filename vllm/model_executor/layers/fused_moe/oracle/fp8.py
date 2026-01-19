@@ -210,7 +210,7 @@ def make_fp8_moe_quant_config(
     a1_scale: torch.Tensor | None,
     a2_scale: torch.Tensor | None,
     block_shape: list[int] | None = None,
-) -> FusedMoEQuantConfig | None:
+) -> FusedMoEQuantConfig:
     """
     Create FusedMoEQuantConfig for the specifed FP8 Backend.
     The FusedMoEQuantConfig holds the scales that are used
@@ -223,9 +223,6 @@ def make_fp8_moe_quant_config(
     In a future PR, we will have this function should be
     a method of the modular kernel itself.
     """
-    # TRTLLM does not use Modular Kernel abstraction yet.
-    if fp8_backend == Fp8MoeBackend.FLASHINFER_TRTLLM:
-        return None
 
     # MARLIN is mixed precision W8A16 config.
     if fp8_backend == Fp8MoeBackend.MARLIN:
@@ -284,7 +281,20 @@ def make_fp8_moe_kernel(
     # via the same code path (i.e. via maybe_init_modular_kernel).
     # NOTE(rob): in progress migrating all into this format.
     use_inplace = True
-    if fp8_backend == Fp8MoeBackend.FLASHINFER_CUTLASS:
+    if fp8_backend == Fp8MoeBackend.FLASHINFER_TRTLLM:
+        from vllm.model_executor.layers.fused_moe.flashinfer_trtllm_fp8_moe import (
+            FlashInferTrtLlmFp8Experts,
+        )
+
+        kernel = mk.FusedMoEModularKernel(
+            MoEPrepareAndFinalizeNoEP(),
+            FlashInferTrtLlmFp8Experts(
+                moe_config=moe_config,
+                quant_config=moe_quant_config,
+            ),
+        )
+
+    elif fp8_backend == Fp8MoeBackend.FLASHINFER_CUTLASS:
         from vllm.model_executor.layers.fused_moe.flashinfer_cutlass_moe import (
             FlashInferExperts,
         )
