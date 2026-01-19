@@ -1451,7 +1451,7 @@ steps:
     - bash weight_loading/run_model_weight_loading_test.sh -c weight_loading/models-large-amd.txt
 
 - label: NixlConnector PD accuracy tests (Distributed) # 30min
-  mirror_hardwares: [amdexperimental]
+  mirror_hardwares: [amdexperimental, amdproduction]
   agent_pool: mi325_4
   # grade: Blocking
   timeout_in_minutes: 30
@@ -1465,7 +1465,7 @@ steps:
     - VLLM_ATTENTION_BACKEND=ROCM_ATTN bash v1/kv_connector/nixl_integration/config_sweep_accuracy_test.sh
 
 - label: DP EP NixlConnector PD accuracy tests (Distributed) # 15min
-  mirror_hardwares: [amdexperimental]
+  mirror_hardwares: [amdexperimental, amdproduction]
   agent_pool: mi325_4
   # grade: Blocking
   timeout_in_minutes: 15
