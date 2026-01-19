@@ -520,6 +520,12 @@ class GPUModelRunner(
             self.async_output_copy_stream = torch.cuda.Stream()
             self.prepare_inputs_event = torch.Event()
 
+        # PP + async scheduling: token-id channel state for non-last PP ranks.
+        # _pp_prev_sampled_token_ids_cpu: [num_reqs, 1 or max_gen_len]
+        self._pp_prev_sampled_token_ids_cpu: torch.Tensor | None = None
+        self._pp_prev_sampled_token_ids_ready_event: torch.Event | None = None
+        self._pp_prev_sampled_req_ids: list[str] | None = None
+
         # self.cudagraph_batch_sizes sorts in ascending order.
         if (
             self.compilation_config.cudagraph_capture_sizes
@@ -983,7 +989,38 @@ class GPUModelRunner(
                 # When using PP, the scheduler sends the sampled tokens back,
                 # because there's no direct communication between the first-
                 # stage worker and the last-stage worker.
-                new_token_ids = req_data.new_token_ids[i]
+                if (
+                    self.use_async_scheduling
+                    and get_pp_group().world_size > 1
+                    and self._pp_prev_sampled_token_ids_cpu is not None
+                ):
+                    # use token ids broadcast from the last PP stage
+                    if (
+                        event := self._pp_prev_sampled_token_ids_ready_event
+                    ) is not None:
+                        event.synchronize()
+                    if not self._pp_prev_sampled_req_ids:
+                        new_token_ids: list[int] = []
+                    else:
+                        prev_map = {
+                            rid: idx
+                            for idx, rid in enumerate(self._pp_prev_sampled_req_ids)
+                        }
+                        prev_idx = prev_map.get(req_id)
+                        if prev_idx is None:
+                            new_token_ids = []
+                        else:
+                            row_tensor = self._pp_prev_sampled_token_ids_cpu[prev_idx]
+                            # `row_tensor` is 1D ([max_gen_len]) where -1 means padding
+                            neg1_idx = (row_tensor == -1).nonzero(as_tuple=True)[0]
+                            end = (
+                                int(neg1_idx[0].item())
+                                if neg1_idx.numel()
+                                else int(row_tensor.numel())
+                            )
+                            new_token_ids = row_tensor[:end].tolist()
+                else:
+                    new_token_ids = req_data.new_token_ids[i]
                 # Add the sampled token(s) from the previous step (if any).
                 # This doesn't include "unverified" tokens like spec tokens.
                 num_new_tokens = (
@@ -3380,7 +3417,9 @@ class GPUModelRunner(
         self.kv_connector_output = None
 
         if self.execute_model_state is None:
-            # Nothing to do (PP non-final rank case), output isn't used.
+            # receive sampled token ids from the last PP rank.
+            if self.use_async_scheduling and get_pp_group().world_size > 1:
+                self._pp_receive_and_cache_sampled_token_ids()
             if not kv_connector_output:
                 return None  # type: ignore[return-value]
 
@@ -3416,6 +3455,10 @@ class GPUModelRunner(
 
         with record_function_or_nullcontext("gpu_model_runner: sample"):
             sampler_output = self._sample(logits, spec_decode_metadata)
+
+        # broadcast sampled token ids from last PP stage
+        if self.use_async_scheduling and get_pp_group().world_size > 1:
+            self._pp_broadcast_sampled_token_ids(sampler_output.sampled_token_ids)
 
         self._draft_token_ids = None
         self._draft_token_req_ids = None
@@ -3546,6 +3589,58 @@ class GPUModelRunner(
             )
 
         return async_output
+
+    def _pp_receive_and_cache_sampled_token_ids(self) -> None:
+        """Receive sampled token ids broadcast from last PP stage and cache them.
+
+        Note: this must be called by non-last PP ranks for every sample_tokens() RPC
+        in PP + async scheduling mode
+        """
+        pp = get_pp_group()
+        src = pp.world_size - 1
+        broadcasted = pp.broadcast_tensor_dict(None, src=src)
+        assert broadcasted is not None
+        sampled_token_ids = broadcasted["pp_sampled_token_ids"]
+        req_ids = broadcasted["pp_req_ids"]
+        self._pp_prev_sampled_req_ids = req_ids
+        self._pp_cache_sampled_token_ids(sampled_token_ids)
+
+    def _pp_broadcast_sampled_token_ids(self, sampled_token_ids: torch.Tensor) -> None:
+        """Broadcast sampled token ids from last PP stage and cache locally."""
+        pp = get_pp_group()
+        assert pp.is_last_rank
+        src = pp.world_size - 1
+        # include req_id ordering so earlier stages can map req_id -> row.
+        self._pp_prev_sampled_req_ids = self.input_batch.req_ids.copy()
+        pp.broadcast_tensor_dict(
+            {
+                "pp_sampled_token_ids": sampled_token_ids,
+                "pp_req_ids": self._pp_prev_sampled_req_ids,
+            },
+            src=src,
+        )
+
+    def _pp_cache_sampled_token_ids(self, sampled_token_ids: torch.Tensor) -> None:
+        """Initiate an async CPU copy of sampled token ids for later consumption."""
+        # last rank already has the tokens
+        if get_pp_group().is_last_rank:
+            return
+
+        assert self.async_output_copy_stream is not None
+
+        # kick off an async copy to CPU
+        default_stream = torch.cuda.current_stream()
+        event = torch.Event()
+        with torch.cuda.stream(self.async_output_copy_stream):
+            # wait for the default stream to complete
+            self.async_output_copy_stream.wait_stream(default_stream)
+            # ensurethis tensor is still in use by the copy stream
+            sampled_token_ids.record_stream(self.async_output_copy_stream)
+            self._pp_prev_sampled_token_ids_cpu = sampled_token_ids.to(
+                "cpu", non_blocking=True
+            )
+            event.record()
+        self._pp_prev_sampled_token_ids_ready_event = event
 
     def take_draft_token_ids(self) -> DraftTokenIds | None:
         if not self.num_spec_tokens or not self._draft_token_req_ids:
