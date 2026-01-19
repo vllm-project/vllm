@@ -30,7 +30,6 @@ colbert_score_reference = [0.7797, 0.4620]
 @pytest.fixture(scope="module")
 def server():
     args = [
-        "--enforce-eager",
         "--max-model-len",
         str(MAX_MODEL_LEN),
         "--hf-overrides",
