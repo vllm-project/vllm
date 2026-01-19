@@ -8,6 +8,7 @@ from pydantic.dataclasses import dataclass
 
 from vllm.config.utils import config
 from vllm.logger import init_logger
+from vllm.v1.attention.backends.mla.prefill.registry import MLAPrefillBackendEnum
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 logger = init_logger(__name__)
@@ -48,6 +49,12 @@ class AttentionConfig:
     disable_flashinfer_q_quantization: bool = False
     """If set, when using fp8 kv, do not quantize Q to fp8."""
 
+    mla_prefill_backend: MLAPrefillBackendEnum | None = None
+    """MLA prefill backend to use. If None, will be selected automatically.
+    Valid options: FLASH_ATTN, FLASHINFER, CUDNN, TRTLLM_RAGGED.
+    This option supersedes use_cudnn_prefill, use_trtllm_ragged_deepseek_prefill,
+    and disable_flashinfer_prefill which are deprecated."""
+
     def compute_hash(self) -> str:
         """
         Provide a hash that uniquely identifies all the configs
@@ -68,6 +75,14 @@ class AttentionConfig:
         """Enable parsing of the `backend` enum type from string."""
         if isinstance(value, str):
             return AttentionBackendEnum[value.upper()]
+        return value
+
+    @field_validator("mla_prefill_backend", mode="before")
+    @classmethod
+    def validate_mla_prefill_backend_before(cls, value: Any) -> Any:
+        """Enable parsing of the `mla_prefill_backend` enum type from string."""
+        if isinstance(value, str):
+            return MLAPrefillBackendEnum[value.upper()]
         return value
 
     def _set_from_env_if_set(self, field_name: str, env_var_name: str) -> None:
@@ -112,3 +127,52 @@ class AttentionConfig:
             "disable_flashinfer_q_quantization",
             "VLLM_FLASHINFER_DISABLE_Q_QUANTIZATION",
         )
+
+        # Migrate deprecated MLA prefill flags to mla_prefill_backend
+        self._migrate_deprecated_mla_prefill_flags()
+
+    def _migrate_deprecated_mla_prefill_flags(self) -> None:
+        """Migrate deprecated MLA prefill flags to mla_prefill_backend."""
+        # If the new option is already set, it takes precedence
+        if self.mla_prefill_backend is not None:
+            return
+
+        # Check for deprecated flags and migrate them
+        deprecated_flag_used = False
+
+        if self.use_cudnn_prefill:
+            deprecated_flag_used = True
+            self.mla_prefill_backend = MLAPrefillBackendEnum.CUDNN
+            logger.warning_once(
+                "use_cudnn_prefill is deprecated and will be removed in "
+                "v0.16. Use --attention-config.mla_prefill_backend="
+                "CUDNN instead."
+            )
+
+        if self.use_trtllm_ragged_deepseek_prefill:
+            if deprecated_flag_used:
+                logger.warning_once(
+                    "Multiple deprecated MLA prefill flags are set. "
+                    "use_trtllm_ragged_deepseek_prefill will be ignored in "
+                    "favor of use_cudnn_prefill. Use "
+                    "--attention-config.mla_prefill_backend instead."
+                )
+            else:
+                deprecated_flag_used = True
+                self.mla_prefill_backend = MLAPrefillBackendEnum.TRTLLM_RAGGED
+                logger.warning_once(
+                    "use_trtllm_ragged_deepseek_prefill is deprecated and "
+                    "will be removed in v0.16. Use "
+                    "--attention-config.mla_prefill_backend=TRTLLM_RAGGED "
+                    "instead."
+                )
+
+        if self.disable_flashinfer_prefill and not deprecated_flag_used:
+            # disable_flashinfer_prefill means "use FLASH_ATTN instead"
+            # This is only relevant if no other backend was explicitly selected
+            self.mla_prefill_backend = MLAPrefillBackendEnum.FLASH_ATTN
+            logger.warning_once(
+                "disable_flashinfer_prefill is deprecated and will be removed "
+                "in v0.16. Use --attention-config.mla_prefill_backend="
+                "FLASH_ATTN instead."
+            )
