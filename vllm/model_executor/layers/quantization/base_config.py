@@ -175,22 +175,15 @@ class QuantizationConfig(ABC):
         """
         # Get the quantization method name
         try:
-            name = self.get_name()
+            name: str = str(self.get_name())
         except Exception:
             name = self.__class__.__name__
 
-        # Collect relevant attributes
         attrs = []
         for key, value in sorted(self.__dict__.items()):
-            # Format the value appropriately
-            if (
-                value is None
-                or isinstance(value, (list, tuple, dict))
-                and len(value) == 0
-            ):
+            if value is None:
                 continue
-            else:
-                attrs.append(f"{key}={value!r}")
+            attrs.append(f"{key}={value!r}")
 
         if attrs:
             return f"{self.__class__.__name__}(name={name!r}, {', '.join(attrs)})"
