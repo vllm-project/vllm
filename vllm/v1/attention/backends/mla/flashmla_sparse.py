@@ -397,8 +397,8 @@ class FlashMLASparseMetadataBuilder(AttentionMetadataBuilder[FlashMLASparseMetad
         self.num_heads = self.model_config.get_num_attention_heads(parallel_config)
         self.mla_dims = get_mla_dims(self.model_config)
         # FP8 decode kernel only supports h_q = 64 or 128, so we need to pad
-        self.fp8_decode_padded_heads = FlashMLASparseImpl._compute_fp8_decode_padding(
-            self.num_heads
+        self.fp8_decode_padded_heads = (
+            FlashMLASparseImpl._compute_fp8_decode_padded_heads(self.num_heads)
         )
 
         self.topk_tokens = vllm_config.model_config.hf_config.index_topk
@@ -704,20 +704,10 @@ class FlashMLASparseMetadataBuilder(AttentionMetadataBuilder[FlashMLASparseMetad
 
 class FlashMLASparseImpl(MLACommonBaseImpl[FlashMLASparseMetadata]):
     @staticmethod
-    def _compute_fp8_decode_padding(num_heads: int) -> int:
-        """Compute padded head count for FP8 sparse decode kernel.
-
-        The FlashMLA sparse FP8 decode kernel only supports h_q = 64 or 128.
-        For smaller head counts, we need to pad to the nearest supported value.
-        """
-        if num_heads <= 64:
-            return 64
-        elif num_heads <= 128:
-            return 128
-        else:
-            # For h_q > 128, no padding needed - use actual heads
-            # (kernel will dispatch to appropriate implementation)
-            return num_heads
+    def _compute_fp8_decode_padded_heads(num_heads: int) -> int:
+        # FP8 decode kernel only supports h_q = 64 or 128
+        # Compute padded head count for decode
+        return 64 if num_heads <= 64 else 128
 
     def __init__(
         self,
@@ -756,9 +746,7 @@ class FlashMLASparseImpl(MLACommonBaseImpl[FlashMLASparseMetadata]):
         self.prefill_padding = (
             128 if current_platform.is_device_capability_family(100) else 64
         )
-        # FP8 decode kernel only supports h_q = 64 or 128
-        # Compute padded head count for decode
-        self.fp8_decode_padding = self._compute_fp8_decode_padding(num_heads)
+        self.fp8_decode_padded_heads = self._compute_fp8_decode_padded_heads(num_heads)
 
         if kv_cache_dtype == "fp8_ds_mla":
             # Reserve workspace during initialization
@@ -942,7 +930,7 @@ class FlashMLASparseImpl(MLACommonBaseImpl[FlashMLASparseMetadata]):
     ) -> tuple[torch.Tensor, torch.Tensor]:
         # q shape: (batch, seq_len, num_heads, head_dim)
         actual_num_heads = q.size(2)
-        padded_num_heads = self.fp8_decode_padding
+        padded_num_heads = self.fp8_decode_padded_heads
 
         # Pad query if needed (kernel only supports h_q = 64 or 128)
         if actual_num_heads < padded_num_heads:
