@@ -114,12 +114,11 @@ class KaldifeatFbank:
         self.opts.frame_opts.dither = dither
         fbank = knf.OnlineFbank(self.opts)
 
-        fbank.accept_waveform(sample_rate, wav_np.tolist())
+        fbank.accept_waveform(sample_rate, wav_np)
         feat = []
         for i in range(fbank.num_frames_ready):
             feat.append(fbank.get_frame(i))
         if len(feat) == 0:
-            print("Check data, len(feat) == 0", wav, flush=True)
             return np.zeros((0, self.opts.mel_opts.num_bins))
         feat = np.vstack(feat)
         return feat

@@ -75,6 +75,8 @@ class FireRedAudioConfig(PretrainedConfig):
         **kwargs,
     ):
         super().__init__(**kwargs)
+        self.encoder_downsample_rate = encoder_downsample_rate
+        self.default_speech_token = default_speech_token
 
         if isinstance(audio_config, dict):
             audio_config = FireRedAudioEncoderConfig(**audio_config)
