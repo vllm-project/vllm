@@ -301,10 +301,13 @@ class FlashInferTrtLlmNvFp4Experts(mk.FusedMoEPermuteExpertsUnpermute):
 
         
         
-        print(f"{w1[-1,-1]=}")
-        print(f"{self.quant_config.w1_scale[-1,-1]=}")
-        print(f"{w2[-1,-1]=}")
-        print(f"{self.quant_config.w2_scale[-1,-1]=}")
+        # print(f"{w1[-1,-1]=}")
+        # print(f"{self.quant_config.w1_scale[-1,-1]=}")
+        # print(f"{w2[-1,-1]=}")
+        # print(f"{self.quant_config.w2_scale[-1,-1]=}")
+        # print(f"{hidden_states[-1,-1]=}")
+        # print(f"{packed_tensor[-1,-1]=}")
+        # print(f"{a1q_scale[-1,-1]=}")
 
 
         # Invoke kernel.

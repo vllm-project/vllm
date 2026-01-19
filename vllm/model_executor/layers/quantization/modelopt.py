@@ -1611,7 +1611,7 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
         )
 
         assert self.kernel is not None
-        return self.kernel(
+        out = self.kernel(
             x,
             layer.w13_weight,
             layer.w2_weight,
@@ -1623,6 +1623,9 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
             expert_map=layer.expert_map,
             apply_router_weight_on_input=layer.apply_router_weight_on_input,
         )
+
+        print(f"{out[-1,-1]=}")
+        return out
 
 
 ModelOptNvFp4Config.LinearMethodCls = ModelOptNvFp4LinearMethod
