@@ -10,6 +10,7 @@ from pydantic import (
 from vllm import PoolingParams
 from vllm.config.pooler import get_use_activation
 from vllm.entrypoints.openai.engine.protocol import OpenAIBaseModel, UsageInfo
+from vllm.entrypoints.pooling.base.protocol import PoolingBasicRequestMixin
 from vllm.entrypoints.pooling.embed.protocol import (
     EmbeddingChatRequest,
     EmbeddingCompletionRequest,
@@ -72,17 +73,8 @@ class PoolingChatRequest(EmbeddingChatRequest):
 T = TypeVar("T")
 
 
-class IOProcessorRequest(OpenAIBaseModel, Generic[T]):
-    model: str | None = None
-
-    priority: int = Field(default=0)
-    """
-    The priority of the request (lower means earlier handling;
-    default: 0). Any priority other than 0 will raise an error
-    if the served model does not use priority scheduling.
-    """
+class IOProcessorRequest(PoolingBasicRequestMixin, Generic[T]):
     data: T
-
     task: PoolingTask = "plugin"
     encoding_format: EncodingFormat = "float"
     embed_dtype: EmbedDType = Field(
