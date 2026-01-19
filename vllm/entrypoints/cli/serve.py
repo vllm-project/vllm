@@ -69,8 +69,7 @@ class ServeSubcommand(CLISubcommand):
             args.data_parallel_external_lb or args.data_parallel_rank is not None
         )
         is_hybrid_lb = (
-            args.data_parallel_hybrid_lb
-            or args.data_parallel_start_rank is not None
+            args.data_parallel_hybrid_lb or args.data_parallel_start_rank is not None
         )
 
         if is_external_lb and is_hybrid_lb:
