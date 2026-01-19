@@ -48,25 +48,27 @@ def _topk_topp_kernel(
     """
     row_idx = tl.program_id(0)
 
-    if TOPK_ENABLED:  # noqa: SIM108
+    if TOPK_ENABLED:
         k = tl.load(k_ptr + row_idx)
+        apply_topk = k < vocab_size
     else:
-        k = vocab_size  # Default: keep all (no top-k filtering)
+        # Default: keep all (no top-k filtering)
+        k = vocab_size
+        apply_topk = False
 
-    if TOPP_ENABLED:  # noqa: SIM108
+    if TOPP_ENABLED:
         p = tl.load(p_ptr + row_idx)
+        apply_topp = p < 1.0
     else:
-        p = 1.0  # Default: keep all (no top-p filtering)
-
-    row_ptr = logits_ptr + row_idx * logits_stride
-
-    # Determine which operations to apply
-    apply_topk = k < vocab_size
-    apply_topp = p < 1.0
+        # Default: keep all (no top-p filtering)
+        p = 1.0
+        apply_topp = False
 
     # Early exit if nothing to do
     if (not apply_topk) and (not apply_topp):
         return
+
+    row_ptr = logits_ptr + row_idx * logits_stride
 
     # =========================================================================
     # Phase 1: Find top-k threshold using binary search on logits
@@ -326,7 +328,7 @@ def apply_top_k_top_p_triton(
         logits: [n, vocab_size] float32 tensor, modified in-place
         k: [n] int32 tensor of top-k values per row, or None to disable top-k
         p: [n] float32 tensor of top-p values per row (0 to 1),
-           or None to disable top-p
+            or None to disable top-p
         mask_value: Value for masked positions (default: -inf)
 
     Returns:
@@ -341,7 +343,7 @@ def apply_top_k_top_p_triton(
     topk_enabled = k is not None
     topp_enabled = p is not None
 
-    if n == 0 or (k is None and p is None):
+    if n == 0 or not (topk_enabled or topp_enabled):
         return logits
 
     if k is not None:
