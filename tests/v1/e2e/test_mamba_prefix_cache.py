@@ -473,7 +473,7 @@ def apply_patch(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(mamba_utils, "do_mamba_copy_block", fake_copy_fn)
 
 
-@pytest.skip(
+@pytest.mark.skip(
     reason="Skipping test_mamba_prefix_cache because it is based on spec "
     "decode which is not allowed now."
 )
