@@ -301,7 +301,8 @@ class NixlConnectorMetadata(KVConnectorMetadata):
 class NixlConnector(KVConnectorBase_V1):
     @property
     def prefer_cross_layer_blocks(self) -> bool:
-        return True
+        extra_config = self.kv_transfer_config.kv_connector_extra_config
+        return extra_config.get("cross_layers_block", False)
 
     def __init__(
         self,
@@ -314,6 +315,7 @@ class NixlConnector(KVConnectorBase_V1):
         assert vllm_config.kv_transfer_config is not None
         assert vllm_config.kv_transfer_config.engine_id is not None
         self.engine_id: EngineId = vllm_config.kv_transfer_config.engine_id
+        self.kv_transfer_config = vllm_config.kv_transfer_config
 
         if role == KVConnectorRole.SCHEDULER:
             self.connector_scheduler: NixlConnectorScheduler | None = (
