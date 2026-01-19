@@ -4,13 +4,13 @@ import asyncio
 import copy
 import logging
 import os
-import re
 import socket
 import threading
 import uuid
 
 import aiohttp
 import msgpack
+import regex as re
 import zmq
 from quart import Quart, make_response, request
 
