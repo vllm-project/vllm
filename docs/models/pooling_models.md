@@ -313,13 +313,13 @@ The `BAAI/bge-m3` model comes with extra weights for sparse and colbert embeddin
 the architecture is declared as `XLMRobertaModel`, which makes `vLLM` load it as a vanilla ROBERTA model without the
 extra weights. To load the full model weights, override its architecture like this:
 
-```
+```shell
 vllm serve BAAI/bge-m3 --hf-overrides '{"architectures": ["BgeM3EmbeddingModel"]}'
 ```
 
 Then you obtain the sparse embeddings like this:
 
-```
+```shell
 curl -s http://localhost:8000/pooling -H "Content-Type: application/json" -d '{
      "model": "BAAI/bge-m3",
      "task": "token_classify",
@@ -334,7 +334,8 @@ Refer to the tests in  `tests/models/language/pooling/test_bge_m3.py` to see how
 to do that.
 
 You can obtain the colbert embeddings like this:
-```
+
+```shell
 curl -s http://localhost:8000/pooling -H "Content-Type: application/json" -d '{
      "model": "BAAI/bge-m3",
      "task": "token_embed",
