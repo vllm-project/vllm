@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import flashinfer
 import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
@@ -208,8 +209,6 @@ class FlashInferTrtLlmNvFp4Experts(mk.FusedMoEPermuteExpertsUnpermute):
     ):
         super().__init__(quant_config)
 
-        import flashinfer
-
         self.moe_config = moe_config
         # TODO: set this via the constructor
         self.routing_method_type = flashinfer.RoutingMethodType.Renormalize
@@ -289,8 +288,6 @@ class FlashInferTrtLlmNvFp4Experts(mk.FusedMoEPermuteExpertsUnpermute):
         expert_tokens_meta: mk.ExpertTokensMetadata | None,
         apply_router_weight_on_input: bool,
     ):
-        import flashinfer
-
         assert activation == "silu"
         assert a1q_scale is not None
 
@@ -300,8 +297,7 @@ class FlashInferTrtLlmNvFp4Experts(mk.FusedMoEPermuteExpertsUnpermute):
         ).view(torch.int16)
 
         # Invoke kernel.
-        # TODO(avoid the copy).
-        out = flashinfer.fused_moe.trtllm_fp4_block_scale_routed_moe(
+        flashinfer.fused_moe.trtllm_fp4_block_scale_routed_moe(
             topk_ids=packed_tensor,
             routing_bias=None,
             hidden_states=hidden_states,
@@ -329,10 +325,8 @@ class FlashInferTrtLlmNvFp4Experts(mk.FusedMoEPermuteExpertsUnpermute):
             tile_tokens_dim=None,
             routing_method_type=1,
             do_finalize=True,
-        )[0]
-
-        assert output.shape == out.shape
-        output.copy_(out)
+            output=output,
+        )
 
     def apply_monolthic(
         self,
@@ -350,8 +344,6 @@ class FlashInferTrtLlmNvFp4Experts(mk.FusedMoEPermuteExpertsUnpermute):
         expert_tokens_meta: mk.ExpertTokensMetadata | None,
         apply_router_weight_on_input: bool,
     ) -> torch.Tensor:
-        import flashinfer
-
         assert activation == "silu"
 
         # Quantize input to FP4
