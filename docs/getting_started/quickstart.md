@@ -53,6 +53,9 @@ This guide will help you quickly get started with vLLM to perform:
     uv pip install vllm --extra-index-url https://wheels.vllm.ai/rocm/
     ```
 
+    !!! note
+        It currently supports Python 3.12, ROCm 7.0 and glibc >= 2.35.
+
 === "Google TPU"
 
     To run vLLM on Google TPUs, you need to install the `vllm-tpu` package.
