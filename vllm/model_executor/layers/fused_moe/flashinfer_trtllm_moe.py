@@ -299,12 +299,13 @@ class FlashInferTrtLlmNvFp4Experts(mk.FusedMoEPermuteExpertsUnpermute):
             torch.bfloat16
         ).view(torch.int16)
 
-        self.x = 0 if not hasattr(self, "x") else self.x + 1
-        if self.x == 0 and self.moe_config.tp_rank == 0:
-            print(f"{a1q_scale=}")
-            print(f"{self.g1_scale_c=}")
-            print(f"{self.quant_config.g1_alphas=}")
-            print(f"{self.quant_config.g2_alphas=}")
+        
+        
+        print(f"{w1[-1,-1]=}")
+        print(f"{self.quant_config.w1_scale[-1,-1]=}")
+        print(f"{w2[-1,-1]=}")
+        print(f"{self.quant_config.w2_scale[-1,-1]=}")
+
 
         # Invoke kernel.
         # TODO(avoid the copy).
