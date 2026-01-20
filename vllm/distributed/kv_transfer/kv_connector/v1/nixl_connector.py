@@ -1426,7 +1426,12 @@ class NixlConnectorWorker:
             multiply = 1
             for dim_idx in range(1, self.kv_topo.physical_kv_heads_position):
                 multiply *= tensor_shape[dim_idx]
-            logger.info("Multiply is %d", multiply)
+            logger.info(
+                "Multiply is %d shape %s kv_heads_pos %d",
+                multiply,
+                tensor_shape,
+                self.kv_topo.physical_kv_heads_position,
+            )
             for i in range(len(self.slot_size_per_layer)):
                 assert self.slot_size_per_layer[i] % multiply == 0
                 self.slot_size_per_layer[i] //= multiply
