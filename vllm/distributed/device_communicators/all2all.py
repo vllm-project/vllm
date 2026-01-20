@@ -581,6 +581,7 @@ class MoriAll2AllManager(All2AllManagerBase):
             block_num=block_num,
             kernel_type=kernel_type,
             rdma_block_num=rdma_block_num,
+            gpu_per_node=min(8, num_ep_ranks),
         )
 
     def _make_handle(self, **kwargs):
