@@ -260,13 +260,6 @@ async def handle_request():
                 selected_prefill_dp_rank,
             )
         )
-        def prefill_done_callback(task):
-            try:
-                task.result()
-            except Exception as e:
-                print(f"DEBUG: Prefill task failed with exception: {e}")
-
-        send_prefill_task.add_done_callback(prefill_done_callback)
 
         ip, port = extract_ip_port_fast(prefill_instance_endpoint["request_address"])
 
