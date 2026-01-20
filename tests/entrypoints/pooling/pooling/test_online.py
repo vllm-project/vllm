@@ -158,7 +158,6 @@ async def test_chat_request(server: RemoteOpenAIServer, model_name: str):
         },
     ]
 
-    ###############################
     # test chat request basic usage
     chat_response = requests.post(
         server.url_for("pooling"),
@@ -199,7 +198,6 @@ async def test_chat_request(server: RemoteOpenAIServer, model_name: str):
         completion_poolings.model_dump(exclude={"id", "created"})
     )
 
-    ###############################
     # test add_generation_prompt
     response = requests.post(
         server.url_for("pooling"),
