@@ -48,10 +48,7 @@ from vllm.entrypoints.openai.responses.protocol import (
     ResponseInputOutputItem,
     ResponsesRequest,
 )
-from vllm.logger import init_logger
 from vllm.utils import random_uuid
-
-logger = init_logger(__name__)
 
 REASONING_EFFORT = {
     "high": ReasoningEffort.HIGH,
@@ -486,42 +483,6 @@ def render_for_completion(messages: list[Message]) -> list[int]:
     return token_ids
 
 
-def _extract_function_name_from_recipient(recipient: str) -> str:
-    """Extract and clean function name from recipient string.
-
-    Handles cases where Harmony special tokens may leak into the recipient,
-    e.g., "functions.write_file<|channel|>commentary" -> "write_file"
-    """
-    if not recipient.startswith("functions."):
-        # For non-functions recipients, still clean special tokens
-        name = recipient.split(".")[-1] if "." in recipient else recipient
-    else:
-        name = recipient.split(".")[-1]
-
-    # Strip all Harmony special tokens that may leak into the name
-    # Process in order, as some tokens may contain others
-    special_tokens = [
-        "<|channel|>",
-        "<|recipient|>",
-        "<|start|>",
-        "<|end|>",
-        "<|message|>",
-        "<|call|>",
-        "<|return|>",
-        "<|constrain|>",
-    ]
-
-    for token in special_tokens:
-        if token in name:
-            name = name.split(token)[0]
-
-    # Additional cleanup: remove any remaining <| pattern
-    if "<|" in name:
-        name = name.split("<|")[0]
-
-    return name
-
-
 def _parse_browser_tool_call(message: Message, recipient: str) -> ResponseOutputItem:
     """Parse browser tool calls (search, open, find) into web search items."""
     if len(message.content) != 1:
@@ -569,7 +530,7 @@ def _parse_browser_tool_call(message: Message, recipient: str) -> ResponseOutput
 
 def _parse_function_call(message: Message, recipient: str) -> list[ResponseOutputItem]:
     """Parse function calls into function tool call items."""
-    function_name = _extract_function_name_from_recipient(recipient)
+    function_name = recipient.split(".")[-1]
     output_items = []
     for content in message.content:
         random_id = random_uuid()
@@ -721,13 +682,12 @@ def parse_remaining_state(parser: StreamableParser) -> list[ResponseOutputItem]:
     if current_recipient and parser.current_channel in ("commentary", "analysis"):
         if current_recipient.startswith("functions."):
             rid = random_uuid()
-            function_name = _extract_function_name_from_recipient(current_recipient)
             return [
                 ResponseFunctionToolCall(
                     arguments=parser.current_content,
                     call_id=f"call_{rid}",
                     type="function_call",
-                    name=function_name,
+                    name=current_recipient.split(".")[-1],
                     id=f"fc_{rid}",
                     status="in_progress",
                 )

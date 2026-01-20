@@ -6,6 +6,7 @@ import json
 import time
 from collections.abc import AsyncGenerator, AsyncIterator
 from collections.abc import Sequence as GenericSequence
+from dataclasses import replace
 from typing import Any, Final
 
 import jinja2
@@ -70,7 +71,11 @@ from vllm.inputs.data import TokensPrompt
 from vllm.logger import init_logger
 from vllm.logprobs import Logprob
 from vllm.outputs import CompletionOutput, RequestOutput
-from vllm.sampling_params import BeamSearchParams, SamplingParams
+from vllm.sampling_params import (
+    BeamSearchParams,
+    SamplingParams,
+    StructuredOutputsParams,
+)
 from vllm.tokenizers import TokenizerLike
 from vllm.tokenizers.mistral import (
     MistralTokenizer,
@@ -411,6 +416,11 @@ class OpenAIServingChat(OpenAIServing):
                         sampling_params,
                     )
 
+                    # Apply Harmony structural_tag constraint for constrained decoding
+                    self._apply_harmony_structural_tag_constraint(
+                        sampling_params, tokenizer
+                    )
+
                 self._log_inputs(
                     sub_request_id,
                     engine_prompt,
@@ -493,6 +503,48 @@ class OpenAIServingChat(OpenAIServing):
         if request.add_generation_prompt:
             return self.response_role
         return request.messages[-1]["role"]
+
+    def _apply_harmony_structural_tag_constraint(
+        self,
+        sampling_params: SamplingParams,
+        tokenizer: TokenizerLike,
+    ) -> None:
+        """
+        Apply Harmony structural_tag constraint for constrained decoding.
+
+        This prevents special tokens (e.g., <|channel|>commentary) from leaking
+        into tool names during generation by using constrained decoding instead
+        of only relying on post-processing parsing.
+
+        Args:
+            sampling_params: The sampling parameters to modify
+            tokenizer: The tokenizer instance for creating reasoning parser
+        """
+        if not self.use_harmony or self.reasoning_parser is None:
+            return
+
+        reasoning_parser = self.reasoning_parser(tokenizer)
+        # Create or update structured_outputs with structural_tag constraint
+        if (
+            isinstance(
+                struct_out := sampling_params.structured_outputs,
+                StructuredOutputsParams,
+            )
+            and struct_out.all_non_structural_tag_constraints_none()
+        ):
+            # Update existing structured_outputs with structural_tag
+            sampling_params.structured_outputs = replace(
+                struct_out,
+                structural_tag=reasoning_parser.prepare_structured_tag(
+                    struct_out.structural_tag, None
+                ),
+            )
+        elif sampling_params.structured_outputs is None:
+            # Create new structured_outputs with structural_tag
+            structural_tag = reasoning_parser.prepare_structured_tag(None, None)
+            sampling_params.structured_outputs = StructuredOutputsParams(
+                structural_tag=structural_tag
+            )
 
     @staticmethod
     def _bracket_level(s: str, opening="{", closing="}") -> int:
