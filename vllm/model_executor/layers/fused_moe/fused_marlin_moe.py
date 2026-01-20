@@ -535,6 +535,8 @@ class MarlinExpertsBase(mk.FusedMoEPermuteExpertsUnpermute):
         self,
         moe_config: FusedMoEConfig,
         quant_config: FusedMoEQuantConfig,
+        max_num_tokens: int | None = None,
+        num_dispatchers: int | None = None,
         w13_g_idx: torch.Tensor | None = None,
         w2_g_idx: torch.Tensor | None = None,
         w13_g_idx_sort_indices: torch.Tensor | None = None,
@@ -553,7 +555,12 @@ class MarlinExpertsBase(mk.FusedMoEPermuteExpertsUnpermute):
         self.w13_g_idx_sort_indices = w13_g_idx_sort_indices
         self.w2_g_idx_sort_indices = w2_g_idx_sort_indices
         self.is_k_full = is_k_full
-        super().__init__(moe_config, quant_config)
+        super().__init__(
+            moe_config=moe_config,
+            quant_config=quant_config,
+            max_num_tokens=max_num_tokens,
+            num_dispatchers=num_dispatchers,
+        )
 
     @staticmethod
     def _supports_current_device() -> bool:
@@ -752,11 +759,11 @@ class BatchedMarlinExperts(MarlinExpertsBase):
         w2_g_idx_sort_indices: torch.Tensor | None = None,
         is_k_full: bool = True,
     ):
-        self._max_num_tokens = max_num_tokens
-        self._num_dispatchers = num_dispatchers
         super().__init__(
             moe_config=moe_config,
             quant_config=quant_config,
+            max_num_tokens=max_num_tokens,
+            num_dispatchers=num_dispatchers,
             w13_g_idx=w13_g_idx,
             w2_g_idx=w2_g_idx,
             w13_g_idx_sort_indices=w13_g_idx_sort_indices,
@@ -788,9 +795,11 @@ class BatchedMarlinExperts(MarlinExpertsBase):
         expert_tokens_meta: mk.ExpertTokensMetadata | None,
         activation: str,
     ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...]]:
+        assert self.num_dispatchers is not None
+        assert self.max_num_tokens is not None
         num_dispatchers = self.num_dispatchers
         num_experts = local_num_experts
-        max_num_tokens = M if self.max_num_tokens is None else self.max_num_tokens
+        max_num_tokens = self.max_num_tokens
         workspace13 = (num_experts * max_num_tokens * num_dispatchers, max(K, N * 2))
         workspace2 = (num_experts * max_num_tokens * num_dispatchers, N)
         output = (num_experts, max_num_tokens * num_dispatchers, K)

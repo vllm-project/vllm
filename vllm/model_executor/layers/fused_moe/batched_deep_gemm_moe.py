@@ -343,6 +343,8 @@ class BatchedDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
         # FIXME (varun): We should be able to dispatch only from the leader
         # DP ranks in the case of TP > 1. At the moment, all the Ranks
         # end up sending their tokens. This needs to be fixed.
+        assert self.num_dispatchers is not None
+        assert self.max_num_tokens is not None
         num_dispatchers = self.num_dispatchers
         num_experts = local_num_experts
         max_num_tokens = M if self.max_num_tokens is None else self.max_num_tokens
