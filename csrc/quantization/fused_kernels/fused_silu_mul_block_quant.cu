@@ -199,7 +199,7 @@ void silu_and_mul_per_block_quant_dispatch(
             
             VLLM_DISPATCH_GROUP_SIZE(group_size, gs, [&] {
                 VLLM_DISPATCH_BOOL(is_scale_transposed, transpose_scale, [&] {
-                    vllm::silu_and_mul_per_block_quant_kernel
+                    vllm::silu_and_mul_per_block_quant_kernel<
                         scalar_in_t, scalar_out_t, transpose_scale, gs
                     ><<<grid, block, 0, stream>>>(
                         out.data_ptr<scalar_out_t>(),
