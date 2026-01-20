@@ -22,6 +22,7 @@ from vllm.v1.engine import (
 from vllm.v1.structured_output.request import StructuredOutputRequest
 from vllm.v1.utils import ConstantList
 
+from vllm.engine import InferenceProfile
 if TYPE_CHECKING:
     from vllm.lora.request import LoRARequest
     from vllm.v1.core.kv_cache_utils import BlockHash
@@ -48,6 +49,7 @@ class Request:
         self.request_id = request_id
         self.client_index = client_index
         self.priority = priority
+        self.inference_profile: InferenceProfile | None = None
         self.sampling_params = sampling_params
         self.pooling_params = pooling_params
         # Because of LoRA, the eos token id can be different for each request.
