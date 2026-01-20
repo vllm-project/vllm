@@ -885,9 +885,6 @@ class NemotronParseForConditionalGeneration(nn.Module, SupportsMultiModal):
         pixel_values = pixel_values.to(dtype)
         return self.encoder(pixel_values)
 
-    def get_language_model(self) -> torch.nn.Module:
-        return self.decoder
-
     def embed_multimodal(self, **kwargs: object) -> MultiModalEmbeddings | None:
         image_input = self._parse_and_validate_image_input(**kwargs)
         if image_input is None:
