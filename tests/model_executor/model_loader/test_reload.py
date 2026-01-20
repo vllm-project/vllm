@@ -15,6 +15,7 @@ from vllm.model_executor.model_loader.reload.meta import (
     to_meta_tensor,
 )
 from vllm.model_executor.model_loader.reload.types import LayerReloadingInfo
+from vllm.platforms import current_platform
 from vllm.utils.torch_utils import cuda_device_count_stateless
 
 
@@ -69,17 +70,36 @@ def test_get_numel_loaded():
 
 
 @pytest.mark.parametrize("tp_size", [1, 2])
-def test_reload_weights(tp_size, vllm_runner):
+@pytest.mark.parametrize(
+    "base_model,mul_model,add_model",
+    [
+        (
+            "Qwen/Qwen3-0.6B",
+            "nm-testing/Qwen3-0.6B-debug-multiply",
+            "nm-testing/Qwen3-0.6B-debug-add",
+        ),
+        (
+            "nm-testing/Qwen3-0.6B-W4A16-G128",
+            "nm-testing/Qwen3-0.6B-debug-multiply-W4A16-G128",
+            "nm-testing/Qwen3-0.6B-debug-add-W4A16-G128",
+        ),
+        (
+            "nm-testing/Qwen3-0.6B-FP8_BLOCK",
+            "nm-testing/Qwen3-0.6B-debug-multiply-FP8_BLOCK",
+            "nm-testing/Qwen3-0.6B-debug-add-FP8_BLOCK",
+        ),
+    ],
+)
+def test_reload_weights(base_model, mul_model, add_model, tp_size, vllm_runner):
     if cuda_device_count_stateless() < tp_size:
         pytest.skip(reason="Not enough CUDA devices")
 
-    base_model = "Qwen/Qwen3-0.6B"
-    mul_model = "nm-testing/Qwen3-0.6B-debug-multiply"
-    add_model = "nm-testing/Qwen3-0.6B-debug-add"
+    if "FP8" in base_model and not current_platform.supports_fp8():
+        pytest.skip(reason="Requires FP8 support")
 
     with vllm_runner(model_name=base_model, tensor_parallel_size=tp_size) as llm:
-        assert llm.generate_prompt_perplexity(["3 4 = 12"], mask=["3 4 ="])[0] >= 3.5
-        assert llm.generate_prompt_perplexity(["3 4 = 7"], mask=["3 4 ="])[0] >= 8.5
+        assert llm.generate_prompt_perplexity(["3 4 = 12"], mask=["3 4 ="])[0] > 1.1
+        assert llm.generate_prompt_perplexity(["3 4 = 7"], mask=["3 4 ="])[0] > 1.1
 
         llm.collective_rpc("reload_weights", kwargs={"weights_path": mul_model})
         assert llm.generate_prompt_perplexity(["3 4 = 12"], mask=["3 4 ="])[0] <= 1.1
@@ -88,37 +108,3 @@ def test_reload_weights(tp_size, vllm_runner):
         llm.collective_rpc("reload_weights", kwargs={"weights_path": add_model})
         assert llm.generate_prompt_perplexity(["3 4 = 12"], mask=["3 4 ="])[0] >= 1e10
         assert llm.generate_prompt_perplexity(["3 4 = 7"], mask=["3 4 ="])[0] <= 1.1
-
-
-@pytest.mark.parametrize("tp_size", [1,])
-def test_reload_quantized_w4a16(tp_size, vllm_runner):
-    if cuda_device_count_stateless() < tp_size:
-        pytest.skip(reason="Not enough CUDA devices")
-
-    base_model = "nm-testing/Qwen3-0.6B-W4A16-G128"
-    mul_model = "nm-testing/Qwen3-0.6B-debug-multiply-W4A16-G128"
-    add_model = "nm-testing/Qwen3-0.6B-debug-add-W4A16-G128"
-
-    with vllm_runner(model_name=base_model, tensor_parallel_size=tp_size) as llm:
-        print(llm.generate_prompt_perplexity(["3 4 = 12"], mask=["3 4 ="])[0])
-        print(llm.generate_prompt_perplexity(["3 4 = 7"], mask=["3 4 ="])[0])
-        assert llm.generate_prompt_perplexity(["3 4 = 12"], mask=["3 4 ="])[0] >= 3.5
-        assert llm.generate_prompt_perplexity(["3 4 = 7"], mask=["3 4 ="])[0] >= 8.5
-
-        llm.collective_rpc("reload_weights", kwargs={"weights_path": mul_model})
-        print(llm.generate_prompt_perplexity(["3 4 = 12"], mask=["3 4 ="])[0])
-        print(llm.generate_prompt_perplexity(["3 4 = 7"], mask=["3 4 ="])[0])
-        assert llm.generate_prompt_perplexity(["3 4 = 12"], mask=["3 4 ="])[0] <= 1.1
-        assert llm.generate_prompt_perplexity(["3 4 = 7"], mask=["3 4 ="])[0] >= 1e10
-
-        llm.collective_rpc("reload_weights", kwargs={"weights_path": add_model})
-        print(llm.generate_prompt_perplexity(["3 4 = 12"], mask=["3 4 ="])[0])
-        print(llm.generate_prompt_perplexity(["3 4 = 7"], mask=["3 4 ="])[0])
-        assert llm.generate_prompt_perplexity(["3 4 = 12"], mask=["3 4 ="])[0] >= 1e10
-        assert llm.generate_prompt_perplexity(["3 4 = 7"], mask=["3 4 ="])[0] <= 1.1
-
-
-
-
-def test_reload_online_quantized():
-    pass

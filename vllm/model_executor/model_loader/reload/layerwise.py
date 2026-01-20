@@ -69,7 +69,7 @@ def initialize_layerwise_reload(layer: torch.nn.Module) -> None:
     info = LAYER_RELOADING_INFO[layer]
 
     # Skip if the layer has already been initialized
-    if info.is_initialized():
+    if info.can_reload():
         return
 
     # Save current tensors for later copying
@@ -82,8 +82,6 @@ def initialize_layerwise_reload(layer: torch.nn.Module) -> None:
     info.load_numel = 0
     info.load_numel_total = get_layer_size(layer)
 
-    print(f"Initialize {layer.__class__.__name__}")
-
     # Wrap each parameter's weight loader
     # Note that nested wrapping will occur for shared tensors
     for param_name, param in get_layer_tensors(layer).items():
@@ -94,39 +92,42 @@ def initialize_layerwise_reload(layer: torch.nn.Module) -> None:
             param: torch.Tensor,
         ) -> Callable:
             """Create a wrapped weight loader that defers processing."""
-            weight_loader = getattr(param, "weight_loader", default_weight_loader)
-            weight_loader_signature = inspect.signature(weight_loader)
+            original_loader = _get_original_loader(param)
+            loader_signature = inspect.signature(original_loader)
+            info = LAYER_RELOADING_INFO[layer]
 
-            @wraps(weight_loader, assigned=("__doc__", "__annotations__"))
+            @wraps(original_loader, assigned=("__doc__", "__annotations__"))
             def restore_and_process_loader(*args, **kwargs):
-                # Bind and normalize arguments
-                bound_args = weight_loader_signature.bind(*args, **kwargs)
-                bound_args.apply_defaults()
-
-                # Cache loaded weights, track loading progress
-                # `get_numel_loaded` triggers inner wrapped function for shared tensors
-                info = LAYER_RELOADING_INFO[layer]
-                if info.is_initialized():
-                    info.loaded_weights.append((param_name, bound_args))
-                    info.load_numel += get_numel_loaded(weight_loader, bound_args)
-                else:
+                if not info.can_reload():
                     # Unfortunately, some qconfigs are set up to load the same weight
                     # multiple times. For example, CT_WNA16 loads `weight_shape` for
                     # each of the qkv partitions. This results in layers loading extra
                     # weights (beyond load_numel_total) after it's already processed.
-                    # 
+                    #
                     # Best solution is to ensure that `load_numel_total` reflects the
                     # actual number of weights loaded, either by modifying qconfigs to
                     # create as many weights as loaded (see padding issue as well)
                     # or maybe capturing how many weights are loaded on first pass
-                    # 
+                    #
                     # For now, `load_numel_total` is still safe to use as long as
                     # there's no way to reach `load_numel_total` without loading all
                     # necessary weights. `weight_shape` is very small, so this is safe.
+                    # see Limitations(4)
                     return
 
-                print(
-                    f"{layer.__class__.__name__}: {info.load_numel} / {info.load_numel_total}"
+                # Bind and normalize arguments
+                bound_args = loader_signature.bind(*args, **kwargs)
+                bound_args.apply_defaults()
+
+                # Cache loaded weights, track loading progress
+                info.loaded_weights.append((param_name, bound_args))
+                info.load_numel += get_numel_loaded(original_loader, bound_args)
+
+                logger.debug(
+                    "%s: %d / %d",
+                    layer.__class__.__name__,
+                    info.load_numel,
+                    info.load_numel_total,
                 )
 
                 # Process and copy when all weights are loaded
@@ -156,15 +157,16 @@ def finalize_layerwise_reload(layer: torch.nn.Module) -> None:
         # when implementing, remember to unwrap layerwise loaders
         raise NotImplementedError("Layerwise reloading of Q/K/V scale weights")
 
-    # Process non-attention layers which did not load all elements due to (padding)
+    # Process non-attention layers which did not load all elements. This can happen
+    # if the created weight has extra padding elements which are not loaded
     # Having too many of these delayed layers can lead to execess memory usage
+    # see Limitations(4)
     if info.load_numel > 0 and info.load_numel < info.load_numel_total:
-        print("SKIP THING")
-        print(f"skip thing: {layer.__class__.__name__}")
-        #_layerwise_process(layer, info)
+        logger.debug("%s: Delayed processing", layer.__class__.__name__)
+        _layerwise_process(layer, info)
 
     # No weights were loaded, place kernel tensors back
-    elif info.is_initialized():
+    elif info.can_reload():
         for name in get_layer_tensors(layer):
             delattr(layer, name)
 
@@ -192,18 +194,13 @@ def _layerwise_process(layer: torch.nn.Module, info: LayerReloadingInfo):
 
     # Unwrap layerwise loading wrappers
     for param in get_layer_tensors(layer).values():
-        weight_loader = getattr(param, "weight_loader", default_weight_loader)
-        param.weight_loader = _unwrap_loader(weight_loader)
+        param.weight_loader = _get_original_loader(param)
 
     # Load all cached weights into materialized layer (using original loaders)
     for name, args in info.loaded_weights:
         param = getattr(layer, name)
         args.arguments["param"] = param
         param.weight_loader(*args.args, **args.kwargs)
-
-    # if "weight_packed" in info.kernel_tensors[0]:
-    #     breakpoint()
-    print(f"start: {layer.__class__.__name__}")
 
     # Process weights (quantization, repacking, etc.)
     # Attention/MLA are processed in `finalize_layerwise_reload`
@@ -221,12 +218,12 @@ def _layerwise_process(layer: torch.nn.Module, info: LayerReloadingInfo):
         layer.register_buffer(name, buffer)
 
     info.reset()
+    logger.debug("%s: Processed", layer.__class__.__name__)
 
-    print(f"process: {layer.__class__.__name__}")
 
-
-def _unwrap_loader(loader: Callable) -> Callable:
+def _get_original_loader(param: torch.Tensor) -> Callable:
     """Return the weight loader with any layerwise wrappers removed"""
+    loader = getattr(param, "weight_loader", default_weight_loader)
     while loader.__name__ == "restore_and_process_loader":
         loader = loader.__wrapped__  # type: ignore[attr-defined]
 
