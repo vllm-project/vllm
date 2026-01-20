@@ -210,6 +210,24 @@ Alternatively, follow these example steps to implement your own plugin:
 
     For more details, refer to the [vLLM's Plugins System](../design/plugin_system.md).
 
+### In-Place LoRA Reloading
+
+When dynamically loading LoRA adapters, you may need to replace an existing adapter with updated weights while keeping the same name. The `load_inplace` parameter enables this functionality. This commonly occurs in asynchronous reinforcement learning setups, where adapters are continuously updated and swapped in without interrupting ongoing inference.
+
+When `load_inplace=True`, vLLM will replace the existing adapter with the new one.
+
+Example request to load or replace a LoRA adapter with the same name:
+
+```bash
+curl -X POST http://localhost:8000/v1/load_lora_adapter \
+-H "Content-Type: application/json" \
+-d '{
+    "lora_name": "my-adapter",
+    "lora_path": "/path/to/adapter/v2",
+    "load_inplace": true
+}'
+```
+
 ## New format for `--lora-modules`
 
 In the previous version, users would provide LoRA modules via the following format, either as a key-value pair or in JSON format. For example:
