@@ -107,7 +107,13 @@ def fused_topk_bias(
             raise ValueError(f"Unsupported scoring function: {scoring_func}")
 
     n_routed_experts = gating_output.shape[-1]
-    scores = gating_output.softmax(dim=-1)
+    if scoring_func == "softmax":
+        scores = gating_output.softmax(dim=-1)
+    elif scoring_func == "sigmoid":
+        scores = gating_output.sigmoid()
+    else:
+        raise ValueError(f"Unsupported scoring function: {scoring_func}")
+
     scores_for_choice = scores.view(
         -1, n_routed_experts
     ) + e_score_correction_bias.unsqueeze(0)
