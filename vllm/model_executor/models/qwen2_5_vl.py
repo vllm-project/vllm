@@ -384,6 +384,7 @@ class Qwen2_5_VisionAttention(nn.Module):
             qk_reshaped = einops.rearrange(
                 qk, "b s two head head_dim -> (two b) s head head_dim", two=2
             )
+            qk_reshaped = qk_reshaped.contiguous()
             qk_rotated = self.apply_rotary_emb(
                 qk_reshaped,
                 rotary_pos_emb_cos,
