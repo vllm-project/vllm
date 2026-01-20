@@ -164,7 +164,7 @@ async def stream_decode_response(session, response, request_id):
             raise RuntimeError(
                 f"decode response.status != 200, status = {response.status}"
             )
-    except Exception as e:
+    except Exception:
         raise
     finally:
         await session.close()

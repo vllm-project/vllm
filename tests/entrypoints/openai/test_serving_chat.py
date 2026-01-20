@@ -103,15 +103,16 @@ def gptoss_server(default_server_args: list[str]):
 
 @pytest.fixture(scope="class")
 def gptoss_speculative_server(default_server_args: list[str]):
+    attention_backend = (
+        "TRITON_ATTN"
+        if not is_aiter_found_and_supported()
+        else "ROCM_AITER_UNIFIED_ATTN"
+    )
     server_args = default_server_args + [
         "--speculative-config",
         f'{{"model": "{GPT_OSS_SPECULATOR_NAME}", '
         f'"method": "eagle3", "num_speculative_tokens": 3}}',
-        f"--attention-backend={
-            'TRITON_ATTN'
-            if not is_aiter_found_and_supported()
-            else 'ROCM_AITER_UNIFIED_ATTN'
-        }",
+        f"--attention-backend={attention_backend}",
     ]
     # gpt-oss requires AITER unified attention on ROCm
     # TODO: Remove after fixing TRITON_ATTN issue on ROCm

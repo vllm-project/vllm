@@ -1833,9 +1833,7 @@ class Scheduler(SchedulerInterface):
                     req_id,
                 )
                 continue
-            logger.debug(
-                "Finished recving KV transfer for request %s", internal_id
-            )
+            logger.debug("Finished recving KV transfer for request %s", internal_id)
             self.finished_recving_kv_req_ids.add(internal_id)
         for req_id in kv_connector_output.finished_sending or ():
             internal_id = self._resolve_internal_req_id(req_id)
@@ -1845,9 +1843,7 @@ class Scheduler(SchedulerInterface):
                     req_id,
                 )
                 continue
-            logger.debug(
-                "Finished sending KV transfer for request %s", internal_id
-            )
+            logger.debug("Finished sending KV transfer for request %s", internal_id)
             self._free_blocks(self.requests[internal_id])
 
     def _update_requests_with_invalid_blocks(
