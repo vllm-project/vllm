@@ -352,8 +352,8 @@ def bind_kv_cache(
                 pass
             else:
                 raise NotImplementedError
-        layer_name = layer_names[0]
-        runner_kv_caches.append(kv_caches[layer_name])
+        for layer_name in layer_names:
+            runner_kv_caches.append(kv_caches[layer_name])
 
     # Bind kv_caches to forward context
     for layer_name, kv_cache in kv_caches.items():
