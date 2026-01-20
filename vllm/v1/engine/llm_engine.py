@@ -65,8 +65,9 @@ class LLMEngine:
 
         self.log_stats = log_stats
 
-        executor_backend = self.vllm_config.parallel_config.distributed_executor_backend
         parallel_config = vllm_config.parallel_config
+        executor_backend = parallel_config.distributed_executor_backend
+
         self.external_launcher_dp = (
             parallel_config.data_parallel_size > 1
             and executor_backend == "external_launcher"
@@ -83,10 +84,7 @@ class LLMEngine:
             self.dp_group = None
         self.should_execute_dummy_batch = False
 
-        if self.model_config.skip_tokenizer_init:
-            tokenizer = None
-        else:
-            tokenizer = cached_tokenizer_from_config(self.model_config)
+        tokenizer = cached_tokenizer_from_config(self.model_config)
 
         self.input_processor = InputProcessor(self.vllm_config, tokenizer)
         self.io_processor = get_io_processor(

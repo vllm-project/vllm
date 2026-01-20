@@ -7,12 +7,12 @@ import torch
 import torch.nn.functional as F
 from einops import rearrange
 
-from vllm.attention.backends.utils import PAD_SLOT_ID
 from vllm.model_executor.layers.mamba.ops.causal_conv1d import (
     causal_conv1d_fn,
     causal_conv1d_update,
 )
-from vllm.platforms import current_platform
+from vllm.utils.torch_utils import set_random_seed
+from vllm.v1.attention.backends.utils import PAD_SLOT_ID
 
 
 def causal_conv1d_ref(
@@ -154,7 +154,7 @@ def test_causal_conv1d_update(dim, width, seqlen, has_bias, silu_activation, ity
     if itype == torch.bfloat16:
         rtol, atol = 1e-2, 5e-2
     # set seed
-    current_platform.seed_everything(0)
+    set_random_seed(0)
     batch = 2
     x = torch.randn(batch, dim, seqlen, device=device, dtype=itype)
     x_ref = x.clone()
@@ -201,7 +201,7 @@ def test_causal_conv1d_update_with_batch_gather(
         rtol, atol = 1e-2, 5e-2
 
     # set seed
-    current_platform.seed_everything(0)
+    set_random_seed(0)
 
     padding = 5 if with_padding else 0
     padded_batch_size = batch_size + padding
@@ -278,7 +278,7 @@ def test_causal_conv1d_varlen(
     if itype == torch.bfloat16:
         rtol, atol = 1e-2, 5e-2
     # set seed
-    current_platform.seed_everything(0)
+    set_random_seed(0)
     seqlens = []
     batch_size = batch
     padding = 3 if with_padding else 0

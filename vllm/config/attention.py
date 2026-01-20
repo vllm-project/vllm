@@ -6,9 +6,9 @@ from typing import Any, Literal
 from pydantic import field_validator
 from pydantic.dataclasses import dataclass
 
-from vllm.attention.backends.registry import AttentionBackendEnum
 from vllm.config.utils import config
 from vllm.logger import init_logger
+from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 logger = init_logger(__name__)
 
@@ -35,7 +35,7 @@ class AttentionConfig:
     use_cudnn_prefill: bool = False
     """Whether to use cudnn prefill."""
 
-    use_trtllm_ragged_deepseek_prefill: bool = False
+    use_trtllm_ragged_deepseek_prefill: bool = True
     """Whether to use TRTLLM ragged deepseek prefill."""
 
     use_trtllm_attention: bool | None = None

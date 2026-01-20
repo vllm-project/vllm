@@ -15,9 +15,10 @@ MODEL_NAME = "hmellor/tiny-random-LlamaForCausalLM"
 def test_preprocess_error_handling(monkeypatch: pytest.MonkeyPatch):
     """Test that preprocessing errors are handled gracefully."""
 
-    if current_platform.is_rocm():
+    if current_platform.is_rocm() or current_platform.is_xpu():
         pytest.skip(
-            "Skipped on ROCm: this test only works with 'fork', but ROCm uses 'spawn'."
+            "Skipped on ROCm/XPU: this test only works with 'fork', "
+            "but ROCm/XPU uses 'spawn'."
         )
 
     assert not torch.cuda.is_initialized(), (
