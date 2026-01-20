@@ -562,7 +562,7 @@ class Lfm2VLForConditionalGeneration(
             self.multi_modal_projector = Lfm2VLMultiModalProjector(
                 config=config,
                 use_data_parallel=self.use_data_parallel,
-                prefix=f"{prefix}.multi_modal_projector",
+                prefix=maybe_prefix(prefix, "multi_modal_projector"),
             )
 
         with self._mark_language_model(vllm_config):
