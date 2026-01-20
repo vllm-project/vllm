@@ -7,6 +7,7 @@ from typing import Any, cast
 import torch
 from torch.nn import Parameter
 
+from vllm import _custom_ops as ops
 from vllm.model_executor.layers.quantization.quark.schemes import QuarkScheme
 from vllm.model_executor.layers.quantization.utils.quant_utils import GroupShape
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
@@ -26,7 +27,10 @@ __all__ = ["QuarkW8A8Fp8"]
 
 class QuarkW8A8Fp8(QuarkScheme):
     def __init__(
-        self, weight_config: dict[str, Any], input_config: dict[str, Any] | None
+        self,
+        weight_config: dict[str, Any],
+        input_config: dict[str, Any] | None,
+        is_online_quant: bool = False,
     ):
         self.weight_qscheme = cast(str, weight_config.get("qscheme"))
         self.is_static_input_scheme: bool = False
@@ -34,7 +38,7 @@ class QuarkW8A8Fp8(QuarkScheme):
         if input_config is not None:
             self.is_static_input_scheme = not cast(bool, input_config.get("is_dynamic"))
             self.input_qscheme = cast(str, input_config.get("qscheme"))
-
+        self.is_online_quant: bool = is_online_quant
         per_token = (
             not self.is_static_input_scheme and self.input_qscheme == "per_channel"
         )
@@ -52,12 +56,41 @@ class QuarkW8A8Fp8(QuarkScheme):
         # lovelace and up
         return 89
 
+    def quant_per_tensor(
+        self, weight: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        splited_weights = weight.split(self.output_partition_sizes, dim=0)
+        quanted_parts = []
+        scales = []
+        for part in splited_weights:
+            quanted_part, scale = ops.scaled_fp8_quant(
+                part, use_per_token_if_dynamic=False
+            )
+            quanted_parts.append(quanted_part)
+            scales.append(scale)
+        return torch.cat(quanted_parts, dim=0), torch.cat(scales, dim=0)
+
+    def quant_per_channel(
+        self, weight: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        quanted_weight, scale = ops.scaled_fp8_quant(
+            weight, scale=None, use_per_token_if_dynamic=False
+        )
+        return quanted_weight, scale.squeeze(-1)
+
     def process_weights_after_loading(self, layer) -> None:
         # If per tensor, when we have a fused module (e.g. QKV) with per
         # tensor scales (thus N scales being passed to the kernel),
         # requantize so we can always run per tensor
         if self.weight_qscheme == "per_tensor":
-            if current_platform.is_fp8_fnuz():
+            if self.is_online_quant:
+                weight, weight_scale = self.quant_per_tensor(layer.weight.data)
+                layer.weight.data = weight
+                layer.weight_scale.data = weight_scale
+            if (
+                current_platform.is_fp8_fnuz()
+                and layer.weight.data.dtype == torch.float8_e4m3fn
+            ):
                 input_scale = getattr(layer, "input_scale", None)
                 weight, max_w_scale, input_scale = normalize_e4m3fn_to_e4m3fnuz(
                     weight=layer.weight,
@@ -81,9 +114,16 @@ class QuarkW8A8Fp8(QuarkScheme):
 
         # If channelwise, scales are already lined up, so just transpose.
         elif self.weight_qscheme == "per_channel":
+            if self.is_online_quant:
+                weight, weight_scale = self.quant_per_channel(layer.weight.data)
+                layer.weight.data = weight
+                layer.weight_scale.data = weight_scale
             weight = layer.weight
 
-            if current_platform.is_fp8_fnuz():
+            if (
+                current_platform.is_fp8_fnuz()
+                and weight.data.dtype == torch.float8_e4m3fn
+            ):
                 input_scale = getattr(layer, "input_scale", None)
                 weight, weight_scale, input_scale = normalize_e4m3fn_to_e4m3fnuz(
                     weight=weight,
@@ -118,6 +158,9 @@ class QuarkW8A8Fp8(QuarkScheme):
         weight_loader: Callable,
         **kwargs,
     ):
+        self.input_size_per_partition = input_size_per_partition
+        self.output_partition_sizes = output_partition_sizes
+
         output_size_per_partition = sum(output_partition_sizes)
         layer.logical_widths = output_partition_sizes
 
@@ -126,7 +169,7 @@ class QuarkW8A8Fp8(QuarkScheme):
             data=torch.empty(
                 output_size_per_partition,
                 input_size_per_partition,
-                dtype=torch.float8_e4m3fn,
+                dtype=params_dtype if self.is_online_quant else torch.float8_e4m3fn,
             ),
             input_dim=1,
             output_dim=0,
