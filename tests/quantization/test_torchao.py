@@ -5,8 +5,8 @@ import importlib.util
 import pytest
 import torch
 
-from vllm.platforms import current_platform
 from vllm.model_executor.model_loader import get_model_loader
+from vllm.platforms import current_platform
 
 DTYPE = ["bfloat16"]
 
@@ -137,7 +137,9 @@ def test_online_quant_config_dict_json(vllm_runner):
 
         load_config = llm.llm.llm_engine.vllm_config.load_config
         model_config = llm.llm.llm_engine.vllm_config.model_config
-        model = llm.llm.llm_engine.model_executor.driver_worker.worker.model_runner.model
+        model = (
+            llm.llm.llm_engine.model_executor.driver_worker.worker.model_runner.model
+        )
 
         model_loader = get_model_loader(load_config)
         weights_iterator = model_loader.get_all_weights(model_config, model)
