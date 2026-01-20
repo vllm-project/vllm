@@ -200,7 +200,7 @@ class TestCudaUUIDSupport(unittest.TestCase):
         mock_handles = [Mock(), Mock(), Mock()]
         mock_pynvml.nvmlDeviceGetHandleByIndex.side_effect = lambda idx: mock_handles[idx]
         mock_pynvml.nvmlDeviceGetUUID.side_effect = lambda h: (
-            f"GPU-{mock_handles.index(h) + 1}23"
+            ["GPU-123", "GPU-456", "GPU-789"][mock_handles.index(h)]
         )
         mock_pynvml.nvmlInit.return_value = None
         mock_pynvml.nvmlShutdown.return_value = None
