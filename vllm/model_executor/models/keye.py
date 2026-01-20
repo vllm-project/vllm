@@ -1242,7 +1242,7 @@ class KeyeMultiModalProcessor(BaseMultiModalProcessor[KeyeProcessingInfo]):
         return _keye_field_config(hf_inputs)
 
 
-class BaseKeyeModule(nn.Module):
+class BaseKeyeModule(nn.Module, SupportsMultiModal):
     packed_modules_mapping = {
         "qkv_proj": [
             "q_proj",
@@ -1280,25 +1280,26 @@ class BaseKeyeModule(nn.Module):
         self.config = config
         self.multimodal_config = multimodal_config
 
-        self.visual = KeyeSiglipVisionModel(
-            config.vision_config,
-            quant_config=quant_config,
-            multimodal_config=multimodal_config,
-            prefix=maybe_prefix(prefix, "visual"),
-        )
+        with self._mark_tower_model(vllm_config, {"image", "video"}):
+            self.visual = KeyeSiglipVisionModel(
+                config.vision_config,
+                quant_config=quant_config,
+                multimodal_config=multimodal_config,
+                prefix=maybe_prefix(prefix, "visual"),
+            )
+            self.mlp_AR = self._build_projector(
+                config,
+                config.vision_config,
+                quant_config=quant_config,
+                prefix=maybe_prefix(prefix, "mlp_AR"),
+            )
 
-        self.mlp_AR = self._build_projector(
-            config,
-            config.vision_config,
-            quant_config=quant_config,
-            prefix=maybe_prefix(prefix, "mlp_AR"),
-        )
-
-        self.language_model = init_vllm_registered_model(
-            vllm_config=vllm_config,
-            prefix=maybe_prefix(prefix, "language_model"),
-            architectures=["Qwen3ForCausalLM"],
-        )
+        with self._mark_language_model(vllm_config):
+            self.language_model = init_vllm_registered_model(
+                vllm_config=vllm_config,
+                prefix=maybe_prefix(prefix, "language_model"),
+                architectures=["Qwen3ForCausalLM"],
+            )
 
         self.make_empty_intermediate_tensors = (
             self.language_model.make_empty_intermediate_tensors
@@ -1312,7 +1313,7 @@ class BaseKeyeModule(nn.Module):
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
     ) -> nn.Module:
-        raise ValueError("Need projector")
+        raise NotImplementedError("Need projector")
 
     def _process_image_input(self, image_input: Any) -> tuple[torch.Tensor, ...]:
         siglip_position_ids = list()
@@ -1428,9 +1429,6 @@ class BaseKeyeModule(nn.Module):
                 modalities["videos"] = self._parse_and_validate_video_input(**kwargs)
 
         return modalities
-
-    def get_language_model(self) -> torch.nn.Module:
-        return self.language_model
 
     def embed_multimodal(self, **kwargs: object) -> MultiModalEmbeddings | None:
         modalities = self._parse_and_validate_multimodal_inputs(**kwargs)
