@@ -240,11 +240,10 @@ class Qwen3TPMoeSparseMoeBlock(nn.Module):
         )
 
         # Add task experts' outputs only for decode tokens with valid task_id
-        if self.task_expert_merge_method == 'gating' and task_ids is not None and is_decode is not None:
+        if self.task_expert_merge_method == 'gating' and task_ids is not None:
             # Create mask for tokens that should use task experts:
-            # - must be decode token (is_decode = True)
             # - must have valid task_id (>= 0)
-            valid_task_mask = is_decode & (task_ids >= 0)
+            valid_task_mask = task_ids >= 0
 
             if valid_task_mask.any():
                 # Get unique task_ids that need processing
@@ -255,7 +254,7 @@ class Qwen3TPMoeSparseMoeBlock(nn.Module):
                     if tid_int < 0 or tid_int >= self.n_task_experts:
                         continue
 
-                    # Find tokens for this task_id that are decode tokens
+                    # Find tokens for this task_id
                     token_mask = valid_task_mask & (task_ids == tid_int)
 
                     if token_mask.any():
@@ -268,7 +267,7 @@ class Qwen3TPMoeSparseMoeBlock(nn.Module):
 
                         # Add gated task expert output to final hidden states
                         final_hidden_states[token_mask] = (
-                            final_hidden_states[token_mask] + gate_scores * task_expert_output
+                            final_hidden_states[token_mask] + gate_scores * task_expert_output * 10
                         )
 
         if self.is_sequence_parallel:
