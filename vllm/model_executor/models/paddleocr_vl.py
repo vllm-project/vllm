@@ -999,6 +999,13 @@ class PaddleOCRVLForConditionalGeneration(nn.Module, SupportsMultiModal, Support
         }
     )
 
+    @classmethod
+    def get_placeholder_str(cls, modality: str, i: int) -> str | None:
+        if modality.startswith("image"):
+            return "<|IMAGE_START|><|IMAGE_PLACEHOLDER|><|IMAGE_END|>"
+
+        raise ValueError("Only image modality is supported")
+
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
         config = vllm_config.model_config.hf_config
@@ -1008,22 +1015,24 @@ class PaddleOCRVLForConditionalGeneration(nn.Module, SupportsMultiModal, Support
         self.config = config
         self.multimodal_config = multimodal_config
 
-        self.visual = SiglipVisionModel(
-            config=config.vision_config,
-            quant_config=quant_config,
-            multimodal_config=multimodal_config,
-            prefix=maybe_prefix(prefix, "visual"),
-        )
-        self.mlp_AR = Projector(config, config.vision_config)
+        with self._mark_tower_model(vllm_config, "image"):
+            self.visual = SiglipVisionModel(
+                config=config.vision_config,
+                quant_config=quant_config,
+                multimodal_config=multimodal_config,
+                prefix=maybe_prefix(prefix, "visual"),
+            )
+            self.mlp_AR = Projector(config, config.vision_config)
 
-        self.language_model = Ernie4_5ForCausalLM(
-            vllm_config=vllm_config,
-            prefix=maybe_prefix(prefix, "language_model"),
-        )
+        with self._mark_language_model(vllm_config):
+            self.language_model = language_model = Ernie4_5ForCausalLM(
+                vllm_config=vllm_config,
+                prefix=maybe_prefix(prefix, "language_model"),
+            )
 
-        for layer in self.language_model.model.layers:
-            if not isinstance(layer, PPMissingLayer):
-                layer.self_attn.rotary_emb.is_neox_style = True
+            for layer in language_model.model.layers:
+                if not isinstance(layer, PPMissingLayer):
+                    layer.self_attn.rotary_emb.is_neox_style = True
 
         self.make_empty_intermediate_tensors = (
             self.language_model.make_empty_intermediate_tensors
@@ -1151,9 +1160,6 @@ class PaddleOCRVLForConditionalGeneration(nn.Module, SupportsMultiModal, Support
 
         return llm_positions, mrope_position_delta
 
-    def get_language_model(self) -> nn.Module:
-        return self.language_model
-
     def _parse_and_validate_image_input(
         self, **kwargs: object
     ) -> PaddleOCRImagePixelInputs | None:
@@ -1180,28 +1186,9 @@ class PaddleOCRVLForConditionalGeneration(nn.Module, SupportsMultiModal, Support
         if intermediate_tensors is not None:
             inputs_embeds = None
 
-        elif inputs_embeds is None:
-            vision_embeddings = self.embed_multimodal(**kwargs)
-            is_multimodal = kwargs.pop("is_multimodal", None)
-            handle_oov_mm_token = kwargs.pop("handle_oov_mm_token", False)
-            inputs_embeds = self.embed_input_ids(
-                input_ids,
-                vision_embeddings,
-                is_multimodal=is_multimodal,
-                handle_oov_mm_token=handle_oov_mm_token,
-            )
-            input_ids = None
-
         return self.language_model(
             input_ids, positions, intermediate_tensors, inputs_embeds
         )
-
-    @classmethod
-    def get_placeholder_str(cls, modality: str, i: int) -> str | None:
-        if modality.startswith("image"):
-            return "<|IMAGE_START|><|IMAGE_PLACEHOLDER|><|IMAGE_END|>"
-
-        raise ValueError("Only image modality is supported")
 
     def encode_image(
         self, pixel_values: torch.Tensor, image_grid_thw: torch.Tensor

@@ -789,7 +789,6 @@ class InternS1ForConditionalGeneration(
         **kwargs: object,
     ) -> IntermediateTensors:
         if intermediate_tensors is not None:
-            input_ids = None
             inputs_embeds = None
 
         forward_kwargs = {

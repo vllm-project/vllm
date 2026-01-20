@@ -451,6 +451,15 @@ class Ovis2_5MultiModalProcessor(BaseMultiModalProcessor[Ovis2_5ProcessingInfo])
     dummy_inputs=Ovis2_5DummyInputsBuilder,
 )
 class Ovis2_5(nn.Module, SupportsMultiModal, SupportsPP):
+    @classmethod
+    def get_placeholder_str(cls, modality: str, i: int) -> str | None:
+        if modality.startswith("image"):
+            return IMAGE_TOKEN
+        if modality.startswith("video"):
+            return VIDEO_TOKEN
+
+        raise ValueError("Only image or video modality is supported")
+
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
         config = vllm_config.model_config.hf_config
@@ -458,20 +467,22 @@ class Ovis2_5(nn.Module, SupportsMultiModal, SupportsPP):
         multimodal_config = vllm_config.model_config.multimodal_config
 
         self.config: PretrainedConfig = config
-        self.llm = init_vllm_registered_model(
-            vllm_config=vllm_config.with_hf_config(config.text_config),
-            prefix=maybe_prefix(prefix, "llm"),
-        )
 
-        self.visual_tokenizer = VisualTokenizer(
-            config=config.vit_config,
-            visual_vocab_size=config.visual_vocab_size,
-            multimodal_config=multimodal_config,
-            quant_config=quant_config,
-            prefix=f"{prefix}.visual_tokenizer",
-        )
+        with self._mark_language_model(vllm_config):
+            self.llm = init_vllm_registered_model(
+                vllm_config=vllm_config.with_hf_config(config.text_config),
+                prefix=maybe_prefix(prefix, "llm"),
+            )
 
-        self.vte = VisualEmbedding(config.visual_vocab_size, config.hidden_size)
+        with self._mark_tower_model(vllm_config, {"image", "video"}):
+            self.visual_tokenizer = VisualTokenizer(
+                config=config.vit_config,
+                visual_vocab_size=config.visual_vocab_size,
+                multimodal_config=multimodal_config,
+                quant_config=quant_config,
+                prefix=f"{prefix}.visual_tokenizer",
+            )
+            self.vte = VisualEmbedding(config.visual_vocab_size, config.hidden_size)
 
         text_model_type = self.config.get_text_config().model_type
         self.image_pad_token_id = IMAGE_PAD_TOKEN_ID_MAP[text_model_type]
@@ -650,12 +661,8 @@ class Ovis2_5(nn.Module, SupportsMultiModal, SupportsPP):
         self,
         hidden_states: torch.Tensor,
     ) -> torch.Tensor | None:
-        logits = self.llm.compute_logits(hidden_states)
-        return logits
+        return self.llm.compute_logits(hidden_states)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         loader = AutoWeightsLoader(self)
         return loader.load_weights(weights)
-
-    def get_language_model(self) -> torch.nn.Module:
-        return self.llm
