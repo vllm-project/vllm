@@ -26,6 +26,7 @@ from vllm.config import (
 )
 from vllm.config.compilation import DynamicShapesType
 from vllm.config.utils import hash_factors
+from vllm.forward_context import get_forward_context, is_forward_context_available
 from vllm.logger import init_logger
 from vllm.sequence import IntermediateTensors
 from vllm.utils.import_utils import resolve_obj_by_qualname
