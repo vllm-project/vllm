@@ -122,3 +122,127 @@ def test_no_tuple_inputs_with_multiple_consumers():
     output_split = split_gm(new_x)
 
     assert torch.allclose(output_original, output_split), "Output mismatch after split"
+
+
+def test_sym_size_moved_across_split_boundary():
+    """
+    Test that sym_size operations (tensor.shape accesses) are moved to the same
+    subgraph as their consumers when they would otherwise cross subgraph boundaries.
+
+    This prevents issues where PT2 doesn't fully support torch.Size as submodule
+    output when sym_size is in one subgraph and its consumer is in another.
+
+    Pattern being tested:
+        # Original order that causes issues:
+        size = tensor_a.shape[0]       # subgraph 0
+        some_cg_unsafe_op              # subgraph 1 (split point)
+        tensor_b = tensor_b.view(size) # subgraph 2 (would fail without fix)
+
+        # After fix, sym_size is moved:
+        some_cg_unsafe_op              # subgraph 1 (split point)
+        size = tensor_a.shape[0]       # moved to subgraph 2
+        tensor_b = tensor_b.view(size) # subgraph 2 (works correctly)
+    """
+
+    def model_fn(x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
+        # Get shape before the split point - this creates sym_size ops
+        batch_size = x.shape[0]
+        hidden_size = x.shape[1]
+
+        # This becomes a splitting operation
+        z = torch.sigmoid(x)
+
+        # Use the shape values after the split point
+        # Without the fix, this would fail because batch_size/hidden_size
+        # would be outputs of the first subgraph (as torch.Size/SymInt)
+        reshaped_y = y.view(batch_size, hidden_size)
+
+        return z + reshaped_y
+
+    x = torch.randn(4, 8)
+    y = torch.randn(32)  # Will be reshaped to (4, 8)
+    # Use symbolic tracing to generate sym_size operations
+    gm = make_fx(model_fn, tracing_mode="symbolic")(x, y)
+
+    # Verify the graph contains sym_size operations
+    sym_size_nodes = [
+        node
+        for node in gm.graph.nodes
+        if node.op == "call_function" and "sym_size" in str(node.target)
+    ]
+    assert (
+        len(sym_size_nodes) > 0
+    ), "Test setup failed: graph should contain sym_size operations"
+
+    # Split on sigmoid which is the split point
+    split_ops = ["aten::sigmoid"]
+    split_gm, split_items = split_graph(gm, split_ops)
+
+    # After the fix, we expect 2 submodules:
+    # - subgraph 1: sigmoid (split point)
+    # - subgraph 2: sym_size ops + view + add (consumer subgraph)
+    # The original subgraph 0 becomes empty because sym_size ops are moved
+    # to the consumer subgraph, so it's not created.
+    assert len(split_items) == 2, f"Expected 2 submodules, got {len(split_items)}"
+
+    # Verify that one is the splitting graph (sigmoid) and one is not
+    splitting_items = [item for item in split_items if item.is_splitting_graph]
+    non_splitting_items = [item for item in split_items if not item.is_splitting_graph]
+    assert len(splitting_items) == 1, "Should have exactly 1 splitting subgraph"
+    assert len(non_splitting_items) == 1, "Should have exactly 1 non-splitting subgraph"
+
+    # The non-splitting subgraph should contain the sym_size operations
+    # (they were moved from before the split to after)
+    consumer_subgraph = non_splitting_items[0].graph
+    sym_size_in_consumer = [
+        node
+        for node in consumer_subgraph.graph.nodes
+        if node.op == "call_function" and "sym_size" in str(node.target)
+    ]
+    assert len(sym_size_in_consumer) > 0, (
+        "sym_size operations should be in the consumer subgraph (after split)"
+    )
+
+    # Verify functional correctness with same-shaped inputs
+    output_original = gm(x, y)
+    output_split = split_gm(x, y)
+    assert torch.allclose(output_original, output_split), "Output mismatch after split"
+
+
+def test_sym_size_with_multiple_consumers_in_different_subgraphs():
+    """
+    Test that when a sym_size result is used by consumers in multiple different
+    subgraphs, it's placed in the earliest consumer subgraph.
+    """
+
+    def model_fn(x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
+        # Get shape before any split points
+        size = x.shape[0]
+
+        # First split point
+        z1 = torch.sigmoid(x)
+
+        # Use size after first split
+        y1 = y[:size]
+
+        # Second split point
+        z2 = torch.sigmoid(z1)
+
+        # Use size again after second split
+        y2 = y[:size]
+
+        return z2 + y1 + y2
+
+    x = torch.randn(4, 8)
+    y = torch.randn(8, 8)
+    # Use symbolic tracing to generate sym_size operations
+    gm = make_fx(model_fn, tracing_mode="symbolic")(x, y)
+
+    # Split on both sigmoid operations
+    split_ops = ["aten::sigmoid"]
+    split_gm, split_items = split_graph(gm, split_ops)
+
+    # Verify functional correctness with same-shaped inputs
+    output_original = gm(x, y)
+    output_split = split_gm(x, y)
+    assert torch.allclose(output_original, output_split), "Output mismatch after split"
