@@ -111,6 +111,7 @@ from vllm.logprobs import Logprob, PromptLogprobs
 from vllm.lora.request import LoRARequest
 from vllm.multimodal import MultiModalDataDict
 from vllm.outputs import CompletionOutput, PoolingRequestOutput, RequestOutput
+from vllm.parser import DelegatingParser, Parser, ParserManager
 from vllm.pooling_params import PoolingParams
 from vllm.reasoning import ReasoningParser, ReasoningParserManager
 from vllm.sampling_params import BeamSearchParams, SamplingParams
@@ -313,6 +314,84 @@ class OpenAIServing:
         except Exception as e:
             raise TypeError(f"{reasoning_parser_name=} has not been registered") from e
         return parser
+
+    def _get_parser(
+        self,
+        tool_parser_name: str | None = None,
+        reasoning_parser_name: str | None = None,
+        enable_auto_tools: bool = False,
+    ) -> type[Parser] | None:
+        """
+        Get a unified Parser that handles both reasoning and tool parsing.
+
+        This method checks if a unified Parser exists that can handle both
+        reasoning extraction and tool call parsing. If no unified parser
+        exists, it creates a DelegatingParser that wraps the individual
+        reasoning and tool parsers.
+
+        Args:
+            tool_parser_name: The name of the tool parser.
+            reasoning_parser_name: The name of the reasoning parser.
+            enable_auto_tools: Whether auto tool choice is enabled.
+
+        Returns:
+            A Parser class, or None if neither parser is specified.
+        """
+        if not tool_parser_name and not reasoning_parser_name:
+            return None
+
+        # Strategy 1: If both names match, check for a unified parser with that name
+        if tool_parser_name and tool_parser_name == reasoning_parser_name:
+            try:
+                parser = ParserManager.get_parser(tool_parser_name)
+                logger.info(
+                    "Using unified parser '%s' for both reasoning and tool parsing.",
+                    tool_parser_name,
+                )
+                return parser
+            except KeyError:
+                pass  # No unified parser with this name
+
+        # Strategy 2: Check for parser with either name
+        for name in [tool_parser_name, reasoning_parser_name]:
+            if name:
+                try:
+                    parser = ParserManager.get_parser(name)
+                    logger.info(
+                        "Using unified parser '%s' for both reasoning and tool parsing.",
+                        name,
+                    )
+                    return parser
+                except KeyError:
+                    pass
+
+        # Strategy 3: Create a DelegatingParser with the individual parser classes
+        reasoning_parser_cls = self._get_reasoning_parser(reasoning_parser_name)
+        tool_parser_cls = self._get_tool_parser(tool_parser_name, enable_auto_tools)
+
+        if reasoning_parser_cls is None and tool_parser_cls is None:
+            return None
+
+        # Create a dynamic DelegatingParser subclass with the parser classes set
+        class _WrappedParser(DelegatingParser):
+            reasoning_parser_cls = None  # Will be set below
+            tool_parser_cls = None  # Will be set below
+
+            def __init__(self, tokenizer: TokenizerLike):
+                super().__init__(tokenizer)
+                # Instantiate the underlying parsers
+                if self.__class__.reasoning_parser_cls is not None:
+                    self._reasoning_parser = self.__class__.reasoning_parser_cls(
+                        tokenizer
+                    )
+                if self.__class__.tool_parser_cls is not None:
+                    self._tool_parser = self.__class__.tool_parser_cls(tokenizer)
+
+        # Set the class-level attributes
+        _WrappedParser.reasoning_parser_cls = reasoning_parser_cls
+        _WrappedParser.tool_parser_cls = tool_parser_cls
+
+        return _WrappedParser
 
     async def reset_mm_cache(self) -> None:
         self.input_processor.clear_mm_cache()

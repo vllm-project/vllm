@@ -37,6 +37,10 @@ class MiniMaxM2Parser(DelegatingParser):
        syntax.
     """
 
+    # Class-level parser classes for compatibility
+    reasoning_parser_cls = MiniMaxM2ReasoningParser
+    tool_parser_cls = MinimaxM2ToolParser
+
     def __init__(self, tokenizer: TokenizerLike):
         super().__init__(tokenizer)
 

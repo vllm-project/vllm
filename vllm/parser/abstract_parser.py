@@ -40,7 +40,18 @@ class Parser:
     1. Override the abstract methods directly for custom parsing logic
     2. Set `reasoning_parser` and `tool_parser` properties to delegate to
        existing parser implementations
+
+    Class Attributes:
+        reasoning_parser_cls: The ReasoningParser class to use (for compatibility
+            with code that needs the class, not instance).
+        tool_parser_cls: The ToolParser class to use (for compatibility with
+            code that needs the class, not instance).
     """
+
+    # Class-level parser classes for compatibility with existing patterns
+    # Subclasses should override these if they use specific parser classes
+    reasoning_parser_cls: type[ReasoningParser] | None = None
+    tool_parser_cls: type[ToolParser] | None = None
 
     def __init__(self, tokenizer: TokenizerLike):
         """
