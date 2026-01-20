@@ -189,9 +189,7 @@ def _get_model_architecture(model_config: ModelConfig) -> tuple[type[nn.Module],
             )
 
     convert_type = model_config.convert_type
-    if convert_type not in ["none", "mm_encoder_only"] and supports_multimodal(
-        model_cls
-    ):
+    if convert_type != "none" and supports_multimodal(model_cls):
         logger.debug_once("Detected conversion of Multi Modal model.")
         converted = try_create_mm_pooling_model_cls(model_cls)
         if converted is not None:
@@ -202,11 +200,6 @@ def _get_model_architecture(model_config: ModelConfig) -> tuple[type[nn.Module],
 
     if convert_type == "none":
         pass
-    elif convert_type == "mm_encoder_only":
-        logger.debug_once("Converting to mm encoder only model.")
-        from vllm.model_executor.models.adapters import as_mm_encoder_only_model
-
-        model_cls = as_mm_encoder_only_model(model_cls)
     elif convert_type == "embed":
         logger.debug_once("Converting to embedding model.")
         model_cls = as_embedding_model(model_cls)
