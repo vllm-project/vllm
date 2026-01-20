@@ -91,6 +91,7 @@ from vllm.multimodal.processing import (
 )
 from vllm.sequence import IntermediateTensors
 from vllm.utils.collection_utils import is_list_of
+from vllm.utils.math_utils import round_up
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 from .interfaces import (
@@ -682,9 +683,7 @@ class Qwen3VLProcessingInfo(Qwen2VLProcessingInfo):
         else:
             preprocessed_size = ImageSize(width=image_width, height=image_height)
 
-        padded_num_frames = (
-            (num_frames + temporal_patch_size - 1) // temporal_patch_size
-        ) * temporal_patch_size
+        padded_num_frames = round_up(num_frames, temporal_patch_size)
 
         grid_t = max(padded_num_frames // temporal_patch_size, 1)
         grid_h = preprocessed_size.height // patch_size + 1
