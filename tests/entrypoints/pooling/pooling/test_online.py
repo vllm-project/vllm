@@ -152,10 +152,6 @@ async def test_chat_request(server: RemoteOpenAIServer, model_name: str):
             "role": "user",
             "content": "Stars twinkle brightly in the night sky.",
         },
-        {
-            "role": "assistant",
-            "content": "",
-        },
     ]
 
     # test chat request basic usage
@@ -210,7 +206,7 @@ async def test_chat_request(server: RemoteOpenAIServer, model_name: str):
     assert output.object == "list"
     assert len(output.data) == 1
     assert output.model == MODEL_NAME
-    assert output.usage.prompt_tokens == 37
+    assert output.usage.prompt_tokens == 33
 
     # test continue_final_message
     # The continue_final_message parameter doesn't seem to be working with this model.
@@ -229,7 +225,7 @@ async def test_chat_request(server: RemoteOpenAIServer, model_name: str):
     assert output.object == "list"
     assert len(output.data) == 1
     assert output.model == MODEL_NAME
-    assert output.usage.prompt_tokens == 37
+    assert output.usage.prompt_tokens == 33
 
     # test add_special_tokens
     response = requests.post(
@@ -243,7 +239,7 @@ async def test_chat_request(server: RemoteOpenAIServer, model_name: str):
     assert output.object == "list"
     assert len(output.data) == 1
     assert output.model == MODEL_NAME
-    assert output.usage.prompt_tokens == 38
+    assert output.usage.prompt_tokens == 34
 
     # test continue_final_message with add_generation_prompt
     response = requests.post(
