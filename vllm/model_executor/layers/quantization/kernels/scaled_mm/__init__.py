@@ -225,7 +225,9 @@ def init_int8_linear_kernel(
         GroupShape.PER_TENSOR if is_static_input_scheme else GroupShape.PER_TOKEN
     )
     activation_scale_desc = ScaleDesc(
-        dtype=torch.float32, static=is_static_input_scheme, group_shape=activation_group_shape
+        dtype=torch.float32,
+        static=is_static_input_scheme,
+        group_shape=activation_group_shape,
     )
     activation_quant_key = QuantKey(
         dtype=torch.int8, scale=activation_scale_desc, symmetric=input_symmetric
