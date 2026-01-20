@@ -141,7 +141,7 @@ trtllm_fp4_block_scale_moe = _lazy_import_wrapper(
 )
 
 trtllm_mxintw4a16_block_scale_moe = _lazy_import_wrapper(
-    "flashinfer", "trtllm_mxintw4a16__moe"
+    "flashinfer", "trtllm_mxint4_block_scale_moe"
 )
 
 # Special case for autotune since it returns a context manager
