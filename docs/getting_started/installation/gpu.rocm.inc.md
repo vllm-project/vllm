@@ -218,7 +218,7 @@ docker run --rm -it \
 
 The [AMD Infinity hub for vLLM](https://hub.docker.com/r/rocm/vllm/tags) offers a prebuilt, optimized
 docker image designed for validating inference performance on the AMD Instinct™ MI300X accelerator.
-AMD also offers nightly prebuilt docker image from [Docker Hub](https://hub.docker.com/r/rocm/vllm-dev), which has vLLM and all its dependencies installed.
+AMD also offers nightly prebuilt docker image from [Docker Hub](https://hub.docker.com/r/rocm/vllm-dev), which has vLLM and all its dependencies installed. The entrypoint of this docker image is `/bin/bash` (different from the vLLM's Official Docker Image).
 
 ???+ console "Commands"
     ```bash
@@ -290,7 +290,7 @@ It provides flexibility to customize the build of docker image using the followi
 
 Their values can be passed in when running `docker build` with `--build-arg` options.
 
-To build vllm on ROCm 7.0 for MI200 and MI300 series, you can use the default:
+To build vllm on ROCm 7.0 for MI200 and MI300 series, you can use the default (which build a docker image with `vllm serve` as entrypoint):
 
 ???+ console "Commands"
     ```bash
@@ -298,6 +298,7 @@ To build vllm on ROCm 7.0 for MI200 and MI300 series, you can use the default:
     ```
 
 To run the above docker image `vllm-rocm`, use the below command:
+
 
 ???+ console "Commands"
     ```bash
@@ -310,7 +311,8 @@ To run the above docker image `vllm-rocm`, use the below command:
     --device /dev/kfd \
     --device /dev/dri \
     -v <path/to/model>:/app/model \
-    vllm-rocm
+    vllm-rocm \
+    --model Qwen/Qwen3-0.6B
     ```
 
 Where the `<path/to/model>` is the location where the model is stored, for example, the weights for llama2 or llama3 models.
