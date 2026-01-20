@@ -278,6 +278,15 @@ class MoRIIOConnectorScheduler:
         self._reqs_need_send: dict[ReqId, float] = {}
         self.paths: dict[str, zmq.Socket] = {}
 
+    @staticmethod
+    def _get_external_req_id(request: "Request") -> str:
+        """Prefer external_req_id when available to align P/D request IDs."""
+        params = getattr(request, "kv_transfer_params", None) or {}
+        external_req_id = params.get("external_req_id") or getattr(
+            request, "external_req_id", None
+        )
+        return external_req_id or request.request_id
+
     def get_num_new_matched_tokens(
         self,
         request: "Request",
@@ -338,9 +347,11 @@ class MoRIIOConnectorScheduler:
         params = request.kv_transfer_params
         if not params:
             return
+        req_id = self._get_external_req_id(request)
+        params.setdefault("external_req_id", req_id)
         if params.get("do_remote_decode"):
             local_block_ids = blocks.get_block_ids()[0]
-            self._reqs_need_save[request.request_id] = (request, local_block_ids)
+            self._reqs_need_save[req_id] = (request, local_block_ids)
 
         if params is not None and params.get("do_remote_prefill"):
             if self.mode == MoRIIOMode.READ:
@@ -361,7 +372,7 @@ class MoRIIOConnectorScheduler:
                         else:
                             local_block_ids = remote_block_ids[-len(local_block_ids) :]
 
-                        self._reqs_need_recv[request.request_id] = (
+                        self._reqs_need_recv[req_id] = (
                             request,
                             local_block_ids,
                         )
@@ -385,7 +396,7 @@ class MoRIIOConnectorScheduler:
                     ] + get_port_offset(remote_dp_rank, tp_index)
 
                     self.send_notify_block(
-                        req_id=request.request_id,
+                        req_id=req_id,
                         block_notify_list=blocks.get_block_ids()[0],
                         host=params.get("remote_host"),
                         port=target_port,
@@ -407,7 +418,6 @@ class MoRIIOConnectorScheduler:
 
             if get_role() == ROLE.CONSUMER:
                 for new_req in scheduler_output.scheduled_new_reqs:
-                    red_id = new_req.req_id
                     local_block_ids = list(new_req.block_ids)[0]
                     assert new_req.sampling_params is not None, (
                         f"sampling_params is None for req {new_req.req_id}"
@@ -420,6 +430,7 @@ class MoRIIOConnectorScheduler:
                         if new_req.sampling_params.extra_args
                         else {}
                     )
+                    red_id = kv_transfer_params.get("external_req_id", new_req.req_id)
                     meta.add_new_req(
                         red_id,
                         local_block_ids,
@@ -515,6 +526,7 @@ class MoRIIOConnectorScheduler:
         )
         if not params:
             return False, None
+        req_id = self._get_external_req_id(request)
 
         if params.get("do_remote_prefill"):
             # If do_remote_prefill is still True when the request is finished,
@@ -523,7 +535,7 @@ class MoRIIOConnectorScheduler:
             # To avoid stranding the prefill blocks in the prefill instance,
             # we must add empty block_ids to _reqs_need_recv so that our
             # worker side will notify and free blocks in the prefill instance.
-            self._reqs_need_recv[request.request_id] = (request, [])
+            self._reqs_need_recv[req_id] = (request, [])
             params["do_remote_prefill"] = False
             return False, None
 
@@ -540,7 +552,7 @@ class MoRIIOConnectorScheduler:
 
         if delay_free_blocks:
             # Prefill request on remote. It will be read from D upon completion
-            self._reqs_need_send[request.request_id] = (
+            self._reqs_need_send[req_id] = (
                 time.perf_counter()
                 + MoRIIOConstants.VLLM_MORI_READ_ABORT_REQUEST_TIMEOUT
             )

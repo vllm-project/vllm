@@ -1759,14 +1759,41 @@ class Scheduler(SchedulerInterface):
         if self.connector is not None:
             self.connector.update_connector_output(kv_connector_output)
 
+        def _resolve_internal_req_id(req_id: str) -> str | None:
+            if req_id in self.requests:
+                return req_id
+            for internal_id, request in self.requests.items():
+                if getattr(request, "external_req_id", None) == req_id:
+                    return internal_id
+                if internal_id.startswith(f"{req_id}-"):
+                    return internal_id
+            return None
+
         # KV Connector:: update recv and send status from last step.
         for req_id in kv_connector_output.finished_recving or ():
-            logger.debug("Finished recving KV transfer for request %s", req_id)
-            self.finished_recving_kv_req_ids.add(req_id)
+            internal_id = _resolve_internal_req_id(req_id)
+            if internal_id is None:
+                logger.warning(
+                    "Finished recving KV transfer for unknown request %s",
+                    req_id,
+                )
+                continue
+            logger.debug(
+                "Finished recving KV transfer for request %s", internal_id
+            )
+            self.finished_recving_kv_req_ids.add(internal_id)
         for req_id in kv_connector_output.finished_sending or ():
-            logger.debug("Finished sending KV transfer for request %s", req_id)
-            assert req_id in self.requests
-            self._free_blocks(self.requests[req_id])
+            internal_id = _resolve_internal_req_id(req_id)
+            if internal_id is None:
+                logger.warning(
+                    "Finished sending KV transfer for unknown request %s",
+                    req_id,
+                )
+                continue
+            logger.debug(
+                "Finished sending KV transfer for request %s", internal_id
+            )
+            self._free_blocks(self.requests[internal_id])
 
     def _update_requests_with_invalid_blocks(
         self,
