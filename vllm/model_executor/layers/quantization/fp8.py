@@ -23,6 +23,7 @@ from vllm.model_executor.layers.fused_moe import (
     FusedMoEMethodBase,
     FusedMoEPermuteExpertsUnpermute,
     FusedMoEPrepareAndFinalize,
+    FusedMoERouter,
     FusedMoeWeightScaleSupported,
 )
 from vllm.model_executor.layers.fused_moe.config import (
@@ -636,6 +637,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             block_quant=self.block_quant,
             tp_size=layer.moe_parallel_config.tp_size,
             with_lora_support=self.moe.is_lora_enabled,
+            is_act_and_mul=self.moe.is_act_and_mul,
         )
 
         if self.fp8_backend == Fp8MoeBackend.FLASHINFER_CUTLASS:
@@ -997,6 +999,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
     def apply(
         self,
         layer: FusedMoE,
+        router: FusedMoERouter,
         x: torch.Tensor,
         router_logits: torch.Tensor,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
@@ -1051,7 +1054,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                     apply_router_weight_on_input=layer.apply_router_weight_on_input,
                 )
 
-        topk_weights, topk_ids = layer.select_experts(
+        topk_weights, topk_ids = router.select_experts(
             hidden_states=x,
             router_logits=router_logits,
         )

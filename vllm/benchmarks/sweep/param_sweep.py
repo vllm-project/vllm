@@ -74,7 +74,8 @@ class ParameterSweepItem(dict[str, object]):
         representation of all parameters.
         """
         if "_benchmark_name" in self:
-            return self["_benchmark_name"]
+            return str(self["_benchmark_name"])
+
         return self.as_text(sep="-")
 
     # In JSON, we prefer "_"

@@ -4,7 +4,7 @@ from abc import ABC, abstractmethod
 from collections.abc import Callable
 from dataclasses import dataclass
 from enum import Enum
-from math import prod, sqrt
+from math import prod
 from typing import final
 
 import torch
@@ -18,6 +18,7 @@ from vllm.model_executor.layers.fused_moe.config import (
 )
 from vllm.model_executor.layers.fused_moe.utils import (
     _resize_cache,
+    apply_moe_activation,
     count_expert_num_tokens,
     disable_inplace,
 )
@@ -542,6 +543,7 @@ class FusedMoEPermuteExpertsUnpermute(ABC):
         global_num_experts: int,
         local_num_experts: int,
         expert_tokens_meta: ExpertTokensMetadata | None,
+        activation: str,
     ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...]]:
         """
         Compute the shapes for the temporary and final outputs of the two gemms
@@ -572,40 +574,31 @@ class FusedMoEPermuteExpertsUnpermute(ABC):
         """
         raise NotImplementedError
 
+    @staticmethod
+    def adjust_N_for_activation(N: int, activation: str) -> int:
+        """
+        Calculate the output dimension for the activation function.
+
+        For *_no_mul activations (e.g. relu2_no_mul),
+        there's no gate/up split, so output size equals input size (N).
+
+        For regular gated activations (e.g., silu, gelu, swigluoai),
+        output size is N // 2 due to gate × activation(up) multiplication.
+
+        Args:
+            N: The intermediate size (width of w1/w3 weights).
+            activation: The activation function name.
+
+        Returns:
+            The output dimension after activation.
+        """
+        is_no_mul = activation.endswith("_no_mul")
+        return N if is_no_mul else N // 2
+
     def activation(
         self, activation: str, output: torch.Tensor, input: torch.Tensor
     ) -> None:
-        # Fused activations (SwiGLU-style): output is half the size of input
-        if activation == "silu":
-            assert output.size(-1) * 2 == input.size(-1)
-            torch.ops._C.silu_and_mul(output, input)
-        elif activation == "gelu":
-            assert output.size(-1) * 2 == input.size(-1)
-            torch.ops._C.gelu_and_mul(output, input)
-        elif activation == "swigluoai":
-            # alpha = 1.702, limit = 7.0
-            assert output.size(-1) * 2 == input.size(-1)
-            torch.ops._C.swigluoai_and_mul(output, input)
-        # Non-fused activations (is_act_and_mul=False): output same size as input
-        elif activation == "silu_no_mul":
-            assert output.size(-1) == input.size(-1)
-            # Use out= argument to avoid intermediate tensor
-            torch.sigmoid(input, out=output)
-            output.mul_(input)
-        elif activation == "gelu_no_mul":
-            assert output.size(-1) == input.size(-1)
-            # GELU(x) = 0.5 * x * (1 + erf(x / sqrt(2)))
-            # Use out= and in-place ops to avoid intermediate tensors
-            output.copy_(input).div_(sqrt(2))
-            torch.erf(output, out=output)
-            output.add_(1).mul_(input).mul_(0.5)
-        elif activation == "relu2_no_mul":
-            assert output.size(-1) == input.size(-1)
-            # ReLU²: clamp has out=, then in-place square
-            torch.clamp(input, min=0, out=output)
-            output.square_()
-        else:
-            raise ValueError(f"Unsupported FusedMoe activation: {activation}")
+        apply_moe_activation(activation, output, input)
 
     def enable_chunking(self):
         return (
@@ -782,6 +775,7 @@ class FusedMoEModularKernel(torch.nn.Module):
         global_num_experts: int,
         local_num_experts: int,
         expert_tokens_meta: ExpertTokensMetadata | None,
+        activation: str,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
         Allocate temporary and output buffers for the fused experts op.
@@ -817,6 +811,7 @@ class FusedMoEModularKernel(torch.nn.Module):
                     # amount of workspace. Mark it None, so we allocate for
                     # the worst-case scenario.
                     expert_tokens_meta=None,
+                    activation=activation,
                 )
             )
 
@@ -835,6 +830,7 @@ class FusedMoEModularKernel(torch.nn.Module):
             global_num_experts,
             local_num_experts,
             expert_tokens_meta,
+            activation,
         )
 
         # Get final output shape based on the full M size.
@@ -846,20 +842,23 @@ class FusedMoEModularKernel(torch.nn.Module):
             global_num_experts,
             local_num_experts,
             expert_tokens_meta,
+            activation,
         )
 
         # We can reuse the memory between cache1 and cache3 because by the
         # time we need cache3, we're done with cache1.
         # Construct the entire output that can then be processed in chunks.
-        # Reuse workspace13 for the output in the non-chunked case as long
-        # as it is large enough. This will not always be the case for standard
+        # Reuse workspace13 for the output in the non-chunked case.
+        # This will not always be the case for standard
         # format experts and with experts that have empty workspaces.
-        if num_chunks == 1 and prod(workspace13_shape) >= prod(fused_out_shape):
-            workspace13, workspace2 = current_workspace_manager().get_simultaneous(
-                (workspace13_shape, workspace_dtype),
+        if num_chunks == 1:
+            max_shape_size = max(prod(workspace13_shape), prod(fused_out_shape))
+            common_workspace, workspace2 = current_workspace_manager().get_simultaneous(
+                ((max_shape_size,), workspace_dtype),
                 (workspace2_shape, workspace_dtype),
             )
-            fused_out = _resize_cache(workspace13, fused_out_shape)
+            workspace13 = _resize_cache(common_workspace, workspace13_shape)
+            fused_out = _resize_cache(common_workspace, fused_out_shape)
         else:
             workspace13, workspace2, fused_out = (
                 current_workspace_manager().get_simultaneous(
@@ -1064,6 +1063,7 @@ class FusedMoEModularKernel(torch.nn.Module):
                 global_num_experts,
                 local_num_experts,
                 expert_tokens_meta,
+                activation,
             )
 
         for chunk_idx in range(num_chunks):

@@ -32,6 +32,9 @@ else:
 
 logger = init_logger(__name__)
 
+# Explicitly exports Range
+__all__ = ["Range"]
+
 
 class CompilationMode(enum.IntEnum):
     """The compilation approach used for torch.compile-based compilation of the
@@ -275,7 +278,11 @@ class DynamicShapesConfig:
     artifacts also.
     When type is backed, aot_compile must be disabled for this mode to work.
     until this change picked up https://github.com/pytorch/pytorch/pull/169239.
+    """
 
+    assume_32_bit_indexing: bool = True
+    """
+    whether all tensor sizes can use 32 bit indexing.
     """
 
     def compute_hash(self) -> str:
@@ -404,7 +411,8 @@ class CompilationConfig:
     - 'none,+op1,+op2' to enable only op1 and op2
 
     By default, all custom ops are enabled when running without Inductor and
-    disabled when running with Inductor: mode>=VLLM_COMPILE and backend="inductor".
+    disabled when running with Inductor: mode>CompilationMode.NONE and
+    backend="inductor".
     Inductor generates (fused) Triton kernels for disabled custom ops."""
     splitting_ops: list[str] | None = None
     """A list of ops to exclude from cudagraphs, used in piecewise compilation.
@@ -426,8 +434,9 @@ class CompilationConfig:
     If empty list [], no ops are excluded (suitable for full cudagraphs)."""
     compile_mm_encoder: bool = False
     """Whether or not to compile the multimodal encoder.
-    Currently, this only works for `Qwen2_5_vl` on selected platforms.
-    Disabled by default until more models are supported/tested to work."""
+    Currently, this only works for `Qwen2_5_vl` and `mLLaMa4` models
+    on selected platforms. Disabled by default until more models
+    are supported/tested to work."""
 
     # Inductor capture
     compile_sizes: list[int | str] | None = None
@@ -635,6 +644,7 @@ class CompilationConfig:
             "compilation_time",
             "static_forward_context",
             "pass_config",  # handled separately below
+            "dynamic_shapes_config",  # handled separately below
         }
 
         from vllm.config.utils import get_hash_factors, hash_factors
@@ -642,6 +652,7 @@ class CompilationConfig:
         factors = get_hash_factors(self, ignored_factors)
 
         factors["pass_config"] = self.pass_config.compute_hash()
+        factors["dynamic_shapes_config"] = self.dynamic_shapes_config.compute_hash()
         return hash_factors(factors)
 
     def __repr__(self) -> str:
@@ -898,6 +909,20 @@ class CompilationConfig:
         # May get recomputed in the model runner if adjustment is needed for spec-decode
         self.compute_bs_to_padded_graph_size()
 
+        # Validate that compile_sizes won't be changed by padding.
+        # Only validate when cudagraphs are actually being used.
+        if self.compile_sizes and self.cudagraph_mode != CUDAGraphMode.NONE:
+            for size in self.compile_sizes:
+                if size <= self.max_cudagraph_capture_size:
+                    padded = self.bs_to_padded_graph_size[size]
+                    if padded != size:
+                        raise ValueError(
+                            f"compile_sizes contains {size} which would be "
+                            f"padded to {padded}. All compile_sizes must be "
+                            "values that won't be changed by cudagraph padding. "
+                            "Use values from cudagraph_capture_sizes."
+                        )
+
     def set_splitting_ops_for_v1(
         self, all2all_backend: str, data_parallel_size: int = 1
     ):
@@ -938,8 +963,8 @@ class CompilationConfig:
                     )
                 if self.cudagraph_mode == CUDAGraphMode.PIECEWISE:
                     logger.warning_once(
-                        "Piecewise compilation with empty splitting_ops do not"
-                        "contains piecewise cudagraph. Setting cudagraph_"
+                        "Piecewise compilation with empty splitting_ops does not "
+                        "contain piecewise cudagraph. Setting cudagraph_"
                         "mode to NONE. Hint: If you are using attention "
                         "backends that support cudagraph, consider manually "
                         "setting cudagraph_mode to FULL or FULL_DECODE_ONLY "
@@ -948,8 +973,8 @@ class CompilationConfig:
                     self.cudagraph_mode = CUDAGraphMode.NONE
                 elif self.cudagraph_mode == CUDAGraphMode.FULL_AND_PIECEWISE:
                     logger.warning_once(
-                        "Piecewise compilation with empty splitting_ops do "
-                        "not contains piecewise cudagraph. Setting "
+                        "Piecewise compilation with empty splitting_ops does "
+                        "not contain piecewise cudagraph. Setting "
                         "cudagraph_mode to FULL."
                     )
                     self.cudagraph_mode = CUDAGraphMode.FULL

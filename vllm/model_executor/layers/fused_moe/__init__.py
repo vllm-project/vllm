@@ -20,6 +20,9 @@ from vllm.model_executor.layers.fused_moe.modular_kernel import (
     FusedMoEPermuteExpertsUnpermute,
     FusedMoEPrepareAndFinalize,
 )
+from vllm.model_executor.layers.fused_moe.router.fused_moe_router import (
+    FusedMoERouter,
+)
 from vllm.model_executor.layers.fused_moe.shared_fused_moe import SharedFusedMoE
 from vllm.model_executor.layers.fused_moe.unquantized_fused_moe_method import (
     UnquantizedFusedMoEMethod,
@@ -48,6 +51,7 @@ def get_config() -> dict[str, Any] | None:
 
 __all__ = [
     "FusedMoE",
+    "FusedMoERouter",
     "FusedMoEConfig",
     "FusedMoEMethodBase",
     "UnquantizedFusedMoEMethod",
@@ -79,11 +83,16 @@ if HAS_TRITON:
         BatchedTritonExperts,
     )
     from vllm.model_executor.layers.fused_moe.fused_moe import (
-        GroupedTopk,
         TritonExperts,
+        TritonWNA16Experts,
         fused_experts,
-        fused_topk,
         get_config_file_name,
+    )
+    from vllm.model_executor.layers.fused_moe.router.fused_topk_router import (
+        fused_topk,
+    )
+    from vllm.model_executor.layers.fused_moe.router.grouped_topk_router import (
+        GroupedTopk,
     )
     from vllm.model_executor.layers.fused_moe.triton_deep_gemm_moe import (
         TritonOrDeepGemmExperts,
@@ -99,6 +108,7 @@ if HAS_TRITON:
         "CutlassBatchedExpertsFp8",
         "CutlassExpertsW4A8Fp8",
         "TritonExperts",
+        "TritonWNA16Experts",
         "BatchedTritonExperts",
         "DeepGemmExperts",
         "BatchedDeepGemmExperts",

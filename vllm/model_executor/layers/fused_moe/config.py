@@ -117,8 +117,12 @@ class RoutingMethodType(IntEnum):
     RenormalizeNaive = (4,)
     # TopK: TopK (no softmax)
     TopK = (5,)
+    # Custom
+    Custom = (6,)
+    # Simulated
+    Simulated = (7,)
     # Unspecified
-    Unspecified = 6.0
+    Unspecified = 8.0
 
 
 @dataclass
@@ -200,11 +204,6 @@ class FusedMoEQuantConfig:
     _a2: FusedMoEQuantDesc
     _w1: FusedMoEQuantDesc
     _w2: FusedMoEQuantDesc
-
-    # Whether activation is fused with gate multiplication (SwiGLU-style).
-    # When True: intermediate_size = N // 2 (gate and up are combined)
-    # When False: intermediate_size = N (no gate multiplication)
-    is_act_and_mul: bool = True
 
     def __post_init__(self):
         assert not self.per_act_token_quant or self.block_shape is None, (
@@ -444,7 +443,6 @@ class FusedMoEQuantConfig:
         w1_zp: torch.Tensor | None = None,
         w2_zp: torch.Tensor | None = None,
         weight_dtype: torch.dtype | str | None = None,
-        is_act_and_mul: bool = True,
     ) -> "FusedMoEQuantConfig":
         """
         General builder function for a FusedMoEQuantConfig.
@@ -504,7 +502,6 @@ class FusedMoEQuantConfig:
             _w2=FusedMoEQuantDesc(
                 weight_dtype, w_shape, w2_scale, g2_alphas, w2_zp, w2_bias
             ),
-            is_act_and_mul=is_act_and_mul,
         )
         assert quant_config.per_act_token_quant == per_act_token_quant
         assert quant_config.per_out_ch_quant == per_out_ch_quant
@@ -836,7 +833,6 @@ def awq_marlin_moe_quant_config(
 def biased_moe_quant_config(
     w1_bias: torch.Tensor | None,
     w2_bias: torch.Tensor | None,
-    is_act_and_mul: bool = True,
 ) -> FusedMoEQuantConfig:
     """
     Construct a quant config for unquantized activations with biases.
@@ -846,7 +842,6 @@ def biased_moe_quant_config(
         _a2=FusedMoEQuantDesc(),
         _w1=FusedMoEQuantDesc(bias=w1_bias),
         _w2=FusedMoEQuantDesc(bias=w2_bias),
-        is_act_and_mul=is_act_and_mul,
     )
 
 
