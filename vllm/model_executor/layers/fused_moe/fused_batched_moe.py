@@ -5,6 +5,12 @@
 import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
+
+# Import the fused silu+mul+fp8_quant kernel for batched masked format.
+# This wrapper calls the Triton kernel on non-SM80+ platforms (including ROCm).
+from vllm.model_executor.layers.fused_moe.batched_masked_silu_mul_quant import (
+    silu_mul_fp8_quant,
+)
 from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
 from vllm.model_executor.layers.fused_moe.fused_moe import try_get_optimal_moe_config
 from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
@@ -19,16 +25,10 @@ from vllm.model_executor.layers.fused_moe.utils import (
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import group_broadcast
 from vllm.triton_utils import tl, triton
+from vllm.utils.deep_gemm import DeepGemmQuantScaleFMT
 
 # Default group size for FP8 block quantization
 FUSED_QUANT_GROUP_SIZE = 128
-
-# Import the fused silu+mul+fp8_quant wrapper from batched_deep_gemm_moe.
-# This wrapper calls the Triton kernel on non-SM80+ platforms (including ROCm).
-from vllm.model_executor.layers.fused_moe.batched_deep_gemm_moe import (
-    persistent_masked_m_silu_mul_quant,
-)
-from vllm.utils.deep_gemm import DeepGemmQuantScaleFMT
 
 
 @triton.jit
@@ -1004,7 +1004,7 @@ class BatchedTritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
         if use_fused_silu_mul_quant:
             # Fused path: silu + mul + fp8 quant in one kernel
             # intermediate_cache1 has shape (E, max_num_tokens, N) where N = 2*H
-            qintermediate_cache2, a2q_scale = persistent_masked_m_silu_mul_quant(
+            qintermediate_cache2, a2q_scale = silu_mul_fp8_quant(
                 intermediate_cache1,
                 expert_num_tokens,
                 group_size=FUSED_QUANT_GROUP_SIZE,
