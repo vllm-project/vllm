@@ -154,7 +154,7 @@ def pplx_cutlass_moe(
             routing_method=RoutingMethodType.Llama4,
         )
 
-    experts = CutlassBatchedExpertsFp8.make_batched_experts(
+    experts = CutlassBatchedExpertsFp8(
         moe_config=make_moe_config(),
         quant_config=fp8_w8a8_moe_quant_config(
             per_act_token_quant=per_act_token,

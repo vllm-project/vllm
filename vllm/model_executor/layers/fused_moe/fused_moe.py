@@ -2269,6 +2269,6 @@ def modular_triton_fused_moe(
 ) -> mk.FusedMoEModularKernel:
     return mk.FusedMoEModularKernel(
         MoEPrepareAndFinalizeNoEP(),
-        TritonExperts.make_standard_experts(moe_config, quant_config),
+        TritonExperts(moe_config, quant_config),
         shared_experts,
     )

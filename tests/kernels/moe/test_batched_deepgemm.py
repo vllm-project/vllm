@@ -68,7 +68,7 @@ def test_batched_deepgemm_vs_triton(
     )
 
     # triton (reference)
-    triton_experts = BatchedTritonExperts.make_batched_experts(
+    triton_experts = BatchedTritonExperts(
         max_num_tokens=max_num_tokens,
         num_dispatchers=1,
         quant_config=quant_config,
@@ -87,7 +87,7 @@ def test_batched_deepgemm_vs_triton(
     )
 
     # deepgemm
-    deepgemm_experts = BatchedDeepGemmExperts.make_batched_experts(
+    deepgemm_experts = BatchedDeepGemmExperts(
         max_num_tokens=max_num_tokens,
         num_dispatchers=1,
         quant_config=quant_config,

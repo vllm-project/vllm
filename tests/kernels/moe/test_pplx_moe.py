@@ -581,7 +581,7 @@ def pplx_moe(
         a2_scale=a2_scale_chunk,
     )
 
-    experts = BatchedTritonExperts.make_batched_experts(
+    experts = BatchedTritonExperts(
         max_num_tokens=max_num_tokens,
         num_dispatchers=prepare_finalize.num_dispatchers(),
         quant_config=quant_config,

@@ -188,7 +188,7 @@ def make_ll_modular_kernel(
         block_shape=test_config.block_size,
     )
 
-    fused_experts = BatchedDeepGemmExperts.make_batched_experts(
+    fused_experts = BatchedDeepGemmExperts(
         max_num_tokens=max_tokens_per_rank,
         num_dispatchers=pgi.world_size // dp_size,
         quant_config=quant_config,
@@ -220,7 +220,7 @@ def make_ht_modular_kernel(
         block_shape=test_config.block_size,
     )
 
-    fused_experts = DeepGemmExperts.make_standard_experts(
+    fused_experts = DeepGemmExperts(
         moe_config=make_dummy_moe_config(),
         quant_config=quant_config,
     )

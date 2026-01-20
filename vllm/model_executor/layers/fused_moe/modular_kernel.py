@@ -380,15 +380,32 @@ class FusedMoEPermuteExpertsUnpermute(ABC):
         self,
         moe_config: FusedMoEConfig,
         quant_config: FusedMoEQuantConfig,
+        max_num_tokens: int | None = None,
+        num_dispatchers: int | None = None,
     ):
         """
         moe_config: MoE layer configuration.
         quant_config: Quantization parameters for this experts instance.
         """
+        if self.activation_format() == FusedMoEActivationFormat.Standard and (
+            max_num_tokens is not None or num_dispatchers is not None
+        ):
+            raise ValueError(
+                "max_num_tokens and num_dispatchers should only be set for "
+                "BatchedExperts activation format."
+            )
+        elif self.activation_format() == FusedMoEActivationFormat.BatchedExperts and (
+            max_num_tokens is None or num_dispatchers is None
+        ):
+            raise ValueError(
+                "max_num_tokens and num_dispatchers must be set for "
+                "BatchedExperts activation format."
+            )
+
         self.moe_config = moe_config
         self.quant_config = quant_config
-        self._max_num_tokens: int | None = None
-        self._num_dispatchers: int | None = None
+        self.max_num_tokens = max_num_tokens
+        self.num_dispatchers = num_dispatchers
 
     @staticmethod
     def expects_unquantized_inputs(
@@ -402,57 +419,6 @@ class FusedMoEPermuteExpertsUnpermute(ABC):
         Sample subclasses that override are AITER and FlashInfer CUTLASS.
         """
         return False
-
-    def _init_batched_experts_addl_params(
-        self,
-        max_num_tokens: int,
-        num_dispatchers: int,
-    ):
-        """
-        Initialize any additional parameters needed for batched experts.
-        """
-        self._max_num_tokens = max_num_tokens
-        self._num_dispatchers = num_dispatchers
-
-    @property
-    def max_num_tokens(self) -> int:
-        if self._max_num_tokens is None:
-            raise AttributeError("max_num_tokens only valid for BatchedExperts")
-        return self._max_num_tokens
-
-    @property
-    def num_dispatchers(self) -> int:
-        if self._num_dispatchers is None:
-            raise AttributeError("num_dispatchers only valid for BatchedExperts")
-        return self._num_dispatchers
-
-    @classmethod
-    def make_standard_experts(
-        cls,
-        moe_config: FusedMoEConfig,
-        quant_config: FusedMoEQuantConfig,
-    ) -> "FusedMoEPermuteExpertsUnpermute":
-        """
-        Factory method to create an instance of this class.
-        """
-        assert cls.activation_format() == FusedMoEActivationFormat.Standard
-        return cls(moe_config, quant_config)
-
-    @classmethod
-    def make_batched_experts(
-        cls,
-        moe_config: FusedMoEConfig,
-        quant_config: FusedMoEQuantConfig,
-        max_num_tokens: int,
-        num_dispatchers: int,
-    ) -> "FusedMoEPermuteExpertsUnpermute":
-        """
-        Factory method to create an instance of this class.
-        """
-        assert cls.activation_format() == FusedMoEActivationFormat.BatchedExperts
-        instance = cls(moe_config, quant_config)
-        instance._init_batched_experts_addl_params(max_num_tokens, num_dispatchers)
-        return instance
 
     @staticmethod
     @abstractmethod

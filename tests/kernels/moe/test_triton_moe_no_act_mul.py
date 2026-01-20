@@ -79,7 +79,7 @@ def test_triton_experts_no_mul_activation(
         m, n, k, NUM_EXPERTS, topk
     )
 
-    experts = TritonExperts.make_standard_experts(
+    experts = TritonExperts(
         moe_config=make_dummy_moe_config,
         quant_config=FUSED_MOE_UNQUANTIZED_CONFIG,
     )
@@ -155,7 +155,7 @@ def test_workspace_shapes_no_mul_vs_gated():
 
     M, N, K, topk = 64, 256, 128, 2
 
-    experts = TritonExperts.make_standard_experts(
+    experts = TritonExperts(
         moe_config=make_dummy_moe_config(),
         quant_config=FUSED_MOE_UNQUANTIZED_CONFIG,
     )
@@ -194,7 +194,7 @@ def test_adjust_n_for_activation():
     """Test the adjust_N_for_activation method."""
     from vllm.model_executor.layers.fused_moe.fused_moe import TritonExperts
 
-    experts = TritonExperts.make_standard_experts(
+    experts = TritonExperts(
         moe_config=make_dummy_moe_config(),
         quant_config=FUSED_MOE_UNQUANTIZED_CONFIG,
     )

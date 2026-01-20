@@ -464,14 +464,14 @@ def make_fp8_moe_kernel_for_mkm(
     if prepare_finalize.activation_format == mk.FusedMoEActivationFormat.BatchedExperts:
         max_num_tokens_per_rank = prepare_finalize.max_num_tokens_per_rank()
         assert max_num_tokens_per_rank is not None
-        experts = experts_cls.make_batched_experts(
+        experts = experts_cls(
             moe_config=moe_config,
             quant_config=quant_config,
             max_num_tokens=max_num_tokens_per_rank,
             num_dispatchers=prepare_finalize.num_dispatchers(),
         )
     else:
-        experts = experts_cls.make_standard_experts(
+        experts = experts_cls(
             moe_config=moe_config,
             quant_config=quant_config,
         )
@@ -505,7 +505,7 @@ def make_fp8_moe_kernel(
     )
 
     # Create Experts.
-    experts = experts_cls.make_standard_experts(
+    experts = experts_cls(
         moe_config=moe_config,
         quant_config=moe_quant_config,
     )

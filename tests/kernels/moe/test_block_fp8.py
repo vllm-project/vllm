@@ -257,7 +257,7 @@ def test_w8a8_block_fp8_deep_gemm_fused_moe(M, N, K, E, topk, seed, monkeypatch)
 
     deep_gemm_experts = mk.FusedMoEModularKernel(
         prepare_finalize=MoEPrepareAndFinalizeNoEP(),
-        fused_experts=TritonOrDeepGemmExperts.make_standard_experts(
+        fused_experts=TritonOrDeepGemmExperts(
             moe_config=make_dummy_moe_config(),
             quant_config=quant_config,
         ),

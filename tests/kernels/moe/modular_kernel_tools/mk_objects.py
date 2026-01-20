@@ -442,10 +442,10 @@ def make_fused_experts(
         == mk.FusedMoEActivationFormat.BatchedExperts
     ):
         print(f"Making {fused_experts_type.__class__.__name__} {batch_kwargs} ...")
-        experts = fused_experts_type.make_batched_experts(**batch_kwargs)
+        experts = fused_experts_type(**batch_kwargs)
     else:
         print(f"Making {fused_experts_type.__class__.__name__} {batch_kwargs} ...")
-        experts = fused_experts_type.make_standard_experts(**kwargs)
+        experts = fused_experts_type(**kwargs)
 
     torch.set_printoptions(threshold=1000, edgeitems=5, linewidth=80)
 

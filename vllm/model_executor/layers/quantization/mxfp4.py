@@ -849,7 +849,7 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
                 max_num_tokens_per_rank = prepare_finalize.max_num_tokens_per_rank()
                 assert max_num_tokens_per_rank is not None
                 assert self.moe_quant_config is not None
-                return BatchedMarlinExperts.make_batched_experts(
+                return BatchedMarlinExperts(
                     max_num_tokens=max_num_tokens_per_rank,
                     num_dispatchers=prepare_finalize.num_dispatchers(),
                     quant_config=self.moe_quant_config,

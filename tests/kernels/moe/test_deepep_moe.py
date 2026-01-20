@@ -167,14 +167,14 @@ def make_modular_kernel(
 
     if low_latency_mode:
         assert not quant_config.per_act_token_quant, "not supported in ll mode"
-        fused_experts = BatchedTritonExperts.make_batched_experts(
+        fused_experts = BatchedTritonExperts(
             max_num_tokens=MAX_TOKENS_PER_RANK,
             num_dispatchers=num_dispatchers,
             moe_config=moe_config,
             quant_config=quant_config,
         )
     else:
-        fused_experts = TritonExperts.make_standard_experts(
+        fused_experts = TritonExperts(
             moe_config=moe_config,
             quant_config=quant_config,
         )

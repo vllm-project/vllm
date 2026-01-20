@@ -139,7 +139,7 @@ def make_unquantized_moe_kernel(
 
         kernel = mk.FusedMoEModularKernel(
             MoEPrepareAndFinalizeNoEP(),
-            FlashInferExperts.make_standard_experts(
+            FlashInferExperts(
                 moe_config=moe_config,
                 quant_config=quant_config,
             ),
@@ -152,7 +152,7 @@ def make_unquantized_moe_kernel(
 
         kernel = mk.FusedMoEModularKernel(
             MoEPrepareAndFinalizeNoEP(),
-            AiterExperts.make_standard_experts(
+            AiterExperts(
                 moe_config=moe_config,
                 quant_config=quant_config,
             ),
@@ -162,7 +162,7 @@ def make_unquantized_moe_kernel(
 
         kernel = mk.FusedMoEModularKernel(
             MoEPrepareAndFinalizeNoEP(),
-            TritonExperts.make_standard_experts(
+            TritonExperts(
                 moe_config=moe_config,
                 quant_config=quant_config,
             ),

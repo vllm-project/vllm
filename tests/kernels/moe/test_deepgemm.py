@@ -111,7 +111,7 @@ def run_single_case(m, n, k, topk, num_experts, block_size):
 
     deep_gemm_experts = mk.FusedMoEModularKernel(
         prepare_finalize=MoEPrepareAndFinalizeNoEP(),
-        fused_experts=TritonOrDeepGemmExperts.make_standard_experts(
+        fused_experts=TritonOrDeepGemmExperts(
             moe_config=make_dummy_moe_config(),
             quant_config=quant_config,
         ),

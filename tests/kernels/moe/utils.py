@@ -110,7 +110,7 @@ def batched_moe(
         BatchedPrepareAndFinalize(
             max_num_tokens, num_dispatchers=1, num_local_experts=w1.shape[0], rank=0
         ),
-        BatchedTritonExperts.make_batched_experts(
+        BatchedTritonExperts(
             max_num_tokens=max_num_tokens,
             num_dispatchers=1,
             quant_config=quant_config,
@@ -151,7 +151,7 @@ def naive_batched_moe(
         BatchedPrepareAndFinalize(
             max_num_tokens, num_dispatchers=1, num_local_experts=w1.shape[0], rank=0
         ),
-        NaiveBatchedExperts.make_batched_experts(
+        NaiveBatchedExperts(
             max_num_tokens=max_num_tokens,
             num_dispatchers=1,
             quant_config=quant_config,
