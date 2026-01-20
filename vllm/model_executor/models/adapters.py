@@ -252,19 +252,14 @@ def as_embedding_model(cls: _T) -> _T:
         return cls
 
     # Lazy import
-    from vllm.model_executor.layers.pooler import DispatchPooler, Pooler
+    from vllm.model_executor.layers.pooler import DispatchPooler
 
     class ModelForEmbedding(_create_pooling_model_cls(cls)):
         def _init_pooler(self, vllm_config: "VllmConfig", prefix: str = ""):
             pooler_config = vllm_config.model_config.pooler_config
             assert pooler_config is not None
 
-            self.pooler = DispatchPooler(
-                {
-                    "token_embed": Pooler.for_token_embed(pooler_config),
-                    "embed": Pooler.for_embed(pooler_config),
-                },
-            )
+            self.pooler = DispatchPooler.for_embedding(pooler_config)
 
     ModelForEmbedding.__name__ = _get_pooling_model_name(cls.__name__, "ForEmbedding")
 
@@ -289,10 +284,7 @@ def as_seq_cls_model(cls: _T) -> _T:
 
     # Lazy import
     from vllm.model_executor.layers.linear import ReplicatedLinear
-    from vllm.model_executor.layers.pooler import (
-        DispatchPooler,
-        Pooler,
-    )
+    from vllm.model_executor.layers.pooler import DispatchPooler
     from vllm.model_executor.models.interfaces import SupportsCrossEncoding
 
     from .utils import maybe_prefix
@@ -318,18 +310,8 @@ def as_seq_cls_model(cls: _T) -> _T:
             pooler_config = vllm_config.model_config.pooler_config
             assert pooler_config is not None
 
-            self.pooler = DispatchPooler(
-                {
-                    "token_classify": Pooler.for_token_classify(
-                        pooler_config, classifier=self.score
-                    ),
-                    "classify": Pooler.for_classify(
-                        pooler_config, classifier=self.score, act_fn="classify"
-                    ),
-                    "score": Pooler.for_classify(
-                        pooler_config, classifier=self.score, act_fn="score"
-                    ),
-                }
+            self.pooler = DispatchPooler.for_seq_cls(
+                pooler_config, classifier=self.score
             )
 
         def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
@@ -419,24 +401,23 @@ def load_weights_using_from_2_way_softmax(
     tokens = cast(list[int], tokens)
     assert len(tokens) == 2
 
-    model.lm_head = ParallelLMHead(
+    language_model = (
+        model.get_language_model() if hasattr(model, "get_language_model") else model
+    )
+    language_model.lm_head = ParallelLMHead(
         text_config.vocab_size, text_config.hidden_size, quant_config=quant_config
     )
     if text_config.tie_word_embeddings:
         # embed_tokens is the assumed name for input embeddings. If the model does not
         # have this attribute, we fall back to get_input_embeddings(), which is used by
         # the Transformers modeling backend.
-        text_backbone = (
-            model.get_language_model().model
-            if hasattr(model, "get_language_model")
-            else model.model
-        )
+        text_backbone = language_model.model
         embed_tokens = (
             text_backbone.embed_tokens
             if hasattr(text_backbone, "embed_tokens")
             else text_backbone.get_input_embeddings()
         )
-        model.lm_head = model.lm_head.tie_weights(embed_tokens)
+        language_model.lm_head = language_model.lm_head.tie_weights(embed_tokens)
 
     # ModelForPooling is dynamically defined inside the _create_pooling_model_cls
     # function, so we need use this hacky method to obtain it.
@@ -456,17 +437,22 @@ def load_weights_using_from_2_way_softmax(
 
     false_id = tokenizer.convert_tokens_to_ids(tokens[0])
     true_id = tokenizer.convert_tokens_to_ids(tokens[1])
-    score_weight = model.lm_head.weight.data[[true_id]].to(
+    lm_head_weight = language_model.lm_head.weight
+    score_weight = lm_head_weight.data[[true_id]].to(
         torch.float32
-    ) - model.lm_head.weight.data[[false_id]].to(torch.float32)
+    ) - lm_head_weight.data[[false_id]].to(torch.float32)
 
     param = model.score.weight
     weight_loader = getattr(param, "weight_loader", default_weight_loader)
     weight_loader(param, score_weight)
 
-    del model.lm_head
+    del language_model.lm_head
     loaded_weights.add("score.weight")
-    loaded_weights.discard("lm_head.weight")
+
+    lm_head_name = "lm_head.weight"
+    if hf_to_vllm_mapper := getattr(model, "hf_to_vllm_mapper", None):
+        lm_head_name = hf_to_vllm_mapper._map_name(lm_head_name)
+    loaded_weights.discard(lm_head_name)
     return loaded_weights
 
 
@@ -543,64 +529,3 @@ def seq_cls_model_loader(model, weights: Iterable[tuple[str, torch.Tensor]]):
     method = getattr(hf_config, "method", getattr(text_config, "method", None))
     assert method in SEQ_CLS_LOAD_METHODS, f"method {method} not supported"
     return SEQ_CLS_LOAD_METHODS[method](model, weights)
-
-
-def as_mm_encoder_only_model(cls: _T) -> _T:
-    """
-    Subclass an existing vLLM vl model to support mm encoder only for
-    EPD encoder instances.
-    """
-    if not hasattr(cls, "embed_multimodal"):
-        # Submodel case: return the original class.
-        return cls
-
-    if not hasattr(cls, "get_language_model_spec"):
-        raise TypeError(f"{cls} need to implement `get_language_model_spec` method.")
-
-    lm_model_cls, lm_attr = cls.get_language_model_spec()
-
-    if lm_model_cls is None or lm_attr is None:
-        raise TypeError(
-            f"{cls}.get_language_model_spec() must return (lm_model_cls, lm_attr)"
-        )
-
-    class DummyLM(nn.Module):
-        def __init__(self, *args, **kwargs):
-            self.make_empty_intermediate_tensors = None
-
-    class ModelForMMEncoderOnly(cls):
-        def __init__(
-            self,
-            *,
-            vllm_config: "VllmConfig",
-            prefix: str = "",
-            **kwargs: Any,
-        ) -> None:
-            self.is_mm_encoder_only_model = True
-            origin_init = lm_model_cls.__init__
-            try:
-                lm_model_cls.__init__ = DummyLM.__init__
-                super().__init__(vllm_config=vllm_config, prefix=prefix, **kwargs)
-
-                if hasattr(self, lm_attr):
-                    delattr(self, lm_attr)
-            finally:
-                lm_model_cls.__init__ = origin_init
-
-        def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-            from .utils import AutoWeightsLoader
-
-            origin_init_ = AutoWeightsLoader.__init__
-
-            def _new_init_(self, *args, **kwargs):
-                origin_init_(self, *args, **kwargs)
-                self.skip_prefixes = (self.skip_prefixes or []) + [f"{lm_attr}."]
-
-            try:
-                AutoWeightsLoader.__init__ = _new_init_
-                result = super().load_weights(weights)
-            finally:
-                AutoWeightsLoader.__init__ = origin_init_
-            return result
-
-    return ModelForMMEncoderOnly  # type: ignore

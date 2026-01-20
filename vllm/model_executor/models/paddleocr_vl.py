@@ -30,14 +30,13 @@ from transformers.modeling_outputs import (
 )
 from transformers.utils import torch_int
 
-from vllm.attention.backends.registry import AttentionBackendEnum
-from vllm.attention.layers.mm_encoder_attention import (
-    MMEncoderAttention,
-)
 from vllm.config import MultiModalConfig, VllmConfig
 from vllm.config.multimodal import BaseDummyOptions
 from vllm.distributed import parallel_state
 from vllm.distributed import utils as dist_utils
+from vllm.model_executor.layers.attention.mm_encoder_attention import (
+    MMEncoderAttention,
+)
 from vllm.model_executor.layers.conv import Conv2dLayer
 from vllm.model_executor.layers.linear import (
     QKVParallelLinear,
@@ -64,14 +63,15 @@ from vllm.multimodal.parse import (
     MultiModalDataItems,
 )
 from vllm.multimodal.processing import (
+    BaseDummyInputsBuilder,
     BaseMultiModalProcessor,
     BaseProcessingInfo,
     PromptReplacement,
     PromptUpdate,
 )
-from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from vllm.sequence import IntermediateTensors
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
+from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 from .ernie45 import Ernie4_5ForCausalLM
 from .interfaces import MultiModalEmbeddings, SupportsMRoPE, SupportsMultiModal
