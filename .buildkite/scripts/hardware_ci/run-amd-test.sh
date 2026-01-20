@@ -238,29 +238,12 @@ elif [[ $commands == *"VLLM_TEST_GROUP_NAME=mi325_4-2-node-tests-4-gpus-in-total
       read -ra node1 <<< ${BASH_REMATCH[3]}
       IFS=$myIFS
       for i in "${!node0[@]}";do 
-        command_node_0=${node0[i]}
-        command_node_1=${node1[i]}
-        #
-        #export commands="curl -fsSL https://get.docker.com -o get-docker.sh && sh get-docker.sh --version ${DCKR_VER} && rm get-docker.sh && nohup bash -c 'dockerd &' && sleep 5 && ${prefix} && ../.buildkite/scripts/run-multi-node-test.sh ./tests 2 2 ${image_name} '${command_node_0}' '${command_node_1}'"
-        export commands="${prefix} && ../.buildkite/scripts/run-multi-node-test.sh ./tests 2 2 ${image_name} '${command_node_0}' '${command_node_1}'"
+        command_node_0=$(echo ${node0[i]} | sed 's/\"//g')
+        command_node_1=$(echo ${node1[i]} | sed 's/\"//g')
+        
+        export commands="./.buildkite/scripts/run-multi-node-test.sh /vllm-workspace/tests 2 2 ${image_name} '${command_node_0}' '${command_node_1}'"
         echo "COMMANDS: ${commands}"
-        #docker run \
-        #  --privileged \
-        #  --device /dev/kfd $BUILDKITE_AGENT_META_DATA_RENDER_DEVICES \
-        #  --network=host \
-        #  --shm-size=16gb \
-        #  --group-add "$render_gid" \
-        #  --rm \
-        #  -e HF_TOKEN \
-        #  -e AWS_ACCESS_KEY_ID \
-        #  -e AWS_SECRET_ACCESS_KEY \
-        #  -e DCKR_VER \
-        #  -v "${HF_CACHE}:${HF_MOUNT}" \
-        #  -e "HF_HOME=${HF_MOUNT}" \
-        #  -e "PYTHONPATH=${MYPYTHONPATH}" \
-        #  --name "${container_name}" \
-        #  "${image_name}" \
-        #  /bin/bash -c "${commands}"  
+        /bin/bash -c "${commands}"
       done
   else
       echo "Failed to parse node commands! Exiting."
