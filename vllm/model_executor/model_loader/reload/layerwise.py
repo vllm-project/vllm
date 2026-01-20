@@ -225,6 +225,6 @@ def _get_original_loader(param: torch.Tensor) -> Callable:
     """Return the weight loader with any layerwise wrappers removed"""
     loader = getattr(param, "weight_loader", default_weight_loader)
     while loader.__name__ == "restore_and_process_loader":
-        loader = loader.__wrapped__  # type: ignore[attr-defined]
+        loader = loader.__wrapped__  # type: ignore[union-attr]
 
     return loader
