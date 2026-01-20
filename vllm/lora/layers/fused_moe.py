@@ -216,7 +216,7 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
                     )
                 else:
                     (token_lora_mapping, _, _, _, _, _) = (
-                        self.punica_wrapper.token_mapping_meta.meta_args(num_tokens)
+                        self.punica_wrapper.get_token_lora_mapping(num_tokens)
                     )
                     expert_ids_lora = curr_topk_ids.reshape(-1)
                     sorted_token_ids_lora = None

@@ -448,6 +448,12 @@ class PunicaWrapperBase(PunicaWrapperABC):
         # TODO: implement it based on torch ops
         raise NotImplementedError
 
+    def get_token_lora_mapping(
+        self,
+        num_tokens: int,
+    ) -> torch.Tensor:
+        raise NotImplementedError
+
     def moe_lora_align_block_size(
         self,
         topk_ids: torch.Tensor,

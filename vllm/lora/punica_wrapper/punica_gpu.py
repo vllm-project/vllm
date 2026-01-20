@@ -424,3 +424,15 @@ class PunicaWrapperGPU(PunicaWrapperBase):
             fully_sharded,
             offset,
         )
+
+    def get_token_lora_mapping(
+        self,
+        num_tokens: int,
+    ) -> torch.Tensor:
+        """
+        Returns the token to LoRA mapping tensor for the given number of tokens.
+        """
+        (token_lora_mapping, _, _, _, _, _) = self.token_mapping_meta.meta_args(
+            num_tokens
+        )
+        return token_lora_mapping
