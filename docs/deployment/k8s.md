@@ -395,11 +395,11 @@ For production deployments, vLLM supports graceful shutdown to enable zero-downt
 
 When vLLM receives a `SIGTERM` signal (sent by Kubernetes during pod termination):
 
-1. The server stops accepting new requests (returns `503 Service Unavailable`)
-2. In-flight requests continue processing until completion or timeout
-3. If using async KV transfer connectors, pending transfers complete before shutdown
-4. The `/live` and `/metrics` endpoints remain accessible during drain
-5. A `vllm:server_draining` Prometheus metric is set to `1.0` to signal drain state
+1. A `vllm:server_draining` Prometheus metric is set to `1.0` to signal drain state
+2. The server stops accepting new requests (returns `503 Service Unavailable`)
+3. In-flight requests continue processing until completion or timeout
+4. If using async KV transfer connectors, pending transfers complete before shutdown
+5. The `/live` and `/metrics` endpoints remain accessible during drain
 
 ### Configuration
 
