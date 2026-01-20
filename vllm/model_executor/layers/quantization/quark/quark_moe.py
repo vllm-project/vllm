@@ -924,13 +924,13 @@ class QuarkW4MXFp4MoEMethod(QuarkW4MXFp4MoEMethodBase):
         self.input_dtype = self.input_quant["dtype"].replace("fp", "mxfp")
 
         self.emulate = not current_platform.supports_mx() or not (
-            rocm_aiter_ops.is_mxfp4_aiter_moe()
+            rocm_aiter_ops.is_fused_moe_enabled()
         )
 
         if self.emulate:
             logger.warning_once(
                 f"The current mode (supports_mx={current_platform.supports_mx()}, "
-                f"use_mxfp4_aiter_moe={rocm_aiter_ops.is_mxfp4_aiter_moe()}, "
+                f"use_mxfp4_aiter_moe={rocm_aiter_ops.is_fused_moe_enabled()}, "
                 "does not support native MXFP4/MXFP6 "
                 "computation. Simulated weight dequantization and activation "
                 "QDQ (quantize and dequantize) will be used, with the linear "
@@ -1265,7 +1265,7 @@ class QuarkW4MXFp4MoEMethod_OSS(QuarkW4MXFp4MoEMethodBase):
         layer.w2_weight = None
         torch.cuda.empty_cache()
 
-        if not envs.VLLM_ROCM_USE_AITER_FUSED_MOE_A16W4:
+        if self.static_input_scales and not envs.VLLM_ROCM_USE_AITER_FUSED_MOE_A16W4:
             if layer.w13_input_scale is None or layer.w2_input_scale is None:
                 raise ValueError(
                     "QuantConfig has static quantization, but found "

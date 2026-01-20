@@ -364,6 +364,8 @@ def triton_kernel_fused_oss_experts(
             unpadded_N=unpadded_N_w2,
             unpadded_K=unpadded_K_w2,
         )
+    else:
+        raise AssertionError(f"Non supported {quant_config=} in fused MoE op")
 
     return intermediate_cache3
 
