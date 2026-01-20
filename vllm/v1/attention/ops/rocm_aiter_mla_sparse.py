@@ -12,7 +12,7 @@ from vllm.v1.attention.backends.mla.indexer import DeepseekV32IndexerMetadata
 from vllm.v1.attention.ops.common import pack_seq_triton, unpack_seq_triton
 
 if current_platform.is_cuda_alike():
-    from vllm import _custom_ops as ops
+    pass
 
 
 @triton.jit
@@ -109,7 +109,7 @@ def indexer_k_quant_and_cache_triton(
         block_size,
         num_tokens,
         head_dim,
-        "NHD",
+        "SHUFFLE",
         block_tile_size,
         head_tile_size,
         IS_FNUZ=current_platform.fp8_dtype() == torch.float8_e4m3fnuz,
@@ -210,7 +210,7 @@ def cp_gather_indexer_k_quant_cache_triton(
         block_table_stride,
         k_cache_value.stride(0),
         k_cache_scale.stride(0),
-        "NHD",
+        "SHUFFLE",
         head_dim,
         block_tile_size,
         head_tile_size,
@@ -306,27 +306,34 @@ def rocm_fp8_paged_mqa_logits(
     from vllm._aiter_ops import rocm_aiter_ops
 
     if rocm_aiter_ops.is_enabled():
+        batch_size, next_n, heads, head_dim = q_fp8.shape
+        num_blocks, block_size, _, _ = kv_cache_fp8.shape
+
         from aiter.ops.triton.attention.pa_mqa_logits import (
-            deepgemm_fp8_paged_mqa_logits_stage1,
+            deepgemm_fp8_paged_mqa_logits,
         )
 
         batch_size, next_n, heads, _ = q_fp8.shape
-        out_qk = torch.full(
-            (heads, batch_size * next_n, max_model_len),
+        out_logits = torch.full(
+            [batch_size * next_n, max_model_len],
             float("-inf"),
             device="cuda",
             dtype=torch.float32,
         )
-        deepgemm_fp8_paged_mqa_logits_stage1(
+        deepgemm_fp8_paged_mqa_logits(
             q_fp8,
             kv_cache_fp8,
             weights,
-            out_qk,
+            out_logits,
             context_lens,
             block_tables,
             max_model_len,
+            ChunkK=256,
+            Preshuffle=block_size == 64,
+            KVBlockSize=block_size,
+            WavePerEU=2,
         )
-        return out_qk.sum(dim=0)
+        return out_logits
     else:
         return fp8_paged_mqa_logits_torch(
             q_fp8, kv_cache_fp8, weights, context_lens, block_tables, max_model_len
@@ -489,20 +496,20 @@ def rocm_aiter_sparse_attn_indexer(
     has_prefill = attn_metadata.num_prefills > 0
     num_decode_tokens = attn_metadata.num_decode_tokens
 
-    # indexer_k_quant_and_cache_triton(
-    #     k,
-    #     kv_cache,
-    #     slot_mapping,
-    #     quant_block_size,
-    #     scale_fmt,
-    # )
-    ops.indexer_k_quant_and_cache(
+    indexer_k_quant_and_cache_triton(
         k,
         kv_cache,
         slot_mapping,
         quant_block_size,
         scale_fmt,
     )
+    # ops.indexer_k_quant_and_cache(
+    #     k,
+    #     kv_cache,
+    #     slot_mapping,
+    #     quant_block_size,
+    #     scale_fmt,
+    # )
 
     topk_indices_buffer[: hidden_states.shape[0]] = -1
     if has_prefill:
@@ -518,21 +525,21 @@ def rocm_aiter_sparse_attn_indexer(
                 device=k.device,
                 dtype=torch.uint8,
             )
-            # cp_gather_indexer_k_quant_cache_triton(
-            #     kv_cache,
-            #     k_fp8,
-            #     k_scale,
-            #     chunk.block_table,
-            #     chunk.cu_seq_lens,
-            #     chunk.token_to_seq,
-            # )
-            ops.cp_gather_indexer_k_quant_cache(
+            cp_gather_indexer_k_quant_cache_triton(
                 kv_cache,
                 k_fp8,
                 k_scale,
                 chunk.block_table,
                 chunk.cu_seq_lens,
+                chunk.token_to_seq,
             )
+            # ops.cp_gather_indexer_k_quant_cache(
+            #     kv_cache,
+            #     k_fp8,
+            #     k_scale,
+            #     chunk.block_table,
+            #     chunk.cu_seq_lens,
+            # )
 
             logits = rocm_fp8_mqa_logits(
                 q_fp8[chunk.token_start : chunk.token_end],
