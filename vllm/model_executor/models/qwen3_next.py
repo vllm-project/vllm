@@ -641,7 +641,20 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
             core_attn_out_spec, last_recurrent_state = None, None
 
         # 2.2: Process the remaining part
-        core_attn_out_non_spec = torch.empty_like(value_non_spec)
+        need_non_spec_out = (attn_metadata.num_decodes > 0) or (
+            attn_metadata.num_prefills > 0
+        )
+
+        if need_non_spec_out:
+            if value_non_spec is None:
+                raise TypeError(
+                    "value_non_spec is None but non-spec outputs are required "
+                    "(num_decodes>0 or num_prefills>0)."
+                )
+            core_attn_out_non_spec = torch.empty_like(value_non_spec)
+        else:
+            core_attn_out_non_spec, last_recurrent_state = None, None
+
         if attn_metadata.num_decodes > 0:
             decode_state_indices = non_spec_state_indices_tensor[
                 : attn_metadata.num_decode_tokens
@@ -688,10 +701,11 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
                 head_first=False,
                 use_qk_l2norm_in_kernel=True,
             )
-            (core_attn_out_non_spec[:, attn_metadata.num_decode_tokens :, :, :],) = (
+            core_attn_out_non_spec[:, attn_metadata.num_decode_tokens :, :, :] = (
                 out_prefill
             )
             ssm_state[prefill_state_indices] = last_recurrent_state.to(ssm_state.dtype)
+
         # 3. Merge core attention output
         if spec_sequence_masks is not None and core_attn_out_non_spec is not None:
             merged_out = torch.empty(
