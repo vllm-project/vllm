@@ -967,7 +967,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             )
         else:
             # Run PyTorch model in eager mode.
-            # TODO(woosuk): Support piecewise CUDA graph.
             positions = input_batch.positions
             if self.uses_mrope:
                 assert input_batch.mrope_positions is not None
@@ -976,6 +975,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 input_batch.attn_metadata,
                 self.vllm_config,
                 num_tokens=input_batch.num_tokens_after_padding,
+                # TODO(woosuk): Support piecewise CUDA graph.
                 cudagraph_runtime_mode=CUDAGraphMode.NONE,
                 num_tokens_across_dp=num_tokens_across_dp,
             ):
