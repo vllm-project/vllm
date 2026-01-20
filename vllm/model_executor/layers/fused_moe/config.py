@@ -1059,7 +1059,7 @@ class FusedMoEConfig:
     intermediate_size_per_partition: int
     num_local_experts: int
     activation: str
-    device: torch.dtype
+    device: torch.device | str
     routing_method: RoutingMethodType
     moe_parallel_config: FusedMoEParallelConfig
 
