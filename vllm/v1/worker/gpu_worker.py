@@ -662,12 +662,7 @@ class Worker(WorkerBase):
             self.profiler.stop()
 
     def execute_dummy_batch(self) -> None:
-        if self.use_v2_model_runner:
-            self.model_runner.execute_model(
-                SchedulerOutput.make_empty(), dummy_run=True
-            )
-        else:
-            self.model_runner._dummy_run(1, uniform_decode=True)
+        self.model_runner._dummy_run(1, uniform_decode=True)
 
     def add_lora(self, lora_request: LoRARequest) -> bool:
         return self.model_runner.add_lora(lora_request)
