@@ -39,12 +39,12 @@ __global__ void silu_and_mul_per_block_quant_kernel(
     // Scale pointer (depends on layout)
     int const num_groups = hidden_size / group_size;
     float* token_scales = is_scale_transposed 
-        ? scales + token_idx  // Column-major: jump by 1, stride by num_tokens
-        : scales + token_idx * num_groups;  // Row-major: contiguous
+        ? scales + token_idx
+        : scales + token_idx * num_groups;
     
-    // Shared memory for reduction and intermediate results
+    // Shared memory - FIX 3: Size based on template parameter
     __shared__ float shared_max[1024];
-    __shared__ float shared_silu_results[128];  // Store one group's results
+    __shared__ float shared_silu_results[group_size];  // Use template parameter
     
     // Process elements in groups
     for (int group_idx = 0; group_idx < num_groups; group_idx++) {
@@ -63,12 +63,11 @@ __global__ void silu_and_mul_per_block_quant_kernel(
             float up = static_cast<float>(token_input_up[elem_idx]);
             
             // Compute SiLU(gate) * up ONCE
-            // SiLU(x) = x * sigmoid(x) = x / (1 + exp(-x))
             float sigmoid_gate = 1.0f / (1.0f + expf(-gate));
             float silu_gate = gate * sigmoid_gate;
             float result = silu_gate * up;
             
-            // Store in shared memory (FIX 1)
+            // Store in shared memory
             shared_silu_results[i] = result;
             
             // Track max absolute value for scale
@@ -78,14 +77,14 @@ __global__ void silu_and_mul_per_block_quant_kernel(
         
         // =====================================================================
         // Step 2: Reduce across threads to find group max
-        // (FIX 2: Handle non-power-of-2 blockDim)
+        // FIX 1: Proper reduction that terminates
         // =====================================================================
         shared_max[tid] = local_max;
         __syncthreads();
         
-        // Parallel reduction (handles non-power-of-2)
-        for (int stride = (blockDim.x + 1) / 2; stride > 0; stride = (stride + 1) / 2) {
-            if (tid < stride && tid + stride < blockDim.x) {
+        // Standard power-of-2 reduction (safe and correct)
+        for (int stride = blockDim.x / 2; stride > 0; stride >>= 1) {
+            if (tid < stride) {
                 shared_max[tid] = fmaxf(shared_max[tid], shared_max[tid + stride]);
             }
             __syncthreads();
@@ -93,13 +92,12 @@ __global__ void silu_and_mul_per_block_quant_kernel(
         
         // =====================================================================
         // Step 3: Compute and store scale (thread 0 only)
-        // (FIX 4: Match PyTorch's scale calculation)
         // =====================================================================
         float group_scale;
         if (tid == 0) {
             float group_max = shared_max[0];
             
-            // Compute scale based on output type (match PyTorch exactly)
+            // Compute scale based on output type
             constexpr float quant_range = std::is_same_v<scalar_out_t, int8_t> 
                 ? 127.0f 
                 : 448.0f;  // FP8 E4M3
@@ -132,12 +130,11 @@ __global__ void silu_and_mul_per_block_quant_kernel(
         
         // =====================================================================
         // Step 4: Quantize this group
-        // (FIX 1: Use stored results, FIX 3: Proper FP8 conversion)
         // =====================================================================
         for (int i = tid; i < group_size; i += blockDim.x) {
             int const elem_idx = group_start + i;
             
-            // Read the SAME result we computed earlier (FIX 1)
+            // Read the SAME result we computed earlier
             float result = shared_silu_results[i];
             
             // Quantize
@@ -149,7 +146,7 @@ __global__ void silu_and_mul_per_block_quant_kernel(
                 quantized = max(-127, min(127, quantized));
                 token_output[elem_idx] = static_cast<int8_t>(quantized);
             } else {
-                // FP8 quantization (FIX 3: Use vLLM's conversion utility)
+                // FP8 quantization using vLLM's conversion utility
                 token_output[elem_idx] = vllm::fp8_e4m3::scaled_convert<scalar_out_t, float>(scaled, 1.0f);
             }
         }
@@ -165,31 +162,37 @@ __global__ void silu_and_mul_per_block_quant_kernel(
 
 template <typename scalar_in_t>
 void silu_and_mul_per_block_quant_dispatch(
-    torch::Tensor& out,           // [num_tokens, hidden_size]
-    torch::Tensor const& input,   // [num_tokens, hidden_size * 2]
-    torch::Tensor& scales,        // [num_tokens, hidden_size / group_size]
+    torch::Tensor& out,
+    torch::Tensor const& input,
+    torch::Tensor& scales,
     int32_t group_size,
     std::optional<at::Tensor> const& scale_ub,
     bool is_scale_transposed
 ) {
-    int32_t hidden_size = out.size(-1);  // Output hidden size
+    int32_t hidden_size = out.size(-1);
     auto num_tokens = input.size(0);
     
-    // Validate dimensions
     TORCH_CHECK(input.size(-1) == hidden_size * 2, 
                 "input last dim must be 2x output hidden_size");
     TORCH_CHECK(hidden_size % group_size == 0,
                 "hidden_size must be divisible by group_size");
     
-    // Launch configuration (match RMS norm pattern)
+    // Launch configuration
+    // Use power-of-2 block sizes for reduction correctness
     dim3 grid(num_tokens);
-    const int max_block_size = (num_tokens <= 256) ? 512 : 256;
-    dim3 block(std::min(hidden_size, max_block_size));
+    int block_size;
+    if (hidden_size <= 256) {
+        block_size = 256;
+    } else if (hidden_size <= 512) {
+        block_size = 512;
+    } else {
+        block_size = 1024;
+    }
+    dim3 block(block_size);
     
     const at::cuda::OptionalCUDAGuard device_guard(device_of(input));
     const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
     
-    // Dispatch based on group size and scale layout
     VLLM_DISPATCH_QUANT_TYPES(
         out.scalar_type(), "silu_and_mul_per_block_quant_kernel", [&] {
             using scalar_out_t = scalar_t;
@@ -210,7 +213,6 @@ void silu_and_mul_per_block_quant_dispatch(
         });
 }
 
-// Main entry point (called from Python)
 void silu_and_mul_per_block_quant(
     torch::Tensor& out,
     torch::Tensor const& input,
@@ -227,10 +229,9 @@ void silu_and_mul_per_block_quant(
     TORCH_CHECK(out.is_contiguous() && input.is_contiguous());
     TORCH_CHECK(input.dtype() == torch::kFloat16 || input.dtype() == torch::kBFloat16,
                 "Input must be FP16 or BF16");
-    TORCH_CHECK(scales.dtype() == torch::kFloat32,
-                "Scales must be FP32");
+    TORCH_CHECK(scales.dtype() == torch::kFloat32, "Scales must be FP32");
     TORCH_CHECK(group_size == 128 || group_size == 64,
-                "Unsupported group size: ", group_size, " (only 64 and 128 supported)");
+                "Unsupported group size: ", group_size);
     
     if (scale_ub.has_value()) {
         TORCH_CHECK(out.dtype() == kFp8Type);
