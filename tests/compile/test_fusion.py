@@ -68,7 +68,7 @@ class TestModel(torch.nn.Module):
         self.norm = [RMSNorm(hidden_size, eps) for _ in range(4)]
 
         # Setup quantization scale descriptor
-        static = group_shape == GroupShape.PER_TENSOR and not use_aiter
+        static = group_shape == GroupShape.PER_TENSOR
         quant_scale = ScaleDesc(torch.float32, static, group_shape)
         self.quant_key = QuantKey(dtype=FP8_DTYPE, scale=quant_scale, symmetric=True)
 
@@ -99,6 +99,7 @@ class TestModel(torch.nn.Module):
 
         # Setup FP8 linear operation
         is_per_group = group_shape.is_per_group()
+        is_per_tensor = group_shape.is_per_tensor()
         if is_per_group and use_aiter:
             self.fp8_linear = W8A8BlockFp8LinearOp(
                 weight_group_shape=GroupShape(128, 128),
@@ -114,6 +115,13 @@ class TestModel(torch.nn.Module):
                 use_aiter_and_is_supported=False,
             )
             self.enable_quant_fp8_custom_op = self.fp8_linear.input_quant_op.enabled()
+        elif use_aiter and is_per_tensor:
+            self.fp8_linear = Fp8LinearOp(
+                act_quant_static=static,
+                act_quant_group_shape=group_shape,
+            )
+            self.fp8_linear.quant_fp8.use_aiter = use_aiter_quant_op
+            self.enable_quant_fp8_custom_op = self.fp8_linear.quant_fp8.enabled()
         elif use_aiter:
             self.fp8_linear = Fp8LinearOp(
                 act_quant_static=False,
@@ -164,15 +172,29 @@ class TestModel(torch.nn.Module):
             return [rocm_aiter_ops.get_group_quant_op()]
         if self.use_aiter and self.group_shape.is_per_group():
             return [torch.ops.vllm.triton_per_token_group_quant_fp8.default]
-        if self.use_aiter and self.use_aiter_quant_op:
+        if (
+            self.use_aiter
+            and self.use_aiter_quant_op
+            and self.group_shape.is_per_tensor()
+        ):
+            return [torch.ops.vllm.rocm_aiter_per_tensor_quant.default]
+        if self.use_aiter and self.use_aiter_quant_op and self.use_aiter_quant_op:
             return [rocm_aiter_ops.get_per_token_quant_op()]
-        if self.use_aiter:
-            return [QUANT_OPS[self.quant_key]]
         if self.enable_quant_fp8_custom_op:
             return [QUANT_OPS[self.quant_key]]
         return [torch.ops.aten.reciprocal]
 
     def ops_in_model_after(self):
+        if self.use_aiter and self.group_shape.is_per_tensor():
+            from vllm.compilation.rocm_aiter_fusion import (
+                AiterFusedAddRMSNormStaticQuantPattern,
+                AiterRMSNormStaticQuantPattern,
+            )
+
+            return [
+                AiterRMSNormStaticQuantPattern.FUSED_OP,
+                AiterFusedAddRMSNormStaticQuantPattern.FUSED_OP,
+            ]
         if self.use_aiter and self.group_shape.is_per_group():
             from vllm.compilation.rocm_aiter_fusion import (
                 AiterFusedAddRMSFp8GroupQuantPattern,
@@ -342,6 +364,8 @@ def test_fusion_rmsnorm_quant(
 GROUP_SHAPE_QUANT_OPS_MATCHS = [
     (GroupShape.PER_TOKEN, True),
     (GroupShape.PER_TOKEN, False),
+    (GroupShape.PER_TENSOR, True),
+    (GroupShape.PER_TENSOR, False),
     (GroupShape(1, 128), True),
 ]
 
@@ -366,11 +390,13 @@ def test_aiter_fusion_rmsnorm_quant(
     use_aiter_quant_op: bool,
     monkeypatch: pytest.MonkeyPatch,
 ):
+    custom_ops = ["+quant_fp8"] if use_aiter_quant_op else ["-quant_fp8"]
+    custom_ops += ["+rms_norm"]
     vllm_config = VllmConfig(
         model_config=ModelConfig(dtype=dtype),
         compilation_config=CompilationConfig(
             mode=CompilationMode.VLLM_COMPILE,
-            custom_ops=["+rms_norm", "+quant_fp8"],
+            custom_ops=custom_ops,
             pass_config=PassConfig(fuse_norm_quant=True, eliminate_noops=True),
         ),
     )
