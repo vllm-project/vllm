@@ -6,12 +6,12 @@ import json
 from unittest.mock import MagicMock
 
 import pytest
+from vllm.entrypoints.openai.protocol import FunctionCall, ToolCall
 
 from tests.entrypoints.openai.tool_parsers.utils import (
     run_tool_extraction,
     run_tool_extraction_streaming,
 )
-from vllm.entrypoints.openai.protocol import FunctionCall, ToolCall
 from vllm.tool_parsers import ToolParser, ToolParserManager
 
 tokenizer = MagicMock()
@@ -84,21 +84,14 @@ def make_tool_call(name, arguments):
         # Single tool call, no arguments,no content
         (
             '<|tool_call_start|>[{"name": "get_weather", "arguments": {}}]<|tool_call_end|>',  # noqa: E501
-            [
-                make_tool_call(
-                    "get_weather", {}
-                )
-            ],
+            [make_tool_call("get_weather", {})],
             None,
         ),
-        
         # Multiple tool calls
         (
             '<|tool_call_start|>[{"name": "get_weather", "arguments": {}}, {"name": "register_user", "arguments": {"name": "John Doe", "age": 37, "address": {"city": "San Francisco", "state": "CA"}, "role": null, "passed_test": true, "aliases": ["John", "Johnny"]}}]<|tool_call_end|>',  # noqa: E501
             [
-                make_tool_call(
-                    "get_weather", {}
-                ),
+                make_tool_call("get_weather", {}),
                 make_tool_call(
                     "register_user",
                     {
@@ -115,13 +108,8 @@ def make_tool_call(name, arguments):
         ),
     ],
 )
-def test_pangu_tool_parser_extract(
-    model_output, expected_tool_calls, expected_content
-):
-    
-    tool_parser: ToolParser = ToolParserManager.get_tool_parser("pangu")(
-        tokenizer
-    )
+def test_pangu_tool_parser_extract(model_output, expected_tool_calls, expected_content):
+    tool_parser: ToolParser = ToolParserManager.get_tool_parser("pangu")(tokenizer)
     content, tool_calls = run_tool_extraction(
         tool_parser, model_output, streaming=False
     )
@@ -189,21 +177,21 @@ def test_pangu_tool_parser_extract(
             ],
         ),
         pytest.param(
-            [  
+            [
                 '<|tool_call_start|>[{"name": "get_weather",',
-                   '"arguments": {"city": ',
-                   '"San Francisco", "metric": ',
-                   '"celsius"}}, {"name": ',
-                   '"register_user", ',
-                   '"arguments": {"name": ',
-                   '"John Doe", "age": 37,',
-                   ' "address": {"city": "San ',
-                   'Francisco", "state": "CA"}, ',
-                   '"role": null, "passed_test": true, ',
-                   '"aliases": ["John", ',
-                   '"Johnny"]}}',
-                   ']<|tool_call_end|>',
-            ], 
+                '"arguments": {"city": ',
+                '"San Francisco", "metric": ',
+                '"celsius"}}, {"name": ',
+                '"register_user", ',
+                '"arguments": {"name": ',
+                '"John Doe", "age": 37,',
+                ' "address": {"city": "San ',
+                'Francisco", "state": "CA"}, ',
+                '"role": null, "passed_test": true, ',
+                '"aliases": ["John", ',
+                '"Johnny"]}}',
+                "]<|tool_call_end|>",
+            ],
             [
                 make_tool_call(
                     "get_weather", {"city": "San Francisco", "metric": "celsius"}
@@ -217,69 +205,53 @@ def test_pangu_tool_parser_extract(
                         "role": None,
                         "passed_test": True,
                         "aliases": ["John", "Johnny"],
-                    }
-                    ),
+                    },
+                ),
             ],
-            
         ),
-         pytest.param(
-            [  
+        pytest.param(
+            [
                 '<|tool_call_start|>[{"name": "get_weather",',
-                   '"arguments": {"city": ',
-                   '"San Francisco", "metric": ',
-                   '"celsius"}}, {"name": ',
-                   '"register_user", ',
-                   '"arguments": {}}',
-                   ']<|tool_call_end|>',
-            ], 
+                '"arguments": {"city": ',
+                '"San Francisco", "metric": ',
+                '"celsius"}}, {"name": ',
+                '"register_user", ',
+                '"arguments": {}}',
+                "]<|tool_call_end|>",
+            ],
             [
                 make_tool_call(
                     "get_weather", {"city": "San Francisco", "metric": "celsius"}
                 ),
-                make_tool_call(
-                    "register_user",
-                    {}
-                    ),
+                make_tool_call("register_user", {}),
             ],
         ),
         pytest.param(
-            [  
-                '<|tool_call_start|>[',
+            [
+                "<|tool_call_start|>[",
                 '{"name": ',
                 '"get_weather",',
-                   '"arguments"',
-                   ': {}}'
-                   ']<|tool_call_end|>',
-            ], 
+                '"arguments"',
+                ": {}}]<|tool_call_end|>",
+            ],
             [
-                make_tool_call(
-                    "get_weather", {}
-                ),
+                make_tool_call("get_weather", {}),
             ],
         ),
-          
-         pytest.param(
-            [  
-                'some content\n<|tool_call_start|>\n[{"name',
-                  '": "device_control_a", "arguments',
-                  '": {}}]\n<|tool_call_end|>'
-            ], 
+        pytest.param(
             [
-                make_tool_call(
-                    "device_control_a", {}
-                ),
+                'some content\n<|tool_call_start|>\n[{"name',
+                '": "device_control_a", "arguments',
+                '": {}}]\n<|tool_call_end|>',
             ],
-            
+            [
+                make_tool_call("device_control_a", {}),
+            ],
         ),
     ],
 )
-
-
 def test_pangu_tool_parser_streaming(model_deltas, expected_tool_calls):
-  
-    tool_parser: ToolParser = ToolParserManager.get_tool_parser("pangu")(
-        tokenizer
-    )
+    tool_parser: ToolParser = ToolParserManager.get_tool_parser("pangu")(tokenizer)
     reconstructor = run_tool_extraction_streaming(
         tool_parser, model_deltas, assert_one_tool_per_delta=False
     )

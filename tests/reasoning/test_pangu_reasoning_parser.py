@@ -4,11 +4,9 @@
 import pytest
 from transformers import AutoTokenizer
 
+from tests.reasoning.test_deepseekr1_reasoning_parser import TEST_CASES
 from tests.reasoning.utils import run_reasoning_extraction
 from vllm.reasoning import ReasoningParser, ReasoningParserManager
-
-from tests.reasoning.test_deepseekr1_reasoning_parser import TEST_CASES
-
 
 parser_name = "pangu"
 start_token = "<think>"
@@ -36,7 +34,7 @@ def test_reasoning(
     parser: ReasoningParser = ReasoningParserManager.get_reasoning_parser(parser_name)(
         pangu_tokenizer
     )
-    
+
     reasoning, content = run_reasoning_extraction(
         parser, output_tokens, streaming=streaming
     )
@@ -62,23 +60,23 @@ def test_reasoning(
 
 
 single_token_output = [
-            "<think>",
-            "Some ",
-            "reasoning ",
-            "content",
-            "</think>",
-            "Final ",
-            "answer",
+    "<think>",
+    "Some ",
+    "reasoning ",
+    "content",
+    "</think>",
+    "Final ",
+    "answer",
 ]
 mutil_tokens_output = [
-            "<think>This ",
-            "is a ",
-            "reasoning process ",
-            "section</think>",
-            "This is ",
-            "the rest",
+    "<think>This ",
+    "is a ",
+    "reasoning process ",
+    "section</think>",
+    "This is ",
+    "the rest",
 ]
- 
+
 SIMPLE_REASONING = {
     "output": single_token_output,
     "reasoning": "Some reasoning content",
@@ -93,7 +91,7 @@ MUTIL_TOKENS_REASONING = {
     "is_reasoning_end": True,
 }
 
-TEST_CASES_STREAMING= [
+TEST_CASES_STREAMING = [
     pytest.param(
         True,
         SIMPLE_REASONING,
@@ -109,7 +107,7 @@ TEST_CASES_STREAMING= [
         SIMPLE_REASONING,
         id="simple_reasoning",
     ),
-     pytest.param(
+    pytest.param(
         False,
         MUTIL_TOKENS_REASONING,
         id="mutil_tokens_reasoning",
@@ -126,7 +124,8 @@ class TestPanguReasoningParserStreaming:
         Test basic reasoning extraction in streaming modes.
         """
         parser: ReasoningParser = ReasoningParserManager.get_reasoning_parser(
-            parser_name)(pangu_tokenizer)
+            parser_name
+        )(pangu_tokenizer)
 
         reasoning, content = run_reasoning_extraction(
             parser, param_dict["output"], streaming=streaming

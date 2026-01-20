@@ -3,10 +3,11 @@
 
 import json
 import re
-from typing import Dict, List, Sequence, Union
+from collections.abc import Sequence
+
 import partial_json_parser
 from partial_json_parser.core.options import Allow
-from vllm.tokenizers import TokenizerLike
+
 from vllm.entrypoints.chat_utils import make_tool_call_id
 from vllm.entrypoints.openai.protocol import (
     ChatCompletionRequest,
@@ -17,15 +18,13 @@ from vllm.entrypoints.openai.protocol import (
     FunctionCall,
     ToolCall,
 )
-from vllm.tool_parsers.abstract_tool_parser import (
-    ToolParser
-)
+from vllm.logger import init_logger
+from vllm.tokenizers import TokenizerLike
+from vllm.tool_parsers.abstract_tool_parser import ToolParser
 from vllm.tool_parsers.utils import (
     find_common_prefix,
     is_complete_json,
 )
-from vllm.logger import init_logger
-
 
 logger = init_logger(__name__)
 
@@ -36,28 +35,34 @@ class PanguToolParser(ToolParser):
 
         # initialize properties used for state when parsing tool calls in
         # streaming mode
-        self.prev_tool_call_arr: List[Dict] = []
+        self.prev_tool_call_arr: list[dict] = []
         self.current_tool_id: int = -1
         self.current_tool_name_sent: bool = False
-        self.streamed_args_for_tool: List[str] = [
-            ]  # map what has been streamed for each tool so far to a list
+        self.streamed_args_for_tool: list[str] = []
 
-        self.tool_call_start_token: str = "<|tool_call_start|>" if self.vocab.get(
-                                        "<|tool_call_start|>") else "[unused11]"
-        self.tool_call_end_token: str = "<|tool_call_end|>" if self.vocab.get(
-                                        "<|tool_call_end|>" ) else "[unused12]"
-        self.pattern = re.escape(
-            self.tool_call_start_token) + "(.*?)" + re.escape(self.tool_call_end_token)
+        self.tool_call_start_token: str = (
+            "<|tool_call_start|>"
+            if self.vocab.get("<|tool_call_start|>")
+            else "[unused11]"
+        )
+        self.tool_call_end_token: str = (
+            "<|tool_call_end|>" if self.vocab.get("<|tool_call_end|>") else "[unused12]"
+        )
+        self.pattern = (
+            re.escape(self.tool_call_start_token)
+            + "(.*?)"
+            + re.escape(self.tool_call_end_token)
+        )
         self.tool_call_regex = re.compile(self.pattern, re.DOTALL)
 
         self.tool_call_start_token_id = self.vocab.get(self.tool_call_start_token)
         self.tool_call_end_token_id = self.vocab.get(self.tool_call_end_token)
 
-        if (
-            self.tool_call_start_token_id is None 
-            or self.tool_call_end_token_id is None):
-            raise RuntimeError("Pangu Tool parser could not locate tool call start/end "
-                               "tokens in the tokenizer!")
+        if self.tool_call_start_token_id is None or self.tool_call_end_token_id is None:
+            raise RuntimeError(
+                "Pangu Tool parser could not locate tool call start/end "
+                "tokens in the tokenizer!"
+            )
         self.is_json_complete = False
         self.text_after_start_token = ""
 
@@ -68,11 +73,13 @@ class PanguToolParser(ToolParser):
         Extract the tool call from a complete model response.
         """
         # case -- if a tool call token is not present, return a text response
-        if not (self.tool_call_start_token in model_output 
-                and self.tool_call_end_token in model_output):
+        if not (
+            self.tool_call_start_token in model_output
+            and self.tool_call_end_token in model_output
+        ):
             return ExtractedToolCallInformation(
                 tools_called=False, tool_calls=[], content=model_output
-                )
+            )
 
         try:
             raw_function_calls = []
@@ -85,14 +92,17 @@ class PanguToolParser(ToolParser):
                 function_call = json.loads(function_call_str)
                 raw_function_calls.extend(function_call)
 
-            tool_calls: List[ToolCall] = [
+            tool_calls: list[ToolCall] = [
                 ToolCall(
                     type="function",
                     function=FunctionCall(
                         name=function_call["name"],
                         # function call args are JSON but as a string
                         arguments=json.dumps(
-                            function_call["arguments"] , ensure_ascii=False)))
+                            function_call["arguments"], ensure_ascii=False
+                        ),
+                    ),
+                )
                 for function_call in raw_function_calls
             ]
             content = model_output[: model_output.find(self.tool_call_start_token)]
@@ -110,7 +120,7 @@ class PanguToolParser(ToolParser):
             # return information to just treat the tool call as regular JSON
             return ExtractedToolCallInformation(
                 tools_called=False, tool_calls=[], content=model_output
-                )
+            )
 
     def extract_tool_calls_streaming(
         self,
@@ -121,28 +131,24 @@ class PanguToolParser(ToolParser):
         current_token_ids: Sequence[int],
         delta_token_ids: Sequence[int],
         request: ChatCompletionRequest,
-    ) -> Union[DeltaMessage, None]:
-
-        if (
-            self.tool_call_end_token_id in delta_token_ids 
-            and len(delta_token_ids) == 1
-            ):
+    ) -> DeltaMessage | None:
+        if self.tool_call_end_token_id in delta_token_ids and len(delta_token_ids) == 1:
             # if it's the only token, return None, so we don't send a chat
             # completion and don't send a control token
             return None
 
         if (
-            self.tool_call_start_token_id in delta_token_ids 
+            self.tool_call_start_token_id in delta_token_ids
             and len(delta_token_ids) == 1
-            ):
+        ):
             # if it's the only token, return None, so we don't send a chat
             # completion and don't send a control token
             return None
 
         if (
-            self.tool_call_end_token in current_text 
+            self.tool_call_end_token in current_text
             and self.tool_call_end_token not in delta_text
-            ):
+        ):
             return None
 
         if self.tool_call_start_token not in current_text:
@@ -160,12 +166,13 @@ class PanguToolParser(ToolParser):
         # seen) allows sending the entire tool/ function name at once.
         flags = Allow.ALL if self.current_tool_name_sent else Allow.ALL & ~Allow.STR
         try:
-
-            tool_call_portion = current_text.split(
-                self.tool_call_start_token)[-1].split(self.tool_call_end_token)[0]
+            tool_call_portion = current_text.split(self.tool_call_start_token)[
+                -1
+            ].split(self.tool_call_end_token)[0]
             try:
                 tool_call_arr: list[dict] = partial_json_parser.loads(
-                    tool_call_portion, flags)
+                    tool_call_portion, flags
+                )
 
                 self.is_json_complete = is_complete_json(tool_call_portion)
             except partial_json_parser.core.exceptions.MalformedJSON:
@@ -175,7 +182,7 @@ class PanguToolParser(ToolParser):
             # select as the current tool call the one we're on the state at
             current_tool_call: dict = (
                 tool_call_arr[self.current_tool_id] if len(tool_call_arr) > 0 else {}
-                )
+            )
 
             # case -- if no tokens have been streamed for the tool, e.g.
             #   only the array brackets, stream nothing
@@ -186,8 +193,7 @@ class PanguToolParser(ToolParser):
             #   -> array has > 0 length AND length has moved past cursor
             elif (
                 len(tool_call_arr) > 0 and len(tool_call_arr) > self.current_tool_id + 1
-                ):
-
+            ):
                 # if we're moving on to a new call, first make sure we
                 # haven't missed anything in the previous one that was
                 # auto-generated due to JSON completions, but wasn't
@@ -212,7 +218,7 @@ class PanguToolParser(ToolParser):
             logger.exception("Error trying to handle streaming tool call.")
             logger.debug(
                 "Skipping chunk as a result of tool streaming extraction error"
-                )
+            )
             return None
 
     def start_new_tool(self, tool_call_arr, current_tool_call):
@@ -228,7 +234,9 @@ class PanguToolParser(ToolParser):
                     tool_calls=[
                         DeltaToolCall(
                             index=self.current_tool_id,
-                            function=DeltaFunctionCall(arguments=argument_diff).model_dump(exclude_none=True),
+                            function=DeltaFunctionCall(
+                                arguments=argument_diff
+                            ).model_dump(exclude_none=True),
                         )
                     ]
                 )
@@ -252,10 +260,10 @@ class PanguToolParser(ToolParser):
         cur_args_json = json.dumps(cur_arguments, ensure_ascii=False)
         argument_diff = None
         if (
-            self.is_json_complete 
+            self.is_json_complete
             and cur_args_json is not None
             and not self.streamed_args_for_tool[-1]
-            ):
+        ):
             argument_diff = cur_args_json
 
         if function_name and argument_diff is None:
@@ -265,7 +273,9 @@ class PanguToolParser(ToolParser):
                         index=self.current_tool_id,
                         type="function",
                         id=make_tool_call_id(),
-                        function=DeltaFunctionCall(name=function_name).model_dump(exclude_none=True),
+                        function=DeltaFunctionCall(name=function_name).model_dump(
+                            exclude_none=True
+                        ),
                     )
                 ]
             )
@@ -278,9 +288,8 @@ class PanguToolParser(ToolParser):
                         type="function",
                         id=make_tool_call_id(),
                         function=DeltaFunctionCall(
-                            name=function_name, 
-                            arguments=argument_diff
-                            ).model_dump(exclude_none=True),
+                            name=function_name, arguments=argument_diff
+                        ).model_dump(exclude_none=True),
                     )
                 ]
             )
@@ -295,16 +304,18 @@ class PanguToolParser(ToolParser):
         cur_arguments = current_tool_call.get("arguments")
         delta = None
         if (
-            self.is_json_complete 
-            and not cur_arguments 
+            self.is_json_complete
+            and not cur_arguments
             and not self.streamed_args_for_tool[-1]
-            ):
+        ):
             argument_diff = "{}"
             delta = DeltaMessage(
                 tool_calls=[
                     DeltaToolCall(
                         index=self.current_tool_id,
-                        function=DeltaFunctionCall(arguments=argument_diff).model_dump(exclude_none=True),
+                        function=DeltaFunctionCall(arguments=argument_diff).model_dump(
+                            exclude_none=True
+                        ),
                     )
                 ]
             )
@@ -313,8 +324,9 @@ class PanguToolParser(ToolParser):
         if cur_arguments:
             sent = len(self.streamed_args_for_tool[self.current_tool_id])
             cur_args_json = json.dumps(cur_arguments, ensure_ascii=False)
-            prev_arguments = self.prev_tool_call_arr[
-                                self.current_tool_id].get("arguments")
+            prev_arguments = self.prev_tool_call_arr[self.current_tool_id].get(
+                "arguments"
+            )
 
             argument_diff = None
             if self.is_json_complete:
@@ -322,7 +334,6 @@ class PanguToolParser(ToolParser):
             elif prev_arguments:
                 prev_args_json = json.dumps(prev_arguments, ensure_ascii=False)
                 if cur_args_json != prev_args_json:
-
                     prefix = find_common_prefix(prev_args_json, cur_args_json)
                     argument_diff = prefix[sent:]
 
@@ -331,7 +342,9 @@ class PanguToolParser(ToolParser):
                     tool_calls=[
                         DeltaToolCall(
                             index=self.current_tool_id,
-                            function=DeltaFunctionCall(arguments=argument_diff).model_dump(exclude_none=True),
+                            function=DeltaFunctionCall(
+                                arguments=argument_diff
+                            ).model_dump(exclude_none=True),
                         )
                     ]
                 )
