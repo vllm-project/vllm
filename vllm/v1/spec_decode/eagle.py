@@ -234,8 +234,9 @@ class SpecDecodeBaseProposer:
         if self.uses_mrope:
             self.mrope_positions[:, :num_tokens] = positions
         else:
-            # Convert M-RoPE positions to 1D if target model uses M-RoPE but draft doesn't
-            # For text inputs, all M-RoPE dimensions are identical
+            # Convert M-RoPE positions if target model uses M-RoPE
+            # but draft doesn't, For text inputs, all M-RoPE
+            # dimensions are identical
             if self.vllm_config.model_config.uses_mrope:
                 positions = positions[0]
             self.positions[:num_tokens] = positions
