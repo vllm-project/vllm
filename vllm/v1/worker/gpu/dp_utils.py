@@ -6,10 +6,7 @@ import torch.distributed as dist
 from vllm.distributed.parallel_state import get_dp_group
 
 
-def make_num_tokens_across_dp(
-    dp_size: int,
-    num_tokens: int,
-) -> torch.Tensor | None:
+def make_num_tokens_across_dp(dp_size: int, num_tokens: int) -> torch.Tensor | None:
     if dp_size == 1:
         return None
     return torch.full((dp_size,), num_tokens, dtype=torch.int32, device="cpu")
