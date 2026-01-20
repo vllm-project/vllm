@@ -56,6 +56,9 @@ class GroupShape(_GroupShape):
     def is_per_token(self) -> bool:
         return self.row == 1 and self.col == -1
 
+    def is_per_channel(self) -> bool:
+        return self.row == -1 and self.col == 1
+
     def is_per_group(self) -> bool:
         return self.row == 1 and self.col >= 1
 
