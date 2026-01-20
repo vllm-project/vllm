@@ -302,7 +302,7 @@ class NixlConnector(KVConnectorBase_V1):
     @property
     def prefer_cross_layer_blocks(self) -> bool:
         extra_config = self.kv_transfer_config.kv_connector_extra_config
-        return extra_config.get("cross_layers_block", False)
+        return bool(str(extra_config.get("enable_cross_layers_block", "True")))
 
     def __init__(
         self,
@@ -408,8 +408,8 @@ class NixlConnector(KVConnectorBase_V1):
         assert self.connector_worker is not None
 
         cross_layer_name = "ALL_LAYERS"
-
         kv_caches = {cross_layer_name: kv_cache}
+
         self.connector_worker.register_kv_caches(kv_caches)
 
     def set_host_xfer_buffer_ops(self, copy_operation: CopyBlocksOp):
@@ -1411,7 +1411,27 @@ class NixlConnectorWorker:
 
         self.device_kv_caches = kv_caches
         self.dst_num_blocks[self.engine_id] = self.num_blocks
-        if self.kv_topo.is_kv_layout_blocks_first:
+
+        if self.kv_topo.cross_layers_blocks:
+            assert len(kv_caches) == 1
+            tensor_shape = list(kv_caches.values())[0].shape
+
+            # NOTE (liranschour) When FlashInfer is used, memory is registered
+            # with joint KV for each block and in Triton joint KV and num_layers
+            # for each block.
+            # In order to be able to split on kv_heads dim as required by
+            # heterogeneous TP, one must be able to index (K/V, layer_idx) separately.
+            # Hence we multiply the number of 'virtual' regions here and divide
+            # `block_len` below.
+            multiply = 1
+            for dim_idx in range(1, self.kv_topo.physical_kv_heads_position):
+                multiply *= tensor_shape[dim_idx]
+            logger.info("Multiply is %d", multiply)
+            for i in range(len(self.slot_size_per_layer)):
+                assert self.slot_size_per_layer[i] % multiply == 0
+                self.slot_size_per_layer[i] //= multiply
+            self.num_regions *= multiply
+        elif self.kv_topo.is_kv_layout_blocks_first:
             for i in range(len(self.slot_size_per_layer)):
                 assert self.slot_size_per_layer[i] % 2 == 0
                 self.slot_size_per_layer[i] //= 2
