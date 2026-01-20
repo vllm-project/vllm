@@ -53,7 +53,7 @@ class Fp8MoeBackend(Enum):
     BATCHED_VLLM_CUTLASS = "BATCHED_VLLM_CUTLASS"
 
 
-def backend_2_kernel_cls(
+def backend_to_kernel_cls(
     backend: Fp8MoeBackend,
 ) -> type[mk.FusedMoEPermuteExpertsUnpermute]:
     if backend == Fp8MoeBackend.FLASHINFER_TRTLLM:
@@ -139,7 +139,7 @@ def select_fp8_moe_backend(
     k_cls: type[mk.FusedMoEPermuteExpertsUnpermute] | None = None
 
     if config.is_lora_enabled:
-        return Fp8MoeBackend.TRITON, backend_2_kernel_cls(Fp8MoeBackend.TRITON)
+        return Fp8MoeBackend.TRITON, backend_to_kernel_cls(Fp8MoeBackend.TRITON)
 
     # NOTE: the kernels are selected in the following order.
     AVAILABLE_BACKENDS = [
@@ -190,7 +190,7 @@ def select_fp8_moe_backend(
         activation_key: QuantKey | None,
         activation_format: mk.FusedMoEActivationFormat,
     ) -> tuple[Fp8MoeBackend, type[mk.FusedMoEPermuteExpertsUnpermute]]:
-        k_cls = backend_2_kernel_cls(backend)
+        k_cls = backend_to_kernel_cls(backend)
         supported, reason = k_cls.is_supported_config(
             k_cls, config, weight_key, activation_key, activation_format
         )
@@ -246,7 +246,7 @@ def select_fp8_moe_backend(
                         activation_format,
                     )
                 else:
-                    k_cls = backend_2_kernel_cls(backend)
+                    k_cls = backend_to_kernel_cls(backend)
                     supported, reason = k_cls.is_supported_config(
                         k_cls,
                         config,
@@ -315,7 +315,7 @@ def select_fp8_moe_backend(
                 activation_format,
             )
         else:
-            k_cls = backend_2_kernel_cls(backend)
+            k_cls = backend_to_kernel_cls(backend)
             supported, reason = k_cls.is_supported_config(
                 k_cls,
                 config,

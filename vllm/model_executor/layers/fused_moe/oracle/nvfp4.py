@@ -64,7 +64,7 @@ def is_global_sf_supported_for_nvfp4_backend(backend: NvFp4MoeBackend) -> bool:
     return backend in FLASHINFER_NVFP4_MOE_BACKENDS
 
 
-def backend_2_kernel_cls(
+def backend_to_kernel_cls(
     backend: NvFp4MoeBackend,
 ) -> type[mk.FusedMoEPermuteExpertsUnpermute]:
     if backend == NvFp4MoeBackend.FLASHINFER_TRTLLM:
@@ -159,7 +159,7 @@ def select_nvfp4_moe_backend(
         activation_key: QuantKey | None,
         activation_format: mk.FusedMoEActivationFormat,
     ) -> tuple[NvFp4MoeBackend, type[mk.FusedMoEPermuteExpertsUnpermute]]:
-        k_cls = backend_2_kernel_cls(backend)
+        k_cls = backend_to_kernel_cls(backend)
         supported, reason = k_cls.is_supported_config(
             k_cls, config, weight_key, activation_key, activation_format
         )
@@ -205,7 +205,7 @@ def select_nvfp4_moe_backend(
                         activation_format,
                     )
                 else:
-                    k_cls = backend_2_kernel_cls(backend)
+                    k_cls = backend_to_kernel_cls(backend)
                     supported, reason = k_cls.is_supported_config(
                         k_cls,
                         config,
@@ -243,7 +243,7 @@ def select_nvfp4_moe_backend(
                 activation_format,
             )
         else:
-            k_cls = backend_2_kernel_cls(backend)
+            k_cls = backend_to_kernel_cls(backend)
             supported, reason = k_cls.is_supported_config(
                 k_cls,
                 config,
