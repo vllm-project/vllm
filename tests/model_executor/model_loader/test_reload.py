@@ -90,8 +90,34 @@ def test_reload_weights(tp_size, vllm_runner):
         assert llm.generate_prompt_perplexity(["3 4 = 7"], mask=["3 4 ="])[0] <= 1.1
 
 
-def test_reload_quantized():
-    pass
+@pytest.mark.parametrize("tp_size", [1,])
+def test_reload_quantized_w4a16(tp_size, vllm_runner):
+    if cuda_device_count_stateless() < tp_size:
+        pytest.skip(reason="Not enough CUDA devices")
+
+    base_model = "nm-testing/Qwen3-0.6B-W4A16-G128"
+    mul_model = "nm-testing/Qwen3-0.6B-debug-multiply-W4A16-G128"
+    add_model = "nm-testing/Qwen3-0.6B-debug-add-W4A16-G128"
+
+    with vllm_runner(model_name=base_model, tensor_parallel_size=tp_size) as llm:
+        print(llm.generate_prompt_perplexity(["3 4 = 12"], mask=["3 4 ="])[0])
+        print(llm.generate_prompt_perplexity(["3 4 = 7"], mask=["3 4 ="])[0])
+        assert llm.generate_prompt_perplexity(["3 4 = 12"], mask=["3 4 ="])[0] >= 3.5
+        assert llm.generate_prompt_perplexity(["3 4 = 7"], mask=["3 4 ="])[0] >= 8.5
+
+        llm.collective_rpc("reload_weights", kwargs={"weights_path": mul_model})
+        print(llm.generate_prompt_perplexity(["3 4 = 12"], mask=["3 4 ="])[0])
+        print(llm.generate_prompt_perplexity(["3 4 = 7"], mask=["3 4 ="])[0])
+        assert llm.generate_prompt_perplexity(["3 4 = 12"], mask=["3 4 ="])[0] <= 1.1
+        assert llm.generate_prompt_perplexity(["3 4 = 7"], mask=["3 4 ="])[0] >= 1e10
+
+        llm.collective_rpc("reload_weights", kwargs={"weights_path": add_model})
+        print(llm.generate_prompt_perplexity(["3 4 = 12"], mask=["3 4 ="])[0])
+        print(llm.generate_prompt_perplexity(["3 4 = 7"], mask=["3 4 ="])[0])
+        assert llm.generate_prompt_perplexity(["3 4 = 12"], mask=["3 4 ="])[0] >= 1e10
+        assert llm.generate_prompt_perplexity(["3 4 = 7"], mask=["3 4 ="])[0] <= 1.1
+
+
 
 
 def test_reload_online_quantized():

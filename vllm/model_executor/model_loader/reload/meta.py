@@ -22,7 +22,7 @@ def to_meta_tensor(tensor: torch.Tensor) -> torch.Tensor:
     """Convert a tensor to a meta tensor while preserving class and attributes."""
     meta_tensor = tensor.data.to("meta")
     meta_tensor.__class__ = tensor.__class__
-    meta_tensor.__dict__ = tensor.__dict__
+    meta_tensor.__dict__ = tensor.__dict__.copy()
     return meta_tensor
 
 
@@ -38,7 +38,7 @@ def materialize_meta_tensor(meta_tensor: torch.Tensor) -> torch.Tensor:
         requires_grad=False,
     )
     tensor.__class__ = meta_tensor.__class__
-    tensor.__dict__ = meta_tensor.__dict__
+    tensor.__dict__ = meta_tensor.__dict__.copy()
     return tensor
 
 

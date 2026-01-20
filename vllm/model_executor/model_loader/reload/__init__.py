@@ -14,9 +14,13 @@ Limitations:
       implemented
     - Tied weights will remain tied, but will only reflect processing from one of the
       parent modules (for example, only processing from lm_head will have an effect)
+    - This design assumes that the number of weights loaded from disk is the same as
+      the number of weights created at model init time. This is not true for
+      quantizations which (1) pad weights or (2) load qkv weights into the same
+      parameter. Both of these cases are non-issues for today's quantizations, but
+      future quantizations may cause reloading to fail
 
 TODO(@ksayers):
-    - Decide on reloading interface, back-compat with reload_weights
     - Check composability with EPLB
 """
 

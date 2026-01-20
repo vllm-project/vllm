@@ -106,8 +106,24 @@ def initialize_layerwise_reload(layer: torch.nn.Module) -> None:
                 # Cache loaded weights, track loading progress
                 # `get_numel_loaded` triggers inner wrapped function for shared tensors
                 info = LAYER_RELOADING_INFO[layer]
-                info.loaded_weights.append((param_name, bound_args))
-                info.load_numel += get_numel_loaded(weight_loader, bound_args)
+                if info.is_initialized():
+                    info.loaded_weights.append((param_name, bound_args))
+                    info.load_numel += get_numel_loaded(weight_loader, bound_args)
+                else:
+                    # Unfortunately, some qconfigs are set up to load the same weight
+                    # multiple times. For example, CT_WNA16 loads `weight_shape` for
+                    # each of the qkv partitions. This results in layers loading extra
+                    # weights (beyond load_numel_total) after it's already processed.
+                    # 
+                    # Best solution is to ensure that `load_numel_total` reflects the
+                    # actual number of weights loaded, either by modifying qconfigs to
+                    # create as many weights as loaded (see padding issue as well)
+                    # or maybe capturing how many weights are loaded on first pass
+                    # 
+                    # For now, `load_numel_total` is still safe to use as long as
+                    # there's no way to reach `load_numel_total` without loading all
+                    # necessary weights. `weight_shape` is very small, so this is safe.
+                    return
 
                 print(
                     f"{layer.__class__.__name__}: {info.load_numel} / {info.load_numel_total}"
@@ -143,7 +159,9 @@ def finalize_layerwise_reload(layer: torch.nn.Module) -> None:
     # Process non-attention layers which did not load all elements due to (padding)
     # Having too many of these delayed layers can lead to execess memory usage
     if info.load_numel > 0 and info.load_numel < info.load_numel_total:
-        _layerwise_process(layer, info)
+        print("SKIP THING")
+        print(f"skip thing: {layer.__class__.__name__}")
+        #_layerwise_process(layer, info)
 
     # No weights were loaded, place kernel tensors back
     elif info.is_initialized():
@@ -182,6 +200,10 @@ def _layerwise_process(layer: torch.nn.Module, info: LayerReloadingInfo):
         param = getattr(layer, name)
         args.arguments["param"] = param
         param.weight_loader(*args.args, **args.kwargs)
+
+    # if "weight_packed" in info.kernel_tensors[0]:
+    #     breakpoint()
+    print(f"start: {layer.__class__.__name__}")
 
     # Process weights (quantization, repacking, etc.)
     # Attention/MLA are processed in `finalize_layerwise_reload`
