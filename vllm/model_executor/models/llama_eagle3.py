@@ -52,13 +52,17 @@ class LlamaDecoderLayer(LlamaDecoderLayer):
         # Subsequent layers use hidden_size (only hidden_states, no embeds)
         qkv_input_size = 2 * self.hidden_size if layer_idx == 0 else self.hidden_size
 
-        # override qkv
+        # Use config.attention_bias for QKV bias (default False)
+        # PTD checkpoints may have attention bias enabled
+        qkv_bias = getattr(config, 'attention_bias', False)
+
+        # Override qkv_proj with correct input size and bias setting
         self.self_attn.qkv_proj = QKVParallelLinear(
             qkv_input_size,
             self.self_attn.head_dim,
             self.self_attn.total_num_heads,
             self.self_attn.total_num_kv_heads,
-            bias=False,
+            bias=qkv_bias,
             quant_config=quant_config,
             prefix=maybe_prefix(prefix, "qkv_proj"),
         )
@@ -225,6 +229,9 @@ class LlamaModel(nn.Module):
         for name, loaded_weight in weights:
             if "midlayer." in name:
                 name = name.replace("midlayer.", "layers.0.")
+            # Skip mask_hidden - loaded separately by PTD proposer
+            if name == "mask_hidden":
+                continue
             # Handle kv cache quantization scales
             if self.quant_config is not None and (
                 scale_name := self.quant_config.get_cache_scale(name)

@@ -54,7 +54,8 @@ def parse_args():
         "--method",
         type=str,
         default="eagle",
-        choices=["ngram", "eagle", "eagle3", "mtp", "draft_model"],
+        choices=["ngram", "eagle", "eagle3", "eagle-ptd", "eagle3-ptd",
+                 "mtp", "draft_model"],
     )
     parser.add_argument("--num-spec-tokens", type=int, default=2)
     parser.add_argument("--prompt-lookup-max", type=int, default=5)
@@ -104,13 +105,16 @@ def main(args):
     else:
         prompts = get_custom_mm_prompts(args.num_prompts)
 
-    if args.method == "eagle" or args.method == "eagle3":
+    if args.method in ("eagle", "eagle3", "eagle-ptd", "eagle3-ptd"):
         eagle_dir = args.eagle_dir
         if args.method == "eagle" and eagle_dir is None:
             eagle_dir = "yuhuili/EAGLE-LLaMA3.1-Instruct-8B"
-
         elif args.method == "eagle3" and eagle_dir is None:
             eagle_dir = "yuhuili/EAGLE3-LLaMA3.1-Instruct-8B"
+        elif args.method in ("eagle-ptd", "eagle3-ptd") and eagle_dir is None:
+            raise ValueError(
+                f"--eagle-dir is required for method {args.method}"
+            )
         speculative_config = {
             "method": args.method,
             "model": eagle_dir,
@@ -223,7 +227,7 @@ if __name__ == "__main__":
 
     if args.test:
         # takes ~30s to run on 1xH100
-        assert args.method in ["eagle", "eagle3"]
+        assert args.method in ["eagle", "eagle3", "eagle-ptd", "eagle3-ptd"]
         assert args.tp == 1
         assert args.num_spec_tokens == 3
         assert args.dataset_name == "hf"

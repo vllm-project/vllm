@@ -147,6 +147,7 @@ from vllm.v1.sample.sampler import Sampler
 from vllm.v1.spec_decode.draft_model import DraftModelProposer
 from vllm.v1.spec_decode.eagle import EagleProposer
 from vllm.v1.spec_decode.medusa import MedusaProposer
+from vllm.v1.spec_decode.ptd_eagle import PTD_METHODS, PtdEagleProposer
 from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
 from vllm.v1.spec_decode.ngram_proposer import NgramProposer
 from vllm.v1.spec_decode.suffix_decoding import SuffixDecodingProposer
@@ -435,6 +436,7 @@ class GPUModelRunner(
                 NgramProposer
                 | SuffixDecodingProposer
                 | EagleProposer
+                | PtdEagleProposer
                 | DraftModelProposer
                 | MedusaProposer
             )
@@ -448,6 +450,17 @@ class GPUModelRunner(
                 )
             elif self.speculative_config.method == "suffix":
                 self.drafter = SuffixDecodingProposer(self.vllm_config)
+            elif self.speculative_config.method in PTD_METHODS:
+                # PTD: Parallel Token Decoding - uses separate proposer class
+                # NOTE: Must check BEFORE use_eagle() since PTD methods are
+                # included there
+                self.drafter = PtdEagleProposer(
+                    self.vllm_config, self.device, self
+                )
+                if self.speculative_config.method == "eagle3-ptd":
+                    self.use_aux_hidden_state_outputs = (
+                        self.drafter.eagle3_use_aux_hidden_state
+                    )
             elif self.speculative_config.use_eagle():
                 self.drafter = EagleProposer(self.vllm_config, self.device, self)
                 if self.speculative_config.method == "eagle3":

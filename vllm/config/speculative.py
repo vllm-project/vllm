@@ -41,13 +41,15 @@ MTPModelTypes = Literal[
     "mtp",
     "pangu_ultra_moe_mtp",
 ]
-EagleModelTypes = Literal["eagle", "eagle3", MTPModelTypes]
+EagleModelTypes = Literal["eagle", "eagle3", "eagle-ptd", "eagle3-ptd", MTPModelTypes]
 SpeculativeMethod = Literal[
     "ngram",
     "medusa",
     "mlp_speculator",
     "draft_model",
     "suffix",
+    "eagle-ptd",
+    "eagle3-ptd",
     EagleModelTypes,
 ]
 
@@ -365,8 +367,8 @@ class SpeculativeConfig:
                     config_format=self.target_model_config.config_format,
                 )
 
-                # Automatically detect the method
-                if self.method in ("eagle", "eagle3"):
+                # Automatically detect the method (skip if already set to eagle variant)
+                if self.method in ("eagle", "eagle3", "eagle-ptd", "eagle3-ptd"):
                     pass
                 # examples:
                 # yuhuili/EAGLE-LLaMA3-Instruct-8B
@@ -408,7 +410,7 @@ class SpeculativeConfig:
                     )
 
                 # Replace hf_config for EAGLE draft_model
-                if self.method in ("eagle", "eagle3"):
+                if self.method in ("eagle", "eagle3", "eagle-ptd", "eagle3-ptd"):
                     from vllm.transformers_utils.configs import SpeculatorsConfig
                     from vllm.transformers_utils.configs.eagle import EAGLEConfig
 
@@ -697,7 +699,9 @@ class SpeculativeConfig:
                 )
 
     def use_eagle(self) -> bool:
-        return self.method in ("eagle", "eagle3", "mtp")
+        return self.method in (
+            "eagle", "eagle3", "eagle-ptd", "eagle3-ptd", "mtp"
+        )
 
     def uses_draft_model(self) -> bool:
         return self.method == "draft_model"

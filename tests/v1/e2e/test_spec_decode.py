@@ -551,6 +551,97 @@ def test_eagle_correctness(
 @pytest.mark.parametrize(
     ["model_setup", "mm_enabled"],
     [
+        pytest.param(
+            (
+                "eagle3-ptd",
+                "openai/gpt-oss-120b",
+                "PATH_TO_PTD_MODEL",  # Replace with actual PTD model path
+                1,
+            ),
+            False,
+            marks=pytest.mark.skip(
+                reason="PTD model not publicly available yet"
+            ),
+        ),
+    ],
+    ids=["gpt_oss_eagle3_ptd"],
+)
+@pytest.mark.parametrize("attn_backend", get_attn_backend_list_based_on_platform())
+def test_ptd_correctness(
+    monkeypatch: pytest.MonkeyPatch,
+    sampling_config: SamplingParams,
+    model_setup: tuple[str, str, str, int],
+    mm_enabled: bool,
+    attn_backend: str,
+):
+    """
+    Compare the outputs of an original LLM and a speculative LLM
+    using PTD (Parallel Token Decoding) speculative decoding.
+    PTD generates K draft tokens in a single forward pass using mask tokens.
+    model_setup: (method, model_name, ptd_model_name, tp_size)
+    """
+    if attn_backend == "TREE_ATTN":
+        pytest.skip("TREE_ATTN not yet supported with PTD")
+
+    test_prompts = get_test_prompts(mm_enabled)
+    attention_config = {"backend": attn_backend}
+
+    if attn_backend == "TRITON_ATTN" and not current_platform.is_rocm():
+        pytest.skip("TRITON_ATTN not supported on current platform")
+
+    with monkeypatch.context() as m:
+        m.setenv("VLLM_MLA_DISABLE", "1")
+
+        method, model_name, spec_model_name, tp_size = model_setup
+        _skip_if_insufficient_gpus_for_tp(tp_size)
+
+        max_model_len = 2048
+
+        ref_llm = LLM(
+            model=model_name,
+            max_model_len=max_model_len,
+            tensor_parallel_size=tp_size,
+            attention_config=attention_config,
+        )
+        ref_outputs = ref_llm.chat(test_prompts, sampling_config)
+        del ref_llm
+        torch.cuda.empty_cache()
+        cleanup_dist_env_and_memory()
+
+        spec_llm = LLM(
+            model=model_name,
+            trust_remote_code=True,
+            tensor_parallel_size=tp_size,
+            speculative_config={
+                "method": method,
+                "model": spec_model_name,
+                "num_speculative_tokens": 6,
+                "max_model_len": max_model_len,
+            },
+            max_model_len=max_model_len,
+            attention_config=attention_config,
+        )
+        spec_outputs = spec_llm.chat(test_prompts, sampling_config)
+        matches = 0
+        misses = 0
+        for ref_output, spec_output in zip(ref_outputs, spec_outputs):
+            if ref_output.outputs[0].text == spec_output.outputs[0].text:
+                matches += 1
+            else:
+                misses += 1
+                print(f"ref_output: {ref_output.outputs[0].text}")
+                print(f"spec_output: {spec_output.outputs[0].text}")
+
+        # Heuristic: expect at least 60% of the prompts to match exactly
+        assert matches > int(0.6 * len(ref_outputs))
+        del spec_llm
+        torch.cuda.empty_cache()
+        cleanup_dist_env_and_memory()
+
+
+@pytest.mark.parametrize(
+    ["model_setup", "mm_enabled"],
+    [
         (("mtp", "XiaomiMiMo/MiMo-7B-Base", 1), False),
         (("mtp", "ZixiQi/DeepSeek-V3-4layers-MTP-FP8", 1), False),
     ],
