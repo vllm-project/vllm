@@ -497,12 +497,12 @@ class NvmlCudaPlatform(CudaPlatformBase):
         Returns:
             Dictionary mapping UUID strings to physical device indices.
         """
-        uuid_to_index = {}
+        uuid_to_index: dict[str, int] = {}
 
         try:
             device_count = pynvml.nvmlDeviceGetCount()
         except pynvml.NVMLError as e:
-            logger.error(f"Failed to get device count from NVML: {e}")
+            logger.error("Failed to get device count from NVML: %s", e)
             return uuid_to_index
 
         for physical_idx in range(device_count):
@@ -512,12 +512,14 @@ class NvmlCudaPlatform(CudaPlatformBase):
                 uuid_to_index[uuid] = physical_idx
             except pynvml.NVMLError as e:
                 logger.warning(
-                    f"Failed to get UUID for device {physical_idx}: {e}. "
-                    f"This device will not be accessible via UUID."
+                    "Failed to get UUID for device %s: %s. "
+                    "This device will not be accessible via UUID.",
+                    physical_idx,
+                    e,
                 )
                 continue
 
-        logger.debug(f"Built UUID to index map: {uuid_to_index}")
+        logger.debug("Built UUID to index map: %s", uuid_to_index)
         return uuid_to_index
 
     @classmethod
@@ -537,21 +539,18 @@ class NvmlCudaPlatform(CudaPlatformBase):
             IndexError: If device_id is out of range
             ValueError: If UUID format is invalid or device not found
         """
-        # Handle Ray CPU placement groups (empty CUDA_VISIBLE_DEVICES)
-        if (
-            cls.device_control_env_var not in os.environ
-            or os.environ[cls.device_control_env_var] == ""
-        ):
+        # Ray CPU placement groups can have empty CUDA_VISIBLE_DEVICES
+        cuda_visible_devices = os.environ.get(cls.device_control_env_var)
+        if not cuda_visible_devices:
             return device_id
 
-        device_ids = os.environ[cls.device_control_env_var].split(",")
+        device_ids = cuda_visible_devices.split(",")
 
-        # Validate index
-        if device_id < 0 or device_id >= len(device_ids):
+        if not 0 <= device_id < len(device_ids):
             raise IndexError(
                 f"device_id {device_id} out of range for "
-                f"{cls.device_control_env_var}={os.environ[cls.device_control_env_var]} "
-                f"(expected 0-{len(device_ids)-1})"
+                f"{cls.device_control_env_var}={cuda_visible_devices} "
+                f"(expected 0-{len(device_ids) - 1})"
             )
 
         physical_device_id_str = device_ids[device_id].strip()
@@ -560,14 +559,12 @@ class NvmlCudaPlatform(CudaPlatformBase):
         if physical_device_id_str.isdigit():
             return int(physical_device_id_str)
 
-        # Check for valid UUID format
         if not cls._is_uuid(physical_device_id_str):
             raise ValueError(
                 f"Invalid device ID format: '{physical_device_id_str}'. "
                 f"Expected integer index or UUID format (GPU-..., MIG-...)."
             )
 
-        # Resolve UUID to physical index
         uuid_map = cls._build_uuid_to_index_map()
 
         if physical_device_id_str not in uuid_map:
