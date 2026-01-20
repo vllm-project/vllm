@@ -25,12 +25,10 @@ class _DeviceCountStatelessTestActor:
     def get_count(self):
         return torch.cuda.device_count()
 
-    def set_cuda_visible_devices(self, cuda_visible_devices: str):
-        update_environment_variables(
-            {self.visible_devices_env_var: cuda_visible_devices}
-        )
+    def set_visible_devices(self, visible_devices: str):
+        update_environment_variables({self.visible_devices_env_var: visible_devices})
 
-    def get_cuda_visible_devices(self):
+    def get_visible_devices(self):
         return envs.__getattr__(self.visible_devices_env_var)
 
 
@@ -43,11 +41,11 @@ def test_device_count_stateless():
     actor = _DeviceCountStatelessTestActor.options(  # type: ignore
         num_gpus=2
     ).remote(visible_devices_env_var)
-    assert len(sorted(ray.get(actor.get_cuda_visible_devices.remote()).split(","))) == 2
+    assert len(sorted(ray.get(actor.get_visible_devices.remote()).split(","))) == 2
     assert ray.get(actor.get_count.remote()) == 2
-    ray.get(actor.set_cuda_visible_devices.remote("0"))
+    ray.get(actor.set_visible_devices.remote("0"))
     assert ray.get(actor.get_count.remote()) == 1
-    ray.get(actor.set_cuda_visible_devices.remote(""))
+    ray.get(actor.set_visible_devices.remote(""))
     assert ray.get(actor.get_count.remote()) == 0
 
 
