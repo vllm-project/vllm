@@ -712,3 +712,7 @@ class InputProcessor:
 
     def clear_mm_cache(self) -> None:
         self.input_preprocessor.clear_mm_cache()
+
+    def close(self) -> None:
+        if self.mm_processor_cache is not None:
+            self.mm_processor_cache.close()
