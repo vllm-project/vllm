@@ -211,6 +211,7 @@ def use_fused_moe_lora_kernel(
         mul_routed_weight,
         fully_sharded=fully_sharded,
         offset=offset,
+        add_inputs=True,
     )
 
 

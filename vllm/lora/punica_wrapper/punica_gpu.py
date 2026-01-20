@@ -410,4 +410,5 @@ class PunicaWrapperGPU(PunicaWrapperBase):
             mul_routed_weight,
             fully_sharded,
             offset,
+            add_inputs=True,
         )
