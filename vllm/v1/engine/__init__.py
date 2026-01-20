@@ -10,6 +10,7 @@ import msgspec
 import numpy as np
 import torch
 
+from vllm.engine.inference_profile import InferenceProfile
 from vllm.lora.request import LoRARequest
 from vllm.multimodal.inputs import MultiModalFeatureSpec
 from vllm.pooling_params import PoolingParams
@@ -51,7 +52,7 @@ class EngineCoreRequest(
     array_like=True,  # type: ignore[call-arg]
     omit_defaults=True,  # type: ignore[call-arg]
     gc=False,
- ):  # type: ignore[call-arg]
+):  # type: ignore[call-arg]
     request_id: str
     prompt_token_ids: list[int] | None
     mm_features: list[MultiModalFeatureSpec] | None
@@ -67,7 +68,7 @@ class EngineCoreRequest(
     # Index of the client, used to ensure outputs are sent back to the same
     # client for this request when scaling out the front-end.
     client_index: int = 0
-    
+
     # Used in DP case to indicate which wave of requests this is expected to
     # belong to, to cover a race condition where the request is sent before
     # a wave finished notification is received.

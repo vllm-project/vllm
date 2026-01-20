@@ -252,11 +252,7 @@ class LLMEngine:
                 prompt_text = cast(str | None, prompt.get("prompt"))
 
         self.input_processor.assign_request_id(request)
-        print(
-    f"[DEBUG] add_request → request_id={request.request_id}, "
-    f"type={type(request).__name__}"
-)
-    
+
         # Use cloned params that may have been updated in process_inputs()
         params = request.params
 
