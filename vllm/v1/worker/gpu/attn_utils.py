@@ -7,8 +7,8 @@ import torch
 
 from vllm.config import VllmConfig, get_layers_from_vllm_config
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
-from vllm.v1.attention.backend import AttentionBackend
-from vllm.v1.attention.backends.utils import (
+from vllm.v1.attention.backend import (
+    AttentionBackend,
     AttentionMetadataBuilder,
     CommonAttentionMetadata,
 )
@@ -57,7 +57,7 @@ def init_attn_backend(
         )
         attn_metadata_builders.append(attn_metadata_builder)  # type: ignore
 
-        if "FLASHINFER" in attn_backend.get_name():
+        if attn_backend.get_name() == "FLASHINFER":
             if flashinfer_workspace is None:
                 flashinfer_workspace = attn_metadata_builder._get_workspace_buffer()
             else:

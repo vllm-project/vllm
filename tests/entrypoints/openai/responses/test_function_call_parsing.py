@@ -7,7 +7,7 @@ import json
 import pytest
 from openai.types.responses import ResponseFunctionToolCall
 
-from vllm.entrypoints.openai.protocol import ResponsesRequest
+from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
 
 
 def test_function_call_dict_converted_to_object():
@@ -253,7 +253,7 @@ def test_function_call_validation_failure_logs_debug(caplog):
     }
 
     # Mock the logger to verify debug was called
-    with patch("vllm.entrypoints.openai.protocol.logger") as mock_logger:
+    with patch("vllm.entrypoints.openai.responses.protocol.logger") as mock_logger:
         with pytest.raises(ValueError):
             ResponsesRequest(**request_data)
 

@@ -10,6 +10,7 @@ import torch
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm import _custom_ops as ops
 from vllm.config import ParallelConfig, VllmConfig, set_current_vllm_config
+from vllm.model_executor.layers.fused_moe import fused_experts, fused_topk
 from vllm.model_executor.layers.fused_moe.config import (
     FUSED_MOE_UNQUANTIZED_CONFIG,
     FusedMoEQuantConfig,
@@ -19,7 +20,6 @@ from vllm.model_executor.layers.fused_moe.cutlass_moe import (
     CutlassExpertsFp8,
     run_cutlass_moe_fp8,
 )
-from vllm.model_executor.layers.fused_moe.fused_moe import fused_experts, fused_topk
 from vllm.model_executor.layers.fused_moe.prepare_finalize import (
     MoEPrepareAndFinalizeNoEP,
 )
@@ -526,7 +526,7 @@ def test_run_cutlass_moe_fp8(
         c_strides1 = torch.full((e,), 2 * n, device="cuda", dtype=torch.int64)
         c_strides2 = torch.full((e,), k, device="cuda", dtype=torch.int64)
 
-        activation = lambda o, i: torch.ops._C.silu_and_mul(o, i)
+        activation = "silu"
         a1q, a1q_scale = moe_kernel_quantize_input(
             mt.a, mt.a_scale, torch.float8_e4m3fn, per_act_token
         )
