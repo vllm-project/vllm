@@ -83,7 +83,10 @@ class LMMissingLayer(nn.Module):
 class TowerMissingLayer(nn.Module):
     packed_modules_mapping: dict[str, list[str]] = {}
 
-    def __init__(self, modalities: set[str]) -> None:
+    def __init__(self, modalities: set[str] | str) -> None:
+        if isinstance(modalities, str):
+            modalities = {modalities}
+
         super().__init__()
 
         self.modalities = modalities

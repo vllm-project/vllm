@@ -689,18 +689,21 @@ class DotsOCRForCausalLM(nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA
         else:
             vision_config = self.config.vision_config
 
-        self.vision_tower = DotsVisionTransformer(
-            vision_config,
-            quant_config=self.quant_config,
-            multimodal_config=multimodal_config,
-            prefix=maybe_prefix(prefix, "vision_tower"),
-        )
-        self.language_model: Qwen2ForCausalLM = init_vllm_registered_model(
-            vllm_config=vllm_config,
-            hf_config=self.config,
-            prefix=maybe_prefix(prefix, "language_model"),
-            architectures=["Qwen2ForCausalLM"],
-        )
+        with self._mark_tower_model(vllm_config, "image"):
+            self.vision_tower = DotsVisionTransformer(
+                vision_config,
+                quant_config=self.quant_config,
+                multimodal_config=multimodal_config,
+                prefix=maybe_prefix(prefix, "vision_tower"),
+            )
+
+        with self._mark_language_model(vllm_config):
+            self.language_model: Qwen2ForCausalLM = init_vllm_registered_model(
+                vllm_config=vllm_config,
+                hf_config=self.config,
+                prefix=maybe_prefix(prefix, "language_model"),
+                architectures=["Qwen2ForCausalLM"],
+            )
 
         self.make_empty_intermediate_tensors = (
             self.language_model.make_empty_intermediate_tensors
@@ -762,9 +765,6 @@ class DotsOCRForCausalLM(nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA
         ).tolist()
 
         return image_embeds.split(sizes)
-
-    def get_language_model(self) -> torch.nn.Module:
-        return self.language_model
 
     def get_num_mm_encoder_tokens(self, num_image_tokens: int) -> int:
         merge_size = self.vision_tower.spatial_merge_size
