@@ -92,8 +92,10 @@ class TestCudaUUIDSupport(unittest.TestCase):
 
         mock_pynvml.nvmlDeviceGetHandleByIndex.side_effect = get_handle_by_index
         mock_pynvml.nvmlDeviceGetUUID.side_effect = lambda h: (
-            "GPU-000" if h == mock_handle_0
-            else "GPU-123" if h == mock_handle_1
+            "GPU-000"
+            if h == mock_handle_0
+            else "GPU-123"
+            if h == mock_handle_1
             else "GPU-222"
         )
         mock_pynvml.nvmlInit.return_value = None
@@ -101,7 +103,8 @@ class TestCudaUUIDSupport(unittest.TestCase):
 
         # Test mixed format
         assert NvmlCudaPlatform.device_id_to_physical_device_id(0) == 0
-        assert NvmlCudaPlatform.device_id_to_physical_device_id(1) == 1  # GPU-123 maps to index 1
+        # GPU-123 maps to index 1
+        assert NvmlCudaPlatform.device_id_to_physical_device_id(1) == 1
         assert NvmlCudaPlatform.device_id_to_physical_device_id(2) == 2
 
     @patch.dict(os.environ, {"CUDA_VISIBLE_DEVICES": "0,1"})
@@ -159,12 +162,18 @@ class TestCudaUUIDSupport(unittest.TestCase):
     def test_is_uuid_gpu_format(self):
         """Test _is_uuid recognizes GPU-xxx format."""
         assert NvmlCudaPlatform._is_uuid("GPU-123") is True
-        assert NvmlCudaPlatform._is_uuid("GPU-441f29f8-b53a-1c18-174a-dd2066ebd468") is True
+        assert (
+            NvmlCudaPlatform._is_uuid("GPU-441f29f8-b53a-1c18-174a-dd2066ebd468")
+            is True
+        )
 
     def test_is_uuid_mig_format(self):
         """Test _is_uuid recognizes MIG-xxx format."""
         assert NvmlCudaPlatform._is_uuid("MIG-123") is True
-        assert NvmlCudaPlatform._is_uuid("MIG-GPU-441f29f8-b53a-1c18-174a-dd2066ebd468") is True
+        assert (
+            NvmlCudaPlatform._is_uuid("MIG-GPU-441f29f8-b53a-1c18-174a-dd2066ebd468")
+            is True
+        )
 
     def test_is_uuid_rejects_invalid_formats(self):
         """Test _is_uuid rejects non-UUID formats."""
@@ -198,7 +207,9 @@ class TestCudaUUIDSupport(unittest.TestCase):
         mock_pynvml.nvmlDeviceGetCount.return_value = 3
 
         mock_handles = [Mock(), Mock(), Mock()]
-        mock_pynvml.nvmlDeviceGetHandleByIndex.side_effect = lambda idx: mock_handles[idx]
+        mock_pynvml.nvmlDeviceGetHandleByIndex.side_effect = lambda idx: mock_handles[
+            idx
+        ]
         mock_pynvml.nvmlDeviceGetUUID.side_effect = lambda h: (
             ["GPU-123", "GPU-456", "GPU-789"][mock_handles.index(h)]
         )
@@ -230,7 +241,9 @@ class TestCudaUUIDSupport(unittest.TestCase):
         # Setup mocks
         mock_pynvml.nvmlDeviceGetCount.return_value = 2
         mock_handles = [Mock(), Mock()]
-        mock_pynvml.nvmlDeviceGetHandleByIndex.side_effect = lambda idx: mock_handles[idx]
+        mock_pynvml.nvmlDeviceGetHandleByIndex.side_effect = lambda idx: mock_handles[
+            idx
+        ]
         mock_pynvml.nvmlDeviceGetUUID.side_effect = lambda h: (
             "GPU-123" if h == mock_handles[0] else "GPU-456"
         )
