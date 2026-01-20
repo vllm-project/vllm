@@ -274,6 +274,7 @@ def _fused_moe_lora_shrink(
         grid_lora_dim,
     )
     if naive_block_assignment:
+        # dummy ptrs
         sorted_token_ids_ptr = expert_ids
         num_tokens_post_padded_ptr = expert_ids
         stride_tl = 0
