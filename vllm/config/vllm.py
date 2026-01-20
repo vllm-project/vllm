@@ -498,17 +498,15 @@ class VllmConfig:
         Right now, this function reads the offloading settings from
         CacheConfig and configures the KVTransferConfig accordingly.
         """
-        if (kv_offloading_backend := self.cache_config.kv_offloading_backend) is None:
+        # KV offloading is only activated when kv_offloading_size is set.
+        if (kv_offloading_size := self.cache_config.kv_offloading_size) is None:
             return
+
+        kv_offloading_backend = self.cache_config.kv_offloading_backend
 
         # If no KVTransferConfig is provided, create a default one.
         if self.kv_transfer_config is None:
             self.kv_transfer_config = KVTransferConfig()
-
-        if (kv_offloading_size := self.cache_config.kv_offloading_size) is None:
-            raise ValueError(
-                "You must set kv_offloading_size when kv_offloading_backend is set."
-            )
         num_kv_ranks = (
             self.parallel_config.tensor_parallel_size
             * self.parallel_config.pipeline_parallel_size
@@ -563,11 +561,6 @@ class VllmConfig:
 
         if self.scheduler_config.async_scheduling:
             # Async scheduling explicitly enabled, hard fail any incompatibilities.
-            if self.parallel_config.pipeline_parallel_size > 1:
-                raise ValueError(
-                    "Async scheduling is not yet compatible with "
-                    "pipeline_parallel_size > 1."
-                )
             # Currently, async scheduling only support eagle speculative
             # decoding.
             if self.speculative_config is not None:
@@ -589,14 +582,7 @@ class VllmConfig:
                 )
         elif self.scheduler_config.async_scheduling is None:
             # Enable async scheduling unless there is an incompatible option.
-            if self.parallel_config.pipeline_parallel_size > 1:
-                logger.warning_once(
-                    "Async scheduling is not yet supported with "
-                    "pipeline_parallel_size > 1 and will be disabled.",
-                    scope="local",
-                )
-                self.scheduler_config.async_scheduling = False
-            elif (
+            if (
                 self.speculative_config is not None
                 and self.speculative_config.method not in get_args(EagleModelTypes)
             ):
@@ -1228,10 +1214,19 @@ class VllmConfig:
         compilation_config = self.compilation_config
         computed_compile_ranges_split_points = []
 
-        # The upper bound of the compile ranges is the max_num_batched_tokens
-        max_num_batched_tokens = self.scheduler_config.max_num_batched_tokens
-        if max_num_batched_tokens is not None:
-            computed_compile_ranges_split_points.append(max_num_batched_tokens)
+        # The upper bound of the compile ranges is the max_num_batched_tokens.
+        # For speculative decoding with draft model, the compile range must be extended
+        # by 1 for each sequence.
+        compile_range_end = self.scheduler_config.max_num_batched_tokens
+        if compile_range_end is not None:
+            do_extend: bool = (
+                self.speculative_config is not None
+                and self.speculative_config.uses_draft_model()
+            )
+            if do_extend:
+                compile_range_end += self.scheduler_config.max_num_seqs
+
+            computed_compile_ranges_split_points.append(compile_range_end)
 
         # Add the compile ranges for flashinfer
         if compilation_config.pass_config.fuse_allreduce_rms:
@@ -1242,10 +1237,7 @@ class VllmConfig:
                     self.model_config.get_hidden_size()
                     * self.model_config.dtype.itemsize
                 )
-                if (
-                    max_num_batched_tokens is not None
-                    and max_token_num < max_num_batched_tokens
-                ):
+                if compile_range_end is not None and max_token_num < compile_range_end:
                     computed_compile_ranges_split_points.append(max_token_num)
                 else:
                     logger.debug(
@@ -1257,11 +1249,7 @@ class VllmConfig:
             for x in compilation_config.compile_ranges_split_points:
                 assert isinstance(x, int)
                 assert x > 0, f"Invalid compile range split point: {x}"
-                if (
-                    max_num_batched_tokens is not None
-                    and x < max_num_batched_tokens
-                    and x > 1
-                ):
+                if compile_range_end is not None and x < compile_range_end and x > 1:
                     computed_compile_ranges_split_points.append(x)
         compilation_config.compile_ranges_split_points = sorted(
             computed_compile_ranges_split_points
@@ -1329,6 +1317,14 @@ class VllmConfig:
         append_path = f"rank_{tp_rank}_dp_{dp_rank}"
         path = self.compilation_config.debug_dump_path / append_path
         return path
+
+    def replace(self, **kwargs):
+        """
+        Replace attributes of the config, and 'recompute' the config.
+        dataclass.replace() calls __init__() and __post_init__(), source:
+        https://docs.python.org/3/library/dataclasses.html#dataclasses.replace
+        """
+        return replace(self, **kwargs)
 
     def __str__(self):
         return (

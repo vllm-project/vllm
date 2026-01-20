@@ -123,6 +123,9 @@ kFp8StaticTensorSym = QuantKey(FP8_DTYPE, kStaticTensorScale, symmetric=True)
 kDynamicTensorScale = ScaleDesc(torch.float32, False, GroupShape.PER_TENSOR)
 kFp8DynamicTensorSym = QuantKey(FP8_DTYPE, kDynamicTensorScale, symmetric=True)
 
+kStaticTokenScale = ScaleDesc(torch.float32, True, GroupShape.PER_TOKEN)
+kFp8StaticTokenSym = QuantKey(FP8_DTYPE, kStaticTokenScale, symmetric=True)
+
 kDynamicTokenScale = ScaleDesc(torch.float32, False, GroupShape.PER_TOKEN)
 kFp8DynamicTokenSym = QuantKey(FP8_DTYPE, kDynamicTokenScale, symmetric=True)
 
@@ -247,8 +250,8 @@ def scaled_dequantize(
     if group_shape is not None:
         group_shape = _normalize_quant_group_shape(x_q, group_shape)
 
-    if x_s.ndim == 0:  # scalar
-        x_s = x_s.unsqueeze(-1).unsqueeze(-1)  # convert to (1, 1) tensor
+    if x_s.numel() == 1:  # scalar
+        x_s = x_s.reshape(1, 1)  # normalize all scalar-like tensors to (1, 1)
     if x_s.ndim == 1:
         if group_shape is None:
             raise AssertionError(

@@ -295,6 +295,10 @@ class BaseMultiModalProcessorCache(
         """
         return [self.is_cached_item(mm_hash) for mm_hash in mm_hashes]
 
+    def close(self) -> None:
+        """Close the underlying cache, if needed."""
+        pass
+
     @abstractmethod
     def touch_sender_cache_item(self, mm_hash: str) -> None:
         """
@@ -533,6 +537,10 @@ class ShmObjectStoreSenderCache(BaseMultiModalProcessorCache):
     @override
     def make_stats(self, *, delta: bool = False) -> CacheInfo:
         return self._stat(delta=delta)
+
+    @override
+    def close(self) -> None:
+        self._shm_cache.close()
 
     def remove_dangling_items(self) -> None:
         """Remove items that are no longer in the shared memory cache."""
