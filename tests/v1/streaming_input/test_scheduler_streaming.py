@@ -126,12 +126,14 @@ class TestStreamingScheduler(unittest.TestCase):
         scheduler._update_request_as_session(session, update)
 
         assert session.sampling_params.max_tokens == 10
-        assert session.max_tokens == 20  # 10 + 10
+        # _update_request_as_session clears output tokens first, so
+        # max_tokens = num_output_tokens (0) + update.max_tokens (10) = 10
+        assert session.max_tokens == 10
 
         session.num_computed_tokens = len(session.prompt_token_ids)
 
-        # only generated additional 5
-        session._output_token_ids = [1] * 15
+        # Simulate generating 5 more output tokens
+        session._output_token_ids = [1] * 5
         new_request2 = DummyRequest(
             request_id="session",
             prompt_token_ids=[7, 8, 9],
@@ -142,7 +144,8 @@ class TestStreamingScheduler(unittest.TestCase):
         scheduler._update_request_as_session(session, update2)
 
         assert session.sampling_params.max_tokens == 10
-        assert session.max_tokens == 25  # 15 + 10
+        # Again, output tokens are cleared first, so max_tokens = 0 + 10 = 10
+        assert session.max_tokens == 10
 
     def test_update_request_as_session(self):
         scheduler = create_scheduler()
@@ -293,14 +296,17 @@ class TestStreamingScheduler(unittest.TestCase):
         update = StreamingUpdate.from_request(new_request)
         scheduler._update_request_as_session(session, update)
 
-        # Verify the last output token (11) was removed, and new prompt tokens added
-        assert session._all_token_ids == [1, 2, 3, 10, 4, 5]
+        # _update_request_as_session discards ALL output tokens (they've been
+        # returned to user and shouldn't be part of next sub-request's context).
+        # Only prompt tokens remain, plus new prompt tokens are appended.
+        assert session._all_token_ids == [1, 2, 3, 4, 5]
         assert session.prompt_token_ids == [1, 2, 3, 4, 5]
-        # Verify output tokens list is unchanged (only removed from _all_token_ids)
-        assert session._output_token_ids == [10, 11]
-        assert session.num_computed_tokens == 4
+        # Output tokens list is cleared
+        assert session._output_token_ids == []
+        # num_computed_tokens is reset to the prompt length (KV cache still valid)
+        assert session.num_computed_tokens == 3
         # Verify that the next schedule will only process the new prompt tokens
-        # num_new_tokens = num_tokens - num_computed_tokens = 6 - 4 = 2
+        # num_new_tokens = num_tokens - num_computed_tokens = 5 - 3 = 2
         num_new_tokens = session.num_tokens - session.num_computed_tokens
         assert num_new_tokens == 2
 
@@ -527,10 +533,11 @@ class TestStreamingScheduler(unittest.TestCase):
         assert (
             scheduler_output_cycle3.num_scheduled_tokens[session.request_id] == 2
         )  # Only new tokens [4, 5]
-        # STOP_TOKEN removed from _all_token_ids
-        assert session._all_token_ids == [1, 2, 3, 10, 4, 5]
+        # All output tokens are discarded from _all_token_ids (they've been
+        # returned to user and shouldn't be part of next sub-request's context)
+        assert session._all_token_ids == [1, 2, 3, 4, 5]
         assert session.prompt_token_ids == [1, 2, 3, 4, 5]  # Only prompts
-        assert session._output_token_ids == [10, STOP_TOKEN]
+        assert session._output_token_ids == []  # Output tokens are cleared
 
         # Step 14: Model runner caches NEW prompt_token_ids reference
         # The model runner makes a copy of prompt_token_ids when creating
