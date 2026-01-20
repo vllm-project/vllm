@@ -17,6 +17,10 @@ from vllm.entrypoints.openai.engine.protocol import (
     DeltaMessage,
     DeltaToolCall,
 )
+from vllm.entrypoints.openai.parser.harmony_utils import (
+    sanitize_harmony_tool_name,
+    strip_harmony_control_tokens,
+)
 
 
 class TokenState(NamedTuple):
@@ -109,7 +113,9 @@ def extract_harmony_streaming_delta(
             opened_new_call = False
             if prev_recipient != group.recipient:
                 # New tool call - emit the opening message
-                tool_name = group.recipient.split("functions.", 1)[1]
+                tool_name = sanitize_harmony_tool_name(
+                    group.recipient.split("functions.", 1)[1]
+                )
                 tool_messages.append(
                     DeltaToolCall(
                         id=make_tool_call_id(),
@@ -158,9 +164,13 @@ def extract_harmony_streaming_delta(
     if content_encountered or combined_reasoning or tool_messages:
         delta_kwargs: dict[str, str | list[DeltaToolCall]] = {}
         if content_encountered:
-            delta_kwargs["content"] = combined_content
+            cleaned_content = strip_harmony_control_tokens(combined_content)
+            if cleaned_content is not None:
+                delta_kwargs["content"] = cleaned_content
         if combined_reasoning:
-            delta_kwargs["reasoning"] = combined_reasoning
+            cleaned_reasoning = strip_harmony_control_tokens(combined_reasoning)
+            if cleaned_reasoning is not None:
+                delta_kwargs["reasoning"] = cleaned_reasoning
         if tool_messages:
             delta_kwargs["tool_calls"] = tool_messages
             tools_streamed = True

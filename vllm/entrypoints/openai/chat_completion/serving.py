@@ -6,11 +6,7 @@ import json
 import time
 from collections.abc import AsyncGenerator, AsyncIterator
 from collections.abc import Sequence as GenericSequence
-from dataclasses import replace
-from typing import TYPE_CHECKING, Any, Final
-
-if TYPE_CHECKING:
-    from vllm.reasoning import ReasoningParser
+from typing import Any, Final
 
 import jinja2
 import partial_json_parser
@@ -74,11 +70,7 @@ from vllm.inputs.data import TokensPrompt
 from vllm.logger import init_logger
 from vllm.logprobs import Logprob
 from vllm.outputs import CompletionOutput, RequestOutput
-from vllm.sampling_params import (
-    BeamSearchParams,
-    SamplingParams,
-    StructuredOutputsParams,
-)
+from vllm.sampling_params import BeamSearchParams, SamplingParams
 from vllm.tokenizers import TokenizerLike
 from vllm.tokenizers.mistral import (
     MistralTokenizer,
@@ -419,11 +411,6 @@ class OpenAIServingChat(OpenAIServing):
                         sampling_params,
                     )
 
-                    # Apply Harmony structural_tag constraint for constrained decoding
-                    self._apply_harmony_structural_tag_constraint(
-                        sampling_params, tokenizer
-                    )
-
                 self._log_inputs(
                     sub_request_id,
                     engine_prompt,
@@ -506,73 +493,6 @@ class OpenAIServingChat(OpenAIServing):
         if request.add_generation_prompt:
             return self.response_role
         return request.messages[-1]["role"]
-
-    def _get_harmony_reasoning_parser(
-        self, tokenizer: TokenizerLike
-    ) -> "ReasoningParser | None":
-        """
-        Get reasoning parser for Harmony models.
-
-        Uses configured parser if available, otherwise creates GptOssReasoningParser
-        to ensure constrained decoding prevents special token leakage.
-        """
-        if self.reasoning_parser is not None:
-            return self.reasoning_parser(tokenizer)
-
-        # Fallback: create GptOssReasoningParser for gpt-oss models
-        # even if not explicitly configured
-        from transformers import PreTrainedTokenizerBase
-
-        from vllm.reasoning.gptoss_reasoning_parser import GptOssReasoningParser
-
-        if isinstance(tokenizer, PreTrainedTokenizerBase):
-            return GptOssReasoningParser(tokenizer)
-
-        return None
-
-    def _apply_harmony_structural_tag_constraint(
-        self,
-        sampling_params: SamplingParams,
-        tokenizer: TokenizerLike,
-    ) -> None:
-        """
-        Apply Harmony structural_tag constraint for constrained decoding.
-
-        This prevents special tokens (e.g., <|channel|>commentary) from leaking
-        into tool names during generation by using constrained decoding instead
-        of only relying on post-processing parsing.
-
-        Args:
-            sampling_params: The sampling parameters to modify
-            tokenizer: The tokenizer instance for creating reasoning parser
-        """
-        if not self.use_harmony:
-            return
-
-        reasoning_parser = self._get_harmony_reasoning_parser(tokenizer)
-        if reasoning_parser is None:
-            return
-        # Create or update structured_outputs with structural_tag constraint
-        if (
-            isinstance(
-                struct_out := sampling_params.structured_outputs,
-                StructuredOutputsParams,
-            )
-            and struct_out.all_non_structural_tag_constraints_none()
-        ):
-            # Update existing structured_outputs with structural_tag
-            sampling_params.structured_outputs = replace(
-                struct_out,
-                structural_tag=reasoning_parser.prepare_structured_tag(
-                    struct_out.structural_tag, None
-                ),
-            )
-        elif sampling_params.structured_outputs is None:
-            # Create new structured_outputs with structural_tag
-            structural_tag = reasoning_parser.prepare_structured_tag(None, None)
-            sampling_params.structured_outputs = StructuredOutputsParams(
-                structural_tag=structural_tag
-            )
 
     @staticmethod
     def _bracket_level(s: str, opening="{", closing="}") -> int:
