@@ -28,7 +28,8 @@ from vllm.entrypoints.openai.engine.protocol import (
     ErrorResponse,
     OpenAIBaseModel,
 )
-from vllm.entrypoints.openai.serving_models import BaseModelPath, OpenAIServingModels
+from vllm.entrypoints.openai.models.protocol import BaseModelPath
+from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.entrypoints.pooling.embed.protocol import EmbeddingRequest, EmbeddingResponse
 from vllm.entrypoints.pooling.embed.serving import OpenAIServingEmbedding
 from vllm.entrypoints.pooling.score.protocol import (
@@ -84,7 +85,7 @@ class BatchRequestInput(OpenAIBaseModel):
         if url == "/v1/embeddings":
             return TypeAdapter(EmbeddingRequest).validate_python(value)
         if url.endswith("/score"):
-            return ScoreRequest.model_validate(value)
+            return TypeAdapter(ScoreRequest).validate_python(value)
         if url.endswith("/rerank"):
             return RerankRequest.model_validate(value)
         return TypeAdapter(BatchRequestInputBody).validate_python(value)

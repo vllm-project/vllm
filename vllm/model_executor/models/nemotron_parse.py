@@ -53,14 +53,14 @@ from vllm.multimodal.inputs import (
 )
 from vllm.multimodal.parse import MultiModalDataItems
 from vllm.multimodal.processing import (
+    BaseDummyInputsBuilder,
     BaseProcessingInfo,
     EncDecMultiModalProcessor,
     PromptReplacement,
     PromptUpdate,
 )
-from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from vllm.transformers_utils.configs.radio import RadioConfig
-from vllm.transformers_utils.tokenizer import AnyTokenizer
+from vllm.transformers_utils.tokenizer import TokenizerLike
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 from vllm.v1.attention.backend import AttentionType
 
@@ -558,7 +558,7 @@ class NemotronParseProcessor:
     def __init__(
         self,
         config: PretrainedConfig,
-        tokenizer: AnyTokenizer,
+        tokenizer: TokenizerLike,
         **kwargs,
     ) -> None:
         super().__init__()

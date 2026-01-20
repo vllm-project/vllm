@@ -606,7 +606,7 @@ class VllmBackend:
             try:
                 with open(filepath) as f:
                     hash_content.append(f.read())
-            except OSError:
+            except (OSError, UnicodeDecodeError):
                 logger.warning("Failed to read file %s", filepath)
                 continue
         code_hash = hashlib.sha256("\n".join(hash_content).encode()).hexdigest()
