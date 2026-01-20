@@ -18,7 +18,7 @@ import ray
 import torch
 
 from vllm import LLM
-from vllm.config import KVTransferConfig
+from vllm.config import KVTransferConfig, set_current_vllm_config
 from vllm.distributed.kv_transfer.kv_connector.utils import (
     KVOutputAggregator,
     TpKVTopology,
@@ -1664,24 +1664,26 @@ def test_register_kv_caches_cross_layers(default_vllm_config, dist_init, attn_ba
         # allocate_uniform_kv_caches does not use this
         kv_cache_groups=[],
     )
-    _, cross_layers_kv_cache, _ = (
-        KVConnectorModelRunnerMixin.allocate_uniform_kv_caches(
-            kv_cache_config=kv_cache_config,
-            attn_groups=[
-                [
-                    AttentionGroup(
-                        backend=backend_cls,
-                        layer_names=[],
-                        kv_cache_spec=kv_cache_spec,
-                        kv_cache_group_id=0,
-                    )
-                ]
-            ],
-            cache_dtype=torch.bfloat16,
-            device=torch.cuda.current_device(),
-            kernel_block_sizes=[block_size],
+
+    with set_current_vllm_config(vllm_config):
+        _, cross_layers_kv_cache, _ = (
+            KVConnectorModelRunnerMixin.allocate_uniform_kv_caches(
+                kv_cache_config=kv_cache_config,
+                attn_groups=[
+                    [
+                        AttentionGroup(
+                            backend=backend_cls,
+                            layer_names=[],
+                            kv_cache_spec=kv_cache_spec,
+                            kv_cache_group_id=0,
+                        )
+                    ]
+                ],
+                cache_dtype=torch.bfloat16,
+                device=torch.cuda.current_device(),
+                kernel_block_sizes=[block_size],
+            )
         )
-    )
 
     # Store tensor info for validation
     expected_tensor_size = (
