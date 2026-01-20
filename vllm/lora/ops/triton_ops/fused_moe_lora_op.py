@@ -273,7 +273,7 @@ def _fused_moe_lora_shrink(
         len(lora_a_stacked),
         grid_lora_dim,
     )
-    if naive_block_assignment:
+    if sorted_token_ids is None:
         # dummy ptrs
         sorted_token_ids_ptr = expert_ids
         num_tokens_post_padded_ptr = expert_ids
@@ -390,7 +390,7 @@ def _fused_moe_lora_expand(
         len(lora_b_stacked),
         grid_lora_dim,
     )
-    if naive_block_assignment:
+    if sorted_token_ids is None:
         sorted_token_ids_ptr = expert_ids
         num_tokens_post_padded_ptr = expert_ids
         stride_tl = 0
@@ -509,7 +509,7 @@ def _fused_moe_lora(
     K = qcurr_hidden_states.shape[1]
     num_tokens = M * top_k_num
     w1_output_dim_size = w1_lora_b_stacked.shape[2]
-    if naive_block_assignment:
+    if sorted_token_ids is None:
         em_shrink = num_tokens * shrink_block_size_m
         em_expand = num_tokens * expand_block_size_m
     else:
