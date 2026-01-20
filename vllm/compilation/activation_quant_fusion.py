@@ -199,17 +199,18 @@ class SiluMulBlockQuantPattern:
         self.quant_dtype = FP8_DTYPE
         
         # Get current config for model dtype
+        from vllm.config import get_current_vllm_config
         config = get_current_vllm_config()
         self.model_dtype = config.model_config.dtype if config.model_config else None
         
         # Matchers for pattern detection
-        from .matcher_utils import MatcherSiluAndMul, MatcherFp8PerTokenGroupQuant
+        from .matcher_utils import MatcherSiluAndMul, MatcherQuantFP8
         self.silu_and_mul_matcher = MatcherSiluAndMul()
         
         # Create quant matcher for group quantization
         scale = ScaleDesc(torch.float32, False, group_shape)
         quant_key = QuantKey(dtype=FP8_DTYPE, scale=scale, symmetric=True)
-        self.quant_matcher = MatcherFp8PerTokenGroupQuant(
+        self.quant_matcher = MatcherQuantFP8(
             quant_key, 
             has_col_major_scales=has_col_major_scales,
             is_e8m0=is_e8m0
@@ -264,11 +265,11 @@ class SiluMulBlockQuantPattern:
         
         # REGISTER THE PATTERN
         inputs = self.silu_and_mul_matcher.inputs()
-        pm.register_replacement(
+        register_replacement(
             pattern,
             replacement,
             inputs,
-            pm.fwd_only,
+            fwd_only,
             pm_pass,
         )
 
