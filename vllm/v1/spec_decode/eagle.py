@@ -168,6 +168,10 @@ class SpecDecodeBaseProposer:
             with_numpy=True,
         )
 
+        self.slot_mapping_buffer = torch.zeros(
+            self.max_num_tokens, dtype=torch.int64, device=device
+        )
+
         # Determine allowed attention backends once during initialization.
         self.allowed_attn_types: tuple | None = None
         if current_platform.is_rocm():
@@ -233,6 +237,20 @@ class SpecDecodeBaseProposer:
             self.mrope_positions[:, :num_tokens] = positions
         else:
             self.positions[:num_tokens] = positions
+
+    def _build_slot_mapping_dict(
+        self, slot_mapping: torch.Tensor, num_tokens: int
+    ) -> dict[str, torch.Tensor]:
+        slot_len = slot_mapping.shape[0]
+        self.slot_mapping_buffer[:slot_len].copy_(slot_mapping)
+        slot_mapping_view = self.slot_mapping_buffer[:num_tokens]
+
+        result = {}
+        for layer_name in self.attn_layer_names:
+            result[layer_name] = slot_mapping_view
+        for layer_name in self.indexer_layer_names:
+            result[layer_name] = slot_mapping_view
+        return result
 
     def propose(
         self,
@@ -351,6 +369,9 @@ class SpecDecodeBaseProposer:
             num_tokens=num_input_tokens,
             num_tokens_across_dp=num_tokens_across_dp,
             cudagraph_runtime_mode=cudagraph_runtime_mode,
+            slot_mapping=self._build_slot_mapping_dict(
+                common_attn_metadata.slot_mapping, num_input_tokens
+            ),
         ):
             ret_hidden_states = self.model(**model_kwargs)
             if not self.model_returns_tuple():
@@ -552,6 +573,9 @@ class SpecDecodeBaseProposer:
                 num_tokens=input_batch_size,
                 num_tokens_across_dp=batch_size_across_dp,
                 cudagraph_runtime_mode=cudagraph_runtime_mode,
+                slot_mapping=self._build_slot_mapping_dict(
+                    common_attn_metadata.slot_mapping, input_batch_size
+                ),
             ):
                 ret_hidden_states = self.model(**model_kwargs)
                 if not self.model_returns_tuple():
@@ -885,6 +909,9 @@ class SpecDecodeBaseProposer:
                 self.vllm_config,
                 num_tokens=num_input_tokens,
                 cudagraph_runtime_mode=cudagraph_runtime_mode,
+                slot_mapping=self._build_slot_mapping_dict(
+                    attn_metadata.slot_mapping, num_input_tokens
+                ),
             ):
                 last_hidden_states, hidden_states = self.model(
                     input_ids=self.input_ids[:num_input_tokens],
@@ -1241,6 +1268,16 @@ class SpecDecodeBaseProposer:
                 if num_tokens_across_dp is not None:
                     num_tokens_across_dp[self.dp_rank] = num_input_tokens
 
+            if is_graph_capturing and self.attn_layer_names:
+                slot_mapping_view = self.slot_mapping_buffer[:num_input_tokens]
+                slot_mapping_dict: dict[str, torch.Tensor] = {}
+                for layer_name in self.attn_layer_names:
+                    slot_mapping_dict[layer_name] = slot_mapping_view
+                for layer_name in self.indexer_layer_names:
+                    slot_mapping_dict[layer_name] = slot_mapping_view
+            else:
+                slot_mapping_dict = {}
+
             with set_forward_context(
                 None,
                 self.vllm_config,
@@ -1249,6 +1286,7 @@ class SpecDecodeBaseProposer:
                 cudagraph_runtime_mode=CUDAGraphMode.PIECEWISE
                 if cudagraphs_enabled
                 else CUDAGraphMode.NONE,
+                slot_mapping=slot_mapping_dict,
             ):
                 if self.supports_mm_inputs:
                     input_ids = None
