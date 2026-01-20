@@ -34,6 +34,8 @@ Unquantized MoE backends are selected via the oracle at
 backends use `vllm/model_executor/layers/fused_moe/oracle/fp8.py` and
 `vllm/model_executor/layers/fused_moe/oracle/nvfp4.py`.
 
+If your backend does not fit MoE/attention/quantization, follow the same pattern: find the central selection/dispatch point, add any layout conversion, wire kernel creation, add tests, and register env vars as needed.
+
 ### Step 1: Add to the Backend Enum
 
 ```python
