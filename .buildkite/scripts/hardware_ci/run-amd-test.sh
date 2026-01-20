@@ -49,7 +49,7 @@ cleanup_docker
 
 echo "--- Resetting GPUs"
 
-echo "reset" > /opt/amdgpu/etc/gpu_state
+#echo "reset" > /opt/amdgpu/etc/gpu_state
 
 while true; do
         sleep 3
@@ -240,11 +240,12 @@ elif [[ $commands == *"VLLM_TEST_GROUP_NAME=mi325_4-2-node-tests-4-gpus-in-total
       for i in "${!node0[@]}";do 
         command_node_0=${node0[i]}
         command_node_1=${node1[i]}
-        export commands="curl -fsSL https://get.docker.com -o get-docker.sh && sh get-docker.sh --version ${DCKR_VER} && rm get-docker.sh && nohup bash -c 'dockerd &' && sleep 5 && ${prefix} && ../.buildkite/scripts/run-multi-node-test.sh ./tests 2 2 ${image_name} '${command_node_0}' '${command_node_1}'"
+        #${prefix} && ../
+        export commands="curl -fsSL https://get.docker.com -o get-docker.sh && sh get-docker.sh --version ${DCKR_VER} && rm get-docker.sh && nohup bash -c 'dockerd &' && sleep 5 && .buildkite/scripts/run-multi-node-test.sh ./tests 2 2 ${image_name} '${command_node_0}' '${command_node_1}'"
         echo "COMMANDS: ${commands}"
         docker run \
           --privileged \
-          --device /dev/kfd $BUILDKITE_AGENT_META_DATA_RENDER_DEVICES \
+          --device /dev/kfd \
           --network=host \
           --shm-size=16gb \
           --group-add "$render_gid" \
