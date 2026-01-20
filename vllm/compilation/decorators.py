@@ -25,10 +25,11 @@ from vllm.config import (
     set_current_vllm_config,
 )
 from vllm.config.compilation import DynamicShapesType
+from vllm.forward_context import get_forward_context, is_forward_context_available
 from vllm.logger import init_logger
 from vllm.sequence import IntermediateTensors
 from vllm.utils.import_utils import resolve_obj_by_qualname
-from vllm.utils.torch_utils import is_torch_equal_or_newer, supports_dynamo
+from vllm.utils.torch_utils import is_torch_equal_or_newer
 
 from .monitor import start_monitoring_torch_compile
 
@@ -312,7 +313,6 @@ def _support_torch_compile(
         self.do_not_compile = (
             self.compilation_config.mode
             in [CompilationMode.NONE, CompilationMode.STOCK_TORCH_COMPILE]
-            or not supports_dynamo()
             or _should_ignore_torch_compile(self.__class__)
             or not enable_compile
         )
@@ -387,6 +387,12 @@ def _support_torch_compile(
         # e.g. TPU has the compilation logic in model runner, so we don't
         # need to compile the model inside.
         if self.do_not_compile or torch.compiler.is_compiling():
+            return self.forward(*args, **kwargs)
+
+        # If skip_compiled is set, bypass compiled model call. This is used e.g. for
+        # enc-dec models where tensor shapes/types vary across invocations, preventing
+        # the capture of a single computational graph.
+        if is_forward_context_available() and get_forward_context().skip_compiled:
             return self.forward(*args, **kwargs)
 
         # if aot_compiled_fn is set, call it with partition wrapper context.

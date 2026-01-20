@@ -18,8 +18,8 @@ from vllm.distributed.kv_transfer.kv_connector.v1.p2p.p2p_nccl_engine import (
 )
 from vllm.distributed.parallel_state import get_world_group
 from vllm.logger import init_logger
+from vllm.model_executor.layers.attention.mla_attention import MLACommonMetadata
 from vllm.v1.attention.backend import AttentionMetadata
-from vllm.v1.attention.backends.mla.common import MLACommonMetadata
 from vllm.v1.core.sched.output import SchedulerOutput
 
 if TYPE_CHECKING:

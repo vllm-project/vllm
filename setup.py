@@ -992,6 +992,8 @@ setup(
         "flashinfer": [],  # Kept for backwards compatibility
         # Optional deps for AMD FP4 quantization support
         "petit-kernel": ["petit-kernel"],
+        # Optional deps for Helion kernel development
+        "helion": ["helion"],
     },
     cmdclass=cmdclass,
     package_data=package_data,
