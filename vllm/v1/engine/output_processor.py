@@ -786,6 +786,12 @@ class OutputProcessor:
 
             if req_state.observable_context and req_state.observable_context.not_empty:
                 ob_context = req_state.observable_context
+                if ob_context.num_cached_tokens is not None:
+                    span.set_attribute(
+                        SpanAttributes.GEN_AI_USAGE_CACHED_TOKENS,
+                        ob_context.num_cached_tokens,
+                    )
+
                 for event in ob_context.engine_core_events:
                     span.add_event(
                         name=get_event_name(event.type),

@@ -21,7 +21,7 @@ class Event:
 class ObservableContext:
     token_related_events: list[Event]
     engine_core_events: list[EngineCoreEvent]
-    num_cached_tokens: int = 0
+    num_cached_tokens: int | None = None
     not_empty: bool = False
 
     @classmethod

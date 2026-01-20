@@ -113,6 +113,7 @@ class SpanAttributes:
     GEN_AI_REQUEST_TOP_P = "gen_ai.request.top_p"
     GEN_AI_REQUEST_TEMPERATURE = "gen_ai.request.temperature"
     GEN_AI_RESPONSE_MODEL = "gen_ai.response.model"
+    GEN_AI_USAGE_CACHED_TOKENS = "gen_ai.usage.cached_tokens"
     # Attribute names added until they are added to the semantic conventions:
     GEN_AI_REQUEST_ID = "gen_ai.request.id"
     GEN_AI_REQUEST_N = "gen_ai.request.n"
@@ -130,29 +131,6 @@ class SpanAttributes:
     GEN_AI_LATENCY_TIME_IN_MODEL_PREFILL = "gen_ai.latency.time_in_model_prefill"
     GEN_AI_LATENCY_TIME_IN_MODEL_DECODE = "gen_ai.latency.time_in_model_decode"
     GEN_AI_LATENCY_TIME_IN_MODEL_INFERENCE = "gen_ai.latency.time_in_model_inference"
-    GEN_AI_REQUEST_TRACE_LEVEL = "gen_ai.request.trace_level"
-
-    # trace_level_2
-    GEN_AI_LATENCY_PER_TOKEN_GENERATION_TIME = (
-        "gen_ai.latency.per_token_generation_time"
-    )
-    GEN_AI_LATENCY_PER_TOKEN_SCHEDULED_TIME = "gen_ai.latency.per_token_scheduled_time"
-    GEN_AI_ITERATION_PER_TOKEN_BATCH_SIZE = "gen_ai.iteration.per_token_batch_size"
-    GEN_AI_ITERATION_PER_TOKEN_WAITING_SIZE = "gen_ai.iteration.per_token_waiting_size"
-    GEN_AI_ITERATION_PER_TOKEN_TOTAL_TOKENS = "gen_ai.iteration.per_token_total_tokens"
-    GEN_AI_ITERATION_PER_TOKEN_CACHED_TOKENS = (
-        "gen_ai.iteration.per_token_cached_tokens"
-    )
-    GEN_AI_RESPONSE_PER_TOKEN_CANDIDATE_DECODED_TOKENS = (
-        "gen_ai.response.per_token_candidate_decoded_tokens"
-    )
-    GEN_AI_RESPONSE_PER_TOKEN_CANDIDATE_TOKEN_IDS = (
-        "gen_ai.response.per_token_candidate_token_ids"
-    )
-    GEN_AI_RESPONSE_PER_TOKEN_CANDIDATE_TOKENS_LOGPROBS = (
-        "gen_ai.response.per_token_candidate_tokens_logprobs"
-    )
-    GEN_AI_REQUEST_PREFILL_CHUNKED_STATS = "gen_ai.request.prefill_chunked_stats"
 
 
 def contains_trace_headers(headers: Mapping[str, str]) -> bool:
