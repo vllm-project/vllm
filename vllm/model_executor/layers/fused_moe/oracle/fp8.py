@@ -271,6 +271,7 @@ def select_fp8_moe_backend(
     if envs.is_set("VLLM_USE_DEEP_GEMM") or envs.is_set("VLLM_MOE_USE_DEEP_GEMM"):
         if not envs.VLLM_USE_DEEP_GEMM or not envs.VLLM_MOE_USE_DEEP_GEMM:
             AVAILABLE_BACKENDS.remove(Fp8MoeBackend.DEEPGEMM)
+            AVAILABLE_BACKENDS.remove(Fp8MoeBackend.BATCHED_DEEPGEMM)
         else:
             backend = (
                 Fp8MoeBackend.DEEPGEMM
