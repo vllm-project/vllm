@@ -306,6 +306,7 @@ class ModelConfig:
     mm_processor_cache_gb: InitVar[float | None] = None
     mm_processor_cache_type: InitVar[MMCacheType | None] = None
     mm_shm_cache_max_object_size_mb: InitVar[int | None] = None
+    mm_encoder_only: InitVar[bool | None] = None
     mm_encoder_tp_mode: InitVar[MMEncoderTPMode | None] = None
     mm_encoder_attn_backend: InitVar[AttentionBackendEnum | str | None] = None
     interleave_mm_strings: InitVar[bool | None] = None
@@ -420,6 +421,7 @@ class ModelConfig:
         mm_processor_cache_gb: float | None,
         mm_processor_cache_type: MMCacheType | None,
         mm_shm_cache_max_object_size_mb: int | None,
+        mm_encoder_only: bool | None,
         mm_encoder_tp_mode: MMEncoderTPMode | None,
         mm_encoder_attn_backend: AttentionBackendEnum | str | None,
         interleave_mm_strings: bool | None,
@@ -496,6 +498,15 @@ class ModelConfig:
             self.model, hf_token=self.hf_token, revision=self.revision
         )
         self.model_arch_config = self.get_model_arch_config()
+
+        if self.convert == "mm_encoder_only":
+            logger.warning_once(
+                "`--convert mm_encoder_only` is deprecated and "
+                "will be removed in v0.15. "
+                "Please use --mm-encoder-only` instead."
+            )
+            mm_encoder_only = True
+            self.convert = "none"
 
         architectures = self.architectures
         registry = self.registry
@@ -583,6 +594,7 @@ class ModelConfig:
                 mm_processor_cache_gb=mm_processor_cache_gb,
                 mm_processor_cache_type=mm_processor_cache_type,
                 mm_shm_cache_max_object_size_mb=mm_shm_cache_max_object_size_mb,
+                mm_encoder_only=mm_encoder_only,
                 mm_encoder_tp_mode=mm_encoder_tp_mode,
                 mm_encoder_attn_backend=mm_encoder_attn_backend,
                 interleave_mm_strings=interleave_mm_strings,

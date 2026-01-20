@@ -108,6 +108,12 @@ class MultiModalConfig:
     """Size limit (in MiB) for each object stored in the multi-modal processor
     shared memory cache. Only effective when `mm_processor_cache_type` is
     `"shm"`."""
+    mm_encoder_only: bool = False
+    """
+    When enabled, skips the language component of the model.
+
+    This is usually only valid in disaggregated Encoder process.
+    """
     mm_encoder_tp_mode: MMEncoderTPMode = "weights"
     """Indicates how to optimize multi-modal encoder inference using tensor
     parallelism (TP).

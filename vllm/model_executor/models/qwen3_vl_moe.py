@@ -424,11 +424,16 @@ class Qwen3VLMoeForConditionalGeneration(
             multimodal_config.is_multimodal_pruning_enabled()
         )
 
-        if not multimodal_config.get_limit_per_prompt(
-            "image"
-        ) and not multimodal_config.get_limit_per_prompt("video"):
-            self.visual = None
-        else:
+        self.use_deepstack = hasattr(config.vision_config, "deepstack_visual_indexes")
+        self.deepstack_num_level = (
+            len(config.vision_config.deepstack_visual_indexes)
+            if self.use_deepstack
+            else 0
+        )
+        self.visual_dim = config.vision_config.out_hidden_size
+        self.multiscale_dim = self.visual_dim * self.deepstack_num_level
+
+        with self._mark_tower_model(vllm_config, {"image", "video"}):
             self.visual = Qwen3_VisionTransformer(
                 config.vision_config,
                 norm_eps=getattr(config, "rms_norm_eps", 1e-6),
@@ -437,9 +442,21 @@ class Qwen3VLMoeForConditionalGeneration(
                 prefix=maybe_prefix(prefix, "visual"),
             )
 
-        self.language_model = Qwen3MoeLLMForCausalLM(
-            vllm_config=vllm_config, prefix=maybe_prefix(prefix, "language_model")
-        )
+            # register buffer for deepstack
+            if self.use_deepstack:
+                self.deepstack_input_embeds = [
+                    torch.zeros(
+                        vllm_config.scheduler_config.max_num_batched_tokens,
+                        config.text_config.hidden_size,
+                    )
+                    for _ in range(self.deepstack_num_level)
+                ]
+
+        with self._mark_language_model(vllm_config):
+            self.language_model = Qwen3MoeLLMForCausalLM(
+                vllm_config=vllm_config, prefix=maybe_prefix(prefix, "language_model")
+            )
+
         # Whether to include the gate_up_proj mapping is determined by
         # the language model.
         self.packed_modules_mapping = (
@@ -449,26 +466,6 @@ class Qwen3VLMoeForConditionalGeneration(
         self.make_empty_intermediate_tensors = (
             self.language_model.make_empty_intermediate_tensors
         )
-
-        self.use_deepstack = hasattr(config.vision_config, "deepstack_visual_indexes")
-        self.deepstack_num_level = (
-            len(config.vision_config.deepstack_visual_indexes)
-            if self.use_deepstack
-            else 0
-        )
-        # register buffer for deepstack
-        if self.use_deepstack and self.visual is not None:
-            self.deepstack_input_embeds = [
-                torch.zeros(
-                    vllm_config.scheduler_config.max_num_batched_tokens,
-                    config.text_config.hidden_size,
-                )
-                for _ in range(self.deepstack_num_level)
-            ]
-        else:
-            self.deepstack_input_embeds = None
-        self.visual_dim = config.vision_config.out_hidden_size
-        self.multiscale_dim = self.visual_dim * self.deepstack_num_level
 
         # Set MoE hyperparameters
         self.set_moe_parameters()

@@ -457,8 +457,7 @@ class Mistral3ForConditionalGeneration(
         ):
             config.projector_hidden_act = "gelu"
 
-        # TODO: Optionally initializes this for supporting embeddings.
-        if multimodal_config.get_limit_per_prompt("image"):
+        with self._mark_tower_model(vllm_config, "image"):
             self.vision_tower = init_vision_tower_for_llava(
                 config,
                 quant_config=quant_config,
@@ -476,15 +475,13 @@ class Mistral3ForConditionalGeneration(
                 quant_config=quant_config,
                 prefix=maybe_prefix(prefix, "multi_modal_projector"),
             )
-        else:
-            self.vision_tower = None
-            self.multi_modal_projector = None
 
-        self.language_model = init_vllm_registered_model(
-            vllm_config=vllm_config,
-            hf_config=config.text_config,
-            prefix=maybe_prefix(prefix, "language_model"),
-        )
+        with self._mark_language_model(vllm_config):
+            self.language_model = init_vllm_registered_model(
+                vllm_config=vllm_config,
+                hf_config=config.text_config,
+                prefix=maybe_prefix(prefix, "language_model"),
+            )
 
         self.make_empty_intermediate_tensors = (
             self.language_model.make_empty_intermediate_tensors
@@ -533,9 +530,6 @@ class Mistral3ForConditionalGeneration(
         else:
             image_embeds = (image_embeds,)
         return image_embeds
-
-    def get_language_model(self) -> torch.nn.Module:
-        return self.language_model
 
     def embed_multimodal(self, **kwargs: object) -> MultiModalEmbeddings:
         image_input = self._parse_and_validate_image_input(**kwargs)
@@ -607,11 +601,7 @@ class Mistral3ForConditionalGeneration(
         return self.language_model.compute_logits(hidden_states)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        skip_prefixes = []
-        if self.vision_tower is None and self.multi_modal_projector is None:
-            skip_prefixes = ["vision_tower.", "multi_modal_projector."]
-
-        loader = AutoWeightsLoader(self, skip_prefixes=skip_prefixes)
+        loader = AutoWeightsLoader(self)
         return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
     def get_mm_mapping(self) -> MultiModelKeys:

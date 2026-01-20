@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from collections.abc import Callable, Iterable, Mapping, MutableSequence
+from contextlib import contextmanager, nullcontext
 from typing import (
     TYPE_CHECKING,
     ClassVar,
@@ -69,6 +70,46 @@ def _require_is_multimodal(is_multimodal: Tensor | None) -> Tensor:
     return is_multimodal
 
 
+class LMMissingLayer(nn.Module):
+    packed_modules_mapping: dict[str, list[str]] = {}
+
+    def make_empty_intermediate_tensors(self, *args, **kwargs):
+        raise RuntimeError("This module should not be called in MM encoder-only mode")
+
+    def __call__(self, *args, **kwargs):
+        raise RuntimeError("This module should not be called in MM encoder-only mode")
+
+
+class TowerMissingLayer(nn.Module):
+    packed_modules_mapping: dict[str, list[str]] = {}
+
+    def __init__(self, modalities: set[str]) -> None:
+        super().__init__()
+
+        self.modalities = modalities
+
+    def __call__(self, *args, **kwargs):
+        raise RuntimeError(f"The following modalities are disabled: {self.modalities}")
+
+
+@contextmanager
+def _no_init_weights(module: nn.Module, placeholder: Callable[[], nn.Module]):
+    """
+    Within this context, prevent weight initialization from using device memory and
+    replace direct child assignments to `module` with the result of `placeholder()`.
+    """
+
+    def callback(module_, name, submodule):
+        if module_ is module:
+            return placeholder()
+
+        return submodule
+
+    with torch.nn.modules.module.register_module_module_registration_hook(callback):  # noqa: E501,SIM117
+        with torch.device("meta"):
+            yield
+
+
 @runtime_checkable
 class SupportsMultiModal(Protocol):
     """The interface required for all multi-modal models."""
@@ -105,6 +146,16 @@ class SupportsMultiModal(Protocol):
     Set internally by `MultiModalRegistry.register_processor`.
     """
 
+    _language_model_names: list[str] = []
+    """
+    Set internally by `_mark_language_model`.
+    """
+
+    _tower_model_names: list[str] = []
+    """
+    Set internally by `_mark_tower_model`.
+    """
+
     @classmethod
     def get_placeholder_str(cls, modality: str, i: int) -> str | None:
         """
@@ -134,7 +185,64 @@ class SupportsMultiModal(Protocol):
         Returns:
             torch.nn.Module: The core language model component.
         """
-        ...
+        if self._language_model_names:
+            return getattr(self, self._language_model_names[0])
+
+        raise NotImplementedError(
+            f"No language model found in {type(self).__name__}! "
+            "You should initialize it inside `_mark_language_model`."
+        )
+
+    @contextmanager
+    def _mark_language_model(self, vllm_config: VllmConfig):
+        """
+        Mark each child module that was assigned to this model
+        during this context as a language model component.
+        """
+        mm_config = vllm_config.model_config.multimodal_config
+
+        children_names = list[str]()
+
+        def callback(module_, name, submodule):
+            if module_ is self:
+                children_names.append(name)
+
+        with torch.nn.modules.module.register_module_module_registration_hook(callback):  # noqa: E501,SIM117
+            with (
+                _no_init_weights(self, LMMissingLayer)
+                if mm_config.mm_encoder_only
+                else nullcontext()
+            ):
+                yield
+
+        self._language_model_names = children_names
+
+    @contextmanager
+    def _mark_tower_model(self, vllm_config: VllmConfig, modalities: set[str] | str):
+        """
+        Mark each child module that was assigned to this model
+        during this context as a tower model component.
+        """
+        if isinstance(modalities, str):
+            modalities = {modalities}
+
+        mm_config = vllm_config.model_config.multimodal_config
+
+        children_names = list[str]()
+
+        def callback(module_, name, submodule):
+            if module_ is self:
+                children_names.append(name)
+
+        with torch.nn.modules.module.register_module_module_registration_hook(callback):  # noqa: E501,SIM117
+            with (
+                _no_init_weights(self, lambda: TowerMissingLayer(modalities))
+                if all(mm_config.get_limit_per_prompt(m) == 0 for m in modalities)
+                else nullcontext()
+            ):
+                yield
+
+        self._tower_model_names = children_names
 
     def get_num_mm_encoder_tokens(self, num_image_tokens: int) -> int:
         """
@@ -153,14 +261,6 @@ class SupportsMultiModal(Protocol):
         multi-modal connector tokens.
         """
         ...
-
-    @classmethod
-    def get_language_model_spec(cls) -> tuple[nn.Module | None, str | None]:
-        """
-        Return the language model spec:
-        (language model class, language model attr)
-        """
-        return None, None
 
     @overload
     def embed_input_ids(self, input_ids: Tensor) -> Tensor: ...
@@ -297,10 +397,6 @@ def requires_raw_input_tokens(model: type[object] | object) -> bool:
 
 def supports_multimodal_encoder_tp_data(model: type[object] | object) -> bool:
     return getattr(model, "supports_encoder_tp_data", False)
-
-
-def supports_mm_encoder_only(model: type[object] | object) -> bool:
-    return getattr(model, "is_mm_encoder_only_model", False)
 
 
 @overload

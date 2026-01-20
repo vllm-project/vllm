@@ -1277,11 +1277,16 @@ class Qwen3VLForConditionalGeneration(
             multimodal_config.is_multimodal_pruning_enabled()
         )
 
-        if not multimodal_config.get_limit_per_prompt(
-            "image"
-        ) and not multimodal_config.get_limit_per_prompt("video"):
-            self.visual = None
-        else:
+        self.use_deepstack = hasattr(config.vision_config, "deepstack_visual_indexes")
+        self.deepstack_num_level = (
+            len(config.vision_config.deepstack_visual_indexes)
+            if self.use_deepstack
+            else 0
+        )
+        self.visual_dim = config.vision_config.out_hidden_size
+        self.multiscale_dim = self.visual_dim * self.deepstack_num_level
+
+        with self._mark_tower_model(vllm_config, {"image", "video"}):
             self.visual = Qwen3_VisionTransformer(
                 config.vision_config,
                 norm_eps=getattr(config, "rms_norm_eps", 1e-6),
@@ -1290,33 +1295,24 @@ class Qwen3VLForConditionalGeneration(
                 prefix=maybe_prefix(prefix, "visual"),
             )
 
-        self.language_model = Qwen3LLMForCausalLM(
-            vllm_config=vllm_config, prefix=maybe_prefix(prefix, "language_model")
-        )
+            # register buffer for deepstack
+            if self.use_deepstack:
+                self.deepstack_input_embeds = [
+                    torch.zeros(
+                        vllm_config.scheduler_config.max_num_batched_tokens,
+                        config.text_config.hidden_size,
+                    )
+                    for _ in range(self.deepstack_num_level)
+                ]
+
+        with self._mark_language_model(vllm_config):
+            self.language_model = Qwen3LLMForCausalLM(
+                vllm_config=vllm_config, prefix=maybe_prefix(prefix, "language_model")
+            )
 
         self.make_empty_intermediate_tensors = (
             self.language_model.make_empty_intermediate_tensors
         )
-
-        self.use_deepstack = hasattr(config.vision_config, "deepstack_visual_indexes")
-        self.deepstack_num_level = (
-            len(config.vision_config.deepstack_visual_indexes)
-            if self.use_deepstack
-            else 0
-        )
-        # register buffer for deepstack
-        if self.use_deepstack and self.visual is not None:
-            self.deepstack_input_embeds = [
-                torch.zeros(
-                    vllm_config.scheduler_config.max_num_batched_tokens,
-                    config.text_config.hidden_size,
-                )
-                for _ in range(self.deepstack_num_level)
-            ]
-        else:
-            self.deepstack_input_embeds = None
-        self.visual_dim = config.vision_config.out_hidden_size
-        self.multiscale_dim = self.visual_dim * self.deepstack_num_level
 
     def set_aux_hidden_state_layers(self, layers: tuple[int, ...]) -> None:
         self.language_model.model.aux_hidden_state_layers = layers
@@ -1893,9 +1889,6 @@ class Qwen3VLForConditionalGeneration(
 
         return torch.from_numpy(llm_positions), mrope_position_delta
 
-    def get_language_model(self) -> torch.nn.Module:
-        return self.language_model
-
     def embed_multimodal(self, **kwargs: object) -> MultiModalEmbeddings | None:
         mm_input_by_modality = self._parse_and_validate_multimodal_inputs(**kwargs)
         if not mm_input_by_modality:
@@ -2076,10 +2069,7 @@ class Qwen3VLForConditionalGeneration(
         return self.language_model.compute_logits(hidden_states)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        skip_prefixes = []
-        if self.visual is None:
-            skip_prefixes.extend(["visual."])
-        loader = AutoWeightsLoader(self, skip_prefixes=skip_prefixes)
+        loader = AutoWeightsLoader(self)
         return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
     def get_mm_mapping(self) -> MultiModelKeys:
@@ -2110,11 +2100,3 @@ class Qwen3VLForConditionalGeneration(
         vision_config = hf_config.vision_config
         merge_size = vision_config.spatial_merge_size
         return num_vision_tokens // merge_size**2
-
-    @classmethod
-    def get_language_model_spec(cls) -> tuple[nn.Module | None, str | None]:
-        """
-        Return the language model spec:
-        (language model class, language model attr)
-        """
-        return Qwen3LLMForCausalLM, "language_model"
