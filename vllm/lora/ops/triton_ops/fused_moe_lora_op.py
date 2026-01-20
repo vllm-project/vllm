@@ -44,7 +44,6 @@ def _get_ptr(lora_weights: list[torch.Tensor], device: torch.device):
         "stride_el",
         "slice_a_size",
         "slice_c_size",
-        "MAX_LORAS_TOTAL",
     ]
 )
 def _fused_moe_lora_kernel(
@@ -227,17 +226,19 @@ def _fused_moe_lora_kernel(
     )
     c_mask = token_mask[:, None] & cn_mask[None, :]
 
+    out_ty = c_ptr.dtype.element_ty
+    acc_out = acc.to(out_ty)
+
     if SPLIT_K == 1:
         if ADD_TO_C:
-            prev = tl.load(c_ptrs, mask=c_mask, other=0.0).to(tl.float32)
-            tl.store(c_ptrs, (acc + prev).to(c_ptr.dtype.element_ty), mask=c_mask)
+            # Perform addition with out_ty, matching the rounding path of torch’s output(dtype)+=delta(dtype).
+            prev = tl.load(c_ptrs, mask=c_mask, other=0.0)  # already out_ty
+            tl.store(c_ptrs, prev + acc_out, mask=c_mask)
         else:
-            tl.store(c_ptrs, acc.to(c_ptr.dtype.element_ty), mask=c_mask)
+            tl.store(c_ptrs, acc_out, mask=c_mask)
     else:
-        tl.atomic_add(
-            c_ptrs, acc.to(c_ptr.dtype.element_ty), mask=c_mask, sem="relaxed"
-        )
-
+        #When SPLIT_K != 1, atomic is still used (note: expand will force split_k=1 to prevent atomic accumulation on non-zero output).
+        tl.atomic_add(c_ptrs, acc_out, mask=c_mask, sem="relaxed")
 
 @torch.inference_mode()
 def _fused_moe_lora_shrink(
@@ -285,6 +286,11 @@ def _fused_moe_lora_shrink(
     )
     grid = (grid0, len(lora_a_stacked), lora_ids.numel())
 
+
+    # a_intermediate_cache1 is now a view sliced from a larger flat buffer. The stride between slices must be calculated using stride(0)，
+    # and can no longer be obtained with numel() // num_slices (otherwise, when capacity > size, it will cause incorrect slice address calculation / overlapping writes).
+    slice_c_size = a_intermediate_cache1.stride(0)
+
     _fused_moe_lora_kernel[grid](
         qcurr_hidden_states,
         b_ptr,
@@ -311,8 +317,8 @@ def _fused_moe_lora_shrink(
         a_intermediate_cache1.stride(3),
         sorted_token_ids.stride(0),
         expert_ids.stride(0),
-        slice_a_size=qcurr_hidden_states.numel(),
-        slice_c_size=a_intermediate_cache1.numel() // num_slices,
+        slice_a_size=qcurr_hidden_states.numel(),  # It has no effect when num_slice_a=1.
+        slice_c_size=slice_c_size,
         num_slice_a=1,
         num_slice_c=num_slices,
         top_k=1 if mul_routed_weight else top_k_num,
@@ -331,8 +337,16 @@ def _fused_moe_lora_shrink(
         num_stages=num_stages,
     )
 
+# A workspace: only one expandable large buffer is retained for each combination of (device, dtype, num_slices, top_k_num).
+_A_WS_BUF: dict[tuple, torch.Tensor] = {}
+_A_WS_CAP: dict[tuple, tuple[int, int]] = {}  # (cap_M, cap_rank)
 
-_A_WS_CACHE: dict[tuple, torch.Tensor] = {}
+
+def _round_up_pow2(x: int) -> int:
+    """Round x up to the nearest power of two to reduce thrashing and fragmentation caused by repeated realloc operations."""
+    if x <= 1:
+        return 1
+    return 1 << (x - 1).bit_length()
 
 
 def _get_a_workspace(
@@ -345,15 +359,86 @@ def _get_a_workspace(
     rank: int,
     must_zero: bool,
 ) -> torch.Tensor:
-    key = (device.type, device.index, dtype, num_slices, M, top_k_num, rank)
-    buf = _A_WS_CACHE.get(key)
-    if buf is None:
-        buf = torch.empty((num_slices, M, top_k_num, rank), device=device, dtype=dtype)
-        _A_WS_CACHE[key] = buf
-    if must_zero:
-        buf.zero_()
-    return buf
+    """
+    Returns a view with shape (num_slices, M, top_k_num, rank).
+    Internally, only one "large buffer" is maintained; it is expanded when capacity is insufficient, avoiding separate tensors for each M.
+    """
+    key = (device.type, device.index, dtype, num_slices, top_k_num)
 
+    buf = _A_WS_BUF.get(key)
+    cap = _A_WS_CAP.get(key)
+    cap_M, cap_rank = cap if cap is not None else (0, 0)
+
+    need_realloc = (buf is None) or (cap_M < M) or (cap_rank < rank)
+    if need_realloc:
+        # Expansion strategy: round up to the nearest power of two large enough, reducing the probability of frequent reallocs.
+        new_cap_M = _round_up_pow2(max(M, cap_M))
+        new_cap_rank = _round_up_pow2(max(rank, cap_rank))
+
+        new_buf = torch.empty(
+            (num_slices, new_cap_M, top_k_num, new_cap_rank),
+            device=device,
+            dtype=dtype,
+        )
+        _A_WS_BUF[key] = new_buf
+        _A_WS_CAP[key] = (new_cap_M, new_cap_rank)
+        buf = new_buf
+
+    # Slice to the currently requested size (view, no copy).
+    view = buf[:, :M, :, :rank]
+
+    # Note: A workspace must be zeroed when shrink_split_k != 1 or under fully_sharded.
+    if must_zero:
+        view.zero_()
+
+    return view
+
+# B(delta) workspace: only one expandable large buffer is retained per (device, dtype, num_slices, top_k_num) combination.
+_B_WS_BUF: dict[tuple, torch.Tensor] = {}
+_B_WS_CAP: dict[tuple, tuple[int, int]] = {}  # (cap_M, cap_N)
+
+
+def _get_b_workspace(
+    *,
+    device: torch.device,
+    dtype: torch.dtype,
+    num_slices: int,
+    M: int,
+    top_k_num: int,
+    N: int,
+    must_zero: bool,
+) -> torch.Tensor:
+    """
+    Returns a view with shape (num_slices, M, top_k_num, N).
+    When split_k > 1, this is used to hold deltas for atomic_add (must be cleared first).
+    """
+    key = (device.type, device.index, dtype, num_slices, top_k_num)
+
+    buf = _B_WS_BUF.get(key)
+    cap = _B_WS_CAP.get(key)
+    cap_M, cap_N = cap if cap is not None else (0, 0)
+
+    need_realloc = (buf is None) or (cap_M < M) or (cap_N < N)
+    if need_realloc:
+        new_cap_M = _round_up_pow2(max(M, cap_M))
+        new_cap_N = _round_up_pow2(max(N, cap_N))
+
+        new_buf = torch.empty(
+            (num_slices, new_cap_M, top_k_num, new_cap_N),
+            device=device,
+            dtype=dtype,
+        )
+        _B_WS_BUF[key] = new_buf
+        _B_WS_CAP[key] = (new_cap_M, new_cap_N)
+        buf = new_buf
+
+    view = buf[:, :M, :, :N]
+
+    # When split_k > 1, the accumulation of deltas relies on atomic_add and must be cleared (only the actually used slices are cleared to avoid a full memset).
+    if must_zero:
+        view.zero_()
+
+    return view
 
 @torch.inference_mode()
 def _fused_moe_lora_expand(
@@ -397,26 +482,95 @@ def _fused_moe_lora_expand(
     # GEMM dims for expand: A: (M * top_k, rank), B: (rank, N_out)
     K = max_lora_rank
     N = w1_output_dim_size
-    EM = EM  # keep passed EM; should be sorted_token_ids.shape[1]
 
-    # flatten slices on the M/top_k axis
-    a2d = a_intermediate_cache1.view(-1, a_intermediate_cache1.shape[3])
-
-    # view into output that this expand call is responsible for
     out_view = output[:, :, offset : offset + num_slices * N]
-
     max_loras_total = sorted_token_ids.shape[0]
 
     grid0 = triton.cdiv(EM, block_size_m) * triton.cdiv(N, block_size_n)
     grid = (grid0, len(lora_b_stacked), lora_ids.numel())
 
-    # each slice occupies a contiguous chunk in the last dim
-    slice_c_size = N * out_view.stride(2)
+    # No longer do .view(-1, rank) on a_intermediate_cache1.
+    # Because a_intermediate_cache1 may be a view sliced from a buffer with a larger cap_rank, each row has padding, and view would fail.
+    # We directly pass the padded layout to Triton and explicitly tell it the strides for the token and slice axes.
+    #
+    # Token axis (flattening (M, top_k)): the stride between adjacent tokens is always stride(2) (i.e., cap_rank), as derived:
+    # (m, tk) -> (m, tk+1) differs by stride(2); crossing rows (tk=top_k-1 -> tk=0, m+1) also differs by stride(2).
+    a_stride_am = a_intermediate_cache1.stride(2)  # = cap_rank
+    a_stride_ak = a_intermediate_cache1.stride(3)  # = 1
+    a_slice_a_size = a_intermediate_cache1.stride(0)  # actual stride between slices (includes cap_M/cap_rank)
+
+    # In out_view, each slice corresponds to an N chunk in the last dimension; stride between slices = N * stride(last_dim)
+    out_slice_c_size = N * out_view.stride(2)
+
+    if split_k == 1:
+        # Fast path: directly perform ADD_TO_C on out_view within the kernel (no additional delta workspace needed).
+        _fused_moe_lora_kernel[grid](
+            a_intermediate_cache1,
+            b_ptr,
+            out_view,
+            topk_weights,
+            sorted_token_ids,
+            expert_ids,
+            num_tokens_post_padded,
+            N,
+            K,
+            EM,
+            num_tokens,
+            num_experts,
+            lora_ids,
+            adapter_enabled,
+            max_loras_total,
+            a_stride_am,
+            a_stride_ak,
+            w1_lora_b.stride(0),
+            w1_lora_b.stride(1),
+            w1_lora_b.stride(3),
+            w1_lora_b.stride(2),
+            # out_view treated as 2D (token, N): token axis stride = out_view.stride(1), column stride = out_view.stride(2)
+            out_view.stride(1),
+            out_view.stride(2),
+            sorted_token_ids.stride(0),
+            expert_ids.stride(0),
+            slice_a_size=a_slice_a_size,
+            slice_c_size=out_slice_c_size,
+            num_slice_a=num_slices,
+            num_slice_c=num_slices,
+            top_k=1,
+            MUL_ROUTED_WEIGHT=mul_routed_weight,
+            ADD_TO_C=True,
+            USE_B_L2_CACHE=True,
+            BLOCK_SIZE_M=block_size_m,
+            BLOCK_SIZE_N=block_size_n,
+            BLOCK_SIZE_K=block_size_k,
+            GROUP_SIZE_M=group_size_m,
+            SPLIT_K=1,
+            USE_GDC=use_gdc,
+            launch_pdl=use_gdc,
+            IS_PRIMARY=False,
+            num_warps=num_warps,
+            num_stages=num_stages,
+        )
+        return
+
+    # Stable and performant path (split_k>1):
+    # First write deltas to b_ws (must be cleared) using atomic_add, then add_ them to out_view in one go.
+    b_ws = _get_b_workspace(
+        device=device,
+        dtype=output.dtype,
+        num_slices=num_slices,
+        M=M,
+        top_k_num=top_k_num,
+        N=N,
+        must_zero=True,
+    )
+
+    # b_ws is also a view sliced from a buffer with a larger cap_N; slice stride must use stride(0)
+    b_slice_c_size = b_ws.stride(0)
 
     _fused_moe_lora_kernel[grid](
-        a2d,
+        a_intermediate_cache1,
         b_ptr,
-        out_view,
+        b_ws,
         topk_weights,
         sorted_token_ids,
         expert_ids,
@@ -429,35 +583,48 @@ def _fused_moe_lora_expand(
         lora_ids,
         adapter_enabled,
         max_loras_total,
-        a2d.stride(0),
-        a2d.stride(1),
+        a_stride_am,
+        a_stride_ak,
         w1_lora_b.stride(0),
         w1_lora_b.stride(1),
         w1_lora_b.stride(3),
         w1_lora_b.stride(2),
-        out_view.stride(1),
-        out_view.stride(2),
+        # b_ws treated as 2D (token, N): token axis stride = b_ws.stride(2)=cap_N, column stride = b_ws.stride(3)=1
+        b_ws.stride(2),
+        b_ws.stride(3),
         sorted_token_ids.stride(0),
         expert_ids.stride(0),
-        slice_a_size=a2d.numel() // num_slices,
-        slice_c_size=slice_c_size,
+        slice_a_size=a_slice_a_size,
+        slice_c_size=b_slice_c_size,
         num_slice_a=num_slices,
         num_slice_c=num_slices,
         top_k=1,
         MUL_ROUTED_WEIGHT=mul_routed_weight,
-        ADD_TO_C=True,
+        ADD_TO_C=False,          # only write delta
         USE_B_L2_CACHE=True,
         BLOCK_SIZE_M=block_size_m,
         BLOCK_SIZE_N=block_size_n,
         BLOCK_SIZE_K=block_size_k,
         GROUP_SIZE_M=group_size_m,
-        SPLIT_K=split_k,
+        SPLIT_K=split_k,         # retain parallelism
         USE_GDC=use_gdc,
         launch_pdl=use_gdc,
         IS_PRIMARY=False,
         num_warps=num_warps,
         num_stages=num_stages,
     )
+
+    # Do not use out_view.view(...) (could also fail with certain strides); use as_strided to construct a 4D view, zero-copy and more stable.
+    # out_view: (M, top_k, num_slices*N) -> out_4d: (M, top_k, num_slices, N)
+    out_4d = out_view.as_strided(
+        size=(M, top_k_num, num_slices, N),
+        stride=(out_view.stride(0), out_view.stride(1), out_slice_c_size, out_view.stride(2)),
+    )
+
+    # b_ws: (num_slices, M, top_k, N) -> (M, top_k, num_slices, N)
+    out_4d.add_(b_ws.permute(1, 2, 0, 3))
+
+
 
 
 @torch.inference_mode()
@@ -517,16 +684,16 @@ def _fused_moe_lora(
     w1_lora_b = lora_b_stacked[0]
 
     num_experts = lora_a_stacked[0].shape[1]
-    N = max_lora_rank
     M = topk_weights.shape[0]
     EM = sorted_token_ids.shape[1]
     K = qcurr_hidden_states.shape[1]
     num_tokens = M * top_k_num
     w1_output_dim_size = w1_lora_b.shape[2]
 
-    # fully_sharded 或 split_k != 1 (使用 atomic_add) 时必须清零 workspace
+    # fully_sharded or shrink_split_k != 1 (atomic_add) must be zeroed
     must_zero_a = fully_sharded or (shrink_split_k != 1)
 
+    # A workspace: may be a padded view (non-contiguous), but shrink/expand kernels already handle strides correctly.
     a_intermediate_cache1 = _get_a_workspace(
         device=device,
         dtype=output.dtype,
@@ -551,34 +718,36 @@ def _fused_moe_lora(
         lora_ids,
         adapter_enabled,
         device,
-        N,
-        M,
-        EM,
-        K,
-        num_tokens,
-        num_experts,
-        num_slices,
-        shrink_block_size_m,
-        shrink_block_size_n,
-        shrink_block_size_k,
-        shrink_group_size_m,
-        shrink_num_warps,
-        shrink_num_stages,
-        shrink_split_k,
-        mul_routed_weight,
+        N=max_lora_rank,
+        M=M,
+        EM=EM,
+        K=K,
+        num_tokens=num_tokens,
+        num_experts=num_experts,
+        num_slices=num_slices,
+        block_size_m=shrink_block_size_m,
+        block_size_n=shrink_block_size_n,
+        block_size_k=shrink_block_size_k,
+        group_size_m=shrink_group_size_m,
+        num_warps=shrink_num_warps,
+        num_stages=shrink_num_stages,
+        split_k=shrink_split_k,
+        mul_routed_weight=mul_routed_weight,
         use_gdc=use_gdc,
     )
 
     if fully_sharded:
+        # Critical fix: TP collective requires contiguous; our workspace is a slice view, often non-contiguous.
+        a_tp = a_intermediate_cache1
+        if not a_tp.is_contiguous():
+            # Only copy the "actual view size" (M * top_k * rank * num_slices), not the padding.
+            a_tp = a_tp.contiguous()
+
         if max_lora_rank == w1_lora_b.shape[-1]:
-            a_intermediate_cache1 = tensor_model_parallel_all_reduce(
-                a_intermediate_cache1
-            )
+            a_intermediate_cache1 = tensor_model_parallel_all_reduce(a_tp)
         else:
-            a_intermediate_cache1 = tensor_model_parallel_all_gather(
-                a_intermediate_cache1
-            )
-            # reset max_lora_rank to the full rank after allgather
+            a_intermediate_cache1 = tensor_model_parallel_all_gather(a_tp)
+            # After all_gather, rank becomes full rank.
             max_lora_rank = a_intermediate_cache1.shape[-1]
 
     _fused_moe_lora_expand(
@@ -593,24 +762,24 @@ def _fused_moe_lora(
         lora_ids,
         adapter_enabled,
         device,
-        N,
-        M,
-        EM,
-        K,
-        num_tokens,
-        num_experts,
-        num_slices,
-        max_lora_rank,
-        w1_output_dim_size,
-        expand_block_size_m,
-        expand_block_size_n,
-        expand_block_size_k,
-        expand_group_size_m,
-        expand_num_warps,
-        expand_num_stages,
-        expand_split_k,
-        mul_routed_weight,
-        offset,
+        N=max_lora_rank,
+        M=M,
+        EM=EM,
+        K=K,
+        num_tokens=num_tokens,
+        num_experts=num_experts,
+        num_slices=num_slices,
+        max_lora_rank=max_lora_rank,
+        w1_output_dim_size=w1_output_dim_size,
+        block_size_m=expand_block_size_m,
+        block_size_n=expand_block_size_n,
+        block_size_k=expand_block_size_k,
+        group_size_m=expand_group_size_m,
+        num_warps=expand_num_warps,
+        num_stages=expand_num_stages,
+        split_k=expand_split_k,
+        mul_routed_weight=mul_routed_weight,
+        offset=offset,
         use_gdc=use_gdc,
     )
 
