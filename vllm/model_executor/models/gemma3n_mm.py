@@ -503,31 +503,35 @@ class Gemma3nForConditionalGeneration(
         self.multimodal_config = multimodal_config
         self.vocab_size = config.text_config.vocab_size
 
-        self.vision_tower = AutoModel.from_config(config=config.vision_config)
-        self.audio_tower = AutoModel.from_config(config=config.audio_config)
-        self.embed_vision = Gemma3nMultimodalEmbedder(
-            config.vision_config, config.text_config
-        )
-        self.embed_audio = Gemma3nMultimodalEmbedder(
-            config.audio_config, config.text_config
-        )
+        with self._mark_tower_model(vllm_config, "image"):
+            self.vision_tower = AutoModel.from_config(config=config.vision_config)
+            self.embed_vision = Gemma3nMultimodalEmbedder(
+                config.vision_config, config.text_config
+            )
 
-        self.language_model: nn.Module = init_vllm_registered_model(
-            vllm_config=vllm_config,
-            hf_config=config.text_config,
-            prefix=maybe_prefix(prefix, "language_model"),
-            architectures=["Gemma3nForCausalLM"],
-        )
-        self.language_model = cast(Gemma3nForCausalLM, self.language_model)
-        # NOTE (NickLucche) In order to be compatible with cudagraph, the
-        # buffer needs to be consistent, so we pre-allocate here.
-        self.per_layer_embeddings = torch.zeros(
-            vllm_config.scheduler_config.max_num_batched_tokens,
-            self.config.text_config.num_hidden_layers,
-            self.config.text_config.hidden_size_per_layer_input,
-            device=self.language_model.model.embed_tokens.weight.device,
-            dtype=self.language_model.model.embed_tokens.weight.dtype,
-        )
+        with self._mark_tower_model(vllm_config, "audio"):
+            self.audio_tower = AutoModel.from_config(config=config.audio_config)
+            self.embed_audio = Gemma3nMultimodalEmbedder(
+                config.audio_config, config.text_config
+            )
+
+        with self._mark_language_model(vllm_config):
+            self.language_model: Gemma3nForCausalLM = init_vllm_registered_model(
+                vllm_config=vllm_config,
+                hf_config=config.text_config,
+                prefix=maybe_prefix(prefix, "language_model"),
+                architectures=["Gemma3nForCausalLM"],
+            )
+
+            # NOTE (NickLucche) In order to be compatible with cudagraph, the
+            # buffer needs to be consistent, so we pre-allocate here.
+            self.per_layer_embeddings = torch.zeros(
+                vllm_config.scheduler_config.max_num_batched_tokens,
+                self.config.text_config.num_hidden_layers,
+                self.config.text_config.hidden_size_per_layer_input,
+                device=self.language_model.model.embed_tokens.weight.device,
+                dtype=self.language_model.model.embed_tokens.weight.dtype,
+            )
 
     def _parse_and_validate_image_input(
         self, **kwargs: object
@@ -583,8 +587,6 @@ class Gemma3nForConditionalGeneration(
         self,
         image_input: Gemma3nImageInputs,
     ) -> list[torch.Tensor]:
-        assert self.vision_tower is not None
-
         pixel_values = image_input["pixel_values"]
         vision_outputs = self.vision_tower(
             pixel_values=pixel_values, do_pooling=False, return_dict=True
@@ -609,7 +611,6 @@ class Gemma3nForConditionalGeneration(
         self,
         audio_input: Gemma3nAudioInputs,
     ) -> list[torch.Tensor]:
-        assert self.audio_tower is not None
         # Run on padded features to enable batching
         input_features = audio_input["input_features_padded"].squeeze(1)
         input_features_mask = audio_input["input_features_mask"].squeeze(1)
@@ -650,9 +651,6 @@ class Gemma3nForConditionalGeneration(
 
         # Return a list of embeddings instead of a batched tensor
         return audio_features.unbind(0)
-
-    def get_language_model(self) -> torch.nn.Module:
-        return self.language_model
 
     def embed_multimodal(self, **kwargs: object) -> MultiModalEmbeddings:
         mm_input_by_modality = self._parse_and_validate_multimodal_inputs(**kwargs)
