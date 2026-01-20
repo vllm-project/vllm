@@ -508,6 +508,7 @@ def test_compile_sizes_padding_validation():
             cudagraph_capture_sizes=[1, 2, 4, 8],
             max_cudagraph_capture_size=8,
             compile_sizes=[3],
+            cudagraph_mode=CUDAGraphMode.FULL,
         )
         config.post_init_cudagraph_sizes()
         dispatcher = CudagraphDispatcher(_create_vllm_config_for_validation(config))
@@ -518,6 +519,7 @@ def test_compile_sizes_padding_validation():
             cudagraph_capture_sizes=[1, 2, 4, 8],
             max_cudagraph_capture_size=8,
             compile_sizes=[5],
+            cudagraph_mode=CUDAGraphMode.FULL,
         )
         config.post_init_cudagraph_sizes()
         dispatcher = CudagraphDispatcher(_create_vllm_config_for_validation(config))
@@ -527,6 +529,7 @@ def test_compile_sizes_padding_validation():
         cudagraph_capture_sizes=[1, 2, 4, 8],
         max_cudagraph_capture_size=8,
         compile_sizes=[1, 2, 4, 8],
+        cudagraph_mode=CUDAGraphMode.FULL,
     )
     config.post_init_cudagraph_sizes()
     assert sorted(config.compile_sizes) == [1, 2, 4, 8]
@@ -537,6 +540,7 @@ def test_compile_sizes_padding_validation():
         cudagraph_capture_sizes=[1, 2, 4, 8],
         max_cudagraph_capture_size=8,
         compile_sizes=["cudagraph_capture_sizes"],
+        cudagraph_mode=CUDAGraphMode.FULL,
     )
     config.post_init_cudagraph_sizes()
     assert sorted(config.compile_sizes) == [1, 2, 4, 8]
