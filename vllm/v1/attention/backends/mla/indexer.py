@@ -15,6 +15,7 @@ from vllm.v1.attention.backend import (
     AttentionMetadataBuilder,
     CommonAttentionMetadata,
     MultipleOf,
+    backend_name,
 )
 from vllm.v1.attention.backends.utils import (
     split_decodes_and_prefills,
@@ -24,6 +25,7 @@ from vllm.v1.attention.backends.utils import (
 logger = init_logger(__name__)
 
 
+@backend_name("DEEPSEEK_V32_INDEXER")
 class DeepseekV32IndexerBackend(AttentionBackend):
     @staticmethod
     def get_supported_kernel_block_sizes() -> list[int | MultipleOf]:
