@@ -291,7 +291,7 @@ class TestMoondream3TilingLogic:
 
     def test_small_image_no_tiling(self):
         """Small images should use 1x1 tiling."""
-        from vllm.model_executor.models.moondream3 import select_tiling
+        from vllm.transformers_utils.processors.moondream3 import select_tiling
 
         tiling = select_tiling(
             height=300, width=300, crop_size=CROP_SIZE, max_crops=MAX_CROPS
@@ -300,7 +300,7 @@ class TestMoondream3TilingLogic:
 
     def test_exact_crop_size(self):
         """Image exactly at crop size should use 1x1."""
-        from vllm.model_executor.models.moondream3 import select_tiling
+        from vllm.transformers_utils.processors.moondream3 import select_tiling
 
         tiling = select_tiling(
             height=CROP_SIZE, width=CROP_SIZE, crop_size=CROP_SIZE, max_crops=MAX_CROPS
@@ -309,7 +309,7 @@ class TestMoondream3TilingLogic:
 
     def test_large_square_image(self):
         """Large square image should use multiple tiles."""
-        from vllm.model_executor.models.moondream3 import select_tiling
+        from vllm.transformers_utils.processors.moondream3 import select_tiling
 
         tiling = select_tiling(
             height=800, width=800, crop_size=CROP_SIZE, max_crops=MAX_CROPS
@@ -321,7 +321,7 @@ class TestMoondream3TilingLogic:
 
     def test_wide_image(self):
         """Wide image should have more width tiles."""
-        from vllm.model_executor.models.moondream3 import select_tiling
+        from vllm.transformers_utils.processors.moondream3 import select_tiling
 
         tiling = select_tiling(
             height=400, width=1200, crop_size=CROP_SIZE, max_crops=MAX_CROPS
@@ -331,7 +331,7 @@ class TestMoondream3TilingLogic:
 
     def test_tall_image(self):
         """Tall image should have more height tiles."""
-        from vllm.model_executor.models.moondream3 import select_tiling
+        from vllm.transformers_utils.processors.moondream3 import select_tiling
 
         tiling = select_tiling(
             height=1200, width=400, crop_size=CROP_SIZE, max_crops=MAX_CROPS
@@ -341,7 +341,7 @@ class TestMoondream3TilingLogic:
 
     def test_respects_max_crops(self):
         """Tiling should not exceed max_crops."""
-        from vllm.model_executor.models.moondream3 import select_tiling
+        from vllm.transformers_utils.processors.moondream3 import select_tiling
 
         tiling = select_tiling(
             height=2000, width=2000, crop_size=CROP_SIZE, max_crops=4
