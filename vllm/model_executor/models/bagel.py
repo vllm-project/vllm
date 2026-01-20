@@ -373,12 +373,13 @@ class BagelForConditionalGeneration(
 
         # Initialize language model (Qwen2)
         # Pass the llm_config from BagelConfig to initialize Qwen2 properly
-        self.language_model = init_vllm_registered_model(
-            vllm_config=vllm_config,
-            hf_config=config.llm_config,
-            prefix=maybe_prefix(prefix, "language_model"),
-            architectures=["Qwen2ForCausalLM"],
-        )
+        with self._mark_language_model(vllm_config):
+            self.language_model = init_vllm_registered_model(
+                vllm_config=vllm_config,
+                hf_config=config.llm_config,
+                prefix=maybe_prefix(prefix, "language_model"),
+                architectures=["Qwen2ForCausalLM"],
+            )
 
         # Initialize vision model (SigLIP) if visual understanding is enabled
         if config.visual_und:
@@ -398,30 +399,31 @@ class BagelForConditionalGeneration(
                 )
                 vit_config.vision_use_head = False
 
-            self.vit_model = SiglipVisionModel(
-                config=vit_config,
-                quant_config=quant_config,
-                prefix=maybe_prefix(prefix, "vit_model"),
-            )
+            with self._mark_tower_model(vllm_config, "image"):
+                self.vit_model = SiglipVisionModel(
+                    config=vit_config,
+                    quant_config=quant_config,
+                    prefix=maybe_prefix(prefix, "vit_model"),
+                )
 
-            # Initialize connector (MLP)
-            vit_hidden_size = config.vit_config.hidden_size
-            llm_hidden_size = config.llm_config.hidden_size
+                # Initialize connector (MLP)
+                vit_hidden_size = config.vit_config.hidden_size
+                llm_hidden_size = config.llm_config.hidden_size
 
-            self.connector = BagelVisionMLP(
-                in_features=vit_hidden_size,
-                hidden_features=llm_hidden_size,
-                out_features=llm_hidden_size,
-                act_layer=config.connector_act,
-                quant_config=quant_config,
-                prefix=maybe_prefix(prefix, "connector"),
-            )
+                self.connector = BagelVisionMLP(
+                    in_features=vit_hidden_size,
+                    hidden_features=llm_hidden_size,
+                    out_features=llm_hidden_size,
+                    act_layer=config.connector_act,
+                    quant_config=quant_config,
+                    prefix=maybe_prefix(prefix, "connector"),
+                )
 
-            # Position embedding for vision tokens
-            self.vit_pos_embed = PositionEmbedding(
-                max_num_patch_per_side=config.vit_max_num_patch_per_side,
-                hidden_size=llm_hidden_size,
-            )
+                # Position embedding for vision tokens
+                self.vit_pos_embed = PositionEmbedding(
+                    max_num_patch_per_side=config.vit_max_num_patch_per_side,
+                    hidden_size=llm_hidden_size,
+                )
         else:
             self.vit_model = None
             self.connector = None
@@ -501,9 +503,6 @@ class BagelForConditionalGeneration(
             return []
 
         return self._process_image_input(image_input)
-
-    def get_language_model(self) -> nn.Module:
-        return self.language_model
 
     def forward(
         self,
