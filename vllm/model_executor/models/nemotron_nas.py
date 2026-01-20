@@ -180,7 +180,7 @@ class DeciLMDecoderLayer(nn.Module):
             self.mlp = LlamaMLP(
                 hidden_size=self.hidden_size,
                 intermediate_size=intermediate_size,
-                hidden_act=config.hidden_act,
+                hidden_act=block_config.ffn.hidden_act,
                 quant_config=quant_config,
                 bias=getattr(config, "mlp_bias", False),
                 prefix=f"{prefix}.mlp",
