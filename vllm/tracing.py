@@ -9,8 +9,6 @@ from vllm.utils.func_utils import run_once
 
 TRACE_HEADERS = ["traceparent", "tracestate"]
 
-APP_NAME = "vllm"
-
 NORMAL_TRACE = 1
 TOKEN_LEVEL_TRACE = 2
 
@@ -117,6 +115,7 @@ class SpanAttributes:
     # Attribute names added until they are added to the semantic conventions:
     GEN_AI_REQUEST_ID = "gen_ai.request.id"
     GEN_AI_REQUEST_N = "gen_ai.request.n"
+    GEN_AI_REQUEST_TRACE_LEVEL = "gen_ai.request.trace_level"
     GEN_AI_RESPONSE_FINISH_REASON = "gen_ai.response.finish_reasons"
     GEN_AI_USAGE_NUM_SEQUENCES = "gen_ai.usage.num_sequences"
     GEN_AI_LATENCY_TIME_IN_QUEUE = "gen_ai.latency.time_in_queue"

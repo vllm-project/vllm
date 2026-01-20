@@ -20,7 +20,14 @@ from vllm.outputs import (
 )
 from vllm.sampling_params import RequestOutputKind
 from vllm.tokenizers import TokenizerLike
-from vllm.tracing import SpanAttributes, SpanKind, Tracer, extract_trace_context
+from vllm.tracing import (
+    NORMAL_TRACE,
+    TOKEN_LEVEL_TRACE,
+    SpanAttributes,
+    SpanKind,
+    Tracer,
+    extract_trace_context,
+)
 from vllm.utils import length_from_prompt_token_ids_or_embeds
 from vllm.v1.engine import (
     EngineCoreOutput,
@@ -786,6 +793,9 @@ class OutputProcessor:
 
             if req_state.observable_context and req_state.observable_context.not_empty:
                 ob_context = req_state.observable_context
+                span.set_attribute(
+                    SpanAttributes.GEN_AI_REQUEST_TRACE_LEVEL, TOKEN_LEVEL_TRACE
+                )
                 if ob_context.num_cached_tokens is not None:
                     span.set_attribute(
                         SpanAttributes.GEN_AI_USAGE_CACHED_TOKENS,
@@ -805,6 +815,10 @@ class OutputProcessor:
                         timestamp=int(event_.timestamp * 1e9),
                         attributes=event_.attributes,
                     )
+            else:
+                span.set_attribute(
+                    SpanAttributes.GEN_AI_REQUEST_TRACE_LEVEL, NORMAL_TRACE
+                )
 
     def _update_stats_from_output(
         self,
