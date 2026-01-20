@@ -16,8 +16,8 @@ logger = init_logger(__name__)
 # Examples:
 # - MyOp.enabled()
 # - op_registry["my_op"].enabled()
-op_registry: dict[str, type["CustomOp"]] = {}
-op_registry_oot: dict[str, type["CustomOp"]] = {}
+op_registry: dict[str, type["CustomOp"] | type["PluggableLayer"]] = {}
+op_registry_oot: dict[str, type["CustomOp"] | type["PluggableLayer"]] = {}
 
 
 class PluggableLayer(nn.Module):
