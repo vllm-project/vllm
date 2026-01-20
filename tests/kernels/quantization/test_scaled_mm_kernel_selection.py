@@ -9,6 +9,7 @@ import inspect
 from abc import ABC
 
 import pytest
+import torch
 
 from vllm.model_executor.layers.quantization.kernels.scaled_mm import (
     Int8ScaledMMLinearLayerConfig,
@@ -21,6 +22,11 @@ from vllm.model_executor.layers.quantization.kernels.scaled_mm.cpu import (
 )
 from vllm.model_executor.layers.quantization.kernels.scaled_mm.ScaledMMLinearKernel import (  # noqa: E501
     ScaledMMLinearKernel,
+)
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    GroupShape,
+    QuantKey,
+    ScaleDesc,
 )
 
 pytestmark = pytest.mark.cpu_test
@@ -73,17 +79,26 @@ def test_aiter_kernel_implements_is_supported():
 
 def test_cpu_kernel_accepts_all_configs():
     """Test that CPUInt8ScaledMMLinearKernel accepts all config combinations."""
+    # Helper to build Int8 config
+    def make_int8_config(is_channelwise: bool, is_static: bool, symmetric: bool):
+        weight_group = GroupShape.PER_TOKEN if is_channelwise else GroupShape.PER_TENSOR
+        act_group = GroupShape.PER_TENSOR if is_static else GroupShape.PER_TOKEN
+        return Int8ScaledMMLinearLayerConfig(
+            weight_quant_key=QuantKey(
+                dtype=torch.int8,
+                scale=ScaleDesc(torch.float32, True, weight_group),
+                symmetric=True,
+            ),
+            activation_quant_key=QuantKey(
+                dtype=torch.int8,
+                scale=ScaleDesc(torch.float32, is_static, act_group),
+                symmetric=symmetric,
+            ),
+        )
+
     configs = [
-        Int8ScaledMMLinearLayerConfig(
-            is_channelwise=False,
-            is_static_input_scheme=True,
-            input_symmetric=True,
-        ),
-        Int8ScaledMMLinearLayerConfig(
-            is_channelwise=True,
-            is_static_input_scheme=False,
-            input_symmetric=False,
-        ),
+        make_int8_config(is_channelwise=False, is_static=True, symmetric=True),
+        make_int8_config(is_channelwise=True, is_static=False, symmetric=False),
     ]
 
     for config in configs:
