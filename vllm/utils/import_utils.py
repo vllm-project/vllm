@@ -436,3 +436,18 @@ def has_arctic_inference() -> bool:
     """Whether the optional `arctic_inference` package is available."""
 
     return _has_module("arctic_inference")
+
+
+def has_helion() -> bool:
+    """Whether the optional `helion` package is available.
+
+    Helion is a Python-embedded DSL for writing ML kernels.
+    See: https://github.com/pytorch/helion
+
+    Usage:
+        if has_helion():
+            import helion
+            import helion.language as hl
+            # use helion...
+    """
+    return _has_module("helion")
