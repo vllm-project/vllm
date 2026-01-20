@@ -214,7 +214,6 @@ async def test_chat_request(server: RemoteOpenAIServer, model_name: str):
     assert output.model == MODEL_NAME
     assert output.usage.prompt_tokens == 37
 
-    ###############################
     # test continue_final_message
     # The continue_final_message parameter doesn't seem to be working with this model.
     response = requests.post(
@@ -234,7 +233,6 @@ async def test_chat_request(server: RemoteOpenAIServer, model_name: str):
     assert output.model == MODEL_NAME
     assert output.usage.prompt_tokens == 37
 
-    ###############################
     # test add_special_tokens
     response = requests.post(
         server.url_for("pooling"),
@@ -249,7 +247,6 @@ async def test_chat_request(server: RemoteOpenAIServer, model_name: str):
     assert output.model == MODEL_NAME
     assert output.usage.prompt_tokens == 38
 
-    ###############################
     # test continue_final_message with add_generation_prompt
     response = requests.post(
         server.url_for("pooling"),

@@ -168,6 +168,7 @@ def test_truncate_prompt_tokens(server: RemoteOpenAIServer, model_name: str):
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
 def test_add_special_tokens(server: RemoteOpenAIServer, model_name: str):
     # The add_special_tokens parameter doesn't seem to be working with this model.
+    # working with papluca/xlm-roberta-base-language-detection
     response = requests.post(
         server.url_for("classify"),
         json={"model": model_name, "input": input_text, "add_special_tokens": False},
@@ -199,13 +200,8 @@ async def test_chat_request(server: RemoteOpenAIServer, model_name: str):
             "role": "user",
             "content": "Stars twinkle brightly in the night sky.",
         },
-        {
-            "role": "assistant",
-            "content": "",
-        },
     ]
 
-    ###############################
     # test chat request basic usage
     response = requests.post(
         server.url_for("classify"),
@@ -220,9 +216,8 @@ async def test_chat_request(server: RemoteOpenAIServer, model_name: str):
     assert len(output.data) == 1
     assert hasattr(output.data[0], "label")
     assert hasattr(output.data[0], "probs")
-    assert output.usage.prompt_tokens == 56
+    assert output.usage.prompt_tokens == 51
 
-    ###############################
     # test add_generation_prompt
     response = requests.post(
         server.url_for("classify"),
@@ -237,9 +232,8 @@ async def test_chat_request(server: RemoteOpenAIServer, model_name: str):
     assert len(output.data) == 1
     assert hasattr(output.data[0], "label")
     assert hasattr(output.data[0], "probs")
-    assert output.usage.prompt_tokens == 59
+    assert output.usage.prompt_tokens == 54
 
-    ###############################
     # test continue_final_message
     response = requests.post(
         server.url_for("classify"),
@@ -258,9 +252,8 @@ async def test_chat_request(server: RemoteOpenAIServer, model_name: str):
     assert len(output.data) == 1
     assert hasattr(output.data[0], "label")
     assert hasattr(output.data[0], "probs")
-    assert output.usage.prompt_tokens == 54
+    assert output.usage.prompt_tokens == 49
 
-    ###############################
     # test add_special_tokens
     # The add_special_tokens parameter doesn't seem to be working with this model.
     response = requests.post(
@@ -276,9 +269,8 @@ async def test_chat_request(server: RemoteOpenAIServer, model_name: str):
     assert len(output.data) == 1
     assert hasattr(output.data[0], "label")
     assert hasattr(output.data[0], "probs")
-    assert output.usage.prompt_tokens == 56
+    assert output.usage.prompt_tokens == 51
 
-    ###############################
     # test continue_final_message with add_generation_prompt
     response = requests.post(
         server.url_for("classify"),
