@@ -374,7 +374,6 @@ class SpecDecodeBaseProposer:
             draft_token_ids = logits.argmax(dim=-1)
             return draft_token_ids.view(-1, 1)
 
-        # Extract positions at last_token_indices (reuse all_positions from above)
         if self.uses_mrope:
             positions = self.positions[:, last_token_indices]
         else:
