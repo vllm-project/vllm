@@ -31,6 +31,7 @@ from vllm.utils.flashinfer import (
     has_flashinfer_cutedsl_grouped_gemm_nt_masked,
     has_flashinfer_cutlass_fused_moe,
 )
+from vllm import _custom_ops as ops
 
 if TYPE_CHECKING:
     from vllm.model_executor.layers.fused_moe.oracle.nvfp4 import (
@@ -286,12 +287,8 @@ def flashinfer_trtllm_fp4_moe(
     if isinstance(x, tuple):
         hidden_states_fp4, hidden_states_scale_linear_fp4 = x
     else:
-        # hidden_states is the already quantized
-        (hidden_states_fp4, hidden_states_scale_linear_fp4) = flashinfer.fp4_quantize(
-            x,
-            layer.a1_gscale,
-            is_sf_swizzled_layout=False,
-        )
+        # hidden_states is the already quantized        
+        (hidden_states_fp4, hidden_states_scale_linear_fp4) = ops.scaled_fp4_quant(x, layer.a1_gscale, is_sf_swizzled_layout=False)
 
     # Determine routing method type
     use_llama4_routing = custom_routing_function is Llama4MoE.custom_routing_function
@@ -381,12 +378,8 @@ def flashinfer_trtllm_fp4_routed_moe(
         # Hidden_states is the already quantized
         hidden_states_fp4, hidden_states_scale_linear_fp4 = x
     else:
-        # Quantize input to FP4
-        (hidden_states_fp4, hidden_states_scale_linear_fp4) = flashinfer.fp4_quantize(
-            x,
-            layer.a1_gscale,
-            is_sf_swizzled_layout=False,
-        )
+        # Quantize input to FP4        
+        (hidden_states_fp4, hidden_states_scale_linear_fp4) = ops.scaled_fp4_quant(x, layer.a1_gscale, is_sf_swizzled_layout=False)
 
     # Call TRT-LLM FP4 block-scale MoE kernel
     out = flashinfer.fused_moe.trtllm_fp4_block_scale_routed_moe(
