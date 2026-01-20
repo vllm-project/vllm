@@ -248,7 +248,7 @@ class LlamaAttention(nn.Module):
         if self.do_llama_4_scaling:
             attn_scale = self._get_llama_4_attn_scale(positions)
             q = (q * attn_scale).to(q.dtype)
-        attn_output = self.attn(q, k, v)
+        attn_output = self.attn(q, k, v, positions=positions)
         output, _ = self.o_proj(attn_output)
         return output
 
