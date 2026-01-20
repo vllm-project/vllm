@@ -1,7 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from vllm.v1.engine import FinishReason
-from vllm.v1.metrics.stats import IterationStats, PromptTokenStats, RequestStateStats
+from vllm.v1.metrics.stats import (
+    CompletedTiming,
+    IterationStats,
+    PromptTokenStats,
+    RequestStateStats,
+    ScheduledTiming,
+)
 
 
 def test_iteration_stats_repr():
@@ -209,3 +215,40 @@ def test_prompt_token_stats_full_external_transfer_recompute():
     assert stats.local_cache_hit == 0
     assert stats.external_kv_transfer == 1000
     assert stats.recomputed_tokens == 1
+
+
+def test_timing_reflects_request_progress():
+    """Timing type reflects how far request progressed before finishing."""
+    # completed request -> CompletedTiming
+    req = RequestStateStats(arrival_time=0.0)
+    req.queued_ts = 0.1
+    req.scheduled_ts = 0.2
+    req.first_token_ts = 0.5
+    req.last_token_ts = 2.0
+    req.num_generation_tokens = 10
+
+    stats = IterationStats()
+    stats.update_from_finished_request(
+        FinishReason.STOP, num_prompt_tokens=100, max_tokens_param=50, req_stats=req
+    )
+    assert isinstance(stats.finished_requests[0].timing, CompletedTiming)
+
+    # scheduled but aborted -> ScheduledTiming
+    req2 = RequestStateStats(arrival_time=0.0)
+    req2.queued_ts = 0.1
+    req2.scheduled_ts = 0.2
+
+    stats2 = IterationStats()
+    stats2.update_from_finished_request(
+        FinishReason.ABORT, num_prompt_tokens=100, max_tokens_param=50, req_stats=req2
+    )
+    assert isinstance(stats2.finished_requests[0].timing, ScheduledTiming)
+
+    # rejected before scheduling -> None
+    req3 = RequestStateStats(arrival_time=0.0)
+
+    stats3 = IterationStats()
+    stats3.update_from_finished_request(
+        FinishReason.ABORT, num_prompt_tokens=100, max_tokens_param=50, req_stats=req3
+    )
+    assert stats3.finished_requests[0].timing is None
