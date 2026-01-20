@@ -38,12 +38,6 @@ class BaseLinearLayerWithLoRA(BaseLayerWithLoRA):
         lora_config: LoRAConfig,
         model_config: PretrainedConfig | None = None,
     ) -> None:
-        # Warmup: trigger Triton JIT compilation for CUDA graph capture
-        self.lora_ready = torch.zeros(1, dtype=torch.int8, device=self.device)
-        self.lora_ready.fill_(1)
-        self._sync_lora_loads()
-        self.lora_ready.fill_(0)
-
         self.lora_config = lora_config
         if isinstance(self.base_layer, ReplicatedLinear):
             lora_a_out_size = lora_config.max_lora_rank
@@ -93,8 +87,8 @@ class BaseLinearLayerWithLoRA(BaseLayerWithLoRA):
 
     def reset_lora(self, index: int):
         for s_index in range(self.n_slices):
-            self.lora_a_stacked[s_index][index] = 0
-            self.lora_b_stacked[s_index][index] = 0
+            self.lora_a_stacked[s_index][index].zero_()
+            self.lora_b_stacked[s_index][index].zero_()
 
     def set_lora(
         self,
@@ -111,9 +105,18 @@ class BaseLinearLayerWithLoRA(BaseLayerWithLoRA):
         assert (
             len(self.lora_a_stacked) == len(self.lora_b_stacked) == self.n_slices == 1
         )
-        # Full contiguous copy
-        self.lora_a_stacked[0][index, 0].copy_(lora_a, non_blocking=True)
-        self.lora_b_stacked[0][index, 0].copy_(lora_b, non_blocking=True)
+        self.reset_lora(index)
+
+        if self.tp_size > 1:
+            lora_a = self.slice_lora_a(lora_a)
+            lora_b = self.slice_lora_b(lora_b)
+
+        self.lora_a_stacked[0][index, 0, : lora_a.shape[0], : lora_a.shape[1]].copy_(
+            lora_a, non_blocking=True
+        )
+        self.lora_b_stacked[0][index, 0, : lora_b.shape[0], : lora_b.shape[1]].copy_(
+            lora_b, non_blocking=True
+        )
 
     def apply(self, x: torch.Tensor, bias: torch.Tensor | None = None) -> torch.Tensor:
         output = self.base_layer.quant_method.apply(self.base_layer, x, bias)

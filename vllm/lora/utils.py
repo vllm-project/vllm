@@ -117,6 +117,7 @@ def from_layer(
         ):
             instance_layer = lora_cls(layer)
             instance_layer.create_lora_weights(max_loras, lora_config, model_config)
+            instance_layer.create_lora_flag(instance_layer.device)
             return instance_layer
     return layer
 
