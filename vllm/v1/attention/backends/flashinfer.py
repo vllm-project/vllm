@@ -1512,9 +1512,11 @@ class FlashInferImpl(AttentionImpl):
                 # Ensure canonical strides by creating new tensor with copy if needed
                 # .contiguous() alone doesn't fix degenerate strides
                 if not is_strictly_contiguous(decode_query):
-                    new_query = torch.empty(decode_query.shape,
-                                           dtype=decode_query.dtype,
-                                           device=decode_query.device)
+                    new_query = torch.empty(
+                        decode_query.shape,
+                        dtype=decode_query.dtype,
+                        device=decode_query.device,
+                    )
                     new_query.copy_(decode_query)
                     decode_query = new_query
                 workspace_buffer = _get_trtllm_gen_workspace_buffer()
@@ -1524,9 +1526,9 @@ class FlashInferImpl(AttentionImpl):
                 # Ensure all tensors have canonical strides for CUDA kernels
                 def ensure_canonical_strides(tensor):
                     if not is_strictly_contiguous(tensor):
-                        new_tensor = torch.empty(tensor.shape,
-                                               dtype=tensor.dtype,
-                                               device=tensor.device)
+                        new_tensor = torch.empty(
+                            tensor.shape, dtype=tensor.dtype, device=tensor.device
+                        )
                         new_tensor.copy_(tensor)
                         return new_tensor
                     return tensor
