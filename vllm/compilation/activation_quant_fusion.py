@@ -233,7 +233,6 @@ class SiluMulBlockQuantPattern:
                 input = input.to(dtype=self.model_dtype)
             
             # Allocate output tensors
-            # Note: silu_and_mul reduces width by 2 (gate||up → result)
             output_shape = list(input.shape)
             output_shape[-1] = output_shape[-1] // 2
             
@@ -245,23 +244,21 @@ class SiluMulBlockQuantPattern:
             
             # Create scale tensor with proper layout
             scale = self.quant_matcher.make_scale(
-                torch.empty(output_shape, device=input.device),  # Dummy tensor for shape
+                torch.empty(output_shape, device=input.device),
                 transposed=self.has_col_major_scales
             )
             
-            # Call the fused operation
-            at = auto_functionalized(
-                torch.ops._C.silu_and_mul_per_block_quant,
-                result=result,
-                input=input,
-                scale=scale,
-                group_size=self.group_shape[1],  # Use column dimension (128 or 64)
-                scale_ub=None,
-                is_scale_transposed=self.has_col_major_scales,
+            # Call the fused operation directly (no auto_functionalized)
+            torch.ops._C.silu_and_mul_per_block_quant(
+                result,
+                input,
+                scale,
+                self.group_shape[1],
+                None,  # scale_ub
+                self.has_col_major_scales,
             )
             
-            # Return result and scale
-            return at[1], at[2]
+            return result, scale
         
         # REGISTER THE PATTERN
         inputs = self.silu_and_mul_matcher.inputs()
