@@ -546,37 +546,36 @@ class Lfm2VLForConditionalGeneration(
         self.multimodal_config = multimodal_config
         self.use_data_parallel = multimodal_config.mm_encoder_tp_mode == "data"
 
-        if vision_config.model_type == "siglip2_vision_model":
-            self.vision_tower = Siglip2Model(
-                config=vision_config,
-                quant_config=quant_config,
-                multimodal_config=multimodal_config,
-                prefix=maybe_prefix(prefix, "vision_tower"),
-            )
-        else:
-            raise ValueError(
-                f"Unsupported visual tokenizer model_type: {vision_config.model_type}"
+        with self._mark_tower_model(vllm_config, "image"):
+            if vision_config.model_type == "siglip2_vision_model":
+                self.vision_tower = Siglip2Model(
+                    config=vision_config,
+                    quant_config=quant_config,
+                    multimodal_config=multimodal_config,
+                    prefix=maybe_prefix(prefix, "vision_tower"),
+                )
+            else:
+                raise ValueError(
+                    f"Unsupported visual tokenizer type: {vision_config.model_type}"
+                )
+
+            self.multi_modal_projector = Lfm2VLMultiModalProjector(
+                config=config,
+                use_data_parallel=self.use_data_parallel,
+                prefix=maybe_prefix(prefix, "multi_modal_projector"),
             )
 
-        self.multi_modal_projector = Lfm2VLMultiModalProjector(
-            config=config,
-            use_data_parallel=self.use_data_parallel,
-            prefix=f"{prefix}.multi_modal_projector",
-        )
-
-        self.language_model = init_vllm_registered_model(
-            vllm_config=vllm_config,
-            hf_config=config.text_config,
-            prefix=maybe_prefix(prefix, "language"),
-            architectures=config.text_config.architectures,
-        )
+        with self._mark_language_model(vllm_config):
+            self.language_model = init_vllm_registered_model(
+                vllm_config=vllm_config,
+                hf_config=config.text_config,
+                prefix=maybe_prefix(prefix, "language"),
+                architectures=config.text_config.architectures,
+            )
 
         self.make_empty_intermediate_tensors = (
             self.language_model.make_empty_intermediate_tensors
         )
-
-    def get_language_model(self) -> torch.nn.Module:
-        return self.language_model
 
     def _parse_and_validate_image_input(
         self, **kwargs: object
@@ -714,8 +713,7 @@ class Lfm2VLForConditionalGeneration(
         self,
         hidden_states: torch.Tensor,
     ) -> torch.Tensor | None:
-        logits = self.language_model.compute_logits(hidden_states)
-        return logits
+        return self.language_model.compute_logits(hidden_states)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         loader = AutoWeightsLoader(self)
