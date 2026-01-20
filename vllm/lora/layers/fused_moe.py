@@ -15,7 +15,6 @@ from vllm.distributed.parallel_state import (
 from vllm.distributed.utils import divide
 from vllm.lora.layers.base import BaseLayerWithLoRA
 from vllm.lora.ops.triton_ops.utils import get_lora_op_configs
-from vllm.lora.punica_wrapper.punica_gpu import PunicaWrapperGPU
 from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.layers.fused_moe.config import (
     _get_config_dtype_str,
@@ -193,14 +192,13 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
 
                 # SPARSITY_FACTOR is a heuristic margin ensuring tokens * top_k
                 # activates only a small fraction of total experts * loras.
-                SPARSITY_FACTOR = 4
+                SPARSITY_FACTOR = 8
                 naive_block_assignment = (
                     expert_map is None
                     and num_tokens * top_k * SPARSITY_FACTOR
                     <= self.base_layer.local_num_experts * self.max_loras
                 )
                 token_lora_mapping = None
-                assert isinstance(self.punica_wrapper, PunicaWrapperGPU)
                 if not naive_block_assignment:
                     # get the block size of m from customized config or default config
                     (
