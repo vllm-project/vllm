@@ -181,37 +181,39 @@ We recommend leveraging `uv`.
 vLLM offers an official Docker image for deployment.
 The image can be used to run OpenAI compatible server and is available on Docker Hub as [vllm/vllm-openai-rocm](https://hub.docker.com/r/vllm/vllm-openai-rocm/tags).
 
-```bash
-docker run --rm \
-    --group-add=video \
-    --cap-add=SYS_PTRACE \
-    --security-opt seccomp=unconfined \
-    --device /dev/kfd \
-    --device /dev/dri \
-    -v ~/.cache/huggingface:/root/.cache/huggingface \
-    --env "HF_TOKEN=$HF_TOKEN" \
-    -p 8000:8000 \
-    --ipc=host \
-    vllm/vllm-openai-rocm:latest \
-    --model Qwen/Qwen3-0.6B
-```
+???+ console "Commands"
+    ```bash
+    docker run --rm \
+        --group-add=video \
+        --cap-add=SYS_PTRACE \
+        --security-opt seccomp=unconfined \
+        --device /dev/kfd \
+        --device /dev/dri \
+        -v ~/.cache/huggingface:/root/.cache/huggingface \
+        --env "HF_TOKEN=$HF_TOKEN" \
+        -p 8000:8000 \
+        --ipc=host \
+        vllm/vllm-openai-rocm:latest \
+        --model Qwen/Qwen3-0.6B
+    ```
 
 To use the docker image as base for development, you can launch it in interactive session through overriding the entrypoint.
 
-```bash
-docker run --rm -it \
-    --group-add=video \
-    --cap-add=SYS_PTRACE \
-    --security-opt seccomp=unconfined \
-    --device /dev/kfd \
-    --device /dev/dri \
-    -v ~/.cache/huggingface:/root/.cache/huggingface \
-    --env "HF_TOKEN=$HF_TOKEN" \
-    -p 8000:8000 \
-    --ipc=host \
-    --entrypoint bash \
-    vllm/vllm-openai-rocm:latest
-```
+???+ console "Commands"
+    ```bash
+    docker run --rm -it \
+        --group-add=video \
+        --cap-add=SYS_PTRACE \
+        --security-opt seccomp=unconfined \
+        --device /dev/kfd \
+        --device /dev/dri \
+        -v ~/.cache/huggingface:/root/.cache/huggingface \
+        --env "HF_TOKEN=$HF_TOKEN" \
+        -p 8000:8000 \
+        --ipc=host \
+        --entrypoint bash \
+        vllm/vllm-openai-rocm:latest
+    ```
 
 
 #### Use AMD's Docker Images
