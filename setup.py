@@ -990,8 +990,6 @@ setup(
         ],  # Required for audio processing
         "video": [],  # Kept for backwards compatibility
         "flashinfer": [],  # Kept for backwards compatibility
-        # Optional deps for AMD FP4 quantization support
-        "petit-kernel": ["petit-kernel"],
         # Optional deps for Helion kernel development
         "helion": ["helion"],
     },
