@@ -1342,11 +1342,14 @@ class IsaacForConditionalGeneration(
                 "mrope_interleaved", rope_scaling["mrope_interleaved"]
             )
         target_cfg.rope_parameters = rope_parameters
-        self.language_model = init_vllm_registered_model(
-            vllm_config=vllm_config,
-            architectures=["Qwen3ForCausalLM"],
-            prefix=maybe_prefix(prefix, "language_model"),
-        )
+
+        with self._mark_language_model(vllm_config):
+            self.language_model = init_vllm_registered_model(
+                vllm_config=vllm_config,
+                architectures=["Qwen3ForCausalLM"],
+                prefix=maybe_prefix(prefix, "language_model"),
+            )
+
         self.make_empty_intermediate_tensors = (
             self.language_model.make_empty_intermediate_tensors
         )
@@ -1363,14 +1366,16 @@ class IsaacForConditionalGeneration(
             vision_cfg._attn_implementation = attn_impl
 
         hidden_dim = vision_cfg.hidden_size * (vision_cfg.pixel_shuffle_scale_factor**2)
-        self.vision_embedding = IsaacVisionEmbedding(
-            vision_cfg=vision_cfg,
-            hidden_dim=hidden_dim,
-            output_dim=config.hidden_size,
-            quant_config=quant_config,
-            multimodal_config=self.multimodal_config,
-            prefix=maybe_prefix(prefix, "vision_embedding"),
-        )
+
+        with self._mark_tower_model(vllm_config, "image"):
+            self.vision_embedding = IsaacVisionEmbedding(
+                vision_cfg=vision_cfg,
+                hidden_dim=hidden_dim,
+                output_dim=config.hidden_size,
+                quant_config=quant_config,
+                multimodal_config=self.multimodal_config,
+                prefix=maybe_prefix(prefix, "vision_embedding"),
+            )
 
     def iter_mm_grid_hw(
         self, input_tokens: list[int], mm_features: list[MultiModalFeatureSpec]
@@ -1456,18 +1461,6 @@ class IsaacForConditionalGeneration(
         if image_input is None:
             return ()
         return self._process_image_input(image_input)
-
-    def get_multimodal_embeddings(
-        self, **kwargs: object
-    ) -> MultiModalEmbeddings | None:
-        # Backward compatibility for older runners.
-        embeddings = self.embed_multimodal(**kwargs)
-        if not embeddings:
-            return []
-        return embeddings
-
-    def get_language_model(self) -> torch.nn.Module:
-        return self.language_model
 
     def forward(
         self,
