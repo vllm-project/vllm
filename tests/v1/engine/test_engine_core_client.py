@@ -143,6 +143,7 @@ def test_mp_client_uses_env_timeout(monkeypatch: pytest.MonkeyPatch):
         data_parallel_rank_local=None,
         data_parallel_hybrid_lb=False,
         data_parallel_external_lb=False,
+        local_engines_only=False,
     )
     vllm_config = SimpleNamespace(parallel_config=parallel_config)
 

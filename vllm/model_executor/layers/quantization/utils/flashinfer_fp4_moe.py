@@ -256,6 +256,7 @@ def flashinfer_trtllm_fp4_moe(
     x: torch.Tensor | tuple[torch.Tensor, torch.Tensor],
     router_logits: torch.Tensor,
     top_k: int,
+    activation: str,
     global_num_experts: int,
     num_expert_group: int | None,
     topk_group: int | None,
@@ -270,6 +271,7 @@ def flashinfer_trtllm_fp4_moe(
         x: Input tensor
         router_logits: Router logits for expert selection
         top_k: Number of experts to select per token
+        activation: Activation function to use
         global_num_experts: Total number of experts across all ranks
         num_expert_group: Number of expert groups (for grouped routing)
         topk_group: Top-k within each group
@@ -282,6 +284,12 @@ def flashinfer_trtllm_fp4_moe(
     import flashinfer
 
     from vllm.model_executor.models.llama4 import Llama4MoE
+
+    # https://github.com/flashinfer-ai/flashinfer/blob/f0277fd1bff90e309e5c19cab36c5dae056d685d/flashinfer/fused_moe/core.py#L2404
+    assert activation == "silu", (
+        "Only SiLU activation is supported for FlashInfer TRTLLM FP4 MoE. "
+        f"{activation} found instead."
+    )
 
     # Quantize input to FP4
     if isinstance(x, tuple):
@@ -349,6 +357,7 @@ def flashinfer_trtllm_fp4_routed_moe(
     topk_ids: torch.Tensor,
     topk_weights: torch.Tensor,
     top_k: int,
+    activation: str,
     global_num_experts: int,
 ) -> torch.Tensor:
     """
@@ -361,12 +370,19 @@ def flashinfer_trtllm_fp4_routed_moe(
         x: Input tensor
         topk_ids: Ids of selected experts
         top_k: Number of experts to select per token
+        activation: Activation function to use
         global_num_experts: Total number of experts across all ranks
 
     Returns:
         Output tensor from the MoE layer
     """
     import flashinfer
+
+    # https://github.com/flashinfer-ai/flashinfer/blob/f0277fd1bff90e309e5c19cab36c5dae056d685d/flashinfer/fused_moe/core.py#L2535
+    assert activation == "silu", (
+        "Only SiLU activation is supported for FlashInfer TRTLLM FP4 Routed MoE. "
+        f"{activation} found instead."
+    )
 
     # Pack top k ids and expert weights into a single int32 tensor, as
     # required by TRT-LLM
