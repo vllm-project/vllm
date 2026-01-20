@@ -682,11 +682,13 @@ class Qwen3VLProcessingInfo(Qwen2VLProcessingInfo):
         else:
             preprocessed_size = ImageSize(width=image_width, height=image_height)
 
-        padded_num_frames = num_frames + num_frames % temporal_patch_size
+        padded_num_frames = (
+            (num_frames + temporal_patch_size - 1) // temporal_patch_size
+        ) * temporal_patch_size
 
         grid_t = max(padded_num_frames // temporal_patch_size, 1)
-        grid_h = preprocessed_size.height // patch_size
-        grid_w = preprocessed_size.width // patch_size
+        grid_h = preprocessed_size.height // patch_size + 1
+        grid_w = preprocessed_size.width // patch_size + 1
 
         num_patches = grid_t * grid_h * grid_w
         num_vision_tokens = num_patches // (merge_size**2)
