@@ -2,13 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Inference-only Moondream3 model implementation."""
 
-import logging
 import math
-import os
-
-# Debug flag for verbose logging
-_DEBUG_MOONDREAM3 = os.environ.get("DEBUG_MOONDREAM3", "0") == "1"
-_debug_logger = logging.getLogger("moondream3_debug")
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from functools import cached_property
@@ -23,7 +17,13 @@ from transformers import BatchFeature
 
 from vllm.attention.layer import Attention
 from vllm.config import VllmConfig
-from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
+from vllm.config.multimodal import BaseDummyOptions
+from vllm.distributed import (
+    get_pp_group,
+    get_tensor_model_parallel_rank,
+    get_tensor_model_parallel_world_size,
+    tensor_model_parallel_all_reduce,
+)
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
@@ -47,12 +47,12 @@ from vllm.multimodal.inputs import (
 )
 from vllm.multimodal.parse import ImageSize, MultiModalDataItems
 from vllm.multimodal.processing import (
+    BaseDummyInputsBuilder,
     BaseMultiModalProcessor,
     BaseProcessingInfo,
     PromptReplacement,
     PromptUpdate,
 )
-from vllm.multimodal.profiling import BaseDummyInputsBuilder, BaseDummyOptions
 from vllm.sequence import IntermediateTensors
 
 from .interfaces import MultiModalEmbeddings, SupportsMultiModal, SupportsPP
@@ -655,13 +655,8 @@ class Moondream3TextMoE(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """Forward pass with expert parallelism and custom GeGLU activation."""
-        from vllm.distributed import (
-            get_tensor_model_parallel_rank,
-            tensor_model_parallel_all_reduce,
-        )
 
         tp_rank = get_tensor_model_parallel_rank()
-        x.shape[0]
 
         # Get router logits and compute top-k
         router_logits, _ = self.gate(x)  # [num_tokens, num_experts]
@@ -673,7 +668,6 @@ class Moondream3TextMoE(nn.Module):
 
         # Compute local expert range
         local_expert_start = tp_rank * self.experts_per_rank
-        local_expert_start + self.experts_per_rank
 
         # Compute MoE output using loop over local experts
         out = x.new_zeros(x.shape)
@@ -758,7 +752,7 @@ class Moondream3Attention(nn.Module):
         )
 
         # Moondream uses 32-dim rotation out of 64-dim head (partial_rotary_factor=0.5)
-        # HF Moondream uses non-interleaved RoPE (split by half, first half real, second half imag)
+        # HF Moondream uses non-interleaved RoPE (split by half)
         # In vLLM, is_neox_style=True means split by half (GPT-NeoX style)
         rope_parameters = {
             "rope_theta": config.rope_theta,
@@ -816,15 +810,17 @@ class Moondream3Attention(nn.Module):
         #
         # For TP, tau weights are sharded by head, but qkv_dim is kept full
 
-        # Get full qkv for tau computation (before splitting)
-        # Shape: [num_tokens, qkv_dim_per_partition]
-        # We need to all-gather to get full qkv for tau weights that expect full qkv_dim
+        # Get full qkv for tau computation
+        # With TP, reconstruct qkv in correct layout [q_full, k_full, v_full]
+        # (all-gather would produce [q_0, k_0, v_0, q_1, k_1, v_1] - wrong)
         if self.tp_size > 1:
             from vllm.distributed import tensor_model_parallel_all_gather
 
-            # qkv is [num_tokens, qkv_dim_per_partition]
-            # All-gather to get [num_tokens, qkv_dim_full]
-            qkv_full = tensor_model_parallel_all_gather(qkv)
+            # All-gather q, k, v separately and concatenate in correct order
+            q_full = tensor_model_parallel_all_gather(q.contiguous())
+            k_full = tensor_model_parallel_all_gather(k.contiguous())
+            v_full = tensor_model_parallel_all_gather(v.contiguous())
+            qkv_full = torch.cat([q_full, k_full, v_full], dim=-1).contiguous()
         else:
             qkv_full = qkv
 
@@ -836,40 +832,37 @@ class Moondream3Attention(nn.Module):
         num_tokens = qkv_full.shape[0]
         orig_dtype = q.dtype
 
-        # Debug: Option to disable tau for testing
-        _disable_tau = os.environ.get("DISABLE_TAU", "0") == "1"
-        if not _disable_tau:
-            # Token-based component
-            tok_feat = F.gelu(qkv_full)  # Apply GELU activation
-            tok_q = torch.tanh(tok_feat @ self.tau_wq.t())  # [N, H_per_partition]
-            tok_v = torch.tanh(tok_feat @ self.tau_wv.t())  # [N, H_per_partition]
+        # Token-based component
+        tok_feat = F.gelu(qkv_full)  # Apply GELU activation
+        tok_q = torch.tanh(tok_feat @ self.tau_wq.t())  # [N, H_per_partition]
+        tok_v = torch.tanh(tok_feat @ self.tau_wv.t())  # [N, H_per_partition]
 
-            # Position-based component
-            # tau_pos = 1 + (sigmoid(alpha * log(pos+1)) - 0.5)
-            # positions is [num_tokens], need to compute for each head
-            # tau_alpha: [num_heads_per_partition]
-            pos_float = (positions.to(orig_dtype) + 1.0).clamp(min=1e-6)
-            pos_log = pos_float.log()  # [num_tokens]
-            # alpha[:, None] * pos_log[None, :] -> [num_heads, num_tokens]
-            tau_pos = 1.0 + (
-                torch.sigmoid(self.tau_alpha[:, None] * pos_log[None, :]) - 0.5
-            )  # [H_per_partition, N]
+        # Position-based component
+        # tau_pos = 1 + (sigmoid(alpha * log(pos+1)) - 0.5)
+        # positions is [num_tokens], need to compute for each head
+        # tau_alpha: [num_heads_per_partition]
+        pos_float = (positions.to(orig_dtype) + 1.0).clamp(min=1e-6)
+        pos_log = pos_float.log()  # [num_tokens]
+        # alpha[:, None] * pos_log[None, :] -> [num_heads, num_tokens]
+        tau_pos = 1.0 + (
+            torch.sigmoid(self.tau_alpha[:, None] * pos_log[None, :]) - 0.5
+        )  # [H_per_partition, N]
 
-            # Combine token and position components
-            tau_q = (tok_q + tau_pos.t()).to(orig_dtype)  # [N, H_per_partition]
-            tau_v = (tok_v + tau_pos.t()).to(orig_dtype)  # [N, H_per_partition]
+        # Combine token and position components
+        tau_q = (tok_q + tau_pos.t()).to(orig_dtype)  # [N, H_per_partition]
+        tau_v = (tok_v + tau_pos.t()).to(orig_dtype)  # [N, H_per_partition]
 
-            # Reshape q and v to apply per-head tau scaling
-            q = q.view(num_tokens, self.num_heads_per_partition, self.head_dim)
-            v = v.view(num_tokens, self.num_kv_heads_per_partition, self.head_dim)
+        # Reshape q and v to apply per-head tau scaling
+        q = q.view(num_tokens, self.num_heads_per_partition, self.head_dim)
+        v = v.view(num_tokens, self.num_kv_heads_per_partition, self.head_dim)
 
-            # Apply tau scaling
-            q = q * tau_q.unsqueeze(-1)
-            v = v * tau_v[:, : self.num_kv_heads_per_partition].unsqueeze(-1)
+        # Apply tau scaling
+        q = q * tau_q.unsqueeze(-1)
+        v = v * tau_v[:, : self.num_kv_heads_per_partition].unsqueeze(-1)
 
-            # Reshape back
-            q = q.view(num_tokens, -1)
-            v = v.view(num_tokens, -1)
+        # Reshape back
+        q = q.view(num_tokens, -1)
+        v = v.view(num_tokens, -1)
 
         q, k = self.rotary_emb(positions, q, k)
         attn_output = self.attn(q, k, v)
@@ -982,21 +975,9 @@ class Moondream3TextModel(nn.Module):
         if pp_group.is_first_rank:
             if inputs_embeds is not None:
                 hidden_states = inputs_embeds
-                if _DEBUG_MOONDREAM3:
-                    _debug_logger.warning(
-                        f"[Text] Using inputs_embeds: shape={hidden_states.shape}, "
-                        f"mean={hidden_states.float().mean():.4f}, "
-                        f"std={hidden_states.float().std():.4f}"
-                    )
             else:
                 assert input_ids is not None
                 hidden_states = self.embed_input_ids(input_ids)
-                if _DEBUG_MOONDREAM3:
-                    _debug_logger.warning(
-                        f"[Text] Embedded input_ids: shape={hidden_states.shape}, "
-                        f"mean={hidden_states.float().mean():.4f}, "
-                        f"std={hidden_states.float().std():.4f}"
-                    )
         else:
             assert intermediate_tensors is not None
             hidden_states = intermediate_tensors["hidden_states"]
@@ -1005,26 +986,11 @@ class Moondream3TextModel(nn.Module):
             islice(self.blocks, self.start_layer, self.end_layer)
         ):
             hidden_states = layer(positions, hidden_states)
-            if _DEBUG_MOONDREAM3 and i < 3:
-                _debug_logger.warning(
-                    f"[Text] After layer {self.start_layer + i}: "
-                    f"mean={hidden_states.float().mean():.4f}, "
-                    f"std={hidden_states.float().std():.4f}"
-                )
 
         if not pp_group.is_last_rank:
             return IntermediateTensors({"hidden_states": hidden_states})
 
         hidden_states = self.post_ln(hidden_states)
-        if _DEBUG_MOONDREAM3:
-            # Only log if not a dummy/warmup run (check for non-trivial std)
-            if hidden_states.float().std() > 0.1:
-                _debug_logger.warning(
-                    f"[Text] After post_ln: shape={hidden_states.shape}, "
-                    f"mean={hidden_states.float().mean():.4f}, "
-                    f"std={hidden_states.float().std():.4f}, "
-                    f"last_token_mean={hidden_states[-1].float().mean():.4f}"
-                )
         return hidden_states
 
 
@@ -1276,33 +1242,9 @@ class Moondream3ForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
             handle_oov_mm_token=handle_oov_mm_token,
         )
 
-        if _DEBUG_MOONDREAM3:
-            _debug_logger.warning(
-                f"[embed_input_ids] inputs_embeds: shape={inputs_embeds.shape}, "
-                f"mean={inputs_embeds.float().mean():.4f}, "
-                f"std={inputs_embeds.float().std():.4f}"
-            )
-
         # If no multimodal embeddings, return text embeddings only
         if multimodal_embeddings is None or len(multimodal_embeddings) == 0:
             return inputs_embeds
-
-        if _DEBUG_MOONDREAM3:
-            for i, mm_emb in enumerate(multimodal_embeddings):
-                _debug_logger.warning(
-                    f"[embed_input_ids] mm_embed[{i}]: shape={mm_emb.shape}, "
-                    f"mean={mm_emb.float().mean():.4f}, "
-                    f"std={mm_emb.float().std():.4f}"
-                )
-            # Debug is_multimodal
-            if is_multimodal is None:
-                _debug_logger.warning("[embed_input_ids] is_multimodal is NONE!")
-            else:
-                mm_sum = is_multimodal.sum().item()
-                _debug_logger.warning(
-                    f"[embed_input_ids] is_multimodal: shape={is_multimodal.shape}, "
-                    f"sum={mm_sum}, expected={len(multimodal_embeddings[0])}"
-                )
 
         # Merge multimodal embeddings with text embeddings
         merged = _merge_multimodal_embeddings(
@@ -1310,13 +1252,6 @@ class Moondream3ForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
             multimodal_embeddings=multimodal_embeddings,
             is_multimodal=is_multimodal,
         )
-
-        if _DEBUG_MOONDREAM3:
-            _debug_logger.warning(
-                f"[embed_input_ids] merged: shape={merged.shape}, "
-                f"mean={merged.float().mean():.4f}, "
-                f"std={merged.float().std():.4f}"
-            )
 
         return merged
 
@@ -1425,19 +1360,7 @@ class Moondream3ForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
         dtype = self.vision.patch_emb.weight.dtype
         pixel_values = pixel_values.to(device=device, dtype=dtype)
 
-        if _DEBUG_MOONDREAM3:
-            _debug_logger.warning(
-                f"[_encode_image_input] pixel_values: shape={pixel_values.shape}, "
-                f"mean={pixel_values.float().mean():.4f}, std={pixel_values.float().std():.4f}"
-            )
-
         features = self.vision(pixel_values)
-
-        if _DEBUG_MOONDREAM3:
-            _debug_logger.warning(
-                f"[_encode_image_input] vision features: shape={features.shape}, "
-                f"mean={features.float().mean():.4f}, std={features.float().std():.4f}"
-            )
 
         grid_size = self.config.vision.enc_n_layers
         enc_dim = self.config.vision.enc_dim
@@ -1465,11 +1388,9 @@ class Moondream3ForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
         combined = torch.cat([global_features, recon], dim=-1).unsqueeze(0)
         projected = self.vision_proj(combined).squeeze(0)
 
-        if _DEBUG_MOONDREAM3:
-            _debug_logger.warning(
-                f"[_encode_image_input] projected: shape={projected.shape}, "
-                f"mean={projected.float().mean():.4f}, std={projected.float().std():.4f}"
-            )
+        # Note: Vision embeddings are already synchronized across TP ranks
+        # because the vision projection uses RowParallelLinear which performs
+        # all-reduce internally, ensuring identical outputs on all ranks.
 
         return projected
 
@@ -1477,19 +1398,11 @@ class Moondream3ForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
         """Generate embeddings from multimodal inputs."""
         image_inputs = self._parse_image_inputs(**kwargs)
         if not image_inputs:
-            if _DEBUG_MOONDREAM3:
-                _debug_logger.warning("[embed_multimodal] No image inputs found")
             return []
 
         results = [
             self._encode_image_input(image_input) for image_input in image_inputs
         ]
-        if _DEBUG_MOONDREAM3:
-            for i, r in enumerate(results):
-                _debug_logger.warning(
-                    f"[embed_multimodal] Output {i}: shape={r.shape}, "
-                    f"mean={r.float().mean():.4f}, std={r.float().std():.4f}"
-                )
         return results
 
     def forward(
@@ -1512,24 +1425,7 @@ class Moondream3ForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
         self,
         hidden_states: torch.Tensor,
     ) -> torch.Tensor | None:
-        if _DEBUG_MOONDREAM3:
-            _debug_logger.warning(
-                f"[compute_logits] hidden_states: shape={hidden_states.shape}, "
-                f"mean={hidden_states.float().mean():.4f}, "
-                f"std={hidden_states.float().std():.4f}"
-            )
         logits = self.logits_processor(self.lm_head, hidden_states)
-        if _DEBUG_MOONDREAM3 and logits is not None:
-            top_probs, top_ids = logits.softmax(dim=-1).topk(5, dim=-1)
-            _debug_logger.warning(
-                f"[compute_logits] logits shape={logits.shape}, "
-                f"mean={logits.float().mean():.4f}, "
-                f"std={logits.float().std():.4f}"
-            )
-            _debug_logger.warning(
-                f"[compute_logits] top5 token ids: {top_ids[0].tolist()}, "
-                f"probs: {top_probs[0].tolist()}"
-            )
         return logits
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
@@ -1640,18 +1536,5 @@ class Moondream3ForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
                 weight_loader = getattr(param, "weight_loader", default_weight_loader)
                 weight_loader(param, loaded_weight)
                 loaded_params.add(name)
-            elif _DEBUG_MOONDREAM3:
-                _debug_logger.warning(f"[load_weights] Skipped: {name}")
-
-        # Debug: Print stats for some critical weights
-        if _DEBUG_MOONDREAM3:
-            _debug_logger.warning(f"[load_weights] Loaded {len(loaded_params)} params")
-            # Check for missing critical weights
-            expected_critical = ["text.wte.weight", "lm_head.weight", "lm_head.bias"]
-            for ec in expected_critical:
-                if ec in loaded_params:
-                    _debug_logger.warning(f"[load_weights] {ec}: LOADED")
-                else:
-                    _debug_logger.warning(f"[load_weights] {ec}: MISSING!")
 
         return loaded_params

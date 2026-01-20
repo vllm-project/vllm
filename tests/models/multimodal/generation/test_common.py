@@ -732,13 +732,33 @@ VLM_TEST_SETTINGS = {
     ),
     "moondream3": VLMTestInfo(
         models=["moondream/moondream3-preview"],
-        test_type=VLMTestType.IMAGE,
+        test_type=(VLMTestType.IMAGE, VLMTestType.CUSTOM_INPUTS),
         prompt_formatter=lambda img_prompt: f"<|endoftext|>{img_prompt}",
         # Note: space after <image> is required for correct tokenization
         img_idx_to_prompt=lambda idx: "<image> \n\n",
+        # Moondream3-specific prompts to test query and caption skills
+        single_image_prompts=IMAGE_ASSETS.prompts(
+            {
+                "stop_sign": "Question: What is this sign?\n\nAnswer:",
+                "cherry_blossom": "Question: What season is shown?\n\nAnswer:",
+            }
+        ),
         max_model_len=2048,
         max_num_seqs=2,
         dtype="bfloat16",
+        patch_hf_runner=model_utils.moondream3_patch_hf_runner,
+        hf_model_kwargs={"trust_remote_code": True},
+        # Custom inputs to test all Moondream3 skills
+        custom_test_opts=[
+            CustomTestOptions(
+                inputs=custom_inputs.moondream3_skill_inputs(),
+                limit_mm_per_prompt={"image": 1},
+            ),
+            CustomTestOptions(
+                inputs=custom_inputs.moondream3_multi_size_inputs(),
+                limit_mm_per_prompt={"image": 1},
+            ),
+        ],
         # Moondream3 is 9B params with MoE, needs significant GPU memory
         marks=[large_gpu_mark(min_gb=48)],
     ),
