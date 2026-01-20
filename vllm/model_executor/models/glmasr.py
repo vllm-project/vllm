@@ -944,26 +944,27 @@ class GlmAsrForConditionalGeneration(
         multimodal_config = vllm_config.model_config.multimodal_config
         self.config = config
         self.multimodal_config = multimodal_config
-
-        # Use optimized vLLM native encoder
-        self.audio_tower = GlmAsrEncoder(
-            config.audio_config,
-            quant_config=quant_config,
-            prefix=maybe_prefix(prefix, "audio_tower"),
-        )
-        self.multi_modal_projector = GlmAsrMultiModalProjector(
-            config,
-            quant_config=quant_config,
-            prefix=maybe_prefix(prefix, "multi_modal_projector"),
-        )
         self.quant_config = quant_config
 
-        self.language_model = init_vllm_registered_model(
-            vllm_config=vllm_config,
-            hf_config=config.text_config,
-            prefix=maybe_prefix(prefix, "language_model"),
-            architectures=["LlamaForCausalLM"],
-        )
+        with self._mark_tower_model(vllm_config, "audio"):
+            self.audio_tower = GlmAsrEncoder(
+                config.audio_config,
+                quant_config=quant_config,
+                prefix=maybe_prefix(prefix, "audio_tower"),
+            )
+            self.multi_modal_projector = GlmAsrMultiModalProjector(
+                config,
+                quant_config=quant_config,
+                prefix=maybe_prefix(prefix, "multi_modal_projector"),
+            )
+
+        with self._mark_language_model(vllm_config):
+            self.language_model = init_vllm_registered_model(
+                vllm_config=vllm_config,
+                hf_config=config.text_config,
+                prefix=maybe_prefix(prefix, "language_model"),
+                architectures=["LlamaForCausalLM"],
+            )
 
         self.make_empty_intermediate_tensors = (
             self.language_model.make_empty_intermediate_tensors
@@ -1062,9 +1063,6 @@ class GlmAsrForConditionalGeneration(
             masked_audio_features, audio_output_lengths.flatten().tolist()
         )
         return _group_audio_embeddings(chunk_embeddings, chunk_counts)
-
-    def get_language_model(self) -> torch.nn.Module:
-        return self.language_model
 
     def embed_multimodal(self, **kwargs: object) -> MultiModalEmbeddings:
         audio_input = self._parse_and_validate_audio_input(**kwargs)
