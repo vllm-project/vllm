@@ -20,7 +20,6 @@ QuantizationMethods = Literal[
     "modelopt_fp4",
     "bitblas",
     "gguf",
-    "gptq_marlin_24",
     "gptq_marlin",
     "gptq_bitblas",
     "awq_marlin",
@@ -48,7 +47,6 @@ DEPRECATED_QUANTIZATION_METHODS = [
     "fbgemm_fp8",
     "fp_quant",
     "bitblas",
-    "gptq_marlin_24",
     "gptq_bitblas",
     "hqq",
     "experts_int8",
@@ -135,7 +133,6 @@ def get_quantization_config(quantization: str) -> type[QuantizationConfig]:
     from .gptq import GPTQConfig
     from .gptq_bitblas import GPTQBitBLASConfig
     from .gptq_marlin import GPTQMarlinConfig
-    from .gptq_marlin_24 import GPTQMarlin24Config
     from .hqq_marlin import HQQMarlinConfig
     from .inc import INCConfig
     from .ipex_quant import IPEXConfig
@@ -157,7 +154,6 @@ def get_quantization_config(quantization: str) -> type[QuantizationConfig]:
         "modelopt_fp4": ModelOptNvFp4Config,
         "bitblas": BitBLASConfig,
         "gguf": GGUFConfig,
-        "gptq_marlin_24": GPTQMarlin24Config,
         "gptq_marlin": GPTQMarlinConfig,
         "gptq_bitblas": GPTQBitBLASConfig,
         "awq_marlin": AWQMarlinConfig,

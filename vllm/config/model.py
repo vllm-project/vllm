@@ -891,7 +891,6 @@ class ModelConfig:
             # of preference (this is particularly important for GPTQ).
             overrides = [
                 "bitblas",
-                "gptq_marlin_24",
                 "gptq_marlin",
                 "gptq_bitblas",
                 "awq_marlin",
