@@ -707,30 +707,30 @@ class MiDashengLMModel(nn.Module, SupportsMultiModal, SupportsPP):
         config = vllm_config.model_config.hf_config
         quant_config = vllm_config.quant_config
         self.config = config
-
-        # Initialize audio components
-        self.audio_encoder = DashengAudioTransformer(
-            config.audio_encoder_config,
-            quant_config=quant_config,
-            prefix=maybe_prefix(prefix, "audio_encoder"),
-        )
-        self.audio_projector = AudioProjectorSubsample(
-            in_dim=config.audio_encoder_config.embed_dim,
-            out_dim=config.text_config.hidden_size,
-            downsample_rate=config.subsample_factor,
-            quant_config=quant_config,
-            prefix=maybe_prefix(prefix, "audio_projector"),
-        )
-
-        # Initialize language model (decoder)
-        self.decoder = init_vllm_registered_model(
-            vllm_config=vllm_config,
-            hf_config=config.text_config,
-            prefix=maybe_prefix(prefix, "decoder"),
-            architectures=["Qwen2ForCausalLM"],
-        )
-
         self.quant_config = quant_config
+
+        with self._mark_tower_model(vllm_config, "audio"):
+            self.audio_encoder = DashengAudioTransformer(
+                config.audio_encoder_config,
+                quant_config=quant_config,
+                prefix=maybe_prefix(prefix, "audio_encoder"),
+            )
+            self.audio_projector = AudioProjectorSubsample(
+                in_dim=config.audio_encoder_config.embed_dim,
+                out_dim=config.text_config.hidden_size,
+                downsample_rate=config.subsample_factor,
+                quant_config=quant_config,
+                prefix=maybe_prefix(prefix, "audio_projector"),
+            )
+
+        with self._mark_language_model(vllm_config):
+            self.decoder = init_vllm_registered_model(
+                vllm_config=vllm_config,
+                hf_config=config.text_config,
+                prefix=maybe_prefix(prefix, "decoder"),
+                architectures=["Qwen2ForCausalLM"],
+            )
+
         self.make_empty_intermediate_tensors = (
             self.decoder.make_empty_intermediate_tensors
         )
@@ -786,9 +786,6 @@ class MiDashengLMModel(nn.Module, SupportsMultiModal, SupportsPP):
         masked_audio_features = audio_embeddings[audio_feature_mask].view(-1, embed_dim)
 
         return torch.split(masked_audio_features, audio_output_lengths.tolist())
-
-    def get_language_model(self) -> torch.nn.Module:
-        return self.decoder
 
     def embed_multimodal(self, **kwargs: object) -> MultiModalEmbeddings:
         audio_input = self._parse_and_validate_audio_input(**kwargs)
