@@ -11,6 +11,8 @@ import torch.nn as nn
 
 from vllm.config import VllmConfig
 from vllm.config.compilation import CUDAGraphMode
+from vllm.distributed.kv_transfer import get_kv_transfer_group, has_kv_transfer_group
+from vllm.distributed.kv_transfer.kv_connector.utils import copy_kv_blocks
 from vllm.distributed.parallel_state import prepare_communication_buffer_for_model
 from vllm.forward_context import set_forward_context
 from vllm.logger import init_logger
@@ -20,10 +22,7 @@ from vllm.utils.mem_utils import DeviceMemoryProfiler, format_gib
 from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
 from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig
-from vllm.v1.outputs import (
-    EMPTY_MODEL_RUNNER_OUTPUT,
-    ModelRunnerOutput,
-)
+from vllm.v1.outputs import KVConnectorOutput, ModelRunnerOutput
 from vllm.v1.worker.gpu.async_utils import AsyncOutput
 from vllm.v1.worker.gpu.attn_utils import (
     build_attn_metadata,
@@ -172,6 +171,10 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         self.tmp_cu_num_logits = UvaBufferPool(self.max_num_reqs + 1, torch.int32)
         self.tmp_query_start_loc = UvaBufferPool(self.max_num_reqs + 1, torch.int32)
 
+        self.execute_model_state: (
+            tuple[torch.Tensor, InputBatch, KVConnectorOutput | None] | None
+        ) = None
+
     def update_max_model_len(self, max_model_len: int) -> None:
         self.max_model_len = max_model_len
         self.req_states.max_model_len = max_model_len
@@ -258,13 +261,22 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 )
 
         self.kv_caches: list[torch.Tensor] = []
-        init_kv_cache(
+        kv_caches_dict = init_kv_cache(
             self.kv_caches,
             self.compilation_config.static_forward_context,
             self.kv_cache_config,
             self.attn_backends,
             self.device,
         )
+
+        if has_kv_transfer_group():
+            # Register kv caches with KV Connector if applicable.
+            # TODO: support cross_layers_kv_cache
+            # (see https://github.com/vllm-project/vllm/pull/27743)
+            kv_transfer_group = get_kv_transfer_group()
+            kv_transfer_group.register_kv_caches(kv_caches_dict)
+            kv_transfer_group.set_host_xfer_buffer_ops(copy_kv_blocks)
+
         # Attention groups are not supported.
         self.attn_groups = []  # type: ignore
 
@@ -312,7 +324,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             dummy_scheduler_output, dummy_run=True, skip_attn_for_dummy_run=skip_attn
         )
         assert self.execute_model_state is not None
-        hidden_states, input_batch = self.execute_model_state
+        hidden_states, input_batch, kv_connector_output = self.execute_model_state
         sample_hidden_states = hidden_states[input_batch.logits_indices]
         return hidden_states, sample_hidden_states
 
@@ -800,26 +812,30 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             self.add_requests(scheduler_output)
             self.update_requests(scheduler_output)
             self.block_tables.apply_staged_writes()
-            if scheduler_output.total_num_scheduled_tokens == 0:
-                # No need to run the model.
-                return EMPTY_MODEL_RUNNER_OUTPUT
 
-        # Get the CUDA graph size. None means no CUDA graph is used.
-        cudagraph_size = self.cudagraph_manager.get_cudagraph_size(
-            scheduler_output.total_num_scheduled_tokens,
-            scheduler_output.num_scheduled_tokens.values(),
-        )
-        use_cudagraph, num_tokens_after_padding, num_tokens_across_dp = (
-            get_cudagraph_and_dp_padding(
+        # Have KV connector to process preemptions if applicable.
+        self.kv_connector_handle_preemptions(scheduler_output)
+
+        if scheduler_output.total_num_scheduled_tokens == 0:
+            # No need to run the model.
+            num_tokens_after_padding = 0
+        else:
+            # Get the CUDA graph size. None means no CUDA graph is used.
+            cudagraph_size = self.cudagraph_manager.get_cudagraph_size(
                 scheduler_output.total_num_scheduled_tokens,
-                cudagraph_size,
-                self.parallel_config.data_parallel_size,
-                self.parallel_config.data_parallel_rank,
+                scheduler_output.num_scheduled_tokens.values(),
             )
-        )
+            use_cudagraph, num_tokens_after_padding, num_tokens_across_dp = (
+                get_cudagraph_and_dp_padding(
+                    scheduler_output.total_num_scheduled_tokens,
+                    cudagraph_size,
+                    self.parallel_config.data_parallel_size,
+                    self.parallel_config.data_parallel_rank,
+                )
+            )
         if num_tokens_after_padding == 0:
-            # All DP ranks have zero tokens to run.
-            return EMPTY_MODEL_RUNNER_OUTPUT
+            # All DP ranks have zero tokens to run, return empty output.
+            return self.kv_connector_no_forward(scheduler_output, self.vllm_config)
 
         if not dummy_run:
             # Common case.
@@ -879,13 +895,16 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             if self.uses_mrope:
                 assert input_batch.mrope_positions is not None
                 positions = input_batch.mrope_positions
-            with set_forward_context(
-                input_batch.attn_metadata,
-                self.vllm_config,
-                num_tokens=input_batch.num_tokens_after_padding,
-                # TODO(woosuk): Support piecewise CUDA graph.
-                cudagraph_runtime_mode=CUDAGraphMode.NONE,
-                num_tokens_across_dp=num_tokens_across_dp,
+            with (
+                set_forward_context(
+                    input_batch.attn_metadata,
+                    self.vllm_config,
+                    num_tokens=input_batch.num_tokens_after_padding,
+                    # TODO(woosuk): Support piecewise CUDA graph.
+                    cudagraph_runtime_mode=CUDAGraphMode.NONE,
+                    num_tokens_across_dp=num_tokens_across_dp,
+                ),
+                self.maybe_get_kv_connector_output(scheduler_output) as kv_conn_output,
             ):
                 hidden_states = self.model(
                     input_ids=input_batch.input_ids,
@@ -893,7 +912,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     inputs_embeds=input_batch.inputs_embeds,
                 )
 
-        self.execute_model_state = hidden_states, input_batch
+        self.execute_model_state = hidden_states, input_batch, kv_conn_output
         return None
 
     @torch.inference_mode()
@@ -902,8 +921,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         grammar_output: GrammarOutput | None,
     ) -> AsyncOutput | ModelRunnerOutput:
         assert self.execute_model_state is not None
-        hidden_states, input_batch = self.execute_model_state
-        self.execute_model_state = None  # type: ignore
+        hidden_states, input_batch, kv_connector_output = self.execute_model_state
+        self.execute_model_state = None
 
         sampler_output, num_sampled, num_rejected = self.sample(
             hidden_states, input_batch, grammar_output
@@ -927,6 +946,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             req_id_to_index={req_id: i for i, req_id in enumerate(input_batch.req_ids)},
             sampled_token_ids=None,  # type: ignore
             prompt_logprobs_dict=prompt_logprobs_dict,  # type: ignore[arg-type]
+            kv_connector_output=kv_connector_output,
         )
         async_output = AsyncOutput(
             model_runner_output=model_runner_output,

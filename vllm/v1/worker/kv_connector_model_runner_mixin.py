@@ -48,6 +48,9 @@ class KVConnectorModelRunnerMixin:
     def kv_connector_no_forward(
         scheduler_output: "SchedulerOutput", vllm_config: VllmConfig
     ) -> ModelRunnerOutput:
+        if not has_kv_transfer_group():
+            return EMPTY_MODEL_RUNNER_OUTPUT
+
         # KV send/recv even if no work to do.
         with (
             set_forward_context(None, vllm_config),
@@ -73,6 +76,12 @@ class KVConnectorModelRunnerMixin:
             if has_kv_transfer_group()
             else nullcontext()
         )
+
+    @staticmethod
+    def kv_connector_handle_preemptions(scheduler_output: SchedulerOutput) -> None:
+        if not scheduler_output.preempted_req_ids or not has_kv_transfer_group():
+            return
+        get_kv_transfer_group().handle_preemptions(scheduler_output.preempted_req_ids)
 
     # This context manager must be used within an active forward context.
     # It encapsulates the entire KV connector lifecycle within execute_model

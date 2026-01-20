@@ -3125,10 +3125,7 @@ class GPUModelRunner(
             else:
                 logger.error("RoutedExpertsCapturer not initialized.")
 
-        if scheduler_output.preempted_req_ids and has_kv_transfer_group():
-            get_kv_transfer_group().handle_preemptions(
-                scheduler_output.preempted_req_ids
-            )
+        self.kv_connector_handle_preemptions(scheduler_output)
 
         num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
         with (
@@ -3159,9 +3156,8 @@ class GPUModelRunner(
                     # dummy run to ensure coordinate_batch_across_dp
                     # is called into to avoid out of sync issues.
                     self._dummy_run(1)
-                if not has_kv_transfer_group():
-                    # Return empty ModelRunnerOutput if no work to do.
-                    return EMPTY_MODEL_RUNNER_OUTPUT
+
+                # Return empty ModelRunnerOutput if no work to do.
                 return self.kv_connector_no_forward(scheduler_output, self.vllm_config)
 
             if self.cache_config.kv_sharing_fast_prefill:
