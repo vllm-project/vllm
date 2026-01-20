@@ -579,6 +579,12 @@ class PixtralForConditionalGeneration(
                     # by language_model.load_weights
                     # Strip "language_model." prefix if present (HF sharded format)
                     name = name.removeprefix("language_model.")
+
+                    # Remap FP8 scale names for HuggingFace checkpoints.
+                    if name.endswith(".activation_scale"):
+                        name = name.replace(".activation_scale", ".input_scale")
+                    elif name.endswith(".weight_scale_inv"):
+                        name = name.replace(".weight_scale_inv", ".weight_scale")
                     yield (name, w)
 
         # Now we call the language model load with the generator
