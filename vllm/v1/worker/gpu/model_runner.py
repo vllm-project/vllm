@@ -12,6 +12,7 @@ import torch.nn as nn
 
 from vllm.config import VllmConfig
 from vllm.config.compilation import CUDAGraphMode
+from vllm.distributed.parallel_state import prepare_communication_buffer_for_model
 from vllm.forward_context import set_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.model_loader import get_model_loader
@@ -205,6 +206,12 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             format_gib(m.consumed_memory),
             time_after_load - time_before_load,
         )
+
+        prepare_communication_buffer_for_model(self.model)
+        if self.do_spec_decode:
+            speculator_model = getattr(self.speculator, "model", None)
+            if speculator_model is not None:
+                prepare_communication_buffer_for_model(speculator_model)
 
     def get_model(self) -> nn.Module:
         return self.model
