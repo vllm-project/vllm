@@ -146,8 +146,8 @@ __global__ void silu_and_mul_per_block_quant_kernel(
                 quantized = max(-127, min(127, quantized));
                 token_output[elem_idx] = static_cast<int8_t>(quantized);
             } else {
-                // FP8 quantization using vLLM's conversion utility
-                token_output[elem_idx] = vllm::fp8_e4m3::scaled_convert<scalar_out_t, float>(scaled, 1.0f);
+                // FP8 quantization - direct cast (hardware handles conversion)
+                token_output[elem_idx] = static_cast<scalar_out_t>(scaled);
             }
         }
         __syncthreads();
