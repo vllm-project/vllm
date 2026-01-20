@@ -669,26 +669,41 @@ class NaiveBatchedExperts(mk.FusedMoEPermuteExpertsUnpermute):
 
     @staticmethod
     def _supports_current_device() -> bool:
-        return True
+        raise NotImplementedError(
+            "NaiveBatchedExperts is not yet used by an Oracle. "
+            "This method should not be called."
+        )
 
     @staticmethod
     def _supports_no_act_and_mul() -> bool:
-        return False
+        raise NotImplementedError(
+            "NaiveBatchedExperts is not yet used by an Oracle. "
+            "This method should not be called."
+        )
 
     @staticmethod
     def _supports_quant_scheme(
         weight_key: QuantKey | None,
         activation_key: QuantKey | None,
     ) -> bool:
-        return False
+        raise NotImplementedError(
+            "NaiveBatchedExperts is not yet used by an Oracle. "
+            "This method should not be called."
+        )
 
     @staticmethod
     def _supports_activation(activation: str) -> bool:
-        return activation in ["silu", "swigluoai"]
+        raise NotImplementedError(
+            "NaiveBatchedExperts is not yet used by an Oracle. "
+            "This method should not be called."
+        )
 
     @staticmethod
     def _supports_parallel_config(moe_parallel_config: FusedMoEParallelConfig) -> bool:
-        return True
+        raise NotImplementedError(
+            "NaiveBatchedExperts is not yet used by an Oracle. "
+            "This method should not be called."
+        )
 
     def supports_chunking(self) -> bool:
         return False
