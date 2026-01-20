@@ -402,7 +402,10 @@ class GPUModelRunner(
         self.use_async_scheduling = self.scheduler_config.async_scheduling
 
         # Sampler
-        self.sampler = Sampler(logprobs_mode=self.model_config.logprobs_mode)
+        self.sampler = Sampler(
+            logprobs_mode=self.model_config.logprobs_mode,
+            vocab_size=self.model_config.get_vocab_size(),
+        )
 
         self.eplb_state: EplbState | None = None
         """
