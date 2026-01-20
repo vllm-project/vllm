@@ -56,17 +56,11 @@ def make_test_data(
 
 
 def make_e_score_correction_bias(
-    e_score_correction_bias_val: float | None,
+    needs_correction_bias: bool,
     num_experts: int,
 ) -> torch.Tensor | None:
-    if e_score_correction_bias_val is not None:
-        return torch.randn(num_experts, device="cuda") * e_score_correction_bias_val
-        # return torch.full(
-        #    (num_experts,),
-        #     e_score_correction_bias_val,
-        #     device="cuda",
-        #     dtype=torch.float32
-        # )
+    if needs_correction_bias:
+        return torch.randn(num_experts, device="cuda")
     else:
         return None
 
@@ -190,6 +184,7 @@ def baseline_grouped_topk(
     num_token = router_logits.shape[0]
 
     # Apply scoring function
+    num_experts = router_logits.shape[-1]
     if scoring_func == "softmax":
         scores = torch.softmax(router_logits, dim=-1, dtype=torch.float32)
     elif scoring_func == "sigmoid":
@@ -197,33 +192,17 @@ def baseline_grouped_topk(
     else:
         raise ValueError(f"Unsupported scoring function: {scoring_func}")
 
-    num_experts = router_logits.shape[-1]
-    if num_expert_group == num_experts:
-        if e_score_correction_bias is not None:
-            scores_for_choice = scores.view(
-                -1, num_experts
-            ) + e_score_correction_bias.unsqueeze(0)
-        else:
-            scores_for_choice = scores
-
-        topk_indices = torch.topk(scores_for_choice, k=top_k, dim=-1, sorted=False)[1]
-        topk_weights = scores.gather(1, topk_indices)
-
-        if renormalize:
-            topk_weights = topk_weights / topk_weights.sum(dim=-1, keepdim=True)
-
-        if routed_scaling_factor != 1.0:
-            topk_weights = topk_weights * routed_scaling_factor
-
-        return topk_weights.to(torch.float32), topk_indices.to(torch.int32)
-
     # Handle bias correction
     if e_score_correction_bias is not None:
         original_scores = scores
         scores = scores + e_score_correction_bias.unsqueeze(0)
         # For bias case, use sum of top-2 scores in each group
+        experts_per_group = num_experts // num_expert_group
+        topk_per_group = min(2, experts_per_group)
         group_scores = (
-            scores.view(num_token, num_expert_group, -1).topk(2, dim=-1)[0].sum(dim=-1)
+            scores.view(num_token, num_expert_group, -1)
+            .topk(topk_per_group, dim=-1)[0]
+            .sum(dim=-1)
         )
     else:
         # Use max score in each group
@@ -323,7 +302,7 @@ def test_fused_topk(
 @pytest.mark.parametrize("global_num_experts", NUM_EXPERTS)
 @pytest.mark.parametrize("renormalize", [False, True])
 @pytest.mark.parametrize("enable_eplb", [False, True])
-@pytest.mark.parametrize("e_score_correction_bias_val", [0.9])
+@pytest.mark.parametrize("needs_correction_bias", [False, True])
 @pytest.mark.parametrize("routed_scaling_factor", [1.0, 1.1])
 def test_fused_topk_bias(
     m: int,
@@ -332,7 +311,7 @@ def test_fused_topk_bias(
     global_num_experts: int,
     renormalize: bool,
     enable_eplb: bool,
-    e_score_correction_bias_val: float,
+    needs_correction_bias: bool,
     routed_scaling_factor: float,
 ):
     if top_k > global_num_experts:
@@ -341,7 +320,7 @@ def test_fused_topk_bias(
     eplb_state = setup_eplb_state(enable_eplb, global_num_experts)
 
     e_score_correction_bias = make_e_score_correction_bias(
-        e_score_correction_bias_val,
+        needs_correction_bias,
         global_num_experts,
     )
 
@@ -380,12 +359,12 @@ def test_fused_topk_bias(
     [
         (64, 8, 4),  # 8 groups of 8 experts, select 4 groups
         (32, 4, 2),  # 4 groups of 8 experts, select 2 groups
-        (8, 8, 4),  # 8 groups of 8 experts, select 4 groups
+        (8, 8, 2),  # 8 groups of 8 experts, select 4 groups
     ],
 )
 @pytest.mark.parametrize("renormalize", [False, True])
 @pytest.mark.parametrize("enable_eplb", [False, True])
-@pytest.mark.parametrize("e_score_correction_bias_val", [None, 0.9])
+@pytest.mark.parametrize("needs_correction_bias", [False, True])
 @pytest.mark.parametrize("routed_scaling_factor", [1.0, 1.1])
 @pytest.mark.parametrize("scoring_func", ["sigmoid", "softmax"])
 @pytest.mark.parametrize("use_custom_op", [True, False])
@@ -399,7 +378,7 @@ def test_grouped_topk(
     num_expert_group: int,
     topk_group: int,
     scoring_func: str,
-    e_score_correction_bias_val: float | None,
+    needs_correction_bias: bool,
     routed_scaling_factor: float,
     use_custom_op: bool,
     monkeypatch,
@@ -407,12 +386,15 @@ def test_grouped_topk(
     if top_k > global_num_experts:
         pytest.skip(f"top_k ({top_k}) > global_num_experts ({global_num_experts})")
 
+    if top_k > topk_group * (global_num_experts / num_expert_group):
+        pytest.skip("top_k > topk_group * (global_num_experts / num_expert_groups)")
+
     monkeypatch.setenv("VLLM_USE_FUSED_MOE_GROUPED_TOPK", "1" if use_custom_op else "0")
 
     eplb_state = setup_eplb_state(enable_eplb, global_num_experts)
 
     e_score_correction_bias = make_e_score_correction_bias(
-        e_score_correction_bias_val,
+        needs_correction_bias,
         global_num_experts,
     )
 
