@@ -170,8 +170,8 @@ def resolve_visual_encoder_outputs(
         last_hs_proc: Optional callable to be applied to the last layer if it
             is used, e.g., pooling head for Siglip. This is done prior to
             feature selection and layer normalization. If select_layers are
-            provided, last_hs_proc must be able to be concatenated with the
-            other select_layers along the last dimension.
+            provided, the output of last_hs_proc must be able to be
+            concatenated with the other select_layers along the last dimension.
         feature_select_strategy: Defines how to select the hidden states
             from each layer.
     """
