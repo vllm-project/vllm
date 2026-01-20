@@ -49,7 +49,11 @@ def test_async_scheduling_with_pipeline_parallelism_is_allowed():
             is_encoder_decoder=False,
             async_scheduling=True,
         ),
-        parallel_config=ParallelConfig(pipeline_parallel_size=2),
+        parallel_config=ParallelConfig(
+            pipeline_parallel_size=2,
+            distributed_executor_backend="mp",
+            nnodes=2,
+        ),
     )
     assert cfg.scheduler_config.async_scheduling is True
 
