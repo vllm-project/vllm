@@ -253,7 +253,7 @@ class ReqMeta:
     remote: RemoteMeta | None = None
 
 
-def if_postprocess_kvcache_on_save(
+def should_transform_kv_for_transfer(
     vllm_config, current_block_size, current_kv_cache_layout
 ):
     assert vllm_config.kv_transfer_config.enable_permute_local_kv
@@ -579,7 +579,7 @@ class NixlConnectorScheduler:
                 self.postprocess_kv_caches_on_save,
                 self.kv_cache_layout_on_save,
                 self.block_size_on_save,
-            ) = if_postprocess_kvcache_on_save(
+            ) = should_transform_kv_for_transfer(
                 self.vllm_config, self.block_size, self.kv_cache_layout
             )
         logger.info("Initializing NIXL Scheduler %s", engine_id)
@@ -1108,9 +1108,11 @@ class NixlConnectorWorker:
                 self.postprocess_kv_caches_on_save,
                 self.kv_cache_layout_on_save,
                 self.block_size_on_save,
-            ) = if_postprocess_kvcache_on_save(
+            ) = should_transform_kv_for_transfer(
                 self.vllm_config, self.block_size, self.kv_cache_layout
             )
+
+        self.block_size_ratio_on_save = self.block_size // self.block_size_on_save
 
         self._tp_size: dict[EngineId, int] = {self.engine_id: self.world_size}
         self._block_size: dict[EngineId, int] = {self.engine_id: self.block_size}
@@ -1458,6 +1460,9 @@ class NixlConnectorWorker:
                     )
                     self.block_size = kernel_block_size
                     self._block_size[self.engine_id] = kernel_block_size
+                    self.block_size_ratio_on_save = (
+                        self.block_size // self.block_size_on_save
+                    )
 
                 seen_base_addresses.append(base_addr)
                 curr_tensor_size_bytes = cache.numel() * cache.element_size()
@@ -1465,12 +1470,13 @@ class NixlConnectorWorker:
                 if tensor_size_bytes is None:
                     tensor_size_bytes = curr_tensor_size_bytes
                     self.num_blocks = cache.shape[0]
+                    self.num_blocks_on_save = (
+                        self.num_blocks * self.block_size_ratio_on_save
+                    )
 
                 assert cache.shape[0] == self.num_blocks, (
                     "All kv cache tensors must have the same number of blocks"
                 )
-
-                block_size_ratio_on_save = self.block_size // self.block_size_on_save
 
                 self.block_len_per_layer.append(
                     curr_tensor_size_bytes // self.num_blocks
@@ -1479,12 +1485,7 @@ class NixlConnectorWorker:
                     self.block_len_per_layer[-1] // self.block_size
                 )
                 block_len_per_layer_on_save.append(
-                    curr_tensor_size_bytes
-                    // self.num_blocks
-                    // block_size_ratio_on_save
-                )
-                num_blocks_on_save = (
-                    curr_tensor_size_bytes // block_len_per_layer_on_save[-1]
+                    self.block_len_per_layer[-1] // self.block_size_ratio_on_save
                 )
 
                 if not self.use_mla:
@@ -1565,7 +1566,7 @@ class NixlConnectorWorker:
             agent_metadata=self.nixl_wrapper.get_agent_metadata(),
             device_id=self.device_id,
             kv_caches_base_addr=self.kv_caches_base_addr[self.engine_id][self.tp_rank],
-            num_blocks=num_blocks_on_save,
+            num_blocks=self.num_blocks_on_save,
             block_lens=block_len_per_layer_on_save,
             kv_cache_layout=self.kv_cache_layout_on_save
             if not self.use_host_buffer
