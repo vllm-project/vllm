@@ -183,7 +183,7 @@ class CudaPlatformBase(Platform):
             if vllm_config.attention_config.backend is None:
                 # Default case
                 if cls.is_device_capability_family(100) and not use_sparse:
-                    # Blackwell => Force FlashInferMLA (unless sparse, i.e. DSv3.2).
+                    # Blackwell => Force FlashInfer MLA (unless sparse, i.e. DSv3.2).
                     use_flashinfer_mla = True
                     # Set the backend in AttentionConfig so it's used during
                     # backend selection
