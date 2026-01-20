@@ -42,7 +42,7 @@ void moe_permute(
   auto sort_workspace = torch::empty(
       {sorter_size},
       torch::dtype(torch::kInt8).device(torch::kCUDA).requires_grad(false));
-  auto copy_topk_ids = topk_ids.clone();  // copy topk_ids for preprocess
+  torch::Tensor topk_ids_for_sort = topk_ids;
   auto permuted_experts_id = torch::empty_like(topk_ids);
   auto sorted_row_idx = torch::empty_like(inv_permuted_idx);
 
@@ -62,12 +62,13 @@ void moe_permute(
     const int* expert_map_ptr = get_ptr<int>(expert_map.value());
     valid_num_ptr =
         get_ptr<int64_t>(expert_first_token_offset) + n_local_expert;
-    preprocessTopkIdLauncher(get_ptr<int>(copy_topk_ids), n_token * topk,
+    topk_ids_for_sort = topk_ids.clone();
+    preprocessTopkIdLauncher(get_ptr<int>(topk_ids_for_sort), n_token * topk,
                              expert_map_ptr, n_expert, stream);
   }
   // expert sort topk expert id and scan expert id get expert_first_token_offset
   sortAndScanExpert(
-      get_ptr<int>(copy_topk_ids), get_ptr<int>(token_expert_indices),
+      get_ptr<const int>(topk_ids_for_sort), get_ptr<int>(token_expert_indices),
       get_ptr<int>(permuted_experts_id), get_ptr<int>(sorted_row_idx),
       get_ptr<int64_t>(expert_first_token_offset), n_token, n_expert,
       n_local_expert, topk, sorter, get_ptr<int>(sort_workspace), stream);
