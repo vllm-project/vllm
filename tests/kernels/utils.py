@@ -609,7 +609,7 @@ def _num_tokens_to_min_blocks(num_tokens: int, block_size: int) -> int:
     Compute the minimum number of blocks required to hold num_tokens tokens,
     given block_size
     """
-    return (num_tokens + block_size) // block_size
+    return (num_tokens + block_size - 1) // block_size
 
 
 def make_empty_slot_mapping_tensor(device: torch.device | str):
@@ -694,7 +694,7 @@ def make_block_tables_slot_mapping(
     For a sequence with num_tokens tokens the minimum number
     of required KV cache blocks is
 
-    num_blocks = (num_tokens + block_size) // block_size
+    num_blocks = (num_tokens + block_size - 1) // block_size
 
     Then the minimum KV cache size in blocks is
 
