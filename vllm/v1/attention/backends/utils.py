@@ -521,14 +521,6 @@ def split_decodes_and_prefills(
     # state initialization). Exclude padding (query_lens == 0).
     is_new_request = (seq_lens == query_lens) & (query_lens > 0)
 
-    # If ALL non-padding requests appear to be "new" (seq_lens == query_lens)
-    # AND all queries are small, treat as a decode-only batch. This handles
-    # CUDA graph capture where synthetic batches have seq_lens == query_lens == 1.
-    # Real prefill batches have large query_lens, so they won't match this.
-    all_new_requests = torch.all(is_new_request | (query_lens == 0))
-    if all_new_requests and max_query_len <= decode_threshold:
-        is_new_request = torch.zeros_like(is_new_request)
-
     if max_query_len <= decode_threshold and (
         not require_uniform or decode_threshold <= 1
     ) and not torch.any(is_new_request):
