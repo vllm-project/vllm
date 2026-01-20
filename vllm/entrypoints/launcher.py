@@ -119,11 +119,8 @@ async def serve_http(
             inflight_count,
         )
 
-        # reject new requests at the HTTP layer
-        set_server_unavailable(True)
-
-        # expose draining state via prometheus for external load balancers
         set_server_draining(model_name, draining=True)
+        set_server_unavailable(True)
 
         async def _drain_operations() -> None:
             # pause generation and wait for in-flight requests
