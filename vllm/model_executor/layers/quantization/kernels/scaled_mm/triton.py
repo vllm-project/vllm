@@ -49,10 +49,11 @@ class TritonInt8ScaledMMLinearKernel(CutlassInt8ScaledMMLinearKernel):
         # Triton kernel supports only per-tensor and per-channel.
         # If we have a fused module (QKV, MLP) with per tensor scales (thus N
         # scales being passed to the kernel), convert to the per-channel case.
-        is_fused_module = len(layer.logical_widths) > 1
+        logical_widths = getattr(layer, "logical_widths")
+        is_fused_module = len(logical_widths) > 1
         weight_scale = getattr(layer, w_s_name)
         if is_fused_module and not self.config.is_channelwise:
-            weight_scale = convert_to_channelwise(weight_scale, layer.logical_widths)
+            weight_scale = convert_to_channelwise(weight_scale, logical_widths)
         replace_parameter(
             layer,
             w_s_name,
