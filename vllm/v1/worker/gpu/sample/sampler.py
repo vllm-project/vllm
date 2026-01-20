@@ -104,10 +104,10 @@ class Sampler:
         logits = torch.empty_like(logits, dtype=torch.float32).copy_(logits)
 
         # Apply logit bias (e.g., allowed_token_ids, min_tokens) in place.
-        self.logit_bias_state.apply_logit_bias(logits, idx_mapping, pos)
+        self.logit_bias_state.apply_logit_bias(logits, idx_mapping, idx_mapping_np, pos)
 
         # Apply penalties in place.
-        self.penalties_state.apply_penalties(logits, idx_mapping)
+        self.penalties_state.apply_penalties(logits, idx_mapping, idx_mapping_np)
 
         # Apply temperature in place.
         apply_temperature(logits, idx_mapping, self.sampling_states.temperature.gpu)
