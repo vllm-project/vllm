@@ -220,8 +220,7 @@ class Qwen3TPMoeSparseMoeBlock(nn.Module):
     def forward(
         self,
         hidden_states: torch.Tensor,
-        task_ids: torch.Tensor | None = None,
-        is_decode: torch.Tensor | None = None,
+        task_expert_masks: list[torch.Tensor] | None = None,
     ) -> torch.Tensor:
         assert hidden_states.dim() <= 2, (
             "Qwen3MoeSparseMoeBlock only supports 1D or 2D inputs"
@@ -241,36 +240,28 @@ class Qwen3TPMoeSparseMoeBlock(nn.Module):
 
         # Add task experts' outputs only for decode tokens with valid task_id
         # --- GRAPH-SAFE LOGIC START ---
-        if self.task_expert_merge_method == 'gating' and task_ids is not None:
+        # Use pre-computed masks from model level to avoid redundant computation
+        if self.task_expert_merge_method == 'gating' and task_expert_masks is not None:
             # We iterate over the fixed experts.
             # TorchDynamo will unroll this loop into a single static graph.
             for tid_int in range(self.n_task_experts):
-                
-                # 1. Create the mask (Boolean)
-                #    (num_tokens,)
-                mask = (task_ids == tid_int) & (task_ids >= 0)
-                
-                # 2. Convert to float for mathematical masking
-                #    (num_tokens, 1)
-                mask_float = mask.to(hidden_states.dtype).unsqueeze(-1)
 
-                # 3. Apply mask to INPUTS
-                #    Tokens not belonging to this expert become 0.
-                #    We preserve the shape (N, D), preventing the "dynamic size" error.
-                masked_input = hidden_states * mask_float
+                # 1. Get pre-computed mask_float (num_tokens, 1)
+                #    Masks are pre-computed once in Qwen3TPMoeModel.forward
+                mask_float = task_expert_masks[tid_int]
 
-                # 4. Compute Expert Output
+                # 2. Compute Expert Output
                 #    We run the MLP on ALL tokens (valid ones + zeroed ones).
                 #    Note: This computes biases for the zeroed tokens, but we filter them later.
-                task_expert_output = self.task_experts[tid_int](masked_input)
-                gate_logits = self.task_expert_gates[tid_int](masked_input)
+                task_expert_output = self.task_experts[tid_int](hidden_states)
+                gate_logits = self.task_expert_gates[tid_int](hidden_states)
                 gate_scores = torch.sigmoid(gate_logits)
 
-                # 5. Compute Update and Apply mask to OUTPUTS
+                # 3. Compute Update and Apply mask to OUTPUTS
                 #    We multiply by mask_float again to ensure zeroed tokens contribute exactly 0.
-                update_value = (gate_scores * task_expert_output * 10) * mask_float
+                update_value = (gate_scores * mask_float) * task_expert_output
 
-                # 6. Accumulate
+                # 5. Accumulate
                 #    Standard addition, no specialized indexing needed.
                 final_hidden_states = final_hidden_states + update_value
         # --- GRAPH-SAFE LOGIC END ---
@@ -445,8 +436,7 @@ class Qwen3TPMoeDecoderLayer(nn.Module):
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
         residual: torch.Tensor | None,
-        task_ids: torch.Tensor | None = None,
-        is_decode: torch.Tensor | None = None,
+        task_expert_masks: list[torch.Tensor] | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         # Self Attention
         if residual is None:
@@ -461,9 +451,9 @@ class Qwen3TPMoeDecoderLayer(nn.Module):
 
         # Fully Connected
         hidden_states, residual = self.post_attention_layernorm(hidden_states, residual)
-        # Pass task_ids and is_decode to MLP if it's a MoE block
+        # Pass pre-computed task_expert_masks to MLP if it's a MoE block
         if isinstance(self.mlp, Qwen3TPMoeSparseMoeBlock):
-            hidden_states = self.mlp(hidden_states, task_ids=task_ids, is_decode=is_decode)
+            hidden_states = self.mlp(hidden_states, task_expert_masks=task_expert_masks)
         else:
             hidden_states = self.mlp(hidden_states)
         return hidden_states, residual
@@ -525,6 +515,16 @@ class Qwen3TPMoeModel(nn.Module):
             hidden_states = intermediate_tensors["hidden_states"]
             residual = intermediate_tensors["residual"]
 
+        # Pre-compute task expert masks once for all layers
+        # This avoids redundant mask computation in each MoE block
+        task_expert_masks: list[torch.Tensor] | None = None
+        if task_ids is not None and self.config.num_task_experts > 0:
+            task_expert_masks = []
+            for tid_int in range(self.config.num_task_experts):
+                mask = (task_ids == tid_int) & (task_ids >= 0)
+                mask_float = mask.to(hidden_states.dtype).unsqueeze(-1)
+                task_expert_masks.append(mask_float)
+
         aux_hidden_states = []
         for layer_idx, layer in enumerate(
             islice(self.layers, self.start_layer, self.end_layer),
@@ -538,7 +538,7 @@ class Qwen3TPMoeModel(nn.Module):
                 aux_hidden_states.append(aux_hidden_state)
             hidden_states, residual = layer(
                 positions, hidden_states, residual,
-                task_ids=task_ids, is_decode=is_decode
+                task_expert_masks=task_expert_masks
             )
 
         if not get_pp_group().is_last_rank:

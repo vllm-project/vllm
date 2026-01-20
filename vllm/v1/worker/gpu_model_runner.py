@@ -2739,8 +2739,6 @@ class GPUModelRunner(
         # Add per-token task_ids and is_decode for task-expert routing
         # Only add if any request has task_id set (i.e., not all are -1)
         num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
-        print('task_ids:', self.task_ids.gpu[:num_input_tokens])
-        print('is_decode:', self.is_decode.gpu[:num_input_tokens])
         model_kwargs.update({
             "task_ids": self.task_ids.gpu[:num_input_tokens],
             "is_decode": self.is_decode.gpu[:num_input_tokens],
