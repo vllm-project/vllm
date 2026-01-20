@@ -787,10 +787,7 @@ def launch_core_engines(
     local_start_index = parallel_config.data_parallel_rank_local
     dp_rank = parallel_config.data_parallel_rank
     host = parallel_config.data_parallel_master_ip
-    local_engines_only = (
-        parallel_config.data_parallel_hybrid_lb
-        or parallel_config.data_parallel_external_lb
-    )
+    local_engines_only = parallel_config.local_engines_only
 
     # In offline mode there is an LLM instance per DP rank and
     # one core engine per LLM, see

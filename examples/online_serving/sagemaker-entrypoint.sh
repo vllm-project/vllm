@@ -21,4 +21,4 @@ while IFS='=' read -r key value; do
 done < <(env | grep "^${PREFIX}")
 
 # Pass the collected arguments to the main entrypoint
-exec vllm serve "${ARGS[@]}"
+exec standard-supervisor vllm serve "${ARGS[@]}"

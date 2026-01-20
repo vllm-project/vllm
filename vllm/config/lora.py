@@ -90,7 +90,7 @@ class LoRAConfig:
         elif self.max_cpu_loras < self.max_loras:
             raise ValueError(
                 f"max_cpu_loras ({self.max_cpu_loras}) must be >= "
-                f"max_loras ({self.max_loras})"
+                f"max_loras ({self.max_loras})."
             )
 
         return self
