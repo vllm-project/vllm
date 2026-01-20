@@ -265,13 +265,20 @@ class BatchedDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
         self,
         moe_config: FusedMoEConfig,
         quant_config: FusedMoEQuantConfig,
+        max_num_tokens: int,
+        num_dispatchers: int,
     ):
         """
         max_num_tokens: Maximum number of tokens from a DP Rank
         num_dispatchers: The number of DP dispatchers.
         quant_config: Quantization configuration
         """
-        super().__init__(moe_config, quant_config)
+        super().__init__(
+            moe_config=moe_config,
+            quant_config=quant_config,
+            max_num_tokens=max_num_tokens,
+            num_dispatchers=num_dispatchers,
+        )
         assert self.block_shape == get_mk_alignment_for_contiguous_layout()
         assert self.quant_config.use_fp8_w8a8
 

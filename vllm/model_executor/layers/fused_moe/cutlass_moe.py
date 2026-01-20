@@ -257,9 +257,16 @@ class CutlassExpertsFp8Base(mk.FusedMoEPermuteExpertsUnpermute):
         self,
         moe_config: FusedMoEConfig,
         quant_config: FusedMoEQuantConfig,
+        max_num_tokens: int | None = None,
+        num_dispatchers: int | None = None,
     ):
+        super().__init__(
+            moe_config=moe_config,
+            quant_config=quant_config,
+            max_num_tokens=max_num_tokens,
+            num_dispatchers=num_dispatchers,
+        )
         assert quant_config.use_fp8_w8a8
-        super().__init__(moe_config=moe_config, quant_config=quant_config)
 
         e = moe_config.num_local_experts
         n = moe_config.intermediate_size_per_partition

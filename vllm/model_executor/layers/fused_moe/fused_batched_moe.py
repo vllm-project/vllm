@@ -649,8 +649,15 @@ class NaiveBatchedExperts(mk.FusedMoEPermuteExpertsUnpermute):
         self,
         moe_config: FusedMoEConfig,
         quant_config: FusedMoEQuantConfig,
+        max_num_tokens: int,
+        num_dispatchers: int,
     ):
-        super().__init__(moe_config, quant_config)
+        super().__init__(
+            moe_config=moe_config,
+            quant_config=quant_config,
+            max_num_tokens=max_num_tokens,
+            num_dispatchers=num_dispatchers,
+        )
         assert not self.quant_config.use_int8_w8a8, "NYI"
         assert not self.quant_config.use_int8_w8a16, "NYI"
         assert not self.quant_config.use_int4_w4a16, "NYI"
@@ -857,8 +864,15 @@ class BatchedTritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
         self,
         moe_config: FusedMoEConfig,
         quant_config: FusedMoEQuantConfig,
+        max_num_tokens: int,
+        num_dispatchers: int,
     ):
-        super().__init__(moe_config, quant_config)
+        super().__init__(
+            moe_config=moe_config,
+            quant_config=quant_config,
+            max_num_tokens=max_num_tokens,
+            num_dispatchers=num_dispatchers,
+        )
         assert not self.quant_config.use_int8_w8a8, "NYI"
         assert not self.quant_config.use_int8_w8a16, "NYI"
         assert not self.quant_config.use_int4_w4a16, "NYI"

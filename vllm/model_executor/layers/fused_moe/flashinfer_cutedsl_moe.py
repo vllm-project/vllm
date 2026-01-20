@@ -34,8 +34,15 @@ class FlashInferCuteDSLExperts(mk.FusedMoEPermuteExpertsUnpermute):
         self,
         moe_config: FusedMoEConfig,
         quant_config: FusedMoEQuantConfig,
+        max_num_tokens: int,
+        num_dispatchers: int,
     ):
-        super().__init__(moe_config, quant_config)
+        super().__init__(
+            moe_config=moe_config,
+            quant_config=quant_config,
+            max_num_tokens=max_num_tokens,
+            num_dispatchers=num_dispatchers,
+        )
         assert quant_config.quant_dtype == "nvfp4", (
             "Only nvfp4 quantization are currently supported."
         )
