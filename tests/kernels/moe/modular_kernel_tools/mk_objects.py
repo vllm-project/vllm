@@ -425,27 +425,25 @@ def make_fused_experts(
     num_dispatchers: int,
     N: int,
 ) -> mk.FusedMoEPermuteExpertsUnpermute:
-    batch_kwargs = {
-        "max_num_tokens": moe.max_num_tokens,
-        "num_dispatchers": num_dispatchers,
-    }
     kwargs = {
         "moe_config": moe,
         "quant_config": quant_config,
     }
-    batch_kwargs = batch_kwargs | kwargs
+    batch_kwargs = {
+        "max_num_tokens": moe.max_num_tokens,
+        "num_dispatchers": num_dispatchers,
+    }
+
+    use_batched = (
+        fused_experts_type.activation_format()
+        == mk.FusedMoEActivationFormat.BatchedExperts
+    )
+    kwargs = (kwargs | batch_kwargs) if use_batched else kwargs
 
     torch.set_printoptions(threshold=0, edgeitems=0, linewidth=10000)
 
-    if (
-        fused_experts_type.activation_format()
-        == mk.FusedMoEActivationFormat.BatchedExperts
-    ):
-        print(f"Making {fused_experts_type.__class__.__name__} {batch_kwargs} ...")
-        experts = fused_experts_type(**batch_kwargs)
-    else:
-        print(f"Making {fused_experts_type.__class__.__name__} {batch_kwargs} ...")
-        experts = fused_experts_type(**kwargs)
+    print(f"Making {fused_experts_type.__class__.__name__} {kwargs} ...")
+    experts = fused_experts_type(**kwargs)
 
     torch.set_printoptions(threshold=1000, edgeitems=5, linewidth=80)
 
