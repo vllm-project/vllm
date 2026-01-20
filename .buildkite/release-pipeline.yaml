@@ -625,7 +625,7 @@ steps:
     commands:
       - "bash .buildkite/scripts/annotate-rocm-release.sh"
     env:
-      S3_BUCKET: "vllm-wheels"
+      S3_BUCKET: "vllm-wheels-dev"
 
   # ROCm Job 5: Build ROCm Release Docker Image
   - label: ":rocm: :docker: Build ROCm Release Docker Image"
