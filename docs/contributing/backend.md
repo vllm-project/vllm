@@ -195,13 +195,21 @@ interface and existing implementations like `TritonExperts` or
 
 ### Step 6: Export Public APIs
 
-Add public symbols to `vllm/model_executor/layers/fused_moe/__init__.py`:
+Add public symbols to `vllm/model_executor/layers/fused_moe/__init__.py` and
+register them in `__all__`. If the backend depends on Triton, append the
+symbols under the `if HAS_TRITON:` block to avoid import errors.
 
 ```python
 from vllm.model_executor.layers.fused_moe.your_backend import (
     YourExperts,
     is_your_backend_supported,
 )
+
+if HAS_TRITON:
+    __all__ += [
+        "YourExperts",
+        "is_your_backend_supported",
+    ]
 ```
 
 ## Testing
