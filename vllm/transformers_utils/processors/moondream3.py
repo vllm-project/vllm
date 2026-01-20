@@ -10,7 +10,11 @@ from PIL import Image
 from transformers import AutoProcessor, BatchFeature
 from transformers.image_utils import ImageInput
 from transformers.processing_utils import ProcessingKwargs, ProcessorMixin, Unpack
-from transformers.tokenization_utils_base import PreTokenizedInput, TextInput
+from transformers.tokenization_utils_base import (
+    PreTokenizedInput,
+    PreTrainedTokenizerBase,
+    TextInput,
+)
 
 from vllm.multimodal.image import convert_image_mode
 
@@ -69,10 +73,11 @@ class Moondream3Processor(ProcessorMixin):
 
     Args:
         tokenizer: The tokenizer to use for text processing.
-        crop_size: Size of each image crop (default: 378).
-        max_crops: Maximum number of crops per image (default: 12).
-        overlap_margin: Margin for overlapping crops in patches (default: 4).
-        patch_size: Size of each patch (default: 14).
+        chat_template: Optional chat template string.
+        crop_size: Size of each image crop.
+        max_crops: Maximum number of crops per image.
+        overlap_margin: Margin for overlapping crops in patches.
+        patch_size: Size of each patch.
     """
 
     attributes = ["tokenizer"]
@@ -131,8 +136,8 @@ class Moondream3Processor(ProcessorMixin):
 
     def __init__(
         self,
-        tokenizer=None,
-        chat_template=None,
+        tokenizer: PreTrainedTokenizerBase | None = None,
+        chat_template: str | None = None,
         crop_size: int = 378,
         max_crops: int = 12,
         overlap_margin: int = 4,

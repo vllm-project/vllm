@@ -2,17 +2,14 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Inference-only Moondream3 model implementation."""
 
-import math
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from functools import cached_property
 from itertools import islice
 
-import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from PIL import Image
 from transformers import BatchFeature
 
 from vllm.attention.layer import Attention
@@ -156,97 +153,6 @@ class Moondream3Config:
 # ============================================================================
 # Image Processing Utilities
 # ============================================================================
-
-
-def select_tiling(
-    height: int, width: int, crop_size: int, max_crops: int
-) -> tuple[int, int]:
-    """Determine the optimal number of tiles to cover an image."""
-    if height <= crop_size or width <= crop_size:
-        return (1, 1)
-
-    min_h = math.ceil(height / crop_size)
-    min_w = math.ceil(width / crop_size)
-
-    if min_h * min_w > max_crops:
-        ratio = math.sqrt(max_crops / (min_h * min_w))
-        return (max(1, math.floor(min_h * ratio)), max(1, math.floor(min_w * ratio)))
-
-    h_tiles = math.floor(math.sqrt(max_crops * height / width))
-    w_tiles = math.floor(math.sqrt(max_crops * width / height))
-
-    h_tiles = max(h_tiles, min_h)
-    w_tiles = max(w_tiles, min_w)
-
-    if h_tiles * w_tiles > max_crops:
-        if w_tiles > h_tiles:
-            w_tiles = math.floor(max_crops / h_tiles)
-        else:
-            h_tiles = math.floor(max_crops / w_tiles)
-
-    return (max(1, h_tiles), max(1, w_tiles))
-
-
-def overlap_crop_image(
-    image: np.ndarray,
-    overlap_margin: int,
-    max_crops: int,
-    base_size: tuple[int, int] = (378, 378),
-    patch_size: int = 14,
-) -> dict:
-    """Process an image using overlap-and-resize cropping strategy."""
-    original_h, original_w = image.shape[:2]
-    margin_pixels = patch_size * overlap_margin
-    total_margin_pixels = margin_pixels * 2
-
-    crop_patches = base_size[0] // patch_size
-    crop_window_patches = crop_patches - (2 * overlap_margin)
-    crop_window_size = crop_window_patches * patch_size
-
-    tiling = select_tiling(
-        original_h - total_margin_pixels,
-        original_w - total_margin_pixels,
-        crop_window_size,
-        max_crops,
-    )
-
-    n_crops = tiling[0] * tiling[1] + 1
-    crops = np.zeros(
-        (n_crops, base_size[0], base_size[1], image.shape[2]), dtype=np.uint8
-    )
-
-    target_size = (
-        tiling[0] * crop_window_size + total_margin_pixels,
-        tiling[1] * crop_window_size + total_margin_pixels,
-    )
-
-    # Use PIL for resizing
-    pil_img = Image.fromarray(image)
-    resized = pil_img.resize(
-        (int(target_size[1]), int(target_size[0])),
-        resample=Image.Resampling.LANCZOS,
-    )
-    image = np.asarray(resized)
-
-    # Create global crop
-    global_pil = pil_img.resize(
-        (int(base_size[1]), int(base_size[0])), resample=Image.Resampling.LANCZOS
-    )
-    crops[0] = np.asarray(global_pil)
-
-    for i in range(tiling[0]):
-        for j in range(tiling[1]):
-            y0 = i * crop_window_size
-            x0 = j * crop_window_size
-            y_end = min(y0 + base_size[0], image.shape[0])
-            x_end = min(x0 + base_size[1], image.shape[1])
-
-            crop_region = image[y0:y_end, x0:x_end]
-            crops[
-                1 + i * tiling[1] + j, : crop_region.shape[0], : crop_region.shape[1]
-            ] = crop_region
-
-    return {"crops": crops, "tiling": tiling}
 
 
 def reconstruct_from_crops(
