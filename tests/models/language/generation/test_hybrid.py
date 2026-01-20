@@ -174,6 +174,9 @@ def test_mamba_cache_cg_padding(
     """
     vllm_config = EngineArgs(model=model, trust_remote_code=True).create_engine_config()
     cudagraph_dispatcher = CudagraphDispatcher(vllm_config)
+    cudagraph_dispatcher.initialize_cudagraph_keys(
+        vllm_config.compilation_config.cudagraph_mode
+    )
     while (
         len(example_prompts)
         == cudagraph_dispatcher.dispatch(len(example_prompts))[1].num_tokens
