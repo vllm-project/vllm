@@ -59,8 +59,6 @@ class ServeSubcommand(CLISubcommand):
                 )
             # Default to 0 in headless mode (no API servers)
             args.api_server_count = 0
-            run_headless(args)
-            return
 
         # Detect LB mode for defaulting api_server_count.
         # External LB: --data-parallel-external-lb or --data-parallel-rank
