@@ -36,6 +36,7 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatMessage,
 )
 from vllm.entrypoints.openai.chat_completion.stream_harmony import (
+    TokenState,
     extract_harmony_streaming_delta,
 )
 from vllm.entrypoints.openai.engine.protocol import (
@@ -53,6 +54,7 @@ from vllm.entrypoints.openai.engine.serving import (
     OpenAIServing,
     clamp_prompt_logprobs,
 )
+from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.entrypoints.openai.parser.harmony_utils import (
     get_developer_message,
     get_stop_tokens_for_assistant_actions,
@@ -62,7 +64,6 @@ from vllm.entrypoints.openai.parser.harmony_utils import (
     parse_chat_output,
     render_for_completion,
 )
-from vllm.entrypoints.openai.serving_models import OpenAIServingModels
 from vllm.entrypoints.openai.utils import maybe_filter_parallel_tool_calls
 from vllm.entrypoints.utils import get_max_tokens, should_include_usage
 from vllm.inputs.data import TokensPrompt
@@ -223,17 +224,16 @@ class OpenAIServingChat(OpenAIServing):
             # Log but don't fail server startup if warmup fails
             logger.exception("Chat template warmup failed")
 
-    async def create_chat_completion(
+    async def render_chat_request(
         self,
         request: ChatCompletionRequest,
-        raw_request: Request | None = None,
-    ) -> AsyncGenerator[str, None] | ChatCompletionResponse | ErrorResponse:
+    ) -> tuple[list[ConversationMessage], list[Any]] | ErrorResponse:
         """
-        Chat Completion API similar to OpenAI's API.
+        render chat request by validating and preprocessing inputs.
 
-        See https://platform.openai.com/docs/api-reference/chat/create
-        for the API specification. This API mimics the OpenAI
-        Chat Completion API.
+        Returns:
+            A tuple of (conversation, engine_prompts) on success,
+            or an ErrorResponse on failure.
         """
         error_check_ret = await self._check_model(request)
         if error_check_ret is not None:
@@ -247,12 +247,6 @@ class OpenAIServingChat(OpenAIServing):
             raise self.engine_client.dead_error
 
         try:
-            lora_request = self._maybe_get_adapters(
-                request, supports_default_mm_loras=True
-            )
-
-            model_name = self.models.model_name(lora_request)
-
             tokenizer = await self.engine_client.get_tokenizer()
 
             tool_parser = self.tool_parser
@@ -335,7 +329,27 @@ class OpenAIServingChat(OpenAIServing):
                 )
         except (ValueError, TypeError, RuntimeError, jinja2.TemplateError) as e:
             logger.exception("Error in preprocessing prompt inputs")
-            return self.create_error_response(f"{e} {e.__cause__}")
+            return self.create_error_response(e)
+
+        return conversation, engine_prompts
+
+    async def create_chat_completion(
+        self,
+        request: ChatCompletionRequest,
+        raw_request: Request | None = None,
+    ) -> AsyncGenerator[str, None] | ChatCompletionResponse | ErrorResponse:
+        """
+        Chat Completion API similar to OpenAI's API.
+
+        See https://platform.openai.com/docs/api-reference/chat/create
+        for the API specification. This API mimics the OpenAI
+        Chat Completion API.
+        """
+        result = await self.render_chat_request(request)
+        if isinstance(result, ErrorResponse):
+            return result
+
+        conversation, engine_prompts = result
 
         request_id = (
             f"chatcmpl-{self._base_request_id(raw_request, request.request_id)}"
@@ -344,6 +358,18 @@ class OpenAIServingChat(OpenAIServing):
         request_metadata = RequestResponseMetadata(request_id=request_id)
         if raw_request:
             raw_request.state.request_metadata = request_metadata
+
+        try:
+            lora_request = self._maybe_get_adapters(
+                request, supports_default_mm_loras=True
+            )
+
+            model_name = self.models.model_name(lora_request)
+
+            tokenizer = await self.engine_client.get_tokenizer()
+        except (ValueError, TypeError, RuntimeError) as e:
+            logger.exception("Error preparing request components")
+            return self.create_error_response(e)
 
         # Extract data_parallel_rank from header (router can inject it)
         data_parallel_rank = self._get_data_parallel_rank(raw_request)
@@ -826,12 +852,22 @@ class OpenAIServingChat(OpenAIServing):
                     if self.use_harmony:
                         harmony_parser = harmony_parsers[i]
                         prev_recipient = harmony_parser.current_recipient
-                        delta_text = ""
+
+                        # Track accumulated content per token with their state
+                        token_states: list[TokenState] = []
                         for token_id in output.token_ids:
                             harmony_parser.process(token_id)
-                            delta_text += harmony_parser.last_content_delta or ""
+                            token_delta = harmony_parser.last_content_delta or ""
+                            token_states.append(
+                                TokenState(
+                                    harmony_parser.current_channel,
+                                    harmony_parser.current_recipient,
+                                    token_delta,
+                                )
+                            )
+                        delta_text = "".join(delta for _, _, delta in token_states)
                         cur_channel = harmony_parser.current_channel
-                        cur_recipient = harmony_parser.current_recipient
+
                         # handle the case where several tokens where generated at once
                         # including the final token, leading to a delta in the text
                         # but the current channel to be empty (start state)
@@ -869,10 +905,8 @@ class OpenAIServingChat(OpenAIServing):
                         delta_message, tools_streamed_flag = (
                             extract_harmony_streaming_delta(
                                 harmony_parser=harmony_parser,
-                                cur_channel=cur_channel,
-                                cur_recipient=cur_recipient,
+                                token_states=token_states,
                                 prev_recipient=prev_recipient,
-                                delta_text=delta_text,
                                 include_reasoning=request.include_reasoning,
                             )
                         )
@@ -1139,17 +1173,23 @@ class OpenAIServingChat(OpenAIServing):
 
                     # Log streaming delta if output logging is enabled
                     if self.enable_log_outputs and self.request_logger:
-                        delta_content = ""
+                        delta_content_parts = []
                         if delta_message.content:
-                            delta_content = delta_message.content
-                        elif delta_message.tool_calls:
-                            delta_content = "".join(
+                            delta_content_parts.append(delta_message.content)
+                        if delta_message.reasoning_content:
+                            reasoning = delta_message.reasoning_content
+                            delta_content_parts.append(f"[reasoning: {reasoning}]")
+                        if delta_message.tool_calls:
+                            tool_args = "".join(
                                 tc.function.arguments
                                 for tc in delta_message.tool_calls
                                 if tc.function and tc.function.arguments
                             )
+                            if tool_args:
+                                delta_content_parts.append(f"[tool_calls: {tool_args}]")
 
-                        if delta_content and self.enable_log_deltas:
+                        if delta_content_parts and self.enable_log_deltas:
+                            delta_content = " ".join(delta_content_parts)
                             self.request_logger.log_outputs(
                                 request_id=request_id,
                                 outputs=delta_content,

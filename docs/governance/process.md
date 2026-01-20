@@ -36,7 +36,7 @@ The responsibilities of the core maintainers are:
 
 ### Lead Maintainers
 
-While Core maintainers assume the day-to-day responsibilities of the project, Lead maintainers are responsible for the overall direction and strategy of the project. A committee of @WoosukKwon, @zhuohan123, @simon-mo, and @youkaichao currently shares this role with divided responsibilities.
+While Core maintainers assume the day-to-day responsibilities of the project, Lead maintainers are responsible for the overall direction and strategy of the project. A committee of @WoosukKwon, @zhuohan123, @simon-mo, @youkaichao, and @robertshaw2-redhat currently shares this role with divided responsibilities.
 
 The responsibilities of the lead maintainers are:
 

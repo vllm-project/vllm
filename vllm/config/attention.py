@@ -35,7 +35,7 @@ class AttentionConfig:
     use_cudnn_prefill: bool = False
     """Whether to use cudnn prefill."""
 
-    use_trtllm_ragged_deepseek_prefill: bool = False
+    use_trtllm_ragged_deepseek_prefill: bool = True
     """Whether to use TRTLLM ragged deepseek prefill."""
 
     use_trtllm_attention: bool | None = None

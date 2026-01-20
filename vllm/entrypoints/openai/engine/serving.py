@@ -31,32 +31,36 @@ from vllm.entrypoints.chat_utils import (
     parse_chat_messages_futures,
     resolve_chat_template_content_format,
 )
-from vllm.entrypoints.context import (
-    ConversationContext,
-    HarmonyContext,
-    ParsableContext,
-    StreamingHarmonyContext,
-)
 from vllm.entrypoints.logger import RequestLogger
 from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionNamedToolChoiceParam,
     ChatCompletionRequest,
     ChatCompletionResponse,
 )
-from vllm.entrypoints.openai.engine.protocol import (
+from vllm.entrypoints.openai.completion.protocol import (
     CompletionRequest,
     CompletionResponse,
+)
+from vllm.entrypoints.openai.engine.protocol import (
     ErrorInfo,
     ErrorResponse,
     FunctionCall,
     FunctionDefinition,
-    VLLMValidationError,
+)
+from vllm.entrypoints.openai.models.serving import OpenAIServingModels
+from vllm.entrypoints.openai.responses.context import (
+    ConversationContext,
+    HarmonyContext,
+    ParsableContext,
+    StreamingHarmonyContext,
 )
 from vllm.entrypoints.openai.responses.protocol import (
     ResponseInputOutputItem,
     ResponsesRequest,
 )
-from vllm.entrypoints.openai.serving_models import OpenAIServingModels
+from vllm.entrypoints.openai.responses.utils import (
+    construct_input_messages,
+)
 from vllm.entrypoints.openai.translations.protocol import (
     TranscriptionRequest,
     TranscriptionResponse,
@@ -80,13 +84,13 @@ from vllm.entrypoints.pooling.pooling.protocol import (
 )
 from vllm.entrypoints.pooling.score.protocol import (
     RerankRequest,
+    ScoreDataRequest,
+    ScoreQueriesDocumentsRequest,
     ScoreRequest,
     ScoreResponse,
+    ScoreTextRequest,
 )
 from vllm.entrypoints.renderer import BaseRenderer, CompletionRenderer, RenderConfig
-from vllm.entrypoints.responses_utils import (
-    construct_input_messages,
-)
 from vllm.entrypoints.serve.disagg.protocol import GenerateRequest, GenerateResponse
 from vllm.entrypoints.serve.tokenize.protocol import (
     DetokenizeRequest,
@@ -94,7 +98,8 @@ from vllm.entrypoints.serve.tokenize.protocol import (
     TokenizeCompletionRequest,
     TokenizeResponse,
 )
-from vllm.entrypoints.utils import _validate_truncation_size
+from vllm.entrypoints.utils import _validate_truncation_size, sanitize_message
+from vllm.exceptions import VLLMValidationError
 from vllm.inputs.data import PromptType, TokensPrompt
 from vllm.inputs.parse import (
     PromptComponents,
@@ -768,10 +773,14 @@ class OpenAIServing:
                 err_type = "BadRequestError"
                 status_code = HTTPStatus.BAD_REQUEST
                 param = exc.parameter
-            elif isinstance(exc, (ValueError, TypeError, RuntimeError)):
+            elif isinstance(exc, (ValueError, TypeError, RuntimeError, OverflowError)):
                 # Common validation errors from user input
                 err_type = "BadRequestError"
                 status_code = HTTPStatus.BAD_REQUEST
+                param = None
+            elif isinstance(exc, NotImplementedError):
+                err_type = "NotImplementedError"
+                status_code = HTTPStatus.NOT_IMPLEMENTED
                 param = None
             elif exc.__class__.__name__ == "TemplateError":
                 # jinja2.TemplateError (avoid importing jinja2)
@@ -791,9 +800,10 @@ class OpenAIServing:
                 traceback.print_exc()
             else:
                 traceback.print_stack()
+
         return ErrorResponse(
             error=ErrorInfo(
-                message=message,
+                message=sanitize_message(message),
                 type=err_type,
                 code=status_code.value,
                 param=param,
@@ -1025,7 +1035,9 @@ class OpenAIServing:
             (
                 EmbeddingChatRequest,
                 EmbeddingCompletionRequest,
-                ScoreRequest,
+                ScoreDataRequest,
+                ScoreTextRequest,
+                ScoreQueriesDocumentsRequest,
                 RerankRequest,
                 ClassificationCompletionRequest,
                 ClassificationChatRequest,
@@ -1035,7 +1047,9 @@ class OpenAIServing:
             # since these requests don't generate tokens.
             if token_num > self.max_model_len:
                 operations: dict[type[AnyRequest], str] = {
-                    ScoreRequest: "score",
+                    ScoreDataRequest: "score",
+                    ScoreTextRequest: "score",
+                    ScoreQueriesDocumentsRequest: "score",
                     ClassificationCompletionRequest: "classification",
                     ClassificationChatRequest: "classification",
                 }
@@ -1270,9 +1284,11 @@ class OpenAIServing:
             assert is_list_of(request_prompt, int), (
                 "Prompt has to be either a string or a list of token ids"
             )
-            prompt_inputs = TokensPrompt(
-                prompt=tokenizer.decode(request_prompt),
-                prompt_token_ids=request_prompt,
+            input_text = tokenizer.decode(request_prompt)
+            prompt_inputs = self._validate_input(
+                request=request,
+                input_ids=request_prompt,
+                input_text=input_text,
             )
 
         engine_prompt = TokensPrompt(prompt_token_ids=prompt_inputs["prompt_token_ids"])

@@ -1,20 +1,50 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import functools
+import hashlib
 import pickle
 import uuid
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 
 import numpy as np
 import torch
-from blake3 import blake3
 from PIL import Image
 
+import vllm.envs as envs
 from vllm.logger import init_logger
 
-from .base import MediaWithBytes
+from .media import MediaWithBytes
 
 logger = init_logger(__name__)
+
+
+@functools.lru_cache(maxsize=3)
+def _get_hasher_factory(algorithm: str) -> Callable[[], "hashlib._Hash"]:
+    """
+    Get the hasher factory based on the configured algorithm.
+
+    Args:
+        algorithm: Hash algorithm name (blake3, sha256, or sha512)
+
+    Returns a callable that creates a new hasher instance.
+    Supports blake3 (default), sha256, and sha512 for FIPS compliance.
+
+    See: https://github.com/vllm-project/vllm/issues/18334
+    """
+    algorithm = algorithm.lower()
+
+    if algorithm == "blake3":
+        from blake3 import blake3
+
+        return blake3
+    elif algorithm == "sha256":
+        return hashlib.sha256
+    elif algorithm == "sha512":
+        return hashlib.sha512
+    else:
+        # This should never happen due to env_with_choices validation
+        raise ValueError(f"Unsupported hash algorithm: {algorithm}")
 
 
 class MultiModalHasher:
@@ -114,7 +144,8 @@ class MultiModalHasher:
 
     @classmethod
     def hash_kwargs(cls, **kwargs: object) -> str:
-        hasher = blake3()
+        hasher_factory = _get_hasher_factory(envs.VLLM_MM_HASHER_ALGORITHM)
+        hasher = hasher_factory()
 
         for k, v in kwargs.items():
             for bytes_ in cls.iter_item_to_bytes(k, v):

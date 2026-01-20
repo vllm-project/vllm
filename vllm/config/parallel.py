@@ -3,6 +3,7 @@
 
 import os
 from collections.abc import Callable
+from dataclasses import replace
 from typing import TYPE_CHECKING, Any, Literal
 
 import torch
@@ -361,6 +362,14 @@ class ParallelConfig:
     def num_ubatches(self) -> int:
         return 2 if self.enable_dbo else self.ubatch_size
 
+    @property
+    def local_engines_only(self) -> bool:
+        """
+        Client manages local+remote EngineCores in pure internal LB case.
+        Client manages local EngineCores in hybrid and external LB case.
+        """
+        return self.data_parallel_external_lb or self.data_parallel_hybrid_lb
+
     def get_next_dp_init_port(self) -> int:
         """
         We might need to initialize process groups in multiple
@@ -701,3 +710,6 @@ class ParallelConfig:
             )
 
         return self
+
+    def replace(self, **kwargs) -> Self:
+        return replace(self, **kwargs)

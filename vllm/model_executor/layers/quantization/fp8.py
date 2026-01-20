@@ -23,13 +23,13 @@ from vllm.model_executor.layers.fused_moe import (
     FusedMoEMethodBase,
     FusedMoEPermuteExpertsUnpermute,
     FusedMoEPrepareAndFinalize,
+    FusedMoERouter,
     FusedMoeWeightScaleSupported,
 )
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEQuantConfig,
     RoutingMethodType,
 )
-from vllm.model_executor.layers.fused_moe.fused_moe_router import FusedMoERouter
 from vllm.model_executor.layers.fused_moe.layer import UnquantizedFusedMoEMethod
 from vllm.model_executor.layers.fused_moe.oracle.fp8 import (
     Fp8MoeBackend,
@@ -637,6 +637,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             block_quant=self.block_quant,
             tp_size=layer.moe_parallel_config.tp_size,
             with_lora_support=self.moe.is_lora_enabled,
+            is_act_and_mul=self.moe.is_act_and_mul,
         )
 
         if self.fp8_backend == Fp8MoeBackend.FLASHINFER_CUTLASS:

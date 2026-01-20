@@ -1,12 +1,24 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import copy
+import logging
+from typing import Any
 
 import pytest
+import regex as re
 import torch._dynamo
 
 from tests.compile.backend import LazyInitPass, TestBackend
-from tests.utils import flat_product
+from tests.compile.fusion_test_utils import (
+    CUSTOM_OPS_FP8,
+    MODELS_FP4,
+    MODELS_FP8,
+    Matches,
+    has_cuda_graph_wrapper_metadata,
+    is_blackwell,
+    run_model,
+)
+from tests.utils import cuda_device_count_stateless, flat_product
 from tests.v1.attention.utils import BatchSpec, create_common_attn_metadata
 from vllm._custom_ops import cutlass_scaled_fp4_mm, scaled_fp4_quant
 from vllm.attention.layer import Attention
@@ -20,6 +32,7 @@ from vllm.config import (
     CacheConfig,
     CompilationConfig,
     CompilationMode,
+    CUDAGraphMode,
     ModelConfig,
     PassConfig,
     SchedulerConfig,
@@ -35,6 +48,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import Fp8LinearOp
 from vllm.platforms import current_platform
 from vllm.utils.flashinfer import has_flashinfer
+from vllm.utils.torch_utils import is_torch_equal_or_newer
 from vllm.v1.attention.backend import AttentionMetadata
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 from vllm.v1.kv_cache_interface import AttentionSpec
@@ -241,8 +255,8 @@ class TestAttentionNvfp4QuantPatternModel(AttentionQuantPatternModel):
         )
 
 
-MODELS_FP8: list[tuple[str, type]] = []
-MODELS_FP4: list[tuple[str, type]] = []
+PATTERN_TEST_MODELS_FP8: list[tuple[str, type]] = []
+PATTERN_TEST_MODELS_FP4: list[tuple[str, type]] = []
 HEADS: list[tuple[int, int]] = []
 SPLIT_ATTENTION: list[bool] = []
 BACKENDS_FP8: list[AttentionBackendEnum] = []
@@ -250,13 +264,13 @@ BACKENDS_FP4: list[AttentionBackendEnum] = []
 
 if current_platform.is_cuda():
     HEADS = [(64, 8), (40, 8)]
-    MODELS_FP8 = [
+    PATTERN_TEST_MODELS_FP8 = [
         (
             "nvidia/Llama-4-Scout-17B-16E-Instruct-FP8",
             TestAttentionFp8StaticQuantPatternModel,
         )
     ]
-    MODELS_FP4 = [
+    PATTERN_TEST_MODELS_FP4 = [
         (
             "nvidia/Llama-4-Scout-17B-16E-Instruct-FP4",
             TestAttentionNvfp4QuantPatternModel,
@@ -267,7 +281,7 @@ if current_platform.is_cuda():
 
 elif current_platform.is_rocm():
     HEADS = [(32, 8), (40, 8)]
-    MODELS_FP8 = [
+    PATTERN_TEST_MODELS_FP8 = [
         ("amd/Llama-3.1-8B-Instruct-FP8-KV", TestAttentionFp8StaticQuantPatternModel)
     ]
     BACKENDS = [
@@ -286,9 +300,13 @@ elif current_platform.is_rocm():
 @pytest.mark.parametrize(
     "backend, model_name, model_class, custom_ops",
     # Test attention+quant_fp8 fusion with custom and torch impls of QuantFP8
-    list(flat_product(BACKENDS_FP8, MODELS_FP8, ["+quant_fp8", "-quant_fp8"]))
+    list(
+        flat_product(
+            BACKENDS_FP8, PATTERN_TEST_MODELS_FP8, ["+quant_fp8", "-quant_fp8"]
+        )
+    )
     # quant_fp4 only has the custom impl
-    + list(flat_product(BACKENDS_FP4, MODELS_FP4, [""])),
+    + list(flat_product(BACKENDS_FP4, PATTERN_TEST_MODELS_FP4, [""])),
 )
 @pytest.mark.skipif(
     not current_platform.is_cuda_alike(), reason="Only test ROCm or CUDA"
@@ -315,6 +333,8 @@ def test_attention_quant_pattern(
         not current_platform.is_device_capability((10, 0)) or not has_flashinfer()
     ):
         pytest.skip("FlashInfer attn fusion requires Blackwell and flashinfer")
+    if "Llama-4-Scout" in model_name and cuda_device_count_stateless() < 2:
+        pytest.skip("Llama-4-Scout requires at least 2 GPUs")
 
     custom_ops_list = custom_ops.split(",") if custom_ops else []
 
@@ -483,3 +503,88 @@ def test_attention_quant_pattern(
 
     # Check that results are close
     torch.testing.assert_close(result_unfused, result_fused, atol=1e-2, rtol=1e-2)
+
+
+@pytest.mark.parametrize(
+    "model_name, model_kwargs, backend, matches, custom_ops",
+    # Test attention+quant_fp8 fusion with custom and torch impls of QuantFP8
+    list(flat_product(MODELS_FP8, CUSTOM_OPS_FP8))
+    # quant_fp4 only has the custom impl
+    + list(flat_product(MODELS_FP4, [""])),
+)
+@pytest.mark.parametrize(
+    "inductor_graph_partition",
+    [
+        pytest.param(
+            True,
+            marks=pytest.mark.skipif(
+                not has_cuda_graph_wrapper_metadata(),
+                reason="This test requires"
+                "torch._inductor.utils.CUDAGraphWrapperMetadata to run",
+            ),
+        ),
+        False,
+    ],
+)
+def test_attn_quant(
+    model_name: str,
+    model_kwargs: dict[str, Any],
+    backend: AttentionBackendEnum,
+    matches: Matches,
+    custom_ops: str,
+    inductor_graph_partition: bool,
+    caplog_mp_spawn,
+    monkeypatch,
+):
+    if not current_platform.has_device_capability(90):
+        pytest.skip("test_attn_quant requires H100 (SM90) or B200 (SM100) GPU")
+    if backend == AttentionBackendEnum.FLASHINFER and (
+        not is_blackwell() or not has_flashinfer()
+    ):
+        pytest.skip("FlashInfer attn fusion requires Blackwell and flashinfer")
+    if inductor_graph_partition and not is_torch_equal_or_newer("2.9.0.dev"):
+        pytest.skip("Inductor graph partition requires torch>=2.9")
+
+    custom_ops_list = custom_ops.split(",") if custom_ops else []
+
+    if inductor_graph_partition:
+        mode = CUDAGraphMode.FULL_AND_PIECEWISE
+        splitting_ops: list[str] | None = None
+    else:
+        # FIXME: Llama-4-Scout-17B-16E-Instruct-FP8 + FlashInfer + Blackwell end at
+        # CUDAGraphMode.NONE here because it derives an attention backend that
+        # does not support full cudagraphs
+        mode = CUDAGraphMode.FULL_DECODE_ONLY
+        splitting_ops = []
+
+    # Disable, compile cache to make sure custom passes run.
+    # Otherwise, we can't verify fusion happened through the logs.
+    monkeypatch.setenv("VLLM_DISABLE_COMPILE_CACHE", "1")
+
+    # To capture subprocess logs, we need to know whether spawn or fork is used.
+    # Force spawn as it is more general.
+    monkeypatch.setenv("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
+    model_kwargs["attention_config"] = {"backend": backend.name}
+
+    compilation_config = CompilationConfig(
+        # Testing properties
+        custom_ops=custom_ops_list,
+        use_inductor_graph_partition=inductor_graph_partition,
+        cudagraph_mode=mode,
+        splitting_ops=splitting_ops,
+        # Common
+        mode=CompilationMode.VLLM_COMPILE,
+        pass_config=PassConfig(fuse_attn_quant=True, eliminate_noops=True),
+        # Inductor caches custom passes by default as well via uuid
+        inductor_compile_config={"force_disable_caches": True},
+    )
+
+    with caplog_mp_spawn(logging.DEBUG) as log_holder:
+        run_model(compilation_config, model_name, **model_kwargs)
+
+    log_matches = re.findall(
+        r"fusion_attn.py:\d+] Fused quant onto (\d+) attention nodes",
+        log_holder.text,
+    )
+    assert len(log_matches) == 1, log_holder.text
+    assert int(log_matches[0]) == matches.attention_fusion

@@ -42,7 +42,7 @@ from vllm.entrypoints.chat_utils import (
     parse_chat_messages,
     resolve_chat_template_content_format,
 )
-from vllm.entrypoints.score_utils import (
+from vllm.entrypoints.pooling.score.utils import (
     ScoreContentPartParam,
     ScoreMultiModalParam,
     _cosine_similarity,

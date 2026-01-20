@@ -25,6 +25,7 @@ from vllm.lora.layers import (
     FusedMoE3DWithLoRA,
     FusedMoEWithLoRA,
     LogitsProcessorWithLoRA,
+    MergedColumnParallelLinearVariableSliceWithLoRA,
     MergedColumnParallelLinearWithLoRA,
     MergedColumnParallelLinearWithShardedLoRA,
     MergedQKVParallelLinearWithLoRA,
@@ -68,6 +69,7 @@ _all_lora_classes: set[type[BaseLayerWithLoRA]] = {
     ColumnParallelLinearWithShardedLoRA,
     QKVParallelLinearWithShardedLoRA,
     MergedColumnParallelLinearWithShardedLoRA,
+    MergedColumnParallelLinearVariableSliceWithLoRA,
     MergedQKVParallelLinearWithShardedLoRA,
     RowParallelLinearWithShardedLoRA,
     FusedMoEWithLoRA,
@@ -266,9 +268,13 @@ def process_packed_modules_mapping(model: nn.Module) -> dict[str, list[str]]:
             packed_modules_mapping = get_packed_modules_mapping(model)
             if not model.is_3d_moe_weight:
                 # 3D MoE LoRA does not need `packed_modules_mapping`
+                # Filter out malformed entries: non-gated MoE has empty
+                # ckpt_up_proj_name which results in weight_name containing ".."
+                # (e.g., "experts.0.." instead of "experts.0.layer_name.")
                 packed_modules_mapping["experts"] = [
                     weight_name.rstrip(".")
                     for _, weight_name, _, _ in moe_packed_mapping
+                    if ".." not in weight_name
                 ]
 
             return packed_modules_mapping

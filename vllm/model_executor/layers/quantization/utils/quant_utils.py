@@ -221,7 +221,8 @@ def scaled_quantize(
     # Compute scales
     min_val, max_val = x_blkd_permd.aminmax(dim=-1)
     amax = torch.maximum(min_val.abs(), max_val.abs()).clamp(min=1e-12)
-    scale = finfo.max / amax
+    _, fp8_max = get_fp8_min_max()
+    scale = fp8_max / amax
 
     # Apply scale and convert form:
     # (BLK_M, BLK_N, BLOCK_SIZE_M * BLOCK_SIZE_N) to (M, N)
@@ -246,8 +247,8 @@ def scaled_dequantize(
     if group_shape is not None:
         group_shape = _normalize_quant_group_shape(x_q, group_shape)
 
-    if x_s.ndim == 0:  # scalar
-        x_s = x_s.unsqueeze(-1).unsqueeze(-1)  # convert to (1, 1) tensor
+    if x_s.numel() == 1:  # scalar
+        x_s = x_s.reshape(1, 1)  # normalize all scalar-like tensors to (1, 1)
     if x_s.ndim == 1:
         if group_shape is None:
             raise AssertionError(
@@ -299,6 +300,9 @@ def get_and_maybe_dequant_weights(
     if (
         isinstance(layer.quant_method, Fp8LinearMethod)
         and not layer.quant_method.use_marlin
+        # DeepGEMM transforms the scales using `transform_sf_into_required_layout` into
+        # a layout that is not compatible with `scaled_dequantize`.
+        and not layer.quant_method.use_deep_gemm
     ):
         weight_scales = get_attribute_fallback(
             layer, ["weight_scale", "weight_scale_inv"]

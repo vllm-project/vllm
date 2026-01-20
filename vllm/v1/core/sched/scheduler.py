@@ -208,6 +208,8 @@ class Scheduler(SchedulerInterface):
             if speculative_config.use_eagle():
                 self.use_eagle = True
                 self.num_lookahead_tokens = self.num_spec_tokens
+            if speculative_config.uses_draft_model():
+                self.num_lookahead_tokens = self.num_spec_tokens
 
         # Create the KV cache manager.
         self.kv_cache_manager = KVCacheManager(
@@ -245,8 +247,7 @@ class Scheduler(SchedulerInterface):
 
             self.routed_experts_reader.attach_buffer(
                 max_num_kv_tokens=self.max_num_kv_tokens,
-                model_config=self.vllm_config.model_config,
-                instance_id=self.vllm_config.instance_id,
+                vllm_config=self.vllm_config,
             )
 
     def schedule(self) -> SchedulerOutput:
@@ -282,6 +283,13 @@ class Scheduler(SchedulerInterface):
         req_index = 0
         while req_index < len(self.running) and token_budget > 0:
             request = self.running[req_index]
+
+            # do not schedule another step for the same request while it still has
+            # output placeholders for PP.
+            # TODO: support PP + async scheduling without this limit
+            if self.use_pp and request.num_output_placeholders > 0:
+                req_index += 1
+                continue
 
             if (
                 request.num_output_placeholders > 0

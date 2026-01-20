@@ -9,10 +9,10 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from typing_extensions import assert_never
 
-from vllm.entrypoints.openai.api_server import validate_json_request
 from vllm.entrypoints.openai.engine.protocol import (
     ErrorResponse,
 )
+from vllm.entrypoints.openai.utils import validate_json_request
 from vllm.entrypoints.serve.tokenize.protocol import (
     DetokenizeRequest,
     DetokenizeResponse,
@@ -51,14 +51,8 @@ async def tokenize(request: TokenizeRequest, raw_request: Request):
 
     try:
         generator = await handler.create_tokenize(request, raw_request)
-    except NotImplementedError as e:
-        raise HTTPException(
-            status_code=HTTPStatus.NOT_IMPLEMENTED.value, detail=str(e)
-        ) from e
     except Exception as e:
-        raise HTTPException(
-            status_code=HTTPStatus.INTERNAL_SERVER_ERROR.value, detail=str(e)
-        ) from e
+        return handler.create_error_response(e)
 
     if isinstance(generator, ErrorResponse):
         return JSONResponse(

@@ -117,8 +117,8 @@ class ScoreClientMtebEncoder(MtebCrossEncoderMixin):
             self.url,
             json={
                 "model": self.model_name,
-                "text_1": query,
-                "text_2": corpus,
+                "queries": query,
+                "documents": corpus,
                 "truncate_prompt_tokens": -1,
             },
         ).json()

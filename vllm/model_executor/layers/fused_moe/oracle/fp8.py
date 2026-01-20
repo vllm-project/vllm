@@ -52,7 +52,7 @@ def select_fp8_moe_backend(
     block_quant: bool,
     tp_size: int,
     with_lora_support: bool,
-    is_act_and_mul: bool = True,
+    is_act_and_mul: bool,
     allow_vllm_cutlass: bool = False,
 ) -> Fp8MoeBackend:
     """
@@ -128,7 +128,7 @@ def select_fp8_moe_backend(
             scope="local",
         )
 
-    if use_deep_gemm and moe_use_deep_gemm and block_quant:
+    if use_deep_gemm and moe_use_deep_gemm and block_quant and is_act_and_mul:
         if not has_deep_gemm():
             logger.warning_once(
                 "DeepGEMM backend requested but not available.", scope="local"
@@ -141,7 +141,12 @@ def select_fp8_moe_backend(
         logger.info_once(_make_log_backend("ROCm AITER"), scope="local")
         return Fp8MoeBackend.AITER
 
-    if allow_vllm_cutlass and not block_quant and cutlass_group_gemm_supported():
+    if (
+        allow_vllm_cutlass
+        and not block_quant
+        and cutlass_group_gemm_supported()
+        and is_act_and_mul
+    ):
         logger.info_once(_make_log_backend("vLLM CUTLASS"), scope="local")
         return Fp8MoeBackend.VLLM_CUTLASS
 

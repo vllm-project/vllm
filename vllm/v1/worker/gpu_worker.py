@@ -312,9 +312,6 @@ class Worker(WorkerBase):
             logger.info(msg)
             return kv_cache_memory_bytes
 
-        torch.cuda.empty_cache()
-        torch.cuda.reset_peak_memory_stats()
-
         # Execute a forward pass with dummy inputs to profile the memory usage
         # of the model.
         with memory_profiling(
@@ -360,7 +357,6 @@ class Worker(WorkerBase):
             format_gib(self.available_kv_cache_memory_bytes),
             scope="local",
         )
-        gc.collect()
 
         return int(self.available_kv_cache_memory_bytes)
 
@@ -666,12 +662,7 @@ class Worker(WorkerBase):
             self.profiler.stop()
 
     def execute_dummy_batch(self) -> None:
-        if self.use_v2_model_runner:
-            self.model_runner.execute_model(
-                SchedulerOutput.make_empty(), dummy_run=True
-            )
-        else:
-            self.model_runner._dummy_run(1, uniform_decode=True)
+        self.model_runner._dummy_run(1, uniform_decode=True)
 
     def add_lora(self, lora_request: LoRARequest) -> bool:
         return self.model_runner.add_lora(lora_request)

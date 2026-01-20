@@ -8,10 +8,10 @@ from packaging import version
 from torch.nn import Module
 
 from vllm._ipex_ops import ipex_ops as ops
-from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
-from vllm.model_executor.layers.fused_moe.fused_moe_router import (
+from vllm.model_executor.layers.fused_moe import (
     FusedMoERouter,
 )
+from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
 from vllm.model_executor.layers.linear import (
     LinearBase,
     LinearMethodBase,
