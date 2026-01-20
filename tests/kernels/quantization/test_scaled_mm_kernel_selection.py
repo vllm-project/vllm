@@ -79,6 +79,7 @@ def test_aiter_kernel_implements_is_supported():
 
 def test_cpu_kernel_accepts_all_configs():
     """Test that CPUInt8ScaledMMLinearKernel accepts all config combinations."""
+
     # Helper to build Int8 config
     def make_int8_config(is_channelwise: bool, is_static: bool, symmetric: bool):
         weight_group = GroupShape.PER_TOKEN if is_channelwise else GroupShape.PER_TENSOR
