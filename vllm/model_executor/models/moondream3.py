@@ -1268,7 +1268,8 @@ class Moondream3ForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
 
         features = self.vision(pixel_values)
 
-        grid_size = self.config.vision.enc_n_layers
+        # Grid size = crop_size / patch_size (e.g., 378 / 14 = 27)
+        grid_size = self.config.vision.crop_size // self.config.vision.enc_patch_size
         enc_dim = self.config.vision.enc_dim
         global_features = features[0]
 
