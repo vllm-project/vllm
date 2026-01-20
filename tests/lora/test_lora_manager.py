@@ -10,6 +10,18 @@ from torch import nn
 
 from vllm.config import ModelConfig, VllmConfig
 from vllm.config.lora import LoRAConfig
+<<<<<<< HEAD
+from vllm.lora.layers import (ColumnParallelLinearWithLoRA,
+                              MergedColumnParallelLinearWithLoRA,
+                              RowParallelLinearWithLoRA)
+from vllm.lora.models import (LoRAMapping, LoRAModel, LoRAModelManager,
+                              LRUCacheLoRAModelManager)
+from vllm.lora.peft_helper import PEFTHelper
+from vllm.lora.request import LoRARequest
+from vllm.lora.weights import LoRALayerWeights, PackedLoRALayerWeights
+from vllm.lora.worker_manager import (LRUCacheWorkerLoRAManager,
+                                      WorkerLoRAManager)
+=======
 from vllm.lora.layers import (
     ColumnParallelLinearWithLoRA,
     MergedColumnParallelLinearWithLoRA,
@@ -26,6 +38,7 @@ from vllm.lora.model_manager import (
 from vllm.lora.peft_helper import PEFTHelper
 from vllm.lora.request import LoRARequest
 from vllm.lora.worker_manager import LRUCacheWorkerLoRAManager, WorkerLoRAManager
+>>>>>>> origin/main
 from vllm.platforms import current_platform
 
 from .utils import create_peft_lora

@@ -61,6 +61,10 @@ class LoRAConfig:
     currently only supports some MM models such as the Qwen VL series. The default 
     is False."""
 
+    max_num_labels: int | None = None
+    """Max classification label number.
+    """
+
     def compute_hash(self) -> str:
         """
         WARNING: Whenever a new field is added to this config,
@@ -79,7 +83,7 @@ class LoRAConfig:
         factors.append(self.fully_sharded_loras)
         factors.append(self.lora_dtype)
         factors.append(self.enable_tower_connector_lora)
-
+        factors.append(self.max_num_labels)
         hash_str = safe_hash(str(factors).encode(), usedforsecurity=False).hexdigest()
         return hash_str
 
@@ -100,3 +104,5 @@ class LoRAConfig:
             self.lora_dtype = model_config.dtype
         elif isinstance(self.lora_dtype, str):
             self.lora_dtype = getattr(torch, self.lora_dtype)
+        if self.max_num_labels is None:
+            self.max_num_labels = model_config.hf_config.num_labels

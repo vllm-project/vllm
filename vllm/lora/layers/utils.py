@@ -29,32 +29,43 @@ class LoRAMapping:
         self.prompt_mapping = tuple(self.prompt_mapping)
 
 
-def _get_lora_device(base_layer: nn.Module) -> torch.device:
-    # code borrowed from https://github.com/fmmoret/vllm/blob/fm-support-lora-on-quantized-models/vllm/lora/layers.py#L34
-    """Returns the device for where to place the LoRA tensors."""
+def _get_layer_weight(layer: torch.nn.Module) -> torch.Tensor:
     # unquantizedLinear
-    if hasattr(base_layer, "weight"):
-        return base_layer.weight.device
+    if hasattr(layer, "weight"):
+        return layer.weight
     # Compressed Tensor
-    elif hasattr(base_layer, "weight_packed"):
-        return base_layer.weight_packed.device
+    elif hasattr(layer, "weight_packed"):
+        return layer.weight_packed
     # GPTQ/AWQ
-    elif hasattr(base_layer, "qweight"):
-        return base_layer.qweight.device
+    elif hasattr(layer, "qweight"):
+        return layer.qweight
+    # marlin
+    elif hasattr(layer, "B"):
+        return layer.B
     # HQQ marlin
-    elif hasattr(base_layer, "W_q"):
-        return base_layer.W_q.device
+    elif hasattr(layer, "W_q"):
+        return layer.W_q.device
     # MoE layer
-    elif hasattr(base_layer, "w2_weight"):
-        return base_layer.w2_weight.device
+    elif hasattr(layer, "w2_weight"):
+        return layer.w2_weight.device
     # MoE Compressed Tensor
-    elif hasattr(base_layer, "w2_weight_packed"):
-        return base_layer.w2_weight_packed.device
+    elif hasattr(layer, "w2_weight_packed"):
+        return layer.w2_weight_packed.device
     # MoE GPTQ/AWQ/GGUF
-    elif hasattr(base_layer, "w2_qweight"):
-        return base_layer.w2_qweight.device
+    elif hasattr(layer, "w2_qweight"):
+        return layer.w2_qweight.device
     else:
-        raise ValueError(f"Unsupported base layer: {base_layer}")
+        raise ValueError(f"Unsupported base layer: {layer}")
+
+
+def _get_layer_device(base_layer: nn.Module) -> torch.device:
+    weight = _get_layer_weight(base_layer)
+    return weight.device
+
+
+def _get_layer_dtype(base_layer: nn.Module) -> torch.dtype:
+    weight = _get_layer_weight(base_layer)
+    return weight.dtype
 
 
 def _not_fully_sharded_can_replace(can_replace):

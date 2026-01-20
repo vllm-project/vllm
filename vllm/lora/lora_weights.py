@@ -248,3 +248,37 @@ class PackedLoRALayerWeights(LoRALayerWeights):
     @property
     def is_packed(self) -> bool:
         return True
+
+
+class ClassifierLoRALayerWeights(LoRALayerWeights):
+    @classmethod
+    def create_dummy_lora_weights(
+        cls,
+        module_name: str,
+        input_dim: int,
+        rank: int,
+        dtype: torch.dtype,
+        device: torch.types.Device,
+        embeddings_tensor_dim: int | None = None,
+        bias_enabled: bool | None = False,
+    ) -> "LoRALayerWeights":
+        pin_memory = str(device) == "cpu" and is_pin_memory_available()
+        lora_a = torch.zeros(
+            [input_dim, rank], dtype=dtype, device=device, pin_memory=pin_memory
+        )
+        return cls(
+            module_name,
+            rank=rank,
+            lora_alpha=1,
+            lora_a=lora_a,
+            lora_b=None,
+            bias=None,
+            embeddings_tensor=None,
+        )
+
+    def optimize(self) -> "LoRALayerWeights":
+        return self
+
+    @property
+    def output_dim(self) -> int:
+        return self.rank

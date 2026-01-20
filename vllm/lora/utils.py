@@ -18,8 +18,12 @@ from vllm.config.lora import LoRAConfig
 from vllm.logger import init_logger
 
 # being imported for _all_lora_classes below
+# yapf conflicts with isort for this block
+# yapf: disable
+# being imported for _all_lora_classes below
 from vllm.lora.layers import (
     BaseLayerWithLoRA,
+    ClassifierWithLoRA,
     ColumnParallelLinearWithLoRA,
     ColumnParallelLinearWithShardedLoRA,
     FusedMoE3DWithLoRA,
@@ -124,9 +128,18 @@ def from_layer_logits_processor(
     return ret
 
 
-def replace_submodule(
-    model: nn.Module, module_name: str, new_module: nn.Module
-) -> nn.Module:
+def from_layer_classifier(
+        layer: nn.Module,
+        max_loras: int,
+        lora_config: LoRAConfig,
+        model_config: PretrainedConfig |None = None) -> nn.Module:
+    classify_layer = ClassifierWithLoRA(layer)
+    classify_layer.create_lora_weights(max_loras, lora_config, model_config)
+    return classify_layer
+
+
+def replace_submodule(model: nn.Module, module_name: str,
+                      new_module: nn.Module) -> nn.Module:
     """Replace a submodule in a model with a new module."""
     parent = model.get_submodule(".".join(module_name.split(".")[:-1]))
     target_name = module_name.split(".")[-1]

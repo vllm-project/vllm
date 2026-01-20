@@ -578,6 +578,8 @@ class EngineArgs:
     kv_offloading_backend: KVOffloadingBackend = CacheConfig.kv_offloading_backend
     tokens_only: bool = False
 
+    max_num_labels: Optional[int] = LoRAConfig.max_num_labels
+
     def __post_init__(self):
         # support `EngineArgs(compilation_config={...})`
         # without having to manually construct a
@@ -1021,6 +1023,8 @@ class EngineArgs:
             "--fully-sharded-loras", **lora_kwargs["fully_sharded_loras"]
         )
         lora_group.add_argument("--default-mm-loras", **lora_kwargs["default_mm_loras"])
+
+        lora_group.add_argument("--max-num-labels", **lora_kwargs["max_num_labels"])
 
         # Observability arguments
         observability_kwargs = get_kwargs(ObservabilityConfig)
@@ -1655,6 +1659,7 @@ class EngineArgs:
 
         lora_config = (
             LoRAConfig(
+                bias_enabled=self.enable_lora_bias,
                 max_lora_rank=self.max_lora_rank,
                 max_loras=self.max_loras,
                 default_mm_loras=self.default_mm_loras,
@@ -1664,6 +1669,7 @@ class EngineArgs:
                 max_cpu_loras=self.max_cpu_loras
                 if self.max_cpu_loras and self.max_cpu_loras > 0
                 else None,
+                max_num_labels=self.max_num_labels,
             )
             if self.enable_lora
             else None

@@ -16,7 +16,7 @@ from vllm.model_executor.layers.linear import (
 from vllm.platforms import current_platform
 
 from .base import BaseLayerWithLoRA
-from .utils import _get_lora_device
+from .utils import _get_layer_device, _get_layer_weight
 
 
 class BaseLinearLayerWithLoRA(BaseLayerWithLoRA):
@@ -27,7 +27,7 @@ class BaseLinearLayerWithLoRA(BaseLayerWithLoRA):
         # Ensure tp_size and tp_rank consistency with the base_layer.
         self.tp_size = self.base_layer.tp_size
         self.tp_rank = self.base_layer.tp_rank
-        self.device = _get_lora_device(self.base_layer)
+        self.device = _get_layer_device(self.base_layer)
         self.output_slices: tuple[int, ...]
         self.output_size: int
         self.n_slices: int
@@ -146,23 +146,7 @@ class BaseLinearLayerWithLoRA(BaseLayerWithLoRA):
 
     @property
     def weight(self) -> torch.Tensor:
-        # unquantizedLinear
-        if hasattr(self.base_layer, "weight"):
-            return self.base_layer.weight
-        # Compressed Tensor
-        elif hasattr(self.base_layer, "weight_packed"):
-            return self.base_layer.weight_packed
-        # GPTQ/AWQ
-        elif hasattr(self.base_layer, "qweight"):
-            return self.base_layer.qweight
-        # marlin
-        elif hasattr(self.base_layer, "B"):
-            return self.base_layer.B
-        # HQQ marlin
-        elif hasattr(self.base_layer, "W_q"):
-            return self.base_layer.W_q
-        else:
-            raise ValueError(f"Unsupported base layer: {self.base_layer}")
+        return _get_layer_weight(self.base_layer)
 
     @property
     def bias(self) -> torch.Tensor | None:
