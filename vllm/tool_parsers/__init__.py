@@ -134,6 +134,10 @@ _TOOL_PARSERS_TO_REGISTER = {
         "step3_tool_parser",
         "Step3ToolParser",
     ),
+    "trinity": (
+        "trinity_tool_parser",
+        "TrinityToolParser",
+    ),
     "xlam": (
         "xlam_tool_parser",
         "xLAMToolParser",
