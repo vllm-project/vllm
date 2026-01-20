@@ -2,6 +2,4 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from vllm.engine.inference_profile import InferenceProfile
 
-__all__ = [
-    "InferenceProfile",
-]
+__all__ = ["InferenceProfile"]
