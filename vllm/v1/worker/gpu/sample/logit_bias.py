@@ -51,7 +51,7 @@ class LogitBiasState:
         )
 
         # Using any of the above.
-        self.use_logit_bias = np.zeros(max_num_reqs, dtype=np.bool)
+        self.use_logit_bias = np.zeros(max_num_reqs, dtype=bool)
 
     def add_request(
         self,
@@ -97,7 +97,7 @@ class LogitBiasState:
         min_tokens = sampling_params.min_tokens
         min_len = prompt_len + min_tokens
         self.min_lens.np[req_idx] = min_len
-        stop_token_ids = sampling_params.stop_token_ids
+        stop_token_ids = sampling_params.all_stop_token_ids
         if min_tokens > 0 and stop_token_ids:
             num_stop_token_ids = len(stop_token_ids)
             if num_stop_token_ids > MAX_NUM_STOP_TOKEN_IDS:
