@@ -3,13 +3,14 @@
 
 from dataclasses import dataclass
 
-from vllm.v1.attention.backend import AttentionBackend
+from vllm.v1.attention.backend import AttentionBackend, backend_name
 from vllm.v1.attention.backends.mamba_attn import (
     BaseMambaAttentionMetadata,
     BaseMambaAttentionMetadataBuilder,
 )
 
 
+@backend_name("MAMBA1_ATTN")
 class Mamba1AttentionBackend(AttentionBackend):
     @staticmethod
     def get_builder_cls() -> type["Mamba1AttentionMetadataBuilder"]:

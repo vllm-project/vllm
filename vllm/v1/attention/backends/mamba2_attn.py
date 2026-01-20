@@ -7,7 +7,11 @@ import torch
 
 from vllm.config import VllmConfig
 from vllm.utils.math_utils import cdiv
-from vllm.v1.attention.backend import AttentionBackend, CommonAttentionMetadata
+from vllm.v1.attention.backend import (
+    AttentionBackend,
+    CommonAttentionMetadata,
+    backend_name,
+)
 from vllm.v1.attention.backends.mamba_attn import (
     BaseMambaAttentionMetadata,
     BaseMambaAttentionMetadataBuilder,
@@ -84,6 +88,7 @@ def compute_varlen_chunk_metadata(
     return cu_chunk_seqlens, last_chunk_indices_t, seq_idx_chunks_t
 
 
+@backend_name("MAMBA2_ATTN")
 class Mamba2AttentionBackend(AttentionBackend):
     @staticmethod
     def get_builder_cls() -> type["Mamba2AttentionMetadataBuilder"]:

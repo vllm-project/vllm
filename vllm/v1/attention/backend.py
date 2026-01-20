@@ -773,3 +773,23 @@ def subclass_attention_backend_with_overrides(
 ) -> type[AttentionBackend]:
     name: str = name_prefix + attention_backend_cls.__name__  # type: ignore
     return type(name, (attention_backend_cls,), overrides)
+
+
+def backend_name(name: str):
+    """Class decorator to automatically add a `get_name()` method
+    to an AttentionBackend.
+
+    Usage:
+        @backend_name("MY_ATTN")
+        class MyAttentionBackend(AttentionBackend):
+            ...
+    """
+
+    def decorator(cls: type[AttentionBackend]) -> type[AttentionBackend]:
+        def get_name() -> str:
+            return name
+
+        cls.get_name = staticmethod(get_name)  # type: ignore[assignment]
+        return cls
+
+    return decorator

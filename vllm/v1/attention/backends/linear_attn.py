@@ -10,11 +10,13 @@ from vllm.v1.attention.backend import (
     AttentionCGSupport,
     AttentionMetadataBuilder,
     CommonAttentionMetadata,
+    backend_name,
 )
 from vllm.v1.attention.backends.utils import split_decodes_and_prefills
 from vllm.v1.kv_cache_interface import AttentionSpec, MambaSpec
 
 
+@backend_name("LINEAR_ATTN")
 class LinearAttentionBackend(AttentionBackend):
     @staticmethod
     def get_builder_cls() -> type["LinearAttentionMetadataBuilder"]:
