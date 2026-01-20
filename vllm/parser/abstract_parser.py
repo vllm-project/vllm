@@ -36,8 +36,10 @@ class Parser:
     (e.g., chain-of-thought content in <think> tags) and tool call extraction
     (e.g., function calls in XML/JSON format) from model outputs.
 
-    Subclasses should implement the abstract methods to provide model-specific
-    parsing logic.
+    Subclasses can either:
+    1. Override the abstract methods directly for custom parsing logic
+    2. Set `reasoning_parser` and `tool_parser` properties to delegate to
+       existing parser implementations
     """
 
     def __init__(self, tokenizer: TokenizerLike):
@@ -49,11 +51,31 @@ class Parser:
                 token-based parsing operations.
         """
         self.model_tokenizer = tokenizer
+        self._reasoning_parser: ReasoningParser | None = None
+        self._tool_parser: ToolParser | None = None
 
     @cached_property
     def vocab(self) -> dict[str, int]:
         """Get the vocabulary mapping from tokens to IDs."""
         return self.model_tokenizer.get_vocab()
+
+    @property
+    def reasoning_parser(self) -> ReasoningParser | None:
+        """The underlying reasoning parser, if any."""
+        return self._reasoning_parser
+
+    @reasoning_parser.setter
+    def reasoning_parser(self, parser: ReasoningParser | None) -> None:
+        self._reasoning_parser = parser
+
+    @property
+    def tool_parser(self) -> ToolParser | None:
+        """The underlying tool parser, if any."""
+        return self._tool_parser
+
+    @tool_parser.setter
+    def tool_parser(self, parser: ToolParser | None) -> None:
+        self._tool_parser = parser
 
     # ========== Reasoning Parser Methods ==========
 
@@ -211,60 +233,45 @@ class Parser:
         """
 
 
-class CompositeParser(Parser):
+class DelegatingParser(Parser):
     """
-    A Parser implementation that composes separate ReasoningParser and
+    A Parser implementation that delegates to separate ReasoningParser and
     ToolParser instances.
 
-    This allows combining existing parser implementations without modification.
+    This is the recommended base class for creating model-specific parsers
+    that combine existing reasoning and tool parser implementations.
+    Subclasses should set `self._reasoning_parser` and `self._tool_parser`
+    in their `__init__` method.
+
     If either parser is None, the corresponding methods will return default
-    values.
+    values (no reasoning extraction, no tool calls).
     """
 
-    def __init__(
-        self,
-        tokenizer: TokenizerLike,
-        reasoning_parser: ReasoningParser | None = None,
-        tool_parser: ToolParser | None = None,
-    ):
-        """
-        Initialize the CompositeParser.
-
-        Args:
-            tokenizer: The tokenizer used by the model.
-            reasoning_parser: Optional ReasoningParser instance for reasoning
-                extraction.
-            tool_parser: Optional ToolParser instance for tool call extraction.
-        """
-        super().__init__(tokenizer)
-        self.reasoning_parser = reasoning_parser
-        self.tool_parser = tool_parser
-
     def is_reasoning_end(self, input_ids: list[int]) -> bool:
-        if self.reasoning_parser is None:
+        if self._reasoning_parser is None:
             return True  # No reasoning parser means reasoning is always "done"
-        return self.reasoning_parser.is_reasoning_end(input_ids)
+        return self._reasoning_parser.is_reasoning_end(input_ids)
 
     def is_reasoning_end_streaming(
         self, input_ids: list[int], delta_ids: list[int]
     ) -> bool:
-        if self.reasoning_parser is None:
+        if self._reasoning_parser is None:
             return True
-        return self.reasoning_parser.is_reasoning_end_streaming(input_ids, delta_ids)
+        return self._reasoning_parser.is_reasoning_end_streaming(input_ids, delta_ids)
 
     def extract_content_ids(self, input_ids: list[int]) -> list[int]:
-        if self.reasoning_parser is None:
+        if self._reasoning_parser is None:
             return input_ids  # All content if no reasoning parser
-        return self.reasoning_parser.extract_content_ids(input_ids)
+        return self._reasoning_parser.extract_content_ids(input_ids)
 
     def extract_reasoning(
         self,
         model_output: str,
         request: ChatCompletionRequest | ResponsesRequest,
     ) -> tuple[str | None, str | None]:
-        if self.reasoning_parser is None:
+        if self._reasoning_parser is None:
             return None, model_output
-        return self.reasoning_parser.extract_reasoning(model_output, request)
+        return self._reasoning_parser.extract_reasoning(model_output, request)
 
     def extract_reasoning_streaming(
         self,
@@ -275,9 +282,9 @@ class CompositeParser(Parser):
         current_token_ids: Sequence[int],
         delta_token_ids: Sequence[int],
     ) -> DeltaMessage | None:
-        if self.reasoning_parser is None:
+        if self._reasoning_parser is None:
             return DeltaMessage(content=delta_text)
-        return self.reasoning_parser.extract_reasoning_streaming(
+        return self._reasoning_parser.extract_reasoning_streaming(
             previous_text,
             current_text,
             delta_text,
@@ -287,20 +294,20 @@ class CompositeParser(Parser):
         )
 
     def adjust_request(self, request: ChatCompletionRequest) -> ChatCompletionRequest:
-        if self.tool_parser is None:
+        if self._tool_parser is None:
             return request
-        return self.tool_parser.adjust_request(request)
+        return self._tool_parser.adjust_request(request)
 
     def extract_tool_calls(
         self,
         model_output: str,
         request: ChatCompletionRequest,
     ) -> ExtractedToolCallInformation:
-        if self.tool_parser is None:
+        if self._tool_parser is None:
             return ExtractedToolCallInformation(
                 tools_called=False, tool_calls=[], content=model_output
             )
-        return self.tool_parser.extract_tool_calls(model_output, request)
+        return self._tool_parser.extract_tool_calls(model_output, request)
 
     def extract_tool_calls_streaming(
         self,
@@ -312,9 +319,9 @@ class CompositeParser(Parser):
         delta_token_ids: Sequence[int],
         request: ChatCompletionRequest,
     ) -> DeltaMessage | None:
-        if self.tool_parser is None:
+        if self._tool_parser is None:
             return None
-        return self.tool_parser.extract_tool_calls_streaming(
+        return self._tool_parser.extract_tool_calls_streaming(
             previous_text,
             current_text,
             delta_text,

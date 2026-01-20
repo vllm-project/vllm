@@ -2,14 +2,14 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from vllm.parser.abstract_parser import (
-    CompositeParser,
+    DelegatingParser,
     Parser,
     ParserManager,
 )
 
 __all__ = [
     "Parser",
-    "CompositeParser",
+    "DelegatingParser",
     "ParserManager",
 ]
 
