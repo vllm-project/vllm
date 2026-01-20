@@ -30,7 +30,7 @@ class TritonOrDeepGemmExperts(FallbackExperts):
         )
 
     @staticmethod
-    def get_clss() -> tuple[
+    def get_clses() -> tuple[
         type[mk.FusedMoEPermuteExpertsUnpermute],
         type[mk.FusedMoEPermuteExpertsUnpermute],
     ]:

@@ -25,7 +25,7 @@ class FallbackExperts(mk.FusedMoEPermuteExpertsUnpermute, ABC):
         self.experts = experts
 
     @staticmethod
-    def get_clss() -> tuple[
+    def get_clses() -> tuple[
         type[mk.FusedMoEPermuteExpertsUnpermute],
         type[mk.FusedMoEPermuteExpertsUnpermute],
     ]:
@@ -44,13 +44,13 @@ class FallbackExperts(mk.FusedMoEPermuteExpertsUnpermute, ABC):
     def activation_format(
         cls: type["FallbackExperts"],
     ) -> mk.FusedMoEActivationFormat:
-        experts_cls, fallback_cls = cls.get_clss()
+        experts_cls, fallback_cls = cls.get_clses()
         assert experts_cls.activation_format() == fallback_cls.activation_format()
         return experts_cls.activation_format()
 
     @classmethod
     def _supports_current_device(cls) -> bool:
-        experts_cls, fallback_cls = cls.get_clss()
+        experts_cls, fallback_cls = cls.get_clses()
         return (
             experts_cls._supports_current_device()
             and fallback_cls._supports_current_device()
@@ -58,7 +58,7 @@ class FallbackExperts(mk.FusedMoEPermuteExpertsUnpermute, ABC):
 
     @classmethod
     def _supports_no_act_and_mul(cls) -> bool:
-        experts_cls, fallback_cls = cls.get_clss()
+        experts_cls, fallback_cls = cls.get_clses()
         return (
             experts_cls._supports_no_act_and_mul()
             and fallback_cls._supports_no_act_and_mul()
@@ -70,14 +70,14 @@ class FallbackExperts(mk.FusedMoEPermuteExpertsUnpermute, ABC):
         weight_key: QuantKey | None,
         activation_key: QuantKey | None,
     ) -> bool:
-        experts_cls, fallback_cls = cls.get_clss()
+        experts_cls, fallback_cls = cls.get_clses()
         return experts_cls._supports_quant_scheme(
             weight_key, activation_key
         ) and fallback_cls._supports_quant_scheme(weight_key, activation_key)
 
     @classmethod
     def _supports_activation(cls, activation: str) -> bool:
-        experts_cls, fallback_cls = cls.get_clss()
+        experts_cls, fallback_cls = cls.get_clses()
         return experts_cls._supports_activation(
             activation
         ) and fallback_cls._supports_activation(activation)
@@ -86,7 +86,7 @@ class FallbackExperts(mk.FusedMoEPermuteExpertsUnpermute, ABC):
     def _supports_parallel_config(
         cls, moe_parallel_config: FusedMoEParallelConfig
     ) -> bool:
-        experts_cls, fallback_cls = cls.get_clss()
+        experts_cls, fallback_cls = cls.get_clses()
         return experts_cls._supports_parallel_config(
             moe_parallel_config
         ) and fallback_cls._supports_parallel_config(moe_parallel_config)
