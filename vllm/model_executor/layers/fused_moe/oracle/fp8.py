@@ -40,7 +40,7 @@ logger = init_logger(__name__)
 
 
 class Fp8MoeBackend(Enum):
-    NONE = 0
+    NONE = "NONE"
     FLASHINFER_TRTLLM = "FLASHINFER_TRTLLM"
     FLASHINFER_CUTLASS = "FLASHINFER_CUTLASS"
     DEEPGEMM = "DEEPGEMM"
