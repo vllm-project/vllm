@@ -136,6 +136,7 @@ def select_fp8_moe_backend(
     Select the primary FP8 MoE backend
     Note: Shape-specific fallbacks may still occur at runtime.
     """
+    k_cls: type[mk.FusedMoEPermuteExpertsUnpermute] | None = None
 
     if config.is_lora_enabled:
         return Fp8MoeBackend.TRITON, backend_2_kernel_cls(Fp8MoeBackend.TRITON)
@@ -306,7 +307,7 @@ def select_fp8_moe_backend(
     # Select kernels in order of backend.
     for backend in AVAILABLE_BACKENDS:
         if backend == Fp8MoeBackend.FLASHINFER_TRTLLM:
-            k_cls = None  # type: ignore[assignment]
+            k_cls = None
             supported, reason = is_supported_config_trtllm(
                 config,
                 weight_key,
