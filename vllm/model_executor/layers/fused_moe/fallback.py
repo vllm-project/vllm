@@ -29,6 +29,13 @@ class FallbackExperts(mk.FusedMoEPermuteExpertsUnpermute, ABC):
         type[mk.FusedMoEPermuteExpertsUnpermute],
         type[mk.FusedMoEPermuteExpertsUnpermute],
     ]:
+        """
+        Get the cls for the experts and fallback experts.
+
+        Subclasses should implement this method, so that
+        we have a consistent way to call the _supports_*
+        class methods below.
+        """
         raise NotImplementedError(
             "Subclasses must return the cls for the experts and fallback experts."
         )
