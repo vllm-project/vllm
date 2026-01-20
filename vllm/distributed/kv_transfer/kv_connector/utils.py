@@ -353,8 +353,13 @@ class TpKVTopology:
 
             physical_kv_heads_position = kv_cache_shape.index(4)
             assert physical_kv_heads_position is not None
-
             self._physical_kv_heads_position = physical_kv_heads_position
+
+            physical_block_size_position = kv_cache_shape.index(16)
+            assert physical_block_size_position is not None
+            self._physical_block_size_position = -(
+                len(kv_cache_shape) - physical_block_size_position
+            )
 
     @property
     def is_kv_layout_blocks_first(self) -> bool:
@@ -381,11 +386,7 @@ class TpKVTopology:
 
     @property
     def block_size_position(self) -> int:
-        return (
-            -2
-            if self.device_type == "cpu" or self.is_mla or self._cross_layers_blocks
-            else -3
-        )
+        return self._physical_block_size_position
 
     @property
     def physical_kv_heads_position(self) -> int:
