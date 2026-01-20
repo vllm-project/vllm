@@ -590,8 +590,6 @@ class AriaForConditionalGeneration(nn.Module, SupportsMultiModal):
     def _process_image_input(
         self, image_input: AriaImagePixelInputs
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        assert self.vision_tower is not None
-
         pixel_values = image_input["pixel_values"]
         pixel_mask = image_input["pixel_mask"]
 
@@ -623,14 +621,8 @@ class AriaForConditionalGeneration(nn.Module, SupportsMultiModal):
         inputs_embeds: torch.Tensor | None = None,
         **kwargs: object,
     ) -> torch.Tensor | IntermediateTensors:
-        if inputs_embeds is None:
-            multimodal_embeddings = self.embed_multimodal(**kwargs)
-            inputs_embeds = self.embed_input_ids(
-                input_ids,
-                multimodal_embeddings,
-                is_multimodal=input_ids == self.config.image_token_index,
-            )
-            input_ids = None
+        if intermediate_tensors is not None:
+            inputs_embeds = None
 
         hidden_states = self.language_model(
             input_ids,

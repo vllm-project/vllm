@@ -382,7 +382,6 @@ class AyaVisionForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsP
     def _process_image_input(
         self, image_input: AyaVisionImagePixelInputs, **kwargs
     ) -> list[torch.Tensor]:
-        assert self.vision_tower is not None
         pixel_values = image_input["pixel_values"]
         num_patches = image_input["num_patches"]
         image_features = self._image_pixels_to_features(
