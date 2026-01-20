@@ -38,7 +38,7 @@ buildkite-test-collector==0.1.9
 
 
 genai_perf>=0.0.8
-tritonclient==2.51.0
+tritonclient>=2.51.0
 
 numba == 0.61.2 # Required for N-gram speculative decoding
 numpy
