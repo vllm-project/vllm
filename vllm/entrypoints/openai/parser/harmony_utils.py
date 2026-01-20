@@ -486,6 +486,42 @@ def render_for_completion(messages: list[Message]) -> list[int]:
     return token_ids
 
 
+def _extract_function_name_from_recipient(recipient: str) -> str:
+    """Extract and clean function name from recipient string.
+
+    Handles cases where Harmony special tokens may leak into the recipient,
+    e.g., "functions.write_file<|channel|>commentary" -> "write_file"
+    """
+    if not recipient.startswith("functions."):
+        # For non-functions recipients, still clean special tokens
+        name = recipient.split(".")[-1] if "." in recipient else recipient
+    else:
+        name = recipient.split(".")[-1]
+
+    # Strip all Harmony special tokens that may leak into the name
+    # Process in order, as some tokens may contain others
+    special_tokens = [
+        "<|channel|>",
+        "<|recipient|>",
+        "<|start|>",
+        "<|end|>",
+        "<|message|>",
+        "<|call|>",
+        "<|return|>",
+        "<|constrain|>",
+    ]
+
+    for token in special_tokens:
+        if token in name:
+            name = name.split(token)[0]
+
+    # Additional cleanup: remove any remaining <| pattern
+    if "<|" in name:
+        name = name.split("<|")[0]
+
+    return name
+
+
 def _parse_browser_tool_call(message: Message, recipient: str) -> ResponseOutputItem:
     """Parse browser tool calls (search, open, find) into web search items."""
     if len(message.content) != 1:
@@ -533,7 +569,7 @@ def _parse_browser_tool_call(message: Message, recipient: str) -> ResponseOutput
 
 def _parse_function_call(message: Message, recipient: str) -> list[ResponseOutputItem]:
     """Parse function calls into function tool call items."""
-    function_name = recipient.split(".")[-1]
+    function_name = _extract_function_name_from_recipient(recipient)
     output_items = []
     for content in message.content:
         random_id = random_uuid()
@@ -636,16 +672,6 @@ def parse_output_message(message: Message) -> list[ResponseOutputItem]:
     output_items: list[ResponseOutputItem] = []
     recipient = message.recipient
 
-    # Diagnostic: detect special tokens in recipient
-    if recipient and ("<|channel|>" in recipient or "<|recipient|>" in recipient):
-        logger.warning(
-            "Harmony parser bug: recipient contains special tokens. "
-            "recipient=%r, channel=%r, author_role=%s",
-            recipient,
-            message.channel,
-            message.author.role if message.author else None,
-        )
-
     if recipient is not None:
         # Browser tool calls
         if recipient.startswith("browser."):
@@ -689,33 +715,19 @@ def parse_remaining_state(parser: StreamableParser) -> list[ResponseOutputItem]:
     if parser.current_role != Role.ASSISTANT:
         return []
     current_recipient = parser.current_recipient
-
-    # Diagnostic: detect special tokens in current_recipient
-    if current_recipient and (
-        "<|channel|>" in current_recipient or "<|recipient|>" in current_recipient
-    ):
-        logger.warning(
-            "Harmony parser bug: parse_remaining_state current_recipient "
-            "contains special tokens. recipient=%r, channel=%r, role=%s, "
-            "message_count=%d",
-            current_recipient,
-            parser.current_channel,
-            parser.current_role,
-            len(parser.messages),
-        )
-
     if current_recipient is not None and current_recipient.startswith("browser."):
         return []
 
     if current_recipient and parser.current_channel in ("commentary", "analysis"):
         if current_recipient.startswith("functions."):
             rid = random_uuid()
+            function_name = _extract_function_name_from_recipient(current_recipient)
             return [
                 ResponseFunctionToolCall(
                     arguments=parser.current_content,
                     call_id=f"call_{rid}",
                     type="function_call",
-                    name=current_recipient.split(".")[-1],
+                    name=function_name,
                     id=f"fc_{rid}",
                     status="in_progress",
                 )

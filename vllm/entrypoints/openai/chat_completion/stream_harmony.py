@@ -17,6 +17,9 @@ from vllm.entrypoints.openai.engine.protocol import (
     DeltaMessage,
     DeltaToolCall,
 )
+from vllm.entrypoints.openai.parser.harmony_utils import (
+    _extract_function_name_from_recipient,
+)
 from vllm.logger import init_logger
 
 logger = init_logger(__name__)
@@ -112,21 +115,7 @@ def extract_harmony_streaming_delta(
             opened_new_call = False
             if prev_recipient != group.recipient:
                 # New tool call - emit the opening message
-                # Diagnostic: detect special tokens in recipient
-                if group.recipient and (
-                    "<|channel|>" in group.recipient
-                    or "<|recipient|>" in group.recipient
-                ):
-                    text_preview = group.text[:50] if group.text else None
-                    logger.warning(
-                        "Harmony parser bug: streaming recipient contains "
-                        "special tokens. recipient=%r, channel=%r, "
-                        "text_preview=%r",
-                        group.recipient,
-                        group.channel,
-                        text_preview,
-                    )
-                tool_name = group.recipient.split("functions.", 1)[1]
+                tool_name = _extract_function_name_from_recipient(group.recipient)
                 tool_messages.append(
                     DeltaToolCall(
                         id=make_tool_call_id(),
