@@ -240,35 +240,40 @@ class Qwen3TPMoeSparseMoeBlock(nn.Module):
         )
 
         # Add task experts' outputs only for decode tokens with valid task_id
+        # --- GRAPH-SAFE LOGIC START ---
         if self.task_expert_merge_method == 'gating' and task_ids is not None:
-            # Create mask for tokens that should use task experts:
-            # - must have valid task_id (>= 0)
-            valid_task_mask = task_ids >= 0
+            # We iterate over the fixed experts.
+            # TorchDynamo will unroll this loop into a single static graph.
+            for tid_int in range(self.n_task_experts):
+                
+                # 1. Create the mask (Boolean)
+                #    (num_tokens,)
+                mask = (task_ids == tid_int) & (task_ids >= 0)
+                
+                # 2. Convert to float for mathematical masking
+                #    (num_tokens, 1)
+                mask_float = mask.to(hidden_states.dtype).unsqueeze(-1)
 
-            if valid_task_mask.any():
-                # Get unique task_ids that need processing
-                unique_task_ids = torch.unique(task_ids[valid_task_mask])
+                # 3. Apply mask to INPUTS
+                #    Tokens not belonging to this expert become 0.
+                #    We preserve the shape (N, D), preventing the "dynamic size" error.
+                masked_input = hidden_states * mask_float
 
-                for tid in unique_task_ids:
-                    tid_int = tid.item()
-                    if tid_int < 0 or tid_int >= self.n_task_experts:
-                        continue
+                # 4. Compute Expert Output
+                #    We run the MLP on ALL tokens (valid ones + zeroed ones).
+                #    Note: This computes biases for the zeroed tokens, but we filter them later.
+                task_expert_output = self.task_experts[tid_int](masked_input)
+                gate_logits = self.task_expert_gates[tid_int](masked_input)
+                gate_scores = torch.sigmoid(gate_logits)
 
-                    # Find tokens for this task_id
-                    token_mask = valid_task_mask & (task_ids == tid_int)
+                # 5. Compute Update and Apply mask to OUTPUTS
+                #    We multiply by mask_float again to ensure zeroed tokens contribute exactly 0.
+                update_value = (gate_scores * task_expert_output * 10) * mask_float
 
-                    if token_mask.any():
-                        # Get hidden states for these tokens
-                        selected_hidden = hidden_states[token_mask]
-
-                        # Apply the corresponding task expert
-                        task_expert_output = self.task_experts[tid_int](selected_hidden)
-                        gate_scores = torch.sigmoid(self.task_expert_gates[tid_int](selected_hidden))
-
-                        # Add gated task expert output to final hidden states
-                        final_hidden_states[token_mask] = (
-                            final_hidden_states[token_mask] + gate_scores * task_expert_output * 10
-                        )
+                # 6. Accumulate
+                #    Standard addition, no specialized indexing needed.
+                final_hidden_states = final_hidden_states + update_value
+        # --- GRAPH-SAFE LOGIC END ---
 
         if self.is_sequence_parallel:
             final_hidden_states = tensor_model_parallel_all_gather(
@@ -830,6 +835,8 @@ class Qwen3TPMoeForCausalLM(
         is_decode: torch.Tensor | None = None,
         **kwargs,
     ) -> torch.Tensor | IntermediateTensors:
+        if task_ids is None:
+            raise ValueError("task_ids must be provided for Qwen3TPMoeForCausalLM.")
         hidden_states = self.model(
             input_ids, positions, intermediate_tensors, inputs_embeds,
             task_ids=task_ids, is_decode=is_decode
