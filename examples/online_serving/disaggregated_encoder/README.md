@@ -38,7 +38,7 @@ Encoder engines should be launched with the following flags:
 
 - `--max-num-batched-tokens=<large value>` **(default: 2048)** – This flag controls the token scheduling budget per decoding step and is irrelevant to encoder-only instances. **Set it to a very high value (effectively unlimited) to bypass scheduler limitations.** The actual token budget is managed by the encoder cache manager.
 
-- `--mm-encoder-only` **(Optional)** - The language model is skipped during initialization to reduce device memory usage. **Models using this option must initialize the language component inside the context of `SupportsMultiModal._mark_language_model`.**
+- `--mm-encoder-only` **(Optional)** - If possible, skips the language model during initialization to reduce device memory usage.
 
 ## Local media inputs
 
