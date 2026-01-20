@@ -154,3 +154,87 @@ def video_with_metadata_glm4_1v():
             video_data=video_input,
         )
     ]
+
+
+def moondream3_skill_inputs():
+    """Builds inputs for Moondream3 testing all four skills.
+
+    Skills:
+    - Query: Question answering
+    - Caption: Image captioning
+    - Detect: Object detection (returns bounding boxes)
+    - Point: Object pointing (returns coordinates)
+    """
+    stop_sign = IMAGE_ASSETS[0].pil_image
+    cherry_blossom = IMAGE_ASSETS[1].pil_image
+
+    # Moondream3 prompt format: <|endoftext|><image> \n\n{task}
+    # Note: space after <image> is required for correct tokenization
+
+    # Test different skills with appropriate prompts
+    prompts = [
+        # Query skill - question answering
+        "<|endoftext|><image> \n\nQuestion: What is shown in this image?\n\nAnswer:",
+        # Caption skill - image description
+        "<|endoftext|><image> \n\nDescribe this image.\n\n",
+        # Query skill - specific question
+        "<|endoftext|><image> \n\nQuestion: What colors do you see?\n\nAnswer:",
+    ]
+
+    images = [
+        stop_sign,
+        cherry_blossom,
+        stop_sign,
+    ]
+
+    return [
+        PromptWithMultiModalInput(
+            prompts=prompts,
+            image_data=images,
+        )
+    ]
+
+
+def moondream3_multi_size_inputs():
+    """Builds inputs for Moondream3 with various image sizes.
+
+    Tests the multi-crop tiling functionality with different
+    image sizes and aspect ratios.
+    """
+    stop_sign = IMAGE_ASSETS[0].pil_image
+    cherry_blossom = IMAGE_ASSETS[1].pil_image
+
+    # Create images of different sizes to test multi-crop tiling
+    small_image = stop_sign.resize((200, 200))
+    medium_image = stop_sign  # Original size
+    large_image = cherry_blossom.resize((1200, 800))
+    tall_image = stop_sign.resize((300, 900))
+    wide_image = cherry_blossom.resize((1000, 300))
+
+    prompts = [
+        # Small image (should use 1x1 tiling)
+        "<|endoftext|><image> \n\nQuestion: Describe this small image.\n\nAnswer:",
+        # Medium image
+        "<|endoftext|><image> \n\nQuestion: What do you see?\n\nAnswer:",
+        # Large image (should use multi-crop)
+        "<|endoftext|><image> \n\nQuestion: Describe this large image.\n\nAnswer:",
+        # Tall image (different aspect ratio)
+        "<|endoftext|><image> \n\nQuestion: Describe this tall image.\n\nAnswer:",
+        # Wide image (different aspect ratio)
+        "<|endoftext|><image> \n\nQuestion: Describe this wide image.\n\nAnswer:",
+    ]
+
+    images = [
+        small_image,
+        medium_image,
+        large_image,
+        tall_image,
+        wide_image,
+    ]
+
+    return [
+        PromptWithMultiModalInput(
+            prompts=prompts,
+            image_data=images,
+        )
+    ]

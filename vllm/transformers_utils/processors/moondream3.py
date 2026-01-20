@@ -98,16 +98,20 @@ class Moondream3Processor(ProcessorMixin):
     #
     # IMPORTANT: BOS token must ALWAYS come first, even with images!
     # HF implementation: BOS + image_embeds + prompt
-    # prefix_attn=730 means first 730 tokens (1 BOS + 729 vision) have bidirectional attention
+    # prefix_attn=730 means first 730 tokens (1 BOS + 729 vision) have
+    # bidirectional attention
     #
-    # Format with image: <|endoftext|><image><|md_reserved_0|>query<|md_reserved_1|>{question}<|md_reserved_2|>
-    # Format without image: <|endoftext|><|md_reserved_0|>query<|md_reserved_1|>{question}<|md_reserved_2|>
+    # Format with image:
+    #   <|endoftext|><image><|md_reserved_0|>query<|md_reserved_1|>{q}<|md_reserved_2|>
+    # Format without image:
+    #   <|endoftext|><|md_reserved_0|>query<|md_reserved_1|>{q}<|md_reserved_2|>
     _default_chat_template = (
         "{% for message in messages %}"
         "{% if message['role'] == 'user' %}"
         "{% if message['content'] is string %}"
         # Simple string content (with image assumed) - BOS + image + prompt
-        "<|endoftext|><image><|md_reserved_0|>query<|md_reserved_1|>{{ message['content'] }}<|md_reserved_2|>"
+        "<|endoftext|><image><|md_reserved_0|>query<|md_reserved_1|>"
+        "{{ message['content'] }}<|md_reserved_2|>"
         "{% else %}"
         # List content - always start with BOS
         "<|endoftext|>"
