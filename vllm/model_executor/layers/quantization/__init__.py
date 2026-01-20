@@ -15,7 +15,6 @@ QuantizationMethods = Literal[
     "fp8",
     "ptpc_fp8",
     "fbgemm_fp8",
-    "fp_quant",
     "modelopt",
     "modelopt_fp4",
     "bitblas",
@@ -46,7 +45,6 @@ DEPRECATED_QUANTIZATION_METHODS = [
     "tpu_int8",
     "ptpc_fp8",
     "fbgemm_fp8",
-    "fp_quant",
     "bitblas",
     "gptq_marlin_24",
     "gptq_bitblas",
@@ -130,7 +128,6 @@ def get_quantization_config(quantization: str) -> type[QuantizationConfig]:
     from .experts_int8 import ExpertsInt8Config
     from .fbgemm_fp8 import FBGEMMFp8Config
     from .fp8 import Fp8Config
-    from .fp_quant import FPQuantConfig
     from .gguf import GGUFConfig
     from .gptq import GPTQConfig
     from .gptq_bitblas import GPTQBitBLASConfig
@@ -152,7 +149,6 @@ def get_quantization_config(quantization: str) -> type[QuantizationConfig]:
         "deepspeedfp": DeepSpeedFPConfig,
         "fp8": Fp8Config,
         "fbgemm_fp8": FBGEMMFp8Config,
-        "fp_quant": FPQuantConfig,
         "modelopt": ModelOptFp8Config,
         "modelopt_fp4": ModelOptNvFp4Config,
         "bitblas": BitBLASConfig,
