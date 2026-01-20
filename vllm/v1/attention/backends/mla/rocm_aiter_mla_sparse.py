@@ -173,6 +173,9 @@ def generate_sparse_seqlen_kernel(
     query_len = query_end - query_start
     query_mask = query_offset + query_start < query_end
     seq_len = tl.load(seq_len_ptr + seq_id)
+    # Just return since the out_ptr is zero initialized.
+    if seq_len == 0:
+        return
     context_start_point = seq_len - query_len
     sparse_seqlen = context_start_point + query_offset
     sparse_seqlen_masked = tl.where(
@@ -192,7 +195,8 @@ def generate_sparse_seqlen_triton(
     max_query_len: int,
 ):
     num_seqs = query_lens.size(0)
-    out = torch.empty([num_tokens], dtype=torch.int32, device=query_lens.device)
+    # zero initialize the tensor to make sure invalid positions will be zero
+    out = torch.zeros([num_tokens], dtype=torch.int32, device=query_lens.device)
     block_size = 64
     num_block_per_row = triton.cdiv(max_query_len, block_size)
     grid = (
