@@ -232,6 +232,7 @@ elif [[ $commands == *"VLLM_TEST_GROUP_NAME=mi325_4-2-node-tests-4-gpus-in-total
   if [[ "$commands" =~ ^(.*)"["(.*)"] && ["(.*)"]"$ ]]; then
       prefix=$( echo "${BASH_REMATCH[1]}" | sed 's/;//g')
       echo "PREFIX: ${prefix}"
+      export composite_command="(command rocm-smi || true)"
       myIFS=$IFS
       IFS=','
       read -ra node0 <<< ${BASH_REMATCH[2]}
@@ -243,8 +244,9 @@ elif [[ $commands == *"VLLM_TEST_GROUP_NAME=mi325_4-2-node-tests-4-gpus-in-total
         
         export commands="./.buildkite/scripts/run-multi-node-test.sh /vllm-workspace/tests 2 2 ${image_name} '${command_node_0}' '${command_node_1}'"
         echo "COMMANDS: ${commands}"
-        /bin/bash -c "${commands}"
+        composite_command=$(echo "${composite_command} && ${commands}")
       done
+      /bin/bash -c "${composite_command}"
   else
       echo "Failed to parse node commands! Exiting."
       exit 111
