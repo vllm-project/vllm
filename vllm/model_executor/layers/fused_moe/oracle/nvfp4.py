@@ -68,7 +68,7 @@ def backend_2_kernel_cls(
     backend: NvFp4MoeBackend,
 ) -> type[mk.FusedMoEPermuteExpertsUnpermute]:
     if backend == NvFp4MoeBackend.FLASHINFER_TRTLLM:
-        raise NotImplementedError
+        raise NotImplementedError("FLASHINFER_TRTLLM doesn't support Modular Kernel Interface")
 
     elif backend == NvFp4MoeBackend.FLASHINFER_CUTLASS:
         from vllm.model_executor.layers.fused_moe.flashinfer_cutlass_moe import (
