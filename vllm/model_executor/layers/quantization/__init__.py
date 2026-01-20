@@ -28,7 +28,6 @@ QuantizationMethods = Literal[
     "compressed-tensors",
     "bitsandbytes",
     "hqq",
-    "experts_int8",
     "ipex",
     "quark",
     "moe_wna16",
