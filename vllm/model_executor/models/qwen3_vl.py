@@ -128,8 +128,8 @@ from .vision import (
 
 logger = init_logger(__name__)
 
-# Official recommended max pixels is 24576 * 32 * 32
-_MAX_FRAMES_PER_VIDEO = 24576
+# Official recommended max frames is 2048
+_MAX_FRAMES_PER_VIDEO = 2048
 
 
 class Qwen3_VisionPatchEmbed(nn.Module):
