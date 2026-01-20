@@ -320,7 +320,7 @@ def _support_torch_compile(
             return
 
         self._check_shape_invariants = shape_invariants
-
+        self.was_aot_compile_fn_loaded_from_disk = False
         compilation_counter.num_models_seen += 1
         self.compiled = False
 
@@ -417,9 +417,9 @@ def _support_torch_compile(
             serialized backend artifacts), then we need to generate a new AOT
             compile artifact from scratch.
             """
-            from .caching import compilation_config_hash_factors
+            from .caching import aot_compile_hash_factors
 
-            factors: list[str] = compilation_config_hash_factors(self.vllm_config)
+            factors: list[str] = aot_compile_hash_factors(self.vllm_config)
 
             factors.append(_model_hash_key(self.forward))
             hash_key = hashlib.sha256(str(factors).encode()).hexdigest()
@@ -446,6 +446,7 @@ def _support_torch_compile(
                 if not self.compilation_config.dynamic_shapes_config.evaluate_guards:
                     loaded_fn.disable_guard_check()
                 self.aot_compiled_fn = loaded_fn
+                self.was_aot_compile_fn_loaded_from_disk = True
             except Exception as e:
                 if os.path.exists(aot_compilation_path):
                     logger.warning(
@@ -547,26 +548,45 @@ def _support_torch_compile(
                 logger.warning("Detected eager backend, disabling AOT compile.")
                 use_aot_compile = False
             if use_aot_compile:
-                self.aot_compiled_fn = self.aot_compile(*args, **kwargs)
-                output = self.aot_compiled_fn(self, *args, **kwargs)
-                assert aot_compilation_path is not None
-                assert cache_dir is not None
-                try:
-                    os.makedirs(cache_dir, exist_ok=True)
-                    self.aot_compiled_fn.save_compiled_function(aot_compilation_path)
-                except Exception as e:
-                    logger.warning(
-                        "Cannot save aot compilation to path %s, error: %s",
-                        aot_compilation_path,
-                        str(e),
-                    )
+                from vllm.compilation.backends import set_on_compilation_complete
+
+                # store the path for saving after warmup
+                self._aot_compilation_path = aot_compilation_path
+                self._aot_cache_dir = cache_dir
+                # set callback in context so it's available when compilation completes
+                with set_on_compilation_complete(self.save_aot_compiled_function):
+                    self.aot_compiled_fn = self.aot_compile(*args, **kwargs)
+                    output = self.aot_compiled_fn(self, *args, **kwargs)
             else:
                 output = TorchCompileWithNoGuardsWrapper.__call__(self, *args, **kwargs)  # type: ignore[arg-type]
 
         self.compiled = True
         return output
 
+    # triggers VllmSerializableFunction.serialize()
+    def save_aot_compiled_function(self):
+        if self.was_aot_compile_fn_loaded_from_disk:
+            logger.debug("AOT compiled function was loaded from cache, skipping save")
+            return
+
+        assert (
+            self.aot_compiled_fn and self._aot_compilation_path and self._aot_cache_dir
+        )
+
+        logger.info("saving AOT compiled function to %s", self._aot_compilation_path)
+        try:
+            os.makedirs(self._aot_cache_dir, exist_ok=True)
+            self.aot_compiled_fn.save_compiled_function(self._aot_compilation_path)
+            logger.info("saved AOT compiled function to %s", self._aot_compilation_path)
+        except Exception as e:
+            logger.warning(
+                "unable to save AOT compiled function to %s: %s",
+                self._aot_compilation_path,
+                e,
+            )
+
     cls.__call__ = __call__
+    cls.save_aot_compiled_function = save_aot_compiled_function
     return cls
 
 
