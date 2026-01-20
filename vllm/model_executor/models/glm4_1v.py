@@ -1414,7 +1414,6 @@ class Glm4vForConditionalGeneration(
             config.vision_config,
             norm_eps=getattr(config, "rms_norm_eps", 1e-5),
             quant_config=quant_config,
-            multimodal_config=multimodal_config,
             prefix=maybe_prefix(prefix, "visual"),
         )
 

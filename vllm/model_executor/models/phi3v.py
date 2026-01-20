@@ -593,7 +593,6 @@ class Phi3VForCausalLM(nn.Module, SupportsMultiModal, SupportsPP, SupportsQuant)
         self.vision_embed_tokens = Phi3HDImageEmbedding(
             config,
             quant_config=quant_config,
-            multimodal_config=multimodal_config,
             prefix=maybe_prefix(prefix, "model.vision_embed_tokens"),
         )
 

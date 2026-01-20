@@ -451,7 +451,6 @@ class Ovis2_5(nn.Module, SupportsMultiModal, SupportsPP):
         super().__init__()
         config = vllm_config.model_config.hf_config
         quant_config = vllm_config.quant_config
-        multimodal_config = vllm_config.model_config.multimodal_config
 
         self.config: PretrainedConfig = config
         self.llm = init_vllm_registered_model(
@@ -462,7 +461,6 @@ class Ovis2_5(nn.Module, SupportsMultiModal, SupportsPP):
         self.visual_tokenizer = VisualTokenizer(
             config=config.vit_config,
             visual_vocab_size=config.visual_vocab_size,
-            multimodal_config=multimodal_config,
             quant_config=quant_config,
             prefix=f"{prefix}.visual_tokenizer",
         )
