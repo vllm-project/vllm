@@ -260,8 +260,10 @@ __device__ __forceinline__ uint8_t* cvt_quant_to_fp4_get_sf_out_offset(
 template <class SFType>
 __device__ __forceinline__ uint8_t* sf_out_rowmajor_u8(
     int row, int pack, int packs_per_row_sf, SFType* SFout) {
-  constexpr int PACK = CVT_FP4_ELTS_PER_THREAD;
+  constexpr int PACK = CVT_FP4_ELTS_PER_THREAD_256b;
   constexpr int THREADS_PER_SF = CVT_FP4_SF_VEC_SIZE / PACK; // 1 if PACK=16, 2 else PACK=8
+
+  static_assert(THREADS_PER_SF == 1);
 
   if (threadIdx.x % THREADS_PER_SF != 0) return nullptr;
 
@@ -442,6 +444,30 @@ __inline__ __device__ PackedVec<Type> compute_silu_mul(
           __fmul2_rn(silu_vec, __bfloat1622float2(y_vec.elts[i])));
     }
   }
+  return result;
+}
+
+template <class Type>
+__inline__ __device__ PackedVec_256b<Type> compute_silu_mul_256b(
+    const PackedVec_256b<Type>& x_vec,
+    const PackedVec_256b<Type>& y_vec) {
+
+  PackedVec_256b<Type> result;
+
+#pragma unroll
+  for (int i = 0; i < (CVT_FP4_ELTS_PER_THREAD_256b / 2); ++i) {  
+    // silu_mul in float32
+    if constexpr (std::is_same_v<Type, half>) {
+      float2 silu_vec = silu2(__half22float2(x_vec.elts[i]));
+      result.elts[i] = __float22half2_rn(
+          __fmul2_rn(silu_vec, __half22float2(y_vec.elts[i])));
+    } else {
+      float2 silu_vec = silu2(__bfloat1622float2(x_vec.elts[i]));
+      result.elts[i] = __float22bfloat162_rn(
+          __fmul2_rn(silu_vec, __bfloat1622float2(y_vec.elts[i])));
+    }
+  }
+
   return result;
 }
 

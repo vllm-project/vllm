@@ -35,11 +35,10 @@ namespace vllm {
 template <class Type, bool UE8M0_SF = false>
 __global__ void __launch_bounds__(512, VLLM_BLOCKS_PER_SM(512))
     cvt_fp16_to_fp4(int32_t numRows, int32_t numCols, int32_t num_padded_cols,
-                    Type const* __restrict__ in,
-                    float const* __restrict__ SFScale, 
-                    uint32_t* __restrict__ out,
-                    uint32_t* __restrict__ SFout, 
-                    bool is_sf_swizzled_layout) {
+                       Type const* __restrict__ in,
+                       float const* __restrict__ SFScale, 
+                       uint32_t* __restrict__ out,
+                       uint32_t* __restrict__ SFout) {
   using PackedVec = PackedVec_256b<Type>;
 
   static constexpr int CVT_FP4_NUM_THREADS_PER_SF =
@@ -72,13 +71,61 @@ __global__ void __launch_bounds__(512, VLLM_BLOCKS_PER_SM(512))
       ld256_or_zero_cg_u32(r, &reinterpret_cast<const uint32_t*>(in)[inOffset * 8], valid);
       memcpy(&in_vec, r, 32);
 
-      uint8_t* sf_out = nullptr;
-      if (is_sf_swizzled_layout){
-        sf_out = cvt_quant_to_fp4_get_sf_out_offset<uint32_t,
+      auto sf_out = cvt_quant_to_fp4_get_sf_out_offset<uint32_t,
                                                 CVT_FP4_NUM_THREADS_PER_SF>(rowIdx, colIdx, numKTiles, SFout);
-      } else {
-        sf_out = sf_out_rowmajor_u8<uint32_t>(rowIdx, colIdx, num_padded_cols, SFout);
+
+      auto out_val = 
+            cvt_warp_fp16_to_fp4_256b<Type, CVT_FP4_NUM_THREADS_PER_SF, UE8M0_SF>(in_vec, global_scale, sf_out);
+      
+      int64_t outOffset = rowIdx * (numCols / 8) + colIdx * 2;      
+      // We do NOT write output for padding because the 'out' tensor is not
+      // padded.
+      if (rowIdx < numRows && elem_idx < numCols) {
+        uint64_t packed64 =
+                    (uint64_t(out_val.hi) << 32) | uint64_t(out_val.lo);
+        reinterpret_cast<uint64_t*>(out)[outOffset >> 1] = packed64;
       }
+    }
+  }
+}
+
+// Use UE4M3 by default.
+template <class Type, bool UE8M0_SF = false>
+__global__ void __launch_bounds__(512, VLLM_BLOCKS_PER_SM(512))
+    cvt_fp16_to_fp4_sf_major(int32_t numRows, int32_t numCols, int32_t sf_n_unpadded,
+                    Type const* __restrict__ in,
+                    float const* __restrict__ SFScale, 
+                    uint32_t* __restrict__ out,
+                    uint32_t* __restrict__ SFout) {
+  using PackedVec = PackedVec_256b<Type>;
+
+  static constexpr int CVT_FP4_NUM_THREADS_PER_SF =
+      (CVT_FP4_SF_VEC_SIZE / CVT_FP4_ELTS_PER_THREAD_256b);
+  static_assert(sizeof(PackedVec) == sizeof(Type) * CVT_FP4_ELTS_PER_THREAD_256b,
+                "Vec size is not matched.");
+
+  int32_t const colIdx = blockDim.x*blockIdx.y+threadIdx.x;
+  int elem_idx = colIdx * CVT_FP4_ELTS_PER_THREAD_256b;
+
+  // Get the global scaling factor, which will be applied to the SF.
+  // Note SFScale is the same as next GEMM's alpha, which is
+  // (448.f / (Alpha_A / 6.f)).
+  float const global_scale = (SFScale == nullptr) ? 1.0f : SFScale[0];
+
+  // Iterate over all rows and cols including padded ones -
+  //  ensures we visit every single scale factor address to initialize it.
+  for (int rowIdx = blockIdx.x; rowIdx < numRows; rowIdx += gridDim.x) {
+    if (colIdx < sf_n_unpadded) {      
+      PackedVec in_vec;
+      int64_t inOffset = rowIdx * (numCols / CVT_FP4_ELTS_PER_THREAD_256b) + colIdx;
+
+      // If we are outside valid rows OR outside valid columns -> Use Zeros
+      bool valid = (rowIdx < numRows) && (elem_idx < numCols);
+      uint32_t r[8];
+      ld256_or_zero_cg_u32(r, &reinterpret_cast<const uint32_t*>(in)[inOffset * 8], valid);
+      memcpy(&in_vec, r, 32);
+
+      auto sf_out = sf_out_rowmajor_u8<uint32_t>(rowIdx, colIdx, sf_n_unpadded, SFout);
 
       auto out_val = 
             cvt_warp_fp16_to_fp4_256b<Type, CVT_FP4_NUM_THREADS_PER_SF, UE8M0_SF>(in_vec, global_scale, sf_out);
@@ -119,29 +166,45 @@ void scaled_fp4_quant_sm1xxa(torch::Tensor const& output,
   const at::cuda::OptionalCUDAGuard device_guard(device_of(input));
   auto stream = at::cuda::getCurrentCUDAStream(input.get_device());
 
+  int sf_n_unpadded = int(n / CVT_FP4_SF_VEC_SIZE);
+
   // Grid, Block size. Each thread converts 8 values.
-  dim3 block(std::min(int(n / ELTS_PER_THREAD_256b), 512));
+  dim3 block(std::min(int(n / ELTS_PER_THREAD_256b), 512)); //FIXME: div:round_up(n/ELTS_PER_THREAD_256b, 32)?
   int const numBlocksPerSM =
       vllm_runtime_blocks_per_sm(static_cast<int>(block.x));
-  
-  int sf_n_unpadded = int(n / CVT_FP4_SF_VEC_SIZE);
-  int sf_n_int = int(vllm::round_up(sf_n_unpadded, 4) / 4);
-  int32_t num_padded_cols = sf_n_int * 4 * CVT_FP4_SF_VEC_SIZE / CVT_FP4_ELTS_PER_THREAD_256b;
-  int grid_y = vllm::div_round_up(num_padded_cols, static_cast<int>(block.x));
-  
-  int grid_x = std::min(vllm::computeEffectiveRows(m), std::max(1, (multiProcessorCount*numBlocksPerSM)/grid_y) );
 
-  dim3 grid(grid_x, grid_y);
+  if (is_sf_swizzled_layout){  
+    int sf_n_int = int(vllm::round_up(sf_n_unpadded, 4) / 4); 
+    int32_t num_padded_cols = sf_n_int * 4 * CVT_FP4_SF_VEC_SIZE / CVT_FP4_ELTS_PER_THREAD_256b;
+    
+    int grid_y = vllm::div_round_up(num_padded_cols, static_cast<int>(block.x));
+    int grid_x = std::min(vllm::computeEffectiveRows(m), std::max(1, (multiProcessorCount*numBlocksPerSM)/grid_y) );
+    dim3 grid(grid_x, grid_y);
 
-  VLLM_DISPATCH_HALF_TYPES(input.scalar_type(), "nvfp4_quant_kernel", [&] {
-    using cuda_type = vllm::CUDATypeConverter<scalar_t>::Type;
-    auto input_ptr = static_cast<cuda_type const*>(input.data_ptr());
-    // NOTE: We don't support e8m0 scales at this moment.
-    vllm::cvt_fp16_to_fp4<cuda_type, false><<<grid, block, 0, stream>>>(
-        m, n, num_padded_cols,
-        input_ptr, input_sf_ptr, 
-        reinterpret_cast<uint32_t*>(output_ptr),
-        reinterpret_cast<uint32_t*>(sf_out), 
-        is_sf_swizzled_layout);
-  });
+    VLLM_DISPATCH_HALF_TYPES(input.scalar_type(), "nvfp4_quant_kernel", [&] {
+      using cuda_type = vllm::CUDATypeConverter<scalar_t>::Type;
+      auto input_ptr = static_cast<cuda_type const*>(input.data_ptr());
+      // NOTE: We don't support e8m0 scales at this moment.
+      vllm::cvt_fp16_to_fp4<cuda_type, false><<<grid, block, 0, stream>>>(
+          m, n, num_padded_cols,
+          input_ptr, input_sf_ptr, 
+          reinterpret_cast<uint32_t*>(output_ptr),
+          reinterpret_cast<uint32_t*>(sf_out));
+    });
+  } else {
+    int grid_y = vllm::div_round_up(n, static_cast<int>(block.x));
+    int grid_x = std::min(m, std::max(1, (multiProcessorCount*numBlocksPerSM)/grid_y) );
+    dim3 grid(grid_x, grid_y);
+
+    VLLM_DISPATCH_HALF_TYPES(input.scalar_type(), "nvfp4_quant_kernel", [&] {
+      using cuda_type = vllm::CUDATypeConverter<scalar_t>::Type;
+      auto input_ptr = static_cast<cuda_type const*>(input.data_ptr());
+      // NOTE: We don't support e8m0 scales at this moment.
+      vllm::cvt_fp16_to_fp4_sf_major<cuda_type, false><<<grid, block, 0, stream>>>(
+          m, n, sf_n_unpadded,
+          input_ptr, input_sf_ptr, 
+          reinterpret_cast<uint32_t*>(output_ptr),
+          reinterpret_cast<uint32_t*>(sf_out));
+    });
+  } 
 }
