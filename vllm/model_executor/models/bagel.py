@@ -44,6 +44,7 @@ from .interfaces import (
     SupportsLoRA,
     SupportsMultiModal,
     SupportsPP,
+    TowerMissingLayer,
 )
 from .siglip import SiglipVisionModel
 from .utils import (
@@ -425,9 +426,9 @@ class BagelForConditionalGeneration(
                     hidden_size=llm_hidden_size,
                 )
         else:
-            self.vit_model = None
-            self.connector = None
-            self.vit_pos_embed = None
+            self.vit_model = TowerMissingLayer("image")
+            self.connector = TowerMissingLayer("image")
+            self.vit_pos_embed = TowerMissingLayer("image")
 
         self.make_empty_intermediate_tensors = (
             self.language_model.make_empty_intermediate_tensors
@@ -539,14 +540,6 @@ class BagelForConditionalGeneration(
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         """Load weights from checkpoint."""
-        skip_prefixes = []
-        # Skip vit_pos_embed.pos_embed as it's handled by PositionEmbedding module
-        skip_prefixes.append("vit_pos_embed.pos_embed")
-
-        # If visual understanding is disabled, skip vision-related weights
-        if self.vit_model is None:
-            skip_prefixes.extend(["vit_model.", "connector.", "vit_pos_embed"])
-
         # Skip generation-related weights since we only support text2text and image2text
         # Filter out all image generation components:
         # - 'moe_gen': MoE generation weights
@@ -586,5 +579,6 @@ class BagelForConditionalGeneration(
 
             filtered_weights.append((name, tensor))
 
-        loader = AutoWeightsLoader(self, skip_prefixes=skip_prefixes)
+        # Skip vit_pos_embed.pos_embed as it's handled by PositionEmbedding module
+        loader = AutoWeightsLoader(self, skip_prefixes=["vit_pos_embed.pos_embed"])
         return loader.load_weights(filtered_weights, mapper=self.hf_to_vllm_mapper)

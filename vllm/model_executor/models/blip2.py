@@ -551,20 +551,17 @@ class Blip2ForConditionalGeneration(
 
         with self._mark_tower_model(vllm_config, "image"):
             self.vision_model = BlipVisionModel(vision_config, quant_config)
-
             self.query_tokens = nn.Parameter(
                 torch.zeros(
                     1, config.num_query_tokens, config.qformer_config.hidden_size
                 )
             )
-
             self.qformer = Blip2QFormerModel(
                 config.qformer_config,
                 cache_config=cache_config,
                 quant_config=quant_config,
                 prefix=f"{prefix}.qformer",
             )
-
             self.language_projection = nn.Linear(
                 config.qformer_config.hidden_size,
                 config.text_config.hidden_size,
