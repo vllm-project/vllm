@@ -48,7 +48,10 @@ from vllm.entrypoints.openai.responses.protocol import (
     ResponseInputOutputItem,
     ResponsesRequest,
 )
+from vllm.logger import init_logger
 from vllm.utils import random_uuid
+
+logger = init_logger(__name__)
 
 REASONING_EFFORT = {
     "high": ReasoningEffort.HIGH,
@@ -633,6 +636,16 @@ def parse_output_message(message: Message) -> list[ResponseOutputItem]:
     output_items: list[ResponseOutputItem] = []
     recipient = message.recipient
 
+    # Diagnostic: detect special tokens in recipient
+    if recipient and ("<|channel|>" in recipient or "<|recipient|>" in recipient):
+        logger.warning(
+            "Harmony parser bug: recipient contains special tokens. "
+            "recipient=%r, channel=%r, author_role=%s",
+            recipient,
+            message.channel,
+            message.author.role if message.author else None,
+        )
+
     if recipient is not None:
         # Browser tool calls
         if recipient.startswith("browser."):
@@ -676,6 +689,21 @@ def parse_remaining_state(parser: StreamableParser) -> list[ResponseOutputItem]:
     if parser.current_role != Role.ASSISTANT:
         return []
     current_recipient = parser.current_recipient
+
+    # Diagnostic: detect special tokens in current_recipient
+    if current_recipient and (
+        "<|channel|>" in current_recipient or "<|recipient|>" in current_recipient
+    ):
+        logger.warning(
+            "Harmony parser bug: parse_remaining_state current_recipient "
+            "contains special tokens. recipient=%r, channel=%r, role=%s, "
+            "message_count=%d",
+            current_recipient,
+            parser.current_channel,
+            parser.current_role,
+            len(parser.messages),
+        )
+
     if current_recipient is not None and current_recipient.startswith("browser."):
         return []
 

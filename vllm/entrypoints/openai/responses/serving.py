@@ -2015,7 +2015,24 @@ class OpenAIServingResponses(OpenAIServing):
         if not state.sent_output_item_added:
             state.sent_output_item_added = True
             state.current_item_id = f"mcp_{random_uuid()}"
-            mcp_name = ctx.parser.current_recipient[len("mcp.") :]
+            recipient = ctx.parser.current_recipient
+
+            # Diagnostic: detect special tokens in current_recipient
+            if recipient and (
+                "<|channel|>" in recipient or "<|recipient|>" in recipient
+            ):
+                logger.warning(
+                    "Harmony parser bug: MCP prefix current_recipient "
+                    "contains special tokens. recipient=%r, channel=%r",
+                    recipient,
+                    ctx.parser.current_channel,
+                )
+
+            mcp_name = (
+                recipient[len("mcp.") :]
+                if recipient and recipient.startswith("mcp.")
+                else recipient
+            )
 
             events.append(
                 ResponseOutputItemAddedEvent(
@@ -2079,8 +2096,25 @@ class OpenAIServingResponses(OpenAIServing):
             or ctx.parser.current_channel == "analysis"
         ) and ctx.parser.current_recipient is not None:
             recipient = ctx.parser.current_recipient
+
+            # Diagnostic: detect special tokens in current_recipient
+            if recipient and (
+                "<|channel|>" in recipient or "<|recipient|>" in recipient
+            ):
+                last_delta = (
+                    ctx.last_content_delta[:50] if ctx.last_content_delta else None
+                )
+                logger.warning(
+                    "Harmony parser bug: streaming current_recipient "
+                    "contains special tokens. recipient=%r, channel=%r, "
+                    "last_content_delta=%r",
+                    recipient,
+                    ctx.parser.current_channel,
+                    last_delta,
+                )
+
             # Check for function calls first - they have their own event handling
-            if recipient.startswith("functions."):
+            if recipient and recipient.startswith("functions."):
                 return self._emit_function_call_delta_events(ctx, state)
             is_mcp_tool = self._is_mcp_tool_by_namespace(recipient)
             if is_mcp_tool:
