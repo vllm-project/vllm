@@ -46,13 +46,13 @@ from vllm.multimodal.inputs import (
 )
 from vllm.multimodal.parse import ImageProcessorItems, ImageSize, MultiModalDataItems
 from vllm.multimodal.processing import (
+    BaseDummyInputsBuilder,
     BaseMultiModalProcessor,
     BaseProcessingInfo,
     PromptIndexTargets,
     PromptReplacement,
     PromptUpdate,
 )
-from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from vllm.sequence import IntermediateTensors
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
@@ -690,9 +690,9 @@ class SiglipMultiheadAttentionPoolingHead(nn.Module):
         hidden_state = self.mlp(hidden_state)
         hidden_state += residual
 
-        pooled = hidden_state[:, 0]
-
-        return pooled.unsqueeze(1)
+        # Handled by resolve_visual_encoder_outputs
+        # return hidden_state[:, 0]
+        return hidden_state
 
 
 class SiglipVisionTransformer(nn.Module):

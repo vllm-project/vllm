@@ -10,8 +10,10 @@ import regex as re
 from transformers import PreTrainedTokenizerBase
 
 import vllm.envs as envs
-from vllm.entrypoints.openai.protocol import (
+from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionRequest,
+)
+from vllm.entrypoints.openai.engine.protocol import (
     DeltaFunctionCall,
     DeltaMessage,
     DeltaToolCall,
