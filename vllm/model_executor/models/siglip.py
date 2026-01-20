@@ -1033,20 +1033,22 @@ class SiglipEmbeddingModel(nn.Module, SupportsMultiModal, SupportsQuant):
 
         self.text_embed_dim = text_config.hidden_size
         self.vision_embed_dim = vision_config.hidden_size
-
-        self.text_model = SiglipTextTransformer(
-            text_config,
-            quant_config=quant_config,
-            prefix=maybe_prefix(prefix, "text_model"),
-        )
-        self.vision_model = SiglipVisionTransformer(
-            vision_config,
-            quant_config=quant_config,
-            multimodal_config=multimodal_config,
-            prefix=maybe_prefix(prefix, "vision_model"),
-        )
-
         self.text_projection_size = text_config.projection_size
+
+        with self._mark_language_model(vllm_config):
+            self.text_model = SiglipTextTransformer(
+                text_config,
+                quant_config=quant_config,
+                prefix=maybe_prefix(prefix, "text_model"),
+            )
+
+        with self._mark_tower_model(vllm_config, "image"):
+            self.vision_model = SiglipVisionTransformer(
+                vision_config,
+                quant_config=quant_config,
+                multimodal_config=multimodal_config,
+                prefix=maybe_prefix(prefix, "vision_model"),
+            )
 
         pooler_config = vllm_config.model_config.pooler_config
         assert pooler_config is not None
@@ -1154,9 +1156,6 @@ class SiglipEmbeddingModel(nn.Module, SupportsMultiModal, SupportsQuant):
         pixel_values = inputs["data"]
 
         return self.get_image_features(pixel_values)
-
-    def get_language_model(self) -> torch.nn.Module:
-        return self.text_model
 
     def _embed_text_input_ids(
         self,

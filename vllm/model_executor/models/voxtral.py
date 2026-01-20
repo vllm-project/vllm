@@ -366,22 +366,22 @@ class VoxtralForConditionalGeneration(
         self.config = config
         self.downsample_factor = self.config.audio_config.downsample_factor
 
-        self.language_model = init_vllm_registered_model(
-            vllm_config=vllm_config,
-            hf_config=config.text_config,
-            prefix=maybe_prefix(prefix, "language_model"),
-        )
-        self.whisper_encoder = VoxtralEncoderModel(
-            vllm_config.with_hf_config(config.audio_config),
-            prefix=maybe_prefix(prefix, "whisper_encoder"),
-        )
-        self.audio_language_adapter = AudioLanguageAdapter(
-            hidden_size=config.audio_config.d_model * self.downsample_factor,
-            dim=config.text_config.hidden_size,
-        )
+        with self._mark_language_model(vllm_config):
+            self.language_model = init_vllm_registered_model(
+                vllm_config=vllm_config,
+                hf_config=config.text_config,
+                prefix=maybe_prefix(prefix, "language_model"),
+            )
 
-    def get_language_model(self) -> torch.nn.Module:
-        return self.language_model
+        with self._mark_tower_model(vllm_config, "audio"):
+            self.whisper_encoder = VoxtralEncoderModel(
+                vllm_config.with_hf_config(config.audio_config),
+                prefix=maybe_prefix(prefix, "whisper_encoder"),
+            )
+            self.audio_language_adapter = AudioLanguageAdapter(
+                hidden_size=config.audio_config.d_model * self.downsample_factor,
+                dim=config.text_config.hidden_size,
+            )
 
     def get_mm_mapping(self) -> MultiModelKeys:
         """Get module prefix for multimodal models to filter LoRA modules."""
