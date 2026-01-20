@@ -175,7 +175,7 @@ def set_process_title(
 
 def _add_prefix(file: TextIO, worker_name: str, pid: int) -> None:
     """Add colored prefix to file output for log decoration."""
-    if envs.NO_COLOR:
+    if envs.NO_COLOR or not file.isatty():
         prefix = f"({worker_name} pid={pid}) "
     else:
         prefix = f"{CYAN}({worker_name} pid={pid}){RESET} "
