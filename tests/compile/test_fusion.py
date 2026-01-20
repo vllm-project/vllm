@@ -166,8 +166,6 @@ class TestModel(torch.nn.Module):
             return [torch.ops.vllm.triton_per_token_group_quant_fp8.default]
         if self.use_aiter and self.use_aiter_quant_op:
             return [rocm_aiter_ops.get_per_token_quant_op()]
-        if self.use_aiter:
-            return [QUANT_OPS[self.quant_key]]
         if self.enable_quant_fp8_custom_op:
             return [QUANT_OPS[self.quant_key]]
         return [torch.ops.aten.reciprocal]
@@ -366,11 +364,13 @@ def test_aiter_fusion_rmsnorm_quant(
     use_aiter_quant_op: bool,
     monkeypatch: pytest.MonkeyPatch,
 ):
+    custom_ops = ["+quant_fp8"] if use_aiter_quant_op else ["-quant_fp8"]
+    custom_ops += ["+rms_norm"]
     vllm_config = VllmConfig(
         model_config=ModelConfig(dtype=dtype),
         compilation_config=CompilationConfig(
             mode=CompilationMode.VLLM_COMPILE,
-            custom_ops=["+rms_norm", "+quant_fp8"],
+            custom_ops=custom_ops,
             pass_config=PassConfig(fuse_norm_quant=True, eliminate_noops=True),
         ),
     )
