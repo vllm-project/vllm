@@ -347,9 +347,10 @@ class OpenAISpeechToText(OpenAIServing):
         if tokens_with_start[-2] < init_token and tokens_with_start[-1] >= init_token:
             tokens_with_start = tokens_with_start + (tokens_with_start[-1],)
         avg_logprob = 0.0
-        for idx, token in enumerate(tokens_with_start, start=1):
+        for idx in range(1, len(tokens_with_start)):
             # Timestamp tokens (e.g., <|0.00|>) are assumed to be sorted.
             # If the ordering is violated, this slicing may produce incorrect results.
+            token = tokens_with_start[idx]
             if token >= init_token and tokens_with_start[idx - 1] >= init_token:
                 sliced_timestamp_tokens = tokens_with_start[last_timestamp_start:idx]
                 start_timestamp = sliced_timestamp_tokens[0] - init_token
