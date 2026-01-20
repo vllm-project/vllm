@@ -9,7 +9,6 @@ import torch
 import torch.nn as nn
 
 from vllm.config import (
-    CompilationMode,
     CUDAGraphMode,
     VllmConfig,
     get_layers_from_vllm_config,
@@ -36,6 +35,7 @@ from vllm.v1.attention.backends.tree_attn import (
     TreeAttentionMetadataBuilder,
 )
 from vllm.v1.attention.backends.triton_attn import TritonAttentionMetadata
+from vllm.v1.cudagraph_dispatcher import CudagraphDispatcher
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.sample.sampler import _SAMPLING_EPS
@@ -100,24 +100,13 @@ class SpecDecodeBaseProposer:
             self._get_eagle3_use_aux_hidden_state_from_config()
         )
 
-        self.use_cuda_graph = False
-
         self.compilation_config = self.vllm_config.compilation_config
-        if self.compilation_config.mode == CompilationMode.VLLM_COMPILE:
-            cudagraph_mode = self.compilation_config.cudagraph_mode
-            if cudagraph_mode != CUDAGraphMode.NONE and not cudagraph_mode.has_mode(
-                CUDAGraphMode.PIECEWISE
-            ):
-                logger.warning(
-                    "Currently the eagle proposer only supports cudagraph_mode "
-                    "PIECEWISE, if you want the drafter to use cuda graphs, "
-                    "please set compilation_config.cudagraph_mode to PIECEWISE "
-                    "or FULL_AND_PIECEWISE"
-                )
-            self.use_cuda_graph = (
-                cudagraph_mode.has_mode(CUDAGraphMode.PIECEWISE)
-                and not self.speculative_config.enforce_eager
-            )
+
+        # Cudagraph dispatcher for PIECEWISE-only dispatching in eagle.
+        # Keys are initialized later via initialize_cudagraph_keys() called from
+        # gpu_model_runner._check_and_update_cudagraph_mode after
+        # adjust_cudagraph_sizes_for_spec_decode is called.
+        self.cudagraph_dispatcher = CudagraphDispatcher(self.vllm_config)
 
         # persistent buffers for cuda graph
         self.input_ids = torch.zeros(
@@ -234,6 +223,23 @@ class SpecDecodeBaseProposer:
         else:
             self.positions[:num_tokens] = positions
 
+    def initialize_cudagraph_keys(self, cudagraph_mode: CUDAGraphMode) -> None:
+        """Initialize cudagraph dispatcher keys for eagle.
+
+        Eagle only supports PIECEWISE cudagraphs (via mixed_mode).
+        This should be called after adjust_cudagraph_sizes_for_spec_decode.
+        """
+        if (
+            not self.speculative_config.enforce_eager
+            and cudagraph_mode.mixed_mode()
+            in [CUDAGraphMode.PIECEWISE, CUDAGraphMode.FULL]
+        ):
+            eagle_cudagraph_mode = CUDAGraphMode.PIECEWISE
+        else:
+            eagle_cudagraph_mode = CUDAGraphMode.NONE
+
+        self.cudagraph_dispatcher.initialize_cudagraph_keys(eagle_cudagraph_mode)
+
     def propose(
         self,
         # [num_tokens]
@@ -304,16 +310,10 @@ class SpecDecodeBaseProposer:
             num_tokens_unpadded=num_tokens, num_tokens_padded=num_tokens
         )
 
-        cudagraph_runtime_mode = CUDAGraphMode.NONE
-        if (
-            self.use_cuda_graph
-            and num_tokens_dp_padded
-            <= self.compilation_config.max_cudagraph_capture_size
-        ):
-            num_input_tokens = self.vllm_config.pad_for_cudagraph(num_tokens_dp_padded)
-            cudagraph_runtime_mode = CUDAGraphMode.PIECEWISE
-        else:
-            num_input_tokens = num_tokens_dp_padded
+        cudagraph_runtime_mode, batch_desc = self.cudagraph_dispatcher.dispatch(
+            num_tokens_dp_padded
+        )
+        num_input_tokens = batch_desc.num_tokens
         if num_tokens_across_dp is not None:
             num_tokens_across_dp[self.dp_rank] = num_input_tokens
 
@@ -412,16 +412,10 @@ class SpecDecodeBaseProposer:
             num_tokens_unpadded=batch_size, num_tokens_padded=batch_size
         )
 
-        if (
-            self.use_cuda_graph
-            and batch_size_dp_padded
-            <= self.compilation_config.max_cudagraph_capture_size
-        ):
-            input_batch_size = self.vllm_config.pad_for_cudagraph(batch_size_dp_padded)
-            cudagraph_runtime_mode = CUDAGraphMode.PIECEWISE
-        else:
-            input_batch_size = batch_size_dp_padded
-            cudagraph_runtime_mode = CUDAGraphMode.NONE
+        cudagraph_runtime_mode, batch_desc = self.cudagraph_dispatcher.dispatch(
+            batch_size_dp_padded
+        )
+        input_batch_size = batch_desc.num_tokens
         if batch_size_across_dp is not None:
             batch_size_across_dp[self.dp_rank] = input_batch_size
 
@@ -870,15 +864,10 @@ class SpecDecodeBaseProposer:
             self.positions[:num_tokens] = tree_positions.view(-1)
             self.hidden_states[:num_tokens] = tree_hidden_states.view(num_tokens, -1)
 
-            if (
-                self.use_cuda_graph
-                and num_tokens <= self.compilation_config.max_cudagraph_capture_size
-            ):
-                num_input_tokens = self.vllm_config.pad_for_cudagraph(num_tokens)
-                cudagraph_runtime_mode = CUDAGraphMode.PIECEWISE
-            else:
-                num_input_tokens = num_tokens
-                cudagraph_runtime_mode = CUDAGraphMode.NONE
+            cudagraph_runtime_mode, batch_desc = self.cudagraph_dispatcher.dispatch(
+                num_tokens
+            )
+            num_input_tokens = batch_desc.num_tokens
             # Run the model.
             with set_forward_context(
                 per_layer_attn_metadata,
@@ -1216,9 +1205,6 @@ class SpecDecodeBaseProposer:
         use_cudagraphs: bool = True,
         is_graph_capturing: bool = False,
     ) -> None:
-        # Determine if CUDA graphs should be used for this run.
-        cudagraphs_enabled = use_cudagraphs and self.use_cuda_graph
-
         # FIXME: when using tree-based specdec, adjust number of forward-passes
         # according to the depth of the tree.
         for fwd_idx in range(
@@ -1228,16 +1214,10 @@ class SpecDecodeBaseProposer:
                 num_tokens_dp_padded, num_tokens_across_dp = self._pad_batch_across_dp(
                     num_tokens_unpadded=num_tokens, num_tokens_padded=num_tokens
                 )
-                if (
-                    cudagraphs_enabled
-                    and num_tokens_dp_padded
-                    <= self.compilation_config.max_cudagraph_capture_size
-                ):
-                    num_input_tokens = self.vllm_config.pad_for_cudagraph(
-                        num_tokens_dp_padded
-                    )
-                else:
-                    num_input_tokens = num_tokens_dp_padded
+                cudagraph_runtime_mode, batch_desc = self.cudagraph_dispatcher.dispatch(
+                    num_tokens_dp_padded
+                )
+                num_input_tokens = batch_desc.num_tokens
                 if num_tokens_across_dp is not None:
                     num_tokens_across_dp[self.dp_rank] = num_input_tokens
 
@@ -1246,9 +1226,7 @@ class SpecDecodeBaseProposer:
                 self.vllm_config,
                 num_tokens=num_input_tokens,
                 num_tokens_across_dp=num_tokens_across_dp,
-                cudagraph_runtime_mode=CUDAGraphMode.PIECEWISE
-                if cudagraphs_enabled
-                else CUDAGraphMode.NONE,
+                cudagraph_runtime_mode=cudagraph_runtime_mode,
             ):
                 if self.supports_mm_inputs:
                     input_ids = None
@@ -1340,7 +1318,8 @@ class SpecDecodeBaseProposer:
             num_tokens_unpadded=num_tokens_unpadded,
             parallel_config=self.vllm_config.parallel_config,
             allow_microbatching=False,
-            allow_dp_padding=self.use_cuda_graph,
+            allow_dp_padding=self.cudagraph_dispatcher.cudagraph_mode
+            != CUDAGraphMode.NONE,
             num_tokens_padded=num_tokens_padded,
             uniform_decode=None,
             num_scheduled_tokens_per_request=None,
