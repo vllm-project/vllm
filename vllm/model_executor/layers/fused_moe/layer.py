@@ -1815,9 +1815,6 @@ class FusedMoE(CustomOp):
             # Matrix multiply.
             if do_naive_dispatch:
                 extra_tensors: list[torch.Tensor] | None = None
-                from vllm.model_executor.layers.quantization.modelopt import (
-                    ModelOptNvFp4FusedMoE,
-                )
 
                 hidden_states, router_logits = get_ep_group().dispatch(
                     hidden_states, router_logits, self.is_sequence_parallel
