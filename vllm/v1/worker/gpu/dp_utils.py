@@ -48,11 +48,11 @@ def get_cudagraph_and_dp_padding(
     num_tokens_across_dp, cudagraph_size_across_dp = get_batch_metadata_across_dp(
         num_tokens, cudagraph_size, dp_size, dp_rank
     )
-    if all(num_tokens_across_dp == 0):
+    if torch.all(num_tokens_across_dp == 0).item():
         # All ranks have zero tokens to run.
         return False, 0, None
 
-    if all(cudagraph_size_across_dp != -1):
+    if torch.all(cudagraph_size_across_dp != -1).item():
         # All ranks use CUDA graph. Use CUDA graph for all ranks.
         # Pad all ranks to the maximum CUDA graph size.
         max_cudagraph_size = int(cudagraph_size_across_dp.max().item())
