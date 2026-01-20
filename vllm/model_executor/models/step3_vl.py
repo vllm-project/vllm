@@ -942,7 +942,7 @@ class Step3VLForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP)
         self.multimodal_config = multimodal_config
         self.use_data_parallel = multimodal_config.mm_encoder_tp_mode == "data"
 
-        if multimodal_config.get_limit_per_prompt("image"):
+        with self._mark_tower_model(vllm_config, "image"):
             self.vision_model = Step3VisionTransformer(
                 config.vision_config,
                 None,
@@ -967,17 +967,13 @@ class Step3VLForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP)
                 config.hidden_size,
                 bias=config.projector_bias,
             )
-        else:
-            self.vision_model = None
-            self.vit_downsampler = None
-            self.vit_downsampler2 = None
-            self.vit_large_projector = None
 
-        self.language_model = init_vllm_registered_model(
-            vllm_config=vllm_config,
-            hf_config=config.text_config,
-            prefix=maybe_prefix(prefix, "language_model"),
-        )
+        with self._mark_language_model(vllm_config):
+            self.language_model = init_vllm_registered_model(
+                vllm_config=vllm_config,
+                hf_config=config.text_config,
+                prefix=maybe_prefix(prefix, "language_model"),
+            )
 
         self.make_empty_intermediate_tensors = (
             self.language_model.make_empty_intermediate_tensors
@@ -1071,9 +1067,6 @@ class Step3VLForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP)
             )
         return merged_image_features
 
-    def get_language_model(self) -> torch.nn.Module:
-        return self.language_model
-
     def embed_multimodal(self, **kwargs) -> MultiModalEmbeddings:
         image_input = self._parse_and_validate_image_input(**kwargs)
         if image_input is None:
@@ -1133,15 +1126,5 @@ class Step3VLForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP)
         return self.language_model.compute_logits(hidden_states)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
-        skip_prefixes = []
-        if self.vision_model is None and self.vit_large_projector is None:
-            skip_prefixes = [
-                "vision_model.",
-                "vit_downsampler.",
-                "vit_downsampler2.",
-                "vit_large_projector.",
-            ]
-
-        loader = AutoWeightsLoader(self, skip_prefixes=skip_prefixes)
-        loaded_weights = loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
-        return loaded_weights
+        loader = AutoWeightsLoader(self)
+        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
