@@ -80,7 +80,7 @@ def test_triton_experts_no_mul_activation(
     )
 
     experts = TritonExperts(
-        moe_config=make_dummy_moe_config,
+        moe_config=make_dummy_moe_config(),
         quant_config=FUSED_MOE_UNQUANTIZED_CONFIG,
     )
 

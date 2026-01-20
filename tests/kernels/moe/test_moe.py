@@ -437,7 +437,7 @@ def test_naive_block_assignment_moe(
     #
     quant_config = FUSED_MOE_UNQUANTIZED_CONFIG
 
-    m_fused_moe_fn = modular_triton_fused_moe(make_dummy_moe_config, quant_config)
+    m_fused_moe_fn = modular_triton_fused_moe(make_dummy_moe_config(), quant_config)
 
     def m_fused_moe(
         a: torch.Tensor,
