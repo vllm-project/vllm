@@ -369,6 +369,7 @@ Flags: `--tool-call-parser glm45`
 Supported models:
 
 * `zai-org/GLM-4.7`
+* `zai-org/GLM-4.7-Flash`
 
 Flags: `--tool-call-parser glm47`
 
