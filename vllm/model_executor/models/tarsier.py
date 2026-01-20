@@ -47,7 +47,12 @@ from vllm.utils.tensor_schema import TensorSchema, TensorShape
 from .clip import CLIPVisionModel
 from .interfaces import MultiModalEmbeddings, SupportsMultiModal, SupportsPP
 from .siglip import SiglipVisionModel
-from .utils import AutoWeightsLoader, init_vllm_registered_model, maybe_prefix
+from .utils import (
+    AutoWeightsLoader,
+    get_layer_index,
+    init_vllm_registered_model,
+    maybe_prefix,
+)
 from .vision import (
     VisionEncoderInfo,
     get_num_selected_vision_tokens,
@@ -356,18 +361,13 @@ def init_vision_tower_for_tarsier(
     feature_layers = hf_config.vision_feature_layer
     base_num_hidden_layers = vision_config.num_hidden_layers
 
-    def _get_layer_index(feature_layer_index: int, num_hidden_layers_total: int) -> int:
-        if feature_layer_index < 0:
-            return num_hidden_layers_total + feature_layer_index + 1
-        return feature_layer_index
-
     if isinstance(feature_layers, int):
-        num_hidden_layers_to_init = _get_layer_index(
+        num_hidden_layers_to_init = get_layer_index(
             feature_layers, base_num_hidden_layers
         )
     elif isinstance(feature_layers, (list, tuple)):
         num_hidden_layers_to_init = max(
-            _get_layer_index(idx, base_num_hidden_layers) for idx in feature_layers
+            get_layer_index(idx, base_num_hidden_layers) for idx in feature_layers
         )
     else:
         raise TypeError(
@@ -597,14 +597,7 @@ class TarsierForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP)
     ) -> torch.Tensor | IntermediateTensors:
         if intermediate_tensors is not None:
             inputs_embeds = None
-        elif inputs_embeds is None:
-            vision_embeddings = self.embed_multimodal(**kwargs)
-            inputs_embeds = self.embed_input_ids(
-                input_ids,
-                vision_embeddings,
-                is_multimodal=input_ids == self.config.image_token_index,
-            )
-            input_ids = None
+
         hidden_states = self.language_model.model(
             input_ids=input_ids,
             positions=positions,
