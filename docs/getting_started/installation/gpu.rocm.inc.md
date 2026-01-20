@@ -19,7 +19,7 @@ If you need a different ROCm version or want to use an existing PyTorch installa
 # --8<-- [end:set-up-using-python]
 # --8<-- [start:pre-built-wheels]
 
-To install the latest version of vLLM for Python 3.12, ROCm 7.0 and glibc >= 2.35.
+To install the latest version of vLLM for Python 3.12, ROCm 7.0 and `glibc >= 2.35`.
 
 ```bash
 uv pip install vllm --extra-index-url https://wheels.vllm.ai/rocm/
@@ -34,7 +34,7 @@ To install a specific version and ROCm variant of vLLM wheel.
 uv pip install vllm --extra-index-url https://wheels.vllm.ai/rocm/0.14.0/rocm700
 ```
 
-We recommend leveraging `uv`.
+We recommend leveraging `uv` to install ROCm wheels.
 
 !!! warning "`pip` caveat"
 
@@ -164,7 +164,7 @@ We recommend leveraging `uv`.
         python3 setup.py develop
         ```
 
-    This may take 5-10 minutes. Currently, `pip install .` does not work for ROCm installation from source.
+    This may take 5-10 minutes. Currently, `pip install .` does not work for ROCm when installing vLLM from source.
 
     !!! tip
         - The ROCm version of PyTorch, ideally, should match the ROCm driver version.
