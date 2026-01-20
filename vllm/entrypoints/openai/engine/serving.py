@@ -84,8 +84,11 @@ from vllm.entrypoints.pooling.pooling.protocol import (
 )
 from vllm.entrypoints.pooling.score.protocol import (
     RerankRequest,
+    ScoreDataRequest,
+    ScoreQueriesDocumentsRequest,
     ScoreRequest,
     ScoreResponse,
+    ScoreTextRequest,
 )
 from vllm.entrypoints.renderer import BaseRenderer, CompletionRenderer, RenderConfig
 from vllm.entrypoints.serve.disagg.protocol import GenerateRequest, GenerateResponse
@@ -1032,7 +1035,9 @@ class OpenAIServing:
             (
                 EmbeddingChatRequest,
                 EmbeddingCompletionRequest,
-                ScoreRequest,
+                ScoreDataRequest,
+                ScoreTextRequest,
+                ScoreQueriesDocumentsRequest,
                 RerankRequest,
                 ClassificationCompletionRequest,
                 ClassificationChatRequest,
@@ -1042,7 +1047,9 @@ class OpenAIServing:
             # since these requests don't generate tokens.
             if token_num > self.max_model_len:
                 operations: dict[type[AnyRequest], str] = {
-                    ScoreRequest: "score",
+                    ScoreDataRequest: "score",
+                    ScoreTextRequest: "score",
+                    ScoreQueriesDocumentsRequest: "score",
                     ClassificationCompletionRequest: "classification",
                     ClassificationChatRequest: "classification",
                 }
@@ -1277,9 +1284,11 @@ class OpenAIServing:
             assert is_list_of(request_prompt, int), (
                 "Prompt has to be either a string or a list of token ids"
             )
-            prompt_inputs = TokensPrompt(
-                prompt=tokenizer.decode(request_prompt),
-                prompt_token_ids=request_prompt,
+            input_text = tokenizer.decode(request_prompt)
+            prompt_inputs = self._validate_input(
+                request=request,
+                input_ids=request_prompt,
+                input_text=input_text,
             )
 
         engine_prompt = TokensPrompt(prompt_token_ids=prompt_inputs["prompt_token_ids"])

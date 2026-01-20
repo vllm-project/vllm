@@ -178,6 +178,7 @@ def convert_to_nvfp4_moe_kernel_format(
             w2=w2,
             w2_scale=w2_scale,
             w2_scale_2=w2_scale_2,
+            is_act_and_mul=is_act_and_mul,
         )
     else:
         raise ValueError(f"Unknown NvFp4 backend for MoE: {nvfp4_backend}")
