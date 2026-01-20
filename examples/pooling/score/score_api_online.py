@@ -40,7 +40,10 @@ def main(args):
     pprint.pprint(score_response.json())
 
     queries = "What is the capital of France?"
-    documents = ["The capital of Brazil is Brasilia.", "The capital of France is Paris."]
+    documents = [
+        "The capital of Brazil is Brasilia.",
+        "The capital of France is Paris.",
+    ]
     prompt = {"model": model_name, "queries": queries, "documents": documents}
     score_response = post_http_request(prompt=prompt, api_url=api_url)
     print("\nPrompt when queries is string and documents is a list:")
@@ -49,7 +52,10 @@ def main(args):
     pprint.pprint(score_response.json())
 
     queries = ["What is the capital of Brazil?", "What is the capital of France?"]
-    documents = ["The capital of Brazil is Brasilia.", "The capital of France is Paris."]
+    documents = [
+        "The capital of Brazil is Brasilia.",
+        "The capital of France is Paris.",
+    ]
     prompt = {"model": model_name, "queries": queries, "documents": documents}
     score_response = post_http_request(prompt=prompt, api_url=api_url)
     print("\nPrompt when queries and documents are both lists:")

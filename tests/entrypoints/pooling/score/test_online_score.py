@@ -61,21 +61,18 @@ def runner(model: dict[str, Any], hf_runner):
 
 
 class TestModel:
-    def test_data_1_str_data_2_list(
+    def test_queries_str_documents_str(
         self, server: RemoteOpenAIServer, model: dict[str, Any], runner
     ):
-        data_1 = "What is the capital of France?"
-        data_2 = [
-            "The capital of Brazil is Brasilia.",
-            "The capital of France is Paris.",
-        ]
+        queries = "What is the capital of France?"
+        documents = "The capital of France is Paris."
 
         score_response = requests.post(
             server.url_for("score"),
             json={
                 "model": model["name"],
-                "data_1": data_1,
-                "data_2": data_2,
+                "queries": queries,
+                "documents": documents,
             },
         )
         score_response.raise_for_status()
@@ -83,24 +80,21 @@ class TestModel:
 
         assert score.id is not None
         assert score.data is not None
-        assert len(score.data) == 2
+        assert len(score.data) == 1
 
         vllm_outputs = [d.score for d in score.data]
 
-        text_pairs = [[data_1, data_2[0]], [data_1, data_2[1]]]
+        text_pairs = [[queries, documents]]
         hf_outputs = run_transformers(runner, model, text_pairs)
 
         for i in range(len(vllm_outputs)):
             assert hf_outputs[i] == pytest.approx(vllm_outputs[i], rel=0.01)
 
-    def test_test_1_str_text_2_list(
+    def test_text_1_str_text_2_str(
         self, server: RemoteOpenAIServer, model: dict[str, Any], runner
     ):
         text_1 = "What is the capital of France?"
-        text_2 = [
-            "The capital of Brazil is Brasilia.",
-            "The capital of France is Paris.",
-        ]
+        text_2 = "The capital of France is Paris."
 
         score_response = requests.post(
             server.url_for("score"),
@@ -115,11 +109,40 @@ class TestModel:
 
         assert score.id is not None
         assert score.data is not None
-        assert len(score.data) == 2
+        assert len(score.data) == 1
 
         vllm_outputs = [d.score for d in score.data]
 
-        text_pairs = [[text_1, text_2[0]], [text_1, text_2[1]]]
+        text_pairs = [[text_1, text_2]]
+        hf_outputs = run_transformers(runner, model, text_pairs)
+
+        for i in range(len(vllm_outputs)):
+            assert hf_outputs[i] == pytest.approx(vllm_outputs[i], rel=0.01)
+
+    def test_data_1_str_data_2_str(
+        self, server: RemoteOpenAIServer, model: dict[str, Any], runner
+    ):
+        data_1 = "What is the capital of France?"
+        data_2 = "The capital of France is Paris."
+
+        score_response = requests.post(
+            server.url_for("score"),
+            json={
+                "model": model["name"],
+                "data_1": data_1,
+                "data_2": data_2,
+            },
+        )
+        score_response.raise_for_status()
+        score = ScoreResponse.model_validate(score_response.json())
+
+        assert score.id is not None
+        assert score.data is not None
+        assert len(score.data) == 1
+
+        vllm_outputs = [d.score for d in score.data]
+
+        text_pairs = [[data_1, data_2]]
         hf_outputs = run_transformers(runner, model, text_pairs)
 
         for i in range(len(vllm_outputs)):
@@ -157,14 +180,14 @@ class TestModel:
         for i in range(len(vllm_outputs)):
             assert hf_outputs[i] == pytest.approx(vllm_outputs[i], rel=0.01)
 
-    def test_data_1_list_data_2_list(
+    def test_queries_list_documents_list(
         self, server: RemoteOpenAIServer, model: dict[str, Any], runner
     ):
-        data_1 = [
+        queries = [
             "What is the capital of the United States?",
             "What is the capital of France?",
         ]
-        data_2 = [
+        documents = [
             "The capital of Brazil is Brasilia.",
             "The capital of France is Paris.",
         ]
@@ -173,8 +196,8 @@ class TestModel:
             server.url_for("score"),
             json={
                 "model": model["name"],
-                "data_1": data_1,
-                "data_2": data_2,
+                "queries": queries,
+                "documents": documents,
             },
         )
         score_response.raise_for_status()
@@ -186,36 +209,7 @@ class TestModel:
 
         vllm_outputs = [d.score for d in score.data]
 
-        text_pairs = [[data_1[0], data_2[0]], [data_1[1], data_2[1]]]
-        hf_outputs = run_transformers(runner, model, text_pairs)
-
-        for i in range(len(vllm_outputs)):
-            assert hf_outputs[i] == pytest.approx(vllm_outputs[i], rel=0.01)
-
-    def test_data_1_str_data_2_str(
-        self, server: RemoteOpenAIServer, model: dict[str, Any], runner
-    ):
-        data_1 = "What is the capital of France?"
-        data_2 = "The capital of France is Paris."
-
-        score_response = requests.post(
-            server.url_for("score"),
-            json={
-                "model": model["name"],
-                "data_1": data_1,
-                "data_2": data_2,
-            },
-        )
-        score_response.raise_for_status()
-        score = ScoreResponse.model_validate(score_response.json())
-
-        assert score.id is not None
-        assert score.data is not None
-        assert len(score.data) == 1
-
-        vllm_outputs = [d.score for d in score.data]
-
-        text_pairs = [[data_1, data_2]]
+        text_pairs = [[queries[0], documents[0]], [queries[1], documents[1]]]
         hf_outputs = run_transformers(runner, model, text_pairs)
 
         for i in range(len(vllm_outputs)):
@@ -224,8 +218,8 @@ class TestModel:
     def test_score_max_model_len(
         self, server: RemoteOpenAIServer, model: dict[str, Any]
     ):
-        data_1 = "What is the capital of France?" * 20
-        data_2 = [
+        queries = "What is the capital of France?" * 20
+        documents = [
             "The capital of Brazil is Brasilia.",
             "The capital of France is Paris.",
         ]
@@ -234,8 +228,8 @@ class TestModel:
             server.url_for("score"),
             json={
                 "model": model["name"],
-                "data_1": data_1,
-                "data_2": data_2,
+                "queries": queries,
+                "documents": documents,
             },
         )
         assert score_response.status_code == 400
@@ -247,8 +241,8 @@ class TestModel:
             server.url_for("score"),
             json={
                 "model": model["name"],
-                "data_1": data_1,
-                "data_2": data_2,
+                "queries": queries,
+                "documents": documents,
                 "truncate_prompt_tokens": 101,
             },
         )
@@ -256,13 +250,13 @@ class TestModel:
         assert "Please, select a smaller truncation size." in score_response.text
 
     def test_invocations(self, server: RemoteOpenAIServer, model: dict[str, Any]):
-        data_1 = "What is the capital of France?"
-        data_2 = "The capital of France is Paris."
+        queries = "What is the capital of France?"
+        documents = "The capital of France is Paris."
 
         request_args = {
             "model": model["name"],
-            "data_1": data_1,
-            "data_2": data_2,
+            "queries": queries,
+            "documents": documents,
         }
 
         score_response = requests.post(server.url_for("score"), json=request_args)
@@ -289,14 +283,14 @@ class TestModel:
 
     def test_use_activation(self, server: RemoteOpenAIServer, model: dict[str, Any]):
         def get_outputs(use_activation):
-            data_1 = "What is the capital of France?"
-            data_2 = "The capital of France is Paris."
+            queries = "What is the capital of France?"
+            documents = "The capital of France is Paris."
             response = requests.post(
                 server.url_for("score"),
                 json={
                     "model": model["name"],
-                    "data_1": data_1,
-                    "data_2": data_2,
+                    "queries": queries,
+                    "documents": documents,
                     "use_activation": use_activation,
                 },
             )

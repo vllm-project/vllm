@@ -24,7 +24,7 @@ import pprint
 import requests
 
 
-def encode_base64_content_from_url(content_url: str) -> dict[str:str]:
+def encode_base64_content_from_url(content_url: str) -> dict[str, str]:
     """Encode a content retrieved from a remote url to base64 format."""
 
     with requests.get(content_url, headers=headers) as response:
