@@ -18,6 +18,10 @@ class ConvLayerBase(CustomOp):
 
     num_dim: int
 
+    @classmethod
+    def enabled(cls) -> bool:
+        return True
+
     def __init__(
         self,
         in_channels: int,
