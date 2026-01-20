@@ -7,7 +7,10 @@ import time
 from collections.abc import AsyncGenerator, AsyncIterator
 from collections.abc import Sequence as GenericSequence
 from dataclasses import replace
-from typing import Any, Final
+from typing import TYPE_CHECKING, Any, Final
+
+if TYPE_CHECKING:
+    from vllm.reasoning import ReasoningParser
 
 import jinja2
 import partial_json_parser
@@ -504,6 +507,29 @@ class OpenAIServingChat(OpenAIServing):
             return self.response_role
         return request.messages[-1]["role"]
 
+    def _get_harmony_reasoning_parser(
+        self, tokenizer: TokenizerLike
+    ) -> "ReasoningParser | None":
+        """
+        Get reasoning parser for Harmony models.
+
+        Uses configured parser if available, otherwise creates GptOssReasoningParser
+        to ensure constrained decoding prevents special token leakage.
+        """
+        if self.reasoning_parser is not None:
+            return self.reasoning_parser(tokenizer)
+
+        # Fallback: create GptOssReasoningParser for gpt-oss models
+        # even if not explicitly configured
+        from transformers import PreTrainedTokenizerBase
+
+        from vllm.reasoning.gptoss_reasoning_parser import GptOssReasoningParser
+
+        if isinstance(tokenizer, PreTrainedTokenizerBase):
+            return GptOssReasoningParser(tokenizer)
+
+        return None
+
     def _apply_harmony_structural_tag_constraint(
         self,
         sampling_params: SamplingParams,
@@ -520,10 +546,12 @@ class OpenAIServingChat(OpenAIServing):
             sampling_params: The sampling parameters to modify
             tokenizer: The tokenizer instance for creating reasoning parser
         """
-        if not self.use_harmony or self.reasoning_parser is None:
+        if not self.use_harmony:
             return
 
-        reasoning_parser = self.reasoning_parser(tokenizer)
+        reasoning_parser = self._get_harmony_reasoning_parser(tokenizer)
+        if reasoning_parser is None:
+            return
         # Create or update structured_outputs with structural_tag constraint
         if (
             isinstance(
