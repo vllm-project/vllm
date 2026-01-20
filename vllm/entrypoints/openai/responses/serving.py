@@ -690,12 +690,12 @@ class OpenAIServingResponses(OpenAIServing):
         output_messages: ResponseInputOutputMessage | None = None
         if self.use_harmony:
             assert isinstance(context, HarmonyContext)
-            output = self._make_response_output_items_with_harmony(context)
+            output_items = self._make_response_output_items_with_harmony(context)
             if request.enable_response_messages:
                 input_messages = context.messages[: context.num_init_messages]
                 output_messages = context.messages[context.num_init_messages :]
             num_tool_output_tokens = context.num_tool_output_tokens
-            if len(output) > 0:
+            if len(output_items) > 0:
                 if context.finish_reason == "length":
                     status = "incomplete"
                 elif context.finish_reason == "abort":
@@ -705,7 +705,9 @@ class OpenAIServingResponses(OpenAIServing):
             else:
                 status = "incomplete"
         elif isinstance(context, ParsableContext):
-            output = context.parser.make_response_output_items_from_parsable_context()
+            output_items = (
+                context.parser.make_response_output_items_from_parsable_context()
+            )
 
             if request.enable_response_messages:
                 input_messages = context.input_messages
@@ -733,7 +735,14 @@ class OpenAIServingResponses(OpenAIServing):
             if final_output.finish_reason == "length":
                 status = "incomplete"
 
-            output = self._make_response_output_items(request, final_output, tokenizer)
+            output_items = []
+            final_outputs = self._split_completion_output(
+                final_output,
+                tokenizer,
+            )
+            for message in final_outputs:
+                temp = self._make_response_output_items(request, message, tokenizer)
+                output_items.extend(temp)
 
             if request.enable_response_messages:
                 input_messages = context.input_messages
@@ -780,7 +789,7 @@ class OpenAIServingResponses(OpenAIServing):
             output_messages=output_messages,
             model_name=model_name,
             created_time=created_time,
-            output=output,
+            output=output_items,
             status=status,
             usage=usage,
         )
@@ -900,6 +909,168 @@ class OpenAIServingResponses(OpenAIServing):
             )
             for lg in lgs
         ]
+
+    def _split_completion_output(
+        self,
+        output: CompletionOutput,
+        tokenizer: TokenizerLike,
+    ) -> list[CompletionOutput]:
+        """Split a CompletionOutput by delimiter tokens.
+
+        Splits both the text and token_ids at each occurrence of any delimiter.
+        The delimiter is included at the start of each split (except the first).
+        Optionally strips end delimiter tokens from the end of each segment.
+
+        Args:
+            output: The CompletionOutput to split
+            delimiters: List of text delimiters (e.g., ["<|start|>", "<|im_start|>"])
+            tokenizer: The tokenizer to use for encoding the delimiters
+            end_delimiters: Optional list of end delimiters to strip from segment
+                ends (e.g., ["<|eom|>", "<|eot|>"])
+
+        Returns:
+            A list of CompletionOutput objects, one for each split segment.
+            Returns a single-element list with the original output if no
+            delimiter is found.
+        """
+        delimiters = []
+        end_delimiters = None
+        if self.reasoning_parser:
+            if hasattr(self.reasoning_parser, "start_message"):
+                delimiters = self.reasoning_parser(tokenizer).start_message
+            if hasattr(self.reasoning_parser, "end_message"):
+                end_delimiters = self.reasoning_parser(tokenizer).end_message
+
+        # Build set of delimiter token IDs (assuming single-token delimiters)
+        delimiter_token_ids: set[int] = set()
+        for delim in delimiters:
+            token_ids_for_delim = tokenizer.encode(delim, add_special_tokens=False)
+            if len(token_ids_for_delim) == 1:
+                delimiter_token_ids.add(token_ids_for_delim[0])
+
+        if not delimiter_token_ids:
+            return [output]
+
+        # Build set of end delimiter token IDs to strip
+        end_delimiter_token_ids: set[int] = set()
+        if end_delimiters:
+            for end_delim in end_delimiters:
+                token_ids_for_end = tokenizer.encode(
+                    end_delim, add_special_tokens=False
+                )
+                if len(token_ids_for_end) == 1:
+                    end_delimiter_token_ids.add(token_ids_for_end[0])
+
+        # Find all split indices where any delimiter token appears
+        token_ids = list(output.token_ids)
+        split_indices = [
+            i for i, tid in enumerate(token_ids) if tid in delimiter_token_ids
+        ]
+
+        # No delimiter found, return original
+        if not split_indices:
+            return [output]
+
+        # Split the token_ids at each delimiter position
+        results: list[CompletionOutput] = []
+        logprobs = output.logprobs
+
+        # Add boundary at end for easier iteration
+        split_indices.append(len(token_ids))
+
+        prev_idx = 0
+        for i, split_idx in enumerate(split_indices[:-1]):
+            # First segment: from start to first delimiter
+            if i == 0 and split_idx > 0:
+                segment_token_ids = token_ids[prev_idx:split_idx]
+                segment_logprobs = logprobs[prev_idx:split_idx] if logprobs else None
+
+                # Strip end delimiters from segment end
+                segment_token_ids, segment_logprobs = self._strip_end_delimiters(
+                    segment_token_ids, segment_logprobs, end_delimiter_token_ids
+                )
+
+                if segment_token_ids:  # Only add if non-empty after stripping
+                    segment_text = tokenizer.decode(segment_token_ids)
+                    results.append(
+                        CompletionOutput(
+                            index=output.index,
+                            text=segment_text,
+                            token_ids=segment_token_ids,
+                            cumulative_logprob=None,  # Not meaningful for splits
+                            logprobs=segment_logprobs,
+                            finish_reason=None,  # Only last segment gets finish_reason
+                            stop_reason=None,
+                            lora_request=output.lora_request,
+                        )
+                    )
+
+            # Segments starting with delimiter
+            next_split = split_indices[i + 1]
+            segment_token_ids = token_ids[split_idx:next_split]
+            segment_logprobs = logprobs[split_idx:next_split] if logprobs else None
+
+            # Strip end delimiters from segment end
+            segment_token_ids, segment_logprobs = self._strip_end_delimiters(
+                segment_token_ids, segment_logprobs, end_delimiter_token_ids
+            )
+
+            if segment_token_ids:  # Only add if non-empty after stripping
+                segment_text = tokenizer.decode(segment_token_ids)
+
+                # Last segment gets the finish_reason
+                is_last = i == len(split_indices) - 2
+                results.append(
+                    CompletionOutput(
+                        index=output.index,
+                        text=segment_text,
+                        token_ids=segment_token_ids,
+                        cumulative_logprob=None,
+                        logprobs=segment_logprobs,
+                        finish_reason=output.finish_reason if is_last else None,
+                        stop_reason=output.stop_reason if is_last else None,
+                        lora_request=output.lora_request,
+                    )
+                )
+
+            prev_idx = split_idx
+
+        # If no results were created (shouldn't happen), return original
+        if not results:
+            return [output]
+
+        return results
+
+    def _strip_end_delimiters(
+        self,
+        token_ids: list[int],
+        logprobs: SampleLogprobs | None,
+        end_delimiter_token_ids: set[int],
+    ) -> tuple[list[int], SampleLogprobs | None]:
+        """Strip end delimiter tokens from the end of a token sequence.
+
+        Args:
+            token_ids: List of token IDs
+            logprobs: Optional logprobs corresponding to token_ids
+            end_delimiter_token_ids: Set of token IDs to strip from the end
+
+        Returns:
+            Tuple of (stripped_token_ids, stripped_logprobs)
+        """
+        if not end_delimiter_token_ids or not token_ids:
+            return token_ids, logprobs
+
+        # Find where to truncate by scanning from the end
+        end_idx = len(token_ids)
+        while end_idx > 0 and token_ids[end_idx - 1] in end_delimiter_token_ids:
+            end_idx -= 1
+
+        if end_idx == len(token_ids):
+            return token_ids, logprobs
+
+        stripped_token_ids = token_ids[:end_idx]
+        stripped_logprobs = logprobs[:end_idx] if logprobs else None
+        return stripped_token_ids, stripped_logprobs
 
     def _make_response_output_items(
         self,

@@ -351,3 +351,330 @@ class TestExtractAllowedToolsFromMcpRequests:
             "server1": ["tool1"],
             "server2": ["tool2"],
         }
+
+
+class TestSplitCompletionOutput:
+    """Test class for _split_completion_output method"""
+
+    @pytest.fixture
+    def mock_tokenizer(self):
+        """Create a mock tokenizer for testing."""
+        tokenizer = MagicMock()
+
+        # Define token mappings for delimiters
+        token_map = {
+            "]~b]": [100],  # start delimiter
+            "[e~[": [200],  # end delimiter
+            "hello": [1],
+            "world": [2],
+            "test": [3],
+        }
+
+        decode_map = {
+            100: "]~b]",
+            200: "[e~[",
+            1: "hello",
+            2: "world",
+            3: "test",
+        }
+
+        def mock_encode(text, add_special_tokens=False):
+            return token_map.get(text, [999])
+
+        def mock_decode(token_ids):
+            return "".join(decode_map.get(tid, "?") for tid in token_ids)
+
+        tokenizer.encode = mock_encode
+        tokenizer.decode = mock_decode
+        return tokenizer
+
+    @pytest.fixture
+    def mock_reasoning_parser_class(self):
+        """Create a mock reasoning parser class with start_message and end_message."""
+
+        class MockReasoningParser:
+            start_message = ["]~b]"]
+            end_message = ["[e~["]
+
+            def __init__(self, tokenizer):
+                pass
+
+        return MockReasoningParser
+
+    @pytest.fixture
+    def mock_reasoning_parser_no_messages(self):
+        """Create a mock reasoning parser without start_message/end_message."""
+
+        class MockReasoningParserNoMessages:
+            def __init__(self, tokenizer):
+                pass
+
+        return MockReasoningParserNoMessages
+
+    @pytest_asyncio.fixture
+    async def serving_responses_instance(self):
+        """Create a real OpenAIServingResponses instance for testing."""
+        engine_client = MagicMock()
+
+        model_config = MagicMock()
+        model_config.hf_config.model_type = "test"
+        model_config.get_diff_sampling_param.return_value = {}
+        engine_client.model_config = model_config
+
+        engine_client.input_processor = MagicMock()
+        engine_client.io_processor = MagicMock()
+
+        models = MagicMock()
+
+        instance = OpenAIServingResponses(
+            engine_client=engine_client,
+            models=models,
+            request_logger=None,
+            chat_template=None,
+            chat_template_content_format="auto",
+        )
+
+        return instance
+
+    def test_no_reasoning_parser(self, serving_responses_instance, mock_tokenizer):
+        """Test that original output is returned when no reasoning parser."""
+        from vllm.outputs import CompletionOutput
+
+        output = CompletionOutput(
+            index=0,
+            text="hello world",
+            token_ids=[1, 2],
+            cumulative_logprob=None,
+            logprobs=None,
+            finish_reason="stop",
+            stop_reason=None,
+        )
+
+        serving_responses_instance.reasoning_parser = None
+
+        result = serving_responses_instance._split_completion_output(
+            output, mock_tokenizer
+        )
+
+        assert len(result) == 1
+        assert result[0] is output
+
+    def test_reasoning_parser_without_start_message(
+        self,
+        serving_responses_instance,
+        mock_tokenizer,
+        mock_reasoning_parser_no_messages,
+    ):
+        """Test parser without start_message attribute returns original output."""
+        from vllm.outputs import CompletionOutput
+
+        output = CompletionOutput(
+            index=0,
+            text="hello world",
+            token_ids=[1, 2],
+            cumulative_logprob=None,
+            logprobs=None,
+            finish_reason="stop",
+            stop_reason=None,
+        )
+
+        serving_responses_instance.reasoning_parser = mock_reasoning_parser_no_messages
+
+        result = serving_responses_instance._split_completion_output(
+            output, mock_tokenizer
+        )
+
+        assert len(result) == 1
+        assert result[0] is output
+
+    def test_no_delimiter_in_output(
+        self,
+        serving_responses_instance,
+        mock_tokenizer,
+        mock_reasoning_parser_class,
+    ):
+        """Test that original output is returned when no delimiter found."""
+        from vllm.outputs import CompletionOutput
+
+        output = CompletionOutput(
+            index=0,
+            text="hello world",
+            token_ids=[1, 2],  # No delimiter tokens
+            cumulative_logprob=None,
+            logprobs=None,
+            finish_reason="stop",
+            stop_reason=None,
+        )
+
+        serving_responses_instance.reasoning_parser = mock_reasoning_parser_class
+
+        result = serving_responses_instance._split_completion_output(
+            output, mock_tokenizer
+        )
+
+        assert len(result) == 1
+        assert result[0] is output
+
+    def test_split_with_delimiter(
+        self,
+        serving_responses_instance,
+        mock_tokenizer,
+        mock_reasoning_parser_class,
+    ):
+        """Test splitting output at delimiter token."""
+        from vllm.outputs import CompletionOutput
+
+        # Output: hello, delimiter, world
+        output = CompletionOutput(
+            index=0,
+            text="hello ]~b] world",
+            token_ids=[1, 100, 2],  # 100 is delimiter
+            cumulative_logprob=None,
+            logprobs=None,
+            finish_reason="stop",
+            stop_reason=None,
+        )
+
+        serving_responses_instance.reasoning_parser = mock_reasoning_parser_class
+
+        result = serving_responses_instance._split_completion_output(
+            output, mock_tokenizer
+        )
+
+        assert len(result) == 2
+        # First segment: before delimiter
+        assert result[0].token_ids == [1]
+        assert result[0].finish_reason is None
+        # Second segment: delimiter + after
+        assert result[1].token_ids == [100, 2]
+        assert result[1].finish_reason == "stop"
+
+    def test_split_with_end_delimiter_stripping(
+        self,
+        serving_responses_instance,
+        mock_tokenizer,
+        mock_reasoning_parser_class,
+    ):
+        """Test that end delimiters are stripped from segment ends."""
+        from vllm.outputs import CompletionOutput
+
+        # Output: hello, end_delimiter, start_delimiter, world
+        output = CompletionOutput(
+            index=0,
+            text="hello [e~[ ]~b] world",
+            token_ids=[1, 200, 100, 2],  # 200 is end delimiter, 100 is start
+            cumulative_logprob=None,
+            logprobs=None,
+            finish_reason="stop",
+            stop_reason=None,
+        )
+
+        serving_responses_instance.reasoning_parser = mock_reasoning_parser_class
+
+        result = serving_responses_instance._split_completion_output(
+            output, mock_tokenizer
+        )
+
+        # First segment should have end delimiter stripped
+        assert len(result) == 2
+        assert result[0].token_ids == [1]  # end delimiter stripped
+        assert result[1].token_ids == [100, 2]
+
+    def test_split_preserves_logprobs(
+        self,
+        serving_responses_instance,
+        mock_tokenizer,
+        mock_reasoning_parser_class,
+    ):
+        """Test that logprobs are correctly split across segments."""
+        from vllm.outputs import CompletionOutput
+
+        logprobs_data = [
+            {1: MagicMock()},
+            {100: MagicMock()},
+            {2: MagicMock()},
+        ]
+
+        output = CompletionOutput(
+            index=0,
+            text="hello ]~b] world",
+            token_ids=[1, 100, 2],
+            cumulative_logprob=None,
+            logprobs=logprobs_data,
+            finish_reason="stop",
+            stop_reason=None,
+        )
+
+        serving_responses_instance.reasoning_parser = mock_reasoning_parser_class
+
+        result = serving_responses_instance._split_completion_output(
+            output, mock_tokenizer
+        )
+
+        assert len(result) == 2
+        assert result[0].logprobs == [logprobs_data[0]]
+        assert result[1].logprobs == [logprobs_data[1], logprobs_data[2]]
+
+    def test_delimiter_at_start(
+        self,
+        serving_responses_instance,
+        mock_tokenizer,
+        mock_reasoning_parser_class,
+    ):
+        """Test handling when delimiter is at the start of output."""
+        from vllm.outputs import CompletionOutput
+
+        output = CompletionOutput(
+            index=0,
+            text="]~b] hello world",
+            token_ids=[100, 1, 2],  # Delimiter at start
+            cumulative_logprob=None,
+            logprobs=None,
+            finish_reason="stop",
+            stop_reason=None,
+        )
+
+        serving_responses_instance.reasoning_parser = mock_reasoning_parser_class
+
+        result = serving_responses_instance._split_completion_output(
+            output, mock_tokenizer
+        )
+
+        # Should return single segment starting with delimiter
+        assert len(result) == 1
+        assert result[0].token_ids == [100, 1, 2]
+        assert result[0].finish_reason == "stop"
+
+    def test_multiple_delimiters(
+        self,
+        serving_responses_instance,
+        mock_tokenizer,
+        mock_reasoning_parser_class,
+    ):
+        """Test splitting with multiple delimiters."""
+        from vllm.outputs import CompletionOutput
+
+        # Output: hello, delimiter, world, delimiter, test
+        output = CompletionOutput(
+            index=0,
+            text="hello ]~b] world ]~b] test",
+            token_ids=[1, 100, 2, 100, 3],
+            cumulative_logprob=None,
+            logprobs=None,
+            finish_reason="stop",
+            stop_reason=None,
+        )
+
+        serving_responses_instance.reasoning_parser = mock_reasoning_parser_class
+
+        result = serving_responses_instance._split_completion_output(
+            output, mock_tokenizer
+        )
+
+        assert len(result) == 3
+        assert result[0].token_ids == [1]
+        assert result[0].finish_reason is None
+        assert result[1].token_ids == [100, 2]
+        assert result[1].finish_reason is None
+        assert result[2].token_ids == [100, 3]
+        assert result[2].finish_reason == "stop"

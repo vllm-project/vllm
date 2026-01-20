@@ -39,6 +39,16 @@ class MiniMaxM2ReasoningParser(BaseThinkingReasoningParser):
         """The token that ends reasoning content."""
         return "</think>"
 
+    @property
+    def start_message(self) -> list[str]:
+        """The tokens that starts Minimax Message."""
+        return ["]~b]"]
+
+    @property
+    def end_message(self) -> list[str]:
+        """The tokens that ends Minimax Message."""
+        return ["[e~["]
+
     def extract_reasoning_streaming(
         self,
         previous_text: str,
