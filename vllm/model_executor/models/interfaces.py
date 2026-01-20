@@ -71,7 +71,8 @@ def _require_is_multimodal(is_multimodal: Tensor | None) -> Tensor:
 
 
 class LMMissingLayer(nn.Module):
-    packed_modules_mapping: dict[str, list[str]] = {}
+    def __getattr__(self, *args, **kwargs):
+        raise RuntimeError("This module should not be accessed in MM encoder-only mode")
 
     def make_empty_intermediate_tensors(self, *args, **kwargs):
         raise RuntimeError("This module should not be called in MM encoder-only mode")
@@ -81,8 +82,6 @@ class LMMissingLayer(nn.Module):
 
 
 class TowerMissingLayer(nn.Module):
-    packed_modules_mapping: dict[str, list[str]] = {}
-
     def __init__(self, modalities: set[str] | str) -> None:
         if isinstance(modalities, str):
             modalities = {modalities}
@@ -91,8 +90,17 @@ class TowerMissingLayer(nn.Module):
 
         self.modalities = modalities
 
+    def __getattr__(self, name: str):
+        raise RuntimeError(
+            f"This module should not be accessed when the following "
+            f"modalities are disabled: {self.modalities}"
+        )
+
     def __call__(self, *args, **kwargs):
-        raise RuntimeError(f"The following modalities are disabled: {self.modalities}")
+        raise RuntimeError(
+            f"This module should not be called when the following "
+            f"modalities are disabled: {self.modalities}"
+        )
 
 
 @contextmanager

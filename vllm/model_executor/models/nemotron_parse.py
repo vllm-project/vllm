@@ -820,16 +820,18 @@ class NemotronParseForConditionalGeneration(nn.Module, SupportsMultiModal):
         cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config
 
-        self.encoder = RadioWithNeck(
-            config=config, quant_config=quant_config, prefix=f"{prefix}.encoder"
-        )
+        with self._mark_tower_model(vllm_config, "image"):
+            self.encoder = RadioWithNeck(
+                config=config, quant_config=quant_config, prefix=f"{prefix}.encoder"
+            )
 
-        self.decoder = MBartDecoderNoPos(
-            config.decoder,
-            cache_config=cache_config,
-            quant_config=quant_config,
-            prefix=f"{prefix}.decoder",
-        )
+        with self._mark_language_model(vllm_config):
+            self.decoder = MBartDecoderNoPos(
+                config.decoder,
+                cache_config=cache_config,
+                quant_config=quant_config,
+                prefix=f"{prefix}.decoder",
+            )
 
         self.vocab_size = config.decoder.vocab_size
         self.lm_head = ParallelLMHead(

@@ -367,7 +367,6 @@ class PaliGemmaForConditionalGeneration(
         if image_input["type"] == "image_embeds":
             return image_input["data"]
 
-        assert self.vision_tower is not None
         pixel_values = image_input["data"]
         image_features = self._image_pixels_to_features(
             self.vision_tower,
