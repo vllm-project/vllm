@@ -4220,10 +4220,15 @@ class GPUModelRunner(
         checkpoint_format: bool = True,
     ) -> None:
         """
+        Reload weights from a weights iterator or from disk
 
-
-        TODO(@kylesayrs): generalize to all runners and loaders
+        :param weights_iterator: weights to load into model
+        :param weights_path: path to load weights from if weights_iterator is not
+            provided. Use path of original model if neither is provided.
+        :param checkpoint_format: set to False if weights have already been process
+            into kernel format (repacking, renaming, ect.)
         """
+        # TODO(@kylesayrs): generalize to all runners and loaders
         # argument validation
         if weights_iterator is None and not checkpoint_format:
             logger.warning(
