@@ -160,7 +160,6 @@ class TrtLlmGenExperts(mk.FusedMoEPermuteExpertsUnpermute):
             "local_expert_offset": local_expert_offset,
             "local_num_experts": local_num_experts,
             "routed_scaling_factor": None,
-            "tile_tokens_dim": None,
             "routing_method_type": 1,
             "do_finalize": True,
             "output": output,
