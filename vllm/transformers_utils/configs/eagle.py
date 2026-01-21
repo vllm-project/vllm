@@ -41,7 +41,7 @@ class EAGLEConfig(PretrainedConfig):
         # LlamaForCausalLM -> EagleLlamaForCausalLM
         # LlamaForCausalLM -> Eagle3LlamaForCausalLM
         # LlamaForCausalLMEagle3 -> LlamaForCausalLMEagle3
-        if method in ("eagle", "eagle-ptd"):
+        if method == "eagle":
             assert self.model is not None, (
                 "model should not be None when method is eagle"
             )
@@ -50,7 +50,7 @@ class EAGLEConfig(PretrainedConfig):
                 for arch in self.model.architectures
             ]
 
-        elif method in ("eagle3", "eagle3-ptd"):
+        elif method == "eagle3":
             assert self.model is not None, (
                 "model should not be None when method is eagle3"
             )
@@ -62,8 +62,7 @@ class EAGLEConfig(PretrainedConfig):
             ]
         else:
             raise ValueError(
-                f"Invalid method {method}. Supported methods are "
-                "eagle, eagle3, eagle-ptd, and eagle3-ptd."
+                f"Invalid method {method}. Supported methods are eagle and eagle3."
             )
 
         super().__init__(**kwargs)

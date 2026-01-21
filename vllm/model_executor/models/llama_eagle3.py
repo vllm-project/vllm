@@ -52,9 +52,8 @@ class LlamaDecoderLayer(LlamaDecoderLayer):
         # Subsequent layers use hidden_size (only hidden_states, no embeds)
         qkv_input_size = 2 * self.hidden_size if layer_idx == 0 else self.hidden_size
 
-        # Use config.attention_bias for QKV bias (default False)
-        # PTD checkpoints may have attention bias enabled
-        qkv_bias = getattr(config, 'attention_bias', False)
+        # Parallel drafting checkpoints may have attention bias enabled
+        qkv_bias = getattr(config, "attention_bias", False)
 
         # Override qkv_proj with correct input size and bias setting
         self.self_attn.qkv_proj = QKVParallelLinear(
@@ -229,9 +228,6 @@ class LlamaModel(nn.Module):
         for name, loaded_weight in weights:
             if "midlayer." in name:
                 name = name.replace("midlayer.", "layers.0.")
-            # Skip mask_hidden - loaded separately by PTD proposer
-            if name == "mask_hidden":
-                continue
             # Handle kv cache quantization scales
             if self.quant_config is not None and (
                 scale_name := self.quant_config.get_cache_scale(name)
@@ -300,6 +296,21 @@ class Eagle3LlamaForCausalLM(LlamaForCausalLM):
             requires_grad=False,
         )
 
+        # Buffer for parallel drafting mask hidden state (loaded from checkpoint)
+        # Size depends on whether model uses aux hidden states (3x hidden_size)
+        eagle_config = getattr(self.config, "eagle_config", None)
+        use_aux = True  # Default for EAGLE3
+        if eagle_config is not None and "use_aux_hidden_state" in eagle_config:
+            use_aux = eagle_config["use_aux_hidden_state"]
+        mask_hidden_size = (
+            self.config.hidden_size * 3 if use_aux else self.config.hidden_size
+        )
+        self.register_buffer(
+            "mask_hidden",
+            torch.zeros(1, mask_hidden_size),
+            persistent=False,
+        )
+
     def embed_input_ids(
         self,
         input_ids: torch.Tensor,
@@ -354,12 +365,18 @@ class Eagle3LlamaForCausalLM(LlamaForCausalLM):
         model_weights = {}
         includes_draft_id_mapping = False
         includes_embed_tokens = False
+        includes_mask_hidden = False
         for name, loaded_weight in weights:
             if "t2d" in name:
                 continue
             if "d2t" in name:
                 name = name.replace("d2t", "draft_id_to_target_id")
                 includes_draft_id_mapping = True
+            elif name == "mask_hidden":
+                # Load mask_hidden directly into buffer
+                includes_mask_hidden = True
+                self.mask_hidden.copy_(loaded_weight.view(1, -1))
+                continue
             elif "lm_head" not in name:
                 name = "model." + name
             if "embed_tokens" in name:
@@ -367,7 +384,10 @@ class Eagle3LlamaForCausalLM(LlamaForCausalLM):
             model_weights[name] = loaded_weight
             process_eagle_weight(self, name)
 
-        skip_substrs = []
+        if includes_mask_hidden:
+            logger.info("Loaded mask_hidden from checkpoint")
+
+        skip_substrs = ["mask_hidden"]
         if not includes_draft_id_mapping:
             skip_substrs.append("draft_id_to_target_id")
         if not includes_embed_tokens:

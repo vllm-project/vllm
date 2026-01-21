@@ -553,14 +553,14 @@ def test_eagle_correctness(
     [
         pytest.param(
             (
-                "eagle3-ptd",
+                "eagle3",
                 "openai/gpt-oss-120b",
-                "PATH_TO_PTD_MODEL",  # Replace with actual PTD model path
+                "PATH_TO_PARALLEL_DRAFT_MODEL",
                 1,
             ),
             False,
             marks=pytest.mark.skip(
-                reason="PTD model not publicly available yet"
+                reason="Parallel draft model not publicly available yet"
             ),
         ),
     ],
@@ -576,12 +576,12 @@ def test_ptd_correctness(
 ):
     """
     Compare the outputs of an original LLM and a speculative LLM
-    using PTD (Parallel Token Decoding) speculative decoding.
-    PTD generates K draft tokens in a single forward pass using mask tokens.
-    model_setup: (method, model_name, ptd_model_name, tp_size)
+    using parallel drafting.
+    Generates K draft tokens in a single forward pass using mask tokens.
+    model_setup: (method, model_name, draft_model_name, tp_size)
     """
     if attn_backend == "TREE_ATTN":
-        pytest.skip("TREE_ATTN not yet supported with PTD")
+        pytest.skip("TREE_ATTN not yet supported with parallel drafting")
 
     test_prompts = get_test_prompts(mm_enabled)
     attention_config = {"backend": attn_backend}
@@ -617,6 +617,7 @@ def test_ptd_correctness(
                 "model": spec_model_name,
                 "num_speculative_tokens": 6,
                 "max_model_len": max_model_len,
+                "parallel_draft": True,
             },
             max_model_len=max_model_len,
             attention_config=attention_config,

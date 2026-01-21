@@ -1,15 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from pathlib import Path
-
 import torch
 import torch.nn as nn
 
-from vllm.config import CUDAGraphMode, VllmConfig, get_layers_from_vllm_config
+from vllm.config import CUDAGraphMode, VllmConfig
 from vllm.forward_context import set_forward_context
 from vllm.logger import init_logger
-from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
-from vllm.model_executor.model_loader import get_model
 from vllm.model_executor.models.llama_eagle3 import Eagle3LlamaForCausalLM
 from vllm.triton_utils import tl, triton
 from vllm.v1.attention.backend import CommonAttentionMetadata
@@ -18,59 +14,75 @@ from vllm.v1.spec_decode.eagle import EagleProposer
 
 logger = init_logger(__name__)
 
-PTD_METHODS = ("eagle-ptd", "eagle3-ptd")
-
 
 @triton.jit
 def ptd_prepare_inputs_kernel(
-    target_token_ids_ptr,
-    target_positions_ptr,
-    target_hidden_ptr,
-    mask_hidden_ptr,
-    next_token_ids_ptr,
-    last_token_indices_ptr,
-    original_slot_mapping_ptr,
-    block_table_ptr,
-    in_query_start_loc_ptr,
-    out_query_start_loc_ptr,
-    out_input_ids_ptr,
-    out_positions_ptr,
-    out_hidden_ptr,
-    out_slot_mapping_ptr,
+    # Input tensors from target model
+    target_token_ids_ptr,  # [num_tokens] - verified token IDs
+    target_positions_ptr,  # [num_tokens] - verified positions
+    target_hidden_ptr,  # [num_tokens, hidden_size] - verified hidden states
+    mask_hidden_ptr,  # [hidden_size] - learned mask embedding for draft positions
+    next_token_ids_ptr,  # [batch_size] - sampled next tokens per request
+    last_token_indices_ptr,  # [batch_size] - index of last verified token per request
+    original_slot_mapping_ptr,  # [num_tokens] - KV cache slots for verified tokens
+    block_table_ptr,  # [batch_size, max_blocks] - KV cache block table
+    in_query_start_loc_ptr,  # [batch_size + 1] - input query boundaries
+    out_query_start_loc_ptr,  # [batch_size + 1] - output query boundaries
+    # Output tensors for draft model
+    out_input_ids_ptr,  # [num_out_tokens] - token IDs for draft
+    out_positions_ptr,  # [num_out_tokens] - positions for draft
+    out_hidden_ptr,  # [num_out_tokens, hidden_size] - hidden states for draft
+    out_slot_mapping_ptr,  # [num_out_tokens] - KV cache slots for draft
+    # Constants
     batch_size: tl.constexpr,
-    K: tl.constexpr,
     hidden_size: tl.constexpr,
-    block_size: tl.constexpr,
-    max_blocks: tl.constexpr,
-    mask_token_id: tl.constexpr,
+    block_size: tl.constexpr,  # KV cache block size
+    max_blocks: tl.constexpr,  # max blocks per sequence
+    mask_token_id: tl.constexpr,  # special token ID for draft positions
     max_model_len: tl.constexpr,
-    BLOCK_H: tl.constexpr,
+    HIDDEN_TILE_SIZE: tl.constexpr,  # tile size for hidden dim parallelism
 ):
     """
-    Prepares inputs for PTD (Parallel Token Decoding) by constructing:
-    - Input token IDs: [shifted verified tokens, next_token, mask, mask, ...]
-    - Positions: [verified positions, incremented positions for draft tokens]
-    - Hidden states: [verified hidden states, mask_hidden for draft positions]
-    - Slot mapping: [verified slots, computed slots for draft positions]
-    """
-    out_idx = tl.program_id(0)
-    h_block = tl.program_id(1)
+    Prepares inputs for parallel token drafting.
 
+    Parallel drafting generates K draft tokens in a single forward pass by:
+    1. Shifting verified tokens left (drop first, append next_token)
+    2. Appending K-1 mask tokens for parallel draft positions
+    3. Using learned mask_hidden embedding for draft position hidden states
+
+    Grid: (num_out_tokens, num_hidden_tiles)
+        - First dim: one program per output token
+        - Second dim: tiles over hidden_size for parallel hidden state copy
+          (HIDDEN_TILE_SIZE=256 is standard for hidden dim operations in vLLM)
+
+    The kernel handles two types of positions:
+        - Verified positions (local_idx <= last_idx): copy from target tensors
+        - Draft positions (local_idx > last_idx): use mask_token_id and mask_hidden
+    """
+    # Program IDs: token_idx iterates over output tokens,
+    # hidden_tile_i tiles over the hidden dimension
+    token_idx = tl.program_id(0)
+    hidden_tile_i = tl.program_id(1)
+
+    # Find which request this token belongs to
     req_idx = 0
     for r in range(batch_size):
         out_start = tl.load(out_query_start_loc_ptr + r)
         out_end = tl.load(out_query_start_loc_ptr + r + 1)
-        req_idx = tl.where((out_idx >= out_start) & (out_idx < out_end), r, req_idx)
+        req_idx = tl.where((token_idx >= out_start) & (token_idx < out_end), r, req_idx)
 
     in_start = tl.load(in_query_start_loc_ptr + req_idx)
     out_start = tl.load(out_query_start_loc_ptr + req_idx)
     global_last_idx = tl.load(last_token_indices_ptr + req_idx)
     last_idx = global_last_idx - in_start
 
-    local_idx = out_idx - out_start
+    local_idx = token_idx - out_start
     is_verified = local_idx <= last_idx
 
-    if h_block == 0:
+    # Scalar outputs (token_ids, positions, slots) are written only by the first
+    # hidden tile (hidden_tile_i == 0) to avoid redundant writes. All tiles
+    # participate in copying hidden states since that's the expensive operation.
+    if hidden_tile_i == 0:
         if is_verified:
             if local_idx < last_idx:
                 out_tok = tl.load(target_token_ids_ptr + in_start + local_idx + 1)
@@ -78,7 +90,7 @@ def ptd_prepare_inputs_kernel(
                 out_tok = tl.load(next_token_ids_ptr + req_idx)
         else:
             out_tok = mask_token_id
-        tl.store(out_input_ids_ptr + out_idx, out_tok)
+        tl.store(out_input_ids_ptr + token_idx, out_tok)
 
         if is_verified:
             out_pos = tl.load(target_positions_ptr + in_start + local_idx)
@@ -86,7 +98,7 @@ def ptd_prepare_inputs_kernel(
             last_pos = tl.load(target_positions_ptr + in_start + last_idx)
             out_pos = last_pos + (local_idx - last_idx)
             out_pos = tl.where(out_pos >= max_model_len, 0, out_pos)
-        tl.store(out_positions_ptr + out_idx, out_pos)
+        tl.store(out_positions_ptr + token_idx, out_pos)
 
         if is_verified:
             slot = tl.load(original_slot_mapping_ptr + in_start + local_idx)
@@ -98,25 +110,29 @@ def ptd_prepare_inputs_kernel(
             block_offset = draft_pos % block_size
             block_id = tl.load(block_table_ptr + req_idx * max_blocks + block_num)
             slot = block_id * block_size + block_offset
-        tl.store(out_slot_mapping_ptr + out_idx, slot)
+        tl.store(out_slot_mapping_ptr + token_idx, slot)
 
-    h_start = h_block * BLOCK_H
-    h_offs = h_start + tl.arange(0, BLOCK_H)
+    # All tiles copy their portion of hidden states
+    h_start = hidden_tile_i * HIDDEN_TILE_SIZE
+    h_offs = h_start + tl.arange(0, HIDDEN_TILE_SIZE)
     h_mask = h_offs < hidden_size
 
     if is_verified:
-        out_vals = tl.load(
+        hidden_vals = tl.load(
             target_hidden_ptr + (in_start + local_idx) * hidden_size + h_offs,
-            mask=h_mask, other=0.0
+            mask=h_mask,
+            other=0.0,
         )
     else:
-        out_vals = tl.load(mask_hidden_ptr + h_offs, mask=h_mask, other=0.0)
+        hidden_vals = tl.load(mask_hidden_ptr + h_offs, mask=h_mask, other=0.0)
 
-    tl.store(out_hidden_ptr + out_idx * hidden_size + h_offs, out_vals, mask=h_mask)
+    tl.store(
+        out_hidden_ptr + token_idx * hidden_size + h_offs, hidden_vals, mask=h_mask
+    )
 
 
 class PtdEagleProposer(EagleProposer):
-    """Generates K draft tokens in a single forward pass using mask tokens."""
+    """Generates draft tokens in a single forward pass using mask tokens."""
 
     def __init__(
         self,
@@ -125,110 +141,41 @@ class PtdEagleProposer(EagleProposer):
         runner=None,
     ):
         super().__init__(vllm_config, device, runner)
-        self._raise_if_unsupported_method()
-        self._raise_if_multimodal()
 
-        self.K = self.num_speculative_tokens
+        # Parallel drafting operates in text-only mode
+        self.supports_mm_inputs = False
+
         self.slot_buffer = torch.zeros(
             self.max_num_tokens, dtype=torch.int64, device=device
         )
-        self.arange_K = torch.arange(self.K, device=device, dtype=torch.int64)
+        self.draft_token_offsets = torch.arange(
+            self.num_speculative_tokens, device=device, dtype=torch.int64
+        )
 
         self.mask_hidden: torch.Tensor | None = None
         self.mask_token_id: int | None = None
         self.block_size = vllm_config.cache_config.block_size
 
-    def _raise_if_unsupported_method(self):
-        if self.method not in PTD_METHODS:
-            raise ValueError(
-                f"PtdEagleProposer only supports methods {PTD_METHODS}, "
-                f"got {self.method}"
-            )
-
-    def _raise_if_multimodal(self):
-        if self.supports_mm_inputs:
-            raise NotImplementedError(
-                "PTD speculative decoding does not support multimodal models"
-            )
-
-    def _get_eagle3_use_aux_hidden_state_from_config(self) -> bool:
-        if self.method != "eagle3-ptd":
-            return False
-        use_aux = True
-        eagle_config = getattr(
-            self.draft_model_config.hf_config, "eagle_config", None
-        )
-        if eagle_config is not None:
-            use_aux = eagle_config.get("use_aux_hidden_state", True)
-        return use_aux
-
     def load_model(self, target_model: nn.Module) -> None:
-        draft_model_config = self.vllm_config.speculative_config.draft_model_config
-        target_attn_layer_names = set(
-            get_layers_from_vllm_config(self.vllm_config, AttentionLayerBase).keys()
-        )
+        super().load_model(target_model)
 
-        from vllm.compilation.backends import set_model_tag
-        with set_model_tag("ptd_eagle_head"):
-            self.model = get_model(
-                vllm_config=self.vllm_config, model_config=draft_model_config
-            )
-
-        draft_attn_layer_names = (
-            get_layers_from_vllm_config(self.vllm_config, AttentionLayerBase).keys()
-            - target_attn_layer_names
-        )
-        self.attn_layer_names = list(draft_attn_layer_names)
-
+        # Parallel drafting requires mask token id from config
         config = self.draft_model_config.hf_config
-        self.mask_token_id = getattr(config, 'ptd_token_id', None)
+        self.mask_token_id = getattr(config, "ptd_token_id", None)
         if self.mask_token_id is None:
             raise ValueError(
-                "PTD requires 'ptd_token_id' in draft model config.json"
+                "Parallel drafting requires 'ptd_token_id' in draft model config.json"
             )
         self.mask_token_id = int(self.mask_token_id)
 
-        self.mask_hidden = self._load_mask_hidden()
+        # Get mask_hidden from model (loaded during weight loading)
+        self.mask_hidden = self.model.mask_hidden
 
-        if self.method == "eagle3-ptd" and self.eagle3_use_aux_hidden_state:
+        if self.method == "eagle3" and self.eagle3_use_aux_hidden_state:
             expected_aux_size = self.hidden_size * 3
             if self.mask_hidden.shape[-1] == expected_aux_size:
                 self.mask_hidden = self.model.combine_hidden_states(self.mask_hidden)
-                logger.info(
-                    "Transformed mask_hidden from aux format to hidden_size"
-                )
-
-    def _load_mask_hidden(self) -> torch.Tensor:
-        checkpoint_path = Path(self.draft_model_config.model)
-
-        def normalize_shape(t: torch.Tensor) -> torch.Tensor:
-            t = t.to(device=self.device, dtype=self.dtype)
-            while t.dim() > 2 and t.size(0) == 1:
-                t = t.squeeze(0)
-            if t.dim() == 1:
-                t = t.unsqueeze(0)
-            return t
-
-        from safetensors.torch import load_file
-
-        # Look for mask_hidden in main model safetensors files
-        safetensor_files = list(checkpoint_path.glob("*.safetensors"))
-        for path in sorted(safetensor_files):
-            try:
-                weights = load_file(str(path))
-                if "mask_hidden" in weights:
-                    logger.info(f"Loaded mask_hidden from {path}")
-                    return normalize_shape(weights["mask_hidden"])
-            except Exception as e:
-                logger.warning(f"Failed to load {path}: {e}")
-
-        # Fallback: use embedding of mask token
-        logger.warning(
-            "mask_hidden not found in checkpoint, "
-            "using embedding of ptd_token_id as fallback"
-        )
-        embed = self.model.model.embed_tokens.weight[self.mask_token_id]
-        return normalize_shape(embed)
+                logger.info("Transformed mask_hidden from aux format to hidden_size")
 
     def propose(
         self,
@@ -244,7 +191,7 @@ class PtdEagleProposer(EagleProposer):
     ) -> torch.Tensor:
         if mm_embed_inputs is not None:
             raise NotImplementedError(
-                "PTD speculative decoding does not support multimodal inputs"
+                "Parallel drafting does not support multimodal inputs"
             )
 
         batch_size = next_token_ids.shape[0]
@@ -252,7 +199,7 @@ class PtdEagleProposer(EagleProposer):
         if last_token_indices is None:
             last_token_indices = common_attn_metadata.query_start_loc[1:] - 1
 
-        if self.method == "eagle3-ptd":
+        if self.method == "eagle3":
             assert isinstance(self.model, Eagle3LlamaForCausalLM)
             target_hidden_states = self.model.combine_hidden_states(
                 target_hidden_states
@@ -261,52 +208,58 @@ class PtdEagleProposer(EagleProposer):
         if self.attn_metadata_builder is None:
             self.attn_metadata_builder = self._get_attention_metadata_builder()
 
-        K = self.K
-        draft_len = K - 1
-        in_qsl = common_attn_metadata.query_start_loc
+        draft_len = self.num_speculative_tokens - 1
+        input_query_start_loc = common_attn_metadata.query_start_loc
 
-        accepted_lengths = last_token_indices - in_qsl[:batch_size] + 1
+        accepted_lengths = last_token_indices - input_query_start_loc[:batch_size] + 1
         out_lens = accepted_lengths + draft_len
 
-        out_qsl = torch.zeros(
+        output_query_start_loc = torch.zeros(
             batch_size + 1, dtype=torch.int32, device=self.device
         )
-        out_qsl[1:] = torch.cumsum(out_lens, dim=0)
+        output_query_start_loc[1:] = torch.cumsum(out_lens, dim=0)
 
-        total_out = (
-            common_attn_metadata.num_actual_tokens + batch_size * draft_len
-        )
+        total_out = common_attn_metadata.num_actual_tokens + batch_size * draft_len
 
-        in_qsl_cpu = common_attn_metadata.query_start_loc_cpu
+        input_query_start_loc_cpu = common_attn_metadata.query_start_loc_cpu
         accepted_lengths_cpu = (
-            in_qsl_cpu[1:batch_size+1] - in_qsl_cpu[:batch_size]
+            input_query_start_loc_cpu[1 : batch_size + 1]
+            - input_query_start_loc_cpu[:batch_size]
         )
-        out_qsl_cpu = torch.zeros(batch_size + 1, dtype=torch.int32)
-        out_qsl_cpu[1:] = torch.cumsum(accepted_lengths_cpu + draft_len, dim=0)
+        output_query_start_loc_cpu = torch.zeros(batch_size + 1, dtype=torch.int32)
+        output_query_start_loc_cpu[1:] = torch.cumsum(
+            accepted_lengths_cpu + draft_len, dim=0
+        )
 
         slot_mapping = self._prepare_ptd_inputs(
-            target_token_ids, target_positions, target_hidden_states,
-            next_token_ids, last_token_indices,
+            target_token_ids,
+            target_positions,
+            target_hidden_states,
+            next_token_ids,
+            last_token_indices,
             common_attn_metadata.slot_mapping,
             common_attn_metadata.block_table_tensor,
-            in_qsl, out_qsl, total_out, batch_size
+            input_query_start_loc,
+            output_query_start_loc,
+            total_out,
+            batch_size,
         )
 
-        seq_lens = common_attn_metadata.seq_lens.clone()
+        seq_lens = common_attn_metadata.seq_lens
         if num_rejected_tokens_gpu is not None:
             seq_lens = seq_lens - num_rejected_tokens_gpu
-        seq_lens = (seq_lens + K).to(common_attn_metadata.seq_lens.dtype)
+        seq_lens = (seq_lens + self.num_speculative_tokens).to(
+            common_attn_metadata.seq_lens.dtype
+        )
 
-        common_attn_metadata.query_start_loc = out_qsl
-        common_attn_metadata.query_start_loc_cpu = out_qsl_cpu
+        common_attn_metadata.query_start_loc = output_query_start_loc
+        common_attn_metadata.query_start_loc_cpu = output_query_start_loc_cpu
         common_attn_metadata.seq_lens = seq_lens
         common_attn_metadata.num_actual_tokens = total_out
         common_attn_metadata.max_query_len = (
             common_attn_metadata.max_query_len + draft_len
         )
-        common_attn_metadata.max_seq_len = (
-            common_attn_metadata.max_seq_len + draft_len
-        )
+        common_attn_metadata.max_seq_len = common_attn_metadata.max_seq_len + draft_len
         common_attn_metadata.slot_mapping = slot_mapping
         common_attn_metadata._seq_lens_cpu = None
         common_attn_metadata._num_computed_tokens_cpu = None
@@ -314,23 +267,21 @@ class PtdEagleProposer(EagleProposer):
         attn_metadata = self.attn_metadata_builder.build_for_drafting(
             common_attn_metadata=common_attn_metadata, draft_index=0
         )
-        per_layer_metadata = {
-            name: attn_metadata for name in self.attn_layer_names
-        }
+        per_layer_metadata = {name: attn_metadata for name in self.attn_layer_names}
 
         num_input, cudagraph_mode = self._get_ptd_cudagraph_config(total_out)
 
-        hidden = self._run_ptd_forward(
+        hidden_states = self._run_ptd_forward(
             num_input, total_out, per_layer_metadata, cudagraph_mode
         )
 
-        ends = out_qsl[1:batch_size+1]
-        starts = ends - K
-        indices = starts.unsqueeze(1) + self.arange_K
-        hidden_selected = hidden[indices.flatten()]
+        ends = output_query_start_loc[1 : batch_size + 1]
+        starts = ends - self.num_speculative_tokens
+        indices = starts.unsqueeze(1) + self.draft_token_offsets
+        hidden_states_selected = hidden_states[indices.flatten()]
 
-        logits = self.model.compute_logits(hidden_selected)
-        return logits.argmax(dim=-1).view(batch_size, K)
+        logits = self.model.compute_logits(hidden_states_selected)
+        return logits.argmax(dim=-1).view(batch_size, self.num_speculative_tokens)
 
     def _prepare_ptd_inputs(
         self,
@@ -341,39 +292,47 @@ class PtdEagleProposer(EagleProposer):
         last_token_indices: torch.Tensor,
         slot_mapping: torch.Tensor,
         block_table: torch.Tensor,
-        in_qsl: torch.Tensor,
-        out_qsl: torch.Tensor,
+        input_query_start_loc: torch.Tensor,
+        output_query_start_loc: torch.Tensor,
         total_out: int,
         batch_size: int,
     ) -> torch.Tensor:
-        BLOCK_H = 256
-        num_h_blocks = (self.hidden_size + BLOCK_H - 1) // BLOCK_H
+        HIDDEN_TILE_SIZE = 256
+        num_hidden_tiles = (self.hidden_size + HIDDEN_TILE_SIZE - 1) // HIDDEN_TILE_SIZE
 
-        ptd_prepare_inputs_kernel[(total_out, num_h_blocks)](
-            target_token_ids, target_positions, target_hidden_states,
-            self.mask_hidden, next_token_ids, last_token_indices,
-            slot_mapping, block_table, in_qsl, out_qsl,
-            self.input_ids, self.positions, self.hidden_states, self.slot_buffer,
-            batch_size=batch_size, K=self.K, hidden_size=self.hidden_size,
-            block_size=self.block_size, max_blocks=block_table.shape[1],
-            mask_token_id=self.mask_token_id, max_model_len=self.max_model_len,
-            BLOCK_H=BLOCK_H
+        ptd_prepare_inputs_kernel[(total_out, num_hidden_tiles)](
+            target_token_ids,
+            target_positions,
+            target_hidden_states,
+            self.mask_hidden,
+            next_token_ids,
+            last_token_indices,
+            slot_mapping,
+            block_table,
+            input_query_start_loc,
+            output_query_start_loc,
+            self.input_ids,
+            self.positions,
+            self.hidden_states,
+            self.slot_buffer,
+            batch_size=batch_size,
+            hidden_size=self.hidden_size,
+            block_size=self.block_size,
+            max_blocks=block_table.shape[1],
+            mask_token_id=self.mask_token_id,
+            max_model_len=self.max_model_len,
+            HIDDEN_TILE_SIZE=HIDDEN_TILE_SIZE,
         )
         return self.slot_buffer[:total_out]
 
-    def _get_ptd_cudagraph_config(
-        self, num_tokens: int
-    ) -> tuple[int, CUDAGraphMode]:
+    def _get_ptd_cudagraph_config(self, num_tokens: int) -> tuple[int, CUDAGraphMode]:
         num_padded, _ = self._pad_batch_across_dp(num_tokens, num_tokens)
 
-        if (
-            self.use_cuda_graph
-            and num_padded <= self.compilation_config.max_cudagraph_capture_size
-        ):
-            num_input = self.vllm_config.pad_for_cudagraph(num_padded)
-            return num_input, CUDAGraphMode.PIECEWISE
-
-        return num_padded, CUDAGraphMode.NONE
+        # Use cudagraph_dispatcher for CUDA graph decisions (compatible with nightly)
+        cudagraph_runtime_mode, batch_desc = self.cudagraph_dispatcher.dispatch(
+            num_padded
+        )
+        return batch_desc.num_tokens, cudagraph_runtime_mode
 
     def _run_ptd_forward(
         self,
@@ -383,8 +342,10 @@ class PtdEagleProposer(EagleProposer):
         cudagraph_mode: CUDAGraphMode,
     ) -> torch.Tensor:
         with set_forward_context(
-            per_layer_metadata, self.vllm_config,
-            num_tokens=num_input, cudagraph_runtime_mode=cudagraph_mode
+            per_layer_metadata,
+            self.vllm_config,
+            num_tokens=num_input,
+            cudagraph_runtime_mode=cudagraph_mode,
         ):
             result = self.model(
                 input_ids=self.input_ids[:num_input],
@@ -392,5 +353,5 @@ class PtdEagleProposer(EagleProposer):
                 hidden_states=self.hidden_states[:num_input],
                 inputs_embeds=None,
             )
-            hidden = result[0] if isinstance(result, tuple) else result
-        return hidden[:num_out]
+            hidden_states = result[0] if isinstance(result, tuple) else result
+        return hidden_states[:num_out]
