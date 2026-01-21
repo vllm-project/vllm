@@ -72,7 +72,7 @@ def _require_is_multimodal(is_multimodal: Tensor | None) -> Tensor:
     return is_multimodal
 
 
-class StageMissingLayer(nn.Identity):
+class StageMissingLayer(nn.Module):
     def __init__(self, name: str) -> None:
         super().__init__()
 
@@ -238,14 +238,11 @@ class SupportsMultiModal(Protocol):
             torch.nn.Module: The core language model component.
         """
         if self._language_model_names:
-            common_path = common_prefix(
-                [name.split(".") for name in self._language_model_names]
-            )
-            assert common_path, "Language model should not be self"
-
             language_model = self
-            for attr in common_path:
-                language_model = getattr(self, attr)
+            for attr in common_prefix(
+                [name.split(".") for name in self._language_model_names]
+            ):
+                language_model = getattr(language_model, attr)
 
             return language_model
 
