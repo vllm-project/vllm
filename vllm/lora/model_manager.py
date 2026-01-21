@@ -10,6 +10,7 @@ import regex as re
 import torch
 from torch import nn
 
+from vllm import envs
 from vllm.config import VllmConfig
 from vllm.config.lora import LoRAConfig, ModelConfig
 from vllm.distributed.parallel_state import (
@@ -106,8 +107,9 @@ class LoRAModelManager:
 
         # LoRA Pipelining
         # nvshmem initialization
-        self._init_nvshmem()
-        self.lora_loading_stream = torch.Stream(device=self.device)
+        if envs.VLLM_LORA_REQUEST_ASYNC_LOADING_CUDA:
+            self._init_nvshmem()
+            self.lora_loading_stream = torch.Stream(device=self.device)
 
         self.is_pooling_model = is_pooling_model(self.model)
         self.packed_modules: dict[str, list[str]] = {}
@@ -138,7 +140,6 @@ class LoRAModelManager:
             nvshmem.init(
                 uid=uid, rank=tp_rank, nranks=tp_size, initializer_method="uid"
             )
-            self.nvshmem_enabled = True
         except Exception as e:
             raise RuntimeError(
                 f"NVSHMEM initialization failed for TP rank {tp_rank}/{tp_size}"
@@ -257,51 +258,67 @@ class LoRAModelManager:
     def adapter_slots(self) -> int:
         return self.lora_slots
 
-    def activate_adapter(
+    def activate_adapters(
         self,
-        lora_id: int,
+        lora_ids: list[int],
     ) -> bool:
-        """Move LoRA into a GPU buffer to be used in the forward pass."""
-        if lora_id in self._active_adapters:
+        """Move multiple LoRAs into GPU buffers to be used in the forward pass."""
+        to_load: list[tuple[int, LoRAModel]] = []  # (slot_index, lora_model)
+        # Allocate slots for all new adapters
+        for lora_id in lora_ids:
+            if lora_id in self._active_adapters:
+                continue
+
+            first_free_slot = next(
+                (i for i, lid in enumerate(self.lora_index_to_id) if lid is None),
+                None,
+            )
+            if first_free_slot is None:
+                raise ValueError("No free lora slots")
+
+            self._active_adapters[lora_id] = None
+            self.lora_index_to_id[first_free_slot] = lora_id
+            lora_model = self._registered_adapters[lora_id]
+            logger.debug(
+                "Activating LoRA. int id: %d, slot index: %d",
+                lora_model.id,
+                first_free_slot,
+            )
+            to_load.append((first_free_slot, lora_model))
+
+        if not to_load:
             return False
-        first_free_slot = next(
-            (
-                (i, lora_id)
-                for i, lora_id in enumerate(self.lora_index_to_id)
-                if lora_id is None
-            ),
-            None,
-        )
-        if first_free_slot is None:
-            raise ValueError("No free lora slots")
-        index, _ = first_free_slot
-        self._active_adapters[lora_id] = None
-        lora_model = self._registered_adapters[lora_id]
-        logger.debug(
-            "Activating LoRA. int id: %d, slot index: %d", lora_model.id, index
-        )
-        self.lora_index_to_id[index] = lora_model.id
 
         # separate elementwise and memcpy reduces cpu time by 20%
-        for module_name, module in self.modules.items():
-            module_lora = self._get_lora_layer_weights(lora_model, module_name)
-            if not module_lora:
-                module.reset_lora(index)
-                continue
-            module.lora_ready.zero_()
+        for index, lora_model in to_load:
+            for module_name, module in self.modules.items():
+                module_lora = self._get_lora_layer_weights(lora_model, module_name)
+                if not module_lora:
+                    module.reset_lora(index)
 
-        for module_name, module in self.modules.items():
-            module_lora = self._get_lora_layer_weights(lora_model, module_name)
-            if not module_lora:
-                continue
+        # Load all weights on loading stream - module by module
+        if envs.VLLM_LORA_REQUEST_ASYNC_LOADING_CUDA:
             with torch.cuda.stream(self.lora_loading_stream):
-                module.set_lora(
-                    index,
-                    module_lora.lora_a,
-                    module_lora.lora_b,
-                )
-                # will need to update for multi-lora request loading
-                module.set_lora_flag(1)
+                for module_name, module in self.modules.items():
+                    module.lora_ready.zero_()
+                    for index, lora_model in to_load:
+                        module_lora = self._get_lora_layer_weights(
+                            lora_model, module_name
+                        )
+                        if module_lora:
+                            module.set_lora(
+                                index, module_lora.lora_a, module_lora.lora_b
+                            )
+
+                    # Set flag once per module after all adapters loaded
+                    module.set_lora_flag(1)
+        else:
+            for module_name, module in self.modules.items():
+                for index, lora_model in to_load:
+                    module_lora = self._get_lora_layer_weights(lora_model, module_name)
+                    if module_lora:
+                        module.set_lora(index, module_lora.lora_a, module_lora.lora_b)
+
         return True
 
     def _deactivate_adapter(self, lora_id: int):
@@ -869,18 +886,27 @@ class LRUCacheLoRAModelManager(LoRAModelManager):
             was_added = False
         return was_added
 
-    def activate_adapter(
-        self,
-        lora_id: int,
-    ) -> bool:
-        if (
-            lora_id not in self._active_adapters
-            and len(self._active_adapters) >= self.lora_slots
-        ):
+    def activate_adapters(self, lora_ids: list[int]) -> bool:
+        # Touch existing requested adapters to protect them from eviction
+        for lora_id in lora_ids:
+            if lora_id in self._active_adapters:
+                self._active_adapters.touch(lora_id)
+
+        # Count how many new slots we actually need
+        new_ids = [lid for lid in lora_ids if lid not in self._active_adapters]
+        num_to_evict = max(
+            0, len(self._active_adapters) + len(new_ids) - self.lora_slots
+        )
+
+        for _ in range(num_to_evict):
             self._active_adapters.remove_oldest()
-        result = super().activate_adapter(lora_id)
-        # We always touch to update the LRU cache order
-        self._active_adapters.touch(lora_id)
+
+        result = super().activate_adapters(lora_ids)
+
+        # Touch new adapters (existing ones already touched above)
+        for lora_id in new_ids:
+            self._active_adapters.touch(lora_id)
+
         return result
 
     def remove_oldest_adapter(self) -> bool:
@@ -906,7 +932,7 @@ class LRUCacheLoRAModelManager(LoRAModelManager):
     def _pin_lora_in_gpu_cache(self, lora_id: int):
         if lora_id not in self._active_adapters:
             # move lora to gpu if not already active
-            self.activate_adapter(lora_id)
+            self.activate_adapters([lora_id])
 
         self._active_adapters.pin(lora_id)
 

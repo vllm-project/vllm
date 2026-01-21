@@ -137,6 +137,7 @@ def from_layer_logits_processor(
         lm_head.get_sharded_to_full_mapping(),
     )
     ret.create_lora_weights(max_loras, lora_config, model_config)
+    ret.create_lora_flag(ret.device)
     return ret
 
 

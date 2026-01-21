@@ -7,6 +7,7 @@ import torch
 import torch.nn as nn
 from transformers import PretrainedConfig
 
+from vllm import envs
 from vllm.config.lora import LoRAConfig
 from vllm.utils.torch_utils import direct_register_custom_op
 
@@ -50,18 +51,21 @@ class BaseLayerWithLoRA(nn.Module):
 
     def create_lora_flag(self, device: torch.device) -> None:
         """Create flag tensor (uint64 for NVSHMEM signal compatibility)."""
-        self.lora_ready = nvshmem_tensor(shape=(1,), dtype=torch.int64)
-        self.lora_ready.zero_()
+        if envs.VLLM_LORA_REQUEST_ASYNC_LOADING_CUDA:
+            self.lora_ready = nvshmem_tensor(shape=(1,), dtype=torch.int64)
+            self.lora_ready.zero_()
 
     def set_lora_flag(self, load_value) -> None:
         """Set flag value and ensure visibility across GPUs via NVSHMEM quiet."""
-        stream = torch.cuda.current_stream().cuda_stream
-        self.lora_ready.fill_(load_value)
-        bindings.quiet_on_stream(stream)
+        if envs.VLLM_LORA_REQUEST_ASYNC_LOADING_CUDA:
+            stream = torch.cuda.current_stream().cuda_stream
+            self.lora_ready.fill_(load_value)
+            bindings.quiet_on_stream(stream)
 
     def _sync_lora_loads(self) -> None:
         """Block until LoRA weights are loaded (flag equals expected value)."""
-        nvshmem_wait_for_lora_flag(self.lora_ready, 1)
+        if envs.VLLM_LORA_REQUEST_ASYNC_LOADING_CUDA:
+            nvshmem_wait_for_lora_flag(self.lora_ready, 1)
 
     def slice_lora_a(
         self, lora_a: torch.Tensor | list[torch.Tensor | None]

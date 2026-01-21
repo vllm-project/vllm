@@ -152,21 +152,21 @@ def test_lora_model_manager(default_vllm_config, dist_init, dummy_model, device)
     )
     assert all(x is None for x in manager.lora_index_to_id)
     assert manager.add_adapter(model_lora1)
-    assert manager.activate_adapter(1)
+    assert manager.activate_adapters([1])
     assert manager.lora_index_to_id[0] == 1
     assert not manager.add_adapter(model_lora1)
-    assert not manager.activate_adapter(1)
+    assert not manager.activate_adapters([1])
     assert manager.add_adapter(model_lora2)
-    assert manager.activate_adapter(2)
+    assert manager.activate_adapters([2])
     assert manager.lora_index_to_id[0] == 1
     assert manager.lora_index_to_id[1] == 2
     assert not manager.add_adapter(model_lora2)
-    assert not manager.activate_adapter(2)
+    assert not manager.activate_adapters([2])
     assert manager.add_adapter(model_lora3)
     assert manager.lora_index_to_id[0] == 1
     assert manager.lora_index_to_id[1] == 2
     with pytest.raises(ValueError):
-        assert manager.activate_adapter(3)
+        assert manager.activate_adapters([3])
     assert manager.lora_index_to_id[0] == 1
     assert manager.lora_index_to_id[1] == 2
     assert manager.remove_adapter(model_lora2.id)
@@ -178,10 +178,10 @@ def test_lora_model_manager(default_vllm_config, dist_init, dummy_model, device)
     assert manager.lora_index_to_id[0] is None
     assert manager.lora_index_to_id[1] is None
     assert manager.add_adapter(model_lora2)
-    assert manager.activate_adapter(3)
+    assert manager.activate_adapters([3])
     assert manager.lora_index_to_id[0] == 3
     assert manager.lora_index_to_id[1] is None
-    assert manager.activate_adapter(2)
+    assert manager.activate_adapters([2])
     assert manager.lora_index_to_id[0] == 3
     assert manager.lora_index_to_id[1] == 2
     assert manager.device == device
@@ -220,20 +220,20 @@ def test_lora_lru_cache_model_manager(
     )
     assert all(x is None for x in manager.lora_index_to_id)
     assert manager.add_adapter(model_lora1)
-    assert manager.activate_adapter(1)
+    assert manager.activate_adapters([1])
     assert manager.lora_index_to_id[0] == 1
     assert not manager.add_adapter(model_lora1)
-    assert not manager.activate_adapter(1)
+    assert not manager.activate_adapters([1])
     assert manager.add_adapter(model_lora2)
-    assert manager.activate_adapter(2)
+    assert manager.activate_adapters([2])
     assert manager.lora_index_to_id[0] == 1
     assert manager.lora_index_to_id[1] == 2
     assert not manager.add_adapter(model_lora2)
-    assert not manager.activate_adapter(2)
+    assert not manager.activate_adapters([2])
     assert manager.add_adapter(model_lora3)
     assert manager.lora_index_to_id[0] == 1
     assert manager.lora_index_to_id[1] == 2
-    assert manager.activate_adapter(3)
+    assert manager.activate_adapters([3])
     assert manager.lora_index_to_id[0] == 3
     assert manager.lora_index_to_id[1] == 2
     assert manager.remove_adapter(model_lora2.id)
@@ -242,29 +242,29 @@ def test_lora_lru_cache_model_manager(
     assert manager.remove_adapter(model_lora1.id)
     assert not manager.remove_adapter(model_lora1.id)
     assert manager.add_adapter(model_lora1)
-    assert manager.activate_adapter(1)
+    assert manager.activate_adapters([1])
     assert manager.lora_index_to_id[0] == 3
     assert manager.lora_index_to_id[1] == 1
     assert manager.add_adapter(model_lora2)
     assert manager.deactivate_adapter(3)
     assert manager.lora_index_to_id[0] is None
     assert manager.lora_index_to_id[1] == 1
-    assert manager.activate_adapter(2)
+    assert manager.activate_adapters([2])
     assert manager.lora_index_to_id[0] == 2
     assert manager.lora_index_to_id[1] == 1
-    assert manager.activate_adapter(3)
+    assert manager.activate_adapters([3])
     assert manager.lora_index_to_id[0] == 2
     assert manager.lora_index_to_id[1] == 3
     assert manager.pin_adapter(2)
     assert manager.lora_index_to_id[0] == 2
     assert manager.lora_index_to_id[1] == 3
-    assert manager.activate_adapter(1)
+    assert manager.activate_adapters([1])
     assert manager.lora_index_to_id[0] == 2
     assert manager.lora_index_to_id[1] == 1
     assert manager.deactivate_adapter(2)
     assert manager.lora_index_to_id[0] is None
     assert manager.lora_index_to_id[1] == 1
-    assert manager.activate_adapter(3)
+    assert manager.activate_adapters([3])
     assert manager.lora_index_to_id[0] == 3
     assert manager.lora_index_to_id[1] == 1
     assert manager.pin_adapter(3)
@@ -274,7 +274,7 @@ def test_lora_lru_cache_model_manager(
     assert manager.lora_index_to_id[0] == 3
     assert manager.lora_index_to_id[1] == 1
     with pytest.raises(RuntimeError):
-        assert manager.activate_adapter(2)
+        assert manager.activate_adapters([2])
 
     assert manager.deactivate_adapter(3)
     assert manager.pin_adapter(2)
@@ -316,8 +316,8 @@ def test_lru_lora_model_manager(default_vllm_config, dist_init, dummy_model, dev
     # Add up to capacity
     assert manager.add_adapter(model_lora1)
     assert manager.add_adapter(model_lora2)
-    assert manager.activate_adapter(1)
-    assert manager.activate_adapter(2)
+    assert manager.activate_adapters([1])
+    assert manager.activate_adapters([2])
 
     assert set(manager.list_adapters()) == {1, 2}
     assert manager.lora_index_to_id[0] == 1
@@ -326,8 +326,8 @@ def test_lru_lora_model_manager(default_vllm_config, dist_init, dummy_model, dev
     # Add over capacity
     assert manager.add_adapter(model_lora3)
     assert manager.add_adapter(model_lora4)
-    assert manager.activate_adapter(3)
-    assert manager.activate_adapter(4)
+    assert manager.activate_adapters([3])
+    assert manager.activate_adapters([4])
 
     assert set(manager.list_adapters()) == {3, 4}
     assert manager.lora_index_to_id[0] == 3
@@ -336,9 +336,9 @@ def test_lru_lora_model_manager(default_vllm_config, dist_init, dummy_model, dev
     # Add 3 again to move it to the top and then add 2
     # should return false since it's in already
     assert not manager.add_adapter(model_lora3)
-    assert not manager.activate_adapter(3)
+    assert not manager.activate_adapters([3])
     assert manager.add_adapter(model_lora2)
-    assert manager.activate_adapter(2)
+    assert manager.activate_adapters([2])
 
     assert set(manager.list_adapters()) == {3, 2}
     assert manager.lora_index_to_id[0] == 3
@@ -353,9 +353,9 @@ def test_lru_lora_model_manager(default_vllm_config, dist_init, dummy_model, dev
     assert manager.lora_index_to_id[1] == 2
 
     assert manager.add_adapter(model_lora3)
-    assert manager.activate_adapter(3)
+    assert manager.activate_adapters([3])
     assert manager.add_adapter(model_lora4)
-    assert manager.activate_adapter(4)
+    assert manager.activate_adapters([4])
 
     assert set(manager.list_adapters()) == {3, 4}
     assert manager.lora_index_to_id[0] == 3
@@ -376,9 +376,9 @@ def test_lru_lora_model_manager(default_vllm_config, dist_init, dummy_model, dev
 
     # pinning
     assert manager.add_adapter(model_lora3)
-    assert manager.activate_adapter(3)
+    assert manager.activate_adapters([3])
     assert manager.add_adapter(model_lora4)
-    assert manager.activate_adapter(4)
+    assert manager.activate_adapters([4])
     assert set(manager.list_adapters()) == {3, 4}
     with pytest.raises(ValueError):
         assert manager.pin_adapter(1)
@@ -394,7 +394,7 @@ def test_lru_lora_model_manager(default_vllm_config, dist_init, dummy_model, dev
     assert manager.add_adapter(model_lora1)
     assert manager.pin_adapter(1)
     assert manager.add_adapter(model_lora2)
-    assert manager.activate_adapter(2)
+    assert manager.activate_adapters([2])
 
     assert set(manager.list_adapters()) == {1, 2}
     assert manager.lora_index_to_id[0] == 1
@@ -508,9 +508,9 @@ def test_lru_cache_worker_adapter_manager(
     )
     assert worker_adapter_manager.list_adapters() == {1, 6, 7, 8}
     assert worker_adapter_manager._adapter_manager.lora_index_to_id[0] == 1
-    assert worker_adapter_manager._adapter_manager.lora_index_to_id[1] == 7
-    assert worker_adapter_manager._adapter_manager.lora_index_to_id[2] == 8
-    assert worker_adapter_manager._adapter_manager.lora_index_to_id[3] == 6
+    assert worker_adapter_manager._adapter_manager.lora_index_to_id[1] == 6
+    assert worker_adapter_manager._adapter_manager.lora_index_to_id[2] == 7
+    assert worker_adapter_manager._adapter_manager.lora_index_to_id[3] == 8
 
     # Over capacity
     with pytest.raises(RuntimeError):
