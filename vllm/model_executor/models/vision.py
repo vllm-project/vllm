@@ -504,7 +504,7 @@ def run_dp_sharded_mrope_vision_model(
         # Pad pixel_values_local for CUDA graph if needed
         if current_input_len < target_input_len:
             padding_size = target_input_len - current_input_len
-            padding = torch.empty(
+            padding = torch.zeros(
                 (padding_size, pixel_values_local.shape[1]),
                 device=pixel_values_local.device,
                 dtype=pixel_values_local.dtype,
