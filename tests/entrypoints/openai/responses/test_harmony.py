@@ -976,6 +976,7 @@ async def test_mcp_code_interpreter_streaming(client: OpenAI, model_name: str, s
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
+@pytest.mark.dependency(depends=["test_mcp_code_interpreter_streaming"])
 async def test_mcp_tool_multi_turn(client: OpenAI, model_name: str, server):
     """Test MCP tool calling across multiple turns.
 

@@ -68,6 +68,14 @@ MCP_BUILTIN_TOOLS: set[str] = {
     "container",
 }
 
+# Mapping from built-in tool recipient names to their MCP server labels.
+# This ensures consistency between streaming and non-streaming responses.
+_BUILTIN_TOOL_TO_MCP_SERVER_LABEL: dict[str, str] = {
+    "python": "code_interpreter",
+    "browser": "web_search_preview",
+    "container": "container",
+}
+
 
 def has_custom_tools(tool_types: set[str]) -> bool:
     """
@@ -605,7 +613,13 @@ def _parse_mcp_recipient(recipient: str) -> tuple[str, str]:
 
 def _parse_mcp_call(message: Message, recipient: str) -> list[ResponseOutputItem]:
     """Parse MCP calls into MCP call items."""
-    server_label, tool_name = _parse_mcp_recipient(recipient)
+    # Handle built-in tools that need server_label mapping
+    if recipient in _BUILTIN_TOOL_TO_MCP_SERVER_LABEL:
+        server_label = _BUILTIN_TOOL_TO_MCP_SERVER_LABEL[recipient]
+        tool_name = recipient
+    else:
+        server_label, tool_name = _parse_mcp_recipient(recipient)
+
     output_items = []
     for content in message.content:
         response_item = McpCall(
@@ -634,7 +648,7 @@ def parse_output_message(message: Message) -> list[ResponseOutputItem]:
     recipient = message.recipient
 
     if recipient is not None:
-        # Browser tool calls
+        # Browser tool calls (browser.search, browser.open, browser.find)
         if recipient.startswith("browser."):
             output_items.append(_parse_browser_tool_call(message, recipient))
 
@@ -642,11 +656,9 @@ def parse_output_message(message: Message) -> list[ResponseOutputItem]:
         elif message.channel == "commentary" and recipient.startswith("functions."):
             output_items.extend(_parse_function_call(message, recipient))
 
-        # Built-in tools are treated as reasoning
-        elif recipient.startswith(("python", "browser", "container")):
-            # Built-in tool recipients (python/browser/container)
-            # generate reasoning output
-            output_items.extend(_parse_reasoning_content(message))
+        # Built-in MCP tools (python, browser, container)
+        elif recipient in _BUILTIN_TOOL_TO_MCP_SERVER_LABEL:
+            output_items.extend(_parse_mcp_call(message, recipient))
 
         # All other recipients are MCP calls
         else:
