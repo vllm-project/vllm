@@ -638,6 +638,7 @@ def maybe_offload_to_cpu(module: torch.nn.Module) -> torch.nn.Module:
 
     assert uva_available, "V1 CPU offloading requires uva (pin memory) support"
     uva_offloading = False
+    pin_memory = False
 
     # offload parameters to CPU
     # use pin_memory if possible, which helps cudagraph capture speed

@@ -142,6 +142,7 @@ def device_loading_context(module: torch.nn.Module, target_device: torch.device)
     finally:
         # Restore parameters to their original devices, ignoring new parameters
         pin_memory = is_pin_memory_available()
+        pin_memory = False
         for name, p in module.named_parameters():
             if name in original_device_states:
                 original_device: torch.device = original_device_states[name]
