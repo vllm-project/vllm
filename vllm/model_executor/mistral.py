@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Mistral adaptation of the LLaMA architecture."""
 
-from typing import Iterable
+from collections.abc import Iterable
 
 import torch
 from torch import nn
@@ -13,13 +13,14 @@ from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization import QuantizationConfig
-from .utils import AutoWeightsLoader
 from vllm.model_executor.models.llama import (
     LlamaAttention,
     LlamaDecoderLayer,
     LlamaForCausalLM,
     LlamaModel,
 )
+
+from .utils import AutoWeightsLoader
 
 logger = init_logger(__file__)
 
@@ -97,7 +98,12 @@ class MistralDecoderLayer(LlamaDecoderLayer):
         prefix: str = "",
         config: LlamaConfig | None = None,
     ) -> None:
-        super().__init__(vllm_config=vllm_config, prefix=prefix, config=config, attn_layer_type=MistralAttention)
+        super().__init__(
+            vllm_config=vllm_config,
+            prefix=prefix,
+            config=config,
+            attn_layer_type=MistralAttention,
+        )
 
         self.layer_idx = int(prefix.split(sep=".")[-1])
         quant_config = self.get_quant_config(vllm_config)
@@ -172,7 +178,6 @@ class MistralForCausalLM(LlamaForCausalLM):
             vllm_config=vllm_config, prefix=prefix, layer_type=layer_type
         )
 
-
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         loader = AutoWeightsLoader(
             self,
@@ -237,4 +242,3 @@ class MistralForCausalLM(LlamaForCausalLM):
                 name = name.replace(item, mapping[item])
 
         return name, loaded_weight
-
