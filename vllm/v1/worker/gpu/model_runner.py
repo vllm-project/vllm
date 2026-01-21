@@ -313,7 +313,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         )
         assert self.execute_model_state is not None
         hidden_states, input_batch = self.execute_model_state
-
         sample_hidden_states = hidden_states[input_batch.logits_indices]
         return hidden_states, sample_hidden_states
 
