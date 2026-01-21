@@ -258,9 +258,6 @@ class FlashInferExperts(mk.FusedMoEPermuteExpertsUnpermute):
             # FlashInfer API requires weight to be long for nvfp4
             fc1_expert_weights = w1.view(torch.long)
             fc2_expert_weights = w2.view(torch.long)
-
-            # FlashInfer API requires swizzled input scales
-            # a1q_scale = nvfp4_block_scale_interleave(a1q_scale)
         elif self.use_deepseek_fp8_block_scale:
             # FP8 block-scale path: provide block-scale weights, omit a1q_scale
             quant_scales = [

@@ -161,7 +161,7 @@ def flashinfer_alltoall_dispatch(
             quant_config.quant_dtype,
             quant_config.per_act_token_quant,
             quant_config.block_shape,
-            is_fp4_scale_swizzled=False,  # delay swizzle to after comm
+            is_fp4_scale_swizzled=False,  # delay swizzle to after comm -  todo: why?
         )
         x = MnnvlMoe.mnnvl_moe_alltoallv(
             x,

@@ -96,13 +96,6 @@ class MoEPrepareAndFinalizeNaiveEP(mk.FusedMoEPrepareAndFinalize):
             assert scales is not None and len(scales) == 1
             a1q_scale = scales[0]
 
-        # NOTE: shuffle into format expected by FLASHINFER_CUTLASS
-        # There are currently no other kernels that use this P/F
-        # with nvfp4. If we add other kernels in the future, we
-        # can regsiter a shuffle that gets called here.
-        # if use_nvfp4:
-        #     a1q_scale = nvfp4_block_scale_interleave(a1q_scale)
-
         return a1q, a1q_scale, expert_tokens_meta, topk_ids, topk_weights
 
     def finalize(
