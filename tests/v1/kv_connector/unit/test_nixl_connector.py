@@ -1514,6 +1514,7 @@ def test_register_kv_caches(default_vllm_config, dist_init, attn_backend):
             expected_num_entries = 1
 
             kv_heads_idx = cross_layers_kv_cache.shape.index(4)
+            print("kv_heads idx %d", kv_heads_idx)
             expected_blocks_count = 8 if kv_heads_idx == 1 else 16
 
             kv_caches = {"all-layers": cross_layers_kv_cache}
