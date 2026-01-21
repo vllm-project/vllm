@@ -9,6 +9,10 @@ from torch._ops import OpOverload
 import vllm.envs as envs
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import direct_register_custom_op, is_torch_equal_or_newer
+from vllm.v1.attention.ops.rocm_aiter_mla_sparse import (
+    rocm_aiter_sparse_attn_indexer,
+    rocm_aiter_sparse_attn_indexer_fake,
+)
 
 _FP8_DTYPE = current_platform.fp8_dtype()
 
@@ -1088,6 +1092,14 @@ class rocm_aiter_ops:
                 op_name="rocm_aiter_per_token_quant",
                 op_func=_rocm_aiter_per_token_quant_impl,
                 fake_impl=_rocm_aiter_per_token_quant_fake,
+                dispatch_key=current_platform.dispatch_key,
+            )
+
+            direct_register_custom_op(
+                op_name="rocm_aiter_sparse_attn_indexer",
+                op_func=rocm_aiter_sparse_attn_indexer,
+                mutates_args=["topk_indices_buffer"],
+                fake_impl=rocm_aiter_sparse_attn_indexer_fake,
                 dispatch_key=current_platform.dispatch_key,
             )
 
