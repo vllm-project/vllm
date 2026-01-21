@@ -392,7 +392,6 @@ def flashinfer_trtllm_fp4_moe(
         local_expert_offset=layer.ep_rank * layer.local_num_experts,
         local_num_experts=layer.local_num_experts,
         routed_scaling_factor=None,
-        tile_tokens_dim=None,
         routing_method_type=routing_method_type,
         do_finalize=True,
     )[0]
@@ -478,7 +477,6 @@ def flashinfer_trtllm_fp4_routed_moe(
         local_expert_offset=layer.ep_rank * layer.local_num_experts,
         local_num_experts=layer.local_num_experts,
         routed_scaling_factor=None,
-        tile_tokens_dim=None,
         routing_method_type=1,
         do_finalize=True,
     )[0]
