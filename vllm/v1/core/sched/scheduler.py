@@ -4,8 +4,9 @@ import itertools
 import time
 from collections import defaultdict
 from collections.abc import Iterable
+from dataclasses import dataclass
+from enum import Enum
 from typing import Any
-
 import numpy as np
 
 from vllm import envs
@@ -61,6 +62,15 @@ from vllm.v1.utils import record_function_or_nullcontext
 
 logger = init_logger(__name__)
 
+_LOOM_HYBRID_STAGE_KEY = "_loom_hybrid_stage"
+_LOOM_HYBRID_HEAD_TOKENS_KEY = "loom_hybrid_head_tokens"
+_LOOM_HYBRID_ENABLE_KEY = "loom_hybrid_enable"
+
+_LOOM_HYBRID_STAGE_HEAD_REGEN = "HEAD_REGEN"
+_LOOM_HYBRID_STAGE_TAIL_FETCH = "TAIL_FETCH"
+_LOOM_HYBRID_STAGE_TAIL_INFLIGHT = "TAIL_INFLIGHT"
+_LOOM_HYBRID_STAGE_DONE = "DONE"
+
 
 class Scheduler(SchedulerInterface):
     def __init__(
@@ -103,6 +113,34 @@ class Scheduler(SchedulerInterface):
         self.max_num_running_reqs = self.scheduler_config.max_num_seqs
         self.max_num_scheduled_tokens = self.scheduler_config.max_num_batched_tokens
         self.max_model_len = vllm_config.model_config.max_model_len
+
+        self._loom_hybrid_head_tokens: int | None = None
+        self._loom_hybrid_head_ratio: float | None = None
+        kv_transfer_config = vllm_config.kv_transfer_config
+        if kv_transfer_config is not None:
+            extra_cfg = kv_transfer_config.kv_connector_extra_config
+            head_tokens_raw = extra_cfg.get(_LOOM_HYBRID_HEAD_TOKENS_KEY)
+            head_ratio_raw = extra_cfg.get("loom_hybrid_head_ratio")
+            if head_tokens_raw is not None:
+                try:
+                    self._loom_hybrid_head_tokens = int(head_tokens_raw)
+                except (TypeError, ValueError) as e:
+                    raise ValueError(
+                        "loom_hybrid_head_tokens must be an int (>=0)"
+                    ) from e
+                if self._loom_hybrid_head_tokens < 0:
+                    raise ValueError("loom_hybrid_head_tokens must be >= 0")
+            if head_ratio_raw is not None:
+                try:
+                    self._loom_hybrid_head_ratio = float(head_ratio_raw)
+                except (TypeError, ValueError) as e:
+                    raise ValueError(
+                        "loom_hybrid_head_ratio must be a float in [0.0, 1.0]"
+                    ) from e
+                if not (0.0 <= self._loom_hybrid_head_ratio <= 1.0):
+                    raise ValueError(
+                        "loom_hybrid_head_ratio must be a float in [0.0, 1.0]"
+                    )
         self.enable_kv_cache_events = (
             self.kv_events_config is not None
             and self.kv_events_config.enable_kv_cache_events
@@ -278,10 +316,40 @@ class Scheduler(SchedulerInterface):
         # For logging.
         scheduled_timestamp = time.monotonic()
 
+        hybrid_reqs_to_move_to_waiting: list[Request] = []
+
         # First, schedule the RUNNING requests.
         req_index = 0
         while req_index < len(self.running) and token_budget > 0:
             request = self.running[req_index]
+
+            kv_params = request.kv_transfer_params or {}
+            hybrid_head_tokens_raw = kv_params.get(_LOOM_HYBRID_HEAD_TOKENS_KEY)
+            if hybrid_head_tokens_raw is None:
+                head_tokens = self._loom_hybrid_head_tokens
+                if head_tokens is None and self._loom_hybrid_head_ratio is not None:
+                    head_tokens = int(request.num_tokens * self._loom_hybrid_head_ratio)
+                if head_tokens is not None and head_tokens > 0:
+                    head_tokens = min(head_tokens, request.num_tokens)
+                    head_tokens = (head_tokens // self.block_size) * self.block_size
+                    if head_tokens > 0:
+                        kv_params[_LOOM_HYBRID_HEAD_TOKENS_KEY] = head_tokens
+                        request.kv_transfer_params = kv_params
+                        hybrid_head_tokens_raw = head_tokens
+            hybrid_stage = kv_params.get(_LOOM_HYBRID_STAGE_KEY)
+            if (
+                hybrid_head_tokens_raw is not None
+                and hybrid_stage is None
+                and request.num_computed_tokens < int(hybrid_head_tokens_raw)
+            ):
+                kv_params[_LOOM_HYBRID_STAGE_KEY] = _LOOM_HYBRID_STAGE_HEAD_REGEN
+                request.kv_transfer_params = kv_params
+                hybrid_stage = _LOOM_HYBRID_STAGE_HEAD_REGEN
+
+            if hybrid_stage == _LOOM_HYBRID_STAGE_TAIL_FETCH:
+                hybrid_reqs_to_move_to_waiting.append(request)
+                req_index += 1
+                continue
 
             if (
                 request.num_output_placeholders > 0
@@ -304,6 +372,17 @@ class Scheduler(SchedulerInterface):
                 + request.num_output_placeholders
                 - request.num_computed_tokens
             )
+
+            if hybrid_stage == _LOOM_HYBRID_STAGE_HEAD_REGEN:
+                head_tokens = int(hybrid_head_tokens_raw)
+                remaining = head_tokens - request.num_computed_tokens
+                if remaining <= 0:
+                    kv_params[_LOOM_HYBRID_STAGE_KEY] = _LOOM_HYBRID_STAGE_TAIL_FETCH
+                    request.kv_transfer_params = kv_params
+                    hybrid_reqs_to_move_to_waiting.append(request)
+                    req_index += 1
+                    continue
+                num_new_tokens = min(num_new_tokens, remaining)
             if 0 < self.scheduler_config.long_prefill_token_threshold < num_new_tokens:
                 num_new_tokens = self.scheduler_config.long_prefill_token_threshold
             num_new_tokens = min(num_new_tokens, token_budget)
@@ -444,6 +523,14 @@ class Scheduler(SchedulerInterface):
                     if self.ec_connector is not None:
                         self.ec_connector.update_state_after_alloc(request, i)
 
+            if (
+                hybrid_stage == _LOOM_HYBRID_STAGE_HEAD_REGEN
+                and request.num_computed_tokens + num_new_tokens >= int(hybrid_head_tokens_raw)
+            ):
+                kv_params[_LOOM_HYBRID_STAGE_KEY] = _LOOM_HYBRID_STAGE_TAIL_FETCH
+                request.kv_transfer_params = kv_params
+                hybrid_reqs_to_move_to_waiting.append(request)
+
         # Record the LoRAs in scheduled_running_reqs
         scheduled_loras: set[int] = set()
         if self.lora_config:
@@ -514,6 +601,9 @@ class Scheduler(SchedulerInterface):
                 num_external_computed_tokens = 0
                 load_kv_async = False
 
+                kv_params = request.kv_transfer_params or {}
+                hybrid_stage = kv_params.get(_LOOM_HYBRID_STAGE_KEY)
+
                 # Get already-cached tokens.
                 if request.num_computed_tokens == 0:
                     # Get locally-cached tokens.
@@ -545,11 +635,34 @@ class Scheduler(SchedulerInterface):
                         num_new_local_computed_tokens + num_external_computed_tokens
                     )
                 else:
-                    # KVTransfer: WAITING reqs have num_computed_tokens > 0
-                    # after async KV recvs are completed.
-                    new_computed_blocks = self.kv_cache_manager.empty_kv_cache_blocks
-                    num_new_local_computed_tokens = 0
-                    num_computed_tokens = request.num_computed_tokens
+                    if hybrid_stage == _LOOM_HYBRID_STAGE_TAIL_FETCH and self.connector is not None:
+                        ext_tokens, load_kv_async = self.connector.get_num_new_matched_tokens(
+                            request, request.num_computed_tokens
+                        )
+                        if ext_tokens is None:
+                            self.waiting.pop_request()
+                            skipped_waiting_requests.prepend_request(request)
+                            continue
+                        request.num_external_computed_tokens = ext_tokens
+                        num_external_computed_tokens = ext_tokens
+                        if num_external_computed_tokens > 0:
+                            num_computed_tokens = request.num_computed_tokens + num_external_computed_tokens
+                            new_computed_blocks = self.kv_cache_manager.empty_kv_cache_blocks
+                            num_new_local_computed_tokens = 0
+                            kv_params[_LOOM_HYBRID_STAGE_KEY] = _LOOM_HYBRID_STAGE_TAIL_INFLIGHT
+                            request.kv_transfer_params = kv_params
+                        else:
+                            num_computed_tokens = request.num_computed_tokens
+                            new_computed_blocks = self.kv_cache_manager.empty_kv_cache_blocks
+                            num_new_local_computed_tokens = 0
+                            kv_params[_LOOM_HYBRID_STAGE_KEY] = _LOOM_HYBRID_STAGE_DONE
+                            request.kv_transfer_params = kv_params
+                    else:
+                        # KVTransfer: WAITING reqs have num_computed_tokens > 0
+                        # after async KV recvs are completed.
+                        new_computed_blocks = self.kv_cache_manager.empty_kv_cache_blocks
+                        num_new_local_computed_tokens = 0
+                        num_computed_tokens = request.num_computed_tokens
 
                 encoder_inputs_to_schedule = None
                 external_load_encoder_input = []
@@ -713,6 +826,13 @@ class Scheduler(SchedulerInterface):
         assert len(scheduled_new_reqs) + len(scheduled_resumed_reqs) + len(
             scheduled_running_reqs
         ) <= len(self.running)
+
+        if hybrid_reqs_to_move_to_waiting:
+            for req in hybrid_reqs_to_move_to_waiting:
+                if req in self.running:
+                    self.running.remove(req)
+                req.status = RequestStatus.PREEMPTED
+                self.waiting.prepend_request(req)
 
         # Get the longest common prefix among all requests in the running queue.
         # This can be potentially used for cascade attention.
@@ -1734,6 +1854,9 @@ class Scheduler(SchedulerInterface):
             request.num_computed_tokens = num_computed_tokens
 
         # Return that we are ready.
+        kv_params = request.kv_transfer_params
+        if kv_params is not None and kv_params.get(_LOOM_HYBRID_STAGE_KEY) == _LOOM_HYBRID_STAGE_TAIL_INFLIGHT:
+            kv_params[_LOOM_HYBRID_STAGE_KEY] = _LOOM_HYBRID_STAGE_DONE
         self.finished_recving_kv_req_ids.remove(request.request_id)
         return True
 

@@ -79,6 +79,8 @@ class LoomOffloadingConfig:
     loom_recompute_ratio: float | Literal["auto"] = 0.0
     loom_disable_store_for_recompute: bool = False
     loom_recompute_log_every_steps: int = 50
+    loom_hybrid_head_tokens: int | None = None
+    loom_hybrid_head_ratio: float | None = None
     cxl_numa_node: int | None = 1
     eviction_policy: Literal["lru", "arc"] = "lru"
 
@@ -117,6 +119,20 @@ class LoomOffloadingConfig:
                 "loom_recompute_log_every_steps", raw["loom_recompute_log_every_steps"]
             )
 
+        loom_hybrid_head_tokens = defaults.loom_hybrid_head_tokens
+        if "loom_hybrid_head_tokens" in raw:
+            loom_hybrid_head_tokens = _coerce_int(
+                "loom_hybrid_head_tokens", raw["loom_hybrid_head_tokens"]
+            )
+            if loom_hybrid_head_tokens < 0:
+                raise ValueError("loom_hybrid_head_tokens must be >= 0")
+
+        loom_hybrid_head_ratio = defaults.loom_hybrid_head_ratio
+        if "loom_hybrid_head_ratio" in raw:
+            loom_hybrid_head_ratio = _coerce_fraction(
+                "loom_hybrid_head_ratio", raw["loom_hybrid_head_ratio"]
+            )
+
         cxl_numa_node = defaults.cxl_numa_node
         if "cxl_numa_node" in raw:
             if raw["cxl_numa_node"] is None:
@@ -136,6 +152,8 @@ class LoomOffloadingConfig:
             loom_recompute_ratio=loom_recompute_ratio,
             loom_disable_store_for_recompute=loom_disable_store_for_recompute,
             loom_recompute_log_every_steps=loom_recompute_log_every_steps,
+            loom_hybrid_head_tokens=loom_hybrid_head_tokens,
+            loom_hybrid_head_ratio=loom_hybrid_head_ratio,
             cxl_numa_node=cxl_numa_node,
             eviction_policy=eviction_policy,
         )
