@@ -26,7 +26,6 @@ from collections.abc import Callable, Iterable, Mapping, Sequence
 from functools import lru_cache, partial
 from typing import Literal, Optional, TypedDict
 
-import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -41,7 +40,7 @@ from vllm.model_executor.layers.activation import _ACTIVATION_REGISTRY, SiluAndM
 from vllm.model_executor.layers.attention.mm_encoder_attention import MMEncoderAttention
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
-    ColumnParallelLinear,
+    ColumarallelLinear,
     MergedColumnParallelLinear,
     QKVParallelLinear,
     RowParallelLinear,
@@ -171,7 +170,9 @@ class OpenPanguVisionAttention(nn.Module):
             cu_seqlens=cu_seqlens,
             max_seqlen=max_seqlen,
         )
-        context_layer = rearrange(context_layer, "b s h d -> s (b h d)", b=1).contiguous()
+        context_layer = rearrange(
+            context_layer, "b s h d -> s (b h d)", b=1
+        ).contiguous()
         output, bias = self.proj(context_layer)
         if bias is not None:
             output = output + bias
@@ -593,9 +594,11 @@ class OpenPanguVisionTransformer(nn.Module):
         grid_thw: torch.Tensor,
     ) -> torch.Tensor:
         # compute cu_seqlens
-        cu_seqlens = torch.repeat_interleave(
-            grid_thw[:, 1] * grid_thw[:, 2], grid_thw[:, 0]
-        ).to(torch.int32).to(x.device)
+        cu_seqlens = (
+            torch.repeat_interleave(grid_thw[:, 1] * grid_thw[:, 2], grid_thw[:, 0])
+            .to(torch.int32)
+            .to(x.device)
+        )
         cu_seqlens = torch.cumsum(cu_seqlens, dim=0, dtype=torch.int32)
         cu_seqlens = F.pad(cu_seqlens, (1, 0), "constant", 0)
 
@@ -1073,7 +1076,7 @@ class OpenPanguVLForConditionalGeneration(
             vision_config=config.vision_config,
             norm_eps=getattr(config.vision_config, "rms_norm_eps", 1e-6),
             quant_config=self._maybe_ignore_quant_config(quant_config),
-            multimodal_config = multimodal_config,
+            multimodal_config=multimodal_config,
             prefix=maybe_prefix(prefix, "visual"),
             use_data_parallel=self.use_data_parallel,
         )
