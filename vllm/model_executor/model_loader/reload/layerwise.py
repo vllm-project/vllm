@@ -131,7 +131,8 @@ def initialize_layerwise_reload(layer: torch.nn.Module) -> None:
 
                 # Cache loaded weights, track loading progress
                 info.loaded_weights.append((param_name, bound_args))
-                info.load_numel += get_numel_loaded(original_loader, bound_args)
+                num_loaded, ret = get_numel_loaded(original_loader, bound_args)
+                info.load_numel += num_loaded
 
                 logger.debug(
                     "%s: %d / %d",
@@ -145,6 +146,8 @@ def initialize_layerwise_reload(layer: torch.nn.Module) -> None:
                     layer, (Attention, MLAAttention)
                 ):
                     _layerwise_process(layer, info)
+
+                return ret
 
             return restore_and_process_loader
 

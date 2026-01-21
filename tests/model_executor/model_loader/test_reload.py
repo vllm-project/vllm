@@ -64,9 +64,12 @@ def test_get_numel_loaded():
     def complex_weight_loader(param, loaded_weight):
         param[:3] = loaded_weight[:3]
         param[5:8] = loaded_weight[5:8]
+        return "value"
 
     args = inspect.signature(complex_weight_loader).bind(param, loaded_weight)
-    assert get_numel_loaded(complex_weight_loader, args) == 6
+    num_loaded, ret = get_numel_loaded(complex_weight_loader, args)
+    assert num_loaded == 6
+    assert ret == "value"
 
 
 @pytest.mark.parametrize("tp_size", [1, 2])
