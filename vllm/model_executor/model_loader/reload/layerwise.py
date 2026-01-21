@@ -10,6 +10,9 @@ from vllm.attention.layer import Attention, MLAAttention
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.modular_kernel import FusedMoEModularKernel
 from vllm.model_executor.layers.quantization.base_config import QuantizeMethodBase
+from vllm.model_executor.layers.quantization.compressed_tensors.transform.module import (  # noqa: E501
+    HadamardTransform,
+)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 
 from .helpers import get_layer_params_buffers, get_layer_size, get_layer_tensors
@@ -31,7 +34,10 @@ __all__ = [
 
 
 LAYER_RELOADING_INFO: dict[torch.nn.Module, LayerReloadingInfo] = dict()
-EXPECTED_POST_INIT_LAYERS: tuple[type[torch.nn.Module]] = (FusedMoEModularKernel,)
+EXPECTED_SKIP_LAYERS: tuple = (
+    FusedMoEModularKernel,
+    HadamardTransform,
+)
 
 
 def record_metadata_for_reloading(layer: torch.nn.Module) -> None:
@@ -43,6 +49,9 @@ def record_metadata_for_reloading(layer: torch.nn.Module) -> None:
 
     Note: Buffers will be restored as parameters.
     """
+    if isinstance(layer, EXPECTED_SKIP_LAYERS):
+        return
+
     params, buffers = get_layer_params_buffers(layer)
     params = {name: to_meta_tensor(param) for name, param in params.items()}
     buffers = {name: to_meta_tensor(buffer) for name, buffer in buffers.items()}
@@ -235,7 +244,7 @@ def _get_original_loader(param: torch.Tensor) -> Callable:
 
 
 def _get_layer_info(layer: torch.nn.Module) -> LayerReloadingInfo | None:
-    if isinstance(layer, EXPECTED_POST_INIT_LAYERS):
+    if isinstance(layer, EXPECTED_SKIP_LAYERS):
         LAYER_RELOADING_INFO[layer] = LayerReloadingInfo(restore_metadata=({}, {}))
 
     if layer in LAYER_RELOADING_INFO:
