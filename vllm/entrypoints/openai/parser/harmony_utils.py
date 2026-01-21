@@ -231,7 +231,8 @@ def parse_response_input(
         if next_msg is not None:
             if not isinstance(next_msg, dict):
                 next_msg = next_msg.model_dump()
-            if next_msg.get("type") == "function_call":
+            # Ensure next_msg is a dict before calling .get()
+            if isinstance(next_msg, dict) and next_msg.get("type") == "function_call":
                 channel = "commentary"
         msg = msg.with_channel(channel)
     elif response_msg["type"] == "function_call":
