@@ -71,7 +71,14 @@ def select_2d_config(
         return {"BLOCK_M": BLOCK_M, "BLOCK_Q": BLOCK_Q, "TILE_SIZE": TILE_SIZE}
 
 
-def select_3d_config(head_size, block_size, max_seqlen_k, num_2d_prgms, element_size):
+def select_3d_config(
+    head_size,
+    block_size,
+    max_seqlen_k,
+    num_2d_prgms,
+    element_size,
+    num_segments_override=None,
+):
     if current_platform.is_rocm():
         cu_count = get_cu_count()
         if head_size < 128 or element_size == 1:
@@ -93,10 +100,16 @@ def select_3d_config(head_size, block_size, max_seqlen_k, num_2d_prgms, element_
 
         reduce_num_warps = 2
 
-        num_segments = math.ceil(target_num_prgms / num_2d_prgms)
-        num_segments = triton.next_power_of_2(num_segments)
-        num_segments = min(num_segments, 128)
-        num_segments = max(num_segments, MIN_SEGMENTS)
+        if num_segments_override is None:
+            num_segments = math.ceil(target_num_prgms / num_2d_prgms)
+            num_segments = triton.next_power_of_2(num_segments)
+            num_segments = min(num_segments, 128)
+            num_segments = max(num_segments, MIN_SEGMENTS)
+        else:
+            num_segments = num_segments_override
+            assert num_segments & (num_segments - 1) == 0, (
+                "NUM_SEGMENTS_PER_SEQ must be a power of two"
+            )
         if num_segments == MIN_SEGMENTS:
             reduce_num_warps = 1
         attn_config = {
@@ -121,8 +134,9 @@ def select_3d_config(head_size, block_size, max_seqlen_k, num_2d_prgms, element_
         TILE_SIZE = 16 if element_size >= 2 else 32
         # for initial version, NUM_SEGMENTS = 16 is chosen as a default
         # value that showed good performance in tests
-        attn_config = {"NUM_SEGMENTS_PER_SEQ": 16, "TILE_SIZE": TILE_SIZE}
-        reduce_config = {"NUM_SEGMENTS_PER_SEQ": 16, "TILE_SIZE": TILE_SIZE}
+        num_segments = 16 if num_segments_override is None else num_segments_override
+        attn_config = {"NUM_SEGMENTS_PER_SEQ": num_segments, "TILE_SIZE": TILE_SIZE}
+        reduce_config = {"NUM_SEGMENTS_PER_SEQ": num_segments, "TILE_SIZE": TILE_SIZE}
         return attn_config, reduce_config
 
 
@@ -1184,7 +1198,12 @@ def unified_attention(
     # provided segmented softmax buffers).
     num_2d_prgms = total_num_q_blocks * num_kv_heads
     attn_config_3d, reduce_config_3d = select_3d_config(
-        head_size, block_size, max_seqlen_k, num_2d_prgms, kv_element_size
+        head_size,
+        block_size,
+        max_seqlen_k,
+        num_2d_prgms,
+        kv_element_size,
+        num_segments_override=num_par_softmax_segments,
     )
 
     # Launch the 2D kernel if
