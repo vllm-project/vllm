@@ -456,7 +456,6 @@ class GPUModelRunner(
             self.rejection_sampler = RejectionSampler(self.sampler)
 
         self.num_spec_tokens = 0
-        self.async_spec_zero_bubble_mode = False
         self.valid_sampled_token_count_gpu: torch.Tensor | None = None
         self.async_spec_reqs_to_fix: dict[str, int] = {}
         if self.speculative_config:
@@ -466,9 +465,9 @@ class GPUModelRunner(
                 self.effective_drafter_max_model_len = draft_config.max_model_len
             else:
                 self.effective_drafter_max_model_len = self.max_model_len
-            self.async_spec_zero_bubble_mode = (
-                self.speculative_config.async_spec_zero_bubble_mode
-            )
+        self.use_async_spec_decode = (
+            self.use_async_scheduling and self.num_spec_tokens > 0
+        )
 
         # Request states.
         self.requests: dict[str, CachedRequestState] = {}
@@ -953,7 +952,7 @@ class GPUModelRunner(
         # Wait until valid_sampled_tokens_count is copied to cpu,
         # then use it to update actual num_computed_tokens of each request.
         valid_sampled_token_count = []
-        if not self.async_spec_zero_bubble_mode:
+        if not self.use_async_spec_decode:
             valid_sampled_token_count = self._get_valid_sampled_token_count()
         else:
             self.async_spec_reqs_to_fix.clear()
@@ -983,10 +982,10 @@ class GPUModelRunner(
                 if req_index is None:
                     req_state.prev_num_draft_len = 0
                 else:
-                    # If async_spec_zero_bubble_mode, assume all tokens are accepted,
+                    # If use_async_spec_decode, assume all tokens are accepted,
                     # and will adjust the inputs correctly in _adjust_inputs_on_gpu to
                     # avoid cpu sync, which may cause gpu bubble in async scheduling.
-                    if self.async_spec_zero_bubble_mode:
+                    if self.use_async_spec_decode:
                         num_accepted = req_state.prev_num_draft_len
                         num_rejected = 0
                         self.async_spec_reqs_to_fix[req_id] = num_accepted
@@ -1099,7 +1098,7 @@ class GPUModelRunner(
            tokens were accepted so the next iteration can shift states.
         """
 
-        if self.async_spec_zero_bubble_mode:
+        if self.use_async_spec_decode:
             self._finalize_async_spec_cpu_state()
 
         if not self.speculative_config or not self.model_config.is_hybrid:
@@ -1418,7 +1417,7 @@ class GPUModelRunner(
         are accepted in update_states to avoid cpu sync, and will adjust the
         inputs correctly based on the actual accepted token count in GPU."""
 
-        if not self.async_spec_zero_bubble_mode:
+        if not self.use_async_spec_decode:
             return
 
         num_reqs = self.input_batch.num_reqs
@@ -1488,7 +1487,7 @@ class GPUModelRunner(
                         diff_per_token
                     )
 
-        # Compute slot mapping only on GPU in async_spec_zero_bubble_mode
+        # Compute slot mapping only on GPU when use_async_spec_decode
         self.input_batch.block_table.compute_slot_mapping_gpu(
             req_indices_flat_gpu, self.positions.gpu[: req_indices_flat_gpu.shape[0]]
         )
@@ -1606,7 +1605,7 @@ class GPUModelRunner(
 
                 output_idx += num_sched
 
-        if not self.async_spec_zero_bubble_mode:
+        if not self.use_async_spec_decode:
             self.input_batch.block_table.compute_slot_mapping(req_indices, positions_np)
             self.input_batch.block_table.commit_slot_mapping(total_num_scheduled_tokens)
 
@@ -1793,7 +1792,7 @@ class GPUModelRunner(
         if self.model_config.enable_return_routed_experts:
             self.slot_mapping = slot_mapping_gid_0[:num_tokens].cpu().numpy()
 
-        if self.async_spec_zero_bubble_mode:
+        if self.use_async_spec_decode:
             seq_lens_cpu = None
             num_computed_tokens_cpu = None
         else:
@@ -3773,7 +3772,7 @@ class GPUModelRunner(
             counts_cpu[: counts.shape[0]].copy_(counts, non_blocking=True)
             self.valid_sampled_token_count_event.record()
 
-        if self.async_spec_zero_bubble_mode:
+        if self.use_async_spec_decode:
             self.valid_sampled_token_count_gpu = valid_sampled_tokens_count
         self.input_batch.prev_sampled_token_ids = next_token_ids.unsqueeze(1)
 
