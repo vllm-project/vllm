@@ -168,7 +168,7 @@ master_address = get_ip()
 master_port = get_open_port()
 
 world_size = ray.get(llm.get_world_size.remote()) + 1  # +1 for the trainer
-handle = llm.init_weight_transfer.remote(
+inference_handle = llm.init_weight_transfer.remote(
     WeightTransferInitRequest(
         init_info=asdict(
             NCCLInitInfo(
@@ -185,7 +185,7 @@ handle = llm.init_weight_transfer.remote(
 train_handle = train_model.init_weight_transfer_group.remote(
     master_address, master_port, world_size
 )
-ray.get([train_handle, handle])
+ray.get([train_handle, inference_handle])
 
 # Simulate a training step by zeroing out all model weights.
 # In a real RLHF training loop the weights would be updated using the gradient
@@ -198,7 +198,7 @@ names, dtype_names, shapes = ray.get(train_model.get_weight_metadata.remote())
 
 # Issue update_weights call with NCCL-specific update info
 # packed=True enables efficient batched tensor broadcasting
-handle = llm.update_weights.remote(
+inference_handle = llm.update_weights.remote(
     WeightUpdateRequest(
         update_info=asdict(
             NCCLUpdateInfo(
@@ -212,8 +212,8 @@ handle = llm.update_weights.remote(
 )
 
 # Broadcast all weights from trainer using the weight transfer API
-broadcast_handle = train_model.broadcast_weights.remote(packed=True)
-ray.get([broadcast_handle, handle])
+train_handle = train_model.broadcast_weights.remote(packed=True)
+ray.get([train_handle, inference_handle])
 
 # Finalize the weight update (processes weights for quantization/kernel format)
 ray.get(llm.finalize_weight_update.remote())

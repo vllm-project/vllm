@@ -30,6 +30,7 @@ causes unexpected behavior.
 import asyncio
 import os
 import uuid
+from dataclasses import asdict
 
 import ray
 import torch
@@ -45,9 +46,57 @@ from vllm.distributed.weight_transfer.base import (
     WeightTransferInitRequest,
     WeightUpdateRequest,
 )
+from vllm.distributed.weight_transfer.nccl_engine import (
+    NCCLInitInfo,
+    NCCLUpdateInfo,
+    NCCLWeightTransferEngine,
+)
 from vllm.utils.network_utils import get_ip, get_open_port
 
 MODEL_NAME = "facebook/opt-125m"
+
+
+@ray.remote(num_gpus=1)
+class TrainModel:
+    """Ray actor that wraps the training model on a dedicated GPU."""
+
+    def __init__(self, model_name: str):
+        self.device = torch.device("cuda:0")
+        torch.cuda.set_device(self.device)
+        self.model = AutoModelForCausalLM.from_pretrained(
+            model_name, dtype=torch.bfloat16
+        )
+        self.model.to(self.device)
+
+    def zero_weights(self):
+        """Zero out all model weights (simulates training step)."""
+        for name, p in self.model.named_parameters():
+            p.data.zero_()
+
+    def get_weight_metadata(self):
+        """Return weight names, dtypes, and shapes for weight transfer."""
+        names = []
+        dtype_names = []
+        shapes = []
+        for name, p in self.model.named_parameters():
+            names.append(name)
+            dtype_names.append(str(p.dtype).split(".")[-1])
+            shapes.append(list(p.shape))
+        return names, dtype_names, shapes
+
+    def init_weight_transfer_group(self, master_address, master_port, world_size):
+        """Initialize the NCCL process group for weight transfer."""
+        self.model_update_group = stateless_init_process_group(
+            master_address, master_port, 0, world_size, self.device
+        )
+
+    def broadcast_weights(self, packed: bool = True):
+        """Broadcast weights to the inference engine."""
+        NCCLWeightTransferEngine.trainer_broadcast_weights(
+            iterator=self.model.named_parameters(),
+            group=self.model_update_group,
+            packed=packed,
+        )
 
 
 class MyLLM:
@@ -109,21 +158,19 @@ class MyLLM:
         return await self.engine.finalize_weight_update()
 
 
-# Load the OPT-125M model onto GPU 0 for the training workload.
-train_model = AutoModelForCausalLM.from_pretrained(MODEL_NAME, dtype=torch.bfloat16)
-train_model.to("cuda:0")
-
 # Initialize Ray and set the visible devices. The vLLM engine will
 # be placed on GPUs 1 and 2.
-os.environ["CUDA_VISIBLE_DEVICES"] = "1,2"
+os.environ["CUDA_VISIBLE_DEVICES"] = "0,1,2"
 ray.init(runtime_env={"excludes": [".git/objects/pack/"]})
 # ray.init()
+
+# Launch the training model actor. Ray's resource scheduler will allocate
+# 1 GPU (via num_gpus=1 in the decorator), ensuring pg_inference gets different GPUs.
+train_model = TrainModel.remote(MODEL_NAME)
 
 # Create a placement group that reserves GPU 1–2 for the vLLM inference engine.
 # Learn more about Ray placement groups:
 # https://docs.ray.io/en/latest/placement-groups.html
-pg_training = placement_group([{"GPU": 1, "CPU": 0}])
-ray.get(pg_training.ready())
 
 pg_inference = placement_group([{"GPU": 1, "CPU": 0}] * 2)
 ray.get(pg_inference.ready())
@@ -169,22 +216,25 @@ sampling_params = [
 master_address = get_ip()
 master_port = get_open_port()
 
-print("reached init weight in driver")
-handle = llm.init_weight_transfer.remote(
+world_size = 3  # 1 trainer + 2 inference workers (tensor_parallel_size=2)
+inference_handle = llm.init_weight_transfer.remote(
     WeightTransferInitRequest(
-        init_info=dict(
-            master_address=master_address,
-            master_port=master_port,
-            rank_offset=1,
-            world_size=3,
+        init_info=asdict(
+            NCCLInitInfo(
+                master_address=master_address,
+                master_port=master_port,
+                rank_offset=1,
+                world_size=world_size,
+            )
         )
     )
 )
 
-model_update_group = stateless_init_process_group(
-    master_address, master_port, 0, 3, torch.device("cuda:0")
+# Initialize weight transfer group on both the training actor and inference engine
+train_handle = train_model.init_weight_transfer_group.remote(
+    master_address, master_port, world_size
 )
-ray.get(handle)
+ray.get([train_handle, inference_handle])
 
 
 generation_futures = [
@@ -200,31 +250,30 @@ ray.get(llm.abort_generation.remote())
 # Simulate a training step by zeroing out all model weights.
 # In a real RLHF training loop the weights would be updated using the gradient
 # from an RL objective such as PPO on a reward model.
-for name, p in train_model.named_parameters():
-    p.data.zero_()
+ray.get(train_model.zero_weights.remote())
 
 # Synchronize the updated weights to the inference engine using batched API.
-# Collect all weight metadata
-names = []
-dtype_names = []
-shapes = []
-for name, p in train_model.named_parameters():
-    names.append(name)
-    dtype_names.append(str(p.dtype).split(".")[-1])
-    shapes.append(p.shape)
+# Collect all weight metadata from the training actor
+names, dtype_names, shapes = ray.get(train_model.get_weight_metadata.remote())
 
-# Issue update_weights call
-handle = llm.update_weights.remote(
+# Issue update_weights call with NCCL-specific update info
+# packed=True enables efficient batched tensor broadcasting
+inference_handle = llm.update_weights.remote(
     WeightUpdateRequest(
-        update_info=dict(names=names, dtype_names=dtype_names, shapes=shapes)
+        update_info=asdict(
+            NCCLUpdateInfo(
+                names=names,
+                dtype_names=dtype_names,
+                shapes=shapes,
+                packed=True,
+            )
+        )
     )
 )
 
-# Broadcast all weights from trainer
-for name, p in train_model.named_parameters():
-    model_update_group.broadcast(p, src=0, stream=torch.cuda.current_stream())
-
-ray.get(handle)
+# Broadcast all weights from trainer using the weight transfer API
+train_handle = train_model.broadcast_weights.remote(packed=True)
+ray.get([train_handle, inference_handle])
 
 # Finalize the weight update (processes weights for quantization/kernel format)
 ray.get(llm.finalize_weight_update.remote())
