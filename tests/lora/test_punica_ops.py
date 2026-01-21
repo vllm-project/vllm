@@ -147,7 +147,9 @@ def check_lora_shrink_kernel(
 
     # Setup metadata information for the LoRA kernel.
     lora_meta = LoRAKernelMeta.make(
-        max_loras=num_loras, max_num_tokens=token_nums, device=current_platform.device_name
+        max_loras=num_loras,
+        max_num_tokens=token_nums,
+        device=current_platform.device_name,
     )
     lora_meta.prepare_tensors(data.token_lora_mapping)
 
@@ -220,7 +222,9 @@ def check_lora_expand_kernel(
 
     # Setup metadata information for the LoRA kernel.
     lora_meta = LoRAKernelMeta.make(
-        max_loras=num_loras, max_num_tokens=token_nums, device=current_platform.device_name
+        max_loras=num_loras,
+        max_num_tokens=token_nums,
+        device=current_platform.device_name,
     )
     lora_meta.prepare_tensors(data.token_lora_mapping)
 

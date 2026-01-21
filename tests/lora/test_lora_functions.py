@@ -24,6 +24,7 @@ def make_lora_request(lora_id: int):
         lora_name=f"{lora_id}", lora_int_id=lora_id, lora_path=LORA_MODULE_PATH
     )
 
+
 @pytest.mark.skipif(current_platform.is_xpu(), reason="case will hang on xpu")
 def test_lora_functions_sync():
     max_loras = 4

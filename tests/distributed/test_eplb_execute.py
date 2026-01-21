@@ -13,11 +13,11 @@ from vllm.distributed.eplb.rebalance_execute import (
     rearrange_expert_weights_inplace,
     transfer_layer,
 )
-from vllm.platforms import current_platform
 from vllm.distributed.parallel_state import (
     ensure_model_parallel_initialized,
     get_tp_group,
 )
+from vllm.platforms import current_platform
 
 from .eplb_utils import distributed_run, set_env_vars_and_device
 

@@ -185,7 +185,9 @@ def test_model_specialization_with_evaluate_guards(
         ):
             monkeypatch.setenv("VLLM_CACHE_ROOT", tmpdirname)
 
-            model = model_class(vllm_config=vllm_config).to(current_platform.device_name)
+            model = model_class(vllm_config=vllm_config).to(
+                current_platform.device_name
+            )
 
             model(input1)
 
@@ -209,8 +211,16 @@ def test_model_specialization_with_evaluate_guards(
             else:
                 model(input2)
 
-    test(ModelWithSizeCheck, torch.randn(20, 10).to(current_platform.device_name), torch.randn(5, 10).to(current_platform.device_name))
-    test(ModelWithSizeCheck, torch.randn(5, 10).to(current_platform.device_name), torch.randn(20, 10).to(current_platform.device_name))
+    test(
+        ModelWithSizeCheck,
+        torch.randn(20, 10).to(current_platform.device_name),
+        torch.randn(5, 10).to(current_platform.device_name),
+    )
+    test(
+        ModelWithSizeCheck,
+        torch.randn(5, 10).to(current_platform.device_name),
+        torch.randn(20, 10).to(current_platform.device_name),
+    )
     test(
         ModelWithOneSizeCheck,
         torch.randn(20, 10).to(current_platform.device_name),

@@ -212,14 +212,18 @@ class Worker(WorkerBase):
                     f"DP adjusted local rank {self.local_rank} is out of bounds. "
                 )
                 visible_device_count = (
-                    current_platform.device_count() if torch.accelerator.is_available() else 0
+                    current_platform.device_count()
+                    if torch.accelerator.is_available()
+                    else 0
                 )
                 assert self.parallel_config.local_world_size <= visible_device_count, (
                     f"local_world_size ({self.parallel_config.local_world_size}) must "
                     f"be less than or equal to the number of visible devices "
                     f"({visible_device_count})."
                 )
-            self.device = torch.device(f"{current_platform.device_name}:{self.local_rank}")
+            self.device = torch.device(
+                f"{current_platform.device_name}:{self.local_rank}"
+            )
             current_platform.set_device(self.device)
 
             current_platform.check_if_supports_dtype(self.model_config.dtype)

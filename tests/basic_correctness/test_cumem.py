@@ -13,8 +13,8 @@ from vllm.utils.mem_constants import GiB_bytes
 
 from ..utils import create_new_process_for_each_test, requires_fp8
 
-
 DEVICE = current_platform.device_type
+
 
 @create_new_process_for_each_test("fork" if not current_platform.is_rocm() else "spawn")
 def test_python_error():
