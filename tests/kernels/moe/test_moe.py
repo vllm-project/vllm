@@ -1512,7 +1512,6 @@ def test_batched_fused_marlin_moe(
         "bias2": None,
         "w1_scale": w1_data.scales,
         "w2_scale": w2_data.scales,
-        "gating_output": score,
         "global_num_experts": e,
         "expert_map": None,
         "global_scale1": w1_data.global_scale,
