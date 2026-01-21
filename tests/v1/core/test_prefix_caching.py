@@ -1855,6 +1855,91 @@ def test_eagle_with_sliding_window():
     assert num_tokens == 0
 
 
+def test_hybrid_model_with_eagle():
+    """
+    Test EAGLE with hybrid model (full attention + sliding window).
+    We check that sliding window adjusts its threshold to compensate for the
+    reduced search range when EAGLE is handled by full attention.
+    """
+    block_size = 16
+    # Sliding window of 128 tokens = 8 blocks
+    sliding_window = 8 * block_size
+
+    kv_cache_config = KVCacheConfig(
+        num_blocks=100,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec(
+                ["full_attn_layer"],
+                FullAttentionSpec(
+                    block_size=block_size,
+                    num_kv_heads=1,
+                    head_size=1,
+                    dtype=torch.float16,
+                ),
+            ),
+            KVCacheGroupSpec(
+                ["sliding_window_layer"],
+                SlidingWindowSpec(
+                    block_size=block_size,
+                    num_kv_heads=1,
+                    head_size=1,
+                    dtype=torch.float32,
+                    sliding_window=sliding_window,
+                ),
+            ),
+        ],
+    )
+    manager = KVCacheManager(
+        kv_cache_config=kv_cache_config,
+        max_model_len=8192,
+        enable_caching=True,
+        use_eagle=True,
+        hash_block_size=block_size,
+    )
+
+    # Create a prompt with 20 blocks (320 tokens).
+    # For sliding window (128 tokens = 8 blocks), only the last 8 blocks
+    # (blocks 12-19) are within the window.
+    num_blocks = 20
+    common_token_ids = [i for i in range(num_blocks) for _ in range(block_size)]
+
+    req0 = make_request("0", common_token_ids, block_size, sha256)
+    computed_blocks, num_computed_tokens = manager.get_computed_blocks(req0)
+    # First request has no cache hits
+    assert num_computed_tokens == 0
+    blocks = manager.allocate_slots(
+        req0,
+        len(common_token_ids),
+        num_computed_tokens,
+        computed_blocks,
+    )
+    # Full attention: 20 blocks allocated
+    assert len(blocks.get_block_ids()[0]) == num_blocks
+    # Sliding window: some null blocks (skipped) + real blocks within window
+    manager.free(req0)
+
+    # Second request: should get cache hits
+    req1 = make_request("1", common_token_ids, block_size, sha256)
+    computed_blocks, num_computed_tokens = manager.get_computed_blocks(req1)
+    assert num_computed_tokens > 0, "Hybrid model with EAGLE should have cache hits"
+
+    # With EAGLE:
+    # - Full attention finds 20 blocks, drops 1 for EAGLE → 19 blocks
+    # - Sliding window adjusts threshold and finds cache hits
+    full_attn_blocks = len(computed_blocks.blocks[0])
+    sliding_window_blocks = len(computed_blocks.blocks[1])
+
+    # Both should have the same number of blocks (they must agree)
+    assert full_attn_blocks == sliding_window_blocks
+
+    # Should be 18 blocks because full attention drops 1 block for EAGLE
+    assert full_attn_blocks == num_blocks - 2, (
+        f"Expected {num_blocks - 2}, got {full_attn_blocks} blocks"
+    )
+    assert num_computed_tokens == full_attn_blocks * block_size
+
+
 def test_different_block_size():
     block_size = 16
     # full attention and sliding window attention layers have the same page size:

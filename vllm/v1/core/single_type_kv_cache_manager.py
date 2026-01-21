@@ -4,6 +4,7 @@ import itertools
 from abc import ABC, abstractmethod
 from collections import defaultdict
 from collections.abc import Sequence
+from enum import Enum
 
 from vllm.utils.math_utils import cdiv
 from vllm.v1.core.block_pool import BlockPool
@@ -19,6 +20,21 @@ from vllm.v1.kv_cache_interface import (
     SlidingWindowSpec,
 )
 from vllm.v1.request import Request
+
+
+class EagleMode(Enum):
+    """How EAGLE speculative decoding affects cache hit searching.
+
+    In hybrid models (e.g., full attention + sliding window), EAGLE handling
+    must be coordinated so that exactly one attention type handles it.
+    """
+
+    DISABLED = 0
+    # This manager handles EAGLE: increase threshold, pop one block at end
+    PRIMARY = 1
+    # Another manager handled EAGLE: decrease threshold to compensate for
+    # the reduced search range, don't pop
+    SECONDARY = 2
 
 
 class SingleTypeKVCacheManager(ABC):
@@ -291,7 +307,7 @@ class SingleTypeKVCacheManager(ABC):
         kv_cache_group_ids: list[int],
         block_pool: BlockPool,
         kv_cache_spec: KVCacheSpec,
-        use_eagle: bool,
+        eagle_mode: EagleMode,
         alignment_tokens: int,
         dcp_world_size: int = 1,
         pcp_world_size: int = 1,
@@ -311,7 +327,7 @@ class SingleTypeKVCacheManager(ABC):
             kv_cache_group_ids: The ids of the kv cache groups.
             block_pool: The block pool.
             kv_cache_spec: The kv cache spec.
-            use_eagle: Whether to use eagle.
+            eagle_mode: The current eagle mode to handle.
             alignment_tokens: The returned cache hit length (in tokens) should
                 be a multiple of this value (in tokens). By default, it should
                 be set to the block_size.
@@ -397,7 +413,7 @@ class FullAttentionManager(SingleTypeKVCacheManager):
         kv_cache_group_ids: list[int],
         block_pool: BlockPool,
         kv_cache_spec: KVCacheSpec,
-        use_eagle: bool,
+        eagle_mode: EagleMode,
         alignment_tokens: int,
         dcp_world_size: int = 1,
         pcp_world_size: int = 1,
@@ -426,8 +442,8 @@ class FullAttentionManager(SingleTypeKVCacheManager):
                     computed.append(cached)
             else:
                 break
-        if use_eagle and computed_blocks[0]:
-            # Need to drop the last matched block if eagle is enabled.
+        if eagle_mode == EagleMode.PRIMARY and computed_blocks[0]:
+            # Drop the last matched block for EAGLE speculative decoding.
             for computed in computed_blocks:
                 computed.pop()
         while (
@@ -465,7 +481,7 @@ class SlidingWindowManager(SingleTypeKVCacheManager):
         kv_cache_group_ids: list[int],
         block_pool: BlockPool,
         kv_cache_spec: KVCacheSpec,
-        use_eagle: bool,
+        eagle_mode: EagleMode,
         alignment_tokens: int,
         dcp_world_size: int = 1,
         pcp_world_size: int = 1,
@@ -481,12 +497,17 @@ class SlidingWindowManager(SingleTypeKVCacheManager):
         sliding_window_contiguous_blocks = cdiv(
             kv_cache_spec.sliding_window - 1, kv_cache_spec.block_size
         )
-        if use_eagle:
-            # Need to drop the last matched block if eagle is enabled. For
-            # sliding window layer, we achieve this by increasing the number of
-            # contiguous blocks needed for prefix cache hit by one and dropping
-            # the last matched block.
+
+        # Adjust threshold based on EAGLE mode:
+        # - PRIMARY: This manager handles EAGLE. Need one extra block so that
+        #   after popping, we still have enough for the sliding window.
+        # - SECONDARY: Another manager (e.g., full attention) handled EAGLE,
+        #   reducing max_length by one block. Decrease threshold to compensate
+        #   for the smaller search range.
+        if eagle_mode == EagleMode.PRIMARY:
             sliding_window_contiguous_blocks += 1
+        elif eagle_mode == EagleMode.SECONDARY and sliding_window_contiguous_blocks > 1:
+            sliding_window_contiguous_blocks -= 1
 
         # TODO: reduce i by sliding_window_contiguous_blocks when cache miss, to
         # optimize the time complexity from O(max_num_blocks) to
@@ -500,6 +521,11 @@ class SlidingWindowManager(SingleTypeKVCacheManager):
         )
         block_size = kv_cache_spec.block_size
         num_contiguous_blocks = 0
+        # Track the best (rightmost) contiguous sequence found during search.
+        # This is needed because sliding window layers may have gaps (null blocks)
+        # for tokens outside the window, causing num_contiguous_blocks to reset.
+        best_match_end_idx = -1  # End index (exclusive) of best match
+        best_match_length = 0  # Length of best match
         match_found = False
         # Search from right to left and early stop when a match is found.
         for i in range(max_num_blocks - 1, -1, -1):
@@ -527,19 +553,39 @@ class SlidingWindowManager(SingleTypeKVCacheManager):
                     match_found = True
                     break
             else:
+                # Track the best contiguous sequence before resetting.
+                if num_contiguous_blocks > best_match_length:
+                    best_match_length = num_contiguous_blocks
+                    best_match_end_idx = i + 1 + num_contiguous_blocks
                 num_contiguous_blocks = 0
         if not match_found:
-            # The first `num_contiguous_blocks` is a cache hit even if
-            # `num_contiguous_blocks < sliding_window_contiguous_blocks`.
-            for computed in computed_blocks:
-                del computed[num_contiguous_blocks:]
+            # Check if the final contiguous sequence (at the start) is the best.
+            if num_contiguous_blocks > best_match_length:
+                best_match_length = num_contiguous_blocks
+                best_match_end_idx = num_contiguous_blocks
+
+            # Choose fallback strategy based on context:
+            # - SECONDARY mode (hybrid model): Use best contiguous sequence found
+            #   anywhere. Sliding window layers may have gaps at the start (blocks
+            #   outside the window), but cached blocks at the end are still valid.
+            # - ELSE: Use standard prefix semantics - only count contiguous
+            #   blocks from position 0. A gap anywhere breaks the prefix.
+            if eagle_mode == EagleMode.SECONDARY and best_match_length > 0:
+                for computed in computed_blocks:
+                    del computed[best_match_end_idx:]
+            else:
+                for computed in computed_blocks:
+                    del computed[num_contiguous_blocks:]
+
             while (
                 block_size != alignment_tokens  # Faster for common case.
+                and len(computed_blocks[0]) > 0
                 and len(computed_blocks[0]) * block_size % alignment_tokens != 0
             ):
                 for computed in computed_blocks:
                     computed.pop()
-        if use_eagle and computed_blocks[0]:
+
+        if eagle_mode == EagleMode.PRIMARY and computed_blocks[0]:
             assert kv_cache_spec.block_size == alignment_tokens, (
                 "aligned_length is not compatible with eagle now"
             )
@@ -601,7 +647,7 @@ class ChunkedLocalAttentionManager(SingleTypeKVCacheManager):
         kv_cache_group_ids: list[int],
         block_pool: BlockPool,
         kv_cache_spec: KVCacheSpec,
-        use_eagle: bool,
+        eagle_mode: EagleMode,
         alignment_tokens: int,
         dcp_world_size: int = 1,
         pcp_world_size: int = 1,
@@ -632,7 +678,7 @@ class ChunkedLocalAttentionManager(SingleTypeKVCacheManager):
             kv_cache_group_ids: The ids of the kv cache groups.
             block_pool: The block pool.
             kv_cache_spec: The kv cache spec.
-            use_eagle: Whether to use eagle.
+            eagle_mode: The current eagle mode to handle.
             dcp_world_size: The world size of decode context parallelism.
             pcp_world_size: The world size of prefill context parallelism.
             alignment_tokens: The returned cache hit length (in tokens) should
@@ -645,8 +691,8 @@ class ChunkedLocalAttentionManager(SingleTypeKVCacheManager):
             "ChunkedLocalAttentionManager can only be used for "
             + "chunked local attention groups"
         )
-        assert use_eagle is False, (
-            "Hybrid KV cache is not supported for " + "eagle + chunked local attention."
+        assert eagle_mode == EagleMode.DISABLED, (
+            "Hybrid KV cache is not supported for eagle + chunked local attention."
         )
         assert dcp_world_size == 1, "DCP not support chunked local attn now."
         assert pcp_world_size == 1, "PCP not support chunked local attn now."
@@ -747,7 +793,7 @@ class MambaManager(SingleTypeKVCacheManager):
         kv_cache_group_ids: list[int],
         block_pool: BlockPool,
         kv_cache_spec: KVCacheSpec,
-        use_eagle: bool,
+        eagle_mode: EagleMode,
         alignment_tokens: int,
         dcp_world_size: int = 1,
         pcp_world_size: int = 1,
@@ -866,7 +912,7 @@ class CrossAttentionManager(SingleTypeKVCacheManager):
         kv_cache_group_ids: list[int],
         block_pool: BlockPool,
         kv_cache_spec: KVCacheSpec,
-        use_eagle: bool,
+        eagle_mode: EagleMode,
         alignment_tokens: int,
         dcp_world_size: int = 1,
         pcp_world_size: int = 1,

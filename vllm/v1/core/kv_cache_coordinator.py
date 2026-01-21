@@ -14,6 +14,7 @@ from vllm.v1.core.kv_cache_utils import (
 )
 from vllm.v1.core.single_type_kv_cache_manager import (
     CrossAttentionManager,
+    EagleMode,
     SingleTypeKVCacheManager,
     get_manager_for_kv_cache_spec,
 )
@@ -336,13 +337,15 @@ class UnitaryKVCacheCoordinator(KVCacheCoordinator):
         block_hashes: list[BlockHash],
         max_cache_hit_length: int,
     ) -> tuple[tuple[list[KVCacheBlock], ...], int]:
+        # For unitary models, this manager is the only EAGLE handler
+        eagle_mode = EagleMode.PRIMARY if self.use_eagle else EagleMode.DISABLED
         hit_blocks = self.single_type_managers[0].find_longest_cache_hit(
             block_hashes=block_hashes,
             max_length=max_cache_hit_length,
             kv_cache_group_ids=[0],
             block_pool=self.block_pool,
             kv_cache_spec=self.kv_cache_spec,
-            use_eagle=self.use_eagle,
+            eagle_mode=eagle_mode,
             alignment_tokens=self.block_size,
             dcp_world_size=self.dcp_world_size,
             pcp_world_size=self.pcp_world_size,
@@ -469,6 +472,14 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
         hit_length = max_cache_hit_length
         hit_blocks_by_group: list[list[KVCacheBlock] | None] = [None] * num_groups
 
+        # Check if full attention exists - this affects EAGLE handling.
+        # If full attention exists, it's the PRIMARY handler and others are
+        # SECONDARY (compensate for reduced search range). If no full attention,
+        # all types are PRIMARY (each handles EAGLE independently).
+        has_full_attn = self.use_eagle and any(
+            isinstance(spec, FullAttentionSpec) for spec, _, _ in self.attention_groups
+        )
+
         while True:
             curr_hit_length = hit_length
 
@@ -490,13 +501,25 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
                         assert blocks is not None
                         del blocks[num_blocks:]
                 else:
+                    # Determine EAGLE mode:
+                    # - If full attention exists: it's PRIMARY, others SECONDARY
+                    # - If no full attention: all types are PRIMARY
+                    if not self.use_eagle:
+                        eagle_mode = EagleMode.DISABLED
+                    elif has_full_attn and is_full_attn:
+                        eagle_mode = EagleMode.PRIMARY
+                    elif has_full_attn:
+                        eagle_mode = EagleMode.SECONDARY
+                    else:
+                        eagle_mode = EagleMode.PRIMARY
+
                     hit_blocks = manager_cls.find_longest_cache_hit(
                         block_hashes=_get_block_hashes(spec),
                         max_length=curr_hit_length,
                         kv_cache_group_ids=group_ids,
                         block_pool=self.block_pool,
                         kv_cache_spec=spec,
-                        use_eagle=self.use_eagle,
+                        eagle_mode=eagle_mode,
                         alignment_tokens=self.lcm_block_size,
                     )
                     curr_hit_length = len(hit_blocks[0]) * spec.block_size
