@@ -166,6 +166,7 @@ def flashinfer_alltoall_dispatch(
             # so we disable it until after the A2A below.
             is_fp4_scale_swizzled=False,
         )
+
         x = MnnvlMoe.mnnvl_moe_alltoallv(
             x,
             alltoall_info,
