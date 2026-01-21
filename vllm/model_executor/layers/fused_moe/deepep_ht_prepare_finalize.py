@@ -48,12 +48,13 @@ class DeepEPHTPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
 
     def __init__(
         self,
+        defer_input_quant: bool,
         buffer: deep_ep.Buffer,
         num_dispatchers: int,
         dp_size: int,
         rank_expert_offset: int,
     ):
-        super().__init__()
+        super().__init__(defer_input_quant=defer_input_quant)
         self.buffer = buffer
         self.num_dispatchers_ = num_dispatchers
         self.dp_size = dp_size

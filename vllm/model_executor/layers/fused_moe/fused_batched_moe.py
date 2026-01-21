@@ -497,12 +497,15 @@ class BatchedPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
 
     def __init__(
         self,
+        defer_input_quant: bool,
         max_num_tokens: int,
         num_local_experts: int,
         num_dispatchers: int,
         rank: int,
     ):
-        super().__init__()
+        if defer_input_quant:
+            raise NotImplementedError()
+        super().__init__(defer_input_quant=defer_input_quant)
         self.max_num_tokens = max_num_tokens
         self.num_local_experts = num_local_experts
         self.rank = rank

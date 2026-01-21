@@ -161,6 +161,14 @@ class FusedMoEPrepareAndFinalize(ABC):
     described above.
     """
 
+    def __init__(
+        self,
+        defer_input_quant: bool,
+    ):
+        # Whether to defer input quantization to the Experts kernel.
+        # Useful for cases where the Kernel applies the quantization.
+        self.defer_input_quant = defer_input_quant
+
     def post_init_setup(self, fused_experts: "FusedMoEPermuteExpertsUnpermute"):
         """
         Initialize FusedMoEPrepareAndFinalize settings that depend on

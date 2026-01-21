@@ -23,10 +23,11 @@ class FlashInferA2APrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
 
     def __init__(
         self,
+        defer_input_quant: bool = False,
         num_dispatchers: int = 1,
         use_deepseek_fp8_block_scale: bool = False,
     ):
-        super().__init__()
+        super().__init__(defer_input_quant=defer_input_quant)
         self.num_dispatchers_ = num_dispatchers
         # TODO(rob): convert this to `defer_input_quant`
         self.use_deepseek_fp8_block_scale = use_deepseek_fp8_block_scale

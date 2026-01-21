@@ -84,6 +84,7 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
 
     def __init__(
         self,
+        defer_input_quant: bool,
         buffer: deep_ep.Buffer,
         max_tokens_per_rank: int,
         num_dispatchers: int,
@@ -92,7 +93,9 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         physical_to_global: torch.Tensor | None = None,
         local_expert_global_ids: torch.Tensor | None = None,
     ):
-        super().__init__()
+        if defer_input_quant:
+            raise NotImplementedError()
+        super().__init__(defer_input_quant=defer_input_quant)
 
         self.buffer = buffer
         self.max_tokens_per_rank = max_tokens_per_rank

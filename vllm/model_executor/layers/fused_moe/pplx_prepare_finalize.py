@@ -65,12 +65,15 @@ def pplx_hidden_dim_scale_bytes(
 class PplxPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
     def __init__(
         self,
+        defer_input_quant: bool,
         a2a: pplx.AllToAll,
         max_num_tokens: int,
         num_local_experts: int,
         num_dispatchers: int,
     ):
-        super().__init__()
+        if defer_input_quant:
+            raise NotImplementedError()
+        super().__init__(defer_input_quant=defer_input_quant)
         assert max_num_tokens > 0
         assert num_local_experts > 0
         self.a2a = a2a
