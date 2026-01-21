@@ -738,9 +738,9 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
 
     @property
     def topk_indices_dtype(self) -> torch.dtype | None:
-        if self.kernel is None:
-            return None
-        return self.kernel.prepare_finalize.topk_indices_dtype()
+        if self.kernel is not None:
+            return self.kernel.prepare_finalize.topk_indices_dtype()
+        return None
 
     def maybe_make_prepare_finalize(
         self,
@@ -1344,9 +1344,9 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
 
     @property
     def topk_indices_dtype(self) -> torch.dtype | None:
-        if self.kernel is None:
-            return None
-        return self.kernel.prepare_finalize.topk_indices_dtype()
+        if self.kernel is not None:
+            return self.kernel.prepare_finalize.topk_indices_dtype()
+        return None
 
     def maybe_make_prepare_finalize(
         self,
