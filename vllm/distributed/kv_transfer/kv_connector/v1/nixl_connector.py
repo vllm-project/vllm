@@ -311,7 +311,7 @@ class NixlConnector(KVConnectorBase_V1):
             return False
 
         extra_config = self.kv_transfer_config.kv_connector_extra_config
-        return bool(str(extra_config.get("enable_cross_layers_blocks", "True")))
+        return bool(str(extra_config.get("enable_cross_layers_blocks", "False")))
 
     def __init__(
         self,

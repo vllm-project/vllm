@@ -1407,6 +1407,9 @@ def test_register_kv_caches(default_vllm_config, dist_init, attn_backend):
 
     vllm_config = create_vllm_config(attention_backend=attn_backend)
 
+    # Enable cross layers blocks
+    vllm_config.kv_transfer_config.extra_config["enable_cross_layers_blocks"] = True
+
     # Import the appropriate backend based on the parameter
     if attn_backend == "FLASH_ATTN":
         from vllm.v1.attention.backends.flash_attn import FlashAttentionBackend
