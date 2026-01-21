@@ -186,7 +186,7 @@ def test_model_specialization_with_evaluate_guards(
             monkeypatch.setenv("VLLM_CACHE_ROOT", tmpdirname)
 
             model = model_class(vllm_config=vllm_config).to(
-                current_platform.device_name
+                current_platform.device_type
             )
 
             model(input1)
