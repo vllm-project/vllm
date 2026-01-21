@@ -1800,12 +1800,12 @@ class FusedMoE(CustomOp):
                 )
                 if extra_tensors is not None:
                     (
-                        orig_hidden_states_combined,
+                        orig_hidden_states,
                         router_logits,
                         extra_tensors_combined,
                     ) = dispatch_res
                     hidden_states_combined = (
-                        orig_hidden_states_combined,
+                        orig_hidden_states,
                         extra_tensors_combined[0],
                     )
                 else:
