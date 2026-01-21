@@ -6,6 +6,7 @@ import torch
 from vllm import _custom_ops as ops
 from vllm.platforms import current_platform
 from vllm.utils.flashinfer import flashinfer_scaled_fp8_mm
+from vllm.utils.torch_utils import set_random_seed
 
 if not current_platform.has_device_capability(100):
     pytest.skip(
@@ -38,7 +39,7 @@ def test_flashinfer_fp8_gemm(
     device: str,
     autotune: bool,
 ) -> None:
-    current_platform.seed_everything(seed)
+    set_random_seed(seed)
     m, n, k = shape
     a = torch.randn((m, k), dtype=dtype, device=device)
     b = torch.randn((n, k), dtype=dtype, device=device) / k

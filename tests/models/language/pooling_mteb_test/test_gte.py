@@ -5,36 +5,32 @@ import pytest
 
 from tests.models.language.pooling.embed_utils import correctness_test_embed_models
 from tests.models.utils import (
-    CLSPoolingEmbedModelInfo,
-    CLSPoolingRerankModelInfo,
     EmbedModelInfo,
-    LASTPoolingEmbedModelInfo,
     RerankModelInfo,
 )
 
-from .mteb_utils import mteb_test_embed_models, mteb_test_rerank_models
+from .mteb_embed_utils import mteb_test_embed_models
+from .mteb_score_utils import mteb_test_rerank_models
 
 MODELS = [
     ########## BertModel
-    CLSPoolingEmbedModelInfo(
+    EmbedModelInfo(
         "thenlper/gte-large",
         mteb_score=0.76807651,
         architecture="BertModel",
+        seq_pooling_type="MEAN",
+        attn_type="encoder_only",
+        is_prefix_caching_supported=False,
+        is_chunked_prefill_supported=False,
         enable_test=True,
     ),
-    CLSPoolingEmbedModelInfo(
-        "thenlper/gte-base", architecture="BertModel", enable_test=False
-    ),
-    CLSPoolingEmbedModelInfo(
-        "thenlper/gte-small", architecture="BertModel", enable_test=False
-    ),
-    CLSPoolingEmbedModelInfo(
+    EmbedModelInfo("thenlper/gte-base", architecture="BertModel", enable_test=False),
+    EmbedModelInfo("thenlper/gte-small", architecture="BertModel", enable_test=False),
+    EmbedModelInfo(
         "thenlper/gte-large-zh", architecture="BertModel", enable_test=False
     ),
-    CLSPoolingEmbedModelInfo(
-        "thenlper/gte-base-zh", architecture="BertModel", enable_test=False
-    ),
-    CLSPoolingEmbedModelInfo(
+    EmbedModelInfo("thenlper/gte-base-zh", architecture="BertModel", enable_test=False),
+    EmbedModelInfo(
         "thenlper/gte-small-zh", architecture="BertModel", enable_test=False
     ),
     ########### NewModel
@@ -43,68 +39,90 @@ MODELS = [
     # - whether to use token_type_embeddings
     # - whether to use context expansion
     # So only test one (the most widely used) model
-    CLSPoolingEmbedModelInfo(
+    EmbedModelInfo(
         "Alibaba-NLP/gte-multilingual-base",
         architecture="GteNewModel",
         mteb_score=0.775074696,
         hf_overrides={"architectures": ["GteNewModel"]},
+        seq_pooling_type="CLS",
+        attn_type="encoder_only",
+        is_prefix_caching_supported=False,
+        is_chunked_prefill_supported=False,
         enable_test=True,
     ),
-    CLSPoolingEmbedModelInfo(
+    EmbedModelInfo(
         "Alibaba-NLP/gte-base-en-v1.5",
         architecture="GteNewModel",
         hf_overrides={"architectures": ["GteNewModel"]},
         enable_test=False,
     ),
-    CLSPoolingEmbedModelInfo(
+    EmbedModelInfo(
         "Alibaba-NLP/gte-large-en-v1.5",
         architecture="GteNewModel",
         hf_overrides={"architectures": ["GteNewModel"]},
         enable_test=False,
     ),
     ########### Qwen2ForCausalLM
-    LASTPoolingEmbedModelInfo(
+    EmbedModelInfo(
         "Alibaba-NLP/gte-Qwen2-1.5B-instruct",
         mteb_score=0.758473459018872,
         architecture="Qwen2ForCausalLM",
+        seq_pooling_type="LAST",
+        attn_type="encoder_only",
+        is_prefix_caching_supported=False,
+        is_chunked_prefill_supported=False,
         enable_test=True,
     ),
     ########## ModernBertModel
-    CLSPoolingEmbedModelInfo(
+    EmbedModelInfo(
         "Alibaba-NLP/gte-modernbert-base",
         mteb_score=0.748193353,
         architecture="ModernBertModel",
+        seq_pooling_type="CLS",
+        attn_type="encoder_only",
+        is_prefix_caching_supported=False,
+        is_chunked_prefill_supported=False,
         enable_test=True,
     ),
     ########## Qwen3ForCausalLM
-    LASTPoolingEmbedModelInfo(
+    EmbedModelInfo(
         "Qwen/Qwen3-Embedding-0.6B",
         mteb_score=0.771163695,
         architecture="Qwen3ForCausalLM",
-        dtype="float32",
+        seq_pooling_type="LAST",
+        attn_type="decoder",
+        is_prefix_caching_supported=True,
+        is_chunked_prefill_supported=True,
         enable_test=True,
     ),
-    LASTPoolingEmbedModelInfo(
+    EmbedModelInfo(
         "Qwen/Qwen3-Embedding-4B",
         architecture="Qwen3ForCausalLM",
-        dtype="float32",
         enable_test=False,
     ),
 ]
 
 RERANK_MODELS = [
-    CLSPoolingRerankModelInfo(
+    RerankModelInfo(
         # classifier_pooling: mean
         "Alibaba-NLP/gte-reranker-modernbert-base",
         mteb_score=0.33386,
         architecture="ModernBertForSequenceClassification",
+        seq_pooling_type="CLS",
+        attn_type="encoder_only",
+        is_prefix_caching_supported=False,
+        is_chunked_prefill_supported=False,
         enable_test=True,
     ),
-    CLSPoolingRerankModelInfo(
+    RerankModelInfo(
         "Alibaba-NLP/gte-multilingual-reranker-base",
         mteb_score=0.33062,
         architecture="GteNewForSequenceClassification",
         hf_overrides={"architectures": ["GteNewForSequenceClassification"]},
+        seq_pooling_type="CLS",
+        attn_type="encoder_only",
+        is_prefix_caching_supported=False,
+        is_chunked_prefill_supported=False,
         enable_test=True,
     ),
 ]
@@ -123,7 +141,5 @@ def test_embed_models_correctness(
 
 
 @pytest.mark.parametrize("model_info", RERANK_MODELS)
-def test_rerank_models_mteb(
-    hf_runner, vllm_runner, model_info: RerankModelInfo
-) -> None:
-    mteb_test_rerank_models(hf_runner, vllm_runner, model_info)
+def test_rerank_models_mteb(vllm_runner, model_info: RerankModelInfo) -> None:
+    mteb_test_rerank_models(vllm_runner, model_info)

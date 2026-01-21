@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from collections.abc import Callable, Iterable, Mapping, MutableSequence, Set
+from collections.abc import Callable, Iterable, Mapping, MutableSequence
+from contextlib import contextmanager, nullcontext
 from typing import (
     TYPE_CHECKING,
     ClassVar,
@@ -69,6 +70,48 @@ def _require_is_multimodal(is_multimodal: Tensor | None) -> Tensor:
     return is_multimodal
 
 
+class LMMissingLayer(nn.Module):
+    def make_empty_intermediate_tensors(self, *args, **kwargs):
+        raise RuntimeError("This module should not be called in MM encoder-only mode")
+
+    def __call__(self, *args, **kwargs):
+        raise RuntimeError("This module should not be called in MM encoder-only mode")
+
+
+class TowerMissingLayer(nn.Module):
+    def __init__(self, modalities: set[str] | str) -> None:
+        if isinstance(modalities, str):
+            modalities = {modalities}
+
+        super().__init__()
+
+        self.modalities = modalities
+
+    def __call__(self, *args, **kwargs):
+        raise RuntimeError(
+            f"This module should not be called when the following "
+            f"modalities are disabled: {self.modalities}"
+        )
+
+
+@contextmanager
+def _no_init_weights(module: nn.Module, placeholder: Callable[[], nn.Module]):
+    """
+    Within this context, prevent weight initialization from using device memory and
+    replace direct child assignments to `module` with the result of `placeholder()`.
+    """
+
+    def callback(module_, name, submodule):
+        if module_ is module:
+            return placeholder()
+
+        return submodule
+
+    with torch.nn.modules.module.register_module_module_registration_hook(callback):  # noqa: E501,SIM117
+        with torch.device("meta"):
+            yield
+
+
 @runtime_checkable
 class SupportsMultiModal(Protocol):
     """The interface required for all multi-modal models."""
@@ -94,20 +137,25 @@ class SupportsMultiModal(Protocol):
     `multimodal_config.mm_encoder_tp_mode="data"`.
     """
 
-    merge_by_field_config: ClassVar[bool | None] = None
+    requires_raw_input_tokens: ClassVar[bool] = False
     """
-    [DEPRECATED] A flag that indicates which implementation of
-    `vllm.multimodal.utils.group_mm_kwargs_by_modality` to use.
-    """
-
-    multimodal_cpu_fields: ClassVar[Set[str] | None] = None
-    """
-    [DEPRECATED] A set indicating CPU-only multimodal fields.
+    A flag that indicates this model processes input id tokens
+    in their raw form and not input embeddings.
     """
 
     _processor_factory: ClassVar[_ProcessorFactories]
     """
     Set internally by `MultiModalRegistry.register_processor`.
+    """
+
+    _language_model_names: list[str] = []
+    """
+    Set internally by `_mark_language_model`.
+    """
+
+    _tower_model_names: list[str] = []
+    """
+    Set internally by `_mark_tower_model`.
     """
 
     @classmethod
@@ -138,6 +186,81 @@ class SupportsMultiModal(Protocol):
 
         Returns:
             torch.nn.Module: The core language model component.
+        """
+        if self._language_model_names:
+            return getattr(self, self._language_model_names[0])
+
+        raise NotImplementedError(
+            f"No language model found in {type(self).__name__}! "
+            "You should initialize it inside `_mark_language_model`."
+        )
+
+    @contextmanager
+    def _mark_language_model(self, vllm_config: VllmConfig):
+        """
+        Mark each child module that was assigned to this model
+        during this context as a language model component.
+        """
+        mm_config = vllm_config.model_config.multimodal_config
+
+        children_names = list[str]()
+
+        def callback(module_, name, submodule):
+            if module_ is self:
+                children_names.append(name)
+
+        with torch.nn.modules.module.register_module_module_registration_hook(callback):  # noqa: E501,SIM117
+            with (
+                _no_init_weights(self, LMMissingLayer)
+                if mm_config.mm_encoder_only
+                else nullcontext()
+            ):
+                yield
+
+        self._language_model_names = children_names
+
+    @contextmanager
+    def _mark_tower_model(self, vllm_config: VllmConfig, modalities: set[str] | str):
+        """
+        Mark each child module that was assigned to this model
+        during this context as a tower model component.
+        """
+        if isinstance(modalities, str):
+            modalities = {modalities}
+
+        mm_config = vllm_config.model_config.multimodal_config
+
+        children_names = list[str]()
+
+        def callback(module_, name, submodule):
+            if module_ is self:
+                children_names.append(name)
+
+        with torch.nn.modules.module.register_module_module_registration_hook(callback):  # noqa: E501,SIM117
+            with (
+                _no_init_weights(self, lambda: TowerMissingLayer(modalities))
+                if all(mm_config.get_limit_per_prompt(m) == 0 for m in modalities)
+                else nullcontext()
+            ):
+                yield
+
+        self._tower_model_names = children_names
+
+    def get_num_mm_encoder_tokens(self, num_image_tokens: int) -> int:
+        """
+        Implement this function to enable LoRA support
+        for the tower module of the multi-modal model.
+        Given the number of image tokens, output the number of
+        multi-modal encoder tokens.
+        """
+        ...
+
+    def get_num_mm_connector_tokens(self, num_vision_tokens: int) -> int:
+        """
+        Implement this function to enable LoRA support
+        for the connector module of the multi-modal model.
+        Given the number of vision tokens, output the number of
+        multi-modal connector tokens.
         """
         ...
 
@@ -263,39 +386,15 @@ def supports_multimodal(model: object) -> TypeIs[SupportsMultiModal]: ...
 def supports_multimodal(
     model: type[object] | object,
 ) -> TypeIs[type[SupportsMultiModal]] | TypeIs[SupportsMultiModal]:
-    res = getattr(model, "supports_multimodal", False)
-
-    if res:
-        # We can remove this starting from v0.14
-        merge_by_field_config = getattr(model, "merge_by_field_config", None)
-        if merge_by_field_config is False:
-            raise ValueError(
-                "`merge_by_field_config=False` is no longer effective, "
-                "please update your model to consider the new batching logic "
-                "in `group_mm_kwargs_by_modality` (refer to "
-                "https://github.com/vllm-project/vllm/issues/26149), "
-                "and then remove the override from your model."
-            )
-        if merge_by_field_config is True:
-            logger.warning_once(
-                "`merge_by_field_config=True` is redundant, "
-                "please remove the override from your model."
-            )
-
-        multimodal_cpu_fields = getattr(model, "multimodal_cpu_fields", None)
-        if multimodal_cpu_fields is not None:
-            raise ValueError(
-                "`multimodal_cpu_fields` is no longer effective, "
-                "please set `keep_on_cpu=True` in `MultiModalFieldConfig` "
-                "(refer to https://github.com/vllm-project/vllm/pull/30181), "
-                "and then remove the override from your model."
-            )
-
-    return res
+    return getattr(model, "supports_multimodal", False)
 
 
 def supports_multimodal_raw_input_only(model: type[object] | object) -> bool:
     return getattr(model, "supports_multimodal_raw_input_only", False)
+
+
+def requires_raw_input_tokens(model: type[object] | object) -> bool:
+    return getattr(model, "requires_raw_input_tokens", False)
 
 
 def supports_multimodal_encoder_tp_data(model: type[object] | object) -> bool:
@@ -375,6 +474,7 @@ class SupportsLoRA(Protocol):
         MRO of your model class.
     """
     is_3d_moe_weight: ClassVar[bool] = False
+    is_non_gated_moe: ClassVar[bool] = False
     # The `embedding_module` and `embedding_padding_modules`
     # are empty by default.
     embedding_modules: ClassVar[dict[str, str]] = {}

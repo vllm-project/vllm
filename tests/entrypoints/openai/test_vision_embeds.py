@@ -33,6 +33,7 @@ def _terratorch_dummy_messages():
     ]
 
 
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "model_name", ["ibm-nasa-geospatial/Prithvi-EO-2.0-300M-TL-Sen1Floods11"]
 )

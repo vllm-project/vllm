@@ -49,7 +49,10 @@ def _create_vllm_config(
         mock_config.lora_config = None
     # Mimic the behavior of VllmConfig.__post_init__()
     if compilation_config.mode == CompilationMode.VLLM_COMPILE:
-        compilation_config.set_splitting_ops_for_v1()
+        compilation_config.set_splitting_ops_for_v1(
+            all2all_backend=mock_config.parallel_config.all2all_backend,
+            data_parallel_size=mock_config.parallel_config.data_parallel_size,
+        )
 
     # mimic VllmConfig.__post_init__
     if compilation_config.cudagraph_capture_sizes:
@@ -58,9 +61,6 @@ def _create_vllm_config(
         )
 
         compilation_config.post_init_cudagraph_sizes()
-        mock_config.pad_for_cudagraph = (
-            lambda batch_size: compilation_config.bs_to_padded_graph_size[batch_size]
-        )
 
     return mock_config
 
@@ -166,6 +166,7 @@ class TestCudagraphDispatcher:
         rt_mode, key = dispatcher.dispatch(
             num_tokens=8, uniform_decode=False, has_lora=False, disable_full=True
         )
+
         if "PIECEWISE" in cudagraph_mode_str:  # string contains check
             assert rt_mode == CUDAGraphMode.PIECEWISE
             assert key == desc_full_exact.relax_for_mixed_batch_cudagraphs()
@@ -357,7 +358,7 @@ class TestCudagraphIntegration:
         ):
             full_wrapper(input_1)
 
-        rt_mode, key = self.dispatcher.dispatch(desc_1)
+        rt_mode, key = self.dispatcher.dispatch(num_tokens=desc_1.num_tokens)
         # 1. Capture first shape
         action = self._run_and_monitor_call(full_wrapper, input_1, rt_mode, key)
         assert action == "capture_global"
@@ -366,7 +367,7 @@ class TestCudagraphIntegration:
         action = self._run_and_monitor_call(full_wrapper, input_1, rt_mode, key)
         assert action == "replay"
 
-        rt_mode, key = self.dispatcher.dispatch(desc_2)
+        rt_mode, key = self.dispatcher.dispatch(num_tokens=desc_2.num_tokens)
         # 3. Capture second shape
         action = self._run_and_monitor_call(full_wrapper, input_2, rt_mode, key)
         assert action == "capture_global"
@@ -378,7 +379,7 @@ class TestCudagraphIntegration:
         assert action == "replay"
 
         # 5. Bypass if no key match
-        rt_mode, key = self.dispatcher.dispatch(desc_3_unseen)
+        rt_mode, key = self.dispatcher.dispatch(num_tokens=desc_3_unseen.num_tokens)
         assert rt_mode == CUDAGraphMode.NONE
         action = self._run_and_monitor_call(full_wrapper, input_3, rt_mode, key)
         assert action == "bypass"

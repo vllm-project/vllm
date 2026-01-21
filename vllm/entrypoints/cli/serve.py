@@ -66,7 +66,11 @@ class ServeSubcommand(CLISubcommand):
         self, subparsers: argparse._SubParsersAction
     ) -> FlexibleArgumentParser:
         serve_parser = subparsers.add_parser(
-            self.name, description=DESCRIPTION, usage="vllm serve [model_tag] [options]"
+            self.name,
+            help="Launch a local OpenAI-compatible API server to serve LLM "
+            "completions via HTTP.",
+            description=DESCRIPTION,
+            usage="vllm serve [model_tag] [options]",
         )
 
         serve_parser = make_arg_parser(serve_parser)
@@ -186,9 +190,7 @@ def run_multi_api_server(args: argparse.Namespace):
 
     parallel_config = vllm_config.parallel_config
     dp_rank = parallel_config.data_parallel_rank
-    external_dp_lb = parallel_config.data_parallel_external_lb
-    hybrid_dp_lb = parallel_config.data_parallel_hybrid_lb
-    assert external_dp_lb or hybrid_dp_lb or dp_rank == 0
+    assert parallel_config.local_engines_only or dp_rank == 0
 
     api_server_manager: APIServerProcessManager | None = None
 
@@ -214,7 +216,7 @@ def run_multi_api_server(args: argparse.Namespace):
         # (after the launcher context manager exits),
         # since we get the front-end stats update address from the coordinator
         # via the handshake with the local engine.
-        if dp_rank == 0 or not (external_dp_lb or hybrid_dp_lb):
+        if dp_rank == 0 or not parallel_config.local_engines_only:
             # Start API servers using the manager.
             api_server_manager = APIServerProcessManager(**api_server_manager_kwargs)
 

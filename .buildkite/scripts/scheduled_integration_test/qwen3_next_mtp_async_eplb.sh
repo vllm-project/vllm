@@ -18,15 +18,18 @@ wait_for_server() {
 
 MODEL="Qwen/Qwen3-Next-80B-A3B-Instruct"
 
-# Set BACKENDS based on platform
+# Set BACKENDS and platform-specific args based on platform
 if command -v rocm-smi &> /dev/null || [[ -d /opt/rocm ]] || [[ -n "${ROCM_PATH:-}" ]]; then
   # ROCm platform
   BACKENDS=("allgather_reducescatter")
   # Disable MOE padding for ROCm since it is causing eplb to fail
   export VLLM_ROCM_MOE_PADDING=0
+  PLATFORM_ARGS=("--no-async-scheduling")
+  echo "Disabled async scheduling for ROCm platform due to issues with spec decode."
 else
   # Non-ROCm platform (CUDA/other)
   BACKENDS=("deepep_high_throughput" "deepep_low_latency")
+  PLATFORM_ARGS=()
 fi
 
 cleanup() {
@@ -43,17 +46,18 @@ trap cleanup EXIT
 
 for BACK in "${BACKENDS[@]}"; do
   VLLM_DEEP_GEMM_WARMUP=skip \
-  VLLM_ALL2ALL_BACKEND=$BACK \
   vllm serve "$MODEL" \
     --enforce-eager \
     --tensor-parallel-size 4 \
     --enable-expert-parallel \
     --enable-eplb \
+    --all2all-backend $BACK \
     --eplb-config '{"window_size":200,"step_interval":600,"use_async":true}' \
     --speculative-config '{"method":"qwen3_next_mtp","num_speculative_tokens":1}' \
     --trust-remote-code \
     --max-model-len 2048 \
     --gpu-memory-utilization 0.9 \
+    "${PLATFORM_ARGS[@]}" \
     --port $PORT &
   SERVER_PID=$!
   wait_for_server $PORT
