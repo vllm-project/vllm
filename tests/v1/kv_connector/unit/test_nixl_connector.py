@@ -1421,14 +1421,10 @@ def test_register_kv_caches(default_vllm_config, dist_init, attn_backend):
         from vllm.v1.attention.backends.rocm_attn import RocmAttentionBackend
 
         backend_cls = RocmAttentionBackend
-    elif attn_backend == "TRITON_ATTN":
+    else:  # TRITON
         from vllm.v1.attention.backends.triton_attn import TritonAttentionBackend
 
         backend_cls = TritonAttentionBackend
-    else:  # FLASHINFER
-        from vllm.v1.attention.backends.flashinfer import FlashInferBackend
-
-        backend_cls = FlashInferBackend
 
     nixl_module = "vllm.distributed.kv_transfer.kv_connector.v1.nixl_connector"
     with (
@@ -1513,9 +1509,7 @@ def test_register_kv_caches(default_vllm_config, dist_init, attn_backend):
             ]
             expected_num_entries = 1
 
-            kv_heads_idx = cross_layers_kv_cache.shape.index(4)
-            print("kv_heads idx %d", kv_heads_idx)
-            expected_blocks_count = 8 if kv_heads_idx == 1 else 16
+            expected_blocks_count = 8
 
             kv_caches = {"all-layers": cross_layers_kv_cache}
 
