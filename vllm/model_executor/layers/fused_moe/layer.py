@@ -1719,8 +1719,8 @@ class FusedMoE(CustomOp):
 
         import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 
-        is_mk = hasattr(self.quant_method, "kernel") and isinstance(
-            self.quant_method.kernel, mk.FusedMoEModularKernel
+        is_mk = isinstance(
+            getattr(self.quant_method, "kernel", None), mk.FusedMoEModularKernel
         )
         mk_has_shared_expert = (
             is_mk
