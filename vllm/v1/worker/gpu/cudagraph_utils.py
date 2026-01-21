@@ -148,9 +148,10 @@ class CudaGraphManager:
         positions: torch.Tensor,
         inputs_embeds: torch.Tensor | None,
         num_tokens_across_dp: torch.Tensor,
-        attn_metadata: dict[str, Any],
+        attn_metadata: dict[str, Any] | None,
         has_lora: bool = False,
     ) -> None:
+        assert attn_metadata is not None
         # Capture the graph.
         assert num_tokens not in self.graphs
         graph = torch.cuda.CUDAGraph()
@@ -169,6 +170,7 @@ class CudaGraphManager:
                 positions=positions,
                 inputs_embeds=inputs_embeds,
             )
+            assert self.hidden_states is not None
             self.hidden_states[:num_tokens] = hidden_states
         self.graphs[num_tokens] = graph
 
@@ -181,7 +183,7 @@ class CudaGraphManager:
         positions: torch.Tensor,
         inputs_embeds: torch.Tensor | None,
         num_tokens_across_dp: torch.Tensor,
-        attn_metadata: dict[str, Any] | None = None,
+        attn_metadata: dict[str, Any] | None,
         has_lora: bool = False,
     ) -> None:
         # create batch descriptor for piecewise cudagraph dispatch key
@@ -194,7 +196,7 @@ class CudaGraphManager:
 
         # Capture run - CUDAGraphWrapper inside torch.compile will auto capture.
         with set_forward_context(
-            attn_metadata=None,
+            attn_metadata=None,  # piecewise no need attn_metadata
             vllm_config=self.vllm_config,
             num_tokens=num_tokens,
             cudagraph_runtime_mode=CUDAGraphMode.PIECEWISE,
@@ -206,6 +208,7 @@ class CudaGraphManager:
                 positions=positions,
                 inputs_embeds=inputs_embeds,
             )
+            assert self.hidden_states is not None
             self.hidden_states[:num_tokens] = hidden_states
 
     @torch.inference_mode()

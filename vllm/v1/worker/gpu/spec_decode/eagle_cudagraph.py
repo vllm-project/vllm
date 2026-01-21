@@ -103,6 +103,7 @@ class EagleCudaGraphManager:
             self.cudagraph_sizes,
             self.device,
             self.capture_graph,
+            capture_cudagraph_mode=CUDAGraphMode.FULL,
             generate_fn=generate_fn,
             input_buffers=input_buffers,
             block_tables=block_tables,

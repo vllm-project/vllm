@@ -371,8 +371,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         # Check if this is a mixed batch (has prefill tokens, i.e., any request
         # has more than 1 token scheduled).
         is_mixed_batch = (
-            any(x > 1 for x in num_scheduled_tokens)
-            if not dummy_run else False
+            any(x > 1 for x in num_scheduled_tokens) if not dummy_run else False
         )
 
         if is_mixed_batch:
