@@ -208,7 +208,16 @@ class CustomOp(nn.Module):
         # Do not compile if compilation disabled
         from vllm.config.compilation import CompilationMode
 
-        if not enable or get_cached_compilation_config().mode == CompilationMode.NONE:
+        if not enable:
+            return fn
+
+        # Do not compile if global compilation disabled
+        compilation_config = get_cached_compilation_config()
+        if compilation_config.mode == CompilationMode.NONE:
+            return fn
+
+        # If eager backend is used, do not compile either
+        if compilation_config.backend == "eager":
             return fn
 
         # dynamic=True to avoid recompilations
