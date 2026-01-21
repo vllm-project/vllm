@@ -133,7 +133,7 @@ def test_kv_cache_model_load_and_run(
 @pytest.mark.parametrize(
     "use_rocm_aiter", [True, False] if current_platform.is_rocm() else [False]
 )
-def test_load_fp16_model(
+def test_online_quantization(
     vllm_runner,
     kv_cache_dtype: str,
     force_marlin: bool,
@@ -190,6 +190,9 @@ def test_load_fp16_model(
                 )
 
         llm.apply_model(check_model)
+
+        outputs = llm.generate_greedy(["Hello my name is"], max_tokens=4)
+        print(outputs[0][1])
 
 
 @pytest.mark.skipif(
