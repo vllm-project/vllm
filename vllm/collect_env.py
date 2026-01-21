@@ -78,6 +78,7 @@ DEFAULT_CONDA_PATTERNS = {
     "nvidia",
     "pynvml",
     "flashinfer-python",
+    "helion",
 }
 
 DEFAULT_PIP_PATTERNS = {
@@ -94,6 +95,7 @@ DEFAULT_PIP_PATTERNS = {
     "nvidia",
     "pynvml",
     "flashinfer-python",
+    "helion",
 }
 
 
