@@ -62,6 +62,7 @@ class EagleCudaGraphManager:
     def capture_graph(
         self,
         num_tokens: int,
+        capture_cudagraph_mode: CUDAGraphMode,
         generate_fn: Callable,
         input_buffers: InputBuffers,
         block_tables: BlockTables,
@@ -104,6 +105,7 @@ class EagleCudaGraphManager:
             self.device,
             self.capture_graph,
             capture_cudagraph_mode=CUDAGraphMode.FULL,
+            desc="Capturing eagle CUDA graphs",
             generate_fn=generate_fn,
             input_buffers=input_buffers,
             block_tables=block_tables,
