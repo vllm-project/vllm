@@ -20,7 +20,7 @@ Alternatively, you can deploy vLLM to Kubernetes using any of the following:
 - [kubernetes-sigs/lws](frameworks/lws.md)
 - [meta-llama/llama-stack](integrations/llamastack.md)
 - [substratusai/kubeai](integrations/kubeai.md)
-- [AIBrix](integrations/aibrix.md)
+- [vllm-project/AIBrix](integrations/aibrix.md)
 - [vllm-project/production-stack](integrations/production-stack.md)
 
 ## Deployment with CPUs
