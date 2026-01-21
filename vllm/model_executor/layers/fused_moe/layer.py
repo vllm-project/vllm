@@ -513,24 +513,23 @@ class FusedMoE(CustomOp):
         self.apply_router_weight_on_input = apply_router_weight_on_input
         self.activation = activation
 
-        self.moe_config: FusedMoEConfig = FusedMoEConfig(
-            num_experts=self.global_num_experts,
-            experts_per_token=top_k,
-            hidden_dim=hidden_size,
-            num_local_experts=self.local_num_experts,
-            moe_parallel_config=self.moe_parallel_config,
-            in_dtype=moe_in_dtype,
-            router_logits_dtype=router_logits_dtype,
-            max_num_tokens=envs.VLLM_MOE_DP_CHUNK_SIZE,
-            has_bias=has_bias,
-            is_act_and_mul=is_act_and_mul,
-            is_lora_enabled=vllm_config.lora_config is not None,
-        )
-        self.moe_config_use_flashinfer_cutlass_kernels = (
-            self.moe_config.use_flashinfer_cutlass_kernels
-        )
-
         self.quant_config = quant_config
+
+        def _create_moe_config(hidden_dim: int) -> FusedMoEConfig:
+            """Helper to create FusedMoEConfig with given hidden_dim."""
+            return FusedMoEConfig(
+                num_experts=self.global_num_experts,
+                experts_per_token=top_k,
+                hidden_dim=hidden_dim,
+                num_local_experts=self.local_num_experts,
+                moe_parallel_config=self.moe_parallel_config,
+                in_dtype=moe_in_dtype,
+                router_logits_dtype=router_logits_dtype,
+                max_num_tokens=envs.VLLM_MOE_DP_CHUNK_SIZE,
+                has_bias=has_bias,
+                is_act_and_mul=is_act_and_mul,
+                is_lora_enabled=vllm_config.lora_config is not None,
+            )
 
         def _get_quant_method() -> FusedMoEMethodBase:
             """
@@ -544,6 +543,13 @@ class FusedMoE(CustomOp):
                 quant_method = UnquantizedFusedMoEMethod(self.moe_config)
             assert isinstance(quant_method, FusedMoEMethodBase)
             return quant_method
+
+        # Create initial moe_config with original hidden_size
+        # This is needed to determine is_mxfp4_quant for rounding decision
+        self.moe_config: FusedMoEConfig = _create_moe_config(hidden_size)
+        self.moe_config_use_flashinfer_cutlass_kernels = (
+            self.moe_config.use_flashinfer_cutlass_kernels
+        )
 
         # Note: get_quant_method will look at the layer's local_num_experts
         # for heuristic purposes, so it must be initialized first.
@@ -566,20 +572,12 @@ class FusedMoE(CustomOp):
             is_lora_enabled=self.vllm_config.lora_config is not None,
         )
 
+        # If hidden_size was rounded, recreate moe_config and quant_method
+        # with the updated hidden_size to ensure consistency
         if is_rounded_hidden_size:
             self.hidden_size = hidden_size
-            self.moe_config = FusedMoEConfig(
-                num_experts=self.global_num_experts,
-                experts_per_token=top_k,
-                hidden_dim=hidden_size,
-                num_local_experts=self.local_num_experts,
-                moe_parallel_config=self.moe_parallel_config,
-                in_dtype=moe_in_dtype,
-                max_num_tokens=envs.VLLM_MOE_DP_CHUNK_SIZE,
-                has_bias=has_bias,
-                is_act_and_mul=is_act_and_mul,
-                is_lora_enabled=vllm_config.lora_config is not None,
-            )
+            self.moe_config = _create_moe_config(hidden_size)
+            self.quant_method = _get_quant_method()
 
         if not self.moe_config.is_act_and_mul and not current_platform.is_cuda_alike():
             raise NotImplementedError(
