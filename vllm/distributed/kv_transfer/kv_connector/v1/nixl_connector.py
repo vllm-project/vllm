@@ -301,7 +301,11 @@ class NixlConnectorMetadata(KVConnectorMetadata):
 class NixlConnector(KVConnectorBase_V1):
     @property
     def prefer_cross_layer_blocks(self) -> bool:
-        if self.attn_backend.get_name() not in ["FLASH_ATTN", "FLASHINFER"]:
+        backend = get_current_attn_backend(self._vllm_config)
+        if backend().get_name() not in [
+            "FLASH_ATTN",
+            "FLASHINFER",
+        ]:
             # For now there is no benefit to run cross layers when backend
             # does not support on HND
             return False
@@ -1431,7 +1435,7 @@ class NixlConnectorWorker:
             multiply = 1
             for dim_idx in range(1, self.kv_topo.physical_kv_heads_position):
                 multiply *= tensor_shape[dim_idx]
-            logger.info(
+            logger.debug(
                 "Multiply is %d shape %s kv_heads_pos %d",
                 multiply,
                 tensor_shape,
