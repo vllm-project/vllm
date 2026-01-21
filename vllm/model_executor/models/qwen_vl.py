@@ -58,7 +58,7 @@ from .interfaces import (
     SupportsMultiModal,
     SupportsPP,
 )
-from .qwen import QWenBaseModel, QWenModel
+from .qwen import QWenBaseModel, QWenBlock, QWenModel
 
 
 class QwenImagePixelInputs(TensorSchema):
@@ -757,10 +757,18 @@ class QwenVLForConditionalGeneration(
         prefix: str = "",
         transformer_type: type[QwenVLModel] = QwenVLModel,
     ) -> None:
+        def transformer_type_(*args, **kwargs):
+            with self._mark_composite_model(
+                vllm_config,
+                language_targets=QWenBlock,
+                tower_targets={"image": VisionTransformer},
+            ):
+                return transformer_type(*args, **kwargs)
+
         super().__init__(
             vllm_config=vllm_config,
             prefix=prefix,
-            transformer_type=transformer_type,
+            transformer_type=transformer_type_,
         )
 
         self.transformer: QwenVLModel
@@ -794,9 +802,6 @@ class QwenVLForConditionalGeneration(
             return image_input["data"]
 
         return self.transformer.visual(image_input["data"])
-
-    def get_language_model(self) -> torch.nn.Module:
-        return self.transformer
 
     def embed_multimodal(self, **kwargs: object) -> MultiModalEmbeddings:
         image_input = self._parse_and_validate_image_input(**kwargs)

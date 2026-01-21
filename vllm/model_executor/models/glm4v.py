@@ -53,7 +53,7 @@ from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.configs import ChatGLMConfig
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
-from .chatglm import ChatGLMBaseModel, ChatGLMModel
+from .chatglm import ChatGLMBaseModel, ChatGLMModel, GLMTransformer
 from .interfaces import (
     MultiModalEmbeddings,
     SupportsLoRA,
@@ -591,10 +591,18 @@ class GLM4VForCausalLM(
         prefix: str = "",
         transformer_type: type[GLM4VModel] = GLM4VModel,
     ) -> None:
+        def transformer_type_(*args, **kwargs):
+            with self._mark_composite_model(
+                vllm_config,
+                language_targets=GLMTransformer,
+                tower_targets={"image": EVA2CLIPModel},
+            ):
+                return transformer_type(*args, **kwargs)
+
         super().__init__(
             vllm_config=vllm_config,
             prefix=prefix,
-            transformer_type=transformer_type,
+            transformer_type=transformer_type_,
         )
 
         self.transformer: GLM4VModel
@@ -751,9 +759,6 @@ class GLM4VForCausalLM(
         llm_positions = torch.cat(llm_pos_ids_list, dim=1).reshape(3, -1)
         mrope_position_delta = (llm_positions.max() + 1 - len(input_tokens)).item()
         return llm_positions, mrope_position_delta
-
-    def get_language_model(self) -> torch.nn.Module:
-        return self.transformer
 
     embed_input_ids = SupportsMultiModal.embed_input_ids
 

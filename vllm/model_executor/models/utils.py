@@ -25,8 +25,7 @@ from vllm.model_executor.model_loader.online_quantization import (
 )
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.interfaces import (
-    LMMissingLayer,
-    TowerMissingLayer,
+    StageMissingLayer,
     supports_any_eagle,
 )
 from vllm.multimodal import NestedTensors
@@ -254,7 +253,7 @@ class AutoWeightsLoader:
         module: nn.Module,
         weights: Iterable[tuple[str, torch.Tensor]],
     ) -> Iterable[str]:
-        if isinstance(module, (LMMissingLayer, TowerMissingLayer, PPMissingLayer)):
+        if isinstance(module, (StageMissingLayer, PPMissingLayer)):
             return
 
         # Avoid infinite recursion since this function is typically
@@ -627,7 +626,7 @@ def get_pp_missing_layer_names(model: torch.nn.Module) -> list[str]:
 
     missing_layer_names = []
     for name, module in model.named_modules():
-        if isinstance(module, PPMissingLayer):
+        if isinstance(module, (StageMissingLayer, PPMissingLayer)):
             # NOTE: the trailing dot is used to match the prefix of the layer.
             # without the dot, we could match a layer that is not missing,
             # e.g., 'encoder.layer.1' would match 'encoder.layer.11'
@@ -639,7 +638,7 @@ def get_pp_missing_layer_names(model: torch.nn.Module) -> list[str]:
 
 def is_pp_missing_parameter(name: str, model: torch.nn.Module) -> bool:
     """Check if a parameter is missing in a pipeline parallel model."""
-    if isinstance(model, PPMissingLayer):
+    if isinstance(model, (StageMissingLayer, PPMissingLayer)):
         return True
 
     return any(

@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from collections.abc import Callable, Iterable, Mapping, MutableSequence
-from contextlib import contextmanager, nullcontext
+from contextlib import ExitStack, contextmanager, nullcontext
 from typing import (
     TYPE_CHECKING,
     ClassVar,
@@ -17,6 +17,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 from torch import Tensor
+from torch.nn.modules.module import register_module_module_registration_hook
 from transformers.models.whisper.tokenization_whisper import LANGUAGES
 from typing_extensions import Self, TypeIs
 
@@ -25,6 +26,7 @@ from vllm.inputs import TokensPrompt
 from vllm.inputs.data import PromptType
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization import QuantizationConfig
+from vllm.utils.collection_utils import common_prefix
 from vllm.utils.func_utils import supports_kw
 
 from .interfaces_base import VllmModel, is_pooling_model
@@ -70,45 +72,93 @@ def _require_is_multimodal(is_multimodal: Tensor | None) -> Tensor:
     return is_multimodal
 
 
-class LMMissingLayer(nn.Module):
-    def make_empty_intermediate_tensors(self, *args, **kwargs):
-        raise RuntimeError("This module should not be called in MM encoder-only mode")
-
-    def __call__(self, *args, **kwargs):
-        raise RuntimeError("This module should not be called in MM encoder-only mode")
-
-
-class TowerMissingLayer(nn.Module):
-    def __init__(self, modalities: set[str] | str) -> None:
-        if isinstance(modalities, str):
-            modalities = {modalities}
-
+class StageMissingLayer(nn.Identity):
+    def __init__(self, name: str) -> None:
         super().__init__()
 
-        self.modalities = modalities
+        self.name = name
+
+    def make_empty_intermediate_tensors(self, *args, **kwargs):
+        raise RuntimeError(f"{self} should not be called")
 
     def __call__(self, *args, **kwargs):
-        raise RuntimeError(
-            f"This module should not be called when the following "
-            f"modalities are disabled: {self.modalities}"
-        )
+        raise RuntimeError(f"{self} should not be called")
+
+    def extra_repr(self) -> str:
+        return f"name={self.name!r}"
 
 
 @contextmanager
-def _no_init_weights(module: nn.Module, placeholder: Callable[[], nn.Module]):
+def _collect_children(
+    module: nn.Module,
+    *,
+    targets: type[nn.Module] | tuple[type[nn.Module], ...] | None = None,
+):
+    """
+    Within this context, collect all direct child assignments to `module`,
+    returning a list of children names that is internally updated until the
+    context is exited.
+
+    If `targets` is set, instead collect descendents of `module`
+    that are an instance of `targets`, even if they aren't direct children.
+    """
+    children_names = list[str]()
+
+    if targets is None:
+
+        def hook(module_: nn.Module, name: str, submodule: nn.Module):
+            if module_ is module:
+                children_names.append(name)
+
+        with register_module_module_registration_hook(hook):
+            yield children_names
+    else:
+        yield children_names
+
+        for name, module_ in module.named_modules():
+            if isinstance(module_, targets):
+                children_names.append(name)
+
+
+@contextmanager
+def _no_init_weights(
+    module: nn.Module,
+    placeholder: Callable[[], nn.Module],
+    *,
+    targets: type[nn.Module] | tuple[type[nn.Module], ...] | None = None,
+):
     """
     Within this context, prevent weight initialization from using device memory and
     replace direct child assignments to `module` with the result of `placeholder()`.
+
+    If `targets` is set, instead prevent weight initialization and
+    replace assignments where the child is an instance of `targets`,
+    even if they aren't direct children of `module`.
     """
+    if targets is None:
 
-    def callback(module_, name, submodule):
-        if module_ is module:
-            return placeholder()
+        def hook(module_: nn.Module, name: str, submodule: nn.Module):
+            if module_ is module:
+                return placeholder()
 
-        return submodule
+            return submodule
 
-    with torch.nn.modules.module.register_module_module_registration_hook(callback):  # noqa: E501,SIM117
-        with torch.device("meta"):
+        with register_module_module_registration_hook(hook), torch.device("meta"):
+            yield
+    else:
+
+        def hook(module_: nn.Module, name: str, submodule: nn.Module):
+            if isinstance(module_, targets):
+                submodule.to("meta")  # Free memory
+            if isinstance(submodule, targets):
+                submodule.to("meta")  # Free memory
+                return placeholder()
+
+            return submodule
+
+        # Not all descendents are targeted, so we can't use a blanket
+        # `torch.device("meta")` context
+        with register_module_module_registration_hook(hook):
             yield
 
 
@@ -150,12 +200,12 @@ class SupportsMultiModal(Protocol):
 
     _language_model_names: list[str] = []
     """
-    Set internally by `_mark_language_model`.
+    Set internally by `_mark_language_model` or similar methods.
     """
 
     _tower_model_names: list[str] = []
     """
-    Set internally by `_mark_tower_model`.
+    Set internally by `_mark_tower_model` or similar methods.
     """
 
     @classmethod
@@ -188,7 +238,16 @@ class SupportsMultiModal(Protocol):
             torch.nn.Module: The core language model component.
         """
         if self._language_model_names:
-            return getattr(self, self._language_model_names[0])
+            common_path = common_prefix(
+                [name.split(".") for name in self._language_model_names]
+            )
+            assert common_path, "Language model should not be self"
+
+            language_model = self
+            for attr in common_path:
+                language_model = getattr(self, attr)
+
+            return language_model
 
         raise NotImplementedError(
             f"No language model found in {type(self).__name__}! "
@@ -196,22 +255,31 @@ class SupportsMultiModal(Protocol):
         )
 
     @contextmanager
-    def _mark_language_model(self, vllm_config: VllmConfig):
+    def _mark_language_model(
+        self,
+        vllm_config: VllmConfig,
+        *,
+        targets: type[nn.Module] | tuple[type[nn.Module], ...] | None = None,
+    ):
         """
-        Mark each child module that was assigned to this model
-        during this context as a language model component.
+        Mark each child module that was assigned to this model during this context
+        as a language model component.
+
+        Language model components are automatically skipped in `--mm-encoder-only`
+        mode.
+
+        If `targets` is set, instead include descendants that are an instance
+        of `targets`, even if they aren't direct children.
         """
         mm_config = vllm_config.model_config.multimodal_config
 
-        children_names = list[str]()
-
-        def callback(module_, name, submodule):
-            if module_ is self:
-                children_names.append(name)
-
-        with torch.nn.modules.module.register_module_module_registration_hook(callback):  # noqa: E501,SIM117
+        with _collect_children(self, targets=targets) as children_names:  # noqa: SIM117
             with (
-                _no_init_weights(self, LMMissingLayer)
+                _no_init_weights(
+                    self,
+                    lambda: StageMissingLayer("language_model"),
+                    targets=targets,
+                )
                 if mm_config.mm_encoder_only
                 else nullcontext()
             ):
@@ -220,31 +288,73 @@ class SupportsMultiModal(Protocol):
         self._language_model_names = children_names
 
     @contextmanager
-    def _mark_tower_model(self, vllm_config: VllmConfig, modalities: set[str] | str):
+    def _mark_tower_model(
+        self,
+        vllm_config: VllmConfig,
+        modalities: set[str] | str,
+        *,
+        targets: type[nn.Module] | tuple[type[nn.Module], ...] | None = None,
+    ):
         """
-        Mark each child module that was assigned to this model
-        during this context as a tower model component.
+        Mark each child module that was assigned to this model during this context
+        as a tower model component.
+
+        Tower model components are automatically skipped when `--limit-mm-per-prompt`
+        is set to zero for all of their modalities.
+
+        If `targets` is set, instead include descendants that are an instance
+        of `targets`, even if they aren't direct children.
         """
         if isinstance(modalities, str):
             modalities = {modalities}
 
+        if modalities == {"image", "video"}:
+            stage_name = "vision_tower"
+        else:
+            stage_name = "_".join([*modalities, "tower"])
+
         mm_config = vllm_config.model_config.multimodal_config
 
-        children_names = list[str]()
-
-        def callback(module_, name, submodule):
-            if module_ is self:
-                children_names.append(name)
-
-        with torch.nn.modules.module.register_module_module_registration_hook(callback):  # noqa: E501,SIM117
+        with _collect_children(self, targets=targets) as children_names:  # noqa: SIM117
             with (
-                _no_init_weights(self, lambda: TowerMissingLayer(modalities))
+                _no_init_weights(
+                    self,
+                    lambda: StageMissingLayer(stage_name),
+                    targets=targets,
+                )
                 if all(mm_config.get_limit_per_prompt(m) == 0 for m in modalities)
                 else nullcontext()
             ):
                 yield
 
         self._tower_model_names = children_names
+
+    @contextmanager
+    def _mark_composite_model(
+        self,
+        vllm_config: VllmConfig,
+        *,
+        language_targets: type[nn.Module] | tuple[type[nn.Module], ...],
+        tower_targets: dict[str, type[nn.Module] | tuple[type[nn.Module], ...]],
+    ):
+        with ExitStack() as stack:
+            stack.enter_context(
+                self._mark_language_model(
+                    vllm_config,
+                    targets=language_targets,
+                )
+            )
+
+            for modality, modality_targets in tower_targets.items():
+                stack.enter_context(
+                    self._mark_tower_model(
+                        vllm_config,
+                        modality,
+                        targets=modality_targets,
+                    )
+                )
+
+            yield
 
     def get_num_mm_encoder_tokens(self, num_image_tokens: int) -> int:
         """
