@@ -51,6 +51,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8StaticTensorSym,
 )
 from vllm.platforms import current_platform
+from vllm.platforms.rocm import on_gfx9
 from vllm.triton_utils import tl, triton
 from vllm.utils.torch_utils import direct_register_custom_op, is_torch_equal_or_newer
 
@@ -1922,7 +1923,7 @@ class TritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
         activation_key: QuantKey | None,
     ) -> bool:
         p = current_platform
-        device_supports_fp8 = (p.is_rocm() and p.rocm.on_gfx9()) or (
+        device_supports_fp8 = (p.is_rocm() and on_gfx9()) or (
             p.is_cuda() and p.has_device_capability((8, 9))
         )
 
