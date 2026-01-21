@@ -518,7 +518,7 @@ class TestNixlHandshake:
                 )
             connector.bind_connector_metadata(metadata)
 
-            # Mimic maybe_setup_kv_connector in gpu_model_runner.
+            # Mimic logic in KVConnectorModelRunnerMixin._get_kv_connector_output.
             dummy_ctx = ForwardContext(
                 no_compile_layers={},
                 attn_metadata={},
@@ -531,7 +531,7 @@ class TestNixlHandshake:
                 f"start_load_kv took {_after_load - _before_load} seconds"
             )
 
-            # Mimic get_finished_kv_transfers in gpu_model_runner.
+            # Mimic logic in KVConnectorModelRunnerMixin._get_kv_connector_output.
             _, done_recving = connector.get_finished(finished_req_ids=set())
             if len(done_recving) > 0:
                 assert request_id in done_recving
