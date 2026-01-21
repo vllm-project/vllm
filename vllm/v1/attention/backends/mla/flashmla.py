@@ -96,7 +96,7 @@ class FlashMLABackend(MLACommonBackend):
 
 @dataclass
 class FlashMLADecodeMetadata(MLACommonDecodeMetadata):
-    sched_meta: FlashMLASchedMeta
+    scheduler_metadata: FlashMLASchedMeta
 
 
 @dataclass
@@ -160,7 +160,7 @@ class FlashMLAMetadataBuilder(MLACommonMetadataBuilder[FlashMLAMetadata]):
         # we use the max but all should be the same due to uniform length requirement
         max_query_len = query_lens_cpu.max().item()
         num_q_tokens_per_head_k = max_query_len * self.num_q_heads // 1
-        sched_meta, _ = get_mla_metadata(
+        scheduler_metadata, _ = get_mla_metadata(
             seq_lens_device,
             num_q_tokens_per_head_k,
             1,  # MQA for the decode path
@@ -172,13 +172,13 @@ class FlashMLAMetadataBuilder(MLACommonMetadataBuilder[FlashMLAMetadata]):
                 num_q_tokens_per_head_k,
                 1,  # MQA for the decode path
             )
-            sched_meta.tile_scheduler_metadata = tile_scheduler_metadata
-            sched_meta.num_splits = num_splits
+            scheduler_metadata.tile_scheduler_metadata = tile_scheduler_metadata
+            scheduler_metadata.num_splits = num_splits
 
         return FlashMLADecodeMetadata(
             block_table=block_table_tensor,
             seq_lens=seq_lens_device,
-            sched_meta=sched_meta,
+            scheduler_metadata=scheduler_metadata,
             dcp_tot_seq_lens=dcp_tot_seq_lens_device,
         )
 
@@ -253,7 +253,7 @@ class FlashMLAImpl(MLACommonImpl[FlashMLAMetadata]):
         num_decodes = attn_metadata.num_decodes
         q = reshape_query_for_spec_decode(q, num_decodes)
 
-        sched_meta = attn_metadata.decode.sched_meta
+        scheduler_metadata = attn_metadata.decode.scheduler_metadata
         if vllm_is_batch_invariant() and not self.kv_cache_dtype.startswith("fp8"):
             device = q.device
             dtype = torch.int32
@@ -281,8 +281,8 @@ class FlashMLAImpl(MLACommonImpl[FlashMLAMetadata]):
             # Non-split path ignores num_splits, but the API requires it:
             # zeros of length B+1
             num_splits = torch.zeros((B + 1,), dtype=dtype, device=device)
-            sched_meta.tile_scheduler_metadata = tile_scheduler_metadata
-            sched_meta.num_splits = num_splits
+            scheduler_metadata.tile_scheduler_metadata = tile_scheduler_metadata
+            scheduler_metadata.num_splits = num_splits
 
         if self.kv_cache_dtype.startswith("fp8"):
             o, lse = flash_mla_with_kvcache_fp8(
@@ -291,8 +291,8 @@ class FlashMLAImpl(MLACommonImpl[FlashMLAMetadata]):
                 block_table=attn_metadata.decode.block_table,
                 cache_seqlens=attn_metadata.decode.seq_lens,
                 head_dim_v=self.kv_lora_rank,
-                tile_scheduler_metadata=sched_meta.tile_scheduler_metadata,
-                num_splits=sched_meta.num_splits,
+                tile_scheduler_metadata=scheduler_metadata.tile_scheduler_metadata,
+                num_splits=scheduler_metadata.num_splits,
                 softmax_scale=self.scale,
                 causal=True,
                 descale_q=layer._q_scale.reshape(1),
@@ -305,7 +305,7 @@ class FlashMLAImpl(MLACommonImpl[FlashMLAMetadata]):
                 block_table=attn_metadata.decode.block_table,
                 cache_seqlens=attn_metadata.decode.seq_lens,
                 head_dim_v=self.kv_lora_rank,
-                tile_scheduler_metadata=sched_meta,
+                tile_scheduler_metadata=scheduler_metadata,
                 softmax_scale=self.scale,
                 causal=True,
                 is_fp8_kvcache=False,

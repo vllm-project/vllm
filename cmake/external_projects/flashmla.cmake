@@ -41,8 +41,6 @@ string(REPLACE "import flash_mla.cuda as flash_mla_cuda"
                "${FLASHMLA_INTERFACE_CONTENT}")
 file(WRITE "${FLASHMLA_VENDOR_DIR}/flash_mla_interface.py"
      "${FLASHMLA_INTERFACE_CONTENT}")
-file(WRITE "${FLASHMLA_VENDOR_DIR}/__init__.py"
-     "# Vendor package for FlashMLA\n")
 
 # The FlashMLA kernels only work on hopper and require CUDA 12.3 or later.
 # Only build FlashMLA kernels if we are building for something compatible with 
