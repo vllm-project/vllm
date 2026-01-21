@@ -656,19 +656,12 @@ __global__ void indexer_k_quant_and_cache_nvfp4_kernel(
   }
 
   // Find max absolute value in this block
+  // Each thread processes a distinct 16-element block, so amax is computed
+  // independently per thread without warp reduction.
   float amax = 0.0f;
   for (int i = 0; i < NVFP4_BLOCK_SIZE && (block_start_idx + i) < head_dim;
        i++) {
     amax = fmaxf(amax, fabsf(values[i]));
-  }
-
-  // Warp-level reduction to find max across the block
-  for (int mask = 16; mask > 0; mask /= 2) {
-  #ifdef USE_ROCM
-    amax = fmaxf(amax, __shfl_xor_sync(uint64_t(-1), amax, mask));
-  #else
-    amax = fmaxf(amax, __shfl_xor_sync(unsigned(-1), amax, mask));
-  #endif
   }
 
   // Compute block scale: max / 6.0 (max value of e2m1)
@@ -728,20 +721,19 @@ __global__ void indexer_k_quant_and_cache_nvfp4_kernel(
   // Scale is stored after the packed data for each token
   // Layout per token: [packed_data (head_dim/2 uint8), scales (head_dim/16 * 4
   // bytes float32)]
-  if (threadIdx.x == 0) {
-    // Calculate scale storage location: after packed data for this token
-    const int64_t token_base_offset =
-        block_idx * cache_block_size * cache_stride +
-        block_offset * cache_stride;
-    const int64_t scale_offset_in_token =
-        packed_data_size;  // bytes after packed data
-    const int64_t scale_idx_in_token =
-        block_start_idx / NVFP4_BLOCK_SIZE;  // which scale (0 to head_dim/16-1)
-    const int64_t scale_byte_offset = token_base_offset +
-                                      scale_offset_in_token +
-                                      scale_idx_in_token * sizeof(float);
-    reinterpret_cast<float*>(&kv_cache[scale_byte_offset])[0] = quantized_scale;
-  }
+  // Each thread processes a distinct 16-element block and writes its own scale
+  // No need to restrict which thread writes (each thread writes a different
+  // scale location)
+  // Calculate scale storage location: after packed data for this token
+  const int64_t token_base_offset =
+      block_idx * cache_block_size * cache_stride + block_offset * cache_stride;
+  const int64_t scale_offset_in_token =
+      packed_data_size;  // bytes after packed data
+  const int64_t scale_idx_in_token =
+      block_start_idx / NVFP4_BLOCK_SIZE;  // which scale (0 to head_dim/16-1)
+  const int64_t scale_byte_offset = token_base_offset + scale_offset_in_token +
+                                    scale_idx_in_token * sizeof(float);
+  reinterpret_cast<float*>(&kv_cache[scale_byte_offset])[0] = quantized_scale;
 }
 #endif  // USE_ROCM
 
