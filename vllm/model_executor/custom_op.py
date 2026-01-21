@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-
-
+import torch
 import torch.nn as nn
 
 from vllm.config import get_cached_compilation_config
@@ -9,7 +8,6 @@ from vllm.logger import init_logger
 from vllm.platforms import current_platform
 
 logger = init_logger(__name__)
-
 
 # Dictionary of all custom ops (classes, indexed by registered name).
 # To check if an op with a name is enabled, call .enabled() on the class.
@@ -180,7 +178,9 @@ class CustomOp(nn.Module):
             compilation_config.disabled_custom_ops.update([self.__class__.name])
 
         if not enabled:
-            return self.forward_native
+            # Compile forward_native to avoid eager torch ops if inside
+            # opaque torch custom op (e.g. fused_moe, unified_attention, etc.)
+            return self.maybe_compile(self.forward_native)
 
         if current_platform.is_rocm():
             return self.forward_hip
@@ -194,6 +194,26 @@ class CustomOp(nn.Module):
             return self.forward_oot
         else:
             return self.forward_cuda
+
+    def maybe_compile(self, fn):
+        """
+        Compile fn if compilation enabled.
+        Useful for CustomOp instances called from within a torch custom op,
+        meaning the forward call is hidden from the model-level torch.compile.
+
+        NOTE: this does not enable fusion across ops, so opaque custom ops
+        should still be unwrapped wherever possible.
+        """
+        # Do not compile if compilation disabled
+        from vllm.config.compilation import CompilationMode
+
+        if get_cached_compilation_config().mode == CompilationMode.NONE:
+            return fn
+
+        # dynamic=True to avoid recompilations
+        return torch.compile(
+            fn, dynamic=True, backend=current_platform.simple_compile_backend
+        )
 
     @classmethod
     def enabled(cls) -> bool:
