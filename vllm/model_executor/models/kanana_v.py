@@ -586,16 +586,21 @@ class KananaVForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP)
         config = vllm_config.model_config.hf_config
         self.config = config
 
-        self.vision_model = CustomQwen2VLVE._from_config(config.vision_config)
-        self.abstractor = DynamicCAbstractor(
-            config.projector_config, num_input_tokens=self.vision_model.get_num_tokens()
-        )
-        self.language_model = init_vllm_registered_model(
-            vllm_config=vllm_config,
-            hf_config=config.text_config,
-            prefix=maybe_prefix(prefix, "model"),
-            architectures=["LlamaForCausalLM"],
-        )
+        with self._mark_tower_model(vllm_config, "image"):
+            self.vision_model = CustomQwen2VLVE._from_config(config.vision_config)
+            self.abstractor = DynamicCAbstractor(
+                config.projector_config,
+                num_input_tokens=self.vision_model.get_num_tokens(),
+            )
+
+        with self._mark_language_model(vllm_config):
+            self.language_model = init_vllm_registered_model(
+                vllm_config=vllm_config,
+                hf_config=config.text_config,
+                prefix=maybe_prefix(prefix, "model"),
+                architectures=["LlamaForCausalLM"],
+            )
+
         self.make_empty_intermediate_tensors = (
             self.language_model.make_empty_intermediate_tensors
         )
@@ -717,9 +722,6 @@ class KananaVForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP)
         visual_features = self.forward_vision(pixel_values, image_metas=image_metas)
         visual_embeds = self.forward_projector(visual_features, image_metas=image_metas)
         return visual_embeds
-
-    def get_language_model(self) -> torch.nn.Module:
-        return self.language_model
 
     def embed_multimodal(self, **kwargs: object) -> MultiModalEmbeddings:
         image_input = self._parse_and_validate_image_input(**kwargs)

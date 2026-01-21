@@ -248,7 +248,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             )
 
         # TODO(woosuk): Support other backends.
-        supported_backends = ("FLASH_ATTN", "FLASHINFER")
+        supported_backends = ("FLASH_ATTN", "FLASHINFER", "FLASHINFER_MLA")
         for backend in self.attn_backends.values():
             backend_name = backend.get_name()
             if backend_name not in supported_backends:

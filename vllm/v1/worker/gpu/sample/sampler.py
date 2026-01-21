@@ -9,7 +9,7 @@ from vllm.config.model import LogprobsMode
 from vllm.sampling_params import SamplingParams
 from vllm.v1.sample.ops.topk_topp_sampler import apply_top_k_top_p
 from vllm.v1.worker.gpu.metrics.logits import get_num_nans
-from vllm.v1.worker.gpu.sample.gumbel import gumbel_sample
+from vllm.v1.worker.gpu.sample.gumbel import apply_temperature, gumbel_sample
 from vllm.v1.worker.gpu.sample.logit_bias import LogitBiasState
 from vllm.v1.worker.gpu.sample.logprob import compute_topk_logprobs
 from vllm.v1.worker.gpu.sample.min_p import apply_min_p
@@ -104,12 +104,13 @@ class Sampler:
         logits = torch.empty_like(logits, dtype=torch.float32).copy_(logits)
 
         # Apply logit bias (e.g., allowed_token_ids, min_tokens) in place.
-        self.logit_bias_state.apply_logit_bias(logits, idx_mapping, pos)
+        self.logit_bias_state.apply_logit_bias(logits, idx_mapping, idx_mapping_np, pos)
 
-        # Apply penalties and temperature in place.
-        self.penalties_state.apply_penalties_and_temperature(
-            logits, idx_mapping, self.sampling_states.temperature.gpu
-        )
+        # Apply penalties in place.
+        self.penalties_state.apply_penalties(logits, idx_mapping, idx_mapping_np)
+
+        # Apply temperature in place.
+        apply_temperature(logits, idx_mapping, self.sampling_states.temperature.gpu)
 
         # Apply min_p in place if any request has a non-zero min_p.
         do_min_p = self.sampling_states.do_min_p(idx_mapping_np)

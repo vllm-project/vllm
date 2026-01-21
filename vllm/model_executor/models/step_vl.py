@@ -504,7 +504,8 @@ class StepVLForConditionalGeneration(Step3VLForConditionalGeneration):
         self.config = config
         self.multimodal_config = multimodal_config
         self.use_data_parallel = multimodal_config.mm_encoder_tp_mode == "data"
-        if multimodal_config.get_limit_per_prompt("image"):
+
+        with self._mark_tower_model(vllm_config, "image"):
             self.vision_model = PerceptionEncoder(
                 config.vision_config,
                 get_act_fn(config.vision_config.hidden_act),
@@ -521,15 +522,13 @@ class StepVLForConditionalGeneration(Step3VLForConditionalGeneration):
                 prefix=maybe_prefix(prefix, "vit_large_projector"),
                 disable_tp=self.use_data_parallel,
             )
-        else:
-            self.vision_model = None
-            self.vit_large_projector = None
 
-        self.language_model = init_vllm_registered_model(
-            vllm_config=vllm_config,
-            hf_config=config.text_config,
-            prefix=maybe_prefix(prefix, "language_model"),
-        )
+        with self._mark_language_model(vllm_config):
+            self.language_model = init_vllm_registered_model(
+                vllm_config=vllm_config,
+                hf_config=config.text_config,
+                prefix=maybe_prefix(prefix, "language_model"),
+            )
 
         self.make_empty_intermediate_tensors = (
             self.language_model.make_empty_intermediate_tensors

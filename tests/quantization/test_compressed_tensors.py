@@ -41,7 +41,7 @@ ROCM_AITER_SUPPORTED_INT8_MODEL = [
     "nm-testing/tinyllama-oneshot-w8a8-channel-dynamic-token-v2",
 ]
 
-# TritonScaledMMLinearKernel only supports symmetric quantization.
+# TritonInt8ScaledMMLinearKernel only supports symmetric quantization.
 ROCM_TRITON_SCALED_MM_SUPPORTED_INT8_MODEL = [
     "nm-testing/tinyllama-oneshot-w8w8-test-static-shape-change",
     "nm-testing/tinyllama-oneshot-w8-channel-a8-tensor",
