@@ -206,7 +206,7 @@ void scaled_fp4_quant_sm1xxa(torch::Tensor const& output,
           reinterpret_cast<uint32_t*>(sf_out));
     });
   } else {
-    int grid_y = vllm::div_round_up(n, static_cast<int>(block.x));
+    int grid_y = vllm::div_round_up(sf_n_unpadded, static_cast<int>(block.x));
     int grid_x = std::min(m, std::max(1, (multiProcessorCount*numBlocksPerSM)/grid_y) );
     dim3 grid(grid_x, grid_y);
 
