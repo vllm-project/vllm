@@ -5,9 +5,9 @@ from collections.abc import Callable
 import numpy as np
 import torch
 
-from vllm.logprobs import LogprobsTensors
 from vllm.sampling_params import SamplingParams
 from vllm.triton_utils import tl, triton
+from vllm.v1.outputs import LogprobsTensors
 from vllm.v1.worker.gpu.input_batch import InputBatch
 from vllm.v1.worker.gpu.sample.logprob import compute_topk_logprobs
 
@@ -169,7 +169,8 @@ def get_prompt_logprobs_token_ids(
     prefill_token_ids: torch.Tensor,
 ) -> torch.Tensor:
     token_ids = torch.empty(num_tokens, dtype=torch.int64, device=idx_mapping.device)
-    _prompt_logprobs_token_ids_kernel[(1,)](
+    num_reqs = idx_mapping.shape[0]
+    _prompt_logprobs_token_ids_kernel[(num_reqs,)](
         token_ids,
         query_start_loc,
         idx_mapping,
