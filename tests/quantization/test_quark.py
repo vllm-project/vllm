@@ -339,3 +339,25 @@ def test_mxfp4_dequant_kernel_match_quark(
     out_torch = dq_mxfp4_torch(w_mxfp4, scale, float_dtype)
 
     assert torch.equal(out_hip, out_torch)
+
+
+# TODO: add "amd-quark/internal-testing-qwen3_0.6b-int8-hadamard"
+# TODO: add "amd-quark/internal-testing-qwen3_0.6b-int8-tuned-orthogonal"
+@pytest.mark.skipif(not QUARK_MXFP4_AVAILABLE, reason="amd-quark not available")
+@pytest.mark.parametrize(
+    "model_id",
+    [
+        "amd-quark/internal-testing-qwen3_0.6b-mxfp4-hadamard",
+        "amd-quark/internal-testing-qwen3_0.6b-fp8-hadamard",
+        "amd-quark/internal-testing-qwen3_0.6b-mxfp4-tuned-orthogonal",
+        "amd-quark/internal-testing-qwen3_0.6b-fp8-tuned-orthogonal",
+    ],
+)
+def test_online_transform_loading(vllm_runner, model_id: str):
+    if version.parse(importlib.metadata.version("amd-quark")) < version.parse("0.11.1"):
+        pytest.skip("This test requires amd-quark>=0.11.1")
+
+    with vllm_runner(model_id, enforce_eager=True) as llm:
+        # Note: this only tests loading correctness.
+        outputs = llm.generate_greedy(["Hello my name is"], max_tokens=4)
+        print(outputs[0][1])

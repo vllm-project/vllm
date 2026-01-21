@@ -10,6 +10,10 @@ from vllm.model_executor.layers.quantization.kernels.scaled_mm import (
     init_int8_linear_kernel,
 )
 from vllm.model_executor.layers.quantization.quark.schemes import QuarkScheme
+from vllm.model_executor.layers.quantization.quark.transform import (
+    OrthogonalTransform,
+    rotation_weight_loader,
+)
 from vllm.model_executor.parameter import (
     BasevLLMParameter,
     ChannelQuantScaleParameter,
@@ -26,10 +30,26 @@ class QuarkW8A8Int8(QuarkScheme):
         qscheme: str,
         is_static_input_scheme: bool | None,
         input_symmetric: bool | None,
+        quant_config: dict | None = None,
+        layer_names: list[str] | None = None,
     ):
         self.qscheme = qscheme
         self.is_static_input_scheme = is_static_input_scheme
         self.input_symmetric = input_symmetric
+
+        # Setup optional online activation transform.
+        if quant_config is not None and layer_names is not None:
+            (
+                self.use_online_rotation,
+                self.rotation_config,
+                self.rotation_size,
+            ) = OrthogonalTransform.setup_transform(
+                quant_config=quant_config, layer_names=layer_names
+            )
+        else:
+            self.use_online_rotation = False
+            self.rotation_config = None
+            self.rotation_size = None
 
     @classmethod
     def get_min_capability(cls) -> int:
@@ -110,6 +130,21 @@ class QuarkW8A8Int8(QuarkScheme):
         if not hasattr(layer, "azp_adj"):
             layer.register_parameter("azp_adj", None)
 
+        if self.use_online_rotation:
+            dtype = torch.float64 if self.rotation_config["trainable"] else torch.int8  # type: ignore[index]
+
+            input_rotation = ModelWeightParameter(
+                data=torch.empty(self.rotation_size, self.rotation_size, dtype=dtype),
+                input_dim=1,
+                output_dim=0,
+                weight_loader=rotation_weight_loader,
+            )
+            layer.register_parameter("input_rotation", input_rotation)
+
+            self.input_transform = OrthogonalTransform(
+                layer.input_rotation, self.rotation_config
+            )
+
     # Checkpoints are serialized in quark format, which is
     # different from the format the kernel may want. Handle repacking here.
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
@@ -121,7 +156,13 @@ class QuarkW8A8Int8(QuarkScheme):
 
         self.kernel.process_weights_after_loading(layer)
 
+        if self.use_online_rotation:
+            self.input_transform.post_process_transform()
+
     def apply_weights(
         self, layer: torch.nn.Module, x: torch.Tensor, bias: torch.Tensor | None
     ) -> torch.Tensor:
+        if self.use_online_rotation:
+            x = self.input_transform(x)
+
         return self.kernel.apply_weights(layer, x, bias)

@@ -419,7 +419,9 @@ class QuarkConfig(QuantizationConfig):
             )
             return global_quant_config
 
-    def _get_scheme_from_config(self, config: dict[str, Any]) -> "QuarkScheme":
+    def _get_scheme_from_config(
+        self, config: dict[str, Any], layer_name: str
+    ) -> "QuarkScheme":
         if config.get("output_tensors") or config.get("bias"):
             raise NotImplementedError(
                 "Currently, Quark models with output_tensors "
@@ -428,21 +430,40 @@ class QuarkConfig(QuantizationConfig):
         weight_config = cast(dict[str, Any], config.get("weight"))
         input_config = cast(dict[str, Any], config.get("input_tensors"))
 
+        # Retrieve the checkpoint (Transformers) layer names that map to a
+        # single vLLM layer (e.g. ["q_proj", "k_proj", "v_proj"]).
+        layer_names = None
+        for vllm_name, transformers_names in self.packed_modules_mapping.items():
+            if vllm_name in layer_name:
+                layer_names = [
+                    layer_name.replace(vllm_name, transformers_name)
+                    for transformers_name in transformers_names
+                ]
+
+        if layer_names is None:
+            layer_names = [layer_name]
+
         if self._is_fp8_w8a8(weight_config, input_config):
             is_fp8_w8a8_supported = self._check_scheme_supported(
                 QuarkW8A8Fp8.get_min_capability(), error=False
             )
             if is_fp8_w8a8_supported:
-                return QuarkW8A8Fp8(weight_config, input_config)
+                return QuarkW8A8Fp8(
+                    weight_config, input_config, self.quant_config, layer_names
+                )
         elif self._is_static_tensor_w8a8(weight_config, input_config):
             weight_qscheme = cast(str, weight_config.get("qscheme"))
             return QuarkW8A8Int8(
                 qscheme=weight_qscheme,
                 is_static_input_scheme=True,
                 input_symmetric=input_config.get("symmetric"),
+                quant_config=self.quant_config,
+                layer_names=layer_names,
             )
         elif self._is_ocp_mx(weight_config, input_config):
-            return QuarkOCP_MX(weight_config, input_config)
+            return QuarkOCP_MX(
+                weight_config, input_config, self.quant_config, layer_names
+            )
 
         raise NotImplementedError(
             "No quark compatible scheme was found. "
@@ -454,7 +475,9 @@ class QuarkConfig(QuantizationConfig):
         layer_quant_config = self._find_matched_config(layer_name, layer)
 
         # Find the quant_scheme
-        scheme = self._get_scheme_from_config(layer_quant_config)
+        scheme = self._get_scheme_from_config(
+            config=layer_quant_config, layer_name=layer_name
+        )
         # Raise error if device does not support the scheme
         # (e.g. fp8 needs ada lovelace)
         self._check_scheme_supported(scheme.get_min_capability())
