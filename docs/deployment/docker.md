@@ -29,6 +29,51 @@ podman run --device nvidia.com/gpu=all \
 
 You can add any other [engine-args](../configuration/engine_args.md) you need after the image tag (`vllm/vllm-openai:latest`).
 
+## Using Docker Compose
+
+For more complex deployment scenarios, you can use [Docker Compose](https://docs.docker.com/compose/). This allows you to manage environment variables, GPU configurations, and other parameters in a structured way.
+
+Below is an example `docker-compose.yaml` file that demonstrates how to deploy vLLM with GPU support and the `--cc` (shorthand for `--compilation-config`) flag for performance optimizations:
+
+```yaml
+services:
+  vllm:
+    image: vllm/vllm-openai:latest
+    command: >
+      --model Qwen/Qwen3-0.6B
+      --cc '{"mode": 3}'
+    volumes:
+      - ~/.cache/huggingface:/root/.cache/huggingface
+    environment:
+      - HF_TOKEN=$HF_TOKEN
+    ports:
+      - "8000:8000"
+    ipc: host
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+```
+
+To start the server, run:
+
+```bash
+docker compose up -d
+```
+
+!!! note
+    The `--cc '{"mode": 3}'` flag specifies the `--compilation-config` in JSON format. The `mode` attribute determines the compilation approach:
+    - `0`: No compilation (fully eager mode).
+    - `1`: Standard `torch.compile`.
+    - `2`: Single Dynamo trace (avoids recompilation).
+    - `3`: (Default) Custom vLLM Inductor-backend with caching and specialized optimizations.
+
+!!! note
+    Ensure you have the [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/install-guide.html) installed on your host machine to use GPUs within Docker.
+
 !!! note
     You can either use the `ipc=host` flag or `--shm-size` flag to allow the
     container to access the host's shared memory. vLLM uses PyTorch, which uses shared
