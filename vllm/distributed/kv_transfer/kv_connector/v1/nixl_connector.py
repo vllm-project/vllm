@@ -301,6 +301,11 @@ class NixlConnectorMetadata(KVConnectorMetadata):
 class NixlConnector(KVConnectorBase_V1):
     @property
     def prefer_cross_layer_blocks(self) -> bool:
+        if self.attn_backend.get_name() not in ["FLASH_ATTN", "FLASHINFER"]:
+            # For now there is no benefit to run cross layers when backend
+            # does not support on HND
+            return False
+
         extra_config = self.kv_transfer_config.kv_connector_extra_config
         return bool(str(extra_config.get("enable_cross_layers_block", "True")))
 
