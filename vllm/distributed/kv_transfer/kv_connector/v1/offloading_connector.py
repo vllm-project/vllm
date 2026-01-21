@@ -91,23 +91,19 @@ class OffloadingConnectorStats(KVConnectorStats):
         stats for the last time interval.
         """
         return_dict: dict[str, int | float] = {}
-        for k, v in self.data.items():
-            assert isinstance(v, list)
-            for op in v:
-                for stat, value in [
-                    ("_total_bytes", op["op_size"]),
-                    ("_total_time", op["op_time"]),
-                ]:
-                    log_key = k + stat
-                    if log_key not in return_dict:
-                        return_dict[log_key] = value
-                    else:
-                        return_dict[log_key] += value
+        for transfer_type, ops_list in self.data.items():
+            assert isinstance(ops_list, list)
+            return_dict[f"{transfer_type}_total_bytes"] = sum(
+                op["op_size"] for op in ops_list
+            )
+            return_dict[f"{transfer_type}_total_time"] = sum(
+                op["op_time"] for op in ops_list
+            )
 
         return return_dict
 
     def is_empty(self) -> bool:
-        return len(self.data.items()) == 0
+        return not self.data
 
     def record_transfer(self, num_bytes: int, time: float, transfer_type: TransferType):
         src, dst = transfer_type
@@ -145,8 +141,6 @@ class OffloadingConnector(KVConnectorBase_V1):
         if role == KVConnectorRole.SCHEDULER:
             self.connector_scheduler = OffloadingConnectorScheduler(spec)
         elif role == KVConnectorRole.WORKER:
-            if kv_cache_config is None:
-                raise ValueError("kv_cache_config cannot be None for WORKER role")
             self.connector_worker = OffloadingConnectorWorker(spec)
 
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
@@ -229,7 +223,7 @@ class OffloadingConnector(KVConnectorBase_V1):
 
     def get_kv_connector_stats(self) -> KVConnectorStats | None:
         if self.connector_worker is None:
-            return None
+            return None  # We only emit stats from the worker-side
         return self.connector_worker.get_kv_connector_stats()
 
     @classmethod
@@ -676,7 +670,11 @@ class OffloadingConnectorWorker:
             job_id = transfer_result.job_id
             assert transfer_result.success
             req_id, store = self._jobs.pop(job_id)
-            if transfer_result.transfer_time:
+            if (
+                transfer_result.transfer_time
+                and transfer_result.transfer_size is not None
+                and transfer_result.transfer_type is not None
+            ):
                 self.kv_connector_stats.record_transfer(
                     num_bytes=transfer_result.transfer_size,
                     time=transfer_result.transfer_time,
@@ -716,7 +714,9 @@ class OffloadingConnectorWorker:
         if self.kv_connector_stats.is_empty():
             return None
         # Clear stats for next iteration
-        return self.kv_connector_stats.clone_and_reset()
+        kv_connector_stats = self.kv_connector_stats
+        self.kv_connector_stats = OffloadingConnectorStats()
+        return kv_connector_stats
 
 
 class OffloadPromMetrics(KVConnectorPromMetrics):
