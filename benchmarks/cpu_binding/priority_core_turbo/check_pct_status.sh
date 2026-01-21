@@ -18,6 +18,11 @@ set -euo pipefail
 TARGET_CLOS="${TARGET_CLOS:-0}"
 CHUNK="${CHUNK:-64}"
 DEBUG_MAP="${DEBUG_MAP:-0}"
+# near top
+SUDO=""
+if [ "$(id -u)" -ne 0 ]; then
+  SUDO="sudo"
+fi
 
 # --- Functions -------------------------------------------------------------
 
@@ -31,7 +36,7 @@ print_header() {
 # Prints normalized lines: "<cpu> <clos>\n"
 get_assoc_for_cpulist() {
   local cpu_list="$1"
-  sudo intel-speed-select -c "$cpu_list" core-power get-assoc 2>&1 |
+  $SUDO intel-speed-select -c "$cpu_list" core-power get-assoc 2>&1 |
     while IFS= read -r line; do
       if [[ "$line" =~ cpu-([0-9]+) ]]; then
         cur_cpu="${BASH_REMATCH[1]}"
@@ -51,17 +56,17 @@ if ! command -v intel-speed-select &>/dev/null; then
   exit 1
 fi
 
-sudo intel-speed-select --info 2>&1 | grep -E "Intel|Executing|Supported|Features" || true
+$SUDO intel-speed-select --info 2>&1 | grep -E "Intel|Executing|Supported|Features" || true
 echo
 
 # --- 2. Check Turbo Frequency (PCT) status --------------------------------
 
 print_header "PCT (Turbo-Frequency) Feature Status"
 
-TF_OUT="$(sudo intel-speed-select turbo-freq info -l 1 2>&1 || true)"
+TF_OUT="$($SUDO intel-speed-select turbo-freq info -l 1 2>&1 || true)"
 
 if echo "$TF_OUT" | grep -qi "Invalid command: specify tdp_level"; then
-  echo "⚠️  Multiple TDP levels detected. Use: sudo intel-speed-select turbo-freq info --tdp_level <N>"
+  echo "⚠️  Multiple TDP levels detected. Use: $SUDO intel-speed-select turbo-freq info --tdp_level <N>"
 elif echo "$TF_OUT" | grep -qi "Failed to get turbo-freq info"; then
   echo "⚠️  turbo-freq info failed at this level. This does not block Core Power / CLOS usage."
 elif echo "$TF_OUT" | grep -qi "high-priority"; then
@@ -75,7 +80,7 @@ echo
 
 print_header "Core Power (CLOS) Feature Status"
 
-CP_OUT="$(sudo intel-speed-select core-power info 2>&1 || true)"
+CP_OUT="$($SUDO intel-speed-select core-power info 2>&1 || true)"
 
 if echo "$CP_OUT" | grep -q "support-status:supported"; then
   if echo "$CP_OUT" | grep -q "enable-status:enabled"; then
@@ -105,7 +110,7 @@ if [[ -z "${MAX_CPU:-}" ]]; then
 fi
 
 # Check get-assoc support
-if ! sudo intel-speed-select -c 0 core-power get-assoc >/dev/null 2>&1; then
+if ! $SUDO intel-speed-select -c 0 core-power get-assoc >/dev/null 2>&1; then
   echo "❌ This intel-speed-select build does not support: core-power get-assoc"
   exit 1
 fi
