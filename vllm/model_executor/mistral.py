@@ -59,6 +59,7 @@ class MistralAttention(LlamaAttention):
         llama_4_scaling_config: dict[str, int | float | str] | None = getattr(config, "llama_4_scaling", None)
         self.do_llama_4_scaling = llama_4_scaling_config is not None
         if self.do_llama_4_scaling:
+            assert llama_4_scaling_config is not None
             self.llama_4_scaling_original_max_position_embeddings = (
                 llama_4_scaling_config["original_max_position_embeddings"]
             )
