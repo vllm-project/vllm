@@ -634,6 +634,7 @@ def _test_masked_logits(
             continue
         assert token_id in unmasked_indices[i]
 
+
 @pytest.mark.parametrize("top_k", [1, 5, 99])
 def test_top_k(rejection_sampler, top_k):
     """Test rejection sampling with top-k sampling"""
@@ -674,6 +675,7 @@ def test_top_k(rejection_sampler, top_k):
         unmasked_indices=top_k_indices,
         sampling_metadata=sampling_metadata,
     )
+
 
 @pytest.mark.parametrize("top_p", [0.5, 0.9, 0.99])
 def test_top_p(rejection_sampler, top_p):

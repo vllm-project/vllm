@@ -17,7 +17,6 @@ from vllm.platforms import current_platform
 from vllm.v1.attention.backend import CommonAttentionMetadata
 from vllm.v1.attention.backends.fa_utils import is_flash_attn_varlen_func_available
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
-from vllm.platforms import current_platform
 
 DEVICE = current_platform.device_type
 
@@ -171,8 +170,6 @@ def _get_available_reference_backends() -> list[AttentionBackendEnum]:
 
     # CUDA: flash attention.
     return [AttentionBackendEnum.FLASH_ATTN]
-
-
 
 
 class MockAttentionLayer(torch.nn.Module):

@@ -4,7 +4,6 @@
 import pytest
 import ray
 
-from vllm.platforms import current_platform
 from vllm.config.model import ModelDType
 from vllm.sampling_params import SamplingParams
 from vllm.v1.engine.async_llm import AsyncEngineArgs, AsyncLLM
@@ -18,7 +17,6 @@ MODELS = [
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("dtype", ["half"])
 @pytest.mark.parametrize("max_tokens", [16])
-@pytest.mark.skipif(current_platform.is_xpu(), reason="python core dump on xpu")
 def test_engine_log_metrics_ray(
     example_prompts,
     model: str,
@@ -52,6 +50,7 @@ def test_engine_log_metrics_ray(
     # Create the actor and call the async method
     actor = EngineTestActor.remote()  # type: ignore[attr-defined]
     ray.get(actor.run.remote())
+
 
 def test_sanitized_opentelemetry_name():
     """Test the metric name sanitization logic for Ray."""

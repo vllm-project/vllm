@@ -94,7 +94,6 @@ class RayTrainingActor:
         current_platform.synchronize()
         # The argument for `get_device_uuid` is the index of the GPU in the
         # list of visible devices.
-        #from vllm.platforms import current_platform
 
         self.device_uuid = current_platform.get_device_uuid(0)
         self.zmq_context = zmq.Context()
@@ -122,7 +121,9 @@ class RayTrainingActor:
         )
         max_tensor_size = max(get_size(p) for p in named_parameters.values())
         # use max_tensor_size * 2 as buffer size
-        buffer = torch.empty(max_tensor_size * 2, dtype=torch.uint8, device=f"{DEVICE}:0")
+        buffer = torch.empty(
+            max_tensor_size * 2, dtype=torch.uint8, device=f"{DEVICE}:0"
+        )
         s = self.zmq_context.socket(zmq.REQ)
         s.bind(self.zmq_handle)
         handle = reduce_tensor(buffer)

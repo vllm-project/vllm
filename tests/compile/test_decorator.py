@@ -123,7 +123,11 @@ def test_ignore_torch_compile_decorator(use_inductor_graph_partition, monkeypatc
     class C(B): ...
 
     with set_current_vllm_config(vllm_config):
-        mod_A = A(vllm_config=vllm_config, prefix="").eval().to(current_platform.device_name)
+        mod_A = (
+            A(vllm_config=vllm_config, prefix="")
+            .eval()
+            .to(current_platform.device_name)
+        )
 
     # A has support_torch_compile
     with compilation_counter.expect(
@@ -136,7 +140,11 @@ def test_ignore_torch_compile_decorator(use_inductor_graph_partition, monkeypatc
         run_model(vllm_config, mod_A, cudagraph_runtime_mode)
 
     with set_current_vllm_config(vllm_config):
-        mod_B = B(vllm_config=vllm_config, prefix="").eval().to(current_platform.device_name)
+        mod_B = (
+            B(vllm_config=vllm_config, prefix="")
+            .eval().
+            to(current_platform.device_name)
+        )
 
     # B's ignore_torch_compile should override A's support_torch_compile
     with compilation_counter.expect(
@@ -149,7 +157,11 @@ def test_ignore_torch_compile_decorator(use_inductor_graph_partition, monkeypatc
         run_model(vllm_config, mod_B, cudagraph_runtime_mode)
 
     with set_current_vllm_config(vllm_config):
-        mod_C = C(vllm_config=vllm_config, prefix="").eval().to(current_platform.device_name)
+        mod_C = (
+            C(vllm_config=vllm_config, prefix="")
+            .eval().
+            to(current_platform.device_name)
+        )
 
     # C's support_torch_compile should override B's ignore_torch_compile
     with compilation_counter.expect(
@@ -223,7 +235,11 @@ def test_conditional_compile_enable_if(use_inductor_graph_partition, monkeypatch
     cudagraph_runtime_mode = CUDAGraphMode.PIECEWISE
 
     with set_current_vllm_config(vllm_config):
-        mod_A = A(vllm_config=vllm_config, prefix="").eval().to(current_platform.device_name)
+        mod_A = (
+            A(vllm_config=vllm_config, prefix="")
+            .eval()
+            .to(current_platform.device_name)
+        )
 
     if use_inductor_graph_partition:
         expected_num_piecewise_graphs_seen = 2
@@ -263,7 +279,11 @@ def test_conditional_compile_enable_if(use_inductor_graph_partition, monkeypatch
     )
 
     with set_current_vllm_config(vllm_config):
-        mod_A = A(vllm_config=vllm_config, prefix="").eval().to(current_platform.device_name)
+        mod_A = (
+            A(vllm_config=vllm_config, prefix="")
+            .eval()
+            .to(current_platform.device_name)
+        )
 
     if use_inductor_graph_partition:
         expected_num_piecewise_graphs_seen = 1
