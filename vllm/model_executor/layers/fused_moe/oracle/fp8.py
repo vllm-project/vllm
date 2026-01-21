@@ -49,6 +49,7 @@ class Fp8MoeBackend(Enum):
     TRITON = "TRITON"
     BATCHED_TRITON = "BATCHED_TRITON"
     AITER = "AITER"
+    AITER_BATCHED_DEEPGEMM = "AITER_BATCHED_DEEPGEMM"
     VLLM_CUTLASS = "VLLM_CUTLASS"
     BATCHED_VLLM_CUTLASS = "BATCHED_VLLM_CUTLASS"
 
@@ -108,6 +109,13 @@ def backend_to_kernel_cls(
 
         return AiterExperts
 
+    elif backend == Fp8MoeBackend.AITER_BATCHED_DEEPGEMM:
+        from vllm.model_executor.layers.fused_moe.rocm_aiter_batched_moe import (
+            AiterBatchedExperts,
+        )
+
+        return AiterBatchedExperts
+
     elif backend == Fp8MoeBackend.VLLM_CUTLASS:
         from vllm.model_executor.layers.fused_moe.triton_cutlass_moe import (
             TritonOrCutlassExperts,
@@ -144,6 +152,7 @@ def select_fp8_moe_backend(
     # NOTE: the kernels are selected in the following order.
     AVAILABLE_BACKENDS = [
         Fp8MoeBackend.AITER,
+        Fp8MoeBackend.AITER_BATCHED_DEEPGEMM,
         Fp8MoeBackend.FLASHINFER_TRTLLM,
         Fp8MoeBackend.FLASHINFER_CUTLASS,
         Fp8MoeBackend.DEEPGEMM,
@@ -294,8 +303,14 @@ def select_fp8_moe_backend(
     if envs.is_set("VLLM_ROCM_USE_AITER") or envs.is_set("VLLM_ROCM_USE_AITER_MOE"):
         if not envs.VLLM_ROCM_USE_AITER or not envs.VLLM_ROCM_USE_AITER_MOE:
             AVAILABLE_BACKENDS.remove(Fp8MoeBackend.AITER)
+            if Fp8MoeBackend.AITER_BATCHED_DEEPGEMM in AVAILABLE_BACKENDS:
+                AVAILABLE_BACKENDS.remove(Fp8MoeBackend.AITER_BATCHED_DEEPGEMM)
         else:
-            backend = Fp8MoeBackend.AITER
+            # Select batched or standard AITER backend based on activation format
+            if activation_format == mk.FusedMoEActivationFormat.BatchedExperts:
+                backend = Fp8MoeBackend.AITER_BATCHED_DEEPGEMM
+            else:
+                backend = Fp8MoeBackend.AITER
             return _return_or_raise(
                 backend, config, weight_key, activation_key, activation_format
             )

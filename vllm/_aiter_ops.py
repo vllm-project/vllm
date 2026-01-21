@@ -444,6 +444,45 @@ def _rocm_aiter_gemm_a8w8_blockscale_fake(
     return Y
 
 
+def _rocm_aiter_deepgemm_impl(
+    XQ: torch.Tensor,
+    WQ: torch.Tensor,
+    Y: torch.Tensor,
+    group_layout: torch.Tensor,
+    x_scale: torch.Tensor | None = None,
+    w_scale: torch.Tensor | None = None,
+) -> torch.Tensor:
+    """
+    AITER DeepGemm masked-M grouped GEMM kernel.
+
+    Args:
+        XQ: Quantized input activations (E, T, K)
+        WQ: Quantized weights (E, N, K) - must be shuffled with shuffle_weight
+        Y: Output tensor (E, T, N)
+        group_layout: Per-expert token counts (E,) - the masked_m tensor
+        x_scale: Optional input scales for FP8 quantization
+        w_scale: Optional weight scales for FP8 quantization
+
+    Returns:
+        Y tensor with results written in-place
+    """
+    from aiter.ops.deepgemm import deepgemm
+
+    return deepgemm(XQ, WQ, Y, group_layout, x_scale, w_scale)
+
+
+def _rocm_aiter_deepgemm_fake(
+    XQ: torch.Tensor,
+    WQ: torch.Tensor,
+    Y: torch.Tensor,
+    group_layout: torch.Tensor,
+    x_scale: torch.Tensor | None = None,
+    w_scale: torch.Tensor | None = None,
+) -> torch.Tensor:
+    # Y is modified in place, return it as-is for symbolic execution
+    return Y
+
+
 def _rocm_aiter_rms_norm_impl(
     x: torch.Tensor, weight: torch.Tensor, variance_epsilon: float
 ) -> torch.Tensor:
@@ -849,6 +888,7 @@ class rocm_aiter_ops:
     _MOE_SHARED_EXPERTS_ENABLED = envs.VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS
     # TODO: Consolidate under _LINEAR_ENABLED
     _TRITON_UNQUANT_GEMM = envs.VLLM_ROCM_USE_AITER_TRITON_GEMM
+    _DEEPGEMM_ENABLED = envs.VLLM_ROCM_USE_AITER_DEEPGEMM
 
     @classmethod
     def refresh_env_variables(cls):
@@ -873,6 +913,7 @@ class rocm_aiter_ops:
         cls._TRITON_ROTARY_EMBED = envs.VLLM_ROCM_USE_AITER_TRITON_ROPE
         cls._MOE_SHARED_EXPERTS_ENABLED = envs.VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS
         cls._TRITON_UNQUANT_GEMM = envs.VLLM_ROCM_USE_AITER_TRITON_GEMM
+        cls._DEEPGEMM_ENABLED = envs.VLLM_ROCM_USE_AITER_DEEPGEMM
 
     @classmethod
     @if_aiter_supported
@@ -948,6 +989,11 @@ class rocm_aiter_ops:
     @if_aiter_supported
     def is_triton_gemm_enabled(cls) -> bool:
         return cls._AITER_ENABLED and cls._TRITON_UNQUANT_GEMM
+
+    @classmethod
+    @if_aiter_supported
+    def is_deepgemm_enabled(cls) -> bool:
+        return cls._AITER_ENABLED and cls._DEEPGEMM_ENABLED
 
     @staticmethod
     @if_aiter_supported
@@ -1027,6 +1073,14 @@ class rocm_aiter_ops:
                 op_name="rocm_aiter_gemm_a8w8_blockscale",
                 op_func=_rocm_aiter_gemm_a8w8_blockscale_impl,
                 fake_impl=_rocm_aiter_gemm_a8w8_blockscale_fake,
+            )
+
+            direct_register_custom_op(
+                op_name="rocm_aiter_deepgemm",
+                op_func=_rocm_aiter_deepgemm_impl,
+                mutates_args=["Y"],
+                fake_impl=_rocm_aiter_deepgemm_fake,
+                dispatch_key=current_platform.dispatch_key,
             )
 
             direct_register_custom_op(
@@ -1193,6 +1247,33 @@ class rocm_aiter_ops:
     ) -> torch.Tensor:
         return torch.ops.vllm.rocm_aiter_gemm_a8w8_blockscale(
             A, B, As, Bs, output_dtype
+        )
+
+    @staticmethod
+    def deepgemm(
+        XQ: torch.Tensor,
+        WQ: torch.Tensor,
+        Y: torch.Tensor,
+        group_layout: torch.Tensor,
+        x_scale: torch.Tensor | None = None,
+        w_scale: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        """
+        AITER DeepGemm masked-M grouped GEMM kernel.
+
+        Args:
+            XQ: Quantized input activations (E, T, K)
+            WQ: Quantized weights (E, N, K) - must be shuffled with shuffle_weight
+            Y: Output tensor (E, T, N)
+            group_layout: Per-expert token counts (E,) - the masked_m tensor
+            x_scale: Optional input scales for FP8 quantization
+            w_scale: Optional weight scales for FP8 quantization
+
+        Returns:
+            Y tensor with results
+        """
+        return torch.ops.vllm.rocm_aiter_deepgemm(
+            XQ, WQ, Y, group_layout, x_scale, w_scale
         )
 
     @staticmethod
