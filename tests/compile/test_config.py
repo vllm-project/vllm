@@ -470,7 +470,9 @@ def test_cached_compilation_config(default_vllm_config):
         query_quant = QuantFP8(static=True, group_shape=GroupShape.PER_TENSOR)
         query_quant = torch.compile(query_quant)
 
-        _q_scale = torch.tensor(1.0, dtype=torch.float32, device=current_platform.device_name)
+        _q_scale = torch.tensor(
+            1.0, dtype=torch.float32, device=current_platform.device_name
+        )
         query = torch.randn(
             batch_size, num_qo_heads * head_size, dtype=dtype, device=device
         )

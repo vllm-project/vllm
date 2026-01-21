@@ -3,7 +3,6 @@
 import dataclasses
 
 import pytest
-import torch
 
 from vllm.config import CompilationMode
 from vllm.platforms import current_platform
@@ -111,10 +110,7 @@ def test_compile_correctness(
     method = test_setting.method
     gpu_nums = current_platform.device_count()
     if gpu_nums < pp_size * tp_size:
-        pytest.skip(
-            f"Need at least {pp_size}*{tp_size} gpus but got "
-            f"{gpu_nums}"
-        )
+        pytest.skip(f"Need at least {pp_size}*{tp_size} gpus but got {gpu_nums}")
 
     final_args = [
         *model_args,

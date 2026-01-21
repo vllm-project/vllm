@@ -38,11 +38,11 @@ from rlhf_utils import stateless_init_process_group
 from transformers import AutoModelForCausalLM
 
 from vllm import LLM, SamplingParams
+from vllm.platforms import current_platform
 from vllm.utils.network_utils import get_ip, get_open_port
 
-from vllm.platforms import current_platform
-
 DEVICE = current_platform.device_type
+
 
 class MyLLM(LLM):
     """Configure the vLLM worker for Ray placement group execution."""
