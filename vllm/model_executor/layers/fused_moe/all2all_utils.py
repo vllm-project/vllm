@@ -182,7 +182,6 @@ def maybe_make_prepare_finalize(
 
     elif moe.use_fi_all2allv_kernels:
         assert quant_config is not None
-        # TODO: audit if this supports all cases.
         prepare_finalize = FlashInferA2APrepareAndFinalize(
             defer_input_quant=defer_input_quant,
             num_dispatchers=all2all_manager.world_size,
@@ -195,5 +194,4 @@ def maybe_make_prepare_finalize(
             num_dispatchers=all2all_manager.world_size,
         )
 
-    print(f"========= {prepare_finalize=}")
     return prepare_finalize
