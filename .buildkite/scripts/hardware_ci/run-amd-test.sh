@@ -169,7 +169,7 @@ if [[ $commands == *" entrypoints/llm "* ]]; then
   --ignore=entrypoints/llm/test_prompt_validation.py "}
 fi
 
-commands=$(echo $commands | sed 's/ \\ / /g')
+commands=$(echo "$commands" | sed 's/ \\ / /g')
 echo "Final commands: $commands"
 
 # --ignore=entrypoints/openai/test_encoder_decoder.py \
