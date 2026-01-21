@@ -25,6 +25,12 @@ from vllm.distributed.eplb.eplb_state import EplbLayerState, EplbState
 from vllm.forward_context import ForwardContext, get_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.custom_op import CustomOp
+from vllm.model_executor.layers.fused_moe.alpha_moe import (
+    interleave_tensor as alpha_moe_interleave_tensor,
+)
+from vllm.model_executor.layers.fused_moe.alpha_moe import (
+    is_alpha_moe_enabled,
+)
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
     FusedMoEParallelConfig,
@@ -535,6 +541,14 @@ class FusedMoE(CustomOp):
         self.moe_config_use_flashinfer_cutlass_kernels = (
             self.moe_config.use_flashinfer_cutlass_kernels
         )
+
+        # Alpha MoE weight interleaving tracking
+        # Track how many chunks (w1, w3) have been loaded for each expert
+        # Interleave when both w1 and w3 are loaded
+        self._alpha_moe_w13_chunks_loaded: list[int] = [0] * self.local_num_experts
+        self._alpha_moe_w13_scale_chunks_loaded: list[int] = [
+            0
+        ] * self.local_num_experts
 
         self.quant_config = quant_config
 
@@ -1047,6 +1061,88 @@ class FusedMoE(CustomOp):
             return expert_id
         return self._expert_map[expert_id].item()
 
+    def _maybe_interleave_for_alpha_moe(
+        self,
+        param: torch.nn.Parameter,
+        expert_id: int,
+        shard_id: str,
+        is_scale: bool,
+    ) -> None:
+        """Interleave w13 weights/scales for Alpha MoE if enabled.
+
+        Alpha MoE requires weights of Up projection and Gate to be interleaved
+        in chunks of 8 (for weights) or 1 (for scales). This method tracks
+        when both w1 and w3 are loaded for each expert and applies interleaving.
+
+        Args:
+            param: The parameter being loaded into.
+            expert_id: The local expert ID.
+            shard_id: Either "w1", "w2", or "w3".
+            is_scale: True if loading weight scales, False for weights.
+        """
+        if not is_alpha_moe_enabled():
+            return
+
+        # Check conditions that match _valid_alpha_moe runtime validation.
+        # This prevents interleaving weights when Alpha MoE will be rejected
+        # at runtime, which would cause fallback paths to use corrupted data.
+        if self.activation not in ("silu", "swiglu"):
+            return
+
+        if self.apply_router_weight_on_input:
+            return
+
+        if self._expert_map is not None:
+            return
+
+        # Only interleave w13 (combined w1 and w3), not w2
+        if shard_id == "w2":
+            return
+
+        # Track chunks loaded
+        tracker = (
+            self._alpha_moe_w13_scale_chunks_loaded
+            if is_scale
+            else self._alpha_moe_w13_chunks_loaded
+        )
+
+        if shard_id in ("w1", "w3"):
+            tracker[expert_id] += 1
+        elif shard_id == "w13":
+            # Combined w1w3 loaded as single tensor
+            tracker[expert_id] += 2
+
+        # Interleave when both halves are loaded
+        if tracker[expert_id] >= 2:
+            # Get expert data
+            expert_data = param.data[expert_id]
+
+            # Interleave: rep=8 for weights, rep=1 for scales
+            rep = 1 if is_scale else 8
+
+            # Reshape to 3D for interleave_tensor: [1, N, K] -> [N, K]
+            original_shape = expert_data.shape
+            if len(original_shape) == 2:
+                # Shape is [N, K] for weights or [N_groups, K_groups] for scales
+                interleaved = alpha_moe_interleave_tensor(
+                    expert_data.unsqueeze(0), rep=rep
+                )[0]
+            else:
+                # Shape might be different, handle accordingly
+                interleaved = alpha_moe_interleave_tensor(
+                    expert_data.view(1, *original_shape), rep=rep
+                ).view(original_shape)
+
+            expert_data.copy_(interleaved)
+
+            # Log once per layer
+            logger.debug(
+                "Alpha MoE: Interleaved w13 %s for expert %d in %s",
+                "scales" if is_scale else "weights",
+                expert_id,
+                self.layer_name,
+            )
+
     def _init_aiter_shared_experts_topK_buffer(
         self, vllm_config: VllmConfig, dp_size: int
     ):
@@ -1307,6 +1403,14 @@ class FusedMoE(CustomOp):
                     tp_rank=self.tp_rank,
                     load_full_w2=getattr(param, "load_full_w2", False),
                 )
+                # Alpha MoE: Interleave w13 weight scales after both are loaded
+                if "weight_scale" in weight_name:
+                    self._maybe_interleave_for_alpha_moe(
+                        param=param,
+                        expert_id=expert_id,
+                        shard_id=shard_id,
+                        is_scale=True,
+                    )
             elif quant_method == FusedMoeWeightScaleSupported.TENSOR.value:
                 self._load_per_tensor_weight_scale(
                     shard_id=shard_id,
@@ -1337,6 +1441,13 @@ class FusedMoE(CustomOp):
                 loaded_weight=loaded_weight,
                 expert_data=expert_data,
                 tp_rank=self.tp_rank,
+            )
+            # Alpha MoE: Interleave w13 weights after both w1 and w3 are loaded
+            self._maybe_interleave_for_alpha_moe(
+                param=param,
+                expert_id=expert_id,
+                shard_id=shard_id,
+                is_scale=False,
             )
             return True if return_success else None
 

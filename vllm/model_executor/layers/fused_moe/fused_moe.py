@@ -17,6 +17,10 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.batch_invariant import (
     vllm_is_batch_invariant,
 )
+from vllm.model_executor.layers.fused_moe.alpha_moe import (
+    _valid_alpha_moe,
+    alpha_moe_fused_experts,
+)
 from vllm.model_executor.layers.fused_moe.config import (
     FUSED_MOE_UNQUANTIZED_CONFIG,
     FusedMoEQuantConfig,
@@ -1538,6 +1542,31 @@ def fused_experts(
 ) -> torch.Tensor:
     if quant_config is None:
         quant_config = FUSED_MOE_UNQUANTIZED_CONFIG
+
+    # Check if Alpha MoE should be used (user explicitly enabled via env var)
+    # Alpha MoE provides fused FP8 megakernels optimized for TP servings
+    if _valid_alpha_moe(
+        hidden_states,
+        w1,
+        w2,
+        quant_config.use_fp8_w8a8,
+        activation,
+        apply_router_weight_on_input,
+        expert_map,
+    ):
+        assert quant_config is not None
+        return alpha_moe_fused_experts(
+            hidden_states=hidden_states,
+            w1=w1,
+            w2=w2,
+            topk_weights=topk_weights,
+            topk_ids=topk_ids,
+            w1_scale=quant_config.w1_scale,
+            w2_scale=quant_config.w2_scale,
+            block_shape=quant_config.block_shape,
+            routed_scaling_factor=1.0,
+            global_num_experts=global_num_experts,
+        )
 
     # For now, disable DeepGemm for small N (<= 512) until better
     # permute/unpermute ops are available.
