@@ -578,8 +578,7 @@ class PixtralForConditionalGeneration(
                     # LLM weights: yield them to be loaded
                     # by language_model.load_weights
                     # Strip "language_model." prefix if present (HF sharded format)
-                    if name.startswith("language_model."):
-                        name = name[len("language_model.") :]
+                    name = name.removeprefix("language_model.")
                     yield (name, w)
 
         # Now we call the language model load with the generator
