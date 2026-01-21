@@ -68,7 +68,7 @@ class OffloadingEvent:
 
 class OffloadingManager(ABC):
     @abstractmethod
-    def lookup(self, block_hashes: Iterable[BlockHash]) -> int:
+    def lookup(self, block_hashes: Iterable[BlockHash]) -> int | None:
         """
         Finds the length of the maximal series of blocks, starting from the
         first one, that are all offloaded.
@@ -78,7 +78,9 @@ class OffloadingManager(ABC):
 
         Returns:
             An integer representing the maximal number of blocks that
-            are currently offloaded.
+            are currently offloaded, or None if the lookup should be retried
+            later. Returning None will delay the request handling by the vLLM
+            scheduler.
         """
         pass
 
