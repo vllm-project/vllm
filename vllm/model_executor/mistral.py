@@ -56,7 +56,7 @@ class MistralAttention(LlamaAttention):
             attn_type=attn_type,
         )
 
-        llama_4_scaling_config = getattr(config, "llama_4_scaling", None)
+        llama_4_scaling_config: dict[str, int | float | str] = getattr(config, "llama_4_scaling", None)
         self.do_llama_4_scaling = llama_4_scaling_config is not None
         if self.do_llama_4_scaling:
             self.llama_4_scaling_original_max_position_embeddings = (
@@ -131,7 +131,7 @@ class MistralModel(LlamaModel):
 
 class MistralForCausalLM(LlamaForCausalLM):
     # Mistral: We don't support LoRA on the embedding layers.
-    embedding_modules = {}
+    embedding_modules: dict[str, str] = {}
 
     # Mistral/Llama models can also be loaded with --load-format mistral
     # from consolidated.safetensors checkpoints
