@@ -327,9 +327,11 @@ def rocm_fp8_paged_mqa_logits(
     aiter_paged_mqa_logits_module = None
     if rocm_aiter_ops.is_enabled():
         aiter_paged_mqa_logits_module = paged_mqa_logits_module()
+    # FIXME(ganyi): Temporarily disable the aiter path until nightly docker
+    # update aiter to the fix PR.
+    aiter_paged_mqa_logits_module = None
 
     if aiter_paged_mqa_logits_module is not None:
-        print("pa_mqa_logits in aiter")
         deepgemm_fp8_paged_mqa_logits_stage1 = (
             aiter_paged_mqa_logits_module.deepgemm_fp8_paged_mqa_logits_stage1
         )
@@ -454,7 +456,6 @@ def rocm_fp8_mqa_logits(
         aiter_mqa_logits_module = mqa_logits_module()
 
     if aiter_mqa_logits_module is not None:
-        print("use fp8_mqa_logits in aiter")
         fp8_mqa_logits = aiter_mqa_logits_module.fp8_mqa_logits
         kv, scale = kv
         return fp8_mqa_logits(q, kv, scale, weights, cu_seqlen_ks, cu_seqlen_ke)
