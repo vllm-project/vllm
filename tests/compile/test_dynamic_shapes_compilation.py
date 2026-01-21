@@ -213,17 +213,17 @@ def test_model_specialization_with_evaluate_guards(
 
     test(
         ModelWithSizeCheck,
-        torch.randn(20, 10).to(current_platform.device_name),
-        torch.randn(5, 10).to(current_platform.device_name),
+        torch.randn(20, 10).to(current_platform.device_type),
+        torch.randn(5, 10).to(current_platform.device_type),
     )
     test(
         ModelWithSizeCheck,
-        torch.randn(5, 10).to(current_platform.device_name),
-        torch.randn(20, 10).to(current_platform.device_name),
+        torch.randn(5, 10).to(current_platform.device_type),
+        torch.randn(20, 10).to(current_platform.device_type),
     )
     test(
         ModelWithOneSizeCheck,
-        torch.randn(20, 10).to(current_platform.device_name),
-        torch.randn(1, 10).to(current_platform.device_name),
+        torch.randn(20, 10).to(current_platform.device_type),
+        torch.randn(1, 10).to(current_platform.device_type),
         is_01_specialization=True,
     )

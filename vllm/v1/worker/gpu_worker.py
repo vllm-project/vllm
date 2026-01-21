@@ -255,7 +255,7 @@ class Worker(WorkerBase):
                     f"({visible_device_count})."
                 )
             self.device = torch.device(
-                f"{current_platform.device_name}:{self.local_rank}"
+                f"{current_platform.device_type}:{self.local_rank}"
             )
             current_platform.set_device(self.device)
 

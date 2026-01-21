@@ -108,7 +108,7 @@ def _run_simple_model(
             intermediate_unbacked=intermediate_unbacked,
         )
 
-    inputs = torch.randn(100).to(current_platform.device_name)
+    inputs = torch.randn(100).to(current_platform.device_type)
 
     with (
         compilation_counter.expect(
@@ -132,7 +132,7 @@ def _run_simple_model(
                 num_tokens=2,
             ),
         ):
-            model(torch.randn(2).to(current_platform.device_name))
+            model(torch.randn(2).to(current_platform.device_type))
         with set_forward_context(
             None,
             vllm_config=vllm_config,
@@ -141,9 +141,9 @@ def _run_simple_model(
                 num_tokens=1,
             ),
         ):
-            model(torch.randn(1).to(current_platform.device_name))
+            model(torch.randn(1).to(current_platform.device_type))
 
-        input = torch.zeros(2).to(current_platform.device_name)
+        input = torch.zeros(2).to(current_platform.device_type)
         reset_global_counter()
         with set_forward_context(
             None,

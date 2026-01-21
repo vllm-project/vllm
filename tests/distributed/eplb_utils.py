@@ -42,7 +42,7 @@ def distributed_run(fn, world_size, *args):
 def set_env_vars_and_device(env: dict[str, str]) -> None:
     update_environment_variables(env)
     local_rank = os.environ["LOCAL_RANK"]
-    device = torch.device(f"{current_platform.device_name}:{local_rank}")
+    device = torch.device(f"{current_platform.device_type}:{local_rank}")
     current_platform.set_device(device)
 
     # Create a minimal vllm config for init_distributed_environment
