@@ -352,6 +352,24 @@ class CompressedTensorsConfig(QuantizationConfig):
         )
 
     @staticmethod
+    def _is_xpu_w8a16_fp8(
+        weight_quant: QuantizationArgs, input_quant: QuantizationArgs
+    ) -> bool:
+        if not current_platform.is_xpu():
+            return False
+            
+        is_8_bits = weight_quant.num_bits == 8
+
+        is_fp8_type = (
+            weight_quant.type == "float" 
+            or weight_quant.zp_dtype == torch.float8_e4m3fn
+        )
+        
+        is_weight_only = (input_quant is None)
+
+        return is_8_bits and is_fp8_type and is_weight_only
+
+    @staticmethod
     def _is_mxfp4(quant_args: QuantizationArgs) -> bool:
         if quant_args is None:
             return False
@@ -690,6 +708,7 @@ class CompressedTensorsConfig(QuantizationConfig):
         """
 
         # Use the new get_quant_args method to extract QuantizationArgs
+        # print(f"layer: {layer}, layer_name : {layer_name}")
         scheme_dict = self.get_scheme_dict(layer, layer_name)
 
         weight_quant = None
@@ -700,6 +719,7 @@ class CompressedTensorsConfig(QuantizationConfig):
             input_quant = scheme_dict.get("input_activations")
             format = scheme_dict.get("format")
 
+        print(f"CT Config scheme_dict: {scheme_dict}, layer_name: {layer_name}")
         # Find the sparsity scheme of the layer
         # assume that fused layers inherit first component's sparsity scheme
         sparsity_targets = self.sparsity_scheme_map.keys() - set(
