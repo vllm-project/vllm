@@ -129,8 +129,9 @@ from .vision import (
 
 logger = init_logger(__name__)
 
-# Official recommended max frames is 2048
-_MAX_FRAMES_PER_VIDEO = 2048
+# We use 2048 dummy video frames that would generate vision embeddings
+# of the maximum size.
+DUMMY_VIDEO_NUM_FRAMES = 2048
 
 
 class Qwen3_VisionPatchEmbed(nn.Module):
@@ -685,6 +686,15 @@ class Qwen3VLProcessingInfo(Qwen2VLProcessingInfo):
 
         padded_num_frames = round_up(num_frames, temporal_patch_size)
 
+        # NOTE: Given t, we computed h and w such that t * h * w *
+        # temporal_patch_size (optional for video) ≤ max_pixels, and set
+        # encoder_cache_size = max_tokens = t * h * w. However, there could exist
+        # another combination (t', h', w') satisfying
+        # t' * h' * w' * temporal_patch_size ≤ max_pixels.
+        #
+        # We set encoder_cache_size = max_tokens = t * (h + 1) * (w + 1), which exceeds
+        # `max_pixels` and thus guarantees it is larger than any valid t' * h' * w'
+        # under the pixel constraint.
         grid_t = max(padded_num_frames // temporal_patch_size, 1)
         grid_h = preprocessed_size.height // patch_size + 1
         grid_w = preprocessed_size.width // patch_size + 1
@@ -705,7 +715,7 @@ class Qwen3VLProcessingInfo(Qwen2VLProcessingInfo):
         mm_counts: Mapping[str, int],
     ) -> int:
         return super().get_num_frames_with_most_features(
-            seq_len, mm_counts, max_frames_per_video=_MAX_FRAMES_PER_VIDEO
+            seq_len, mm_counts, max_frames_per_video=DUMMY_VIDEO_NUM_FRAMES
         )
 
     def get_max_video_tokens(
