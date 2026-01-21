@@ -201,7 +201,7 @@ def _create_pooling_model_cls(orig_cls: _T) -> _T:
             # If `*ForCausalLM` defines `load_weights` on the inner model
             # and there are no other inner modules with other parameters,
             # we support loading from both `*Model` and `*ForCausalLM`
-            if hasattr(self, "model") and hasattr(self.model, "load_weights"):
+            if hasattr(self, "model") and hasattr(self.model, "logits_processor"):
                 # Some weights might be tied to weights under `self.model`
                 model_params_ids = [id(p) for p in self.model.parameters()]
 
@@ -211,19 +211,12 @@ def _create_pooling_model_cls(orig_cls: _T) -> _T:
                     if name != "model"
                 ):
                     mapper = WeightsMapper(orig_to_new_prefix={"model.": ""})
-                    weights = mapper.apply(weights)
+                    loader = AutoWeightsLoader(self)
+                    loaded_params = loader.load_weights(weights, mapper=mapper)
+                    return {f"model.{name}" for name in loaded_params}
 
-                    loaded_params = self.model.load_weights(weights)
-                    loaded_params = {f"model.{name}" for name in loaded_params}
-                    return loaded_params
-
-            # For most other models
-            if hasattr(orig_cls, "load_weights"):
-                return orig_cls.load_weights(self, weights)  # type: ignore
-            # Fallback
-            else:
-                loader = AutoWeightsLoader(self)
-                return loader.load_weights(weights)
+            loader = AutoWeightsLoader(self)
+            return loader.load_weights(weights)
 
     return ModelForPooling  # type: ignore
 
