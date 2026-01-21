@@ -18,7 +18,6 @@ set -euo pipefail
 TARGET_CLOS="${TARGET_CLOS:-0}"
 CHUNK="${CHUNK:-64}"
 DEBUG_MAP="${DEBUG_MAP:-0}"
-# near top
 SUDO=""
 if [ "$(id -u)" -ne 0 ]; then
   SUDO="sudo"
