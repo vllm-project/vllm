@@ -142,8 +142,8 @@ def test_ignore_torch_compile_decorator(use_inductor_graph_partition, monkeypatc
     with set_current_vllm_config(vllm_config):
         mod_B = (
             B(vllm_config=vllm_config, prefix="")
-            .eval().
-            to(current_platform.device_name)
+            .eval()
+            .to(current_platform.device_name)
         )
 
     # B's ignore_torch_compile should override A's support_torch_compile
@@ -159,8 +159,8 @@ def test_ignore_torch_compile_decorator(use_inductor_graph_partition, monkeypatc
     with set_current_vllm_config(vllm_config):
         mod_C = (
             C(vllm_config=vllm_config, prefix="")
-            .eval().
-            to(current_platform.device_name)
+            .eval()
+            .to(current_platform.device_name)
         )
 
     # C's support_torch_compile should override B's ignore_torch_compile
