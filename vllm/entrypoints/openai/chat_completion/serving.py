@@ -1530,17 +1530,31 @@ class OpenAIServingChat(OpenAIServing):
             ):
                 message = ChatMessage(role=role, reasoning=reasoning, content=content)
 
-            # if the request uses tools and specified a tool choice
             elif (
                 request.tool_choice
                 and type(request.tool_choice) is ChatCompletionNamedToolChoiceParam
             ):
                 assert tool_calls is not None and len(tool_calls) > 0
+                tool_call_class_items = []
+                for tc in tool_calls:
+                    tool_call_class_items.append(
+                        tool_call_class(
+                            id=tc.id
+                            if tc.id
+                            else make_tool_call_id(
+                                id_type=self.tool_call_id_type,
+                                func_name=tc.name,
+                                idx=history_tool_call_cnt,
+                            ),
+                            function=tc,
+                        )
+                    )
+                    history_tool_call_cnt += 1
                 message = ChatMessage(
                     role=role,
                     reasoning=reasoning,
                     content="",
-                    tool_calls=[tool_call_class(function=tc) for tc in tool_calls],
+                    tool_calls=tool_call_class_items,
                 )
 
             elif request.tool_choice and request.tool_choice == "required":
@@ -1582,17 +1596,27 @@ class OpenAIServingChat(OpenAIServing):
                 # call. The same is not true for named function calls
                 auto_tools_called = tool_calls is not None and len(tool_calls) > 0
                 if tool_calls:
+                    tool_call_items = []
+                    for tc in tool_calls:
+                        tool_call_items.append(
+                            ToolCall(
+                                id=tc.id
+                                if tc.id
+                                else make_tool_call_id(
+                                    id_type=self.tool_call_id_type,
+                                    func_name=tc.name,
+                                    idx=history_tool_call_cnt,
+                                ),
+                                function=tc,
+                                type="function",
+                            )
+                        )
+                        history_tool_call_cnt += 1
                     message = ChatMessage(
                         role=role,
                         reasoning=reasoning,
                         content=content,
-                        tool_calls=[
-                            ToolCall(
-                                function=tc,
-                                type="function",
-                            )
-                            for tc in tool_calls
-                        ],
+                        tool_calls=tool_call_items,
                     )
 
                 else:

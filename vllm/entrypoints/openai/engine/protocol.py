@@ -218,6 +218,10 @@ def get_logits_processors(
 
 
 class FunctionCall(OpenAIBaseModel):
+    # Internal field to preserve native tool call ID from tool parser.
+    # Excluded from serialization to maintain OpenAI API compatibility
+    # (function object should only contain 'name' and 'arguments').
+    id: str | None = Field(default=None, exclude=True)
     name: str
     arguments: str
 

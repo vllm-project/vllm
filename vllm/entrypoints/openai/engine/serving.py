@@ -1525,6 +1525,7 @@ class OpenAIServing:
                 # extract_tool_calls() returns a list of tool calls.
                 function_calls.extend(
                     FunctionCall(
+                        id=tool_call.id,
                         name=tool_call.function.name,
                         arguments=tool_call.function.arguments,
                     )
