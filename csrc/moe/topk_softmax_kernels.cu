@@ -220,6 +220,7 @@ __launch_bounds__(TPB) __global__ void moeTopK(
             const bool should_process_row = row_is_active && node_uses_expert;
 
             const int idx = k * block_row + k_idx;
+            // Return the unbiased scores for output weights
             output[idx] = inputs_after_softmax[thread_read_offset + expert];
             indices[idx] = should_process_row ? (expert - start_expert) : num_experts;
             assert(indices[idx] >= 0);
@@ -443,6 +444,7 @@ __launch_bounds__(WARPS_PER_CTA* WARP_SIZE_PARAM) __global__
 
     static constexpr int COLS_PER_GROUP_LDG = ELTS_PER_LDG * THREADS_PER_ROW;
 
+    // If bias is not null, use biased value for selection
     float row_chunk_for_choice[VPT];
     // Apply correction bias
     if (bias != nullptr) {

@@ -25,6 +25,7 @@ def torch_topk(
     if scoring_func == "softmax":
         scores = torch.softmax(gating_output.float(), dim=-1)
     else:
+        assert scoring_func == "sigmoid"
         scores = torch.sigmoid(gating_output.float())
 
     if e_score_correction_bias is not None:
