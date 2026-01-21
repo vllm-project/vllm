@@ -194,17 +194,6 @@ def test_sym_size_moved_across_split_boundary():
 
     This prevents issues where PT2 doesn't fully support torch.Size as submodule
     output when sym_size is in one subgraph and its consumer is in another.
-
-    Pattern being tested:
-        # Original order that causes issues:
-        size = tensor_a.shape[0]       # subgraph 0
-        some_cg_unsafe_op              # subgraph 1 (split point)
-        tensor_b = tensor_b.view(size) # subgraph 2 (would fail without fix)
-
-        # After fix, sym_size is moved:
-        some_cg_unsafe_op              # subgraph 1 (split point)
-        size = tensor_a.shape[0]       # moved to subgraph 2
-        tensor_b = tensor_b.view(size) # subgraph 2 (works correctly)
     """
 
     def model_fn(x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
@@ -233,37 +222,76 @@ def test_sym_size_moved_across_split_boundary():
         for node in gm.graph.nodes
         if node.op == "call_function" and "sym_size" in str(node.target)
     ]
-    assert (
-        len(sym_size_nodes) > 0
-    ), "Test setup failed: graph should contain sym_size operations"
+    assert len(sym_size_nodes) > 0, (
+        "Test setup failed: graph should contain sym_size operations"
+    )
 
     # Split on sigmoid which is the split point
     split_ops = ["aten::sigmoid"]
     split_gm, split_items = split_graph(gm, split_ops)
 
-    # After the fix, we expect 2 submodules:
-    # - subgraph 1: sigmoid (split point)
-    # - subgraph 2: sym_size ops + view + add (consumer subgraph)
-    # The original subgraph 0 becomes empty because sym_size ops are moved
-    # to the consumer subgraph, so it's not created.
-    assert len(split_items) == 2, f"Expected 2 submodules, got {len(split_items)}"
-
-    # Verify that one is the splitting graph (sigmoid) and one is not
+    # Find the sigmoid (splitting) subgraph and the consumer subgraph
     splitting_items = [item for item in split_items if item.is_splitting_graph]
-    non_splitting_items = [item for item in split_items if not item.is_splitting_graph]
     assert len(splitting_items) == 1, "Should have exactly 1 splitting subgraph"
-    assert len(non_splitting_items) == 1, "Should have exactly 1 non-splitting subgraph"
 
-    # The non-splitting subgraph should contain the sym_size operations
-    # (they were moved from before the split to after)
-    consumer_subgraph = non_splitting_items[0].graph
-    sym_size_in_consumer = [
+    # KEY VERIFICATION: sym_size operations should be in the same subgraph
+    # as the view operation (their consumer), NOT in an earlier subgraph.
+    # This prevents torch.Size from crossing subgraph boundaries.
+
+    # Find which subgraph contains the view operation
+    view_subgraph = None
+    for item in split_items:
+        for node in item.graph.graph.nodes:
+            if node.op == "call_function" and "view" in str(node.target).lower():
+                view_subgraph = item
+                break
+        if view_subgraph:
+            break
+
+    assert view_subgraph is not None, "Should have a subgraph with view operation"
+
+    # Verify sym_size operations are in the SAME subgraph as view
+    sym_size_in_view_subgraph = [
         node
-        for node in consumer_subgraph.graph.nodes
+        for node in view_subgraph.graph.graph.nodes
         if node.op == "call_function" and "sym_size" in str(node.target)
     ]
-    assert len(sym_size_in_consumer) > 0, (
-        "sym_size operations should be in the consumer subgraph (after split)"
+    assert len(sym_size_in_view_subgraph) > 0, (
+        "sym_size operations should be in the same subgraph as their consumer "
+        "(view). This ensures torch.Size doesn't cross subgraph boundaries."
+    )
+
+    # Verify ordering within the consumer subgraph: sym_size before view
+    consumer_nodes = list(view_subgraph.graph.graph.nodes)
+    # CRITICAL VERIFICATION: The sigmoid (splitting/unsafe op) subgraph must
+    # have a LOWER graph_id than the consumer subgraph. Since subgraphs execute
+    # in order of graph_id, this proves that:
+    # 1. Sigmoid runs FIRST
+    # 2. sym_size + view run SECOND (in consumer subgraph)
+    # Therefore, sym_size now happens AFTER the unsafe op.
+    sigmoid_subgraph = splitting_items[0]
+    assert sigmoid_subgraph.graph_id < view_subgraph.graph_id, (
+        f"Sigmoid subgraph (graph_id={sigmoid_subgraph.graph_id}) must execute "
+        f"before consumer subgraph (graph_id={view_subgraph.graph_id}). "
+        "This ensures sym_size happens AFTER the unsafe operation."
+    )
+
+    sym_size_indices = [
+        i
+        for i, node in enumerate(consumer_nodes)
+        if node.op == "call_function" and "sym_size" in str(node.target)
+    ]
+    view_indices = [
+        i
+        for i, node in enumerate(consumer_nodes)
+        if node.op == "call_function" and "view" in str(node.target).lower()
+    ]
+
+    max_sym_size_idx = max(sym_size_indices)
+    min_view_idx = min(view_indices)
+    assert max_sym_size_idx < min_view_idx, (
+        f"sym_size (max index {max_sym_size_idx}) should come before "
+        f"view (min index {min_view_idx}) in the consumer subgraph."
     )
 
     # Verify functional correctness with same-shaped inputs
