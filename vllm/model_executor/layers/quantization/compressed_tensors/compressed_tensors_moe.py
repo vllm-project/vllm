@@ -1259,6 +1259,13 @@ class CompressedTensorsWNA16MarlinMoEMethod(CompressedTensorsMoEMethod):
             and self.group_size == 32
             and weight_quant.num_bits == 4
         )
+        if self.use_flashinfer_mxint4_moe:
+            logger.info_once(
+                "Using Flashinfer TRTLLM Kernels for MXINT4 MoE"
+                f"with group size {self.group_size}, "
+                f"and num bits {self.num_bits}",
+                scope="local",
+            )
 
     def get_weight_shape(
         self,
@@ -1340,7 +1347,6 @@ class CompressedTensorsWNA16MarlinMoEMethod(CompressedTensorsMoEMethod):
         **extra_weight_attrs,
     ):
         intermediate_size_full = extra_weight_attrs.pop("intermediate_size_full")
-        w13_num_shards = 2 if self.moe.is_act_and_mul else 1
 
         # Will transpose the loaded weight along the
         # intermediate and hidden dim sizes. Will
@@ -1689,7 +1695,6 @@ class CompressedTensorsWNA16MarlinMoEMethod(CompressedTensorsMoEMethod):
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        
         if self.use_flashinfer_mxint4_moe:
             return flashinfer_trtllm_mxint4_moe(
                 layer=layer,
