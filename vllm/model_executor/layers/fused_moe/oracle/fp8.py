@@ -457,31 +457,6 @@ def make_fp8_moe_quant_config(
     )
 
 
-def make_fp8_moe_kernel_for_mkm(
-    moe_config: FusedMoEConfig,
-    quant_config: FusedMoEQuantConfig,
-    experts_cls: type[mk.FusedMoEPermuteExpertsUnpermute],
-    prepare_finalize: mk.FusedMoEPrepareAndFinalize,
-) -> mk.FusedMoEPermuteExpertsUnpermute:
-    if prepare_finalize.activation_format == mk.FusedMoEActivationFormat.BatchedExperts:
-        max_num_tokens_per_rank = prepare_finalize.max_num_tokens_per_rank()
-        assert max_num_tokens_per_rank is not None
-        experts = experts_cls(
-            moe_config=moe_config,
-            quant_config=quant_config,
-            max_num_tokens=max_num_tokens_per_rank,
-            num_dispatchers=prepare_finalize.num_dispatchers(),
-        )
-    else:
-        experts = experts_cls(
-            moe_config=moe_config,
-            quant_config=quant_config,
-        )
-
-    logger.debug_once("Using %s", experts.__class__.__name__)
-    return experts
-
-
 def make_fp8_moe_kernel(
     moe_quant_config: FusedMoEQuantConfig,
     moe_config: FusedMoEConfig,
