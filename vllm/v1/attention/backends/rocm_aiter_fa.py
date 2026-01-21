@@ -1171,6 +1171,22 @@ class AiterFlashAttentionImpl(AttentionImpl):
                     )
                     new_key_cache = key_cache.view_as(k_cache_template)
                     new_value_cache = value_cache.view_as(v_cache_template)
+
+                    k_qscale_asm = layer._k_scale
+                    v_qscale_asm = layer._v_scale
+                    if attn_metadata.k_scale is not None:
+                        if isinstance(attn_metadata.k_scale, dict):
+                            # per token quant scale for each layer
+                            k_qscale_asm = attn_metadata.k_scale[layer.layer_name]
+                        else:
+                            k_qscale_asm = attn_metadata.k_scale
+                    if attn_metadata.v_scale is not None:
+                        if isinstance(attn_metadata.v_scale, dict):
+                            # per token quant scale for each layer
+                            v_qscale_asm = attn_metadata.v_scale[layer.layer_name]
+                        else:
+                            v_qscale_asm = attn_metadata.v_scale
+
                     rocm_aiter_ops.paged_attention_common(
                         Q=query[:num_decode_tokens],
                         K=new_key_cache,
@@ -1187,8 +1203,8 @@ class AiterFlashAttentionImpl(AttentionImpl):
                         scale=self.scale,
                         K_QScale_hip=layer._k_scale,
                         V_QScale_hip=layer._v_scale,
-                        K_QScale_asm=attn_metadata.k_scale[layer.layer_name] if attn_metadata.k_scale else layer._k_scale,
-                        V_QScale_asm=attn_metadata.v_scale[layer.layer_name] if attn_metadata.v_scale else layer._v_scale,
+                        K_QScale_asm=k_qscale_asm,
+                        V_QScale_asm=v_qscale_asm,
                         out_=output[:num_decode_tokens],
                         kv_cache_dtype=self.kv_cache_dtype,
                     )
