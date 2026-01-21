@@ -704,13 +704,22 @@ def parse_remaining_state(parser: StreamableParser) -> list[ResponseOutputItem]:
                     status="in_progress",
                 )
             ]
-        # Built-in tools (python, browser, container) should be treated as reasoning
-        elif not (
-            current_recipient.startswith("python")
-            or current_recipient.startswith("browser")
-            or current_recipient.startswith("container")
-        ):
-            # All other recipients are MCP calls
+        # Built-in MCP tools (python, browser, container)
+        elif current_recipient in _BUILTIN_TOOL_TO_MCP_SERVER_LABEL:
+            rid = random_uuid()
+            server_label = _BUILTIN_TOOL_TO_MCP_SERVER_LABEL[current_recipient]
+            return [
+                McpCall(
+                    arguments=parser.current_content,
+                    type="mcp_call",
+                    name=current_recipient,
+                    server_label=server_label,
+                    id=f"mcp_{rid}",
+                    status="in_progress",
+                )
+            ]
+        # All other recipients are MCP calls
+        else:
             rid = random_uuid()
             server_label, tool_name = _parse_mcp_recipient(current_recipient)
             return [
