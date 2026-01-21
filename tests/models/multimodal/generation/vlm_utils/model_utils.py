@@ -124,8 +124,10 @@ def _llava_vllm_to_hf_output(
         if token_id != mm_token_id or output_ids[idx - 1] != mm_token_id
     ]
 
-    assert output_str[0] == " "
-    hf_output_str = output_str[1:]
+    # output_str[0] is not " " in some cases, e.g., Granite Vision,
+    # but for most llava based models, this is the case
+    hf_output_str = output_str[1:] if output_str[0] == " " else output_str
+
     if hf_output_ids[-1] == eos_token_id:
         hf_output_str = hf_output_str + tokenizer.decode(eos_token_id)
 

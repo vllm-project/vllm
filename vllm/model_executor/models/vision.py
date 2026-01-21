@@ -154,6 +154,7 @@ def resolve_visual_encoder_outputs(
     *,
     select_layers: list[int] | None = None,
     max_possible_layers: int | None = None,
+    last_hs_proc: Callable[[torch.Tensor], torch.Tensor] | None = None,
     feature_select_strategy: VisionFeatureSelectStrategy | None = None,
 ) -> torch.Tensor:
     """Given the outputs a visual encoder module that may correspond to the
@@ -166,6 +167,11 @@ def resolve_visual_encoder_outputs(
         select_layers: Optional layer indices to grab from the encoder
             outputs; if provided, encoder outputs must be a list.
         max_possible_layers: Total layers in the fully loaded visual encoder.
+        last_hs_proc: Optional callable to be applied to the last layer if it
+            is used, e.g., pooling head for Siglip. This is done prior to
+            feature selection and layer normalization. If select_layers are
+            provided, the output of last_hs_proc must be able to be
+            concatenated with the other select_layers along the last dimension.
         feature_select_strategy: Defines how to select the hidden states
             from each layer.
     """
@@ -175,6 +181,11 @@ def resolve_visual_encoder_outputs(
                 "Expected only a single encoder output when "
                 "`select_layers` is not provided"
             )
+
+        # Preprocess the encoder outputs as needed, e.g., map head
+        # and layer norm for siglip, which runs before feature selection
+        if last_hs_proc is not None:
+            encoder_outputs = last_hs_proc(encoder_outputs)
 
         if feature_select_strategy is not None:
             select_features = _get_vision_feature_selector(feature_select_strategy)
@@ -205,12 +216,15 @@ def resolve_visual_encoder_outputs(
         for layer_idx in select_layers
     ]
 
+    uses_last_layer = select_layers[-1] in (max_possible_layers - 1, -1)
+    if last_hs_proc is not None and uses_last_layer:
+        hs_pool[-1] = last_hs_proc(hs_pool[-1])
+
     if feature_select_strategy is not None:
         select_features = _get_vision_feature_selector(feature_select_strategy)
         hs_pool = [select_features(hs) for hs in hs_pool]
 
     # Apply post-norm on the final hidden state if we are using it
-    uses_last_layer = select_layers[-1] in (max_possible_layers - 1, -1)
     if post_layer_norm is not None and uses_last_layer:
         hs_pool[-1] = post_layer_norm(hs_pool[-1])
 

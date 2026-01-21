@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from collections.abc import Callable, Iterable, Mapping
-from functools import cached_property
+from functools import cached_property, partial
 from typing import Annotated, Literal
 
 import torch
@@ -705,6 +705,7 @@ class SiglipVisionTransformer(nn.Module):
         num_hidden_layers_override: int | None = None,
         require_post_norm: bool | None = None,
         prefix: str = "",
+        use_head: bool | None = False,
     ) -> None:
         super().__init__()
 
@@ -738,16 +739,30 @@ class SiglipVisionTransformer(nn.Module):
         else:
             self.post_layernorm = None
 
-        self.use_head = (
-            True if not hasattr(config, "vision_use_head") else config.vision_use_head
-        )
-        if self.use_head:
-            self.head = SiglipMultiheadAttentionPoolingHead(
+        # Fall back to the config if a bool is not provided explicitly;
+        # note that many config types, including SiglipVisionConfig,
+        # do not have vision_use_head as a defined attribute.
+        if isinstance(use_head, bool):
+            self.use_head = use_head
+        else:
+            self.use_head = (
+                True
+                if not hasattr(config, "vision_use_head")
+                else config.vision_use_head
+            )
+
+        # Only create and load the head weights if we actually need them
+        self.head = (
+            SiglipMultiheadAttentionPoolingHead(
                 config=config,
                 quant_config=quant_config,
                 multimodal_config=multimodal_config,
                 prefix=f"{prefix}.head",
             )
+            if self.use_head
+            else None
+        )
+        self.last_hs_proc = partial(self.maybe_layer_norm_and_apply_head)
 
     @property
     def dtype(self):
@@ -776,21 +791,35 @@ class SiglipVisionTransformer(nn.Module):
             return_all_hidden_states=select_layers is not None,
         )
 
-        if self.post_layernorm is not None:
-            encoder_outputs = self.post_layernorm(encoder_outputs)
-
-        if self.use_head:
-            encoder_outputs = self.head(encoder_outputs)
-
-        # stacks feature layers if needed
+        # In the case that we have multiple feature layers,
+        # we stack and concatenate them into a tensor.
+        # NOTE: post layer norm and the attention pooling head
+        # are handled by last_hs_proc, which runs before applying
+        # the vision feature selection strategy.
         encoder_outputs = resolve_visual_encoder_outputs(
             encoder_outputs,
             None,
             select_layers=select_layers,
             max_possible_layers=self.config.num_hidden_layers,
+            last_hs_proc=self.last_hs_proc,
             feature_select_strategy=feature_select_strategy,
         )
 
+        return encoder_outputs
+
+    def maybe_layer_norm_and_apply_head(
+        self, encoder_outputs: torch.Tensor
+    ) -> torch.Tensor:
+        """Apply the post layer norm and head if they are enabled,
+        given the last hidden states tensor.
+
+        args:
+            encoder_outputs: The last hidden states from the visual encoder.
+        """
+        if self.post_layernorm is not None:
+            encoder_outputs = self.post_layernorm(encoder_outputs)
+        if self.head is not None:
+            encoder_outputs = self.head(encoder_outputs)
         return encoder_outputs
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
@@ -807,6 +836,11 @@ class SiglipVisionTransformer(nn.Module):
         for name, loaded_weight in weights:
             # post_layernorm is not needed in SiglipVisionTransformer
             if name.startswith("post_layernorm") and self.post_layernorm is None:
+                continue
+
+            # if the model configuration is not going to use
+            # the pooling head for inference, don't load its weights
+            if self.head is None and name.startswith("head"):
                 continue
 
             # omit layers when num_hidden_layers_override is set
@@ -841,6 +875,7 @@ class SiglipVisionModel(nn.Module):
         num_hidden_layers_override: int | None = None,
         require_post_norm: bool | None = None,
         prefix: str = "",
+        use_head: bool | None = False,
     ) -> None:
         super().__init__()
 
@@ -852,6 +887,7 @@ class SiglipVisionModel(nn.Module):
             num_hidden_layers_override=num_hidden_layers_override,
             require_post_norm=require_post_norm,
             prefix=f"{prefix}.vision_model",
+            use_head=use_head,
         )
 
     def get_input_embeddings(self) -> nn.Module:
@@ -896,6 +932,11 @@ class SiglipVisionModel(nn.Module):
                 name.startswith("vision_model.post_layernorm")
                 and self.vision_model.post_layernorm is None
             ):
+                continue
+
+            # if the model configuration is not going to use
+            # the pooling head for inference, don't load its weights
+            if self.vision_model.head is None and name.startswith("vision_model.head"):
                 continue
 
             # omit layers when num_hidden_layers_override is set
@@ -1048,6 +1089,7 @@ class SiglipEmbeddingModel(nn.Module, SupportsMultiModal, SupportsQuant):
                 quant_config=quant_config,
                 multimodal_config=multimodal_config,
                 prefix=maybe_prefix(prefix, "vision_model"),
+                use_head=None,  # Allows potential pooling head
             )
 
         pooler_config = vllm_config.model_config.pooler_config
