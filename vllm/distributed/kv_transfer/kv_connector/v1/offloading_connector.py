@@ -50,7 +50,7 @@ logger = init_logger(__name__)
 
 @dataclass
 class OffloadingOperationMetrics:
-    op_size: float
+    op_size: int
     op_time: float
 
     def __getitem__(self, key):
@@ -794,6 +794,7 @@ class OffloadPromMetrics(KVConnectorPromMetrics):
             # Process ops:
             assert isinstance(ops, list)
             for op in ops:  # ops is a list of serialized OffloadingOperationMetrics
+                assert isinstance(op, dict)
                 # Observe size histogram
                 self.histogram_transfer_size[(engine_idx, transfer_type)].observe(
                     op["op_size"]
