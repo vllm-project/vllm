@@ -5,6 +5,7 @@ import torch.nn as nn
 
 from vllm.config import get_cached_compilation_config
 from vllm.logger import init_logger
+from vllm.model_executor.utils import maybe_disable_graph_partition
 from vllm.platforms import current_platform
 
 logger = init_logger(__name__)
@@ -212,7 +213,12 @@ class CustomOp(nn.Module):
 
         # dynamic=True to avoid recompilations
         return torch.compile(
-            fn, dynamic=True, backend=current_platform.simple_compile_backend
+            fn,
+            dynamic=True,
+            backend=current_platform.simple_compile_backend,
+            options=maybe_disable_graph_partition(
+                current_platform.simple_compile_backend
+            ),
         )
 
     @classmethod
