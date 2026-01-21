@@ -243,7 +243,7 @@ def use_torch(
 
 
 DTYPES = [torch.float16, torch.bfloat16]
-DEVICES = [f"{current_platform.device_name}:{0}"]
+DEVICES = [f"{current_platform.device_type}:{0}"]
 SEED = [42]
 
 

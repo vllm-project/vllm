@@ -252,7 +252,7 @@ def _test_async_transfer_layer_without_mtp_worker(
     tp_group = get_tp_group()
     ep_group = tp_group.device_group
     ep_rank = torch.distributed.get_rank()
-    device = torch.device(f"{current_platform.device_name}:{ep_rank}")
+    device = torch.device(f"{current_platform.device_type}:{ep_rank}")
 
     total_physical_experts = world_size * num_local_experts
     hidden_sizes = [16, 32]
@@ -344,7 +344,7 @@ def _test_rearrange_expert_weights_with_redundancy(
 
     ep_group = get_tp_group().cpu_group
     ep_rank = torch.distributed.get_rank()
-    device = torch.device(f"{current_platform.device_name}:{ep_rank}")
+    device = torch.device(f"{current_platform.device_type}:{ep_rank}")
 
     # Test parameters
     total_physical_experts = world_size * num_local_experts
@@ -452,7 +452,7 @@ def _test_rearrange_expert_weights_no_change(env, world_size) -> None:
 
     ep_group = get_tp_group().cpu_group
     ep_rank = torch.distributed.get_rank()
-    device = torch.device(f"{current_platform.device_name}:{ep_rank}")
+    device = torch.device(f"{current_platform.device_type}:{ep_rank}")
 
     num_layers = 2
     num_local_experts = 2
@@ -545,7 +545,7 @@ def _test_rearrange_expert_weights_profile_mode(env, world_size) -> None:
 
     ep_group = get_tp_group().cpu_group
     ep_rank = torch.distributed.get_rank()
-    device = torch.device(f"{current_platform.device_name}:{ep_rank}")
+    device = torch.device(f"{current_platform.device_type}:{ep_rank}")
 
     num_layers = 1
     num_local_experts = 2

@@ -28,8 +28,8 @@ def sample_data(num_experts, max_loras, num_tokens, topk_num):
             topk_ids[i, j] = pool[j]
         token_lora_mapping[i] = random.randint(0, max_loras - 1)
 
-    return topk_ids.to(current_platform.device_name), token_lora_mapping.to(
-        current_platform.device_name
+    return topk_ids.to(current_platform.device_type), token_lora_mapping.to(
+        current_platform.device_type
     )
 
 
@@ -57,28 +57,28 @@ def test_moe_lora_align_block_size(
         (max_loras * max_num_tokens_padded,),
         topk_ids.numel(),
         dtype=torch.int32,
-        device=current_platform.device_name,
+        device=current_platform.device_type,
     )
     expert_ids = torch.full(
         (max_loras * max_num_m_blocks,),
         num_experts,
         dtype=torch.int32,
-        device=current_platform.device_name,
+        device=current_platform.device_type,
     )
     num_tokens_post_pad = torch.zeros(
         (max_loras,),
         dtype=torch.int32,
-        device=current_platform.device_name,
+        device=current_platform.device_type,
     )
     adapter_enabled = torch.ones(
         (max_loras + 1,),
         dtype=torch.int32,
-        device=current_platform.device_name,
+        device=current_platform.device_type,
     )
     lora_ids = torch.arange(
         max_loras + 2,
         dtype=torch.int32,
-        device=current_platform.device_name,
+        device=current_platform.device_type,
     )
 
     # call kernel

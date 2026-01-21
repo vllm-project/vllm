@@ -149,7 +149,7 @@ def check_lora_shrink_kernel(
     lora_meta = LoRAKernelMeta.make(
         max_loras=num_loras,
         max_num_tokens=token_nums,
-        device=current_platform.device_name,
+        device=current_platform.device_type,
     )
     lora_meta.prepare_tensors(data.token_lora_mapping)
 
@@ -224,7 +224,7 @@ def check_lora_expand_kernel(
     lora_meta = LoRAKernelMeta.make(
         max_loras=num_loras,
         max_num_tokens=token_nums,
-        device=current_platform.device_name,
+        device=current_platform.device_type,
     )
     lora_meta.prepare_tensors(data.token_lora_mapping)
 
@@ -372,7 +372,7 @@ test_params = {
 }
 
 DTYPES = [torch.float16, torch.bfloat16]
-DEVICES = [f"{current_platform.device_name}:{0}"]
+DEVICES = [f"{current_platform.device_type}:{0}"]
 SEED = [0]
 
 

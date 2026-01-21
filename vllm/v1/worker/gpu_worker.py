@@ -110,7 +110,7 @@ class Worker(WorkerBase):
                 profiler_config,
                 worker_name=worker_name,
                 local_rank=self.local_rank,
-                activities=["CPU", current_platform.device_name.upper()],
+                activities=["CPU", current_platform.dispatch_key],
             )
         elif profiler_config.profiler == "cuda":
             self.profiler = CudaProfilerWrapper(profiler_config)
@@ -222,7 +222,7 @@ class Worker(WorkerBase):
                     f"({visible_device_count})."
                 )
             self.device = torch.device(
-                f"{current_platform.device_name}:{self.local_rank}"
+                f"{current_platform.device_type}:{self.local_rank}"
             )
             current_platform.set_device(self.device)
 
