@@ -466,11 +466,11 @@ class Qwen3VLMoeForConditionalGeneration(
                 prefix=maybe_prefix(prefix, "language_model"),
             )
 
-            # Whether to include the gate_up_proj mapping is determined by
-            # the language model.
-            self.packed_modules_mapping = (
-                self.packed_modules_mapping | self.language_model.packed_modules_mapping
-            )
+        # Whether to include the gate_up_proj mapping is determined by
+        # the language model.
+        self.packed_modules_mapping = (
+            self.packed_modules_mapping | self.language_model.packed_modules_mapping
+        )
 
         self.make_empty_intermediate_tensors = (
             self.language_model.make_empty_intermediate_tensors
