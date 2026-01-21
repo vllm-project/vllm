@@ -26,6 +26,8 @@ from collections.abc import AsyncGenerator
 
 import grpc
 import uvloop
+from grpc_health.v1 import health_pb2, health_pb2_grpc
+from grpc_health.v1.health import HealthServicer
 from grpc_reflection.v1alpha import reflection
 
 from vllm import SamplingParams, TextPrompt, TokensPrompt
@@ -402,6 +404,45 @@ class VllmEngineServicer(vllm_engine_pb2_grpc.VllmEngineServicer):
         )
 
 
+async def _health_monitor(
+    health_servicer: HealthServicer,
+    async_llm: "AsyncLLM",
+    stop_event: asyncio.Event,
+    interval: float = 1.0,
+):
+    """
+    Monitor engine health and update gRPC health service status.
+
+    This background task periodically checks the engine state and updates
+    the standard gRPC health service accordingly. This enables Kubernetes
+    native gRPC health probes.
+
+    Args:
+        health_servicer: The gRPC health servicer to update
+        async_llm: The AsyncLLM instance to monitor
+        stop_event: Event to signal shutdown
+        interval: Polling interval in seconds
+    """
+    service_names = ["", "vllm.grpc.engine.VllmEngine"]
+
+    while not stop_event.is_set():
+        try:
+            status = (
+                health_pb2.HealthCheckResponse.NOT_SERVING
+                if async_llm.errored
+                else health_pb2.HealthCheckResponse.SERVING
+            )
+            for name in service_names:
+                health_servicer.set(name, status)
+        except Exception as e:
+            logger.error("Health monitor error: %s", e)
+
+        try:
+            await asyncio.wait_for(stop_event.wait(), timeout=interval)
+        except asyncio.TimeoutError:
+            pass
+
+
 async def serve_grpc(args: argparse.Namespace):
     """
     Main serving function.
@@ -444,9 +485,23 @@ async def serve_grpc(args: argparse.Namespace):
     # Add servicer to server
     vllm_engine_pb2_grpc.add_VllmEngineServicer_to_server(servicer, server)
 
+    # Add standard gRPC health checking service (grpc.health.v1.Health)
+    # This enables Kubernetes native gRPC health probes
+    health_servicer = HealthServicer()
+    health_pb2_grpc.add_HealthServicer_to_server(health_servicer, server)
+
+    # Set initial health status to SERVING
+    # "" represents overall server health (default for K8s probes)
+    health_servicer.set("", health_pb2.HealthCheckResponse.SERVING)
+    health_servicer.set(
+        "vllm.grpc.engine.VllmEngine",
+        health_pb2.HealthCheckResponse.SERVING,
+    )
+
     # Enable reflection for grpcurl and other tools
     service_names = (
         vllm_engine_pb2.DESCRIPTOR.services_by_name["VllmEngine"].full_name,
+        "grpc.health.v1.Health",
         reflection.SERVICE_NAME,
     )
     reflection.enable_server_reflection(service_names, server)
@@ -471,6 +526,11 @@ async def serve_grpc(args: argparse.Namespace):
     for sig in (signal.SIGTERM, signal.SIGINT):
         loop.add_signal_handler(sig, signal_handler)
 
+    # Start health monitoring background task
+    health_monitor_task = asyncio.create_task(
+        _health_monitor(health_servicer, async_llm, stop_event, interval=1.0)
+    )
+
     # Serve until shutdown signal
     try:
         await stop_event.wait()
@@ -478,6 +538,17 @@ async def serve_grpc(args: argparse.Namespace):
         logger.info("Interrupted by user")
     finally:
         logger.info("Shutting down vLLM gRPC server...")
+
+        # Stop health monitoring
+        stop_event.set()
+        health_monitor_task.cancel()
+        try:
+            await health_monitor_task
+        except asyncio.CancelledError:
+            pass
+
+        # Mark all services as NOT_SERVING during graceful shutdown
+        health_servicer.enter_graceful_shutdown()
 
         # Stop gRPC server
         await server.stop(grace=5.0)
