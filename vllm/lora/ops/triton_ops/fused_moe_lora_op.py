@@ -83,7 +83,7 @@ def _fused_moe_lora_kernel(
     # Meta-parameters
     num_slice_a: tl.constexpr,
     num_slice_c: tl.constexpr,
-    top_k: tl.constexpr,
+    input_token_stride: tl.constexpr,
     naive_block_assignment: tl.constexpr,
     MUL_ROUTED_WEIGHT: tl.constexpr,
     BLOCK_SIZE_M: tl.constexpr,
@@ -160,7 +160,8 @@ def _fused_moe_lora_kernel(
 
     # get a_ptrs,b_ptrs
     a_ptrs = cur_a_ptr + (
-        offs_token[:, None] // top_k * stride_am + offs_k[None, :] * stride_ak
+        offs_token[:, None] // input_token_stride * stride_am
+        + offs_k[None, :] * stride_ak
     )
 
     b_ptrs = (
@@ -274,14 +275,9 @@ def _fused_moe_lora_shrink(
         grid_lora_dim,
     )
     if sorted_token_ids is None:
-        # dummy ptrs
-        sorted_token_ids_ptr = expert_ids
-        num_tokens_post_padded_ptr = expert_ids
         stride_tl = 0
         stride_el = 0
     else:
-        sorted_token_ids_ptr = sorted_token_ids
-        num_tokens_post_padded_ptr = num_tokens_post_padded
         stride_tl = sorted_token_ids.stride(0)
         stride_el = expert_ids.stride(0)
     _fused_moe_lora_kernel[grid](
@@ -289,9 +285,9 @@ def _fused_moe_lora_shrink(
         b_ptr,
         a_intermediate_cache1,
         topk_weights,
-        sorted_token_ids_ptr,
+        sorted_token_ids,
         expert_ids,
-        num_tokens_post_padded_ptr,
+        num_tokens_post_padded,
         token_lora_mapping,
         N,
         K,
@@ -315,7 +311,7 @@ def _fused_moe_lora_shrink(
         slice_c_size=a_intermediate_cache1.numel() // num_slices,
         num_slice_a=1,
         num_slice_c=num_slices,
-        top_k=1 if mul_routed_weight else top_k_num,
+        input_token_stride=1 if mul_routed_weight else top_k_num,
         naive_block_assignment=naive_block_assignment,
         MUL_ROUTED_WEIGHT=False,
         IS_PRIMARY=True,
@@ -391,13 +387,9 @@ def _fused_moe_lora_expand(
         grid_lora_dim,
     )
     if sorted_token_ids is None:
-        sorted_token_ids_ptr = expert_ids
-        num_tokens_post_padded_ptr = expert_ids
         stride_tl = 0
         stride_el = 0
     else:
-        sorted_token_ids_ptr = sorted_token_ids
-        num_tokens_post_padded_ptr = num_tokens_post_padded
         stride_tl = sorted_token_ids.stride(0)
         stride_el = expert_ids.stride(0)
     _fused_moe_lora_kernel[grid](
@@ -405,9 +397,9 @@ def _fused_moe_lora_expand(
         b_ptr,
         b_intermediate_cache1,
         topk_weights,
-        sorted_token_ids_ptr,
+        sorted_token_ids,
         expert_ids,
-        num_tokens_post_padded_ptr,
+        num_tokens_post_padded,
         token_lora_mapping,
         N,
         K,
@@ -431,7 +423,7 @@ def _fused_moe_lora_expand(
         slice_c_size=b_intermediate_cache1.numel() // num_slices,
         num_slice_a=num_slices,
         num_slice_c=num_slices,
-        top_k=1,
+        input_token_stride=1,
         naive_block_assignment=naive_block_assignment,
         MUL_ROUTED_WEIGHT=mul_routed_weight,
         IS_PRIMARY=False,
