@@ -13,7 +13,7 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEQuantConfig,
 )
 from vllm.model_executor.layers.fused_moe.flashinfer_cutlass_prepare_finalize import (
-    FlashInferAllToAllMoEPrepareAndFinalize,
+    FlashInferA2APrepareAndFinalize,
 )
 from vllm.model_executor.layers.fused_moe.modular_kernel import (
     FusedMoEPrepareAndFinalize,
@@ -183,8 +183,7 @@ def maybe_make_prepare_finalize(
     elif moe.use_fi_all2allv_kernels:
         assert quant_config is not None
         # TODO: audit if this supports all cases.
-        prepare_finalize = FlashInferAllToAllMoEPrepareAndFinalize(
-            use_dp=True,
+        prepare_finalize = FlashInferA2APrepareAndFinalize(
             num_dispatchers=all2all_manager.world_size,
             use_deepseek_fp8_block_scale=quant_config.is_block_quantized,
         )

@@ -18,22 +18,19 @@ def get_local_sizes():
     return get_forward_context().dp_metadata.get_chunk_sizes_across_dp_rank()
 
 
-class FlashInferCutlassMoEPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
+class FlashInferA2APrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
     """Base class for FlashInfer MoE prepare and finalize operations."""
 
     def __init__(
         self,
-        use_dp: bool,
         num_dispatchers: int = 1,
         use_deepseek_fp8_block_scale: bool = False,
     ):
         super().__init__()
         self.num_dispatchers_ = num_dispatchers
-        self.use_dp = use_dp
-        self.local_tokens = None
-        # Toggle for DeepSeek-style FP8 block-scale path where activations are
-        # not quantized here and weight block scales are consumed by the kernel.
+        # TODO(rob): convert this to `defer_input_quant`
         self.use_deepseek_fp8_block_scale = use_deepseek_fp8_block_scale
+        self.all2all_manager = get_ep_group().device_communicator.all2all_manager
 
     @property
     def activation_format(self) -> mk.FusedMoEActivationFormat:
@@ -66,24 +63,6 @@ class FlashInferCutlassMoEPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
             )
             a1.mul_(topk_weights.to(a1.dtype))
 
-
-class FlashInferAllToAllMoEPrepareAndFinalize(FlashInferCutlassMoEPrepareAndFinalize):
-    """FlashInfer implementation using AllToAll communication."""
-
-    def __init__(
-        self,
-        use_dp: bool,
-        num_dispatchers: int = 1,
-        use_deepseek_fp8_block_scale: bool = False,
-    ):
-        super().__init__(use_dp, num_dispatchers, use_deepseek_fp8_block_scale)
-        self.alltoall_info = None
-
-        # Initialize all2all_manager only for DP case
-        self.all2all_manager = None
-        if self.use_dp:
-            self.all2all_manager = get_ep_group().device_communicator.all2all_manager
-
     def prepare(
         self,
         a1: torch.Tensor,
@@ -97,40 +76,23 @@ class FlashInferAllToAllMoEPrepareAndFinalize(FlashInferCutlassMoEPrepareAndFina
         self._apply_router_weight_on_input(
             a1, topk_weights, topk_ids, apply_router_weight_on_input
         )
+        global_num_tokens_cpu = get_local_sizes()
+        top_k = topk_ids.size(1)
 
-        if not self.use_dp:
-            # Non-DP case: quantize activations unless using block-scale path
-            if not self.use_deepseek_fp8_block_scale:
-                a1q, a1q_scale = moe_kernel_quantize_input(
-                    a1,
-                    quant_config.a1_gscale,
-                    quant_config.quant_dtype,
-                    quant_config.per_act_token_quant,
-                    quant_config.block_shape,
-                    is_fp4_scale_swizzled=not self.use_dp,
-                )
-            else:
-                a1q = a1
-                a1q_scale = None
-        else:
-            # DP case: use FlashInfer AllToAll
-            global_num_tokens_cpu = get_local_sizes()
-            top_k = topk_ids.size(1)
-
-            (self.alltoall_info, topk_ids, topk_weights, a1q, a1q_scale) = (
-                flashinfer_alltoall_dispatch(
-                    self.all2all_manager,
-                    global_num_tokens_cpu,
-                    a1,
-                    quant_config.a1_gscale,
-                    topk_ids,
-                    topk_weights,
-                    top_k,
-                    num_experts,
-                    quant_config,
-                    use_deepseek_fp8_block_scale=self.use_deepseek_fp8_block_scale,
-                )
+        (self.alltoall_info, topk_ids, topk_weights, a1q, a1q_scale) = (
+            flashinfer_alltoall_dispatch(
+                self.all2all_manager,
+                global_num_tokens_cpu,
+                a1,
+                quant_config.a1_gscale,
+                topk_ids,
+                topk_weights,
+                top_k,
+                num_experts,
+                quant_config,
+                use_deepseek_fp8_block_scale=self.use_deepseek_fp8_block_scale,
             )
+        )
 
         return a1q, a1q_scale, None, topk_ids, topk_weights
 
@@ -143,16 +105,15 @@ class FlashInferAllToAllMoEPrepareAndFinalize(FlashInferCutlassMoEPrepareAndFina
         apply_router_weight_on_input: bool,
         weight_and_reduce_impl: mk.TopKWeightAndReduce,
     ) -> None:
-        if self.use_dp:
-            top_k = topk_ids.size(1)
-            token_count = output.shape[0]
-            fused_expert_output = flashinfer_alltoall_combine(
-                self.all2all_manager,
-                fused_expert_output,
-                top_k=top_k,
-                token_count=token_count,
-                alltoall_info=self.alltoall_info,
-            )
+        top_k = topk_ids.size(1)
+        token_count = output.shape[0]
+        fused_expert_output = flashinfer_alltoall_combine(
+            self.all2all_manager,
+            fused_expert_output,
+            top_k=top_k,
+            token_count=token_count,
+            alltoall_info=self.alltoall_info,
+        )
         output.copy_(fused_expert_output)
 
 
