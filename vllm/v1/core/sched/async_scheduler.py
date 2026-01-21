@@ -16,7 +16,9 @@ class AsyncScheduler(Scheduler):
         pending_structured_output_tokens = False
         spec_decode_tokens = scheduler_output.scheduled_spec_decode_tokens
         for req_id in scheduler_output.num_scheduled_tokens:
-            request = self.requests[req_id]
+            request = self.requests.get(req_id)
+            if request is None:
+                continue
             has_structured_output_requests |= request.use_structured_output
             pending_structured_output_tokens |= (
                 request.use_structured_output and request.num_output_placeholders > 0
