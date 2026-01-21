@@ -596,10 +596,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             query_start_loc,
             self.input_buffers.positions[:num_tokens],
         )
-        # Layer name -> slot mapping.
-        slot_mappings_by_layer = build_slot_mappings_by_layer(
-            slot_mappings, self.kv_cache_config
-        )
 
         # Layer name -> attention metadata.
         attn_metadata = build_attn_metadata(
