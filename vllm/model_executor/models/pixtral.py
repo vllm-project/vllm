@@ -398,13 +398,14 @@ class PixtralForConditionalGeneration(
         self.vision_args = VisionEncoderArgs(**vision_args)
 
         # init MistralForCausalLM
-        self.language_model = init_vllm_registered_model(
-            vllm_config=vllm_config,
-            hf_config=config.text_config,
-            prefix=maybe_prefix(prefix, "language_model"),
-        )
+        with self._mark_language_model(vllm_config):
+            self.language_model = init_vllm_registered_model(
+                vllm_config=vllm_config,
+                hf_config=config.text_config,
+                prefix=maybe_prefix(prefix, "language_model"),
+            )
 
-        if multimodal_config.get_limit_per_prompt("image"):
+        with self._mark_tower_model(vllm_config, "image"):
             self.vision_encoder = VisionTransformer(self.vision_args)
             self.pre_mm_projector_norm = (
                 RMSNorm(self.vision_args.hidden_size, eps=1e-5)
@@ -423,11 +424,6 @@ class PixtralForConditionalGeneration(
             self.vision_language_adapter = VisionLanguageAdapter(
                 self.vision_args, dim=config.text_config.hidden_size
             )
-        else:
-            self.vision_encoder = None
-            self.pre_mm_projector_norm = None
-            self.patch_merger = None
-            self.vision_language_adapter = None
 
         self.make_empty_intermediate_tensors = (
             self.language_model.make_empty_intermediate_tensors
@@ -449,10 +445,6 @@ class PixtralForConditionalGeneration(
         self,
         image_input: PixtralImagePixelInputs,
     ) -> tuple[torch.Tensor, ...]:
-        assert (
-            self.vision_encoder is not None and self.vision_language_adapter is not None
-        )
-
         images = image_input["images"]
         image_features = self.vision_encoder(images)
         feature_sizes = [image_feature.shape[0] for image_feature in image_features]
@@ -476,9 +468,6 @@ class PixtralForConditionalGeneration(
         image_embeds = self.vision_language_adapter(image_features)
         image_embeds = torch.split(image_embeds, feature_sizes)
         return image_embeds
-
-    def get_language_model(self) -> torch.nn.Module:
-        return self.language_model
 
     def embed_multimodal(self, **kwargs: object) -> MultiModalEmbeddings:
         image_input = self._parse_and_validate_image_input(**kwargs)
@@ -513,10 +502,12 @@ class PixtralForConditionalGeneration(
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
         def is_vision_encoder_weights(weight: tuple[str, torch.Tensor]):
-            return weight[0].startswith("vision_encoder")
+            return weight[0].startswith(("vision_encoder", "vision_tower"))
 
         def is_vision_lang_adapter_weights(weight: tuple[str, torch.Tensor]):
-            return weight[0].startswith("vision_language_adapter")
+            return weight[0].startswith(
+                ("vision_language_adapter", "multi_modal_projector")
+            )
 
         def is_patch_merger(weight: tuple[str, torch.Tensor]):
             return weight[0].startswith("patch_merger")
@@ -554,9 +545,10 @@ class PixtralForConditionalGeneration(
                         continue
                     # Load vision encoder weights directly
                     trimmed_name = ".".join(name.split(".")[1:])
-                    param = vision_encoder_dict[trimmed_name]
-                    with torch.no_grad():
-                        default_weight_loader(param, w)
+                    param = vision_encoder_dict.get(trimmed_name)
+                    if param is not None:
+                        with torch.no_grad():
+                            default_weight_loader(param, w)
                 elif is_patch_merger((name, w)):
                     if self.patch_merger is None:
                         continue
@@ -578,12 +570,15 @@ class PixtralForConditionalGeneration(
                         continue
                     # Load vision-language adapter weights directly
                     trimmed_name = ".".join(name.split(".")[1:])
-                    param = vision_lang_adapter_dict[trimmed_name]
-                    with torch.no_grad():
-                        default_weight_loader(param, w)
+                    param = vision_lang_adapter_dict.get(trimmed_name)
+                    if param is not None:
+                        with torch.no_grad():
+                            default_weight_loader(param, w)
                 else:
                     # LLM weights: yield them to be loaded
                     # by language_model.load_weights
+                    # Strip "language_model." prefix if present (HF sharded format)
+                    name = name.removeprefix("language_model.")
                     yield (name, w)
 
         # Now we call the language model load with the generator
