@@ -30,6 +30,20 @@ endif()
 FetchContent_MakeAvailable(flashmla)
 message(STATUS "FlashMLA is available at ${flashmla_SOURCE_DIR}")
 
+# Vendor FlashMLA interface into vLLM with torch-ops shim.
+set(FLASHMLA_VENDOR_DIR "${CMAKE_SOURCE_DIR}/vllm/third_party/flashmla")
+file(MAKE_DIRECTORY "${FLASHMLA_VENDOR_DIR}")
+file(READ "${flashmla_SOURCE_DIR}/flash_mla/flash_mla_interface.py"
+     FLASHMLA_INTERFACE_CONTENT)
+string(REPLACE "import flash_mla.cuda as flash_mla_cuda"
+               "import vllm._flashmla_C\nflash_mla_cuda = torch.ops._flashmla_C"
+               FLASHMLA_INTERFACE_CONTENT
+               "${FLASHMLA_INTERFACE_CONTENT}")
+file(WRITE "${FLASHMLA_VENDOR_DIR}/flash_mla_interface.py"
+     "${FLASHMLA_INTERFACE_CONTENT}")
+file(WRITE "${FLASHMLA_VENDOR_DIR}/__init__.py"
+     "# Vendor package for FlashMLA\n")
+
 # The FlashMLA kernels only work on hopper and require CUDA 12.3 or later.
 # Only build FlashMLA kernels if we are building for something compatible with 
 # sm90a
@@ -79,7 +93,6 @@ if(FLASH_MLA_ARCHS)
 
         # sm100 dense prefill & backward
         ${flashmla_SOURCE_DIR}/csrc/sm100/prefill/dense/fmha_cutlass_fwd_sm100.cu
-        ${flashmla_SOURCE_DIR}/csrc/sm100/prefill/dense/fmha_cutlass_bwd_sm100.cu
 
         # sm100 sparse prefill
         ${flashmla_SOURCE_DIR}/csrc/sm100/prefill/sparse/fwd/head64/instantiations/phase1_k512.cu
