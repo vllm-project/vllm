@@ -3,6 +3,8 @@
 from typing import cast
 
 import pytest
+import transformers
+from packaging import version
 from transformers import AutoModel
 
 from vllm.entrypoints.chat_utils import (
@@ -277,6 +279,10 @@ def _run_test(
 
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("dtype", ["half"])
+@pytest.mark.skipif(
+    version.parse(transformers.__version__) == version.parse("4.57.5"),
+    reason="Skipped for transformers==4.57.5, https://github.com/huggingface/transformers/issues/43295",
+)
 def test_model_text_image(
     hf_runner,
     vllm_runner,
