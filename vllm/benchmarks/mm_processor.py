@@ -38,6 +38,7 @@ except ImportError:
 
 def collect_mm_processor_stats(
     llm_engine: Any,
+    warmup_requests: int = 0,
 ) -> dict[str, list[float]]:
     """
     Collect multimodal processor timing stats.
@@ -53,18 +54,20 @@ def collect_mm_processor_stats(
         "total_time": [],
     }
 
-    for stats_dict in all_stats.values():
+    # Skip warmup requests
+    stats_list = list(all_stats.values())[warmup_requests:]
+
+    for stats_dict in stats_list:
         stats_by_stage["hf_processor_time"].append(
-            stats_dict.get("hf_processor_time", 0.0)
-        )
-        stats_by_stage["hashing_time"].append(stats_dict.get("hashing_time", 0.0))
+            stats_dict.get("hf_processor_time", 0.0))
+        stats_by_stage["hashing_time"].append(
+            stats_dict.get("hashing_time", 0.0))
         stats_by_stage["cache_lookup_time"].append(
-            stats_dict.get("cache_lookup_time", 0.0)
-        )
+            stats_dict.get("cache_lookup_time", 0.0))
         stats_by_stage["prompt_update_time"].append(
-            stats_dict.get("prompt_update_time", 0.0)
-        )
-        stats_by_stage["total_time"].append(stats_dict.get("total_time", 0.0))
+            stats_dict.get("prompt_update_time", 0.0))
+        stats_by_stage["total_time"].append(
+            stats_dict.get("total_time", 0.0))
 
     return stats_by_stage
 
@@ -162,6 +165,30 @@ def benchmark_multimodal_processor(
 
     freeze_gc_heap()
 
+    num_warmups = getattr(args, "num_warmups", 0)
+    if num_warmups > 0:
+        print(f"Processing {num_warmups} warmup requests...")
+        # Create a temporary args object for warmup requests
+        warmup_args = argparse.Namespace(**vars(args))
+        warmup_args.num_prompts = num_warmups
+        warmup_requests = get_requests(warmup_args, tokenizer)
+        warmup_prompts = [req.prompt for req in warmup_requests]
+        warmup_output_lens = [req.expected_output_len for req in warmup_requests]
+        warmup_sampling_params = [
+            SamplingParams(
+                n=1,
+                temperature=0.0,
+                max_tokens=output_len,
+                detokenize=True,
+            )
+            for output_len in warmup_output_lens
+        ]
+        llm.chat(
+            warmup_prompts,
+            warmup_sampling_params,
+            use_tqdm=not getattr(args, "disable_tqdm", False),
+        )
+
     print(f"Processing {len(prompts)} requests...")
     start_time = time.perf_counter()
 
@@ -173,7 +200,7 @@ def benchmark_multimodal_processor(
     total_time = end_time - start_time
 
     mm_stats_by_stage = collect_mm_processor_stats(
-        llm.llm_engine,
+        llm.llm_engine, num_warmups
     )
 
     if not any(mm_stats_by_stage.values()):
@@ -261,6 +288,12 @@ def add_cli_args(parser: argparse.ArgumentParser) -> None:
         type=int,
         default=10,
         help="Number of prompts to process.",
+    )
+    parser.add_argument(
+        "--num-warmups",
+        type=int,
+        default=1,
+        help="Number of warmup prompts to process.",
     )
 
     from vllm.benchmarks.datasets import (
