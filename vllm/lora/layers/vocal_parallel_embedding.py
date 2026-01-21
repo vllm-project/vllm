@@ -71,8 +71,8 @@ class VocabParallelEmbeddingWithLoRA(BaseLayerWithLoRA):
         )
 
     def reset_lora(self, index: int):
-        self.lora_a_stacked[index] = 0
-        self.lora_b_stacked[index] = 0
+        self.lora_a_stacked[index].zero_()
+        self.lora_b_stacked[index].zero_()
 
     def set_lora(
         self,
