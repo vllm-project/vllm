@@ -5,6 +5,12 @@
 import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
+
+# Import the fused silu+mul+fp8_quant kernel for batched masked format.
+# This wrapper calls the Triton kernel on non-SM80+ platforms (including ROCm).
+from vllm.model_executor.layers.fused_moe.batched_masked_silu_mul_quant import (
+    silu_mul_fp8_quant,
+)
 from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
 from vllm.model_executor.layers.fused_moe.fused_moe import try_get_optimal_moe_config
 from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
@@ -19,6 +25,10 @@ from vllm.model_executor.layers.fused_moe.utils import (
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import group_broadcast
 from vllm.triton_utils import tl, triton
+from vllm.utils.deep_gemm import DeepGemmQuantScaleFMT
+
+# Default group size for FP8 block quantization
+FUSED_QUANT_GROUP_SIZE = 128
 
 
 @triton.jit
@@ -979,26 +989,48 @@ class BatchedTritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
             block_shape=self.block_shape,
         )
 
-        intermediate_cache2.fill_(0)
-
-        # TODO (bnell): use triton utility from batched deep gemm.
-        self.activation(
-            activation,
-            intermediate_cache2.view(-1, activation_out_dim),
-            intermediate_cache1.view(-1, N),
+        # Check if we can use the fused silu + mul + fp8 quant kernel.
+        # N here is the output dim of w1 (= 2*H for gated activations).
+        # The kernel requires H % group_size == 0, so we check N % (2*group_size) == 0.
+        use_fused_silu_mul_quant = (
+            activation == "silu"
+            and self.quant_config.use_fp8_w8a8
+            and self.block_shape is not None
+            and self.block_shape[1] == FUSED_QUANT_GROUP_SIZE
+            and not self.per_act_token_quant
+            and N % (2 * FUSED_QUANT_GROUP_SIZE) == 0
         )
 
-        qintermediate_cache2, a2q_scale = batched_moe_kernel_quantize_input(
-            intermediate_cache2,
-            a2_scale,
-            max_num_tokens,
-            E,
-            N,
-            expert_num_tokens,
-            self.quant_dtype,
-            self.per_act_token_quant,
-            self.block_shape,
-        )
+        if use_fused_silu_mul_quant:
+            # Fused path: silu + mul + fp8 quant in one kernel
+            # intermediate_cache1 has shape (E, max_num_tokens, N) where N = 2*H
+            qintermediate_cache2, a2q_scale = silu_mul_fp8_quant(
+                intermediate_cache1,
+                expert_num_tokens,
+                group_size=FUSED_QUANT_GROUP_SIZE,
+                quant_scale_fmt=DeepGemmQuantScaleFMT.FLOAT32,
+            )
+        else:
+            # Unfused path: separate activation and quantization
+            intermediate_cache2.fill_(0)
+
+            self.activation(
+                activation,
+                intermediate_cache2.view(-1, activation_out_dim),
+                intermediate_cache1.view(-1, N),
+            )
+
+            qintermediate_cache2, a2q_scale = batched_moe_kernel_quantize_input(
+                intermediate_cache2,
+                a2_scale,
+                max_num_tokens,
+                E,
+                N,
+                expert_num_tokens,
+                self.quant_dtype,
+                self.per_act_token_quant,
+                self.block_shape,
+            )
 
         invoke_moe_batched_triton_kernel(
             A=qintermediate_cache2,
