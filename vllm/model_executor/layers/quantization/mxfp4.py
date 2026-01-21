@@ -14,6 +14,7 @@ from vllm.model_executor.layers.fused_moe import (
     FusedMoE,
     FusedMoEConfig,
     FusedMoEMethodBase,
+    FusedMoERouter,
 )
 from vllm.model_executor.layers.fused_moe import modular_kernel as mk
 from vllm.model_executor.layers.fused_moe.config import (
@@ -27,7 +28,6 @@ from vllm.model_executor.layers.fused_moe.fused_marlin_moe import (
     MarlinExperts,
     fused_marlin_moe,
 )
-from vllm.model_executor.layers.fused_moe.fused_moe_router import FusedMoERouter
 from vllm.model_executor.layers.fused_moe.gpt_oss_triton_kernels_moe import (
     OAITritonExperts,
     UnfusedOAITritonExperts,
@@ -853,6 +853,7 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
                     max_num_tokens=max_num_tokens_per_rank,
                     num_dispatchers=prepare_finalize.num_dispatchers(),
                     quant_config=self.moe_quant_config,
+                    moe_config=self.moe,
                 )
             else:
                 raise NotImplementedError(
@@ -875,11 +876,11 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
                 }
                 return TrtLlmGenExperts(self.moe, self.moe_quant_config, **kwargs)
             elif self.mxfp4_backend == Mxfp4Backend.MARLIN:
-                return MarlinExperts(self.moe_quant_config)
+                return MarlinExperts(self.moe, self.moe_quant_config)
             elif self.mxfp4_backend == Mxfp4Backend.TRITON:
                 if self.moe.is_lora_enabled:
-                    return UnfusedOAITritonExperts(self.moe_quant_config)
-                return OAITritonExperts(self.moe_quant_config)
+                    return UnfusedOAITritonExperts(self.moe, self.moe_quant_config)
+                return OAITritonExperts(self.moe, self.moe_quant_config)
             else:
                 raise NotImplementedError(
                     f"Incompatible Mxfp4 backend ({self.mxfp4_backend}) for EP"
@@ -936,9 +937,9 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
             layer.apply_router_weight_on_input,
             layer.scoring_func,
             layer.activation,
-            layer.expert_load_view,
-            layer.logical_to_physical_map,
-            layer.logical_replica_count,
+            layer.eplb_state.expert_load_view,
+            layer.eplb_state.logical_to_physical_map,
+            layer.eplb_state.logical_replica_count,
         ), "MXFP4 are not supported with this configuration."
 
         if (
