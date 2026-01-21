@@ -124,6 +124,8 @@ def _rocm_aiter_fused_moe_fake(
     num_local_tokens: torch.Tensor | None = None,
     output_dtype: torch.dtype | None = None,
 ) -> torch.Tensor:
+    if output_dtype is not None:
+        return torch.empty_like(hidden_states, dtype=output_dtype)
     return torch.empty_like(hidden_states)
 
 
