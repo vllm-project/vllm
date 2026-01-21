@@ -1513,7 +1513,11 @@ def test_register_kv_caches(default_vllm_config, dist_init, attn_backend):
             ]
             expected_num_entries = 1
 
+            kv_heads_idx = cross_layers_kv_cache.shape.index(4)
+            expected_blocks_count = 8 if kv_heads_idx == 1 else 16
+
             kv_caches = {"all-layers": cross_layers_kv_cache}
+
         else:
             # Create test kv cache tensors using proper backend shape
             kv_cache_shape = backend_cls.get_kv_cache_shape(
@@ -1554,6 +1558,7 @@ def test_register_kv_caches(default_vllm_config, dist_init, attn_backend):
                     unique_tensor[1].data_ptr(),
                 ]
                 expected_num_entries = 4
+                expected_blocks_count = 8
 
         # Execute register_kv_caches
         connector.register_kv_caches(kv_caches)
@@ -1578,7 +1583,6 @@ def test_register_kv_caches(default_vllm_config, dist_init, attn_backend):
         blocks_data, _ = mock_wrapper_instance.get_xfer_descs.call_args[0]
 
         # Validate blocks_data structure and size
-        expected_blocks_count = 8
         assert len(blocks_data) == expected_blocks_count, (
             f"Expected {expected_blocks_count} blocks, got {len(blocks_data)}"
         )
