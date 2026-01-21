@@ -1390,6 +1390,7 @@ def _run_abort_timeout_test(llm: LLM, timeout: int):
             ),
         ),
         "TRITON_ATTN",
+        "FLASHINFER",
     ],
 )
 def test_register_kv_caches(default_vllm_config, dist_init, attn_backend):
