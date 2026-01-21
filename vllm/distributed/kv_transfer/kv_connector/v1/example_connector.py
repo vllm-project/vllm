@@ -38,6 +38,7 @@ class ReqMeta:
     # Is store or load
     is_store: bool
     mm_hashes: list[str]
+    req_id: str
 
     @staticmethod
     def make_meta(
@@ -46,6 +47,7 @@ class ReqMeta:
         block_size: int,
         is_store: bool,
         mm_hashes: list[str],
+        req_id: str = "",
     ) -> "ReqMeta":
         valid_num_tokens = align_to_block_size(len(token_ids), block_size)
         token_ids_tensor = torch.tensor(token_ids)[:valid_num_tokens]
@@ -62,6 +64,7 @@ class ReqMeta:
             slot_mapping=slot_mapping,
             is_store=is_store,
             mm_hashes=mm_hashes,
+            req_id=req_id,
         )
 
 
@@ -76,9 +79,12 @@ class ExampleConnectorMetadata(KVConnectorMetadata):
         block_size: int,
         is_store: bool,
         mm_hashes: list[str],
+        req_id: str = "",
     ) -> None:
         self.requests.append(
-            ReqMeta.make_meta(token_ids, block_ids, block_size, is_store, mm_hashes)
+            ReqMeta.make_meta(
+                token_ids, block_ids, block_size, is_store, mm_hashes, req_id
+            )
         )
 
 
@@ -335,6 +341,7 @@ class ExampleConnector(KVConnectorBase_V1):
                     block_size=self._block_size,
                     is_store=False,
                     mm_hashes=mm_hashes,
+                    req_id=new_req.req_id,
                 )
                 total_need_load += 1
             else:
@@ -349,6 +356,7 @@ class ExampleConnector(KVConnectorBase_V1):
                         block_size=self._block_size,
                         is_store=True,
                         mm_hashes=mm_hashes,
+                        req_id=new_req.req_id,
                     )
 
         cached_reqs = scheduler_output.scheduled_cached_reqs
@@ -379,6 +387,7 @@ class ExampleConnector(KVConnectorBase_V1):
                 block_size=self._block_size,
                 is_store=False,
                 mm_hashes=[f.identifier for f in request.mm_features],
+                req_id=req_id,
             )
             total_need_load += 1
 
