@@ -1541,10 +1541,7 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
         # TODO(rob): unify these so FP8MoEMethod owns the ModularKernel
         # in both cases.
         self.moe_quant_config = self.get_fused_moe_quant_config(layer)
-        if self.moe_quant_config and (
-            (not self.moe.moe_parallel_config.use_all2all_kernels)
-            or self.moe.moe_parallel_config.use_naive_all2all_kernels
-        ):
+        if self.moe_quant_config:
             assert self.experts_cls is not None
             self.kernel = make_nvfp4_moe_kernel(
                 moe_quant_config=self.moe_quant_config,

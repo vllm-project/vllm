@@ -232,11 +232,11 @@ if has_pplx():
     )
 
 if has_flashinfer_cutlass_fused_moe() and current_platform.has_device_capability(100):
+    from vllm.model_executor.layers.fused_moe.flashinfer_a2a_prepare_finalize import (  # noqa: E501
+        FlashInferCutlassMoEPrepareAndFinalize,
+    )
     from vllm.model_executor.layers.fused_moe.flashinfer_cutlass_moe import (
         FlashInferExperts,
-    )
-    from vllm.model_executor.layers.fused_moe.flashinfer_cutlass_prepare_finalize import (  # noqa: E501
-        FlashInferCutlassMoEPrepareAndFinalize,
     )
 
     register_prepare_and_finalize(

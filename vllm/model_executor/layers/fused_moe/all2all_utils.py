@@ -12,7 +12,7 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEParallelConfig,
     FusedMoEQuantConfig,
 )
-from vllm.model_executor.layers.fused_moe.flashinfer_cutlass_prepare_finalize import (
+from vllm.model_executor.layers.fused_moe.flashinfer_a2a_prepare_finalize import (
     FlashInferA2APrepareAndFinalize,
 )
 from vllm.model_executor.layers.fused_moe.modular_kernel import (
@@ -80,7 +80,6 @@ def maybe_make_prepare_finalize(
 ) -> FusedMoEPrepareAndFinalize | None:
     # TODO
     # A) what is DP>1 and EP=1?
-    # B) what if defer_input_quant=True, but we have a special A2A kernel?
     if not moe.moe_parallel_config.use_all2all_kernels:
         if allow_new_interface:
             return MoEPrepareAndFinalizeNoEP(defer_input_quant)
@@ -139,7 +138,8 @@ def maybe_make_prepare_finalize(
         all_to_all_args = dict()
         handle = all2all_manager.get_handle(all_to_all_args)
         prepare_finalize = DeepEPHTPrepareAndFinalize(
-            handle,
+            defer_input_quant=defer_input_quant,
+            buffer=handle,
             num_dispatchers=all2all_manager.world_size,
             dp_size=all2all_manager.dp_world_size,
             rank_expert_offset=all2all_manager.rank * moe.num_local_experts,
