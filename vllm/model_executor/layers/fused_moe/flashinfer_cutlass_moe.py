@@ -24,6 +24,7 @@ from vllm.platforms import current_platform
 from vllm.utils.flashinfer import (
     flashinfer_cutlass_fused_moe,
     has_flashinfer_cutlass_fused_moe,
+    nvfp4_block_scale_interleave,
 )
 
 logger = init_logger(__name__)
@@ -82,12 +83,7 @@ class FlashInferExperts(mk.FusedMoEPermuteExpertsUnpermute):
     def expects_unquantized_inputs(
         moe_config: mk.FusedMoEConfig, quant_config: FusedMoEQuantConfig
     ) -> bool:
-        # NVFP4 TP kernels and FP8 block-quantized kernels apply
-        # input quantization inside FusedMoEPermuteExpertsUnpermute.
-        return (
-            quant_config.use_nvfp4_w4a4
-            and not moe_config.moe_parallel_config.use_all2all_kernels
-        ) or (quant_config.use_fp8_w8a8 and quant_config.is_block_quantized)
+        return quant_config.use_fp8_w8a8 and quant_config.is_block_quantized
 
     @staticmethod
     def _supports_current_device() -> bool:
@@ -194,8 +190,9 @@ class FlashInferExperts(mk.FusedMoEPermuteExpertsUnpermute):
         """
         workspace1 = (M, K)
         workspace2 = (0,)
-        # For TP, the quantization is fused with fused_moe call.
-        output_shape = (M, K * 2 if self.quant_dtype == "nvfp4" and self.use_dp else K)
+        # For NVFP4, the output is stored in a packed int8 format,
+        # so the actual hidden dim is 2x the size of K here.
+        output_shape = (M, K * 2 if self.quant_dtype == "nvfp4" else K)
         # The workspace is determined by `aq`, since it comes after any
         # potential communication op and is involved in the expert computation.
         return (workspace1, workspace2, output_shape)
@@ -262,6 +259,9 @@ class FlashInferExperts(mk.FusedMoEPermuteExpertsUnpermute):
             # FlashInfer API requires weight to be long for nvfp4
             fc1_expert_weights = w1.view(torch.long)
             fc2_expert_weights = w2.view(torch.long)
+
+            # FlashInfer API requires swizzled input scales
+            a1q_scale = nvfp4_block_scale_interleave(a1q_scale)
         elif self.use_deepseek_fp8_block_scale:
             # FP8 block-scale path: provide block-scale weights, omit a1q_scale
             quant_scales = [

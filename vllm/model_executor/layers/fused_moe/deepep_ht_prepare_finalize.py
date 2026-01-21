@@ -238,6 +238,7 @@ class DeepEPHTPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
                     quant_dtype=quant_config.quant_dtype,
                     per_act_token_quant=False,
                     block_shape=quant_config.block_shape,
+                    is_fp4_scale_swizzled=False,
                 )
 
         return (
@@ -281,6 +282,7 @@ class DeepEPHTPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
                 quant_dtype=quant_config.quant_dtype,
                 per_act_token_quant=quant_config.per_act_token_quant,
                 block_shape=quant_config.block_shape,
+                is_fp4_scale_swizzled=False,
             )
             if a1q_scale is not None and a1q_scale.numel() == 1:
                 a1q_scale = a1q_scale.view(1, 1)
@@ -288,7 +290,11 @@ class DeepEPHTPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         else:
             a1q = a1
             a1q_scale = None
-            a1_post_scale = quant_config.a1_scale
+            a1_post_scale = (
+                quant_config.a1_gscale
+                if quant_config.quant_dtype == "nvfp4"
+                else quant_config.a1_scale
+            )
 
         return self._do_dispatch(
             tokens=a1q,

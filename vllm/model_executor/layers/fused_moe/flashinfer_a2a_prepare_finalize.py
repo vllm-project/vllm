@@ -11,7 +11,6 @@ from vllm.distributed.device_communicators.base_device_communicator import (
 from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
 from vllm.model_executor.layers.fused_moe.utils import moe_kernel_quantize_input
-from vllm.utils.flashinfer import nvfp4_block_scale_interleave
 
 
 def get_local_sizes():
@@ -182,8 +181,8 @@ def flashinfer_alltoall_dispatch(
             ep_rank,
             ep_size,
         )
-        if quant_config.quant_dtype == "nvfp4":
-            x_sf = nvfp4_block_scale_interleave(x_sf)
+        # if quant_config.quant_dtype == "nvfp4":
+        #     x_sf = nvfp4_block_scale_interleave(x_sf)
     else:
         # Block-scale path: pass activations through without quantization
         x_sf = None
