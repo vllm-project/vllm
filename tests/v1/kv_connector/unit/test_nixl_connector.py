@@ -1421,10 +1421,14 @@ def test_register_kv_caches(default_vllm_config, dist_init, attn_backend):
         from vllm.v1.attention.backends.rocm_attn import RocmAttentionBackend
 
         backend_cls = RocmAttentionBackend
-    else:  # TRITON_ATTN
+    elif attn_backend == "TRITON_ATTN":
         from vllm.v1.attention.backends.triton_attn import TritonAttentionBackend
 
         backend_cls = TritonAttentionBackend
+    else:  # FLASHINFER
+        from vllm.v1.attention.backends.flashinfer import FlashInferBackend
+
+        backend_cls = FlashInferBackend
 
     nixl_module = "vllm.distributed.kv_transfer.kv_connector.v1.nixl_connector"
     with (
