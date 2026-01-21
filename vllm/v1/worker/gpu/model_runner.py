@@ -358,6 +358,28 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         # SP is not supported yet.
         return num_scheduled_tokens
 
+    def _get_cudagraph_runtime_mode(
+        self,
+        use_cudagraph: bool,
+        num_scheduled_tokens: np.ndarray,
+        dummy_run: bool,
+    ) -> CUDAGraphMode:
+        if not use_cudagraph:
+            return CUDAGraphMode.NONE
+
+        cudagraph_mode = self.cudagraph_manager.cudagraph_mode
+        # Check if this is a mixed batch (has prefill tokens, i.e., any request
+        # has more than 1 token scheduled).
+        is_mixed_batch = (
+            any(x > 1 for x in num_scheduled_tokens)
+            if not dummy_run else False
+        )
+
+        if is_mixed_batch:
+            return cudagraph_mode.mixed_mode()
+        else:
+            return cudagraph_mode.decode_mode()
+
     @torch.inference_mode()
     def capture_model(self) -> int:
         if not self.cudagraph_manager.needs_capture():
@@ -387,6 +409,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 block_tables=self.block_tables,
                 attn_metadata_builders=self.attn_metadata_builders,
                 kv_cache_config=self.kv_cache_config,
+                has_lora=self.lora_config is not None,
             )
             if self.do_spec_decode:
                 self.speculator.capture_model()
@@ -957,16 +980,20 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 self.prepare_dummy_attn_metadata(input_batch)
             # FIXME(woosuk): Fix warmup for LoRA.
 
+        # Determine the cudagraph runtime mode based on batch type and config.
+        cudagraph_runtime_mode = self._get_cudagraph_runtime_mode(
+            use_cudagraph=use_cudagraph,
+            num_scheduled_tokens=input_batch.num_scheduled_tokens,
+            dummy_run=dummy_run,
+        )
         # Run model.
-        if use_cudagraph:
-            # Run CUDA graph.
-            # NOTE(woosuk): Here, we don't need to pass the input tensors,
-            # because they are already copied to the CUDA graph input buffers.
-            hidden_states = self.cudagraph_manager.run(
+        if cudagraph_runtime_mode == CUDAGraphMode.FULL:
+            # Use explicit cudagraph replay for FULL mode.
+            hidden_states = self.cudagraph_manager.run_fullgraph(
                 input_batch.num_tokens_after_padding
             )
         else:
-            # Run PyTorch model in eager mode.
+            # For piecewise and eager mode, just call model().
             positions = input_batch.positions
             if self.uses_mrope:
                 assert input_batch.mrope_positions is not None
@@ -975,8 +1002,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 input_batch.attn_metadata,
                 self.vllm_config,
                 num_tokens=input_batch.num_tokens_after_padding,
-                # TODO(woosuk): Support piecewise CUDA graph.
-                cudagraph_runtime_mode=CUDAGraphMode.NONE,
+                cudagraph_runtime_mode=cudagraph_runtime_mode,
                 num_tokens_across_dp=num_tokens_across_dp,
             ):
                 hidden_states = self.model(

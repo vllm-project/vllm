@@ -11,7 +11,7 @@ from tqdm import tqdm
 from vllm.config import VllmConfig
 from vllm.config.compilation import CUDAGraphMode
 from vllm.distributed.parallel_state import graph_capture, is_global_first_rank
-from vllm.forward_context import set_forward_context
+from vllm.forward_context import BatchDescriptor, set_forward_context
 from vllm.v1.attention.backend import AttentionMetadataBuilder
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.worker.gpu.attn_utils import build_attn_metadata
@@ -72,6 +72,7 @@ class CudaGraphManager:
     def capture_graph(
         self,
         num_tokens: int,
+        capture_cudagraph_mode: CUDAGraphMode,
         model: nn.Module,
         input_buffers: InputBuffers,
         mrope_positions: torch.Tensor | None,
@@ -79,7 +80,18 @@ class CudaGraphManager:
         block_tables: BlockTables,
         attn_metadata_builders: list[AttentionMetadataBuilder],
         kv_cache_config: KVCacheConfig,
+        has_lora: bool = False,
     ) -> None:
+        # select and check capture function
+        if capture_cudagraph_mode == CUDAGraphMode.PIECEWISE:
+            capture_fn = self._capture_piecewise_graph
+        elif capture_cudagraph_mode == CUDAGraphMode.FULL:
+            capture_fn = self._capture_full_graph
+        else:
+            raise ValueError(
+                f"Invalid capture_cudagraph_mode for capture: {capture_cudagraph_mode}"
+            )
+        # prepare inputs
         num_reqs = min(num_tokens, self.max_num_reqs)
         input_ids = input_buffers.input_ids[:num_tokens]
         positions = input_buffers.positions[:num_tokens]
@@ -115,13 +127,37 @@ class CudaGraphManager:
             if self.hidden_states is None:
                 self.hidden_states = torch.empty_like(hidden_states)
 
+        capture_fn(
+            num_tokens=num_tokens,
+            num_reqs=num_reqs,
+            model=model,
+            input_ids=input_ids,
+            positions=positions,
+            inputs_embeds=inputs_embeds,
+            num_tokens_across_dp=num_tokens_across_dp,
+            attn_metadata=attn_metadata,
+            has_lora=has_lora,
+        )
+
+    def _capture_full_graph(
+        self,
+        num_tokens: int,
+        num_reqs: int,
+        model: nn.Module,
+        input_ids: torch.Tensor,
+        positions: torch.Tensor,
+        inputs_embeds: torch.Tensor | None,
+        num_tokens_across_dp: torch.Tensor,
+        attn_metadata: dict[str, Any],
+        has_lora: bool = False,
+    ) -> None:
         # Capture the graph.
         assert num_tokens not in self.graphs
         graph = torch.cuda.CUDAGraph()
         with (
             set_forward_context(
-                attn_metadata,
-                self.vllm_config,
+                attn_metadata=attn_metadata,
+                vllm_config=self.vllm_config,
                 num_tokens=num_tokens,
                 cudagraph_runtime_mode=CUDAGraphMode.NONE,
                 num_tokens_across_dp=num_tokens_across_dp,
@@ -136,6 +172,42 @@ class CudaGraphManager:
             self.hidden_states[:num_tokens] = hidden_states
         self.graphs[num_tokens] = graph
 
+    def _capture_piecewise_graph(
+        self,
+        num_tokens: int,
+        num_reqs: int,
+        model: nn.Module,
+        input_ids: torch.Tensor,
+        positions: torch.Tensor,
+        inputs_embeds: torch.Tensor | None,
+        num_tokens_across_dp: torch.Tensor,
+        attn_metadata: dict[str, Any] | None = None,
+        has_lora: bool = False,
+    ) -> None:
+        # create batch descriptor for piecewise cudagraph dispatch key
+        batch_descriptor = BatchDescriptor(
+            num_tokens=num_tokens,
+            num_reqs=None,
+            uniform=False,
+            has_lora=has_lora,
+        )
+
+        # Capture run - CUDAGraphWrapper inside torch.compile will auto capture.
+        with set_forward_context(
+            attn_metadata=None,
+            vllm_config=self.vllm_config,
+            num_tokens=num_tokens,
+            cudagraph_runtime_mode=CUDAGraphMode.PIECEWISE,
+            batch_descriptor=batch_descriptor,
+            num_tokens_across_dp=num_tokens_across_dp,
+        ):
+            hidden_states = model(
+                input_ids=input_ids,
+                positions=positions,
+                inputs_embeds=inputs_embeds,
+            )
+            self.hidden_states[:num_tokens] = hidden_states
+
     @torch.inference_mode()
     def capture(
         self,
@@ -146,11 +218,9 @@ class CudaGraphManager:
         block_tables: BlockTables,
         attn_metadata_builders: list[AttentionMetadataBuilder],
         kv_cache_config: KVCacheConfig,
+        has_lora: bool = False,
     ) -> None:
-        capture_graphs(
-            self.cudagraph_sizes,
-            self.device,
-            self.capture_graph,
+        common_kwargs = dict(
             model=model,
             input_buffers=input_buffers,
             mrope_positions=mrope_positions,
@@ -158,10 +228,39 @@ class CudaGraphManager:
             block_tables=block_tables,
             attn_metadata_builders=attn_metadata_builders,
             kv_cache_config=kv_cache_config,
+            has_lora=has_lora,
         )
 
-    def run(self, num_tokens: int) -> torch.Tensor:
-        assert num_tokens in self.graphs
+        # Phase 1: Capture for mixed prefill-decode batches if needed.
+        mixed_mode = self.cudagraph_mode.mixed_mode()
+        if mixed_mode != CUDAGraphMode.NONE:
+            capture_graphs(
+                cudagraph_sizes=self.cudagraph_sizes,
+                device=self.device,
+                capture_fn=self.capture_graph,
+                capture_cudagraph_mode=mixed_mode,
+                desc=f"Capturing CUDA graphs (mixed, {mixed_mode.name})",
+                **common_kwargs,
+            )
+
+        # Phase 2: Capture FULL graphs for uniform decode batches if needed.
+        # This is only needed if we use a separate routine for decode batches
+        # and the decode_mode is FULL.
+        if (
+            self.cudagraph_mode.decode_mode() == CUDAGraphMode.FULL
+            and self.cudagraph_mode.separate_routine()
+        ):
+            capture_graphs(
+                cudagraph_sizes=self.cudagraph_sizes,
+                device=self.device,
+                capture_fn=self.capture_graph,
+                capture_cudagraph_mode=CUDAGraphMode.FULL,
+                desc="Capturing CUDA graphs (decode, FULL)",
+                **common_kwargs,
+            )
+
+    def run_fullgraph(self, num_tokens: int) -> torch.Tensor:
+        assert num_tokens in self.graphs, f"No cudagraph for {num_tokens} tokens"
         self.graphs[num_tokens].replay()
         assert self.hidden_states is not None
         return self.hidden_states[:num_tokens]
@@ -173,7 +272,8 @@ def get_cudagraph_sizes(
     max_num_tokens: int,
     cudagraph_mode: CUDAGraphMode,
 ) -> dict[int, int]:
-    if not cudagraph_mode.has_full_cudagraphs():
+    # Support both FULL and PIECEWISE cudagraph modes
+    if cudagraph_mode == CUDAGraphMode.NONE:
         return {}
     if not capture_sizes:
         return {}
@@ -204,8 +304,8 @@ def get_cudagraph_size(
     cudagraph_sizes: dict[int, int],
     cudagraph_mode: CUDAGraphMode,
 ) -> int | None:
-    if not cudagraph_mode.has_full_cudagraphs():
-        # No full CUDA graph is used.
+    if cudagraph_mode == CUDAGraphMode.NONE:
+        # No CUDA graph is used.
         return None
 
     size = cudagraph_sizes.get(num_tokens_after_dp_padding)
@@ -214,9 +314,15 @@ def get_cudagraph_size(
         return None
 
     is_mixed = any(x > 1 for x in num_tokens_per_request)
-    if is_mixed and cudagraph_mode.mixed_mode() != CUDAGraphMode.FULL:
-        # Prefill is included, and this mode doesn't use CUDA graph for it.
-        return None
+
+    if is_mixed:
+        # Mixed batch (has prefill tokens)
+        if cudagraph_mode.mixed_mode() == CUDAGraphMode.NONE:
+            return None
+    else:
+        # Pure decode batch
+        if cudagraph_mode.decode_mode() == CUDAGraphMode.NONE:
+            return None
     return size
 
 
@@ -224,16 +330,18 @@ def capture_graphs(
     cudagraph_sizes: dict[int, int],
     device: torch.device,
     capture_fn: Callable,
+    capture_cudagraph_mode: CUDAGraphMode,
+    desc: str = "Capturing CUDA graphs",
     **capture_kwargs,
 ) -> None:
     # Capture larger graphs first.
     sizes_to_capture = sorted(set(cudagraph_sizes.values()), reverse=True)
     if is_global_first_rank():
-        sizes_to_capture = tqdm(sizes_to_capture, desc="Capturing CUDA graphs")
+        sizes_to_capture = tqdm(sizes_to_capture, desc=desc)
 
     with graph_capture(device=device):
         for size in sizes_to_capture:
-            capture_fn(size, **capture_kwargs)
+            capture_fn(size, capture_cudagraph_mode, **capture_kwargs)
 
 
 def prepare_inputs_to_capture(

@@ -183,6 +183,9 @@ cython_debug/
 # VSCode
 .vscode/
 
+# Cursor
+.cursor/
+
 # Claude
 CLAUDE.md
 .claude/
