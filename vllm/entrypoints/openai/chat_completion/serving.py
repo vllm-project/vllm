@@ -44,6 +44,7 @@ from vllm.entrypoints.openai.engine.protocol import (
     DeltaMessage,
     DeltaToolCall,
     ErrorResponse,
+    FunctionCall,
     PromptTokenUsageInfo,
     RequestResponseMetadata,
     ToolCall,
@@ -1537,18 +1538,15 @@ class OpenAIServingChat(OpenAIServing):
                 assert tool_calls is not None and len(tool_calls) > 0
                 tool_call_class_items = []
                 for tc in tool_calls:
-                    tool_call_class_items.append(
-                        tool_call_class(
-                            id=tc.id
-                            if tc.id
-                            else make_tool_call_id(
-                                id_type=self.tool_call_id_type,
-                                func_name=tc.name,
-                                idx=history_tool_call_cnt,
-                            ),
-                            function=tc,
+                    # Use native ID if available (e.g., Kimi K2),
+                    # otherwise let class use its default
+                    # (MistralToolCall -> 9 chars, ToolCall -> 30 chars)
+                    if tc.id:
+                        tool_call_class_items.append(
+                            tool_call_class(id=tc.id, function=tc)
                         )
-                    )
+                    else:
+                        tool_call_class_items.append(tool_call_class(function=tc))
                     history_tool_call_cnt += 1
                 message = ChatMessage(
                     role=role,
@@ -1561,16 +1559,16 @@ class OpenAIServingChat(OpenAIServing):
                 tool_call_class_items = []
                 assert tool_calls is not None and len(tool_calls) > 0
                 for tool_call in tool_calls:
-                    tool_call_class_items.append(
-                        tool_call_class(
-                            id=make_tool_call_id(
-                                id_type=self.tool_call_id_type,
-                                func_name=tool_call.name,
-                                idx=history_tool_call_cnt,
-                            ),
-                            function=tool_call,
+                    # Use native ID if available,
+                    # otherwise let class use its default
+                    if tool_call.id:
+                        tool_call_class_items.append(
+                            tool_call_class(id=tool_call.id, function=tool_call)
                         )
-                    )
+                    else:
+                        tool_call_class_items.append(
+                            tool_call_class(function=tool_call)
+                        )
                     history_tool_call_cnt += 1
                 message = ChatMessage(
                     role=role,
@@ -1598,19 +1596,15 @@ class OpenAIServingChat(OpenAIServing):
                 if tool_calls:
                     tool_call_items = []
                     for tc in tool_calls:
-                        tool_call_items.append(
-                            ToolCall(
-                                id=tc.id
-                                if tc.id
-                                else make_tool_call_id(
-                                    id_type=self.tool_call_id_type,
-                                    func_name=tc.name,
-                                    idx=history_tool_call_cnt,
-                                ),
-                                function=tc,
-                                type="function",
+                        # Use native ID if available (e.g., Kimi K2),
+                        # otherwise let tool_call_class use its default
+                        # (MistralToolCall -> 9 chars, ToolCall -> 30 chars)
+                        if tc.id:
+                            tool_call_items.append(
+                                tool_call_class(id=tc.id, function=tc)
                             )
-                        )
+                        else:
+                            tool_call_items.append(tool_call_class(function=tc))
                         history_tool_call_cnt += 1
                     message = ChatMessage(
                         role=role,
@@ -1725,13 +1719,11 @@ class OpenAIServingChat(OpenAIServing):
                 elif choice.message.tool_calls:
                     # For tool calls, log the function name and arguments
                     tool_call_descriptions = []
-                    for tc in choice.message.tool_calls:
-                        if hasattr(tc.function, "name") and hasattr(
-                            tc.function, "arguments"
-                        ):
-                            tool_call_descriptions.append(
-                                f"{tc.function.name}({tc.function.arguments})"
-                            )
+                    for tc in choice.message.tool_calls:  # type: ignore
+                        function_call: FunctionCall = tc.function  # type: ignore
+                        tool_call_descriptions.append(
+                            f"{function_call.name}({function_call.arguments})"
+                        )
                     tool_calls_str = ", ".join(tool_call_descriptions)
                     output_text = f"[tool_calls: {tool_calls_str}]"
 
