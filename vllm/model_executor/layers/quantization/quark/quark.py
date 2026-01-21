@@ -380,6 +380,7 @@ class QuarkConfig(QuantizationConfig):
                 layer_name.replace(proj_name, shard_proj_name)
                 for shard_proj_name in shard_proj_names
             ]
+
             shard_configs = []
             for shard_name in shard_names:
                 if shard_name == layer_name:
@@ -389,6 +390,7 @@ class QuarkConfig(QuantizationConfig):
                 else:
                     config = self._find_matched_config(shard_name, module)
                 shard_configs.append(config)
+
             if not all(
                 deep_compare(q_config, shard_configs[0]) for q_config in shard_configs
             ):
