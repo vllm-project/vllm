@@ -51,7 +51,7 @@ class AttentionBackend(ABC):
     # makes sure the output tensor is allocated inside the cudagraph.
     accept_output_buffer: bool = False
     supported_dtypes: ClassVar[list[torch.dtype]] = [torch.float16, torch.bfloat16]
-    supported_kv_cache_dtypes: ClassVar[list["CacheDType"]] = ["auto"]
+    supported_kv_cache_dtypes: ClassVar[list["CacheDType"]] = ["auto", "bfloat16"]
 
     @staticmethod
     def get_supported_kernel_block_sizes() -> list[int | MultipleOf]:
