@@ -1077,8 +1077,6 @@ class FusedMoEConfig:
 
     is_lora_enabled: bool = False
 
-    enable_eplb: bool = False
-
     def __post_init__(self):
         if self.dp_size > 1:
             logger.debug_once(

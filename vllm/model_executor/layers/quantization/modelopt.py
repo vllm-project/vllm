@@ -1637,7 +1637,7 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
     def is_monolithic(self) -> bool:
         return (
             self.nvfp4_backend == NvFp4MoeBackend.FLASHINFER_TRTLLM
-            and not self.moe.enable_eplb
+            and not self.moe.moe_parallel_config.enable_eplb
         )
 
     def apply_monolithic(
