@@ -59,15 +59,16 @@ def collect_mm_processor_stats(
 
     for stats_dict in stats_list:
         stats_by_stage["hf_processor_time"].append(
-            stats_dict.get("hf_processor_time", 0.0))
-        stats_by_stage["hashing_time"].append(
-            stats_dict.get("hashing_time", 0.0))
+            stats_dict.get("hf_processor_time", 0.0)
+        )
+        stats_by_stage["hashing_time"].append(stats_dict.get("hashing_time", 0.0))
         stats_by_stage["cache_lookup_time"].append(
-            stats_dict.get("cache_lookup_time", 0.0))
+            stats_dict.get("cache_lookup_time", 0.0)
+        )
         stats_by_stage["prompt_update_time"].append(
-            stats_dict.get("prompt_update_time", 0.0))
-        stats_by_stage["total_time"].append(
-            stats_dict.get("total_time", 0.0))
+            stats_dict.get("prompt_update_time", 0.0)
+        )
+        stats_by_stage["total_time"].append(stats_dict.get("total_time", 0.0))
 
     return stats_by_stage
 
@@ -200,9 +201,7 @@ def benchmark_multimodal_processor(
     end_time = time.perf_counter()
     total_time = end_time - start_time
 
-    mm_stats_by_stage = collect_mm_processor_stats(
-        llm.llm_engine, num_warmups
-    )
+    mm_stats_by_stage = collect_mm_processor_stats(llm.llm_engine, num_warmups)
 
     if not any(mm_stats_by_stage.values()):
         print(
@@ -224,7 +223,7 @@ def benchmark_multimodal_processor(
         if not output.finished or output.metrics is None:
             continue
         metrics = output.metrics
-        # Use first_token_latency + (last_token_ts - first_token_ts) to calculate E2E latency
+        # Calculate E2E latency as: TTFT + (last_token_ts - first_token_ts)
         if (
             getattr(metrics, "first_token_latency", None) is not None
             and getattr(metrics, "last_token_ts", None) is not None
@@ -238,7 +237,8 @@ def benchmark_multimodal_processor(
     if not e2el_times and completed > 0:
         print(
             "\n⚠️  Warning: Detailed end-to-end latency metrics not available.\n"
-            "   Falling back to average request latency (total_time / num_completed_requests).\n"
+            "   Falling back to average request latency "
+            "(total_time / num_completed_requests).\n"
         )
         avg_time_per_request = total_time / completed
         e2el_times = [avg_time_per_request * 1000] * completed
