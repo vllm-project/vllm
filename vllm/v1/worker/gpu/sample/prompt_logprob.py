@@ -96,6 +96,8 @@ class PromptLogprobsWorker:
             assert start_idx < end_idx, (
                 f"start_idx ({start_idx}) >= end_idx ({end_idx})"
             )
+            if not is_prompt_chunked[i]:
+                end_idx -= 1
             logprobs = LogprobsTensors(
                 logprob_token_ids=prompt_token_ids[start_idx:end_idx],
                 logprobs=prompt_logprobs[start_idx:end_idx],
@@ -177,6 +179,7 @@ def get_prompt_logprobs_token_ids(
         num_computed_tokens,
         prefill_token_ids,
         prefill_token_ids.stride(0),
+        BLOCK_SIZE=1024,
     )
     return token_ids
 
