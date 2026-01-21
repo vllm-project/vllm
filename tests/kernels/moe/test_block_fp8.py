@@ -11,13 +11,15 @@ from tests.kernels.quant_utils import (
 )
 from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.model_executor.layers.activation import SiluAndMul
-from vllm.model_executor.layers.fused_moe import fused_experts
+from vllm.model_executor.layers.fused_moe import (
+    fused_experts,
+    fused_topk,
+)
 from vllm.model_executor.layers.fused_moe.deep_gemm_moe import (
     _valid_deep_gemm_shape,
     deep_gemm_moe_fp8,
 )
 from vllm.model_executor.layers.fused_moe.fused_moe import (
-    fused_topk,
     modular_triton_fused_moe,
 )
 from vllm.platforms import current_platform

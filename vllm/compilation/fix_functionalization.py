@@ -26,7 +26,7 @@ class FixFunctionalizationPass(VllmInductorPass):
     """
 
     @VllmInductorPass.time_and_log
-    def __call__(self, graph: torch.fx.Graph):
+    def __call__(self, graph: torch.fx.Graph) -> None:
         # XPU does not support auto-functionalization yet.
         # Will enable this when switch to vllm-xpu-kernels.
         if current_platform.is_xpu():
@@ -182,7 +182,7 @@ class FixFunctionalizationPass(VllmInductorPass):
         )
         self.nodes_to_remove.clear()
 
-    def _remove(self, node_or_nodes: torch.fx.Node | Iterable[torch.fx.Node]):
+    def _remove(self, node_or_nodes: torch.fx.Node | Iterable[torch.fx.Node]) -> None:
         """
         Stage a node (or nodes) for removal at the end of the pass.
         """
@@ -197,7 +197,7 @@ class FixFunctionalizationPass(VllmInductorPass):
         node: torch.fx.Node,
         mutated_args: dict[int, torch.fx.Node | str],
         args: tuple[torch.fx.Node | str, ...] | None = None,
-    ):
+    ) -> None:
         """
         De-functionalize a node by replacing it with a call to the original.
         It also replaces the getitem users with the mutated arguments.
@@ -209,7 +209,7 @@ class FixFunctionalizationPass(VllmInductorPass):
 
     def replace_users_with_mutated_args(
         self, node: torch.fx.Node, mutated_args: dict[int, torch.fx.Node | str]
-    ):
+    ) -> None:
         """
         Replace all getitem users of the auto-functionalized node with the
         mutated arguments.
@@ -240,7 +240,7 @@ class FixFunctionalizationPass(VllmInductorPass):
         graph: torch.fx.Graph,
         node: torch.fx.Node,
         args: tuple[torch.fx.Node | str, ...] | None = None,
-    ):
+    ) -> None:
         """
         Insert a new defunctionalized node into the graph before node.
         If one of the kwargs is 'out', provide args directly,

@@ -89,6 +89,34 @@ def run_gemma3n(question: str, audio_count: int) -> ModelRequestData:
     )
 
 
+# GLM-ASR
+def run_glmasr(question: str, audio_count: int) -> ModelRequestData:
+    model_name = "zai-org/GLM-ASR-Nano-2512"
+
+    tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
+
+    # GLM-ASR uses <|pad|> token for audio
+    audio_placeholder = "<|pad|>" * audio_count
+
+    messages = [{"role": "user", "content": f"{audio_placeholder}{question}"}]
+    prompt = tokenizer.apply_chat_template(
+        messages, tokenize=False, add_generation_prompt=True
+    )
+
+    engine_args = EngineArgs(
+        model=model_name,
+        trust_remote_code=True,
+        max_model_len=4096,
+        max_num_seqs=2,
+        limit_mm_per_prompt={"audio": audio_count},
+    )
+
+    return ModelRequestData(
+        engine_args=engine_args,
+        prompt=prompt,
+    )
+
+
 # Granite Speech
 def run_granite_speech(question: str, audio_count: int) -> ModelRequestData:
     # NOTE - the setting in this example are somewhat different from what is
@@ -199,37 +227,6 @@ def run_phi4mm(question: str, audio_count: int) -> ModelRequestData:
     engine_args = EngineArgs(
         model=model_path,
         trust_remote_code=True,
-        max_model_len=12800,
-        max_num_seqs=2,
-        enable_lora=True,
-        max_lora_rank=320,
-        limit_mm_per_prompt={"audio": audio_count},
-    )
-
-    return ModelRequestData(
-        engine_args=engine_args,
-        prompt=prompts,
-        lora_requests=[LoRARequest("speech", 1, speech_lora_path)],
-    )
-
-
-def run_phi4_multimodal(question: str, audio_count: int) -> ModelRequestData:
-    """
-    Phi-4-multimodal-instruct supports both image and audio inputs. Here, we
-    show how to process audio inputs.
-    """
-    model_path = snapshot_download(
-        "microsoft/Phi-4-multimodal-instruct", revision="refs/pr/70"
-    )
-    # Since the vision-lora and speech-lora co-exist with the base model,
-    # we have to manually specify the path of the lora weights.
-    speech_lora_path = os.path.join(model_path, "speech-lora")
-    placeholders = "<|audio|>" * audio_count
-
-    prompts = f"<|user|>{placeholders}{question}<|end|><|assistant|>"
-
-    engine_args = EngineArgs(
-        model=model_path,
         max_model_len=12800,
         max_num_seqs=2,
         enable_lora=True,
@@ -412,11 +409,11 @@ def run_whisper(question: str, audio_count: int) -> ModelRequestData:
 model_example_map = {
     "audioflamingo3": run_audioflamingo3,
     "gemma3n": run_gemma3n,
+    "glmasr": run_glmasr,
     "granite_speech": run_granite_speech,
     "midashenglm": run_midashenglm,
     "minicpmo": run_minicpmo,
     "phi4_mm": run_phi4mm,
-    "phi4_multimodal": run_phi4_multimodal,
     "qwen2_audio": run_qwen2_audio,
     "qwen2_5_omni": run_qwen2_5_omni,
     "ultravox": run_ultravox,
@@ -498,27 +495,40 @@ def main(args):
         temperature=0.2, max_tokens=64, stop_token_ids=req_data.stop_token_ids
     )
 
-    mm_data = req_data.multi_modal_data
-    if not mm_data:
-        mm_data = {}
-        if audio_count > 0:
-            mm_data = {
-                "audio": [
-                    asset.audio_and_sample_rate for asset in audio_assets[:audio_count]
-                ]
-            }
+    def get_input(start, end):
+        mm_data = req_data.multi_modal_data
+        if not mm_data:
+            mm_data = {}
+            if end - start > 0:
+                mm_data = {
+                    "audio": [
+                        asset.audio_and_sample_rate for asset in audio_assets[start:end]
+                    ]
+                }
 
+        inputs = {"multi_modal_data": mm_data}
+
+        if req_data.prompt:
+            inputs["prompt"] = req_data.prompt
+        else:
+            inputs["prompt_token_ids"] = req_data.prompt_token_ids
+
+        return inputs
+
+    # Batch inference
     assert args.num_prompts > 0
-    inputs = {"multi_modal_data": mm_data}
-
-    if req_data.prompt:
-        inputs["prompt"] = req_data.prompt
-    else:
-        inputs["prompt_token_ids"] = req_data.prompt_token_ids
-
-    if args.num_prompts > 1:
-        # Batch inference
+    if audio_count != 1:
+        inputs = get_input(0, audio_count)
         inputs = [inputs] * args.num_prompts
+    else:
+        # For single audio input, we need to vary the audio input
+        # to avoid deduplication in vLLM engine.
+        inputs = []
+        for i in range(args.num_prompts):
+            start = i % len(audio_assets)
+            inp = get_input(start, start + 1)
+            inputs.append(inp)
+
     # Add LoRA request if applicable
     lora_request = (
         req_data.lora_requests * args.num_prompts if req_data.lora_requests else None

@@ -67,6 +67,15 @@ else:
 
 logger = init_logger(__name__)
 
+
+class ChatTemplateResolutionError(ValueError):
+    """Raised when chat template resolution fails.
+
+    This is a subclass of ValueError for backward compatibility with
+    existing exception handlers.
+    """
+
+
 MODALITY_PLACEHOLDERS_MAP = {
     "image": "<##IMAGE##>",
     "audio": "<##AUDIO##>",
@@ -1814,7 +1823,7 @@ def apply_hf_chat_template(
     )
 
     if hf_chat_template is None:
-        raise ValueError(
+        raise ChatTemplateResolutionError(
             "As of transformers v4.44, default chat template is no longer "
             "allowed, so you must provide a chat template if the tokenizer "
             "does not define one."
