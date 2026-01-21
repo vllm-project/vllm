@@ -17,6 +17,14 @@ __all__ = [
     "get_numel_loaded",
 ]
 
+SKIP_RESTORE_ATTRS: set[str] = {
+    "_expert_map",
+    "expert_mask",
+    "expert_global_to_physical",
+    "expert_physical_to_global",
+    "expert_local_to_global",
+}
+
 
 def to_meta_tensor(tensor: torch.Tensor) -> torch.Tensor:
     """Convert a tensor to a meta tensor while preserving class and attributes."""
@@ -46,13 +54,16 @@ def restore_layer_on_meta(layer: torch.nn.Module, info: LayerReloadingInfo):
     """Restore a layer to model format with tensors on the meta device"""
     # print(f"(restore) deleting: {get_layer_tensors(layer).keys()}")
     for name in get_layer_tensors(layer):
-        delattr(layer, name)
+        if name not in SKIP_RESTORE_ATTRS:
+            delattr(layer, name)
 
     restore_params, restore_buffers = info.restore_metadata
     for name, param in restore_params.items():
-        layer.register_parameter(name, param)
+        if name not in SKIP_RESTORE_ATTRS:
+            layer.register_parameter(name, param)
     for name, buffer in restore_buffers.items():
-        layer.register_buffer(name, buffer)
+        if name not in SKIP_RESTORE_ATTRS:
+            layer.register_buffer(name, buffer)
 
     # print(f"(restore) restored: {get_layer_tensors(layer).keys()}")
 
@@ -60,7 +71,8 @@ def restore_layer_on_meta(layer: torch.nn.Module, info: LayerReloadingInfo):
 def materialize_layer(layer: torch.nn.Module) -> None:
     """Materialize all meta tensors in a layer to actual tensors."""
     for name, tensor in get_layer_tensors(layer).items():
-        setattr(layer, name, materialize_meta_tensor(tensor))
+        if name not in SKIP_RESTORE_ATTRS:
+            setattr(layer, name, materialize_meta_tensor(tensor))
 
 
 class MetaCopyCounter(TorchDispatchMode):

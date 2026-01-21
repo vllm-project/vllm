@@ -3,6 +3,7 @@
 import inspect
 from collections.abc import Callable
 from functools import wraps
+from weakref import WeakKeyDictionary
 
 import torch
 
@@ -33,7 +34,9 @@ __all__ = [
 ]
 
 
-LAYER_RELOADING_INFO: dict[torch.nn.Module, LayerReloadingInfo] = dict()
+LAYER_RELOADING_INFO: WeakKeyDictionary[torch.nn.Module, LayerReloadingInfo] = (
+    WeakKeyDictionary()
+)
 EXPECTED_SKIP_LAYERS: tuple = (
     FusedMoEModularKernel,
     HadamardTransform,
