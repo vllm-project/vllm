@@ -24,11 +24,13 @@ def stateless_init_process_group(master_address, master_port, rank, world_size, 
 
     if device.type == "xpu":
         from vllm.distributed.device_communicators.xpu_communicator import (
-            XpuCommunicator
+            XpuCommunicator,
         )
+
         pynccl = XpuCommunicator(pg, device=device)
     else:
         from vllm.distributed.device_communicators.pynccl import PyNcclCommunicator
+
         pynccl = PyNcclCommunicator(pg, device=device)
     return pynccl
 
