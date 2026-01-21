@@ -486,6 +486,7 @@ class MessageQueue:
             socket_addr = handle.remote_subscribe_addr
             logger.debug("Connecting to %s", socket_addr)
             self.remote_socket.connect(socket_addr)
+            self._spin_condition = None  # type: ignore
 
         self.shutting_down = False
         return self
