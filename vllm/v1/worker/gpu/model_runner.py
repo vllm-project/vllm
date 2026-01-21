@@ -22,7 +22,6 @@ from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.outputs import (
     EMPTY_MODEL_RUNNER_OUTPUT,
-    LogprobsTensors,
     ModelRunnerOutput,
 )
 from vllm.v1.worker.gpu.async_utils import AsyncOutput
@@ -51,8 +50,8 @@ from vllm.v1.worker.gpu.input_batch import (
 )
 from vllm.v1.worker.gpu.mm.encoder_runner import EncoderRunner
 from vllm.v1.worker.gpu.mm.mrope_utils import MRopeState
-from vllm.v1.worker.gpu.sample.logprob import compute_prompt_logprobs
 from vllm.v1.worker.gpu.sample.output import SamplerOutput
+from vllm.v1.worker.gpu.sample.prompt_logprob import PromptLogprobsWorker
 from vllm.v1.worker.gpu.sample.sampler import Sampler
 from vllm.v1.worker.gpu.spec_decode import init_speculator
 from vllm.v1.worker.gpu.spec_decode.rejection_sample import rejection_sample
@@ -156,6 +155,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             device=self.device,
             logprobs_mode=self.model_config.logprobs_mode,
         )
+        self.prompt_logprobs_worker = PromptLogprobsWorker(self.max_num_reqs)
 
         # CUDA graphs.
         self.cudagraph_manager = CudaGraphManager(
@@ -416,10 +416,12 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 self.req_states.remove_request(req_id)
                 if self.supports_mm_inputs:
                     self.encoder_runner.remove_request(req_id)
+                self.prompt_logprobs_worker.remove_request(req_id)
         for req_id in scheduler_output.finished_req_ids:
             self.req_states.remove_request(req_id)
             if self.supports_mm_inputs:
                 self.encoder_runner.remove_request(req_id)
+            self.prompt_logprobs_worker.remove_request(req_id)
 
     def free_states(self, scheduler_output: SchedulerOutput) -> None:
         if self.supports_mm_inputs:
@@ -438,7 +440,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 prompt_len=prompt_len,
                 prefill_token_ids=new_req_data.prefill_token_ids,
                 num_computed_tokens=new_req_data.num_computed_tokens,
-                sampling_params=new_req_data.sampling_params,
                 lora_request=new_req_data.lora_request,
             )
             req_index = self.req_states.req_id_to_index[req_id]
@@ -460,6 +461,9 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             )
             self.sampler.add_request(
                 req_index, prompt_len, new_req_data.sampling_params
+            )
+            self.prompt_logprobs_worker.add_request(
+                req_id, req_index, new_req_data.sampling_params
             )
 
         if scheduler_output.scheduled_new_reqs:
@@ -729,104 +733,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         )
         return sampler_output, num_sampled, num_rejected
 
-    def compute_prompt_logprobs(
-        self,
-        hidden_states: torch.Tensor,
-        input_batch: InputBatch,
-    ) -> dict[str, LogprobsTensors]:
-        idx_mapping_np = input_batch.idx_mapping_np
-        needs_prompt_logprobs = self.req_states.needs_prompt_logprobs[idx_mapping_np]
-        if not np.any(needs_prompt_logprobs):
-            # No request asks for prompt logprobs.
-            return {}
-
-        prompt_lens = self.req_states.prompt_len[idx_mapping_np]
-        # NOTE(woosuk): -1 because the last prompt token's hidden state is not
-        # needed for prompt logprobs.
-        computed_prefill = self.req_states.num_computed_prefill_tokens[idx_mapping_np]
-        includes_prompt = computed_prefill < prompt_lens - 1
-        # NOTE(woosuk): If the request was resumed after preemption, its prompt
-        # logprobs must have been computed before preemption. Skip.
-        resumed_after_prompt = (
-            prompt_lens < self.req_states.prefill_len.np[idx_mapping_np]
-        )
-        needs_prompt_logprobs &= includes_prompt & ~resumed_after_prompt
-        if not np.any(needs_prompt_logprobs):
-            return {}
-
-        # Just to be safe, clone the input ids.
-        n = input_batch.num_tokens
-        # Shift the input ids by one.
-        token_ids = torch.empty_like(input_batch.input_ids[:n])
-        token_ids[: n - 1] = input_batch.input_ids[1:n]
-        # To avoid out-of-bound access, set the last token id to 0.
-        token_ids[n - 1] = 0
-
-        # Handle chunked prompts.
-        pos_after_step = computed_prefill + input_batch.num_scheduled_tokens
-        is_prompt_chunked = pos_after_step < prompt_lens
-        prefill_token_ids = self.req_states.prefill_token_ids.gpu
-        query_start_loc_np = input_batch.query_start_loc_np
-        for i, req_id in enumerate(input_batch.req_ids):
-            if not needs_prompt_logprobs[i]:
-                continue
-            if not is_prompt_chunked[i]:
-                continue
-            # The prompt is chunked. Get the next prompt token.
-            req_idx = input_batch.idx_mapping_np[i]
-            idx = int(query_start_loc_np[i + 1] - 1)
-            # NOTE(woosuk): This triggers two GPU operations.
-            next_prompt_token = prefill_token_ids[req_idx, pos_after_step[i]]
-            token_ids[idx] = next_prompt_token
-
-        # NOTE(woosuk): We mask out logprobs for negative tokens.
-        prompt_logprobs, prompt_ranks = compute_prompt_logprobs(
-            token_ids,
-            hidden_states[:n],
-            self.model.compute_logits,
-        )
-
-        prompt_token_ids = token_ids.unsqueeze(-1)
-        prompt_logprobs_dict: dict[str, LogprobsTensors] = {}
-        for i, req_id in enumerate(input_batch.req_ids):
-            if not needs_prompt_logprobs[i]:
-                continue
-
-            start_idx = query_start_loc_np[i]
-            end_idx = query_start_loc_np[i + 1]
-            assert start_idx < end_idx, (
-                f"start_idx ({start_idx}) >= end_idx ({end_idx})"
-            )
-            logprobs = LogprobsTensors(
-                logprob_token_ids=prompt_token_ids[start_idx:end_idx],
-                logprobs=prompt_logprobs[start_idx:end_idx],
-                selected_token_ranks=prompt_ranks[start_idx:end_idx],
-            )
-
-            req_extra_data = self.req_states.extra_data[req_id]
-            prompt_logprobs_list = req_extra_data.in_progress_prompt_logprobs
-            if is_prompt_chunked[i]:
-                # Prompt is chunked. Do not return the logprobs yet.
-                prompt_logprobs_list.append(logprobs)
-                continue
-
-            if prompt_logprobs_list:
-                # Merge the in-progress logprobs.
-                prompt_logprobs_list.append(logprobs)
-                logprobs = LogprobsTensors(
-                    logprob_token_ids=torch.cat(
-                        [x.logprob_token_ids for x in prompt_logprobs_list]
-                    ),
-                    logprobs=torch.cat([x.logprobs for x in prompt_logprobs_list]),
-                    selected_token_ranks=torch.cat(
-                        [x.selected_token_ranks for x in prompt_logprobs_list]
-                    ),
-                )
-                prompt_logprobs_list.clear()
-
-            prompt_logprobs_dict[req_id] = logprobs
-        return prompt_logprobs_dict
-
     def postprocess(
         self,
         input_batch: InputBatch,
@@ -1002,7 +908,16 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         sampler_output, num_sampled, num_rejected = self.sample(
             hidden_states, input_batch, grammar_output
         )
-        prompt_logprobs_dict = self.compute_prompt_logprobs(hidden_states, input_batch)
+        prompt_logprobs_dict = self.prompt_logprobs_worker.compute_prompt_logprobs(
+            self.model.compute_logits,
+            hidden_states,
+            input_batch,
+            self.req_states.prefill_token_ids.gpu,
+            self.req_states.num_computed_tokens.gpu,
+            self.req_states.prompt_len,
+            self.req_states.prefill_len.np,
+            self.req_states.num_computed_prefill_tokens,
+        )
 
         # Prepare the model runner output.
         model_runner_output = ModelRunnerOutput(
