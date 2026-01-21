@@ -131,6 +131,8 @@ def create_fused_moe_router(
             enable_eplb=enable_eplb,
             indices_type_getter=indices_type_getter,
         )
+        router.capture = capture
+        return router
 
     if e_score_correction_bias is not None:
         return FusedTopKBiasRouter(
