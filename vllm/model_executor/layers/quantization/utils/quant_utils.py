@@ -88,7 +88,6 @@ class ScaleDesc:
             GroupShape.PER_CHANNEL: "per_channel",
         }
         group_shape = d.get(self.group_shape, str(self.group_shape))
-
         return (
             f"{fx.graph.dtype_abbrs[self.dtype]},"
             f"{'static' if self.static else 'dynamic'},{group_shape}"
@@ -128,14 +127,27 @@ kFp8DynamicTensorSym = QuantKey(FP8_DTYPE, kDynamicTensorScale, symmetric=True)
 kStaticChannelScale = ScaleDesc(torch.float32, True, GroupShape.PER_CHANNEL)
 kFp8StaticChannelSym = QuantKey(FP8_DTYPE, kStaticChannelScale, symmetric=True)
 
+kStaticChannelScale = ScaleDesc(torch.float32, True, GroupShape.PER_CHANNEL)
+kFp8StaticChannelSym = QuantKey(FP8_DTYPE, kStaticChannelScale, symmetric=True)
+
 kDynamicTokenScale = ScaleDesc(torch.float32, False, GroupShape.PER_TOKEN)
 kFp8DynamicTokenSym = QuantKey(FP8_DTYPE, kDynamicTokenScale, symmetric=True)
 
-kNvfp4GroupScale = ScaleDesc(FP8_DTYPE, False, GroupShape(1, 16))
-kNvfp4Quant = QuantKey(FP4_DTYPE, scale=kNvfp4GroupScale, scale2=kStaticTensorScale)
+kNvfp4DynamicGroupScale = ScaleDesc(FP8_DTYPE, False, GroupShape(1, 16))
+kNvfp4Dynamic = QuantKey(
+    FP4_DTYPE, scale=kNvfp4DynamicGroupScale, scale2=kStaticTensorScale
+)
+
+kNvfp4StaticGroupScale = ScaleDesc(FP8_DTYPE, True, GroupShape(1, 16))
+kNvfp4Static = QuantKey(
+    FP4_DTYPE, scale=kNvfp4StaticGroupScale, scale2=kStaticTensorScale
+)
 
 kDynamic128Scale = ScaleDesc(torch.float32, False, GroupShape(1, 128))
 kFp8Dynamic128Sym = QuantKey(FP8_DTYPE, kDynamic128Scale, symmetric=True)
+
+kStatic128BlockScale = ScaleDesc(torch.float32, True, GroupShape(128, 128))
+kFp8Static128BlockSym = QuantKey(FP8_DTYPE, kStatic128BlockScale, symmetric=True)
 
 kDynamic64Scale = ScaleDesc(torch.float32, False, GroupShape(1, 64))
 kFp8Dynamic64Sym = QuantKey(FP8_DTYPE, kDynamic64Scale, symmetric=True)
