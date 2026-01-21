@@ -30,14 +30,13 @@ class NgramGPUKernel(nn.Module):
 
     PERFORMANCE OPTIMIZATION WITH TORCH.COMPILE:
 
-    1. Tensor Allocation Strategy:
-       - DO: Allocate tensors inside forward() - torch.compile will optimize this
-       - DON'T: Pre-allocate buffers as class attributes - breaks compilation
-       - WHY: torch.compile fuses allocations into the compiled graph for efficiency
+    1. Tensor allocation:
+       - Allocate inside forward(); torch.compile can fuse allocations.
+       - Avoid pre-allocating buffers as attributes (breaks compilation).
 
     2. Dynamic Shapes:
-       - Batch size (dim 0) is automatically marked as dynamic in support_torch_compile
-       - torch.compile generates specialized kernels for different shapes
+       - Batch dim is marked dynamic by support_torch_compile.
+       - torch.compile specializes per shape.
     """
 
     def __init__(
@@ -66,112 +65,76 @@ class NgramGPUKernel(nn.Module):
         num_draft_tokens: int,
     ) -> torch.Tensor:
         """
-        Find n-gram matches and extract tokens following the match.
-
-        For each sequence, searches for the earliest occurrence of the trailing
-        n-gram (the "suffix") earlier in the sequence. When found, extracts
-        the tokens that followed that earlier occurrence as draft predictions.
-        Tries multiple n-gram lengths and selects the longest match.
-
-        Terminology:
-            - suffix: The trailing n-gram at the end of each sequence that we
-                      search for earlier in the history
-            - search_window: A sliding view over the sequence used to find
-                             matches of the suffix
-            - match_position: The starting index where the suffix was found
-            - draft_tokens: Tokens extracted after the match position
+        Find suffix n-gram matches and extract following tokens.
+        Searches for the earliest prior occurrence of the trailing n-gram,
+        tries multiple lengths, and picks the longest valid match.
 
         Args:
             token_ids: Token IDs for each sequence
-                Shape: [batch_size, max_seq_len]
             seq_lengths: Actual length of each sequence (excluding padding)
-                Shape: [batch_size]
             min_ngram_len: Minimum n-gram size to search for (e.g., 2)
             max_ngram_len: Maximum n-gram size to search for (e.g., 5)
             num_draft_tokens: Number of tokens to extract after match (k)
 
         Returns:
-            Draft token predictions, -1 for invalid/no-match positions
-                Shape: [batch_size, num_draft_tokens]
+            Draft token predictions; -1 means invalid/no match.
         """
         batch_size = token_ids.shape[0]
         max_seq_len = token_ids.shape[1]
         device = token_ids.device
         num_ngram_sizes = max_ngram_len - min_ngram_len + 1
 
-        # ngram_lengths: All n-gram sizes we'll try
-        # Shape: [num_ngram_sizes]
+        # All n-gram sizes to try.
         ngram_lengths = torch.arange(min_ngram_len, max_ngram_len + 1, device=device)
         batch_indices = torch.arange(batch_size, device=device)
 
-        # first_match_positions: Stores the earliest match position for each
-        # (sequence, ngram_length) pair. -1 means no match found.
-        # Shape: [batch_size, num_ngram_sizes]
+        # Earliest match per (sequence, ngram_len); -1 means no match.
         first_match_positions = torch.full(
             (batch_size, num_ngram_sizes), -1, dtype=torch.long, device=device
         )
 
         for i, ngram_len in enumerate(range(min_ngram_len, max_ngram_len + 1)):
-            # Create sliding windows of size ngram_len over each sequence.
-            # Window w contains tokens[w : w + ngram_len].
-            # Shape: [batch_size, num_windows, ngram_len]
-            #   where num_windows = max_seq_len - ngram_len + 1
-            # Note: unfold returns a view (O(1)), so calling it per iteration
-            # is efficient and avoids complex prefix handling for shorter n-grams.
+            # Sliding windows of size ngram_len; unfold is O(1) view.
             search_windows = token_ids.unfold(1, ngram_len, 1)
             num_windows = search_windows.shape[1]
 
-            # Extract the trailing suffix (last ngram_len tokens) from each seq
-            # suffix_starts[b] = position where suffix begins in sequence b
-            # Shape: suffix_starts [batch_size], suffix [batch_size, ngram_len]
+            # Trailing suffix (last ngram_len tokens) for each sequence.
             suffix_starts = seq_lengths - ngram_len
             suffix_indices = suffix_starts.unsqueeze(1) + torch.arange(
                 ngram_len, device=device
             )
             suffix = torch.gather(token_ids, 1, suffix_indices.clamp(min=0))
 
-            # Check which windows match the suffix
-            # matches[b, w] = True if window w in sequence b matches suffix[b]
-            # Shape: [batch_size, num_windows]
+            # Window matches for each sequence.
             matches = (search_windows == suffix.unsqueeze(1)).all(dim=-1)
 
-            # Validity check: the match position must leave room for at least
-            # one token after the suffix to extract as a draft token.
-            # Window positions are simply 0, 1, 2, ... num_windows-1
-            # max_valid_suffix_start[b] = last valid starting position in seq b
+            # Match must leave room for at least one draft token.
             max_valid_suffix_start = seq_lengths - ngram_len - 1
             window_positions = torch.arange(num_windows, device=device)
             valid_mask = window_positions <= max_valid_suffix_start.unsqueeze(1)
             final_matches = matches & valid_mask
 
-            # Find first (earliest) match position for each sequence
-            # (argmax returns 0 if no match, so we verify with has_match)
+            # Find earliest match (argmax=0 when empty; verify with has_match).
             first_match_idx = torch.argmax(final_matches.int(), dim=1)
             has_match = final_matches[batch_indices, first_match_idx]
 
-            # Store valid match positions (window index = actual position)
+            # Store valid match positions (window index = position).
             first_match_positions[:, i] = torch.where(has_match, first_match_idx, -1)
 
-        # Select the longest n-gram that found a valid match
-        # (search from back to front to prioritize longer n-grams)
-        # Shape: best_ngram_idx [batch_size]
+        # Select the longest n-gram with a match.
         best_ngram_idx = (first_match_positions >= 0).int().flip(dims=[1]).argmax(dim=1)
         best_ngram_idx = num_ngram_sizes - 1 - best_ngram_idx  # Flip back
 
-        # Get the match position for the best n-gram
-        # Shape: best_match_pos [batch_size]
+        # Match position for the best n-gram.
         best_match_pos = first_match_positions[batch_indices, best_ngram_idx]
 
-        # Handle matched cases - completely avoid data-dependent branching
+        # Avoid data-dependent branching.
         has_any_match = best_match_pos >= 0
 
-        # best_ngram_lengths[b] = length of the best matching n-gram for seq b
-        # Shape: [batch_size]
+        # Length of the best matching n-gram.
         best_ngram_lengths = ngram_lengths[best_ngram_idx]
 
-        # Calculate where to start extracting draft tokens
-        # draft_start[b] = position right after the matched suffix
-        # Shape: draft_start [batch_size]
+        # Start position right after the matched suffix.
         draft_start = torch.where(
             has_any_match,
             best_match_pos + best_ngram_lengths,
@@ -179,18 +142,16 @@ class NgramGPUKernel(nn.Module):
         )
         tokens_available = seq_lengths - draft_start
 
-        # Create gather indices for extracting draft tokens
-        # Shape: draft_indices [batch_size, num_draft_tokens]
+        # Gather indices for draft tokens.
         draft_indices = draft_start.unsqueeze(1) + torch.arange(
             num_draft_tokens, device=device
         )
         draft_indices = draft_indices.clamp(min=0, max=max_seq_len - 1)
 
-        # Extract draft tokens (always execute gather, even for invalid positions)
-        # Shape: draft_tokens [batch_size, num_draft_tokens]
+        # Extract draft tokens; gather always runs.
         draft_tokens = torch.gather(token_ids, 1, draft_indices)
 
-        # Mask out positions beyond what's available in the sequence
+        # Mask positions beyond available tokens.
         position_indices = torch.arange(num_draft_tokens, device=device).unsqueeze(0)
         valid_positions = position_indices < tokens_available.unsqueeze(1)
 
@@ -200,7 +161,7 @@ class NgramGPUKernel(nn.Module):
             torch.full_like(draft_tokens, -1),
         )
 
-        # Mask out all positions if no match was found
+        # If no match, mask all positions.
         draft_tokens = torch.where(
             has_any_match.unsqueeze(1),
             draft_tokens,
@@ -230,12 +191,12 @@ class NgramGPUKernel(nn.Module):
 
         device = token_ids_gpu.device
 
-        # Infer batch_size from the input tensor shape to maintain dynamic shape
+        # Infer batch size to preserve dynamic shape.
         actual_batch_size = token_ids_gpu.shape[0]
 
-        # Initialize output tensor - torch.compile will optimize this allocation
+        # Allocate in forward so torch.compile can optimize.
         # NOTE(patchy): Do NOT pre-allocate this as a buffer
-        #               it would break torch.compile
+        #               it breaks torch.compile
         draft_tokens = torch.full(
             (actual_batch_size, self.k), -1, dtype=torch.int32, device=device
         )
@@ -373,11 +334,7 @@ class NgramProposerGPU:
         """
         Propose draft tokens using GPU-accelerated n-gram matching.
 
-        This method:
-        1. Scatters newly sampled tokens into token_ids_gpu
-        2. Updates num_tokens_no_spec in-place
-        3. Computes validity masks for speculative decoding
-        4. Runs n-gram matching kernel to propose draft tokens
+        Steps: scatter new tokens, update lengths, build masks, run kernel.
 
         Args:
             num_tokens_no_spec: Number of tokens per sequence (modified in-place)
@@ -395,7 +352,7 @@ class NgramProposerGPU:
         batch_size = num_tokens_no_spec.shape[0]
         max_new_tokens = valid_sampled_token_ids_gpu.shape[1]  # num_spec_tokens + 1
 
-        # Scatter newly sampled tokens into token_ids_gpu
+        # Scatter newly sampled tokens into token_ids_gpu.
         offsets = torch.arange(max_new_tokens, device=self.device)
         write_positions = num_tokens_no_spec.unsqueeze(1) + offsets.unsqueeze(0)
         valid_write_mask = offsets.unsqueeze(0) < valid_sampled_tokens_count.unsqueeze(
@@ -414,10 +371,10 @@ class NgramProposerGPU:
         )
         token_ids_gpu.scatter_(1, write_positions_long, tokens_to_scatter)
 
-        # Update num_tokens_no_spec in-place
+        # Update num_tokens_no_spec in-place.
         num_tokens_no_spec += valid_sampled_tokens_count
 
-        # Compute validity masks
+        # Compute validity masks.
         sampled_flags = valid_sampled_tokens_count > 0
         valid_mask = torch.ones(batch_size, dtype=torch.bool, device=self.device)
 
@@ -437,58 +394,71 @@ class NgramProposerGPU:
 
     def update_token_ids_ngram(
         self,
-        sampled_token_ids: torch.Tensor,
+        sampled_token_ids: torch.Tensor | list[list[int]],
         gpu_input_batch: InputBatch,
         token_ids_gpu: torch.Tensor,
         num_tokens_no_spec: torch.Tensor,
         discard_request_mask: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
-        This function is used to prepare the inputs for speculative decoding.
-        It calculates the next token ids and the number of valid sampled tokens
-        for each request, considering the "discarded" requests whose next token
-        is not sampled and comes from `request.get_token_id()` instead.
-        It also accounts for the rejected tokens in `sampled_token_ids`.
-        This function must use device functions to operate on the inputs, and
-        should not introduce any blocking CPU-GPU synchronization.
+        Prepare speculative decoding inputs on device:
+        compute next token ids and valid counts, honoring discarded requests
+        and rejected tokens, without CPU-GPU sync.
         """
         num_reqs = gpu_input_batch.num_reqs
 
-        # Extract backup_next_token_ids from token_ids_gpu using vectorized gather
-        # For each request i, get token_ids_gpu[i, num_tokens_no_spec[i] - 1]
-        # This is the last valid token before speculative tokens
+        if isinstance(sampled_token_ids, list):
+            # When disable_padded_drafter_batch=True, sampled_token_ids is
+            # an irregular list[list[int]] where sublists may have different
+            # lengths (including empty lists for discarded requests).
+            # Pad all sublists to the same length with -1 before converting
+            # to tensor.
+            max_len = max(
+                (len(sublist) for sublist in sampled_token_ids),
+                default=0,
+            )
+            # Ensure at least length 1 for tensor creation
+            max_len = max(max_len, 1)
+            padded_list = [
+                sublist + [-1] * (max_len - len(sublist))
+                for sublist in sampled_token_ids
+            ]
+            sampled_token_ids = torch.tensor(
+                padded_list, dtype=torch.int32, device=self.device
+            )
+        assert isinstance(sampled_token_ids, torch.Tensor), (
+            "sampled_token_ids should be a torch.Tensor for ngram_gpu"
+        )
+
+        # Backup last valid token before speculative tokens.
         backup_indices = (num_tokens_no_spec[:num_reqs] - 1).clamp(min=0).long()
         backup_next_token_ids = torch.gather(
             token_ids_gpu[:num_reqs], dim=1, index=backup_indices.unsqueeze(1)
         ).squeeze(1)
 
         valid_sampled_token_ids_gpu = sampled_token_ids.clone()
-        # Use discard_request_mask to invalidate sampled tokens for discarded
-        # requests (e.g., chunked prefill partial requests that should not be
-        # sampled). Expand mask to match [num_reqs, num_tokens] shape.
-        # Use masked_fill_ to avoid creating new tensors (no CPU-GPU sync).
+        # Invalidate sampled tokens for discarded requests.
         discard_mask_expanded = discard_request_mask[:num_reqs].unsqueeze(1)
         valid_sampled_token_ids_gpu.masked_fill_(discard_mask_expanded, -1)
 
-        # Generate a mask for all valid tokens within those requests
+        # Mask valid tokens within each request.
         valid_mask = (valid_sampled_token_ids_gpu != -1) & (
             valid_sampled_token_ids_gpu < gpu_input_batch.vocab_size
         )
 
-        # Count the number of valid tokens in each request
+        # Count valid tokens per request.
         valid_sampled_tokens_count = valid_mask.sum(dim=1)
 
-        # Get the rightmost valid index per row
+        # Rightmost valid index per row.
         last_valid_indices = valid_sampled_tokens_count - 1
         last_valid_indices_safe = torch.clamp(last_valid_indices, min=0)
 
-        # Get last valid token from each row
-        # (assume undefined state where there is no valid token)
+        # Last valid token from each row; undefined if none.
         selected_tokens = torch.gather(
             valid_sampled_token_ids_gpu, 1, last_valid_indices_safe.unsqueeze(1)
         ).squeeze(1)
 
-        # Use last token if valid, vectorized backup from token_ids_gpu if not
+        # Use last token if valid; otherwise fallback to backup.
         next_token_ids = torch.where(
             last_valid_indices != -1,
             selected_tokens,
@@ -509,9 +479,8 @@ def update_scheduler_for_empty_drafts(
 ) -> None:
     """Update scheduler_output for requests with empty draft tokens.
 
-    This method is called between _update_states and _prepare_inputs to
-    defer the sync point for is_empty_draft_tokens. By delaying the sync,
-    the async D2H copy has more time to complete, reducing kernel bubbles.
+    Called between _update_states and _prepare_inputs to delay the sync so
+    the async D2H copy can finish and reduce kernel bubbles.
 
     Args:
         scheduler_output: The scheduler output to update.
@@ -519,9 +488,8 @@ def update_scheduler_for_empty_drafts(
     """
     req_data = scheduler_output.scheduled_cached_reqs
 
-    # Sync the is_empty_draft_tokens copy (should be complete by now)
+    # Sync the is_empty_draft_tokens copy (should be complete).
     is_empty_draft_tokens_event.synchronize()
-    is_empty_draft_tokens_cpu = is_empty_draft_tokens_cpu
 
     for req_id in req_data.req_ids:
         req_index = req_id_to_index.get(req_id)
@@ -546,10 +514,7 @@ def update_ngram_gpu_tensors_incremental(
     """Incrementally update token_ids_gpu_tensor and num_tokens_no_spec_gpu
     for ngram GPU proposer.
 
-    This method handles three cases:
-    1. First run (no prev_req_id_to_index): full initialization
-    2. Index changes due to condense/reorder: GPU scatter to new positions
-    3. New/resumed requests: full copy of prompt + output tokens
+    Handles three cases: first run, reorder, and new/resumed requests.
 
     Args:
         new_reqs: List of new or resumed requests that need full tensor copy.
@@ -560,10 +525,10 @@ def update_ngram_gpu_tensors_incremental(
     if not curr_req_id_to_index:
         return
 
-    # Build set of new request IDs for fast lookup
+    # Build set of new request IDs for fast lookup.
     new_req_ids = {req.req_id for req in new_reqs}
 
-    # Case 1: First run, no previous state - full initialization
+    # Case 1: First run, no previous state.
     if prev_req_id_to_index is None:
         for idx in curr_req_id_to_index.values():
             num_tokens = input_batch.num_tokens_no_spec[idx]
@@ -578,12 +543,12 @@ def update_ngram_gpu_tensors_incremental(
                 )
         return
 
-    # Case 2: Detect index changes, collect requests needing reorder
+    # Case 2: Detect index changes for reorder.
     reorder_src: list[int] = []
     reorder_dst: list[int] = []
 
     for req_id, curr_idx in curr_req_id_to_index.items():
-        # Skip new requests (handled separately later)
+        # Skip new requests (handled separately).
         if req_id in new_req_ids:
             continue
 
@@ -592,19 +557,18 @@ def update_ngram_gpu_tensors_incremental(
             reorder_src.append(prev_idx)
             reorder_dst.append(curr_idx)
 
-    # GPU scatter reorder
+    # GPU scatter reorder.
     if reorder_src:
         src_tensor = torch.tensor(reorder_src, dtype=torch.long, device=device)
         dst_tensor = torch.tensor(reorder_dst, dtype=torch.long, device=device)
 
-        # Clone to avoid overwriting during scatter
+        # Clone to avoid overwriting during scatter.
         temp_token_ids = token_ids_gpu_tensor[src_tensor].clone()
         temp_num_tokens = num_tokens_no_spec_gpu[src_tensor].clone()
 
         token_ids_gpu_tensor[dst_tensor] = temp_token_ids
         num_tokens_no_spec_gpu[dst_tensor] = temp_num_tokens
-    # Case 3: Full copy for new/resumed requests
-    # Use data already stored in input_batch by add_request()
+    # Case 3: Full copy for new/resumed requests.
     for req_state in new_reqs:
         new_req_idx = curr_req_id_to_index.get(req_state.req_id)
         if new_req_idx is None:
@@ -612,7 +576,7 @@ def update_ngram_gpu_tensors_incremental(
 
         num_tokens = input_batch.num_tokens_no_spec[new_req_idx]
         if num_tokens > 0:
-            # Copy from input_batch.token_ids_cpu to GPU
+            # Copy from input_batch.token_ids_cpu to GPU.
             token_ids_gpu_tensor[new_req_idx, :num_tokens].copy_(
                 input_batch.token_ids_cpu_tensor[new_req_idx, :num_tokens],
                 non_blocking=True,
@@ -634,9 +598,7 @@ def copy_is_empty_draft_tokens(
 ) -> None:
     """Async copy is_empty_draft_tokens to CPU using dedicated stream.
 
-    This method uses a separate CUDA stream to overlap the D2H copy with
-    GPU kernel execution, avoiding GPU kernel gaps that would occur if
-    the copy was issued on the default stream.
+    Uses a separate CUDA stream to overlap D2H copy with kernel execution.
     """
     if is_empty_draft_tokens is None:
         return

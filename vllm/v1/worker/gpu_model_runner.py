@@ -218,7 +218,6 @@ class AsyncGPUModelRunnerOutput(AsyncModelRunnerOutput):
 
         # Initiate the copy on a separate stream, but do not synchronize it.
         default_stream = torch.cuda.current_stream()
-
         with torch.cuda.stream(async_output_copy_stream):
             async_output_copy_stream.wait_stream(default_stream)
             self.sampled_token_ids_cpu = self._sampled_token_ids.to(
@@ -671,19 +670,8 @@ class GPUModelRunner(
         self._is_empty_draft_tokens_cpu: torch.Tensor | None = None
         self._is_empty_draft_tokens_event: torch.cuda.Event | None = None
         self._is_empty_draft_tokens_copy_stream: torch.cuda.Stream | None = None
-        # Async D2H copy mechanism for is_empty_draft_tokens (ngram_gpu only)
-        #
-        # Purpose: Filter out requests with empty draft tokens BEFORE model forward,
+        # Filter out requests with empty draft tokens BEFORE model forward,
         # saving computation on placeholder tokens that would otherwise be wasted.
-        #
-        # Benefits:
-        # 1. Reduced Forward Computation: By excluding empty draft token requests
-        #    from scheduler_output before _prepare_inputs(), we avoid computing
-        #    attention, FFN, and logits for invalid placeholder tokens.
-        # 2. Reduced Rejection Sampling: Fewer tokens to verify means less sampling
-        #    overhead in the speculative decoding verification phase.
-        # 3. Async Overlap: Using a dedicated CUDA stream for D2H copy allows the
-        #    transfer to overlap with GPU kernel execution, avoiding pipeline bubbles.
         if (
             self.speculative_config is not None
             and self.speculative_config.use_ngram_gpu()
@@ -691,10 +679,7 @@ class GPUModelRunner(
             self._is_empty_draft_tokens_cpu = torch.empty(
                 self.max_num_reqs, dtype=torch.bool, pin_memory=self.pin_memory
             )
-            # CUDA event for synchronizing _is_empty_draft_tokens async copy
             self._is_empty_draft_tokens_event = torch.cuda.Event()
-            # Dedicated stream for _is_empty_draft_tokens copy to
-            # overlap with GPU kernels
             self._is_empty_draft_tokens_copy_stream = torch.cuda.Stream()
 
         self._draft_token_req_ids: list[str] | None = None
@@ -938,12 +923,10 @@ class GPUModelRunner(
         for req_id in unscheduled_req_ids:
             self.input_batch.remove_request(req_id)
 
-        # Check if ngram_gpu mode is enabled for incremental GPU tensor updates
         is_ngram_gpu = (
             self.speculative_config is not None
             and self.speculative_config.use_ngram_gpu()
         )
-        # Collect new/resumed requests that need full GPU tensor copy
         if is_ngram_gpu:
             ngram_gpu_new_reqs: list[CachedRequestState] = []
 
@@ -1396,8 +1379,6 @@ class GPUModelRunner(
         # because input_ids dtype is torch.int32,
         # so convert draft_token_ids to torch.int32 here.
         draft_token_ids = self._draft_token_ids.to(dtype=torch.int32)
-        self._draft_token_ids = None
-        self._is_empty_draft_tokens = None
 
         self.input_ids.gpu.scatter_(
             dim=0,
@@ -3553,8 +3534,6 @@ class GPUModelRunner(
                     spec_decode_metadata,
                     spec_decode_common_attn_metadata,
                 )
-                # DEBUG(patchy)
-                # from fpdb import ForkedPdb; ForkedPdb().set_trace()
                 self._copy_draft_token_ids_to_cpu(scheduler_output)
 
         spec_config = self.speculative_config
@@ -3809,35 +3788,12 @@ class GPUModelRunner(
         elif spec_config.method == "ngram_gpu":
             # GPU-accelerated ngram proposer
             assert isinstance(self.drafter, NgramProposerGPU)
-            sampled_token_ids_gpu_tensor = sampled_token_ids
-            if isinstance(sampled_token_ids_gpu_tensor, list):
-                # When disable_padded_drafter_batch=True, sampled_token_ids is
-                # an irregular list[list[int]] where sublists may have different
-                # lengths (including empty lists for discarded requests).
-                # Pad all sublists to the same length with -1 before converting
-                # to tensor.
-                max_len = max(
-                    (len(sublist) for sublist in sampled_token_ids_gpu_tensor),
-                    default=0,
-                )
-                # Ensure at least length 1 for tensor creation
-                max_len = max(max_len, 1)
-                padded_list = [
-                    sublist + [-1] * (max_len - len(sublist))
-                    for sublist in sampled_token_ids_gpu_tensor
-                ]
-                sampled_token_ids_gpu_tensor = torch.tensor(
-                    padded_list, dtype=torch.int32, device=self.device
-                )
-            assert isinstance(sampled_token_ids_gpu_tensor, torch.Tensor), (
-                "sampled_token_ids should be a torch.Tensor for ngram_gpu"
-            )
             (
                 next_token_ids,
                 valid_sampled_tokens_count,
                 valid_sampled_token_ids_gpu,
             ) = self.drafter.update_token_ids_ngram(
-                sampled_token_ids_gpu_tensor,
+                sampled_token_ids,
                 self.input_batch,
                 self.token_ids_gpu_tensor,
                 self.num_tokens_no_spec_gpu,
