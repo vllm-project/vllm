@@ -579,7 +579,7 @@ class EngineArgs:
     kv_offloading_backend: KVOffloadingBackend = CacheConfig.kv_offloading_backend
     tokens_only: bool = False
 
-    weight_transfer_backend: str = "nccl"
+    weight_transfer_backend: str | None = None
     """Backend for weight transfer during RL training. Options: nccl, ipc"""
 
     weight_transfer_config: WeightTransferConfig = field(
