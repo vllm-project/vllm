@@ -132,7 +132,7 @@ class SchedulerConfig:
     """If set to True, perform async scheduling. This helps to avoid gaps in
     GPU utilization, leading to better latency and throughput.
     Async scheduling is currently not supported with some features such as
-    speculative decoding and pipeline parallelism.
+    pipeline parallelism.
     """
 
     stream_interval: int = Field(default=1, ge=1)
