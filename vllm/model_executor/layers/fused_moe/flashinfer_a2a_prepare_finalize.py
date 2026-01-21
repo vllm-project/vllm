@@ -11,6 +11,7 @@ from vllm.distributed.device_communicators.base_device_communicator import (
 from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
 from vllm.model_executor.layers.fused_moe.utils import moe_kernel_quantize_input
+from vllm.utils.flashinfer import nvfp4_block_scale_interleave
 
 
 def get_local_sizes():
@@ -161,7 +162,9 @@ def flashinfer_alltoall_dispatch(
             quant_config.quant_dtype,
             quant_config.per_act_token_quant,
             quant_config.block_shape,
-            is_fp4_scale_swizzled=False,  # delay swizzle to after comm -  todo: why?
+            # NOTE: the kernel crashes with swizzled scales
+            # so we disable it until after the A2A below.
+            is_fp4_scale_swizzled=False,
         )
         x = MnnvlMoe.mnnvl_moe_alltoallv(
             x,
@@ -178,6 +181,10 @@ def flashinfer_alltoall_dispatch(
             ep_rank,
             ep_size,
         )
+
+        # Swizzle after the A2A if nvfp4.
+        if quant_config.quant_dtype == "nvfp4":
+            x_sf = nvfp4_block_scale_interleave(x_sf)
     else:
         # Block-scale path: pass activations through without quantization
         x_sf = None

@@ -195,4 +195,5 @@ def maybe_make_prepare_finalize(
             num_dispatchers=all2all_manager.world_size,
         )
 
+    print(f"========= {prepare_finalize=}")
     return prepare_finalize
