@@ -134,7 +134,7 @@ class SchedulerConfig:
     """If set to False, disable async scheduling. Async scheduling helps to
     avoid gaps in GPU utilization, leading to better latency and throughput.
     It is currently not supported with some features such as
-    speculative decoding and pipeline parallelism, and will be automatically
+    pipeline parallelism, and will be automatically
     disabled in those cases.
     """
 
