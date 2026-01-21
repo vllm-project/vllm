@@ -9,10 +9,20 @@ import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.model_executor.layers.fused_moe.config import (
     FUSED_MOE_UNQUANTIZED_CONFIG,
+    FusedMoEParallelConfig,
     FusedMoEQuantConfig,
 )
 from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceNoOP,
+)
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    QuantKey,
+    kFp8Dynamic128Sym,
+    kFp8DynamicTensorSym,
+    kFp8DynamicTokenSym,
+    kFp8Static128BlockSym,
+    kFp8StaticChannelSym,
+    kFp8StaticTensorSym,
 )
 
 
@@ -269,17 +279,49 @@ def rocm_aiter_fused_experts(
 
 
 class AiterExperts(mk.FusedMoEPermuteExpertsUnpermute):
-    def __init__(self, quant_config):
-        super().__init__(quant_config)
+    @staticmethod
+    def activation_format() -> mk.FusedMoEActivationFormat:
+        return mk.FusedMoEActivationFormat.Standard
 
-    @property
-    def activation_formats(
-        self,
-    ) -> tuple[mk.FusedMoEActivationFormat, mk.FusedMoEActivationFormat]:
-        return (
-            mk.FusedMoEActivationFormat.Standard,
-            mk.FusedMoEActivationFormat.Standard,
-        )
+    @staticmethod
+    def expects_unquantized_inputs(
+        fused_moe_config: mk.FusedMoEConfig, quant_config: FusedMoEQuantConfig
+    ) -> bool:
+        # AITER fused MoE kernels handle input quantization internally.
+        return True
+
+    @staticmethod
+    def _supports_current_device() -> bool:
+        return rocm_aiter_ops.is_fused_moe_enabled()
+
+    @staticmethod
+    def _supports_no_act_and_mul() -> bool:
+        return False
+
+    @staticmethod
+    def _supports_quant_scheme(
+        weight_key: QuantKey | None,
+        activation_key: QuantKey | None,
+    ) -> bool:
+        # TODO(rob): AITER also supports MXFP4, which is not
+        # yet supported via an Oracle. Once it is, we will add
+        # MXFP4 to this list.
+        SUPPORTED_W_A = [
+            (None, None),
+            (kFp8Static128BlockSym, kFp8Dynamic128Sym),
+            (kFp8StaticTensorSym, kFp8StaticTensorSym),
+            (kFp8StaticTensorSym, kFp8DynamicTensorSym),
+            (kFp8StaticChannelSym, kFp8DynamicTokenSym),
+        ]
+        return (weight_key, activation_key) in SUPPORTED_W_A
+
+    @staticmethod
+    def _supports_activation(activation: str) -> bool:
+        return activation in ["silu", "gelu"]
+
+    @staticmethod
+    def _supports_parallel_config(moe_parallel_config: FusedMoEParallelConfig) -> bool:
+        return True
 
     def supports_expert_map(self):
         return True
