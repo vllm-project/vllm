@@ -222,11 +222,11 @@ class DeepEPHTPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
             expert_num_tokens_per_expert_list, device=expert_x.device
         )
 
-        # Dispatch and Quant
-        # DeepEP kernels only support dispatching block-quantized
-        # activation scales.
-        # Dispatch in bfloat16 and quantize afterwards
-        if not quant_config.is_block_quantized:
+        # * For non-block quant, dispatch in b16 and quantize now as
+        #   DeepEP kernels only support dispatching block scales.
+        # * For expert kernels that require unquantized inputs,
+        #   defer quantization to FusedMoEExpertsPermuteUnpermute.
+        if not quant_config.is_block_quantized and not self.defer_input_quant:
             # Quantize after dispatch.
             expert_x_scale = None
             if expert_x.numel() != 0:
@@ -269,8 +269,12 @@ class DeepEPHTPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
             )
             a1 = a1 * topk_weights.to(a1.dtype)
 
-        if quant_config.is_block_quantized:
-            # Quant and Dispatch
+        # * DeepEP only supports fp8 block scales so quantize
+        #   before the dispatch for these models.
+        # * For all other quantization, dispatch after.
+        # * For expert kernels that require unquantized inputs,
+        #   defer quantization to FusedMoEExpertsPermuteUnpermute.
+        if quant_config.is_block_quantized and not self.defer_input_quant:
             a1q, a1q_scale = moe_kernel_quantize_input(
                 a1,
                 quant_config.a1_scale,
