@@ -53,7 +53,7 @@ SPARSE_BACKEND_BATCH_SPECS["large_q_pure_prefill"] = BatchSpec(
 
 def _float_to_e8m0_truncate(f: float) -> float:
     """Simulate SM100's float -> e8m0 -> bf16 scale conversion.
-    
+
     e8m0 format only stores the exponent (power of 2).
     cudaRoundZero truncates toward zero, meaning we round down to the
     nearest power of 2.
@@ -63,15 +63,18 @@ def _float_to_e8m0_truncate(f: float) -> float:
     # e8m0 = floor(log2(f)), then 2^(e8m0)
     # This is equivalent to truncating to the nearest power of 2 below f
     exp = math.floor(math.log2(f))
-    return 2.0 ** exp
+    return 2.0**exp
 
 
 def _dequantize_fp8_ds_mla_entry(
-    cache_slice: torch.Tensor, kv_lora_rank: int, rope_dim: int, dtype: torch.dtype,
+    cache_slice: torch.Tensor,
+    kv_lora_rank: int,
+    rope_dim: int,
+    dtype: torch.dtype,
     simulate_sm100_e8m0_scales: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Dequantize a single fp8_ds_mla cache entry back to latent + rope.
-    
+
     Args:
         simulate_sm100_e8m0_scales: If True, simulate the SM100 kernel's
             float -> e8m0 -> bf16 scale conversion path.
@@ -102,11 +105,14 @@ def _dequantize_fp8_ds_mla_entry(
 
 
 def _quantize_dequantize_fp8_ds_mla(
-    kv_c: torch.Tensor, k_pe: torch.Tensor, block_size: int, scale: torch.Tensor,
+    kv_c: torch.Tensor,
+    k_pe: torch.Tensor,
+    block_size: int,
+    scale: torch.Tensor,
     simulate_sm100_e8m0_scales: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Round-trip kv_c/k_pe though the fp8_ds_mla cache layout.
-    
+
     Args:
         simulate_sm100_e8m0_scales: If True, simulate the SM100 kernel's
             float -> e8m0 -> bf16 scale conversion in dequantization.
@@ -139,7 +145,10 @@ def _quantize_dequantize_fp8_ds_mla(
         block_offset = slot % block_size
         cache_slice = tmp_cache[block_idx, block_offset]
         latent, rope_vals = _dequantize_fp8_ds_mla_entry(
-            cache_slice, kv_lora_rank, rope_dim, kv_c.dtype,
+            cache_slice,
+            kv_lora_rank,
+            rope_dim,
+            kv_c.dtype,
             simulate_sm100_e8m0_scales=simulate_sm100_e8m0_scales,
         )
         dequant_kv_c[token_idx] = latent
