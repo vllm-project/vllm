@@ -20,7 +20,7 @@ from dataclasses import dataclass
 
 import torch
 
-from vllm.v1.sample.ops.topk_topp_sampler import apply_top_k_top_pytorch
+from vllm.v1.sample.ops.topk_topp_sampler import apply_top_k_top_p_pytorch
 from vllm.v1.sample.ops.topk_topp_triton import apply_top_k_top_p_triton
 
 
@@ -296,7 +296,7 @@ def run_benchmark(
         # Benchmark PyTorch
         reset_memory_stats()
         pytorch_time, pytorch_mem = benchmark_function(
-            apply_top_k_top_pytorch,
+            apply_top_k_top_p_pytorch,
             logits,
             config.k_values,
             config.p_values,

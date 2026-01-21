@@ -11,7 +11,10 @@ from vllm._aiter_ops import rocm_aiter_ops
 from vllm.config.model import LogprobsMode
 from vllm.logger import init_logger
 from vllm.platforms import CpuArchEnum, current_platform
-from vllm.v1.sample.ops.topk_topp_triton import apply_top_k_top_p_triton
+from vllm.triton_utils import HAS_TRITON
+
+if HAS_TRITON:
+    from vllm.v1.sample.ops.topk_topp_triton import apply_top_k_top_p_triton
 
 logger = init_logger(__name__)
 
@@ -148,7 +151,7 @@ class TopKTopPSampler(nn.Module):
 
         The logits tensor may be updated in-place.
         """
-        logits = apply_top_k_top_pytorch(logits, k, p, allow_cpu_sync=True)
+        logits = apply_top_k_top_p_pytorch(logits, k, p, allow_cpu_sync=True)
         logits_to_return = None
         if self.logprobs_mode == "processed_logits":
             logits_to_return = logits
@@ -246,16 +249,18 @@ def apply_top_k_top_p(
         return logits
 
     # Rough empirical heuristic
-    batch_size, vocab_size = logits.shape
-    both_k_and_p = p is not None and k is not None
-    threshold = vocab_size // (1024 if both_k_and_p else 2048)
-    if batch_size < threshold:
-        # Use pytorch sort implementation for smaller batch sizes.
-        return apply_top_k_top_pytorch(logits, k, p)
-    return apply_top_k_top_p_triton(logits, k, p)
+    if HAS_TRITON:
+        batch_size, vocab_size = logits.shape
+        both_k_and_p = p is not None and k is not None
+        threshold = vocab_size // (1024 if both_k_and_p else 2048)
+        if batch_size >= threshold:
+            # Use pytorch sort implementation for smaller batch sizes.
+            return apply_top_k_top_p_triton(logits, k, p)
+
+    return apply_top_k_top_p_pytorch(logits, k, p)
 
 
-def apply_top_k_top_pytorch(
+def apply_top_k_top_p_pytorch(
     logits: torch.Tensor,
     k: torch.Tensor | None,
     p: torch.Tensor | None,

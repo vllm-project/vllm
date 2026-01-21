@@ -5,7 +5,7 @@ import torch
 from torch import Generator
 
 from vllm.platforms import current_platform
-from vllm.v1.sample.ops.topk_topp_sampler import apply_top_k_top_pytorch
+from vllm.v1.sample.ops.topk_topp_sampler import apply_top_k_top_p_pytorch
 
 CUDA_DEVICE = "cuda" if current_platform.is_cuda() else None
 DEVICE = current_platform.device_type
@@ -40,11 +40,11 @@ def test_topk_impl_equivalence():
     )
 
     # Top-k only implementation
-    result1 = apply_top_k_top_pytorch(logits=logits.clone(), k=k, p=None)
+    result1 = apply_top_k_top_p_pytorch(logits=logits.clone(), k=k, p=None)
 
     # Top-p + top-k
     no_op_top_p = torch.tensor([1.0])
-    result2 = apply_top_k_top_pytorch(logits=logits.clone(), k=k, p=no_op_top_p)
+    result2 = apply_top_k_top_p_pytorch(logits=logits.clone(), k=k, p=no_op_top_p)
 
     assert torch.allclose(result1, result2)
 
@@ -94,7 +94,7 @@ def test_flashinfer_sampler():
         torch.randint(0, 2, (BATCH_SIZE,), generator=generator, dtype=torch.bool), 1.0
     )
 
-    python_logits = apply_top_k_top_pytorch(
+    python_logits = apply_top_k_top_p_pytorch(
         logits=logits.clone(),
         k=k_values,
         p=p_values,
@@ -152,7 +152,7 @@ class TestTritonTopkTopp:
         logits_triton = logits.clone().to(torch.float32)
 
         # Apply PyTorch sorting implementation
-        result_pytorch = apply_top_k_top_pytorch(logits_pytorch, k, p)
+        result_pytorch = apply_top_k_top_p_pytorch(logits_pytorch, k, p)
 
         # Apply Triton kernel
         k_i32 = k.to(torch.int32) if k is not None else None
