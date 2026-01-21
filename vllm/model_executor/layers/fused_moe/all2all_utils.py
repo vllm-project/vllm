@@ -189,7 +189,7 @@ def maybe_make_prepare_finalize(
             use_deepseek_fp8_block_scale=quant_config.is_block_quantized,
         )
 
-    elif moe.use_naive_kernels and allow_new_interface:
+    elif moe.use_naive_all2all_kernels and allow_new_interface:
         prepare_finalize = MoEPrepareAndFinalizeNaiveEP(
             defer_input_quant,
             is_sequence_parallel=(moe.moe_parallel_config.is_sequence_parallel),

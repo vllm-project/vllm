@@ -4,16 +4,8 @@ from enum import Enum
 
 import torch
 
-import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm import envs
 from vllm.logger import init_logger
-from vllm.model_executor.layers.fused_moe.config import (
-    FusedMoEConfig,
-    FusedMoEQuantConfig,
-)
-from vllm.model_executor.layers.fused_moe.flashinfer_cutlass_moe import (
-    FlashInferExperts,
-)
 from vllm.platforms import current_platform
 from vllm.utils.math_utils import round_up
 
@@ -186,33 +178,6 @@ def make_fp8_moe_alpha_scales_for_fi(
     g2_alphas = (w2_scale * w2_input_scale).squeeze()
 
     return g1_alphas, g2_alphas
-
-
-def select_cutlass_fp8_gemm_impl(
-    moe: FusedMoEConfig | None,
-    quant_config: FusedMoEQuantConfig,
-    out_dtype: torch.dtype | None = None,
-    use_deepseek_fp8_block_scale: bool = False,
-) -> mk.FusedMoEPermuteExpertsUnpermute:
-    """Return a GEMM *experts* implementation for fused-MoE layers"""
-
-    if moe is not None:
-        return FlashInferExperts(
-            out_dtype=moe.in_dtype,
-            quant_config=quant_config,
-            ep_rank=moe.moe_parallel_config.ep_rank,
-            ep_size=moe.moe_parallel_config.ep_size,
-            tp_rank=moe.moe_parallel_config.tp_rank,
-            tp_size=moe.moe_parallel_config.tp_size,
-            use_deepseek_fp8_block_scale=use_deepseek_fp8_block_scale,
-        )
-
-    assert out_dtype is not None, "If moe config is None, out_dtype must be passed"
-    return FlashInferExperts(
-        out_dtype=out_dtype,
-        quant_config=quant_config,
-        use_deepseek_fp8_block_scale=use_deepseek_fp8_block_scale,
-    )
 
 
 def get_flashinfer_moe_backend() -> FlashinferMoeBackend:

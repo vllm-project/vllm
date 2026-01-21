@@ -862,6 +862,7 @@ class FusedMoEParallelConfig:
     use_ep: bool  # whether to use EP or not
     all2all_backend: str  # all2all backend for MoE communication
     is_sequence_parallel: bool  # whether sequence parallelism is used
+    enable_eplb: bool  # whether to enable expert load balancing
 
     @property
     def use_all2all_kernels(self):
@@ -889,9 +890,13 @@ class FusedMoEParallelConfig:
         )
 
     @property
-    def use_naive_kernels(self):
+    def use_batched_activation_format(self):
+        return self.use_deepep_ll_kernels or self.use_pplx_kernels
+
+    @property
+    def use_naive_all2all_kernels(self):
         return self.use_all2all_kernels and (
-            self.all2all_backend in ["allgather_reducescatter", "naive"]
+            self.all2all_backend in ["naive", "allgather_reducescatter"]
         )
 
     @staticmethod
@@ -1012,6 +1017,7 @@ class FusedMoEParallelConfig:
                 use_ep=False,
                 all2all_backend=vllm_parallel_config.all2all_backend,
                 is_sequence_parallel=vllm_parallel_config.use_sequence_parallel_moe,
+                enable_eplb=vllm_parallel_config.enable_eplb,
             )
         # DP + EP / TP + EP / DP + TP + EP
         assert use_ep
@@ -1031,6 +1037,25 @@ class FusedMoEParallelConfig:
             use_ep=True,
             all2all_backend=vllm_parallel_config.all2all_backend,
             is_sequence_parallel=vllm_parallel_config.use_sequence_parallel_moe,
+            enable_eplb=vllm_parallel_config.enable_eplb,
+        )
+
+    @classmethod
+    def make_no_parallel(cls) -> "FusedMoEParallelConfig":
+        """For usage in CI/CD and testing."""
+        return FusedMoEParallelConfig(
+            tp_size=1,
+            tp_rank=0,
+            pcp_size=1,
+            pcp_rank=0,
+            dp_size=1,
+            dp_rank=0,
+            ep_size=1,
+            ep_rank=0,
+            use_ep=False,
+            all2all_backend="naive",
+            enable_eplb=False,
+            is_sequence_parallel=False,
         )
 
 
@@ -1041,8 +1066,10 @@ class FusedMoEConfig:
     experts_per_token: int
     hidden_dim: int
     intermediate_size_per_partition: int
-
     num_local_experts: int
+    activation: str
+    device: torch.device | str
+    routing_method: RoutingMethodType
     moe_parallel_config: FusedMoEParallelConfig
 
     # The activation type.
@@ -1123,5 +1150,5 @@ class FusedMoEConfig:
         return self.moe_parallel_config.use_fi_all2allv_kernels
 
     @property
-    def use_naive_kernels(self):
-        return self.moe_parallel_config.use_naive_kernels
+    def use_naive_all2all_kernels(self):
+        return self.moe_parallel_config.use_naive_all2all_kernels

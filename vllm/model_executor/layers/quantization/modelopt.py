@@ -48,6 +48,9 @@ from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig,
     QuantizeMethodBase,
 )
+from vllm.model_executor.layers.quantization.kernels.scaled_mm import (
+    init_fp8_linear_kernel,
+)
 from vllm.model_executor.layers.quantization.kv_cache import BaseKVCacheMethod
 from vllm.model_executor.layers.quantization.utils.flashinfer_fp4_moe import (
     flashinfer_trtllm_fp4_moe,
@@ -73,10 +76,14 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     GroupShape,
     cutlass_fp4_supported,
     is_layer_skipped,
+    kFp8DynamicTokenSym,
+    kFp8StaticTensorSym,
+    kFp8StaticTokenSym,
+    kNvfp4Dynamic,
+    kNvfp4Static,
     swizzle_blockscale,
 )
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
-    Fp8LinearOp,
     cutlass_block_fp8_supported,
     requantize_with_max_scale,
 )
@@ -433,8 +440,11 @@ class ModelOptFp8LinearMethod(LinearMethodBase):
 
     def __init__(self, quant_config: ModelOptFp8Config) -> None:
         self.quant_config = quant_config
-        self.fp8_linear = Fp8LinearOp(
-            act_quant_static=True, act_quant_group_shape=GroupShape.PER_TENSOR
+        self.fp8_linear = init_fp8_linear_kernel(
+            activation_quant_key=kFp8StaticTensorSym,
+            weight_quant_key=kFp8StaticTensorSym,
+            out_dtype=torch.get_default_dtype(),
+            module_name=self.__class__.__name__,
         )
 
     def create_weights(
@@ -502,13 +512,7 @@ class ModelOptFp8LinearMethod(LinearMethodBase):
         x: torch.Tensor,
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        return self.fp8_linear.apply(
-            input=x,
-            weight=layer.weight,
-            weight_scale=layer.weight_scale,
-            input_scale=layer.input_scale,
-            bias=bias,
-        )
+        return self.fp8_linear.apply_weights(layer, x, bias)
 
 
 class ModelOptFp8PcPtLinearMethod(LinearMethodBase):
@@ -522,8 +526,11 @@ class ModelOptFp8PcPtLinearMethod(LinearMethodBase):
 
     def __init__(self, quant_config: ModelOptFp8Config) -> None:
         self.quant_config = quant_config
-        self.fp8_linear = Fp8LinearOp(
-            act_quant_static=False, act_quant_group_shape=GroupShape.PER_TOKEN
+        self.fp8_linear = init_fp8_linear_kernel(
+            activation_quant_key=kFp8DynamicTokenSym,
+            weight_quant_key=kFp8StaticTokenSym,
+            out_dtype=torch.get_default_dtype(),
+            module_name=self.__class__.__name__,
         )
 
     def create_weights(
@@ -580,13 +587,7 @@ class ModelOptFp8PcPtLinearMethod(LinearMethodBase):
         x: torch.Tensor,
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        return self.fp8_linear.apply(
-            input=x,
-            weight=layer.weight,
-            weight_scale=layer.weight_scale,
-            input_scale=None,
-            bias=bias,
-        )
+        return self.fp8_linear.apply_weights(layer, x, bias)
 
 
 class ModelOptFp8PbWoLinearMethod(LinearMethodBase):
@@ -724,12 +725,15 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
         super().__init__(moe_config)
         self.quant_config = quant_config
         assert self.quant_config.is_checkpoint_fp8_serialized
-        self.fp8_backend = select_fp8_moe_backend(
-            block_quant=False,
-            tp_size=moe_config.moe_parallel_config.tp_size,
-            with_lora_support=self.moe.is_lora_enabled,
-            is_act_and_mul=self.moe.is_act_and_mul,
+
+        # Select Fp8 MoE backend
+        self.fp8_backend, self.experts_cls = select_fp8_moe_backend(
+            config=self.moe,
+            weight_key=kFp8StaticTensorSym,
+            activation_key=kFp8StaticTensorSym,
         )
+
+        # Delay creation of the kernel until after process-weights.
         self.kernel: mk.FusedMoEModularKernel | None = None
 
     @property
@@ -864,14 +868,15 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
         replace_parameter(layer, "w13_weight_scale", w13_scale)
         replace_parameter(layer, "w2_weight_scale", w2_scale)
 
-        # Setup modular kernel for TP case.
+        # Setup modular kernel.
         self.moe_quant_config = self.get_fused_moe_quant_config(layer)
         if self.moe_quant_config:
+            assert self.experts_cls is not None
             self.kernel, self.use_inplace = make_fp8_moe_kernel(
-                layer=layer,
                 moe_quant_config=self.moe_quant_config,
                 moe_config=self.moe,
                 fp8_backend=self.fp8_backend,
+                experts_cls=self.experts_cls,
             )
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
@@ -1323,21 +1328,19 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
     ) -> None:
         super().__init__(moe_config)
         self.quant_config = quant_config
-        self.nvfp4_backend = select_nvfp4_moe_backend()
-        # TODO: move this type of check into the oracle.
-        if not self.moe.is_act_and_mul and self.nvfp4_backend not in [
-            NvFp4MoeBackend.FLASHINFER_CUTLASS,
-            NvFp4MoeBackend.MARLIN,
-        ]:
-            raise NotImplementedError(
-                "Non-gated activations are only supported by FlashInfer "
-                f"CUTLASS and Marlin NvFP4 MoE backends, not {self.nvfp4_backend}."
-            )
+        # Select experts implementation.
+        self.nvfp4_backend, self.experts_cls = select_nvfp4_moe_backend(
+            config=self.moe,
+            weight_key=kNvfp4Static,
+            activation_key=kNvfp4Dynamic,
+        )
+
+        # Delay creation of the kernel until after process-weights.
+        self.kernel: mk.FusedMoEModularKernel | None = None
 
         self.use_global_sf = is_global_sf_supported_for_nvfp4_backend(
             self.nvfp4_backend
         )
-        self.kernel: mk.FusedMoEModularKernel | None = None
 
     @property
     def topk_indices_dtype(self) -> torch.dtype | None:
@@ -1533,14 +1536,25 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
         replace_parameter(layer, "w2_weight_scale_2", w2_scale_2)
         replace_parameter(layer, "w2_input_scale", a2_scale)
 
+        # Setup modular kernel for TP case and naive DP/EP case.
+        # In non-naive DP/EP case, we will create a ModularKernelMethod.
+        # TODO(rob): unify these so FP8MoEMethod owns the ModularKernel
+        # in both cases.
         self.moe_quant_config = self.get_fused_moe_quant_config(layer)
-        use_dp = self.moe.dp_size > 1
-        if self.moe_quant_config is not None and not use_dp:
+        if self.moe_quant_config and (
+            (not self.moe.moe_parallel_config.use_all2all_kernels)
+            or self.moe.moe_parallel_config.use_naive_all2all_kernels
+        ):
+            assert self.experts_cls is not None
             self.kernel = make_nvfp4_moe_kernel(
-                backend=self.nvfp4_backend,
                 quant_config=self.moe_quant_config,
                 moe_config=self.moe,
+                experts_cls=self.experts_cls,
             )
+
+    @property
+    def do_post_quant_allgather(self):
+        return self.nvfp4_backend == NvFp4MoeBackend.FLASHINFER_TRTLLM
 
     def prepare_dp_allgather_tensor(
         self,
@@ -1549,13 +1563,17 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
         router_logits: torch.Tensor,
     ) -> tuple[torch.Tensor, list[torch.Tensor]]:
         """Optionally prepare extra tensors to carry through DP allgather/EP."""
+        if self.nvfp4_backend != NvFp4MoeBackend.FLASHINFER_TRTLLM:
+            raise RuntimeError(
+                "prepare_dp_allgather_tensor is only supported for "
+                "FlashInfer TRTLLM NVFP4 MoE backend."
+            )
+
         import flashinfer
 
-        assert self.moe_quant_config is not None
-        a1_gscale = self.moe_quant_config.a1_gscale
         hidden_states_fp4, hidden_states_sf = flashinfer.fp4_quantize(
             hidden_states,
-            a1_gscale,
+            layer.a1_gscale,
             is_sf_swizzled_layout=False,
         )
         extra_tensors: list[torch.Tensor] = [hidden_states_sf]

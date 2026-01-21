@@ -47,6 +47,9 @@ from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig,
     QuantizeMethodBase,
 )
+from vllm.model_executor.layers.quantization.kernels.scaled_mm import (
+    init_fp8_linear_kernel,
+)
 from vllm.model_executor.layers.quantization.kv_cache import BaseKVCacheMethod
 from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
     apply_fi_trtllm_fp8_per_tensor_moe,
@@ -73,12 +76,15 @@ from vllm.model_executor.layers.quantization.utils.marlin_utils_fp8 import (
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     GroupShape,
     is_layer_skipped,
+    kFp8Dynamic128Sym,
+    kFp8DynamicTensorSym,
+    kFp8DynamicTokenSym,
+    kFp8Static128BlockSym,
+    kFp8StaticTensorSym,
 )
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
-    Fp8LinearOp,
     cutlass_block_fp8_supported,
     cutlass_fp8_supported,
-    maybe_create_device_identity,
     normalize_e4m3fn_to_e4m3fnuz,
 )
 from vllm.model_executor.parameter import (
@@ -223,9 +229,14 @@ class Fp8Config(QuantizationConfig):
                 fused_mapping=self.packed_modules_mapping,
             ):
                 return UnquantizedLinearMethod()
-            quant_method = Fp8LinearMethod(self)
-            quant_method.marlin_input_dtype = get_marlin_input_dtype(prefix)
-            return quant_method
+            if not self.is_checkpoint_fp8_serialized:
+                online_method = Fp8OnlineLinearMethod(self)
+                online_method.marlin_input_dtype = get_marlin_input_dtype(prefix)
+                return online_method
+            else:
+                offline_method = Fp8LinearMethod(self)
+                offline_method.marlin_input_dtype = get_marlin_input_dtype(prefix)
+                return offline_method
         elif isinstance(layer, FusedMoE):
             if is_layer_skipped(
                 prefix=prefix,
@@ -288,13 +299,8 @@ class Fp8LinearMethod(LinearMethodBase):
     Supports loading FP8 checkpoints with static weight scale and
     dynamic/static activation scale.
 
-    Also supports loading quantized FP16/BF16 model checkpoints with dynamic
-    activation scaling. The weight scaling factor will be initialized after
-    the model weights are loaded.
-
     Limitations:
-    1. Only support per-tensor quantization due to torch._scaled_mm support.
-    2. Only support float8_e4m3fn data type due to the limitation of
+    1. Only support float8_e4m3fn data type due to the limitation of
        torch._scaled_mm (https://github.com/pytorch/pytorch/blob/2e48b39603411a41c5025efbe52f89560b827825/aten/src/ATen/native/cuda/Blas.cpp#L854-L856)
 
     Args:
@@ -325,28 +331,30 @@ class Fp8LinearMethod(LinearMethodBase):
         self.weight_block_size = self.quant_config.weight_block_size
         self.block_quant = self.weight_block_size is not None
         self.act_q_static = self.quant_config.activation_scheme == "static"
-        if self.weight_block_size:
-            self.act_q_group_shape = GroupShape(1, self.weight_block_size[0])
-        else:
-            # Use per-token quantization for better perf if dynamic and cutlass
-            if not self.act_q_static and cutlass_fp8_supported():
-                self.act_q_group_shape = GroupShape.PER_TOKEN
-            else:
-                self.act_q_group_shape = GroupShape.PER_TENSOR
 
         if self.block_quant:
             assert not self.act_q_static
             assert self.weight_block_size is not None
             self.w8a8_block_fp8_linear = W8A8BlockFp8LinearOp(
                 weight_group_shape=GroupShape(*self.weight_block_size),
-                act_quant_group_shape=self.act_q_group_shape,
+                act_quant_group_shape=GroupShape(1, self.weight_block_size[0]),
                 cutlass_block_fp8_supported=self.cutlass_block_fp8_supported,
                 use_aiter_and_is_supported=self.use_aiter_and_is_supported,
             )
         else:
-            self.fp8_linear = Fp8LinearOp(
-                act_quant_static=self.act_q_static,
-                act_quant_group_shape=self.act_q_group_shape,
+            # Use per-token quantization for better perf if dynamic and cutlass
+            if self.act_q_static:
+                activation_quant_key = kFp8StaticTensorSym
+            elif cutlass_fp8_supported():
+                activation_quant_key = kFp8DynamicTokenSym
+            else:
+                activation_quant_key = kFp8DynamicTensorSym
+
+            self.fp8_linear = init_fp8_linear_kernel(
+                activation_quant_key=activation_quant_key,
+                weight_quant_key=kFp8StaticTensorSym,
+                out_dtype=torch.get_default_dtype(),
+                module_name=self.__class__.__name__,
             )
 
     def create_weights(
@@ -359,8 +367,6 @@ class Fp8LinearMethod(LinearMethodBase):
         params_dtype: torch.dtype,
         **extra_weight_attrs,
     ):
-        maybe_create_device_identity()
-
         output_size_per_partition = sum(output_partition_sizes)
         weight_loader = extra_weight_attrs.get("weight_loader")
         layer.logical_widths = output_partition_sizes
@@ -381,91 +387,43 @@ class Fp8LinearMethod(LinearMethodBase):
                 self.weight_block_size,
             )
 
-        # WEIGHT
-        if self.quant_config.is_checkpoint_fp8_serialized:
-            weight = create_fp8_weight_parameter(
-                output_size_per_partition, input_size_per_partition, weight_loader
-            )
-        else:
-
-            def patched_weight_loader(param, loaded_weight, *args, **kwargs):
-                # track how many elements we have updated
-                if not hasattr(layer, "_loaded_numel"):
-                    layer._loaded_numel = 0
-
-                # load the current weight chunk
-                copy_numel_counter = CopyNumelCounter()
-                with copy_numel_counter:
-                    res = weight_loader(param, loaded_weight, *args, **kwargs)  # type: ignore[misc]
-                layer._loaded_numel += copy_numel_counter.copied_numel
-
-                # if we have loaded all of the elements, call
-                # process_weights_after_loading
-                target_loaded_numel = layer.weight.numel()
-                if layer._loaded_numel == target_loaded_numel:
-                    self.process_weights_after_loading(layer)
-
-                    # Delete the bookkeeping
-                    del layer._loaded_numel
-                    # Prevent the usual `process_weights_after_loading` call from doing
-                    # anything
-                    layer._already_called_process_weights_after_loading = True
-
-                return res
-
-            # For non-serialized checkpoints, use original dtype
-            weight = ModelWeightParameter(
-                data=torch.empty(
-                    output_size_per_partition,
-                    input_size_per_partition,
-                    dtype=params_dtype,
-                ),
-                input_dim=1,
-                output_dim=0,
-                weight_loader=patched_weight_loader,
-            )
+        weight = create_fp8_weight_parameter(
+            output_size_per_partition, input_size_per_partition, weight_loader
+        )
         layer.register_parameter("weight", weight)
 
-        # If checkpoint is serialized fp8, load them.
-        # Otherwise, wait until process_weights_after_loading.
-        if self.quant_config.is_checkpoint_fp8_serialized:
-            # WEIGHT SCALE
-            if not self.block_quant:
-                scale = create_fp8_scale_parameter(
-                    PerTensorScaleParameter,
-                    output_partition_sizes,
-                    input_size_per_partition,
-                    None,
-                    weight_loader,
-                )
-                set_weight_attrs(scale, {"scale_type": "weight_scale"})
-                layer.register_parameter("weight_scale", scale)
-            else:
-                assert not self.act_q_static
-                assert self.weight_block_size is not None
-                scale = create_fp8_scale_parameter(
-                    BlockQuantScaleParameter,
-                    output_partition_sizes,
-                    input_size_per_partition,
-                    self.weight_block_size,
-                    weight_loader,
-                )
-                set_weight_attrs(scale, {"scale_type": "weight_scale"})
-                # The weight_scale_inv name is intentional for deepseekv3
-                layer.register_parameter("weight_scale_inv", scale)
+        # WEIGHT SCALE
+        if not self.block_quant:
+            scale = create_fp8_scale_parameter(
+                PerTensorScaleParameter,
+                output_partition_sizes,
+                input_size_per_partition,
+                None,
+                weight_loader,
+            )
+            set_weight_attrs(scale, {"scale_type": "weight_scale"})
+            layer.register_parameter("weight_scale", scale)
+        else:
+            assert not self.act_q_static
+            assert self.weight_block_size is not None
+            scale = create_fp8_scale_parameter(
+                BlockQuantScaleParameter,
+                output_partition_sizes,
+                input_size_per_partition,
+                self.weight_block_size,
+                weight_loader,
+            )
+            set_weight_attrs(scale, {"scale_type": "weight_scale"})
+            # The weight_scale_inv name is intentional for deepseekv3
+            layer.register_parameter("weight_scale_inv", scale)
 
-            # INPUT ACTIVATION SCALE
-            if self.act_q_static:
-                scale = create_fp8_input_scale(output_partition_sizes, weight_loader)
-                set_weight_attrs(scale, {"scale_type": "input_scale"})
-                layer.register_parameter("input_scale", scale)
-            else:
-                layer.register_parameter("input_scale", None)
+        # INPUT ACTIVATION SCALE
+        if self.act_q_static:
+            scale = create_fp8_input_scale(output_partition_sizes, weight_loader)
+            set_weight_attrs(scale, {"scale_type": "input_scale"})
+            layer.register_parameter("input_scale", scale)
 
     def process_weights_after_loading(self, layer: Module) -> None:
-        if getattr(layer, "_already_called_process_weights_after_loading", False):
-            return
-
         size_k_first = True
         input_scale = None
         # TODO(rob): refactor block quant into separate class.
@@ -483,31 +441,24 @@ class Fp8LinearMethod(LinearMethodBase):
 
         # If checkpoint not serialized fp8, quantize the weights.
         else:
-            if not self.quant_config.is_checkpoint_fp8_serialized:
-                qweight, weight_scale = ops.scaled_fp8_quant(layer.weight, scale=None)
-                weight = qweight.t()
-
             # If checkpoint is fp8 per-tensor, handle that there are N scales for N
             # shards in a fused module
-            else:
-                weight = layer.weight
-                weight_scale = layer.weight_scale
+            weight = layer.weight
+            weight_scale = layer.weight_scale
 
-                # If using w8a8, torch._scaled_mm needs per tensor, so
-                # requantize the logical shards as a single weight.
-                if not self.use_marlin:
-                    weight, weight_scale, input_scale = (
-                        process_fp8_weight_tensor_strategy(
-                            weight,
-                            weight_scale,
-                            layer.logical_widths,
-                            getattr(layer, "input_scale", None),
-                        )
-                    )
-                    if self.act_q_static:
-                        assert input_scale is not None
-                        input_scale = input_scale.max()
-                weight = weight.t()
+            # If using w8a8, torch._scaled_mm needs per tensor, so
+            # requantize the logical shards as a single weight.
+            if not self.use_marlin:
+                weight, weight_scale, input_scale = process_fp8_weight_tensor_strategy(
+                    weight,
+                    weight_scale,
+                    layer.logical_widths,
+                    getattr(layer, "input_scale", None),
+                )
+                if self.act_q_static:
+                    assert input_scale is not None
+                    input_scale = input_scale.max()
+            weight = weight.t()
 
             # Update layer with new values.
             replace_parameter(layer, "weight", weight.data)
@@ -599,14 +550,90 @@ class Fp8LinearMethod(LinearMethodBase):
                 bias=bias,
             )
 
-        return self.fp8_linear.apply(
-            input=x,
-            weight=layer.weight,
-            weight_scale=layer.weight_scale,
-            out_dtype=self.out_dtype,
-            input_scale=layer.input_scale,
-            bias=bias,
+        return self.fp8_linear.apply_weights(layer, x, bias)
+
+
+class Fp8OnlineLinearMethod(Fp8LinearMethod):
+    """Online version of Fp8LinearMethod, loads the fp16/bf16 checkpoint
+    and quantized the weights during loading."""
+
+    def create_weights(
+        self,
+        layer: torch.nn.Module,
+        input_size_per_partition: int,
+        output_partition_sizes: list[int],
+        input_size: int,
+        output_size: int,
+        params_dtype: torch.dtype,
+        **extra_weight_attrs,
+    ):
+        output_size_per_partition = sum(output_partition_sizes)
+        weight_loader = extra_weight_attrs.get("weight_loader")
+        layer.logical_widths = output_partition_sizes
+        layer.input_size_per_partition = input_size_per_partition
+        layer.output_size_per_partition = output_size_per_partition
+        layer.orig_dtype = params_dtype
+        layer.weight_block_size = None
+
+        # WEIGHT
+        def patched_weight_loader(param, loaded_weight, *args, **kwargs):
+            # track how many elements we have updated
+            if not hasattr(layer, "_loaded_numel"):
+                layer._loaded_numel = 0
+
+            # load the current weight chunk
+            copy_numel_counter = CopyNumelCounter()
+            with copy_numel_counter:
+                res = weight_loader(param, loaded_weight, *args, **kwargs)  # type: ignore[misc]
+            layer._loaded_numel += copy_numel_counter.copied_numel
+
+            # if we have loaded all of the elements, call
+            # process_weights_after_loading
+            target_loaded_numel = layer.weight.numel()
+            if layer._loaded_numel == target_loaded_numel:
+                self.process_weights_after_loading(layer)
+
+                # Delete the bookkeeping
+                del layer._loaded_numel
+                # Prevent the usual `process_weights_after_loading` call from doing
+                # anything
+                layer._already_called_process_weights_after_loading = True
+
+            return res
+
+        weight = ModelWeightParameter(
+            data=torch.empty(
+                output_size_per_partition,
+                input_size_per_partition,
+                dtype=params_dtype,
+            ),
+            input_dim=1,
+            output_dim=0,
+            weight_loader=patched_weight_loader,
         )
+        layer.register_parameter("weight", weight)
+
+    def process_weights_after_loading(self, layer: Module) -> None:
+        if getattr(layer, "_already_called_process_weights_after_loading", False):
+            return
+
+        # TODO(future): support block_quant in online quant path
+        assert not self.block_quant
+
+        layer.input_scale = None
+        qweight, weight_scale = ops.scaled_fp8_quant(layer.weight, scale=None)
+        weight = qweight.t()
+
+        # Update layer with new values.
+        replace_parameter(layer, "weight", weight.data)
+        replace_parameter(layer, "weight_scale", weight_scale.data)
+
+        if self.use_marlin:
+            size_k_first = True
+            prepare_fp8_layer_for_marlin(
+                layer, size_k_first, input_dtype=self.marlin_input_dtype
+            )
+            # Activations not quantized for marlin.
 
 
 class Fp8MoEMethod(FusedMoEMethodBase):
@@ -630,37 +657,35 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         self.weight_scale_name = (
             "weight_scale_inv" if self.block_quant else "weight_scale"
         )
-        self.fp8_backend = select_fp8_moe_backend(
-            block_quant=self.block_quant,
-            tp_size=layer.moe_parallel_config.tp_size,
-            with_lora_support=self.moe.is_lora_enabled,
-            is_act_and_mul=self.moe.is_act_and_mul,
-        )
 
-        if self.fp8_backend == Fp8MoeBackend.FLASHINFER_CUTLASS:
-            if self.block_quant and self.weight_block_size != [128, 128]:
-                raise NotImplementedError(
-                    "FlashInfer CUTLASS FP8 MoE backend only supports block "
-                    "size [128, 128]."
-                )
-            if layer.activation != "silu":
-                raise NotImplementedError(
-                    "FlashInfer CUTLASS FP8 MoE backend only supports SiLU "
-                    "activation function, but got {layer.activation}."
-                )
-        dynamic_per_token = (
-            not self.block_quant and self.quant_config.activation_scheme != "static"
-        )
-        if dynamic_per_token and self.fp8_backend in [
-            Fp8MoeBackend.FLASHINFER_TRTLLM,
-            Fp8MoeBackend.FLASHINFER_CUTLASS,
-        ]:
-            raise NotImplementedError(
-                "FlashInfer FP8 MoE backend does not support dynamic per token "
-                "activation quantization."
+        # Set weight key and activation key for kernel compatibility
+        if self.block_quant:
+            weight_key = kFp8Static128BlockSym
+            activation_key = kFp8Dynamic128Sym
+        else:
+            weight_key = kFp8StaticTensorSym
+            activation_key = (
+                kFp8StaticTensorSym
+                if self.quant_config.activation_scheme == "static"
+                else kFp8DynamicTensorSym
             )
 
+        # Select Fp8 MoE backend
+        self.fp8_backend, self.experts_cls = select_fp8_moe_backend(
+            config=self.moe,
+            weight_key=weight_key,
+            activation_key=activation_key,
+            allow_vllm_cutlass=False,
+        )
+
+        # Delay creation of the kernel until after process-weights.
         self.kernel: mk.FusedMoEModularKernel | None = None
+
+    @property
+    def topk_indices_dtype(self) -> torch.dtype | None:
+        if self.kernel is not None:
+            return self.kernel.prepare_finalize.topk_indices_dtype()
+        return None
 
     def create_weights(
         self,
@@ -814,14 +839,21 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         replace_parameter(layer, f"w13_{self.weight_scale_name}", w13_scale)
         replace_parameter(layer, f"w2_{self.weight_scale_name}", w2_scale)
 
-        # Setup modular kernel for TP case.
+        # Setup modular kernel for TP case and naive DP/EP case.
+        # In non-naive DP/EP case, we will create a ModularKernelMethod.
+        # TODO(rob): unify these so FP8MoEMethod owns the ModularKernel
+        # in both cases.
         self.moe_quant_config = self.get_fused_moe_quant_config(layer)
-        if self.moe_quant_config:
+        if self.moe_quant_config and (
+            (not self.moe.moe_parallel_config.use_all2all_kernels)
+            or self.moe.moe_parallel_config.use_naive_all2all_kernels
+        ):
+            assert self.experts_cls is not None
             self.kernel, self.use_inplace = make_fp8_moe_kernel(
-                layer=layer,
                 moe_quant_config=self.moe_quant_config,
                 moe_config=self.moe,
                 fp8_backend=self.fp8_backend,
+                experts_cls=self.experts_cls,
             )
 
     def process_weights_after_loading(self, layer: Module) -> None:
@@ -871,12 +903,6 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         self._setup_kernel(
             layer, w13, w2, w13_scale, w2_scale, w13_input_scale, w2_input_scale
         )
-
-    @property
-    def topk_indices_dtype(self) -> torch.dtype | None:
-        if self.kernel is None:
-            return None
-        return self.kernel.prepare_finalize.topk_indices_dtype()
 
     def maybe_make_prepare_finalize(
         self,
@@ -972,7 +998,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                     routed_scaling=layer.routed_scaling_factor,
                 )
             else:
-                result = apply_fi_trtllm_fp8_per_tensor_moe(
+                return apply_fi_trtllm_fp8_per_tensor_moe(
                     layer=layer,
                     hidden_states=x,
                     router_logits=router_logits,
