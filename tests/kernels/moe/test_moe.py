@@ -953,18 +953,18 @@ class MarlinMoEWeightData:
 )
 @pytest.mark.skipif(current_platform.is_rocm(), reason="Skip for rocm")
 def test_fused_marlin_moe(
-    a_type,
-    b_type,
-    c_type,
-    group_blocks,
-    m,
-    n,
-    k,
-    e,
-    topk,
-    ep_size,
-    act_order,
-    is_k_full,
+    a_type: ScalarType,
+    b_type: ScalarType,
+    c_type: ScalarType,
+    group_blocks: int,
+    m: int,
+    n: int,
+    k: int,
+    e: int,
+    topk: int,
+    ep_size: int,
+    act_order: bool,
+    is_k_full: bool,
 ):
     torch.cuda.manual_seed(1)
     group_size = group_blocks if group_blocks <= 0 else group_blocks * 16
@@ -1040,7 +1040,6 @@ def test_fused_marlin_moe(
         None,
         w1_data.scales,
         w2_data.scales,
-        score,
         topk_weights,
         topk_ids,
         global_num_experts=e,
@@ -1116,7 +1115,6 @@ def test_fused_marlin_moe_with_bias(m):
         w2_data.marlin_bias,
         w1_data.scales,
         w2_data.scales,
-        score,
         topk_weights,
         topk_ids,
         global_num_experts=e,
@@ -1195,7 +1193,6 @@ def test_fused_marlin_moe_non_gated(m: int, n: int, k: int, e: int, topk: int):
         None,  # bias2
         w1_data.scales,
         w2_data.scales,
-        score,
         topk_weights,
         topk_ids,
         global_num_experts=e,
