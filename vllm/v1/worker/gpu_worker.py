@@ -39,7 +39,11 @@ from vllm.lora.request import LoRARequest
 from vllm.model_executor.models.interfaces import is_mixture_of_experts
 from vllm.model_executor.warmup.kernel_warmup import kernel_warmup
 from vllm.platforms import current_platform
-from vllm.profiler.wrapper import CudaProfilerWrapper, TorchProfilerWrapper
+from vllm.profiler.wrapper import (
+    CudaProfilerWrapper,
+    TorchProfilerWrapper,
+    TorchProfilerActivity,
+)
 from vllm.sequence import IntermediateTensors
 from vllm.tasks import SupportedTask
 from vllm.tracing import instrument
@@ -110,7 +114,10 @@ class Worker(WorkerBase):
                 profiler_config,
                 worker_name=worker_name,
                 local_rank=self.local_rank,
-                activities=["CPU", current_platform.dispatch_key],
+                activities=[
+                    "CPU",
+                    cast(TorchProfilerActivity, current_platform.dispatch_key)
+                ],
             )
         elif profiler_config.profiler == "cuda":
             self.profiler = CudaProfilerWrapper(profiler_config)
