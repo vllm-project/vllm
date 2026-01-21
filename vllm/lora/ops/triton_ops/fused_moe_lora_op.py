@@ -124,11 +124,7 @@ def _fused_moe_lora_kernel(
         return
 
     ind_e = lora_id_i32 * stride_el + pid_m
-    expert_id_i32 = tl.load(
-        expert_ids_ptr + ind_e,
-        mask=ind_e < (max_loras_u32.to(tl.int32) * stride_el),
-        other=-1,
-    ).to(tl.int32)
+    expert_id_i32 = tl.load(expert_ids_ptr + ind_e).to(tl.int32)
     expert_id_u32 = expert_id_i32.to(tl.uint32)
     if expert_id_u32 >= num_experts_u32:
         return
