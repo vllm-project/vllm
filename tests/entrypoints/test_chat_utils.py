@@ -2659,3 +2659,51 @@ def test_translategemma_registry_fallback():
     # Regular Gemma 3 should return None (use HF template)
     gemma3_path = get_chat_template_fallback_path("gemma3", "google/gemma-3-27b-it")
     assert gemma3_path is None
+
+
+@pytest.mark.asyncio
+async def test_translategemma_image_translation_fields_preserved(
+    phi3v_model_config,
+    image_url,
+):
+    """Test that translation fields are preserved for image inputs.
+
+    TranslateGemma supports image-to-text translation where an image
+    containing text is translated to a target language.
+    """
+    messages = [
+        {
+            "role": "user",
+            "content": [
+                {
+                    "type": "image_url",
+                    "image_url": {"url": image_url},
+                    "source_lang_code": "en",
+                    "target_lang_code": "es",
+                },
+            ],
+        }
+    ]
+
+    # Use openai format to preserve structured content
+    conversation, mm_future, mm_uuids = parse_chat_messages_futures(
+        messages,
+        phi3v_model_config,
+        content_format="openai",
+    )
+
+    assert len(conversation) == 1
+    assert conversation[0]["role"] == "user"
+
+    content = conversation[0]["content"]
+    assert isinstance(content, list)
+    assert len(content) == 1
+
+    image_part = content[0]
+    assert image_part["type"] == "image"
+    # Verify translation fields are preserved on image parts
+    assert image_part["source_lang_code"] == "en"
+    assert image_part["target_lang_code"] == "es"
+
+    # Verify image data is processed correctly
+    _assert_mm_data_is_image_input(await mm_future, 1)
