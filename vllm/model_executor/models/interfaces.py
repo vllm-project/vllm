@@ -121,13 +121,6 @@ class SupportsMultiModal(Protocol):
     Set internally by `_mark_tower_model` or similar methods.
     """
 
-    # NOTE: By default, `initialize_model` assigns
-    # `make_empty_intermediate_tensors`, `forward`, `compute_logits` and `pooler`
-    # from the language model to this model.
-    # Compared to HF Transformers, `forward` method is decomposed to
-    # `embed_multimodal` and `embed_input_ids` and `<language model>.forward`
-    # which are executed separately by the model runner.
-
     @classmethod
     def get_placeholder_str(cls, modality: str, i: int) -> str | None:
         """
