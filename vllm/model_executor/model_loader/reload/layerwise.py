@@ -8,6 +8,7 @@ import torch
 
 from vllm.attention.layer import Attention, MLAAttention
 from vllm.logger import init_logger
+from vllm.model_executor.layers.fused_moe.modular_kernel import FusedMoEModularKernel
 from vllm.model_executor.layers.quantization.base_config import QuantizeMethodBase
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 
@@ -30,6 +31,7 @@ __all__ = [
 
 
 LAYER_RELOADING_INFO: dict[torch.nn.Module, LayerReloadingInfo] = dict()
+EXPECTED_POST_INIT_LAYERS: tuple[type[torch.nn.Module]] = (FusedMoEModularKernel,)
 
 
 def record_metadata_for_reloading(layer: torch.nn.Module) -> None:
@@ -63,10 +65,9 @@ def initialize_layerwise_reload(layer: torch.nn.Module) -> None:
     3. Run quantization processing if applicable
     4. Copy processed values back to original tensor storage
     """
-    if layer not in LAYER_RELOADING_INFO:
-        raise ValueError("Must call `record_metadata_for_reloading` reloading")
-
-    info = LAYER_RELOADING_INFO[layer]
+    info = _get_layer_info(layer)
+    if info is None:
+        raise ValueError("Must call `record_metadata_for_reloading` before reloading")
 
     # Skip if the layer has already been initialized
     if info.can_reload():
@@ -88,13 +89,13 @@ def initialize_layerwise_reload(layer: torch.nn.Module) -> None:
 
         def make_restore_loader(
             layer: torch.nn.Module,
+            info: LayerReloadingInfo,
             param_name: str,
             param: torch.Tensor,
         ) -> Callable:
             """Create a wrapped weight loader that defers processing."""
             original_loader = _get_original_loader(param)
             loader_signature = inspect.signature(original_loader)
-            info = LAYER_RELOADING_INFO[layer]
 
             @wraps(original_loader, assigned=("__doc__", "__annotations__"))
             def restore_and_process_loader(*args, **kwargs):
@@ -138,7 +139,7 @@ def initialize_layerwise_reload(layer: torch.nn.Module) -> None:
 
             return restore_and_process_loader
 
-        param.weight_loader = make_restore_loader(layer, param_name, param)
+        param.weight_loader = make_restore_loader(layer, info, param_name, param)
 
 
 def finalize_layerwise_reload(layer: torch.nn.Module) -> None:
@@ -150,10 +151,13 @@ def finalize_layerwise_reload(layer: torch.nn.Module) -> None:
 
     Also processes Attention/MLA layers, which must be processed after all other layers
     """
-    info = LAYER_RELOADING_INFO[layer]
+    info = _get_layer_info(layer)
+
+    if info is None:
+        raise ValueError(f"Encountered unexpected module {layer.__class__.__name__}")
 
     # Attention/MLA layers are processed after all other layers
-    if isinstance(layer, (Attention, MLAAttention)) and info.load_numel > 0:
+    elif isinstance(layer, (Attention, MLAAttention)) and info.load_numel > 0:
         # when implementing, remember to unwrap layerwise loaders
         raise NotImplementedError("Layerwise reloading of Q/K/V scale weights")
 
@@ -161,7 +165,7 @@ def finalize_layerwise_reload(layer: torch.nn.Module) -> None:
     # if the created weight has extra padding elements which are not loaded
     # Having too many of these delayed layers can lead to execess memory usage
     # see Limitations(4)
-    if info.load_numel > 0 and info.load_numel < info.load_numel_total:
+    elif info.load_numel > 0 and info.load_numel < info.load_numel_total:
         logger.debug("%s: Delayed processing", layer.__class__.__name__)
         _layerwise_process(layer, info)
 
@@ -170,7 +174,7 @@ def finalize_layerwise_reload(layer: torch.nn.Module) -> None:
         for name in get_layer_tensors(layer):
             delattr(layer, name)
 
-        parameters, buffers = LAYER_RELOADING_INFO[layer].kernel_tensors
+        parameters, buffers = info.kernel_tensors
         for name, param in parameters.items():
             layer.register_parameter(name, param)
         for name, buffer in buffers.items():
@@ -228,3 +232,13 @@ def _get_original_loader(param: torch.Tensor) -> Callable:
         loader = loader.__wrapped__  # type: ignore[union-attr]
 
     return loader
+
+
+def _get_layer_info(layer: torch.nn.Module) -> LayerReloadingInfo | None:
+    if isinstance(layer, EXPECTED_POST_INIT_LAYERS):
+        LAYER_RELOADING_INFO[layer] = LayerReloadingInfo(restore_metadata=({}, {}))
+
+    if layer in LAYER_RELOADING_INFO:
+        return LAYER_RELOADING_INFO[layer]
+
+    return None

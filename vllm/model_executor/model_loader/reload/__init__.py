@@ -26,8 +26,10 @@ __all__ = [
     "initialize_layerwise_reload",
     "finalize_layerwise_reload",
     "support_quantized_model_reload_from_hp_weights",
+    "model_apply",
 ]
 
+from .helpers import model_apply
 from .layerwise import (
     finalize_layerwise_reload,
     initialize_layerwise_reload,
