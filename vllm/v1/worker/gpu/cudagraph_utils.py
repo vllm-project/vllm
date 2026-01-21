@@ -200,8 +200,8 @@ class CudaGraphManager:
             vllm_config=self.vllm_config,
             num_tokens=num_tokens,
             cudagraph_runtime_mode=CUDAGraphMode.PIECEWISE,
-            batch_descriptor=batch_descriptor,
             num_tokens_across_dp=num_tokens_across_dp,
+            batch_descriptor=batch_descriptor,
         ):
             hidden_states = model(
                 input_ids=input_ids,

@@ -12,7 +12,7 @@ import torch.nn as nn
 from vllm.config import VllmConfig
 from vllm.config.compilation import CUDAGraphMode
 from vllm.distributed.parallel_state import prepare_communication_buffer_for_model
-from vllm.forward_context import set_forward_context
+from vllm.forward_context import BatchDescriptor, set_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.model_loader import get_model_loader
 from vllm.multimodal import MULTIMODAL_REGISTRY
@@ -997,12 +997,20 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             if self.uses_mrope:
                 assert input_batch.mrope_positions is not None
                 positions = input_batch.mrope_positions
+
+            batch_descriptor = BatchDescriptor(
+                num_tokens=input_batch.num_tokens_after_padding,
+                num_reqs=None,
+                uniform=False,
+                has_lora=self.lora_config is not None,
+            )
             with set_forward_context(
                 input_batch.attn_metadata,
                 self.vllm_config,
                 num_tokens=input_batch.num_tokens_after_padding,
                 cudagraph_runtime_mode=cudagraph_runtime_mode,
                 num_tokens_across_dp=num_tokens_across_dp,
+                batch_descriptor=batch_descriptor,
             ):
                 hidden_states = self.model(
                     input_ids=input_batch.input_ids,
