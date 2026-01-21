@@ -835,7 +835,10 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             )
         if num_tokens_after_padding == 0:
             # All DP ranks have zero tokens to run, return empty output.
-            return self.kv_connector_no_forward(scheduler_output, self.vllm_config)
+            empty_model_runner_output = self.kv_connector_no_forward(
+                scheduler_output, self.vllm_config
+            )
+            return empty_model_runner_output
 
         if not dummy_run:
             # Common case.
