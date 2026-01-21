@@ -180,6 +180,7 @@ def test_quantize_to_fp4_padded(pad_shape: tuple[int, int]) -> None:
     torch.testing.assert_close(out_ans, out_ref)
     torch.testing.assert_close(scale_ans, scale_ref)
 
+
 @pytest.mark.parametrize("pad_shape", PAD_SHAPES)
 @torch.inference_mode()
 def test_quantize_to_fp4_padded_no_sf_swizzled(pad_shape: tuple[int, int]) -> None:
@@ -199,4 +200,4 @@ def test_quantize_to_fp4_padded_no_sf_swizzled(pad_shape: tuple[int, int]) -> No
     scale_ans = out_scale.to(torch.float32)
     out_ans = cast_from_fp4(out, m, n)
     torch.testing.assert_close(out_ans, out_ref)
-    torch.testing.assert_close(scale_ans, scale_ref)    
+    torch.testing.assert_close(scale_ans, scale_ref)

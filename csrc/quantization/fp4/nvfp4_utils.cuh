@@ -13,18 +13,19 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
- 
+
 #pragma once
 
 #include <cuda_runtime.h>
 #include <cuda_fp8.h>
 
-#if (defined(NVFP4_ENABLE_ELTS16) && (CUDART_VERSION >= 12090) && defined(ENABLE_NVFP4_SM100) && ENABLE_NVFP4_SM100)
-#define ELTS_PER_THREAD 16
+#if (defined(NVFP4_ENABLE_ELTS16) && (CUDART_VERSION >= 12090) && \
+     defined(ENABLE_NVFP4_SM100) && ENABLE_NVFP4_SM100)
+  #define ELTS_PER_THREAD 16
 constexpr int CVT_FP4_ELTS_PER_THREAD = 16;
 constexpr bool CVT_FP4_PACK16 = true;
 #else
-#define ELTS_PER_THREAD 8
+  #define ELTS_PER_THREAD 8
 constexpr int CVT_FP4_ELTS_PER_THREAD = 8;
 constexpr bool CVT_FP4_PACK16 = false;
 #endif
@@ -75,7 +76,8 @@ struct TypeConverter<__nv_bfloat16> {
   using Type = __nv_bfloat162;
 };
 
-#if (defined(NVFP4_ENABLE_ELTS16) && (CUDART_VERSION >= 12090) && defined(ENABLE_NVFP4_SM100) && ENABLE_NVFP4_SM100)
+#if (defined(NVFP4_ENABLE_ELTS16) && (CUDART_VERSION >= 12090) && \
+     defined(ENABLE_NVFP4_SM100) && ENABLE_NVFP4_SM100)
 // Define a 32 bytes packed data type.
 template <class Type>
 struct alignas(32) PackedVec {
@@ -103,7 +105,7 @@ __host__ __device__ inline Int round_up(Int x, Int y) {
 
 template <typename Int>
 __host__ __device__ __forceinline__ Int div_round_up(Int x, Int y) {
-    return (x + y - 1) / y;
+  return (x + y - 1) / y;
 }
 
 // Compute effective rows for grid configuration with swizzled SF layouts.
@@ -149,14 +151,14 @@ __device__ __forceinline__ uint32_t fp32_vec8_to_e2m1(float2 (&array)[4]) {
       "mov.b32 %0, {byte0, byte1, byte2, byte3};\n"
       "}\n"
       : "=r"(val)
-      : "f"(array[0].x), "f"(array[0].y),
-        "f"(array[1].x), "f"(array[1].y),
-        "f"(array[2].x), "f"(array[2].y),
-        "f"(array[3].x), "f"(array[3].y));
+      : "f"(array[0].x), "f"(array[0].y), "f"(array[1].x), "f"(array[1].y),
+        "f"(array[2].x), "f"(array[2].y), "f"(array[3].x), "f"(array[3].y));
   return val;
 }
 
-struct u32x2 { uint32_t lo, hi; };
+struct u32x2 {
+  uint32_t lo, hi;
+};
 
 using fp4_packed_t = std::conditional_t<CVT_FP4_PACK16, u32x2, uint32_t>;
 
@@ -184,15 +186,10 @@ __device__ __forceinline__ u32x2 fp32_vec16_to_e2m1(float2 (&array)[8]) {
       "mov.b32 %1, {b4, b5, b6, b7};\n"
       "}\n"
       : "=r"(out.lo), "=r"(out.hi)
-      : "f"(array[0].x), "f"(array[0].y),
-        "f"(array[1].x), "f"(array[1].y),
-        "f"(array[2].x), "f"(array[2].y),
-        "f"(array[3].x), "f"(array[3].y),
-        "f"(array[4].x), "f"(array[4].y),
-        "f"(array[5].x), "f"(array[5].y),
-        "f"(array[6].x), "f"(array[6].y),
-        "f"(array[7].x), "f"(array[7].y)
-  );
+      : "f"(array[0].x), "f"(array[0].y), "f"(array[1].x), "f"(array[1].y),
+        "f"(array[2].x), "f"(array[2].y), "f"(array[3].x), "f"(array[3].y),
+        "f"(array[4].x), "f"(array[4].y), "f"(array[5].x), "f"(array[5].y),
+        "f"(array[6].x), "f"(array[6].y), "f"(array[7].x), "f"(array[7].y));
   return out;
 }
 
@@ -214,53 +211,51 @@ __device__ __forceinline__ float reciprocal_approximate_ftz(float a) {
 template <class Type>
 __device__ __forceinline__ void ld128_or_zero_cg_u32(PackedVec<Type>& out,
                                                      const void* ptr,
-                                                     bool pred)
-{
-    uint32_t r0, r1, r2, r3;
+                                                     bool pred) {
+  uint32_t r0, r1, r2, r3;
 
-    asm volatile(
-        "{\n"
-        "  .reg .pred pr;\n"
-        "  setp.ne.u32 pr, %4, 0;\n"
-        "  mov.u32 %0, 0;\n"
-        "  mov.u32 %1, 0;\n"
-        "  mov.u32 %2, 0;\n"
-        "  mov.u32 %3, 0;\n"
-        "  @pr ld.global.cg.v4.u32 {%0,%1,%2,%3}, [%5];\n"
-        "}\n"
-        : "=r"(r0), "=r"(r1), "=r"(r2), "=r"(r3)
-        : "r"((int)pred), "l"(ptr)
-    );
+  asm volatile(
+      "{\n"
+      "  .reg .pred pr;\n"
+      "  setp.ne.u32 pr, %4, 0;\n"
+      "  mov.u32 %0, 0;\n"
+      "  mov.u32 %1, 0;\n"
+      "  mov.u32 %2, 0;\n"
+      "  mov.u32 %3, 0;\n"
+      "  @pr ld.global.cg.v4.u32 {%0,%1,%2,%3}, [%5];\n"
+      "}\n"
+      : "=r"(r0), "=r"(r1), "=r"(r2), "=r"(r3)
+      : "r"((int)pred), "l"(ptr));
 
-    *reinterpret_cast<uint4*>(&out) = uint4{r0, r1, r2, r3};
+  *reinterpret_cast<uint4*>(&out) = uint4{r0, r1, r2, r3};
 }
 
 template <class Type>
-__device__ __forceinline__ void ld256_or_zero_cg_u32(PackedVec<Type>& out, const void* ptr, bool pred)
-{
-    uint32_t r0, r1, r2, r3, r4, r5, r6, r7;
+__device__ __forceinline__ void ld256_or_zero_cg_u32(PackedVec<Type>& out,
+                                                     const void* ptr,
+                                                     bool pred) {
+  uint32_t r0, r1, r2, r3, r4, r5, r6, r7;
 
-    asm volatile(
-        "{\n"
-        "  .reg .pred pr;\n"
-        "  setp.ne.u32 pr, %8, 0;\n"
-        "  mov.u32 %0, 0;\n"
-        "  mov.u32 %1, 0;\n"
-        "  mov.u32 %2, 0;\n"
-        "  mov.u32 %3, 0;\n"
-        "  mov.u32 %4, 0;\n"
-        "  mov.u32 %5, 0;\n"
-        "  mov.u32 %6, 0;\n"
-        "  mov.u32 %7, 0;\n"
-        "  @pr ld.global.cg.v8.u32 {%0,%1,%2,%3,%4,%5,%6,%7}, [%9];\n"
-        "}\n"
-        : "=r"(r0), "=r"(r1), "=r"(r2), "=r"(r3),
-          "=r"(r4), "=r"(r5), "=r"(r6), "=r"(r7)
-        : "r"((int)pred), "l"(ptr)
-    );
+  asm volatile(
+      "{\n"
+      "  .reg .pred pr;\n"
+      "  setp.ne.u32 pr, %8, 0;\n"
+      "  mov.u32 %0, 0;\n"
+      "  mov.u32 %1, 0;\n"
+      "  mov.u32 %2, 0;\n"
+      "  mov.u32 %3, 0;\n"
+      "  mov.u32 %4, 0;\n"
+      "  mov.u32 %5, 0;\n"
+      "  mov.u32 %6, 0;\n"
+      "  mov.u32 %7, 0;\n"
+      "  @pr ld.global.cg.v8.u32 {%0,%1,%2,%3,%4,%5,%6,%7}, [%9];\n"
+      "}\n"
+      : "=r"(r0), "=r"(r1), "=r"(r2), "=r"(r3), "=r"(r4), "=r"(r5), "=r"(r6),
+        "=r"(r7)
+      : "r"((int)pred), "l"(ptr));
 
-    reinterpret_cast<uint4*>(&out)[0] = uint4{r0, r1, r2, r3};
-    reinterpret_cast<uint4*>(&out)[1] = uint4{r4, r5, r6, r7};
+  reinterpret_cast<uint4*>(&out)[0] = uint4{r0, r1, r2, r3};
+  reinterpret_cast<uint4*>(&out)[1] = uint4{r4, r5, r6, r7};
 }
 
 // Compute SF output offset for swizzled tensor core layout.
@@ -269,7 +264,7 @@ __device__ __forceinline__ void ld256_or_zero_cg_u32(PackedVec<Type>& out, const
 template <class SFType, int CVT_FP4_NUM_THREADS_PER_SF>
 __device__ __forceinline__ uint8_t* cvt_quant_to_fp4_get_sf_out_offset(
     int rowIdx, int colIdx, int32_t numKTiles, SFType* SFout) {
-  static_assert(CVT_FP4_NUM_THREADS_PER_SF == 1 || 
+  static_assert(CVT_FP4_NUM_THREADS_PER_SF == 1 ||
                 CVT_FP4_NUM_THREADS_PER_SF == 2);
 
   // One pair of threads write one SF to global memory.
@@ -294,22 +289,25 @@ __device__ __forceinline__ uint8_t* cvt_quant_to_fp4_get_sf_out_offset(
   // Compute global SF offset: mTileIdx * (numKTiles * 512) + kTileIdx * 512 +
   //                           outerMIdx * 16 + innerMIdx * 4 + innerKIdx
   // Use bitwise OR for non-overlapping lower bits.
-  int64_t SFOffset =
-      (static_cast<int64_t>(mTileIdx) * numKTiles + kTileIdx) << 9 |
-      (outerMIdx << 4) | (innerMIdx << 2) | innerKIdx;
+  int64_t SFOffset = (static_cast<int64_t>(mTileIdx) * numKTiles + kTileIdx)
+                         << 9 |
+                     (outerMIdx << 4) | (innerMIdx << 2) | innerKIdx;
 
   return reinterpret_cast<uint8_t*>(SFout) + SFOffset;
 }
 
 template <class SFType>
-__device__ __forceinline__ uint8_t* sf_out_rowmajor_u8(
-    int row, int pack, int packs_per_row_sf, SFType* SFout) {
+__device__ __forceinline__ uint8_t* sf_out_rowmajor_u8(int row, int pack,
+                                                       int packs_per_row_sf,
+                                                       SFType* SFout) {
   constexpr int PACK = CVT_FP4_ELTS_PER_THREAD;
-  constexpr int THREADS_PER_SF = CVT_FP4_SF_VEC_SIZE / PACK; // 1 if PACK=16, 2 else PACK=8
+  constexpr int THREADS_PER_SF =
+      CVT_FP4_SF_VEC_SIZE / PACK;  // 1 if PACK=16, 2 else PACK=8
 
   if (threadIdx.x % THREADS_PER_SF != 0) return nullptr;
 
-  int sf_col = pack / THREADS_PER_SF; // PACK=16 => sf_col=pack; PACK=8 => sf_col=pack/2
+  int sf_col =
+      pack / THREADS_PER_SF;  // PACK=16 => sf_col=pack; PACK=8 => sf_col=pack/2
   int64_t off = (int64_t)row * packs_per_row_sf + sf_col;
 
   return (uint8_t*)SFout + off;
@@ -317,7 +315,8 @@ __device__ __forceinline__ uint8_t* sf_out_rowmajor_u8(
 
 // Quantizes the provided PackedVec into the uint32_t output
 template <class Type, int CVT_FP4_NUM_THREADS_PER_SF, bool UE8M0_SF = false>
-__device__ __forceinline__ fp4_packed_t cvt_warp_fp16_to_fp4(PackedVec<Type>& vec, float SFScaleVal, uint8_t* SFout) {
+__device__ __forceinline__ fp4_packed_t
+cvt_warp_fp16_to_fp4(PackedVec<Type>& vec, float SFScaleVal, uint8_t* SFout) {
   // Get absolute maximum values among the local 8 values.
   auto localMax = __habs2(vec.elts[0]);
 
@@ -326,7 +325,7 @@ __device__ __forceinline__ fp4_packed_t cvt_warp_fp16_to_fp4(PackedVec<Type>& ve
   for (int i = 1; i < CVT_FP4_ELTS_PER_THREAD / 2; i++) {
     localMax = __hmax2(localMax, __habs2(vec.elts[i]));
   }
-  
+
   // Get the absolute maximum among all 16 values (two threads).
 
   if constexpr (CVT_FP4_NUM_THREADS_PER_SF == 2) {
@@ -356,7 +355,7 @@ __device__ __forceinline__ fp4_packed_t cvt_warp_fp16_to_fp4(PackedVec<Type>& ve
     // Convert back to fp32.
     SFValue = float(tmp);
   }
-  
+
   // Write the SF to global memory (STG.8).
   if (SFout) *SFout = fp8SFVal;
 
@@ -364,13 +363,13 @@ __device__ __forceinline__ fp4_packed_t cvt_warp_fp16_to_fp4(PackedVec<Type>& ve
   // Recipe: final_scale = reciprocal(fp32(fp8(SFValue * SFScaleVal))) *
   //                       reciprocal(SFScaleVal))
   float outputScale =
-      SFValue != 0.0f
-          ? reciprocal_approximate_ftz(SFValue * reciprocal_approximate_ftz(SFScaleVal))
-          : 0.0f;
+      SFValue != 0.0f ? reciprocal_approximate_ftz(
+                            SFValue * reciprocal_approximate_ftz(SFScaleVal))
+                      : 0.0f;
 
   // Convert the input to float.
   float2 fp2Vals[CVT_FP4_ELTS_PER_THREAD / 2];
-  
+
 #pragma unroll
   for (int i = 0; i < CVT_FP4_ELTS_PER_THREAD / 2; i++) {
     if constexpr (std::is_same_v<Type, half>) {

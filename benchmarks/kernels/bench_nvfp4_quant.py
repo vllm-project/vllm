@@ -23,7 +23,9 @@ PROVIDER_CFGS = {
     "vllm": dict(backend="vllm", is_sf_swizzled_layout=False, enabled=True),
     "vllm-swizzle": dict(backend="vllm", is_sf_swizzled_layout=True, enabled=True),
     "flashinfer": dict(backend="flashinfer", is_sf_swizzled_layout=False, enabled=True),
-    "flashinfer-swizzle": dict(backend="flashinfer", is_sf_swizzled_layout=True, enabled=True),
+    "flashinfer-swizzle": dict(
+        backend="flashinfer", is_sf_swizzled_layout=True, enabled=True
+    ),
 }
 
 _enabled = [k for k, v in PROVIDER_CFGS.items() if v["enabled"]]
@@ -67,12 +69,16 @@ def benchmark(batch_size, provider, N, K):
         # vLLM's FP4 quantization
         if cfg["is_sf_swizzled_layout"]:
             ms, min_ms, max_ms = triton.testing.do_bench_cudagraph(
-                lambda: ops.scaled_fp4_quant(a, a_global_scale, is_sf_swizzled_layout=True),
+                lambda: ops.scaled_fp4_quant(
+                    a, a_global_scale, is_sf_swizzled_layout=True
+                ),
                 quantiles=quantiles,
             )
         else:
             ms, min_ms, max_ms = triton.testing.do_bench_cudagraph(
-                lambda: ops.scaled_fp4_quant(a, a_global_scale, is_sf_swizzled_layout=False),
+                lambda: ops.scaled_fp4_quant(
+                    a, a_global_scale, is_sf_swizzled_layout=False
+                ),
                 quantiles=quantiles,
             )
     elif cfg["backend"] == "flashinfer":
@@ -107,7 +113,9 @@ def prepare_shapes(args):
     return out
 
 
-def _test_accuracy_once(M: int, K: int, dtype: torch.dtype, device: str, is_sf_swizzled_layout: bool):
+def _test_accuracy_once(
+    M: int, K: int, dtype: torch.dtype, device: str, is_sf_swizzled_layout: bool
+):
     """Test accuracy between vLLM and FlashInfer FP4 quantization."""
     # Create input tensor
     a = torch.randn((M, K), device=device, dtype=dtype)
@@ -116,7 +124,9 @@ def _test_accuracy_once(M: int, K: int, dtype: torch.dtype, device: str, is_sf_s
     a_global_scale = compute_global_scale(a)
 
     # vLLM quantization
-    vllm_fp4, vllm_scale = ops.scaled_fp4_quant(a, a_global_scale, is_sf_swizzled_layout=is_sf_swizzled_layout)
+    vllm_fp4, vllm_scale = ops.scaled_fp4_quant(
+        a, a_global_scale, is_sf_swizzled_layout=is_sf_swizzled_layout
+    )
 
     # FlashInfer quantization (with swizzled layout to match vLLM's output)
     flashinfer_fp4, flashinfer_scale = flashinfer_fp4_quantize(
@@ -134,7 +144,9 @@ def _test_accuracy_once(M: int, K: int, dtype: torch.dtype, device: str, is_sf_s
         vllm_scale,
         flashinfer_scale,
     )
-    print(f"M={M}, K={K}, dtype={dtype}, is_sf_swizzled_layout={is_sf_swizzled_layout}: PASSED")
+    print(
+        f"M={M}, K={K}, dtype={dtype}, is_sf_swizzled_layout={is_sf_swizzled_layout}: PASSED"  # noqa: E501
+    )
 
 
 def test_accuracy():

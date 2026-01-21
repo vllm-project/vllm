@@ -1578,7 +1578,7 @@ def scaled_fp4_quant(
     else:
         # Two fp4 values will be packed into an uint8.
         output = torch.empty((m, n // 2), device=device, dtype=torch.uint8)
-        if is_sf_swizzled_layout:            
+        if is_sf_swizzled_layout:
             # We use the rounded values to store the swizzled values. Due to the
             # requirement of the Tensor Core, the minimum tile is 128x4 for the scales.
             # So, we first pad the scales to multiples of 128 and 4. Then, the scales
@@ -1592,11 +1592,11 @@ def scaled_fp4_quant(
                 (rounded_m, rounded_n // 4), device=device, dtype=torch.int32
             )
         else:
-            output_scale = torch.empty(
-                (m, n // 16), device=device, dtype=torch.uint8
-            )
+            output_scale = torch.empty((m, n // 16), device=device, dtype=torch.uint8)
 
-        torch.ops._C.scaled_fp4_quant(output, input, output_scale, input_global_scale, is_sf_swizzled_layout)
+        torch.ops._C.scaled_fp4_quant(
+            output, input, output_scale, input_global_scale, is_sf_swizzled_layout
+        )
 
     output_scale = output_scale.view(torch.float8_e4m3fn)
     return output, output_scale
