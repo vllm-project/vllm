@@ -586,7 +586,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 # This is ~1.1GB and only changes when FlashInfer version bumps
 # https://docs.flashinfer.ai/installation.html
 # From versions.json: .flashinfer.version
-ARG FLASHINFER_VERSION=0.6.2
+ARG FLASHINFER_VERSION=0.6.1
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv pip install --system flashinfer-cubin==${FLASHINFER_VERSION} \
     && uv pip install --system flashinfer-jit-cache==${FLASHINFER_VERSION} \
