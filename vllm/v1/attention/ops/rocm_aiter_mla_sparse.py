@@ -531,13 +531,6 @@ def rocm_aiter_sparse_attn_indexer(
     has_prefill = attn_metadata.num_prefills > 0
     num_decode_tokens = attn_metadata.num_decode_tokens
 
-    # indexer_k_quant_and_cache_triton(
-    #     k,
-    #     kv_cache,
-    #     slot_mapping,
-    #     quant_block_size,
-    #     scale_fmt,
-    # )
     ops.indexer_k_quant_and_cache(
         k,
         kv_cache,
@@ -560,14 +553,7 @@ def rocm_aiter_sparse_attn_indexer(
                 device=k.device,
                 dtype=torch.uint8,
             )
-            # cp_gather_indexer_k_quant_cache_triton(
-            #     kv_cache,
-            #     k_fp8,
-            #     k_scale,
-            #     chunk.block_table,
-            #     chunk.cu_seq_lens,
-            #     chunk.token_to_seq,
-            # )
+
             ops.cp_gather_indexer_k_quant_cache(
                 kv_cache,
                 k_fp8,
