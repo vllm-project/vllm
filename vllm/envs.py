@@ -215,7 +215,7 @@ if TYPE_CHECKING:
     VLLM_MORIIO_NUM_WORKERS: int = 1
     VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT: int = 480
     VLLM_USE_CUDNN_PREFILL: bool = False
-    VLLM_USE_TRTLLM_RAGGED_DEEPSEEK_PREFILL: bool = False
+    VLLM_USE_TRTLLM_RAGGED_DEEPSEEK_PREFILL: bool = True
     VLLM_ENABLE_CUDAGRAPH_GC: bool = False
     VLLM_LOOPBACK_IP: str = ""
     VLLM_ALLOW_CHUNKED_LOCAL_ATTN_WITH_HYBRID_KV_CACHE: bool = True
@@ -1470,7 +1470,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
     ),
     # Controls whether to use TRT-LLM ragged DeepSeek prefill
     "VLLM_USE_TRTLLM_RAGGED_DEEPSEEK_PREFILL": lambda: bool(
-        int(os.getenv("VLLM_USE_TRTLLM_RAGGED_DEEPSEEK_PREFILL", "0"))
+        int(os.getenv("VLLM_USE_TRTLLM_RAGGED_DEEPSEEK_PREFILL", "1"))
     ),
     # If set to 1/True, use the TRTLLM attention backend in flashinfer.
     # If set to 0/False, use the default attention backend in flashinfer.
