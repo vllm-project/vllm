@@ -307,8 +307,6 @@ __device__ __forceinline__ uint8_t* sf_out_rowmajor_u8(
   constexpr int PACK = CVT_FP4_ELTS_PER_THREAD;
   constexpr int THREADS_PER_SF = CVT_FP4_SF_VEC_SIZE / PACK; // 1 if PACK=16, 2 else PACK=8
 
-  static_assert(THREADS_PER_SF == 1);
-
   if (threadIdx.x % THREADS_PER_SF != 0) return nullptr;
 
   int sf_col = pack / THREADS_PER_SF; // PACK=16 => sf_col=pack; PACK=8 => sf_col=pack/2
