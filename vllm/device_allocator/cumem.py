@@ -321,33 +321,45 @@ class CuMemAllocator:
             device = torch.cuda.current_device()
             
             for ptr, data in self.pointer_to_data.items():
-                if (tags is None or data.tag in tags) and data.is_on_cpu:
-                    handle = data.handle
-                    size_in_bytes = handle[1]
-                    
-                    try:
-                        # Advise CUDA to prefer this memory back on GPU
-                        libcudart.cudaMemAdvise(
-                            ptr,
-                            size_in_bytes,
-                            cudaMemAdviseSetPreferredLocation,
-                            device,
-                        )
-                        # Prefetch back to GPU asynchronously
-                        libcudart.cudaMemPrefetchAsync(
-                            ptr, size_in_bytes, device, None
-                        )
-                        data.is_on_cpu = False
+                if tags is None or data.tag in tags:
+                    # Handle tensors that were successfully migrated with unified memory
+                    if data.is_on_cpu:
+                        handle = data.handle
+                        size_in_bytes = handle[1]
                         
-                    except Exception as e:
-                        logger.warning(
-                            f"cudaMemAdvise/Prefetch failed during wake_up: {e}"
+                        try:
+                            # Advise CUDA to prefer this memory back on GPU
+                            libcudart.cudaMemAdvise(
+                                ptr,
+                                size_in_bytes,
+                                cudaMemAdviseSetPreferredLocation,
+                                device,
+                            )
+                            # Prefetch back to GPU asynchronously
+                            libcudart.cudaMemPrefetchAsync(
+                                ptr, size_in_bytes, device, None
+                            )
+                            data.is_on_cpu = False
+                            
+                        except Exception as e:
+                            logger.warning(
+                                f"cudaMemAdvise/Prefetch failed during wake_up: {e}"
+                            )
+                            # If unified memory fails, we have a problem
+                            # because we didn't save a CPU backup
+                            raise RuntimeError(
+                                "Unified memory wake_up failed and no CPU backup available"
+                            ) from e
+                    
+                    # Handle tensors that fell back to CPU copy during sleep
+                    elif data.cpu_backup_tensor is not None:
+                        cpu_backup_tensor = data.cpu_backup_tensor
+                        size_in_bytes = (
+                            cpu_backup_tensor.numel() * cpu_backup_tensor.element_size()
                         )
-                        # If unified memory fails, we have a problem
-                        # because we didn't save a CPU backup
-                        raise RuntimeError(
-                            "Unified memory wake_up failed and no CPU backup available"
-                        ) from e
+                        cpu_ptr = cpu_backup_tensor.data_ptr()
+                        libcudart.cudaMemcpy(ptr, cpu_ptr, size_in_bytes)
+                        data.cpu_backup_tensor = None
         else:
             # ============ TRADITIONAL PATH: Physical Copy ============
             for ptr, data in self.pointer_to_data.items():
