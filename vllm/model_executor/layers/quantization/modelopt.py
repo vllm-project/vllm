@@ -13,11 +13,11 @@ import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm._custom_ops import cutlass_scaled_fp4_mm, scaled_fp4_quant
 from vllm.attention.layer import Attention
 from vllm.logger import init_logger
+from vllm.model_executor.layers.fused_moe import FusedMoERouter
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
     FusedMoEQuantConfig,
 )
-from vllm.model_executor.layers.fused_moe.fused_moe_router import FusedMoERouter
 from vllm.model_executor.layers.fused_moe.layer import (
     FusedMoE,
     FusedMoEMethodBase,
@@ -49,6 +49,9 @@ from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig,
     QuantizeMethodBase,
 )
+from vllm.model_executor.layers.quantization.kernels.scaled_mm import (
+    init_fp8_linear_kernel,
+)
 from vllm.model_executor.layers.quantization.kv_cache import BaseKVCacheMethod
 from vllm.model_executor.layers.quantization.utils.flashinfer_fp4_moe import (
     build_flashinfer_fp4_cutlass_moe_prepare_finalize,
@@ -78,10 +81,12 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     GroupShape,
     cutlass_fp4_supported,
     is_layer_skipped,
+    kFp8DynamicTokenSym,
+    kFp8StaticTensorSym,
+    kFp8StaticTokenSym,
     swizzle_blockscale,
 )
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
-    Fp8LinearOp,
     cutlass_block_fp8_supported,
     requantize_with_max_scale,
 )
@@ -438,8 +443,11 @@ class ModelOptFp8LinearMethod(LinearMethodBase):
 
     def __init__(self, quant_config: ModelOptFp8Config) -> None:
         self.quant_config = quant_config
-        self.fp8_linear = Fp8LinearOp(
-            act_quant_static=True, act_quant_group_shape=GroupShape.PER_TENSOR
+        self.fp8_linear = init_fp8_linear_kernel(
+            activation_quant_key=kFp8StaticTensorSym,
+            weight_quant_key=kFp8StaticTensorSym,
+            out_dtype=torch.get_default_dtype(),
+            module_name=self.__class__.__name__,
         )
 
     def create_weights(
@@ -507,13 +515,7 @@ class ModelOptFp8LinearMethod(LinearMethodBase):
         x: torch.Tensor,
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        return self.fp8_linear.apply(
-            input=x,
-            weight=layer.weight,
-            weight_scale=layer.weight_scale,
-            input_scale=layer.input_scale,
-            bias=bias,
-        )
+        return self.fp8_linear.apply_weights(layer, x, bias)
 
 
 class ModelOptFp8PcPtLinearMethod(LinearMethodBase):
@@ -527,8 +529,11 @@ class ModelOptFp8PcPtLinearMethod(LinearMethodBase):
 
     def __init__(self, quant_config: ModelOptFp8Config) -> None:
         self.quant_config = quant_config
-        self.fp8_linear = Fp8LinearOp(
-            act_quant_static=False, act_quant_group_shape=GroupShape.PER_TOKEN
+        self.fp8_linear = init_fp8_linear_kernel(
+            activation_quant_key=kFp8DynamicTokenSym,
+            weight_quant_key=kFp8StaticTokenSym,
+            out_dtype=torch.get_default_dtype(),
+            module_name=self.__class__.__name__,
         )
 
     def create_weights(
@@ -585,13 +590,7 @@ class ModelOptFp8PcPtLinearMethod(LinearMethodBase):
         x: torch.Tensor,
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        return self.fp8_linear.apply(
-            input=x,
-            weight=layer.weight,
-            weight_scale=layer.weight_scale,
-            input_scale=None,
-            bias=bias,
-        )
+        return self.fp8_linear.apply_weights(layer, x, bias)
 
 
 class ModelOptFp8PbWoLinearMethod(LinearMethodBase):
@@ -733,6 +732,7 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
             block_quant=False,
             tp_size=moe_config.moe_parallel_config.tp_size,
             with_lora_support=self.moe.is_lora_enabled,
+            is_act_and_mul=self.moe.is_act_and_mul,
         )
         self.kernel: mk.FusedMoEModularKernel | None = None
 
@@ -789,15 +789,12 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
         )
         weight_loader = extra_weight_attrs.get("weight_loader")
 
-        if self.moe.is_act_and_mul:
-            w13_up_dim = 2 * intermediate_size_per_partition
-        else:
-            w13_up_dim = intermediate_size_per_partition
+        w13_num_shards = 2 if self.moe.is_act_and_mul else 1
 
         w13_weight = ModelWeightParameter(
             data=torch.empty(
                 num_experts,
-                w13_up_dim,
+                w13_num_shards * intermediate_size_per_partition,
                 hidden_size,
                 dtype=weight_dtype,
             ),
@@ -826,7 +823,7 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
         # For non-gated MoE, allocate 1 scale for w13.
         w13_weight_scale = PerTensorScaleParameter(
             data=torch.full(
-                (num_experts, 2 if self.moe.is_act_and_mul else 1),
+                (num_experts, w13_num_shards),
                 1.0,
                 dtype=torch.float32,
             ),
@@ -1132,6 +1129,9 @@ class ModelOptNvFp4LinearMethod(LinearMethodBase):
         elif envs.VLLM_NVFP4_GEMM_BACKEND == "cutlass":
             self.backend = "cutlass"
             assert cutlass_fp4_supported(), f"Cutlass is required for {self.backend}"
+        elif envs.VLLM_NVFP4_GEMM_BACKEND == "marlin":
+            self.backend = "marlin"
+            assert is_fp4_marlin_supported(), f"Marlin is required for {self.backend}"
 
         if self.backend == "none":
             raise ValueError(
@@ -1291,7 +1291,7 @@ class ModelOptNvFp4LinearMethod(LinearMethodBase):
         output_shape = [x.shape[0], layer.weight.shape[0]]
 
         # quantize BF16 or FP16 to (FP4 and interleaved block scale)
-        x_fp4, x_blockscale = scaled_fp4_quant(x, layer.input_scale_inv)
+        x_fp4, x_blockscale = scaled_fp4_quant(x, layer.input_scale_inv, self.backend)
 
         # validate dtypes of quantized input, input block scale,
         # weight and weight_blockscale
@@ -1337,13 +1337,13 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
         self.quant_config = quant_config
         self.nvfp4_backend = select_nvfp4_moe_backend()
         # TODO: move this type of check into the oracle.
-        if (
-            not self.moe.is_act_and_mul
-            and not self.nvfp4_backend == NvFp4MoeBackend.FLASHINFER_CUTLASS
-        ):
+        if not self.moe.is_act_and_mul and self.nvfp4_backend not in [
+            NvFp4MoeBackend.FLASHINFER_CUTLASS,
+            NvFp4MoeBackend.MARLIN,
+        ]:
             raise NotImplementedError(
                 "Non-gated activations are only supported by FlashInfer "
-                "CUTLASS NvFP4 MoE backend."
+                f"CUTLASS and Marlin NvFP4 MoE backends, not {self.nvfp4_backend}."
             )
 
         self.use_global_sf = is_global_sf_supported_for_nvfp4_backend(
@@ -1409,11 +1409,12 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
         weight_scale_dtype = torch.float8_e4m3fn
         weight_loader = extra_weight_attrs.get("weight_loader")
         global_num_experts = extra_weight_attrs.get("global_num_experts")
+        w13_num_shards = 2 if self.moe.is_act_and_mul else 1
         # GEMM 1
         w13_weight = ModelWeightParameter(
             data=torch.empty(
                 num_experts,
-                (2 if self.moe.is_act_and_mul else 1) * intermediate_size_per_partition,
+                w13_num_shards * intermediate_size_per_partition,
                 # 2 fp4 items are packed in the input dimension
                 hidden_size // 2,
                 dtype=weight_dtype,
@@ -1442,7 +1443,7 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
         w13_weight_scale = ModelWeightParameter(
             data=torch.empty(
                 num_experts,
-                (2 if self.moe.is_act_and_mul else 1) * intermediate_size_per_partition,
+                w13_num_shards * intermediate_size_per_partition,
                 # 2 fp4 items are packed in the input dimension
                 hidden_size // self.quant_config.group_size,
                 dtype=weight_scale_dtype,
@@ -1472,9 +1473,7 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
         )
 
         w13_weight_scale_2 = PerTensorScaleParameter(
-            data=torch.empty(
-                num_experts, 2 if self.moe.is_act_and_mul else 1, dtype=torch.float32
-            ),
+            data=torch.empty(num_experts, w13_num_shards, dtype=torch.float32),
             weight_loader=weight_loader,
         )
         layer.register_parameter("w13_weight_scale_2", w13_weight_scale_2)
@@ -1495,7 +1494,7 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
         w13_input_scale = PerTensorScaleParameter(
             data=torch.empty(
                 global_sf_num_experts,
-                2 if self.moe.is_act_and_mul else 1,
+                w13_num_shards,
                 dtype=torch.float32,
             ),
             weight_loader=weight_loader,
@@ -1564,6 +1563,10 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
                 moe_config=self.moe,
             )
 
+    @property
+    def do_post_quant_allgather(self):
+        return self.nvfp4_backend == NvFp4MoeBackend.FLASHINFER_TRTLLM
+
     def prepare_dp_allgather_tensor(
         self,
         layer: FusedMoE,
@@ -1571,13 +1574,17 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
         router_logits: torch.Tensor,
     ) -> tuple[torch.Tensor, list[torch.Tensor]]:
         """Optionally prepare extra tensors to carry through DP allgather/EP."""
+        if self.nvfp4_backend != NvFp4MoeBackend.FLASHINFER_TRTLLM:
+            raise RuntimeError(
+                "prepare_dp_allgather_tensor is only supported for "
+                "FlashInfer TRTLLM NVFP4 MoE backend."
+            )
+
         import flashinfer
 
-        assert self.moe_quant_config is not None
-        a1_gscale = self.moe_quant_config.a1_gscale
         hidden_states_fp4, hidden_states_sf = flashinfer.fp4_quantize(
             hidden_states,
-            a1_gscale,
+            layer.a1_gscale,
             is_sf_swizzled_layout=False,
         )
         extra_tensors: list[torch.Tensor] = [hidden_states_sf]
@@ -1616,6 +1623,7 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
                 x=x,
                 router_logits=router_logits,
                 top_k=layer.top_k,
+                activation=layer.activation,
                 global_num_experts=layer.global_num_experts,
                 num_expert_group=layer.num_expert_group,
                 topk_group=layer.topk_group,
@@ -1642,6 +1650,7 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
                 topk_ids=topk_ids,
                 topk_weights=topk_weights,
                 top_k=layer.top_k,
+                activation=layer.activation,
                 global_num_experts=layer.global_num_experts,
             )
         else:

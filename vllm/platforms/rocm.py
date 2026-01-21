@@ -170,7 +170,9 @@ class RocmPlatform(Platform):
 
     supported_quantization: list[str] = [
         "awq",
+        "awq_marlin",  # will be overwritten with awq
         "gptq",
+        "gptq_marlin",  # will be overwritten with gptq
         "fp8",
         "compressed-tensors",
         "fbgemm_fp8",
@@ -184,6 +186,17 @@ class RocmPlatform(Platform):
     # bitsandbytes not supported on gfx9 (warp size 64 limitation)
     if not on_gfx9():
         supported_quantization += ["bitsandbytes"]
+
+    @classmethod
+    def import_kernels(cls) -> None:
+        """Import ROCm-specific kernels."""
+        super().import_kernels()
+
+        import contextlib
+
+        # Import ROCm-specific extension
+        with contextlib.suppress(ImportError):
+            import vllm._rocm_C  # noqa: F401
 
     @classmethod
     def get_attn_backend_cls(

@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import time
-from typing import Annotated, Any
+from typing import Any, TypeAlias
 
 from pydantic import (
     BaseModel,
@@ -10,31 +10,20 @@ from pydantic import (
 
 from vllm import PoolingParams
 from vllm.config.pooler import get_use_activation
-from vllm.entrypoints.openai.protocol import OpenAIBaseModel, UsageInfo
-from vllm.entrypoints.score_utils import ScoreContentPartParam, ScoreMultiModalParam
+from vllm.entrypoints.openai.engine.protocol import OpenAIBaseModel, UsageInfo
+from vllm.entrypoints.pooling.base.protocol import PoolingBasicRequestMixin
+from vllm.entrypoints.pooling.score.utils import (
+    ScoreContentPartParam,
+    ScoreMultiModalParam,
+)
 from vllm.utils import random_uuid
 
 
-class ScoreRequest(OpenAIBaseModel):
-    model: str | None = None
-    text_1: list[str] | str | ScoreMultiModalParam
-    text_2: list[str] | str | ScoreMultiModalParam
-    truncate_prompt_tokens: Annotated[int, Field(ge=-1)] | None = None
-
+class ScoreRequestMixin(PoolingBasicRequestMixin):
     # --8<-- [start:score-extra-params]
-
     mm_processor_kwargs: dict[str, Any] | None = Field(
         default=None,
         description=("Additional kwargs to pass to the HF processor."),
-    )
-
-    priority: int = Field(
-        default=0,
-        description=(
-            "The priority of the request (lower means earlier handling; "
-            "default: 0). Any priority other than 0 will raise an error "
-            "if the served model does not use priority scheduling."
-        ),
     )
 
     softmax: bool | None = Field(
@@ -61,29 +50,52 @@ class ScoreRequest(OpenAIBaseModel):
         )
 
 
-class RerankRequest(OpenAIBaseModel):
-    model: str | None = None
+class ScoreDataRequest(ScoreRequestMixin):
+    data_1: list[str] | str | ScoreMultiModalParam
+    data_2: list[str] | str | ScoreMultiModalParam
+
+
+class ScoreQueriesDocumentsRequest(ScoreRequestMixin):
+    queries: list[str] | str | ScoreMultiModalParam
+    documents: list[str] | str | ScoreMultiModalParam
+
+    @property
+    def data_1(self):
+        return self.queries
+
+    @property
+    def data_2(self):
+        return self.documents
+
+
+class ScoreTextRequest(ScoreRequestMixin):
+    text_1: list[str] | str | ScoreMultiModalParam
+    text_2: list[str] | str | ScoreMultiModalParam
+
+    @property
+    def data_1(self):
+        return self.text_1
+
+    @property
+    def data_2(self):
+        return self.text_2
+
+
+ScoreRequest: TypeAlias = (
+    ScoreQueriesDocumentsRequest | ScoreDataRequest | ScoreTextRequest
+)
+
+
+class RerankRequest(PoolingBasicRequestMixin):
     query: str | ScoreMultiModalParam
     documents: list[str] | ScoreMultiModalParam
     top_n: int = Field(default_factory=lambda: 0)
-    truncate_prompt_tokens: Annotated[int, Field(ge=-1)] | None = None
 
     # --8<-- [start:rerank-extra-params]
-
     mm_processor_kwargs: dict[str, Any] | None = Field(
         default=None,
         description=("Additional kwargs to pass to the HF processor."),
     )
-
-    priority: int = Field(
-        default=0,
-        description=(
-            "The priority of the request (lower means earlier handling; "
-            "default: 0). Any priority other than 0 will raise an error "
-            "if the served model does not use priority scheduling."
-        ),
-    )
-
     softmax: bool | None = Field(
         default=None,
         description="softmax will be deprecated, please use use_activation instead.",

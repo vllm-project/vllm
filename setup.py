@@ -978,12 +978,13 @@ setup(
     ext_modules=ext_modules,
     install_requires=get_requirements(),
     extras_require={
-        "bench": ["pandas", "matplotlib", "seaborn", "datasets"],
+        "bench": ["pandas", "matplotlib", "seaborn", "datasets", "scipy"],
         "tensorizer": ["tensorizer==2.10.1"],
         "fastsafetensors": ["fastsafetensors >= 0.1.10"],
         "runai": ["runai-model-streamer[s3,gcs] >= 0.15.3"],
         "audio": [
             "librosa",
+            "scipy",
             "soundfile",
             "mistral_common[audio]",
         ],  # Required for audio processing
@@ -991,6 +992,8 @@ setup(
         "flashinfer": [],  # Kept for backwards compatibility
         # Optional deps for AMD FP4 quantization support
         "petit-kernel": ["petit-kernel"],
+        # Optional deps for Helion kernel development
+        "helion": ["helion"],
     },
     cmdclass=cmdclass,
     package_data=package_data,

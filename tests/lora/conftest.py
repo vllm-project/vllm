@@ -234,6 +234,18 @@ def qwen3vl_vision_lora_files():
 
 
 @pytest.fixture(scope="session")
+def qwen3_meowing_lora_files():
+    """Download Qwen3 Meow LoRA files once per test session."""
+    return snapshot_download(repo_id="Jackmin108/Qwen3-0.6B-Meow-LoRA")
+
+
+@pytest.fixture(scope="session")
+def qwen3_woofing_lora_files():
+    """Download Qwen3 Woof LoRA files once per test session."""
+    return snapshot_download(repo_id="Jackmin108/Qwen3-0.6B-Woof-LoRA")
+
+
+@pytest.fixture(scope="session")
 def tinyllama_lora_files():
     return snapshot_download(repo_id="jashing/tinyllama-colorist-lora")
 
