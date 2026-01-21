@@ -241,20 +241,22 @@ class SupportsMultiModal(Protocol):
         Returns:
             torch.nn.Module: The core language model component.
         """
-        if self._language_model_names:
-            language_model = self
-            for attr in common_prefix(
-                [name.split(".") for name in self._language_model_names]
-            ):
-                language_model = getattr(language_model, attr)
-
-            if hasattr(language_model, "embed_input_ids"):
-                return language_model
-
-        # Fallback
+        # Cached
         if self in _language_model_by_module:
             return _language_model_by_module[self]
 
+        if self._language_model_names:
+            mod = self
+            for attr in common_prefix(
+                [name.split(".") for name in self._language_model_names]
+            ):
+                mod = getattr(mod, attr)
+
+            if mod is not self and hasattr(mod, "embed_input_ids"):
+                _language_model_by_module[self] = mod
+                return mod
+
+        # Fallback
         for name, mod in self.named_modules():
             if mod is not self and hasattr(mod, "embed_input_ids"):
                 _language_model_by_module[self] = mod
