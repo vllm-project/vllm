@@ -7,7 +7,7 @@ import torch
 import torch.nn as nn
 from transformers import Lfm2Config
 
-from vllm.attention import Attention
+from vllm.attention.layer import Attention
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, ModelConfig, VllmConfig
 from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
@@ -143,7 +143,6 @@ class Lfm2Attention(nn.Module):
         )
         self.rotary_emb = get_rope(
             self.head_dim,
-            rotary_dim=self.head_dim,
             max_position=self.max_position_embeddings,
             rope_parameters=config.rope_parameters,
             is_neox_style=True,
@@ -249,7 +248,7 @@ class Lfm2ShortConvDecoderLayer(nn.Module):
     ) -> None:
         super().__init__()
         self.layer_idx = layer_idx
-        self.conv = ShortConv(
+        self.short_conv = ShortConv(
             config=config,
             dim=config.conv_dim,
             layer_idx=layer_idx,
@@ -282,7 +281,7 @@ class Lfm2ShortConvDecoderLayer(nn.Module):
         else:
             hidden_states, residual = self.operator_norm(hidden_states, residual)
         output = torch.empty_like(hidden_states)
-        self.conv(
+        self.short_conv(
             hidden_states,
             output,
         )
@@ -381,6 +380,9 @@ class Lfm2Model(nn.Module):
         params_dict = dict(self.named_parameters())
         loaded_params: set[str] = set()
         for name, loaded_weight in weights:
+            if ".conv." in name:
+                name = name.replace(".conv.", ".short_conv.", 1)
+
             for param_name, weight_name, shard_id in stacked_params_mapping:
                 if weight_name not in name:
                     continue
@@ -415,6 +417,7 @@ class Lfm2ForCausalLM(
             "w1",
             "w3",
         ],
+        "in_proj": ["in_proj"],
     }
 
     # LoRA specific attributes
@@ -422,7 +425,6 @@ class Lfm2ForCausalLM(
         "embed_tokens": "input_embeddings",
         "lm_head": "output_embeddings",
     }
-    embedding_padding_modules = ["lm_head"]
 
     @classmethod
     def get_mamba_state_dtype_from_config(

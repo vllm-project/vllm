@@ -287,7 +287,10 @@ class BatchedDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
         """
         DeepGemm supports packed ue8m0 activation scales format in devices == sm100
         """
-        return is_deep_gemm_e8m0_used() and current_platform.is_device_capability(100)
+        return (
+            is_deep_gemm_e8m0_used()
+            and current_platform.is_device_capability_family(100)
+        )
 
     def finalize_weight_and_reduce_impl(self) -> mk.TopKWeightAndReduce:
         # Let PrepareAndFinalize::finalize() decide the impl.
@@ -302,6 +305,7 @@ class BatchedDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
         global_num_experts: int,
         local_num_experts: int,
         expert_tokens_meta: mk.ExpertTokensMetadata | None,
+        activation: str,
     ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...]]:
         # FIXME (varun): We should be able to dispatch only from the leader
         # DP ranks in the case of TP > 1. At the moment, all the Ranks
@@ -309,8 +313,9 @@ class BatchedDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
         num_dispatchers = self.num_dispatchers
         num_experts = local_num_experts
         max_num_tokens = M if self.max_num_tokens is None else self.max_num_tokens
+        activation_out_dim = self.adjust_N_for_activation(N, activation)
         workspace13 = (num_experts, max_num_tokens * num_dispatchers, max(K, N))
-        workspace2 = (num_experts, max_num_tokens * num_dispatchers, (N // 2))
+        workspace2 = (num_experts, max_num_tokens * num_dispatchers, activation_out_dim)
         output = (num_experts, max_num_tokens * num_dispatchers, K)
         return (workspace13, workspace2, output)
 

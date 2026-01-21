@@ -5,16 +5,16 @@
 import copy
 import os
 from collections import defaultdict
-from collections.abc import Callable, Iterable, Sequence
-from dataclasses import dataclass
-from typing import Any, NewType, TypeAlias
+from collections.abc import Callable, Iterable, Iterator, Sequence
+from dataclasses import dataclass, replace
+from typing import Any, NewType, TypeAlias, overload
 
 from vllm import envs
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
-from vllm.utils.hashing import sha256_cbor
+from vllm.utils.hashing import sha256_cbor, xxhash_cbor
 from vllm.utils.math_utils import cdiv
-from vllm.utils.mem_constants import GiB_bytes
+from vllm.utils.mem_utils import format_gib
 from vllm.v1.kv_cache_interface import (
     ChunkedLocalAttentionSpec,
     FullAttentionSpec,
@@ -83,18 +83,19 @@ logger = init_logger(__name__)
 #
 # The function `init_none_hash` initializes this variable globally.
 NONE_HASH: BlockHash
+_CBOR_HASH_FUNCTIONS = frozenset({sha256_cbor, xxhash_cbor})
 
 
 def init_none_hash(hash_fn: Callable[[Any], bytes]):
     global NONE_HASH
 
     hash_seed = os.getenv("PYTHONHASHSEED")
-    if hash_seed is None and hash_fn is sha256_cbor:
+    if hash_seed is None and hash_fn in _CBOR_HASH_FUNCTIONS:
         logger.warning(
             "PYTHONHASHSEED is not set. This will lead to non-reproducible "
-            "block-hashes when using sha256_cbor as the hash function."
-            "Consider setting PYTHONHASHSEED to a fixed value for "
-            "reproducibility."
+            "block-hashes when using CBOR-based hash functions such as "
+            "sha256_cbor or xxhash_cbor. Consider setting PYTHONHASHSEED to a "
+            "fixed value for reproducibility."
         )
 
     if hash_seed is None:
@@ -605,6 +606,43 @@ def get_request_block_hasher(
     return request_block_hasher
 
 
+def _check_enough_kv_cache_memory(
+    available_memory: int,
+    get_needed_memory: Callable[[], int],
+    max_model_len: int,
+    estimate_max_model_len: Callable[[int], int],
+):
+    if available_memory <= 0:
+        raise ValueError(
+            "No available memory for the cache blocks. "
+            "Try increasing `gpu_memory_utilization` when initializing the engine. "
+            "See https://docs.vllm.ai/en/latest/configuration/conserving_memory/ "
+            "for more details."
+        )
+
+    needed_memory = get_needed_memory()
+
+    if needed_memory > available_memory:
+        estimated_max_len = estimate_max_model_len(available_memory)
+        estimated_msg = ""
+        if estimated_max_len > 0:
+            estimated_msg = (
+                "Based on the available memory, "
+                f"the estimated maximum model length is {estimated_max_len}. "
+            )
+
+        raise ValueError(
+            f"To serve at least one request with the models's max seq len "
+            f"({max_model_len}), ({format_gib(needed_memory)} GiB KV "
+            f"cache is needed, which is larger than the available KV cache "
+            f"memory ({format_gib(available_memory)} GiB). {estimated_msg}"
+            f"Try increasing `gpu_memory_utilization` or decreasing `max_model_len` "
+            f"when initializing the engine. "
+            f"See https://docs.vllm.ai/en/latest/configuration/conserving_memory/ "
+            f"for more details."
+        )
+
+
 def max_memory_usage_bytes(
     vllm_config: VllmConfig, kv_cache_specs: Iterable[KVCacheSpec]
 ) -> int:
@@ -623,6 +661,9 @@ def estimate_max_model_len(
     Estimates the maximum model length that can fit in the available memory
     using binary search.
 
+    This function temporarily modifies max_model_len during estimation but
+    restores the original value before returning, ensuring no side effects.
+
     Args:
         vllm_config: The global VllmConfig
         kv_cache_spec: The kv cache spec of each attention layer in the model
@@ -631,33 +672,38 @@ def estimate_max_model_len(
     Returns:
         The estimated maximum model length that can fit in the available memory.
     """
+    # Save the original max_model_len to restore after estimation
+    original_max_model_len = vllm_config.model_config.max_model_len
 
     # Define a function to check if a given model length fits in memory
     def fits_in_memory(model_len: int) -> bool:
-        # Modify the max_model_len for this calculation
+        # Temporarily modify the max_model_len for this calculation
         vllm_config.model_config.max_model_len = model_len
         # Calculate memory needed for the given model length
         memory_needed = max_memory_usage_bytes(vllm_config, kv_cache_spec.values())
         return memory_needed <= available_memory
 
-    # Binary search for the maximum model length
-    current_max = vllm_config.model_config.max_model_len
-    left, right = 1, current_max
+    try:
+        # Binary search for the maximum model length
+        left, right = 1, original_max_model_len
 
-    # If even the smallest model length doesn't fit, return 0
-    if not fits_in_memory(left):
-        return 0
+        # If even the smallest model length doesn't fit, return 0
+        if not fits_in_memory(left):
+            return 0
 
-    # Binary search for the maximum model length that fits
-    result = 1
-    while left <= right:
-        mid = (left + right) // 2
-        if fits_in_memory(mid):
-            result = mid
-            left = mid + 1
-        else:
-            right = mid - 1
-    return result
+        # Binary search for the maximum model length that fits
+        result = 1
+        while left <= right:
+            mid = (left + right) // 2
+            if fits_in_memory(mid):
+                result = mid
+                left = mid + 1
+            else:
+                right = mid - 1
+        return result
+    finally:
+        # Always restore the original max_model_len to avoid side effects
+        vllm_config.model_config.max_model_len = original_max_model_len
 
 
 def check_enough_kv_cache_memory(
@@ -679,39 +725,12 @@ def check_enough_kv_cache_memory(
     """
 
     # No need to check for available memory if the kv_cache_spec is empty
-    if not kv_cache_spec:
-        return
-
-    if available_memory <= 0:
-        raise ValueError(
-            "No available memory for the cache blocks. "
-            "Try increasing `gpu_memory_utilization` when "
-            "initializing the engine."
-        )
-
-    max_model_len = vllm_config.model_config.max_model_len
-    needed_memory = max_memory_usage_bytes(vllm_config, kv_cache_spec.values())
-
-    if needed_memory > available_memory:
-        # Estimate the maximum model length that can fit in the available memory
-        estimated_max_len = estimate_max_model_len(
-            vllm_config, kv_cache_spec, available_memory
-        )
-        estimated_msg = ""
-        if estimated_max_len > 0:
-            estimated_msg = (
-                "Based on the available memory, "
-                f"the estimated maximum model length is {estimated_max_len}."
-            )
-
-        raise ValueError(
-            f"To serve at least one request with the models's max seq len "
-            f"({max_model_len}), ({needed_memory / GiB_bytes:.2f} GiB KV "
-            f"cache is needed, which is larger than the available KV cache "
-            f"memory ({available_memory / GiB_bytes:.2f} GiB). "
-            f"{estimated_msg} "
-            f"Try increasing `gpu_memory_utilization` or decreasing "
-            f"`max_model_len` when initializing the engine."
+    if kv_cache_spec:
+        _check_enough_kv_cache_memory(
+            available_memory,
+            lambda: max_memory_usage_bytes(vllm_config, kv_cache_spec.values()),
+            vllm_config.model_config.max_model_len,
+            lambda am: estimate_max_model_len(vllm_config, kv_cache_spec, am),
         )
 
 
@@ -825,11 +844,11 @@ def get_num_blocks(
     return num_blocks
 
 
-def get_uniform_page_size(kv_cache_spec: dict[str, KVCacheSpec]) -> int:
+def get_uniform_page_size(kv_cache_specs: Iterable[KVCacheSpec]) -> int:
     """
     Get the page size of the KV cache.
     """
-    page_sizes = set(layer.page_size_bytes for layer in kv_cache_spec.values())
+    page_sizes = {layer.page_size_bytes for layer in kv_cache_specs}
     assert len(page_sizes) == 1
     return page_sizes.pop()
 
@@ -880,6 +899,46 @@ def is_kv_cache_page_size_uniform(kv_cache_spec: dict[str, KVCacheSpec]) -> bool
 
     page_sizes = {layer.page_size_bytes for layer in kv_cache_spec.values()}
     return len(page_sizes) == 1
+
+
+def unify_kv_cache_spec_page_size(
+    kv_cache_spec: dict[str, KVCacheSpec],
+) -> dict[str, KVCacheSpec]:
+    """
+    Unify the page size of the given KVCacheSpec. If the page size of all layers
+    are the same, return the original KVCacheSpec. If not same, unify the page
+    size by increasing the block size of layers with smaller page size. Raise
+    NotImplementedError if failed to unify the page size.
+
+    Args:
+        kv_cache_spec: The KVCacheSpec of each attention layer in the model
+
+    Returns:
+        The updated KVCacheSpec with the same page_size_bytes.
+    """
+    page_sizes = {layer.page_size_bytes for layer in kv_cache_spec.values()}
+    if len(page_sizes) <= 1:
+        # All layers have the same page size, no need to unify.
+        return kv_cache_spec
+
+    max_page_size = max(page_sizes)
+    new_kv_cache_spec = {}
+    for layer_name, layer_spec in kv_cache_spec.items():
+        if layer_spec.page_size_bytes == max_page_size:
+            new_kv_cache_spec[layer_name] = layer_spec
+        else:
+            layer_page_size = layer_spec.page_size_bytes
+            if max_page_size % layer_page_size != 0:
+                raise NotImplementedError(
+                    "The page size of the layer is not divisible by the "
+                    "maximum page size. Cannot unify by adjusting block_size."
+                )
+            ratio = max_page_size // layer_page_size
+            new_block_size = layer_spec.block_size * ratio
+            new_spec = replace(layer_spec, block_size=new_block_size)
+            assert new_spec.page_size_bytes == max_page_size
+            new_kv_cache_spec[layer_name] = new_spec
+    return new_kv_cache_spec
 
 
 def is_kv_cache_type_attention_free(kv_cache_spec: dict[str, KVCacheSpec]) -> bool:
@@ -971,7 +1030,16 @@ def _get_kv_cache_groups_uniform_page_size(
     # is the minimum number of layers among all attention types. Need a better
     # strategy if we want to support more complex patterns (e.g., 20 full + 30
     # sw, where the group size should be 10).
-    group_size = min([len(layers) for layers in same_type_layers.values()])
+    min_num_layers = min([len(layers) for layers in same_type_layers.values()])
+    group_size = min_num_layers
+    max_num_layers = max([len(layers) for layers in same_type_layers.values()])
+    if max_num_layers < min_num_layers * 1.25:
+        # If the number of layers is not much larger than the minimum number of layers,
+        # use the maximum number of layers as the group size to avoid too many padding
+        # layers. A typical example is gpt-oss-20b + eagle, with 12 sw + 13 full. We
+        # pad it to (13 sw, 13 full) instead of (12 sw, 24 full). 1.25 is just a
+        # magic number to avoid too many padding layers.
+        group_size = max_num_layers
     grouped_layers = []
     for layers in same_type_layers.values():
         num_padding_layers = group_size - len(layers) % group_size
@@ -1001,7 +1069,6 @@ def _get_kv_cache_groups_uniform_page_size(
 def get_kv_cache_config_from_groups(
     vllm_config: VllmConfig,
     kv_cache_groups: list[KVCacheGroupSpec],
-    kv_cache_specs: dict[str, KVCacheSpec],
     available_memory: int,
 ) -> KVCacheConfig:
     """
@@ -1011,7 +1078,6 @@ def get_kv_cache_config_from_groups(
     Args:
         vllm_config: The global VllmConfig
         kv_cache_groups: The KV cache groups
-        kv_cache_specs: The KV cache spec of each attention layer in the model
         available_memory: Memory available for KV cache in bytes
     Returns:
         The generated KVCacheConfig
@@ -1055,7 +1121,9 @@ def get_kv_cache_config_from_groups(
         # full.1, sw.2: share another Tensor with size=available_memory//2
         group_size = max(len(group.layer_names) for group in kv_cache_groups)
 
-        page_size = get_uniform_page_size(kv_cache_specs)
+        page_size = get_uniform_page_size(
+            [group.kv_cache_spec for group in kv_cache_groups]
+        )
         assert group_size > 0, "group_size must be greater than 0"
         num_blocks = get_num_blocks(
             vllm_config, group_size, available_memory, page_size
@@ -1117,6 +1185,7 @@ def unify_hybrid_kv_cache_specs(kv_cache_spec: dict[str, KVCacheSpec]):
                     head_size=spec.head_size,
                     dtype=spec.dtype,
                     sliding_window=spec.sliding_window,
+                    page_size_padded=spec.page_size_padded,
                 )
             elif isinstance(spec, ChunkedLocalAttentionSpec):
                 kv_cache_spec[layer_name] = FullAttentionSpec(
@@ -1125,6 +1194,7 @@ def unify_hybrid_kv_cache_specs(kv_cache_spec: dict[str, KVCacheSpec]):
                     head_size=spec.head_size,
                     dtype=spec.dtype,
                     attention_chunk_size=spec.attention_chunk_size,
+                    page_size_padded=spec.page_size_padded,
                 )
 
     if not (
@@ -1157,7 +1227,8 @@ def get_kv_cache_groups(
         # This returns an empty list to allow for the KVCacheManager to handle
         # attention free models.
         return []
-    elif is_kv_cache_spec_uniform(kv_cache_spec):
+
+    if is_kv_cache_spec_uniform(kv_cache_spec):
         # KV cache of all layers are the same, which is true for
         # most models. Allocate the same amount of memory for
         # each layer.
@@ -1167,14 +1238,16 @@ def get_kv_cache_groups(
         # full attention, or all layers are sliding window attention with the
         # same window size). Put all layers into one group.
         return _get_kv_cache_groups_uniform_type(uniform_spec)
-    elif is_kv_cache_page_size_uniform(kv_cache_spec):
-        # Model contains multiple attention types, but KV cache of all layers
-        # have the same physical memory per block per layer. Split the layers
-        # into groups with the same number of layers, and thus same total page
-        # size.
-        return _get_kv_cache_groups_uniform_page_size(kv_cache_spec)
 
-    raise NotImplementedError
+    # As KVCacheManager can only allocate memory of one size, we need to unify
+    # the page size of the layers. For cases cannot be unified, this function
+    # will raise an error.
+    kv_cache_spec = unify_kv_cache_spec_page_size(kv_cache_spec)
+    # Model contains multiple attention types, but KV cache of all layers
+    # have the same physical memory per block per layer. Split the layers
+    # into groups with the same number of layers, and thus same total page
+    # size.
+    return _get_kv_cache_groups_uniform_page_size(kv_cache_spec)
 
 
 def generate_scheduler_kv_cache_config(
@@ -1244,6 +1317,140 @@ def _report_kv_cache_config(
     )
 
 
+def _max_memory_usage_bytes_from_groups(
+    vllm_config: VllmConfig,
+    kv_cache_groups: list[KVCacheGroupSpec],
+) -> int:
+    """
+    Calculate maximum memory usage in bytes from KV cache groups.
+
+    This correctly accounts for padding in hybrid models. For example, if a
+    model has 8 full attention layers and 9 sliding window layers, they will
+    be padded to 9 full + 9 sliding window for uniform group sizes.
+    """
+    if not kv_cache_groups:
+        return 0
+
+    # UniformTypeKVCacheSpecs special case (single group, per-layer specs)
+    if len(kv_cache_groups) == 1 and isinstance(
+        kv_cache_groups[0].kv_cache_spec, UniformTypeKVCacheSpecs
+    ):
+        per_layer_specs = kv_cache_groups[0].kv_cache_spec.kv_cache_specs
+        return sum(
+            spec.max_memory_usage_bytes(vllm_config)
+            for spec in per_layer_specs.values()
+        )
+
+    # General case: group_size pools, each shared by one layer per group
+    # Memory = group_size * page_size * blocks_for_max_len
+    group_size = max(len(group.layer_names) for group in kv_cache_groups)
+    page_size = get_uniform_page_size(
+        [group.kv_cache_spec for group in kv_cache_groups]
+    )
+    any_spec = kv_cache_groups[0].kv_cache_spec
+    blocks_needed = cdiv(any_spec.max_memory_usage_bytes(vllm_config), page_size)
+
+    return group_size * page_size * blocks_needed
+
+
+def _estimate_max_model_len_from_groups(
+    vllm_config: VllmConfig,
+    kv_cache_groups: list[KVCacheGroupSpec],
+    available_memory: int,
+) -> int:
+    """
+    Binary search for the maximum model length that fits in available memory.
+    Returns 0 if even 1 token doesn't fit.
+    """
+    original_max = vllm_config.model_config.max_model_len
+
+    def fits(model_len: int) -> bool:
+        vllm_config.model_config.max_model_len = model_len
+        return (
+            _max_memory_usage_bytes_from_groups(vllm_config, kv_cache_groups)
+            <= available_memory
+        )
+
+    try:
+        left, right = 1, original_max
+        if not fits(left):
+            return 0
+        result = 1
+        while left <= right:
+            mid = (left + right) // 2
+            if fits(mid):
+                result = mid
+                left = mid + 1
+            else:
+                right = mid - 1
+        return result
+    finally:
+        vllm_config.model_config.max_model_len = original_max
+
+
+def _auto_fit_max_model_len(
+    vllm_config: VllmConfig,
+    kv_cache_groups: list[KVCacheGroupSpec],
+    available_memory: list[int],
+) -> None:
+    """
+    When max_model_len is set to -1, this function estimates the largest
+    context length that can be supported with the available GPU memory.
+    It uses binary search to find the maximum length that fits across all
+    workers.
+
+    Args:
+        vllm_config: The global VllmConfig (will be modified in-place)
+        kv_cache_groups: The global KV cache groups (from get_kv_cache_groups).
+            This correctly accounts for padding in hybrid models.
+        available_memory: Memory available for KV cache in bytes for each
+            worker.
+    """
+    original_max = vllm_config.model_config.max_model_len
+
+    if not kv_cache_groups:
+        # All workers have empty specs (attention-free model)
+        logger.info_once(
+            "Auto-fit max_model_len: attention-free model, "
+            "using derived max_model_len=%d",
+            original_max,
+            scope="local",
+        )
+        return
+
+    # Use minimum available memory across all workers
+    min_available_memory = min(available_memory)
+    auto_fit_max = _estimate_max_model_len_from_groups(
+        vllm_config, kv_cache_groups, min_available_memory
+    )
+
+    if auto_fit_max <= 0:
+        raise ValueError(
+            "Cannot auto-fit max_model_len: not enough GPU memory available "
+            "to serve even a single token. Try increasing `gpu_memory_utilization`."
+        )
+
+    if auto_fit_max >= original_max:
+        # The model's full context length fits in memory
+        logger.info_once(
+            "Auto-fit max_model_len: full model context length %d fits in "
+            "available GPU memory",
+            original_max,
+            scope="local",
+        )
+    else:
+        # Need to reduce max_model_len to fit in memory
+        vllm_config.model_config.max_model_len = auto_fit_max
+        logger.info_once(
+            "Auto-fit max_model_len: reduced from %d to %d to fit in "
+            "available GPU memory (%s GiB available for KV cache)",
+            original_max,
+            auto_fit_max,
+            format_gib(min_available_memory),
+            scope="local",
+        )
+
+
 def get_kv_cache_configs(
     vllm_config: VllmConfig,
     kv_cache_specs: list[dict[str, KVCacheSpec]],
@@ -1260,10 +1467,12 @@ def get_kv_cache_configs(
     1. Merge the KV cache specs of all workers to get the KVCacheSpecs for
        the whole model.
     2. Generate the KV cache groups based on the layer ratio of the whole model.
-    3. Generate the KV cache configs for each worker based on the KV cache
+       This also handles spec unification for hybrid models.
+    3. Handle auto-fit max_model_len and memory checks using the unified specs.
+    4. Generate the KV cache configs for each worker based on the KV cache
        grouping strategy. (This is reasonable because the layer ratio of
        different PP stages are similar.)
-    4. Change the num_blocks of each worker to the smallest among all workers
+    5. Change the num_blocks of each worker to the smallest among all workers
        and shrink tensor sizes proportionally to avoid allocating unused memory.
 
     Args:
@@ -1275,14 +1484,6 @@ def get_kv_cache_configs(
     Returns:
         The generated KVCacheConfigs for each worker.
     """
-
-    # Check if the available memory is enough for each worker.
-    for kv_cache_spec_one_worker, available_memory_one_worker in zip(
-        kv_cache_specs, available_memory
-    ):
-        check_enough_kv_cache_memory(
-            vllm_config, kv_cache_spec_one_worker, available_memory_one_worker
-        )
 
     # Merge the KV cache specs of all workers. Different PP stages may have
     # different layer names, and different TP ranks of the same PP stage should
@@ -1297,7 +1498,31 @@ def get_kv_cache_configs(
                     "The KV cache specs for the same layer are different "
                     "across workers. This is not supported yet."
                 )
+
+    # Get global KV cache groups. This also handles spec unification for
+    # hybrid models when disable_hybrid_kv_cache_manager is enabled.
+    # After this call, merged_kv_cache_specs may be modified in-place.
     global_kv_cache_groups = get_kv_cache_groups(vllm_config, merged_kv_cache_specs)
+
+    # If original_max_model_len was -1, automatically
+    # determine the maximum model length that fits in available GPU memory.
+    # We use the global groups here to correctly account for padding.
+    if vllm_config.model_config.original_max_model_len == -1:
+        _auto_fit_max_model_len(vllm_config, global_kv_cache_groups, available_memory)
+
+    # Check if the available memory is enough (using min across all workers).
+    # We use the global groups to correctly account for padding.
+    if global_kv_cache_groups:
+        _check_enough_kv_cache_memory(
+            min(available_memory),
+            lambda: _max_memory_usage_bytes_from_groups(
+                vllm_config, global_kv_cache_groups
+            ),
+            vllm_config.model_config.max_model_len,
+            lambda am: _estimate_max_model_len_from_groups(
+                vllm_config, global_kv_cache_groups, am
+            ),
+        )
 
     kv_cache_configs: list[KVCacheConfig] = []
     for kv_cache_spec_one_worker, available_memory_one_worker in zip(
@@ -1318,10 +1543,7 @@ def get_kv_cache_configs(
         ) == len(kv_cache_spec_one_worker), "Some layers are not assigned to any group."
         kv_cache_configs.append(
             get_kv_cache_config_from_groups(
-                vllm_config,
-                kv_cache_groups_one_worker,
-                kv_cache_spec_one_worker,
-                available_memory_one_worker,
+                vllm_config, kv_cache_groups_one_worker, available_memory_one_worker
             )
         )
 
@@ -1344,3 +1566,79 @@ def get_kv_cache_configs(
             _report_kv_cache_config(vllm_config, kv_cache_config)
 
     return kv_cache_configs
+
+
+class BlockHashListWithBlockSize:
+    """
+    Convert block-hash granularity from `hash_block_size` to `target_block_size`.
+    Used when KV cache groups have different block sizes: `hash_block_size`
+    is the size used to compute the original `block_hashes`; `target_block_size`
+    is the group's actual block size.
+
+    Currently, only scaling up by an integer factor is supported (i.e.,
+    `target_block_size` is a multiple of `hash_block_size`). Conversion is
+    performed lazily on access for efficiency, by concatenating consecutive
+    hashes at `hash_block_size` to form each hash at `target_block_size`.
+
+    Example (`hash_block_size` = 16, `target_block_size` = 32):
+    concatenating two 16-size hashes yields one 32-size hash:
+
+    Block hashes with block_size 16:
+    | Token Range | 0-15 | 16-31 | 32-47 | 48-63 |
+    |-------------|------|-------|-------|-------|
+    | Hash        | A    | B     | C     | D     |
+
+    Block hashes with block_size 32:
+    | Token Range | 0-31 | 32-63 |
+    |-------------|------|-------|
+    | Hash        | AB   | CD    |
+
+    Args:
+        block_hashes: Block hashes to convert, computed at `hash_block_size`.
+        hash_block_size: Block size at which `block_hashes` were computed.
+        target_block_size: Desired block size; must be a multiple of `hash_block_size`.
+    """
+
+    def __init__(
+        self,
+        block_hashes: list[BlockHash],
+        hash_block_size: int,
+        target_block_size: int,
+    ):
+        self.block_hashes = block_hashes
+        assert target_block_size % hash_block_size == 0
+        self.scale_factor = target_block_size // hash_block_size
+
+    def __len__(self) -> int:
+        return len(self.block_hashes) // self.scale_factor
+
+    @overload
+    def __getitem__(self, idx: int) -> BlockHash: ...
+
+    @overload
+    def __getitem__(self, idx: slice) -> list[BlockHash]: ...
+
+    def __getitem__(self, idx):
+        if isinstance(idx, int):
+            return self._get_value_at(idx)
+
+        if isinstance(idx, slice):
+            start, stop, step = idx.indices(len(self))
+            return [self._get_value_at(i) for i in range(start, stop, step)]
+
+        raise TypeError(f"Invalid index type: {type(idx)!r}")
+
+    def __iter__(self) -> Iterator[BlockHash]:
+        for i in range(len(self)):
+            yield self._get_value_at(i)
+
+    def _get_value_at(self, idx: int) -> BlockHash:
+        base = idx * self.scale_factor
+        end = base + self.scale_factor
+        merged_hash: bytes = self.block_hashes[base]
+        for i in range(base + 1, end):
+            merged_hash += self.block_hashes[i]
+        return BlockHash(merged_hash)
+
+
+BlockHashList = list[BlockHash] | BlockHashListWithBlockSize

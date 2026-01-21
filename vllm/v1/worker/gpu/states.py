@@ -8,53 +8,9 @@ import torch
 from vllm.lora.request import LoRARequest
 from vllm.sampling_params import SamplingParams
 from vllm.v1.outputs import LogprobsTensors
-from vllm.v1.utils import CpuGpuBuffer
+from vllm.v1.worker.gpu.buffer_utils import StagedWriteTensor, UvaBackedTensor
 
-_NP_INT64_MIN = np.iinfo(np.int64).min
-_NP_INT64_MAX = np.iinfo(np.int64).max
 NO_LORA_ID = 0
-
-
-@dataclass
-class SamplingMetadata:
-    temperature: torch.Tensor
-
-    top_p: torch.Tensor | None
-    top_k: torch.Tensor | None
-
-    seeds: torch.Tensor
-    pos: torch.Tensor
-
-    # None means no logprobs, 0 means sampled token logprobs only
-    max_num_logprobs: int | None
-
-    @classmethod
-    def make_dummy(
-        cls,
-        num_reqs: int,
-        device: torch.device,
-    ) -> "SamplingMetadata":
-        assert num_reqs > 0
-        temperature = torch.zeros(num_reqs, dtype=torch.float32, device=device)
-        temperature[0] = 0.5
-        # TODO(woosuk): Use top-p and top-k for dummy sampler.
-        # Currently, they are disabled because of memory usage.
-        # top_p = torch.full((num_reqs,), 0.95, dtype=torch.float32, device=device)
-        # top_k = torch.full((num_reqs,), 20, dtype=torch.int32, device=device)
-        top_p = None
-        top_k = None
-        seeds = torch.zeros(num_reqs, dtype=torch.int64, device=device)
-        pos = torch.zeros(num_reqs, dtype=torch.int64, device=device)
-        max_num_logprobs = 20
-
-        return cls(
-            temperature=temperature,
-            top_p=top_p,
-            top_k=top_k,
-            seeds=seeds,
-            pos=pos,
-            max_num_logprobs=max_num_logprobs,
-        )
 
 
 class RequestState:
@@ -63,16 +19,16 @@ class RequestState:
         max_num_reqs: int,
         max_model_len: int,
         max_num_batched_tokens: int,
+        num_speculative_steps: int,
         vocab_size: int,
         device: torch.device,
-        pin_memory: bool,
     ):
         self.max_num_reqs = max_num_reqs
         self.max_model_len = max_model_len
         self.max_num_batched_tokens = max_num_batched_tokens
+        self.num_speculative_steps = num_speculative_steps
         self.vocab_size = vocab_size
         self.device = device
-        self.pin_memory = pin_memory
 
         self.req_id_to_index: dict[str, int] = {}
         self.index_to_req_id: dict[int, str] = {}
@@ -80,13 +36,22 @@ class RequestState:
         self.extra_data: dict[str, ExtraData] = {}
 
         self.prompt_len = np.zeros(self.max_num_reqs, dtype=np.int32)
-        self.prefill_token_ids = np.zeros(
+        # NOTE(woosuk): This tensor can be extremely large (e.g., several GBs)
+        # depending on the configured max_num_reqs and max_model_len.
+        # To save GPU memory, we use UVA instead of GPU for this tensor.
+        self.prefill_token_ids = StagedWriteTensor(
             (self.max_num_reqs, self.max_model_len),
-            dtype=np.int32,
+            dtype=torch.int32,
+            device=device,
+            uva_instead_of_gpu=True,
         )
-        self.prefill_len = self._make_buffer(self.max_num_reqs, dtype=torch.int32)
-        self.num_tokens = np.zeros(self.max_num_reqs, dtype=np.int32)
-        self.num_computed_tokens = np.zeros(self.max_num_reqs, dtype=np.int32)
+        self.prefill_len = UvaBackedTensor(self.max_num_reqs, dtype=torch.int32)
+
+        # Number of computed tokens.
+        self.num_computed_prefill_tokens = np.zeros(self.max_num_reqs, dtype=np.int32)
+        self.num_computed_tokens = StagedWriteTensor(
+            self.max_num_reqs, dtype=torch.int32, device=device
+        )
 
         # Last sampled tokens.
         self.last_sampled_tokens = torch.zeros(
@@ -96,28 +61,22 @@ class RequestState:
             device=device,
         )
 
+        # Draft tokens.
+        self.draft_tokens = torch.zeros(
+            self.max_num_reqs,
+            self.num_speculative_steps,
+            dtype=torch.int64,
+            device=device,
+        )
+        self.next_prefill_tokens = torch.zeros(
+            self.max_num_reqs, dtype=torch.int32, device=device
+        )
+
         # LoRA.
         self.lora_ids = np.zeros(self.max_num_reqs, dtype=np.int32)
         self.lora_ids.fill(NO_LORA_ID)
 
-        # Sampling parameters.
-        self.temperature = self._make_param(self.max_num_reqs, torch.float32)
-        self.top_p = self._make_param(self.max_num_reqs, torch.float32)
-        self.top_k = self._make_param(self.max_num_reqs, torch.int32)
-        self.seeds = self._make_param(self.max_num_reqs, torch.int64)
-
-        self.num_logprobs = np.empty(self.max_num_reqs, dtype=np.int32)
-        # -1 means no logprobs are requested.
-        self.num_logprobs.fill(-1)
         self.needs_prompt_logprobs = np.zeros(self.max_num_reqs, dtype=bool)
-
-    def _make_param(self, size: int, dtype: torch.dtype) -> "Param":
-        return Param(size, dtype=dtype, device=self.device, pin_memory=self.pin_memory)
-
-    def _make_buffer(self, size: int, dtype: torch.dtype) -> CpuGpuBuffer:
-        return CpuGpuBuffer(
-            size, dtype=dtype, device=self.device, pin_memory=self.pin_memory
-        )
 
     @property
     def num_reqs(self) -> int:
@@ -144,38 +103,23 @@ class RequestState:
             f"prefill_len {prefill_len} < prompt_len {prompt_len}"
         )
         self.prefill_len.np[req_idx] = prefill_len
-        self.prefill_token_ids[req_idx, :prefill_len] = prefill_token_ids
-        self.num_tokens[req_idx] = prefill_len
-        self.num_computed_tokens[req_idx] = num_computed_tokens
+        self.prefill_token_ids.stage_write(req_idx, 0, prefill_token_ids)
+        self.num_computed_prefill_tokens[req_idx] = num_computed_tokens
+        self.num_computed_tokens.stage_write_elem(req_idx, num_computed_tokens)
 
         if lora_request is not None:
             self.lora_ids[req_idx] = lora_request.lora_int_id
         else:
             self.lora_ids[req_idx] = NO_LORA_ID
 
-        self.temperature.np[req_idx] = sampling_params.temperature
-        self.top_p.np[req_idx] = sampling_params.top_p
-        if 0 < sampling_params.top_k < self.vocab_size:
-            top_k = sampling_params.top_k
-        else:
-            top_k = self.vocab_size
-        self.top_k.np[req_idx] = top_k
-
-        if sampling_params.seed is not None:
-            seed = sampling_params.seed
-        else:
-            seed = np.random.randint(_NP_INT64_MIN, _NP_INT64_MAX)
-        self.seeds.np[req_idx] = seed
-
-        if sampling_params.logprobs is not None:
-            num_logprobs = sampling_params.logprobs
-        else:
-            num_logprobs = -1
-        self.num_logprobs[req_idx] = num_logprobs
-
         # For now, only support prompt logprobs for the prompt tokens.
         needs_prompt_logprobs = sampling_params.prompt_logprobs is not None
         self.needs_prompt_logprobs[req_idx] = needs_prompt_logprobs
+
+    def apply_staged_writes(self) -> None:
+        self.prefill_len.copy_to_uva()
+        self.prefill_token_ids.apply_write()
+        self.num_computed_tokens.apply_write()
 
     def remove_request(self, req_id: str) -> None:
         self.extra_data.pop(req_id, None)
@@ -185,39 +129,6 @@ class RequestState:
             return
         self.index_to_req_id.pop(req_idx, None)
         self.free_indices.append(req_idx)
-
-    def make_sampling_metadata(
-        self,
-        idx_mapping: np.ndarray,
-        pos: torch.Tensor,
-    ) -> SamplingMetadata:
-        temperature = self.temperature.np[idx_mapping]
-        temperature = self.temperature.copy_np_to_gpu(temperature)
-
-        top_p = self.top_p.np[idx_mapping]
-        no_top_p = np.all(top_p == 1.0)
-        top_p = self.top_p.copy_np_to_gpu(top_p) if not no_top_p else None
-
-        top_k = self.top_k.np[idx_mapping]
-        no_top_k = np.all(top_k == self.vocab_size)
-        top_k = self.top_k.copy_np_to_gpu(top_k) if not no_top_k else None
-
-        seeds = self.seeds.np[idx_mapping]
-        seeds = self.seeds.copy_np_to_gpu(seeds)
-
-        num_logprobs = self.num_logprobs[idx_mapping]
-        max_num_logprobs: int | None = int(np.max(num_logprobs))
-        if max_num_logprobs == -1:
-            max_num_logprobs = None
-
-        return SamplingMetadata(
-            temperature=temperature,
-            top_p=top_p,
-            top_k=top_k,
-            seeds=seeds,
-            pos=pos,
-            max_num_logprobs=max_num_logprobs,
-        )
 
     def make_lora_inputs(
         self,
@@ -235,28 +146,6 @@ class RequestState:
             if lora_request is not None:
                 active_lora_requests.add(lora_request)
         return prompt_lora_mapping, token_lora_mapping, active_lora_requests
-
-
-class Param:
-    def __init__(
-        self,
-        size: int,
-        dtype: torch.dtype,
-        device: torch.device,
-        pin_memory: bool,
-    ):
-        self.buffer = CpuGpuBuffer(
-            size,
-            dtype=dtype,
-            device=device,
-            pin_memory=pin_memory,
-        )
-        self.np = np.zeros_like(self.buffer.np)
-
-    def copy_np_to_gpu(self, x: np.ndarray) -> torch.Tensor:
-        n = x.shape[0]
-        self.buffer.np[:n] = x
-        return self.buffer.copy_to_gpu(n)
 
 
 @dataclass
