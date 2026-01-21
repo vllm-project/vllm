@@ -110,9 +110,14 @@ class Qwen3MoeLLMModel(Qwen3MoeModel):
             assert intermediate_tensors is not None
             hidden_states = intermediate_tensors["hidden_states"]
             residual = intermediate_tensors["residual"]
+
+        aux_hidden_states = []
         for layer_idx, layer in islice(
             enumerate(self.layers), self.start_layer, self.end_layer
         ):
+            if layer_idx in self.aux_hidden_state_layers:
+                aux_hidden_states.append(hidden_states + residual)
+
             hidden_states, residual = layer(
                 positions,
                 hidden_states,
@@ -132,6 +137,9 @@ class Qwen3MoeLLMModel(Qwen3MoeModel):
                 {"hidden_states": hidden_states, "residual": residual}
             )
         hidden_states, _ = self.norm(hidden_states, residual)
+
+        if len(aux_hidden_states) > 0:
+            return hidden_states, aux_hidden_states
         return hidden_states
 
     def load_fused_expert_weights(
