@@ -61,7 +61,7 @@ def test_worker_apply_lora(qwen3_lora_files):
             max_num_seqs=32,
             max_num_partial_prefills=32,
         ),
-        device_config=DeviceConfig(current_platform.device_name),
+        device_config=DeviceConfig(current_platform.device_type),
         cache_config=CacheConfig(
             block_size=16,
             swap_space=0,

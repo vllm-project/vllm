@@ -31,7 +31,7 @@ def run_model(
 ):
     with set_forward_context({}, vllm_config=vllm_config):
         # warmup for the model with cudagraph_mode NONE
-        model(torch.randn(BATCH_SIZE, MLP_SIZE).to(current_platform.device_name))
+        model(torch.randn(BATCH_SIZE, MLP_SIZE).to(current_platform.device_type))
 
         # simulate cudagraphs capturing
         with set_forward_context(
@@ -42,7 +42,7 @@ def run_model(
                 num_tokens=2,
             ),
         ):
-            model(torch.randn(2, MLP_SIZE).to(current_platform.device_name))
+            model(torch.randn(2, MLP_SIZE).to(current_platform.device_type))
         with set_forward_context(
             {},
             vllm_config=vllm_config,
@@ -51,7 +51,7 @@ def run_model(
                 num_tokens=1,
             ),
         ):
-            model(torch.randn(1, MLP_SIZE).to(current_platform.device_name))
+            model(torch.randn(1, MLP_SIZE).to(current_platform.device_type))
 
         # simulate cudagraphs replay
         with set_forward_context(
@@ -62,7 +62,7 @@ def run_model(
                 num_tokens=2,
             ),
         ):
-            output = model(torch.randn(2, MLP_SIZE).to(current_platform.device_name))
+            output = model(torch.randn(2, MLP_SIZE).to(current_platform.device_type))
 
         output = output.cpu()
         return output.cpu()
@@ -126,7 +126,7 @@ def test_ignore_torch_compile_decorator(use_inductor_graph_partition, monkeypatc
         mod_A = (
             A(vllm_config=vllm_config, prefix="")
             .eval()
-            .to(current_platform.device_name)
+            .to(current_platform.device_type)
         )
 
     # A has support_torch_compile
@@ -143,7 +143,7 @@ def test_ignore_torch_compile_decorator(use_inductor_graph_partition, monkeypatc
         mod_B = (
             B(vllm_config=vllm_config, prefix="")
             .eval()
-            .to(current_platform.device_name)
+            .to(current_platform.device_type)
         )
 
     # B's ignore_torch_compile should override A's support_torch_compile
@@ -160,7 +160,7 @@ def test_ignore_torch_compile_decorator(use_inductor_graph_partition, monkeypatc
         mod_C = (
             C(vllm_config=vllm_config, prefix="")
             .eval()
-            .to(current_platform.device_name)
+            .to(current_platform.device_type)
         )
 
     # C's support_torch_compile should override B's ignore_torch_compile
@@ -238,7 +238,7 @@ def test_conditional_compile_enable_if(use_inductor_graph_partition, monkeypatch
         mod_A = (
             A(vllm_config=vllm_config, prefix="")
             .eval()
-            .to(current_platform.device_name)
+            .to(current_platform.device_type)
         )
 
     if use_inductor_graph_partition:
@@ -282,7 +282,7 @@ def test_conditional_compile_enable_if(use_inductor_graph_partition, monkeypatch
         mod_A = (
             A(vllm_config=vllm_config, prefix="")
             .eval()
-            .to(current_platform.device_name)
+            .to(current_platform.device_type)
         )
 
     if use_inductor_graph_partition:

@@ -448,7 +448,7 @@ def test_cached_compilation_config(default_vllm_config):
     from vllm.model_executor.layers.quantization.utils.quant_utils import GroupShape
 
     dtype = torch.bfloat16
-    device = torch.device(f"{current_platform.device_name}:0")
+    device = torch.device(f"{current_platform.device_type}:0")
     batch_size, num_qo_heads, head_size = 8, 16, 128
 
     # access and cache default compilation config
@@ -471,7 +471,7 @@ def test_cached_compilation_config(default_vllm_config):
         query_quant = torch.compile(query_quant)
 
         _q_scale = torch.tensor(
-            1.0, dtype=torch.float32, device=current_platform.device_name
+            1.0, dtype=torch.float32, device=current_platform.device_type
         )
         query = torch.randn(
             batch_size, num_qo_heads * head_size, dtype=dtype, device=device
