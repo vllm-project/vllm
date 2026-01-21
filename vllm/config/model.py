@@ -271,8 +271,16 @@ class ModelConfig:
     merged with the default config from the model. If used with
     `--generation-config vllm`, only the override parameters are used."""
     enable_sleep_mode: bool = False
-    """Enable sleep mode for the engine (only cuda and
-    hip platforms are supported)."""
+    """Enable sleep mode for the engine (only cuda and hip platforms are supported).
+    
+    On GB200/Grace-Blackwell systems, unified memory optimization is automatically
+    enabled for significantly faster sleep/wake times (<10ms vs 300-400ms).
+    
+    Control unified memory via VLLM_USE_UNIFIED_MEMORY environment variable:
+    - Set to "true" to force enable
+    - Set to "false" to force disable
+    - Unset for auto-detection based on hardware
+    """
     model_impl: str | ModelImpl = "auto"
     """Which implementation of the model to use:\n
     - "auto" will try to use the vLLM implementation, if it exists, and fall

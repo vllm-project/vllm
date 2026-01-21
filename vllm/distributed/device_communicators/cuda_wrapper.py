@@ -78,6 +78,19 @@ class CudaRTLibrary:
             cudaError_t,
             [ctypes.POINTER(ctypes.c_void_p), cudaIpcMemHandle_t, ctypes.c_uint],
         ),
+        # Unified memory functions for GB200
+        # cudaError_t cudaMemAdvise ( const void* devPtr, size_t count, cudaMemoryAdvise advice, int device ) # noqa
+        Function(
+            "cudaMemAdvise",
+            cudaError_t,
+            [ctypes.c_void_p, ctypes.c_size_t, ctypes.c_int, ctypes.c_int],
+        ),
+        # cudaError_t cudaMemPrefetchAsync ( const void* devPtr, size_t count, int dstDevice, cudaStream_t stream ) # noqa
+        Function(
+            "cudaMemPrefetchAsync",
+            cudaError_t,
+            [ctypes.c_void_p, ctypes.c_size_t, ctypes.c_int, ctypes.c_void_p],
+        ),
     ]
 
     # https://rocm.docs.amd.com/projects/HIPIFY/en/latest/tables/CUDA_Runtime_API_functions_supported_by_HIP.html # noqa
@@ -92,6 +105,8 @@ class CudaRTLibrary:
         "cudaMemcpy": "hipMemcpy",
         "cudaIpcGetMemHandle": "hipIpcGetMemHandle",
         "cudaIpcOpenMemHandle": "hipIpcOpenMemHandle",
+        "cudaMemAdvise": "hipMemAdvise",
+        "cudaMemPrefetchAsync": "hipMemPrefetchAsync",
     }
 
     # class attribute to store the mapping from the path to the library
@@ -188,3 +203,40 @@ class CudaRTLibrary:
             )
         )
         return devPtr
+
+    def cudaMemAdvise(
+        self, devPtr: ctypes.c_void_p, count: int, advice: int, device: int
+    ) -> None:
+        """
+        Advise about the usage of a given memory range.
+        Used for GB200 unified memory optimization.
+        """
+        self.CUDART_CHECK(self.funcs["cudaMemAdvise"](devPtr, count, advice, device))
+
+    def cudaMemPrefetchAsync(
+        self,
+        devPtr: ctypes.c_void_p,
+        count: int,
+        dstDevice: int,
+        stream: ctypes.c_void_p | None = None,
+    ) -> None:
+        """
+        Prefetch memory to the specified device asynchronously.
+        Used for GB200 unified memory optimization.
+        """
+        stream_ptr = stream if stream is not None else ctypes.c_void_p(0)
+        self.CUDART_CHECK(
+            self.funcs["cudaMemPrefetchAsync"](devPtr, count, dstDevice, stream_ptr)
+        )
+
+
+# Constants for cudaMemAdvise
+cudaMemAdviseSetReadMostly = 1
+cudaMemAdviseUnsetReadMostly = 2
+cudaMemAdviseSetPreferredLocation = 3
+cudaMemAdviseUnsetPreferredLocation = 4
+cudaMemAdviseSetAccessedBy = 5
+cudaMemAdviseUnsetAccessedBy = 6
+
+# Special device ID for CPU
+cudaCpuDeviceId = -1
