@@ -6,7 +6,7 @@ from vllm.utils.collection_utils import common_prefix, swap_dict_values
 
 
 @pytest.mark.parametrize(
-    ("inputs", "output"),
+    ("inputs", "expected_output"),
     [
         ([""], ""),
         (["a"], "a"),
@@ -17,8 +17,8 @@ from vllm.utils.collection_utils import common_prefix, swap_dict_values
         (["aba", "abc", "ab"], "ab"),
     ],
 )
-def test_common_prefix(inputs, output):
-    assert common_prefix(inputs) == output
+def test_common_prefix(inputs, expected_output):
+    assert common_prefix(inputs) == expected_output
 
 
 @pytest.mark.parametrize(
