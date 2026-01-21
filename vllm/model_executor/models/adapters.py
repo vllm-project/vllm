@@ -185,6 +185,9 @@ def _create_pooling_model_cls(orig_cls: _T) -> _T:
             ):
                 super().__init__(vllm_config=vllm_config, prefix=prefix, **kwargs)
 
+            # Used by SEQ_CLS_LOAD_METHODS
+            self.vllm_config = vllm_config
+
             # If the model already defines a pooler instance, don't overwrite it
             if not getattr(self, "pooler", None):
                 self._init_pooler(vllm_config, prefix=prefix)
@@ -192,33 +195,22 @@ def _create_pooling_model_cls(orig_cls: _T) -> _T:
         def _init_pooler(self, vllm_config: "VllmConfig", prefix: str = ""):
             raise NotImplementedError
 
-        def load_weights(
-            self,
-            weights: Iterable[tuple[str, torch.Tensor]],
-            load_lm_head: bool = False,
-        ):
+        def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
             # TODO: Support uninitialized params tracking
 
-            # For most pooling models: We have deleted this attribute, so don't load it.
-            # For converting an LLM into a seq cls model, we need the lm_head.
-            if not load_lm_head:
-                weights = (
-                    (name, data)
-                    for name, data in weights
-                    if not name.startswith("lm_head.")
-                )
-
             # If `*ForCausalLM` defines `load_weights` on the inner model
-            # and there are no other inner modules with parameters,
+            # and there are no other inner modules with other parameters,
             # we support loading from both `*Model` and `*ForCausalLM`
             if hasattr(self, "model") and hasattr(self.model, "load_weights"):
-                # Whether only `self.model` contains parameters
-                model_is_only_param = all(
-                    name == "model" or next(child.parameters(), None) is None
-                    for name, child in self.named_children()
-                )
+                # Whether all parameters come from `self.model`
+                model_params_ids = [id(p) for p in self.model.parameters()]
 
-                if model_is_only_param:
+                if all(
+                    # Some weights might be tied to weights under `self.model`
+                    all(id(p) in model_params_ids for p in child.parameters())
+                    for name, child in self.named_children()
+                    if name != "model"
+                ):
                     mapper = WeightsMapper(orig_to_new_prefix={"model.": ""})
                     weights = mapper.apply(weights)
 
@@ -425,7 +417,7 @@ def load_weights_using_from_2_way_softmax(
     pooling_model_cls = next(
         x for x in type(model).__mro__ if x.__name__ == "ModelForPooling"
     )
-    loaded_weights = pooling_model_cls.load_weights(model, weights, load_lm_head=True)
+    loaded_weights = pooling_model_cls.load_weights(model, weights)
 
     from vllm.tokenizers import get_tokenizer
 
