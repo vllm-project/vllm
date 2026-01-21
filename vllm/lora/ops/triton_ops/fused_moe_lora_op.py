@@ -424,6 +424,7 @@ def _fused_moe_lora_expand(
         **expand_config,
     )
 
+
 @torch.inference_mode()
 def _fused_moe_lora(
     output: torch.Tensor,  # (num_tokens, top_k_num, N*len(lora_a_stacked),)
