@@ -56,7 +56,6 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
         # since there's only up_proj (w1), not gate_proj + up_proj (w1 + w3)
         self._w13_slices = 2 if base_layer.moe_config.is_act_and_mul else 1
         self._inject_lora_into_fused_moe()
-        self._one = torch.tensor([1], dtype=torch.int, device=self.device)
 
     def _normalize_keys(self, config: dict[str, int | None]) -> dict[str, int | None]:
         normalized_config = {}
@@ -155,7 +154,6 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
                 moe_state_dict["apply_router_weight_on_input"] = kwargs[
                     "apply_router_weight_on_input"
                 ]
-                self._sync_lora_loads()
                 result = func(*args, **kwargs)
                 return result
 
@@ -409,13 +407,6 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
         """Initializes lora matrices."""
         self.max_loras = lora_config.max_loras
         self.fully_sharded = lora_config.fully_sharded_loras
-
-        self.lora_ready = torch.zeros(1, dtype=torch.int8, device=self.device)
-        # Warmup: trigger Triton JIT compilation for CUDA graph capture
-        self.lora_ready.fill_(1)
-        self._sync_lora_loads()
-        self.lora_ready.fill_(0)
-
         self.adapter_enabled = torch.tensor(
             [0] * (max_loras + 1), dtype=torch.int, device=self.device
         )
@@ -527,14 +518,23 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
         lora_b: torch.Tensor | list[torch.Tensor],
     ):
         """Overwrites lora tensors at index."""
+        # Make mypy happy
         assert isinstance(lora_a, list)
         assert isinstance(lora_b, list)
 
+        self.reset_lora(index)
         self.adapter_enabled[index : index + 1].copy_(self._one, non_blocking=True)
 
+        num_experts = self.w13_lora_a_stacked[0].shape[1]
         w1_lora_a, w2_lora_a, w3_lora_a = lora_a
         w1_lora_b, w2_lora_b, w3_lora_b = lora_b
 
+        assert (
+            num_experts
+            == w1_lora_a.shape[0]
+            == w2_lora_a.shape[0]
+            == w3_lora_a.shape[0]
+        )
         slliced_w1_lora_a = self._slice_w13_a(w1_lora_a)
         slliced_w1_lora_b = self._slice_w13_b(w1_lora_b)
 
@@ -571,7 +571,8 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
         ].copy_(sliced_w2_lora_b, non_blocking=True)
 
     def forward(self, *args, **kwargs):
-        # self._sync_lora_loads()
+        # synchronizing lora load
+        self._sync_lora_loads()
         return self.base_layer.forward(*args, **kwargs)
 
     def maybe_all_reduce_tensor_model_parallel(self, *args, **kwargs):
@@ -649,13 +650,6 @@ class FusedMoE3DWithLoRA(FusedMoEWithLoRA):
         self._base_model = model_config.architectures[0]
         self.max_loras = lora_config.max_loras
         self.fully_sharded = lora_config.fully_sharded_loras
-
-        # Warmup: trigger Triton JIT compilation for CUDA graph capture
-        self.lora_ready = torch.zeros(1, dtype=torch.int8, device=self.device)
-        self.lora_ready.fill_(1)
-        self._sync_lora_loads()
-        self.lora_ready.fill_(0)
-
         self.adapter_enabled = torch.tensor(
             [0] * (max_loras + 1), dtype=torch.int, device=self.device
         )
