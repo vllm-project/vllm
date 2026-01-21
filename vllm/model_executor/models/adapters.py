@@ -158,7 +158,15 @@ def try_create_mm_pooling_model_cls(orig_cls: _T) -> _T:
 
 def _create_pooling_model_cls(orig_cls: _T) -> _T:
     # Lazy import
-    from .utils import AutoWeightsLoader, WeightsMapper
+    from vllm.model_executor.layers.logits_processor import LogitsProcessor
+    from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
+
+    from .utils import (
+        AutoWeightsLoader,
+        StageMissingLayer,
+        WeightsMapper,
+        no_init_weights,
+    )
 
     class ModelForPooling(orig_cls, VllmModelForPooling):
         is_pooling_model = True
@@ -170,19 +178,12 @@ def _create_pooling_model_cls(orig_cls: _T) -> _T:
             prefix: str = "",
             **kwargs: Any,
         ) -> None:
-            super().__init__(vllm_config=vllm_config, prefix=prefix, **kwargs)
-
-            self.vllm_config = vllm_config
-
-            # These are not used in pooling models
-            objects_to_clean = [self]
-            if language_model := getattr(self, "language_model", None):
-                objects_to_clean.append(language_model)
-
-            for obj in objects_to_clean:
-                for attr in ("lm_head", "logits_processor"):
-                    if hasattr(obj, attr):
-                        delattr(obj, attr)
+            with no_init_weights(
+                self,
+                lambda mod: StageMissingLayer("output", mod),
+                targets=(LogitsProcessor, ParallelLMHead),
+            ):
+                super().__init__(vllm_config=vllm_config, prefix=prefix, **kwargs)
 
             # If the model already defines a pooler instance, don't overwrite it
             if not getattr(self, "pooler", None):

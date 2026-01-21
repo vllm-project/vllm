@@ -757,19 +757,16 @@ class QwenVLForConditionalGeneration(
         prefix: str = "",
         transformer_type: type[QwenVLModel] = QwenVLModel,
     ) -> None:
-        def transformer_type_(*args, **kwargs):
-            with self._mark_composite_model(
-                vllm_config,
-                language_targets=QWenBlock,
-                tower_targets={"image": VisionTransformer},
-            ):
-                return transformer_type(*args, **kwargs)
-
-        super().__init__(
-            vllm_config=vllm_config,
-            prefix=prefix,
-            transformer_type=transformer_type_,
-        )
+        with self._mark_composite_model(
+            vllm_config,
+            language_targets=QWenBlock,
+            tower_targets={"image": VisionTransformer},
+        ):
+            super().__init__(
+                vllm_config=vllm_config,
+                prefix=prefix,
+                transformer_type=transformer_type,
+            )
 
         self.transformer: QwenVLModel
 

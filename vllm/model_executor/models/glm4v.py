@@ -591,19 +591,16 @@ class GLM4VForCausalLM(
         prefix: str = "",
         transformer_type: type[GLM4VModel] = GLM4VModel,
     ) -> None:
-        def transformer_type_(*args, **kwargs):
-            with self._mark_composite_model(
-                vllm_config,
-                language_targets=GLMTransformer,
-                tower_targets={"image": EVA2CLIPModel},
-            ):
-                return transformer_type(*args, **kwargs)
-
-        super().__init__(
-            vllm_config=vllm_config,
-            prefix=prefix,
-            transformer_type=transformer_type_,
-        )
+        with self._mark_composite_model(
+            vllm_config,
+            language_targets=GLMTransformer,
+            tower_targets={"image": EVA2CLIPModel},
+        ):
+            super().__init__(
+                vllm_config=vllm_config,
+                prefix=prefix,
+                transformer_type=transformer_type,
+            )
 
         self.transformer: GLM4VModel
 

@@ -41,7 +41,6 @@ from vllm.utils.tensor_schema import TensorSchema
 
 from .interfaces import (
     MultiModalEmbeddings,
-    StageMissingLayer,
     SupportsLoRA,
     SupportsMultiModal,
     SupportsPP,
@@ -49,6 +48,7 @@ from .interfaces import (
 from .siglip import SiglipVisionModel
 from .utils import (
     AutoWeightsLoader,
+    StageMissingLayer,
     WeightsMapper,
     init_vllm_registered_model,
     maybe_prefix,

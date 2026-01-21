@@ -72,17 +72,13 @@ from vllm.utils.tensor_schema import TensorSchema, TensorShape
 from .interfaces import (
     MixtureOfExperts,
     MultiModalEmbeddings,
-    StageMissingLayer,
     SupportsEagle3,
     SupportsLoRA,
     SupportsMultiModal,
     SupportsPP,
 )
 from .llama4 import Llama4ForCausalLM
-from .utils import (
-    AutoWeightsLoader,
-    maybe_prefix,
-)
+from .utils import AutoWeightsLoader, StageMissingLayer, maybe_prefix
 from .vision import run_dp_sharded_vision_model
 
 

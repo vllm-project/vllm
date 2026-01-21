@@ -17,7 +17,6 @@ import numpy as np
 import torch
 import torch.nn as nn
 from torch import Tensor
-from torch.nn.modules.module import register_module_module_registration_hook
 from transformers.models.whisper.tokenization_whisper import LANGUAGES
 from typing_extensions import Self, TypeIs
 
@@ -72,96 +71,6 @@ def _require_is_multimodal(is_multimodal: Tensor | None) -> Tensor:
     return is_multimodal
 
 
-class StageMissingLayer(nn.Module):
-    def __init__(self, name: str) -> None:
-        super().__init__()
-
-        self.name = name
-
-    def make_empty_intermediate_tensors(self, *args, **kwargs):
-        raise RuntimeError(f"{self} should not be called")
-
-    def __call__(self, *args, **kwargs):
-        raise RuntimeError(f"{self} should not be called")
-
-    def extra_repr(self) -> str:
-        return f"name={self.name!r}"
-
-
-@contextmanager
-def _collect_children(
-    module: nn.Module,
-    *,
-    targets: type[nn.Module] | tuple[type[nn.Module], ...] | None = None,
-):
-    """
-    Within this context, collect all direct child assignments to `module`,
-    returning a list of children names that is internally updated until the
-    context is exited.
-
-    If `targets` is set, instead collect descendents of `module`
-    that are an instance of `targets`, even if they aren't direct children.
-    """
-    children_names = list[str]()
-
-    if targets is None:
-
-        def hook(module_: nn.Module, name: str, submodule: nn.Module):
-            if module_ is module:
-                children_names.append(name)
-
-        with register_module_module_registration_hook(hook):
-            yield children_names
-    else:
-        yield children_names
-
-        for name, module_ in module.named_modules():
-            if isinstance(module_, targets):
-                children_names.append(name)
-
-
-@contextmanager
-def _no_init_weights(
-    module: nn.Module,
-    placeholder: Callable[[], nn.Module],
-    *,
-    targets: type[nn.Module] | tuple[type[nn.Module], ...] | None = None,
-):
-    """
-    Within this context, prevent weight initialization from using device memory and
-    replace direct child assignments to `module` with the result of `placeholder()`.
-
-    If `targets` is set, instead prevent weight initialization and
-    replace assignments where the child is an instance of `targets`,
-    even if they aren't direct children of `module`.
-    """
-    if targets is None:
-
-        def hook(module_: nn.Module, name: str, submodule: nn.Module):
-            if module_ is module:
-                return placeholder()
-
-            return submodule
-
-        with register_module_module_registration_hook(hook), torch.device("meta"):
-            yield
-    else:
-
-        def hook(module_: nn.Module, name: str, submodule: nn.Module):
-            if isinstance(module_, targets):
-                submodule.to("meta")  # Free memory
-            if isinstance(submodule, targets):
-                submodule.to("meta")  # Free memory
-                return placeholder()
-
-            return submodule
-
-        # Not all descendents are targeted, so we can't use a blanket
-        # `torch.device("meta")` context
-        with register_module_module_registration_hook(hook):
-            yield
-
-
 # Cache results of `SupportsMultiModal.get_language_model`
 _language_model_by_module = dict[nn.Module, VllmModel]()
 
@@ -211,6 +120,13 @@ class SupportsMultiModal(Protocol):
     """
     Set internally by `_mark_tower_model` or similar methods.
     """
+
+    # NOTE: By default, `initialize_model` assigns
+    # `make_empty_intermediate_tensors`, `forward`, `compute_logits` and `pooler`
+    # from the language model to this model.
+    # Compared to HF Transformers, `forward` method is decomposed to
+    # `embed_multimodal` and `embed_input_ids` and `<language model>.forward`
+    # which are executed separately by the model runner.
 
     @classmethod
     def get_placeholder_str(cls, modality: str, i: int) -> str | None:
@@ -284,13 +200,15 @@ class SupportsMultiModal(Protocol):
         If `targets` is set, instead include descendants that are an instance
         of `targets`, even if they aren't direct children.
         """
+        from .utils import StageMissingLayer, collect_children, no_init_weights
+
         mm_config = vllm_config.model_config.multimodal_config
 
-        with _collect_children(self, targets=targets) as children_names:  # noqa: SIM117
+        with collect_children(self, targets=targets) as children_names:  # noqa: SIM117
             with (
-                _no_init_weights(
+                no_init_weights(
                     self,
-                    lambda: StageMissingLayer("language_model"),
+                    lambda mod: StageMissingLayer("language_model", mod),
                     targets=targets,
                 )
                 if mm_config.mm_encoder_only
@@ -318,6 +236,8 @@ class SupportsMultiModal(Protocol):
         If `targets` is set, instead include descendants that are an instance
         of `targets`, even if they aren't direct children.
         """
+        from .utils import StageMissingLayer, collect_children, no_init_weights
+
         if isinstance(modalities, str):
             modalities = {modalities}
 
@@ -328,11 +248,11 @@ class SupportsMultiModal(Protocol):
 
         mm_config = vllm_config.model_config.multimodal_config
 
-        with _collect_children(self, targets=targets) as children_names:  # noqa: SIM117
+        with collect_children(self, targets=targets) as children_names:  # noqa: SIM117
             with (
-                _no_init_weights(
+                no_init_weights(
                     self,
-                    lambda: StageMissingLayer(stage_name),
+                    lambda mod: StageMissingLayer(stage_name, mod),
                     targets=targets,
                 )
                 if all(mm_config.get_limit_per_prompt(m) == 0 for m in modalities)
