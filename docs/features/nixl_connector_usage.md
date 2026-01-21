@@ -189,7 +189,7 @@ Support use case: Prefill with 'HND' and decode with 'NHD' with experimental con
 By default, this feature is enabled. On attention backends that support this feature, each logical block is contiguous in physical memory. This reduces the number of buffers that need to be transferred.
 You can disable this feature:
 
-```
+```bash
 --kv-transfer-config '{..., "kv_connector_extra_config": {"enable_cross_layers_blocks": "False"}}'
 ```
 
