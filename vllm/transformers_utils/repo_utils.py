@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import TypeVar
 
 import huggingface_hub
-from huggingface_hub import file_exists, hf_hub_download, try_to_load_from_cache
+from huggingface_hub import hf_hub_download, try_to_load_from_cache
 from huggingface_hub import list_repo_files as hf_list_repo_files
 from huggingface_hub.utils import (
     EntryNotFoundError,
@@ -125,6 +125,22 @@ def list_filtered_repo_files(
             ]
         )
     return file_list
+
+
+def file_exists(
+    repo_id: str,
+    file_name: str,
+    *,
+    repo_type: str | None = None,
+    revision: str | None = None,
+    token: str | bool | None = None,
+) -> bool:
+    # `list_repo_files` is cached and retried on error, so this is more efficient than
+    # huggingface_hub.file_exists default implementation when looking for multiple files
+    file_list = list_repo_files(
+        repo_id, repo_type=repo_type, revision=revision, token=token
+    )
+    return file_name in file_list
 
 
 # In offline mode the result can be a false negative
