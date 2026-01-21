@@ -19,7 +19,7 @@ else()
   FetchContent_Declare(
         flashmla
         GIT_REPOSITORY https://github.com/vllm-project/FlashMLA
-        GIT_TAG 46d64a8ebef03fa50b4ae74937276a5c940e3f95
+        GIT_TAG 526781394b33d9888e4c41952e692266267dd8bf
         GIT_PROGRESS TRUE
         CONFIGURE_COMMAND ""
         BUILD_COMMAND ""
@@ -55,16 +55,43 @@ if(FLASH_MLA_ARCHS)
 
     set(FlashMLA_SOURCES
         ${flashmla_SOURCE_DIR}/csrc/torch_api.cpp
-        ${flashmla_SOURCE_DIR}/csrc/pybind.cpp
-        ${flashmla_SOURCE_DIR}/csrc/smxx/get_mla_metadata.cu
-        ${flashmla_SOURCE_DIR}/csrc/smxx/mla_combine.cu
-        ${flashmla_SOURCE_DIR}/csrc/sm90/decode/dense/splitkv_mla.cu
-        ${flashmla_SOURCE_DIR}/csrc/sm90/decode/sparse_fp8/splitkv_mla.cu
+
+        # Misc kernels for decoding
+        ${flashmla_SOURCE_DIR}/csrc/smxx/decode/get_decoding_sched_meta/get_decoding_sched_meta.cu
+        ${flashmla_SOURCE_DIR}/csrc/smxx/decode/combine/combine.cu
+
+        # sm90 dense decode
+        ${flashmla_SOURCE_DIR}/csrc/sm90/decode/dense/instantiations/fp16.cu
+        ${flashmla_SOURCE_DIR}/csrc/sm90/decode/dense/instantiations/bf16.cu
+
+        # sm90 sparse decode
+        ${flashmla_SOURCE_DIR}/csrc/sm90/decode/sparse_fp8/instantiations/model1_persistent_h64.cu
+        ${flashmla_SOURCE_DIR}/csrc/sm90/decode/sparse_fp8/instantiations/model1_persistent_h128.cu
+        ${flashmla_SOURCE_DIR}/csrc/sm90/decode/sparse_fp8/instantiations/v32_persistent_h64.cu
+        ${flashmla_SOURCE_DIR}/csrc/sm90/decode/sparse_fp8/instantiations/v32_persistent_h128.cu
+
+        # sm90 sparse prefill
         ${flashmla_SOURCE_DIR}/csrc/sm90/prefill/sparse/fwd.cu
-        ${flashmla_SOURCE_DIR}/csrc/sm100/decode/sparse_fp8/splitkv_mla.cu
+        ${flashmla_SOURCE_DIR}/csrc/sm90/prefill/sparse/instantiations/phase1_k512.cu
+        ${flashmla_SOURCE_DIR}/csrc/sm90/prefill/sparse/instantiations/phase1_k512_topklen.cu
+        ${flashmla_SOURCE_DIR}/csrc/sm90/prefill/sparse/instantiations/phase1_k576.cu
+        ${flashmla_SOURCE_DIR}/csrc/sm90/prefill/sparse/instantiations/phase1_k576_topklen.cu
+
+        # sm100 dense prefill & backward
         ${flashmla_SOURCE_DIR}/csrc/sm100/prefill/dense/fmha_cutlass_fwd_sm100.cu
         ${flashmla_SOURCE_DIR}/csrc/sm100/prefill/dense/fmha_cutlass_bwd_sm100.cu
-        ${flashmla_SOURCE_DIR}/csrc/sm100/prefill/sparse/fwd.cu
+
+        # sm100 sparse prefill
+        ${flashmla_SOURCE_DIR}/csrc/sm100/prefill/sparse/fwd/head64/instantiations/phase1_k512.cu
+        ${flashmla_SOURCE_DIR}/csrc/sm100/prefill/sparse/fwd/head64/instantiations/phase1_k576.cu
+        ${flashmla_SOURCE_DIR}/csrc/sm100/prefill/sparse/fwd/head128/instantiations/phase1_k512.cu
+        ${flashmla_SOURCE_DIR}/csrc/sm100/prefill/sparse/fwd/head128/instantiations/phase1_k576.cu
+        ${flashmla_SOURCE_DIR}/csrc/sm100/prefill/sparse/fwd_for_small_topk/head128/instantiations/phase1_prefill_k512.cu
+
+        # sm100 sparse decode
+        ${flashmla_SOURCE_DIR}/csrc/sm100/decode/head64/instantiations/v32.cu
+        ${flashmla_SOURCE_DIR}/csrc/sm100/decode/head64/instantiations/model1.cu
+        ${flashmla_SOURCE_DIR}/csrc/sm100/prefill/sparse/fwd_for_small_topk/head128/instantiations/phase1_decode_k512.cu
     )
 
     set(FlashMLA_Extension_SOURCES
@@ -76,6 +103,7 @@ if(FLASH_MLA_ARCHS)
 
     set(FlashMLA_INCLUDES
         ${flashmla_SOURCE_DIR}/csrc
+        ${flashmla_SOURCE_DIR}/csrc/kerutils/include
         ${flashmla_SOURCE_DIR}/csrc/sm90
         ${flashmla_SOURCE_DIR}/csrc/cutlass/include
         ${flashmla_SOURCE_DIR}/csrc/cutlass/tools/util/include
@@ -83,7 +111,6 @@ if(FLASH_MLA_ARCHS)
 
     set(FlashMLA_Extension_INCLUDES
         ${flashmla_SOURCE_DIR}/csrc
-        ${flashmla_SOURCE_DIR}/csrc/sm90
         ${flashmla_SOURCE_DIR}/csrc/extension/sm90/dense_fp8/
         ${flashmla_SOURCE_DIR}/csrc/cutlass/include
         ${flashmla_SOURCE_DIR}/csrc/cutlass/tools/util/include
@@ -110,9 +137,12 @@ if(FLASH_MLA_ARCHS)
 
     # Keep Stable ABI for the module, but *not* for CUDA/C++ files.
     # This prevents Py_LIMITED_API from affecting nvcc and C++ compiles.
+    # Also enable C++20 for the FlashMLA sources (required for std::span, requires, etc.)
     target_compile_options(_flashmla_C PRIVATE
         $<$<COMPILE_LANGUAGE:CUDA>:-UPy_LIMITED_API>
-        $<$<COMPILE_LANGUAGE:CXX>:-UPy_LIMITED_API>)
+        $<$<COMPILE_LANGUAGE:CXX>:-UPy_LIMITED_API>
+        $<$<COMPILE_LANGUAGE:CXX>:-std=c++20>
+        $<$<COMPILE_LANGUAGE:CUDA>:-std=c++20>)
 
     define_extension_target(
         _flashmla_extension_C
