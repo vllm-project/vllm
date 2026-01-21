@@ -397,6 +397,14 @@ VLM_TEST_SETTINGS = {
         vllm_runner_kwargs={"mm_processor_kwargs": {"do_pan_and_scan": True}},
         patch_hf_runner=model_utils.gemma3_patch_hf_runner,
     ),
+    "granite_vision": VLMTestInfo(
+        models=["ibm-granite/granite-vision-3.3-2b"],
+        test_type=(VLMTestType.IMAGE),
+        prompt_formatter=lambda img_prompt: f"<|user|>\n{img_prompt}\n<|assistant|>\n",
+        max_model_len=8192,
+        auto_cls=AutoModelForImageTextToText,
+        vllm_output_post_proc=model_utils.llava_image_vllm_to_hf_output,
+    ),
     "glm4v": VLMTestInfo(
         models=["zai-org/glm-4v-9b"],
         test_type=VLMTestType.IMAGE,
