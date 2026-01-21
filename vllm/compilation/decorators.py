@@ -564,7 +564,7 @@ def _support_torch_compile(
         return output
 
     # triggers VllmSerializableFunction.serialize()
-    def save_aot_compiled_function(self):
+    def save_aot_compiled_function(self: type[_T]) -> None:
         if self.was_aot_compile_fn_loaded_from_disk:
             logger.debug("AOT compiled function was loaded from cache, skipping save")
             return
