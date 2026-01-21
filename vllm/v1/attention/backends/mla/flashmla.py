@@ -6,20 +6,10 @@ from typing import ClassVar
 
 import torch
 
-from vllm.attention.backends.abstract import AttentionLayer, AttentionType, MultipleOf
-from vllm.attention.ops.flashmla import (
-    flash_mla_with_kvcache,
-    get_mla_metadata,
-    is_flashmla_dense_supported,
-)
 from vllm.config import VllmConfig
 from vllm.config.cache import CacheDType
 from vllm.logger import init_logger
-from vllm.model_executor.layers.batch_invariant import (
-    vllm_is_batch_invariant,
-)
-from vllm.platforms.interface import DeviceCapability
-from vllm.v1.attention.backends.mla.common import (
+from vllm.model_executor.layers.attention.mla_attention import (
     MLACommonBackend,
     MLACommonDecodeMetadata,
     MLACommonImpl,
@@ -27,10 +17,24 @@ from vllm.v1.attention.backends.mla.common import (
     MLACommonMetadataBuilder,
     QueryLenSupport,
 )
-from vllm.v1.attention.backends.utils import (
+from vllm.model_executor.layers.batch_invariant import (
+    vllm_is_batch_invariant,
+)
+from vllm.platforms.interface import DeviceCapability
+from vllm.v1.attention.backend import (
     AttentionCGSupport,
+    AttentionLayer,
+    AttentionType,
+    MultipleOf,
+)
+from vllm.v1.attention.backends.utils import (
     reshape_attn_output_for_spec_decode,
     reshape_query_for_spec_decode,
+)
+from vllm.v1.attention.ops.flashmla import (
+    flash_mla_with_kvcache,
+    get_mla_metadata,
+    is_flashmla_dense_supported,
 )
 from vllm.v1.kv_cache_interface import AttentionSpec
 
@@ -39,12 +43,15 @@ logger = init_logger(__name__)
 
 class FlashMLABackend(MLACommonBackend):
     supported_dtypes: ClassVar[list[torch.dtype]] = [torch.float16, torch.bfloat16]
-    supported_kernel_block_sizes: ClassVar[list[int | MultipleOf]] = [64]
     supported_kv_cache_dtypes: ClassVar[list[CacheDType]] = [
         "auto",
         "fp8",
         "fp8_e4m3",
     ]
+
+    @staticmethod
+    def get_supported_kernel_block_sizes() -> list[int | MultipleOf]:
+        return [64]
 
     @staticmethod
     def get_name() -> str:
@@ -75,11 +82,11 @@ class FlashMLABackend(MLACommonBackend):
         device_capability: DeviceCapability,
     ) -> str | None:
         if use_sparse:
-            from vllm.attention.ops.flashmla import is_flashmla_sparse_supported
+            from vllm.v1.attention.ops.flashmla import is_flashmla_sparse_supported
 
             return is_flashmla_sparse_supported()[1]
         else:
-            from vllm.attention.ops.flashmla import is_flashmla_dense_supported
+            from vllm.v1.attention.ops.flashmla import is_flashmla_dense_supported
 
             return is_flashmla_dense_supported()[1]
 
@@ -140,8 +147,8 @@ class FlashMLAMetadataBuilder(MLACommonMetadataBuilder[FlashMLAMetadata]):
     def _build_decode(
         self,
         block_table_tensor: torch.Tensor,
-        seq_lens_cpu: torch.Tensor,
         seq_lens_device: torch.Tensor,
+        max_seq_len: int,
         query_start_loc_cpu: torch.Tensor,
         query_start_loc_device: torch.Tensor,
         num_decode_tokens: int,

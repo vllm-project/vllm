@@ -15,14 +15,18 @@ from tests.kernels.quantization.nvfp4_utils import (
 )
 from tests.kernels.utils import torch_experts
 from vllm.config import VllmConfig
-from vllm.distributed import get_dp_group, get_tensor_model_parallel_world_size
+from vllm.distributed import (
+    get_dp_group,
+    get_pcp_group,
+    get_tensor_model_parallel_world_size,
+)
 from vllm.forward_context import set_forward_context
+from vllm.model_executor.layers.fused_moe import fused_topk
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
     FusedMoEParallelConfig,
     FusedMoEQuantConfig,
 )
-from vllm.model_executor.layers.fused_moe.fused_moe import fused_topk
 from vllm.utils.import_utils import has_deep_ep, has_deep_gemm, has_pplx
 
 from .mk_objects import (
@@ -254,16 +258,16 @@ class Config:
                     f"{self.fe_supported_types()}."
                 )
 
-        # Check block quanization support
-        is_block_quatized = self.quant_block_shape is not None
-        if is_block_quatized and self.quant_dtype is None:
+        # Check block quantization support
+        is_block_quantized = self.quant_block_shape is not None
+        if is_block_quantized and self.quant_dtype is None:
             return False, "No block quantization support."
 
-        if is_block_quatized and not self.is_block_quant_supported():
+        if is_block_quantized and not self.is_block_quant_supported():
             return False, "Mismatched block quantization support."
 
         # deep_gemm only works with block-quantized
-        if self.needs_deep_gemm() and not is_block_quatized:
+        if self.needs_deep_gemm() and not is_block_quantized:
             return False, "Needs DeepGEMM but not block quantized."
 
         # Check dependencies (turn into asserts?)
@@ -561,6 +565,7 @@ def make_modular_kernel(
     # make moe config
     moe_parallel_config: FusedMoEParallelConfig = FusedMoEParallelConfig.make(
         tp_size_=get_tensor_model_parallel_world_size(),
+        pcp_size_=get_pcp_group().world_size,
         dp_size_=get_dp_group().world_size,
         vllm_parallel_config=vllm_config.parallel_config,
     )
@@ -589,7 +594,8 @@ def make_modular_kernel(
     )
 
     modular_kernel = mk.FusedMoEModularKernel(
-        prepare_finalize=prepare_finalize, fused_experts=fused_experts
+        prepare_finalize=prepare_finalize,
+        fused_experts=fused_experts,
     )
 
     return modular_kernel

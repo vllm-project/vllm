@@ -7,6 +7,9 @@ import torch
 from tests.kernels.utils import opcheck
 from vllm._custom_ops import permute_cols
 
+if not hasattr(torch.ops._C, "permute_cols"):
+    pytest.skip(reason="permute_cols is not supported on ROCm", allow_module_level=True)
+
 
 @pytest.mark.parametrize("shape", [(1, 512), (544, 4096), (67, 8192)])
 @pytest.mark.parametrize("dtype", [torch.bfloat16])

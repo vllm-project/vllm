@@ -31,7 +31,6 @@ class PunicaWrapperABC(ABC):
         lora_index_to_id: list[int | None],
         max_loras: int,
         vocab_size: int,
-        extra_vocab_size: int,
         **kwargs,
     ) -> None:
         """
@@ -172,8 +171,11 @@ class PunicaWrapperBase(PunicaWrapperABC):
         lora_index_to_id: list[int | None],
         max_loras: int,
         vocab_size: int,
-        extra_vocab_size: int,
     ):
+        # NOTE We have remove lora extra vocab support for now. So we set
+        # extra_vocab_size always to 0, and extra_vocab_size will be removed.
+
+        extra_vocab_size = 0
         (
             base_indices,
             sampler_indices,
@@ -285,12 +287,9 @@ class PunicaWrapperBase(PunicaWrapperABC):
         lora_index_to_id: list[int | None],
         max_loras: int,
         vocab_size: int,
-        extra_vocab_size: int,
         **kwargs,
     ):
-        self._update_base_metadata(
-            mapping, lora_index_to_id, max_loras, vocab_size, extra_vocab_size
-        )
+        self._update_base_metadata(mapping, lora_index_to_id, max_loras, vocab_size)
 
         if mapping.is_prefill:
             # Update metadata required for prefill-related operators.
@@ -471,8 +470,8 @@ class PunicaWrapperBase(PunicaWrapperABC):
         self,
         y: torch.Tensor,
         x: torch.Tensor,
-        lora_a_stacked: list[torch.Tensor],
-        lora_b_stacked: list[torch.Tensor],
+        lora_a_stacked: tuple[torch.Tensor, ...],
+        lora_b_stacked: tuple[torch.Tensor, ...],
         topk_weights: torch.Tensor,
         sorted_token_ids: torch.Tensor,
         expert_ids: torch.Tensor,
@@ -483,6 +482,8 @@ class PunicaWrapperBase(PunicaWrapperABC):
         expand_config,
         adapter_enabled: torch.Tensor,
         mul_routed_weight=False,
+        fully_sharded: bool = False,
+        offset: int = 0,
     ):
         """
         Performs a fused forward computation for LoRA of

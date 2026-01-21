@@ -100,6 +100,27 @@ void cpu_attention_with_kv_cache(
     const torch::Tensor& scheduler_metadata,
     const std::optional<torch::Tensor>& s_aux);
 
+// Note: just for avoiding importing errors
+void placeholder_op() { TORCH_CHECK(false, "Unimplemented"); }
+
+void cpu_gemm_wna16(const torch::Tensor& input, const torch::Tensor& q_weight,
+                    torch::Tensor& output, const torch::Tensor& scales,
+                    const std::optional<torch::Tensor>& zeros,
+                    const std::optional<torch::Tensor>& g_idx,
+                    const std::optional<torch::Tensor>& bias,
+                    const int64_t pack_factor, const std::string& isa_hint);
+
+void prepack_moe_weight(const torch::Tensor& weight,
+                        torch::Tensor& packed_weight, const std::string& isa);
+
+void cpu_fused_moe(torch::Tensor& output, const torch::Tensor& input,
+                   const torch::Tensor& w13, const torch::Tensor& w2,
+                   const std::optional<torch::Tensor>& w13_bias,
+                   const std::optional<torch::Tensor>& w2_bias,
+                   const torch::Tensor& topk_weights,
+                   const torch::Tensor& topk_id, const std::string& act,
+                   const std::string& isa);
+
 TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   // vLLM custom ops
 
@@ -162,7 +183,6 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   // Quantization
 #if defined(__AVX512F__) || (defined(__aarch64__) && !defined(__APPLE__)) || \
     defined(__powerpc64__)
-  at::Tag stride_tag = at::Tag::needs_fixed_stride_order;
   // Helper function to release oneDNN handlers
   ops.def("release_dnnl_matmul_handler(int handler) -> ()",
           &release_dnnl_matmul_handler);
@@ -198,15 +218,13 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   // Compute int8 quantized tensor for given scaling factor.
   ops.def(
       "static_scaled_int8_quant(Tensor! out, Tensor input, Tensor scale,"
-      "Tensor? azp) -> ()",
-      {stride_tag});
+      "Tensor? azp) -> ()");
   ops.impl("static_scaled_int8_quant", torch::kCPU, &static_scaled_int8_quant);
 
   // Compute int8 quantized tensor and scaling factor
   ops.def(
       "dynamic_scaled_int8_quant(Tensor! out, Tensor input, Tensor! scale, "
-      "Tensor!? azp) -> ()",
-      {stride_tag});
+      "Tensor!? azp) -> ()");
   ops.impl("dynamic_scaled_int8_quant", torch::kCPU,
            &dynamic_scaled_int8_quant);
 #endif
@@ -275,6 +293,33 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "sliding_window_left, SymInt sliding_window_right, Tensor block_table, "
       "float softcap, Tensor sheduler_metadata, Tensor? s_aux) -> ()",
       &cpu_attention_with_kv_cache);
+
+  // placeholders
+  ops.def("static_scaled_fp8_quant() -> ()", placeholder_op);
+  ops.def("dynamic_scaled_fp8_quant() -> ()", placeholder_op);
+  ops.def("dynamic_per_token_scaled_fp8_quant() -> ()", placeholder_op);
+
+  // WNA16
+#if defined(__AVX512F__)
+  ops.def(
+      "cpu_gemm_wna16(Tensor input, Tensor q_weight, Tensor(a2!) output, "
+      "Tensor scales, Tensor? zeros, Tensor? g_idx, Tensor? bias, SymInt "
+      "pack_factor, str isa_hint) -> ()");
+  ops.impl("cpu_gemm_wna16", torch::kCPU, &cpu_gemm_wna16);
+#endif
+
+  // fused moe
+#if defined(__AVX512F__)
+  ops.def(
+      "prepack_moe_weight(Tensor weight, Tensor(a1!) packed_weight, str isa) "
+      "-> ()");
+  ops.impl("prepack_moe_weight", torch::kCPU, &prepack_moe_weight);
+  ops.def(
+      "cpu_fused_moe(Tensor(a0!) output, Tensor input, Tensor w13, Tensor w2, "
+      "Tensor? w13_bias, Tensor? w2_bias, Tensor topk_weights, Tensor topk_id, "
+      "str act, str isa) -> ()");
+  ops.impl("cpu_fused_moe", torch::kCPU, &cpu_fused_moe);
+#endif
 }
 
 TORCH_LIBRARY_EXPAND(CONCAT(TORCH_EXTENSION_NAME, _utils), utils) {

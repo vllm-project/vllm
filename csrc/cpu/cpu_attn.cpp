@@ -13,6 +13,19 @@
   #define AMX_DISPATCH(...) case cpu_attention::ISA::AMX:
 #endif
 
+#ifdef __aarch64__
+  #include "cpu_attn_neon.hpp"
+  // NEON requires head_dim to be a multiple of 32
+  #define NEON_DISPATCH(...)                                                   \
+    case cpu_attention::ISA::NEON: {                                           \
+      using attn_impl = cpu_attention::AttentionImpl<cpu_attention::ISA::NEON, \
+                                                     scalar_t, head_dim>;      \
+      return __VA_ARGS__();                                                    \
+    }
+#else
+  #define NEON_DISPATCH(...) case cpu_attention::ISA::NEON:
+#endif  // #ifdef __aarch64__
+
 #define CPU_ATTN_DISPATCH_CASE(HEAD_DIM, ...) \
   case HEAD_DIM: {                            \
     constexpr size_t head_dim = HEAD_DIM;     \
@@ -24,7 +37,9 @@
     switch (HEAD_DIM) {                                         \
       CPU_ATTN_DISPATCH_CASE(32, __VA_ARGS__)                   \
       CPU_ATTN_DISPATCH_CASE(64, __VA_ARGS__)                   \
+      CPU_ATTN_DISPATCH_CASE(80, __VA_ARGS__)                   \
       CPU_ATTN_DISPATCH_CASE(96, __VA_ARGS__)                   \
+      CPU_ATTN_DISPATCH_CASE(112, __VA_ARGS__)                  \
       CPU_ATTN_DISPATCH_CASE(128, __VA_ARGS__)                  \
       CPU_ATTN_DISPATCH_CASE(160, __VA_ARGS__)                  \
       CPU_ATTN_DISPATCH_CASE(192, __VA_ARGS__)                  \
@@ -41,6 +56,7 @@
   [&] {                                                                       \
     switch (ISA_TYPE) {                                                       \
       AMX_DISPATCH(__VA_ARGS__)                                               \
+      NEON_DISPATCH(__VA_ARGS__)                                              \
       case cpu_attention::ISA::VEC: {                                         \
         using attn_impl =                                                     \
             cpu_attention::AttentionImpl<cpu_attention::ISA::VEC, scalar_t,   \
@@ -73,6 +89,8 @@ torch::Tensor get_scheduler_metadata(
     isa = cpu_attention::ISA::VEC;
   } else if (isa_hint == "vec16") {
     isa = cpu_attention::ISA::VEC16;
+  } else if (isa_hint == "neon") {
+    isa = cpu_attention::ISA::NEON;
   } else {
     TORCH_CHECK(false, "Unsupported CPU attention ISA hint: " + isa_hint);
   }
@@ -102,7 +120,6 @@ torch::Tensor get_scheduler_metadata(
   input.casual = casual;
   input.isa = isa;
   input.enable_kv_split = enable_kv_split;
-  TORCH_CHECK(casual, "Only supports casual mask for now.");
 
   VLLM_DISPATCH_FLOATING_TYPES(dtype, "get_scheduler_metadata", [&]() {
     CPU_ATTN_DISPATCH_CASE_HEADDIM(head_dim, [&] {
@@ -158,6 +175,8 @@ void cpu_attn_reshape_and_cache(
       return cpu_attention::ISA::VEC;
     } else if (isa == "vec16") {
       return cpu_attention::ISA::VEC16;
+    } else if (isa == "neon") {
+      return cpu_attention::ISA::NEON;
     } else {
       TORCH_CHECK(false, "Invalid ISA type: " + isa);
     }

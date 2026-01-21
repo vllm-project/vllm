@@ -5,14 +5,19 @@ import pytest
 import torch
 
 from vllm._aiter_ops import rocm_aiter_ops
-from vllm.config import CompilationConfig, VllmConfig, set_current_vllm_config
+from vllm.config import (
+    CompilationConfig,
+    VllmConfig,
+    get_cached_compilation_config,
+    set_current_vllm_config,
+)
 from vllm.model_executor.custom_op import CustomOp
 from vllm.model_executor.layers.activation import (
     GeluAndMul,
     ReLUSquaredActivation,
     SiluAndMul,
 )
-from vllm.model_executor.layers.fused_moe.fused_moe import (
+from vllm.model_executor.layers.fused_moe.router.fused_topk_router import (
     dispatch_topk_func,
     vllm_topk_softmax,
 )
@@ -86,6 +91,7 @@ def test_enabled_ops(
             backend=backend, mode=compilation_mode, custom_ops=custom_ops
         )
     )
+    get_cached_compilation_config.cache_clear()
     with set_current_vllm_config(vllm_config):
         assert CustomOp.default_on() == default_on
 

@@ -5,12 +5,12 @@
 import torch
 
 from vllm import _custom_ops as ops
-from vllm.attention.backends.abstract import AttentionType
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
     kFp8StaticTensorSym,
 )
+from vllm.v1.attention.backend import AttentionType
 from vllm.v1.attention.backends.flash_attn import FlashAttentionMetadata
 from vllm.v1.attention.backends.rocm_attn import (
     RocmAttentionBackend,
@@ -142,7 +142,14 @@ class RocmAiterUnifiedAttentionImpl(RocmAttentionImpl):
 
         key_cache, value_cache = kv_cache.unbind(0)
 
-        if self.kv_sharing_target_layer_name is None:
+        # key and value may be None in the case of cross attention. They are
+        # calculated once based on the output from the encoder and then cached
+        # in KV cache.
+        if (
+            self.kv_sharing_target_layer_name is None
+            and key is not None
+            and value is not None
+        ):
             # Reshape the input keys and values and store them in the cache.
             # Skip this if sharing KV cache with an earlier attention layer.
             ops.reshape_and_cache_flash(
@@ -169,7 +176,10 @@ class RocmAiterUnifiedAttentionImpl(RocmAttentionImpl):
         max_seqlen_k = attn_metadata.max_seq_len
         block_table = attn_metadata.block_table
 
-        descale_shape = (cu_seqlens_q.shape[0] - 1, key.shape[1])
+        descale_shape = (
+            cu_seqlens_q.shape[0] - 1,
+            key.shape[1] if key is not None else self.num_kv_heads,
+        )
 
         self.unified_attention(
             q=query[:num_actual_tokens],

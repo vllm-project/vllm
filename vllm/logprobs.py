@@ -5,8 +5,6 @@ from collections.abc import Iterable, Iterator, MutableSequence
 from dataclasses import dataclass, field
 from typing import overload
 
-import vllm.envs as envs
-
 
 # We use dataclass for now because it is used for
 # openai server output, and msgspec is not serializable.
@@ -161,17 +159,17 @@ PromptLogprobs = FlatLogprobs | list[LogprobsOnePosition | None]
 SampleLogprobs = FlatLogprobs | list[LogprobsOnePosition]
 
 
-def create_prompt_logprobs() -> PromptLogprobs:
+def create_prompt_logprobs(flat_logprobs: bool) -> PromptLogprobs:
     """Creates a container to store prompt logprobs for a request"""
-    logprobs = FlatLogprobs() if envs.VLLM_FLAT_LOGPROBS else []
+    logprobs = FlatLogprobs() if flat_logprobs else []
     # NOTE: logprob of first prompt token is None.
     logprobs.append(None)
     return logprobs
 
 
-def create_sample_logprobs() -> SampleLogprobs:
+def create_sample_logprobs(flat_logprobs: bool) -> SampleLogprobs:
     """Creates a container to store decode logprobs for a request"""
-    return FlatLogprobs() if envs.VLLM_FLAT_LOGPROBS else []
+    return FlatLogprobs() if flat_logprobs else []
 
 
 def append_logprobs_for_next_position(
