@@ -44,6 +44,15 @@ cleanup_docker() {
   fi
 }
 
+cleanup_network() {
+  for node in $(seq 0 $((NUM_NODES-1))); do
+    if docker pr -a -q -f name="node${node}" | grep -q .; then
+      docker stop "node${node}"
+    fi
+  done
+  docker network rm docker-net 
+}
+
 # Call the cleanup docker function
 cleanup_docker
 
@@ -247,8 +256,10 @@ elif [[ $commands == *"VLLM_TEST_GROUP_NAME=mi325_4-2-node-tests-4-gpus-in-total
         composite_command=$(echo "${composite_command} && ${commands}")
       done
       /bin/bash -c "${composite_command}"
+      cleanup_network
   else
       echo "Failed to parse node commands! Exiting."
+      cleanup_network
       exit 111
   fi
 else
