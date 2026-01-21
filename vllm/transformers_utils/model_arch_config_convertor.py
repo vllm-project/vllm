@@ -190,6 +190,7 @@ class ModelArchConfigConvertorBase:
             "deepseek_v32",
             "deepseek_mtp",
             "glm4_moe_lite",
+            "glm4_moe_lite_mtp",
             "kimi_k2",
             "kimi_linear",
             "longcat_flash",
