@@ -29,6 +29,15 @@ def _get_minicpmv_chat_template_fallback(tokenizer_name_or_path: str) -> Path | 
     return CHAT_TEMPLATES_DIR / "template_chatml.jinja"
 
 
+def _get_gemma3_chat_template_fallback(tokenizer_name_or_path: str) -> Path | None:
+    # TranslateGemma uses a specialized template with language code support
+    if "translategemma" in tokenizer_name_or_path.lower():
+        return CHAT_TEMPLATES_DIR / "template_translategemma.jinja"
+
+    # Other Gemma 3 models use HuggingFace's built-in template
+    return None
+
+
 _MODEL_TYPE_TO_CHAT_TEMPLATE_FALLBACK: dict[str, ChatTemplatePath] = {
     "blip-2": CHAT_TEMPLATES_DIR / "template_blip2.jinja",
     "chameleon": CHAT_TEMPLATES_DIR / "template_basic.jinja",
@@ -36,6 +45,7 @@ _MODEL_TYPE_TO_CHAT_TEMPLATE_FALLBACK: dict[str, ChatTemplatePath] = {
     "deepseek_ocr": CHAT_TEMPLATES_DIR / "template_deepseek_ocr.jinja",
     "deepseek_vl_v2": CHAT_TEMPLATES_DIR / "template_deepseek_vl2.jinja",
     "fuyu": CHAT_TEMPLATES_DIR / "template_fuyu.jinja",
+    "gemma3": _get_gemma3_chat_template_fallback,
     "minicpmv": _get_minicpmv_chat_template_fallback,
     "paligemma": CHAT_TEMPLATES_DIR / "template_basic.jinja",
     "qwen": _get_qwen_chat_template_fallback,
