@@ -50,7 +50,9 @@ cleanup_network() {
       docker stop "node${node}"
     fi
   done
-  docker network rm docker-net 
+  if docker network ls docker-net; then
+    docker network rm docker-net
+  fi
 }
 
 # Call the cleanup docker function
