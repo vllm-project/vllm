@@ -180,7 +180,6 @@ class RocmPlatform(Platform):
         "quark",
         "ptpc_fp8",
         "mxfp4",
-        "petit_nvfp4",
         "torchao",
     ]
     # bitsandbytes not supported on gfx9 (warp size 64 limitation)
