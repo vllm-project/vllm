@@ -1724,7 +1724,7 @@ class FusedMoE(CustomOp):
         )
         mk_has_shared_expert = (
             is_mk
-            and getattr(self.quant_method.kernel, "shared_experts", None) is not None
+            and getattr(self.quant_method.kernel, "shared_experts", None) is not None  # type: ignore[attr-defined]
         )
 
         has_separate_shared_experts = (
