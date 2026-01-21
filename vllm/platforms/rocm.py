@@ -480,6 +480,9 @@ class RocmPlatform(Platform):
         ):
             compilation_config.custom_ops.append("+grouped_topk")
 
+        # Default dispatch to rocm's sparse_attn_indexer implementation
+        compilation_config.custom_ops.append("+sparse_attn_indexer")
+
     @classmethod
     def verify_model_arch(cls, model_arch: str) -> None:
         if model_arch in _ROCM_UNSUPPORTED_MODELS:
