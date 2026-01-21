@@ -149,7 +149,7 @@ uv pip install vllm --extra-index-url https://wheels.vllm.ai/rocm/0.14.0/rocm700
         # Install dependencies
         pip install --upgrade numba \
             scipy \
-            huggingface-hub[cli,hf_transfer] \
+            huggingface-hub \
             setuptools_scm
         pip install -r requirements/rocm.txt
 
