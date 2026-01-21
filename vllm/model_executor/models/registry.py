@@ -302,6 +302,10 @@ _MULTIMODAL_MODELS = {
     "DeepseekVLV2ForCausalLM": ("deepseek_vl2", "DeepseekVLV2ForCausalLM"),
     "DeepseekOCRForCausalLM": ("deepseek_ocr", "DeepseekOCRForCausalLM"),
     "DotsOCRForCausalLM": ("dots_ocr", "DotsOCRForCausalLM"),
+    "Eagle2_5_VLForConditionalGeneration": (
+        "eagle2_5_vl",
+        "Eagle2_5_VLForConditionalGeneration",
+    ),
     "Ernie4_5_VLMoeForConditionalGeneration": (
         "ernie45_vl",
         "Ernie4_5_VLMoeForConditionalGeneration",
