@@ -3,7 +3,12 @@
 
 import torch
 
-from vllm.model_executor.layers.fused_moe.config import RoutingMethodType
+import vllm.model_executor.layers.fused_moe.modular_kernel as mk
+from vllm.model_executor.layers.fused_moe.config import (
+    FusedMoEConfig,
+    FusedMoEParallelConfig,
+    RoutingMethodType,
+)
 from vllm.model_executor.layers.fused_moe.utils import moe_kernel_quantize_input
 from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
     calculate_tile_tokens_dim,
@@ -11,7 +16,106 @@ from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     per_token_group_quant_fp8,
 )
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    QuantKey,
+    kFp8Dynamic128Sym,
+    kFp8Static128BlockSym,
+    kFp8StaticTensorSym,
+)
+from vllm.platforms import current_platform
 from vllm.utils.torch_utils import direct_register_custom_op
+
+#
+# Methods used by the oracle for kernel selection.
+#
+
+
+def _supports_current_device() -> bool:
+    """Supports only Blackwell-family GPUs."""
+    p = current_platform
+    # Add check flashinfer trtllm is available
+    return p.is_cuda() and p.is_device_capability_family(100)
+
+
+def _supports_no_act_and_mul() -> bool:
+    """Does not support non-gated MoE (i.e. Nanotron-Mini)."""
+    return False
+
+
+def _supports_quant_scheme(
+    weight_key: QuantKey | None,
+    activation_key: QuantKey | None,
+) -> bool:
+    """Supports Fp8 per-tensor and Fp8 block."""
+    SUPPORTED_W_A = [
+        (kFp8Static128BlockSym, kFp8Dynamic128Sym),
+        (kFp8StaticTensorSym, kFp8StaticTensorSym),
+    ]
+    return (weight_key, activation_key) in SUPPORTED_W_A
+
+
+def _supports_activation(activation: str) -> bool:
+    """Supports silu activation only."""
+    return activation in ["silu"]
+
+
+def _supports_routing_method(
+    weight_key: QuantKey | None,
+    activation_key: QuantKey | None,
+    routing_method: RoutingMethodType,
+) -> bool:
+    """Monolithic kernels need to express router support."""
+    if (weight_key, activation_key) == (kFp8Static128BlockSym, kFp8Dynamic128Sym):
+        # NOTE(rob): potentially allow others here. This is a conservative list.
+        return routing_method in [
+            RoutingMethodType.DeepSeekV3,
+            RoutingMethodType.Renormalize,
+            RoutingMethodType.RenormalizeNaive,
+        ]
+    elif (weight_key, activation_key) == (kFp8StaticTensorSym, kFp8StaticTensorSym):
+        # NOTE(rob): kernel requires Llama4.
+        return routing_method == RoutingMethodType.Llama4
+
+    else:
+        raise ValueError("Unsupported quantization scheme.")
+
+
+def _supports_parallel_config(moe_parallel_config: FusedMoEParallelConfig) -> bool:
+    """Supports TRTLLM Kernel does not support EPLB."""
+    return not moe_parallel_config.enable_eplb
+
+
+def is_supported_config_trtllm(
+    moe_config: FusedMoEConfig,
+    weight_key: QuantKey | None,
+    activation_key: QuantKey | None,
+    activation_format: mk.FusedMoEActivationFormat,
+) -> tuple[bool, str | None]:
+    """
+    This method mirrors mk.FusedMoEPermuteExpertsUnpermute.is_supported_config
+    """
+
+    def _make_reason(reason: str) -> str:
+        return f"kernel does not support {reason}"
+
+    if not _supports_current_device():
+        return False, _make_reason("current device")
+    elif not (moe_config.is_act_and_mul or _supports_no_act_and_mul()):
+        return False, _make_reason("no act_and_mul MLP layer")
+    elif not _supports_activation(moe_config.activation):
+        return False, _make_reason(f"{moe_config.activation} activation")
+    elif not _supports_quant_scheme(weight_key, activation_key):
+        return False, _make_reason("quantization scheme")
+    elif not _supports_parallel_config(moe_config.moe_parallel_config):
+        return False, _make_reason("parallel config")
+    elif not _supports_routing_method(
+        weight_key, activation_key, moe_config.routing_method
+    ):
+        return False, _make_reason("routing method")
+    elif activation_format != mk.FusedMoEActivationFormat.Standard:
+        return False, _make_reason("activation format")
+
+    return True, None
 
 
 def flashinfer_fused_moe_blockscale_fp8(
