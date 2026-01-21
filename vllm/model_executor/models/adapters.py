@@ -202,11 +202,10 @@ def _create_pooling_model_cls(orig_cls: _T) -> _T:
             # and there are no other inner modules with other parameters,
             # we support loading from both `*Model` and `*ForCausalLM`
             if hasattr(self, "model") and hasattr(self.model, "load_weights"):
-                # Whether all parameters come from `self.model`
+                # Some weights might be tied to weights under `self.model`
                 model_params_ids = [id(p) for p in self.model.parameters()]
 
                 if all(
-                    # Some weights might be tied to weights under `self.model`
                     all(id(p) in model_params_ids for p in child.parameters())
                     for name, child in self.named_children()
                     if name != "model"
