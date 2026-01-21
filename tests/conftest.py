@@ -63,7 +63,7 @@ from vllm.distributed import (
 )
 from vllm.logger import init_logger
 from vllm.logprobs import Logprob
-from vllm.multimodal.base import MediaWithBytes
+from vllm.multimodal.media import MediaWithBytes
 from vllm.multimodal.utils import fetch_image
 from vllm.outputs import RequestOutput
 from vllm.sampling_params import BeamSearchParams
@@ -187,6 +187,17 @@ def dist_init():
     initialize_model_parallel(1, 1)
     yield
     cleanup_dist_env_and_memory()
+
+
+@pytest.fixture
+def default_vllm_config():
+    """Set a default VllmConfig for tests that directly test CustomOps or pathways
+    that use get_current_vllm_config() outside of a full engine context.
+    """
+    from vllm.config import VllmConfig, set_current_vllm_config
+
+    with set_current_vllm_config(VllmConfig()):
+        yield
 
 
 @pytest.fixture()
@@ -685,6 +696,7 @@ class HfRunner:
         images: PromptImageInput | None = None,
         audios: PromptAudioInput | None = None,
         videos: PromptVideoInput | None = None,
+        use_cache: bool = True,
         **kwargs: Any,
     ) -> list[TokensTextLogprobs]:
         all_inputs = self.get_inputs(
@@ -698,7 +710,7 @@ class HfRunner:
         for inputs in all_inputs:
             output: "GenerateOutput" = self.model.generate(
                 **self.wrap_device(inputs),
-                use_cache=True,
+                use_cache=use_cache,
                 do_sample=False,
                 max_new_tokens=max_tokens,
                 output_hidden_states=True,

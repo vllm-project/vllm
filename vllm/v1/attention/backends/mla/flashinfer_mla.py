@@ -7,22 +7,23 @@ import torch
 from flashinfer.decode import trtllm_batch_decode_with_kv_cache_mla
 from flashinfer.rope import mla_rope_quantize_fp8
 
-from vllm.attention.backends.abstract import (
-    AttentionLayer,
-    AttentionType,
-    MultipleOf,
-)
 from vllm.config.cache import CacheDType
 from vllm.logger import init_logger
-from vllm.platforms.interface import DeviceCapability
-from vllm.v1.attention.backends.mla.common import (
+from vllm.model_executor.layers.attention.mla_attention import (
     MLACommonBackend,
     MLACommonImpl,
     MLACommonMetadata,
     MLACommonMetadataBuilder,
     QueryLenSupport,
 )
-from vllm.v1.attention.backends.utils import AttentionCGSupport, KVCacheLayoutType
+from vllm.platforms.interface import DeviceCapability
+from vllm.v1.attention.backend import (
+    AttentionCGSupport,
+    AttentionLayer,
+    AttentionType,
+    MultipleOf,
+)
+from vllm.v1.attention.backends.utils import KVCacheLayoutType
 
 logger = init_logger(__name__)
 

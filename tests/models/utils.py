@@ -11,6 +11,7 @@ import torch.nn.functional as F
 from transformers import PretrainedConfig
 
 from vllm.config.model import AttnTypeStr, ModelConfig, ModelDType, RunnerOption
+from vllm.config.pooler import SequencePoolingType, TokenPoolingType
 from vllm.logprobs import Logprob, PromptLogprobs, SampleLogprobs
 from vllm.multimodal.processing import InputProcessingContext
 from vllm.tokenizers import cached_tokenizer_from_config
@@ -379,7 +380,8 @@ class ModelInfo:
     max_model_len: int | None = None
     hf_dtype: str = "float32"
     hf_overrides: dict[str, Any] | None = None
-    pooling_type: str | None = None
+    seq_pooling_type: SequencePoolingType | None = None
+    tok_pooling_type: TokenPoolingType | None = None
     attn_type: AttnTypeStr | None = None
     is_prefix_caching_supported: bool | None = None
     is_chunked_prefill_supported: bool | None = None
@@ -452,6 +454,9 @@ def dummy_hf_overrides(
     # Ensure at least 2 expert per group
     # Since `grouped_topk` assumes top-2
     n_group = getattr(text_config, "n_group", None)
+    # Kimi uses `num_expert_group` instead of `n_group`.
+    if n_group is None:
+        n_group = getattr(text_config, "num_expert_group", None)
     num_experts = n_group * 2 if n_group is not None else 2
 
     # we use three layers for Gemma-3n to check
@@ -485,6 +490,8 @@ def dummy_hf_overrides(
             {
                 "num_experts": num_experts,
                 "num_experts_per_tok": 2,
+                # Kimi uses `num_experts_per_token`.
+                "num_experts_per_token": 2,
                 "num_local_experts": num_experts,
                 # Otherwise there will not be any expert layers
                 "first_k_dense_replace": 0,

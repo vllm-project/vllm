@@ -1,23 +1,21 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import math
 from collections import defaultdict
 from dataclasses import dataclass, field
 
 import torch
 from typing_extensions import deprecated
 
-from vllm.attention.backends.abstract import AttentionBackend
 from vllm.attention.layer import Attention
-from vllm.config import CacheConfig, ModelConfig, SchedulerConfig, VllmConfig
+from vllm.config import CacheConfig, VllmConfig
 from vllm.logger import init_logger
 from vllm.model_executor.models.interfaces import MultiModalEmbeddings
 from vllm.model_executor.models.utils import extract_layer_index
-from vllm.multimodal.cache import processor_only_cache_from_config
 from vllm.multimodal.registry import MultiModalRegistry
 from vllm.platforms import current_platform
-from vllm.utils.mem_constants import GiB_bytes
-from vllm.utils.mem_utils import MemorySnapshot
-from vllm.v1.attention.backends.utils import AttentionMetadataBuilder
+from vllm.utils.mem_utils import MemorySnapshot, format_gib
+from vllm.v1.attention.backend import AttentionBackend, AttentionMetadataBuilder
 from vllm.v1.core.encoder_cache_manager import compute_mm_encoder_budget
 from vllm.v1.kv_cache_interface import KVCacheGroupSpec, KVCacheSpec
 
@@ -29,16 +27,15 @@ class MultiModalBudget:
 
     def __init__(
         self,
-        model_config: ModelConfig,
-        scheduler_config: SchedulerConfig,
+        vllm_config: VllmConfig,
         mm_registry: MultiModalRegistry,
     ) -> None:
         super().__init__()
 
-        self.model_config = model_config
-        self.scheduler_config = scheduler_config
+        self.model_config = model_config = vllm_config.model_config
+        self.scheduler_config = scheduler_config = vllm_config.scheduler_config
         self.mm_registry = mm_registry
-        self.cache = cache = processor_only_cache_from_config(model_config, mm_registry)
+        self.cache = cache = mm_registry.processor_only_cache_from_config(vllm_config)
 
         self.max_model_len = model_config.max_model_len
         self.max_num_reqs = scheduler_config.max_num_seqs
@@ -250,22 +247,23 @@ def gather_mm_placeholders(
     return placeholders[is_embed]
 
 
-def request_memory(init_snapshot: MemorySnapshot, cache_config: CacheConfig) -> float:
+def request_memory(init_snapshot: MemorySnapshot, cache_config: CacheConfig) -> int:
     """
     Calculate the amount of memory required by vLLM, then validate
     that the current amount of free memory is sufficient for that.
     """
-    requested_memory = init_snapshot.total_memory * cache_config.gpu_memory_utilization
+    requested_memory = math.ceil(
+        init_snapshot.total_memory * cache_config.gpu_memory_utilization
+    )
 
     if init_snapshot.free_memory < requested_memory:
-        GiB = lambda b: round(b / GiB_bytes, 2)
         raise ValueError(
             f"Free memory on device {init_snapshot.device_} "
-            f"({GiB(init_snapshot.free_memory)}/"
-            f"{GiB(init_snapshot.total_memory)} GiB) on startup "
+            f"({format_gib(init_snapshot.free_memory)}/"
+            f"{format_gib(init_snapshot.total_memory)} GiB) on startup "
             f"is less than desired GPU memory utilization "
             f"({cache_config.gpu_memory_utilization}, "
-            f"{GiB(requested_memory)} GiB). Decrease GPU memory "
+            f"{format_gib(requested_memory)} GiB). Decrease GPU memory "
             f"utilization or reduce GPU memory used by other processes."
         )
 
@@ -354,8 +352,8 @@ def bind_kv_cache(
                 pass
             else:
                 raise NotImplementedError
-        layer_name = layer_names[0]
-        runner_kv_caches.append(kv_caches[layer_name])
+        for layer_name in layer_names:
+            runner_kv_caches.append(kv_caches[layer_name])
 
     # Bind kv_caches to forward context
     for layer_name, kv_cache in kv_caches.items():
