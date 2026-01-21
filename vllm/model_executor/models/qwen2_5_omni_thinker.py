@@ -374,6 +374,51 @@ class Qwen2_5OmniThinkerMultiModalProcessor(
             self.info.get_hf_config().vision_config.spatial_merge_size
         )(hf_inputs)
 
+    def _derive_audio_from_video_placeholders(
+        self,
+        placeholders: Mapping[str, list[PlaceholderFeaturesInfo]],
+        mm_prompt_updates: MultiModalPromptUpdates,
+    ) -> Mapping[str, list[PlaceholderFeaturesInfo]]:
+        """
+        Helper to derive audio placeholders from video placeholders when
+        use_audio_in_video=True.
+        """
+        if "video" not in placeholders:
+            return placeholders
+
+        # Validate audio and video counts match
+        num_videos = len(placeholders["video"])
+        num_audios = len(mm_prompt_updates.get("audio", []))
+        if num_audios != num_videos:
+            raise ValueError(
+                f"use_audio_in_video requires equal number of audio and video "
+                f"items, got {num_audios=}, {num_videos=}"
+            )
+
+        tokenizer = self.info.get_tokenizer()
+        processor = self.info.get_hf_processor()
+        audio_token_id = tokenizer.get_vocab()[processor.audio_token]
+
+        result_placeholders = dict(placeholders)
+        audio_placeholders = []
+
+        # Each video is paired with one audio
+        for video_idx, video_placeholder in enumerate(placeholders["video"]):
+            # Create is_embed mask selecting only audio tokens
+            audio_is_embed = torch.tensor(video_placeholder.tokens) == audio_token_id
+
+            audio_placeholder = PlaceholderFeaturesInfo(
+                modality="audio",
+                item_idx=video_idx,
+                start_idx=video_placeholder.start_idx,
+                tokens=video_placeholder.tokens,
+                is_embed=audio_is_embed,
+            )
+            audio_placeholders.append(audio_placeholder)
+
+        result_placeholders["audio"] = audio_placeholders
+        return result_placeholders
+
     def _maybe_apply_prompt_updates(
         self,
         mm_items: MultiModalDataItems,
@@ -389,6 +434,16 @@ class Qwen2_5OmniThinkerMultiModalProcessor(
         self._validate_mm_kwargs(mm_kwargs, mm_item_counts)
         self._validate_mm_updates(mm_prompt_updates, mm_item_counts)
 
+        # Detect use_audio_in_video from mm_kwargs
+        use_audio_in_video = False
+        if "video" in mm_kwargs:
+            for item in mm_kwargs["video"]:
+                if item and item.get("use_audio_in_video"):
+                    use_audio_in_video_tensor = item["use_audio_in_video"].data
+                    if use_audio_in_video_tensor.numel() > 0:
+                        use_audio_in_video = bool(use_audio_in_video_tensor.item())
+                        break
+
         if is_update_applied:
             mm_placeholders = self._find_mm_placeholders(
                 prompt_ids,
@@ -399,10 +454,25 @@ class Qwen2_5OmniThinkerMultiModalProcessor(
                 mm_item_counts,
             )
         else:
-            prompt_ids, mm_placeholders = self._apply_prompt_updates(
-                prompt_ids,
-                mm_prompt_updates,
-            )
+            if use_audio_in_video and "audio" in mm_prompt_updates:
+                # Filter out audio updates - they are embedded in video
+                filtered_updates = {
+                    k: v for k, v in mm_prompt_updates.items() if k != "audio"
+                }
+                prompt_ids, mm_placeholders = self._apply_prompt_updates(
+                    prompt_ids,
+                    filtered_updates,
+                )
+                # Derive audio placeholders from video placeholders
+                mm_placeholders = self._derive_audio_from_video_placeholders(
+                    mm_placeholders, mm_prompt_updates
+                )
+            else:
+                prompt_ids, mm_placeholders = self._apply_prompt_updates(
+                    prompt_ids,
+                    mm_prompt_updates,
+                )
+
             self._validate_mm_placeholders(
                 mm_placeholders,
                 mm_item_counts,
