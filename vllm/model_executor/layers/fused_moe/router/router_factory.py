@@ -6,7 +6,6 @@ import torch
 
 import vllm.envs as envs
 from vllm.distributed.eplb.eplb_state import EplbLayerState
-from vllm.model_executor.layers.fused_moe.config import RoutingMethodType
 from vllm.model_executor.layers.fused_moe.router.base_router import BaseRouter
 from vllm.model_executor.layers.fused_moe.router.custom_routing_router import (
     CustomRoutingRouter,
@@ -36,7 +35,6 @@ def create_fused_moe_router(
     global_num_experts: int,
     renormalize: bool = True,
     indices_type_getter: Callable[[], torch.dtype | None] | None = None,
-    routing_method_type: RoutingMethodType | None = None,
     # grouped topk parameters
     use_grouped_topk: bool = False,
     num_expert_group: int | None = None,
@@ -128,7 +126,6 @@ def create_fused_moe_router(
             num_fused_shared_experts=num_fused_shared_experts,
             enable_eplb=enable_eplb,
             indices_type_getter=indices_type_getter,
-            routing_method_type=routing_method_type,
         )
         router.capture = capture
         return router

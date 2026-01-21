@@ -96,13 +96,17 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
         ):
             logger.debug("BatchedTritonExperts %s", self.moe)
             return BatchedTritonExperts(
+                moe_config=self.moe,
+                quant_config=self.moe_quant_config,
                 max_num_tokens=self.moe.max_num_tokens,
                 num_dispatchers=prepare_finalize.num_dispatchers(),
-                quant_config=self.moe_quant_config,
             )
         else:
             logger.debug("TritonExperts %s", self.moe)
-            return TritonExperts(self.moe_quant_config)
+            return TritonExperts(
+                moe_config=self.moe,
+                quant_config=self.moe_quant_config,
+            )
 
     def create_weights(
         self,
@@ -192,7 +196,6 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
         assert self.moe_quant_config is not None
 
         self.kernel, self.use_inplace = make_unquantized_moe_kernel(
-            layer=layer,
             backend=self.unquantized_backend,
             quant_config=self.moe_quant_config,
             moe_config=self.moe,
