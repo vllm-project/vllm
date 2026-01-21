@@ -198,13 +198,13 @@ class CpuPlatform(Platform):
         if (
             scheduler_config.enable_chunked_prefill
             or cache_config.enable_prefix_caching
-        ) and cache_config.cache_dtype != "auto":
+        ) and cache_config.cache_dtype.startswith("fp8"):
             raise RuntimeError(
                 "Chunked-prefill and prefix-cache on the CPU "
                 "backend is not compatible with FP8 KV cache."
             )
 
-        if cache_config.cache_dtype != "auto":
+        if cache_config.cache_dtype.startswith("fp8"):
             logger.warning(
                 "CPU backend doesn't support KV cache quantization fallback to auto."
             )

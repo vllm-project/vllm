@@ -747,7 +747,7 @@ class MLAAttentionImpl(AttentionImpl[T], Generic[T]):
 
 
 def is_quantized_kv_cache(kv_cache_dtype: str) -> bool:
-    return kv_cache_dtype != "auto"
+    return kv_cache_dtype.startswith("fp8")
 
 
 def subclass_attention_backend(
