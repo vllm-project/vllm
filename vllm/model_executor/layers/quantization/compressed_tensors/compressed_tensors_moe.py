@@ -153,9 +153,6 @@ class CompressedTensorsMoEMethod(FusedMoEMethodBase):
             print(f"moe scheme_dict: {scheme_dict}, \
                 input_quant: {input_quant}, layer: {layer}, layer.moe_config: {layer.moe_config}")
         if quant_config._is_xpu_w8a16_fp8(weight_quant, input_quant):
-            from vllm_xpu_kernels.fused_moe_interface import xpu_fused_moe
-            if layer.moe_config.moe_parallel_config.tp_rank == 0:
-                print("xpu_fused_moe imported")
             return XPUFp8MoEMethod(quant_config, layer.moe_config, layer)
 
             #return XPUFp8MoEMethod(weight_quant, input_quant, layer.moe_config)
@@ -330,6 +327,75 @@ class XPUFp8MoEMethod(CompressedTensorsMoEMethod):
         
         if layer.moe_config.moe_parallel_config.tp_rank == 0:
             print("--------------------XPUFP8 process_weights_after_loading-----------------------------")
+
+        fp8_dtype = torch.float8_e4m3fn
+        assert layer.w13_weight.dtype == fp8_dtype
+        if layer.w13_weight_scale.dim() == 2 and layer.w13_weight_scale.shape[1] == 2:    
+            num_experts = layer.num_experts
+            # W13 的形状是 [Num_Experts, 2 * Inter, Hidden]
+            # 我们需要切分出中间维度
+            full_inter_dim = layer.w13_weight.shape[1]
+            inter_dim = full_inter_dim // 2
+            
+            # 1. 提取旧的 Scales
+            # w1_scales: [Num_Experts]
+            # w3_scales: [Num_Experts]
+            old_scales = layer.w13_weight_scale.to(torch.float32)
+            w1_scales = old_scales[:, 0].reshape(num_experts, 1, 1)
+            w3_scales = old_scales[:, 1].reshape(num_experts, 1, 1)
+            
+            # 2. 计算新的统一 Scale (Max)
+            # new_scales: [Num_Experts, 1, 1]
+            unified_scales, _ = torch.max(old_scales, dim=1, keepdim=True)
+            unified_scales_expanded = unified_scales.reshape(num_experts, 1, 1)
+            
+            # 3. 提取权重切片 (FP8)
+            # 注意：切片是 View，不会立即复制内存
+            w1_weight_fp8 = layer.w13_weight[:, :inter_dim, :]
+            w3_weight_fp8 = layer.w13_weight[:, inter_dim:, :]
+            
+            # 4. 执行“重对齐” (Re-alignment)
+            # 逻辑：Real_Value = FP8 * Old_Scale
+            #       New_FP8    = Real_Value / New_Scale
+            #       New_FP8    = FP8 * (Old_Scale / New_Scale)
+            # 计算修正因子 (FP32)
+            w1_correction = w1_scales / (unified_scales_expanded + 1e-6) # 加上 1e-6 防止除0
+            w3_correction = w3_scales / (unified_scales_expanded + 1e-6)
+            
+            # 转换 W1 (FP8 -> FP32 -> Rescale -> FP8)
+            w1_aligned = (w1_weight_fp8.to(torch.float32) * w1_correction)
+            
+            # 转换 W3 (FP8 -> FP32 -> Rescale -> FP8)
+            w3_aligned = (w3_weight_fp8.to(torch.float32) * w3_correction)
+            
+            # 5. 拼回 W13
+            # 创建一个新的容器来存放合并后的权重
+            w13_new = torch.cat([w1_aligned, w3_aligned], dim=1).to(fp8_dtype)
+            
+            # 6. 更新 Layer 的 Parameter
+            layer.w13_weight.data = w13_new
+            # 将 Scale 更新为统一后的值 [Num_Experts]
+            # 注意要去掉最后那个为 1 的维度，变成 [Num_Experts] 或 [Num_Experts, 1] 取决于 Kernel 要求
+            # 这里假设 Kernel 需要 [Num_Experts]
+            layer.w13_weight_scale = torch.nn.Parameter(
+                unified_scales.squeeze(), requires_grad=False
+            )
+            
+            print(f"XPU MoE: Successfully merged W1/W3 scales for {num_experts} experts.")
+
+        # =========================================================
+        # 处理 W2 (Down) - 比较简单
+        # =========================================================
+        # W2 通常只有一个 Scale，只需要确保数据类型和设备正确
+        if layer.w2_weight_scale.dim() > 1:
+             layer.w2_weight_scale.data = layer.w2_weight_scale.data.squeeze()
+
+        # 确保所有东西都在正确的 Device 上
+        device = layer.w13_weight.device
+        layer.w13_weight_scale.data = layer.w13_weight_scale.data.to(device)
+        layer.w2_weight_scale.data = layer.w2_weight_scale.data.to(device)
+
+
         if False:
             fp8_dtype = current_platform.fp8_dtype()
             w13_weight = torch.empty_like(layer.w13_weight.data, dtype=fp8_dtype)
@@ -371,12 +437,71 @@ class XPUFp8MoEMethod(CompressedTensorsMoEMethod):
         router_logits: torch.Tensor,
         ) -> torch.Tensor:
 
-        print("--------------------XPUFP8 apply-----------------------------")
-
+        # 1
         routing_weights, selected_experts = router.select_experts(
                 hidden_states=x,
                 router_logits=router_logits
             )
+
+        if layer.moe_config.moe_parallel_config.tp_rank == 0:
+            print(f"--------------------XPUFP8 apply-x.device: {x.device}----routing_weights.shape:{routing_weights.shape}, selected_experts:{selected_experts}------------------------")
+
+        # 2        
+        # M, _ = x.size()
+        # routing_weights = torch.empty(
+        #     M, layer.top_k, dtype=torch.float32, device=x.device
+        # )
+        # selected_experts = torch.empty(
+        #     M, layer.top_k, dtype=torch.int32, device=x.device
+        # )
+        # token_expert_indices = torch.empty(
+        #     M, layer.top_k, dtype=torch.int32, device=x.device
+        # )
+        # if layer.use_grouped_topk:
+        #     routing_weights, selected_experts = torch.ops._moe_C.fused_grouped_topk(
+        #         x,
+        #         router_logits,
+        #         layer.top_k,
+        #         layer.renormalize,
+        #         n_expert_group=layer.num_expert_group,
+        #         n_topk_group=layer.topk_group,
+        #         scoring_func=layer.scoring_func,
+        #         routed_scaling_factor=layer.routed_scaling_factor,
+        #         bias=layer.e_score_correction_bias,
+        #     )
+        # else:
+        #     torch.ops._moe_C.topk_softmax(
+        #         routing_weights,
+        #         selected_experts,
+        #         token_expert_indices,
+        #         router_logits,
+        #         layer.renormalize,
+        #     )
+        
+        # # -----------------------------------
+        # # 1. Softmax (在全部专家上做)
+        # # router_logits: [Batch, Num_Experts]
+        # routing_weights = torch.nn.functional.softmax(
+        #     router_logits, dim=-1, dtype=torch.float32
+        # )
+
+        # # 2. TopK Selection
+        # # 选出分数最高的 K 个专家
+        # # topk_weights: [Batch, TopK]
+        # # topk_ids: [Batch, TopK]
+        # topk_weights, topk_ids = torch.topk(
+        #     routing_weights, layer.top_k, dim=-1
+        # )
+        
+        # # 3. Renormalize (可选，但推荐)
+        # # 重新归一化，让选中的 K 个权重之和为 1
+        # if layer.renormalize:
+        #     topk_weights = topk_weights / topk_weights.sum(dim=-1, keepdim=True)
+        # # -----------------------------------
+
+        from vllm_xpu_kernels.fused_moe_interface import xpu_fused_moe
+        if layer.moe_config.moe_parallel_config.tp_rank == 0:
+            print("xpu_fused_moe imported")
 
         return xpu_fused_moe(
             hidden_states=x,
@@ -387,11 +512,11 @@ class XPUFp8MoEMethod(CompressedTensorsMoEMethod):
             w2_scales=layer.w2_weight_scale,
             w2_bias=layer.w2_bias if self.moe.has_bias else None,
             topk_weights=routing_weights,
+            # topk_ids=topk_ids.to(torch.int32), # 确保转成 int32 传给 Kerne
             topk_ids=selected_experts,
             n_experts_per_token=layer.top_k,
             activation=layer.activation,
-            num_experts=layer.global_num_experts
-            // self.moe.moe_parallel_config.ep_size,
+            num_experts=layer.global_num_experts // self.moe.moe_parallel_config.ep_size,
             ep_rank=self.moe.moe_parallel_config.ep_rank,
             ep_size=self.moe.moe_parallel_config.ep_size,
             is_fp8=True,
@@ -2840,7 +2965,7 @@ class CompressedTensorsW8A16MoEMethodForXPU(CompressedTensorsMoEMethod):
 
             # 2. 调用 XPU Fused MoE Kernel
             # 这里的调用签名需要匹配 vllm-xpu-kernel 的定义
-            from vllm.model_executor.layers.fused_moe.xpu_moe import xpu_fused_moe
+            from vllm_xpu_kernels.fused_moe_interface import xpu_fused_moe
 
             return xpu_fused_moe(
                 hidden_states=x,
