@@ -66,6 +66,9 @@ class SpeculativeConfig:
     num_speculative_tokens: int = Field(default=None, gt=0)
     """The number of speculative tokens, if provided. It will default to the
     number in the draft model config if present, otherwise, it is required."""
+    spec_confidence_threshold: float = Field(default=0.0, ge=0.0, le=1.0)
+    """The confidence threshold for accepting speculative tokens. Tokens with
+    confidence scores below this threshold will be rejected."""
     model: str | None = None
     """The name of the draft model, eagle head, or additional weights, if
     provided."""
