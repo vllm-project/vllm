@@ -920,7 +920,7 @@ class BatchedTritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
         else:
             is_rocm_on_gfx9 = False
 
-        device_supports_fp8 = (is_rocm_on_gfx9) or (
+        device_supports_fp8 = is_rocm_on_gfx9 or (
             p.is_cuda() and p.has_device_capability((8, 9))
         )
 
