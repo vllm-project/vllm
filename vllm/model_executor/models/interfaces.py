@@ -113,12 +113,12 @@ class SupportsMultiModal(Protocol):
 
     _language_model_names: list[str] = []
     """
-    Set internally by `_mark_language_model` or similar methods.
+    Set internally by `_mark_language_model`.
     """
 
     _tower_model_names: list[str] = []
     """
-    Set internally by `_mark_tower_model` or similar methods.
+    Set internally by `_mark_tower_model`.
     """
 
     @classmethod
@@ -166,8 +166,8 @@ class SupportsMultiModal(Protocol):
                 return mod
 
         # Fallback
-        for name, mod in self.named_modules():
-            if mod is not self and hasattr(mod, "embed_input_ids"):
+        for mod in self.children():
+            if hasattr(mod, "embed_input_ids"):
                 _language_model_by_module[self] = mod
                 return mod
 
@@ -263,6 +263,10 @@ class SupportsMultiModal(Protocol):
         language_targets: type[nn.Module] | tuple[type[nn.Module], ...],
         tower_targets: dict[str, type[nn.Module] | tuple[type[nn.Module], ...]],
     ):
+        """
+        Composite wrapper over `_mark_language_model` and
+        `_mark_tower_model` by modality.
+        """
         with ExitStack() as stack:
             stack.enter_context(
                 self._mark_language_model(
