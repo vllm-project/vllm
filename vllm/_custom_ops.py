@@ -1593,7 +1593,7 @@ def scaled_fp4_quant(
             )
         else:
             output_scale = torch.empty(
-                (m, n // 16 // 4), device=device, dtype=torch.int32
+                (m, n // 16), device=device, dtype=torch.uint8
             )
 
         torch.ops._C.scaled_fp4_quant(output, input, output_scale, input_global_scale, is_sf_swizzled_layout)
