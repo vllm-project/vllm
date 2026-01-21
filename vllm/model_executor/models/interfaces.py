@@ -162,6 +162,10 @@ def _no_init_weights(
             yield
 
 
+# Cache results of `SupportsMultiModal.get_language_model`
+_language_model_by_module = dict[nn.Module, VllmModel]()
+
+
 @runtime_checkable
 class SupportsMultiModal(Protocol):
     """The interface required for all multi-modal models."""
@@ -244,11 +248,21 @@ class SupportsMultiModal(Protocol):
             ):
                 language_model = getattr(language_model, attr)
 
-            return language_model
+            if hasattr(language_model, "embed_input_ids"):
+                return language_model
+
+        # Fallback
+        if self in _language_model_by_module:
+            return _language_model_by_module[self]
+
+        for name, mod in self.named_modules():
+            if mod is not self and hasattr(mod, "embed_input_ids"):
+                _language_model_by_module[self] = mod
+                return mod
 
         raise NotImplementedError(
             f"No language model found in {type(self).__name__}! "
-            "You should initialize it inside `_mark_language_model`."
+            "You should initialize it via `_mark_language_model`."
         )
 
     @contextmanager
