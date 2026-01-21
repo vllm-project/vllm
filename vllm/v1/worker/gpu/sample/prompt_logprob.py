@@ -23,9 +23,11 @@ class PromptLogprobsWorker:
     def add_request(self, req_id: str, req_idx: int, sampling_params: SamplingParams):
         # For now, only support prompt logprobs for the prompt tokens (not top-k).
         uses_prompt_logprobs = sampling_params.prompt_logprobs is not None
-        self.uses_prompt_logprobs[req_idx] = uses_prompt_logprobs
         if uses_prompt_logprobs:
+            self.uses_prompt_logprobs[req_idx] = True
             self.in_progress_prompt_logprobs[req_id] = []
+        else:
+            self.uses_prompt_logprobs[req_idx] = False
 
     def remove_request(self, req_id: str) -> None:
         self.in_progress_prompt_logprobs.pop(req_id, None)
