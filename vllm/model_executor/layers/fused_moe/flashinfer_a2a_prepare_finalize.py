@@ -24,12 +24,9 @@ class FlashInferA2APrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         self,
         defer_input_quant: bool = False,
         num_dispatchers: int = 1,
-        use_deepseek_fp8_block_scale: bool = False,
     ):
         super().__init__(defer_input_quant=defer_input_quant)
         self.num_dispatchers_ = num_dispatchers
-        # TODO(rob): convert this to `defer_input_quant`
-        self.use_deepseek_fp8_block_scale = use_deepseek_fp8_block_scale
         self.all2all_manager = get_ep_group().device_communicator.all2all_manager
 
     @property
@@ -90,7 +87,7 @@ class FlashInferA2APrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
                 top_k,
                 num_experts,
                 quant_config,
-                use_deepseek_fp8_block_scale=self.use_deepseek_fp8_block_scale,
+                defer_input_quant=self.defer_input_quant,
             )
         )
 
@@ -127,7 +124,7 @@ def flashinfer_alltoall_dispatch(
     top_k: int,
     num_experts: int,
     quant_config: FusedMoEQuantConfig,
-    use_deepseek_fp8_block_scale: bool = False,
+    defer_input_quant: bool = False,
 ):
     from flashinfer.comm.trtllm_alltoall import MnnvlMoe
 
@@ -157,7 +154,7 @@ def flashinfer_alltoall_dispatch(
     )
     topk_weights = topk_weights.view(dtype=orig_topk_weights_dtype)
 
-    if not use_deepseek_fp8_block_scale:
+    if not defer_input_quant:
         x, x_sf = moe_kernel_quantize_input(
             x,
             gs,
@@ -181,8 +178,6 @@ def flashinfer_alltoall_dispatch(
             ep_rank,
             ep_size,
         )
-        # if quant_config.quant_dtype == "nvfp4":
-        #     x_sf = nvfp4_block_scale_interleave(x_sf)
     else:
         # Block-scale path: pass activations through without quantization
         x_sf = None

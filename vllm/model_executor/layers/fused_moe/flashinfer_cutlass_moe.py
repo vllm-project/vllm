@@ -24,7 +24,6 @@ from vllm.platforms import current_platform
 from vllm.utils.flashinfer import (
     flashinfer_cutlass_fused_moe,
     has_flashinfer_cutlass_fused_moe,
-    nvfp4_block_scale_interleave,
 )
 
 logger = init_logger(__name__)
@@ -261,7 +260,7 @@ class FlashInferExperts(mk.FusedMoEPermuteExpertsUnpermute):
             fc2_expert_weights = w2.view(torch.long)
 
             # FlashInfer API requires swizzled input scales
-            a1q_scale = nvfp4_block_scale_interleave(a1q_scale)
+            # a1q_scale = nvfp4_block_scale_interleave(a1q_scale)
         elif self.use_deepseek_fp8_block_scale:
             # FP8 block-scale path: provide block-scale weights, omit a1q_scale
             quant_scales = [

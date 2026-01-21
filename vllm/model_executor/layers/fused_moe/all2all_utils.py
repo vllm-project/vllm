@@ -184,8 +184,8 @@ def maybe_make_prepare_finalize(
         assert quant_config is not None
         # TODO: audit if this supports all cases.
         prepare_finalize = FlashInferA2APrepareAndFinalize(
+            defer_input_quant=defer_input_quant,
             num_dispatchers=all2all_manager.world_size,
-            use_deepseek_fp8_block_scale=quant_config.is_block_quantized,
         )
 
     elif moe.use_naive_all2all_kernels and allow_new_interface:

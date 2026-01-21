@@ -70,7 +70,7 @@ class MoEPrepareAndFinalizeNaiveEP(mk.FusedMoEPrepareAndFinalize):
                 quant_config.quant_dtype,
                 quant_config.per_act_token_quant,
                 quant_config.block_shape,
-                is_fp4_scale_swizzled=False,
+                is_fp4_scale_swizzled=True,
             )
 
         # TODO - this is just for deepgemm?
@@ -171,15 +171,17 @@ class MoEPrepareAndFinalizeNoEP(mk.FusedMoEPrepareAndFinalize):
         if self.defer_input_quant:
             return a1, None, None, None, None
 
-        a1q, a1q_scale = moe_kernel_quantize_input(
-            a1,
+        input_sf = (
             quant_config.a1_gscale
             if quant_config.use_nvfp4_w4a4
-            else quant_config.a1_scale,
+            else quant_config.a1_scale
+        )
+        a1q, a1q_scale = moe_kernel_quantize_input(
+            a1,
+            input_sf,
             quant_config.quant_dtype,
             quant_config.per_act_token_quant,
             quant_config.block_shape,
-            is_fp4_scale_swizzled=False,
         )
 
         return a1q, a1q_scale, None, None, None
