@@ -1152,11 +1152,6 @@ class Qwen2_5OmniThinkerForConditionalGeneration(
             |V_1 ...    V_n|A_1 ...   A_n|V_n+1 ... V_2n|A_n+1 ... A_2n|...
             |vision chunk 1|audio chunk 1|vision chunk 2|audio chunk 2 |...
         """
-        if not mm_features:
-            seq_len = len(input_tokens)
-            llm_positions = np.broadcast_to(np.arange(seq_len), (3, seq_len))
-            return torch.from_numpy(llm_positions.copy()), 0
-
         llm_pos_ids_list: list[np.ndarray] = []
         st = 0
 
