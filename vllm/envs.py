@@ -108,6 +108,7 @@ if TYPE_CHECKING:
     VLLM_USE_AOT_COMPILE: bool = False
     VLLM_USE_BYTECODE_HOOK: bool = False
     VLLM_FORCE_AOT_LOAD: bool = False
+    VLLM_USE_MEGA_AOT_ARTIFACT: bool = False
     VLLM_USE_TRITON_AWQ: bool = False
     VLLM_ALLOW_RUNTIME_LORA_UPDATING: bool = False
     VLLM_SKIP_P2P_CHECK: bool = False
@@ -630,6 +631,13 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # to load will result in a hard error when this is enabled.
     # Will be ignored when VLLM_USE_AOT_COMPILE is disabled.
     "VLLM_FORCE_AOT_LOAD": lambda: os.environ.get("VLLM_FORCE_AOT_LOAD", "0") == "1",
+    # Enable loading compiled models directly from cached standalone compile artifacts
+    # without re-splitting graph modules. This reduces overhead during model
+    # loading by using reconstruct_serializable_fn_from_mega_artifact.
+    "VLLM_USE_MEGA_AOT_ARTIFACT": lambda: os.environ.get(
+        "VLLM_USE_MEGA_AOT_ARTIFACT", "0"
+    )
+    == "1",
     # local rank of the process in the distributed setting, used to determine
     # the GPU device id
     "LOCAL_RANK": lambda: int(os.environ.get("LOCAL_RANK", "0")),
