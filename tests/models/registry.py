@@ -271,6 +271,11 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
     "GlmForCausalLM": _HfExamplesInfo("zai-org/glm-4-9b-chat-hf"),
     "Glm4ForCausalLM": _HfExamplesInfo("zai-org/GLM-4-9B-0414"),
     "Glm4MoeForCausalLM": _HfExamplesInfo("zai-org/GLM-4.5"),
+    "Glm4MoeLiteForCausalLM": _HfExamplesInfo(
+        "zai-org/GLM-4.7-Flash",
+        min_transformers_version="5.0.0.dev",
+        is_available_online=False,
+    ),
     "GPT2LMHeadModel": _HfExamplesInfo("openai-community/gpt2", {"alias": "gpt2"}),
     "GPTBigCodeForCausalLM": _HfExamplesInfo(
         "bigcode/starcoder",
@@ -472,6 +477,9 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
         "ByteDance-Seed/Seed-OSS-36B-Instruct",
         trust_remote_code=True,
     ),
+    "Step1ForCausalLM": _HfExamplesInfo(
+        "stepfun-ai/Step-Audio-EditX", trust_remote_code=True
+    ),
     "SmolLM3ForCausalLM": _HfExamplesInfo("HuggingFaceTB/SmolLM3-3B"),
     "StableLMEpochForCausalLM": _HfExamplesInfo("stabilityai/stablelm-zephyr-3b"),
     "StableLmForCausalLM": _HfExamplesInfo("stabilityai/stablelm-3b-4e1t"),
@@ -671,6 +679,9 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     "DotsOCRForCausalLM": _HfExamplesInfo(
         "rednote-hilab/dots.ocr", trust_remote_code=True
     ),
+    "Eagle2_5_VLForConditionalGeneration": _HfExamplesInfo(
+        "nvidia/Eagle2.5-8B", trust_remote_code=True, is_available_online=False
+    ),
     "Emu3ForConditionalGeneration": _HfExamplesInfo("BAAI/Emu3-Chat-hf"),
     "Ernie4_5_VLMoeForConditionalGeneration": _HfExamplesInfo(
         "baidu/ERNIE-4.5-VL-28B-A3B-PT",
@@ -684,6 +695,7 @@ _MULTIMODAL_EXAMPLE_MODELS = {
         trust_remote_code=True,
         min_transformers_version="5.0",
     ),
+    "GraniteVision": _HfExamplesInfo("ibm-granite/granite-vision-3.3-2b"),
     "GraniteSpeechForConditionalGeneration": _HfExamplesInfo(
         "ibm-granite/granite-speech-3.3-2b"
     ),
@@ -1036,6 +1048,11 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
     "Glm4MoeMTPModel": _HfExamplesInfo(
         "zai-org/GLM-4.5",
         speculative_model="zai-org/GLM-4.5",
+    ),
+    "Glm4MoeLiteMTPModel": _HfExamplesInfo(
+        "zai-org/GLM-4.7-Flash",
+        speculative_model="zai-org/GLM-4.7-Flash",
+        is_available_online=False,
     ),
     "LongCatFlashMTPModel": _HfExamplesInfo(
         "meituan-longcat/LongCat-Flash-Chat",

@@ -66,15 +66,15 @@ class ServingScores(OpenAIServing):
     async def _embedding_score(
         self,
         tokenizer: TokenizerLike,
-        texts_1: list[str],
-        texts_2: list[str],
+        data_1: list[str],
+        data_2: list[str],
         request: RerankRequest | ScoreRequest,
         request_id: str,
         tokenization_kwargs: dict[str, Any] | None = None,
         lora_request: LoRARequest | None | None = None,
         trace_headers: Mapping[str, str] | None = None,
     ) -> list[PoolingRequestOutput] | ErrorResponse:
-        input_texts = texts_1 + texts_2
+        input_texts = data_1 + data_2
 
         engine_prompts: list[TokensPrompt] = []
         tokenize_async = make_async(
@@ -135,22 +135,22 @@ class ServingScores(OpenAIServing):
         async for i, res in result_generator:
             embeddings[i] = res
 
-        emb_texts_1: list[PoolingRequestOutput] = []
-        emb_texts_2: list[PoolingRequestOutput] = []
+        emb_data_1: list[PoolingRequestOutput] = []
+        emb_data_2: list[PoolingRequestOutput] = []
 
-        for i in range(0, len(texts_1)):
+        for i in range(0, len(data_1)):
             assert (emb := embeddings[i]) is not None
-            emb_texts_1.append(emb)
+            emb_data_1.append(emb)
 
-        for i in range(len(texts_1), len(embeddings)):
+        for i in range(len(data_1), len(embeddings)):
             assert (emb := embeddings[i]) is not None
-            emb_texts_2.append(emb)
+            emb_data_2.append(emb)
 
-        if len(emb_texts_1) == 1:
-            emb_texts_1 = emb_texts_1 * len(emb_texts_2)
+        if len(emb_data_1) == 1:
+            emb_data_1 = emb_data_1 * len(emb_data_2)
 
         final_res_batch = _cosine_similarity(
-            tokenizer=tokenizer, embed_1=emb_texts_1, embed_2=emb_texts_2
+            tokenizer=tokenizer, embed_1=emb_data_1, embed_2=emb_data_2
         )
 
         return final_res_batch
@@ -333,8 +333,8 @@ class ServingScores(OpenAIServing):
         else:
             return await self._embedding_score(
                 tokenizer=tokenizer,
-                texts_1=data_1,  # type: ignore[arg-type]
-                texts_2=data_2,  # type: ignore[arg-type]
+                data_1=data_1,  # type: ignore[arg-type]
+                data_2=data_2,  # type: ignore[arg-type]
                 request=request,
                 request_id=request_id,
                 tokenization_kwargs=tokenization_kwargs,
@@ -361,8 +361,8 @@ class ServingScores(OpenAIServing):
 
         try:
             final_res_batch = await self._run_scoring(
-                request.text_1,
-                request.text_2,
+                request.data_1,
+                request.data_2,
                 request,
                 request_id,
                 raw_request,
