@@ -139,10 +139,8 @@ class FlashInferExperts(mk.FusedMoEPermuteExpertsUnpermute):
         # FLASHINFER_CUTLASS currently uses its down P/F, which does not
         # work with SP. This will be removed in follow up after we get
         # rid of the FlashInfer specific P/F function.
-        return (
-            moe_parallel_config.dp_size == 1
-            or moe_parallel_config.dp_size == moe_parallel_config.ep_size
-        )
+        # TODO: the per-tensor fp8 kernels don't work with MNNVL FI A2As.
+        return not moe_parallel_config.is_sequence_parallel
 
     @staticmethod
     def activation_format() -> mk.FusedMoEActivationFormat:
