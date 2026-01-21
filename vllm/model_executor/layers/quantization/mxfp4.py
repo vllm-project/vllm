@@ -14,6 +14,7 @@ from vllm.model_executor.layers.fused_moe import (
     FusedMoE,
     FusedMoEConfig,
     FusedMoEMethodBase,
+    FusedMoERouter,
 )
 from vllm.model_executor.layers.fused_moe import modular_kernel as mk
 from vllm.model_executor.layers.fused_moe.config import (
@@ -783,7 +784,10 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
             layer.w13_weight = w13_weight
             layer.w2_weight = w2_weight
         else:
-            raise ValueError(f"Unsupported backend: {self.mxfp4_backend}")
+            raise ValueError(
+                f"Unsupported mxfp4_backend: {self.mxfp4_backend}: "
+                f"should be one of: {list(Mxfp4Backend)}."
+            )
 
     def get_fused_moe_quant_config(
         self, layer: torch.nn.Module
@@ -888,6 +892,7 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
     def apply(
         self,
         layer: FusedMoE,
+        router: FusedMoERouter,
         x: torch.Tensor,
         router_logits: torch.Tensor,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
@@ -895,7 +900,7 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
             raise NotImplementedError("EPLB is not supported for mxfp4")
 
         if self.mxfp4_backend == Mxfp4Backend.MARLIN:
-            topk_weights, topk_ids = layer.select_experts(
+            topk_weights, topk_ids = router.select_experts(
                 hidden_states=x,
                 router_logits=router_logits,
             )
@@ -931,9 +936,9 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
             layer.apply_router_weight_on_input,
             layer.scoring_func,
             layer.activation,
-            layer.expert_load_view,
-            layer.logical_to_physical_map,
-            layer.logical_replica_count,
+            layer.eplb_state.expert_load_view,
+            layer.eplb_state.logical_to_physical_map,
+            layer.eplb_state.logical_replica_count,
         ), "MXFP4 are not supported with this configuration."
 
         if (
@@ -989,7 +994,7 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
         ):
             from vllm.utils.flashinfer import flashinfer_cutlass_fused_moe
 
-            topk_weights, topk_ids = layer.select_experts(
+            topk_weights, topk_ids = router.select_experts(
                 hidden_states=x,
                 router_logits=router_logits,
             )
@@ -1116,7 +1121,8 @@ class IpexMxfp4MoEMethod(Mxfp4MoEMethod):
 
     def apply(
         self,
-        layer: torch.nn.Module,
+        layer: FusedMoE,
+        router: FusedMoERouter,
         x: torch.Tensor,
         router_logits: torch.Tensor,
     ) -> torch.Tensor:
