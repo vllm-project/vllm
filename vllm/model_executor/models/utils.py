@@ -648,16 +648,10 @@ def maybe_offload_to_cpu(module: torch.nn.Module) -> torch.nn.Module:
             # one module might have some parameters offloaded and some not
             break
 
-        # `torch.empty_like` does not support `pin_memory` argument
-        cpu_data = torch.empty_strided(
-            size=p.data.size(),
-            stride=p.data.stride(),
-            dtype=p.data.dtype,
-            layout=p.data.layout,
-            device="cpu",
-            pin_memory=pin_memory,
-        )
-        cpu_data.copy_(p.data)
+        cpu_data = p.data.to(device="cpu")
+        if pin_memory:
+            cpu_data = cpu_data.pin_memory()
+        
         if not uva_offloading:
             p.data = cpu_data
         else:
