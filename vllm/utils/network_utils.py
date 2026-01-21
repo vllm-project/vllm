@@ -224,6 +224,8 @@ def split_zmq_path(path: str) -> tuple[str, str, str]:
     scheme = parsed.scheme
     host = parsed.hostname or ""
     port = str(parsed.port or "")
+    if host.startswith("[") and host.endswith("]"):
+        host = host[1:-1]  # Remove brackets for IPv6 address
 
     if scheme == "tcp" and not all((host, port)):
         # The host and port fields are required for tcp
