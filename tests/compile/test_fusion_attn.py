@@ -43,7 +43,7 @@ from vllm.forward_context import get_forward_context, set_forward_context
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
     kFp8StaticTensorSym,
-    kNvfp4Quant,
+    kNvfp4Dynamic,
 )
 from vllm.platforms import current_platform
 from vllm.utils.flashinfer import has_flashinfer
@@ -215,7 +215,7 @@ class TestAttentionFp8StaticQuantPatternModel(AttentionQuantPatternModel):
 class TestAttentionNvfp4QuantPatternModel(AttentionQuantPatternModel):
     """Test model for AttentionNvfp4QuantPattern fusion."""
 
-    quant_key = kNvfp4Quant
+    quant_key = kNvfp4Dynamic
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -468,7 +468,7 @@ def test_attention_quant_pattern(
 
     # Note: for fp8, fully_replaced=False because query quant ops remain in graph.
     # Only output quant ops are fused into attention.
-    test_backend.check_before_ops([quant_op], fully_replaced=quant_key is kNvfp4Quant)
+    test_backend.check_before_ops([quant_op], fully_replaced=quant_key is kNvfp4Dynamic)
 
     # access the underlying `AttnFusionPass` on the `LazyInitPass`
     assert attn_pass.pass_.matched_count == sum(attn_fusion_supported)

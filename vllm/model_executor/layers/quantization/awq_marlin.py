@@ -739,6 +739,7 @@ class AWQMarlinMoEMethod(FusedMoEMethodBase):
             return BatchedMarlinExperts(
                 max_num_tokens=max_num_tokens_per_rank,
                 num_dispatchers=prepare_finalize.num_dispatchers(),
+                moe_config=self.moe,
                 quant_config=self.moe_quant_config,
                 w13_g_idx=w13_g_idx,
                 w2_g_idx=w2_g_idx,
@@ -749,6 +750,7 @@ class AWQMarlinMoEMethod(FusedMoEMethodBase):
         else:
             # Standard Marlin experts for AWQ
             return MarlinExperts(
+                moe_config=self.moe,
                 quant_config=self.moe_quant_config,
                 w13_g_idx=w13_g_idx,
                 w2_g_idx=w2_g_idx,
