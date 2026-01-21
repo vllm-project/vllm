@@ -1008,10 +1008,11 @@ class Qwen2_5OmniThinkerForConditionalGeneration(
             thinker_config.vision_config, "tokens_per_second", 25
         )
 
-        # Pre-pair audio with video for use_audio_in_video case
-        audio_for_video = self._get_audio_for_video_mapping(mm_features)
+        # Sort features by offset first, then pair audio with video
+        sorted_features = sorted(mm_features, key=lambda f: f.mm_position.offset)
+        audio_for_video = self._get_audio_for_video_mapping(sorted_features)
 
-        for mm_feature in sorted(mm_features, key=lambda f: f.mm_position.offset):
+        for mm_feature in sorted_features:
             offset = mm_feature.mm_position.offset
             modality = mm_feature.modality
 
