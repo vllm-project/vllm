@@ -104,9 +104,7 @@ class SingleDirectionOffloadingHandler(OffloadingHandler):
         self.dst_block_size_factor: int = dst_block_size_factor
         assert len(src_tensors) > 0
         self.gpu_to_cpu: bool = self.src_tensors[0].is_cuda
-        self.transfer_type: tuple[str, str] = ("CPU", "GPU")
-        if self.gpu_to_cpu:
-            self.transfer_type = ("GPU", "CPU")
+        self.transfer_type = ("GPU", "CPU") if self.gpu_to_cpu else ("CPU", "GPU")
         # job_id -> event
         self._transfer_events: dict[int, torch.Event] = {}
         # queue of transfers (job_id, stream, event)
@@ -200,7 +198,9 @@ class SingleDirectionOffloadingHandler(OffloadingHandler):
         results: list[TransferResult] = []
         while self._transfers and self._transfers[0].end_event.query():
             transfer = self._transfers.popleft()
-            transfer_time = transfer.start_event.elapsed_time(transfer.end_event)
+            transfer_time = (
+                transfer.start_event.elapsed_time(transfer.end_event) * 1e-3
+            )  # elapsed_time is in miliseconds
             result = TransferResult(
                 job_id=transfer.job_id,
                 success=True,

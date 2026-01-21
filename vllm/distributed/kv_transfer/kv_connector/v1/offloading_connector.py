@@ -3,7 +3,7 @@
 import copy
 from collections import defaultdict
 from collections.abc import Iterable
-from dataclasses import astuple, dataclass
+from dataclasses import dataclass
 from itertools import islice
 from typing import Any
 
@@ -33,7 +33,7 @@ from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.kv_offload.abstract import OffloadingManager
 from vllm.v1.kv_offload.factory import OffloadingSpecFactory
-from vllm.v1.kv_offload.mediums import BlockIDsLoadStoreSpec, GPULoadStoreSpec
+from vllm.v1.kv_offload.mediums import GPULoadStoreSpec
 from vllm.v1.kv_offload.spec import OffloadingSpec
 from vllm.v1.kv_offload.worker.worker import (
     OffloadingWorker,
@@ -52,7 +52,9 @@ logger = init_logger(__name__)
 class OffloadingOperationMetrics:
     op_size: float
     op_time: float
-    op_type: str
+
+    def __getitem__(self, key):
+        return getattr(self, key)
 
 
 @dataclass
@@ -91,7 +93,17 @@ class OffloadingConnectorStats(KVConnectorStats):
         return_dict: dict[str, int | float] = {}
         for k, v in self.data.items():
             assert isinstance(v, list)
-            return_dict[k] = len(v)
+            for op in v:
+                for stat, value in [
+                    ("_total_bytes", op["op_size"]),
+                    ("_total_time", op["op_time"]),
+                ]:
+                    log_key = k + stat
+                    if log_key not in return_dict:
+                        return_dict[log_key] = value
+                    else:
+                        return_dict[log_key] += value
+
         return return_dict
 
     def is_empty(self) -> bool:
@@ -100,7 +112,7 @@ class OffloadingConnectorStats(KVConnectorStats):
     def record_transfer(self, num_bytes: int, time: float, transfer_type: TransferType):
         src, dst = transfer_type
         transfer_type_key = src + "_to_" + dst
-        op = OffloadingOperationMetrics(num_bytes, time * 1e-3, transfer_type_key)
+        op = OffloadingOperationMetrics(num_bytes, time)
         if transfer_type_key in self.data:
             self.data[transfer_type_key].append(op)
         else:
@@ -598,8 +610,6 @@ class OffloadingConnectorWorker:
 
         for req_id, transfer_spec in metadata.reqs_to_load.items():
             job_id = self._generate_job_id()
-            src_spec, dst_spec = transfer_spec
-            assert isinstance(src_spec, BlockIDsLoadStoreSpec)
             self._jobs[job_id] = (req_id, False)
             assert req_id not in self._load_job
             self._load_job[req_id] = job_id
@@ -609,8 +619,6 @@ class OffloadingConnectorWorker:
     def prepare_store_kv(self, metadata: OffloadingConnectorMetadata):
         for req_id, transfer_spec in metadata.reqs_to_store.items():
             job_id = self._generate_job_id()
-            src_spec, dst_spec = transfer_spec
-            assert isinstance(dst_spec, BlockIDsLoadStoreSpec)
             self._jobs[job_id] = (req_id, True)
             self._store_jobs[req_id].add(job_id)
             # NOTE(orozery): defer the store to the beginning of the next engine step,
@@ -632,14 +640,14 @@ class OffloadingConnectorWorker:
         finished_recving = set()
         for transfer_result in self.worker.get_finished():
             # we currently do not support job failures
-            job_id, success, num_bytes, transfer_time, transfer_type = astuple(
-                transfer_result
-            )
-            assert success
+            job_id = transfer_result.job_id
+            assert transfer_result.success
             req_id, store = self._jobs.pop(job_id)
-            if transfer_time > 0:
+            if transfer_result.transfer_time:
                 self.kv_connector_stats.record_transfer(
-                    num_bytes, transfer_time, transfer_type
+                    num_bytes=transfer_result.transfer_size,
+                    time=transfer_result.transfer_time,
+                    transfer_type=transfer_result.transfer_type,
                 )
             if store:
                 req_jobs = self._store_jobs[req_id]
@@ -671,10 +679,11 @@ class OffloadingConnectorWorker:
         """
         Get the KV transfer stats for the connector.
         """
+
+        if self.kv_connector_stats.is_empty():
+            return None
         # Clear stats for next iteration
-        if not self.kv_connector_stats.is_empty():
-            return self.kv_connector_stats.clone_and_reset()
-        return None
+        return self.kv_connector_stats.clone_and_reset()
 
 
 class OffloadPromMetrics(KVConnectorPromMetrics):
@@ -690,7 +699,6 @@ class OffloadPromMetrics(KVConnectorPromMetrics):
         self.histogram_transfer_size: dict[tuple[int, str], PromMetricT] = {}
         self.counter_kv_bytes: dict[tuple[int, str], PromMetricT] = {}
         self.counter_kv_transfer_time: dict[tuple[int, str], PromMetricT] = {}
-        self.counter_kv_transfers: dict[tuple[int, str], PromMetricT] = {}
         buckets = [  # In bytes
             1e6,
             5e6,
@@ -723,12 +731,6 @@ class OffloadPromMetrics(KVConnectorPromMetrics):
             labelnames=labelnames + ["transfer_type"],
         )
 
-        self._counter_kv_transfers = self._counter_cls(
-            name="vllm:kv_offload_num_transfers",
-            documentation="Number of KV offload transfers done",
-            labelnames=labelnames + ["transfer_type"],
-        )
-
     def observe(self, transfer_stats_data: dict[str, Any], engine_idx: int = 0):
         """
         Observe transfer statistics from the new data structure.
@@ -755,14 +757,10 @@ class OffloadPromMetrics(KVConnectorPromMetrics):
                         *(self.per_engine_labelvalues[engine_idx] + [transfer_type])
                     )
                 )
-                self.counter_kv_transfers[(engine_idx, transfer_type)] = (
-                    self._counter_kv_transfers.labels(
-                        *(self.per_engine_labelvalues[engine_idx] + [transfer_type])
-                    )
-                )
 
             # Process ops:
-            for op in ops:
+            assert isinstance(ops, list)
+            for op in ops:  # ops is a list of serialized OffloadingOperationMetrics
                 # Observe size histogram
                 self.histogram_transfer_size[(engine_idx, transfer_type)].observe(
                     op["op_size"]
@@ -774,6 +772,3 @@ class OffloadPromMetrics(KVConnectorPromMetrics):
                 self.counter_kv_transfer_time[(engine_idx, transfer_type)].inc(
                     op["op_time"]
                 )
-
-                # Update transfer counter
-                self.counter_kv_transfers[(engine_idx, transfer_type)].inc(1)
