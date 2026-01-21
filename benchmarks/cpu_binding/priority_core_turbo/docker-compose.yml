@@ -19,9 +19,13 @@ services:
     volumes:
       - /dev/cpu:/dev/cpu
       - /sys:/sys:ro
+      - "./check_pct_status.sh:/usr/bin/check_pct_status.sh:ro"
+      - "./pct_map_and_set_clos.sh:/usr/bin/pct_map_and_set_clos.sh:ro"
+      - "./results:/workspace/benchmarks/results"
+
 
     environment:
       http_proxy: ${http_proxy}
       https_proxy: ${https_proxy}
       no_proxy: ${no_proxy}
-
+    entrypoint: ["bash", "/usr/bin/pct_map_and_set_clos.sh"]
