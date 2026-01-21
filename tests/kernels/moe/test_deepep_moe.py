@@ -10,11 +10,14 @@ import pytest
 import torch.distributed
 from torch.distributed import ProcessGroup
 
+from tests.kernels.moe.utils import make_dummy_moe_config
 from vllm import _custom_ops as ops
 from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.fused_moe import TritonExperts
-from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
+from vllm.model_executor.layers.fused_moe.config import (
+    FusedMoEQuantConfig,
+)
 from vllm.model_executor.layers.fused_moe.fused_batched_moe import BatchedTritonExperts
 from vllm.model_executor.layers.fused_moe.modular_kernel import FusedMoEModularKernel
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
@@ -160,15 +163,21 @@ def make_modular_kernel(
 
     num_dispatchers = pgi.world_size // dp_size
 
+    moe_config = make_dummy_moe_config()
+
     if low_latency_mode:
         assert not quant_config.per_act_token_quant, "not supported in ll mode"
         fused_experts = BatchedTritonExperts(
             max_num_tokens=MAX_TOKENS_PER_RANK,
             num_dispatchers=num_dispatchers,
+            moe_config=moe_config,
             quant_config=quant_config,
         )
     else:
-        fused_experts = TritonExperts(quant_config=quant_config)
+        fused_experts = TritonExperts(
+            moe_config=moe_config,
+            quant_config=quant_config,
+        )
 
     mk = FusedMoEModularKernel(prepare_finalize=a2a, fused_experts=fused_experts)
     return mk

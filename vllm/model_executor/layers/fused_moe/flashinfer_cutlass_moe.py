@@ -5,13 +5,22 @@ import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.logger import init_logger
-from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
-from vllm.model_executor.layers.fused_moe.flashinfer_cutlass_prepare_finalize import (  # noqa: E501
-    create_flashinfer_prepare_finalize,
+from vllm.model_executor.layers.fused_moe.config import (
+    FusedMoEParallelConfig,
+    FusedMoEQuantConfig,
 )
 from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceNoOP,
 )
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    QuantKey,
+    kFp8Dynamic128Sym,
+    kFp8Static128BlockSym,
+    kFp8StaticTensorSym,
+    kNvfp4Dynamic,
+    kNvfp4Static,
+)
+from vllm.platforms import current_platform
 from vllm.utils.flashinfer import (
     flashinfer_cutlass_fused_moe,
     has_flashinfer_cutlass_fused_moe,
@@ -50,39 +59,99 @@ def is_valid_flashinfer_cutlass_fused_moe(
 class FlashInferExperts(mk.FusedMoEPermuteExpertsUnpermute):
     def __init__(
         self,
-        out_dtype: torch.dtype,
+        moe_config: mk.FusedMoEConfig,
         quant_config: FusedMoEQuantConfig,
-        ep_rank: int = 0,
-        ep_size: int = 1,
-        tp_rank: int = 0,
-        tp_size: int = 1,
-        use_dp: bool = False,
-        use_deepseek_fp8_block_scale: bool = False,
     ):
-        super().__init__(quant_config)
+        super().__init__(moe_config, quant_config)
         assert quant_config.quant_dtype in ("nvfp4", torch.float8_e4m3fn, None), (
             "Only nvfp4, fp8, bfloat16 and"
             " float16 quantization are currently supported."
         )
-        self.ep_rank = ep_rank
-        self.ep_size = ep_size
-        self.tp_rank = tp_rank
-        self.tp_size = tp_size
-        self.out_dtype = out_dtype
-        self.use_dp = use_dp
+        self.ep_rank = moe_config.moe_parallel_config.ep_rank
+        self.ep_size = moe_config.moe_parallel_config.ep_size
+        self.tp_rank = moe_config.moe_parallel_config.tp_rank
+        self.tp_size = moe_config.moe_parallel_config.tp_size
+        self.out_dtype = moe_config.in_dtype
+        self.use_dp = moe_config.moe_parallel_config.dp_size > 1
         # Enables DeepSeek-style FP8 block-scale path:
         # - pass per-block weight scales to the kernel
         # - skip input activation quantization (kernel applies scaling)
-        self.use_deepseek_fp8_block_scale = use_deepseek_fp8_block_scale
+        self.use_deepseek_fp8_block_scale = quant_config.is_block_quantized
 
-    @property
-    def activation_formats(
-        self,
-    ) -> tuple[mk.FusedMoEActivationFormat, mk.FusedMoEActivationFormat]:
+    @staticmethod
+    def expects_unquantized_inputs(
+        moe_config: mk.FusedMoEConfig, quant_config: FusedMoEQuantConfig
+    ) -> bool:
+        # NVFP4 TP kernels and FP8 block-quantized kernels apply
+        # input quantization inside FusedMoEPermuteExpertsUnpermute.
         return (
-            mk.FusedMoEActivationFormat.Standard,
-            mk.FusedMoEActivationFormat.Standard,
+            quant_config.use_nvfp4_w4a4
+            and not moe_config.moe_parallel_config.use_all2all_kernels
+        ) or (quant_config.use_fp8_w8a8 and quant_config.is_block_quantized)
+
+    @staticmethod
+    def _supports_current_device() -> bool:
+        return (
+            current_platform.is_cuda()
+            and (
+                current_platform.is_device_capability((9, 0))
+                or current_platform.is_device_capability_family(100)
+            )
+            and has_flashinfer_cutlass_fused_moe()
         )
+
+    @staticmethod
+    def _supports_no_act_and_mul() -> bool:
+        return True
+
+    @staticmethod
+    def _supports_quant_scheme(
+        weight_key: QuantKey | None,
+        activation_key: QuantKey | None,
+    ) -> bool:
+        # The following are supported by FlashInferExperts:
+        #   * unquantized
+        #   * fp8 static per-tensor on 9.0+
+        #   * fp8 block on 9.0
+        #   * nvfp4 on 10.0+
+
+        p = current_platform
+        scheme = (weight_key, activation_key)
+        return (
+            (
+                scheme
+                in [
+                    (None, None),
+                    (kFp8StaticTensorSym, kFp8StaticTensorSym),
+                ]
+            )
+            or (
+                (scheme == (kFp8Static128BlockSym, kFp8Dynamic128Sym))
+                and (p.is_device_capability((9, 0)))
+            )
+            or (
+                (scheme == (kNvfp4Static, kNvfp4Dynamic))
+                and (p.is_device_capability_family(100))
+            )
+        )
+
+    @staticmethod
+    def _supports_activation(activation: str) -> bool:
+        return activation in ["silu", "relu2_no_mul"]
+
+    @staticmethod
+    def _supports_parallel_config(moe_parallel_config: FusedMoEParallelConfig) -> bool:
+        # FLASHINFER_CUTLASS currently uses its down P/F, which does not
+        # work with SP. This will be removed in follow up after we get
+        # rid of the FlashInfer specific P/F function.
+        return (
+            moe_parallel_config.dp_size == 1
+            or moe_parallel_config.dp_size == moe_parallel_config.ep_size
+        )
+
+    @staticmethod
+    def activation_format() -> mk.FusedMoEActivationFormat:
+        return mk.FusedMoEActivationFormat.Standard
 
     def supports_expert_map(self) -> bool:
         return False
@@ -231,85 +300,3 @@ class FlashInferExperts(mk.FusedMoEPermuteExpertsUnpermute):
         # No support for LoRA in flashinfer_cutlass_fused_moe.
         # See TODOs in flashinfer functions runMoe and runMoeMinLantency.
         raise NotImplementedError("LoRA is not supported for flashinfer_cutlass_moe")
-
-
-def flashinfer_cutlass_moe_fp4(
-    hidden_states: torch.Tensor,
-    w1: torch.Tensor,
-    w2: torch.Tensor,
-    topk_weights: torch.Tensor,
-    topk_ids: torch.Tensor,
-    quant_config: FusedMoEQuantConfig,
-    inplace: bool = False,
-    activation: str = "silu",
-    global_num_experts: int = -1,
-    expert_map: torch.Tensor | None = None,
-    apply_router_weight_on_input: bool = False,
-) -> torch.Tensor:
-    fused_experts = mk.FusedMoEModularKernel(
-        create_flashinfer_prepare_finalize(
-            use_dp=False, use_nvfp4=True, enable_alltoallv=False
-        ),
-        FlashInferExperts(
-            out_dtype=hidden_states.dtype,
-            quant_config=quant_config,
-            use_dp=False,
-        ),
-    )
-
-    return fused_experts(
-        hidden_states=hidden_states,
-        w1=w1,
-        w2=w2,
-        topk_weights=topk_weights,
-        topk_ids=topk_ids,
-        inplace=inplace,
-        activation=activation,
-        global_num_experts=global_num_experts,
-        expert_map=expert_map,
-        apply_router_weight_on_input=apply_router_weight_on_input,
-    )
-
-
-def flashinfer_cutlass_moe(
-    hidden_states: torch.Tensor,
-    w1: torch.Tensor,
-    w2: torch.Tensor,
-    topk_weights: torch.Tensor,
-    topk_ids: torch.Tensor,
-    quant_config: FusedMoEQuantConfig,
-    inplace: bool = False,
-    activation: str = "silu",
-    global_num_experts: int = -1,
-    expert_map: torch.Tensor | None = None,
-    apply_router_weight_on_input: bool = False,
-    tp_rank: int = 0,
-    tp_size: int = 1,
-    ep_rank: int = 0,
-    ep_size: int = 1,
-    use_dp: bool = False,
-) -> torch.Tensor:
-    fused_experts = mk.FusedMoEModularKernel(
-        create_flashinfer_prepare_finalize(use_dp=use_dp),
-        FlashInferExperts(
-            out_dtype=hidden_states.dtype,
-            quant_config=quant_config,
-            tp_rank=tp_rank,
-            tp_size=tp_size,
-            ep_rank=ep_rank,
-            ep_size=ep_size,
-        ),
-    )
-
-    return fused_experts(
-        hidden_states=hidden_states,
-        w1=w1,
-        w2=w2,
-        topk_weights=topk_weights,
-        topk_ids=topk_ids,
-        inplace=inplace,
-        activation=activation,
-        global_num_experts=global_num_experts,
-        expert_map=expert_map,
-        apply_router_weight_on_input=apply_router_weight_on_input,
-    )

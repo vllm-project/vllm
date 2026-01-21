@@ -13,6 +13,7 @@ import vllm.envs as envs
 from vllm.forward_context import get_forward_context, is_forward_context_available
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.config import (
+    FusedMoEConfig,
     FusedMoEParallelConfig,
     FusedMoEQuantConfig,
 )
@@ -21,6 +22,9 @@ from vllm.model_executor.layers.fused_moe.utils import (
     apply_moe_activation,
     count_expert_num_tokens,
     disable_inplace,
+)
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    QuantKey,
 )
 from vllm.utils.math_utils import cdiv
 from vllm.v1.worker.ubatching import (
@@ -374,18 +378,51 @@ class FusedMoEPermuteExpertsUnpermute(ABC):
 
     def __init__(
         self,
+        moe_config: FusedMoEConfig,
         quant_config: FusedMoEQuantConfig,
+        max_num_tokens: int | None = None,
+        num_dispatchers: int | None = None,
     ):
         """
+        moe_config: MoE layer configuration.
         quant_config: Quantization parameters for this experts instance.
         """
-        self.quant_config = quant_config
+        if self.activation_format() == FusedMoEActivationFormat.Standard and (
+            max_num_tokens is not None or num_dispatchers is not None
+        ):
+            raise ValueError(
+                "max_num_tokens and num_dispatchers should only be set for "
+                "BatchedExperts activation format."
+            )
+        elif self.activation_format() == FusedMoEActivationFormat.BatchedExperts and (
+            max_num_tokens is None or num_dispatchers is None
+        ):
+            raise ValueError(
+                "max_num_tokens and num_dispatchers must be set for "
+                "BatchedExperts activation format."
+            )
 
-    @property
+        self.moe_config = moe_config
+        self.quant_config = quant_config
+        self.max_num_tokens = max_num_tokens
+        self.num_dispatchers = num_dispatchers
+
+    @staticmethod
+    def expects_unquantized_inputs(
+        moe_config: FusedMoEConfig, quant_config: FusedMoEQuantConfig
+    ) -> bool:
+        """
+        Whether or not the PrepareFinalize should defer input quantization
+        in the prepare step. If True, then the Experts kernel will
+        execute the input quantization itself.
+
+        Sample subclasses that override are AITER and FlashInfer CUTLASS.
+        """
+        return False
+
+    @staticmethod
     @abstractmethod
-    def activation_formats(
-        self,
-    ) -> tuple[FusedMoEActivationFormat, FusedMoEActivationFormat]:
+    def activation_format() -> FusedMoEActivationFormat:
         """
         A property which is a tuple of the input and output activation formats
         for the 'apply' method.
@@ -434,6 +471,78 @@ class FusedMoEPermuteExpertsUnpermute(ABC):
         topk = topk_ids.size(1)
 
         return E, M, N, K, topk
+
+    #
+    # Various helpers for registering support for various features.
+    # Used by the oracle to select a particular kernel for a deployment.
+    #
+
+    @staticmethod
+    def is_supported_config(
+        cls: type["FusedMoEPermuteExpertsUnpermute"],
+        moe_config: FusedMoEConfig,
+        weight_key: QuantKey | None,
+        activation_key: QuantKey | None,
+        activation_format: FusedMoEActivationFormat,
+    ) -> tuple[bool, str | None]:
+        def _make_reason(reason: str) -> str:
+            return f"kernel does not support {reason}"
+
+        if not cls._supports_current_device():
+            return False, _make_reason("current device")
+        elif not (moe_config.is_act_and_mul or cls._supports_no_act_and_mul()):
+            return False, _make_reason("no act_and_mul MLP layer")
+        elif not cls._supports_activation(moe_config.activation):
+            return False, _make_reason(f"{moe_config.activation} activation")
+        elif not cls._supports_quant_scheme(weight_key, activation_key):
+            return False, _make_reason("quantization scheme")
+        elif not cls._supports_parallel_config(moe_config.moe_parallel_config):
+            return False, _make_reason("parallel config")
+        elif activation_format != cls.activation_format():
+            return False, _make_reason(f"{activation_format.value} activation format")
+        return True, None
+
+    @staticmethod
+    @abstractmethod
+    def _supports_current_device() -> bool:
+        """
+        Whether the kernel supports the current device type
+        (compute cability and current platform).
+        """
+        raise NotImplementedError
+
+    @staticmethod
+    @abstractmethod
+    def _supports_no_act_and_mul() -> bool:
+        """
+        Whether the kernel supports act_and_mul=False, i.e.
+        non-gated MoE models like Nemotron-Nano.
+        """
+        raise NotImplementedError
+
+    @staticmethod
+    @abstractmethod
+    def _supports_quant_scheme(
+        weight_key: QuantKey | None,
+        activation_key: QuantKey | None,
+    ) -> bool:
+        raise NotImplementedError
+
+    @staticmethod
+    @abstractmethod
+    def _supports_activation(activation: str) -> bool:
+        """
+        Whether the kernel supports a particular act function.
+        """
+        raise NotImplementedError
+
+    @staticmethod
+    @abstractmethod
+    def _supports_parallel_config(moe_parallel_config: FusedMoEParallelConfig) -> bool:
+        """
+        Whether the kernel supports deployment in expert parallel.
+        """
+        raise NotImplementedError
 
     #
     # Various helpers for accessing quantization parameters from the
@@ -715,12 +824,12 @@ class FusedMoEModularKernel(torch.nn.Module):
 
         self._post_init_setup()
         assert (
-            prepare_finalize.activation_format == fused_experts.activation_formats[0]
+            prepare_finalize.activation_format == fused_experts.activation_format()
         ), (
             f"{prepare_finalize.__class__.__name__}."
             f"{prepare_finalize.activation_format} == "
             f"{fused_experts.__class__.__name__}."
-            f"{fused_experts.activation_formats[0]}"
+            f"{fused_experts.activation_format()}"
         )
 
     def _post_init_setup(self):

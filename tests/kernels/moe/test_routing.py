@@ -6,7 +6,6 @@ import pytest
 import torch
 
 from vllm.distributed.eplb.eplb_state import EplbLayerState
-from vllm.model_executor.layers.fused_moe.config import RoutingMethodType
 from vllm.model_executor.layers.fused_moe.router.router_factory import (
     create_fused_moe_router,
 )
@@ -385,17 +384,11 @@ def test_grouped_topk(
         global_num_experts,
     )
 
-    routing_method_type = None
-    if scoring_func == "llama4":
-        routing_method_type = RoutingMethodType.Llama4
-        scoring_func = "sigmoid"
-
     router = create_fused_moe_router(
         use_grouped_topk=True,
         num_expert_group=num_expert_group,
         topk_group=topk_group,
         scoring_func=scoring_func,
-        routing_method_type=routing_method_type,
         e_score_correction_bias=e_score_correction_bias,
         routed_scaling_factor=routed_scaling_factor,
         top_k=top_k,

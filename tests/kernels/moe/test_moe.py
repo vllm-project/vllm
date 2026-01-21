@@ -18,7 +18,7 @@ from transformers import MixtralConfig
 from transformers.models.mixtral.modeling_mixtral import MixtralSparseMoeBlock
 
 import vllm.model_executor.layers.fused_moe  # noqa
-from tests.kernels.moe.utils import fused_moe
+from tests.kernels.moe.utils import fused_moe, make_dummy_moe_config
 from tests.kernels.utils import opcheck, stack_and_dev, torch_experts, torch_moe
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.config import VllmConfig, set_current_vllm_config
@@ -332,7 +332,7 @@ def test_fused_moe(
     #
     quant_config = FUSED_MOE_UNQUANTIZED_CONFIG
 
-    m_fused_moe_fn = modular_triton_fused_moe(quant_config)
+    m_fused_moe_fn = modular_triton_fused_moe(make_dummy_moe_config(), quant_config)
 
     def m_fused_moe(
         a: torch.Tensor,
@@ -437,7 +437,7 @@ def test_naive_block_assignment_moe(
     #
     quant_config = FUSED_MOE_UNQUANTIZED_CONFIG
 
-    m_fused_moe_fn = modular_triton_fused_moe(quant_config)
+    m_fused_moe_fn = modular_triton_fused_moe(make_dummy_moe_config(), quant_config)
 
     def m_fused_moe(
         a: torch.Tensor,

@@ -44,7 +44,7 @@ from vllm.model_executor.layers.quantization.utils.fp8_utils import W8A8BlockFp8
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     GroupShape,
     kFp8StaticTensorSym,
-    kNvfp4Quant,
+    kNvfp4Dynamic,
 )
 from vllm.platforms import current_platform
 
@@ -134,11 +134,11 @@ class TestSiluMulNvfp4QuantModel(torch.nn.Module):
     def ops_in_model_before(self):
         return [
             SILU_MUL_OP if self.enable_silu_mul_custom_op else torch.ops.aten.mul,
-            QUANT_OPS[kNvfp4Quant],
+            QUANT_OPS[kNvfp4Dynamic],
         ]
 
     def ops_in_model_after(self):
-        return [FUSED_OPS[kNvfp4Quant]]
+        return [FUSED_OPS[kNvfp4Dynamic]]
 
 
 class TestSiluMulGroupFp8QuantModel(torch.nn.Module):

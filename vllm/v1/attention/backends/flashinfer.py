@@ -29,7 +29,7 @@ from vllm.model_executor.layers.batch_invariant import (
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
     kFp8StaticTensorSym,
-    kNvfp4Quant,
+    kNvfp4Dynamic,
 )
 from vllm.platforms import current_platform
 from vllm.platforms.interface import DeviceCapability
@@ -1184,7 +1184,7 @@ class FlashInferImpl(AttentionImpl):
         return (
             self.support_trtllm_attn
             and self.kv_cache_dtype.startswith("fp8")
-            and quant_key in (kFp8StaticTensorSym, kNvfp4Quant)
+            and quant_key in (kFp8StaticTensorSym, kNvfp4Dynamic)
         )
 
     # FlashInfer requires attention sinks to be float32
