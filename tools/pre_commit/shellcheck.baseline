@@ -23,6 +23,7 @@ benchmarks/run_structured_output_benchmark.sh:SC2086
 .buildkite/scripts/hardware_ci/run-npu-test.sh:SC2086
 .buildkite/scripts/hardware_ci/run-npu-test.sh:SC2181
 .buildkite/scripts/hardware_ci/run-xpu-test.sh:SC2086
+.buildkite/scripts/push-nightly-builds.sh:SC2086
 .buildkite/scripts/run-multi-node-test.sh:SC2086
 .buildkite/scripts/run-multi-node-test.sh:SC2089
 .buildkite/scripts/run-multi-node-test.sh:SC2090
@@ -34,10 +35,12 @@ benchmarks/run_structured_output_benchmark.sh:SC2086
 .buildkite/scripts/tpu/docker_run_bm.sh:SC2086
 .buildkite/scripts/tpu/run_bm.sh:SC2034
 .buildkite/scripts/tpu/run_bm.sh:SC2086
+.buildkite/scripts/upload-nightly-wheels.sh:SC2086
+.buildkite/scripts/upload-nightly-wheels.sh:SC2115
+.buildkite/scripts/upload-nightly-wheels.sh:SC2236
+.buildkite/scripts/upload-release-wheels.sh:SC2046
+.buildkite/scripts/upload-release-wheels.sh:SC2086
 .buildkite/scripts/upload-rocm-wheels.sh:SC2012
-.buildkite/scripts/upload-wheels.sh:SC2086
-.buildkite/scripts/upload-wheels.sh:SC2115
-.buildkite/scripts/upload-wheels.sh:SC2236
 examples/online_serving/disaggregated_encoder/disagg_1e1p1d_example.sh:SC2086
 examples/online_serving/disaggregated_encoder/disagg_1e1pd_example.sh:SC2086
 examples/online_serving/disaggregated_prefill.sh:SC2086
