@@ -25,6 +25,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libnl-route-3-dev \
     kmod \
     util-linux \
+    python3 \
+    sudo \
     && rm -rf /var/lib/apt/lists/*
 
 # Fetch Linux kernel source (tools tree includes intel-speed-select)
