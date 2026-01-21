@@ -27,6 +27,8 @@
 
 #include "cuda_utils.h"
 #include "launch_bounds_utils.h"
+
+#define NVFP4_ENABLE_ELTS16 1
 #include "nvfp4_utils.cuh"
 
 namespace vllm {
@@ -39,10 +41,10 @@ __global__ void __launch_bounds__(512, VLLM_BLOCKS_PER_SM(512))
                              float const* __restrict__ SFScale, 
                              uint32_t* __restrict__ out,
                              uint32_t* __restrict__ SFout) {
-  using PackedVec = PackedVec_256b<Type>;
+  using PackedVec = vllm::PackedVec<Type>;
   static constexpr int CVT_FP4_NUM_THREADS_PER_SF =
-      (CVT_FP4_SF_VEC_SIZE / CVT_FP4_ELTS_PER_THREAD_256b);
-  static_assert(sizeof(PackedVec) == sizeof(Type) * CVT_FP4_ELTS_PER_THREAD_256b,
+      (CVT_FP4_SF_VEC_SIZE / CVT_FP4_ELTS_PER_THREAD);
+  static_assert(sizeof(PackedVec) == sizeof(Type) * CVT_FP4_ELTS_PER_THREAD,
                 "Vec size is not matched.");
 
   // Precompute SF layout parameter (constant for entire kernel).
@@ -54,28 +56,42 @@ __global__ void __launch_bounds__(512, VLLM_BLOCKS_PER_SM(512))
   float const SFScaleVal = (SFScale == nullptr) ? 1.0f : SFScale[0];
 
   int32_t const colIdx = blockDim.x*blockIdx.y+threadIdx.x;
-  int elem_idx = colIdx * CVT_FP4_ELTS_PER_THREAD_256b;
+  int elem_idx = colIdx * CVT_FP4_ELTS_PER_THREAD;
 
   // Input tensor row/col loops.
   for (int rowIdx = blockIdx.x; rowIdx < numRows; rowIdx += gridDim.x) {
     if (colIdx < num_padded_cols) {      
-      PackedVec_256b<Type> in_vec;
-      PackedVec_256b<Type> in_vec2;
+      PackedVec in_vec;
+      PackedVec in_vec2;
       int64_t inOffset =
-          rowIdx * (numCols * 2 / CVT_FP4_ELTS_PER_THREAD_256b) + colIdx;
-      int64_t inOffset2 = rowIdx * (numCols * 2 / CVT_FP4_ELTS_PER_THREAD_256b) +
-                          numCols / CVT_FP4_ELTS_PER_THREAD_256b + colIdx;
+          rowIdx * (numCols * 2 / CVT_FP4_ELTS_PER_THREAD) + colIdx;
+      int64_t inOffset2 = rowIdx * (numCols * 2 / CVT_FP4_ELTS_PER_THREAD) +
+                          numCols / CVT_FP4_ELTS_PER_THREAD + colIdx;
 
       bool valid = (rowIdx < numRows) && (elem_idx < numCols);
-      uint32_t r[8];
-      ld256_or_zero_cg_u32(r, &reinterpret_cast<const uint32_t*>(in)[inOffset * 8], valid);
-      memcpy(&in_vec, r, 32);
-      
-      ld256_or_zero_cg_u32(r, &reinterpret_cast<const uint32_t*>(in)[inOffset2 * 8], valid);
-      memcpy(&in_vec2, r, 32);
+      if constexpr (CVT_FP4_PACK16) {
+        /* uint32_t r[8];
+        ld256_or_zero_cg_u32(r, &reinterpret_cast<const uint32_t*>(in)[inOffset * 8], valid);
+        memcpy(&in_vec, r, 32);
+        
+        ld256_or_zero_cg_u32(r, &reinterpret_cast<const uint32_t*>(in)[inOffset2 * 8], valid);
+        memcpy(&in_vec2, r, 32); */
+        
+        ld256_or_zero_cg_u32<Type>(in_vec, &reinterpret_cast<const uint32_t*>(in)[inOffset * 8], valid);
+        ld256_or_zero_cg_u32<Type>(in_vec2, &reinterpret_cast<const uint32_t*>(in)[inOffset2 * 8], valid);
+      } else {
+        /* uint32_t r[4];
+        ld128_or_zero_cg_u32(r, &reinterpret_cast<const uint32_t*>(in)[inOffset * 4], valid);
+        memcpy(&in_vec, r, 16);
+        
+        ld128_or_zero_cg_u32(r, &reinterpret_cast<const uint32_t*>(in)[inOffset2 * 4], valid);
+        memcpy(&in_vec2, r, 16); */
+        ld128_or_zero_cg_u32<Type>(in_vec, &reinterpret_cast<const uint32_t*>(in)[inOffset * 4], valid);
+        ld128_or_zero_cg_u32<Type>(in_vec2, &reinterpret_cast<const uint32_t*>(in)[inOffset2 * 4], valid);
+      }
 
       // Compute silu and mul
-      PackedVec out_silu_mul = compute_silu_mul_256b<Type>(in_vec, in_vec2);
+      PackedVec out_silu_mul = compute_silu_mul<Type>(in_vec, in_vec2);
 
       auto sf_out =
           cvt_quant_to_fp4_get_sf_out_offset<uint32_t,
@@ -83,14 +99,18 @@ __global__ void __launch_bounds__(512, VLLM_BLOCKS_PER_SM(512))
               rowIdx, colIdx, numKTiles, SFout);
 
       auto out_val = 
-            cvt_warp_fp16_to_fp4_256b<Type, CVT_FP4_NUM_THREADS_PER_SF, UE8M0_SF>(out_silu_mul, SFScaleVal, sf_out);                                                     
-      
-      int64_t outOffset = rowIdx * (numCols / 8) + colIdx * 2;
-      if (rowIdx < numRows && elem_idx < numCols) {      
-        uint64_t packed64 =
-                    (uint64_t(out_val.hi) << 32) | uint64_t(out_val.lo);
-        reinterpret_cast<uint64_t*>(out)[outOffset >> 1] = packed64;
-      }                                                     
+            cvt_warp_fp16_to_fp4<Type, CVT_FP4_NUM_THREADS_PER_SF, UE8M0_SF>(out_silu_mul, SFScaleVal, sf_out);                                                     
+                            
+      if (valid){
+        if constexpr (CVT_FP4_PACK16) {      
+            int64_t outOffset = rowIdx * (numCols / 8) + colIdx * 2;            
+            uint64_t packed64 =
+                        (uint64_t(out_val.hi) << 32) | uint64_t(out_val.lo);
+            reinterpret_cast<uint64_t*>(out)[outOffset >> 1] = packed64;
+        } else {
+            out[inOffset] = out_val;        
+        }
+      }                                     
     }
   }
 }
@@ -117,7 +137,7 @@ void silu_and_mul_nvfp4_quant_sm1xxa(torch::Tensor& output,  // [..., d]
   auto output_ptr = static_cast<int64_t*>(output.data_ptr());
   const at::cuda::OptionalCUDAGuard device_guard(device_of(input));
   auto stream = at::cuda::getCurrentCUDAStream(input.get_device());
-  dim3 block(std::min(int(n / ELTS_PER_THREAD_256b), 512));
+  dim3 block(std::min(int(n / ELTS_PER_THREAD), 512));
   int const numBlocksPerSM =
       vllm_runtime_blocks_per_sm(static_cast<int>(block.x));
   

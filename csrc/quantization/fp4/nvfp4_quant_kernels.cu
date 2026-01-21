@@ -27,6 +27,8 @@
 
 #include "cuda_utils.h"
 #include "launch_bounds_utils.h"
+
+#define NVFP4_ENABLE_ELTS16 1
 #include "nvfp4_utils.cuh"
 
 namespace vllm {
@@ -39,11 +41,11 @@ __global__ void __launch_bounds__(512, VLLM_BLOCKS_PER_SM(512))
                        float const* __restrict__ SFScale, 
                        uint32_t* __restrict__ out,
                        uint32_t* __restrict__ SFout) {
-  using PackedVec = PackedVec_256b<Type>;
+  using PackedVec = vllm::PackedVec<Type>;
 
   static constexpr int CVT_FP4_NUM_THREADS_PER_SF =
-      (CVT_FP4_SF_VEC_SIZE / CVT_FP4_ELTS_PER_THREAD_256b);
-  static_assert(sizeof(PackedVec) == sizeof(Type) * CVT_FP4_ELTS_PER_THREAD_256b,
+      (CVT_FP4_SF_VEC_SIZE / CVT_FP4_ELTS_PER_THREAD);
+  static_assert(sizeof(PackedVec) == sizeof(Type) * CVT_FP4_ELTS_PER_THREAD,
                 "Vec size is not matched.");
 
   // Precompute SF layout parameter (constant for entire kernel).
@@ -51,7 +53,7 @@ __global__ void __launch_bounds__(512, VLLM_BLOCKS_PER_SM(512))
 
   int sf_m = round_up<int>(numRows, 128);
   int32_t const colIdx = blockDim.x*blockIdx.y+threadIdx.x;
-  int elem_idx = colIdx * CVT_FP4_ELTS_PER_THREAD_256b;
+  int elem_idx = colIdx * CVT_FP4_ELTS_PER_THREAD;
 
   // Get the global scaling factor, which will be applied to the SF.
   // Note SFScale is the same as next GEMM's alpha, which is
@@ -63,27 +65,39 @@ __global__ void __launch_bounds__(512, VLLM_BLOCKS_PER_SM(512))
   for (int rowIdx = blockIdx.x; rowIdx < sf_m; rowIdx += gridDim.x) {
     if (colIdx < num_padded_cols) {      
       PackedVec in_vec;
-      int64_t inOffset = rowIdx * (numCols / CVT_FP4_ELTS_PER_THREAD_256b) + colIdx;
+      int64_t inOffset = rowIdx * (numCols / CVT_FP4_ELTS_PER_THREAD) + colIdx;
 
       // If we are outside valid rows OR outside valid columns -> Use Zeros
       bool valid = (rowIdx < numRows) && (elem_idx < numCols);
-      uint32_t r[8];
-      ld256_or_zero_cg_u32(r, &reinterpret_cast<const uint32_t*>(in)[inOffset * 8], valid);
-      memcpy(&in_vec, r, 32);
+      if constexpr (CVT_FP4_PACK16) {
+        /* uint32_t r[8];
+        ld256_or_zero_cg_u32(r, &reinterpret_cast<const uint32_t*>(in)[inOffset * 8], valid);
+        memcpy(&in_vec, r, 32); */
+        ld256_or_zero_cg_u32<Type>(in_vec, &reinterpret_cast<const uint32_t*>(in)[inOffset * 8], valid);
+      } else {
+        /* uint32_t r[4];
+        ld128_or_zero_cg_u32(r, &reinterpret_cast<const uint32_t*>(in)[inOffset * 4], valid);
+        memcpy(&in_vec, r, 16); */
+        ld128_or_zero_cg_u32<Type>(in_vec, &reinterpret_cast<const uint32_t*>(in)[inOffset * 4], valid);
+      }
 
       auto sf_out = cvt_quant_to_fp4_get_sf_out_offset<uint32_t,
                                                 CVT_FP4_NUM_THREADS_PER_SF>(rowIdx, colIdx, numKTiles, SFout);
 
       auto out_val = 
-            cvt_warp_fp16_to_fp4_256b<Type, CVT_FP4_NUM_THREADS_PER_SF, UE8M0_SF>(in_vec, global_scale, sf_out);
+            cvt_warp_fp16_to_fp4<Type, CVT_FP4_NUM_THREADS_PER_SF, UE8M0_SF>(in_vec, global_scale, sf_out);
       
-      int64_t outOffset = rowIdx * (numCols / 8) + colIdx * 2;      
       // We do NOT write output for padding because the 'out' tensor is not
-      // padded.
-      if (rowIdx < numRows && elem_idx < numCols) {
-        uint64_t packed64 =
-                    (uint64_t(out_val.hi) << 32) | uint64_t(out_val.lo);
-        reinterpret_cast<uint64_t*>(out)[outOffset >> 1] = packed64;
+      // padded.      
+      if (valid){
+        if constexpr (CVT_FP4_PACK16) {      
+            int64_t outOffset = rowIdx * (numCols / 8) + colIdx * 2;            
+            uint64_t packed64 =
+                        (uint64_t(out_val.hi) << 32) | uint64_t(out_val.lo);
+            reinterpret_cast<uint64_t*>(out)[outOffset >> 1] = packed64;
+        } else {
+            out[inOffset] = out_val;        
+        }
       }
     }
   }
@@ -97,15 +111,15 @@ __global__ void __launch_bounds__(512, VLLM_BLOCKS_PER_SM(512))
                     float const* __restrict__ SFScale, 
                     uint32_t* __restrict__ out,
                     uint32_t* __restrict__ SFout) {
-  using PackedVec = PackedVec_256b<Type>;
+  using PackedVec = PackedVec<Type>;
 
   static constexpr int CVT_FP4_NUM_THREADS_PER_SF =
-      (CVT_FP4_SF_VEC_SIZE / CVT_FP4_ELTS_PER_THREAD_256b);
-  static_assert(sizeof(PackedVec) == sizeof(Type) * CVT_FP4_ELTS_PER_THREAD_256b,
+      (CVT_FP4_SF_VEC_SIZE / CVT_FP4_ELTS_PER_THREAD);
+  static_assert(sizeof(PackedVec) == sizeof(Type) * CVT_FP4_ELTS_PER_THREAD,
                 "Vec size is not matched.");
 
   int32_t const colIdx = blockDim.x*blockIdx.y+threadIdx.x;
-  int elem_idx = colIdx * CVT_FP4_ELTS_PER_THREAD_256b;
+  int elem_idx = colIdx * CVT_FP4_ELTS_PER_THREAD;
 
   // Get the global scaling factor, which will be applied to the SF.
   // Note SFScale is the same as next GEMM's alpha, which is
@@ -117,26 +131,32 @@ __global__ void __launch_bounds__(512, VLLM_BLOCKS_PER_SM(512))
   for (int rowIdx = blockIdx.x; rowIdx < numRows; rowIdx += gridDim.x) {
     if (colIdx < sf_n_unpadded) {      
       PackedVec in_vec;
-      int64_t inOffset = rowIdx * (numCols / CVT_FP4_ELTS_PER_THREAD_256b) + colIdx;
+      int64_t inOffset = rowIdx * (numCols / CVT_FP4_ELTS_PER_THREAD) + colIdx;
 
       // If we are outside valid rows OR outside valid columns -> Use Zeros
       bool valid = (rowIdx < numRows) && (elem_idx < numCols);
-      uint32_t r[8];
-      ld256_or_zero_cg_u32(r, &reinterpret_cast<const uint32_t*>(in)[inOffset * 8], valid);
-      memcpy(&in_vec, r, 32);
+      if constexpr (CVT_FP4_PACK16) {
+        ld256_or_zero_cg_u32<Type>(in_vec, &reinterpret_cast<const uint32_t*>(in)[inOffset * 8], valid);
+      } else {
+        ld128_or_zero_cg_u32<Type>(in_vec, &reinterpret_cast<const uint32_t*>(in)[inOffset * 4], valid);
+      }
 
       auto sf_out = sf_out_rowmajor_u8<uint32_t>(rowIdx, colIdx, sf_n_unpadded, SFout);
 
       auto out_val = 
-            cvt_warp_fp16_to_fp4_256b<Type, CVT_FP4_NUM_THREADS_PER_SF, UE8M0_SF>(in_vec, global_scale, sf_out);
+            cvt_warp_fp16_to_fp4<Type, CVT_FP4_NUM_THREADS_PER_SF, UE8M0_SF>(in_vec, global_scale, sf_out);
       
-      int64_t outOffset = rowIdx * (numCols / 8) + colIdx * 2;      
       // We do NOT write output for padding because the 'out' tensor is not
       // padded.
-      if (rowIdx < numRows && elem_idx < numCols) {
-        uint64_t packed64 =
-                    (uint64_t(out_val.hi) << 32) | uint64_t(out_val.lo);
-        reinterpret_cast<uint64_t*>(out)[outOffset >> 1] = packed64;
+      if (valid){
+        if constexpr (CVT_FP4_PACK16) {      
+            int64_t outOffset = rowIdx * (numCols / 8) + colIdx * 2;            
+            uint64_t packed64 =
+                        (uint64_t(out_val.hi) << 32) | uint64_t(out_val.lo);
+            reinterpret_cast<uint64_t*>(out)[outOffset >> 1] = packed64;
+        } else {
+            out[inOffset] = out_val;        
+        }
       }
     }
   }
@@ -169,13 +189,13 @@ void scaled_fp4_quant_sm1xxa(torch::Tensor const& output,
   int sf_n_unpadded = int(n / CVT_FP4_SF_VEC_SIZE);
 
   // Grid, Block size. Each thread converts 8 values.
-  dim3 block(std::min(int(n / ELTS_PER_THREAD_256b), 512)); //FIXME: div:round_up(n/ELTS_PER_THREAD_256b, 32)?
+  dim3 block(std::min(int(n / ELTS_PER_THREAD), 512)); //TODO: div:round_up(n/ELTS_PER_THREAD, 32)?
   int const numBlocksPerSM =
       vllm_runtime_blocks_per_sm(static_cast<int>(block.x));
 
   if (is_sf_swizzled_layout){  
     int sf_n_int = int(vllm::round_up(sf_n_unpadded, 4) / 4); 
-    int32_t num_padded_cols = sf_n_int * 4 * CVT_FP4_SF_VEC_SIZE / CVT_FP4_ELTS_PER_THREAD_256b;
+    int32_t num_padded_cols = sf_n_int * 4 * CVT_FP4_SF_VEC_SIZE / CVT_FP4_ELTS_PER_THREAD;
     
     int grid_y = vllm::div_round_up(num_padded_cols, static_cast<int>(block.x));
     int grid_x = std::min(vllm::computeEffectiveRows(m), std::max(1, (multiProcessorCount*numBlocksPerSM)/grid_y) );
