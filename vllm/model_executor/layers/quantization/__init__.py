@@ -11,7 +11,6 @@ logger = init_logger(__name__)
 
 QuantizationMethods = Literal[
     "awq",
-    "deepspeedfp",
     "fp8",
     "ptpc_fp8",
     "fbgemm_fp8",
@@ -25,7 +24,6 @@ QuantizationMethods = Literal[
     "gptq",
     "compressed-tensors",
     "bitsandbytes",
-    "hqq",
     "experts_int8",
     "ipex",
     "quark",
@@ -40,13 +38,11 @@ QuantizationMethods = Literal[
 QUANTIZATION_METHODS: list[str] = list(get_args(QuantizationMethods))
 
 DEPRECATED_QUANTIZATION_METHODS = [
-    "deepspeedfp",
     "tpu_int8",
     "ptpc_fp8",
     "fbgemm_fp8",
     "fp_quant",
     "gptq_marlin_24",
-    "hqq",
     "experts_int8",
     "ipex",
     "rtn",
@@ -121,7 +117,6 @@ def get_quantization_config(quantization: str) -> type[QuantizationConfig]:
         CompressedTensorsConfig,
     )
     from .cpu_wna16 import CPUAWQConfig
-    from .deepspeedfp import DeepSpeedFPConfig
     from .experts_int8 import ExpertsInt8Config
     from .fbgemm_fp8 import FBGEMMFp8Config
     from .fp8 import Fp8Config
@@ -130,7 +125,6 @@ def get_quantization_config(quantization: str) -> type[QuantizationConfig]:
     from .gptq import GPTQConfig
     from .gptq_marlin import GPTQMarlinConfig
     from .gptq_marlin_24 import GPTQMarlin24Config
-    from .hqq_marlin import HQQMarlinConfig
     from .inc import INCConfig
     from .ipex_quant import IPEXConfig
     from .modelopt import ModelOptFp8Config, ModelOptNvFp4Config
@@ -143,7 +137,6 @@ def get_quantization_config(quantization: str) -> type[QuantizationConfig]:
 
     method_to_config: dict[str, type[QuantizationConfig]] = {
         "awq": AWQConfig,
-        "deepspeedfp": DeepSpeedFPConfig,
         "fp8": Fp8Config,
         "fbgemm_fp8": FBGEMMFp8Config,
         "fp_quant": FPQuantConfig,
@@ -157,7 +150,6 @@ def get_quantization_config(quantization: str) -> type[QuantizationConfig]:
         "compressed-tensors": CompressedTensorsConfig,
         "bitsandbytes": BitsAndBytesConfig,
         "ptpc_fp8": PTPCFp8Config,
-        "hqq": HQQMarlinConfig,
         "experts_int8": ExpertsInt8Config,
         "ipex": IPEXConfig,
         "quark": QuarkConfig,
