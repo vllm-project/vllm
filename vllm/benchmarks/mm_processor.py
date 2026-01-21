@@ -196,17 +196,22 @@ def benchmark_multimodal_processor(
         if not output.finished or output.metrics is None:
             continue
         metrics = output.metrics
-        for attr in ("finished_time", "last_token_time"):
-            if (
-                getattr(metrics, attr, None) is not None
-                and getattr(metrics, "arrival_time", None) is not None
-            ):
-                e2el_times.append(
-                    (getattr(metrics, attr) - metrics.arrival_time) * 1000
-                )
-                break
+        # Use first_token_latency + (last_token_ts - first_token_ts) to calculate E2E latency
+        if (
+            getattr(metrics, "first_token_latency", None) is not None
+            and getattr(metrics, "last_token_ts", None) is not None
+            and getattr(metrics, "first_token_ts", None) is not None
+        ):
+            ttft = metrics.first_token_latency
+            # Decode time is the duration between the first and last token generation
+            decode_time = max(0.0, metrics.last_token_ts - metrics.first_token_ts)
+            e2el_times.append((ttft + decode_time) * 1000)
 
     if not e2el_times and completed > 0:
+        print(
+            "\n⚠️  Warning: Detailed end-to-end latency metrics not available.\n"
+            "   Falling back to average request latency (total_time / num_completed_requests).\n"
+        )
         avg_time_per_request = total_time / completed
         e2el_times = [avg_time_per_request * 1000] * completed
 
