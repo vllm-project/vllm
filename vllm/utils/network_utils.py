@@ -11,12 +11,12 @@ from collections.abc import (
     Sequence,
 )
 from typing import Any
-from urllib.parse import urlparse
 from uuid import uuid4
 
 import psutil
 import zmq
 import zmq.asyncio
+from urllib3.util import parse_url
 
 import vllm.envs as envs
 from vllm.logger import init_logger
@@ -217,7 +217,7 @@ def find_process_using_port(port: int) -> psutil.Process | None:
 
 def split_zmq_path(path: str) -> tuple[str, str, str]:
     """Split a zmq path into its parts."""
-    parsed = urlparse(path)
+    parsed = parse_url(path)
     if not parsed.scheme:
         raise ValueError(f"Invalid zmq path: {path}")
 
