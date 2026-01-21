@@ -5,7 +5,6 @@ from typing import TYPE_CHECKING, Any, Optional
 
 import torch
 from torch.nn import Module
-from torch.utils._python_dispatch import TorchDispatchMode
 
 import vllm.envs as envs
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
