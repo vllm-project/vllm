@@ -8,10 +8,8 @@ import torch
 from torch import nn
 from transformers import LlamaConfig
 
-from vllm.attention import AttentionType
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
-from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.models.llama import (
     LlamaAttention,
@@ -19,10 +17,9 @@ from vllm.model_executor.models.llama import (
     LlamaForCausalLM,
     LlamaModel,
 )
+from vllm.v1.attention.backend import AttentionType
 
 from .utils import AutoWeightsLoader
-
-logger = init_logger(__file__)
 
 
 class MistralAttention(LlamaAttention):
