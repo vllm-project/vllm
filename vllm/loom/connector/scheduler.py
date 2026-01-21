@@ -4,6 +4,8 @@
 from collections import defaultdict
 from collections.abc import Iterable
 import hashlib
+import json
+import time
 from itertools import islice
 from typing import Any
 
@@ -54,6 +56,8 @@ class LoomConnectorScheduler:
         self._reqs_being_loaded = defaultdict[ReqId, set[BlockHash]](set)
 
         self._request_phases: dict[ReqId, RequestPhase] = {}
+
+        self._timing: dict[ReqId, dict[str, float | int | bool | None]] = {}
 
         # MVP-0: request-level recompute (token_ids-only seed).
         # If a request is marked for recompute, we will return 0 external
@@ -129,6 +133,11 @@ class LoomConnectorScheduler:
             )
             old_phase = self._request_phases.get(req_id)
             if old_phase is not None and old_phase != new_phase:
+                if new_phase == RequestPhase.DECODE:
+                    now = time.perf_counter()
+                    stats = self._timing.get(req_id)
+                    if stats is not None and stats.get("decode_start_ts") is None:
+                        stats["decode_start_ts"] = now
                 logger.debug(
                     "Request %s phase %s -> %s (num_computed_tokens=%d, num_prompt_tokens=%d)",
                     req_id,
@@ -215,6 +224,20 @@ class LoomConnectorScheduler:
         # the block ids are updated in _get_reqs_to_store
         self._request_block_ids[request.request_id] = []
 
+        self._timing.setdefault(
+            request.request_id,
+            {
+                "arrival_time": request.arrival_time,
+                "forced_recompute": self._should_force_recompute(request.request_id),
+                "num_prompt_tokens": int(request.num_prompt_tokens),
+                "load_enqueue_ts": None,
+                "load_done_ts": None,
+                "decode_start_ts": None,
+                "finish_ts": None,
+                "num_loaded_blocks": None,
+            },
+        )
+
         if num_external_tokens == 0:
             return
 
@@ -249,6 +272,10 @@ class LoomConnectorScheduler:
         self._reqs_to_load[request.request_id] = (src_spec, dst_spec)
         self._reqs_being_loaded[request.request_id].update(block_hashes)
         self._next_stored_block_idx[request.request_id] = num_blocks
+
+        stats = self._timing.get(request.request_id)
+        if stats is not None and stats.get("load_enqueue_ts") is None:
+            stats["load_enqueue_ts"] = time.perf_counter()
 
     def build_connector_meta(
         self, scheduler_output: SchedulerOutput
@@ -338,6 +365,11 @@ class LoomConnectorScheduler:
             if block_hashes:
                 self.manager.complete_load(block_hashes)
 
+            stats = self._timing.get(req_id)
+            if stats is not None and stats.get("load_done_ts") is None:
+                stats["load_done_ts"] = time.perf_counter()
+                stats["num_loaded_blocks"] = len(block_hashes) if block_hashes else 0
+
     def request_finished(
         self,
         request: Request,
@@ -354,6 +386,20 @@ class LoomConnectorScheduler:
             returned by the engine.
         """
         req_id = request.request_id
+        now = time.perf_counter()
+        stats = self._timing.pop(req_id, None)
+        if stats is not None:
+            stats["finish_ts"] = now
+            load_enqueue_ts = stats.get("load_enqueue_ts")
+            load_done_ts = stats.get("load_done_ts")
+            decode_start_ts = stats.get("decode_start_ts")
+            finish_ts = stats.get("finish_ts")
+            if isinstance(load_enqueue_ts, float) and isinstance(load_done_ts, float):
+                stats["load_ms"] = (load_done_ts - load_enqueue_ts) * 1e3
+            if isinstance(decode_start_ts, float) and isinstance(finish_ts, float):
+                stats["decode_wall_ms"] = (finish_ts - decode_start_ts) * 1e3
+            logger.info("loom_timing %s", json.dumps({"req_id": req_id, **stats}, sort_keys=True))
+
         self._requests.pop(req_id, None)
         self._request_phases.pop(req_id, None)
         self._request_block_ids.pop(req_id, None)
