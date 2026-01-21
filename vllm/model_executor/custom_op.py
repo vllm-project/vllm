@@ -116,10 +116,10 @@ class CustomOp(nn.Module):
             )
         return super().__new__(op_cls_to_instantiate)
 
-    def __init__(self, enforce_enable: bool = False):
+    def __init__(self, *, enforce_enable: bool = False, compile_native: bool = False):
         super().__init__()
         self._enforce_enable = enforce_enable
-        self._forward_method = self.dispatch_forward()
+        self._forward_method = self.dispatch_forward(compile_native=compile_native)
 
     def forward(self, *args, **kwargs):
         return self._forward_method(*args, **kwargs)
@@ -160,7 +160,7 @@ class CustomOp(nn.Module):
         # PyTorch-native implementation.
         return self.forward_native(*args, **kwargs)
 
-    def dispatch_forward(self):
+    def dispatch_forward(self, compile_native: bool):
         # NOTE(woosuk): Here we assume that vLLM was built for only one
         # specific backend. Currently, we do not support dynamic dispatching.
         compilation_config = get_cached_compilation_config()
@@ -180,7 +180,7 @@ class CustomOp(nn.Module):
         if not enabled:
             # Compile forward_native to avoid eager torch ops if inside
             # opaque torch custom op (e.g. fused_moe, unified_attention, etc.)
-            return self.maybe_compile(self.forward_native)
+            return self.maybe_compile(self.forward_native, enable=compile_native)
 
         if current_platform.is_rocm():
             return self.forward_hip
@@ -195,7 +195,7 @@ class CustomOp(nn.Module):
         else:
             return self.forward_cuda
 
-    def maybe_compile(self, fn):
+    def maybe_compile(self, fn, *, enable: bool = True):
         """
         Compile fn if compilation enabled.
         Useful for CustomOp instances called from within a torch custom op,
@@ -207,7 +207,7 @@ class CustomOp(nn.Module):
         # Do not compile if compilation disabled
         from vllm.config.compilation import CompilationMode
 
-        if get_cached_compilation_config().mode == CompilationMode.NONE:
+        if not enable or get_cached_compilation_config().mode == CompilationMode.NONE:
             return fn
 
         # dynamic=True to avoid recompilations

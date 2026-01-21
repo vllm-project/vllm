@@ -36,6 +36,7 @@ class QuantFP8(CustomOp):
         num_token_padding: int | None = None,
         column_major_scales: bool = False,
         use_ue8m0: bool | None = None,  # for Torch compile
+        compile_native: bool = True,
     ):
         """
         :param static: static or dynamic quantization
@@ -45,8 +46,9 @@ class QuantFP8(CustomOp):
             size
         :param column_major_scales: For group quantization, output scales in
             column major format
+        :param compile_native: Manually compile forward_native if compile mode > None
         """
-        super().__init__()
+        super().__init__(compile_native=compile_native)
         self.static = static
         self.group_shape = group_shape
         self.use_per_token_if_dynamic = group_shape == GroupShape.PER_TOKEN
