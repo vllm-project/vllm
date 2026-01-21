@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import itertools
-from collections.abc import Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field
 from typing import Any, Literal, Protocol, overload
 
@@ -11,6 +11,7 @@ import torch.nn as nn
 from torch.func import functional_call
 from transformers import PretrainedConfig
 
+from vllm._aiter_ops import AITER_TOPK_SIGMOID_FOUND, rocm_aiter_ops
 from vllm.config import VllmConfig
 from vllm.distributed import (
     get_tensor_model_parallel_rank,
@@ -769,6 +770,33 @@ def fast_topk(
     else:
         # Use topk for efficiency with larger k values
         return torch.topk(values, topk, dim=dim)
+
+
+def torch_topk_sigmoid_routing_func(
+    gating_output: torch.Tensor,
+    topk: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Call topk(dim=-1)+sigmoid+pseudo-standard casting.
+
+    This uses fast_topk, to choose the faster implementation dependent
+    on the topk argument value.
+    """
+    router_scores, router_indices = fast_topk(gating_output, topk, dim=-1)
+    router_scores = torch.sigmoid(router_scores.float())
+    return (router_scores, router_indices.to(torch.int32))
+
+
+def dispatch_topk_sigmoid_routing_func(
+    fallback_func: Callable[[torch.Tensor, int], tuple[torch.Tensor, torch.Tensor]]
+    | None = None,
+) -> Callable[[torch.Tensor, int], tuple[torch.Tensor, torch.Tensor]]:
+    if AITER_TOPK_SIGMOID_FOUND and rocm_aiter_ops.is_fused_moe_enabled():
+        return rocm_aiter_ops.topk_sigmoid
+    if fallback_func is not None:
+        return fallback_func
+
+    # torch implementation
+    return torch_topk_sigmoid_routing_func
 
 
 # Chunk x along the num_tokens axis for sequence parallelism
