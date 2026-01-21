@@ -1558,7 +1558,7 @@ def test_register_kv_caches(default_vllm_config, dist_init, attn_backend):
                     unique_tensor[1].data_ptr(),
                 ]
                 expected_num_entries = 4
-                expected_blocks_count = 8
+            expected_blocks_count = 8
 
         # Execute register_kv_caches
         connector.register_kv_caches(kv_caches)
