@@ -25,7 +25,7 @@ Maintainers form a hierarchy based on sustained, high-quality contributions and 
 
 ### Core Maintainers
 
-Core Maintainers function like a project planning and decision making committee. In other convention, they might be called a Technical Steering Committee (TSC). In vLLM vocabulary, they are often known as "Project Leads". They meet weekly to coordinate roadmap priorities and allocate engineering resources. Current active leads: @WoosukKwon, @zhuohan123, @simon-mo, @youkaichao, @robertshaw2-redhat, @tlrmchlsmth, @mgoin, @njhill, @ywang96, @houseroad, @yeqcharlotte, @ApostaC
+Core Maintainers function like a project planning and decision making committee. In other convention, they might be called a Technical Steering Committee (TSC). In vLLM vocabulary, they are often known as "Project Leads". They meet weekly to coordinate roadmap priorities and allocate engineering resources. Current active leads: @WoosukKwon, @zhuohan123, @simon-mo, @youkaichao, @robertgshaw2-redhat, @tlrmchlsmth, @mgoin, @njhill, @ywang96, @houseroad, @yeqcharlotte, @ApostaC
 
 The responsibilities of the core maintainers are:
 
@@ -36,7 +36,7 @@ The responsibilities of the core maintainers are:
 
 ### Lead Maintainers
 
-While Core maintainers assume the day-to-day responsibilities of the project, Lead maintainers are responsible for the overall direction and strategy of the project. A committee of @WoosukKwon, @zhuohan123, @simon-mo, @youkaichao, and @robertshaw2-redhat currently shares this role with divided responsibilities.
+While Core maintainers assume the day-to-day responsibilities of the project, Lead maintainers are responsible for the overall direction and strategy of the project. A committee of @WoosukKwon, @zhuohan123, @simon-mo, @youkaichao, and @robertgshaw2-redhat currently shares this role with divided responsibilities.
 
 The responsibilities of the lead maintainers are:
 
