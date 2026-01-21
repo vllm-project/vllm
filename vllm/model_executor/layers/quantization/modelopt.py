@@ -1547,7 +1547,7 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
         ):
             assert self.experts_cls is not None
             self.kernel = make_nvfp4_moe_kernel(
-                quant_config=self.moe_quant_config,
+                moe_quant_config=self.moe_quant_config,
                 moe_config=self.moe,
                 experts_cls=self.experts_cls,
             )

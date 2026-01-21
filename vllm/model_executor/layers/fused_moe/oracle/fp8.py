@@ -493,7 +493,10 @@ def make_fp8_moe_kernel(
         moe=moe_config,
         quant_config=moe_quant_config,
         routing_tables=None,
-        defer_input_quant=experts_cls.expects_unquantized_inputs(),
+        defer_input_quant=experts_cls.expects_unquantized_inputs(
+            moe_config=moe_config,
+            quant_config=moe_quant_config,
+        ),
         allow_new_interface=True,
     )
     assert prepare_finalize is not None

@@ -334,7 +334,7 @@ class CompressedTensorsW4A4Mxfp4MoEMethod(CompressedTensorsMoEMethod):
         self.moe_quant_config = self.get_fused_moe_quant_config(layer)
         if self.moe_quant_config is not None:
             self.kernel = make_nvfp4_moe_kernel(
-                quant_config=self.moe_quant_config,
+                moe_quant_config=self.moe_quant_config,
                 moe_config=self.moe,
                 experts_cls=self.experts_cls,
             )
@@ -585,7 +585,7 @@ class CompressedTensorsW4A4Nvfp4MoEMethod(CompressedTensorsMoEMethod):
         ):
             assert self.experts_cls is not None
             self.kernel = make_nvfp4_moe_kernel(
-                quant_config=self.moe_quant_config,
+                moe_quant_config=self.moe_quant_config,
                 moe_config=self.moe,
                 experts_cls=self.experts_cls,
             )

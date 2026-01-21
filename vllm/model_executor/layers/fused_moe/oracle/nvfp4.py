@@ -392,16 +392,19 @@ def make_nvfp4_moe_quant_config(
 
 
 def make_nvfp4_moe_kernel(
-    quant_config: FusedMoEQuantConfig,
+    moe_quant_config: FusedMoEQuantConfig,
     moe_config: FusedMoEConfig,
     experts_cls: type[mk.FusedMoEPermuteExpertsUnpermute],
 ) -> mk.FusedMoEModularKernel:
     # Create Prepare/Finalize.
     prepare_finalize = maybe_make_prepare_finalize(
         moe=moe_config,
-        quant_config=quant_config,
+        quant_config=moe_quant_config,
         routing_tables=None,
-        defer_input_quant=experts_cls.expects_unquantized_inputs(),
+        defer_input_quant=experts_cls.expects_unquantized_inputs(
+            moe_config=moe_config,
+            quant_config=moe_quant_config,
+        ),
         allow_new_interface=True,
     )
     assert prepare_finalize is not None
@@ -411,7 +414,7 @@ def make_nvfp4_moe_kernel(
     # Create Experts.
     experts = experts_cls(
         moe_config=moe_config,
-        quant_config=quant_config,
+        quant_config=moe_quant_config,
     )
 
     # NOTE(rob): we only want the mk to control the shared_expert
