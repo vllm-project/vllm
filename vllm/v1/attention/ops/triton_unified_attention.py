@@ -985,7 +985,8 @@ def unified_attention(
     # Note: Buffer capacity is seq_threshold_3D * 16 to accommodate speculative decode
     # with a maximum of 16 query tokens (15 speculative + 1 confirmed).
     buffer_capacity = seq_threshold_3D * 16 if seq_threshold_3D is not None else 0
-    if (
+
+    use_2d = (
         seq_threshold_3D is None
         or num_par_softmax_segments is None
         or softmax_segm_output is None
@@ -993,9 +994,11 @@ def unified_attention(
         or softmax_segm_expsum is None
         or max_seqlen_q > 16  # Prefill-like: reject large query batches
         or max_seqlen_k <= 256  # 3D needs long KV to benefit from segmentation
-        or total_num_q_blocks * num_kv_heads > 128  # Grid too large for 3D
+        or total_num_q_blocks * num_kv_heads > 512  # Grid too large for 3D
         or q.shape[0] > buffer_capacity  # Total tokens exceed buffer capacity
-    ):
+    )
+
+    if use_2d:
         kernel_unified_attention_2d[
             (
                 total_num_q_blocks,
