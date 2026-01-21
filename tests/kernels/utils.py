@@ -13,7 +13,7 @@ import torch
 from torch._prims_common import TensorLikeType
 
 from tests.kernels.quant_utils import native_w8a8_block_matmul
-from vllm.model_executor.custom_op import CustomOp
+from vllm.model_executor.custom_op import op_registry
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.fused_moe.utils import moe_kernel_quantize_input
 from vllm.utils.torch_utils import make_tensor_with_pad
@@ -883,7 +883,7 @@ def torch_experts(
 
     f32 = torch.float32
 
-    act = CustomOp.op_registry[activation]
+    act = op_registry[activation]
 
     for i in range(num_experts):
         mask = topk_ids == i
