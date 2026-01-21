@@ -637,7 +637,7 @@ def maybe_offload_to_cpu(module: torch.nn.Module) -> torch.nn.Module:
     uva_available = is_uva_available()
 
     assert uva_available, "V1 CPU offloading requires uva (pin memory) support"
-    uva_offloading = True
+    uva_offloading = False
 
     # offload parameters to CPU
     # use pin_memory if possible, which helps cudagraph capture speed
@@ -678,6 +678,9 @@ def maybe_offload_to_cpu(module: torch.nn.Module) -> torch.nn.Module:
                 k: v.to(device, non_blocking=True)
                 for k, v in module.state_dict().items()
             }
+
+            # set `tie_weights=False` as tied weights in original model
+            # become untied when calling .to(device)
             output = functional_call(module, device_state, args=args, kwargs=kwargs, tie_weights=False)
             module.forward = forward
             return output
