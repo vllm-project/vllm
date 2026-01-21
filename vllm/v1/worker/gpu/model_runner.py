@@ -607,7 +607,9 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
         # Compute slot mappings: [num_kv_cache_groups, num_tokens]
         slot_mappings = self.block_tables.compute_slot_mappings(
-            query_start_loc, self.input_buffers.positions[:num_tokens]
+            idx_mapping,
+            query_start_loc,
+            self.input_buffers.positions[:num_tokens],
         )
 
         # Layer name -> attention metadata.

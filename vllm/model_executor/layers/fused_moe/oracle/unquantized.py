@@ -123,7 +123,6 @@ def convert_to_unquantized_kernel_format(
 
 
 def make_unquantized_moe_kernel(
-    layer: torch.nn.Module,
     backend: UnquantizedMoeBackend,
     quant_config: FusedMoEQuantConfig,
     moe_config: FusedMoEConfig,
@@ -141,12 +140,8 @@ def make_unquantized_moe_kernel(
         kernel = mk.FusedMoEModularKernel(
             MoEPrepareAndFinalizeNoEP(),
             FlashInferExperts(
-                out_dtype=layer.params_dtype,
+                moe_config=moe_config,
                 quant_config=quant_config,
-                tp_rank=moe_config.moe_parallel_config.tp_rank,
-                tp_size=moe_config.moe_parallel_config.tp_size,
-                ep_rank=moe_config.moe_parallel_config.ep_rank,
-                ep_size=moe_config.moe_parallel_config.ep_size,
             ),
         )
         use_inplace = False
@@ -157,13 +152,19 @@ def make_unquantized_moe_kernel(
 
         kernel = mk.FusedMoEModularKernel(
             MoEPrepareAndFinalizeNoEP(),
-            AiterExperts(quant_config),
+            AiterExperts(
+                moe_config=moe_config,
+                quant_config=quant_config,
+            ),
         )
     elif backend == UnquantizedMoeBackend.TRITON:
         from vllm.model_executor.layers.fused_moe import TritonExperts
 
         kernel = mk.FusedMoEModularKernel(
             MoEPrepareAndFinalizeNoEP(),
-            TritonExperts(quant_config),
+            TritonExperts(
+                moe_config=moe_config,
+                quant_config=quant_config,
+            ),
         )
     return kernel, use_inplace
