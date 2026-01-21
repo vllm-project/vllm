@@ -5,7 +5,7 @@
 #   - pct_map.sh  (derive HP CPU list from numactl -H + intel-speed-select core-power info)
 #   - set_clos.sh (apply HP -> CLOS0 and non-HP -> CLOS2)
 # And adds authoritative verification via:
-#   sudo intel-speed-select -c <cpu-list> core-power get-assoc
+#   $SUDO intel-speed-select -c <cpu-list> core-power get-assoc
 #
 # IMPORTANT BEHAVIOR ON YOUR PLATFORM:
 #   Your get-assoc output shows that when a CPU thread is assigned to a CLOS, its HT sibling
@@ -26,8 +26,12 @@ INCLUDE_HT="${INCLUDE_HT:-0}"         # 1 = include HT half in initial pick per 
 HP_CLOS="${HP_CLOS:-0}"
 OTHER_CLOS="${OTHER_CLOS:-2}"
 DRY_RUN="${DRY_RUN:-0}"
+SUDO=""
+if [ "$(id -u)" -ne 0 ]; then
+  SUDO="sudo"
+fi
 
-ISS_INFO_CMD="${ISS_INFO_CMD:-sudo intel-speed-select core-power info}"
+ISS_INFO_CMD="${ISS_INFO_CMD:-$SUDO intel-speed-select core-power info}"
 NUMACTL_CMD="${NUMACTL_CMD:-numactl -H}"
 
 tmp_iss="$(mktemp)"
@@ -200,7 +204,7 @@ verify_get_assoc() {
 
   echo "=== Verify ($label): expect clos:$expect_clos on cpu-list [$cpu_list] ==="
 
-  out="$(sudo intel-speed-select -c "$cpu_list" core-power get-assoc 2>&1)"
+  out="$($SUDO intel-speed-select -c "$cpu_list" core-power get-assoc 2>&1)"
 
   # Show a short preview
   echo "$out" | sed -n '1,25p'
@@ -327,14 +331,14 @@ echo
 if [[ "$DRY_RUN" == "1" ]]; then
   echo "DRY_RUN=1 set; not applying changes."
   echo "Would run:"
-  echo "  sudo intel-speed-select -c \"$HP_EFFECTIVE_RANGES\" core-power assoc --clos \"$HP_CLOS\""
-  echo "  sudo intel-speed-select -c \"$NON_HP_RANGES\" core-power assoc --clos \"$OTHER_CLOS\""
+  echo "  $SUDO intel-speed-select -c \"$HP_EFFECTIVE_RANGES\" core-power assoc --clos \"$HP_CLOS\""
+  echo "  $SUDO intel-speed-select -c \"$NON_HP_RANGES\" core-power assoc --clos \"$OTHER_CLOS\""
   echo "And verify via get-assoc."
   exit 0
 fi
 
-sudo intel-speed-select -c "$HP_EFFECTIVE_RANGES" core-power assoc --clos "$HP_CLOS"
-sudo intel-speed-select -c "$NON_HP_RANGES" core-power assoc --clos "$OTHER_CLOS"
+$SUDO intel-speed-select -c "$HP_EFFECTIVE_RANGES" core-power assoc --clos "$HP_CLOS"
+$SUDO intel-speed-select -c "$NON_HP_RANGES" core-power assoc --clos "$OTHER_CLOS"
 
 echo
 echo "=== Verification using get-assoc (authoritative for your build) ==="
