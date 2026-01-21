@@ -66,7 +66,7 @@ class TestSiluMulFp8QuantModel(torch.nn.Module):
         self, hidden_size: int, force_kernel: FP8ScaledMMLinearKernel, **kwargs
     ):
         super().__init__()
-        self.silu_and_mul = SiluAndMul()
+        self.silu_and_mul = SiluAndMul(compile_native=False)
 
         self.fp8_linear = TestFP8Layer(
             weight_shape=(hidden_size, hidden_size),
@@ -106,7 +106,7 @@ class TestSiluMulNvfp4QuantModel(torch.nn.Module):
 
         assert silu_and_mul_nvfp4_quant_supported
 
-        self.silu_and_mul = SiluAndMul()
+        self.silu_and_mul = SiluAndMul(compile_native=False)
         self.enable_silu_mul_custom_op = self.silu_and_mul.enabled()
 
         # create nvfp4 weight
@@ -144,7 +144,7 @@ class TestSiluMulNvfp4QuantModel(torch.nn.Module):
 class TestSiluMulGroupFp8QuantModel(torch.nn.Module):
     def __init__(self, hidden_size: int, **kwargs):
         super().__init__()
-        self.silu_and_mul = SiluAndMul()
+        self.silu_and_mul = SiluAndMul(compile_native=False)
         self.w8a8_block_fp8_linear = W8A8BlockFp8LinearOp(
             weight_group_shape=GroupShape(128, 128),
             act_quant_group_shape=GroupShape(1, 128),
