@@ -56,7 +56,9 @@ class MistralAttention(LlamaAttention):
             attn_type=attn_type,
         )
 
-        llama_4_scaling_config: dict[str, int | float | str] | None = getattr(config, "llama_4_scaling", None)
+        llama_4_scaling_config: dict[str, int | float | str] | None = getattr(
+            config, "llama_4_scaling", None
+        )
         self.do_llama_4_scaling = llama_4_scaling_config is not None
         if self.do_llama_4_scaling:
             assert llama_4_scaling_config is not None
