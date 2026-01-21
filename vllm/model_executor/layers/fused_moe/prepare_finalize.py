@@ -78,14 +78,6 @@ class MoEPrepareAndFinalizeNaiveEP(mk.FusedMoEPrepareAndFinalize):
         # TODO - this is just for deepgemm?
         expert_tokens_meta = None
 
-        from vllm.platforms import current_platform
-
-        # The torch ops do not support fp8, so use an int8 view.
-        # Since dispatch does not do a reduce, this is safe to do.
-        use_int8_view = a1q.dtype == current_platform.fp8_dtype()
-        if use_int8_view:
-            a1q = a1q.view(torch.int8)
-
         # Skip gathering scales if we have static quantization
         # (the scale is a scalar, replicated on all ranks) or
         # if quantization is deferred.
@@ -105,9 +97,6 @@ class MoEPrepareAndFinalizeNaiveEP(mk.FusedMoEPrepareAndFinalize):
             a1q, topk_weights, topk_ids, scales = res
             assert scales is not None and len(scales) == 1
             a1q_scale = scales[0]
-
-        if use_int8_view:
-            a1q = a1q.view(current_platform.fp8_dtype())
 
         # NOTE: shuffle into format expected by FLASHINFER_CUTLASS
         # There are currently no other kernels that use this P/F
