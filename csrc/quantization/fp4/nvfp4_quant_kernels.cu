@@ -70,14 +70,8 @@ __global__ void __launch_bounds__(512, VLLM_BLOCKS_PER_SM(512))
       // If we are outside valid rows OR outside valid columns -> Use Zeros
       bool valid = (rowIdx < numRows) && (elem_idx < numCols);
       if constexpr (CVT_FP4_PACK16) {
-        /* uint32_t r[8];
-        ld256_or_zero_cg_u32(r, &reinterpret_cast<const uint32_t*>(in)[inOffset * 8], valid);
-        memcpy(&in_vec, r, 32); */
         ld256_or_zero_cg_u32<Type>(in_vec, &reinterpret_cast<const uint32_t*>(in)[inOffset * 8], valid);
       } else {
-        /* uint32_t r[4];
-        ld128_or_zero_cg_u32(r, &reinterpret_cast<const uint32_t*>(in)[inOffset * 4], valid);
-        memcpy(&in_vec, r, 16); */
         ld128_or_zero_cg_u32<Type>(in_vec, &reinterpret_cast<const uint32_t*>(in)[inOffset * 4], valid);
       }
 
