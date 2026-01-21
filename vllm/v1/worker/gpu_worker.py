@@ -177,8 +177,7 @@ class Worker(WorkerBase):
             os.environ.pop("NCCL_ASYNC_ERROR_HANDLING", None)
             parallel_config = self.parallel_config
             if (
-                parallel_config.distributed_executor_backend
-                not in ("ray", "external_launcher")
+                parallel_config.distributed_executor_backend in ("mp", "uni")
                 and parallel_config.data_parallel_backend != "ray"
                 and parallel_config.nnodes_within_dp == 1
             ):
