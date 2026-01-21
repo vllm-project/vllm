@@ -181,9 +181,12 @@ def get_user_message(content: str) -> Message:
 def parse_response_input(
     response_msg: ResponseInputOutputItem,
     prev_responses: list[ResponseOutputItem | ResponseReasoningItem],
+    next_msg: ResponseInputOutputItem | None = None,
 ) -> Message:
     if not isinstance(response_msg, dict):
         response_msg = response_msg.model_dump()
+    if next_msg is not None and not isinstance(next_msg, dict):
+        next_msg = next_msg.model_dump()
     if "type" not in response_msg or response_msg["type"] == "message":
         role = response_msg["role"]
         content = response_msg["content"]
@@ -213,10 +216,24 @@ def parse_response_input(
             Author.new(Role.TOOL, f"functions.{call_response.name}"),
             response_msg["output"],
         )
+        # Issue #28262: Function call outputs should be on commentary channel
+        msg = msg.with_channel("commentary")
+        # Set content_type to json for consistency with function tools
+        msg = msg.with_content_type("json")
     elif response_msg["type"] == "reasoning":
         content = response_msg["content"]
         assert len(content) == 1
         msg = Message.from_role_and_content(Role.ASSISTANT, content[0]["text"])
+        # Issue #28262: Reasoning channel should match the following message
+        # - If followed by function_call, use commentary channel
+        # - Otherwise, use analysis channel (default)
+        channel = "analysis"
+        if next_msg is not None:
+            if not isinstance(next_msg, dict):
+                next_msg = next_msg.model_dump()
+            if next_msg.get("type") == "function_call":
+                channel = "commentary"
+        msg = msg.with_channel(channel)
     elif response_msg["type"] == "function_call":
         msg = Message.from_role_and_content(Role.ASSISTANT, response_msg["arguments"])
         msg = msg.with_channel("commentary")
