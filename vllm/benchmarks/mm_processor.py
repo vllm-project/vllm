@@ -171,6 +171,7 @@ def benchmark_multimodal_processor(
         # Create a temporary args object for warmup requests
         warmup_args = argparse.Namespace(**vars(args))
         warmup_args.num_prompts = num_warmups
+        warmup_args.seed += 1
         warmup_requests = get_requests(warmup_args, tokenizer)
         warmup_prompts = [req.prompt for req in warmup_requests]
         warmup_output_lens = [req.expected_output_len for req in warmup_requests]
