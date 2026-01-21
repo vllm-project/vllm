@@ -52,7 +52,9 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
         self.tp_size = get_tensor_model_parallel_world_size()
         self.tp_rank = get_tensor_model_parallel_rank()
         self.device = _get_lora_device(base_layer)
-        self._w13_slices = 2
+        # For non-gated MoE (is_act_and_mul=False), only 1 slice is needed
+        # since there's only up_proj (w1), not gate_proj + up_proj (w1 + w3)
+        self._w13_slices = 2 if base_layer.moe_config.is_act_and_mul else 1
         self._inject_lora_into_fused_moe()
 
     def _normalize_keys(self, config: dict[str, int | None]) -> dict[str, int | None]:
@@ -400,7 +402,8 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
         self.lora_b_stacked = []
         for lora_id in range(max_loras):
             for experts_id in range(self.base_layer.local_num_experts):
-                # gate_proj,down_proj,up_proj
+                # For gated MoE: gate_proj (w1), down_proj (w2), up_proj (w3)
+                # For non-gated MoE: up_proj (w1), down_proj (w2)
                 self.lora_a_stacked.append(
                     self.w13_lora_a_stacked[0][lora_id][experts_id]
                 )
@@ -415,12 +418,14 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
                     self.w2_lora_b_stacked[0][lora_id][experts_id]
                 )
 
-                self.lora_a_stacked.append(
-                    self.w13_lora_a_stacked[1][lora_id][experts_id]
-                )
-                self.lora_b_stacked.append(
-                    self.w13_lora_b_stacked[1][lora_id][experts_id]
-                )
+                # Only add w3 (up_proj) for gated MoE (_w13_slices == 2)
+                if self._w13_slices == 2:
+                    self.lora_a_stacked.append(
+                        self.w13_lora_a_stacked[1][lora_id][experts_id]
+                    )
+                    self.lora_b_stacked.append(
+                        self.w13_lora_b_stacked[1][lora_id][experts_id]
+                    )
 
     def _slice_w13_a(self, w13_lora_a: torch.Tensor) -> torch.Tensor:
         """
@@ -515,8 +520,6 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
 
         slliced_w1_lora_a = self._slice_w13_a(w1_lora_a)
         slliced_w1_lora_b = self._slice_w13_b(w1_lora_b)
-        slliced_w3_lora_a = self._slice_w13_a(w3_lora_a)
-        slliced_w3_lora_b = self._slice_w13_b(w3_lora_b)
 
         sliced_w2_lora_a = self._slice_w2_a(w2_lora_a)
         sliced_w2_lora_b = self._slice_w2_b(w2_lora_b)
@@ -525,17 +528,22 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
             index, :, : slliced_w1_lora_a.shape[1], : slliced_w1_lora_a.shape[2]
         ].copy_(slliced_w1_lora_a, non_blocking=True)
 
-        self.w13_lora_a_stacked[1][
-            index, :, : slliced_w3_lora_a.shape[1], : slliced_w3_lora_a.shape[2]
-        ].copy_(slliced_w3_lora_a, non_blocking=True)
-
         self.w13_lora_b_stacked[0][
             index, :, : slliced_w1_lora_b.shape[1], : slliced_w1_lora_b.shape[2]
         ].copy_(slliced_w1_lora_b, non_blocking=True)
 
-        self.w13_lora_b_stacked[1][
-            index, :, : slliced_w3_lora_b.shape[1], : slliced_w3_lora_b.shape[2]
-        ].copy_(slliced_w3_lora_b, non_blocking=True)
+        # Only copy w3 (up_proj) for gated MoE (_w13_slices == 2)
+        if self._w13_slices == 2:
+            slliced_w3_lora_a = self._slice_w13_a(w3_lora_a)
+            slliced_w3_lora_b = self._slice_w13_b(w3_lora_b)
+
+            self.w13_lora_a_stacked[1][
+                index, :, : slliced_w3_lora_a.shape[1], : slliced_w3_lora_a.shape[2]
+            ].copy_(slliced_w3_lora_a, non_blocking=True)
+
+            self.w13_lora_b_stacked[1][
+                index, :, : slliced_w3_lora_b.shape[1], : slliced_w3_lora_b.shape[2]
+            ].copy_(slliced_w3_lora_b, non_blocking=True)
 
         self.w2_lora_a_stacked[0][
             index, :, : sliced_w2_lora_a.shape[1], : sliced_w2_lora_a.shape[2]
