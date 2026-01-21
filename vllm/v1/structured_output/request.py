@@ -86,6 +86,8 @@ def get_structured_output_key(params: StructuredOutputsParams) -> StructuredOutp
         return StructuredOutputOptions.CHOICE, json_str
     if params.grammar is not None:
         return StructuredOutputOptions.GRAMMAR, params.grammar
+    if params.lark is not None:
+        return StructuredOutputOptions.LARK, params.lark
     if params.structural_tag is not None:
         return StructuredOutputOptions.STRUCTURAL_TAG, params.structural_tag
     raise ValueError("No valid structured output parameter found")

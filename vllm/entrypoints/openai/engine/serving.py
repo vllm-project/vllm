@@ -110,7 +110,9 @@ from vllm.pooling_params import PoolingParams
 from vllm.renderers import ChatParams, TokenizeParams, merge_kwargs
 from vllm.sampling_params import BeamSearchParams, SamplingParams
 from vllm.tokenizers import TokenizerLike
+from vllm.tokenizers.mistral import MistralTokenizer
 from vllm.tool_parsers import ToolParser
+from vllm.tool_parsers.mistral_tool_parser import MistralToolParser
 from vllm.tracing import (
     contains_trace_headers,
     extract_trace_headers,
@@ -1228,16 +1230,25 @@ class OpenAIServing:
         tool_parser_cls: Callable[[TokenizerLike], ToolParser] | None,
         content: str | None = None,
     ) -> tuple[list[FunctionCall] | None, str | None]:
+        is_mistral_flow = tool_parser_cls == MistralToolParser and isinstance(
+            tokenizer, MistralTokenizer
+        )
         function_calls = list[FunctionCall]()
-        if request.tool_choice and isinstance(request.tool_choice, ToolChoiceFunction):
+        if (
+            request.tool_choice
+            and isinstance(request.tool_choice, ToolChoiceFunction)
+            and not is_mistral_flow
+        ):
             assert content is not None
             # Forced Function Call
             function_calls.append(
                 FunctionCall(name=request.tool_choice.name, arguments=content)
             )
             content = None  # Clear content since tool is called.
-        elif request.tool_choice and isinstance(
-            request.tool_choice, ChatCompletionNamedToolChoiceParam
+        elif (
+            request.tool_choice
+            and isinstance(request.tool_choice, ChatCompletionNamedToolChoiceParam)
+            and not is_mistral_flow
         ):
             assert content is not None
             # Forced Function Call
@@ -1245,7 +1256,7 @@ class OpenAIServing:
                 FunctionCall(name=request.tool_choice.function.name, arguments=content)
             )
             content = None  # Clear content since tool is called.
-        elif request.tool_choice == "required":
+        elif request.tool_choice == "required" and not is_mistral_flow:
             assert content is not None
             tool_calls = TypeAdapter(list[FunctionDefinition]).validate_json(content)
             function_calls.extend(
@@ -1259,7 +1270,8 @@ class OpenAIServing:
             )
             content = None  # Clear content since tool is called.
         elif (
-            tool_parser_cls
+            is_mistral_flow
+            or tool_parser_cls
             and enable_auto_tools
             and (request.tool_choice == "auto" or request.tool_choice is None)
         ):
@@ -1270,6 +1282,7 @@ class OpenAIServing:
 
             # Automatic Tool Call Parsing
             try:
+                assert tool_parser_cls is not None
                 tool_parser = tool_parser_cls(tokenizer)
             except RuntimeError as e:
                 logger.exception("Error in tool parser creation.")
