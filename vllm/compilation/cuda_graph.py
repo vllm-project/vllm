@@ -247,7 +247,6 @@ class CUDAGraphWrapper:
             input_addresses = [
                 x.data_ptr() for x in args if isinstance(x, torch.Tensor)
             ]
-            entry.input_addresses = input_addresses
             cudagraph = torch.cuda.CUDAGraph()
 
             with ExitStack() as stack:
@@ -293,7 +292,6 @@ class CUDAGraphWrapper:
             # the weak ref of the output, so that pytorch can correctly
             # manage the memory during cuda graph capture
             return output
-
         if self.is_debugging_mode:
             # check if the input addresses are the same
             new_input_addresses = [
