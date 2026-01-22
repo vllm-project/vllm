@@ -15,15 +15,23 @@ import ray
 import torch
 from ray.experimental.tqdm_ray import tqdm
 
+from vllm.model_executor.layers.fused_moe import fused_topk
 from vllm.model_executor.layers.fused_moe.config import (
+    FusedMoEConfig,
+    FusedMoEParallelConfig,
     FusedMoEQuantConfig,
+    RoutingMethodType,
     _get_config_dtype_str,
 )
 from vllm.model_executor.layers.fused_moe.fused_moe import *
+from vllm.model_executor.layers.fused_moe.triton_deep_gemm_moe import (
+    TritonOrDeepGemmExperts,
+)
 from vllm.platforms import current_platform
 from vllm.transformers_utils.config import get_config
 from vllm.triton_utils import triton
 from vllm.utils.argparse_utils import FlexibleArgumentParser
+from vllm.utils.torch_utils import set_random_seed
 
 FP8_DTYPE = current_platform.fp8_dtype()
 
@@ -47,8 +55,6 @@ def clear_triton_cache():
 
     # Try to clear Triton's runtime cache
     try:
-        import triton
-
         if (
             hasattr(triton, "runtime")
             and hasattr(triton.runtime, "cache")
@@ -195,10 +201,36 @@ def benchmark_config(
             block_shape=block_quant_shape,
         )
 
+        deep_gemm_experts = None
+        if use_deep_gemm:
+            deep_gemm_experts = mk.FusedMoEModularKernel(
+                prepare_finalize=MoEPrepareAndFinalizeNoEP(),
+                fused_experts=TritonOrDeepGemmExperts(
+                    moe_config=FusedMoEConfig(
+                        num_experts=num_experts,
+                        experts_per_token=topk,
+                        hidden_dim=hidden_size,
+                        intermediate_size_per_partition=shard_intermediate_size,
+                        num_local_experts=num_experts,
+                        activation="silu",
+                        moe_parallel_config=FusedMoEParallelConfig.make_no_parallel(),
+                        in_dtype=init_dtype,
+                        routing_method=RoutingMethodType.TopK,
+                        device="cuda",
+                    ),
+                    quant_config=quant_config,
+                ),
+            )
+
         with override_config(config):
             topk_weights, topk_ids, token_expert_indices = fused_topk(
                 x, input_gating, topk, renormalize=not use_deep_gemm
             )
+
+            if use_deep_gemm:
+                return deep_gemm_experts(
+                    x, w1, w2, topk_weights, topk_ids, inplace=True
+                )
             return fused_experts(
                 x,
                 w1,
@@ -207,7 +239,6 @@ def benchmark_config(
                 topk_ids,
                 inplace=True,
                 quant_config=quant_config,
-                allow_deep_gemm=use_deep_gemm,
             )
 
     # JIT compilation & warmup
@@ -431,7 +462,7 @@ def merge_unique_dicts(list1, list2):
 class BenchmarkWorker:
     def __init__(self, seed: int) -> None:
         torch.set_default_device("cuda")
-        current_platform.seed_everything(seed)
+        set_random_seed(seed)
         self.seed = seed
         # Get the device ID to allocate tensors and kernels
         # on the respective GPU. This is required for Ray to work
@@ -451,7 +482,7 @@ class BenchmarkWorker:
         block_quant_shape: list[int] = None,
         use_deep_gemm: bool = False,
     ) -> tuple[dict[str, int], float]:
-        current_platform.seed_everything(self.seed)
+        set_random_seed(self.seed)
         dtype_str = _get_config_dtype_str(
             dtype, use_int8_w8a16=use_int8_w8a16, use_fp8_w8a8=use_fp8_w8a8
         )
@@ -644,6 +675,7 @@ def main(args: argparse.Namespace):
         "DeepseekV3ForCausalLM",
         "DeepseekV32ForCausalLM",
         "Glm4MoeForCausalLM",
+        "Glm4MoeLiteForCausalLM",
         "NemotronHForCausalLM",
     ):
         E = config.n_routed_experts

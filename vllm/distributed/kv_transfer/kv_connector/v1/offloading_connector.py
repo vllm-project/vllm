@@ -4,11 +4,10 @@ from collections import defaultdict
 from collections.abc import Iterable
 from dataclasses import dataclass
 from itertools import islice
-from typing import Any, ClassVar
+from typing import Any
 
 import torch
 
-from vllm.attention.backends.abstract import AttentionBackend, AttentionMetadata
 from vllm.attention.layer import Attention
 from vllm.config import VllmConfig, get_layers_from_vllm_config
 from vllm.distributed.kv_events import BlockRemoved, BlockStored, KVCacheEvent
@@ -20,6 +19,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1 import (
 from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorMetadata
 from vllm.forward_context import ForwardContext
 from vllm.logger import init_logger
+from vllm.v1.attention.backend import AttentionBackend, AttentionMetadata
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks
 from vllm.v1.core.kv_cache_utils import BlockHash
 from vllm.v1.core.sched.output import SchedulerOutput
@@ -44,7 +44,9 @@ class OffloadingConnectorMetadata(KVConnectorMetadata):
 
 
 class OffloadingConnector(KVConnectorBase_V1):
-    prefer_cross_layer_blocks: ClassVar[bool] = True
+    @property
+    def prefer_cross_layer_blocks(self) -> bool:
+        return True
 
     def __init__(
         self,
@@ -54,7 +56,7 @@ class OffloadingConnector(KVConnectorBase_V1):
     ):
         super().__init__(vllm_config, role, kv_cache_config)
 
-        spec = OffloadingSpecFactory.create_spec(vllm_config)
+        spec = OffloadingSpecFactory.create_spec(vllm_config, kv_cache_config)
 
         self.connector_scheduler: OffloadingConnectorScheduler | None = None
         self.connector_worker: OffloadingConnectorWorker | None = None
@@ -73,10 +75,14 @@ class OffloadingConnector(KVConnectorBase_V1):
         assert self.connector_worker is not None
         self.connector_worker.register_cross_layers_kv_cache(kv_cache, attn_backend)
 
+    def handle_preemptions(self, preempted_req_ids: set[str]):
+        assert self.connector_worker is not None
+        self.connector_worker.handle_preemptions(preempted_req_ids)
+
     def start_load_kv(self, forward_context: "ForwardContext", **kwargs) -> None:
         assert self.connector_worker is not None
         assert isinstance(self._connector_metadata, OffloadingConnectorMetadata)
-        self.connector_worker.start_load_kv(self._connector_metadata)
+        self.connector_worker.start_kv_transfers(self._connector_metadata)
 
     def wait_for_layer_load(self, layer_name: str) -> None:
         pass
@@ -93,7 +99,7 @@ class OffloadingConnector(KVConnectorBase_V1):
     def wait_for_save(self):
         assert self.connector_worker is not None
         assert isinstance(self._connector_metadata, OffloadingConnectorMetadata)
-        self.connector_worker.start_store_kv(self._connector_metadata)
+        self.connector_worker.prepare_store_kv(self._connector_metadata)
 
     def get_finished(self, finished_req_ids: set[str]) -> tuple[set[str], set[str]]:
         assert self.connector_worker is not None
@@ -101,7 +107,7 @@ class OffloadingConnector(KVConnectorBase_V1):
 
     def get_num_new_matched_tokens(
         self, request: "Request", num_computed_tokens: int
-    ) -> tuple[int, bool]:
+    ) -> tuple[int | None, bool]:
         assert self.connector_scheduler is not None
         return self.connector_scheduler.get_num_new_matched_tokens(
             request, num_computed_tokens
@@ -155,6 +161,11 @@ class OffloadingConnectorScheduler:
         # request blocks are stored in order
         # index of next block (of size offloaded_block_size) to offload
         self._next_stored_block_idx: dict[ReqId, int] = {}
+        # if GPU prefix caching is enabled,
+        # track loaded blocks to avoid redundant loads
+        self._blocks_being_loaded: set[BlockHash] | None = (
+            set() if spec.vllm_config.cache_config.enable_prefix_caching else None
+        )
 
         # request ID -> set(block hashes being stored/load)
         self._reqs_being_stored = defaultdict[ReqId, set[BlockHash]](set)
@@ -175,7 +186,7 @@ class OffloadingConnectorScheduler:
 
     def get_num_new_matched_tokens(
         self, request: Request, num_computed_tokens: int
-    ) -> tuple[int, bool]:
+    ) -> tuple[int | None, bool]:
         """
         Get number of new tokens that can be loaded beyond the
         num_computed_tokens.
@@ -189,6 +200,9 @@ class OffloadingConnectorScheduler:
             A tuple with the following elements:
                 - The number of tokens that can be loaded beyond what is
                   already computed.
+                  If None, it means that the connector needs more time to
+                  determine the number of matched tokens, and the scheduler
+                  should query for this request again later.
                 - `True` if tokens will be loaded asynchronously
                   (between scheduler steps).
         """
@@ -208,6 +222,9 @@ class OffloadingConnectorScheduler:
         hits = self.manager.lookup(
             self._get_block_hashes(request, start_idx=start_block_idx)
         )
+        if hits is None:
+            # indicates a lookup that should be tried later
+            return None, False
         if hits == 0:
             return 0, False
 
@@ -222,6 +239,22 @@ class OffloadingConnectorScheduler:
         )
         if num_hit_tokens < self.offloaded_block_size:
             return 0, False
+
+        if self._blocks_being_loaded:
+            block_hashes = self._get_block_hashes(
+                request, start_idx=start_block_idx, end_idx=start_block_idx + hits
+            )
+
+            if any(
+                block_hash in self._blocks_being_loaded for block_hash in block_hashes
+            ):
+                # hit blocks are being loaded, delay request
+                logger.debug(
+                    "Delaying request %s since some of its blocks are already"
+                    " being loaded",
+                    request.request_id,
+                )
+                return None, False
 
         return num_hit_tokens, True
 
@@ -264,8 +297,12 @@ class OffloadingConnectorScheduler:
         )
 
         self._reqs_to_load[request.request_id] = (src_spec, dst_spec)
-        self._reqs_being_loaded[request.request_id].update(block_hashes)
+        req_blocks_being_loaded = self._reqs_being_loaded[request.request_id]
+        req_blocks_being_loaded.update(block_hashes)
         self._next_stored_block_idx[request.request_id] = num_blocks
+
+        if self._blocks_being_loaded is not None:
+            self._blocks_being_loaded.update(req_blocks_being_loaded)
 
     def _get_reqs_to_store(self, scheduler_output: SchedulerOutput):
         reqs_to_store: dict[ReqId, TransferSpec] = {}
@@ -346,6 +383,15 @@ class OffloadingConnectorScheduler:
             reqs_to_store=self._get_reqs_to_store(scheduler_output),
         )
         self._reqs_to_load = {}
+
+        # NOTE (orozery): we should move this logic to update_connector_output
+        # once KVConnectorOutput allows us to report completed transfers
+        for req_id in scheduler_output.preempted_req_ids or ():
+            block_hashes = self._reqs_being_stored.get(req_id)
+            if block_hashes:
+                self.manager.complete_store(block_hashes)
+                block_hashes.clear()
+
         return meta
 
     def update_connector_output(self, connector_output: KVConnectorOutput):
@@ -364,6 +410,8 @@ class OffloadingConnectorScheduler:
         for req_id in connector_output.finished_recving or []:
             block_hashes = self._reqs_being_loaded.pop(req_id, None)
             if block_hashes:
+                if self._blocks_being_loaded:
+                    self._blocks_being_loaded.difference_update(block_hashes)
                 self.manager.complete_load(block_hashes)
 
     def request_finished(
@@ -419,12 +467,14 @@ class OffloadingConnectorWorker:
 
         self._job_counter = 0
 
-        # req_id -> (job_id, store)
+        # job_id -> (req_id, store)
         self._jobs: dict[int, tuple[ReqId, bool]] = {}
         # req_id -> active job IDs
         self._load_job: dict[ReqId, int] = {}
         # req_id -> set(active job IDs)
         self._store_jobs = defaultdict[ReqId, set[int]](set)
+        # list of store jobs pending submission (job_id, transfer_spec)
+        self._unsubmitted_store_jobs: list[tuple[int, TransferSpec]] = []
 
         self._finished_reqs_waiting_for_store: set[ReqId] = set()
 
@@ -462,20 +512,40 @@ class OffloadingConnectorWorker:
         attn_backends = {cross_layer_name: attn_backend}
         self._register_handlers(kv_caches, attn_backends)
 
-    def start_load_kv(self, metadata: OffloadingConnectorMetadata):
+    def handle_preemptions(self, preempted_req_ids: set[str]):
+        for job_id, transfer_spec in self._unsubmitted_store_jobs:
+            success = self.worker.transfer_async(job_id, transfer_spec)
+            assert success
+        self._unsubmitted_store_jobs.clear()
+
+        for req_id in preempted_req_ids:
+            job_ids = self._store_jobs.get(req_id)
+            if job_ids:
+                self.worker.wait(job_ids)
+
+    def start_kv_transfers(self, metadata: OffloadingConnectorMetadata):
+        for job_id, transfer_spec in self._unsubmitted_store_jobs:
+            success = self.worker.transfer_async(job_id, transfer_spec)
+            assert success
+        self._unsubmitted_store_jobs.clear()
+
         for req_id, transfer_spec in metadata.reqs_to_load.items():
             job_id = self._generate_job_id()
             self._jobs[job_id] = (req_id, False)
             assert req_id not in self._load_job
             self._load_job[req_id] = job_id
-            assert self.worker.transfer_async(job_id, transfer_spec)
+            success = self.worker.transfer_async(job_id, transfer_spec)
+            assert success
 
-    def start_store_kv(self, metadata: OffloadingConnectorMetadata):
+    def prepare_store_kv(self, metadata: OffloadingConnectorMetadata):
         for req_id, transfer_spec in metadata.reqs_to_store.items():
             job_id = self._generate_job_id()
             self._jobs[job_id] = (req_id, True)
             self._store_jobs[req_id].add(job_id)
-            assert self.worker.transfer_async(job_id, transfer_spec)
+            # NOTE(orozery): defer the store to the beginning of the next engine step,
+            # so that offloading starts AFTER transfers related to token sampling,
+            # thereby avoiding delays to token generation due to offloading.
+            self._unsubmitted_store_jobs.append((job_id, transfer_spec))
 
     def get_finished(self, finished_req_ids: set[str]) -> tuple[set[str], set[str]]:
         """

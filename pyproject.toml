@@ -9,6 +9,7 @@ requires = [
     "torch == 2.9.1",
     "wheel",
     "jinja2",
+    "grpcio-tools>=1.76.0",
 ]
 build-backend = "setuptools.build_meta"
 
@@ -55,6 +56,10 @@ include = ["vllm*"]
 "vllm/third_party/**" = ["ALL"]
 "vllm/version.py" = ["F401"]
 "vllm/_version.py" = ["ALL"]
+# Exclude generated protobuf files
+"vllm/grpc/*_pb2.py" = ["ALL"]
+"vllm/grpc/*_pb2_grpc.py" = ["ALL"]
+"vllm/grpc/*_pb2.pyi" = ["ALL"]
 
 [tool.ruff.lint]
 select = [
@@ -93,6 +98,13 @@ docstring-code-format = true
 plugins = ['pydantic.mypy']
 ignore_missing_imports = true
 check_untyped_defs = true
+follow_imports = "silent"
+
+[[tool.mypy.overrides]]
+module = "vllm.compilation.*"
+disallow_untyped_defs = true
+disallow_incomplete_defs = true
+warn_return_any = true
 follow_imports = "silent"
 
 [tool.pytest.ini_options]
@@ -162,6 +174,7 @@ depthwise_seperable_CNN = "depthwise_seperable_CNN"
 [tool.typos.default.extend-words]
 iy = "iy"
 tendencias = "tendencias"
+indx = "indx"
 # intel cpu features
 tme = "tme"
 dout = "dout"

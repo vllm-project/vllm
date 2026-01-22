@@ -80,9 +80,17 @@ num2words==0.5.14
 pqdm==0.2.0
     # via lm-eval
 
+# Required for fastsafetensors test
+fastsafetensors @ git+https://github.com/foundation-model-stack/fastsafetensors.git@d6f998a03432b2452f8de2bb5cefb5af9795d459
 # Required for suffix decoding test
 arctic-inference == 0.1.1
 # Required for Nemotron test
 open-clip-torch==2.32.0
 # Required for isaac Multi-Modal generation test
 perceptron==0.1.4
+# Required for the multi-modal models test
+timm==1.0.17
+# Required for plugins test
+albumentations==1.4.6
+# Pin transformers version
+transformers==4.57.3

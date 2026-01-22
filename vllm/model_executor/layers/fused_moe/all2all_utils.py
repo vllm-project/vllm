@@ -15,11 +15,8 @@ from vllm.model_executor.layers.fused_moe.config import (
 from vllm.model_executor.layers.fused_moe.modular_kernel import (
     FusedMoEPrepareAndFinalize,
 )
-from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
-    build_flashinfer_fp8_cutlass_moe_prepare_finalize,
-)
 from vllm.platforms import current_platform
-from vllm.utils.import_utils import has_deep_ep, has_pplx
+from vllm.utils.import_utils import has_deep_ep, has_mori, has_pplx
 
 if current_platform.is_cuda_alike():
     if has_pplx():
@@ -33,6 +30,8 @@ if current_platform.is_cuda_alike():
             DEEPEP_QUANT_BLOCK_SHAPE,
             DeepEPLLPrepareAndFinalize,
         )
+    if has_mori():
+        from .mori_prepare_finalize import MoriPrepareAndFinalize
 
 
 def maybe_roundup_layer_hidden_size(
@@ -80,17 +79,12 @@ def maybe_make_prepare_finalize(
 
     prepare_finalize: FusedMoEPrepareAndFinalize | None = None
 
-    if moe.use_flashinfer_cutlass_kernels:
-        assert quant_config is not None
-        use_deepseek_fp8_block_scale = (
-            quant_config is not None and quant_config.is_block_quantized
-        )
-        prepare_finalize = build_flashinfer_fp8_cutlass_moe_prepare_finalize(
-            moe=moe,
-            use_deepseek_fp8_block_scale=use_deepseek_fp8_block_scale,
-        )
+    # TODO(rob): update this as part of the MoE refactor.
+    assert not moe.use_flashinfer_cutlass_kernels, (
+        "Must be created in modelopt.py or fp8.py"
+    )
 
-    elif moe.use_pplx_kernels:
+    if moe.use_pplx_kernels:
         assert quant_config is not None
 
         hidden_dim_bytes, hidden_scale_bytes = pplx_hidden_dim_scale_bytes(
@@ -176,6 +170,37 @@ def maybe_make_prepare_finalize(
             global_to_physical=global_to_physical,
             physical_to_global=physical_to_global,
             local_expert_global_ids=local_expert_global_ids,
+        )
+    elif moe.use_mori_kernels:
+        assert quant_config is not None
+
+        # Note: We may want to use FP8 dispatch just to reduce
+        # data movement.
+        use_fp8_dispatch = (
+            quant_config.is_per_act_token or quant_config.is_block_quantized
+        )
+        # For PTPC (per token per channel) quant, the scale dim for each token is 1
+        # For 1x128 quant, the scale dim for each token is hidden_dim // 128
+        scale_dim = 1 if quant_config.is_per_act_token else moe.hidden_dim // 128
+        all_to_all_args = dict(
+            rank=all2all_manager.rank,
+            num_ep_ranks=all2all_manager.world_size,
+            quant_dtype=quant_config.quant_dtype,
+            token_hidden_size=moe.hidden_dim,
+            scale_dim=scale_dim,
+            scale_type_size=torch.float32.itemsize,
+            max_num_tokens_per_dp_rank=moe.max_num_tokens,
+            input_dtype=moe.in_dtype,
+            num_local_experts=moe.num_experts // all2all_manager.world_size,
+            num_experts_per_token=moe.experts_per_token,
+        )
+        handle = all2all_manager.get_handle(all_to_all_args)
+
+        prepare_finalize = MoriPrepareAndFinalize(
+            handle,
+            max_tokens_per_rank=moe.max_num_tokens,
+            num_dispatchers=all2all_manager.world_size,
+            use_fp8_dispatch=use_fp8_dispatch,
         )
 
     return prepare_finalize

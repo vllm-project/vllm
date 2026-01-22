@@ -5,10 +5,15 @@ import pytest
 
 from vllm.assets.image import ImageAsset
 from vllm.assets.video import VideoAsset
-from vllm.config import CacheConfig, DeviceConfig, ModelConfig, VllmConfig
-from vllm.multimodal import MultiModalUUIDDict
+from vllm.config import (
+    CacheConfig,
+    DeviceConfig,
+    ModelConfig,
+    MultiModalConfig,
+    VllmConfig,
+)
+from vllm.multimodal import MultiModalRegistry, MultiModalUUIDDict
 from vllm.sampling_params import SamplingParams
-from vllm.v1.engine import input_processor as input_processor_mod
 from vllm.v1.engine.input_processor import InputProcessor
 
 cherry_pil_image = ImageAsset("cherry_blossom").pil_image
@@ -36,36 +41,31 @@ def _mock_input_processor(
         raising=True,
     )
     monkeypatch.setattr(
-        input_processor_mod,
+        MultiModalRegistry,
         "processor_cache_from_config",
-        lambda vllm_config, mm_registry: None,
+        lambda self, vllm_config: None,
         raising=True,
     )
 
     monkeypatch.setattr(VllmConfig, "__post_init__", lambda self: None, raising=True)
 
     model_config = ModelConfig(
+        tokenizer="dummy",
         skip_tokenizer_init=True,
         max_model_len=128,
         mm_processor_cache_gb=mm_cache_gb,
         generation_config="vllm",
-        tokenizer="dummy",
     )
+    model_config.runner_type = "generate"
+    model_config.multimodal_config = MultiModalConfig(mm_processor_cache_gb=mm_cache_gb)
 
-    # Minimal multimodal_config to satisfy references in
-    # Processor.process_inputs.
-    class _MockMMConfig:
-        def __init__(self, gb: float):
-            self.mm_processor_cache_gb = gb
-
-    model_config.multimodal_config = _MockMMConfig(mm_cache_gb)  # type: ignore[attr-defined]
     vllm_config = VllmConfig(
         model_config=model_config,
         cache_config=CacheConfig(enable_prefix_caching=enable_prefix_caching),
         device_config=DeviceConfig(device="cpu"),
     )
 
-    return InputProcessor(vllm_config, tokenizer=None)
+    return InputProcessor(vllm_config)
 
 
 def test_multi_modal_uuids_length_mismatch_raises(monkeypatch):

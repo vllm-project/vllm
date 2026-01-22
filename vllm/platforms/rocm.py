@@ -8,16 +8,15 @@ from typing import TYPE_CHECKING, Optional
 import torch
 
 import vllm.envs as envs
-from vllm.attention.backends.abstract import AttentionType
-from vllm.attention.backends.registry import AttentionBackendEnum
 from vllm.logger import init_logger
 from vllm.utils.torch_utils import cuda_device_count_stateless
+from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 from .interface import DeviceCapability, Platform, PlatformEnum
 
 if TYPE_CHECKING:
-    from vllm.attention.selector import AttentionSelectorConfig
     from vllm.config import VllmConfig
+    from vllm.v1.attention.selector import AttentionSelectorConfig
 
 logger = init_logger(__name__)
 
@@ -108,6 +107,12 @@ def on_gfx9() -> bool:
 
 
 @cache
+def on_gfx942() -> bool:
+    GPU_ARCH = torch.cuda.get_device_properties("cuda").gcnArchName
+    return any(arch in GPU_ARCH for arch in ["gfx942"])
+
+
+@cache
 def on_gfx950() -> bool:
     GPU_ARCH = torch.cuda.get_device_properties("cuda").gcnArchName
     return any(arch in GPU_ARCH for arch in ["gfx950"])
@@ -171,7 +176,9 @@ class RocmPlatform(Platform):
 
     supported_quantization: list[str] = [
         "awq",
+        "awq_marlin",  # will be overwritten with awq
         "gptq",
+        "gptq_marlin",  # will be overwritten with gptq
         "fp8",
         "compressed-tensors",
         "fbgemm_fp8",
@@ -185,6 +192,17 @@ class RocmPlatform(Platform):
     # bitsandbytes not supported on gfx9 (warp size 64 limitation)
     if not on_gfx9():
         supported_quantization += ["bitsandbytes"]
+
+    @classmethod
+    def import_kernels(cls) -> None:
+        """Import ROCm-specific kernels."""
+        super().import_kernels()
+
+        import contextlib
+
+        # Import ROCm-specific extension
+        with contextlib.suppress(ImportError):
+            import vllm._rocm_C  # noqa: F401
 
     @classmethod
     def get_attn_backend_cls(
@@ -275,7 +293,13 @@ class RocmPlatform(Platform):
                 return AttentionBackendEnum.ROCM_AITER_FA.get_path()
 
             # Priority 3: Check for ROCM_ATTN (prefill-decode split)
-            if envs.VLLM_V1_USE_PREFILL_DECODE_ATTENTION:
+            from vllm.config import get_current_vllm_config_or_none
+
+            vllm_config = get_current_vllm_config_or_none()
+            if (
+                vllm_config is not None
+                and vllm_config.attention_config.use_prefill_decode_attention
+            ):
                 logger.info("Using Rocm Attention backend.")
                 return AttentionBackendEnum.ROCM_ATTN.get_path()
 
@@ -288,14 +312,6 @@ class RocmPlatform(Platform):
             ):
                 logger.info("Using Aiter Flash Attention backend.")
                 return AttentionBackendEnum.ROCM_AITER_FA.get_path()
-
-            # Priority 5: If model is Encoder-only self-attention type
-            if (
-                attn_selector_config.attn_type is not None
-                and attn_selector_config.attn_type == AttentionType.ENCODER_ONLY
-            ):
-                logger.info("Using FlexAttention backend.")
-                return AttentionBackendEnum.FLEX_ATTENTION.get_path()
 
             # Default: Triton Unified Attention
             logger.info("Using Triton Attention backend.")
@@ -475,6 +491,9 @@ class RocmPlatform(Platform):
             and "-grouped_topk" not in compilation_config.custom_ops
         ):
             compilation_config.custom_ops.append("+grouped_topk")
+
+        # Default dispatch to rocm's sparse_attn_indexer implementation
+        compilation_config.custom_ops.append("+sparse_attn_indexer")
 
     @classmethod
     def verify_model_arch(cls, model_arch: str) -> None:

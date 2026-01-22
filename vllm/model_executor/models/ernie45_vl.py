@@ -36,16 +36,15 @@ import torch.nn.functional as F
 from einops import rearrange
 from transformers import BatchFeature
 
-from vllm.attention.backends.registry import AttentionBackendEnum
-from vllm.attention.layers.mm_encoder_attention import (
-    MMEncoderAttention,
-)
 from vllm.config import MultiModalConfig, VllmConfig
 from vllm.config.multimodal import BaseDummyOptions, VideoDummyOptions
 from vllm.distributed import parallel_state
 from vllm.distributed import utils as dist_utils
 from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import QuickGELU
+from vllm.model_executor.layers.attention.mm_encoder_attention import (
+    MMEncoderAttention,
+)
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
@@ -66,14 +65,15 @@ from vllm.multimodal.inputs import (
 )
 from vllm.multimodal.parse import ImageSize, MultiModalDataItems, MultiModalDataParser
 from vllm.multimodal.processing import (
+    BaseDummyInputsBuilder,
     BaseMultiModalProcessor,
     BaseProcessingInfo,
     PromptReplacement,
     PromptUpdate,
 )
-from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from vllm.sequence import IntermediateTensors
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
+from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 from .ernie45_vl_moe import Ernie4_5_VLMoeForCausalLM
 from .interfaces import (
@@ -152,6 +152,7 @@ class Ernie4_5_VisionAttention(nn.Module):
         self.attn = MMEncoderAttention(
             num_heads=self.num_attention_heads_per_partition,
             head_size=self.hidden_size_per_attention_head,
+            scale=self.hidden_size_per_attention_head**-0.5,
             multimodal_config=multimodal_config,
             prefix=f"{prefix}.attn",
         )
@@ -599,7 +600,11 @@ def smart_resize(
         w_bar = ceil_by_factor(width * beta, factor)
 
     if min_pixels > h_bar * w_bar or h_bar * w_bar > max_pixels:
-        raise ValueError(f"encounter invalid h_bar: {h_bar}, w_bar: {w_bar}")
+        raise ValueError(
+            f"Invalid h_bar={h_bar}, w_bar={w_bar}: "
+            f"h_bar * w_bar must be >= min_pixels ({min_pixels}) "
+            f"and <= max_pixels ({max_pixels})."
+        )
 
     return h_bar, w_bar
 
@@ -1298,27 +1303,28 @@ class Ernie4_5_VLMoeForConditionalGeneration(
         self.config = config
         self.multimodal_config = multimodal_config
 
-        self.vision_model = Ernie4_5_VisionTransformer(
-            config.vision_config,
-            norm_eps=getattr(config, "rms_norm_eps", 1e-6),
-            quant_config=quant_config,
-            multimodal_config=multimodal_config,
-            prefix=maybe_prefix(prefix, "vision_model"),
-        )
+        with self._mark_tower_model(vllm_config, {"image", "video"}):
+            self.vision_model = Ernie4_5_VisionTransformer(
+                config.vision_config,
+                norm_eps=getattr(config, "rms_norm_eps", 1e-6),
+                quant_config=quant_config,
+                multimodal_config=multimodal_config,
+                prefix=maybe_prefix(prefix, "vision_model"),
+            )
+            self.resampler_model = VariableResolutionResamplerModel(
+                self.config.pixel_hidden_size,
+                self.config.hidden_size,
+                self.config.spatial_conv_size,
+                self.config.temporal_conv_size,
+                config=self.config,
+                prefix=maybe_prefix(prefix, "resampler_model"),
+            )
 
-        self.language_model = Ernie4_5_VLMoeForCausalLM(
-            vllm_config=vllm_config,
-            prefix=maybe_prefix(prefix, "language_model"),
-        )
-
-        self.resampler_model = VariableResolutionResamplerModel(
-            self.config.pixel_hidden_size,
-            self.config.hidden_size,
-            self.config.spatial_conv_size,
-            self.config.temporal_conv_size,
-            config=self.config,
-            prefix=maybe_prefix(prefix, "resampler_model"),
-        )
+        with self._mark_language_model(vllm_config):
+            self.language_model = Ernie4_5_VLMoeForCausalLM(
+                vllm_config=vllm_config,
+                prefix=maybe_prefix(prefix, "language_model"),
+            )
 
         self.visual_token_mask = None
         self.make_empty_intermediate_tensors = (
@@ -1516,9 +1522,6 @@ class Ernie4_5_VLMoeForConditionalGeneration(
         llm_positions = torch.cat(llm_pos_ids_list, dim=1).reshape(3, -1)
         mrope_position_delta = (llm_positions.max() + 1 - len(input_tokens)).item()
         return llm_positions, mrope_position_delta
-
-    def get_language_model(self) -> torch.nn.Module:
-        return self.language_model
 
     def _parse_and_validate_image_input(
         self, **kwargs: object
