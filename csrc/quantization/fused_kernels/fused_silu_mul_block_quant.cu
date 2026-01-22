@@ -114,7 +114,7 @@ __global__ void silu_and_mul_per_block_quant_kernel(
             
             // Store scale with correct stride
             if constexpr (is_scale_transposed) {
-                token_scales[group_idx * num_tokens] = group_scale;
+                token_scales[group_idx * blockDim.x] = group_scale;
             } else {
                 token_scales[group_idx] = group_scale;
             }
@@ -123,7 +123,7 @@ __global__ void silu_and_mul_per_block_quant_kernel(
         
         // Broadcast scale to all threads
         if constexpr (is_scale_transposed) {
-            group_scale = token_scales[group_idx * num_tokens];
+            group_scale = token_scales[group_idx * blockDim.x];
         } else {
             group_scale = token_scales[group_idx];
         }
