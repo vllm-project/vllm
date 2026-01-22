@@ -33,11 +33,14 @@ class ChatParams:
         if not default_chat_template_kwargs:
             return self
 
+        chat_template_kwargs = self.chat_template_kwargs or {}
+
         return ChatParams(
             chat_template=self.chat_template,
             chat_template_content_format=self.chat_template_content_format,
             chat_template_kwargs=(
-                default_chat_template_kwargs | (self.chat_template_kwargs or {})
+                default_chat_template_kwargs
+                | {k: v for k, v in chat_template_kwargs.items() if v is not None}
             ),
         )
 
