@@ -17,6 +17,7 @@ from vllm.entrypoints.constants import (
     H11_MAX_HEADER_COUNT_DEFAULT,
     H11_MAX_INCOMPLETE_EVENT_SIZE_DEFAULT,
 )
+from vllm.entrypoints.openai.cli_args import FrontendArgs
 from vllm.entrypoints.serve.middleware import set_rejecting_requests
 from vllm.entrypoints.ssl import SSLCertRefresher
 from vllm.logger import init_logger
@@ -104,12 +105,11 @@ async def serve_http(
 
     async def graceful_drain() -> None:
         """Perform graceful drain before shutdown."""
-        drain_timeout = getattr(args, "drain_timeout", 120)
+        drain_timeout = getattr(args, "drain_timeout", FrontendArgs.drain_timeout)
 
         inflight_count = engine_client.get_num_unfinished_requests()
         logger.info(
-            "Graceful shutdown: starting drain (timeout=%ds), in-flight requests: %d",
-            drain_timeout,
+            "Graceful shutdown: draining %d in-flight requests",
             inflight_count,
         )
 
@@ -155,21 +155,33 @@ async def serve_http(
 
     async def graceful_signal_handler() -> None:
         """Async wrapper for graceful shutdown."""
-        await graceful_drain()
+        try:
+            await graceful_drain()
+        except asyncio.CancelledError:
+            logger.info("Graceful drain cancelled, proceeding with immediate shutdown")
         signal_handler()
 
     shutting_down = False
+    graceful_task: asyncio.Task | None = None
 
     def on_signal() -> None:
         """Signal callback that spawns the graceful shutdown task."""
-        nonlocal shutting_down
+        nonlocal shutting_down, graceful_task
         if shutting_down:
-            logger.debug("Ignoring duplicate shutdown signal")
+            if graceful_task is not None and not graceful_task.done():
+                logger.warning("Received second signal, forcing immediate shutdown")
+                graceful_task.cancel()
             return
         shutting_down = True
 
         if enable_graceful:
-            loop.create_task(graceful_signal_handler())
+            drain_timeout = getattr(args, "drain_timeout", FrontendArgs.drain_timeout)
+            logger.info(
+                "Graceful shutdown initiated (timeout: %ds). "
+                "Send SIGTERM again to force immediate shutdown.",
+                drain_timeout,
+            )
+            graceful_task = loop.create_task(graceful_signal_handler())
         else:
             signal_handler()
 

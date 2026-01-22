@@ -18,6 +18,7 @@ from typing import Any, TypeAlias, TypeVar
 import msgspec.msgpack
 import zmq
 import zmq.asyncio
+from typing_extensions import override
 
 from vllm.config import VllmConfig
 from vllm.envs import VLLM_ENGINE_READY_TIMEOUT_S
@@ -1290,7 +1291,13 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
             )
         )[0]
 
+    @override
     async def has_pending_kv_transfers_async(self) -> bool:
+        """
+        Note: We override the method here using internal _call_utility_async
+        becuase it lets us to a custom any() reduce across all engines, instead
+        of a naiive first()
+        """
         results = await asyncio.gather(
             *[
                 self._call_utility_async("has_pending_kv_transfers", engine=engine)
