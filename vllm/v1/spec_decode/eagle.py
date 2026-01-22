@@ -76,8 +76,12 @@ class SpecDecodeBaseProposer:
         self.num_speculative_tokens = self.speculative_config.num_speculative_tokens
         # The drafter can get longer sequences than the target model.
         max_batch_size = vllm_config.scheduler_config.max_num_seqs
+        multiplier = (
+            self.num_speculative_tokens if self.speculative_config.parallel_draft else 1
+        )
         self.max_num_tokens = (
-            vllm_config.scheduler_config.max_num_batched_tokens + max_batch_size
+            vllm_config.scheduler_config.max_num_batched_tokens
+            + max_batch_size * multiplier
         )
         self.token_arange_np = np.arange(self.max_num_tokens)
         # We need to get the hidden size from the draft model config because
