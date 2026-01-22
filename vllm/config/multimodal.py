@@ -146,6 +146,11 @@ class MultiModalConfig:
     Value sits in range [0;1) and determines fraction of media tokens
     from each video to be pruned.
     """
+    video_sparse_rate: float | None = Field(default=None, ge=0.0, lt=1.0)
+    """Sets sparse rate for video key frames selection.
+    Value sits in range [0;1) and determines fraction of frames
+    from each video to be sparsed.
+    """
 
     @field_validator("limit_per_prompt", mode="before")
     @classmethod

@@ -38,7 +38,7 @@ from .data import (
     token_inputs,
 )
 from .parse import is_explicit_encoder_decoder_prompt, parse_singleton_prompt
-
+from vllm.multimodal.video_sparse import SimilarFrameDetector, is_multimodal_EFS_enabled
 logger = init_logger(__name__)
 
 
@@ -688,6 +688,17 @@ class InputPreprocessor:
         *,
         mm_uuids: MultiModalUUIDDict | None = None,
     ) -> ProcessorInputs:
+        """Efficient Frame Selection For Videos."""
+        EFS_sparse_rate = self.model_config.multimodal_config.video_sparse_rate
+        EFS_sparse_enabled = is_multimodal_EFS_enabled(EFS_sparse_rate)
+        if EFS_sparse_enabled:
+            if ('multi_modal_data' in prompt and isinstance(prompt['multi_modal_data'], dict) and 'video' in prompt['multi_modal_data']):
+                videos = prompt['multi_modal_data']['video']
+                detector = SimilarFrameDetector(
+                    sparse_ratio=(1-EFS_sparse_rate)
+                )
+                videos = detector.process_video_frames(videos)
+                prompt['multi_modal_data']['video'] = videos
         """Preprocess the input prompt."""
         res = self._preprocess(prompt, tokenization_kwargs, mm_uuids=mm_uuids)
 
