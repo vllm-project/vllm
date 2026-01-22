@@ -104,7 +104,9 @@ def get_vit_attn_backend(
     """
     try:
         vllm_config: VllmConfig = get_current_vllm_config()
-        multimodal_config: MultiModalConfig | None = vllm_config.multimodal_config
+        multimodal_config: MultiModalConfig | None = (
+            vllm_config.model_config.multimodal_config
+        )
     except AssertionError:
         multimodal_config = None
 
@@ -127,7 +129,9 @@ def is_vit_use_data_parallel():
     """
     try:
         vllm_config: VllmConfig = get_current_vllm_config()
-        multimodal_config: MultiModalConfig | None = vllm_config.multimodal_config
+        multimodal_config: MultiModalConfig | None = (
+            vllm_config.model_config.multimodal_config
+        )
     except AssertionError:
         multimodal_config = None
 
