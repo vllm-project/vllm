@@ -175,7 +175,11 @@ class ResponsesRequest(OpenAIBaseModel):
     include_stop_str_in_output: bool = False
     prompt_cache_key: str | None = Field(
         default=None,
-        description=("A key that was used to read from or write to the prompt cache."),
+        description=(
+            "A key that was used to read from or write to the prompt cache."
+            "Note: Note that this field has not been implemented yet "
+            "and will have no effect."
+        ),
     )
 
     # --8<-- [start:responses-extra-params]
