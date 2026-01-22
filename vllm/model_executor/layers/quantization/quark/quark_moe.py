@@ -66,7 +66,12 @@ class QuarkMoEMethod(FusedMoEMethodBase):
         if quant_config._is_fp8_w4a8(weight_config, input_config):
             return QuarkW4A8Fp8MoEMethod(weight_config, input_config, module.moe_config)
         elif quant_config._is_fp8_w8a8(weight_config, input_config):
-            return QuarkW8A8Fp8MoEMethod(weight_config, input_config, module.moe_config)
+            return QuarkW8A8Fp8MoEMethod(
+                weight_config,
+                input_config,
+                module.moe_config,
+                quant_config.quant_config.get("is_online_quant", False),
+            )
         elif quant_config._is_ocp_mx(weight_config, input_config):
             return QuarkOCP_MX_MoEMethod(weight_config, input_config, module.moe_config)
         else:
@@ -79,6 +84,7 @@ class QuarkW8A8Fp8MoEMethod(QuarkMoEMethod):
         weight_config: dict[str, Any],
         input_config: dict[str, Any],
         moe: FusedMoEConfig,
+        is_online_quant: bool = False,
     ):
         super().__init__(moe)
         self.weight_quant = weight_config
@@ -95,6 +101,7 @@ class QuarkW8A8Fp8MoEMethod(QuarkMoEMethod):
         self.act_quant_group_shape = (
             GroupShape.PER_TOKEN if per_channel else GroupShape.PER_TENSOR
         )
+        self.is_online_quant = is_online_quant
         if not (per_tensor or per_channel):
             raise ValueError(
                 "For FP8 Fused MoE layers, only per-tensor and per-channel "
@@ -135,7 +142,6 @@ class QuarkW8A8Fp8MoEMethod(QuarkMoEMethod):
         layer.num_experts = num_experts
         layer.orig_dtype = params_dtype
         layer.weight_block_size = None
-        params_dtype = torch.float8_e4m3fn
 
         # WEIGHTS
         w13_weight = torch.nn.Parameter(
@@ -143,7 +149,7 @@ class QuarkW8A8Fp8MoEMethod(QuarkMoEMethod):
                 num_experts,
                 2 * intermediate_size_per_partition,
                 hidden_size,
-                dtype=params_dtype,
+                dtype=params_dtype if self.is_online_quant else torch.float8_e4m3fn,
             ),
             requires_grad=False,
         )
@@ -155,7 +161,7 @@ class QuarkW8A8Fp8MoEMethod(QuarkMoEMethod):
                 num_experts,
                 hidden_size,
                 intermediate_size_per_partition,
-                dtype=params_dtype,
+                dtype=params_dtype if self.is_online_quant else torch.float8_e4m3fn,
             ),
             requires_grad=False,
         )
@@ -220,9 +226,34 @@ class QuarkW8A8Fp8MoEMethod(QuarkMoEMethod):
             layer.w13_input_scale = None
             layer.w2_input_scale = None
 
+    def quant_per_channel(
+        self, weight: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        assert weight.ndim == 3
+        A, B, C = weight.shape
+        weight = weight.view(-1, C)
+        weight, scale = ops.scaled_fp8_quant(
+            weight, scale=None, use_per_token_if_dynamic=True
+        )
+        weight = weight.view(A, B, C)
+        scale = scale.view(A, B)
+        return weight, scale
+
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         # Fp8 moe kernels require a single activation scale.
         # We take the max of all the scales in case they differ.
+        if self.is_online_quant:
+            if self.weight_qscheme == "per_channel":
+                w13_weight, w13_weight_scale = self.quant_per_channel(
+                    layer.w13_weight.data
+                )
+                layer.w13_weight.data = w13_weight
+                layer.w13_weight_scale.data = w13_weight_scale
+                w2_weight, w2_weight_scale = self.quant_per_channel(
+                    layer.w2_weight.data
+                )
+                layer.w2_weight.data = w2_weight
+                layer.w2_weight_scale.data = w2_weight_scale
         if self.static_input_scales:
             if layer.w13_input_scale is None or layer.w2_input_scale is None:
                 raise ValueError(
