@@ -83,6 +83,11 @@ EXCLUDE = [
     "vllm/logger.py",
 ]
 
+# Directories that should be checked with --strict
+STRICT_DIRS = [
+    "vllm/compilation",
+]
+
 
 def group_files(changed_files: list[str]) -> dict[str, list[str]]:
     """
@@ -112,11 +117,17 @@ def group_files(changed_files: list[str]) -> dict[str, list[str]]:
     return file_groups
 
 
+def is_strict_file(filepath: str) -> bool:
+    """Check if a file should be checked with strict mode."""
+    return any(filepath.startswith(strict_dir) for strict_dir in STRICT_DIRS)
+
+
 def mypy(
     targets: list[str],
     python_version: str | None,
     follow_imports: str | None,
     file_group: str,
+    strict: bool = False,
 ) -> int:
     """
     Run mypy on the given targets.
@@ -128,6 +139,7 @@ def mypy(
         follow_imports: Value for the --follow-imports option or None to use
             the default mypy behavior.
         file_group: The file group name for logging purposes.
+        strict: If True, run mypy with --strict flag.
 
     Returns:
         The return code from mypy.
@@ -137,6 +149,8 @@ def mypy(
         args += ["--python-version", python_version]
     if follow_imports is not None:
         args += ["--follow-imports", follow_imports]
+    if strict:
+        args += ["--strict"]
     print(f"$ {' '.join(args)} {file_group}")
     return subprocess.run(args + targets, check=False).returncode
 
@@ -153,9 +167,29 @@ def main():
     for file_group, changed_files in file_groups.items():
         follow_imports = None if ci and file_group == "" else "skip"
         if changed_files:
-            returncode |= mypy(
-                changed_files, python_version, follow_imports, file_group
-            )
+            # Separate files into strict and non-strict groups
+            strict_files = [f for f in changed_files if is_strict_file(f)]
+            non_strict_files = [f for f in changed_files if not is_strict_file(f)]
+
+            # Run mypy on non-strict files
+            if non_strict_files:
+                returncode |= mypy(
+                    non_strict_files,
+                    python_version,
+                    follow_imports,
+                    file_group,
+                    strict=False,
+                )
+
+            # Run mypy on strict files with --strict flag
+            if strict_files:
+                returncode |= mypy(
+                    strict_files,
+                    python_version,
+                    follow_imports,
+                    f"{file_group} (strict)",
+                    strict=True,
+                )
     return returncode
 
 
