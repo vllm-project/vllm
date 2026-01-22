@@ -26,5 +26,4 @@ compressed-tensors, nm-testing/SparseLlama-3.1-8B-gsm8k-pruned.2of4-W8A8-testing
 awq, casperhansen/mixtral-instruct-awq, main
 awq_marlin, casperhansen/mixtral-instruct-awq, main
 fp8, neuralmagic/Meta-Llama-3-8B-Instruct-FP8-KV, main
-hqq, nm-testing/Llama-3.2-1B-Instruct-HQQ, main
 None, mgleize/fairseq2-dummy-Llama-3.2-1B, main

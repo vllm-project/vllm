@@ -853,6 +853,7 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
                     max_num_tokens=max_num_tokens_per_rank,
                     num_dispatchers=prepare_finalize.num_dispatchers(),
                     quant_config=self.moe_quant_config,
+                    moe_config=self.moe,
                 )
             else:
                 raise NotImplementedError(
@@ -875,11 +876,11 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
                 }
                 return TrtLlmGenExperts(self.moe, self.moe_quant_config, **kwargs)
             elif self.mxfp4_backend == Mxfp4Backend.MARLIN:
-                return MarlinExperts(self.moe_quant_config)
+                return MarlinExperts(self.moe, self.moe_quant_config)
             elif self.mxfp4_backend == Mxfp4Backend.TRITON:
                 if self.moe.is_lora_enabled:
-                    return UnfusedOAITritonExperts(self.moe_quant_config)
-                return OAITritonExperts(self.moe_quant_config)
+                    return UnfusedOAITritonExperts(self.moe, self.moe_quant_config)
+                return OAITritonExperts(self.moe, self.moe_quant_config)
             else:
                 raise NotImplementedError(
                     f"Incompatible Mxfp4 backend ({self.mxfp4_backend}) for EP"
@@ -981,8 +982,7 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
                 self.intermediate_size,  # padded to multiple of 256
                 layer.ep_rank * layer.local_num_experts,  # local_expert_offset
                 self.num_experts,  # local num experts
-                None,
-                None,
+                None,  # routed_scaling_factor
                 1 if layer.renormalize else 0,  # routing_method_type, renormalize
                 True,  # do finalize
                 tune_max_num_tokens=max(self.max_capture_size, 1),
