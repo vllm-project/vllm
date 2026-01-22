@@ -160,8 +160,12 @@ def test_models(
         tokenizer_name=model_info.tokenizer or model,
         tokenizer_mode=model_info.tokenizer_mode,
         trust_remote_code=model_info.trust_remote_code,
-        max_num_seqs=2,
+        # Remove the effects of batch variance on ROCm since batch invariance
+        # is not yet supported.
+        # See: https://github.com/vllm-project/vllm/issues/27433
+        max_num_seqs=1 if current_platform.is_rocm() else 2,
         enable_prompt_embeds=use_prompt_embeds,
+        compilation_config={"cudagraph_capture_sizes": [1, 2]},
     ) as vllm_model:
         vllm_outputs = vllm_model.generate_greedy_logprobs(
             example_prompts, max_tokens, num_logprobs
