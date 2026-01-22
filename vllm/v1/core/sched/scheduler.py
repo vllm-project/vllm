@@ -6,6 +6,8 @@ from collections import defaultdict
 from collections.abc import Iterable
 from typing import Any
 
+import numpy as np
+
 from vllm import envs
 from vllm.compilation.cuda_graph import CUDAGraphStat
 from vllm.config import VllmConfig
@@ -24,6 +26,9 @@ from vllm.distributed.kv_transfer.kv_connector.v1 import (
 from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorMetadata
 from vllm.distributed.kv_transfer.kv_connector.v1.metrics import KVConnectorStats
 from vllm.logger import init_logger
+from vllm.model_executor.layers.fused_moe.routed_experts_capturer import (
+    RoutedExpertsReader,
+)
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
 from vllm.v1.core.encoder_cache_manager import (
     EncoderCacheManager,
@@ -203,6 +208,8 @@ class Scheduler(SchedulerInterface):
             if speculative_config.use_eagle():
                 self.use_eagle = True
                 self.num_lookahead_tokens = self.num_spec_tokens
+            if speculative_config.uses_draft_model():
+                self.num_lookahead_tokens = self.num_spec_tokens
 
         # Create the KV cache manager.
         self.kv_cache_manager = KVCacheManager(
@@ -219,10 +226,29 @@ class Scheduler(SchedulerInterface):
         )
         self.use_pp = self.parallel_config.pipeline_parallel_size > 1
         self.use_v2_model_runner = envs.VLLM_USE_V2_MODEL_RUNNER
-
         self.perf_metrics: ModelMetrics | None = None
         if self.log_stats and vllm_config.observability_config.enable_mfu_metrics:
             self.perf_metrics = ModelMetrics(vllm_config)
+
+        if self.vllm_config.model_config.enable_return_routed_experts:
+            assert self.dcp_world_size == 1 and self.pcp_world_size == 1, (
+                "enable_return_routed_experts does not support context parallelism "
+                "(dcp_world_size > 1 or pcp_world_size > 1)"
+            )
+
+            self.routed_experts_reader = RoutedExpertsReader.create()
+
+            assert len(kv_cache_config.kv_cache_groups) > 0, (
+                "enable_return_routed_experts requires at least one kv cache group"
+            )
+            self.max_num_kv_tokens = (
+                kv_cache_config.num_blocks // len(kv_cache_config.kv_cache_groups) + 1
+            ) * self.block_size
+
+            self.routed_experts_reader.attach_buffer(
+                max_num_kv_tokens=self.max_num_kv_tokens,
+                vllm_config=self.vllm_config,
+            )
 
     def schedule(self) -> SchedulerOutput:
         # NOTE(woosuk) on the scheduling algorithm:
@@ -257,6 +283,13 @@ class Scheduler(SchedulerInterface):
         req_index = 0
         while req_index < len(self.running) and token_budget > 0:
             request = self.running[req_index]
+
+            # do not schedule another step for the same request while it still has
+            # output placeholders for PP.
+            # TODO: support PP + async scheduling without this limit
+            if self.use_pp and request.num_output_placeholders > 0:
+                req_index += 1
+                continue
 
             if (
                 request.num_output_placeholders > 0
@@ -445,7 +478,12 @@ class Scheduler(SchedulerInterface):
                 if request.status == RequestStatus.WAITING_FOR_REMOTE_KVS:
                     is_ready = self._update_waiting_for_remote_kv(request)
                     if is_ready:
-                        request.status = RequestStatus.WAITING
+                        if request.num_preemptions:
+                            # We must be loading for a resumed preemption
+                            # rather than a new request.
+                            request.status = RequestStatus.PREEMPTED
+                        else:
+                            request.status = RequestStatus.WAITING
                     else:
                         logger.debug(
                             "%s is still in WAITING_FOR_REMOTE_KVS state.",
@@ -598,6 +636,11 @@ class Scheduler(SchedulerInterface):
 
                 if new_blocks is None:
                     # The request cannot be scheduled.
+
+                    # NOTE: we need to untouch the request from the encode cache
+                    # manager
+                    if request.has_encoder_inputs:
+                        self.encoder_cache_manager.free(request)
                     break
 
                 # KVTransfer: the connector uses this info to determine
@@ -904,9 +947,6 @@ class Scheduler(SchedulerInterface):
         assert len(mm_features) > 0
         external_load_encoder_input = []
 
-        # Check remote cache first
-        if self.ec_connector is not None:
-            remote_cache_has_item = self.ec_connector.has_caches(request)
         # NOTE: since scheduler operates on the request level (possibly with
         # multiple encoder inputs per request), we need to create temporary
         # trackers for accounting at the encoder input level.
@@ -916,6 +956,7 @@ class Scheduler(SchedulerInterface):
             start_pos = mm_feature.mm_position.offset
             num_encoder_tokens = mm_feature.mm_position.length
             num_encoder_embeds = mm_feature.mm_position.get_num_embeds
+            item_identifier = mm_feature.identifier
 
             # The encoder output is needed if the two ranges overlap:
             # [num_computed_tokens, num_computed_tokens + num_new_tokens) and
@@ -950,7 +991,7 @@ class Scheduler(SchedulerInterface):
             if not self.is_encoder_decoder:
                 # We are not using the encoder cache for encoder-decoder models,
                 # yet.
-                if request.mm_features[i].identifier in mm_hashes_to_schedule:
+                if item_identifier in mm_hashes_to_schedule:
                     # The same encoder input has already been scheduled in the
                     # current step.
                     continue
@@ -1008,15 +1049,17 @@ class Scheduler(SchedulerInterface):
             if curr_embeds_end - curr_embeds_start == 0:
                 continue
 
-            if self.ec_connector is not None and remote_cache_has_item[i]:
-                mm_hashes_to_schedule.add(request.mm_features[i].identifier)
+            if self.ec_connector is not None and self.ec_connector.has_cache_item(
+                item_identifier
+            ):
+                mm_hashes_to_schedule.add(item_identifier)
                 external_load_encoder_input.append(i)
                 num_embeds_to_schedule += num_encoder_embeds
                 continue
 
             num_embeds_to_schedule += num_encoder_embeds
             encoder_compute_budget -= num_encoder_embeds
-            mm_hashes_to_schedule.add(request.mm_features[i].identifier)
+            mm_hashes_to_schedule.add(item_identifier)
             encoder_inputs_to_schedule.append(i)
 
         return (
@@ -1152,7 +1195,30 @@ class Scheduler(SchedulerInterface):
                 request.status = RequestStatus.FINISHED_STOPPED
                 stopped = True
 
+            routed_experts = None
             if stopped:
+                if self.vllm_config.model_config.enable_return_routed_experts:
+                    kv_blocks = self.kv_cache_manager.get_blocks(request.request_id)
+                    block_ids = kv_blocks.get_block_ids()[0]
+                    num_tokens = request.num_tokens - 1
+
+                    # compute slot mapping
+                    block_ids_array = np.array(block_ids, dtype=np.int32)
+                    num_blocks = len(block_ids)
+                    block_size = self.block_size
+
+                    # generate block offsets
+                    block_offsets = np.arange(0, block_size)
+
+                    # compute slot mapping: slot = block_id * block_size + offset
+                    slot_mapping = (
+                        block_offsets.reshape((1, block_size))
+                        + block_ids_array.reshape((num_blocks, 1)) * block_size
+                    ).flatten()[:num_tokens]
+
+                    routed_experts = self.routed_experts_reader.get_routed_experts(
+                        indices=slot_mapping
+                    )
                 kv_transfer_params = self._free_request(request)
                 if status_before_stop == RequestStatus.RUNNING:
                     stopped_running_reqs.add(request)
@@ -1199,6 +1265,7 @@ class Scheduler(SchedulerInterface):
                         kv_transfer_params=kv_transfer_params,
                         trace_headers=request.trace_headers,
                         num_cached_tokens=request.num_cached_tokens,
+                        routed_experts=routed_experts,
                         num_nans_in_logits=request.num_nans_in_logits,
                     )
                 )
