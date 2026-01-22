@@ -399,7 +399,12 @@ def selective_state_update(
         else (
             (16, 4)
             if dstate <= 32
-            else ((8, 4) if dstate <= 64 else ((4, 4) if dstate <= 128 else ((4, 8))))
+            else (
+                (8, 4)
+                if dstate <= 64
+                # Optimized for B200 with dstate=128
+                else ((32, 8) if dstate <= 128 else ((16, 8)))
+            )
         )
     )
     tie_hdim = (
