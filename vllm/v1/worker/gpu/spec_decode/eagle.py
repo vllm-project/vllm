@@ -48,9 +48,6 @@ class EagleSpeculator:
         self.input_buffers = InputBuffers(
             max_num_reqs=self.max_num_reqs,
             max_num_tokens=self.max_num_tokens,
-            inputs_embeds_size=self.inputs_embeds_size,
-            vocab_size=self.vocab_size,
-            dtype=self.dtype,
             device=device,
         )
         self.hidden_states = torch.zeros(
@@ -141,6 +138,7 @@ class EagleSpeculator:
     ) -> None:
         pos = self.input_buffers.positions[:num_reqs]
         query_start_loc = self.input_buffers.query_start_loc[: num_reqs + 1]
+        idx_mapping = self.idx_mapping[:num_reqs]
         for step in range(1, self.num_speculative_steps):
             # Run the eagle model.
             last_hidden_states, hidden_states = self.run_model(
@@ -152,7 +150,7 @@ class EagleSpeculator:
             # used for draft and target sampling.
             draft_tokens = gumbel_sample(
                 logits,
-                self.idx_mapping[:num_reqs],
+                idx_mapping,
                 self.temperature,
                 self.seeds,
                 pos + 1,
@@ -169,7 +167,9 @@ class EagleSpeculator:
                     self.hidden_states,
                     self.max_model_len,
                 )
-                self.block_tables.compute_slot_mappings(query_start_loc, pos)
+                self.block_tables.compute_slot_mappings(
+                    idx_mapping, query_start_loc, pos
+                )
 
     def capture_model(self) -> None:
         if self.num_speculative_steps == 1:
@@ -282,7 +282,9 @@ class EagleSpeculator:
             self.max_num_reqs,
         )
         query_start_loc = self.input_buffers.query_start_loc[: num_reqs + 1]
-        slot_mappings = self.block_tables.compute_slot_mappings(query_start_loc, pos)
+        slot_mappings = self.block_tables.compute_slot_mappings(
+            idx_mapping, query_start_loc, pos
+        )
 
         cudagraph_size = self.cudagraph_manager.get_cudagraph_size(num_reqs)
         if cudagraph_size is not None:
