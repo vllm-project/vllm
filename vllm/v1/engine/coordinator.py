@@ -4,13 +4,15 @@ import copy
 import multiprocessing
 import time
 import weakref
+from contextlib import ExitStack
+from multiprocessing.connection import Connection
 
 import msgspec.msgpack
 import zmq
 
 from vllm.config import ParallelConfig
 from vllm.logger import init_logger
-from vllm.utils.network_utils import make_zmq_socket
+from vllm.utils.network_utils import is_wildcard_addr, make_zmq_socket
 from vllm.utils.system_utils import get_mp_context, set_process_title
 from vllm.v1.engine import EngineCoreOutputs, EngineCoreRequestType
 from vllm.v1.serial_utils import MsgpackDecoder
@@ -74,6 +76,9 @@ class DPCoordinator:
         back_publish_address = get_engine_client_zmq_addr(local_only_eng, host)
         back_output_address = get_engine_client_zmq_addr(local_only_eng, host)
 
+        # Create pipe for late binding address reporting
+        parent_conn, child_conn = multiprocessing.Pipe()
+
         context = get_mp_context()
         self.proc: multiprocessing.Process = context.Process(
             target=DPCoordinatorProc.run_coordinator,
@@ -83,11 +88,46 @@ class DPCoordinator:
                 "front_publish_address": front_publish_address,
                 "back_output_address": back_output_address,
                 "back_publish_address": back_publish_address,
+                "address_report_pipe": child_conn,  # For late binding
                 "enable_wave_coordination": enable_wave_coordination,
             },
             daemon=True,
         )
         self.proc.start()
+
+        # Wait for coordinator to report actual addresses (for late binding)
+        needs_late_binding = any(
+            is_wildcard_addr(x)
+            for x in (front_publish_address, back_publish_address, back_output_address)
+        )
+
+        if needs_late_binding:
+            try:
+                if not parent_conn.poll(timeout=30.0):  # 30 second timeout
+                    raise TimeoutError(
+                        "DP Coordinator proc did not report addresses within 30 seconds"
+                    )
+                addr_report = parent_conn.recv()
+                front_publish_address = addr_report.get(
+                    "front_publish", front_publish_address
+                )
+                back_publish_address = addr_report.get(
+                    "back_publish", back_publish_address
+                )
+                back_output_address = addr_report.get(
+                    "back_output", back_output_address
+                )
+                logger.debug(
+                    "DP Coordinator reported addresses:"
+                    " front=%s, back_pub=%s, back_out=%s",
+                    front_publish_address,
+                    back_publish_address,
+                    back_output_address,
+                )
+            except Exception as e:
+                logger.error("Failed to get addresses from DP Coordinator: %s", e)
+                raise
+        parent_conn.close()
 
         self.stats_publish_address = front_publish_address
         self.coord_in_address = back_publish_address
@@ -131,6 +171,7 @@ class DPCoordinatorProc:
         front_publish_address: str,
         back_output_address: str,
         back_publish_address: str,
+        address_report_pipe: Connection | None = None,
         min_stats_update_interval_ms: int = 100,
         enable_wave_coordination: bool = True,
     ):
@@ -144,6 +185,7 @@ class DPCoordinatorProc:
                 front_publish_address,
                 back_output_address,
                 back_publish_address,
+                address_report_pipe,
             )
         except KeyboardInterrupt:
             logger.info("DP Coordinator process exiting")
@@ -153,6 +195,7 @@ class DPCoordinatorProc:
         front_publish_address: str,
         back_output_address: str,
         back_publish_address: str,
+        address_report_pipe: Connection | None = None,
     ):
         decoder = MsgpackDecoder(EngineCoreOutputs)
 
@@ -166,26 +209,46 @@ class DPCoordinatorProc:
         last_stats_wave = -1
         last_step_counts: list[list[int]] | None = None
 
-        with (
-            make_zmq_socket(
-                path=front_publish_address,  # IPC
+        with ExitStack() as sockets_to_close:
+            # Bind sockets with late binding support (auto-discovers wildcard ports).
+            publish_front, actual_front = make_zmq_socket(
                 ctx=self.ctx,
+                path=front_publish_address,
                 socket_type=zmq.XPUB,
                 bind=True,
-            ) as publish_front,
-            make_zmq_socket(
-                path=back_output_address,  # IPC or TCP
+                return_address=True,
+            )
+            sockets_to_close.enter_context(publish_front)
+
+            output_back, actual_back_out = make_zmq_socket(
                 ctx=self.ctx,
+                path=back_output_address,
                 socket_type=zmq.PULL,
                 bind=True,
-            ) as output_back,
-            make_zmq_socket(
-                path=back_publish_address,  # IPC or TCP
+                return_address=True,
+            )
+            sockets_to_close.enter_context(output_back)
+
+            publish_back, actual_back_pub = make_zmq_socket(
                 ctx=self.ctx,
+                path=back_publish_address,
                 socket_type=zmq.XPUB,
                 bind=True,
-            ) as publish_back,
-        ):
+                return_address=True,
+            )
+            sockets_to_close.enter_context(publish_back)
+
+            # Report actual addresses to parent
+            if address_report_pipe is not None:
+                address_report_pipe.send(
+                    {
+                        "front_publish": actual_front,
+                        "back_output": actual_back_out,
+                        "back_publish": actual_back_pub,
+                    }
+                )
+                address_report_pipe.close()
+
             # Wait until all engines subscribe.
             for _ in self.engines:
                 if publish_back.recv() != b"\x01":

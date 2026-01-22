@@ -26,7 +26,7 @@ from torch.autograd.profiler import record_function
 import vllm.envs as envs
 from vllm.logger import init_logger
 from vllm.usage.usage_lib import UsageContext, is_usage_stats_enabled, usage_message
-from vllm.utils.network_utils import get_open_port, get_open_zmq_ipc_path, get_tcp_uri
+from vllm.utils.network_utils import get_open_zmq_ipc_path, get_tcp_uri
 from vllm.utils.system_utils import kill_process_tree
 from vllm.v1.core.sched.output import SchedulerOutput
 
@@ -147,14 +147,19 @@ def get_engine_client_zmq_addr(local_only: bool, host: str, port: int = 0) -> st
     If local_only is True, participants are colocated and so a unique IPC
     address will be returned.
 
-    Otherwise, the provided host and port will be used to construct a TCP
-    address (port == 0 means assign an available port)."""
+    Otherwise, returns a TCP address. When port==0, returns a wildcard port
+    address (e.g., "tcp://192.168.1.5:0") for late binding. The actual port
+    will be discovered after the socket is bound via socket.last_endpoint.
 
-    return (
-        get_open_zmq_ipc_path()
-        if local_only
-        else (get_tcp_uri(host, port or get_open_port()))
-    )
+    Args:
+        local_only: If True, use IPC; if False, use TCP
+        host: Host for TCP addresses (preserved in wildcard binding)
+        port: Port for TCP (0 means wildcard port; non-zero for explicit port)
+
+    Returns:
+        IPC path, explicit TCP address, or TCP wildcard "tcp://<host>:0"
+    """
+    return get_open_zmq_ipc_path() if local_only else get_tcp_uri(host, port)
 
 
 class APIServerProcessManager:
@@ -195,14 +200,22 @@ class APIServerProcessManager:
         spawn_context = multiprocessing.get_context("spawn")
         self.processes: list[BaseProcess] = []
 
+        # Create pipes for late binding address reporting
+        address_pipes: list[multiprocessing.connection.Connection] = []
+
         for i, in_addr, out_addr in zip(
             range(num_servers), input_addresses, output_addresses
         ):
+            # Create pipe for this API server to report actual addresses
+            parent_conn, child_conn = multiprocessing.Pipe()
+            address_pipes.append(parent_conn)
+
             client_config = {
                 "input_address": in_addr,
                 "output_address": out_addr,
                 "client_count": num_servers,
                 "client_index": i,
+                "address_report_pipe": child_conn,  # For late binding
             }
             if stats_update_address is not None:
                 client_config["stats_update_address"] = stats_update_address
@@ -216,6 +229,71 @@ class APIServerProcessManager:
             proc.start()
 
         logger.info("Started %d API server processes", len(self.processes))
+
+        # Collect actual addresses from API servers (for late binding)
+        self.actual_input_addresses: list[str] = []
+        self.actual_output_addresses: list[str] = []
+
+        from vllm.utils.network_utils import is_wildcard_addr
+
+        for i, (pipe, in_addr, out_addr) in enumerate(
+            zip(address_pipes, input_addresses, output_addresses)
+        ):
+            # Check if this address needs late binding (wildcard)
+            needs_late_binding = is_wildcard_addr(in_addr) or is_wildcard_addr(out_addr)
+            if needs_late_binding:
+                # Wait for API server to report actual addresses
+                try:
+                    if not pipe.poll(timeout=30.0):  # 30 second timeout
+                        raise TimeoutError(
+                            f"API server {i} did not report addresses within timeout"
+                        )
+                    addr_report = pipe.recv()
+                    actual_in = addr_report.get("input", in_addr)
+                    actual_out = addr_report.get("output", out_addr)
+                    logger.debug(
+                        "API server %d reported addresses: input=%s, output=%s",
+                        i,
+                        actual_in,
+                        actual_out,
+                    )
+                except Exception as e:
+                    logger.error("Failed to get addresses from API server %d: %s", i, e)
+                    raise
+            else:
+                # No late binding needed - use original addresses
+                actual_in = in_addr
+                actual_out = out_addr
+
+            self.actual_input_addresses.append(actual_in)
+            self.actual_output_addresses.append(actual_out)
+            pipe.close()
+
+        # Update the original address lists with actual addresses
+        # (for engines to connect).
+        # This is important because engines receive addresses during handshake
+        # AFTER API servers have bound and discovered the actual addresses.
+        if len(input_addresses) == len(self.actual_input_addresses):
+            for i, actual_addr in enumerate(self.actual_input_addresses):
+                if input_addresses[i] != actual_addr:
+                    logger.debug(
+                        "Updating input address %d: %s -> %s",
+                        i,
+                        input_addresses[i],
+                        actual_addr,
+                    )
+                    input_addresses[i] = actual_addr
+
+        if len(output_addresses) == len(self.actual_output_addresses):
+            for i, actual_addr in enumerate(self.actual_output_addresses):
+                if output_addresses[i] != actual_addr:
+                    logger.debug(
+                        "Updating output address %d: %s -> %s",
+                        i,
+                        output_addresses[i],
+                        actual_addr,
+                    )
+                    output_addresses[i] = actual_addr
 
         # Shutdown only the API server processes on garbage collection
         # The extra processes are managed by their owners
