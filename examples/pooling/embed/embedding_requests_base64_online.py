@@ -26,36 +26,42 @@ def post_http_request(prompt: dict, api_url: str) -> requests.Response:
 
 
 def parse_args():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--host", type=str, default="localhost")
-    parser.add_argument("--port", type=int, default=8000)
-    parser.add_argument("--model", type=str, default="intfloat/e5-small")
-
-    return parser.parse_args()
+    parse = argparse.ArgumentParser()
+    parse.add_argument("--host", type=str, default="localhost")
+    parse.add_argument("--port", type=int, default=8000)
+    return parse.parse_args()
 
 
 def main(args):
-    api_url = f"http://{args.host}:{args.port}/v1/embeddings"
-    model_name = args.model
+    base_url = f"http://{args.host}:{args.port}"
+    models_url = base_url + "/v1/models"
+    embeddings_url = base_url + "/v1/embeddings"
+
+    response = requests.get(models_url)
+    model = response.json()["data"][0]["id"]
+
+    input_texts = [
+        "The best thing about vLLM is that it supports many different models",
+    ] * 2
 
     # The OpenAI client does not support the embed_dtype and endianness parameters.
     for embed_dtype in EMBED_DTYPE_TO_TORCH_DTYPE:
         for endianness in ENDIANNESS:
             prompt = {
-                "model": model_name,
-                "input": "vLLM is great!",
+                "model": model,
+                "input": input_texts,
                 "encoding_format": "base64",
                 "embed_dtype": embed_dtype,
                 "endianness": endianness,
             }
-            response = post_http_request(prompt=prompt, api_url=api_url)
+            response = post_http_request(prompt=prompt, api_url=embeddings_url)
 
             embedding = []
             for data in response.json()["data"]:
                 binary = base64.b64decode(data["embedding"])
                 tensor = binary2tensor(binary, (-1,), embed_dtype, endianness)
                 embedding.append(tensor.to(torch.float32))
-            embedding = torch.cat(embedding)
+            embedding = torch.stack(embedding)
             print(embed_dtype, endianness, embedding.shape)
 
 
