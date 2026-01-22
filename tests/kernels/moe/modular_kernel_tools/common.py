@@ -578,6 +578,7 @@ def make_modular_kernel(
         intermediate_size_per_partition=config.N,
         num_local_experts=config.num_local_experts,
         moe_parallel_config=moe_parallel_config,
+        is_sequence_parallel=False,
         in_dtype=config.dtype,
         max_num_tokens=next_power_of_2(config.M),
         activation="silu",

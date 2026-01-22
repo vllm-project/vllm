@@ -1062,6 +1062,7 @@ class FusedMoEConfig:
     device: torch.device | str
     routing_method: RoutingMethodType
     moe_parallel_config: FusedMoEParallelConfig
+    is_sequence_parallel: bool
 
     # The activation type.
     in_dtype: torch.dtype

@@ -98,7 +98,21 @@ class FusedMoEModularMethod(FusedMoEMethodBase, CustomOp):
         x: torch.Tensor,
         router_logits: torch.Tensor,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        topk_weights, topk_ids = router.select_experts(
+        if layer.enable_eplb:
+            if self.supports_eplb:
+                assert layer.expert_load_view is not None
+                assert layer.logical_to_physical_map is not None
+                assert layer.logical_replica_count is not None
+            else:
+                raise NotImplementedError(
+                    "EPLB is not supported for "
+                    f"{self.old_quant_method.__class__.__name__}."
+                )
+
+        prepare_finalize = self.fused_experts.prepare_finalize
+        x, router_logits = prepare_finalize.preprocess_inputs(x, router_logits, layer)
+
+        topk_weights, topk_ids, zero_expert_result = layer.select_experts(
             hidden_states=x,
             router_logits=router_logits,
         )
@@ -116,4 +130,16 @@ class FusedMoEModularMethod(FusedMoEMethodBase, CustomOp):
             expert_map=None if self.disable_expert_map else layer.expert_map,
         )
 
-        return result
+        if layer.zero_expert_num != 0 and layer.zero_expert_type is not None:
+            assert not isinstance(result, tuple), (
+                "Shared + zero experts are mutually exclusive not yet supported"
+            )
+            result = prepare_finalize.postprocess_tensor(result, layer)
+            return result, zero_expert_result
+        else:
+            if isinstance(result, tuple):
+                return (
+                    result[0],
+                    prepare_finalize.postprocess_tensor(result[1], layer),
+                )
+            return prepare_finalize.postprocess_tensor(result, layer)

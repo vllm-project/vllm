@@ -4,7 +4,15 @@
 from collections.abc import Callable, Iterable
 from contextlib import nullcontext
 from enum import Enum
-from typing import Literal, cast, get_args, overload
+from typing import (
+    TYPE_CHECKING,
+    Literal,
+    Protocol,
+    TypeAlias,
+    cast,
+    get_args,
+    overload,
+)
 
 import torch
 import torch.nn.functional as F
@@ -60,6 +68,26 @@ from vllm.utils.torch_utils import (
     direct_register_custom_op,
 )
 from vllm.v1.worker.ubatching import dbo_current_ubatch_id
+
+if TYPE_CHECKING:
+    from .naive_epdp_prepare_finalize import (
+        NaiveEPDPPrepareAndFinalize as _NaiveEPDPPrepareAndFinalizeType,
+    )
+else:
+
+    class _NaiveEPDPPrepareAndFinalizeType(Protocol): ...
+
+
+NaiveEPDPPrepareAndFinalizeCls: TypeAlias = type[_NaiveEPDPPrepareAndFinalizeType]
+NaiveEPDPPrepareAndFinalize: NaiveEPDPPrepareAndFinalizeCls | None = None
+
+if current_platform.is_cuda_alike():
+    from .naive_epdp_prepare_finalize import (
+        NaiveEPDPPrepareAndFinalize as _NaiveEPDPPrepareAndFinalizeClass,
+    )
+
+    NaiveEPDPPrepareAndFinalize = _NaiveEPDPPrepareAndFinalizeClass
+
 
 logger = init_logger(__name__)
 
@@ -557,6 +585,7 @@ class FusedMoE(CustomOp):
             intermediate_size_per_partition=self.intermediate_size_per_partition,
             num_local_experts=self.local_num_experts,
             moe_parallel_config=self.moe_parallel_config,
+            is_sequence_parallel=self.is_sequence_parallel,
             in_dtype=moe_in_dtype,
             router_logits_dtype=router_logits_dtype,
             max_num_tokens=envs.VLLM_MOE_DP_CHUNK_SIZE,
@@ -1748,9 +1777,15 @@ class FusedMoE(CustomOp):
                 hidden_states, router_logits, has_separate_shared_experts
             )
 
-        do_naive_dispatch_combine: bool = self.dp_size > 1 and not isinstance(
-            self.quant_method, FusedMoEModularMethod
-        )
+        shared_output = None
+
+        # Launch shared experts early only when using a dedicated stream so the
+        # work can overlap with routing/dispatch + matmul.
+        if has_separate_shared_experts and use_shared_experts_stream:
+            assert self.shared_experts is not None
+            assert hidden_states_clone is not None
+            with torch.cuda.stream(self.shared_experts_stream):
+                shared_output = self.shared_experts(hidden_states_clone)
 
         ctx = get_forward_context()
         sp_ctx = (
@@ -1759,9 +1794,34 @@ class FusedMoE(CustomOp):
             else nullcontext()
         )
 
+        modular_prepare_finalize = None
+        if isinstance(self.quant_method, FusedMoEModularMethod):
+            modular_prepare_finalize = self.quant_method.fused_experts.prepare_finalize
+
+        do_naive_dispatch = False
+        naive_prepare_finalize_cls = NaiveEPDPPrepareAndFinalize
+        if (
+            self.dp_size > 1
+            and modular_prepare_finalize is not None
+            and naive_prepare_finalize_cls is not None
+            and isinstance(
+                modular_prepare_finalize,
+                cast(type[object], naive_prepare_finalize_cls),
+            )
+        ):
+            do_naive_dispatch = True
+
         with sp_ctx:
-            extra_tensors = None
-            if do_naive_dispatch_combine:
+            x_for_apply: torch.Tensor | tuple[torch.Tensor, torch.Tensor]
+            x_for_apply = hidden_states
+            # Matrix multiply.
+            if do_naive_dispatch:
+                extra_tensors: list[torch.Tensor] | None = None
+
+                hidden_states, router_logits = get_ep_group().dispatch(
+                    hidden_states, router_logits, self.is_sequence_parallel
+                )
+
                 post_quant_allgather = (
                     self.quant_method is not None
                     and self.dp_size > 1
@@ -1787,15 +1847,14 @@ class FusedMoE(CustomOp):
                     hidden_states_combined, router_logits, extra_tensors_combined = (
                         dispatch_res
                     )
-                    hidden_states_combined = (
-                        hidden_states_combined,
-                        extra_tensors_combined[0],
-                    )
+                    hidden_states = hidden_states_combined
+                    x_for_apply = (hidden_states_combined, extra_tensors_combined[0])
                 else:
-                    hidden_states_combined, router_logits = dispatch_res
+                    hidden_states, router_logits = dispatch_res
+                    x_for_apply = hidden_states
 
-            # Run shared experts before matrix multiply.
-            # because matrix multiply maybe modify the hidden_states.
+            # Run shared experts before matrix multiply if we are not using the
+            # dedicated stream (non-overlap path).
             if has_separate_shared_experts and not use_shared_experts_stream:
                 assert self.shared_experts is not None
                 shared_output = self.shared_experts(hidden_states)
@@ -1812,14 +1871,16 @@ class FusedMoE(CustomOp):
                     router_logits,
                     dim=0,
                 )
+                x_for_apply = (
+                    (hidden_states, x_for_apply[1])
+                    if isinstance(x_for_apply, tuple)
+                    else hidden_states
+                )
 
-            # Matrix multiply.
             final_hidden_states = self.quant_method.apply(
                 layer=self,
                 router=self.router,
-                x=hidden_states_combined
-                if do_naive_dispatch_combine
-                else hidden_states,
+                x=x_for_apply,
                 router_logits=router_logits,
             )
 
@@ -1827,15 +1888,7 @@ class FusedMoE(CustomOp):
                 assert self.shared_experts is not None
 
                 if use_shared_experts_stream:
-                    # Run shared experts in parallel on a separate stream
-                    # NOTE: We start the separate stream here and mark the
-                    # sync end point immediately after it is done. This is
-                    # important to avoid excessive stream allocations by the cuda
-                    # graph replay later.
-                    with torch.cuda.stream(self.shared_experts_stream):
-                        # Note that hidden_states clone() is necessary here to avoid
-                        # conflict with the main stream
-                        shared_output = self.shared_experts(hidden_states_clone)
+                    assert shared_output is not None
                     current_stream().wait_stream(self.shared_experts_stream)
 
                 final_hidden_states = (
@@ -1843,25 +1896,24 @@ class FusedMoE(CustomOp):
                     final_hidden_states,
                 )
 
-            def combine_output(states: torch.Tensor) -> torch.Tensor:
-                if do_naive_dispatch_combine:
-                    states = get_ep_group().combine(states, self.is_sequence_parallel)
-
-                if self.pcp_size > 1:
-                    states = get_pcp_group().reduce_scatter(
-                        states,
-                        dim=0,
-                    )
-
-                return states
+            if (
+                self.zero_expert_num is not None
+                and self.zero_expert_num > 0
+                and self.shared_experts is None
+            ):
+                assert isinstance(final_hidden_states, tuple)
+                final_hidden_states, zero_expert_result = final_hidden_states
 
             if self.shared_experts is not None:
                 return (
                     final_hidden_states[0],
-                    combine_output(final_hidden_states[1]),
+                    final_hidden_states[1],
                 )
+            elif self.zero_expert_num is not None and self.zero_expert_num > 0:
+                assert isinstance(final_hidden_states, torch.Tensor)
+                return (final_hidden_states, zero_expert_result)
             else:
-                return combine_output(final_hidden_states)
+                return final_hidden_states
 
     @classmethod
     def make_expert_params_mapping(
