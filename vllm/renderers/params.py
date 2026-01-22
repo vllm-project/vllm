@@ -30,7 +30,7 @@ class ChatParams:
     """The kwargs to pass to the chat template."""
 
     @staticmethod
-    def _merge_kwargs(a: dict[str, Any] | None, b: dict[str, Any] | None):
+    def merge_kwargs(a: dict[str, Any] | None, b: dict[str, Any] | None):
         a = a or {}
         b = b or {}
 
@@ -43,7 +43,7 @@ class ChatParams:
         return ChatParams(
             chat_template=self.chat_template,
             chat_template_content_format=self.chat_template_content_format,
-            chat_template_kwargs=self._merge_kwargs(
+            chat_template_kwargs=self.merge_kwargs(
                 default_chat_template_kwargs,
                 self.chat_template_kwargs,
             ),

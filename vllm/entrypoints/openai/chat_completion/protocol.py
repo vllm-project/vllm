@@ -366,7 +366,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
         return ChatParams(
             chat_template=self.chat_template or default_template,
             chat_template_content_format=default_template_content_format,
-            chat_template_kwargs=ChatParams._merge_kwargs(
+            chat_template_kwargs=ChatParams.merge_kwargs(
                 self.chat_template_kwargs,
                 dict(
                     add_generation_prompt=self.add_generation_prompt,
