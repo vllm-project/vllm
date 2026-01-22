@@ -1116,12 +1116,22 @@ class FusedMoE(CustomOp):
     ) -> bool | None:
         quant_method_name = self.quant_method.__class__.__name__
 
+        # Check for Quark OCP_MX quantization using isinstance for robustness
+        try:
+            from vllm.model_executor.layers.quantization.quark.quark_moe import (
+                QuarkOCP_MX_MoEMethod,
+            )
+
+            is_quark_ocp_mx = isinstance(self.quant_method, QuarkOCP_MX_MoEMethod)
+        except ImportError:
+            is_quark_ocp_mx = False
+
         # MXFP4-style weight loading: handles both native mxfp4 and Quark OCP_MX
         # (which exports MXFP4 weights). These quantization schemes pack weights
         # with all experts combined in a single tensor.
         is_mxfp4_style = (
             self.quant_config and self.quant_config.get_name() == "mxfp4"
-        ) or quant_method_name == "QuarkOCP_MX_MoEMethod"
+        ) or is_quark_ocp_mx
         if is_mxfp4_style:
             # (FIXME) for gpt-oss and Quark OCP_MX all experts are combined
             if "bias" in weight_name:
