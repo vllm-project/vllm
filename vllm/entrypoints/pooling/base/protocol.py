@@ -6,11 +6,7 @@ from typing import Annotated, Any
 
 from pydantic import Field, model_validator
 
-from vllm import PoolingParams
-from vllm.entrypoints.chat_utils import (
-    ChatCompletionMessageParam,
-    ChatTemplateContentFormatOption,
-)
+from vllm.entrypoints.chat_utils import ChatCompletionMessageParam
 from vllm.entrypoints.openai.engine.protocol import OpenAIBaseModel
 from vllm.logger import init_logger
 from vllm.renderers import ChatParams, merge_kwargs
@@ -60,15 +56,11 @@ class CompletionRequestMixin(OpenAIBaseModel):
             "the prompt."
         ),
     )
-    # --8<-- [end:completion-extra-params]
 
 
 class ChatRequestMixin(OpenAIBaseModel):
-    # --8<-- [start:chat-params]
     messages: list[ChatCompletionMessageParam]
-    # --8<-- [end:chat-params]
 
-    # --8<-- [start:chat-extra-params]
     add_generation_prompt: bool = Field(
         default=False,
         description=(
@@ -77,6 +69,7 @@ class ChatRequestMixin(OpenAIBaseModel):
             "model."
         ),
     )
+
     continue_final_message: bool = Field(
         default=False,
         description=(
@@ -87,6 +80,7 @@ class ChatRequestMixin(OpenAIBaseModel):
             "Cannot be used at the same time as `add_generation_prompt`."
         ),
     )
+
     add_special_tokens: bool = Field(
         default=False,
         description=(
@@ -97,6 +91,7 @@ class ChatRequestMixin(OpenAIBaseModel):
             "default)."
         ),
     )
+
     chat_template: str | None = Field(
         default=None,
         description=(
@@ -106,6 +101,7 @@ class ChatRequestMixin(OpenAIBaseModel):
             "does not define one."
         ),
     )
+
     chat_template_kwargs: dict[str, Any] | None = Field(
         default=None,
         description=(
@@ -113,7 +109,6 @@ class ChatRequestMixin(OpenAIBaseModel):
             "Will be accessible by the chat template."
         ),
     )
-    # --8<-- [end:chat-extra-params]
 
     @model_validator(mode="before")
     @classmethod
@@ -124,93 +119,3 @@ class ChatRequestMixin(OpenAIBaseModel):
                 "`add_generation_prompt` to True."
             )
         return data
-
-    def build_chat_params(
-        self,
-        default_template: str | None,
-        default_template_content_format: ChatTemplateContentFormatOption,
-    ) -> ChatParams:
-        return ChatParams(
-            chat_template=self.chat_template or default_template,
-            chat_template_content_format=default_template_content_format,
-            chat_template_kwargs=merge_kwargs(
-                self.chat_template_kwargs,
-                dict(
-                    add_generation_prompt=self.add_generation_prompt,
-                    continue_final_message=self.continue_final_message,
-                ),
-            ),
-        )
-
-
-class EncodingRequestMixin(OpenAIBaseModel):
-    # --8<-- [start:encoding-params]
-    encoding_format: EncodingFormat = "float"
-    # --8<-- [end:encoding-params]
-
-    # --8<-- [start:encoding-extra-params]
-    embed_dtype: EmbedDType = Field(
-        default="float32",
-        description=(
-            "What dtype to use for encoding. Default to using float32 for base64 "
-            "encoding to match the OpenAI python client behavior. "
-            "This parameter will affect base64 and binary_response."
-        ),
-    )
-    endianness: Endianness = Field(
-        default="native",
-        description=(
-            "What endianness to use for encoding. Default to using native for "
-            "base64 encoding to match the OpenAI python client behavior."
-            "This parameter will affect base64 and binary_response."
-        ),
-    )
-    # --8<-- [end:encoding-extra-params]
-
-
-class EmbedRequestMixin(EncodingRequestMixin):
-    # --8<-- [start:embed-params]
-    dimensions: int | None = None
-    # --8<-- [end:embed-params]
-
-    # --8<-- [start:embed-extra-params]
-    use_activation: bool | None = Field(
-        default=None,
-        description="Whether to use activation for the pooler outputs. "
-        "`None` uses the pooler's default, which is `True` in most cases.",
-    )
-    normalize: bool | None = Field(
-        default=None,
-        description="Deprecated; please pass `use_activation` instead",
-    )
-    # --8<-- [end:embed-extra-params]
-
-    def to_pooling_params(self):
-        if self.normalize is not None:
-            logger.warning_once(
-                "`normalize` is deprecated and will be removed in v0.17. "
-                "Please pass `use_activation` instead."
-            )
-            self.use_activation = self.normalize
-
-        return PoolingParams(
-            dimensions=self.dimensions,
-            use_activation=self.use_activation,
-            truncate_prompt_tokens=getattr(self, "truncate_prompt_tokens", None),
-        )
-
-
-class ClassifyRequestMixin(OpenAIBaseModel):
-    # --8<-- [start:classify-extra-params]
-    use_activation: bool | None = Field(
-        default=None,
-        description="Whether to use activation for the pooler outputs. "
-        "`None` uses the pooler's default, which is `True` in most cases.",
-    )
-    # --8<-- [end:classify-extra-params]
-
-    def to_pooling_params(self):
-        return PoolingParams(
-            use_activation=self.use_activation,
-            truncate_prompt_tokens=getattr(self, "truncate_prompt_tokens", None),
-        )

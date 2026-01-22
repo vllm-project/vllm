@@ -305,44 +305,6 @@ Expected output:
 
 An OpenAI client example can be found here: [examples/pooling/embed/openai_embedding_matryoshka_fy_client.py](../../examples/pooling/embed/openai_embedding_matryoshka_fy_client.py)
 
-## Specific models
-
-### BAAI/bge-m3
-
-The `BAAI/bge-m3` model comes with extra weights for sparse and colbert embeddings but unfortunately in its `config.json`
-the architecture is declared as `XLMRobertaModel`, which makes `vLLM` load it as a vanilla ROBERTA model without the
-extra weights. To load the full model weights, override its architecture like this:
-
-```shell
-vllm serve BAAI/bge-m3 --hf-overrides '{"architectures": ["BgeM3EmbeddingModel"]}'
-```
-
-Then you obtain the sparse embeddings like this:
-
-```shell
-curl -s http://localhost:8000/pooling -H "Content-Type: application/json" -d '{
-     "model": "BAAI/bge-m3",
-     "task": "token_classify",
-     "input": ["What is BGE M3?", "Defination of BM25"]
-}'
-```
-
-Due to limitations in the output schema, the output consists of a list of
-token scores for each token for each input. This means that you'll have to call
-`/tokenize` as well to be able to pair tokens with scores.
-Refer to the tests in  `tests/models/language/pooling/test_bge_m3.py` to see how
-to do that.
-
-You can obtain the colbert embeddings like this:
-
-```shell
-curl -s http://localhost:8000/pooling -H "Content-Type: application/json" -d '{
-     "model": "BAAI/bge-m3",
-     "task": "token_embed",
-     "input": ["What is BGE M3?", "Defination of BM25"]
-}'
-```
-
 ## Deprecated Features
 
 ### Encode task

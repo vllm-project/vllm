@@ -3,9 +3,11 @@
 import time
 from typing import Any, TypeAlias
 
-from pydantic import Field
+from pydantic import (
+    Field,
+)
 
-from vllm.config import ModelConfig
+from vllm import PoolingParams
 from vllm.entrypoints.openai.engine.protocol import OpenAIBaseModel, UsageInfo
 from vllm.entrypoints.pooling.base.protocol import (
     ChatRequestMixin,
@@ -56,25 +58,18 @@ class EmbeddingCompletionRequest(
         )
 
 
-class EmbeddingChatRequest(
-    PoolingBasicRequestMixin, ChatRequestMixin, EmbedRequestMixin
-):
+class EmbeddingChatRequest(PoolingBasicRequestMixin, ChatRequestMixin):
+    encoding_format: EncodingFormat = "float"
+    dimensions: int | None = None
+
+    # --8<-- [start:chat-embedding-extra-params]
     mm_processor_kwargs: dict[str, Any] | None = Field(
         default=None,
         description=("Additional kwargs to pass to the HF processor."),
     )
 
-    def build_tok_params(self, model_config: ModelConfig) -> TokenizeParams:
-        encoder_config = model_config.encoder_config or {}
-
-        (
-            max_total_tokens,
-            max_output_tokens,
-        ) = _get_max_total_output_tokens(model_config)
-
-        return TokenizeParams(
-            max_total_tokens=max_total_tokens,
-            max_output_tokens=max_output_tokens,
+    def to_pooling_params(self):
+        return PoolingParams(
             truncate_prompt_tokens=self.truncate_prompt_tokens,
             do_lower_case=encoder_config.get("do_lower_case", False),
             add_special_tokens=self.add_special_tokens,

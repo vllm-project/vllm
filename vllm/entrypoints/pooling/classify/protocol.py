@@ -6,11 +6,11 @@ from typing import Any, TypeAlias
 
 from pydantic import Field
 
-from vllm.config import ModelConfig
+from vllm import PoolingParams
+from vllm.config.pooler import get_use_activation
 from vllm.entrypoints.openai.engine.protocol import OpenAIBaseModel, UsageInfo
 from vllm.entrypoints.pooling.base.protocol import (
     ChatRequestMixin,
-    ClassifyRequestMixin,
     CompletionRequestMixin,
     PoolingBasicRequestMixin,
 )
@@ -34,9 +34,7 @@ class ClassificationCompletionRequest(
         )
 
 
-class ClassificationChatRequest(
-    PoolingBasicRequestMixin, ChatRequestMixin, ClassifyRequestMixin
-):
+class ClassificationChatRequest(PoolingBasicRequestMixin, ChatRequestMixin):
     # --8<-- [start:chat-classification-extra-params]
     mm_processor_kwargs: dict[str, Any] | None = Field(
         default=None,
