@@ -30,6 +30,7 @@ from io import BytesIO
 from tempfile import NamedTemporaryFile
 from typing import Any, cast
 
+import msgspec
 import numpy as np
 from PIL import Image
 from typing_extensions import deprecated
@@ -107,13 +108,9 @@ def serialize_sample_requests(
         if req.multi_modal_data is not None:
             req_dict["multi_modal_data"] = req.multi_modal_data
 
-        # Handle lora_request
+        # Handle lora_request (use msgspec for complete serialization)
         if req.lora_request is not None:
-            req_dict["lora_request"] = {
-                "lora_name": req.lora_request.lora_name,
-                "lora_int_id": req.lora_request.lora_int_id,
-                "lora_path": req.lora_request.lora_path,
-            }
+            req_dict["lora_request"] = msgspec.to_builtins(req.lora_request)
 
         serializable_requests.append(req_dict)
 
@@ -154,12 +151,7 @@ def deserialize_sample_requests(input_path: str) -> list[SampleRequest]:
     for req_dict in data["requests"]:
         lora_request = None
         if req_dict.get("lora_request"):
-            lora_data = req_dict["lora_request"]
-            lora_request = LoRARequest(
-                lora_name=lora_data["lora_name"],
-                lora_int_id=lora_data["lora_int_id"],
-                lora_path=lora_data["lora_path"],
-            )
+            lora_request = msgspec.convert(req_dict["lora_request"], LoRARequest)
 
         requests.append(
             SampleRequest(
