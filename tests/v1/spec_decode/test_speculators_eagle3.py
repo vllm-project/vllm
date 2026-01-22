@@ -27,6 +27,17 @@ from vllm.platforms import current_platform
                 reason="The tests are skipped on rocm platform.",
             ),
         ),
+        pytest.param(
+            "nm-testing/Speculator-Qwen3-30B-MOE-VL-Eagle3",
+            id="qwen3-30b-moe-vl-eagle3-speculator",
+            marks=[
+                pytest.mark.optional,
+                pytest.mark.skipif(
+                    current_platform.is_rocm(),
+                    reason="The tests are skipped on rocm platform.",
+                ),
+            ],
+        ),
     ],
 )
 def test_eagle3_speculators_model(
