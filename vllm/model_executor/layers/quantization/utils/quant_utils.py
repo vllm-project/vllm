@@ -876,25 +876,29 @@ def pad_nvfp4_weight_for_cutlass(
     weight_current_col_bytes = weight.shape[1]
     weight_current_col_elements = weight_current_col_bytes * 2
 
-    weights_padding_cols = 0
+    weights_padding_bytes = 0
     if weight_current_col_elements % alignment != 0:
         total_cols = round_up(weight_current_col_elements, alignment)
         pad_cols = total_cols - weight_current_col_elements
-        weight = torch.nn.functional.pad(weight, (0, pad_cols, 0, 0)).contiguous()
-        weights_padding_cols = pad_cols
+        # Convert from FP4 element count to bytes (2 FP4 values per byte)
+        # pad_cols is always even since alignment=32 and current elements are even
+        pad_bytes = pad_cols // 2
+        weight = torch.nn.functional.pad(weight, (0, pad_bytes, 0, 0)).contiguous()
+        weights_padding_bytes = pad_bytes
 
-    return weight, weights_padding_cols
+    return weight, weights_padding_bytes
 
 
 def pad_nvfp4_activation_for_cutlass(
     x_fp4: torch.Tensor,
-    weights_padding_cols: int,
+    weights_padding_bytes: int,
 ) -> torch.Tensor:
     """
     Pad packed FP4 activations to match the K-dimension padding applied to weights.
+    The padding is in bytes (tensor dimension), not FP4 elements.
     """
-    if weights_padding_cols > 0:
-        return torch.nn.functional.pad(x_fp4, (0, weights_padding_cols)).contiguous()
+    if weights_padding_bytes > 0:
+        return torch.nn.functional.pad(x_fp4, (0, weights_padding_bytes)).contiguous()
     return x_fp4
 
 
