@@ -25,6 +25,7 @@ typedef __hip_bfloat16 __nv_bfloat16;
 #endif
 
 void swap_blocks(torch::Tensor& src, torch::Tensor& dst,
+                 int64_t block_size_in_bytes,
                  const torch::Tensor& block_mapping) {
   torch::Device src_device = src.device();
   torch::Device dst_device = dst.device();
@@ -49,10 +50,6 @@ void swap_blocks(torch::Tensor& src, torch::Tensor& dst,
   char* src_ptr = static_cast<char*>(src.data_ptr());
   char* dst_ptr = static_cast<char*>(dst.data_ptr());
 
-  // We use the stride instead of numel in case the cache is padded for memory
-  // alignment reasons, we assume the blocks data (inclusive of any padding)
-  // is contiguous in memory
-  const int64_t block_size_in_bytes = src.element_size() * src.stride(0);
   const at::cuda::OptionalCUDAGuard device_guard(
       src_device.is_cuda() ? src_device : dst_device);
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
