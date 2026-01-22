@@ -18,11 +18,14 @@ from vllm.multimodal.inputs import MultiModalFeatureSpec, MultiModalUUIDDict
 from vllm.multimodal.parse import MultiModalDataParser
 from vllm.multimodal.processing.context import set_request_id
 from vllm.multimodal.utils import argsort_mm_positions
+from vllm.platforms import current_platform
 from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import _SAMPLING_EPS, SamplingParams
 from vllm.tokenizers import TokenizerLike
 from vllm.tokenizers.mistral import MistralTokenizer
 from vllm.utils import length_from_prompt_token_ids_or_embeds, random_uuid
+from vllm.utils.mem_constants import GiB_bytes
+from vllm.utils.mem_utils import MemorySnapshot, memory_profiling
 from vllm.utils.torch_utils import set_default_torch_num_threads
 from vllm.v1.engine import EngineCoreRequest
 from vllm.v1.metrics.stats import MultiModalCacheStats
@@ -37,6 +40,7 @@ from vllm.v1.structured_output.backend_outlines import (
     validate_structured_output_request_outlines,
 )
 from vllm.v1.structured_output.backend_xgrammar import validate_xgrammar_grammar
+from vllm.v1.worker.utils import MultiModalBudget, request_memory
 
 logger = init_logger(__name__)
 
@@ -52,6 +56,8 @@ class InputProcessor:
         self.model_config = vllm_config.model_config
         self.cache_config = vllm_config.cache_config
         self.lora_config = vllm_config.lora_config
+        self.parallel_config = vllm_config.parallel_config
+        self.scheduler_config = vllm_config.scheduler_config
         self.structured_outputs_config = vllm_config.structured_outputs_config
 
         self.generation_config_fields = self.model_config.try_get_generation_config()
@@ -66,6 +72,8 @@ class InputProcessor:
             mm_registry,
             mm_processor_cache=self.mm_processor_cache,
         )
+
+        self.profile_run()
 
     @property
     def tokenizer(self) -> TokenizerLike | None:
@@ -682,9 +690,8 @@ class InputProcessor:
                 )
 
             raise ValueError(
-                f"The {prompt_type} prompt (length {prompt_len}) is "
-                f"longer than the maximum model length of {max_prompt_len}. "
-                f"{suggestion}"
+                f"The {prompt_type} prompt (length {prompt_len}) is longer than "
+                f"the maximum model length of {max_prompt_len}. {suggestion}"
             )
 
             # TODO: Find out how many placeholder tokens are there so we can
@@ -706,6 +713,79 @@ class InputProcessor:
                 f"requested output tokens (at least 1) is longer than the maximum "
                 f"model length of {max_prompt_len}. {suggestion}"
             )
+
+    def profile_run(self) -> None:
+        model_config = self.model_config
+        mm_config = model_config.multimodal_config
+
+        if not mm_config:
+            return
+
+        parallel_config = self.parallel_config
+        gpu_allocation = parallel_config._renderer_gpu_allocation
+        if not gpu_allocation:
+            return
+
+        device = mm_config.mm_processing_device
+        if device != "cpu":
+            # Peak memory usage (required for this profiling)
+            # is only tracked for CUDA
+            if not current_platform.is_cuda_alike():
+                return
+
+            # Only run profiling on the first Processor for each device,
+            # then multiply the usage by the number of processors for that
+            # device.
+            # Compared to running profiling on every Processor in parallel,
+            # this avoids non-deterministic peak memory usage calculation.
+            api_process_rank = parallel_config._api_process_rank
+            if api_process_rank != gpu_allocation.index(device):
+                return
+
+            mm_budget = MultiModalBudget(self.vllm_config, self.mm_registry)
+
+            baseline_snapshot = MemorySnapshot(device=device)
+            device_ = baseline_snapshot.device_
+
+            # Only check init memory if we are sure that the EngineCore is not
+            # loading weights or running profiling on the same GPU
+            new_device_index = device_.index
+            local_gpu_count = (
+                parallel_config.data_parallel_size_local * parallel_config.world_size
+            )
+            if new_device_index < local_gpu_count:
+                logger.warning(
+                    "Both EngineCore and multi-modal processor are using "
+                    "the same GPU (%s). This may result in inaccurate memory "
+                    "profiling, and resource contention during inference.",
+                    device_,
+                )
+            else:
+                request_memory(baseline_snapshot, self.cache_config)
+
+            with memory_profiling(baseline_snapshot) as diff:
+                for (
+                    modality,
+                    max_items_per_prompt,
+                ) in mm_budget.max_items_per_prompt_by_modality.items():
+                    self.mm_registry.get_dummy_mm_inputs(
+                        model_config=model_config,
+                        mm_counts={modality: max_items_per_prompt},
+                    )
+
+            usage_mult = gpu_allocation.count(device)
+            memory_usage = diff.torch_peak_increase * usage_mult
+            logger.info(
+                "Multi-modal processing took %.4f GiB and %.6f seconds on %s",
+                memory_usage / GiB_bytes,
+                diff.profile_time,
+                device_,
+            )
+            if memory_usage > diff.before_profile.free_memory:
+                raise ValueError(
+                    f"Not enough memory in {device_} for multi-modal processor. "
+                    f"Try reducing `api_server_count` or revert to CPU processing."
+                )
 
     def stat_mm_cache(self) -> MultiModalCacheStats | None:
         return self.input_preprocessor.stat_mm_cache()
