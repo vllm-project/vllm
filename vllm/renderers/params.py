@@ -29,18 +29,23 @@ class ChatParams:
     chat_template_kwargs: dict[str, Any] | None = None
     """The kwargs to pass to the chat template."""
 
+    @staticmethod
+    def _merge_kwargs(a: dict[str, Any] | None, b: dict[str, Any] | None):
+        a = a or {}
+        b = b or {}
+
+        return a | {k: v for k, v in b.items() if v is not None}
+
     def with_defaults(self, default_chat_template_kwargs: dict[str, Any] | None):
         if not default_chat_template_kwargs:
             return self
 
-        chat_template_kwargs = self.chat_template_kwargs or {}
-
         return ChatParams(
             chat_template=self.chat_template,
             chat_template_content_format=self.chat_template_content_format,
-            chat_template_kwargs=(
-                default_chat_template_kwargs
-                | {k: v for k, v in chat_template_kwargs.items() if v is not None}
+            chat_template_kwargs=self._merge_kwargs(
+                default_chat_template_kwargs,
+                self.chat_template_kwargs,
             ),
         )
 
