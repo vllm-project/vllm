@@ -1513,7 +1513,7 @@ class NemotronH_Nano_VL_V2(
         self.video_pruning_rate = multimodal_config.video_pruning_rate
 
         with self._mark_language_model(vllm_config):
-            self.language_model = language_model = init_vllm_registered_model(
+            self.language_model = init_vllm_registered_model(
                 vllm_config=vllm_config,
                 hf_config=config.text_config,
                 prefix=maybe_prefix(prefix, "language_model"),
@@ -1542,7 +1542,7 @@ class NemotronH_Nano_VL_V2(
                 ReLUSquaredActivation(),
                 nn.Linear(vision_projection_hidden_size, llm_hidden_size, bias=False),
             )
-            self.mlp1 = mlp1.to(language_model.config.dtype)
+            self.mlp1 = mlp1.to(self.language_model.config.dtype)
 
         self.config = config
         self.model_config = vllm_config.model_config

@@ -44,11 +44,11 @@ from .interfaces import (
     SupportsLoRA,
     SupportsMultiModal,
     SupportsPP,
-    TowerMissingLayer,
 )
 from .siglip import SiglipVisionModel
 from .utils import (
     AutoWeightsLoader,
+    StageMissingLayer,
     WeightsMapper,
     init_vllm_registered_model,
     maybe_prefix,
@@ -426,9 +426,9 @@ class BagelForConditionalGeneration(
                     hidden_size=llm_hidden_size,
                 )
         else:
-            self.vit_model = TowerMissingLayer("image")
-            self.connector = TowerMissingLayer("image")
-            self.vit_pos_embed = TowerMissingLayer("image")
+            self.vit_model = StageMissingLayer("image_tower")
+            self.connector = StageMissingLayer("image_tower")
+            self.vit_pos_embed = StageMissingLayer("image_tower")
 
         self.make_empty_intermediate_tensors = (
             self.language_model.make_empty_intermediate_tensors

@@ -1025,12 +1025,12 @@ class PaddleOCRVLForConditionalGeneration(nn.Module, SupportsMultiModal, Support
             self.mlp_AR = Projector(config, config.vision_config)
 
         with self._mark_language_model(vllm_config):
-            self.language_model = language_model = Ernie4_5ForCausalLM(
+            self.language_model = Ernie4_5ForCausalLM(
                 vllm_config=vllm_config,
                 prefix=maybe_prefix(prefix, "language_model"),
             )
 
-            for layer in language_model.model.layers:
+            for layer in self.language_model.model.layers:
                 if not isinstance(layer, PPMissingLayer):
                     layer.self_attn.rotary_emb.is_neox_style = True
 
