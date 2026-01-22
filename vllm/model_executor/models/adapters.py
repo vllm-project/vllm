@@ -150,15 +150,17 @@ def _create_pooling_model_cls(orig_cls: _T) -> _T:
             self.vllm_config = vllm_config
 
             # If the model already defines a pooler instance, don't overwrite it
-            if not getattr(self, "pooler", None):
+            pooler = getattr(self, "pooler", None)
+            if not pooler:
                 from .interfaces import supports_multimodal
 
                 if supports_multimodal(self):
                     # Try to get the pooler from the LM backbone
                     language_model = self.get_language_model()
                     if hasattr(language_model, "pooler"):
-                        self.pooler = language_model.pooler
+                        self.pooler = pooler = language_model.pooler
 
+            if not pooler:
                 self._init_pooler(vllm_config, prefix=prefix)
 
         def _init_pooler(self, vllm_config: "VllmConfig", prefix: str = ""):
