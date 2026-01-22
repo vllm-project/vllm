@@ -44,6 +44,7 @@ from openai_harmony import Role as OpenAIHarmonyRole
 
 from vllm import envs
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionToolsParam
+from vllm.entrypoints.openai.reasoning_encryption import encrypt_reasoning_content
 from vllm.entrypoints.openai.responses.protocol import (
     ResponseInputOutputItem,
     ResponsesRequest,
@@ -67,6 +68,38 @@ MCP_BUILTIN_TOOLS: set[str] = {
     "code_interpreter",
     "container",
 }
+
+
+def _create_reasoning_item_with_encrypted_content(
+    reasoning_id: str,
+    content: list[ResponseReasoningTextContent] | None = None,
+    status: str | None = None,
+    summary: list | None = None,
+) -> ResponseReasoningItem:
+    """Create a ResponseReasoningItem with encrypted_content populated.
+
+    The encrypted_content field enables clients to round-trip reasoning items
+    in multi-turn conversations. When VLLM_ENCRYPT_REASONING_CONTENT is enabled,
+    the content is encrypted using Fernet symmetric encryption. Otherwise,
+    it contains a plain JSON-serialized representation.
+    """
+    if summary is None:
+        summary = []
+
+    encrypted_content = None
+    if content:
+        # Serialize id and content to encrypted_content for round-tripping
+        content_dict = [{"type": c.type, "text": c.text} for c in content]
+        encrypted_content = encrypt_reasoning_content(reasoning_id, content_dict)
+
+    return ResponseReasoningItem(
+        type="reasoning",
+        id=reasoning_id,
+        summary=summary,
+        content=content,
+        encrypted_content=encrypted_content,
+        status=status,
+    )
 
 
 def has_custom_tools(tool_types: set[str]) -> bool:
@@ -549,13 +582,13 @@ def _parse_reasoning_content(message: Message) -> list[ResponseOutputItem]:
     """Parse reasoning/analysis content into reasoning items."""
     output_items = []
     for content in message.content:
-        reasoning_item = ResponseReasoningItem(
-            id=f"rs_{random_uuid()}",
-            summary=[],
-            type="reasoning",
-            content=[
-                ResponseReasoningTextContent(text=content.text, type="reasoning_text")
-            ],
+        reasoning_id = f"rs_{random_uuid()}"
+        reasoning_content = [
+            ResponseReasoningTextContent(text=content.text, type="reasoning_text")
+        ]
+        reasoning_item = _create_reasoning_item_with_encrypted_content(
+            reasoning_id=reasoning_id,
+            content=reasoning_content,
             status=None,
         )
         output_items.append(reasoning_item)
@@ -713,31 +746,31 @@ def parse_remaining_state(parser: StreamableParser) -> list[ResponseOutputItem]:
             ]
 
     if parser.current_channel == "commentary":
+        reasoning_id = f"rs_{random_uuid()}"
+        reasoning_content = [
+            ResponseReasoningTextContent(
+                text=parser.current_content, type="reasoning_text"
+            )
+        ]
         return [
-            ResponseReasoningItem(
-                id=f"rs_{random_uuid()}",
-                summary=[],
-                type="reasoning",
-                content=[
-                    ResponseReasoningTextContent(
-                        text=parser.current_content, type="reasoning_text"
-                    )
-                ],
+            _create_reasoning_item_with_encrypted_content(
+                reasoning_id=reasoning_id,
+                content=reasoning_content,
                 status=None,
             )
         ]
 
     if parser.current_channel == "analysis":
+        reasoning_id = f"rs_{random_uuid()}"
+        reasoning_content = [
+            ResponseReasoningTextContent(
+                text=parser.current_content, type="reasoning_text"
+            )
+        ]
         return [
-            ResponseReasoningItem(
-                id=f"rs_{random_uuid()}",
-                summary=[],
-                type="reasoning",
-                content=[
-                    ResponseReasoningTextContent(
-                        text=parser.current_content, type="reasoning_text"
-                    )
-                ],
+            _create_reasoning_item_with_encrypted_content(
+                reasoning_id=reasoning_id,
+                content=reasoning_content,
                 status=None,
             )
         ]
