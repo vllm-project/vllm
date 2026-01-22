@@ -146,12 +146,17 @@ class SiluMulNvfp4QuantPattern(ActivationQuantPattern):
             scale: torch.Tensor,
         ) -> tuple[torch.Tensor, torch.Tensor]:
             result_silu_mul = self.silu_and_mul_matcher(input)
+            quant_kwargs = {
+                "output": result,
+                "input": result_silu_mul,
+                "output_scale": output_scale,
+                "input_scale": scale,
+            }
+            if self.quant_key == kNvfp4Quant:
+                quant_kwargs["is_sf_swizzled_layout"] = True
             at = auto_functionalized(
                 self.QUANT_OP,
-                output=result,
-                input=result_silu_mul,
-                output_scale=output_scale,
-                input_scale=scale,
+                **quant_kwargs,
             )
             return at[1], at[2]
 
