@@ -11,7 +11,7 @@ from typing import TYPE_CHECKING
 import torch
 from torch.distributed import ProcessGroup
 
-from vllm.distributed.parallel_state import get_ep_group
+from vllm.distributed.parallel_state import get_eplb_group
 from vllm.logger import init_logger
 
 from .rebalance_execute import transfer_layer
@@ -27,8 +27,8 @@ def start_async_worker(
     rank_mapping: dict[int, int] | None = None,
     is_profile: bool = False,
 ) -> threading.Thread:
-    ep_group = get_ep_group().device_group
-    rank = ep_group.rank()
+    eplb_group = get_eplb_group().device_group
+    rank = eplb_group.rank()
     device_index = state.cuda_device_index
     assert state.is_async
 
@@ -42,7 +42,7 @@ def start_async_worker(
             loop.run_until_complete(
                 transfer_run_periodically(
                     state=state,
-                    ep_group=ep_group,
+                    eplb_group=eplb_group,
                     cuda_stream=cuda_stream,
                     is_profile=is_profile,
                     rank_mapping=rank_mapping,
@@ -72,8 +72,6 @@ def run_rebalance_experts(
     model_state.workload_ready_event = None
 
     # Move the global expert load window to CPU for computation.
-    # It has to be done in the main stream to avoid race condition
-    # with the main thread.
     global_expert_load_window = eplb_stats.global_expert_load_window.cpu()
     # Compute new expert mappings for the model
     (
@@ -105,7 +103,7 @@ def run_rebalance_experts(
 
 async def transfer_run_periodically(
     state: "EplbState",
-    ep_group: ProcessGroup,
+    eplb_group: ProcessGroup,
     cuda_stream: torch.cuda.Stream,
     is_profile: bool = False,
     rank_mapping: dict[int, int] | None = None,
@@ -162,7 +160,7 @@ async def transfer_run_periodically(
                             new_layer_indices=new_layer_indices,
                             expert_weights=model_state.model.expert_weights[layer_idx],
                             expert_weights_buffer=model_state.expert_buffer,
-                            ep_group=ep_group,
+                            ep_group=eplb_group,
                             is_profile=is_profile,
                             cuda_stream=cuda_stream,
                             rank_mapping=rank_mapping,
