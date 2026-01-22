@@ -2034,21 +2034,16 @@ def selective_scan_fwd(
 def rocm_enforce_contiguous_skinny_gemm_inputs(
     function_name: str, a: torch.Tensor, b: torch.Tensor
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    if current_platform.is_rocm():
-        if not a.is_contiguous() or not b.is_contiguous():
-            logger.warning_once(
-                f"{function_name}:Encountered non-contiguous tensor during execution on ROCm."
-                "Making them contiguous, which may incur a performance hit."
-            )
-        a = a.contiguous()
-        b = b.contiguous()
+    # if current_platform.is_rocm():
+        # a = a.contiguous()  # no-op if already contiguous, else clone
+        # b = b.contiguous()  # no-op if already contiguous, else clone
     return a, b
 
 
 # ROCm skinny gemms
 def LLMM1(a: torch.Tensor, b: torch.Tensor, rows_per_block: int) -> torch.Tensor:
     a, b = rocm_enforce_contiguous_skinny_gemm_inputs("LLM1", a, b)
-    return torch.ops._rocm_C.LLMM1("LLMM1", a, b, rows_per_block)
+    return torch.ops._rocm_C.LLMM1(a, b, rows_per_block)
 
 
 def wvSplitK(
