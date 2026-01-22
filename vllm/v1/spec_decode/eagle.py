@@ -280,6 +280,7 @@ class SpecDecodeBaseProposer:
         sampling_metadata: SamplingMetadata,
         mm_embed_inputs: tuple[list[torch.Tensor], torch.Tensor] | None = None,
         num_rejected_tokens_gpu: torch.Tensor | None = None,
+        slot_mappings: dict[str, torch.Tensor] | None = None,
     ) -> torch.Tensor:
         batch_size = common_attn_metadata.batch_size()
 
@@ -376,9 +377,10 @@ class SpecDecodeBaseProposer:
             num_tokens=num_input_tokens,
             num_tokens_across_dp=num_tokens_across_dp,
             cudagraph_runtime_mode=cudagraph_runtime_mode,
-            slot_mapping=self._build_slot_mapping_dict(
-                common_attn_metadata.slot_mapping, num_input_tokens
-            ),
+            # slot_mapping=self._build_slot_mapping_dict(
+            #     common_attn_metadata.slot_mapping, num_input_tokens
+            # ),
+            slot_mapping=slot_mappings,
         ):
             ret_hidden_states = self.model(**model_kwargs)
             if not self.model_returns_tuple():
@@ -417,6 +419,7 @@ class SpecDecodeBaseProposer:
                 positions=positions,
                 hidden_states=hidden_states,
                 common_attn_metadata=common_attn_metadata,
+                slot_mappings=slot_mappings,
             )
             # [batch_size, num_tree_tokens]
             return torch.cat(draft_token_ids_list, dim=1)
@@ -574,9 +577,10 @@ class SpecDecodeBaseProposer:
                 num_tokens=input_batch_size,
                 num_tokens_across_dp=batch_size_across_dp,
                 cudagraph_runtime_mode=cudagraph_runtime_mode,
-                slot_mapping=self._build_slot_mapping_dict(
-                    common_attn_metadata.slot_mapping, input_batch_size
-                ),
+                # slot_mapping=self._build_slot_mapping_dict(
+                #     common_attn_metadata.slot_mapping, input_batch_size
+                # ),
+                slot_mapping=slot_mappings,
             ):
                 ret_hidden_states = self.model(**model_kwargs)
                 if not self.model_returns_tuple():
@@ -784,6 +788,7 @@ class SpecDecodeBaseProposer:
         # [num_tokens, hidden_size]
         hidden_states: torch.Tensor,
         common_attn_metadata: CommonAttentionMetadata,
+        slot_mappings: dict[str, torch.Tensor] | None = None,
     ) -> list[torch.Tensor]:
         tree_attn_metadata_builder = self.runner.attn_groups[0][
             0
@@ -905,9 +910,7 @@ class SpecDecodeBaseProposer:
                 self.vllm_config,
                 num_tokens=num_input_tokens,
                 cudagraph_runtime_mode=cudagraph_runtime_mode,
-                slot_mapping=self._build_slot_mapping_dict(
-                    attn_metadata.slot_mapping, num_input_tokens
-                ),
+                slot_mapping=slot_mappings,
             ):
                 last_hidden_states, hidden_states = self.model(
                     input_ids=self.input_ids[:num_input_tokens],
@@ -1239,6 +1242,7 @@ class SpecDecodeBaseProposer:
         num_tokens: int,
         use_cudagraphs: bool = True,
         is_graph_capturing: bool = False,
+        slot_mappings: dict[str, torch.Tensor] | None = None,
     ) -> None:
         # FIXME: when using tree-based specdec, adjust number of forward-passes
         # according to the depth of the tree.
@@ -1272,7 +1276,8 @@ class SpecDecodeBaseProposer:
                 num_tokens=num_input_tokens,
                 num_tokens_across_dp=num_tokens_across_dp,
                 cudagraph_runtime_mode=cudagraph_runtime_mode,
-                slot_mapping=slot_mapping_dict,
+                # slot_mapping=slot_mapping_dict,
+                slot_mapping=slot_mappings,
             ):
                 if self.supports_mm_inputs:
                     input_ids = None
