@@ -234,6 +234,7 @@ class SiluMulBlockQuantPattern:
         
         # DEFINE THE REPLACEMENT (fused operation)
         def replacement(input: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+            print(f"FUSED KERNEL MATCHED! input shape: {input.shape}")
             # Convert to model dtype if needed
             if self.model_dtype is not None:
                 input = input.to(dtype=self.model_dtype)
