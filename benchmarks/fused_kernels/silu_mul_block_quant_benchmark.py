@@ -24,7 +24,7 @@ class bench_params_t:
     num_tokens: int
     hidden_size: int
     dtype: torch.dtype
-    group_size: list[int]
+    group_size: int  # Changed from list[int] to int
 
     def description(self):
         return (
@@ -40,7 +40,7 @@ def get_bench_params() -> list[bench_params_t]:
     NUM_TOKENS = [16, 128, 512, 2048]
     HIDDEN_SIZES = [1024, 2048, 4096, 5120, 14336]  # Common FFN sizes
     DTYPES = [torch.float16, torch.bfloat16]
-    GROUP_SIZES = [[1, 64], [1, 128]]
+    GROUP_SIZES = [64, 128]  # Changed from [[1, 64], [1, 128]]
 
     combinations = product(NUM_TOKENS, HIDDEN_SIZES, DTYPES, GROUP_SIZES)
     bench_params = list(
@@ -53,23 +53,23 @@ def get_bench_params() -> list[bench_params_t]:
 def unfused_fp8_impl(
     x: torch.Tensor,
     quant_dtype: torch.dtype,
-    group_size: list[int],
+    group_size: int,  # Changed from list[int]
 ):
-    """Unfused: SiLU+Mul then quantize separately."""
+    """Unfused: SiLU+Mul then per-tensor quantize."""
     hidden = x.shape[-1] // 2
     gate, up = x.split(hidden, dim=-1)
     
     # SiLU(gate) * up
     silu_out = F.silu(gate) * up
     
-    # Quantize
+    # Per-tensor quantize (no group_size used here)
     silu_out, _ = ops.scaled_fp8_quant(silu_out)
 
 
 def unfused_groupwise_fp8_impl(
     x: torch.Tensor,
     quant_dtype: torch.dtype,
-    group_size: list[int],
+    group_size: int,  # Changed from list[int]
 ):
     """Unfused: SiLU+Mul then group-wise quantize."""
     hidden = x.shape[-1] // 2
@@ -78,9 +78,9 @@ def unfused_groupwise_fp8_impl(
     # SiLU(gate) * up
     silu_out = F.silu(gate) * up
     
-    # Group quantize
+    # Group quantize - use group_size directly
     silu_out, _ = per_token_group_quant_fp8(
-        silu_out, group_size=group_size[1], use_ue8m0=False
+        silu_out, group_size=group_size, use_ue8m0=False
     )
 
 
@@ -102,7 +102,7 @@ def fused_impl(
 def bench_fn(
     x: torch.Tensor,
     quant_dtype: torch.dtype,
-    group_size: list[int],
+    group_size: int,
     label: str,
     sub_label: str,
     fn: Callable,
@@ -194,15 +194,26 @@ def main():
     torch.set_default_device("cuda")
     bench_params = get_bench_params()
 
+    print(f"Running {len(bench_params)} benchmark configurations...")
+    print(f"This will take approximately {len(bench_params) * 3} seconds (1s per variant)")
+    print()
+
     timers = []
     for bp in tqdm(bench_params):
-        timers.extend(bench(bp, "silu-mul-block-quant", bp.description()))
+        result_timers = bench(bp, "silu-mul-block-quant", bp.description())
+        timers.extend(result_timers)
+    
+    print("\n" + "="*80)
+    print("FINAL COMPARISON - ALL RESULTS")
+    print("="*80)
     print_timers(timers)
 
     # Pickle all the results
     timestamp = int(time.time())
-    with open(f"silu_mul_block_quant-{timestamp}.pkl", "wb") as f:
+    filename = f"silu_mul_block_quant-{timestamp}.pkl"
+    with open(filename, "wb") as f:
         pkl.dump(timers, f)
+    print(f"\nResults saved to: {filename}")
 
 
 if __name__ == "__main__":
