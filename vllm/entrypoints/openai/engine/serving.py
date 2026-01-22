@@ -1088,7 +1088,7 @@ class OpenAIServing:
         # which is used for logging and `enable_response_messages`.
         from vllm.tokenizers.mistral import MistralTokenizer
 
-        chat_template_kwargs = chat_params.chat_template_kwargs
+        chat_template_kwargs = chat_params.chat_template_kwargs or {}
         conversation, rendered_prompt = await renderer.render_messages_async(
             messages,
             chat_template=chat_params.chat_template,
