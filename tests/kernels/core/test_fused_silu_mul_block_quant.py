@@ -88,9 +88,10 @@ def ops_impl(
         x, group_size, quant_dtype, scale_ub, is_scale_transposed
     )
     
-    # Transpose scales back if needed for comparison
-    if is_scale_transposed:
-        scales = scales.t().contiguous()
+    # DON'T transpose - keep scales in native layout
+    # Remove these lines:
+    # if is_scale_transposed:
+    #     scales = scales.t().contiguous()
     
     return out, scales
 
@@ -176,22 +177,20 @@ def test_silu_and_mul_per_block_quant(
     ok = torch.allclose(a, b, atol=1.0, rtol=0.0)  # Allow ±1 quantization error
     
     if not ok:
-        # Fallback: compare dequantized values with relaxed tolerance
-        # Output shape: [num_tokens, hidden_size]
-        # Scales need to be expanded to match this
+        # Fallback: compare dequantized values
+        # Both ref_scales and ops_scales are now in SAME layout
         
+        # Normalize both to [num_tokens, num_groups]
         if is_scale_transposed:
-            # scales shape: [num_groups, num_tokens]
-            # Need to transpose to [num_tokens, num_groups] first
-            ref_scales_row_major = ref_scales.t()  # [num_tokens, num_groups]
-            ops_scales_row_major = ops_scales.t()  # [num_tokens, num_groups]
-        else:
-            # scales already in [num_tokens, num_groups]
+            # ops_scales is [num_groups, num_tokens], ref is [num_tokens, num_groups]
+            ops_scales_row_major = ops_scales.t()
             ref_scales_row_major = ref_scales
+        else:
+            # Both are [num_tokens, num_groups]
             ops_scales_row_major = ops_scales
+            ref_scales_row_major = ref_scales
         
-        # Now expand along the hidden dimension (dim=1)
-        # [num_tokens, num_groups] → [num_tokens, hidden_size]
+        # Expand to [num_tokens, hidden_size]
         ref_scales_expanded = ref_scales_row_major.repeat_interleave(group_size, dim=1)
         ops_scales_expanded = ops_scales_row_major.repeat_interleave(group_size, dim=1)
         
