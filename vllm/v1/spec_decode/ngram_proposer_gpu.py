@@ -25,19 +25,7 @@ from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
 
 @support_torch_compile()
 class NgramGPUKernel(nn.Module):
-    """
-    GPU-accelerated N-gram proposer using fully async tensor operations.
-
-    PERFORMANCE OPTIMIZATION WITH TORCH.COMPILE:
-
-    1. Tensor allocation:
-       - Allocate inside forward(); torch.compile can fuse allocations.
-       - Avoid pre-allocating buffers as attributes (breaks compilation).
-
-    2. Dynamic Shapes:
-       - Batch dim is marked dynamic by support_torch_compile.
-       - torch.compile specializes per shape.
-    """
+    """GPU-accelerated N-gram proposer using fully async tensor operations."""
 
     def __init__(
         self, vllm_config: VllmConfig, prefix: str = "", device: torch.device = "cuda"
@@ -53,7 +41,6 @@ class NgramGPUKernel(nn.Module):
         self.k = vllm_config.speculative_config.num_speculative_tokens
         self.max_model_len = vllm_config.model_config.max_model_len
         self.max_num_seqs = vllm_config.scheduler_config.max_num_seqs
-        self.vocab_size = vllm_config.model_config.get_vocab_size()
         self.device = device
 
     def _find_first_and_extract_all_n_parallel(
@@ -257,13 +244,11 @@ class NgramProposerGPU:
         self.k = vllm_config.speculative_config.num_speculative_tokens
         self.max_model_len = vllm_config.model_config.max_model_len
         self.max_num_seqs = vllm_config.scheduler_config.max_num_seqs
-        self.vocab_size = vllm_config.model_config.get_vocab_size()
         self.device = device
 
         self.kernel = NgramGPUKernel(
             vllm_config=self.vllm_config, prefix="ngram_gpu_kernel", device=device
         )
-        self.device = device
         self.kernel.to(device)
         self.kernel.eval()
 
@@ -305,7 +290,6 @@ class NgramProposerGPU:
             sampled_flags: [batch_size] bool tensor
             valid_mask: [batch_size] bool tensor
         """
-        # Generate random token IDs
         token_ids = torch.zeros(
             batch_size,
             max_seq_len,
@@ -313,12 +297,10 @@ class NgramProposerGPU:
             device=device,
         )
 
-        # Generate random sequence lengths
         num_tokens = torch.randint(
             pattern_len, max_seq_len, (batch_size,), dtype=torch.int32, device=device
         )
 
-        # All sequences have sampled tokens and are valid
         sampled_flags = torch.ones(batch_size, dtype=torch.bool, device=device)
         valid_mask = torch.ones(batch_size, dtype=torch.bool, device=device)
 
@@ -525,10 +507,9 @@ def update_ngram_gpu_tensors_incremental(
     if not curr_req_id_to_index:
         return
 
-    # Build set of new request IDs for fast lookup.
     new_req_ids = {req.req_id for req in new_reqs}
 
-    # Case 1: First run, no previous state.
+    # First run, no previous state
     if prev_req_id_to_index is None:
         for idx in curr_req_id_to_index.values():
             num_tokens = input_batch.num_tokens_no_spec[idx]
@@ -543,12 +524,11 @@ def update_ngram_gpu_tensors_incremental(
                 )
         return
 
-    # Case 2: Detect index changes for reorder.
+    # Detect index changes for reorder
     reorder_src: list[int] = []
     reorder_dst: list[int] = []
 
     for req_id, curr_idx in curr_req_id_to_index.items():
-        # Skip new requests (handled separately).
         if req_id in new_req_ids:
             continue
 
@@ -557,18 +537,17 @@ def update_ngram_gpu_tensors_incremental(
             reorder_src.append(prev_idx)
             reorder_dst.append(curr_idx)
 
-    # GPU scatter reorder.
     if reorder_src:
         src_tensor = torch.tensor(reorder_src, dtype=torch.long, device=device)
         dst_tensor = torch.tensor(reorder_dst, dtype=torch.long, device=device)
 
-        # Clone to avoid overwriting during scatter.
         temp_token_ids = token_ids_gpu_tensor[src_tensor].clone()
         temp_num_tokens = num_tokens_no_spec_gpu[src_tensor].clone()
 
         token_ids_gpu_tensor[dst_tensor] = temp_token_ids
         num_tokens_no_spec_gpu[dst_tensor] = temp_num_tokens
-    # Case 3: Full copy for new/resumed requests.
+
+    # Full copy for new/resumed requests
     for req_state in new_reqs:
         new_req_idx = curr_req_id_to_index.get(req_state.req_id)
         if new_req_idx is None:
@@ -576,7 +555,6 @@ def update_ngram_gpu_tensors_incremental(
 
         num_tokens = input_batch.num_tokens_no_spec[new_req_idx]
         if num_tokens > 0:
-            # Copy from input_batch.token_ids_cpu to GPU.
             token_ids_gpu_tensor[new_req_idx, :num_tokens].copy_(
                 input_batch.token_ids_cpu_tensor[new_req_idx, :num_tokens],
                 non_blocking=True,

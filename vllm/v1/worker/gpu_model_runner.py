@@ -9,6 +9,7 @@ from collections import defaultdict
 from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 from copy import copy, deepcopy
+from dataclasses import replace
 from functools import reduce
 from itertools import product
 from typing import TYPE_CHECKING, Any, NamedTuple, TypeAlias, cast
@@ -453,7 +454,7 @@ class GPUModelRunner(
                     device=self.device,
                     runner=self,
                 )
-            elif self.speculative_config.method == "ngram_gpu":
+            elif self.speculative_config.use_ngram_gpu():
                 self.drafter = NgramProposerGPU(self.vllm_config, self.device, self)
                 self.num_tokens_no_spec_gpu = torch.zeros(
                     self.max_num_reqs, dtype=torch.int32, device=device
@@ -3203,8 +3204,6 @@ class GPUModelRunner(
             self.speculative_config is not None
             and self.speculative_config.use_ngram_gpu()
         ):
-            from dataclasses import replace
-
             num_scheduled_tokens_copy = scheduler_output.num_scheduled_tokens.copy()
             spec_decode_tokens_copy = (
                 scheduler_output.scheduled_spec_decode_tokens.copy()
@@ -3781,8 +3780,7 @@ class GPUModelRunner(
                     self.input_batch.num_tokens_no_spec,
                     self.input_batch.token_ids_cpu,
                 )
-        elif spec_config.method == "ngram_gpu":
-            # GPU-accelerated ngram proposer
+        elif spec_config.use_ngram_gpu():
             assert isinstance(self.drafter, NgramProposerGPU)
             (
                 next_token_ids,

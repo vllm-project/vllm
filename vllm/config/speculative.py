@@ -306,10 +306,10 @@ class SpeculativeConfig:
         ):
             self.method = "ngram"
 
-        if self.method in ("ngram", "[ngram]", "ngram_gpu"):
-            # Unified to "ngram" internally
-            if self.method in ("ngram", "[ngram]"):
-                self.method = "ngram"
+        if self.method in ("ngram", "[ngram]"):
+            self.method = "ngram"
+
+        if self.method in ("ngram", "ngram_gpu"):
             # Set default values if not provided
             if self.prompt_lookup_min is None and self.prompt_lookup_max is None:
                 # TODO(woosuk): Tune these values. They are arbitrarily chosen.
