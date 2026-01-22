@@ -192,6 +192,8 @@ def _create_pooling_model_cls(orig_cls: _T) -> _T:
 
         def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
             params_dict = dict(self.named_parameters())
+
+            # We support loading from both `*Model` and `*ForCausalLM`
             candidate_prefixes = ["", "model."]
             target_prefix = ""
 
@@ -218,8 +220,8 @@ def _create_pooling_model_cls(orig_cls: _T) -> _T:
                         target_model = getattr(self, attr)
 
                 logger.info(
-                    "Mapping weights to %s as the weights "
-                    "are relative to this model instead of %s.",
+                    "Mapping weights to %s as they are "
+                    "relative to this model instead of %s.",
                     target_model._get_name(),
                     self._get_name(),
                 )
