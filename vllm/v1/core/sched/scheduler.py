@@ -947,9 +947,6 @@ class Scheduler(SchedulerInterface):
         assert len(mm_features) > 0
         external_load_encoder_input = []
 
-        # Check remote cache first
-        if self.ec_connector is not None:
-            remote_cache_has_item = self.ec_connector.has_caches(request)
         # NOTE: since scheduler operates on the request level (possibly with
         # multiple encoder inputs per request), we need to create temporary
         # trackers for accounting at the encoder input level.
@@ -959,6 +956,7 @@ class Scheduler(SchedulerInterface):
             start_pos = mm_feature.mm_position.offset
             num_encoder_tokens = mm_feature.mm_position.length
             num_encoder_embeds = mm_feature.mm_position.get_num_embeds
+            item_identifier = mm_feature.identifier
 
             # The encoder output is needed if the two ranges overlap:
             # [num_computed_tokens, num_computed_tokens + num_new_tokens) and
@@ -993,7 +991,7 @@ class Scheduler(SchedulerInterface):
             if not self.is_encoder_decoder:
                 # We are not using the encoder cache for encoder-decoder models,
                 # yet.
-                if request.mm_features[i].identifier in mm_hashes_to_schedule:
+                if item_identifier in mm_hashes_to_schedule:
                     # The same encoder input has already been scheduled in the
                     # current step.
                     continue
@@ -1051,15 +1049,17 @@ class Scheduler(SchedulerInterface):
             if curr_embeds_end - curr_embeds_start == 0:
                 continue
 
-            if self.ec_connector is not None and remote_cache_has_item[i]:
-                mm_hashes_to_schedule.add(request.mm_features[i].identifier)
+            if self.ec_connector is not None and self.ec_connector.has_cache_item(
+                item_identifier
+            ):
+                mm_hashes_to_schedule.add(item_identifier)
                 external_load_encoder_input.append(i)
                 num_embeds_to_schedule += num_encoder_embeds
                 continue
 
             num_embeds_to_schedule += num_encoder_embeds
             encoder_compute_budget -= num_encoder_embeds
-            mm_hashes_to_schedule.add(request.mm_features[i].identifier)
+            mm_hashes_to_schedule.add(item_identifier)
             encoder_inputs_to_schedule.append(i)
 
         return (

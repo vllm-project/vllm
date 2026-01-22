@@ -18,7 +18,7 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
     kFp8StaticTensorSym,
-    kNvfp4Quant,
+    kNvfp4Dynamic,
 )
 from vllm.platforms import current_platform
 
@@ -41,7 +41,7 @@ silu_and_mul_nvfp4_quant_supported = current_platform.is_cuda() and hasattr(
     torch.ops._C, "silu_and_mul_nvfp4_quant"
 )
 if silu_and_mul_nvfp4_quant_supported:
-    FUSED_OPS[kNvfp4Quant] = torch.ops._C.silu_and_mul_nvfp4_quant.default  # noqa: E501
+    FUSED_OPS[kNvfp4Dynamic] = torch.ops._C.silu_and_mul_nvfp4_quant.default  # noqa: E501
 
 
 class ActivationQuantPattern(ABC):
@@ -129,7 +129,7 @@ class SiluMulNvfp4QuantPattern(ActivationQuantPattern):
     """
 
     def __init__(self) -> None:
-        super().__init__(kNvfp4Quant)
+        super().__init__(kNvfp4Dynamic)
 
     def get_inputs(self) -> list[torch.Tensor]:
         result = self.empty_quant(5, 32)

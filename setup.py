@@ -646,6 +646,9 @@ class precompiled_wheel_utils:
                 triton_kernels_regex = re.compile(
                     r"vllm/third_party/triton_kernels/(?:[^/.][^/]*/)*(?!\.)[^/]*\.py"
                 )
+                flashmla_regex = re.compile(
+                    r"vllm/third_party/flashmla/(?:[^/.][^/]*/)*(?!\.)[^/]*\.py"
+                )
                 file_members = list(
                     filter(lambda x: x.filename in files_to_copy, wheel.filelist)
                 )
@@ -656,6 +659,9 @@ class precompiled_wheel_utils:
                     filter(
                         lambda x: triton_kernels_regex.match(x.filename), wheel.filelist
                     )
+                )
+                file_members += list(
+                    filter(lambda x: flashmla_regex.match(x.filename), wheel.filelist)
                 )
 
                 for file in file_members:
@@ -925,6 +931,10 @@ if _is_cuda():
     ):
         # FA3 requires CUDA 12.3 or later
         ext_modules.append(CMakeExtension(name="vllm.vllm_flash_attn._vllm_fa3_C"))
+    if envs.VLLM_USE_PRECOMPILED or (
+        CUDA_HOME and get_nvcc_cuda_version() >= Version("12.9")
+    ):
+        # FlashMLA requires CUDA 12.9 or later
         # Optional since this doesn't get built (produce an .so file) when
         # not targeting a hopper system
         ext_modules.append(CMakeExtension(name="vllm._flashmla_C", optional=True))

@@ -261,7 +261,6 @@ class GroupedTopKRouter(BaseRouter):
         num_fused_shared_experts: int = 0,
         enable_eplb: bool = False,
         indices_type_getter: Callable[[], torch.dtype | None] | None = None,
-        routing_method_type: RoutingMethodType | None = None,
     ):
         super().__init__(
             top_k=top_k,
@@ -278,13 +277,12 @@ class GroupedTopKRouter(BaseRouter):
         self.e_score_correction_bias = e_score_correction_bias
         self.num_fused_shared_experts = num_fused_shared_experts
 
-        # Determine routing method type
-        if routing_method_type is not None:
-            self._routing_method_type = routing_method_type
-        elif scoring_func == "sigmoid":
+        if scoring_func == "sigmoid":
             self._routing_method_type = RoutingMethodType.DeepSeekV3
         else:
-            self._routing_method_type = RoutingMethodType.TopK
+            # NOTE: this prohibits the FLASHINFER_TRTLLM kernels from
+            # being selected, since they only support DeepSeek-style.
+            self._routing_method_type = RoutingMethodType.Unspecified
 
     @property
     def routing_method_type(self) -> RoutingMethodType:

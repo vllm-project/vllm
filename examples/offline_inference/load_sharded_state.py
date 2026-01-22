@@ -9,14 +9,12 @@ Example usage:
 
 python save_sharded_state.py \
     --model /path/to/load \
-    --quantization deepspeedfp \
     --tensor-parallel-size 8 \
     --output /path/to/save/sharded/model
 
 python load_sharded_state.py \
     --model /path/to/saved/sharded/model \
     --load-format sharded_state \
-    --quantization deepspeedfp \
     --tensor-parallel-size 8 \
     --prompt "Hello, my name is" \
     --max-tokens 50

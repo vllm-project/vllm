@@ -935,9 +935,20 @@ class ChameleonForConditionalGeneration(
         multimodal_config = vllm_config.model_config.multimodal_config
         self.config = config
         self.multimodal_config = multimodal_config
-        self.model = ChameleonModel(
-            vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model")
-        )
+
+        with self._mark_composite_model(
+            vllm_config,
+            language_targets=(
+                ChameleonDecoderLayer
+                if not self.config.swin_norm
+                else ChameleonSwinDecoderLayer
+            ),
+            tower_targets={"image": ChameleonVQVAE},
+        ):
+            self.model = ChameleonModel(
+                vllm_config=vllm_config,
+                prefix=maybe_prefix(prefix, "model"),
+            )
 
         self.lm_head = ParallelLMHead(
             config.vocab_size,
@@ -969,9 +980,6 @@ class ChameleonForConditionalGeneration(
             data=pixel_values,
             resolve_bindings={"h": expected_h, "w": expected_w},
         )
-
-    def get_language_model(self) -> torch.nn.Module:
-        return self.model
 
     def embed_multimodal(self, **kwargs: object) -> MultiModalEmbeddings:
         image_input = self._parse_and_validate_image_input(**kwargs)

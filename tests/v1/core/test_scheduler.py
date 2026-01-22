@@ -2560,15 +2560,14 @@ def test_ec_connector_cache_hit_external_load(use_kv_connector):
         mm_positions=mm_positions,
     )[0]
 
-    # Mock cache hit - encoder cache exists externally
-    scheduler.ec_connector.has_caches = Mock(return_value=[True])
+    # Mock cache hit - encoder cache has_exists externally
+    scheduler.ec_connector.has_cache_item = Mock(return_value=True)
     scheduler.ec_connector.update_state_after_alloc = Mock(
         wraps=scheduler.ec_connector.update_state_after_alloc
     )
 
     scheduler.add_request(request)
     output = scheduler.schedule()
-
     # Should schedule prompt tokens
     scheduled_tokens = output.num_scheduled_tokens[request.request_id]
     assert scheduled_tokens == NUM_TOKENS
@@ -2611,7 +2610,7 @@ def test_ec_connector_cache_miss_computes_locally(use_kv_connector):
     )[0]
 
     # Mock cache miss - encoder cache doesn't exist externally
-    scheduler.ec_connector.has_caches = Mock(return_value=[False])
+    scheduler.ec_connector.has_cache_item = Mock(return_value=False)
 
     scheduler.add_request(request_mm_missed)
     output = scheduler.schedule()
@@ -2665,7 +2664,7 @@ def test_ec_connector_with_partial_cache_hit_multi_round(use_kv_connector):
             PlaceholderRange(offset=250, length=NUM_ENCODER_TOKENS_1),
         ]
     ]
-
+    has_cache_item_result_map_1 = {"hash1_A": False, "hash1_B": True, "hash1_F": True}
     # Create request with 4 MM items, with 2 identical items
     request1 = create_requests(
         num_requests=1,
@@ -2676,7 +2675,9 @@ def test_ec_connector_with_partial_cache_hit_multi_round(use_kv_connector):
     )[0]
 
     # Mock partial cache hit: 1st and 3rd missing, 2nd and 4th exist
-    scheduler.ec_connector.has_caches = Mock(return_value=[False, True, False, True])
+    scheduler.ec_connector.has_cache_item = Mock(
+        side_effect=lambda hash_val: has_cache_item_result_map_1[hash_val]
+    )
     scheduler.ec_connector.update_state_after_alloc = Mock(
         wraps=scheduler.ec_connector.update_state_after_alloc
     )
@@ -2736,7 +2737,12 @@ def test_ec_connector_with_partial_cache_hit_multi_round(use_kv_connector):
             PlaceholderRange(offset=250, length=NUM_ENCODER_TOKENS_2),
         ]
     ]
-
+    has_cache_item_result_map_2 = {
+        "hash1_C": True,
+        "hash1_D": False,
+        "hash1_E": False,
+        "hash1_A": True,
+    }
     request2 = create_requests(
         num_requests=1,
         num_tokens=NUM_TOKENS_2,
@@ -2746,7 +2752,9 @@ def test_ec_connector_with_partial_cache_hit_multi_round(use_kv_connector):
     )[0]
 
     # Mock partial cache hit: only hash1_A and hash1_C exist in connector
-    scheduler.ec_connector.has_caches = Mock(return_value=[True, False, False, True])
+    scheduler.ec_connector.has_cache_item = Mock(
+        side_effect=lambda hash_val: has_cache_item_result_map_2[hash_val]
+    )
 
     scheduler.add_request(request2)
     output = scheduler.schedule()
@@ -2821,9 +2829,9 @@ def test_ec_connector_schedule_multiple_requests(cache_exist, use_kv_connector):
 
     if cache_exist == "connector_only":
         # Cache exist in ec_connector
-        scheduler.ec_connector.has_caches = Mock(return_value=[True])
+        scheduler.ec_connector.has_cache_item = Mock(return_value=True)
     elif cache_exist == "no_where":
-        scheduler.ec_connector.has_caches = Mock(return_value=[False])
+        scheduler.ec_connector.has_cache_item = Mock(return_value=False)
 
     output = scheduler.schedule()
     assert len(output.scheduled_new_reqs) == len(requests)
@@ -2887,7 +2895,7 @@ def test_ec_connector_unable_to_allocate(use_kv_connector):
     )
 
     # Mock ec_connector load external cache behavior
-    scheduler.ec_connector.has_caches = Mock(return_value=[True])
+    scheduler.ec_connector.has_cache_item = Mock(return_value=True)
     scheduler.ec_connector.update_state_after_alloc = Mock(
         wraps=scheduler.ec_connector.update_state_after_alloc
     )
@@ -2984,7 +2992,7 @@ def test_priority_scheduling_ec_connector_preemption_and_resumption(
     )
 
     # Mock cache hit: Both cache exist in connector (at E->PD initially)
-    scheduler.ec_connector.has_caches = Mock(return_value=[True])
+    scheduler.ec_connector.has_cache_item = Mock(return_value=True)
     scheduler.ec_connector.update_state_after_alloc = Mock(
         wraps=scheduler.ec_connector.update_state_after_alloc
     )
@@ -3139,9 +3147,9 @@ def test_priority_scheduling_ec_connector_preemption_and_resumption(
 
     if cache_exist == "connector_only":
         # Cache exist in ec_connector
-        scheduler.ec_connector.has_caches = Mock(return_value=[True])
+        scheduler.ec_connector.has_cache_item = Mock(return_value=True)
     elif cache_exist == "no_where":
-        scheduler.ec_connector.has_caches = Mock(return_value=[False])
+        scheduler.ec_connector.has_cache_item = Mock(return_value=False)
 
     # 4th Schedule - this should trigger req_low resumption from waiting
     output = scheduler.schedule()
@@ -3259,8 +3267,8 @@ def test_ec_connector_allocate_encoder_tokens_with_external_load(use_kv_connecto
     )[0]
 
     # Mock cache hit: MM of request1 NOT cached remotely, request2 cached remotely
-    scheduler.ec_connector.has_caches = Mock(
-        side_effect=lambda req: [True, True, True] if req == request2 else [False]
+    scheduler.ec_connector.has_cache_item = Mock(
+        side_effect=lambda hash_value: hash_value in mm_hashes_list_2[0]
     )
     scheduler.ec_connector.update_state_after_alloc = Mock(
         wraps=scheduler.ec_connector.update_state_after_alloc

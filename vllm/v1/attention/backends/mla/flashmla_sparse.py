@@ -33,7 +33,8 @@ from vllm.v1.attention.backends.utils import (
     split_prefill_chunks,
 )
 from vllm.v1.attention.ops.flashmla import (
-    flash_mla_sparse_prefill,
+    FlashMLASchedMeta,
+    flash_mla_sparse_fwd,
     flash_mla_with_kvcache,
     get_mla_metadata,
 )
@@ -142,8 +143,7 @@ class FlashMLASparseMetadata(AttentionMetadata):
 
     @dataclass
     class FP8KernelMetadata:
-        scheduler_metadata: torch.Tensor | None
-        num_splits: torch.Tensor
+        scheduler_metadata: FlashMLASchedMeta
         dummy_block_table: torch.Tensor
         cache_lens: torch.Tensor
 
@@ -468,7 +468,7 @@ class FlashMLASparseMetadataBuilder(AttentionMetadataBuilder[FlashMLASparseMetad
         padded_heads = self.fp8_decode_padded_heads
 
         # Build metadata for all tokens as a single batch
-        tile_scheduler_metadata, num_splits = get_mla_metadata(
+        scheduler_metadata, _ = get_mla_metadata(
             cache_seqlens=self.topk_tokens_tensor[:1],  # Single batch
             num_q_tokens_per_head_k=num_tokens * padded_heads,
             topk=self.topk_tokens,
@@ -477,17 +477,8 @@ class FlashMLASparseMetadataBuilder(AttentionMetadataBuilder[FlashMLASparseMetad
             is_fp8_kvcache=True,
         )
 
-        num_sm_parts = tile_scheduler_metadata.size(0)
-        tile_scheduler_metadata_buffer = self.tile_scheduler_metadata_buffer[
-            :num_sm_parts
-        ]
-        tile_scheduler_metadata_buffer.copy_(tile_scheduler_metadata)
-        num_splits_view = self.num_splits_buffer[:2]
-        num_splits_view.copy_(num_splits)
-
         fp8_metadata = FlashMLASparseMetadata.FP8KernelMetadata(
-            scheduler_metadata=tile_scheduler_metadata_buffer,
-            num_splits=num_splits_view,
+            scheduler_metadata=scheduler_metadata,
             cache_lens=self.max_model_len_tensor[:1],
             dummy_block_table=self.dummy_block_table[:1],
         )
@@ -620,7 +611,7 @@ class FlashMLASparseMetadataBuilder(AttentionMetadataBuilder[FlashMLASparseMetad
 
             # Use padded head count since that's what the kernel will see
             padded_heads = self.fp8_decode_padded_heads
-            tile_scheduler_metadata, num_splits = get_mla_metadata(
+            scheduler_metadata, _ = get_mla_metadata(
                 cache_seqlens=self.topk_tokens_tensor[:num_decodes],
                 num_q_tokens_per_head_k=decode_query_len * padded_heads,
                 topk=self.topk_tokens,
@@ -629,19 +620,8 @@ class FlashMLASparseMetadataBuilder(AttentionMetadataBuilder[FlashMLASparseMetad
                 is_fp8_kvcache=True,
             )
 
-            num_sm_parts = tile_scheduler_metadata.size(0)
-            # Copy to persistent buffer for full-CG support
-            tile_scheduler_metadata_buffer = self.tile_scheduler_metadata_buffer[
-                :num_sm_parts
-            ]
-            tile_scheduler_metadata_buffer.copy_(tile_scheduler_metadata)
-            # num_splits has size [num_decodes + 1]
-            num_splits_view = self.num_splits_buffer[: num_decodes + 1]
-            num_splits_view.copy_(num_splits)
-
             kernel_meta = FlashMLASparseMetadata.FP8KernelMetadata(
-                scheduler_metadata=tile_scheduler_metadata_buffer,
-                num_splits=num_splits_view,
+                scheduler_metadata=scheduler_metadata,
                 dummy_block_table=self.dummy_block_table[:num_decodes],
                 cache_lens=self.max_model_len_tensor[:num_decodes],
             )
@@ -949,7 +929,6 @@ class FlashMLASparseImpl(MLACommonBaseImpl[FlashMLASparseMetadata]):
             head_dim_v=512,
             cache_seqlens=kernel_metadata.cache_lens,
             tile_scheduler_metadata=kernel_metadata.scheduler_metadata,
-            num_splits=kernel_metadata.num_splits,
             is_fp8_kvcache=True,
             indices=topk_indices,
             softmax_scale=self.softmax_scale,
@@ -985,7 +964,7 @@ class FlashMLASparseImpl(MLACommonBaseImpl[FlashMLASparseMetadata]):
             q = q_padded
 
         topk_indices = topk_indices.view(num_tokens, 1, -1)
-        output = flash_mla_sparse_prefill(
+        output = flash_mla_sparse_fwd(
             q, kv_c_and_k_pe_cache, topk_indices, self.softmax_scale
         )[0]
         output = output[:, : self.num_heads, :]

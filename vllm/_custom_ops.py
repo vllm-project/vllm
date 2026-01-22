@@ -2177,9 +2177,33 @@ def topk_softmax(
     token_expert_indices: torch.Tensor,
     gating_output: torch.Tensor,
     renormalize: bool = False,
+    e_score_correction_bias: torch.Tensor | None = None,
 ) -> None:
     torch.ops._moe_C.topk_softmax(
-        topk_weights, topk_ids, token_expert_indices, gating_output, renormalize
+        topk_weights,
+        topk_ids,
+        token_expert_indices,
+        gating_output,
+        renormalize,
+        e_score_correction_bias,
+    )
+
+
+def topk_sigmoid(
+    topk_weights: torch.Tensor,
+    topk_ids: torch.Tensor,
+    token_expert_indices: torch.Tensor,
+    gating_output: torch.Tensor,
+    renormalize: bool = False,
+    e_score_correction_bias: torch.Tensor | None = None,
+) -> None:
+    torch.ops._moe_C.topk_sigmoid(
+        topk_weights,
+        topk_ids,
+        token_expert_indices,
+        gating_output,
+        renormalize,
+        e_score_correction_bias,
     )
 
 
@@ -2431,9 +2455,32 @@ def concat_and_cache_mla_rope_fused(
 
 
 def swap_blocks(
-    src: torch.Tensor, dst: torch.Tensor, block_mapping: torch.Tensor
+    src: torch.Tensor,
+    dst: torch.Tensor,
+    block_size_in_bytes: int,
+    block_mapping: torch.Tensor,
 ) -> None:
-    torch.ops._C_cache_ops.swap_blocks(src, dst, block_mapping)
+    """
+    Copy specific blocks from one tensor to another.
+
+    This method assumes each of the two input tensors is composed of
+    consecutive contiguous blocks, of size block_size_in_bytes.
+    i.e. the memory layout for each tensor is:
+    [block0] [block1] ... [block N]
+
+    block_mapping determines the subset of blocks to copy of the source tensor,
+    and their matching destination block number on the destination tensor.
+    block_mapping is expected to be a tensor of shape (num_blocks_to_copy, 2)
+    where each block_mapping[i] represents a single copy operation, copying
+    block #block_mapping[i][0] from the source tensor
+    to block #block_mapping[i][1] on the destination tensor.
+    block_mapping should have dtype int64.
+
+    The source and the destination tensors can be either on cpu or gpu,
+    but not both on cpu.
+    the block mapping tensor must on cpu.
+    """
+    torch.ops._C_cache_ops.swap_blocks(src, dst, block_size_in_bytes, block_mapping)
 
 
 def convert_fp8(

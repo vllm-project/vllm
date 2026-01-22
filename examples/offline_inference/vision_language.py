@@ -287,6 +287,40 @@ def run_dots_ocr(questions: list[str], modality: str) -> ModelRequestData:
     )
 
 
+# Eagle2.5-VL
+def run_eagle2_5(questions: list[str], modality: str) -> ModelRequestData:
+    assert modality == "image"
+
+    model_name = "nvidia/Eagle2.5-8B"
+
+    engine_args = EngineArgs(
+        model=model_name,
+        max_model_len=4096,
+        max_num_seqs=2,
+        trust_remote_code=True,
+        limit_mm_per_prompt={modality: 1},
+    )
+
+    tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
+    messages = [
+        [{"role": "user", "content": f"<image>\n{question}"}] for question in questions
+    ]
+    prompts = tokenizer.apply_chat_template(
+        messages, tokenize=False, add_generation_prompt=True
+    )
+
+    # Stop tokens for Eagle2.5 (Qwen2 based)
+    stop_tokens = ["<|endoftext|>", "<|im_start|>", "<|im_end|>"]
+    stop_token_ids = [tokenizer.convert_tokens_to_ids(i) for i in stop_tokens]
+    stop_token_ids = [token_id for token_id in stop_token_ids if token_id is not None]
+
+    return ModelRequestData(
+        engine_args=engine_args,
+        prompts=prompts,
+        stop_token_ids=stop_token_ids,
+    )
+
+
 # Ernie4.5-VL
 def run_ernie45_vl(questions: list[str], modality: str) -> ModelRequestData:
     model_name = "baidu/ERNIE-4.5-VL-28B-A3B-PT"
@@ -1919,6 +1953,7 @@ model_example_map = {
     "deepseek_vl_v2": run_deepseek_vl2,
     "deepseek_ocr": run_deepseek_ocr,
     "dots_ocr": run_dots_ocr,
+    "eagle2_5": run_eagle2_5,
     "ernie45_vl": run_ernie45_vl,
     "fuyu": run_fuyu,
     "gemma3": run_gemma3,
