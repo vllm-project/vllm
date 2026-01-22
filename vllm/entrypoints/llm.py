@@ -897,7 +897,7 @@ class LLM:
         tools: list[dict[str, Any]] | None = None,
         tokenization_kwargs: dict[str, Any] | None = None,
         mm_processor_kwargs: dict[str, Any] | None = None,
-    ) -> list[EnginePrompt]:
+    ) -> list[TextPrompt | TokensPrompt]:
         """
         Convert a list of conversations into prompts so that they can then
         be used as input for other LLM APIs.
@@ -910,24 +910,35 @@ class LLM:
         """
         renderer = self.llm_engine.renderer
 
-        chat_params = ChatParams(
-            chat_template=chat_template,
-            chat_template_content_format=chat_template_content_format,
-            chat_template_kwargs=merge_kwargs(
-                chat_template_kwargs,
-                dict(
-                    add_generation_prompt=add_generation_prompt,
-                    continue_final_message=continue_final_message,
-                    tools=tools,
-                    tokenize=isinstance(renderer.tokenizer, MistralTokenizer),
-                ),
-            ),
-        )
-        tok_params = self._get_chat_tok_params(tokenization_kwargs)
+        # Handle multi and single conversations
+        if is_list_of(messages, list):
+            # messages is list[list[...]]
+            list_of_messages = cast(list[list[ChatCompletionMessageParam]], messages)
+        else:
+            # messages is list[...]
+            list_of_messages = [cast(list[ChatCompletionMessageParam], messages)]
 
-        engine_prompts = list[EnginePrompt]()
-        for conversation in self._normalize_conversations(conversations):
-            _, in_prompt = renderer.render_messages(conversation, chat_params)
+        renderer = self.llm_engine.renderer
+
+        chat_template_kwargs = {
+            "chat_template": chat_template,
+            "add_generation_prompt": add_generation_prompt,
+            "continue_final_message": continue_final_message,
+            "tools": tools,
+            **(chat_template_kwargs or {}),
+        }
+
+        prompts = list[TextPrompt | TokensPrompt]()
+
+        for msgs in list_of_messages:
+            # NOTE: renderer.render_messages() currently doesn't
+            # handle mm_processor_kwargs, since there is no implementation in
+            # the chat message parsing for it.
+            _, prompt = renderer.render_messages(
+                msgs,
+                chat_template_content_format=chat_template_content_format,
+                **chat_template_kwargs,
+            )
             if mm_processor_kwargs is not None:
                 in_prompt["mm_processor_kwargs"] = mm_processor_kwargs
 

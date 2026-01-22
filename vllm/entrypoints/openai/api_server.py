@@ -22,6 +22,7 @@ from starlette.datastructures import State
 import vllm.envs as envs
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.protocol import EngineClient
+from vllm.entrypoints.anthropic.serving import AnthropicServingMessages
 from vllm.entrypoints.chat_utils import load_chat_template
 from vllm.entrypoints.launcher import serve_http
 from vllm.entrypoints.logger import RequestLogger
@@ -43,7 +44,6 @@ from vllm.entrypoints.serve.tokenize.serving import OpenAIServingTokenization
 from vllm.entrypoints.utils import (
     cli_env_setup,
     log_non_default_args,
-    log_version_and_model,
     process_lora_modules,
 )
 from vllm.logger import init_logger
@@ -284,7 +284,20 @@ async def init_app_state(
     state.log_stats = not args.disable_log_stats
     state.vllm_config = vllm_config
     state.args = args
+    supported_tasks = await engine_client.get_supported_tasks()
+    logger.info("Supported tasks: %s", supported_tasks)
+
     resolved_chat_template = load_chat_template(args.chat_template)
+
+    if args.tool_server == "demo":
+        tool_server: ToolServer | None = DemoToolServer()
+        assert isinstance(tool_server, DemoToolServer)
+        await tool_server.init_and_validate()
+    elif args.tool_server:
+        tool_server = MCPToolServer()
+        await tool_server.add_tool_server(args.tool_server)
+    else:
+        tool_server = None
 
     # Merge default_mm_loras into the static lora_modules
     default_mm_loras = (

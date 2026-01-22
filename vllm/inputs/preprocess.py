@@ -17,7 +17,6 @@ from vllm.multimodal.inputs import (
     MultiModalUUIDDict,
 )
 from vllm.multimodal.processing import BaseMultiModalProcessor
-from vllm.multimodal.video_sparse import SimilarFrameDetector, is_multimodal_efs_enabled
 from vllm.renderers import renderer_from_config
 from vllm.tokenizers import TokenizerLike
 from vllm.utils.jsontree import json_iter_leaves

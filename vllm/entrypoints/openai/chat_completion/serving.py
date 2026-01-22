@@ -184,6 +184,8 @@ class OpenAIServingChat(OpenAIServing):
         start_time = time.perf_counter()
 
         try:
+            renderer = self.engine_client.renderer
+
             # Create a minimal dummy request
             dummy_request = ChatCompletionRequest(
                 messages=[{"role": "user", "content": "warmup"}],
@@ -198,6 +200,7 @@ class OpenAIServingChat(OpenAIServing):
             # 3. Tokenizer initialization for chat
             await self._preprocess_chat(
                 dummy_request,
+                renderer,
                 dummy_request.messages,
                 default_template=self.chat_template,
                 default_template_content_format=self.chat_template_content_format,
@@ -296,6 +299,7 @@ class OpenAIServingChat(OpenAIServing):
 
                 conversation, engine_prompts = await self._preprocess_chat(
                     request,
+                    renderer,
                     request.messages,
                     default_template=self.chat_template,
                     default_template_content_format=self.chat_template_content_format,
@@ -446,7 +450,6 @@ class OpenAIServingChat(OpenAIServing):
 
         # Streaming response
         tokenizer = self.renderer.tokenizer
-        assert tokenizer is not None
 
         if request.stream:
             return self.chat_completion_stream_generator(

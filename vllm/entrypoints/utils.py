@@ -6,20 +6,15 @@ import dataclasses
 import functools
 import os
 from argparse import Namespace
-from logging import Logger
-from string import Template
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import regex as re
 from fastapi import Request
 from fastapi.responses import JSONResponse, StreamingResponse
 from starlette.background import BackgroundTask, BackgroundTasks
 
-from vllm import envs
 from vllm.engine.arg_utils import EngineArgs
-from vllm.inputs import EmbedsPrompt, TokensPrompt
-from vllm.inputs.parse import get_prompt_len
-from vllm.logger import current_formatter_type, init_logger
+from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.utils.argparse_utils import FlexibleArgumentParser
 

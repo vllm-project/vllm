@@ -64,13 +64,15 @@ class ServingClassification(OpenAIServing):
         and prepare model-specific inputs.
         """
         try:
-            ctx.lora_request = self._maybe_get_adapters(ctx.request)
+            request_obj = ctx.request
 
-            if isinstance(ctx.request, ClassificationChatRequest):
-                error_check_ret = self._validate_chat_template(
-                    request_chat_template=ctx.request.chat_template,
-                    chat_template_kwargs=ctx.request.chat_template_kwargs,
-                    trust_request_chat_template=self.trust_request_chat_template,
+            if isinstance(request_obj, ClassificationChatRequest):
+                chat_request = request_obj
+                messages = chat_request.messages
+                trust_request_chat_template = getattr(
+                    self,
+                    "trust_request_chat_template",
+                    False,
                 )
                 if error_check_ret:
                     return error_check_ret
@@ -87,7 +89,7 @@ class ServingClassification(OpenAIServing):
 
                 _, engine_prompts = await self._preprocess_chat(
                     cast(ChatCompletionRequest, chat_request),
-                    ctx.tokenizer,
+                    self.renderer,
                     messages,
                     chat_template=(
                         chat_request.chat_template
@@ -115,7 +117,7 @@ class ServingClassification(OpenAIServing):
                     ctx.engine_prompts = []
                     return None
 
-                renderer = self._get_renderer(ctx.tokenizer)
+                renderer = self._get_completion_renderer()
                 prompt_input = cast(str | list[str], input_data)
                 ctx.engine_prompts = await renderer.render_prompt(
                     prompt_or_prompts=prompt_input,
