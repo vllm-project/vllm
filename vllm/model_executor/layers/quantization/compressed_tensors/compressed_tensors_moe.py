@@ -351,8 +351,8 @@ class CompressedTensorsW4A4Mxfp4MoEMethod(CompressedTensorsMoEMethod):
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        assert self.moe_mk is not None
-        return self.moe_mk(
+        assert self.kernel is not None
+        return self.kernel(
             x,
             layer.w13_weight,
             layer.w2_weight,
@@ -1075,8 +1075,8 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
         topk_ids: torch.Tensor,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         assert not self.is_monolithic
-        assert self.moe_mk is not None
-        return self.moe_mk(
+        assert self.kernel is not None
+        return self.kernel(
             x,
             layer.w13_weight,
             layer.w2_weight,
@@ -1695,35 +1695,9 @@ class CompressedTensorsWNA16MarlinMoEMethod(CompressedTensorsMoEMethod):
         self,
         layer: FusedMoE,
         x: torch.Tensor,
-        router_logits: torch.Tensor,
-    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        assert self.kernel_backend == "Flashinfer"
-        return flashinfer_trtllm_mxint4_moe(
-            x=x,
-            router_logits=router_logits,
-            w13_weight_packed=layer.w13_weight_packed,
-            w13_weight_scale=layer.w13_weight_scale,
-            w2_weight_packed=layer.w2_weight_packed,
-            w2_weight_scale=layer.w2_weight_scale,
-            global_num_experts=layer.global_num_experts,
-            top_k=layer.top_k,
-            intermediate_size_per_partition=layer.intermediate_size_per_partition,
-            local_num_experts=layer.local_num_experts,
-            ep_rank=layer.ep_rank,
-            num_expert_group=layer.num_expert_group,
-            topk_group=layer.topk_group,
-            e_score_correction_bias=layer.e_score_correction_bias,
-            routing_method_type=layer.routing_method_type,
-        )
-
-    def apply(
-        self,
-        layer: FusedMoE,
-        x: torch.Tensor,
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        assert self.kernel_backend == "Marlin"
         return fused_marlin_moe(
             x,
             layer.w13_weight_packed,
