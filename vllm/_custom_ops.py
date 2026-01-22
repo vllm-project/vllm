@@ -12,6 +12,7 @@ from vllm.scalar_type import ScalarType
 from vllm.utils.flashinfer import (
     flashinfer_quant_nvfp4_8x4_sf_layout,
 )
+from vllm.utils.math_utils import cdiv
 from vllm.utils.torch_utils import direct_register_custom_op
 
 logger = init_logger(__name__)
@@ -1070,41 +1071,6 @@ def get_cutlass_moe_mm_data(
     )
 
 
-def get_cutlass_moe_mm_problem_sizes(
-    topk_ids: torch.Tensor,
-    problem_sizes1: torch.Tensor,
-    problem_sizes2: torch.Tensor,
-    num_experts: int,
-    n: int,
-    k: int,
-    blockscale_offsets: torch.Tensor | None = None,
-    force_swap_ab: bool | None = None,
-):
-    """
-    Compute only the per-expert problem sizes needed by the two grouped matrix
-    multiplications used in CUTLASS-based fused MoE.
-
-    The function takes in topk_ids (token→expert mapping) and computes:
-    - problem_sizes1, problem_sizes2: M×N×K sizes of each expert's
-                                    multiplication for the two grouped MMs
-                                    used in the fused MoE operation.
-    Optional:
-    - force_swap_ab: If set to True or False, explicitly enable or disable the
-                     A/B input swap optimization. If None (default), the swap
-                     is selected automatically based on tensor sizes.
-    """
-    return torch.ops._C.get_cutlass_moe_mm_problem_sizes(
-        topk_ids,
-        problem_sizes1,
-        problem_sizes2,
-        num_experts,
-        n,
-        k,
-        blockscale_offsets,
-        force_swap_ab,
-    )
-
-
 def get_cutlass_moe_mm_problem_sizes_from_expert_offsets(
     expert_first_token_offset: torch.Tensor,
     problem_sizes1: torch.Tensor,
@@ -2099,6 +2065,12 @@ def wvSplitK(
     return torch.ops._rocm_C.wvSplitK(a, b, bias, cu_count)
 
 
+def wvSplitKrc(
+    a: torch.Tensor, b: torch.Tensor, cu_count: int, bias: torch.Tensor = None
+) -> torch.Tensor:
+    return torch.ops._rocm_C.wvSplitKrc(a, b, bias, cu_count)
+
+
 def wvSplitKQ(
     a: torch.Tensor,
     b: torch.Tensor,
@@ -2232,9 +2204,33 @@ def topk_softmax(
     token_expert_indices: torch.Tensor,
     gating_output: torch.Tensor,
     renormalize: bool = False,
+    e_score_correction_bias: torch.Tensor | None = None,
 ) -> None:
     torch.ops._moe_C.topk_softmax(
-        topk_weights, topk_ids, token_expert_indices, gating_output, renormalize
+        topk_weights,
+        topk_ids,
+        token_expert_indices,
+        gating_output,
+        renormalize,
+        e_score_correction_bias,
+    )
+
+
+def topk_sigmoid(
+    topk_weights: torch.Tensor,
+    topk_ids: torch.Tensor,
+    token_expert_indices: torch.Tensor,
+    gating_output: torch.Tensor,
+    renormalize: bool = False,
+    e_score_correction_bias: torch.Tensor | None = None,
+) -> None:
+    torch.ops._moe_C.topk_sigmoid(
+        topk_weights,
+        topk_ids,
+        token_expert_indices,
+        gating_output,
+        renormalize,
+        e_score_correction_bias,
     )
 
 
@@ -3132,10 +3128,6 @@ def matmul_ada_mxf4_bf16_tn(
     return torch.ops._qutlass_C.matmul_ada_mxf4_bf16_tn(a, b, a_sf, b_sf, alpha)
 
 
-def ceil_div(a, b):
-    return (a + b - 1) // b
-
-
 if hasattr(torch.ops._qutlass_C, "fusedQuantizeMxQuest"):
 
     @register_fake("_qutlass_C::fusedQuantizeMxQuest")
@@ -3169,8 +3161,8 @@ def fusedQuantizeMx(
     )
 
     rows, cols = a.numel() // a.size(-1), a.size(-1) // 32
-    n_row_blocks = ceil_div(rows, 128)
-    n_col_blocks = ceil_div(cols, 4)
+    n_row_blocks = cdiv(rows, 128)
+    n_col_blocks = cdiv(cols, 4)
     padded_rows = n_row_blocks * 128
     padded_cols = n_col_blocks * 4
 
@@ -3213,8 +3205,8 @@ def fusedQuantizeNv(
     )
 
     rows, cols = a.numel() // a.size(-1), a.size(-1) // 16
-    n_row_blocks = ceil_div(rows, 128)
-    n_col_blocks = ceil_div(cols, 4)
+    n_row_blocks = cdiv(rows, 128)
+    n_col_blocks = cdiv(cols, 4)
     padded_rows = n_row_blocks * 128
     padded_cols = n_col_blocks * 4
     xh_e4m3 = torch.empty(

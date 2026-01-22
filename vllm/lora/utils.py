@@ -5,12 +5,7 @@ import os
 from typing import TYPE_CHECKING, Optional
 
 import huggingface_hub
-from huggingface_hub.utils import (
-    EntryNotFoundError,
-    HfHubHTTPError,
-    HFValidationError,
-    RepositoryNotFoundError,
-)
+from huggingface_hub.utils import HfHubHTTPError, HFValidationError
 from torch import nn
 from transformers import PretrainedConfig
 
@@ -25,6 +20,7 @@ from vllm.lora.layers import (
     FusedMoE3DWithLoRA,
     FusedMoEWithLoRA,
     LogitsProcessorWithLoRA,
+    MergedColumnParallelLinearVariableSliceWithLoRA,
     MergedColumnParallelLinearWithLoRA,
     MergedColumnParallelLinearWithShardedLoRA,
     MergedQKVParallelLinearWithLoRA,
@@ -68,6 +64,7 @@ _all_lora_classes: set[type[BaseLayerWithLoRA]] = {
     ColumnParallelLinearWithShardedLoRA,
     QKVParallelLinearWithShardedLoRA,
     MergedColumnParallelLinearWithShardedLoRA,
+    MergedColumnParallelLinearVariableSliceWithLoRA,
     MergedQKVParallelLinearWithShardedLoRA,
     RowParallelLinearWithShardedLoRA,
     FusedMoEWithLoRA,
@@ -241,12 +238,7 @@ def get_adapter_absolute_path(lora_path: str) -> str:
     # If the path does not exist locally, assume it's a Hugging Face repo.
     try:
         local_snapshot_path = huggingface_hub.snapshot_download(repo_id=lora_path)
-    except (
-        HfHubHTTPError,
-        RepositoryNotFoundError,
-        EntryNotFoundError,
-        HFValidationError,
-    ):
+    except (HfHubHTTPError, HFValidationError):
         # Handle errors that may occur during the download
         # Return original path instead of throwing error here
         logger.exception("Error downloading the HuggingFace model")
@@ -266,9 +258,13 @@ def process_packed_modules_mapping(model: nn.Module) -> dict[str, list[str]]:
             packed_modules_mapping = get_packed_modules_mapping(model)
             if not model.is_3d_moe_weight:
                 # 3D MoE LoRA does not need `packed_modules_mapping`
+                # Filter out malformed entries: non-gated MoE has empty
+                # ckpt_up_proj_name which results in weight_name containing ".."
+                # (e.g., "experts.0.." instead of "experts.0.layer_name.")
                 packed_modules_mapping["experts"] = [
                     weight_name.rstrip(".")
                     for _, weight_name, _, _ in moe_packed_mapping
+                    if ".." not in weight_name
                 ]
 
             return packed_modules_mapping
