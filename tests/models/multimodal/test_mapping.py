@@ -128,6 +128,8 @@ def test_hf_model_weights_mapper(model_arch: str):
     ref_weight_names = set(map(lambda x: x[0], mapped_original_weights))
     weight_names = set(map(lambda x: x[0], mapped_hf_converted_weights))
     buffer_names = set(map(lambda x: x[0], mapped_hf_converted_buffers))
+
+    # Some checkpoints may have buffers, we ignore them for this test
     ref_weight_names -= buffer_names
 
     # Filter out tied weights that don't exist in the checkpoint

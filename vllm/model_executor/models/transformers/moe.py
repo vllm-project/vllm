@@ -156,6 +156,9 @@ class MoEMixin(MixtureOfExperts):
         Params for weights, fp8 weight scales, fp8 activation scales
         (param_name, weight_name, expert_id, shard_id)
         """
+        if getattr(self, "_has_packed_experts", False):
+            return []
+
         ckpt_names = [
             # (ckpt_gate_proj_name, ckpt_down_proj_name, ckpt_up_proj_name)
             ("gate_proj", "down_proj", "up_proj"),  # Most common MoE style
@@ -180,6 +183,37 @@ class MoEMixin(MixtureOfExperts):
 
     def recursive_replace(self):
         """Initialize the MoE layers."""
+
+        # Handle packed 3D experts (transformers >= 5.0.0)
+        def _detect_packed_experts(model):
+            for module in model.modules():
+                if hasattr(module, "experts"):
+                    params = list(module.experts.parameters())
+                    if len(params) > 0 and all(p.ndim == 3 for p in params):
+                        return True
+            return False
+
+        self._has_packed_experts = _detect_packed_experts(self.model)
+        if self._has_packed_experts:
+            from vllm.logger import init_logger
+
+            init_logger(__name__).warning_once(
+                "Detected packed 3D experts (transformers >= 5.0). "
+                "Using native HuggingFace MoE implementation."
+            )
+            self.mlp_moe_layers = []
+            self.moe_layers = []
+            self.expert_weights = []
+            self.num_moe_layers = 0
+            self.num_expert_groups = 1
+            self.num_logical_experts = self.model_config.get_num_experts()
+            self.num_physical_experts = self.num_logical_experts
+            self.num_local_physical_experts = self.num_logical_experts
+            self.num_routed_experts = self.num_logical_experts
+            self.num_shared_experts = 0
+            self.num_redundant_experts = 0
+            return
+
         text_config = self.text_config
 
         # Positional arguments

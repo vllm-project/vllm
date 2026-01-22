@@ -176,12 +176,33 @@ class Base(
 
         # Set correct attn and init on "meta" to delay allocating GPU tensors
         self.text_config._attn_implementation = "vllm"
-        with init_on_device_without_buffers("meta"):
-            self.model: PreTrainedModel = AutoModel.from_config(
-                self.config,
-                dtype=self.model_config.dtype,
+
+        # Check for packed experts (transformers >= 5.0)
+        self._has_packed_experts = self._check_packed_experts_config()
+
+        if self._has_packed_experts:
+            # For packed expert models, use from_pretrained to handle
+            # the packed weight format correctly
+            logger.info(
+                "Using from_pretrained for packed expert model (transformers >= 5.0)"
+            )
+            from transformers import AutoModelForCausalLM
+
+            self._packed_full_model = AutoModelForCausalLM.from_pretrained(
+                self.model_config.model,
+                config=self.config,
+                torch_dtype=self.model_config.dtype,
                 trust_remote_code=self.model_config.trust_remote_code,
             )
+            self.model: PreTrainedModel = self._packed_full_model.model
+            self._packed_lm_head = self._packed_full_model.lm_head
+        else:
+            with init_on_device_without_buffers("meta"):
+                self.model: PreTrainedModel = AutoModel.from_config(
+                    self.config,
+                    dtype=self.model_config.dtype,
+                    trust_remote_code=self.model_config.trust_remote_code,
+                )
 
         # Remove layers not on this pipeline parallel rank
         self.pipeline_parallel()
@@ -195,31 +216,52 @@ class Base(
         if not isinstance(input_embeddings, PPMissingLayer):
             # Some models scale embeddings inside the input embedding layer
             self.embed_scale = getattr(input_embeddings, "embed_scale", None)
-            names = ("embedding_size", "hidden_size")
-            embedding_dim = getattr_iter(self.text_config, names, None)
-            assert embedding_dim is not None
-            self.model.set_input_embeddings(
-                VocabParallelEmbedding(
-                    self.text_config.vocab_size,
-                    embedding_dim=embedding_dim,
-                    org_num_embeddings=self.text_config.vocab_size,
-                    quant_config=self.quant_config,
+            if not getattr(self, "_has_packed_experts", False):
+                names = ("embedding_size", "hidden_size")
+                embedding_dim = getattr_iter(self.text_config, names, None)
+                assert embedding_dim is not None
+                self.model.set_input_embeddings(
+                    VocabParallelEmbedding(
+                        self.text_config.vocab_size,
+                        embedding_dim=embedding_dim,
+                        org_num_embeddings=self.text_config.vocab_size,
+                        quant_config=self.quant_config,
+                    )
                 )
-            )
 
         # Initialize any parameters that have not had their modules replaced
-        self.init_parameters(self.model)
+        if not getattr(self, "_has_packed_experts", False):
+            self.init_parameters(self.model)
 
         # Pipeline parallel intermediate tensors
         self.make_empty_intermediate_tensors = make_empty_intermediate_tensors_factory(
             ["hidden_states"], self.text_config.hidden_size
         )
 
+    def _check_packed_experts_config(self) -> bool:
+        """Check if model uses packed 3D experts (transformers >= 5.0)."""
+        # Only relevant for transformers >= 5.0.0
+        if Version(transformers.__version__) < Version("5.0.0.dev0"):
+            return False
+        model_type = getattr(self.config, "model_type", "").lower()
+        if model_type in ["olmoe"]:
+            return True
+        if hasattr(self.config, "num_experts") or hasattr(
+            self.config, "num_local_experts"
+        ):
+            for arch in getattr(self.config, "architectures", []):
+                if "moe" in arch.lower():
+                    return True
+        return False
+
     def pipeline_parallel(self):
         """
         Apply the model's pipeline parallelization plan.
         """
         if self.pp_group.world_size <= 1:
+            return
+
+        if getattr(self, "_has_packed_experts", False):
             return
 
         if not self.model.supports_pp_plan:
@@ -281,6 +323,9 @@ class Base(
         - `nn.Linear` with vLLM's tensor parallel linear classes
         - `*RMSNorm` with vLLM's `RMSNorm`
         """
+        if getattr(self, "_has_packed_experts", False):
+            return
+
         tp_plan = self.model.tp_plan
 
         if not tp_plan and self.tp_group.world_size > 1:
@@ -482,6 +527,13 @@ class Base(
         self,
         weights: Iterable[tuple[str, torch.Tensor]],
     ) -> set[str]:
+        if getattr(self, "_has_packed_experts", False):
+            logger.info("Packed experts: weights loaded via from_pretrained")
+            # Consume the generator
+            for _ in weights:
+                pass
+            return set(name for name, _ in self.named_parameters())
+
         loader = AutoWeightsLoader(
             self,
             skip_prefixes=self.skip_prefixes,

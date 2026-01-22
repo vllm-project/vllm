@@ -79,14 +79,22 @@ def test_models(
 
     installed = Version(transformers.__version__)
     required = Version("5.0.0.dev")
-    if model == "allenai/OLMoE-1B-7B-0924" and installed < required:
-        pytest.skip(
-            "MoE models with the Transformers modeling backend require "
-            f"transformers>={required}, but got {installed}"
-        )
+    if model == "allenai/OLMoE-1B-7B-0924":
+        if installed < required:
+            pytest.skip(
+                "MoE models with the Transformers modeling backend require "
+                f"transformers>={required}, but got {installed}"
+            )
+        kwargs_test = {"model_impl": model_impl, "enforce_eager": True}
+    else:
+        kwargs_test = {"model_impl": model_impl}
 
     check_implementation(
-        hf_runner, vllm_runner, example_prompts, model, model_impl=model_impl
+        hf_runner,
+        vllm_runner,
+        example_prompts,
+        model,
+        kwargs_test=kwargs_test,
     )
 
 

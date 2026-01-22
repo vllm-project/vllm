@@ -42,16 +42,21 @@ class CausalMixin(VllmModelForTextGeneration):
             self.skip_prefixes.append("lm_head.")
 
         if self.pp_group.is_last_rank:
-            self.lm_head = ParallelLMHead(
-                self.text_config.vocab_size,
-                self.text_config.hidden_size,
-                quant_config=self.quant_config,
-                prefix=maybe_prefix(prefix, "lm_head"),
-            )
-            if self.text_config.tie_word_embeddings:
-                self.lm_head = self.lm_head.tie_weights(
-                    self.model.get_input_embeddings()
+            if getattr(self, "_has_packed_experts", False) and hasattr(
+                self, "_packed_lm_head"
+            ):
+                self.lm_head = self._packed_lm_head
+            else:
+                self.lm_head = ParallelLMHead(
+                    self.text_config.vocab_size,
+                    self.text_config.hidden_size,
+                    quant_config=self.quant_config,
+                    prefix=maybe_prefix(prefix, "lm_head"),
                 )
+                if self.text_config.tie_word_embeddings:
+                    self.lm_head = self.lm_head.tie_weights(
+                        self.model.get_input_embeddings()
+                    )
 
             logit_scale = getattr(self.text_config, "logit_scale", 1.0)
             self.logits_processor = LogitsProcessor(
@@ -61,5 +66,14 @@ class CausalMixin(VllmModelForTextGeneration):
             self.lm_head = PPMissingLayer()
 
     def compute_logits(self, hidden_states: "torch.Tensor") -> "torch.Tensor | None":
+        if getattr(self, "_has_packed_experts", False) and not hasattr(
+            self.lm_head, "quant_method"
+        ):
+            logits = self.lm_head(hidden_states)
+            logit_scale = getattr(self.text_config, "logit_scale", 1.0)
+            if logit_scale != 1.0:
+                logits = logits * logit_scale
+            return logits
+
         logits = self.logits_processor(self.lm_head, hidden_states)
         return logits
