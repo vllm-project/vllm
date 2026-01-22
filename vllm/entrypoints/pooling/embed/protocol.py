@@ -15,7 +15,7 @@ from vllm.entrypoints.pooling.base.protocol import (
     CompletionRequestMixin,
     PoolingBasicRequestMixin,
 )
-from vllm.renderers import TokenizationParams
+from vllm.renderers import TokenizeParams
 from vllm.utils import random_uuid
 from vllm.utils.serial_utils import EmbedDType, EncodingFormat, Endianness
 
@@ -50,7 +50,7 @@ class EmbeddingCompletionRequest(PoolingBasicRequestMixin, CompletionRequestMixi
     )
     # --8<-- [end:embedding-extra-params]
 
-    def build_tok_params(self, model_config: ModelConfig) -> TokenizationParams:
+    def build_tok_params(self, model_config: ModelConfig) -> TokenizeParams:
         pooler_config = model_config.pooler_config
 
         if pooler_config and pooler_config.enable_chunked_processing:
@@ -58,7 +58,7 @@ class EmbeddingCompletionRequest(PoolingBasicRequestMixin, CompletionRequestMixi
         else:
             max_length = pooler_config.max_embed_len or model_config.max_model_len
 
-        return TokenizationParams.from_config(
+        return TokenizeParams.from_config(
             model_config,
             max_length=max_length,
             truncate_prompt_tokens=self.truncate_prompt_tokens,
@@ -104,7 +104,7 @@ class EmbeddingChatRequest(PoolingBasicRequestMixin, ChatRequestMixin):
     )
     # --8<-- [end:chat-embedding-extra-params]
 
-    def build_tok_params(self, model_config: ModelConfig) -> TokenizationParams:
+    def build_tok_params(self, model_config: ModelConfig) -> TokenizeParams:
         pooler_config = model_config.pooler_config
 
         if pooler_config and pooler_config.enable_chunked_processing:
@@ -112,7 +112,7 @@ class EmbeddingChatRequest(PoolingBasicRequestMixin, ChatRequestMixin):
         else:
             max_length = pooler_config.max_embed_len or model_config.max_model_len
 
-        return TokenizationParams.from_config(
+        return TokenizeParams.from_config(
             model_config,
             max_length=max_length,
             truncate_prompt_tokens=self.truncate_prompt_tokens,

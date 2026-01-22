@@ -15,7 +15,7 @@ from vllm.entrypoints.pooling.base.protocol import (
     CompletionRequestMixin,
     PoolingBasicRequestMixin,
 )
-from vllm.renderers import TokenizationParams
+from vllm.renderers import TokenizeParams
 from vllm.utils import random_uuid
 
 
@@ -38,8 +38,8 @@ class ClassificationCompletionRequest(PoolingBasicRequestMixin, CompletionReques
     )
     # --8<-- [end:classification-extra-params]
 
-    def build_tok_params(self, model_config: ModelConfig) -> TokenizationParams:
-        return TokenizationParams.from_config(
+    def build_tok_params(self, model_config: ModelConfig) -> TokenizeParams:
+        return TokenizeParams.from_config(
             model_config,
             max_length=model_config.max_model_len,
             truncate_prompt_tokens=self.truncate_prompt_tokens,
@@ -77,8 +77,8 @@ class ClassificationChatRequest(PoolingBasicRequestMixin, ChatRequestMixin):
     )
     # --8<-- [end:chat-classification-extra-params]
 
-    def build_tok_params(self, model_config: ModelConfig) -> TokenizationParams:
-        return TokenizationParams.from_config(
+    def build_tok_params(self, model_config: ModelConfig) -> TokenizeParams:
+        return TokenizeParams.from_config(
             model_config,
             max_length=model_config.max_model_len,
             truncate_prompt_tokens=self.truncate_prompt_tokens,

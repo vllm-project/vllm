@@ -43,7 +43,7 @@ class ChatParserParams:
 
 
 @dataclass(frozen=True)
-class TokenizationParams:
+class TokenizeParams:
     """Configuration to control how prompts are tokenized."""
 
     max_length: int | None = None
@@ -68,11 +68,11 @@ class TokenizationParams:
         truncate_prompt_tokens: int | None = None,
         add_special_tokens: bool = True,
         needs_detokenization: bool = False,
-    ) -> "TokenizationParams":
+    ) -> "TokenizeParams":
         if truncate_prompt_tokens is not None and truncate_prompt_tokens < 0:
             truncate_prompt_tokens = model_config.max_model_len
 
-        return TokenizationParams(
+        return TokenizeParams(
             max_length=max_length,
             truncate_prompt_tokens=truncate_prompt_tokens,
             add_special_tokens=add_special_tokens,

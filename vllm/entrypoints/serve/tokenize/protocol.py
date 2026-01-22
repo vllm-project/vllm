@@ -17,7 +17,7 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
 from vllm.entrypoints.openai.engine.protocol import (
     OpenAIBaseModel,
 )
-from vllm.renderers import ChatParserParams, TokenizationParams
+from vllm.renderers import ChatParserParams, TokenizeParams
 
 
 class TokenizeCompletionRequest(OpenAIBaseModel):
@@ -38,8 +38,8 @@ class TokenizeCompletionRequest(OpenAIBaseModel):
         ),
     )
 
-    def build_tok_params(self, model_config: ModelConfig) -> TokenizationParams:
-        return TokenizationParams.from_config(
+    def build_tok_params(self, model_config: ModelConfig) -> TokenizeParams:
+        return TokenizeParams.from_config(
             model_config,
             add_special_tokens=self.add_special_tokens,
         )
@@ -132,8 +132,8 @@ class TokenizeChatRequest(OpenAIBaseModel):
             ),
         ).with_defaults(self.chat_template_kwargs)
 
-    def build_tok_params(self, model_config: ModelConfig) -> TokenizationParams:
-        return TokenizationParams.from_config(
+    def build_tok_params(self, model_config: ModelConfig) -> TokenizeParams:
+        return TokenizeParams.from_config(
             model_config,
             add_special_tokens=self.add_special_tokens,
         )
@@ -153,8 +153,8 @@ class DetokenizeRequest(OpenAIBaseModel):
     model: str | None = None
     tokens: list[int]
 
-    def build_tok_params(self, model_config: ModelConfig) -> TokenizationParams:
-        return TokenizationParams.from_config(
+    def build_tok_params(self, model_config: ModelConfig) -> TokenizeParams:
+        return TokenizeParams.from_config(
             model_config,
             needs_detokenization=True,
         )

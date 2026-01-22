@@ -108,7 +108,7 @@ from vllm.multimodal import MultiModalDataDict
 from vllm.outputs import CompletionOutput, PoolingRequestOutput, RequestOutput
 from vllm.pooling_params import PoolingParams
 from vllm.reasoning import ReasoningParser, ReasoningParserManager
-from vllm.renderers import ChatParserParams, TokenizationParams
+from vllm.renderers import ChatParserParams, TokenizeParams
 from vllm.sampling_params import BeamSearchParams, SamplingParams
 from vllm.tokenizers import TokenizerLike
 from vllm.tool_parsers import ToolParser, ToolParserManager
@@ -138,7 +138,7 @@ logger = init_logger(__name__)
 
 
 class RendererRequest(Protocol):
-    def build_tok_params(self, model_config: ModelConfig) -> TokenizationParams:
+    def build_tok_params(self, model_config: ModelConfig) -> TokenizeParams:
         raise NotImplementedError
 
 

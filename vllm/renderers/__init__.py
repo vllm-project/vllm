@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from .params import ChatParserParams, TokenizationParams
+from .params import ChatParserParams, TokenizeParams
 from .protocol import RendererLike
 from .registry import RendererRegistry, renderer_from_config
 
@@ -10,5 +10,5 @@ __all__ = [
     "RendererRegistry",
     "renderer_from_config",
     "ChatParserParams",
-    "TokenizationParams",
+    "TokenizeParams",
 ]

@@ -10,7 +10,7 @@ from vllm.utils.async_utils import AsyncMicrobatchTokenizer
 from vllm.utils.collection_utils import is_list_of
 
 from .embed_utils import safe_load_prompt_embeds
-from .params import TokenizationParams
+from .params import TokenizeParams
 
 if TYPE_CHECKING:
     from vllm.config import ModelConfig
@@ -113,7 +113,7 @@ class RendererLike(Protocol):
     def tokenize_prompt(
         self,
         prompt: TextPrompt | TokensPrompt | EmbedsPrompt,
-        params: TokenizationParams,
+        params: TokenizeParams,
     ) -> TokensPrompt | EmbedsPrompt:
         if "prompt_token_ids" not in prompt and "prompt_embeds" not in prompt:
             prompt = params.apply_pre_tokenization(prompt)
@@ -141,7 +141,7 @@ class RendererLike(Protocol):
     async def tokenize_prompt_async(
         self,
         prompt: TextPrompt | TokensPrompt | EmbedsPrompt,
-        params: TokenizationParams,
+        params: TokenizeParams,
     ) -> TokensPrompt | EmbedsPrompt:
         if "prompt_token_ids" not in prompt and "prompt_embeds" not in prompt:
             prompt = params.apply_pre_tokenization(prompt)

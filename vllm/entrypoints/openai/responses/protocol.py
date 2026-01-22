@@ -67,7 +67,7 @@ from vllm.entrypoints.chat_utils import (
 from vllm.entrypoints.openai.engine.protocol import OpenAIBaseModel
 from vllm.exceptions import VLLMValidationError
 from vllm.logger import init_logger
-from vllm.renderers import ChatParserParams, TokenizationParams
+from vllm.renderers import ChatParserParams, TokenizeParams
 from vllm.sampling_params import (
     RequestOutputKind,
     SamplingParams,
@@ -257,7 +257,7 @@ class ResponsesRequest(OpenAIBaseModel):
             ),
         )
 
-    def build_tok_params(self, model_config: ModelConfig) -> TokenizationParams:
+    def build_tok_params(self, model_config: ModelConfig) -> TokenizeParams:
         max_tokens = self.max_output_tokens
 
         # Validate max_tokens before using it
@@ -269,7 +269,7 @@ class ResponsesRequest(OpenAIBaseModel):
                 value=max_tokens,
             )
 
-        return TokenizationParams.from_config(
+        return TokenizeParams.from_config(
             model_config,
             max_length=model_config.max_model_len - (max_tokens or 0),
             truncate_prompt_tokens=self.truncation != "disabled",

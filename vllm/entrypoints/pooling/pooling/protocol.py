@@ -14,7 +14,7 @@ from vllm.entrypoints.pooling.embed.protocol import (
     EmbeddingChatRequest,
     EmbeddingCompletionRequest,
 )
-from vllm.renderers import TokenizationParams
+from vllm.renderers import TokenizeParams
 from vllm.tasks import PoolingTask
 from vllm.utils import random_uuid
 from vllm.utils.serial_utils import EmbedDType, EncodingFormat, Endianness
@@ -37,8 +37,8 @@ class PoolingCompletionRequest(EmbeddingCompletionRequest):
         "for other tasks, this value should be None.",
     )
 
-    def build_tok_params(self, model_config: ModelConfig) -> TokenizationParams:
-        return TokenizationParams.from_config(
+    def build_tok_params(self, model_config: ModelConfig) -> TokenizeParams:
+        return TokenizeParams.from_config(
             model_config,
             max_length=model_config.max_model_len,
             truncate_prompt_tokens=self.truncate_prompt_tokens,
@@ -70,8 +70,8 @@ class PoolingChatRequest(EmbeddingChatRequest):
         "for other tasks, this value should be None.",
     )
 
-    def build_tok_params(self, model_config: ModelConfig) -> TokenizationParams:
-        return TokenizationParams.from_config(
+    def build_tok_params(self, model_config: ModelConfig) -> TokenizeParams:
+        return TokenizeParams.from_config(
             model_config,
             max_length=model_config.max_model_len,
             truncate_prompt_tokens=self.truncate_prompt_tokens,

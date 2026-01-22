@@ -25,7 +25,7 @@ from vllm.entrypoints.openai.engine.protocol import (
 from vllm.exceptions import VLLMValidationError
 from vllm.logger import init_logger
 from vllm.logprobs import Logprob
-from vllm.renderers import TokenizationParams
+from vllm.renderers import TokenizeParams
 from vllm.sampling_params import (
     BeamSearchParams,
     RequestOutputKind,
@@ -177,7 +177,7 @@ class CompletionRequest(OpenAIBaseModel):
 
     # --8<-- [end:completion-extra-params]
 
-    def build_tok_params(self, model_config: ModelConfig) -> TokenizationParams:
+    def build_tok_params(self, model_config: ModelConfig) -> TokenizeParams:
         max_tokens = self.max_tokens
 
         # Validate max_tokens before using it
@@ -189,7 +189,7 @@ class CompletionRequest(OpenAIBaseModel):
                 value=max_tokens,
             )
 
-        return TokenizationParams.from_config(
+        return TokenizeParams.from_config(
             model_config,
             max_length=model_config.max_model_len - (max_tokens or 0),
             truncate_prompt_tokens=self.truncate_prompt_tokens,
