@@ -5,7 +5,7 @@ import glob
 import itertools
 import math
 import os
-from collections.abc import Callable, Generator
+from collections.abc import Callable, Generator, Iterable
 from typing import Any
 
 import numpy as np
@@ -386,8 +386,8 @@ class BitsAndBytesModelLoader(BaseModelLoader):
                 #   w2_weight: [num_experts, hidden_size, intermediate_size]
                 num_experts = weight_tensor.shape[0]
 
-                # Transpose to match FusedMoE layout: [n_exp, out, in]
-                weight_tensor = weight_tensor.transpose(-1, -2).contiguous()
+                # Transpose to FusedMoE layout: [n_exp, out, in]
+                weight_tensor = weight_tensor.transpose(-1, -2)
 
                 # Quantize each expert separately and store their quant states
                 quantized_experts = []
@@ -434,12 +434,23 @@ class BitsAndBytesModelLoader(BaseModelLoader):
                     quantized_experts.append(quantized)
                     quant_states_list.append(quant_state)
 
-                # Stack quantized experts
+                # Stack quantized experts to match param shape
+                # quantize_4bit returns [quantized_size, 1], so after stack:
+                # Output shape: [num_experts, quantized_size, 1]
                 processed_weight = torch.stack(quantized_experts, dim=0)
+
+                # Custom weight_loader for direct copy in _wrap_3d_moe_iterator
+                def fused_moe_weight_loader(param, loaded_weight):
+                    param.data.copy_(loaded_weight)
+                    return True
+
+                set_weight_attrs(
+                    processed_weight,
+                    {"fused_moe_weight_loader": fused_moe_weight_loader},
+                )
 
                 # Store quant states as a list for later fusion
                 quant_state_dict[mapped_weight_name] = quant_states_list
-
 
             elif is_regular_target:
                 # Without sharding
@@ -523,7 +534,6 @@ class BitsAndBytesModelLoader(BaseModelLoader):
                 processed_weight = weight_tensor
             yield org_weight_name, processed_weight
 
-
     def _get_bnb_target_modules(self, model: nn.Module) -> None:
         """
         Identify and collect all modules that support BitsAndBytes
@@ -576,7 +586,6 @@ class BitsAndBytesModelLoader(BaseModelLoader):
                         rep_name = base + weight_name.removesuffix(".")
                         self.target_modules.append(rep_name)
 
-
         assert self.target_modules, (
             "vLLM currently does not support BNB quantization for"
         )
@@ -616,7 +625,6 @@ class BitsAndBytesModelLoader(BaseModelLoader):
                                 "experts", ""
                             ) + weight_name.removesuffix(".")
                             self.column_sharded_weights_modules.append(rep_name)
-
 
     def _verify_model_compatibility(
         self, model: nn.Module, model_config: ModelConfig
@@ -838,7 +846,6 @@ class BitsAndBytesModelLoader(BaseModelLoader):
             gate_up_states = quant_states_dict[gate_up_key]  # list of QuantState
             down_states = quant_states_dict[down_key]  # list of QuantState
 
-
             # Dequantize nested states
             for qs in gate_up_states:
                 self._dequantize_dq(qs)
@@ -895,7 +902,6 @@ class BitsAndBytesModelLoader(BaseModelLoader):
             del quant_states_dict[down_key]
 
         return expert_qs_dict
-
 
     def _stack_quantization_states(
         self, model: nn.Module, quant_state_dict: dict
@@ -993,7 +999,22 @@ class BitsAndBytesModelLoader(BaseModelLoader):
             model_config.revision,
         )
         weights_to_load = {name for name, _ in model.named_parameters()}
-        loaded_weights = model.load_weights(qweight_iterator)
+
+        # For 3D MoE models with BNB, wrap the iterator to handle 3D MoE
+        # weights inline. This avoids materializing all weights into memory.
+        if self.is_3d_moe_weight:
+            bnb_loaded_weights: set[str] = set()
+            wrapped_iterator = self._wrap_3d_moe_iterator(
+                model, qweight_iterator, bnb_loaded_weights
+            )
+            loaded_weights = model.load_weights(wrapped_iterator)
+            # Merge the BNB-loaded weights with the model-loaded weights
+            if loaded_weights is not None:
+                loaded_weights = loaded_weights | bnb_loaded_weights
+        else:
+            # Standard loading for non-3D-MoE models
+            loaded_weights = model.load_weights(qweight_iterator)
+
         # Some models may have weights loading tracker unimplemented.
         if loaded_weights is not None:
             weights_not_loaded = weights_to_load - loaded_weights
@@ -1017,3 +1038,47 @@ class BitsAndBytesModelLoader(BaseModelLoader):
 
     def download_model(self, model_config: ModelConfig) -> None:
         self._prepare_weights(model_config.model, model_config.revision)
+
+    def _wrap_3d_moe_iterator(
+        self,
+        model: nn.Module,
+        weights_iterator: Iterable[tuple[str, torch.Tensor]],
+        bnb_loaded_weights: set[str],
+    ) -> Generator[tuple[str, torch.Tensor], None, None]:
+        """Wrap weights iterator to intercept and directly load 3D MoE weights."""
+        params_dict = dict(model.named_parameters())
+
+        fused_expert_params_mapping = [
+            ("experts.w13_weight", "experts.gate_up_proj"),
+            ("experts.w2_weight", "experts.down_proj"),
+        ]
+
+        for org_name, loaded_weight in weights_iterator:
+            mapped_name = self.weight_mapper(org_name)
+
+            is_3d_moe_weight = (
+                "experts.gate_up_proj" in mapped_name
+                or "experts.down_proj" in mapped_name
+            ) and len(loaded_weight.shape) == 3
+
+            if not is_3d_moe_weight:
+                yield org_name, loaded_weight
+                continue
+
+            for model_suffix, checkpoint_suffix in fused_expert_params_mapping:
+                if checkpoint_suffix not in mapped_name:
+                    continue
+
+                param_name = mapped_name.replace(checkpoint_suffix, model_suffix)
+                if param_name not in params_dict:
+                    continue
+
+                param = params_dict[param_name]
+                fused_moe_weight_loader = getattr(
+                    loaded_weight, "fused_moe_weight_loader", None
+                )
+
+                if fused_moe_weight_loader is not None:
+                    if fused_moe_weight_loader(param, loaded_weight):
+                        bnb_loaded_weights.add(param_name)
+                break
