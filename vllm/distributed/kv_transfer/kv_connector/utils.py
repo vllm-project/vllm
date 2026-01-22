@@ -317,7 +317,6 @@ class TpKVTopology:
     engine_id: EngineId
     remote_block_size: dict[EngineId, int]
     tensor_shape: torch.Size | None = None
-    device_type: str = "cuda"
 
     def __post_init__(self):
         # Figure out whether the first dimension of the cache is K/V
@@ -351,10 +350,6 @@ class TpKVTopology:
             # permute kv_cache_shape according to stride_order
             kv_cache_shape = tuple(kv_cache_shape[i] for i in kv_cache_stride_order)
 
-            physical_kv_heads_position = kv_cache_shape.index(4)
-            assert physical_kv_heads_position is not None
-            self._physical_kv_heads_position = physical_kv_heads_position
-
             physical_block_size_position = kv_cache_shape.index(16)
             assert physical_block_size_position is not None
             self._physical_block_size_position = -(
@@ -387,11 +382,6 @@ class TpKVTopology:
     @property
     def block_size_position(self) -> int:
         return self._physical_block_size_position
-
-    @property
-    def physical_kv_heads_position(self) -> int:
-        assert self._physical_kv_heads_position is not None
-        return self._physical_kv_heads_position
 
     def tp_ratio(
         self,

@@ -1021,15 +1021,6 @@ class NixlConnectorWorker:
         self.consumer_notification_counts_by_req = defaultdict[ReqId, int](int)
         self.xfer_stats = NixlKVConnectorStats()
 
-        self.kv_topo = TpKVTopology(
-            tp_rank=self.tp_rank,
-            engine_id=self.engine_id,
-            remote_tp_size=self._tp_size,  # shared state
-            remote_block_size=self._block_size,  # shared state
-            is_mla=self.use_mla,
-            total_num_kv_heads=self.model_config.get_total_num_kv_heads(),
-            attn_backend=self.attn_backend,
-        )
         self._physical_blocks_per_logical_kv_block = 1
 
         self.enforce_compat_hash = self.kv_transfer_config.get_from_extra_config(
@@ -1740,8 +1731,10 @@ class NixlConnectorWorker:
         """
         remote_engine_id = nixl_agent_meta.engine_id
 
-        assert self._tp_size[remote_engine_id] == remote_tp_size
-        assert self.kv_topo is not None
+        assert (
+            self._tp_size[remote_engine_id] == remote_tp_size
+            and self.kv_topo is not None
+        )
 
         tp_ratio = self.kv_topo.tp_ratio_from_engine_id(remote_engine_id)
         block_size_ratio = self.kv_topo.block_size_ratio_from_engine_id(
@@ -1878,6 +1871,7 @@ class NixlConnectorWorker:
         if len(self.device_kv_caches) == 0:
             return
         assert block_size_ratio >= 1, "Only nP < nD supported currently."
+        assert self.kv_topo is not None
         if self.enable_permute_local_kv and block_size_ratio > 1:
             logger.debug(
                 "Post-processing device kv cache on receive by converting "
@@ -1897,7 +1891,6 @@ class NixlConnectorWorker:
                 block_size_ratio,
             )
 
-        assert self.kv_topo is not None
         split_k_and_v = self.kv_topo.split_k_and_v
 
         for block_ids in block_ids_list:
@@ -1923,10 +1916,9 @@ class NixlConnectorWorker:
         The scheduler process (via the MultiprocExecutor) will use this output
         to track which workers are done.
         """
+        assert self.kv_topo is not None
         done_sending = self._get_new_notifs()
         done_recving = self._pop_done_transfers(self._recving_transfers)
-
-        assert self.kv_topo is not None
 
         # add requests that skipped transfer to done_recving
         done_recving.update(self._failed_recv_reqs)
@@ -1994,6 +1986,7 @@ class NixlConnectorWorker:
         are reading from the same producer (heterogeneous TP scenario), wait
         for all consumers to be done pulling.
         """
+        assert self.kv_topo is not None
         notified_req_ids: set[str] = set()
         for notifs in self.nixl_wrapper.get_new_notifs().values():
             for notif in notifs:
@@ -2012,7 +2005,6 @@ class NixlConnectorWorker:
 
                 # NOTE: `tp_ratio` is the opposite when swapping local<>remote
                 n_consumers = int(tp_size)
-                assert self.kv_topo is not None
                 tp_ratio = self.kv_topo.tp_ratio(n_consumers)
 
                 # Number of reads *per producer* to wait for.
@@ -2154,8 +2146,7 @@ class NixlConnectorWorker:
                 self._reqs_to_send[req_id] = expiration_time
 
     def _read_blocks_for_req(self, req_id: str, meta: ReqMeta):
-        assert meta.remote is not None
-        assert self.kv_topo is not None
+        assert meta.remote is not None and self.kv_topo is not None
         remote_ranks = self.kv_topo.get_target_remote_ranks_from_engine_id(
             meta.remote.engine_id
         )
