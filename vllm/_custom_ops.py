@@ -2047,7 +2047,7 @@ def rocm_enforce_contiguous_skinny_gemm_inputs(
 
 # ROCm skinny gemms
 def LLMM1(a: torch.Tensor, b: torch.Tensor, rows_per_block: int) -> torch.Tensor:
-    a, b = rocm_enforce_contiguous_skinny_gemm_inputs(a, b)
+    a, b = rocm_enforce_contiguous_skinny_gemm_inputs("LLM1", a, b)
     return torch.ops._rocm_C.LLMM1("LLMM1", a, b, rows_per_block)
 
 
