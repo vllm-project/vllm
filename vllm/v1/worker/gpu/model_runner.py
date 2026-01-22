@@ -45,7 +45,11 @@ from vllm.v1.worker.gpu.input_batch import (
     prepare_pos_seq_lens,
     prepare_prefill_inputs,
 )
-from vllm.v1.worker.gpu.kv_connector import KVConnector, get_kv_connector
+from vllm.v1.worker.gpu.kv_connector import (
+    NO_OP_KV_CONNECTOR,
+    KVConnector,
+    get_kv_connector,
+)
 from vllm.v1.worker.gpu.mm.encoder_runner import EncoderRunner
 from vllm.v1.worker.gpu.mm.mrope_utils import MRopeState
 from vllm.v1.worker.gpu.sample.output import SamplerOutput
@@ -169,7 +173,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.tmp_cu_num_logits = UvaBufferPool(self.max_num_reqs + 1, torch.int32)
         self.tmp_query_start_loc = UvaBufferPool(self.max_num_reqs + 1, torch.int32)
 
-        self.kv_connector: KVConnector
+        self.kv_connector: KVConnector = NO_OP_KV_CONNECTOR
 
     def update_max_model_len(self, max_model_len: int) -> None:
         self.max_model_len = max_model_len

@@ -65,7 +65,6 @@ class ActiveKVConnector(KVConnector):
 
         if scheduler_output.preempted_req_ids:
             self.kv_connector.handle_preemptions(scheduler_output.preempted_req_ids)
-
         assert scheduler_output.kv_connector_metadata is not None
         self.kv_connector.bind_connector_metadata(
             scheduler_output.kv_connector_metadata
@@ -92,7 +91,6 @@ class ActiveKVConnector(KVConnector):
         output.invalid_block_ids = self.kv_connector.get_block_ids_with_load_errors()
         output.kv_connector_stats = self.kv_connector.get_kv_connector_stats()
         output.kv_cache_events = self.kv_connector.get_kv_connector_kv_cache_events()
-
         self.kv_connector.clear_connector_metadata()
         return output
 
@@ -114,10 +112,14 @@ class ActiveKVConnector(KVConnector):
         self._disabled = disabled
 
 
+NO_OP_KV_CONNECTOR = KVConnector()
+
+
 def get_kv_connector(
     vllm_config: VllmConfig, kv_caches_dict: dict[str, torch.Tensor]
 ) -> KVConnector:
     if not has_kv_transfer_group():
         # No-op connector.
-        return KVConnector()
+        return NO_OP_KV_CONNECTOR
+
     return ActiveKVConnector(vllm_config, kv_caches_dict)
