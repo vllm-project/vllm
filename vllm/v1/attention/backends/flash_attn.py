@@ -79,7 +79,7 @@ class FlashAttentionBackend(AttentionBackend):
             return [16, 32, 64]
         return [MultipleOf(16)]
 
-    forward_includes_kv_cache: bool = False
+    forward_includes_kv_cache_update: bool = False
 
     @staticmethod
     def get_name() -> str:

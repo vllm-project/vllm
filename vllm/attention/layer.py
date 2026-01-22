@@ -391,7 +391,7 @@ class Attention(nn.Module, AttentionLayerBase):
                 value = value.view(-1, self.num_kv_heads, self.head_size_v)
             if self.use_direct_call:
                 kv_cache_dummy_dep = None
-                if not self.attn_backend.forward_includes_kv_cache:
+                if not self.attn_backend.forward_includes_kv_cache_update:
                     kv_cache_dummy_dep = unified_kv_cache_update(
                         key, value, self.layer_name
                     )
@@ -405,7 +405,7 @@ class Attention(nn.Module, AttentionLayerBase):
                 )
             else:
                 kv_cache_dummy_dep = None
-                if not self.attn_backend.forward_includes_kv_cache and (
+                if not self.attn_backend.forward_includes_kv_cache_update and (
                     # torch can only dispatch custom op if a tensor is passed
                     key is not None or value is not None
                 ):
@@ -422,7 +422,7 @@ class Attention(nn.Module, AttentionLayerBase):
                 )
             return output.view(-1, hidden_size)
         else:
-            assert self.attn_backend.forward_includes_kv_cache, (
+            assert self.attn_backend.forward_includes_kv_cache_update, (
                 "Split KV cache update not supported when output tensor not provided."
             )
             if self.use_direct_call:

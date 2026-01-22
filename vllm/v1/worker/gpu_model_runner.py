@@ -3306,10 +3306,13 @@ class GPUModelRunner(
             )
 
             # True if any attention backend handles KV cache update separately
-            # from forward() (i.e., forward_includes_kv_cache=False). When true,
+            # from forward() (i.e., forward_includes_kv_cache_update=False). When true,
             # slot_mappings must use padded dimensions to match the key/value tensors.
             has_separate_kv_update = not all(
-                all(g.backend.forward_includes_kv_cache for g in self.attn_groups[id])
+                all(
+                    g.backend.forward_includes_kv_cache_update
+                    for g in self.attn_groups[id]
+                )
                 for id, spec in enumerate(self.kv_cache_config.kv_cache_groups)
                 if not isinstance(spec.kv_cache_spec, EncoderOnlyAttentionSpec)
             )

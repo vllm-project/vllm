@@ -13,7 +13,7 @@ from tests.v1.attention.utils import (
     create_common_attn_metadata,
     create_standard_kv_cache_spec,
     create_vllm_config,
-    try_backend_includes_kv_cache,
+    try_backend_includes_kv_cache_update,
     try_get_attention_backend,
 )
 from vllm.config import ModelConfig
@@ -296,7 +296,7 @@ def run_attention_backend(
     # Run forward pass
     # NOTE: The query, key, and value are already shaped correctly
     # in the calling test function.
-    if not try_backend_includes_kv_cache(actual_backend):
+    if not try_backend_includes_kv_cache_update(actual_backend):
         impl.do_kv_cache_update(
             mock_layer, key, value, kv_cache, attn_metadata.slot_mapping
         )

@@ -130,13 +130,13 @@ def try_get_attention_backend(
         raise AssertionError("unreachable") from None
 
 
-def try_backend_includes_kv_cache(
+def try_backend_includes_kv_cache_update(
     backend: AttentionBackendEnum,
 ) -> bool:
     """Try to get the attention backend class, skipping test if not found."""
     try:
         backend_class = backend.get_class()
-        return backend_class.forward_includes_kv_cache
+        return backend_class.forward_includes_kv_cache_update
     except ImportError as e:
         pytest.skip(f"{backend.name} not available: {e}")
         raise AssertionError("unreachable") from None

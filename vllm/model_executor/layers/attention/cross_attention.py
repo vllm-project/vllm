@@ -134,7 +134,7 @@ def create_cross_attention_backend(
             output_block_scale: torch.Tensor | None = None,
         ) -> torch.Tensor:
             if (
-                not underlying_attn_backend.forward_includes_kv_cache
+                not underlying_attn_backend.forward_includes_kv_cache_update
                 and attn_metadata is not None
             ):
                 self.do_kv_cache_update(
@@ -159,7 +159,7 @@ def create_cross_attention_backend(
         overrides={
             "get_builder_cls": lambda: CrossAttentionBuilder,
             "get_impl_cls": lambda: CrossAttentionImpl,
-            "forward_includes_kv_cache": True,
+            "forward_includes_kv_cache_update": True,
         },
     )
 

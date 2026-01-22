@@ -54,7 +54,7 @@ class AttentionBackend(ABC):
     supported_kv_cache_dtypes: ClassVar[list["CacheDType"]] = ["auto", "bfloat16"]
 
     # Does attention's forward() include kv cache update?
-    forward_includes_kv_cache: bool = True
+    forward_includes_kv_cache_update: bool = True
 
     @staticmethod
     def get_supported_kernel_block_sizes() -> list[int | MultipleOf]:
