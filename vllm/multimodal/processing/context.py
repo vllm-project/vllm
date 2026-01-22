@@ -178,6 +178,15 @@ def get_timing_stats_from_engine_client(
     for request_id, enc_dict in encoder_stats.items():
         if request_id in merged_stats:
             merged_stats[request_id].update(enc_dict)
+            continue
+
+        # In V1 engine, the request_id in encoder_stats has a suffix
+        # appended to the original request_id (which is used in
+        # preprocessing_stats).
+        # We try to strip the suffix to find the matching request.
+        possible_original_id = request_id.rpartition("-")[0]
+        if possible_original_id and possible_original_id in merged_stats:
+            merged_stats[possible_original_id].update(enc_dict)
         else:
             merged_stats[request_id] = dict(enc_dict)
 
