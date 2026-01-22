@@ -178,8 +178,9 @@ class TopKTopPSampler(nn.Module):
         if (k is None and p is None) or generators or (p is not None):
             if generators or (p is not None):
                 logger.warning_once(
-                    "aiter sampler does not support per-request generators; "
-                    "falling back to PyTorch-native."
+                    "aiter sampler does not support per-request generators "
+                    "or Top-P sampling; falling back to PyTorch-native"
+                    "to ensure correctness."
                 )
             return self.forward_native(logits, generators, k, p)
         assert self.logprobs_mode not in (
