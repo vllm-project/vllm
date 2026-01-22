@@ -5,7 +5,6 @@ import enum
 import math
 from collections.abc import Iterable, Mapping, Sequence
 from contextlib import nullcontext
-from functools import partial
 from typing import Annotated, Literal, cast
 
 import numpy as np
@@ -480,18 +479,14 @@ class WhisperEncoder(nn.Module):
             )
 
         maybe_fp32_init_ctx = (
-            set_default_torch_dtype(torch.float32)
-            if init_in_fp32
-            else nullcontext()
+            set_default_torch_dtype(torch.float32) if init_in_fp32 else nullcontext()
         )
 
         with (
             torch.no_grad(),
             maybe_fp32_init_ctx,
         ):
-            self.embed_positions = nn.Embedding(
-                self.max_source_positions, embed_dim
-            )
+            self.embed_positions = nn.Embedding(self.max_source_positions, embed_dim)
             self.embed_positions.weight.copy_(
                 sinusoids(*self.embed_positions.weight.shape)
             )

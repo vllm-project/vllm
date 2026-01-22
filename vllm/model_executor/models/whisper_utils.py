@@ -1,27 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-import copy
-import functools
-import math
-from dataclasses import replace
 
-import torch
-import torch.nn.functional as F
-from torch import nn
-
-from vllm.attention.layer import Attention
-from vllm.config import CacheConfig, VllmConfig
-from vllm.model_executor.layers.quantization import QuantizationConfig
-from vllm.v1.attention.backend import (
-    AttentionBackend,
-    AttentionMetadata,
-    AttentionType,
-    CommonAttentionMetadata,
-    subclass_attention_backend_with_overrides,
-)
-from vllm.v1.attention.backends.flash_attn import FlashAttentionBackend
-from vllm.v1.attention.selector import get_attn_backend
-from vllm.v1.kv_cache_interface import AttentionSpec
 
 # From https://platform.openai.com/docs/guides/speech-to-text/supported-languages
 ISO639_1_SUPPORTED_LANGS = {

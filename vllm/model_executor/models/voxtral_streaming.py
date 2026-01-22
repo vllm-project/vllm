@@ -42,29 +42,6 @@ from .utils import (
     _flatten_embeddings,
 )
 
-import copy
-import functools
-import math
-from dataclasses import replace
-
-import torch
-import torch.nn.functional as F
-from torch import nn
-
-from vllm.attention.layer import Attention
-from vllm.config import CacheConfig, VllmConfig
-from vllm.model_executor.layers.quantization import QuantizationConfig
-from vllm.v1.attention.backend import (
-    AttentionBackend,
-    AttentionMetadata,
-    AttentionType,
-    CommonAttentionMetadata,
-    subclass_attention_backend_with_overrides,
-)
-from vllm.v1.attention.backends.flash_attn import FlashAttentionBackend
-from vllm.v1.attention.selector import get_attn_backend
-from vllm.v1.kv_cache_interface import AttentionSpec
-
 logger = init_logger(__name__)
 
 
@@ -236,7 +213,11 @@ class VoxtralStreamingGeneration(VoxtralForConditionalGeneration):
         t_cond = self.time_embedding(time_tensor)
 
         hidden_states = self.language_model.model(
-            input_ids, positions, intermediate_tensors, inputs_embeds=inputs_embeds, t_cond=t_cond
+            input_ids,
+            positions,
+            intermediate_tensors,
+            inputs_embeds=inputs_embeds,
+            t_cond=t_cond,
         )
 
         return hidden_states
