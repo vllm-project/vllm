@@ -635,7 +635,7 @@ steps:
         allow_failure: false
     agents:
       queue: cpu_queue_postmerge
-    timeout_in_minutes: 120
+    timeout_in_minutes: 60
     commands:
       - |
         set -euo pipefail
@@ -660,6 +660,11 @@ steps:
         LOAD_OUTPUT=$$(gunzip -c artifacts/rocm-docker-image/rocm-base-image.tar.gz | docker load)
         BASE_IMAGE_TAG=$$(echo "$${LOAD_OUTPUT}" | grep "Loaded image:" | sed 's/Loaded image: //')
         echo "Loaded base image: $${BASE_IMAGE_TAG}"
+
+        # Tag and push the base image to ECR
+        docker tag "$${BASE_IMAGE_TAG}" public.ecr.aws/q9t5s3a7/vllm-release-repo:$${BUILDKITE_COMMIT}-rocm-base
+        docker push public.ecr.aws/q9t5s3a7/vllm-release-repo:$${BUILDKITE_COMMIT}-rocm-base
+        echo "Pushed base image: public.ecr.aws/q9t5s3a7/vllm-release-repo:$${BUILDKITE_COMMIT}-rocm-base"
 
         # Get GPU architectures from meta-data
         PYTORCH_ROCM_ARCH="$$(buildkite-agent meta-data get rocm-pytorch-rocm-arch 2>/dev/null || echo '')"
