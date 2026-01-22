@@ -125,9 +125,11 @@ class OpenAIServingPooling(OpenAIServing):
                 _, engine_prompts = await self._preprocess_chat(
                     request,
                     request.messages,
-                    default_template=self.chat_template,
-                    default_template_content_format=self.chat_template_content_format,
-                    default_template_kwargs=None,
+                    chat_template=request.chat_template or self.chat_template,
+                    chat_template_content_format=self.chat_template_content_format,
+                    add_generation_prompt=request.add_generation_prompt,
+                    continue_final_message=request.continue_final_message,
+                    add_special_tokens=request.add_special_tokens,
                 )
             elif isinstance(request, PoolingCompletionRequest):
                 engine_prompts = await self._preprocess_completion(

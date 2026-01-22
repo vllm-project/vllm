@@ -82,11 +82,44 @@ class ServingClassification(OpenAIServing):
                     default_template_content_format=self.chat_template_content_format,
                     default_template_kwargs=None,
                 )
-            elif isinstance(ctx.request, ClassificationCompletionRequest):
-                ctx.engine_prompts = await self._preprocess_completion(
-                    ctx.request,
-                    prompt_input=ctx.request.input,
-                    prompt_embeds=None,
+                if ret:
+                    return ret
+
+                _, engine_prompts = await self._preprocess_chat(
+                    cast(ChatCompletionRequest, chat_request),
+                    ctx.tokenizer,
+                    messages,
+                    chat_template=(
+                        chat_request.chat_template
+                        or getattr(self, "chat_template", None)
+                    ),
+                    chat_template_content_format=cast(
+                        ChatTemplateContentFormatOption,
+                        getattr(self, "chat_template_content_format", "auto"),
+                    ),
+                    add_generation_prompt=chat_request.add_generation_prompt,
+                    continue_final_message=chat_request.continue_final_message,
+                    add_special_tokens=chat_request.add_special_tokens,
+                )
+                ctx.engine_prompts = engine_prompts
+
+            elif isinstance(request_obj, ClassificationCompletionRequest):
+                completion_request = request_obj
+                input_data = completion_request.input
+                if input_data in (None, ""):
+                    return self.create_error_response(
+                        "Input or messages must be provided",
+                        status_code=HTTPStatus.BAD_REQUEST,
+                    )
+                if isinstance(input_data, list) and not input_data:
+                    ctx.engine_prompts = []
+                    return None
+
+                renderer = self._get_renderer(ctx.tokenizer)
+                prompt_input = cast(str | list[str], input_data)
+                ctx.engine_prompts = await renderer.render_prompt(
+                    prompt_or_prompts=prompt_input,
+                    config=self._build_render_config(completion_request),
                 )
             else:
                 return self.create_error_response("Invalid classification request type")
