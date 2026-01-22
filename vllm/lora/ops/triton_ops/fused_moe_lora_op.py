@@ -83,7 +83,10 @@ def _fused_moe_lora_kernel(
     # Meta-parameters
     num_slice_a: tl.constexpr,
     num_slice_c: tl.constexpr,
+    # top_k_num or 1 depending on input token
+    # is expanded by top_k or not
     input_token_stride: tl.constexpr,
+    # whether use naive block assignment
     naive_block_assignment: tl.constexpr,
     MUL_ROUTED_WEIGHT: tl.constexpr,
     BLOCK_SIZE_M: tl.constexpr,

@@ -229,7 +229,6 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
                 moe_state_dict["num_tokens_post_padded_lora"] = (
                     num_tokens_post_padded_lora
                 )
-                moe_state_dict["naive_block_assignment"] = naive_block_assignment
                 moe_state_dict["token_lora_mapping"] = token_lora_mapping
 
                 if not naive_block_assignment:
@@ -296,9 +295,7 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
                 num_tokens_post_padded_lora = moe_state_dict[
                     "num_tokens_post_padded_lora"
                 ]
-                naive_block_assignment = moe_state_dict.get(
-                    "naive_block_assignment", False
-                )
+                naive_block_assignment = sorted_token_ids_lora is None
                 token_lora_mapping = moe_state_dict.get("token_lora_mapping")
 
                 if not naive_block_assignment:
