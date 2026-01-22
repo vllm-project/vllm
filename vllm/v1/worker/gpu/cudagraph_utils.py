@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from collections.abc import Callable, Iterable
+from collections.abc import Callable
 from typing import Any
 
 import numpy as np
@@ -12,6 +12,7 @@ from vllm.config import VllmConfig
 from vllm.config.compilation import CUDAGraphMode
 from vllm.distributed.parallel_state import graph_capture, is_global_first_rank
 from vllm.forward_context import BatchDescriptor, set_forward_context
+from vllm.utils.math_utils import cdiv
 from vllm.v1.attention.backend import AttentionMetadataBuilder
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.worker.gpu.attn_utils import build_attn_metadata
@@ -50,6 +51,12 @@ class CudaGraphManager:
             self.cudagraph_mode,
         )
 
+        # Compute uniform decode query length for spec decode support
+        spec_config = vllm_config.speculative_config
+        self.uniform_decode_query_len = 1
+        if spec_config is not None:
+            self.uniform_decode_query_len = 1 + spec_config.num_speculative_tokens
+
         self.graphs: dict[int, torch.cuda.CUDAGraph] = {}
         self.pool = torch.cuda.graph_pool_handle()
         self.hidden_states: torch.Tensor | None = None
@@ -59,15 +66,9 @@ class CudaGraphManager:
 
     def get_cudagraph_size(
         self,
-        num_tokens_after_padding: int,
-        num_tokens_per_request: Iterable[int],
+        num_tokens: int,
     ) -> int | None:
-        return get_cudagraph_size(
-            num_tokens_after_padding,
-            num_tokens_per_request,
-            self.cudagraph_sizes,
-            self.cudagraph_mode,
-        )
+        return self.cudagraph_sizes.get(num_tokens)
 
     def capture_graph(
         self,
@@ -81,6 +82,7 @@ class CudaGraphManager:
         attn_metadata_builders: list[AttentionMetadataBuilder],
         kv_cache_config: KVCacheConfig,
         has_lora: bool = False,
+        uniform_decode: bool = False,
     ) -> None:
         # select and check capture function
         if capture_cudagraph_mode == CUDAGraphMode.PIECEWISE:
@@ -92,7 +94,13 @@ class CudaGraphManager:
                 f"Invalid capture_cudagraph_mode for capture: {capture_cudagraph_mode}"
             )
         # prepare inputs
-        num_reqs = min(num_tokens, self.max_num_reqs)
+        if uniform_decode:
+            num_reqs = min(
+                cdiv(num_tokens, self.uniform_decode_query_len),
+                self.max_num_reqs,
+            )
+        else:
+            num_reqs = min(num_tokens, self.max_num_reqs)
         input_ids = input_buffers.input_ids[:num_tokens]
         positions = input_buffers.positions[:num_tokens]
         if self.uses_mrope:
@@ -108,6 +116,9 @@ class CudaGraphManager:
             attn_metadata_builders,
             self.max_model_len,
             kv_cache_config,
+            uniform_decode_query_len=(
+                self.uniform_decode_query_len if uniform_decode else 0
+            ),
         )
         num_tokens_across_dp = make_num_tokens_across_dp(self.dp_size, num_tokens)
 
@@ -243,6 +254,7 @@ class CudaGraphManager:
                 capture_fn=self.capture_graph,
                 capture_cudagraph_mode=mixed_mode,
                 desc=f"Capturing CUDA graphs (mixed, {mixed_mode.name})",
+                uniform_decode=False,
                 **common_kwargs,
             )
 
@@ -259,6 +271,7 @@ class CudaGraphManager:
                 capture_fn=self.capture_graph,
                 capture_cudagraph_mode=CUDAGraphMode.FULL,
                 desc="Capturing CUDA graphs (decode, FULL)",
+                uniform_decode=True,
                 **common_kwargs,
             )
 
@@ -301,40 +314,13 @@ def get_cudagraph_sizes(
     return cudagraph_sizes
 
 
-def get_cudagraph_size(
-    num_tokens_after_dp_padding: int,
-    num_tokens_per_request: Iterable[int],
-    cudagraph_sizes: dict[int, int],
-    cudagraph_mode: CUDAGraphMode,
-) -> int | None:
-    if cudagraph_mode == CUDAGraphMode.NONE:
-        # No CUDA graph is used.
-        return None
-
-    size = cudagraph_sizes.get(num_tokens_after_dp_padding)
-    if size is None:
-        # No CUDA graph for this size.
-        return None
-
-    is_mixed = any(x > 1 for x in num_tokens_per_request)
-
-    if is_mixed:
-        # Mixed batch (has prefill tokens)
-        if cudagraph_mode.mixed_mode() == CUDAGraphMode.NONE:
-            return None
-    else:
-        # Pure decode batch
-        if cudagraph_mode.decode_mode() == CUDAGraphMode.NONE:
-            return None
-    return size
-
-
 def capture_graphs(
     cudagraph_sizes: dict[int, int],
     device: torch.device,
     capture_fn: Callable,
     capture_cudagraph_mode: CUDAGraphMode,
     desc: str = "Capturing CUDA graphs",
+    uniform_decode: bool = False,
     **capture_kwargs,
 ) -> None:
     # Capture larger graphs first.
@@ -344,7 +330,12 @@ def capture_graphs(
 
     with graph_capture(device=device):
         for size in sizes_to_capture:
-            capture_fn(size, capture_cudagraph_mode, **capture_kwargs)
+            capture_fn(
+                size,
+                capture_cudagraph_mode,
+                uniform_decode=uniform_decode,
+                **capture_kwargs,
+            )
 
 
 def prepare_inputs_to_capture(
@@ -355,8 +346,12 @@ def prepare_inputs_to_capture(
     attn_metadata_builders: list[AttentionMetadataBuilder],
     max_model_len: int,
     kv_cache_config: KVCacheConfig,
+    uniform_decode_query_len: int = 0,
 ) -> dict[str, Any]:
-    num_tokens_per_req = num_tokens // num_reqs
+    if uniform_decode_query_len > 0:
+        num_tokens_per_req = uniform_decode_query_len
+    else:
+        num_tokens_per_req = num_tokens // num_reqs
 
     query_start_loc_np = np.arange(num_reqs + 1, dtype=np.int32) * num_tokens_per_req
     query_start_loc_np[-1] = num_tokens

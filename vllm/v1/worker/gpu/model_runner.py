@@ -136,6 +136,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             self.do_spec_decode = False
             self.num_speculative_steps = 0
             self.speculator = None
+        self.uniform_decode_query_len = 1 + self.num_speculative_steps
 
         self.req_states = RequestState(
             max_num_reqs=self.max_num_reqs,
@@ -360,24 +361,34 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
     def _get_cudagraph_runtime_mode(
         self,
-        use_cudagraph: bool,
-        num_scheduled_tokens: np.ndarray,
-        dummy_run: bool,
-    ) -> CUDAGraphMode:
-        if not use_cudagraph:
-            return CUDAGraphMode.NONE
-
-        cudagraph_mode = self.cudagraph_manager.cudagraph_mode
-        # Check if this is a mixed batch (has prefill tokens, i.e., any request
-        # has more than 1 token scheduled).
-        is_mixed_batch = (
-            any(x > 1 for x in num_scheduled_tokens) if not dummy_run else False
+        scheduler_output: SchedulerOutput,
+    ) -> tuple[CUDAGraphMode, int | None]:
+        # Get cudagraph_size for local num_tokens (single lookup)
+        local_cudagraph_size = self.cudagraph_manager.get_cudagraph_size(
+            scheduler_output.total_num_scheduled_tokens
         )
-
-        if is_mixed_batch:
-            return cudagraph_mode.mixed_mode()
+        if local_cudagraph_size is None:
+            local_cudagraph_runtime_mode = CUDAGraphMode.NONE
         else:
-            return cudagraph_mode.decode_mode()
+            cudagraph_mode = self.cudagraph_manager.cudagraph_mode
+
+            num_reqs = len(scheduler_output.num_scheduled_tokens)
+            max_num_scheduled_tokens = max(
+                scheduler_output.num_scheduled_tokens.values()
+            )
+            is_uniform_decode = (
+                max_num_scheduled_tokens == self.uniform_decode_query_len
+            ) and (
+                scheduler_output.total_num_scheduled_tokens
+                == max_num_scheduled_tokens * num_reqs
+            )
+
+            if is_uniform_decode:
+                local_cudagraph_runtime_mode = cudagraph_mode.decode_mode()
+            else:
+                local_cudagraph_runtime_mode = cudagraph_mode.mixed_mode()
+
+        return local_cudagraph_runtime_mode, local_cudagraph_size
 
     @torch.inference_mode()
     def capture_model(self) -> int:
@@ -918,19 +929,24 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 # No need to run the model.
                 return EMPTY_MODEL_RUNNER_OUTPUT
 
-        # Get the CUDA graph size. None means no CUDA graph is used.
-        cudagraph_size = self.cudagraph_manager.get_cudagraph_size(
+        # Get local cudagraph mode and size.
+        local_cudagraph_mode, local_cudagraph_size = self._get_cudagraph_runtime_mode(
+            scheduler_output
+        )
+
+        # DP sync: num_tokens + cudagraph_size + cudagraph_mode
+        (
+            num_tokens_after_padding,
+            num_tokens_across_dp,
+            synced_cudagraph_mode,
+        ) = get_cudagraph_and_dp_padding(
             scheduler_output.total_num_scheduled_tokens,
-            scheduler_output.num_scheduled_tokens.values(),
+            local_cudagraph_size,
+            local_cudagraph_mode.value,
+            self.parallel_config.data_parallel_size,
+            self.parallel_config.data_parallel_rank,
         )
-        use_cudagraph, num_tokens_after_padding, num_tokens_across_dp = (
-            get_cudagraph_and_dp_padding(
-                scheduler_output.total_num_scheduled_tokens,
-                cudagraph_size,
-                self.parallel_config.data_parallel_size,
-                self.parallel_config.data_parallel_rank,
-            )
-        )
+        cudagraph_runtime_mode = CUDAGraphMode(synced_cudagraph_mode)
         if num_tokens_after_padding == 0:
             # All DP ranks have zero tokens to run.
             return EMPTY_MODEL_RUNNER_OUTPUT
@@ -979,12 +995,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 self.prepare_dummy_attn_metadata(input_batch)
             # FIXME(woosuk): Fix warmup for LoRA.
 
-        # Determine the cudagraph runtime mode based on batch type and config.
-        cudagraph_runtime_mode = self._get_cudagraph_runtime_mode(
-            use_cudagraph=use_cudagraph,
-            num_scheduled_tokens=input_batch.num_scheduled_tokens,
-            dummy_run=dummy_run,
-        )
         # Run model.
         if cudagraph_runtime_mode == CUDAGraphMode.FULL:
             # Use explicit cudagraph replay for FULL mode.

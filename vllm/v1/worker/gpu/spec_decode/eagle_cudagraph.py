@@ -68,6 +68,7 @@ class EagleCudaGraphManager:
         block_tables: BlockTables,
         attn_metadata_builders: list[AttentionMetadataBuilder],
         kv_cache_config: KVCacheConfig,
+        uniform_decode: bool = True,
     ) -> None:
         num_reqs = min(num_tokens, self.max_num_reqs)
         attn_metadata = prepare_inputs_to_capture(
@@ -78,6 +79,7 @@ class EagleCudaGraphManager:
             attn_metadata_builders,
             self.max_model_len,
             kv_cache_config,
+            uniform_decode_query_len=1,
         )
         num_tokens_across_dp = make_num_tokens_across_dp(self.dp_size, num_tokens)
 
@@ -111,6 +113,7 @@ class EagleCudaGraphManager:
             block_tables=block_tables,
             attn_metadata_builders=attn_metadata_builders,
             kv_cache_config=kv_cache_config,
+            uniform_decode=True,
         )
 
     def run(self, num_tokens: int) -> None:
