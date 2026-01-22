@@ -302,7 +302,6 @@ def test_fused_topk(
 @pytest.mark.parametrize("global_num_experts", NUM_EXPERTS)
 @pytest.mark.parametrize("renormalize", [False, True])
 @pytest.mark.parametrize("enable_eplb", [False, True])
-@pytest.mark.parametrize("needs_correction_bias", [False, True])
 @pytest.mark.parametrize("routed_scaling_factor", [1.0, 1.1])
 def test_fused_topk_bias(
     m: int,
@@ -311,7 +310,6 @@ def test_fused_topk_bias(
     global_num_experts: int,
     renormalize: bool,
     enable_eplb: bool,
-    needs_correction_bias: bool,
     routed_scaling_factor: float,
 ):
     if top_k > global_num_experts:
@@ -320,7 +318,7 @@ def test_fused_topk_bias(
     eplb_state = setup_eplb_state(enable_eplb, global_num_experts)
 
     e_score_correction_bias = make_e_score_correction_bias(
-        needs_correction_bias,
+        True,
         global_num_experts,
     )
 

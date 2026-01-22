@@ -91,6 +91,8 @@ def grouped_topk(
         and num_expert_group <= 32
         and topk <= 32
         and e_score_correction_bias is not None
+        and num_expert_group
+        < gating_output.shape[-1]  # Disable kernel for 1-expert-per-group case
     ):
         return fused_grouped_topk(
             hidden_states=hidden_states,
@@ -123,9 +125,15 @@ def grouped_topk(
             scores_for_choice = scores
 
         use_sorted = vllm_is_batch_invariant()
-        topk_indices = torch.topk(scores_for_choice, k=topk, dim=-1, sorted=use_sorted)[
-            1
-        ]
+
+        # First select top topk_group experts (since each expert is its own group)
+        group_topk_values, group_topk_indices = torch.topk(
+            scores_for_choice, k=topk_group, dim=-1, sorted=use_sorted
+        )
+
+        # Then select final top-k from those selected groups
+        final_topk = min(topk, topk_group)
+        topk_indices = group_topk_indices[:, :final_topk]
         topk_weights = scores.gather(1, topk_indices)
 
         if renormalize:
