@@ -22,7 +22,11 @@ from vllm.distributed import (
     tensor_model_parallel_all_reduce,
 )
 from vllm.distributed.eplb.eplb_state import EplbLayerState, EplbState
-from vllm.forward_context import ForwardContext, get_forward_context
+from vllm.forward_context import (
+    ForwardContext,
+    get_forward_context,
+    is_forward_context_available,
+)
 from vllm.logger import init_logger
 from vllm.model_executor.custom_op import CustomOp
 from vllm.model_executor.layers.fused_moe.config import (
@@ -570,6 +574,14 @@ class FusedMoE(CustomOp):
         self.moe_config_use_flashinfer_cutlass_kernels = (
             self.moe_config.use_flashinfer_cutlass_kernels
         )
+        if self.use_mori_kernels:
+            assert self.rocm_aiter_fmoe_enabled, (
+                "Mori needs to be used with aiter fused_moe for now."
+            )
+            assert not self.aiter_fmoe_shared_expert_enabled, (
+                "Mori does not support fusion shared expert now. "
+                "Turn it off by setting VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS=0"
+            )
 
         self.quant_config = quant_config
 
@@ -713,6 +725,10 @@ class FusedMoE(CustomOp):
         return self.moe_parallel_config.use_deepep_ll_kernels
 
     @property
+    def use_mori_kernels(self):
+        return self.moe_parallel_config.use_mori_kernels
+
+    @property
     def use_flashinfer_cutlass_kernels(self):
         return (
             self.moe_quant_config is not None
@@ -729,6 +745,7 @@ class FusedMoE(CustomOp):
         return (
             self.moe_parallel_config.use_pplx_kernels
             or self.moe_parallel_config.use_deepep_ll_kernels
+            or self.moe_parallel_config.use_mori_kernels
             or (self.dp_size > 1 and self.use_flashinfer_cutlass_kernels)
         ) and envs.VLLM_ENABLE_MOE_DP_CHUNK
 
@@ -1551,6 +1568,15 @@ class FusedMoE(CustomOp):
                 states = self.maybe_all_reduce_tensor_model_parallel(states)
             return states
 
+        def encode_layer_name() -> str:
+            # Can be unavailable or None in unittests
+            if (
+                is_forward_context_available()
+                and get_forward_context().remaining_moe_layers is not None
+            ):
+                return "from_forward_context"
+            return self.layer_name
+
         if self.shared_experts is None:
             if current_platform.is_tpu() or current_platform.is_cpu():
                 # TODO: Once the OOM issue for the TPU backend is resolved, we
@@ -1560,7 +1586,7 @@ class FusedMoE(CustomOp):
                 assert not isinstance(fused_output, tuple)
             else:
                 fused_output = torch.ops.vllm.moe_forward(
-                    hidden_states, router_logits, self.layer_name
+                    hidden_states, router_logits, encode_layer_name()
                 )
             return reduce_output(fused_output)[..., :og_hidden_states]
         else:
@@ -1573,7 +1599,7 @@ class FusedMoE(CustomOp):
                 )
             else:
                 shared_output, fused_output = torch.ops.vllm.moe_forward_shared(
-                    hidden_states, router_logits, self.layer_name
+                    hidden_states, router_logits, encode_layer_name()
                 )
             return (
                 reduce_output(shared_output)[..., :og_hidden_states],
@@ -1923,13 +1949,26 @@ class FusedMoE(CustomOp):
         return s
 
 
+def get_layer_from_name(layer_name: str) -> FusedMoE:
+    forward_context: ForwardContext = get_forward_context()
+    if layer_name == "from_forward_context":
+        if not forward_context.remaining_moe_layers:
+            raise AssertionError(
+                "We expected the number of MOE layers in `remaining_moe_layers` "
+                "to be equal to the number of "
+                "{vllm.moe_forward, vllm.moe_forward_shared} calls."
+            )
+        layer_name = forward_context.remaining_moe_layers.pop()
+    self = cast(FusedMoE, forward_context.no_compile_layers[layer_name])
+    return self
+
+
 def moe_forward(
     hidden_states: torch.Tensor,
     router_logits: torch.Tensor,
     layer_name: str,
 ) -> torch.Tensor:
-    forward_context: ForwardContext = get_forward_context()
-    self = forward_context.no_compile_layers[layer_name]
+    self = get_layer_from_name(layer_name)
     assert self.shared_experts is None
     return self.forward_impl(hidden_states, router_logits)
 
@@ -1956,8 +1995,7 @@ def moe_forward_shared(
     router_logits: torch.Tensor,
     layer_name: str,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    forward_context: ForwardContext = get_forward_context()
-    self = forward_context.no_compile_layers[layer_name]
+    self = get_layer_from_name(layer_name)
     assert self.shared_experts is not None
     return self.forward_impl(hidden_states, router_logits)
 
