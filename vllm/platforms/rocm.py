@@ -175,7 +175,12 @@ def flash_attn_triton_available() -> bool:
             return False
         if find_spec("flash_attn.flash_attn_triton_amd") is None:
             return False
-        os.environ["FLASH_ATTENTION_TRITON_AMD_ENABLE"] = "TRUE"
+        if os.environ.get("FLASH_ATTENTION_TRITON_AMD_ENABLE") != "TRUE":
+            logger.info_once(
+                "Set FLASH_ATTENTION_TRITON_AMD_ENABLE=TRUE to enable "
+                "Flash Attention Triton backend on RDNA."
+            )
+            return False
         return True
     except ImportError:
         return False
