@@ -379,6 +379,12 @@ if (AVX512_FOUND AND NOT AVX512_DISABLED)
     endif()
 endif()
 
+if (ASIMD_FOUND AND NOT APPLE_SILICON_FOUND)
+    set(VLLM_EXT_SRC
+        "csrc/cpu/shm.cpp"
+        ${VLLM_EXT_SRC})
+endif()
+
 if(USE_ONEDNN)
     set(VLLM_EXT_SRC
         "csrc/cpu/dnnl_kernels.cpp"
