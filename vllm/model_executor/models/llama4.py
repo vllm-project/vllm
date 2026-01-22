@@ -51,6 +51,7 @@ from vllm.model_executor.model_loader.weight_utils import (
 )
 from vllm.model_executor.models.interfaces import MixtureOfExperts
 from vllm.model_executor.models.utils import sequence_parallel_chunk
+from vllm.utils.torch_utils import is_torch_equal_or_newer
 
 from .llama import LlamaForCausalLM, LlamaMLP, LlamaModel
 from .utils import (
@@ -504,7 +505,17 @@ class Llama4Model(LlamaModel):
                         .flatten()
                         .to(new_loaded_weight.device)
                     )
-                    new_loaded_weight = new_loaded_weight[local_expert_indices]
+                    if (
+                        new_loaded_weight.device.type == "cpu"
+                        and new_loaded_weight.dtype == torch.float8_e4m3fn
+                        and not is_torch_equal_or_newer("2.11.0")
+                    ):
+                        # PyTorch < 2.11 doesn't support CPU float8 indexing.
+                        new_loaded_weight = new_loaded_weight.to(torch.float16)[
+                            local_expert_indices
+                        ].to(new_loaded_weight.dtype)
+                    else:
+                        new_loaded_weight = new_loaded_weight[local_expert_indices]
                     expert_id = local_expert_indices[0].item()
             else:
                 # TODO: add EP support for non fused weights
