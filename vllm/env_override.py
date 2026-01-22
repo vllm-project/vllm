@@ -341,6 +341,12 @@ def should_partition_patched(self, node, should_log: bool = False) -> bool:
         log_partition_reason("CUDAGraph-unsafe custom ops", node=node)
         return True
 
+    # Check if the node uses unbacked (data-dependent) symbols in its inputs
+    if hasattr(node.node, "get_free_symbol_uses"):
+        unbacked_symbols = node.node.get_free_symbol_uses(unbacked_only=True)
+        if unbacked_symbols:
+            log_partition_reason("ops using unbacked symbols", node=node)
+            return True
     return False
 
 
@@ -387,7 +393,7 @@ def _patch_get_raw_stream_if_needed():
 
 _patch_get_raw_stream_if_needed()
 
-if is_torch_equal("2.9.0"):
+if is_torch_equal("2.9.0") or is_torch_equal("2.9.1"):
     from torch._inductor.codegen.wrapper import PythonWrapperCodegen
     from torch._inductor.graph import GraphLowering
     from torch.utils._config_module import _Config, _ConfigEntry
