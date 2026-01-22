@@ -92,6 +92,11 @@ class _HfExamplesInfo:
     length that is too large to fit into memory in CI.
     """
 
+    max_num_batched_tokens: int | None = None
+    """
+    The maximum number of tokens to be processed in a single batch.
+    """
+
     revision: str | None = None
     """
     The specific revision (commit hash, tag, or branch) to use for the model.
@@ -266,6 +271,11 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
     "GlmForCausalLM": _HfExamplesInfo("zai-org/glm-4-9b-chat-hf"),
     "Glm4ForCausalLM": _HfExamplesInfo("zai-org/GLM-4-9B-0414"),
     "Glm4MoeForCausalLM": _HfExamplesInfo("zai-org/GLM-4.5"),
+    "Glm4MoeLiteForCausalLM": _HfExamplesInfo(
+        "zai-org/GLM-4.7-Flash",
+        min_transformers_version="5.0.0.dev",
+        is_available_online=False,
+    ),
     "GPT2LMHeadModel": _HfExamplesInfo("openai-community/gpt2", {"alias": "gpt2"}),
     "GPTBigCodeForCausalLM": _HfExamplesInfo(
         "bigcode/starcoder",
@@ -467,6 +477,9 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
         "ByteDance-Seed/Seed-OSS-36B-Instruct",
         trust_remote_code=True,
     ),
+    "Step1ForCausalLM": _HfExamplesInfo(
+        "stepfun-ai/Step-Audio-EditX", trust_remote_code=True
+    ),
     "SmolLM3ForCausalLM": _HfExamplesInfo("HuggingFaceTB/SmolLM3-3B"),
     "StableLMEpochForCausalLM": _HfExamplesInfo("stabilityai/stablelm-zephyr-3b"),
     "StableLmForCausalLM": _HfExamplesInfo("stabilityai/stablelm-3b-4e1t"),
@@ -666,6 +679,9 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     "DotsOCRForCausalLM": _HfExamplesInfo(
         "rednote-hilab/dots.ocr", trust_remote_code=True
     ),
+    "Eagle2_5_VLForConditionalGeneration": _HfExamplesInfo(
+        "nvidia/Eagle2.5-8B", trust_remote_code=True, is_available_online=False
+    ),
     "Emu3ForConditionalGeneration": _HfExamplesInfo("BAAI/Emu3-Chat-hf"),
     "Ernie4_5_VLMoeForConditionalGeneration": _HfExamplesInfo(
         "baidu/ERNIE-4.5-VL-28B-A3B-PT",
@@ -679,6 +695,7 @@ _MULTIMODAL_EXAMPLE_MODELS = {
         trust_remote_code=True,
         min_transformers_version="5.0",
     ),
+    "GraniteVision": _HfExamplesInfo("ibm-granite/granite-vision-3.3-2b"),
     "GraniteSpeechForConditionalGeneration": _HfExamplesInfo(
         "ibm-granite/granite-speech-3.3-2b"
     ),
@@ -817,6 +834,14 @@ _MULTIMODAL_EXAMPLE_MODELS = {
         extras={"olmo": "allenai/Molmo-7B-O-0924"},
         trust_remote_code=True,
     ),
+    "Molmo2ForConditionalGeneration": _HfExamplesInfo(
+        "allenai/Molmo2-8B",
+        extras={"olmo": "allenai/Molmo2-O-7B"},
+        min_transformers_version="4.51",
+        trust_remote_code=True,
+        # required by current PrefixLM implementation
+        max_num_batched_tokens=31872,
+    ),
     "NVLM_D": _HfExamplesInfo("nvidia/NVLM-D-72B", trust_remote_code=True),
     "Llama_Nemotron_Nano_VL": _HfExamplesInfo(
         "nvidia/Llama-3.1-Nemotron-Nano-VL-8B-V1",
@@ -911,6 +936,9 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     ),
     "Step3VLForConditionalGeneration": _HfExamplesInfo(
         "stepfun-ai/step3", trust_remote_code=True
+    ),
+    "StepVLForConditionalGeneration": _HfExamplesInfo(
+        "stepfun-ai/Step3-VL-10B", trust_remote_code=True
     ),
     "UltravoxModel": _HfExamplesInfo(
         "fixie-ai/ultravox-v0_5-llama-3_2-1b",
@@ -1020,6 +1048,11 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
     "Glm4MoeMTPModel": _HfExamplesInfo(
         "zai-org/GLM-4.5",
         speculative_model="zai-org/GLM-4.5",
+    ),
+    "Glm4MoeLiteMTPModel": _HfExamplesInfo(
+        "zai-org/GLM-4.7-Flash",
+        speculative_model="zai-org/GLM-4.7-Flash",
+        is_available_online=False,
     ),
     "LongCatFlashMTPModel": _HfExamplesInfo(
         "meituan-longcat/LongCat-Flash-Chat",

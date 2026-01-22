@@ -23,29 +23,32 @@ Further update the model as follows:
                 raise ValueError("Only image modality is supported")
         ```
 
-- Reserve a keyword parameter in [forward][torch.nn.Module.forward] for each input tensor that corresponds to a multi-modal input, as shown in the following example:
+- Inside `__init__` method, initialize the language components of the model inside [_mark_language_model][vllm.model_executor.models.interfaces.SupportsMultiModal._mark_language_model], and the multimodal components of the model inside [_mark_tower_model][vllm.model_executor.models.interfaces.SupportsMultiModal._mark_tower_model], e.g.:
 
-  ```diff
-    def forward(
-        self,
-        input_ids: torch.Tensor,
-        positions: torch.Tensor,
-  +     pixel_values: torch.Tensor,
-    ) -> SamplerOutput:
-  ```
-  
-  More conveniently, you can simply pass `**kwargs` to the [forward][torch.nn.Module.forward] method and retrieve the keyword parameters for multimodal inputs from it.
+    ```python
+        def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
+            super().__init__()
+
+            config = vllm_config.model_config.hf_config
+
+            with self._mark_tower_model(vllm_config, "image"):
+                self.vision_encoder = ...
+                self.multi_modal_projector = ...
+
+            with self._mark_language_model(vllm_config):
+                self.language_model = init_vllm_registered_model(
+                    vllm_config=vllm_config,
+                    hf_config=config.text_config,
+                    prefix=maybe_prefix(prefix, "language_model"),
+                )
+    ```
 
 - Implement [embed_multimodal][vllm.model_executor.models.interfaces.SupportsMultiModal.embed_multimodal] that returns the embeddings from running the multimodal inputs through the multimodal tokenizer of the model. Below we provide a boilerplate of a typical implementation pattern, but feel free to adjust it to your own needs.
 
     ??? code
 
         ```python
-        class YourModelForImage2Seq(nn.Module):
-            ...
-
             def _process_image_input(self, image_input: YourModelImageInputs) -> torch.Tensor:
-                assert self.vision_encoder is not None
                 image_features = self.vision_encoder(image_input)
                 return self.multi_modal_projector(image_features)
 
@@ -71,18 +74,7 @@ Further update the model as follows:
     [PlaceholderRange][vllm.multimodal.inputs.PlaceholderRange] from input processing.
     This logic can be found at [embed_input_ids][vllm.model_executor.models.interfaces.SupportsMultiModal.embed_input_ids].
 
-    You may override this method if additional logic is required for your model when merging embeddings. 
-
-- Implement [get_language_model][vllm.model_executor.models.interfaces.SupportsMultiModal.get_language_model] getter to provide stable access to the underlying language model.
-
-    ```python
-    class YourModelForImage2Seq(nn.Module):
-        ...
-
-        def get_language_model(self) -> torch.nn.Module:
-            # Change `language_model` according to your implementation.
-            return self.language_model
-    ```
+    You may override this method if additional logic is required for your model when merging embeddings.
 
 - Once the above steps are done, update the model class with the [SupportsMultiModal][vllm.model_executor.models.interfaces.SupportsMultiModal] interface.
 
@@ -116,12 +108,10 @@ def get_supported_mm_limits(self) -> Mapping[str, int | None]:
 
 ## 3. Specify dummy inputs
 
-Then, inherit [BaseDummyInputsBuilder][vllm.multimodal.profiling.BaseDummyInputsBuilder] to construct dummy inputs for
-HF processing as well as memory profiling.
+Then, inherit [BaseDummyInputsBuilder][vllm.multimodal.processing.BaseDummyInputsBuilder] to construct dummy inputs for
+HF processing. The processed outputs are also used for memory profiling.
 
-### For memory profiling
-
-Override the abstract methods [get_dummy_text][vllm.multimodal.profiling.BaseDummyInputsBuilder.get_dummy_text] and [get_dummy_mm_data][vllm.multimodal.profiling.BaseDummyInputsBuilder.get_dummy_mm_data] to construct dummy inputs for memory profiling. These dummy inputs should result in the worst-case memory usage of the model so that vLLM can reserve the correct amount of memory for it.
+Override the abstract methods [get_dummy_text][vllm.multimodal.processing.BaseDummyInputsBuilder.get_dummy_text] and [get_dummy_mm_data][vllm.multimodal.processing.BaseDummyInputsBuilder.get_dummy_mm_data] to construct dummy inputs. These dummy inputs should result in the worst-case memory usage of the model so that vLLM can reserve the correct amount of memory for it.
 
 Assuming that the memory usage increases with the number of tokens, the dummy inputs can be constructed to maximize the number of output embeddings, which is the same number as placeholder feature tokens.
 
@@ -803,7 +793,7 @@ Each [PromptUpdate][vllm.multimodal.processing.PromptUpdate] instance specifies 
 ## 5. Register processor-related classes
 
 After you have defined [BaseProcessingInfo][vllm.multimodal.processing.BaseProcessingInfo] (Step 2),
-[BaseDummyInputsBuilder][vllm.multimodal.profiling.BaseDummyInputsBuilder] (Step 3),
+[BaseDummyInputsBuilder][vllm.multimodal.processing.BaseDummyInputsBuilder] (Step 3),
 and [BaseMultiModalProcessor][vllm.multimodal.processing.BaseMultiModalProcessor] (Step 4),
 decorate the model class with [MULTIMODAL_REGISTRY.register_processor][vllm.multimodal.registry.MultiModalRegistry.register_processor]
 to register them to the multi-modal registry:

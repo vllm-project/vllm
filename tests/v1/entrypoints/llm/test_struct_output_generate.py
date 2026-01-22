@@ -87,6 +87,10 @@ PARAMS_MODELS_TOKENIZER_MODE = [
     ("Qwen/Qwen2.5-1.5B-Instruct", "auto"),
 ]
 
+platform_args = {}
+if current_platform.is_rocm():
+    platform_args["async_scheduling"] = False
+
 
 class CarType(str, Enum):
     sedan = "sedan"
@@ -134,6 +138,7 @@ def test_structured_output(
         load_format="auto" if not model_name.startswith("mistralai/") else "hf",
         config_format="auto" if not model_name.startswith("mistralai/") else "hf",
         speculative_config=speculative_config,
+        **platform_args,
     )
 
     #

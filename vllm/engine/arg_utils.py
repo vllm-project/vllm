@@ -223,10 +223,6 @@ def get_type_hints(type_hint: TypeHint) -> set[TypeHint]:
     return type_hints
 
 
-def is_online_quantization(quantization: Any) -> bool:
-    return quantization in ["inc"]
-
-
 NEEDS_HELP = (
     any("--help" in arg for arg in sys.argv)  # vllm SUBCOMMAND --help
     or (argv0 := sys.argv[0]).endswith("mkdocs")  # mkdocs SUBCOMMAND
@@ -471,6 +467,7 @@ class EngineArgs:
     mm_shm_cache_max_object_size_mb: int = (
         MultiModalConfig.mm_shm_cache_max_object_size_mb
     )
+    mm_encoder_only: bool = MultiModalConfig.mm_encoder_only
     mm_encoder_tp_mode: MMEncoderTPMode = MultiModalConfig.mm_encoder_tp_mode
     mm_encoder_attn_backend: AttentionBackendEnum | str | None = (
         MultiModalConfig.mm_encoder_attn_backend
@@ -578,9 +575,7 @@ class EngineArgs:
     optimization_level: OptimizationLevel = VllmConfig.optimization_level
 
     kv_offloading_size: float | None = CacheConfig.kv_offloading_size
-    kv_offloading_backend: KVOffloadingBackend | None = (
-        CacheConfig.kv_offloading_backend
-    )
+    kv_offloading_backend: KVOffloadingBackend = CacheConfig.kv_offloading_backend
     tokens_only: bool = False
 
     def __post_init__(self):
@@ -980,6 +975,9 @@ class EngineArgs:
             **multimodal_kwargs["mm_shm_cache_max_object_size_mb"],
         )
         multimodal_group.add_argument(
+            "--mm-encoder-only", **multimodal_kwargs["mm_encoder_only"]
+        )
+        multimodal_group.add_argument(
             "--mm-encoder-tp-mode", **multimodal_kwargs["mm_encoder_tp_mode"]
         )
         multimodal_group.add_argument(
@@ -1262,6 +1260,7 @@ class EngineArgs:
             mm_processor_cache_gb=self.mm_processor_cache_gb,
             mm_processor_cache_type=self.mm_processor_cache_type,
             mm_shm_cache_max_object_size_mb=self.mm_shm_cache_max_object_size_mb,
+            mm_encoder_only=self.mm_encoder_only,
             mm_encoder_tp_mode=self.mm_encoder_tp_mode,
             mm_encoder_attn_backend=self.mm_encoder_attn_backend,
             pooler_config=self.pooler_config,
@@ -1304,7 +1303,6 @@ class EngineArgs:
             load_format=self.load_format,
             download_dir=self.download_dir,
             safetensors_load_strategy=self.safetensors_load_strategy,
-            device="cpu" if is_online_quantization(self.quantization) else None,
             model_loader_extra_config=self.model_loader_extra_config,
             ignore_patterns=self.ignore_patterns,
             use_tqdm_on_load=self.use_tqdm_on_load,
@@ -1782,21 +1780,6 @@ class EngineArgs:
             != SchedulerConfig.max_long_partial_prefills
         ):
             _raise_unsupported_error(feature_name="Concurrent Partial Prefill")
-
-        # N-gram, Medusa, and Eagle are supported for speculative decoding.
-        if self.speculative_config is not None:
-            # speculative_config could still be a dict at this point
-            if isinstance(self.speculative_config, dict):
-                method = self.speculative_config.get("method", None)
-            else:
-                method = self.speculative_config.method
-
-            if method == "draft_model":
-                raise NotImplementedError(
-                    "Draft model speculative decoding is not supported yet. "
-                    "Please consider using other speculative decoding methods "
-                    "such as ngram, medusa, eagle, or mtp."
-                )
 
         if self.pipeline_parallel_size > 1:
             supports_pp = getattr(
