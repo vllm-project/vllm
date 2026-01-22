@@ -330,7 +330,6 @@ class FusedMoE(CustomOp):
         is_sequence_parallel=False,
         expert_mapping: list[tuple[str, str, int, str]] | None = None,
         n_shared_experts: int | None = None,
-        routing_method_type: RoutingMethodType | None = None,
         router_logits_dtype: torch.dtype | None = None,
     ):
         super().__init__()
@@ -519,10 +518,43 @@ class FusedMoE(CustomOp):
         self.apply_router_weight_on_input = apply_router_weight_on_input
         self.activation = activation
 
+        # TODO(bnell): in next PR move capture back to layer
+        capture: Callable[[torch.Tensor], None] | None = None
+        if (
+            self.vllm_config.model_config is not None
+            and self.vllm_config.model_config.enable_return_routed_experts
+        ):
+            # In dummy runs, the capturer is not initialized.
+            capturer = RoutedExpertsCapturer.get_instance()
+            if capturer is not None:
+                capture = lambda topk_ids: capturer.capture(self.layer_id, topk_ids)
+
+        self.router = create_fused_moe_router(
+            top_k=top_k,
+            global_num_experts=self.global_num_experts,
+            eplb_state=self.eplb_state,
+            renormalize=renormalize,
+            use_grouped_topk=use_grouped_topk,
+            num_expert_group=num_expert_group,
+            topk_group=topk_group,
+            custom_routing_function=custom_routing_function,
+            scoring_func=scoring_func,
+            routed_scaling_factor=routed_scaling_factor,
+            e_score_correction_bias=e_score_correction_bias,
+            num_fused_shared_experts=self.num_fused_shared_experts,
+            enable_eplb=enable_eplb,
+            # TODO(bnell): once we can construct the MK at init time, we
+            # can make this a value.
+            indices_type_getter=lambda: self.quant_method.topk_indices_dtype,
+            capture=capture,
+        )
+        self.routing_method_type: RoutingMethodType = self.router.routing_method_type
+
         self.moe_config: FusedMoEConfig = FusedMoEConfig(
             num_experts=self.global_num_experts,
             experts_per_token=top_k,
             hidden_dim=hidden_size,
+            intermediate_size_per_partition=self.intermediate_size_per_partition,
             num_local_experts=self.local_num_experts,
             moe_parallel_config=self.moe_parallel_config,
             in_dtype=moe_in_dtype,
@@ -531,10 +563,21 @@ class FusedMoE(CustomOp):
             has_bias=has_bias,
             is_act_and_mul=is_act_and_mul,
             is_lora_enabled=vllm_config.lora_config is not None,
+            activation=activation,
+            device=vllm_config.device_config.device,
+            routing_method=self.routing_method_type,
         )
         self.moe_config_use_flashinfer_cutlass_kernels = (
             self.moe_config.use_flashinfer_cutlass_kernels
         )
+        if self.use_mori_kernels:
+            assert self.rocm_aiter_fmoe_enabled, (
+                "Mori needs to be used with aiter fused_moe for now."
+            )
+            assert not self.aiter_fmoe_shared_expert_enabled, (
+                "Mori does not support fusion shared expert now. "
+                "Turn it off by setting VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS=0"
+            )
 
         self.quant_config = quant_config
 
@@ -593,39 +636,6 @@ class FusedMoE(CustomOp):
         # Chunked all2all staging tensor
         self.batched_hidden_states: torch.Tensor | None = None
         self.batched_router_logits: torch.Tensor | None = None
-
-        # TODO(bnell): in next PR move capture back to layer
-        capture: Callable[[torch.Tensor], None] | None = None
-        if (
-            self.vllm_config.model_config is not None
-            and self.vllm_config.model_config.enable_return_routed_experts
-        ):
-            # In dummy runs, the capturer is not initialized.
-            capturer = RoutedExpertsCapturer.get_instance()
-            if capturer is not None:
-                capture = lambda topk_ids: capturer.capture(self.layer_id, topk_ids)
-
-        self.router = create_fused_moe_router(
-            top_k=top_k,
-            global_num_experts=self.global_num_experts,
-            eplb_state=self.eplb_state,
-            renormalize=renormalize,
-            use_grouped_topk=use_grouped_topk,
-            num_expert_group=num_expert_group,
-            topk_group=topk_group,
-            custom_routing_function=custom_routing_function,
-            scoring_func=scoring_func,
-            routed_scaling_factor=routed_scaling_factor,
-            e_score_correction_bias=e_score_correction_bias,
-            num_fused_shared_experts=self.num_fused_shared_experts,
-            enable_eplb=enable_eplb,
-            # TODO(bnell): once we can construct the MK at init time, we
-            # can make this a value.
-            indices_type_getter=lambda: self.quant_method.topk_indices_dtype,
-            routing_method_type=routing_method_type,
-            capture=capture,
-        )
-        self.routing_method_type: RoutingMethodType = self.router.routing_method_type
 
     # Note: maybe_init_modular_kernel should only be called by
     # prepare_communication_buffer_for_model.
@@ -711,6 +721,10 @@ class FusedMoE(CustomOp):
         return self.moe_parallel_config.use_deepep_ll_kernels
 
     @property
+    def use_mori_kernels(self):
+        return self.moe_parallel_config.use_mori_kernels
+
+    @property
     def use_flashinfer_cutlass_kernels(self):
         return (
             self.moe_quant_config is not None
@@ -727,6 +741,7 @@ class FusedMoE(CustomOp):
         return (
             self.moe_parallel_config.use_pplx_kernels
             or self.moe_parallel_config.use_deepep_ll_kernels
+            or self.moe_parallel_config.use_mori_kernels
             or (self.dp_size > 1 and self.use_flashinfer_cutlass_kernels)
         ) and envs.VLLM_ENABLE_MOE_DP_CHUNK
 
