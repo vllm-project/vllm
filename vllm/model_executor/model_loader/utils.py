@@ -82,7 +82,7 @@ def initialize_model(
         kwargs["scheduler_config"] = vllm_config.scheduler_config
     with set_current_vllm_config(vllm_config, check_compile=True, prefix=prefix):
         model = model_class(**kwargs)
-        model.apply(record_metadata_for_reloading)
+        model_apply(model, record_metadata_for_reloading)
 
     return model
 
