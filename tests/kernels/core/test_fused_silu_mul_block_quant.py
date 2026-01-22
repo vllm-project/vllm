@@ -176,15 +176,24 @@ def test_silu_and_mul_per_block_quant(
     ok = torch.allclose(a, b, atol=1.0, rtol=0.0)  # Allow ±1 quantization error
     
     if not ok:
-        # Fallback: compare dequantized values
+        # Fallback: compare dequantized values with relaxed tolerance
+        # Output shape: [num_tokens, hidden_size]
+        # Scales need to be expanded to match this
+        
         if is_scale_transposed:
-            # scales: [num_groups, num_tokens] → transpose back
-            ref_scales_expanded = ref_scales.t().repeat_interleave(group_size, dim=1)
-            ops_scales_expanded = ops_scales.t().repeat_interleave(group_size, dim=1)
+            # scales shape: [num_groups, num_tokens]
+            # Need to transpose to [num_tokens, num_groups] first
+            ref_scales_row_major = ref_scales.t()  # [num_tokens, num_groups]
+            ops_scales_row_major = ops_scales.t()  # [num_tokens, num_groups]
         else:
-            # scales: [num_tokens, num_groups]
-            ref_scales_expanded = ref_scales.repeat_interleave(group_size, dim=1)
-            ops_scales_expanded = ops_scales.repeat_interleave(group_size, dim=1)
+            # scales already in [num_tokens, num_groups]
+            ref_scales_row_major = ref_scales
+            ops_scales_row_major = ops_scales
+        
+        # Now expand along the hidden dimension (dim=1)
+        # [num_tokens, num_groups] → [num_tokens, hidden_size]
+        ref_scales_expanded = ref_scales_row_major.repeat_interleave(group_size, dim=1)
+        ops_scales_expanded = ops_scales_row_major.repeat_interleave(group_size, dim=1)
         
         a_deq = a * ref_scales_expanded
         b_deq = b * ops_scales_expanded
