@@ -13,15 +13,15 @@ from openai.types.responses.tool import (
     Tool,
 )
 
-from vllm.entrypoints.context import ConversationContext
+from vllm.entrypoints.mcp.tool_server import ToolServer
 from vllm.entrypoints.openai.engine.protocol import ErrorResponse
+from vllm.entrypoints.openai.responses.context import ConversationContext
 from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
 from vllm.entrypoints.openai.responses.serving import (
     OpenAIServingResponses,
     _extract_allowed_tools_from_mcp_requests,
     extract_tool_types,
 )
-from vllm.entrypoints.tool_server import ToolServer
 from vllm.inputs.data import TokensPrompt
 
 
@@ -131,6 +131,7 @@ class TestInitializeToolSessions:
 
         engine_client.input_processor = MagicMock()
         engine_client.io_processor = MagicMock()
+        engine_client.renderer = MagicMock()
 
         models = MagicMock()
 
@@ -217,6 +218,7 @@ class TestValidateGeneratorInput:
 
         engine_client.input_processor = MagicMock()
         engine_client.io_processor = MagicMock()
+        engine_client.renderer = MagicMock()
 
         models = MagicMock()
 
