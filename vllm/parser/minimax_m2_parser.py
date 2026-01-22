@@ -10,7 +10,8 @@ to those implementations.
 """
 
 from vllm.logger import init_logger
-from vllm.parser.abstract_parser import DelegatingParser, ParserManager
+from vllm.parser.abstract_parser import DelegatingParser
+from vllm.parser.parser_manager import ParserManager
 from vllm.reasoning.minimax_m2_reasoning_parser import MiniMaxM2ReasoningParser
 from vllm.tokenizers import TokenizerLike
 from vllm.tool_parsers.minimax_m2_tool_parser import MinimaxM2ToolParser

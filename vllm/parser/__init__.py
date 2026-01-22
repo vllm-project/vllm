@@ -4,13 +4,15 @@
 from vllm.parser.abstract_parser import (
     DelegatingParser,
     Parser,
-    ParserManager,
+    _WrappedParser,
 )
+from vllm.parser.parser_manager import ParserManager
 
 __all__ = [
     "Parser",
     "DelegatingParser",
     "ParserManager",
+    "_WrappedParser",
 ]
 
 # Register lazy parsers

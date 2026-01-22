@@ -111,7 +111,7 @@ from vllm.logprobs import Logprob, PromptLogprobs
 from vllm.lora.request import LoRARequest
 from vllm.multimodal import MultiModalDataDict
 from vllm.outputs import CompletionOutput, PoolingRequestOutput, RequestOutput
-from vllm.parser import DelegatingParser, Parser, ParserManager
+from vllm.parser import Parser, ParserManager, _WrappedParser
 from vllm.pooling_params import PoolingParams
 from vllm.reasoning import ReasoningParser, ReasoningParserManager
 from vllm.sampling_params import BeamSearchParams, SamplingParams
@@ -372,22 +372,7 @@ class OpenAIServing:
         if reasoning_parser_cls is None and tool_parser_cls is None:
             return None
 
-        # Create a dynamic DelegatingParser subclass with the parser classes set
-        class _WrappedParser(DelegatingParser):
-            reasoning_parser_cls = None  # Will be set below
-            tool_parser_cls = None  # Will be set below
-
-            def __init__(self, tokenizer: TokenizerLike):
-                super().__init__(tokenizer)
-                # Instantiate the underlying parsers
-                if self.__class__.reasoning_parser_cls is not None:
-                    self._reasoning_parser = self.__class__.reasoning_parser_cls(
-                        tokenizer
-                    )
-                if self.__class__.tool_parser_cls is not None:
-                    self._tool_parser = self.__class__.tool_parser_cls(tokenizer)
-
-        # Set the class-level attributes
+        # Set the class-level attributes on the imported _WrappedParser
         _WrappedParser.reasoning_parser_cls = reasoning_parser_cls
         _WrappedParser.tool_parser_cls = tool_parser_cls
 
