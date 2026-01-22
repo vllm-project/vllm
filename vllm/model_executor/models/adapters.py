@@ -1,8 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import ast
-import inspect
 from collections.abc import Iterable
 from typing import TYPE_CHECKING, Any, TypeVar, cast
 
@@ -124,38 +122,6 @@ def _get_pooling_model_name(orig_model_name: str, pooling_suffix: str) -> str:
     return model_name + pooling_suffix
 
 
-def try_create_mm_pooling_model_cls(orig_cls: _T) -> _T:
-    class CallVisitor(ast.NodeVisitor):
-        def __init__(self):
-            self.calls = []
-
-        def visit_Call(self, node):
-            if isinstance(node.func, ast.Name):
-                self.calls.append(node.func.id)
-            self.generic_visit(node)
-
-    visitor = CallVisitor()
-    visitor.visit(ast.parse(inspect.getsource(orig_cls)))
-    if "init_vllm_registered_model" not in visitor.calls:
-        return None
-
-    class ModelForPooling(orig_cls, VllmModelForPooling):
-        is_pooling_model = True
-
-        def __init__(
-            self,
-            *,
-            vllm_config: "VllmConfig",
-            prefix: str = "",
-            **kwargs: Any,
-        ) -> None:
-            super().__init__(vllm_config=vllm_config, prefix=prefix, **kwargs)
-
-            self.pooler = self.get_language_model().pooler
-
-    return ModelForPooling  # type: ignore
-
-
 def _create_pooling_model_cls(orig_cls: _T) -> _T:
     # Lazy import
     from vllm.model_executor.layers.logits_processor import LogitsProcessor
@@ -185,6 +151,14 @@ def _create_pooling_model_cls(orig_cls: _T) -> _T:
 
             # If the model already defines a pooler instance, don't overwrite it
             if not getattr(self, "pooler", None):
+                from .interfaces import supports_multimodal
+
+                if supports_multimodal(self):
+                    # Try to get the pooler from the LM backbone
+                    language_model = self.get_language_model()
+                    if hasattr(language_model, "pooler"):
+                        self.pooler = language_model.pooler
+
                 self._init_pooler(vllm_config, prefix=prefix)
 
         def _init_pooler(self, vllm_config: "VllmConfig", prefix: str = ""):
