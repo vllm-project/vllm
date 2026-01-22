@@ -53,10 +53,13 @@ class EmbeddingCompletionRequest(PoolingBasicRequestMixin, CompletionRequestMixi
     def build_tok_params(self, model_config: ModelConfig) -> TokenizeParams:
         pooler_config = model_config.pooler_config
 
-        if pooler_config and pooler_config.enable_chunked_processing:
-            max_length = None
+        if pooler_config:
+            if pooler_config.enable_chunked_processing:
+                max_length = None
+            else:
+                max_length = pooler_config.max_embed_len
         else:
-            max_length = pooler_config.max_embed_len or model_config.max_model_len
+            max_length = model_config.max_model_len
 
         return TokenizeParams.from_config(
             model_config,
@@ -107,10 +110,13 @@ class EmbeddingChatRequest(PoolingBasicRequestMixin, ChatRequestMixin):
     def build_tok_params(self, model_config: ModelConfig) -> TokenizeParams:
         pooler_config = model_config.pooler_config
 
-        if pooler_config and pooler_config.enable_chunked_processing:
-            max_length = None
+        if pooler_config:
+            if pooler_config.enable_chunked_processing:
+                max_length = None
+            else:
+                max_length = pooler_config.max_embed_len
         else:
-            max_length = pooler_config.max_embed_len or model_config.max_model_len
+            max_length = model_config.max_model_len
 
         return TokenizeParams.from_config(
             model_config,
