@@ -22,7 +22,6 @@ from vllm.entrypoints.ssl import SSLCertRefresher
 from vllm.logger import init_logger
 from vllm.utils.network_utils import find_process_using_port
 from vllm.v1.engine.exceptions import EngineDeadError, EngineGenerateError
-from vllm.v1.metrics.prometheus import set_server_draining
 
 logger = init_logger(__name__)
 
@@ -107,11 +106,6 @@ async def serve_http(
         """Perform graceful drain before shutdown."""
         drain_timeout = getattr(args, "drain_timeout", 120)
 
-        served_name = engine_client.model_config.served_model_name
-        if isinstance(served_name, list):
-            model_name = served_name[0] if served_name else "unknown"
-        else:
-            model_name = served_name or "unknown"
         inflight_count = engine_client.get_num_unfinished_requests()
         logger.info(
             "Graceful shutdown: starting drain (timeout=%ds), in-flight requests: %d",
@@ -119,7 +113,6 @@ async def serve_http(
             inflight_count,
         )
 
-        set_server_draining(model_name, draining=True)
         set_server_unavailable(True)
 
         async def _drain_operations() -> None:
