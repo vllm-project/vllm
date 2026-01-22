@@ -1145,7 +1145,9 @@ class AiterFlashAttentionImpl(AttentionImpl):
                 num_seqs = attn_metadata.seq_lens.shape[0]
 
                 if rocm_aiter_ops.is_shuffle_kv_cache_enabled():
-                    max_num_partitions = (attn_metadata.max_seq_len + _PARTITION_SIZE_ROCM - 1) // _PARTITION_SIZE_ROCM
+                    max_num_partitions = (
+                        attn_metadata.max_seq_len + _PARTITION_SIZE_ROCM - 1
+                    ) // _PARTITION_SIZE_ROCM
                     tmp_out = torch.empty(
                         (num_seqs, num_heads, max_num_partitions, head_size),
                         dtype=query.dtype,
@@ -1176,13 +1178,11 @@ class AiterFlashAttentionImpl(AttentionImpl):
                     v_qscale_asm = layer._v_scale
                     if attn_metadata.k_scale is not None:
                         if isinstance(attn_metadata.k_scale, dict):
-                            # per token quant scale for each layer
                             k_qscale_asm = attn_metadata.k_scale[layer.layer_name]
                         else:
                             k_qscale_asm = attn_metadata.k_scale
                     if attn_metadata.v_scale is not None:
                         if isinstance(attn_metadata.v_scale, dict):
-                            # per token quant scale for each layer
                             v_qscale_asm = attn_metadata.v_scale[layer.layer_name]
                         else:
                             v_qscale_asm = attn_metadata.v_scale
