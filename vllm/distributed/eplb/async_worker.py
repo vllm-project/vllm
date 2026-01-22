@@ -143,6 +143,12 @@ async def transfer_run_periodically(
 
                         assert model_state.new_physical_to_logical_map is not None
 
+                        # Wait for the main thread to finish consuming the buffer
+                        # before overwriting it
+                        if model_state.buffer_consumed_event is not None:
+                            cuda_stream.wait_event(model_state.buffer_consumed_event)
+                            model_state.buffer_consumed_event = None
+
                         layer_idx = model_state.layer_to_transfer
                         old_layer_indices = model_state.physical_to_logical_map[
                             layer_idx
