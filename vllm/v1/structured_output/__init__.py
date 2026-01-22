@@ -323,7 +323,7 @@ class StructuredOutputManager:
 
         # Check if reasoning ends in *this* step
         delta_from = request.num_computed_tokens - request.num_output_placeholders
-        all_token_ids = list(request.all_token_ids)
+        all_token_ids = request.all_token_ids
         if self.reasoner.is_reasoning_end_streaming(
             all_token_ids, all_token_ids[delta_from:]
         ):

@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from collections.abc import Sequence
 from functools import cached_property
 
 from vllm.entrypoints.openai.chat_completion.protocol import (
@@ -65,7 +66,7 @@ class MistralReasoningParser(BaseThinkingReasoningParser):
 
         return SpecialTokens.end_think
 
-    def is_reasoning_end(self, input_ids: list[int]) -> bool:
+    def is_reasoning_end(self, input_ids: Sequence[int]) -> bool:
         has_eot_token = False
 
         for id in input_ids[::-1]:
