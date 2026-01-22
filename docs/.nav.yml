@@ -57,6 +57,9 @@ nav:
     - api/README.md
     - api/vllm
   - CLI Reference: cli
+  - Related Projects:
+    - usage/llm_compressor.md
+    - usage/speculators.md
   - Community:
     - community/*
     - Governance: governance
