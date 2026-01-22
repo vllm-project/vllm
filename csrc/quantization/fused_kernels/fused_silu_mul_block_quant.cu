@@ -6,7 +6,7 @@
 
 #include "../../dispatch_utils.h"
 #include "quant_conversions.cuh"
-#include "common.cuh"
+#include "../w8a8/fp8/common.cuh"
 
 namespace vllm {
 
