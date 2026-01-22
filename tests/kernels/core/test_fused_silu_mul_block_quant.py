@@ -8,12 +8,15 @@ import torch.nn.functional as F
 import vllm._custom_ops as ops
 from tests.kernels.utils import opcheck
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
-    per_token_group_quant_fp8,
+    per_token_group_quant_fp8
+)
+from vllm.model_executor.layers.quantization.utils.int8_utils import (
+    per_token_group_quant_int8
 )
 from vllm.platforms import current_platform
 
 DTYPES = [torch.float16, torch.bfloat16]
-QUANT_DTYPES = [torch.float8_e4m3fn]
+QUANT_DTYPES = [torch.float8_e4m3fn, torch.int8]
 VEC_HIDDEN_SIZES = [1024, 1025, 1027, 1029]
 # Avoid combinatorial explosion with full Cartesian product
 NUM_TOKENS_HIDDEN_SIZES = [
@@ -24,7 +27,7 @@ NUM_TOKENS_HIDDEN_SIZES = [
 ]
 
 SCALE_UBS = [False]  # Scale upper bound not supported yet
-GROUP_SIZES = [[1, 64], [1, 128]]
+GROUP_SIZES = [64, 128]
 IS_SCALE_TRANSPOSED = [False, True]
 SEEDS = [0]
 CUDA_DEVICES = [
@@ -53,6 +56,11 @@ def ref_silu_and_mul_per_block_quant(
     if quant_dtype == current_platform.fp8_dtype():
         torch_out, scales = per_token_group_quant_fp8(
             silu_out, group_size=group_size[1], use_ue8m0=False
+        )
+    elif quant_dtype == torch.int8:
+        # Need INT8 reference implementation
+        torch_out, scales = per_token_group_quant_int8(
+            silu_out, group_size=group_size[1]
         )
     else:
         raise ValueError(f"Unsupported quant_dtype: {quant_dtype}")
@@ -137,6 +145,24 @@ def test_silu_and_mul_per_block_quant(
         x, quant_dtype, scale_ub, group_size, is_scale_transposed
     )
 
+    # ========== ADD THESE CHECKS ==========
+    # Check for NaN/Inf in outputs
+    assert not torch.isnan(ops_out.float()).any(), \
+        "Kernel output contains NaN values"
+    assert not torch.isinf(ops_out.float()).any(), \
+        "Kernel output contains Inf values"
+    assert not torch.isnan(ops_scales).any(), \
+        "Kernel scales contain NaN values"
+    assert not torch.isinf(ops_scales).any(), \
+        "Kernel scales contain Inf values"
+    
+    # Also check reference for sanity
+    assert not torch.isnan(ref_out.float()).any(), \
+        "Reference output contains NaN values"
+    assert not torch.isnan(ref_scales).any(), \
+        "Reference scales contain NaN values"
+    # ======================================
+
     # Check output dtype
     assert ref_out.dtype == quant_dtype
     assert ops_out.dtype == quant_dtype
@@ -148,12 +174,21 @@ def test_silu_and_mul_per_block_quant(
     # Check output correctness
     a = ref_out.to(dtype=torch.float32)
     b = ops_out.to(dtype=torch.float32)
-    ok = torch.allclose(a, b, atol=1.0)  # FP8 has limited precision
+    ok = torch.allclose(a, b, atol=1.0, rtol=0.0)  # Allow ±1 quantization error
     
     if not ok:
-        # Fallback: compare dequantized values with relaxed tolerance
-        a_deq = a * ref_scales.repeat_interleave(group_size[1], dim=1)
-        b_deq = b * ops_scales.repeat_interleave(group_size[1], dim=1)
+        # Fallback: compare dequantized values
+        if is_scale_transposed:
+            # scales: [num_groups, num_tokens] → transpose back
+            ref_scales_expanded = ref_scales.t().repeat_interleave(group_size[1], dim=1)
+            ops_scales_expanded = ops_scales.t().repeat_interleave(group_size[1], dim=1)
+        else:
+            # scales: [num_tokens, num_groups]
+            ref_scales_expanded = ref_scales.repeat_interleave(group_size[1], dim=1)
+            ops_scales_expanded = ops_scales.repeat_interleave(group_size[1], dim=1)
+        
+        a_deq = a * ref_scales_expanded
+        b_deq = b * ops_scales_expanded
         ok = torch.allclose(a_deq, b_deq, rtol=5e-2, atol=5e-2)
         
         if not ok:
