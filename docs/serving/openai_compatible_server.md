@@ -173,6 +173,14 @@ with `--enable-request-id-headers`.
     print(completion._request_id)
     ```
 
+## Offline API Documentation
+
+The FastAPI `/docs` endpoint requires an internet connection by default. To enable offline access in air-gapped environments, use the `--enable-offline-docs` flag:
+
+```bash
+vllm serve NousResearch/Meta-Llama-3-8B-Instruct --enable-offline-docs
+```
+
 ## API Reference
 
 ### Completions API
@@ -362,7 +370,7 @@ and passing a list of `messages` in the request. Refer to the examples below for
         `MrLight/dse-qwen2-2b-mrl-v1` requires a placeholder image of the minimum image size for text query embeddings. See the full code
         example below for details.
 
-Full example: [examples/pooling/embed/openai_chat_embedding_client_for_multimodal.py](../../examples/pooling/embed/openai_chat_embedding_client_for_multimodal.py)
+Full example: [examples/pooling/embed/vision_embedding_online.py](../../examples/pooling/embed/vision_embedding_online.py)
 
 #### Extra parameters
 
@@ -543,7 +551,7 @@ Our Pooling API encodes input prompts using a [pooling model](../models/pooling_
 
 The input format is the same as [Embeddings API](#embeddings-api), but the output data can contain an arbitrary nested list, not just a 1-D list of floats.
 
-Code example: [examples/pooling/pooling/openai_pooling_client.py](../../examples/pooling/pooling/openai_pooling_client.py)
+Code example: [examples/pooling/pooling/pooling_online.py](../../examples/pooling/pooling/pooling_online.py)
 
 ### Classification API
 
@@ -551,7 +559,7 @@ Our Classification API directly supports Hugging Face sequence-classification mo
 
 We automatically wrap any other transformer via `as_seq_cls_model()`, which pools on the last token, attaches a `RowParallelLinear` head, and applies a softmax to produce per-class probabilities.
 
-Code example: [examples/pooling/classify/openai_classification_client.py](../../examples/pooling/classify/openai_classification_client.py)
+Code example: [examples/pooling/classify/classification_online.py](../../examples/pooling/classify/classification_online.py)
 
 #### Example Requests
 
@@ -667,7 +675,7 @@ Usually, the score for a sentence pair refers to the similarity between two sent
 
 You can find the documentation for cross encoder models at [sbert.net](https://www.sbert.net/docs/package_reference/cross_encoder/cross_encoder.html).
 
-Code example: [examples/pooling/score/openai_cross_encoder_score.py](../../examples/pooling/score/openai_cross_encoder_score.py)
+Code example: [examples/pooling/score/score_api_online.py](../../examples/pooling/score/score_api_online.py)
 
 #### Score Template
 
@@ -686,7 +694,7 @@ Example template file: [examples/pooling/score/template/nemotron-rerank.jinja](.
 
 #### Single inference
 
-You can pass a string to both `text_1` and `text_2`, forming a single sentence pair.
+You can pass a string to both `queries` and `documents`, forming a single sentence pair.
 
 ```bash
 curl -X 'POST' \
@@ -696,8 +704,8 @@ curl -X 'POST' \
   -d '{
   "model": "BAAI/bge-reranker-v2-m3",
   "encoding_format": "float",
-  "text_1": "What is the capital of France?",
-  "text_2": "The capital of France is Paris."
+  "queries": "What is the capital of France?",
+  "documents": "The capital of France is Paris."
 }'
 ```
 
@@ -722,9 +730,9 @@ curl -X 'POST' \
 
 #### Batch inference
 
-You can pass a string to `text_1` and a list to `text_2`, forming multiple sentence pairs
-where each pair is built from `text_1` and a string in `text_2`.
-The total number of pairs is `len(text_2)`.
+You can pass a string to `queries` and a list to `documents`, forming multiple sentence pairs
+where each pair is built from `queries` and a string in `documents`.
+The total number of pairs is `len(documents)`.
 
 ??? console "Request"
 
@@ -735,8 +743,8 @@ The total number of pairs is `len(text_2)`.
       -H 'Content-Type: application/json' \
       -d '{
       "model": "BAAI/bge-reranker-v2-m3",
-      "text_1": "What is the capital of France?",
-      "text_2": [
+      "queries": "What is the capital of France?",
+      "documents": [
         "The capital of Brazil is Brasilia.",
         "The capital of France is Paris."
       ]
@@ -767,9 +775,9 @@ The total number of pairs is `len(text_2)`.
     }
     ```
 
-You can pass a list to both `text_1` and `text_2`, forming multiple sentence pairs
-where each pair is built from a string in `text_1` and the corresponding string in `text_2` (similar to `zip()`).
-The total number of pairs is `len(text_2)`.
+You can pass a list to both `queries` and `documents`, forming multiple sentence pairs
+where each pair is built from a string in `queries` and the corresponding string in `documents` (similar to `zip()`).
+The total number of pairs is `len(documents)`.
 
 ??? console "Request"
 
@@ -781,11 +789,11 @@ The total number of pairs is `len(text_2)`.
       -d '{
       "model": "BAAI/bge-reranker-v2-m3",
       "encoding_format": "float",
-      "text_1": [
+      "queries": [
         "What is the capital of Brazil?",
         "What is the capital of France?"
       ],
-      "text_2": [
+      "documents": [
         "The capital of Brazil is Brasilia.",
         "The capital of France is Paris."
       ]
@@ -839,8 +847,8 @@ You can pass multi-modal inputs to scoring models by passing `content` including
             "http://localhost:8000/v1/score",
             json={
                 "model": "jinaai/jina-reranker-m0",
-                "text_1": "slm markdown",
-                "text_2": {
+                "queries": "slm markdown",
+                "documents": {
                     "content": [
                         {
                             "type": "image_url",
@@ -863,7 +871,10 @@ You can pass multi-modal inputs to scoring models by passing `content` including
         print("Scoring output:", response_json["data"][0]["score"])
         print("Scoring output:", response_json["data"][1]["score"])
         ```
-Full example: [examples/pooling/score/openai_cross_encoder_score_for_multimodal.py](../../examples/pooling/score/openai_cross_encoder_score_for_multimodal.py)
+Full example:
+
+- [examples/pooling/score/vision_score_api_online.py](../../examples/pooling/score/vision_score_api_online.py)
+- [examples/pooling/score/vision_rerank_api_online.py](../../examples/pooling/score/vision_rerank_api_online.py)
 
 #### Extra parameters
 
@@ -893,7 +904,7 @@ endpoints are compatible with both [Jina AI's re-rank API interface](https://jin
 [Cohere's re-rank API interface](https://docs.cohere.com/v2/reference/rerank) to ensure compatibility with
 popular open-source tools.
 
-Code example: [examples/pooling/score/openai_reranker.py](../../examples/pooling/score/openai_reranker.py)
+Code example: [examples/pooling/score/rerank_api_online.py](../../examples/pooling/score/rerank_api_online.py)
 
 #### Example Request
 

@@ -100,9 +100,6 @@ class MiniMaxM2MoE(nn.Module):
             num_experts=config.num_local_experts,
             top_k=config.num_experts_per_tok,
             scoring_func=config.scoring_func,
-            use_grouped_topk=True,
-            num_expert_group=1,
-            topk_group=1,
             e_score_correction_bias=self.e_score_correction_bias,
             hidden_size=config.hidden_size,
             intermediate_size=config.intermediate_size,
@@ -392,6 +389,7 @@ class MiniMaxM2Model(nn.Module):
 
     def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:
         return FusedMoE.make_expert_params_mapping(
+            self,
             ckpt_gate_proj_name="w1",
             ckpt_down_proj_name="w2",
             ckpt_up_proj_name="w3",

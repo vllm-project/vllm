@@ -16,11 +16,11 @@ from transformers.image_processing_utils import BatchFeature
 from transformers.tokenization_utils import TensorType
 from typing_extensions import TypedDict, Unpack
 
-from vllm.attention.layers.mm_encoder_attention import MMEncoderAttention
 from vllm.config import MultiModalConfig, VllmConfig
 from vllm.config.model import ModelConfig
 from vllm.distributed import parallel_state
 from vllm.distributed import utils as dist_utils
+from vllm.model_executor.layers.attention.mm_encoder_attention import MMEncoderAttention
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
     QKVParallelLinear,
@@ -55,16 +55,17 @@ from vllm.multimodal.inputs import (
 )
 from vllm.multimodal.parse import ImageSize, MultiModalDataItems
 from vllm.multimodal.processing import (
+    BaseDummyInputsBuilder,
     BaseMultiModalProcessor,
     BaseProcessingInfo,
     PromptReplacement,
     PromptUpdate,
     PromptUpdateDetails,
 )
-from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from vllm.sequence import IntermediateTensors
 from vllm.tokenizers import get_tokenizer
 from vllm.tokenizers.hf import get_cached_tokenizer
+from vllm.transformers_utils.config import patch_rope_parameters
 from vllm.transformers_utils.configs import (
     IsaacConfig,
     PixelShuffleSiglip2VisionConfig,
@@ -984,6 +985,7 @@ class Siglip2VisionAttention(nn.Module):
         self.attn = MMEncoderAttention(
             num_heads=self.num_attention_heads_per_partition,
             head_size=self.hidden_size_per_attention_head,
+            scale=self.hidden_size_per_attention_head**-0.5,
             prefix=f"{prefix}.attn",
             multimodal_config=multimodal_config,
         )
@@ -1226,8 +1228,8 @@ class IsaacVisionEmbedding(nn.Module):
         self.transformer = Siglip2VisionTransformer(
             vision_cfg,
             quant_config=quant_config,
-            prefix=maybe_prefix(prefix, "0"),
             multimodal_config=multimodal_config,
+            prefix=maybe_prefix(prefix, "0"),
         )
         self.linear_fc1 = ColumnParallelLinear(
             hidden_dim,
@@ -1283,11 +1285,14 @@ class IsaacForConditionalGeneration(
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_prefix={
             "lm_head.": "language_model.lm_head.",
+            "model.text_model.lm_head.": "language_model.lm_head.",
+            "model.text_model.": "language_model.model.",
             "model.vision_embedding.0": "vision_embedding.transformer",
             "model.vision_embedding.1": "vision_embedding.linear_fc1",
             "model.vision_embedding.2": "vision_embedding.act",
             "model.vision_embedding.3": "vision_embedding.linear_fc2",
             "model.vision_embedding.": "vision_embedding.",
+            "model.lm_head.": "language_model.lm_head.",
             "model.": "language_model.model.",
         }
     )
@@ -1318,12 +1323,33 @@ class IsaacForConditionalGeneration(
         )
         config.image_token_id = self.vision_token_id
 
-        config.rope_scaling["mrope_section"] = calculated_mrope_section
-        self.language_model = init_vllm_registered_model(
-            vllm_config=vllm_config,
-            architectures=["Qwen3ForCausalLM"],
-            prefix=maybe_prefix(prefix, "language_model"),
+        text_cfg = getattr(config, "text_config", None)
+        target_cfg = (
+            text_cfg
+            if text_cfg is not None and not isinstance(text_cfg, dict)
+            else config
         )
+
+        rope_scaling = getattr(target_cfg, "rope_scaling", None)
+        if rope_scaling is None and target_cfg is config:
+            rope_scaling = getattr(config, "_rope_scaling", None)
+
+        patch_rope_parameters(target_cfg)
+        rope_parameters = target_cfg.rope_parameters
+        rope_parameters["mrope_section"] = calculated_mrope_section
+        if rope_scaling is not None and "mrope_interleaved" in rope_scaling:
+            rope_parameters.setdefault(
+                "mrope_interleaved", rope_scaling["mrope_interleaved"]
+            )
+        target_cfg.rope_parameters = rope_parameters
+
+        with self._mark_language_model(vllm_config):
+            self.language_model = init_vllm_registered_model(
+                vllm_config=vllm_config,
+                architectures=["Qwen3ForCausalLM"],
+                prefix=maybe_prefix(prefix, "language_model"),
+            )
+
         self.make_empty_intermediate_tensors = (
             self.language_model.make_empty_intermediate_tensors
         )
@@ -1340,14 +1366,16 @@ class IsaacForConditionalGeneration(
             vision_cfg._attn_implementation = attn_impl
 
         hidden_dim = vision_cfg.hidden_size * (vision_cfg.pixel_shuffle_scale_factor**2)
-        self.vision_embedding = IsaacVisionEmbedding(
-            vision_cfg=vision_cfg,
-            hidden_dim=hidden_dim,
-            output_dim=config.hidden_size,
-            quant_config=quant_config,
-            multimodal_config=self.multimodal_config,
-            prefix=maybe_prefix(prefix, "vision_embedding"),
-        )
+
+        with self._mark_tower_model(vllm_config, "image"):
+            self.vision_embedding = IsaacVisionEmbedding(
+                vision_cfg=vision_cfg,
+                hidden_dim=hidden_dim,
+                output_dim=config.hidden_size,
+                quant_config=quant_config,
+                multimodal_config=self.multimodal_config,
+                prefix=maybe_prefix(prefix, "vision_embedding"),
+            )
 
     def iter_mm_grid_hw(
         self, input_tokens: list[int], mm_features: list[MultiModalFeatureSpec]
@@ -1433,18 +1461,6 @@ class IsaacForConditionalGeneration(
         if image_input is None:
             return ()
         return self._process_image_input(image_input)
-
-    def get_multimodal_embeddings(
-        self, **kwargs: object
-    ) -> MultiModalEmbeddings | None:
-        # Backward compatibility for older runners.
-        embeddings = self.embed_multimodal(**kwargs)
-        if not embeddings:
-            return []
-        return embeddings
-
-    def get_language_model(self) -> torch.nn.Module:
-        return self.language_model
 
     def forward(
         self,

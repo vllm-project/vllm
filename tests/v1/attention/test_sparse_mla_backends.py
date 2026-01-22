@@ -21,7 +21,6 @@ from tests.v1.attention.utils import (
     create_vllm_config,
 )
 from vllm import _custom_ops as ops
-from vllm.attention.ops import flashmla
 from vllm.config import set_current_vllm_config
 from vllm.model_executor.layers.linear import ColumnParallelLinear
 from vllm.platforms import current_platform
@@ -31,6 +30,7 @@ from vllm.v1.attention.backends.mla.flashmla_sparse import (
     triton_convert_req_index_to_global_index,
 )
 from vllm.v1.attention.backends.utils import split_prefill_chunks
+from vllm.v1.attention.ops import flashmla
 
 SPARSE_BACKEND_BATCH_SPECS = {
     name: BATCH_SPECS[name]
@@ -51,10 +51,33 @@ SPARSE_BACKEND_BATCH_SPECS["large_q_pure_prefill"] = BatchSpec(
 )
 
 
+def _float_to_e8m0_truncate(f: float) -> float:
+    """Simulate SM100's float -> e8m0 -> bf16 scale conversion.
+    e8m0 format only stores the exponent (power of 2).
+    cudaRoundZero truncates toward zero, meaning we round down to the
+    nearest power of 2.
+    """
+    if f <= 0:
+        return 0.0
+    # e8m0 = floor(log2(f)), then 2^(e8m0)
+    # This is equivalent to truncating to the nearest power of 2 below f
+    exp = math.floor(math.log2(f))
+    return 2.0**exp
+
+
 def _dequantize_fp8_ds_mla_entry(
-    cache_slice: torch.Tensor, kv_lora_rank: int, rope_dim: int, dtype: torch.dtype
+    cache_slice: torch.Tensor,
+    kv_lora_rank: int,
+    rope_dim: int,
+    dtype: torch.dtype,
+    simulate_sm100_e8m0_scales: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Dequantize a single fp8_ds_mla cache entry back to latent + rope."""
+    """Dequantize a single fp8_ds_mla cache entry back to latent + rope.
+
+    Args:
+        simulate_sm100_e8m0_scales: If True, simulate the SM100 kernel's
+            float -> e8m0 -> bf16 scale conversion path.
+    """
 
     # The first kv_lora_rank bytes store FP8 latent values with one scale per
     # 128 element tile written as float32 right after the latent payload.
@@ -63,10 +86,14 @@ def _dequantize_fp8_ds_mla_entry(
     for tile_idx in range(4):
         tile_start = tile_idx * 128
         tile_end = tile_start + 128
+        scale_val = float(scales[tile_idx].item())
+        if simulate_sm100_e8m0_scales:
+            # Simulate the lossy float -> e8m0 -> bf16 conversion
+            scale_val = _float_to_e8m0_truncate(scale_val)
         ops.convert_fp8(
             latent[tile_start:tile_end],
             cache_slice[tile_start:tile_end],
-            float(scales[tile_idx].item()),
+            scale_val,
             kv_dtype="fp8",
         )
     latent = latent.to(dtype)
@@ -77,9 +104,18 @@ def _dequantize_fp8_ds_mla_entry(
 
 
 def _quantize_dequantize_fp8_ds_mla(
-    kv_c: torch.Tensor, k_pe: torch.Tensor, block_size: int, scale: torch.Tensor
+    kv_c: torch.Tensor,
+    k_pe: torch.Tensor,
+    block_size: int,
+    scale: torch.Tensor,
+    simulate_sm100_e8m0_scales: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Round-trip kv_c/k_pe though the fp8_ds_mla cache layout."""
+    """Round-trip kv_c/k_pe though the fp8_ds_mla cache layout.
+
+    Args:
+        simulate_sm100_e8m0_scales: If True, simulate the SM100 kernel's
+            float -> e8m0 -> bf16 scale conversion in dequantization.
+    """
 
     if kv_c.numel() == 0:
         return kv_c.clone(), k_pe.clone()
@@ -108,7 +144,11 @@ def _quantize_dequantize_fp8_ds_mla(
         block_offset = slot % block_size
         cache_slice = tmp_cache[block_idx, block_offset]
         latent, rope_vals = _dequantize_fp8_ds_mla_entry(
-            cache_slice, kv_lora_rank, rope_dim, kv_c.dtype
+            cache_slice,
+            kv_lora_rank,
+            rope_dim,
+            kv_c.dtype,
+            simulate_sm100_e8m0_scales=simulate_sm100_e8m0_scales,
         )
         dequant_kv_c[token_idx] = latent
         dequant_k_pe[token_idx] = rope_vals
@@ -124,7 +164,12 @@ def _quantize_dequantize_fp8_ds_mla(
     reason="FlashMLASparseBackend requires CUDA 9.0 or higher",
 )
 def test_sparse_backend_decode_correctness(
-    dist_init, batch_name, kv_cache_dtype, tensor_parallel_size, workspace_init
+    default_vllm_config,
+    dist_init,
+    batch_name,
+    kv_cache_dtype,
+    tensor_parallel_size,
+    workspace_init,
 ):
     if current_platform.is_rocm():
         pytest.skip("ROCm does not support fp8_ds_mla data type for kv cache.")
@@ -138,7 +183,10 @@ def test_sparse_backend_decode_correctness(
     batch_spec = SPARSE_BACKEND_BATCH_SPECS[batch_name]
 
     # Model hyper-parameters (kept intentionally small for the unit test)
-    num_heads = 128
+    total_num_heads = 128
+    # Compute per-rank heads for simulated TP
+    num_heads = max(1, total_num_heads // tensor_parallel_size)
+
     kv_lora_rank = 512
     qk_nope_head_dim = 128
     qk_rope_head_dim = 64
@@ -174,7 +222,7 @@ def test_sparse_backend_decode_correctness(
     )
     model_config.dtype = dtype
     model_config.get_num_attention_heads = MethodType(
-        lambda self, parallel_config: max(1, num_heads // tensor_parallel_size),
+        lambda self, parallel_config: num_heads,
         model_config,
     )
     model_config.get_num_kv_heads = MethodType(
@@ -190,10 +238,10 @@ def test_sparse_backend_decode_correctness(
     scale = 1.0 / math.sqrt(head_size)
 
     # Shared MLA projection weights to keep reference and backend in sync
-    W_UK = torch.randn(
+    W_UK = torch.rand(
         kv_lora_rank, num_heads, qk_nope_head_dim, dtype=dtype, device=device
     )
-    W_UV = torch.randn(kv_lora_rank, num_heads, v_head_dim, dtype=dtype, device=device)
+    W_UV = torch.rand(kv_lora_rank, num_heads, v_head_dim, dtype=dtype, device=device)
 
     # Build synthetic decode-only workload
     seq_lens = batch_spec.seq_lens
@@ -220,11 +268,15 @@ def test_sparse_backend_decode_correctness(
         kv_c_full = torch.rand(s_len, kv_lora_rank, dtype=dtype, device=device)
         k_pe_full = torch.rand(s_len, 1, qk_rope_head_dim, dtype=dtype, device=device)
 
+        # SM100 (Blackwell) uses float -> e8m0 -> bf16 scale conversion
+        # which truncates scales to powers of 2. Simulate this in reference.
+        is_sm100 = torch.cuda.get_device_capability()[0] >= 10
         kv_c_full, k_pe_full = _quantize_dequantize_fp8_ds_mla(
             kv_c_full,
             k_pe_full.squeeze(1),
             block_size=vllm_config.cache_config.block_size,
             scale=kv_cache_scale,
+            simulate_sm100_e8m0_scales=is_sm100,
         )
 
         q_nope, q_pe = q_c.split([qk_nope_head_dim, qk_rope_head_dim], dim=-1)
@@ -297,7 +349,7 @@ def test_sparse_backend_decode_correctness(
     positions = np.arange(starts[-1], dtype=np.int32) - np.repeat(
         starts[:-1], seg_lengths
     )
-    seq_lengths = np.asarray(common_attn_metadata.seq_lens_cpu, dtype=np.int32)
+    seq_lengths = np.asarray(common_attn_metadata.seq_lens.cpu(), dtype=np.int32)
     prefix_lengths = seq_lengths - seg_lengths
     positions += np.repeat(prefix_lengths, seg_lengths)
 
@@ -376,7 +428,12 @@ def test_sparse_backend_decode_correctness(
     assert backend_output.dtype == sdpa_reference.dtype
     assert torch.isfinite(backend_output).all()
 
-    torch.testing.assert_close(backend_output, sdpa_reference, rtol=0.5, atol=0.5)
+    # FP8 quantization introduces some error, but should be within reasonable bounds
+    # BF16 (auto) should be very accurate, FP8 allows slightly more tolerance
+    if kv_cache_dtype == "fp8_ds_mla":
+        torch.testing.assert_close(backend_output, sdpa_reference, rtol=0.05, atol=0.05)
+    else:
+        torch.testing.assert_close(backend_output, sdpa_reference, rtol=0.01, atol=0.01)
 
 
 def _triton_convert_reference_impl(

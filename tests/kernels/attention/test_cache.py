@@ -9,6 +9,7 @@ import torch
 from tests.kernels.utils import DEFAULT_OPCHECK_TEST_UTILS, opcheck
 from vllm import _custom_ops as ops
 from vllm.platforms import current_platform
+from vllm.utils.torch_utils import set_random_seed
 
 COPYING_DIRECTION = [("cuda", "cpu"), ("cuda", "cuda"), ("cpu", "cuda")]
 DTYPES = [torch.bfloat16, torch.float]
@@ -64,7 +65,7 @@ def test_reshape_and_cache(
 ) -> None:
     if kv_cache_dtype == "fp8" and head_size % 16:
         pytest.skip()
-    current_platform.seed_everything(seed)
+    set_random_seed(seed)
     torch.set_default_device(device)
     torch.cuda.set_device(device)
     # Create a random slot mapping.
@@ -185,7 +186,7 @@ def test_reshape_and_cache_flash(
     kv_cache_layout: str,
     implementation: str,
 ) -> None:
-    current_platform.seed_everything(seed)
+    set_random_seed(seed)
     torch.set_default_device(device)
     torch.cuda.set_device(device)
     assert implementation in ["cuda", "triton"]
@@ -269,7 +270,7 @@ def test_reshape_and_cache_flash(
             v_scale,
         )
     elif implementation == "triton":
-        from vllm.attention.ops.triton_reshape_and_cache_flash import (
+        from vllm.v1.attention.ops.triton_reshape_and_cache_flash import (
             triton_reshape_and_cache_flash,
         )
 
@@ -355,7 +356,7 @@ def test_swap_blocks(
     if kv_cache_dtype == "fp8" and head_size % 16:
         pytest.skip()
 
-    current_platform.seed_everything(seed)
+    set_random_seed(seed)
 
     src_device = device if direction[0] == "cuda" else "cpu"
     dst_device = device if direction[1] == "cuda" else "cpu"
@@ -404,19 +405,41 @@ def test_swap_blocks(
 
     # Call the swap_blocks kernel.
     do_opcheck = head_size == HEAD_SIZES[0]
+    src_cache = src_key_caches[0]
+    block_size_in_bytes = src_cache.element_size() * src_cache.stride(0)
     opcheck(
         torch.ops._C_cache_ops.swap_blocks,
-        (src_key_caches[0], dist_key_caches[0], block_mapping_tensor),
+        (
+            src_key_caches[0],
+            dist_key_caches[0],
+            block_size_in_bytes,
+            block_mapping_tensor,
+        ),
         cond=do_opcheck,
     )
     opcheck(
         torch.ops._C_cache_ops.swap_blocks,
-        (src_value_caches[0], dist_value_caches[0], block_mapping_tensor),
+        (
+            src_value_caches[0],
+            dist_value_caches[0],
+            block_size_in_bytes,
+            block_mapping_tensor,
+        ),
         cond=do_opcheck,
     )
 
-    ops.swap_blocks(src_key_caches[0], dist_key_caches[0], block_mapping_tensor)
-    ops.swap_blocks(src_value_caches[0], dist_value_caches[0], block_mapping_tensor)
+    ops.swap_blocks(
+        src_key_caches[0],
+        dist_key_caches[0],
+        block_size_in_bytes,
+        block_mapping_tensor,
+    )
+    ops.swap_blocks(
+        src_value_caches[0],
+        dist_value_caches[0],
+        block_size_in_bytes,
+        block_mapping_tensor,
+    )
 
     for src, dst in block_mapping:
         torch.testing.assert_close(
@@ -444,7 +467,7 @@ def test_fp8_e4m3_conversion(
     seed: int,
     device: str,
 ) -> None:
-    current_platform.seed_everything(seed)
+    set_random_seed(seed)
 
     low = -224.0
     high = 224.0
@@ -507,7 +530,7 @@ def test_concat_and_cache_mla(
     device: str,
     kv_cache_dtype: str,
 ) -> None:
-    current_platform.seed_everything(seed)
+    set_random_seed(seed)
     torch.set_default_device(device)
     torch.cuda.set_device(device)
 
@@ -584,7 +607,7 @@ def test_concat_and_cache_ds_mla(
     if dtype.itemsize != 2:
         pytest.skip("ds_mla only supports 16-bit input")
     kv_cache_dtype = "fp8_ds_mla"
-    current_platform.seed_everything(seed)
+    set_random_seed(seed)
     torch.set_default_device(device)
     torch.cuda.set_device(device)
 
@@ -695,7 +718,7 @@ def test_swap_blocks_mla(
     device: str,
     kv_cache_dtype: str,
 ) -> None:
-    current_platform.seed_everything(seed)
+    set_random_seed(seed)
     torch.set_default_device(device)
     torch.cuda.set_device(device)
 
@@ -722,13 +745,14 @@ def test_swap_blocks_mla(
         block_mapping, dtype=torch.int64, device="cpu"
     ).view(-1, 2)
 
+    block_size_in_bytes = src_cache.element_size() * src_cache.stride(0)
     opcheck(
         torch.ops._C_cache_ops.swap_blocks,
-        (src_cache, dst_cache, block_mapping_tensor),
+        (src_cache, dst_cache, block_size_in_bytes, block_mapping_tensor),
         test_utils=DEFAULT_OPCHECK_TEST_UTILS,
     )
 
-    ops.swap_blocks(src_cache, dst_cache, block_mapping_tensor)
+    ops.swap_blocks(src_cache, dst_cache, block_size_in_bytes, block_mapping_tensor)
 
     for src, dst in block_mapping:
         torch.testing.assert_close(
@@ -947,7 +971,7 @@ def test_concat_and_cache_mla_cpu(
 ) -> None:
     device = "cpu"
     kv_cache_dtype = "auto"
-    current_platform.seed_everything(seed)
+    set_random_seed(seed)
     torch.set_default_device(device)
 
     total_slots = num_blocks * block_size

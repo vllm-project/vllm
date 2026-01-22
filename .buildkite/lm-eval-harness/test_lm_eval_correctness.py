@@ -60,6 +60,7 @@ def launch_lm_eval(eval_config, tp_size):
         f"add_bos_token=true,"
         f"trust_remote_code={trust_remote_code},"
         f"max_model_len={max_model_len},"
+        "allow_deprecated_quantization=True,"
     )
 
     env_vars = eval_config.get("env_vars", None)

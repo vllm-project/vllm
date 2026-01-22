@@ -3,10 +3,10 @@
 
 from collections.abc import Mapping, MutableMapping
 from pathlib import Path
-from urllib.parse import urlparse
 
 import aiohttp
 import requests
+from urllib3.util import parse_url
 
 from vllm.version import __version__ as VLLM_VERSION
 
@@ -37,7 +37,7 @@ class HTTPConnection:
         return self._async_client
 
     def _validate_http_url(self, url: str):
-        parsed_url = urlparse(url)
+        parsed_url = parse_url(url)
 
         if parsed_url.scheme not in ("http", "https"):
             raise ValueError(
