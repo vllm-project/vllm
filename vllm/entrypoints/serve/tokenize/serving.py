@@ -67,9 +67,6 @@ class OpenAIServingTokenization(OpenAIServing):
         try:
             lora_request = self._maybe_get_adapters(request)
 
-            tokenizer = await self.engine_client.get_tokenizer()
-            renderer = self._get_renderer(tokenizer)
-
             if isinstance(request, TokenizeChatRequest):
                 tool_dicts = (
                     None
@@ -86,7 +83,7 @@ class OpenAIServingTokenization(OpenAIServing):
 
                 _, engine_prompts = await self._preprocess_chat(
                     request,
-                    tokenizer,
+                    self.renderer,
                     request.messages,
                     tool_dicts=tool_dicts,
                     chat_template=request.chat_template or self.chat_template,
@@ -97,6 +94,7 @@ class OpenAIServingTokenization(OpenAIServing):
                     add_special_tokens=request.add_special_tokens,
                 )
             else:
+                renderer = self._get_completion_renderer()
                 engine_prompts = await renderer.render_prompt(
                     prompt_or_prompts=request.prompt,
                     config=self._build_render_config(request),
@@ -116,6 +114,7 @@ class OpenAIServingTokenization(OpenAIServing):
 
         token_strs = None
         if request.return_token_strs:
+            tokenizer = self.renderer.get_tokenizer()
             token_strs = tokenizer.convert_ids_to_tokens(input_ids)
 
         return TokenizeResponse(
@@ -137,8 +136,7 @@ class OpenAIServingTokenization(OpenAIServing):
         request_id = f"tokenize-{self._base_request_id(raw_request)}"
 
         lora_request = self._maybe_get_adapters(request)
-
-        tokenizer = await self.engine_client.get_tokenizer()
+        tokenizer = self.renderer.get_tokenizer()
 
         self._log_inputs(
             request_id,
@@ -161,7 +159,7 @@ class OpenAIServingTokenization(OpenAIServing):
     ) -> TokenizerInfoResponse | ErrorResponse:
         """Get comprehensive tokenizer information."""
         try:
-            tokenizer = await self.engine_client.get_tokenizer()
+            tokenizer = self.renderer.get_tokenizer()
             info = TokenizerInfo(tokenizer, self.chat_template).to_dict()
             return TokenizerInfoResponse(**info)
         except Exception as e:
