@@ -346,15 +346,11 @@ def patch_rope_parameters(config: PretrainedConfig) -> None:
         # Patch legacy fields into rope_parameters
         # Skip for nested rope_parameters (e.g., TranslateGemma) as these
         # fields should not be added to the top-level nested structure
-        if not is_rope_parameters_nested(
-            getattr(config, "rope_parameters", {})
-        ):
+        if not is_rope_parameters_nested(getattr(config, "rope_parameters", {})):
             if rope_theta is not None:
                 config.rope_parameters["rope_theta"] = rope_theta
             if partial_rotary_factor is not None:
-                config.rope_parameters["partial_rotary_factor"] = (
-                    partial_rotary_factor
-                )
+                config.rope_parameters["partial_rotary_factor"] = partial_rotary_factor
             if ompe is not None:
                 config.rope_parameters["original_max_position_embeddings"] = ompe
     elif rope_theta is not None or getattr(config, "rope_parameters", None):
@@ -367,9 +363,7 @@ def patch_rope_parameters(config: PretrainedConfig) -> None:
         # Standardize and validate RoPE parameters
         # Skip validation for nested rope_parameters (e.g., TranslateGemma)
         # as vLLM handles validation in patch_rope_parameters_dict()
-        if not is_rope_parameters_nested(
-            getattr(config, "rope_parameters", {})
-        ):
+        if not is_rope_parameters_nested(getattr(config, "rope_parameters", {})):
             config.standardize_rope_params()
             config.validate_rope()
 

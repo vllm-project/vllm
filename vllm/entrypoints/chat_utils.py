@@ -1538,9 +1538,10 @@ def _parse_chat_message_content_part(
         if wrap_dicts:
             result: dict[str, Any] = {"type": "text", "text": str_content}
             # Preserve translation-specific fields for models like TranslateGemma
+            part_dict = cast(dict[str, Any], part)
             for field in ("source_lang_code", "target_lang_code"):
-                if field in part:
-                    result[field] = part[field]
+                if field in part_dict:
+                    result[field] = part_dict[field]
             return result
         else:
             return str_content
@@ -1586,9 +1587,10 @@ def _parse_chat_message_content_part(
     if wrap_dicts:
         result = {"type": modality}
         # Preserve translation-specific fields for models like TranslateGemma
+        part_dict = cast(dict[str, Any], part)
         for field in ("source_lang_code", "target_lang_code"):
-            if field in part:
-                result[field] = part[field]
+            if field in part_dict:
+                result[field] = part_dict[field]
         return result
     else:
         return MODALITY_PLACEHOLDERS_MAP[modality] if interleave_strings else None
