@@ -137,7 +137,12 @@ class RejectionSampler(nn.Module):
             sampling_metadata,
         )
         # Compute probability distribution from target logits.
-        target_probs = target_logits.softmax(dim=-1, dtype=torch.float32)
+        # NOTE: For all-greedy decoding, the rejection sampler only needs
+        # argmax(target_logits), so computing a full-vocab softmax is wasted.
+        if sampling_metadata.all_greedy:
+            target_probs = target_logits
+        else:
+            target_probs = target_logits.softmax(dim=-1, dtype=torch.float32)
 
         output_token_ids = rejection_sample(
             metadata.draft_token_ids,
