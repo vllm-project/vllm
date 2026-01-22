@@ -70,19 +70,17 @@ class ServingClassification(OpenAIServing):
             ctx.lora_request = self._maybe_get_adapters(ctx.request)
 
             if isinstance(ctx.request, ClassificationChatRequest):
-                chat_request = ctx.request
-                messages = chat_request.messages
                 ret = self._validate_chat_template(
-                    request_chat_template=chat_request.chat_template,
-                    chat_template_kwargs=chat_request.chat_template_kwargs,
+                    request_chat_template=ctx.request.chat_template,
+                    chat_template_kwargs=ctx.request.chat_template_kwargs,
                     trust_request_chat_template=self.trust_request_chat_template,
                 )
                 if ret:
                     return ret
 
                 _, engine_prompts = await self._preprocess_chat(
-                    chat_request,
-                    messages,
+                    ctx.request,
+                    ctx.request.messages,
                     default_template=self.chat_template,
                     default_template_content_format=self.chat_template_content_format,
                     default_template_kwargs=None,
