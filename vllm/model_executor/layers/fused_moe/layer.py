@@ -557,6 +557,9 @@ class FusedMoE(CustomOp):
             device=vllm_config.device_config.device,
             routing_method=self.routing_method_type,
         )
+        self.moe_config_use_flashinfer_cutlass_kernels = (
+            self.moe_config.use_flashinfer_cutlass_kernels
+        )
         if self.use_mori_kernels:
             assert self.rocm_aiter_fmoe_enabled, (
                 "Mori needs to be used with aiter fused_moe for now."
@@ -717,6 +720,14 @@ class FusedMoE(CustomOp):
         return self.moe_parallel_config.use_mori_kernels
 
     @property
+    def use_flashinfer_cutlass_kernels(self):
+        return (
+            self.moe_quant_config is not None
+            and self.moe_quant_config.quant_dtype == "nvfp4"
+            and self.moe_config_use_flashinfer_cutlass_kernels
+        )
+
+    @property
     def use_marlin_kernels(self):
         return getattr(self.quant_method, "use_marlin", False)
 
@@ -726,7 +737,7 @@ class FusedMoE(CustomOp):
             self.moe_parallel_config.use_pplx_kernels
             or self.moe_parallel_config.use_deepep_ll_kernels
             or self.moe_parallel_config.use_mori_kernels
-            or self.moe_parallel_config.use_fi_all2allv_kernels
+            or (self.dp_size > 1 and self.use_flashinfer_cutlass_kernels)
         ) and envs.VLLM_ENABLE_MOE_DP_CHUNK
 
     @property

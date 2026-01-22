@@ -1154,9 +1154,12 @@ class FusedMoEConfig:
         return self.moe_parallel_config.use_mori_kernels
 
     @property
-    def use_fi_all2allv_kernels(self):
-        return self.moe_parallel_config.use_fi_all2allv_kernels
-
-    @property
-    def use_naive_all2all_kernels(self):
-        return self.moe_parallel_config.use_naive_all2all_kernels
+    def use_flashinfer_cutlass_kernels(self):
+        """
+        Whether to use FlashInfer cutlass kernels for NVFP4 MoE.
+        """
+        return (
+            envs.VLLM_USE_FLASHINFER_MOE_FP4
+            and has_flashinfer_cutlass_fused_moe()
+            and envs.VLLM_FLASHINFER_MOE_BACKEND == "throughput"
+        )
