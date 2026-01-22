@@ -57,15 +57,19 @@ class GroupShape(_GroupShape):
         return self.row == 1 and self.col == -1
 
     def is_per_channel(self) -> bool:
-        return self.row == -1 and self.col == 1
+        return self.row == 1 and self.col == -1
 
     def is_per_group(self) -> bool:
         return self.row == 1 and self.col >= 1
 
 
 GroupShape.PER_TENSOR = GroupShape(-1, -1)
+# Input shape is in (M, K)
+# Descriptor for weights that are quantized per token
 GroupShape.PER_TOKEN = GroupShape(1, -1)
-GroupShape.PER_CHANNEL = GroupShape(-1, 1)
+# Weight shape is in (N, K)
+# Descriptor for weights that are quantized per output channel
+GroupShape.PER_CHANNEL = GroupShape(1, -1)
 
 
 @dataclass(frozen=True)
@@ -123,9 +127,6 @@ kFp8StaticTensorSym = QuantKey(FP8_DTYPE, kStaticTensorScale, symmetric=True)
 
 kDynamicTensorScale = ScaleDesc(torch.float32, False, GroupShape.PER_TENSOR)
 kFp8DynamicTensorSym = QuantKey(FP8_DTYPE, kDynamicTensorScale, symmetric=True)
-
-kStaticChannelScale = ScaleDesc(torch.float32, True, GroupShape.PER_CHANNEL)
-kFp8StaticChannelSym = QuantKey(FP8_DTYPE, kStaticChannelScale, symmetric=True)
 
 kStaticChannelScale = ScaleDesc(torch.float32, True, GroupShape.PER_CHANNEL)
 kFp8StaticChannelSym = QuantKey(FP8_DTYPE, kStaticChannelScale, symmetric=True)
