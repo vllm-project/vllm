@@ -6,20 +6,20 @@ from collections.abc import Awaitable
 from fastapi.responses import JSONResponse
 from starlette.types import ASGIApp, Receive, Scope, Send
 
-# Global variable to track server unavailability (scaling, draining, etc.)
-_server_unavailable = False
+# tracks whether server is rejecting new requests (during scaling, shutdown, etc.)
+_rejecting_requests = False
 
 # paths that should remain accessible during drain (liveness + observability)
 _EXEMPT_PATHS = {"/live", "/metrics"}
 
 
-def is_server_unavailable() -> bool:
-    return _server_unavailable
+def is_rejecting_requests() -> bool:
+    return _rejecting_requests
 
 
-def set_server_unavailable(value: bool) -> None:
-    global _server_unavailable
-    _server_unavailable = value
+def set_rejecting_requests(value: bool) -> None:
+    global _rejecting_requests
+    _rejecting_requests = value
 
 
 class ScalingMiddleware:
@@ -37,7 +37,7 @@ class ScalingMiddleware:
             return self.app(scope, receive, send)
 
         path = scope.get("path", "")
-        if is_server_unavailable() and path not in _EXEMPT_PATHS:
+        if is_rejecting_requests() and path not in _EXEMPT_PATHS:
             response = JSONResponse(
                 content={"error": "Server is unavailable. Please try again later."},
                 status_code=503,
