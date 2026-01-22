@@ -1114,8 +1114,16 @@ class FusedMoE(CustomOp):
         expert_id: int,
         return_success: bool = False,
     ) -> bool | None:
-        if self.quant_config and self.quant_config.get_name() == "mxfp4":
-            # (FIXME) for gpt-oss all experts are combined
+        quant_method_name = self.quant_method.__class__.__name__
+
+        # MXFP4-style weight loading: handles both native mxfp4 and Quark OCP_MX
+        # (which exports MXFP4 weights). These quantization schemes pack weights
+        # with all experts combined in a single tensor.
+        is_mxfp4_style = (
+            self.quant_config and self.quant_config.get_name() == "mxfp4"
+        ) or quant_method_name == "QuarkOCP_MX_MoEMethod"
+        if is_mxfp4_style:
+            # (FIXME) for gpt-oss and Quark OCP_MX all experts are combined
             if "bias" in weight_name:
                 dim1 = loaded_weight.shape[1]
                 param.data[:, :dim1].copy_(loaded_weight)
@@ -1124,8 +1132,6 @@ class FusedMoE(CustomOp):
                 dim2 = loaded_weight.shape[2]
                 param.data[:, :dim1, :dim2].copy_(loaded_weight)
             return True if return_success else None
-
-        quant_method_name = self.quant_method.__class__.__name__
         global_expert_id = expert_id
         expert_id = self._map_global_expert_id_to_local_expert_id(global_expert_id)
 
