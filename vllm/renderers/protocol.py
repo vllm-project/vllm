@@ -7,21 +7,16 @@ from vllm.inputs import EmbedsPrompt, TextPrompt, TokensPrompt
 from vllm.tokenizers import TokenizerLike
 from vllm.utils.async_utils import AsyncMicrobatchTokenizer
 from vllm.utils.collection_utils import is_list_of
-from vllm.utils.import_utils import LazyLoader
 
 from .embed_utils import safe_load_prompt_embeds
 from .params import TokenizeParams
 
 if TYPE_CHECKING:
-    import torch
-
     from vllm.config import ModelConfig
     from vllm.entrypoints.chat_utils import (
         ChatCompletionMessageParam,
         ConversationMessage,
     )
-else:
-    torch = LazyLoader("torch", globals(), "torch")
 
 
 class RendererLike(Protocol):
@@ -57,7 +52,7 @@ class RendererLike(Protocol):
     # Step 1: Convert raw inputs to prompts
     def render_completion(
         self,
-        prompt_raw: str | list[int] | torch.Tensor,
+        prompt_raw: str | list[int] | bytes,
     ) -> TextPrompt | TokensPrompt | EmbedsPrompt:
         if isinstance(prompt_raw, str):
             encoder_config = self.config.encoder_config or {}
@@ -76,16 +71,16 @@ class RendererLike(Protocol):
         prompt_input: str | list[str] | list[int] | list[list[int]] | None = None,
         prompt_embeds: bytes | list[bytes] | None = None,
     ) -> list[TextPrompt | TokensPrompt | EmbedsPrompt]:
-        prompts_raw = list[str | list[int] | torch.Tensor]()
+        prompts_raw = list[str | list[int] | bytes]()
 
         if prompt_input is not None:
             if isinstance(prompt_input, str) or is_list_of(prompt_input, int):
-                prompts_raw.append(prompt_input)
+                prompts_raw.append(prompt_input)  # type: ignore[arg-type]
             else:
-                prompts_raw.extend(prompt_input)
+                prompts_raw.extend(prompt_input)  # type: ignore[arg-type]
 
         if prompt_embeds is not None:
-            if isinstance(prompt_embeds, torch.Tensor):
+            if isinstance(prompt_embeds, bytes):
                 prompts_raw.append(prompt_embeds)
             else:
                 prompts_raw.extend(prompt_embeds)
