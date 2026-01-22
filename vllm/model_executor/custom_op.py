@@ -1,7 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import contextlib
 
+import torch
 import torch.nn as nn
 
 from vllm.config import get_cached_compilation_config
@@ -9,6 +11,24 @@ from vllm.logger import init_logger
 from vllm.platforms import current_platform
 
 logger = init_logger(__name__)
+
+# Global flag to track if we're inside an opaque custom op
+_inside_opaque_custom_op = False
+
+
+@contextlib.contextmanager
+def inside_opaque_custom_op():
+    global _inside_opaque_custom_op
+    old = _inside_opaque_custom_op
+    _inside_opaque_custom_op = True
+    try:
+        yield
+    finally:
+        _inside_opaque_custom_op = old
+
+
+def is_inside_opaque_custom_op() -> bool:
+    return _inside_opaque_custom_op
 
 
 # Dictionary of all custom ops (classes, indexed by registered name).
@@ -180,6 +200,9 @@ class CustomOp(nn.Module):
             compilation_config.disabled_custom_ops.update([self.__class__.name])
 
         if not enabled:
+            # Compile forward_native if inside opaque custom op
+            if is_inside_opaque_custom_op():
+                return self.maybe_compile(self.forward_native)
             return self.forward_native
 
         if current_platform.is_rocm():
@@ -194,6 +217,31 @@ class CustomOp(nn.Module):
             return self.forward_oot
         else:
             return self.forward_cuda
+
+    def maybe_compile(self, fn):
+        """
+        Compile fn if inside opaque custom op.
+        Useful for CustomOp instances called from within a torch custom op,
+        meaning the forward call is hidden from the model-level torch.compile.
+        """
+        from vllm.config.compilation import CompilationMode
+        from vllm.model_executor.utils import maybe_disable_graph_partition
+
+        compilation_config = get_cached_compilation_config()
+        if compilation_config.mode == CompilationMode.NONE:
+            return fn
+
+        if compilation_config.backend == "eager":
+            return fn
+
+        return torch.compile(
+            fn,
+            dynamic=True,
+            backend=current_platform.simple_compile_backend,
+            options=maybe_disable_graph_partition(
+                current_platform.simple_compile_backend
+            ),
+        )
 
     @classmethod
     def enabled(cls) -> bool:

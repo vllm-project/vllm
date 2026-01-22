@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import contextlib
+import functools
 import importlib.metadata
 import os
 import random
@@ -723,6 +724,7 @@ def direct_register_custom_op(
     target_lib: Library | None = None,
     dispatch_key: str | None = None,
     tags: tuple[torch.Tag, ...] = (),
+    opaque: bool = True,
 ):
     """
     `torch.library.custom_op` can have significant overhead because it
@@ -738,6 +740,9 @@ def direct_register_custom_op(
     IMPORTANT: the lifetime of the operator is tied to the lifetime of the
     library object. If you want to bind the operator to a different library,
     make sure the library object is alive when the operator is used.
+
+    If `opaque=True` (default), any CustomOp with forward_native inside this
+    op will be compiled to avoid eager execution overhead.
     """
     if mutates_args is None:
         mutates_args = []
@@ -746,6 +751,17 @@ def direct_register_custom_op(
         from vllm.platforms import current_platform
 
         dispatch_key = current_platform.dispatch_key
+
+    # Wrap op_func to mark execution as inside an opaque custom op
+    if opaque:
+        from vllm.model_executor.custom_op import inside_opaque_custom_op
+
+        @functools.wraps(op_func)
+        def wrapped_op_func(*args, **kwargs):
+            with inside_opaque_custom_op():
+                return op_func(*args, **kwargs)
+
+        op_func = wrapped_op_func
 
     schema_str = infer_schema(op_func, mutates_args=mutates_args)
 
