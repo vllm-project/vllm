@@ -6,8 +6,12 @@ from typing import Annotated, Any
 
 from pydantic import Field, model_validator
 
-from vllm.entrypoints.chat_utils import ChatCompletionMessageParam
+from vllm.entrypoints.chat_utils import (
+    ChatCompletionMessageParam,
+    ChatTemplateContentFormatOption,
+)
 from vllm.entrypoints.openai.engine.protocol import OpenAIBaseModel
+from vllm.renderers import ChatParserParams
 from vllm.utils import random_uuid
 
 
@@ -108,3 +112,17 @@ class ChatRequestMixin(OpenAIBaseModel):
                 "`add_generation_prompt` to True."
             )
         return data
+
+    def build_chat_params(
+        self,
+        default_template: str | None,
+        default_template_content_format: ChatTemplateContentFormatOption,
+    ) -> ChatParserParams:
+        return ChatParserParams(
+            chat_template=self.chat_template or default_template,
+            chat_template_content_format=default_template_content_format,
+            chat_template_kwargs=dict(
+                add_generation_prompt=self.add_generation_prompt,
+                continue_final_message=self.continue_final_message,
+            ),
+        ).with_defaults(self.chat_template_kwargs)

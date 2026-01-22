@@ -3,11 +3,10 @@
 import time
 from typing import Generic, TypeAlias, TypeVar
 
-from pydantic import (
-    Field,
-)
+from pydantic import Field
 
 from vllm import PoolingParams
+from vllm.config import ModelConfig
 from vllm.config.pooler import get_use_activation
 from vllm.entrypoints.openai.engine.protocol import OpenAIBaseModel, UsageInfo
 from vllm.entrypoints.pooling.base.protocol import PoolingBasicRequestMixin
@@ -15,6 +14,7 @@ from vllm.entrypoints.pooling.embed.protocol import (
     EmbeddingChatRequest,
     EmbeddingCompletionRequest,
 )
+from vllm.renderers import TokenizationParams
 from vllm.tasks import PoolingTask
 from vllm.utils import random_uuid
 from vllm.utils.serial_utils import EmbedDType, EncodingFormat, Endianness
@@ -36,6 +36,14 @@ class PoolingCompletionRequest(EmbeddingCompletionRequest):
         "If it is a classify or token_classify task, the default is True; "
         "for other tasks, this value should be None.",
     )
+
+    def build_tok_params(self, model_config: ModelConfig) -> TokenizationParams:
+        return TokenizationParams.from_config(
+            model_config,
+            max_length=model_config.max_model_len,
+            truncate_prompt_tokens=self.truncate_prompt_tokens,
+            add_special_tokens=self.add_special_tokens,
+        )
 
     def to_pooling_params(self):
         return PoolingParams(
@@ -61,6 +69,14 @@ class PoolingChatRequest(EmbeddingChatRequest):
         "If it is a classify or token_classify task, the default is True; "
         "for other tasks, this value should be None.",
     )
+
+    def build_tok_params(self, model_config: ModelConfig) -> TokenizationParams:
+        return TokenizationParams.from_config(
+            model_config,
+            max_length=model_config.max_model_len,
+            truncate_prompt_tokens=self.truncate_prompt_tokens,
+            add_special_tokens=self.add_special_tokens,
+        )
 
     def to_pooling_params(self):
         return PoolingParams(

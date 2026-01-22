@@ -8,12 +8,14 @@ from pydantic import (
 )
 
 from vllm import PoolingParams
+from vllm.config import ModelConfig
 from vllm.entrypoints.openai.engine.protocol import OpenAIBaseModel, UsageInfo
 from vllm.entrypoints.pooling.base.protocol import (
     ChatRequestMixin,
     CompletionRequestMixin,
     PoolingBasicRequestMixin,
 )
+from vllm.renderers import TokenizationParams
 from vllm.utils import random_uuid
 from vllm.utils.serial_utils import EmbedDType, EncodingFormat, Endianness
 
@@ -47,6 +49,21 @@ class EmbeddingCompletionRequest(PoolingBasicRequestMixin, CompletionRequestMixi
         ),
     )
     # --8<-- [end:embedding-extra-params]
+
+    def build_tok_params(self, model_config: ModelConfig) -> TokenizationParams:
+        pooler_config = model_config.pooler_config
+
+        if pooler_config and pooler_config.enable_chunked_processing:
+            max_length = None
+        else:
+            max_length = pooler_config.max_embed_len or model_config.max_model_len
+
+        return TokenizationParams.from_config(
+            model_config,
+            max_length=max_length,
+            truncate_prompt_tokens=self.truncate_prompt_tokens,
+            add_special_tokens=self.add_special_tokens,
+        )
 
     def to_pooling_params(self):
         return PoolingParams(
@@ -86,6 +103,21 @@ class EmbeddingChatRequest(PoolingBasicRequestMixin, ChatRequestMixin):
         ),
     )
     # --8<-- [end:chat-embedding-extra-params]
+
+    def build_tok_params(self, model_config: ModelConfig) -> TokenizationParams:
+        pooler_config = model_config.pooler_config
+
+        if pooler_config and pooler_config.enable_chunked_processing:
+            max_length = None
+        else:
+            max_length = pooler_config.max_embed_len or model_config.max_model_len
+
+        return TokenizationParams.from_config(
+            model_config,
+            max_length=max_length,
+            truncate_prompt_tokens=self.truncate_prompt_tokens,
+            add_special_tokens=self.add_special_tokens,
+        )
 
     def to_pooling_params(self):
         return PoolingParams(

@@ -113,7 +113,6 @@ from vllm.entrypoints.openai.responses.utils import (
     construct_input_messages,
     construct_tool_dicts,
     extract_tool_types,
-    should_continue_final_message,
 )
 from vllm.exceptions import VLLMValidationError
 from vllm.inputs.data import TokensPrompt
@@ -121,7 +120,6 @@ from vllm.logger import init_logger
 from vllm.logprobs import Logprob as SampleLogprob
 from vllm.logprobs import SampleLogprobs
 from vllm.outputs import CompletionOutput
-from vllm.renderers import RendererLike
 from vllm.sampling_params import SamplingParams, StructuredOutputsParams
 from vllm.tokenizers import TokenizerLike
 from vllm.utils import random_uuid
@@ -381,8 +379,6 @@ class OpenAIServingResponses(OpenAIServing):
         try:
             lora_request = self._maybe_get_adapters(request)
             model_name = self.models.model_name(lora_request)
-            renderer = self.engine_client.renderer
-            tokenizer = renderer.get_tokenizer()
 
             if self.use_harmony:
                 messages, engine_prompts = self._make_request_with_harmony(
@@ -390,7 +386,7 @@ class OpenAIServingResponses(OpenAIServing):
                 )
             else:
                 messages, engine_prompts = await self._make_request(
-                    request, prev_response, renderer
+                    request, prev_response
                 )
 
         except (
@@ -425,6 +421,9 @@ class OpenAIServingResponses(OpenAIServing):
             assert len(builtin_tool_list) == 0
             available_tools = []
         try:
+            renderer = self.engine_client.renderer
+            tokenizer = renderer.get_tokenizer()
+
             for engine_prompt in engine_prompts:
                 maybe_error = self._validate_generator_input(engine_prompt)
                 if maybe_error is not None:
@@ -456,7 +455,7 @@ class OpenAIServingResponses(OpenAIServing):
                         # tokens during generation instead of at the end
                         context = ParsableContext(
                             response_messages=messages,
-                            renderer=renderer,
+                            tokenizer=tokenizer,
                             reasoning_parser_cls=self.reasoning_parser,
                             request=request,
                             tool_parser_cls=self.tool_parser,
@@ -587,7 +586,6 @@ class OpenAIServingResponses(OpenAIServing):
         self,
         request: ResponsesRequest,
         prev_response: ResponsesResponse | None,
-        renderer: RendererLike,
     ):
         tool_dicts = construct_tool_dicts(request.tools, request.tool_choice)
         # Construct the input messages.
@@ -597,30 +595,15 @@ class OpenAIServingResponses(OpenAIServing):
             prev_msg=self.msg_store.get(prev_response.id) if prev_response else None,
             prev_response_output=prev_response.output if prev_response else None,
         )
-        # Check if we should continue the final message (partial completion)
-        # This enables Anthropic-style partial message completion where the
-        # user provides an incomplete assistant message to continue from.
-        continue_final = should_continue_final_message(request.input)
-        chat_template_kwargs = dict(
-            reasoning_effort=None
-            if request.reasoning is None
-            else request.reasoning.effort
-        )
 
         _, engine_prompts = await self._preprocess_chat(
             request,
-            renderer,
             messages,
+            default_template=self.chat_template,
+            default_template_content_format=self.chat_template_content_format,
+            default_template_kwargs=None,
             tool_dicts=tool_dicts,
             tool_parser=self.tool_parser,
-            chat_template=self.chat_template,
-            chat_template_content_format=self.chat_template_content_format,
-            # When continuing a partial message, we set continue_final_message=True
-            # and add_generation_prompt=False so the model continues the message
-            # rather than starting a new one.
-            add_generation_prompt=not continue_final,
-            continue_final_message=continue_final,
-            chat_template_kwargs=chat_template_kwargs,
         )
         return messages, engine_prompts
 

@@ -22,6 +22,7 @@ if TYPE_CHECKING:
     import torch
 
 
+# TODO: Migrate tests to use renderer
 def parse_raw_prompts(
     prompt: str | list[str] | list[int] | list[list[int]],
 ) -> Sequence[TextPrompt] | Sequence[TokensPrompt]:

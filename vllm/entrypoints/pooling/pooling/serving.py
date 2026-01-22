@@ -14,10 +14,7 @@ from typing_extensions import assert_never
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.chat_utils import ChatTemplateContentFormatOption
 from vllm.entrypoints.logger import RequestLogger
-from vllm.entrypoints.openai.engine.protocol import (
-    ErrorResponse,
-    UsageInfo,
-)
+from vllm.entrypoints.openai.engine.protocol import ErrorResponse, UsageInfo
 from vllm.entrypoints.openai.engine.serving import OpenAIServing
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.entrypoints.pooling.pooling.protocol import (
@@ -30,7 +27,6 @@ from vllm.entrypoints.pooling.pooling.protocol import (
     PoolingResponse,
     PoolingResponseData,
 )
-from vllm.entrypoints.renderer import RenderConfig
 from vllm.entrypoints.utils import _validate_truncation_size
 from vllm.logger import init_logger
 from vllm.outputs import PoolingRequestOutput
@@ -134,19 +130,16 @@ class OpenAIServingPooling(OpenAIServing):
 
                 _, engine_prompts = await self._preprocess_chat(
                     request,
-                    self.renderer,
                     request.messages,
-                    chat_template=request.chat_template or self.chat_template,
-                    chat_template_content_format=self.chat_template_content_format,
-                    add_generation_prompt=request.add_generation_prompt,
-                    continue_final_message=request.continue_final_message,
-                    add_special_tokens=request.add_special_tokens,
+                    default_template=self.chat_template,
+                    default_template_content_format=self.chat_template_content_format,
+                    default_template_kwargs=None,
                 )
             elif isinstance(request, PoolingCompletionRequest):
-                renderer = self._get_completion_renderer()
-                engine_prompts = await renderer.render_prompt(
-                    prompt_or_prompts=request.input,
-                    config=self._build_render_config(request),
+                engine_prompts = await self._preprocess_completion(
+                    request,
+                    prompt_input=request.input,
+                    prompt_embeds=None,
                 )
             else:
                 raise ValueError(f"Unsupported request of type {type(request)}")
@@ -338,10 +331,3 @@ class OpenAIServingPooling(OpenAIServing):
             return encode_bytes(bytes_only=encoding_format == "bytes_only")
         else:
             assert_never(encoding_format)
-
-    def _build_render_config(self, request: PoolingCompletionRequest) -> RenderConfig:
-        return RenderConfig(
-            max_length=self.max_model_len,
-            truncate_prompt_tokens=request.truncate_prompt_tokens,
-            add_special_tokens=request.add_special_tokens,
-        )

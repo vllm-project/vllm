@@ -59,12 +59,15 @@ from pydantic import (
     model_validator,
 )
 
-from vllm.entrypoints.chat_utils import ChatCompletionMessageParam
-from vllm.entrypoints.openai.engine.protocol import (
-    OpenAIBaseModel,
+from vllm.config import ModelConfig
+from vllm.entrypoints.chat_utils import (
+    ChatCompletionMessageParam,
+    ChatTemplateContentFormatOption,
 )
+from vllm.entrypoints.openai.engine.protocol import OpenAIBaseModel
 from vllm.exceptions import VLLMValidationError
 from vllm.logger import init_logger
+from vllm.renderers import ChatParserParams, TokenizationParams
 from vllm.sampling_params import (
     RequestOutputKind,
     SamplingParams,
@@ -229,6 +232,49 @@ class ResponsesRequest(OpenAIBaseModel):
     # TODO: consider supporting non harmony messages as well
     previous_input_messages: list[OpenAIHarmonyMessage | dict] | None = None
     # --8<-- [end:responses-extra-params]
+
+    def build_chat_params(
+        self,
+        default_template: str | None,
+        default_template_content_format: ChatTemplateContentFormatOption,
+    ) -> ChatParserParams:
+        from .utils import should_continue_final_message
+
+        # Check if we should continue the final message (partial completion)
+        # This enables Anthropic-style partial message completion where the
+        # user provides an incomplete assistant message to continue from.
+        continue_final = should_continue_final_message(self.input)
+
+        reasoning = self.reasoning
+
+        return ChatParserParams(
+            chat_template=default_template,
+            chat_template_content_format=default_template_content_format,
+            chat_template_kwargs=dict(
+                add_generation_prompt=not continue_final,
+                continue_final_message=continue_final,
+                reasoning_effort=None if reasoning is None else reasoning.effort,
+            ),
+        )
+
+    def build_tok_params(self, model_config: ModelConfig) -> TokenizationParams:
+        max_tokens = self.max_output_tokens
+
+        # Validate max_tokens before using it
+        if max_tokens is not None and max_tokens > model_config.max_model_len:
+            raise VLLMValidationError(
+                f"'max_tokens' ({max_tokens}) cannot be greater than the "
+                f"model's maximum context length ({model_config.max_model_len}).",
+                parameter="max_tokens",
+                value=max_tokens,
+            )
+
+        return TokenizationParams.from_config(
+            model_config,
+            max_length=model_config.max_model_len - (max_tokens or 0),
+            truncate_prompt_tokens=self.truncation != "disabled",
+            add_special_tokens=not self.skip_special_tokens,
+        )
 
     _DEFAULT_SAMPLING_PARAMS = {
         "temperature": 1.0,

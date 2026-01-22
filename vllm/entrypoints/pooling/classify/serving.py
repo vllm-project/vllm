@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from http import HTTPStatus
-from typing import cast
+from typing import Final, cast
 
 import jinja2
 import numpy as np
@@ -11,13 +11,7 @@ from fastapi import Request
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.chat_utils import ChatTemplateContentFormatOption
 from vllm.entrypoints.logger import RequestLogger
-from vllm.entrypoints.openai.chat_completion.protocol import (
-    ChatCompletionRequest,
-)
-from vllm.entrypoints.openai.engine.protocol import (
-    ErrorResponse,
-    UsageInfo,
-)
+from vllm.entrypoints.openai.engine.protocol import ErrorResponse, UsageInfo
 from vllm.entrypoints.openai.engine.serving import (
     ClassificationServeContext,
     OpenAIServing,
@@ -31,7 +25,6 @@ from vllm.entrypoints.pooling.classify.protocol import (
     ClassificationRequest,
     ClassificationResponse,
 )
-from vllm.entrypoints.renderer import RenderConfig
 from vllm.logger import init_logger
 from vllm.outputs import ClassificationOutput, PoolingRequestOutput
 from vllm.pooling_params import PoolingParams
@@ -39,10 +32,30 @@ from vllm.pooling_params import PoolingParams
 logger = init_logger(__name__)
 
 
-class ClassificationMixin(OpenAIServing):
-    chat_template: str | None
-    chat_template_content_format: ChatTemplateContentFormatOption
-    trust_request_chat_template: bool
+class ServingClassification(OpenAIServing):
+    request_id_prefix = "classify"
+
+    def __init__(
+        self,
+        engine_client: EngineClient,
+        models: OpenAIServingModels,
+        *,
+        request_logger: RequestLogger | None,
+        chat_template: str | None = None,
+        chat_template_content_format: ChatTemplateContentFormatOption = "auto",
+        trust_request_chat_template: bool = False,
+        log_error_stack: bool = False,
+    ) -> None:
+        super().__init__(
+            engine_client=engine_client,
+            models=models,
+            request_logger=request_logger,
+            log_error_stack=log_error_stack,
+        )
+
+        self.chat_template = chat_template
+        self.chat_template_content_format: Final = chat_template_content_format
+        self.trust_request_chat_template = trust_request_chat_template
 
     async def _preprocess(
         self,
@@ -54,59 +67,41 @@ class ClassificationMixin(OpenAIServing):
         """
         ctx = cast(ClassificationServeContext, ctx)
         try:
-            request_obj = ctx.request
+            ctx.lora_request = self._maybe_get_adapters(ctx.request)
 
-            if isinstance(request_obj, ClassificationChatRequest):
-                chat_request = request_obj
+            if isinstance(ctx.request, ClassificationChatRequest):
+                chat_request = ctx.request
                 messages = chat_request.messages
-                trust_request_chat_template = getattr(
-                    self,
-                    "trust_request_chat_template",
-                    False,
-                )
                 ret = self._validate_chat_template(
                     request_chat_template=chat_request.chat_template,
                     chat_template_kwargs=chat_request.chat_template_kwargs,
-                    trust_request_chat_template=trust_request_chat_template,
+                    trust_request_chat_template=self.trust_request_chat_template,
                 )
                 if ret:
                     return ret
 
                 _, engine_prompts = await self._preprocess_chat(
-                    cast(ChatCompletionRequest, chat_request),
-                    self.renderer,
+                    chat_request,
                     messages,
-                    chat_template=(
-                        chat_request.chat_template
-                        or getattr(self, "chat_template", None)
-                    ),
-                    chat_template_content_format=cast(
-                        ChatTemplateContentFormatOption,
-                        getattr(self, "chat_template_content_format", "auto"),
-                    ),
-                    add_generation_prompt=chat_request.add_generation_prompt,
-                    continue_final_message=chat_request.continue_final_message,
-                    add_special_tokens=chat_request.add_special_tokens,
+                    default_template=self.chat_template,
+                    default_template_content_format=self.chat_template_content_format,
+                    default_template_kwargs=None,
                 )
                 ctx.engine_prompts = engine_prompts
 
-            elif isinstance(request_obj, ClassificationCompletionRequest):
-                completion_request = request_obj
+            elif isinstance(ctx.request, ClassificationCompletionRequest):
+                completion_request = ctx.request
                 input_data = completion_request.input
                 if input_data in (None, ""):
                     return self.create_error_response(
                         "Input or messages must be provided",
                         status_code=HTTPStatus.BAD_REQUEST,
                     )
-                if isinstance(input_data, list) and not input_data:
-                    ctx.engine_prompts = []
-                    return None
 
-                renderer = self._get_completion_renderer()
-                prompt_input = cast(str | list[str], input_data)
-                ctx.engine_prompts = await renderer.render_prompt(
-                    prompt_or_prompts=prompt_input,
-                    config=self._build_render_config(completion_request),
+                ctx.engine_prompts = await self._preprocess_completion(
+                    ctx.request,
+                    prompt_input=input_data,
+                    prompt_embeds=None,
                 )
             else:
                 return self.create_error_response(
@@ -128,6 +123,8 @@ class ClassificationMixin(OpenAIServing):
         Convert model outputs to a formatted classification response
         with probabilities and labels.
         """
+        id2label = getattr(self.model_config.hf_config, "id2label", {})
+
         ctx = cast(ClassificationServeContext, ctx)
         items: list[ClassificationData] = []
         num_prompt_tokens = 0
@@ -139,9 +136,7 @@ class ClassificationMixin(OpenAIServing):
 
             probs = classify_res.probs
             predicted_index = int(np.argmax(probs))
-            label = getattr(self.model_config.hf_config, "id2label", {}).get(
-                predicted_index
-            )
+            label = id2label.get(predicted_index)
 
             item = ClassificationData(
                 index=idx,
@@ -166,39 +161,6 @@ class ClassificationMixin(OpenAIServing):
             data=items,
             usage=usage,
         )
-
-    def _build_render_config(self, request: ClassificationRequest) -> RenderConfig:
-        return RenderConfig(
-            max_length=self.max_model_len,
-            truncate_prompt_tokens=request.truncate_prompt_tokens,
-            add_special_tokens=request.add_special_tokens,
-        )
-
-
-class ServingClassification(ClassificationMixin):
-    request_id_prefix = "classify"
-
-    def __init__(
-        self,
-        engine_client: EngineClient,
-        models: OpenAIServingModels,
-        *,
-        request_logger: RequestLogger | None,
-        chat_template: str | None = None,
-        chat_template_content_format: ChatTemplateContentFormatOption = "auto",
-        trust_request_chat_template: bool = False,
-        log_error_stack: bool = False,
-    ) -> None:
-        super().__init__(
-            engine_client=engine_client,
-            models=models,
-            request_logger=request_logger,
-            log_error_stack=log_error_stack,
-        )
-
-        self.chat_template = chat_template
-        self.chat_template_content_format = chat_template_content_format
-        self.trust_request_chat_template = trust_request_chat_template
 
     async def create_classify(
         self,

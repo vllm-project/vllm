@@ -24,7 +24,7 @@ from vllm.entrypoints.chat_utils import (
     parse_chat_messages,
     parse_chat_messages_async,
 )
-from vllm.inputs import TextPrompt, TokensPrompt
+from vllm.inputs import EmbedsPrompt, TextPrompt, TokensPrompt
 from vllm.logger import init_logger
 from vllm.tokenizers import cached_get_tokenizer
 from vllm.tokenizers.hf import CachedHfTokenizer, HfTokenizer
@@ -524,7 +524,7 @@ class HfRenderer(RendererLike):
         messages: list[ChatCompletionMessageParam],
         chat_template_content_format: ChatTemplateContentFormatOption = "auto",
         **kwargs,
-    ) -> tuple[list[ConversationMessage], TextPrompt | TokensPrompt]:
+    ) -> tuple[list[ConversationMessage], TextPrompt | TokensPrompt | EmbedsPrompt]:
         model_config = self.config
         tokenizer = self.get_tokenizer()
 
@@ -547,11 +547,7 @@ class HfRenderer(RendererLike):
             **kwargs,
         )
 
-        prompt = (
-            TextPrompt(prompt=prompt_raw)
-            if isinstance(prompt_raw, str)
-            else TokensPrompt(prompt_token_ids=prompt_raw)
-        )
+        prompt = self.render_completion(prompt_raw)
         if mm_data is not None:
             prompt["multi_modal_data"] = mm_data
         if mm_uuids is not None:
@@ -564,7 +560,7 @@ class HfRenderer(RendererLike):
         messages: list[ChatCompletionMessageParam],
         chat_template_content_format: ChatTemplateContentFormatOption = "auto",
         **kwargs,
-    ) -> tuple[list[ConversationMessage], TextPrompt | TokensPrompt]:
+    ) -> tuple[list[ConversationMessage], TextPrompt | TokensPrompt | EmbedsPrompt]:
         model_config = self.config
         tokenizer = self.get_tokenizer()
 
@@ -587,11 +583,7 @@ class HfRenderer(RendererLike):
             **kwargs,
         )
 
-        prompt = (
-            TextPrompt(prompt=prompt_raw)
-            if isinstance(prompt_raw, str)
-            else TokensPrompt(prompt_token_ids=prompt_raw)
-        )
+        prompt = self.render_completion(prompt_raw)
         if mm_data is not None:
             prompt["multi_modal_data"] = mm_data
         if mm_uuids is not None:

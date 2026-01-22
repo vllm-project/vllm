@@ -4,11 +4,10 @@
 import time
 from typing import Any, TypeAlias
 
-from pydantic import (
-    Field,
-)
+from pydantic import Field
 
 from vllm import PoolingParams
+from vllm.config import ModelConfig
 from vllm.config.pooler import get_use_activation
 from vllm.entrypoints.openai.engine.protocol import OpenAIBaseModel, UsageInfo
 from vllm.entrypoints.pooling.base.protocol import (
@@ -16,6 +15,7 @@ from vllm.entrypoints.pooling.base.protocol import (
     CompletionRequestMixin,
     PoolingBasicRequestMixin,
 )
+from vllm.renderers import TokenizationParams
 from vllm.utils import random_uuid
 
 
@@ -37,6 +37,14 @@ class ClassificationCompletionRequest(PoolingBasicRequestMixin, CompletionReques
         "Default is True.",
     )
     # --8<-- [end:classification-extra-params]
+
+    def build_tok_params(self, model_config: ModelConfig) -> TokenizationParams:
+        return TokenizationParams.from_config(
+            model_config,
+            max_length=model_config.max_model_len,
+            truncate_prompt_tokens=self.truncate_prompt_tokens,
+            add_special_tokens=self.add_special_tokens,
+        )
 
     def to_pooling_params(self):
         return PoolingParams(
@@ -68,6 +76,14 @@ class ClassificationChatRequest(PoolingBasicRequestMixin, ChatRequestMixin):
         "Default is True.",
     )
     # --8<-- [end:chat-classification-extra-params]
+
+    def build_tok_params(self, model_config: ModelConfig) -> TokenizationParams:
+        return TokenizationParams.from_config(
+            model_config,
+            max_length=model_config.max_model_len,
+            truncate_prompt_tokens=self.truncate_prompt_tokens,
+            add_special_tokens=self.add_special_tokens,
+        )
 
     def to_pooling_params(self):
         return PoolingParams(
