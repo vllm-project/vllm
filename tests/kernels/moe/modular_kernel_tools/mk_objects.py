@@ -288,7 +288,7 @@ else:
 
 
 if has_aiter():
-    from vllm.model_executor.layers.fused_moe.fused_aiter_moe import (
+    from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (
         AiterExperts,
     )
 

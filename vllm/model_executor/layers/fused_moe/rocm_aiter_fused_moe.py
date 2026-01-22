@@ -378,9 +378,12 @@ class AiterExperts(mk.FusedMoEPermuteExpertsUnpermute):
         # TODO(rob): rocm_aiter_fused_experts uses self.quant_config's
         # a_scales for static quantization. Update this to fit better
         # with the interface once all quant integrations are complete.
-        assert a1q_scale is None
         assert a2_scale == self.quant_config.a2_scale
-        assert expert_tokens_meta is None
+
+        if expert_tokens_meta is not None:
+            num_local_tokens = expert_tokens_meta.expert_num_tokens
+        else:
+            num_local_tokens = None
 
         result = rocm_aiter_fused_experts(
             hidden_states=hidden_states,
@@ -392,6 +395,8 @@ class AiterExperts(mk.FusedMoEPermuteExpertsUnpermute):
             apply_router_weight_on_input=apply_router_weight_on_input,
             expert_map=expert_map,
             quant_config=self.quant_config,
+            a1q_scale=a1q_scale,
+            num_local_tokens=num_local_tokens,
+            output_dtype=output.dtype,
         )
-        assert result.shape == output.shape
         output.copy_(result)
