@@ -25,18 +25,21 @@ def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument("--host", type=str, default="localhost")
     parser.add_argument("--port", type=int, default=8000)
-    parser.add_argument("--model", type=str, default="internlm/internlm2-1_8b-reward")
 
     return parser.parse_args()
 
 
 def main(args):
-    api_url = f"http://{args.host}:{args.port}/pooling"
-    model_name = args.model
+    base_url = f"http://{args.host}:{args.port}"
+    models_url = base_url + "/v1/models"
+    pooing_url = base_url + "/pooling"
+
+    response = requests.get(models_url)
+    model = response.json()["data"][0]["id"]
 
     # Input like Completions API
-    prompt = {"model": model_name, "input": "vLLM is great!"}
-    pooling_response = post_http_request(prompt=prompt, api_url=api_url)
+    prompt = {"model": model, "input": "vLLM is great!"}
+    pooling_response = post_http_request(prompt=prompt, api_url=pooing_url)
     print("-" * 50)
     print("Pooling Response:")
     pprint.pprint(pooling_response.json())
@@ -44,7 +47,7 @@ def main(args):
 
     # Input like Chat API
     prompt = {
-        "model": model_name,
+        "model": model,
         "messages": [
             {
                 "role": "user",
@@ -52,7 +55,7 @@ def main(args):
             }
         ],
     }
-    pooling_response = post_http_request(prompt=prompt, api_url=api_url)
+    pooling_response = post_http_request(prompt=prompt, api_url=pooing_url)
     print("Pooling Response:")
     pprint.pprint(pooling_response.json())
     print("-" * 50)
