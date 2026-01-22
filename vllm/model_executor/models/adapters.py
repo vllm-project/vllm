@@ -161,12 +161,7 @@ def _create_pooling_model_cls(orig_cls: _T) -> _T:
     from vllm.model_executor.layers.logits_processor import LogitsProcessor
     from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 
-    from .utils import (
-        AutoWeightsLoader,
-        StageMissingLayer,
-        WeightsMapper,
-        no_init_weights,
-    )
+    from .utils import AutoWeightsLoader, StageMissingLayer, no_init_weights
 
     class ModelForPooling(orig_cls, VllmModelForPooling):
         is_pooling_model = True
@@ -196,27 +191,46 @@ def _create_pooling_model_cls(orig_cls: _T) -> _T:
             raise NotImplementedError
 
         def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
-            # TODO: Support uninitialized params tracking
+            params_dict = dict(self.named_parameters())
+            candidate_prefixes = ["", "model."]
+            target_prefix = ""
 
-            # If `*ForCausalLM` defines `load_weights` on the inner model
-            # and there are no other inner modules with other parameters,
-            # we support loading from both `*Model` and `*ForCausalLM`
-            if hasattr(self, "model") and hasattr(self.model, "logits_processor"):
-                # Some weights might be tied to weights under `self.model`
-                model_params_ids = [id(p) for p in self.model.parameters()]
+            seen_weights = list[tuple[str, torch.Tensor]]()
+            for name, loaded_weight in weights:
+                seen_weights.append((name, loaded_weight))
 
-                if all(
-                    all(id(p) in model_params_ids for p in child.parameters())
-                    for name, child in self.named_children()
-                    if name != "model"
-                ):
-                    mapper = WeightsMapper(orig_to_new_prefix={"model.": ""})
-                    loader = AutoWeightsLoader(self)
-                    loaded_params = loader.load_weights(weights, mapper=mapper)
-                    return {f"model.{name}" for name in loaded_params}
+                try:
+                    target_prefix = next(
+                        prefix
+                        for prefix in candidate_prefixes
+                        if prefix + name in params_dict
+                    )
+                    break
+                except StopIteration:
+                    # The weight might not exist on the model
+                    # (to be handled by AutoWeightsLoader)
+                    pass
+
+            if target_prefix:
+                target_model = self
+                for attr in target_prefix.split("."):
+                    if attr:
+                        target_model = getattr(self, attr)
+
+                logger.info(
+                    "Mapping weights to %s as the weights "
+                    "are relative to this model instead of %s.",
+                    target_model._get_name(),
+                    self._get_name(),
+                )
 
             loader = AutoWeightsLoader(self)
-            return loader.load_weights(weights)
+            return loader.load_weights(
+                (
+                    (target_prefix + name, weight)
+                    for name, weight in (*seen_weights, *weights)
+                )
+            )
 
     return ModelForPooling  # type: ignore
 

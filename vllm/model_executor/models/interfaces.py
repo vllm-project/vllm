@@ -159,7 +159,8 @@ class SupportsMultiModal(Protocol):
             for attr in common_prefix(
                 [name.split(".") for name in self._language_model_names]
             ):
-                mod = getattr(mod, attr)
+                if attr:
+                    mod = getattr(mod, attr)
 
             if mod is not self and hasattr(mod, "embed_input_ids"):
                 _language_model_by_module[self] = mod
