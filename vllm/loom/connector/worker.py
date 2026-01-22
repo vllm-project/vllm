@@ -26,6 +26,9 @@ class LoomConnectorWorker:
         self.spec = spec
         self.worker = OffloadingWorker()
 
+        loom_cfg = getattr(spec, "loom_config", None)
+        self._loom_load_only: bool = bool(getattr(loom_cfg, "loom_load_only", False))
+
         self._job_counter = 0
 
         # req_id -> (job_id, store)
@@ -74,6 +77,8 @@ class LoomConnectorWorker:
         self._register_handlers(kv_caches, attn_backends)
 
     def handle_preemptions(self, preempted_req_ids: set[str]):
+        if self._loom_load_only:
+            return
         for job_id, transfer_spec in self._unsubmitted_store_jobs:
             success = self.worker.transfer_async(job_id, transfer_spec)
             assert success
@@ -86,10 +91,11 @@ class LoomConnectorWorker:
 
     def start_kv_transfers(self, metadata: LoomConnectorMetadata, forward_context: object):
         _get_forward_context_arg(forward_context)
-        for job_id, transfer_spec in self._unsubmitted_store_jobs:
-            success = self.worker.transfer_async(job_id, transfer_spec)
-            assert success
-        self._unsubmitted_store_jobs.clear()
+        if not self._loom_load_only:
+            for job_id, transfer_spec in self._unsubmitted_store_jobs:
+                success = self.worker.transfer_async(job_id, transfer_spec)
+                assert success
+            self._unsubmitted_store_jobs.clear()
 
         for req_id, transfer_spec in metadata.reqs_to_load.items():
             job_id = self._generate_job_id()
@@ -100,6 +106,8 @@ class LoomConnectorWorker:
             assert success
 
     def prepare_store_kv(self, metadata: LoomConnectorMetadata):
+        if self._loom_load_only:
+            return
         for req_id, transfer_spec in metadata.reqs_to_store.items():
             job_id = self._generate_job_id()
             self._jobs[job_id] = (req_id, True)
@@ -112,11 +120,15 @@ class LoomConnectorWorker:
     def get_finished(self, finished_req_ids: set[str]) -> tuple[set[str], set[str]]:
         finished_sending = set()
         finished_recving = set()
+        if self._loom_load_only:
+            finished_req_ids = set()
         for job_id, success in self.worker.get_finished():
             # we currently do not support job failures
             assert success
             req_id, store = self._jobs.pop(job_id)
             if store:
+                if self._loom_load_only:
+                    continue
                 req_jobs = self._store_jobs[req_id]
                 req_jobs.remove(job_id)
                 if req_jobs:

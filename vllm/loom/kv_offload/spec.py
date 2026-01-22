@@ -78,6 +78,7 @@ class LoomOffloadingConfig:
     # Loom (MVP-0): request-level recompute baseline knobs.
     loom_recompute_ratio: float | Literal["auto"] = 0.0
     loom_disable_store_for_recompute: bool = False
+    loom_load_only: bool = False
     loom_recompute_log_every_steps: int = 50
     loom_hybrid_head_tokens: int | None = None
     loom_hybrid_head_ratio: float | None = None
@@ -112,6 +113,10 @@ class LoomOffloadingConfig:
                 "loom_disable_store_for_recompute",
                 raw["loom_disable_store_for_recompute"],
             )
+
+        loom_load_only = defaults.loom_load_only
+        if "loom_load_only" in raw:
+            loom_load_only = _coerce_bool("loom_load_only", raw["loom_load_only"])
 
         loom_recompute_log_every_steps = defaults.loom_recompute_log_every_steps
         if "loom_recompute_log_every_steps" in raw:
@@ -151,6 +156,7 @@ class LoomOffloadingConfig:
             cxl_kvcache_size_GB=cxl_kvcache_size_GB,
             loom_recompute_ratio=loom_recompute_ratio,
             loom_disable_store_for_recompute=loom_disable_store_for_recompute,
+            loom_load_only=loom_load_only,
             loom_recompute_log_every_steps=loom_recompute_log_every_steps,
             loom_hybrid_head_tokens=loom_hybrid_head_tokens,
             loom_hybrid_head_ratio=loom_hybrid_head_ratio,

@@ -84,7 +84,8 @@ class LoomConnector(KVConnectorBase_V1):
     def wait_for_save(self):
         assert self.connector_worker is not None
         assert isinstance(self._connector_metadata, LoomConnectorMetadata)
-        self.connector_worker.prepare_store_kv(self._connector_metadata)
+        if self._connector_metadata.reqs_to_store:
+            self.connector_worker.prepare_store_kv(self._connector_metadata)
 
     def get_finished(self, finished_req_ids: set[str]) -> tuple[set[str], set[str]]:
         assert self.connector_worker is not None

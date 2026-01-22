@@ -70,6 +70,7 @@ class LoomConnectorScheduler:
 
         recompute_ratio_raw: object = getattr(loom_cfg, "loom_recompute_ratio", 0.0)
         disable_store_raw: object = getattr(loom_cfg, "loom_disable_store_for_recompute", False)
+        load_only_raw: object = getattr(loom_cfg, "loom_load_only", False)
         log_every_raw: object = getattr(loom_cfg, "loom_recompute_log_every_steps", 50)
 
         self._loom_recompute_auto: bool = False
@@ -88,6 +89,7 @@ class LoomConnectorScheduler:
                 )
 
         self._loom_disable_store_for_recompute: bool = bool(disable_store_raw)
+        self._loom_load_only: bool = bool(load_only_raw)
         self._loom_force_recompute: dict[ReqId, bool] = {}
 
         self._loom_step_counter: int = 0
@@ -314,21 +316,24 @@ class LoomConnectorScheduler:
                 num_prefill + num_decode,
             )
 
-        reqs_to_store = self.policy.get_reqs_to_store(
-            scheduler_output,
-            requests=self._requests,
-            request_block_ids=self._request_block_ids,
-            next_stored_block_idx=self._next_stored_block_idx,
-            reqs_being_stored=self._reqs_being_stored,
-            get_block_hashes=self._get_block_hashes,
-            request_phases=self._request_phases,
-        )
-        if self._loom_disable_store_for_recompute and reqs_to_store:
-            reqs_to_store = {
-                req_id: spec
-                for req_id, spec in reqs_to_store.items()
-                if not self._should_force_recompute(req_id)
-            }
+        if self._loom_load_only:
+            reqs_to_store = {}
+        else:
+            reqs_to_store = self.policy.get_reqs_to_store(
+                scheduler_output,
+                requests=self._requests,
+                request_block_ids=self._request_block_ids,
+                next_stored_block_idx=self._next_stored_block_idx,
+                reqs_being_stored=self._reqs_being_stored,
+                get_block_hashes=self._get_block_hashes,
+                request_phases=self._request_phases,
+            )
+            if self._loom_disable_store_for_recompute and reqs_to_store:
+                reqs_to_store = {
+                    req_id: spec
+                    for req_id, spec in reqs_to_store.items()
+                    if not self._should_force_recompute(req_id)
+                }
 
         meta = LoomConnectorMetadata(
             reqs_to_load=self._reqs_to_load,
@@ -339,11 +344,12 @@ class LoomConnectorScheduler:
 
         # NOTE (orozery): we should move this logic to update_connector_output
         # once KVConnectorOutput allows us to report completed transfers
-        for req_id in scheduler_output.preempted_req_ids or ():
-            block_hashes = self._reqs_being_stored.get(req_id)
-            if block_hashes:
-                self.manager.complete_store(block_hashes)
-                block_hashes.clear()
+        if not self._loom_load_only:
+            for req_id in scheduler_output.preempted_req_ids or ():
+                block_hashes = self._reqs_being_stored.get(req_id)
+                if block_hashes:
+                    self.manager.complete_store(block_hashes)
+                    block_hashes.clear()
 
         return meta
 
@@ -405,6 +411,9 @@ class LoomConnectorScheduler:
         self._request_block_ids.pop(req_id, None)
         self._next_stored_block_idx.pop(req_id, None)
         self._loom_force_recompute.pop(req_id, None)
+
+        if self._loom_load_only:
+            return False, None
 
         request_being_stored = req_id in self._reqs_being_stored
         return request_being_stored, None
