@@ -178,11 +178,34 @@ class Base(
         self.text_config._attn_implementation = "vllm"
 
         # Check for packed experts (transformers >= 5.0)
+        # Only load via from_pretrained for CausalLM models
         self._has_packed_experts = self._check_packed_experts_config()
 
         if self._has_packed_experts:
-            # For packed expert models, use from_pretrained to handle
-            # the packed weight format correctly
+            # Check if this is a CausalLM model (has CausalMixin in MRO)
+            is_causal_lm = any(
+                cls.__name__ == "CausalMixin" for cls in type(self).__mro__
+            )
+
+            if not is_causal_lm:
+                raise NotImplementedError(
+                    "Packed 3D experts (transformers >= 5.0) are currently only "
+                    "supported for CausalLM models. Embedding and classification "
+                    "models with packed experts are not yet supported."
+                )
+
+            # Validate TP/PP settings
+            if self.pp_group.world_size > 1:
+                raise ValueError(
+                    "Pipeline parallelism is not supported for packed 3D expert "
+                    "models (transformers >= 5.0). Please use PP=1."
+                )
+            if self.tp_group.world_size > 1:
+                raise ValueError(
+                    "Tensor parallelism is not supported for packed 3D expert "
+                    "models (transformers >= 5.0). Please use TP=1."
+                )
+
             logger.info(
                 "Using from_pretrained for packed expert model (transformers >= 5.0)"
             )

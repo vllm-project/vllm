@@ -193,7 +193,27 @@ class MoEMixin(MixtureOfExperts):
                         return True
             return False
 
-        self._has_packed_experts = _detect_packed_experts(self.model)
+        detected_packed = _detect_packed_experts(self.model)
+
+        # Check consistency with config-based detection from Base.__init__
+        if hasattr(self, "_has_packed_experts"):
+            if (
+                self._has_packed_experts != detected_packed
+                and detected_packed
+                and not self._has_packed_experts
+            ):
+                # Model has packed experts but config detection missed it
+                # This is a problem - model is on meta device without weights
+                raise RuntimeError(
+                    "Packed 3D experts detected in model but config-based "
+                    "detection returned False. Model weights were not loaded. "
+                    "Please report this issue with your model name."
+                )
+        # If config said True but model says False, that's fine -
+        # we loaded weights that will work either way
+        else:
+            self._has_packed_experts = detected_packed
+
         if self._has_packed_experts:
             from vllm.logger import init_logger
 
