@@ -483,13 +483,12 @@ def load_weights_using_from_2_way_softmax(
         )
         language_model.lm_head = language_model.lm_head.tie_weights(embed_tokens)
 
-    with _disable_seq_cls_loading_on_inner_model(language_model, is_vlm):
-        # ModelForPooling is dynamically defined inside the _create_pooling_model_cls
-        # function, so we need use this hacky method to obtain it.
-        pooling_model_cls = next(
-            x for x in type(model).__mro__ if x.__name__ == "ModelForPooling"
-        )
-        loaded_weights = pooling_model_cls.load_weights(model, weights)
+    # ModelForPooling is dynamically defined inside the _create_pooling_model_cls
+    # function, so we need use this hacky method to obtain it.
+    pooling_model_cls = next(
+        x for x in type(model).__mro__ if x.__name__ == "ModelForPooling"
+    )
+    loaded_weights = pooling_model_cls.load_weights(model, weights)
 
     from vllm.tokenizers import get_tokenizer
 

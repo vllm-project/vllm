@@ -18,10 +18,6 @@ from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig,
     QuantizeMethodBase,
 )
-from vllm.model_executor.model_loader.reload import (
-    record_metadata_for_reloading,
-    set_torchao_reload_attrs,
-)
 from vllm.model_executor.models.interfaces import SupportsQuant
 from vllm.utils.platform_utils import is_pin_memory_available
 
