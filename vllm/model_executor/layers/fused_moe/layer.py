@@ -605,18 +605,6 @@ class FusedMoE(CustomOp):
 
         self.quant_method.create_weights(layer=self, **moe_quant_params)
 
-        self.capture: Callable[[torch.Tensor], None] | None = None
-        if (
-            self.vllm_config.model_config is not None
-            and self.vllm_config.model_config.enable_return_routed_experts
-        ):
-            # In dummy runs, the capturer is not initialized.
-            capturer = RoutedExpertsCapturer.get_instance()
-            if capturer is not None:
-                self.capture = lambda topk_ids: capturer.capture(
-                    self.layer_id, topk_ids
-                )
-
         self._runner: MoERunner | None = None
 
     def init_runner(self, reconstruct=False):
@@ -1525,64 +1513,18 @@ class FusedMoE(CustomOp):
         """
         return self.runner.maybe_all_reduce_tensor_model_parallel(final_hidden_states)
 
-    @property
-    def expert_map(self) -> torch.Tensor | None:
-        return (
-            self._expert_map if not self.rocm_aiter_fmoe_enabled else self.expert_mask
-        )
-
-    @classmethod
-    def make_expert_params_mapping(
-        cls,
-        model: torch.nn.Module,
-        ckpt_gate_proj_name: str,
-        ckpt_down_proj_name: str,
-        ckpt_up_proj_name: str,
-        num_experts: int,
-        num_redundant_experts: int = 0,
-    ) -> list[tuple[str, str, int, str]]:
-        num_physical_experts = num_experts + num_redundant_experts
-
-        # In the returned mapping:
-        # - `expert_id` is the physical expert id
-        # - `weight_name` contains the weight name of the logical expert
-        # So that we should map the expert id to logical in `weight_name`
-        physical_to_logical_map = (
-            EplbState.build_initial_global_physical_to_logical_map(
-                num_experts, num_redundant_experts
-            )
-        )
-
-        base_layer = (
-            "base_layer."
-            if any(".base_layer." in name for name, _ in model.named_parameters())
-            else ""
-        )
-
-        return [
-            # (param_name, weight_name, expert_id, shard_id)
-            (
-                f"experts.{base_layer}w13_"
-                if weight_name in [ckpt_gate_proj_name, ckpt_up_proj_name]
-                else f"experts.{base_layer}w2_",
-                f"experts.{physical_to_logical_map[expert_id]}.{weight_name}.{base_layer}",
-                expert_id,
-                shard_id,
-            )
-            for expert_id in range(num_physical_experts)
-            for shard_id, weight_name in [
-                ("w1", ckpt_gate_proj_name),
-                ("w2", ckpt_down_proj_name),
-                ("w3", ckpt_up_proj_name),
-            ]
-        ]
-
     def forward_native(
         self,
         hidden_states: torch.Tensor,
         router_logits: torch.Tensor,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         return self.runner.forward(hidden_states, router_logits)
+
+    @property
+    def expert_map(self) -> torch.Tensor | None:
+        return (
+            self._expert_map if not self.rocm_aiter_fmoe_enabled else self.expert_mask
+        )
 
     def forward_cuda(
         self,
