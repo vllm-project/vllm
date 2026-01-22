@@ -758,7 +758,7 @@ class VoxtralEncoderModel(nn.Module):
         super().__init__()
         self.config = cast(WhisperConfig, vllm_config.model_config.hf_config)
         self.dtype: torch.dtype = vllm_config.model_config.dtype
-        self.is_causal = getattr(self.config, "is_causal", bool)
+        self.is_causal = getattr(self.config, "is_causal", False)
         if self.is_causal:
             WhisperEncoderCls = WhisperCausalEncoder
         else:
