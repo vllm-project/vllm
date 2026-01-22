@@ -2035,7 +2035,7 @@ def LLMM1(a: torch.Tensor, b: torch.Tensor, rows_per_block: int) -> torch.Tensor
 def wvSplitK(
     a: torch.Tensor, b: torch.Tensor, cu_count: int, bias: torch.Tensor = None
 ) -> torch.Tensor:
-    # NOTE: The wvSplitK kernel is unable to properly handle non-congituous
+    # NOTE: The wvSplitK kernel is unable to properly handle non-contiguous
     # tensors.  It might be a good TODO(rasmith) to augment this kernel
     # to be able to handle non-contiguous kernels for better performance.
     if current_platform.is_rocm():
