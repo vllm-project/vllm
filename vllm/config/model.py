@@ -312,7 +312,7 @@ class ModelConfig:
     interleave_mm_strings: InitVar[bool | None] = None
     skip_mm_profiling: InitVar[bool | None] = None
     video_pruning_rate: InitVar[float | None] = None
-    video_sparse_rate: InitVar[float | None] = None
+    video_sparse_rate: InitVar[float | None] = None    
 
     def compute_hash(self) -> str:
         """
