@@ -166,7 +166,7 @@ class VllmModelForPooling(VllmModel[T_co], Protocol[T_co]):
     default_pooling_type: ClassVar[str] = "LAST"
     """
     Indicates the
-    [vllm.model_executor.layers.pooler.PoolerConfig.pooling_type][]
+    [vllm.config.PoolerConfig.pooling_type][]
     to use by default.
 
     You can use the
