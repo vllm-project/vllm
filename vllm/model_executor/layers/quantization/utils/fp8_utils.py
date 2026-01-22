@@ -922,7 +922,7 @@ def per_token_group_quant_fp8(
                 shape, stride, device=x.device, dtype=torch.float32
             )
         else:
-            shape = (x.shape[-1] // group_size,) + x.shape[:-1]
+            shape = x.shape[:-2] + (x.shape[-1] // group_size, x.shape[-2])
             x_s = torch.empty(shape, device=x.device, dtype=torch.float32).permute(
                 -1, -2
             )
