@@ -17,7 +17,7 @@ _S = TypeVar("_S", bound=list[int] | torch.Tensor)
 
 
 @dataclass(frozen=True)
-class ChatParserParams:
+class ChatParams:
     """Configuration to control how to parse chat messages."""
 
     chat_template: str | None = None
@@ -33,7 +33,7 @@ class ChatParserParams:
         if not default_chat_template_kwargs:
             return self
 
-        return ChatParserParams(
+        return ChatParams(
             chat_template=self.chat_template,
             chat_template_content_format=self.chat_template_content_format,
             chat_template_kwargs=(

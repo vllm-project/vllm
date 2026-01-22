@@ -11,7 +11,7 @@ from vllm.entrypoints.chat_utils import (
     ChatTemplateContentFormatOption,
 )
 from vllm.entrypoints.openai.engine.protocol import OpenAIBaseModel
-from vllm.renderers import ChatParserParams
+from vllm.renderers import ChatParams
 from vllm.utils import random_uuid
 
 
@@ -117,8 +117,8 @@ class ChatRequestMixin(OpenAIBaseModel):
         self,
         default_template: str | None,
         default_template_content_format: ChatTemplateContentFormatOption,
-    ) -> ChatParserParams:
-        return ChatParserParams(
+    ) -> ChatParams:
+        return ChatParams(
             chat_template=self.chat_template or default_template,
             chat_template_content_format=default_template_content_format,
             chat_template_kwargs=dict(

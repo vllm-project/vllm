@@ -67,7 +67,7 @@ from vllm.entrypoints.chat_utils import (
 from vllm.entrypoints.openai.engine.protocol import OpenAIBaseModel
 from vllm.exceptions import VLLMValidationError
 from vllm.logger import init_logger
-from vllm.renderers import ChatParserParams, TokenizeParams
+from vllm.renderers import ChatParams, TokenizeParams
 from vllm.sampling_params import (
     RequestOutputKind,
     SamplingParams,
@@ -237,7 +237,7 @@ class ResponsesRequest(OpenAIBaseModel):
         self,
         default_template: str | None,
         default_template_content_format: ChatTemplateContentFormatOption,
-    ) -> ChatParserParams:
+    ) -> ChatParams:
         from .utils import should_continue_final_message
 
         # Check if we should continue the final message (partial completion)
@@ -247,7 +247,7 @@ class ResponsesRequest(OpenAIBaseModel):
 
         reasoning = self.reasoning
 
-        return ChatParserParams(
+        return ChatParams(
             chat_template=default_template,
             chat_template_content_format=default_template_content_format,
             chat_template_kwargs=dict(

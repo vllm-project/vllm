@@ -37,7 +37,7 @@ from vllm.entrypoints.openai.engine.protocol import (
 from vllm.exceptions import VLLMValidationError
 from vllm.logger import init_logger
 from vllm.logprobs import Logprob
-from vllm.renderers import ChatParserParams, TokenizeParams
+from vllm.renderers import ChatParams, TokenizeParams
 from vllm.sampling_params import (
     BeamSearchParams,
     RequestOutputKind,
@@ -362,8 +362,8 @@ class ChatCompletionRequest(OpenAIBaseModel):
         self,
         default_template: str | None,
         default_template_content_format: ChatTemplateContentFormatOption,
-    ) -> ChatParserParams:
-        return ChatParserParams(
+    ) -> ChatParams:
+        return ChatParams(
             chat_template=self.chat_template or default_template,
             chat_template_content_format=default_template_content_format,
             chat_template_kwargs=dict(

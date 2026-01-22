@@ -108,7 +108,7 @@ from vllm.multimodal import MultiModalDataDict
 from vllm.outputs import CompletionOutput, PoolingRequestOutput, RequestOutput
 from vllm.pooling_params import PoolingParams
 from vllm.reasoning import ReasoningParser, ReasoningParserManager
-from vllm.renderers import ChatParserParams, TokenizeParams
+from vllm.renderers import ChatParams, TokenizeParams
 from vllm.sampling_params import BeamSearchParams, SamplingParams
 from vllm.tokenizers import TokenizerLike
 from vllm.tool_parsers import ToolParser, ToolParserManager
@@ -147,7 +147,7 @@ class RendererChatRequest(RendererRequest, Protocol):
         self,
         default_template: str | None,
         default_template_content_format: ChatTemplateContentFormatOption,
-    ) -> ChatParserParams:
+    ) -> ChatParams:
         raise NotImplementedError
 
 
