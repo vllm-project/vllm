@@ -1878,7 +1878,8 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
         k_nope: torch.Tensor,
         k_pe: torch.Tensor,
         positions: torch.Tensor,
-        q_scale: torch.Tensor,
+        q_scale: float,
+        k_scale: float,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Fused RoPE + FP8 quantization for Q and K.
 
@@ -1891,7 +1892,8 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
             k_nope: k_c_normed (latent). Shape: [B, L] (2D, no head dim).
             k_pe: Raw k_pe (no RoPE yet). Shape: [B, R] (2D, squeezed by caller).
             positions: Position indices. Shape: [B]
-            q_scale: Scale for FP8 quantization.
+            q_scale: Scale for FP8 quantization of Q (host float).
+            k_scale: Scale for FP8 quantization of K (host float).
 
         Returns:
             tuple of:
@@ -2106,7 +2108,8 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
                     decode_k_c_normed,
                     decode_k_pe.squeeze(1),
                     decode_positions,
-                    layer._q_scale,
+                    layer._q_scale_float,
+                    layer._k_scale_float,
                 )
                 # decode_k_c_normed and decode_k_pe are now FP8
                 # concat_and_cache_mla supports FP8 input directly

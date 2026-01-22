@@ -134,7 +134,8 @@ class FlashInferMLAImpl(MLACommonImpl[MLACommonMetadata]):
         k_nope: torch.Tensor,
         k_pe: torch.Tensor,
         positions: torch.Tensor,
-        q_scale: torch.Tensor,
+        q_scale: float,
+        k_scale: float,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Fused RoPE + FP8 quantization for Q and K.
 
@@ -147,7 +148,8 @@ class FlashInferMLAImpl(MLACommonImpl[MLACommonMetadata]):
             k_nope: k_c_normed (latent). Shape: [B, L] (2D, no head dim).
             k_pe: Raw k_pe (no RoPE yet). Shape: [B, R] (2D, squeezed by caller).
             positions: Position indices. Shape: [B]
-            q_scale: Scale for FP8 quantization (unused, scale is 1.0).
+            q_scale: Scale for FP8 quantization of Q (host float).
+            k_scale: Scale for FP8 quantization of K (host float).
 
         Returns:
             tuple of:
@@ -185,8 +187,8 @@ class FlashInferMLAImpl(MLACommonImpl[MLACommonMetadata]):
             q_nope_out=q_out[..., :L],  # nope portion goes first
             k_rope_out=k_pe_out,
             k_nope_out=k_nope_out,
-            quant_scale_q=1.0,
-            quant_scale_kv=1.0,
+            quant_scale_q=q_scale,
+            quant_scale_kv=k_scale,
         )
 
         return q_out, k_nope_out, k_pe_out
