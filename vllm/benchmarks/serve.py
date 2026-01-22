@@ -1419,8 +1419,7 @@ def add_cli_args(parser: argparse.ArgumentParser):
         type=float,
         default=None,
         help="Temperature sampling parameter. Only has effect on "
-        "openai-compatible backends. If not specified, default to greedy "
-        "decoding (i.e. temperature==0.0).",
+        "openai-compatible backends.",
     )
     sampling_group.add_argument(
         "--frequency-penalty",
@@ -1634,7 +1633,12 @@ async def main_async(args: argparse.Namespace) -> dict[str, Any]:
             )
 
         if "temperature" not in sampling_params:
-            sampling_params["temperature"] = 0.0  # Default to greedy decoding.
+            print(
+                "WARNING: vllm bench serve no longer sets temperature==0 (greedy) "
+                "in requests by default. The default will be determined on the "
+                "server side and can be model/API specific. "
+                "For the old behavior, include --temperature=0."
+            )
 
         default_percentile_metrics = "ttft,tpot,itl"
     else:
