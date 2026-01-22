@@ -194,6 +194,9 @@ CLAUDE.md
 AGENTS.md
 .codex/
 
+# Cursor
+.cursor/
+
 # DS Store
 .DS_Store
 
