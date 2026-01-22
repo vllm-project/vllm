@@ -64,6 +64,13 @@ def run_rebalance_experts(
 ) -> None:
     assert model_state.eplb_stats is not None
     eplb_stats = model_state.eplb_stats
+
+    # Wait for the main thread's all-reduce and clone to complete before
+    # accessing the global_expert_load_window tensor.
+    assert model_state.workload_ready_event is not None
+    model_state.workload_ready_event.wait()
+    model_state.workload_ready_event = None
+
     # Move the global expert load window to CPU for computation.
     # It has to be done in the main stream to avoid race condition
     # with the main thread.
@@ -110,10 +117,6 @@ async def transfer_run_periodically(
         assert state.is_async
         for model_state in state.model_states.values():
             rebalancing_algorithm_executed = False
-            logger.info(
-                "Async worker computed new indices for model %s",
-                model_state.model_name,
-            )
 
             current_num_layers = model_state.model.num_moe_layers
             while (
@@ -135,6 +138,11 @@ async def transfer_run_periodically(
                         ):
                             run_rebalance_experts(model_state, state)
                             rebalancing_algorithm_executed = True
+                            logger.info(
+                                "Async worker computed new indices for model %s",
+                                model_state.model_name,
+                            )
+
                         assert model_state.new_physical_to_logical_map is not None
 
                         layer_idx = model_state.layer_to_transfer

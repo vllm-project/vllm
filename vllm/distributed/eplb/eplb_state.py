@@ -180,6 +180,11 @@ class EplbModelState:
     CUDA event recorded when the async worker finishes filling the buffer.
     The main thread waits on this before consuming the buffer.
     """
+    workload_ready_event: torch.cuda.Event | None
+    """
+    CUDA event recorded after all-reduce and clone on the main thread.
+    The async worker waits on this before accessing global_expert_load_window.
+    """
     ep_buffer_ready: int
     """
     The flag indicates whether the expert buffer is ready for transfer.
@@ -535,6 +540,7 @@ class EplbState:
             expert_buffer=expert_buffer,
             buffer_lock=threading.Lock(),
             buffer_ready_event=None,
+            workload_ready_event=None,
             ep_buffer_ready=0,
             layer_to_transfer=0,
             rebalanced=False,
@@ -896,6 +902,12 @@ class EplbState:
                     num_nodes=num_nodes,
                     num_gpus=num_gpus,
                 )
+                # Record event after clone to signal async worker
+                # that load stats data is ready
+                sync_event = torch.cuda.Event()
+                sync_event.record()
+                eplb_model_state.workload_ready_event = sync_event
+
                 eplb_model_state.rebalanced = True
                 eplb_model_state.layer_to_transfer = 0
                 eplb_model_state.pending_global_ready_check = True
