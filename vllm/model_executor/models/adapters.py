@@ -226,13 +226,17 @@ def _create_pooling_model_cls(orig_cls: _T) -> _T:
                     self._get_name(),
                 )
 
-            loader = AutoWeightsLoader(self)
-            return loader.load_weights(
-                (
-                    (target_prefix + name, weight)
-                    for name, weight in (*seen_weights, *weights)
-                )
+            mapped_weights = (
+                (target_prefix + name, weight)
+                for name, weight in (*seen_weights, *weights)
             )
+
+            def default_load_weights(weights):
+                loader = AutoWeightsLoader(self)
+                return loader.load_weights(weights)
+
+            load_weights = getattr(super(), "load_weights", default_load_weights)
+            return load_weights(mapped_weights)
 
     return ModelForPooling  # type: ignore
 
