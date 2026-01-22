@@ -42,8 +42,6 @@ class MistralAttention(LlamaAttention):
             hidden_size=hidden_size,
             num_heads=num_heads,
             num_kv_heads=num_kv_heads,
-            # mistral-nemo has special head dim
-            head_dim=getattr(config, "head_dim", None),
             max_position_embeddings=max_position_embeddings,
             quant_config=quant_config,
             bias=bias,
