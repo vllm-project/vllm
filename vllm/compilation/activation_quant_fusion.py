@@ -186,14 +186,20 @@ class SiluMulBlockQuantPattern:
     This is the GROUP/BLOCK quantization version (one scale per group of elements).
     For PER-TOKEN quantization (one scale per entire token), use SiluMulFp8StaticQuantPattern.
     """
-    
     def __init__(
         self, 
-        group_shape: GroupShape,
+        group_shape: GroupShape,  # Keep as GroupShape
         has_col_major_scales: bool = False,
         is_e8m0: bool = False,
     ):
+        # Validate that it's per-token quantization (group_m must be 1)
+        assert group_shape[0] == 1, (
+            f"SiluMulBlockQuantPattern only supports per-token quantization "
+            f"(group_m=1), got group_shape={group_shape}"
+        )
+        
         self.group_shape = group_shape
+        self.group_size = group_shape[1]  # Extract for convenience
         self.has_col_major_scales = has_col_major_scales
         self.is_e8m0 = is_e8m0
         self.quant_dtype = FP8_DTYPE
@@ -253,7 +259,7 @@ class SiluMulBlockQuantPattern:
                 result,
                 input,
                 scale,
-                self.group_shape[1],
+                self.group_size,
                 None,  # scale_ub
                 self.has_col_major_scales,
             )

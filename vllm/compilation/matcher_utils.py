@@ -514,14 +514,15 @@ class MatcherSiluAndMulBlockQuant(MatcherCustomOp):
         scale = torch.empty(scale_shape, dtype=torch.float32, device=x.device)
         
         # Call fused kernel
+        # Changed: positional args to match C++ signature order
         _, result, scale = auto_functionalized(
             self.FUSED_OP,
-            result=result,
-            input=x,
-            scale=scale,
-            group_size=group_size,
-            scale_ub=None,
-            is_scale_transposed=self.has_col_major_scales,
+            result,                          # out (Tensor!)
+            x,                               # input (Tensor)
+            scale,                           # scales (Tensor!)
+            group_size,                      # group_size (int) - no keyword
+            None,                            # scale_ub (Tensor?)
+            self.has_col_major_scales,       # is_scale_transposed (bool)
         )
         
         return result, scale

@@ -87,7 +87,7 @@ def unfused_groupwise_fp8_impl(
 def fused_impl(
     x: torch.Tensor,
     quant_dtype: torch.dtype,
-    group_size: list[int],
+    group_size: int,
 ):
     """Fused: SiLU+Mul+Block Quantization in single kernel."""
     out, _ = ops.silu_and_mul_per_block_quant(

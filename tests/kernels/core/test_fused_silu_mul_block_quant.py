@@ -43,7 +43,7 @@ def ref_silu_and_mul_per_block_quant(
     x: torch.Tensor,
     quant_dtype: torch.dtype,
     scale_ub: torch.Tensor | None,
-    group_size: list[int],
+    group_size: int,  # Changed from list[int]
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Reference implementation: unfused SiLU+Mul then group quantization."""
     hidden = x.shape[-1] // 2
@@ -55,12 +55,11 @@ def ref_silu_and_mul_per_block_quant(
     # Group quantize
     if quant_dtype == current_platform.fp8_dtype():
         torch_out, scales = per_token_group_quant_fp8(
-            silu_out, group_size=group_size[1], use_ue8m0=False
+            silu_out, group_size=group_size, use_ue8m0=False
         )
     elif quant_dtype == torch.int8:
-        # Need INT8 reference implementation
         torch_out, scales = per_token_group_quant_int8(
-            silu_out, group_size=group_size[1]
+            silu_out, group_size=group_size
         )
     else:
         raise ValueError(f"Unsupported quant_dtype: {quant_dtype}")
@@ -72,7 +71,7 @@ def ref_impl(
     x: torch.Tensor,
     quant_dtype: torch.dtype,
     scale_ub: torch.Tensor | None,
-    group_size: list[int],
+    group_size: int,  # Changed from list[int]
 ) -> tuple[torch.Tensor, torch.Tensor]:
     return ref_silu_and_mul_per_block_quant(x, quant_dtype, scale_ub, group_size)
 
@@ -81,7 +80,7 @@ def ops_impl(
     x: torch.Tensor,
     quant_dtype: torch.dtype,
     scale_ub: torch.Tensor | None,
-    group_size: list[int],
+    group_size: int,  # Changed from list[int]
     is_scale_transposed: bool,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Fused kernel implementation."""
@@ -112,7 +111,7 @@ def test_silu_and_mul_per_block_quant(
     has_scale_ub: bool,
     dtype: torch.dtype,
     quant_dtype: torch.dtype,
-    group_size: list[int],
+    group_size: int,  # Changed from list[int]
     is_scale_transposed: bool,
     seed: int,
     device: str,
@@ -124,7 +123,7 @@ def test_silu_and_mul_per_block_quant(
     torch.set_default_device(device)
     torch.cuda.set_device(device)
 
-    if hidden_size % group_size[1] != 0:
+    if hidden_size % group_size != 0:
         # Skip invalid configurations
         return
 
@@ -180,12 +179,12 @@ def test_silu_and_mul_per_block_quant(
         # Fallback: compare dequantized values
         if is_scale_transposed:
             # scales: [num_groups, num_tokens] → transpose back
-            ref_scales_expanded = ref_scales.t().repeat_interleave(group_size[1], dim=1)
-            ops_scales_expanded = ops_scales.t().repeat_interleave(group_size[1], dim=1)
+            ref_scales_expanded = ref_scales.t().repeat_interleave(group_size, dim=1)
+            ops_scales_expanded = ops_scales.t().repeat_interleave(group_size, dim=1)
         else:
             # scales: [num_tokens, num_groups]
-            ref_scales_expanded = ref_scales.repeat_interleave(group_size[1], dim=1)
-            ops_scales_expanded = ops_scales.repeat_interleave(group_size[1], dim=1)
+            ref_scales_expanded = ref_scales.repeat_interleave(group_size, dim=1)
+            ops_scales_expanded = ops_scales.repeat_interleave(group_size, dim=1)
         
         a_deq = a * ref_scales_expanded
         b_deq = b * ops_scales_expanded
@@ -199,7 +198,7 @@ def test_silu_and_mul_per_block_quant(
 
     # Test opcheck for correctness verification
     output = torch.empty(num_tokens, hidden_size, device=device, dtype=quant_dtype)
-    num_groups = hidden_size // group_size[1]
+    num_groups = hidden_size // group_size
     if is_scale_transposed:
         scales = torch.empty(num_groups, num_tokens, device=device, dtype=torch.float32)
     else:
@@ -207,16 +206,16 @@ def test_silu_and_mul_per_block_quant(
 
     opcheck(
         torch.ops._C.silu_and_mul_per_block_quant,
-        (output, x, scales, group_size[1], scale_ub, is_scale_transposed),
+        (output, x, scales, group_size, scale_ub, is_scale_transposed),
     )
 
 
 @pytest.mark.parametrize("dtype", [torch.float16])
 @pytest.mark.parametrize("hidden_size", [4096])
 @pytest.mark.parametrize("num_tokens", [128])
-@pytest.mark.parametrize("group_size", [[1, 128]])
+@pytest.mark.parametrize("group_size", [128])  # Changed from [[1, 128]]
 def test_silu_block_quant_shapes(
-    default_vllm_config, dtype: torch.dtype, hidden_size: int, num_tokens: int, group_size: list[int]
+    default_vllm_config, dtype: torch.dtype, hidden_size: int, num_tokens: int, group_size: int  # Changed type
 ):
     """Test that output shapes are correct."""
     torch.set_default_device("cuda")
@@ -232,7 +231,7 @@ def test_silu_block_quant_shapes(
     )
     
     assert out.shape == (num_tokens, hidden_size)
-    assert scales.shape == (num_tokens, hidden_size // group_size[1])
+    assert scales.shape == (num_tokens, hidden_size // group_size)
     
     # Test column-major scales
     out, scales = ops.silu_and_mul_per_block_quant(
@@ -243,8 +242,7 @@ def test_silu_block_quant_shapes(
     )
     
     assert out.shape == (num_tokens, hidden_size)
-    assert scales.shape == (hidden_size // group_size[1], num_tokens)
-
+    assert scales.shape == (hidden_size // group_size, num_tokens)
 
 @pytest.mark.parametrize("dtype", [torch.float16])
 @pytest.mark.parametrize("batch_size", [1, 16, 256])
@@ -259,7 +257,7 @@ def test_silu_block_quant_edge_cases(
     
     out, scales = ops.silu_and_mul_per_block_quant(
         x,
-        group_size=[1, 128],
+        group_size=128,  # Changed from [1, 128]
         quant_dtype=torch.float8_e4m3fn,
         is_scale_transposed=False,
     )

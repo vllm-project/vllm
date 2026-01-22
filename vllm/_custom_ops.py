@@ -482,12 +482,11 @@ def rms_norm_per_block_quant(
 # fused silu_and_mul + block quant
 def silu_and_mul_per_block_quant(
     input: torch.Tensor,
-    group_size: list[int],
+    group_size: int,  # Changed from list[int]
     quant_dtype: torch.dtype,
     scale_ub: torch.Tensor | None = None,
     is_scale_transposed: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    assert len(group_size) == 2, f"group_size must be [row, col], got {group_size}"
     assert input.ndim == 2, f"input must be 2D [batch, hidden*2], got {input.shape}"
     assert input.shape[-1] % 2 == 0, (
         f"input last dim must be even (gate||up layout), got {input.shape[-1]}"
@@ -505,7 +504,7 @@ def silu_and_mul_per_block_quant(
     )
     
     # Allocate scales tensor
-    num_groups = hidden_size // group_size[1]
+    num_groups = hidden_size // group_size  # Directly use group_size
     if is_scale_transposed:
         scales = torch.empty(
             (num_groups, num_tokens),
@@ -524,7 +523,7 @@ def silu_and_mul_per_block_quant(
         output,
         input,
         scales,
-        group_size[1],  # Pass the column dimension (128 or 64)
+        group_size,  # Pass directly as int
         scale_ub,
         is_scale_transposed,
     )
