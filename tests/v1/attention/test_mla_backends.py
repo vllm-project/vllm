@@ -19,12 +19,12 @@ from tests.v1.attention.utils import (
 )
 from vllm import _custom_ops as ops
 from vllm.config.vllm import set_current_vllm_config
+from vllm.model_executor.layers.attention.mla_attention import QueryLenSupport
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.utils.math_utils import cdiv
 from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
 from vllm.v1.attention.backend import CommonAttentionMetadata
 from vllm.v1.attention.backends.fa_utils import flash_attn_supports_mla
-from vllm.v1.attention.backends.mla.common import QueryLenSupport
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 from vllm.v1.attention.ops.flashmla import is_flashmla_dense_supported
 from vllm.v1.kv_cache_interface import FullAttentionSpec
@@ -504,6 +504,14 @@ def test_backend_correctness(
     W_UV = torch.randn(
         kv_lora_rank, num_q_heads, v_head_dim, dtype=dtype, device=device
     )
+
+    # Scale weights to produce realistic magnitude outputs.
+    # Without scaling, projection output has std ~sqrt(kv_lora_rank) ≈ 22.6,
+    # causing extreme attention scores and numerical instability in LSE merging.
+    weight_scale = 1.0 / (kv_lora_rank**0.5)
+    W_UK = W_UK * weight_scale
+    W_UV = W_UV * weight_scale
+
     kv_b_proj_weight = torch.cat([W_UK, W_UV], dim=-1)
 
     for i, backend in enumerate(BACKENDS_TO_TEST):
