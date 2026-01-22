@@ -962,12 +962,16 @@ class Qwen2_5OmniThinkerForConditionalGeneration(
 
     def _get_audio_for_video_mapping(
         self, mm_features: list[MultiModalFeatureSpec]
-    ) -> dict[int, int]:
+    ) -> tuple[dict[int, int], set[int]]:
         """
         Map video offset -> paired audio_feature_length for use_audio_in_video.
 
         When use_audio_in_video=True, audio is interleaved within video chunks.
         The pairing is based on feature order in mm_features.
+
+        Returns:
+            Tuple of (video_offset -> audio_feature_length mapping,
+                      set of paired audio offsets to skip)
         """
         videos_with_audio = [
             f
@@ -980,11 +984,13 @@ class Qwen2_5OmniThinkerForConditionalGeneration(
 
         # Pair videos with audio features (assumes matching order)
         mapping: dict[int, int] = {}
+        paired_audio_offsets: set[int] = set()
         for i, video_f in enumerate(videos_with_audio):
             if i < len(audios):
                 audio_len = audios[i].data["audio_feature_lengths"].data.item()
                 mapping[video_f.mm_position.offset] = audio_len
-        return mapping
+                paired_audio_offsets.add(audios[i].mm_position.offset)
+        return mapping, paired_audio_offsets
 
     def _compute_audio_token_count(self, audio_feature_length: int) -> int:
         """Compute audio tokens from feature length."""
@@ -1010,7 +1016,9 @@ class Qwen2_5OmniThinkerForConditionalGeneration(
 
         # Sort features by offset first, then pair audio with video
         sorted_features = sorted(mm_features, key=lambda f: f.mm_position.offset)
-        audio_for_video = self._get_audio_for_video_mapping(sorted_features)
+        audio_for_video, paired_audio_offsets = self._get_audio_for_video_mapping(
+            sorted_features
+        )
 
         for mm_feature in sorted_features:
             offset = mm_feature.mm_position.offset
@@ -1055,7 +1063,7 @@ class Qwen2_5OmniThinkerForConditionalGeneration(
                 )
             elif modality == "audio":
                 # Skip audio that's paired with video (handled in video case)
-                if offset not in audio_for_video.values():
+                if offset not in paired_audio_offsets:
                     audio_len = mm_feature.data["audio_feature_lengths"].data.item()
                     yield offset, "audio", {"audio_feature_length": audio_len}
 
