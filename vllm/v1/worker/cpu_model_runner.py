@@ -8,17 +8,13 @@ import torch.nn as nn
 
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
+from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.model_executor.model_loader import get_model
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.utils import CpuGpuBuffer
 from vllm.v1.worker.gpu_model_runner import GPUModelRunner
 
 logger = init_logger(__name__)
-
-# Type alias for type hints
-from typing import TYPE_CHECKING
-if TYPE_CHECKING:
-    pass
 
 
 class CPUModelRunner(GPUModelRunner):
@@ -93,7 +89,7 @@ class CPUModelRunner(GPUModelRunner):
         
         logger.info("Warming up done.")
 
-    def initialize_kv_cache(self, kv_cache_config) -> None:
+    def initialize_kv_cache(self, kv_cache_config: KVCacheConfig) -> None:
         """
         Initialize KV cache for CPU backend, including drafter cache if needed.
         
@@ -103,22 +99,12 @@ class CPUModelRunner(GPUModelRunner):
         # Call parent implementation
         super().initialize_kv_cache(kv_cache_config)
         
-        # Validate EAGLE drafter KV cache groups if applicable
-        if self.speculative_config and self.speculative_config.use_eagle():
-            from vllm.v1.spec_decode.eagle import EagleProposer
-            if isinstance(self.drafter, EagleProposer):
-                # Validate all draft model layers belong to the same kv cache group
-                self.drafter.validate_same_kv_cache_group(kv_cache_config)
-                logger.info("EAGLE drafter KV cache validation successful for CPU backend")
-        # Validate Draft model KV cache groups if applicable
-        elif self.speculative_config and (
-            self.speculative_config.uses_draft_model()
-        ):
-            from vllm.v1.spec_decode.draft_model import DraftModelProposer
-            if isinstance(self.drafter, (DraftModelProposer)):
-                # Validate all draft model layers belong to the same kv cache group
-                self.drafter.validate_same_kv_cache_group(kv_cache_config)
-                logger.info("Draft model drafter KV cache validation successful for CPU backend")
+        # Log CPU-specific confirmation for speculative decoding
+        if self.speculative_config:
+            if self.speculative_config.use_eagle():
+                logger.info("EAGLE drafter KV cache initialized for CPU backend")
+            elif self.speculative_config.uses_draft_model():
+                logger.info("Draft model KV cache initialized for CPU backend")
 
     def _init_device_properties(self) -> None:
         pass

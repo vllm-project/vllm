@@ -20,8 +20,9 @@ logger = init_logger(__name__)
 
 # Check if Triton is actually available for kernel execution
 try:
-    import triton.language as triton_lang
-    HAS_TRITON = hasattr(triton, 'jit') and callable(triton.jit)
+    import importlib.util
+    HAS_TRITON = (importlib.util.find_spec("triton.language") is not None
+                  and hasattr(triton, 'jit') and callable(triton.jit))
 except (ImportError, AttributeError):
     HAS_TRITON = False
 

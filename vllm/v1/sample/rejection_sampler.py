@@ -21,8 +21,9 @@ logger = init_logger(__name__)
 
 # Check if Triton is actually available for kernel execution
 try:
-    import triton.language as triton_lang
-    HAS_TRITON = hasattr(triton, 'jit') and callable(triton.jit)
+    import importlib.util
+    HAS_TRITON = (importlib.util.find_spec("triton.language") is not None
+                  and hasattr(triton, 'jit') and callable(triton.jit))
 except (ImportError, AttributeError):
     HAS_TRITON = False
 
@@ -740,16 +741,19 @@ def rejection_random_sample_pytorch(
     bonus_token_ids: torch.Tensor,  # [batch_size]
     recovered_token_ids: torch.Tensor,  # [num_tokens]
     uniform_probs: torch.Tensor,  # [num_tokens]
-    is_greedy: torch.Tensor,  # [batch_size]
+    is_greedy: torch.Tensor | None,  # [batch_size] or None
     no_draft_probs: bool = False,
 ):
     """PyTorch implementation of rejection_random_sample_kernel."""
+    if not no_draft_probs and draft_probs is None:
+        raise ValueError("draft_probs is required when no_draft_probs=False")
+    
     batch_size = cu_num_draft_tokens.shape[0]
     
     for req_idx in range(batch_size):
-        # Skip greedy sampling requests
-        if is_greedy[req_idx]:
-            continue
+        if is_greedy is not None:
+            if is_greedy[req_idx]:
+                continue
         
         # Get start and end indices for this request
         start_idx = 0 if req_idx == 0 else cu_num_draft_tokens[req_idx - 1].item()
@@ -764,7 +768,8 @@ def rejection_random_sample_pytorch(
                 if no_draft_probs:
                     draft_prob = 1.0
                 else:
-                    draft_prob = draft_probs[start_idx + pos, draft_token_id].item()
+                    draft_prob = draft_probs[start_idx + pos,  # type: ignore[index]
+                                             draft_token_id].item()
                 
                 target_prob = target_probs[start_idx + pos, draft_token_id].item()
                 uniform_prob = uniform_probs[start_idx + pos].item()
@@ -816,12 +821,21 @@ def sample_recovered_tokens_pytorch(
     no_draft_probs: bool = False,
 ):
     """PyTorch implementation of sample_recovered_tokens_kernel."""
+    if not no_draft_probs and draft_probs is None:
+        raise ValueError("draft_probs is required when no_draft_probs=False")
+    
     batch_size = cu_num_draft_tokens.shape[0]
+    
+    eps = torch.tensor(1e-10, device=q.device, dtype=q.dtype)
     
     for req_idx in range(batch_size):
         start_idx = 0 if req_idx == 0 else cu_num_draft_tokens[req_idx - 1].item()
         end_idx = cu_num_draft_tokens[req_idx].item()
         num_draft_tokens = end_idx - start_idx
+        
+        q_vals = q[req_idx]
+        # Avoid division by zero: set q_vals == 0 to a small value
+        q_vals_safe = torch.where(q_vals > 0, q_vals, eps)
         
         for pos in range(num_draft_tokens):
             token_idx = start_idx + pos
@@ -832,14 +846,12 @@ def sample_recovered_tokens_pytorch(
                 prob = target_probs[token_idx].clone()
                 prob[draft_token_id] = 0
             else:
-                draft_prob = draft_probs[token_idx]
+                draft_prob = draft_probs[token_idx]  # type: ignore[index]
                 target_prob = target_probs[token_idx]
-                prob = torch.maximum(target_prob - draft_prob, torch.zeros_like(target_prob))
+                diff = target_prob - draft_prob
+                prob = torch.maximum(diff, torch.zeros_like(target_prob))
             
             # Gumbel-max trick: argmax(prob / q)
-            q_vals = q[req_idx]
-            # Avoid division by zero: set q_vals == 0 to a small value
-            q_vals_safe = torch.where(q_vals > 0, q_vals, torch.tensor(1e-10, device=q_vals.device))
             recovered_id = torch.argmax(prob / q_vals_safe).item()
             output_token_ids[token_idx] = recovered_id
 

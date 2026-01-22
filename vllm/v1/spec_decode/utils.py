@@ -4,13 +4,6 @@ import torch
 
 from vllm.triton_utils import tl, triton
 
-# Check if Triton is actually available for kernel execution
-try:
-    import triton.language as triton_lang
-    HAS_TRITON = hasattr(triton, 'jit') and callable(triton.jit)
-except (ImportError, AttributeError):
-    HAS_TRITON = False
-
 
 def eagle_prepare_inputs_padded_pytorch(
     cu_num_draft_tokens: torch.Tensor,  # [num_reqs]
