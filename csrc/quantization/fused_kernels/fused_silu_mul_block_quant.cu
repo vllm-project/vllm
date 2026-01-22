@@ -98,7 +98,7 @@ __global__ void silu_and_mul_per_block_quant_kernel(
             float group_max = shared_max[0];
             
             // Use vLLM's quantization constants
-            constexpr float quant_range = quant_type_max_v<scalar_out_t>;
+            float const quant_range = quant_type_max_v<scalar_out_t>;
             
             group_scale = group_max / quant_range;
             
