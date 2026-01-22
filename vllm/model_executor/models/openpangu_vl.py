@@ -224,10 +224,9 @@ class OpenPanguVisionMLP(nn.Module):
     def forward(self, x: torch.Tensor):
         if self.hidden_act == "silu":
             x, _ = self.gate_up_proj(x)
-            x = SiluAndMul()(x)
         else:
             x, _ = self.up_proj(x)
-            x = self.act_fn(x)
+        x = self.act_fn(x)
         x, _ = self.down_proj(x)
         return x
 
@@ -396,93 +395,89 @@ class OpenPanguVisionTransformer(nn.Module):
         multimodal_config: MultiModalConfig | None = None,
         prefix: str = "",
         interleaved=False,
-        use_data_parallel: bool = False,
     ) -> None:
-        self.use_data_parallel = use_data_parallel
-        self._tp_group = self._get_tp_group()
-        with parallel_state.patch_tensor_parallel_group(self._tp_group):
-            super().__init__()
-            self.hidden_size = vision_config.hidden_size
-            self.num_heads = vision_config.num_heads
-            self.window_size = vision_config.window_size
-            self.patch_size = vision_config.patch_size
-            self.spatial_merge_size = vision_config.spatial_merge_size
-            self.fullatt_block_indexes = vision_config.fullatt_block_indexes
-            self.spatial_merge_unit = self.spatial_merge_size**2
+        super().__init__()
+        self.hidden_size = vision_config.hidden_size
+        self.num_heads = vision_config.num_heads
+        self.window_size = vision_config.window_size
+        self.patch_size = vision_config.patch_size
+        self.spatial_merge_size = vision_config.spatial_merge_size
+        self.fullatt_block_indexes = vision_config.fullatt_block_indexes
+        self.spatial_merge_unit = self.spatial_merge_size**2
 
-            norm_layer = partial(RMSNorm, eps=norm_eps)
-            self.interleaved = interleaved
-            self.out_hidden_size = vision_config.out_hidden_size
-            self.hidden_act = vision_config.hidden_act
+        norm_layer = partial(RMSNorm, eps=norm_eps)
+        self.interleaved = interleaved
+        self.out_hidden_size = vision_config.out_hidden_size
+        self.hidden_act = vision_config.hidden_act
 
-            head_dim = self.hidden_size // self.num_heads
-            attn_backend_override = (
-                multimodal_config.mm_encoder_attn_backend if multimodal_config else None
+        head_dim = self.hidden_size // self.num_heads
+        attn_backend_override = (
+            multimodal_config.mm_encoder_attn_backend if multimodal_config else None
+        )
+        self.attn_backend = get_vit_attn_backend(
+            head_size=head_dim,
+            dtype=torch.get_default_dtype(),
+            attn_backend_override=attn_backend_override,
+        )
+
+        if self.attn_backend not in {
+            AttentionBackendEnum.FLASH_ATTN,
+        }:
+            raise RuntimeError(
+                f"Pangu-VL does not support {self.attn_backend} backend now."
             )
-            self.attn_backend = get_vit_attn_backend(
-                head_size=head_dim,
-                dtype=torch.get_default_dtype(),
-                attn_backend_override=attn_backend_override,
-            )
-
-            if self.attn_backend not in {
-                AttentionBackendEnum.FLASH_ATTN,
-            }:
-                raise RuntimeError(
-                    f"Pangu-VL does not support {self.attn_backend} backend now."
+        self.rotary_pos_emb = OpenPanguVisionRotaryEmbedding(head_dim // 2)
+        self.patch_embed = OpenPanguVisionPatchEmbed(
+            patch_size=vision_config.patch_size,
+            temporal_patch_size=vision_config.temporal_patch_size,
+            in_channels=vision_config.in_channels,
+            hidden_size=self.hidden_size,
+        )
+        self.blocks = nn.ModuleList(
+            [
+                OpenPanguVisionBlock(
+                    dim=self.hidden_size,
+                    num_heads=self.num_heads,
+                    mlp_hidden_dim=vision_config.intermediate_size,
+                    act_fn=_ACTIVATION_REGISTRY[vision_config.hidden_act],
+                    vision_config=vision_config,
+                    norm_layer=norm_layer,
+                    quant_config=quant_config,
+                    multimodal_config=multimodal_config,
+                    prefix=f"{prefix}.blocks.{layer_idx}",
                 )
-            self.rotary_pos_emb = OpenPanguVisionRotaryEmbedding(head_dim // 2)
-            self.patch_embed = OpenPanguVisionPatchEmbed(
-                patch_size=vision_config.patch_size,
-                temporal_patch_size=vision_config.temporal_patch_size,
-                in_channels=vision_config.in_channels,
-                hidden_size=self.hidden_size,
-            )
-            self.blocks = nn.ModuleList(
-                [
-                    OpenPanguVisionBlock(
-                        dim=self.hidden_size,
-                        num_heads=self.num_heads,
-                        mlp_hidden_dim=vision_config.intermediate_size,
-                        act_fn=_ACTIVATION_REGISTRY[vision_config.hidden_act],
-                        vision_config=vision_config,
-                        norm_layer=norm_layer,
-                        quant_config=quant_config,
-                        multimodal_config=multimodal_config,
-                        prefix=f"{prefix}.blocks.{layer_idx}",
-                    )
-                    for layer_idx in range(vision_config.depth)
-                ]
-            )
-            self.tp_size = parallel_state.get_tensor_model_parallel_world_size()
-            self.tp_rank = parallel_state.get_tensor_model_parallel_rank()
-            self.hidden_size_per_attention_head = dist_utils.divide(
-                self.hidden_size, self.num_heads
-            )
+                for layer_idx in range(vision_config.depth)
+            ]
+        )
+        self.tp_size = parallel_state.get_tensor_model_parallel_world_size()
+        self.tp_rank = parallel_state.get_tensor_model_parallel_rank()
+        self.hidden_size_per_attention_head = dist_utils.divide(
+            self.hidden_size, self.num_heads
+        )
 
-            self.select_layer = getattr(
-                vision_config, "mm_unit_vision_select_layer", [-1, -3]
-            )
-            self.select_index = [vision_config.depth + i for i in self.select_layer]
-            self.select_index = self.select_index[::-1]
-            self.select_layer = [-1 * (i + 1) for i in range(len(self.select_index))]
+        self.select_layer = getattr(
+            vision_config, "mm_unit_vision_select_layer", [-1, -3]
+        )
+        self.select_index = [vision_config.depth + i for i in self.select_layer]
+        self.select_index = self.select_index[::-1]
+        self.select_layer = [-1 * (i + 1) for i in range(len(self.select_index))]
 
-            self.take_indices = self.select_index
+        self.take_indices = self.select_index
 
-            self.final_layernorm = RMSNorm(self.hidden_size, eps=norm_eps)
-            self.merger = nn.ModuleList(
-                [
-                    OpenPanguVisionPatchMerger(
-                        d_model=vision_config.out_hidden_size,
-                        context_dim=self.hidden_size,
-                        norm_layer=norm_layer,
-                        spatial_merge_size=self.spatial_merge_size,
-                        quant_config=quant_config,
-                        prefix=f"{prefix}.merger.{i}",
-                    )
-                    for i in range(len(self.select_layer))
-                ]
-            )
+        self.final_layernorm = RMSNorm(self.hidden_size, eps=norm_eps)
+        self.merger = nn.ModuleList(
+            [
+                OpenPanguVisionPatchMerger(
+                    d_model=vision_config.out_hidden_size,
+                    context_dim=self.hidden_size,
+                    norm_layer=norm_layer,
+                    spatial_merge_size=self.spatial_merge_size,
+                    quant_config=quant_config,
+                    prefix=f"{prefix}.merger.{i}",
+                )
+                for i in range(len(self.select_layer))
+            ]
+        )
 
     @property
     def dtype(self) -> torch.dtype:
@@ -660,62 +655,41 @@ class OpenPanguVisionTransformer(nn.Module):
             pad[-(dim + 1) * 2 + 1] = pad_len
             return F.pad(w, pad, mode="constant", value=0)
 
-        with parallel_state.patch_tensor_parallel_group(self._tp_group):
-            stacked_params_mapping = [
-                ("attn.qkv.", "attn.q.", "q"),
-                ("attn.qkv.", "attn.k.", "k"),
-                ("attn.qkv.", "attn.v.", "v"),
-            ]
+        stacked_params_mapping = [
+            ("attn.qkv.", "attn.q.", "q"),
+            ("attn.qkv.", "attn.k.", "k"),
+            ("attn.qkv.", "attn.v.", "v"),
+        ]
+        if self.hidden_act == "silu":
+            stacked_params_mapping.extend(
+                [
+                    ("gate_up_proj", "gate_proj", 0),
+                    ("gate_up_proj", "up_proj", 1),
+                ]
+            )
+        params_dict = dict(self.named_parameters(remove_duplicate=False))
+        loaded_params: set[str] = set()
+
+        for name, loaded_weight in weights:
             if self.hidden_act == "silu":
-                stacked_params_mapping.extend(
-                    [
-                        ("gate_up_proj", "gate_proj", 0),
-                        ("gate_up_proj", "up_proj", 1),
-                    ]
+                loaded_weight = _padding_weight(name, loaded_weight)
+            for param_name, weight_name, shard_id in stacked_params_mapping:
+                if weight_name not in name:
+                    continue
+                name = name.replace(weight_name, param_name)
+
+                param = params_dict[name]
+                weight_loader = param.weight_loader
+                weight_loader(param, loaded_weight, shard_id)
+                break
+            else:
+                param = params_dict[name]
+                weight_loader = getattr(
+                    param, "weight_loader", default_weight_loader
                 )
-            params_dict = dict(self.named_parameters(remove_duplicate=False))
-            loaded_params: set[str] = set()
-
-            for name, loaded_weight in weights:
-                if self.hidden_act == "silu":
-                    loaded_weight = _padding_weight(name, loaded_weight)
-                for param_name, weight_name, shard_id in stacked_params_mapping:
-                    if weight_name not in name:
-                        continue
-                    name = name.replace(weight_name, param_name)
-
-                    param = params_dict[name]
-                    weight_loader = param.weight_loader
-                    weight_loader(param, loaded_weight, shard_id)
-                    break
-                else:
-                    param = params_dict[name]
-                    weight_loader = getattr(
-                        param, "weight_loader", default_weight_loader
-                    )
-                    weight_loader(param, loaded_weight)
-                loaded_params.add(name)
+                weight_loader(param, loaded_weight)
+            loaded_params.add(name)
         return loaded_params
-
-    def _get_tp_group(self) -> None:
-        if not self.use_data_parallel:
-            return parallel_state.get_tp_group()
-
-        world_size = torch.distributed.get_world_size()
-        tensor_model_parallel_size = 1
-        group_ranks = (
-            torch.arange(world_size).view(-1, tensor_model_parallel_size).unbind(0)
-        )
-        group_ranks = [x.tolist() for x in group_ranks]
-
-        # creates tp process group containing only a subset of gpu ranks
-        local_rank = parallel_state.get_world_group().local_rank
-        tp_backend = torch.distributed.get_backend(
-            parallel_state.get_tp_group().device_group
-        )
-        return parallel_state.init_model_parallel_group(
-            group_ranks, local_rank, tp_backend
-        )
 
 
 class ProjectionSingle(nn.Module):
@@ -749,197 +723,6 @@ class OpenPanguVLProcessingInfo(Qwen2_5_VLProcessingInfo):
             use_fast=kwargs.pop("use_fast", True),
             **kwargs,
         )
-
-
-def get_load_balance_assignment(
-    sizes: list[int],
-    num_gpus: int = 2,
-) -> tuple[list[int], list[int], list[int]]:
-    # see https://github.com/vllm-project/vllm/blob/main/vllm/model_executor/models/vision.py#L253 for details. # noqa: E501
-    n_samples = len(sizes)
-
-    # Handle edge cases
-    if n_samples == 0:
-        return [], [0] * num_gpus, [0] * num_gpus
-
-    # Use greedy algorithm - balance by total size, not sample count
-    gpu_assignments = [list[int]() for _ in range(num_gpus)]
-    gpu_loads = [0] * num_gpus  # This tracks total SIZE, not sample count
-
-    # Sort indices by size (largest first for better load balancing)
-    large_to_small_indices = sorted(
-        range(n_samples), key=lambda i: sizes[i], reverse=True
-    )
-
-    for idx in large_to_small_indices:
-        # Find GPU with minimum current load (by total size)
-        min_gpu = min(range(num_gpus), key=lambda i: gpu_loads[i])
-        gpu_assignments[min_gpu].append(idx)
-        gpu_loads[min_gpu] += sizes[idx]
-
-    # Create shuffle indices and counts
-    shuffle_indices = list[int]()
-    gpu_sample_counts = list[int]()
-    for gpu_id in range(num_gpus):
-        shuffle_indices.extend(gpu_assignments[gpu_id])
-        gpu_sample_counts.append(len(gpu_assignments[gpu_id]))
-
-    return (shuffle_indices, gpu_sample_counts, gpu_loads)
-
-
-def run_dp_sharded_mrope_vision_model(
-    vision_model: torch.nn.Module,
-    pixel_values: torch.Tensor,
-    grid_thw_list,
-    *,
-    rope_type: Literal["rope_3d", "rope_2d"],
-) -> tuple[torch.Tensor, ...]:
-    # https://github.com/vllm-project/vllm/blob/main/vllm/model_executor/models/vision.py#L322 for details. # noqa: E501
-    grid_thw_list = grid_thw_list.tolist()
-    tp_size = parallel_state.get_tensor_model_parallel_world_size()
-
-    tp_rank_local = parallel_state.get_tensor_model_parallel_rank()
-
-    patches_per_image = [math.prod(grid_thw) for grid_thw in grid_thw_list]
-    cum_patches_per_image = [0, *itertools.accumulate(patches_per_image)]
-
-    # Get load balancing assignment with all metadata
-    (image_to_tp_rank, gpu_sample_counts, grouped_pixel_values_len) = (
-        get_load_balance_assignment(patches_per_image, tp_size)
-    )
-
-    cum_gpu_sample_counts = [0, *itertools.accumulate(gpu_sample_counts)]
-
-    image_idxs_local = image_to_tp_rank[
-        cum_gpu_sample_counts[tp_rank_local] : cum_gpu_sample_counts[tp_rank_local + 1]
-    ]
-
-    # Get the pixel values for the local images based on the image_idxs_local
-    if len(image_idxs_local) > 0:
-        pixel_values_local = torch.cat(
-            [
-                pixel_values[cum_patches_per_image[i] : cum_patches_per_image[i + 1]]
-                for i in image_idxs_local
-            ]
-        )
-    else:
-        # Handle case where this rank has no images
-        pixel_values_local = torch.empty(
-            (0, pixel_values.shape[1]),
-            device=pixel_values.device,
-            dtype=pixel_values.dtype,
-        )
-    if rope_type == "rope_2d":
-        embed_dim_reduction_factor = (
-            vision_model.merge_kernel_size[0] * vision_model.merge_kernel_size[1]
-        )
-    else:
-        embed_dim_reduction_factor = (
-            vision_model.spatial_merge_size * vision_model.spatial_merge_size
-        )
-
-    # Find the max length across all ranks
-    # The output embedding of every DP rank has to be
-    # padded to this length for tensor_model_parallel_all_gather
-    # to work
-    max_len_per_rank = max(grouped_pixel_values_len) // embed_dim_reduction_factor
-    local_grid_thw_list = [grid_thw_list[i] for i in image_idxs_local]
-
-    # Run the vision model on the local pixel_values_local
-    if rope_type == "rope_2d":
-        if pixel_values_local.shape[0] > 0:
-            image_embeds_local = vision_model(
-                pixel_values_local, torch.tensor(local_grid_thw_list)
-            )
-            if isinstance(image_embeds_local, list):
-                image_embeds_local = torch.cat(image_embeds_local, dim=0)
-        else:
-            out_dim = getattr(vision_model.config, "hidden_size", None)
-            image_embeds_local = torch.empty(
-                (0, embed_dim_reduction_factor, out_dim),
-                device=pixel_values.device,
-                dtype=pixel_values.dtype,
-            )
-    else:
-        if pixel_values_local.shape[0] > 0:
-            image_embeds_local = vision_model(
-                pixel_values_local, torch.tensor(local_grid_thw_list)
-            )
-        else:
-            # Handle empty case
-            image_embeds_local = torch.empty(
-                (0, vision_model.out_hidden_size),
-                device=pixel_values.device,
-                dtype=pixel_values.dtype,
-            )
-
-    # Pad the output based on max_len_per_rank
-    # for tensor_model_parallel_all_gather to work
-    current_len = image_embeds_local.shape[0]
-    if current_len < max_len_per_rank:
-        padding_size = max_len_per_rank - current_len
-        if rope_type == "rope_2d":
-            padding = torch.empty(
-                (
-                    padding_size,
-                    image_embeds_local.shape[1],
-                    image_embeds_local.shape[2],
-                ),
-                dtype=image_embeds_local.dtype,
-                device=image_embeds_local.device,
-            )
-        else:
-            padding = torch.empty(
-                (padding_size, image_embeds_local.shape[1]),
-                dtype=image_embeds_local.dtype,
-                device=image_embeds_local.device,
-            )
-        image_embeds_local_padded = torch.cat([image_embeds_local, padding], dim=0)
-    else:
-        image_embeds_local_padded = image_embeds_local
-
-    # Do all_gather to collect embeddings from all ranks
-    gathered_embeds = tensor_model_parallel_all_gather(image_embeds_local_padded, dim=0)
-
-    # Remove padding and reconstruct per-rank embeddings
-    rank_embeddings = list[torch.Tensor]()
-    for rank in range(tp_size):
-        start_idx = rank * max_len_per_rank
-        end_idx = start_idx + (
-            grouped_pixel_values_len[rank] // embed_dim_reduction_factor
-        )
-        rank_embeddings.append(gathered_embeds[start_idx:end_idx])
-
-    patches_per_output_image = [
-        (patch_size // embed_dim_reduction_factor) for patch_size in patches_per_image
-    ]
-
-    # Reconstruct embeddings in the original order
-    original_order_embeddings = [None] * len(grid_thw_list)
-    current_idx = 0
-    for rank in range(tp_size):
-        count = gpu_sample_counts[rank]
-        if count > 0:
-            # Get images assigned to this rank in shuffled order
-            rank_images = image_to_tp_rank[current_idx : current_idx + count]
-
-            rank_embed = rank_embeddings[rank]
-            # Split rank embeddings back to individual images
-            embed_start = 0
-            for img_idx in rank_images:
-                img_patches = patches_per_output_image[img_idx]
-                original_order_embeddings[img_idx] = rank_embed[
-                    embed_start : embed_start + img_patches
-                ]
-                embed_start += img_patches
-            current_idx += count
-    out_embeddings = tuple(
-        embed for embed in original_order_embeddings if embed is not None
-    )
-    if len(out_embeddings) != len(original_order_embeddings):
-        raise ValueError("Found unassigned embeddings")
-
-    return torch.concat(out_embeddings)
 
 
 class OpenPanguVLImagePixelInputs(TypedDict):
@@ -1063,11 +846,6 @@ class OpenPanguVLForConditionalGeneration(
         super().__init__()
         config = vllm_config.model_config.hf_config
         multimodal_config = vllm_config.model_config.multimodal_config
-        self.use_data_parallel = getattr(
-            vllm_config.parallel_config,
-            "enable_multimodal_encoder_data_parallel",
-            False,
-        )
         self.config = config
         self.vllm_config = vllm_config
         self.multimodal_config = multimodal_config
@@ -1078,7 +856,6 @@ class OpenPanguVLForConditionalGeneration(
             quant_config=self._maybe_ignore_quant_config(quant_config),
             multimodal_config=multimodal_config,
             prefix=maybe_prefix(prefix, "visual"),
-            use_data_parallel=self.use_data_parallel,
         )
         self.visual.vision_projection = ProjectionSingle(
             config.vision_config.out_hidden_size, config.hidden_size
@@ -1339,12 +1116,7 @@ class OpenPanguVLForConditionalGeneration(
             pixel_values = pixel_values.reshape(
                 -1, self.channel * self.patch_size * self.patch_size
             )
-            if self.use_data_parallel:
-                image_embeds = run_dp_sharded_mrope_vision_model(
-                    self.visual, pixel_values, grid_thw, rope_type="rope_3d"
-                )
-            else:
-                image_embeds = self.visual(pixel_values, grid_thw=grid_thw)
+            image_embeds = self.visual(pixel_values, grid_thw=grid_thw)
 
             image_embeds = self.visual.vision_projection(image_embeds)
         # Split concatenated embeddings for each image item.
@@ -1363,12 +1135,7 @@ class OpenPanguVLForConditionalGeneration(
             pixel_values_videos = video_input["pixel_values_videos"].type(
                 self.visual.dtype
             )
-            if self.use_data_parallel:
-                video_embeds = run_dp_sharded_mrope_vision_model(
-                    self.visual, pixel_values_videos, grid_thw, rope_type="rope_3d"
-                )
-            else:
-                video_embeds = self.visual(pixel_values_videos, grid_thw=grid_thw)
+            video_embeds = self.visual(pixel_values_videos, grid_thw=grid_thw)
 
             video_embeds = self.visual.vision_projection(video_embeds)
         # Split concatenated embeddings for each video item.
