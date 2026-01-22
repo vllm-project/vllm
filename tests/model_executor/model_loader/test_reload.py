@@ -111,3 +111,30 @@ def test_reload_weights(base_model, mul_model, add_model, tp_size, vllm_runner):
         llm.collective_rpc("reload_weights", kwargs={"weights_path": add_model})
         assert llm.generate_prompt_perplexity(["3 4 = 12"], mask=["3 4 ="])[0] >= 1e10
         assert llm.generate_prompt_perplexity(["3 4 = 7"], mask=["3 4 ="])[0] <= 1.1
+
+
+@pytest.mark.parametrize(
+    "tp_size",
+    [
+        2,
+    ],
+)
+def test_eplb(tp_size, vllm_runner):
+    if cuda_device_count_stateless() < tp_size:
+        pytest.skip(reason="Not enough CUDA devices")
+
+    base_model = "deepseek-ai/DeepSeek-V2-Lite-Chat"
+    prompts = ["The capital of France is Paris"]
+
+    with vllm_runner(
+        model_name=base_model,
+        enable_eplb=True,
+        enable_expert_parallel=True,
+        tensor_parallel_size=tp_size,
+        enable_prefix_caching=False,
+    ) as llm:
+        exp_perp = llm.generate_prompt_perplexity(prompts)
+        llm.collective_rpc("reload_weights")
+        reload_perp = llm.generate_prompt_perplexity(prompts)
+
+        assert reload_perp == exp_perp

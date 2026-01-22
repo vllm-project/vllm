@@ -16,9 +16,6 @@ Limitations:
    which (1) pad weights or (2) load qkv weights into the same parameter. Both of these
    cases are non-issues for today's quant methods, but future quantizations may cause
    reloading to fail
-
-TODO(@ksayers):
-    - Check composability with EPLB
 """
 
 __all__ = [
