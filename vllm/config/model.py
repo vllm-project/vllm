@@ -506,6 +506,12 @@ class ModelConfig:
         is_generative_model = registry.is_text_generation_model(architectures, self)
         is_pooling_model = registry.is_pooling_model(architectures, self)
 
+        # if self.st_v6_config.get("model_type", None) == "CrossEncoder":
+        #    self.runner = "pooling"
+        #    self.convert = "classify"
+        #    is_generative_model = False
+        #    is_pooling_model = True
+
         self.runner_type = self._get_runner_type(architectures, self.runner)
         self.convert_type = self._get_convert_type(
             architectures, self.runner_type, self.convert
@@ -1481,6 +1487,25 @@ class ModelConfig:
             return use_pad_token
 
         return getattr(self.hf_config, "use_sep_token", True)
+
+    @property
+    def classifier_convert_method(self) -> str | None:
+        return self.st_v6_config.get(
+            "method",
+            getattr(
+                self.hf_config,
+                "method",
+                getattr(self.hf_config.get_text_config(), "method", None),
+            ),
+        )
+
+    @property
+    def classifier_from_token(self) -> list[int | str] | None:
+        return getattr(
+            self.hf_config,
+            "classifier_from_token",
+            getattr(self.hf_config.get_text_config(), "classifier_from_token", None),
+        )
 
     @property
     def head_dtype(self) -> torch.dtype:

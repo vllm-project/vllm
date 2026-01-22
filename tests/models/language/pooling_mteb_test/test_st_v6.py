@@ -8,6 +8,10 @@ from tests.models.utils import (
 
 from .mteb_score_utils import mteb_test_rerank_models
 
+qwen3_reranker_hf_overrides = {
+    "architectures": ["Qwen3ForSequenceClassification"],
+}
+
 RERANK_MODELS = [
     RerankModelInfo(
         "noooop9527/llama-nemotron-rerank-1b-v2-STv6",
@@ -17,7 +21,7 @@ RERANK_MODELS = [
         attn_type="encoder_only",
         is_prefix_caching_supported=False,
         is_chunked_prefill_supported=False,
-        enable_test=False
+        enable_test=False,
     ),
     RerankModelInfo(
         "noooop9527/Qwen3-Reranker-0.6B-seq-cls-STv6",
@@ -28,6 +32,17 @@ RERANK_MODELS = [
         is_chunked_prefill_supported=True,
         mteb_score=0.33459,
         enable_test=True,
+    ),
+    RerankModelInfo(
+        "noooop9527/Qwen3-Reranker-0.6B-STv6",
+        architecture="Qwen3ForSequenceClassification",
+        seq_pooling_type="LAST",
+        attn_type="decoder",
+        hf_overrides=qwen3_reranker_hf_overrides,
+        is_prefix_caching_supported=True,
+        is_chunked_prefill_supported=True,
+        mteb_score=0.33459,
+        enable_test=False,
     ),
 ]
 
