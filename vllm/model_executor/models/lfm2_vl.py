@@ -50,7 +50,7 @@ from .interfaces import (
     SupportsMultiModal,
     SupportsPP,
 )
-from .siglip2 import Siglip2Model
+from .lfm2_siglip2 import Siglip2Model
 from .utils import (
     AutoWeightsLoader,
     WeightsMapper,
