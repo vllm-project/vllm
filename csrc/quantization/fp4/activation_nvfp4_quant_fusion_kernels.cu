@@ -28,6 +28,8 @@
 #include "cuda_utils.h"
 #include "launch_bounds_utils.h"
 
+// Define before including nvfp4_utils.cuh so the header
+// can use this macro during compilation.
 #define NVFP4_ENABLE_ELTS16 1
 #include "nvfp4_utils.cuh"
 

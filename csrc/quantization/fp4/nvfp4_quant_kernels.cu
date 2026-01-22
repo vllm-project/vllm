@@ -28,6 +28,8 @@
 #include "cuda_utils.h"
 #include "launch_bounds_utils.h"
 
+// Define before including nvfp4_utils.cuh so the header
+// can use this macro during compilation.
 #define NVFP4_ENABLE_ELTS16 1
 #include "nvfp4_utils.cuh"
 
@@ -195,8 +197,7 @@ void scaled_fp4_quant_sm1xxa(torch::Tensor const& output,
   int sf_n_unpadded = int(n / CVT_FP4_SF_VEC_SIZE);
 
   // Grid, Block size. Each thread converts 8 values.
-  dim3 block(std::min(int(n / ELTS_PER_THREAD),
-                      512));  // TODO: div:round_up(n/ELTS_PER_THREAD, 32)?
+  dim3 block(std::min(int(n / ELTS_PER_THREAD), 512));
   int const numBlocksPerSM =
       vllm_runtime_blocks_per_sm(static_cast<int>(block.x));
 

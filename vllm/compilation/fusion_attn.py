@@ -242,17 +242,13 @@ class AttentionNvfp4QuantPattern(AttentionQuantPattern):
             attn_out_view = RESHAPE_OP(
                 at1[1], [q.shape[0], self.num_heads * self.head_size]
             )
-            quant_kwargs = {
-                "output": output_quant,
-                "input": attn_out_view,
-                "output_scale": output_scale,
-                "input_scale": input_scale,
-            }
-            if self.quant_key == kNvfp4Quant:
-                quant_kwargs["is_sf_swizzled_layout"] = True
             at2 = auto_functionalized(
                 self.QUANT_OP,
-                **quant_kwargs,
+                output=output_quant,
+                input=attn_out_view,
+                output_scale=output_scale,
+                input_scale=input_scale,
+                is_sf_swizzled_layout=True,
             )
             output_scale_view = torch.ops.aten.view.dtype(at2[2], FP8_DTYPE)
             return at2[1], output_scale_view
