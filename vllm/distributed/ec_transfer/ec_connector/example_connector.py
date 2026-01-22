@@ -117,23 +117,20 @@ class ECExampleConnector(ECConnectorBase):
         safetensors.torch.save_file(tensors, filename)
         logger.debug("Save cache successful for mm_hash %s", mm_hash)
 
-    def has_caches(
+    def has_cache_item(
         self,
-        request: "Request",
-    ) -> list[bool]:
+        identifier: str,
+    ) -> bool:
         """
-        Check if cache exist externally for each mm_data of request
+        Check if cache exist externally for the media
 
         Args:
-            request (Request): the request object.
+            identifier (str): the identifier of the media.
 
         Returns:
-            List of bool indicate that ith mm_data exist in cache or not
+            Bool indicate that media exists in cache or not
         """
-        result = []
-        for feature in request.mm_features:
-            result.append(self._found_match_for_mm_data(feature.identifier))
-        return result
+        return self._found_match_for_mm_data(identifier)
 
     def update_state_after_alloc(
         self,
