@@ -2,22 +2,25 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from typing import TYPE_CHECKING, Any, Protocol
 
-import torch
-
 from vllm.inputs import EmbedsPrompt, TextPrompt, TokensPrompt
 from vllm.tokenizers import TokenizerLike
 from vllm.utils.async_utils import AsyncMicrobatchTokenizer
 from vllm.utils.collection_utils import is_list_of
+from vllm.utils.import_utils import LazyLoader
 
 from .embed_utils import safe_load_prompt_embeds
 from .params import TokenizeParams
 
 if TYPE_CHECKING:
+    import torch
+
     from vllm.config import ModelConfig
     from vllm.entrypoints.chat_utils import (
         ChatCompletionMessageParam,
         ConversationMessage,
     )
+else:
+    torch = LazyLoader("torch", globals(), "torch")
 
 
 class RendererLike(Protocol):
