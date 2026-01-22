@@ -6,6 +6,7 @@
 
 #include "../../dispatch_utils.h"
 #include "quant_conversions.cuh"
+#include "common.cuh"
 
 namespace vllm {
 
@@ -42,9 +43,9 @@ __global__ void silu_and_mul_per_block_quant_kernel(
         ? scales + token_idx
         : scales + token_idx * num_groups;
     
-    // Shared memory - FIX 3: Size based
-    __shared__ float shared_max[1024];
-    __shared__ float shared_silu_results[group_size];  
+    // Shared memory
+    __shared__ float shared_max[1024];              // Keep hardcoded for now
+    __shared__ float shared_silu_results[group_size];  // Compile-time sized
     
     // Process elements in groups
     for (int group_idx = 0; group_idx < num_groups; group_idx++) {
@@ -77,7 +78,6 @@ __global__ void silu_and_mul_per_block_quant_kernel(
         
         // =====================================================================
         // Step 2: Reduce across threads to find group max
-        // FIX 1: Proper reduction that terminates
         // =====================================================================
         shared_max[tid] = local_max;
         __syncthreads();
@@ -97,10 +97,8 @@ __global__ void silu_and_mul_per_block_quant_kernel(
         if (tid == 0) {
             float group_max = shared_max[0];
             
-            // Compute scale based on output type
-            constexpr float quant_range = std::is_same_v<scalar_out_t, int8_t> 
-                ? 127.0f 
-                : 448.0f;  // FP8 E4M3
+            // Use vLLM's quantization constants
+            constexpr float quant_range = quant_type_max_v<scalar_out_t>;
             
             group_scale = group_max / quant_range;
             
@@ -109,13 +107,15 @@ __global__ void silu_and_mul_per_block_quant_kernel(
                 group_scale = fminf(group_scale, *scale_ub);
             }
             
-            // Avoid division by zero
-            group_scale = fmaxf(group_scale, 1e-10f);
+            // Use minimum safe scaling factor for the quant type
+            group_scale = fmaxf(group_scale, min_scaling_factor<scalar_out_t>::val());
             
             // Store scale with correct stride
             if constexpr (is_scale_transposed) {
-                token_scales[group_idx * blockDim.x] = group_scale;
+                // Transposed layout: [num_groups, num_tokens]
+                token_scales[group_idx * num_tokens] = group_scale;
             } else {
+                // Normal layout: [num_tokens, num_groups]
                 token_scales[group_idx] = group_scale;
             }
         }
@@ -123,7 +123,7 @@ __global__ void silu_and_mul_per_block_quant_kernel(
         
         // Broadcast scale to all threads
         if constexpr (is_scale_transposed) {
-            group_scale = token_scales[group_idx * blockDim.x];
+            group_scale = token_scales[group_idx * num_tokens];
         } else {
             group_scale = token_scales[group_idx];
         }
@@ -137,18 +137,9 @@ __global__ void silu_and_mul_per_block_quant_kernel(
             // Read the SAME result we computed earlier
             float result = shared_silu_results[i];
             
-            // Quantize
-            float scaled = result / group_scale;
-            
-            if constexpr (std::is_same_v<scalar_out_t, int8_t>) {
-                // INT8 quantization
-                int32_t quantized = static_cast<int32_t>(roundf(scaled));
-                quantized = max(-127, min(127, quantized));
-                token_output[elem_idx] = static_cast<int8_t>(quantized);
-            } else {
-                // FP8 quantization - direct cast (hardware handles conversion)
-                token_output[elem_idx] = static_cast<scalar_out_t>(scaled);
-            }
+            // Quantize using vLLM's helper
+            token_output[elem_idx] = 
+                vllm::ScaledQuant<scalar_out_t, false>::quant_fn(result, group_scale);
         }
         __syncthreads();
     }
