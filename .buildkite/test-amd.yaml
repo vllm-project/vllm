@@ -866,7 +866,7 @@ steps:
 
 - label: Language Models Tests (Standard)
   timeout_in_minutes: 25
-  mirror_hardwares: [amdexperimental]
+  mirror_hardwares: [amdexperimental, amdproduction]
   agent_pool: mi325_1
   # grade: Blocking
   torch_nightly: true
@@ -1473,7 +1473,7 @@ steps:
     - tests/v1/kv_connector/nixl_integration/
   commands:
     - uv pip install --system -r /vllm-workspace/requirements/kv_connectors_rocm.txt
-    - VLLM_ATTENTION_BACKEND=ROCM_ATTN bash v1/kv_connector/nixl_integration/config_sweep_accuracy_test.sh
+    - bash v1/kv_connector/nixl_integration/config_sweep_accuracy_test.sh --attention-backend ROCM_ATTN
 
 - label: DP EP NixlConnector PD accuracy tests (Distributed) # 15min
   mirror_hardwares: [amdexperimental, amdproduction]
@@ -1487,7 +1487,7 @@ steps:
     - tests/v1/kv_connector/nixl_integration/
   commands:
     - uv pip install --system -r /vllm-workspace/requirements/kv_connectors_rocm.txt
-    - VLLM_ATTENTION_BACKEND=ROCM_ATTN DP_EP=1 bash v1/kv_connector/nixl_integration/config_sweep_accuracy_test.sh
+    - DP_EP=1 bash v1/kv_connector/nixl_integration/config_sweep_accuracy_test.sh --attention-backend ROCM_ATTN
 
 ##### multi gpus test #####
 ##### A100 test #####
@@ -1673,17 +1673,6 @@ steps:
   commands:
   - bash .buildkite/scripts/scheduled_integration_test/qwen30b_a3b_fp8_block_ep_eplb.sh 0.8 200 8020 2 1
 
-- label: DeepSeek V2-Lite Async EPLB Accuracy
-  timeout_in_minutes: 60
-  mirror_hardwares: [amdexperimental]
-  agent_pool: mi325_4
-  # grade: Blocking
-  gpu: h100
-  optional: true
-  num_gpus: 4
-  working_dir: "/vllm-workspace"
-  commands:
-  - bash .buildkite/scripts/scheduled_integration_test/deepseek_v2_lite_ep_async_eplb.sh 0.25 1319 8030
 
 - label: Qwen3-Next-80B-A3B-Instruct MTP Async EPLB Accuracy
   timeout_in_minutes: 60

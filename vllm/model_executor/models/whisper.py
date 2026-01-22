@@ -909,7 +909,12 @@ class WhisperForConditionalGeneration(
         self.config = config
         self.dtype = vllm_config.model_config.dtype
 
-        self.model = WhisperModel(vllm_config=vllm_config, prefix=prefix)
+        with self._mark_composite_model(
+            vllm_config,
+            language_targets=WhisperDecoder,
+            tower_targets={"audio": WhisperEncoder},
+        ):
+            self.model = WhisperModel(vllm_config=vllm_config, prefix=prefix)
 
         self.proj_out = ParallelLMHead(
             config.vocab_size,
@@ -936,9 +941,6 @@ class WhisperForConditionalGeneration(
             encoder_outputs=encoder_outputs,
         )
         return decoder_outputs
-
-    def get_language_model(self) -> torch.nn.Module:
-        return self.model.decoder
 
     def embed_multimodal(self, **kwargs: object) -> MultiModalEmbeddings:
         # Required as part of SupportsMultiModal interface.
