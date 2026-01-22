@@ -43,15 +43,15 @@ class StandaloneCompiledArtifacts:
     split on attn)
     """
 
-    def __init__(self):
+    def __init__(self) -> None:
         # dict from submodule name to byte hash
-        self.submodule_bytes = {}
+        self.submodule_bytes: dict[str, str] = {}
         # dict from byte hash to bytes
-        self.submodule_bytes_store = {}
+        self.submodule_bytes_store: dict[str, bytes] = {}
         # dict from byte hash to loaded module
-        self.loaded_submodule_store = {}
+        self.loaded_submodule_store: dict[str, Any] = {}
 
-    def insert(self, submod_name: str, shape: str, entry: bytes):
+    def insert(self, submod_name: str, shape: str, entry: bytes) -> None:
         hasher = hashlib.sha256()
         hasher.update(entry)
         hex_digest = hasher.hexdigest()
@@ -86,7 +86,7 @@ class StandaloneCompiledArtifacts:
             self.submodule_bytes[f"{submod_name}_{shape}"]
         ]
 
-    def get_loaded(self, submod_name: str, shape: str):
+    def get_loaded(self, submod_name: str, shape: str) -> Any:
         logger.debug(
             "getting artifact for submod %s with shape %s",
             submod_name,
@@ -119,7 +119,7 @@ class StandaloneCompiledArtifacts:
 
         from torch._inductor.standalone_compile import AOTCompiledArtifact
 
-        def _load_entry(entry_bytes) -> AOTCompiledArtifact:
+        def _load_entry(entry_bytes: bytes) -> AOTCompiledArtifact:
             entry = pickle.loads(entry_bytes)
             return AOTCompiledArtifact.deserialize(entry)
 
@@ -132,13 +132,13 @@ class StandaloneCompiledArtifacts:
 
         logger.debug("loaded all %s submodules", self.num_artifacts())
 
-    def __getstate__(self):
+    def __getstate__(self) -> dict[str, dict[str, str] | dict[str, bytes]]:
         return {
             "submodule_bytes": self.submodule_bytes,
             "submodule_bytes_store": self.submodule_bytes_store,
         }
 
-    def __setstate__(self, state):
+    def __setstate__(self, state: dict[str, dict[str, Any]]) -> None:
         self.submodule_bytes = state["submodule_bytes"]
         self.submodule_bytes_store = state["submodule_bytes_store"]
         self.loaded_submodule_store = {}
@@ -387,7 +387,7 @@ def reconstruct_serializable_fn_from_mega_artifact(
     standalone_compile_artifacts.load_all()
 
     submod_names = standalone_compile_artifacts.submodule_names()
-    compiled_callables: dict[str, dict[str, Callable]] = {}
+    compiled_callables: dict[str, dict[str, Callable[..., Any]]] = {}
 
     for cache_key in standalone_compile_artifacts.submodule_bytes:
         submod_name, shape_str = cache_key.rsplit("_", 1)
@@ -495,9 +495,10 @@ def _compute_code_hash_with_content(file_contents: dict[str, str]) -> str:
             # e.g. exec(). We can't actually check these.
             continue
         hash_content.append(content)
-    return safe_hash(
+    result: str = safe_hash(
         "\n".join(hash_content).encode(), usedforsecurity=False
     ).hexdigest()
+    return result
 
 
 def _compute_code_hash(files: set[str]) -> str:
