@@ -683,11 +683,26 @@ class MooncakeConnectorWorker:
         for layer_name, cache_or_caches in kv_caches.items():
             if hasattr(cache_or_caches, "shape"):
                 logger.debug(
-                    "registering layer %s with shape %s", layer_name, cache_or_caches.shape
+                    "registering layer %s with shape %s",
+                    layer_name,
+                    cache_or_caches.shape,
+                )
+            elif isinstance(cache_or_caches, (list, tuple)):
+                shapes = [
+                    c.shape if hasattr(c, "shape") else str(type(c))
+                    for c in cache_or_caches
+                ]
+                logger.debug(
+                    "registering layer %s with type %s, shapes: %s",
+                    layer_name,
+                    type(cache_or_caches),
+                    shapes,
                 )
             else:
                 logger.debug(
-                    "registering layer %s with type %s", layer_name, type(cache_or_caches)
+                    "registering layer %s with type %s",
+                    layer_name,
+                    type(cache_or_caches),
                 )
             cache_list = cache_or_caches if split_k_and_v else [cache_or_caches]
 
