@@ -105,7 +105,7 @@ def test_opt_125m_awq_int4wo_model_loading_with_params(vllm_runner):
 
 
 @pytest.mark.skipif(not TORCHAO_AVAILABLE, reason="torchao is not available")
-def test_online_quant_config_dict_json(vllm_runner):
+def test_online_quant_config_dict_json(vllm_runner, enable_pickle):
     """Testing online quantization, load_weights integration point,
     with config dict serialized to json string
     """
@@ -137,13 +137,13 @@ def test_online_quant_config_dict_json(vllm_runner):
 
         load_config = llm.llm.llm_engine.vllm_config.load_config
         model_config = llm.llm.llm_engine.vllm_config.model_config
-        model = (
-            llm.llm.llm_engine.model_executor.driver_worker.worker.model_runner.model
-        )
 
-        model_loader = get_model_loader(load_config)
-        weights_iterator = model_loader.get_all_weights(model_config, model)
-        model.load_weights(weights_iterator)
+        def load_weights(model):
+            model_loader = get_model_loader(load_config)
+            weights_iterator = model_loader.get_all_weights(model_config, model)
+            model.load_weights(weights_iterator)
+
+        llm.apply_model(load_weights)
 
         reload_output = llm.generate_greedy(["The capital of France is"], max_tokens=4)
         assert output[0][0] == reload_output[0][0]

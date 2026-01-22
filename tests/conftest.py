@@ -1544,3 +1544,9 @@ def use_fresh_inductor_cache():
     """
     with fresh_cache():
         yield
+
+
+@pytest.fixture(scope="function")
+def enable_pickle(monkeypatch):
+    """`LLM.apply_model` requires pickling a function."""
+    monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
