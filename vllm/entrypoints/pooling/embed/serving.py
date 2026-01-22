@@ -2,22 +2,17 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import json
 from collections.abc import AsyncGenerator, Mapping
-from typing import Any, Final, cast
+from typing import Any, Final
 
 import torch
 from fastapi import Request
-from fastapi.responses import Response
 from typing_extensions import assert_never
 
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.chat_utils import ChatTemplateContentFormatOption
 from vllm.entrypoints.logger import RequestLogger
 from vllm.entrypoints.openai.engine.protocol import ErrorResponse, UsageInfo
-from vllm.entrypoints.openai.engine.serving import (
-    AnyRequest,
-    OpenAIServing,
-    ServeContext,
-)
+from vllm.entrypoints.openai.engine.serving import OpenAIServing, ServeContext
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.entrypoints.pooling.embed.protocol import (
     EmbeddingBytesResponse,
@@ -29,12 +24,7 @@ from vllm.entrypoints.pooling.embed.protocol import (
 )
 from vllm.inputs.data import EmbedsPrompt, TokensPrompt
 from vllm.logger import init_logger
-from vllm.outputs import (
-    EmbeddingRequestOutput,
-    PoolingOutput,
-    PoolingRequestOutput,
-    RequestOutput,
-)
+from vllm.outputs import PoolingOutput, PoolingRequestOutput
 from vllm.pooling_params import PoolingParams
 from vllm.utils.async_utils import merge_async_iterators
 from vllm.utils.collection_utils import chunk_list
@@ -128,7 +118,7 @@ class OpenAIServingEmbedding(OpenAIServing):
     def _build_response(
         self,
         ctx: EmbeddingServeContext,
-    ) -> EmbeddingResponse | Response | ErrorResponse:
+    ) -> EmbeddingResponse | EmbeddingBytesResponse | ErrorResponse:
         final_res_batch_checked = ctx.final_res_batch
 
         encoding_format: EncodingFormat = ctx.request.encoding_format
@@ -257,7 +247,7 @@ class OpenAIServingEmbedding(OpenAIServing):
 
     def _validate_input(
         self,
-        request: AnyRequest,
+        request: object,
         input_ids: list[int],
         input_text: str,
     ) -> TokensPrompt:
@@ -337,7 +327,7 @@ class OpenAIServingEmbedding(OpenAIServing):
         pooling_params: PoolingParams,
         trace_headers: Mapping[str, str] | None,
         prompt_index: int,
-    ) -> AsyncGenerator[RequestOutput | PoolingRequestOutput, None]:
+    ) -> AsyncGenerator[PoolingRequestOutput, None]:
         """Create a generator for a single prompt using standard processing."""
         request_id_item = f"{ctx.request_id}-{prompt_index}"
 
@@ -371,9 +361,7 @@ class OpenAIServingEmbedding(OpenAIServing):
             return await super()._prepare_generators(ctx)
 
         # Custom logic for chunked processing
-        generators: list[
-            AsyncGenerator[RequestOutput | PoolingRequestOutput, None]
-        ] = []
+        generators: list[AsyncGenerator[PoolingRequestOutput, None]] = []
 
         try:
             trace_headers = (
@@ -537,7 +525,7 @@ class OpenAIServingEmbedding(OpenAIServing):
                     short_prompts_results[prompt_idx] = result
 
             # Finalize aggregated results
-            final_res_batch: list[PoolingRequestOutput | EmbeddingRequestOutput] = []
+            final_res_batch: list[PoolingRequestOutput] = []
             num_prompts = len(ctx.engine_prompts)
 
             for prompt_idx in range(num_prompts):
@@ -585,9 +573,7 @@ class OpenAIServingEmbedding(OpenAIServing):
                             f"Failed to aggregate chunks for prompt {prompt_idx}"
                         )
                 elif prompt_idx in short_prompts_results:
-                    final_res_batch.append(
-                        cast(PoolingRequestOutput, short_prompts_results[prompt_idx])
-                    )
+                    final_res_batch.append(short_prompts_results[prompt_idx])
                 else:
                     return self.create_error_response(
                         f"Result not found for prompt {prompt_idx}"
@@ -624,7 +610,7 @@ class OpenAIServingEmbedding(OpenAIServing):
             request_id=request_id,
         )
 
-        return await self.handle(ctx)  # type: ignore[return-type]
+        return await self.handle(ctx)  # type: ignore[return-value]
 
     def _create_pooling_params(
         self,

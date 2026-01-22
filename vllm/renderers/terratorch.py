@@ -46,7 +46,7 @@ class TerratorchRenderer(RendererLike):
         self,
         messages: list[ChatCompletionMessageParam],
         **kwargs,
-    ) -> tuple[list[ConversationMessage], TextPrompt | TokensPrompt]:
+    ) -> tuple[list[ConversationMessage], TextPrompt | TokensPrompt | EmbedsPrompt]:
         model_config = self.config
 
         conversation, mm_data, mm_uuids = parse_chat_messages(

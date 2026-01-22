@@ -49,6 +49,7 @@ from vllm.entrypoints.pooling.score.utils import (
 from vllm.entrypoints.utils import _validate_truncation_size, log_non_default_args
 from vllm.inputs import (
     DataPrompt,
+    EmbedsPrompt,
     PromptType,
     SingletonPrompt,
     TextPrompt,
@@ -782,7 +783,7 @@ class LLM:
         tools: list[dict[str, Any]] | None = None,
         chat_template_kwargs: dict[str, Any] | None = None,
         mm_processor_kwargs: dict[str, Any] | None = None,
-    ) -> list[TextPrompt | TokensPrompt]:
+    ) -> list[TextPrompt | TokensPrompt | EmbedsPrompt]:
         """
         Generate prompt for a chat conversation. The pre-processed
         prompt can then be used as input for the other LLM methods.
@@ -813,7 +814,7 @@ class LLM:
             **(chat_template_kwargs or {}),
         }
 
-        prompts = list[TextPrompt | TokensPrompt]()
+        prompts = list[TextPrompt | TokensPrompt | EmbedsPrompt]()
 
         for msgs in list_of_messages:
             # NOTE: renderer.render_messages() currently doesn't
@@ -1208,8 +1209,8 @@ class LLM:
     def _embedding_score(
         self,
         tokenizer: TokenizerLike,
-        text_1: list[str | TextPrompt | TokensPrompt],
-        text_2: list[str | TextPrompt | TokensPrompt],
+        text_1: list[str | TextPrompt | TokensPrompt | EmbedsPrompt],
+        text_2: list[str | TextPrompt | TokensPrompt | EmbedsPrompt],
         truncate_prompt_tokens: int | None = None,
         use_tqdm: bool | Callable[..., tqdm] = True,
         pooling_params: PoolingParams | None = None,

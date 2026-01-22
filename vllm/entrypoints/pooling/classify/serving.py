@@ -158,7 +158,7 @@ class ServingClassification(OpenAIServing):
             request_id=request_id,
         )
 
-        return await self.handle(ctx)  # type: ignore[return-type]
+        return await self.handle(ctx)  # type: ignore[return-value]
 
     def _create_pooling_params(
         self,
