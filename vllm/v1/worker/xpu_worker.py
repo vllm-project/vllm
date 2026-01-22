@@ -4,7 +4,6 @@ import os
 from typing import Any
 
 import torch
-import torch.distributed
 
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
@@ -84,6 +83,10 @@ class XPUWorker(Worker):
             self.local_rank,
             current_platform.dist_backend,
         )
+
+        # Initialize workspace manager
+        num_ubatches = 2 if self.vllm_config.parallel_config.enable_dbo else 1
+        init_workspace_manager(self.device, num_ubatches)
 
         torch.xpu.empty_cache()
         self.init_snapshot = init_snapshot = MemorySnapshot(device=self.device)

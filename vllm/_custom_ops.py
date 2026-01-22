@@ -1786,7 +1786,7 @@ def scaled_fp8_quant(
                 output, input, scale, scale_ub
             )
         else:
-            scale = torch.empty(1, device=input.device, dtype=torch.float32)
+            scale = torch.zeros((1, 1), device=input.device, dtype=torch.float32)
             torch.ops._C.dynamic_scaled_fp8_quant(output, input, scale)
     else:
         torch.ops._C.static_scaled_fp8_quant(output, input, scale, group_shape)
@@ -2095,7 +2095,8 @@ def moe_align_block_size(
         sorted_token_ids,
         experts_ids,
         num_tokens_post_pad,
-        expert_map,
+        # FIXME: add this back when we support this in the sycl kernel code
+        # expert_map,
     )
 
 
@@ -2201,7 +2202,7 @@ def topk_softmax(
         token_expert_indices,
         gating_output,
         renormalize,
-        e_score_correction_bias,
+        # FIX: add back when xpu kernel support e_score_correction_bias,
     )
 
 
