@@ -2034,8 +2034,8 @@ class TestFindBestGroupSize:
         result = kv_cache_utils._find_best_group_size(same_type_layers, vllm_config)
         # group_size >= 3 would add > 10% overhead, so fallback to 1
         assert result == 1
-        
-        
+
+
 def test_unify_hybrid_kv_cache_specs():
     # 1. has_full_attention and has_sliding_window
     before_spec_1 = new_kv_cache_spec()
