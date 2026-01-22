@@ -21,12 +21,13 @@ from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
     swap_w13_to_w31,
 )
 from vllm.platforms import current_platform
-from vllm.utils.flashinfer import has_flashinfer_cutlass_fused_moe
+from vllm.utils.flashinfer import has_flashinfer, has_flashinfer_cutlass_fused_moe
 
 logger = init_logger(__name__)
 
 
 class UnquantizedMoeBackend(Enum):
+    FLASHINFER_TRTLLM = "FlashInfer TRTLLM"
     FLASHINFER_CUTLASS = "FlashInfer CUTLASS"
     AITER = "ROCm AITER"
     TRITON = "TRITON"
@@ -40,6 +41,7 @@ class UnquantizedMoeBackend(Enum):
 # that is not conform with Modular kernel format.
 # We will directly call the kernel for those backend
 UNSUPPORTED_BACKEND = [
+    UnquantizedMoeBackend.FLASHINFER_TRTLLM,
     UnquantizedMoeBackend.CPU,
     UnquantizedMoeBackend.XPU,
     UnquantizedMoeBackend.TPU,
@@ -67,7 +69,13 @@ def select_unquantized_moe_backend(
         and envs.VLLM_USE_FLASHINFER_MOE_FP16
         and use_ep
         and (not use_dp)
-        and current_platform.get_device_capability()[0] >= 9
+        and current_platform.has_device_capability(90)
+    )
+    flashinfer_trtllm_moe_enabled = (
+        has_flashinfer()
+        and envs.VLLM_USE_FLASHINFER_MOE_FP16
+        and envs.VLLM_FLASHINFER_MOE_BACKEND == "latency"
+        and current_platform.has_device_capability(100)
     )
     if current_platform.is_rocm():
         if rocm_aiter_moe_enabled:
@@ -75,7 +83,9 @@ def select_unquantized_moe_backend(
         else:
             backend = UnquantizedMoeBackend.TRITON
     if current_platform.is_cuda():
-        if flashinfer_cutlass_moe_enabled:
+        if flashinfer_trtllm_moe_enabled:
+            backend = UnquantizedMoeBackend.FLASHINFER_TRTLLM
+        elif flashinfer_cutlass_moe_enabled:
             backend = UnquantizedMoeBackend.FLASHINFER_CUTLASS
         else:
             if use_ep and (not use_dp):
