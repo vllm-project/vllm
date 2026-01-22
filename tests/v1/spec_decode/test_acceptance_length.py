@@ -103,8 +103,6 @@ def get_available_attention_backends() -> list[str]:
     get_valid_backends = getattr(current_platform.__class__, "get_valid_backends", None)
     if get_valid_backends is None:
         if current_platform.is_rocm():
-            # ROCm uses Triton as its default attention backend since
-            # Flash Attention is not supported.
             return ["TRITON_ATTN"]
         else:
             return ["FLASH_ATTN"]
