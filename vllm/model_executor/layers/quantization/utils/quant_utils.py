@@ -128,6 +128,9 @@ kFp8StaticTensorSym = QuantKey(FP8_DTYPE, kStaticTensorScale, symmetric=True)
 kDynamicTensorScale = ScaleDesc(torch.float32, False, GroupShape.PER_TENSOR)
 kFp8DynamicTensorSym = QuantKey(FP8_DTYPE, kDynamicTensorScale, symmetric=True)
 
+kStaticTokenScale = ScaleDesc(torch.float32, True, GroupShape.PER_TOKEN)
+kFp8StaticTokenSym = QuantKey(FP8_DTYPE, kStaticTokenScale, symmetric=True)
+
 kStaticChannelScale = ScaleDesc(torch.float32, True, GroupShape.PER_CHANNEL)
 kFp8StaticChannelSym = QuantKey(FP8_DTYPE, kStaticChannelScale, symmetric=True)
 
