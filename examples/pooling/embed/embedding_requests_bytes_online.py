@@ -31,14 +31,18 @@ def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument("--host", type=str, default="localhost")
     parser.add_argument("--port", type=int, default=8000)
-    parser.add_argument("--model", type=str, default="intfloat/e5-small")
 
     return parser.parse_args()
 
 
 def main(args):
-    api_url = f"http://{args.host}:{args.port}/v1/embeddings"
-    model_name = args.model
+    base_url = f"http://{args.host}:{args.port}"
+    models_url = base_url + "/v1/models"
+    embeddings_url = base_url + "/v1/embeddings"
+
+    response = requests.get(models_url)
+    model = response.json()["data"][0]["id"]
+
     embedding_size = 0
 
     input_texts = [
@@ -50,13 +54,13 @@ def main(args):
     for embed_dtype in EMBED_DTYPE_TO_TORCH_DTYPE:
         for endianness in ENDIANNESS:
             prompt = {
-                "model": model_name,
+                "model": model,
                 "input": input_texts,
                 "encoding_format": "bytes",
                 "embed_dtype": embed_dtype,
                 "endianness": endianness,
             }
-            response = post_http_request(prompt=prompt, api_url=api_url)
+            response = post_http_request(prompt=prompt, api_url=embeddings_url)
             metadata = json.loads(response.headers["metadata"])
             body = response.content
             items = [MetadataItem(**x) for x in metadata["data"]]
@@ -73,13 +77,13 @@ def main(args):
     for embed_dtype in EMBED_DTYPE_TO_TORCH_DTYPE:
         for endianness in ENDIANNESS:
             prompt = {
-                "model": model_name,
+                "model": model,
                 "input": input_texts,
                 "encoding_format": "bytes_only",
                 "embed_dtype": embed_dtype,
                 "endianness": endianness,
             }
-            response = post_http_request(prompt=prompt, api_url=api_url)
+            response = post_http_request(prompt=prompt, api_url=embeddings_url)
             body = response.content
 
             items = build_metadata_items(

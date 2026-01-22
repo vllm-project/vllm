@@ -619,7 +619,7 @@ These models primarily support the [`LLM.encode`](./pooling_models.md#llmencode)
 | `ModernBertForTokenClassification` | ModernBERT-based | `disham993/electrical-ner-ModernBERT-base` |  |  |
 
 !!! note
-    Named Entity Recognition (NER) usage, please refer to [examples/pooling/token_classify/ner.py](../../examples/pooling/token_classify/ner.py), [examples/pooling/token_classify/ner_client.py](../../examples/pooling/token_classify/ner_client.py).
+    Named Entity Recognition (NER) usage, please refer to [examples/pooling/token_classify/ner_offline.py](../../examples/pooling/token_classify/ner_offline.py), [examples/pooling/token_classify/ner_online.py](../../examples/pooling/token_classify/ner_online.py).
 
 ## List of Multimodal Language Models
 

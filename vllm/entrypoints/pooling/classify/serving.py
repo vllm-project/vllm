@@ -86,8 +86,8 @@ class ClassificationMixin(OpenAIServing):
                         ChatTemplateContentFormatOption,
                         getattr(self, "chat_template_content_format", "auto"),
                     ),
-                    add_generation_prompt=False,
-                    continue_final_message=False,
+                    add_generation_prompt=chat_request.add_generation_prompt,
+                    continue_final_message=chat_request.continue_final_message,
                     add_special_tokens=chat_request.add_special_tokens,
                 )
                 ctx.engine_prompts = engine_prompts
