@@ -2034,9 +2034,9 @@ def selective_scan_fwd(
 def rocm_enforce_contiguous_skinny_gemm_inputs(
     function_name: str, a: torch.Tensor, b: torch.Tensor
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    # if current_platform.is_rocm():
-        # a = a.contiguous()  # no-op if already contiguous, else clone
-        # b = b.contiguous()  # no-op if already contiguous, else clone
+    if current_platform.is_rocm():
+        a = a.contiguous()  # no-op if already contiguous, else clone
+        b = b.contiguous()  # no-op if already contiguous, else clone
     return a, b
 
 
