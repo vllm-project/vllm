@@ -111,6 +111,8 @@ class MediaConnector:
         url_spec_path = url_spec.path or ""
         data_spec, data = url_spec_path.split(",", 1)
         media_type, data_type = data_spec.split(";", 1)
+        # media_type starts with a leading "/" (e.g., "/video/jpeg")
+        media_type = media_type.lstrip("/")
 
         if data_type != "base64":
             msg = "Only base64 data URLs are supported for now."
