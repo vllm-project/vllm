@@ -88,6 +88,9 @@ if HAS_TRITON:
         fused_experts,
         get_config_file_name,
     )
+    from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (
+        AiterExperts,
+    )
     from vllm.model_executor.layers.fused_moe.router.fused_topk_router import (
         fused_topk,
     )
@@ -99,6 +102,7 @@ if HAS_TRITON:
     )
 
     __all__ += [
+        "AiterExperts",
         "fused_topk",
         "fused_experts",
         "get_config_file_name",

@@ -28,7 +28,13 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEQuantConfig,
     RoutingMethodType,
 )
-from vllm.utils.import_utils import has_deep_ep, has_deep_gemm, has_pplx
+from vllm.utils.import_utils import (
+    has_aiter,
+    has_deep_ep,
+    has_deep_gemm,
+    has_mori,
+    has_pplx,
+)
 
 from .mk_objects import (
     TestMoEQuantConfig,
@@ -211,6 +217,14 @@ class Config:
             or info.backend == "deepep_low_latency"
         )
 
+    def needs_aiter(self):
+        info = expert_info(self.fused_experts_type)
+        return info.needs_aiter
+
+    def needs_mori(self):
+        info = prepare_finalize_info(self.prepare_finalize_type)
+        return info.backend == "mori"
+
     def all2all_backend(self):
         info = prepare_finalize_info(self.prepare_finalize_type)
         return info.backend
@@ -278,6 +292,10 @@ class Config:
             return False, "Needs DeepGEMM, but DeepGEMM not available."
         if self.needs_pplx() and not has_pplx():  # noqa: SIM103
             return False, "Needs PPLX, but PPLX not available."
+        if self.needs_aiter() and not has_aiter():  # noqa: SIM103
+            return False, "Needs Aiter, but Aiter not available."
+        if self.needs_mori() and not has_mori():  # noqa: SIM103
+            return False, "Needs MoRI, but MoRI not available."
 
         return True, None
 
