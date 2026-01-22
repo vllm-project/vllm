@@ -30,19 +30,15 @@ from .vllm_inductor_pass import VllmInductorPass, VllmPatternMatcherPass
 
 FP8_DTYPE = current_platform.fp8_dtype()
 
+flashinfer_comm: ModuleType | None = None
 if find_spec("flashinfer"):
     try:
-        import flashinfer.comm as flashinfer_comm
+        import flashinfer.comm as _flashinfer_comm
 
-        flashinfer_comm: ModuleType | None = (  # type: ignore[no-redef]
-            flashinfer_comm
-            if hasattr(flashinfer_comm, "trtllm_allreduce_fusion")
-            else None
-        )
+        if hasattr(_flashinfer_comm, "trtllm_allreduce_fusion"):
+            flashinfer_comm = _flashinfer_comm
     except ImportError:
-        flashinfer_comm = None  # type: ignore[assignment]
-else:
-    flashinfer_comm = None  # type: ignore[assignment]
+        pass
 
 logger = init_logger(__name__)
 
@@ -441,7 +437,7 @@ class AsyncTPPass(VllmPatternMatcherPass):
         ):
             return True
         tp_size = get_tensor_model_parallel_world_size()
-        return compile_range.is_single_size() and compile_range.end % tp_size == 0
+        return bool(compile_range.is_single_size() and compile_range.end % tp_size == 0)
 
     @VllmInductorPass.time_and_log
     def __call__(self, graph: fx.Graph) -> None:
@@ -516,7 +512,7 @@ if flashinfer_comm is not None:
         # Get one shot input size limit for the current world size
         # for the current device capability
         max_one_shot_size = _FI_ALLREDUCE_ONE_SHOT_MAX_SIZES_MB.get(
-            device_capability,  # type: ignore[arg-type]
+            device_capability,  # type: ignore[arg-type, unused-ignore]
             {},
         ).get(world_size, None)
         # Use one shot if no max size is specified
@@ -666,6 +662,7 @@ class AllReduceRMSNormPattern(BasePattern):
         ) -> tuple[torch.Tensor, torch.Tensor]:
             residual = torch.zeros_like(input)
             rms_result = torch.empty_like(input)
+            assert flashinfer_comm is not None, "FlashInfer must be enabled"
             allreduce = auto_functionalized(
                 flashinfer_trtllm_fused_allreduce_norm,
                 allreduce_in=input,
@@ -722,6 +719,7 @@ class AllReduceFusedAddRMSNormPattern(BasePattern):
         def replacement(
             residual: torch.Tensor, input: torch.Tensor, weight: torch.Tensor
         ) -> tuple[torch.Tensor, torch.Tensor]:
+            assert flashinfer_comm is not None, "FlashInfer must be enabled"
             allreduce = auto_functionalized(
                 flashinfer_trtllm_fused_allreduce_norm,
                 allreduce_in=input,
@@ -800,6 +798,7 @@ class AllReduceFusedRMSNormStaticQuantFP8Pattern(BasePattern):
             residual = torch.zeros_like(input)
             result_rms = torch.empty_like(input)
             result_quant = torch.empty_like(input, dtype=self.quant_dtype)
+            assert flashinfer_comm is not None, "FlashInfer must be enabled"
             allreduce = auto_functionalized(
                 flashinfer_trtllm_fused_allreduce_norm,
                 allreduce_in=input,
@@ -875,6 +874,7 @@ class AllReduceFusedAddRMSNormStaticQuantFP8Pattern(BasePattern):
             scale: torch.Tensor,
         ) -> tuple[torch.Tensor, torch.Tensor]:
             result_quant = torch.empty_like(input, dtype=self.quant_dtype)
+            assert flashinfer_comm is not None, "FlashInfer must be enabled"
             allreduce = auto_functionalized(
                 flashinfer_trtllm_fused_allreduce_norm,
                 allreduce_in=input,
@@ -960,6 +960,7 @@ class AllReduceFusedRMSNormStaticQuantNVFP4Pattern(BasePattern):
         ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
             residual = torch.zeros_like(input)
             result_rms = torch.empty_like(input)
+            assert flashinfer_comm is not None, "FlashInfer must be enabled"
             allreduce = auto_functionalized(
                 flashinfer_trtllm_fused_allreduce_norm,
                 allreduce_in=input,
@@ -1055,6 +1056,7 @@ class AllReduceFusedAddRMSNormStaticQuantNVFP4Pattern(BasePattern):
             weight: torch.Tensor,
             input_global_scale: torch.Tensor,
         ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+            assert flashinfer_comm is not None, "FlashInfer must be enabled"
             allreduce = auto_functionalized(
                 flashinfer_trtllm_fused_allreduce_norm,
                 allreduce_in=input,
@@ -1131,7 +1133,7 @@ class AllReduceFusionPass(VllmPatternMatcherPass):
         )
 
         self.ipc_handles, workspace_tensor = (
-            flashinfer_comm.trtllm_create_ipc_workspace_for_all_reduce_fusion(  # type: ignore[misc]
+            flashinfer_comm.trtllm_create_ipc_workspace_for_all_reduce_fusion(
                 tp_rank=rank,
                 tp_size=self.tp_size,
                 max_token_num=self.max_token_num,
@@ -1204,7 +1206,7 @@ class AllReduceFusionPass(VllmPatternMatcherPass):
         if self.disabled:
             logger.warning_once("AllReduce fusion pass is disabled.")
             return False
-        return compile_range.end <= self.max_token_num
+        return bool(compile_range.end <= self.max_token_num)
 
     @VllmInductorPass.time_and_log
     def __call__(self, graph: fx.Graph) -> None:
