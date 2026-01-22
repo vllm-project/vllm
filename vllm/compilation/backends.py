@@ -348,34 +348,19 @@ def _is_sym_size_op(node: fx.Node) -> bool:
     return False
 
 
-def _move_sym_size_nodes_for_split(
+def _replicate_sym_size_nodes_for_split(
     graph: fx.GraphModule,
     node_to_subgraph_id: dict[fx.Node, int],
 ) -> None:
     """
-    Move sym_size operations to the same subgraph as their consumers.
+    Replicate sym_size operations to ALL consumer subgraphs.
 
-    When splitting a graph, if a sym_size call is in one submodule and its
-    consumer is in another, PyTorch 2 has issues because torch.Size is not
-    fully supported as a submodule output. This function reorders sym_size
-    nodes to be just before their consumers when they would otherwise cross
-    subgraph boundaries.
-
-    Pattern being fixed:
-        # Old (causes issues):
-        size = tensor_a.shape          # subgraph 0
-        some_cg_unsafe_op              # subgraph 1 (split point)
-        tensor_b = tensor_b.view(size) # subgraph 2 (consumes size)
-
-        # New (fixed):
-        some_cg_unsafe_op              # subgraph 1 (split point)
-        size = tensor_a.shape          # moved to subgraph 2
-        tensor_b = tensor_b.view(size) # subgraph 2 (consumes size)
+    When splitting a graph, if a sym_size call has consumers in multiple
+    subgraphs, we replicate the sym_size operation to each consumer subgraph.
+    This ensures each subgraph computes sym_size locally rather than receiving
+    it as an input, avoiding torch.Size crossing subgraph boundaries.
     """
-    # Collect all sym_size nodes that need to be moved
-    sym_size_nodes_to_move: list[tuple[fx.Node, int]] = []
-
-    for node in graph.graph.nodes:
+    for node in list(graph.graph.nodes):
         if node.op in ("output", "placeholder"):
             continue
 
@@ -386,28 +371,35 @@ def _move_sym_size_nodes_for_split(
         if node_subgraph is None:
             continue
 
-        # Find the minimum subgraph ID among all consumers of this sym_size
-        consumer_subgraph_ids: list[int] = []
+        # Group consumers by their subgraph ID (only those in later subgraphs)
+        subgraph_to_consumers: dict[int, list[fx.Node]] = {}
         for user in node.users:
             if user.op == "output":
                 continue
             user_subgraph = node_to_subgraph_id.get(user)
-            if user_subgraph is not None:
-                consumer_subgraph_ids.append(user_subgraph)
+            if user_subgraph is not None and user_subgraph > node_subgraph:
+                if user_subgraph not in subgraph_to_consumers:
+                    subgraph_to_consumers[user_subgraph] = []
+                subgraph_to_consumers[user_subgraph].append(user)
 
-        if not consumer_subgraph_ids:
+        if not subgraph_to_consumers:
             continue
 
-        # The minimum consumer subgraph is where we want to move the sym_size
-        min_consumer_subgraph = min(consumer_subgraph_ids)
+        # Create a copy of sym_size for EACH consumer subgraph
+        for subgraph_id, consumer_list in subgraph_to_consumers.items():
+            with graph.graph.inserting_before(consumer_list[0]):
+                new_sym_size = graph.graph.call_function(
+                    node.target,
+                    args=node.args,
+                    kwargs=node.kwargs,
+                )
+                if node.meta:
+                    new_sym_size.meta = node.meta.copy()
 
-        # Only move if the sym_size would cross into a later subgraph
-        if min_consumer_subgraph > node_subgraph:
-            sym_size_nodes_to_move.append((node, min_consumer_subgraph))
+            node_to_subgraph_id[new_sym_size] = subgraph_id
 
-    # Update the subgraph assignments for sym_size nodes that need to move
-    for node, new_subgraph_id in sym_size_nodes_to_move:
-        node_to_subgraph_id[node] = new_subgraph_id
+            for consumer in consumer_list:
+                consumer.replace_input_with(node, new_sym_size)
 
 
 def split_graph(
@@ -448,11 +440,11 @@ def split_graph(
         else:
             node_to_subgraph_id[node] = subgraph_id
 
-    # Move sym_size operations (tensor.shape accesses) to be closer to their
-    # consumers. This avoids issues where PT2 doesn't support torch.Size as
+    # Replicate sym_size operations (tensor.shape accesses) to all consumer
+    # subgraphs. This avoids issues where PT2 doesn't support torch.Size as
     # submodule output when sym_size is in one subgraph and its consumer is
     # in another.
-    _move_sym_size_nodes_for_split(graph, node_to_subgraph_id)
+    _replicate_sym_size_nodes_for_split(graph, node_to_subgraph_id)
 
     # `keep_original_order` is important!
     # otherwise pytorch might reorder the nodes and
