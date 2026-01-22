@@ -247,16 +247,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 self.block_tables,
             )
 
-        # TODO(woosuk): Support other backends.
-        supported_backends = ("FLASH_ATTN", "FLASHINFER", "FLASHINFER_MLA")
-        for backend in self.attn_backends.values():
-            backend_name = backend.get_name()
-            if backend_name not in supported_backends:
-                raise NotImplementedError(
-                    f"The {backend_name} attention backend is not supported yet. "
-                    f"Supported backends are: {supported_backends}."
-                )
-
         self.kv_caches: list[torch.Tensor] = []
         init_kv_cache(
             self.kv_caches,
