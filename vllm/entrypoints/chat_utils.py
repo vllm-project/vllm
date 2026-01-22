@@ -62,6 +62,7 @@ if TYPE_CHECKING:
     import torch
 
     from vllm.tokenizers.mistral import MistralTokenizer
+    from vllm.tokenizers.step_audio_2 import StepAudio2Tokenizer
 else:
     torch = LazyLoader("torch", globals(), "torch")
 
@@ -1893,6 +1894,18 @@ def apply_mistral_chat_template(
             "An error occurred in `mistral_common` while applying chat template"
         )
         raise ValueError(str(e)) from e
+
+
+def apply_step_audio_2_chat_template(
+    tokenizer: "StepAudio2Tokenizer",
+    conversation: list[ConversationMessage],
+    chat_template: str | None = None,
+    **kwargs: Any,
+) -> list[int]:
+    return tokenizer.apply_chat_template_trans_ta4(
+        conversation=conversation,
+        **kwargs,
+    )
 
 
 def get_history_tool_calls_cnt(conversation: list[ConversationMessage]):

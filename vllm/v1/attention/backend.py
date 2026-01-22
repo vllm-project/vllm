@@ -177,6 +177,10 @@ class AttentionBackend(ABC):
         return False
 
     @classmethod
+    def default_use_alibi_sqrt(cls) -> bool:
+        return False
+
+    @classmethod
     def supports_mm_prefix(cls) -> bool:
         return False
 

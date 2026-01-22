@@ -322,6 +322,14 @@ class TritonAttentionBackend(AttentionBackend):
         return True
 
     @classmethod
+    def supports_alibi_sqrt(cls) -> bool:
+        return True
+
+    @classmethod
+    def default_use_alibi_sqrt(cls) -> bool:
+        return False
+
+    @classmethod
     def supports_attn_type(cls, attn_type: str) -> bool:
         """TritonAttention supports all attention types."""
         return attn_type in (
@@ -330,10 +338,6 @@ class TritonAttentionBackend(AttentionBackend):
             AttentionType.ENCODER_ONLY,
             AttentionType.ENCODER_DECODER,
         )
-
-    @classmethod
-    def supports_alibi_sqrt(cls) -> bool:
-        return True
 
     @classmethod
     def supports_compute_capability(cls, capability: DeviceCapability) -> bool:
@@ -391,6 +395,7 @@ class TritonAttentionImpl(AttentionImpl):
                 f"heads in the layer. Sinks shape: {sinks.shape}, "
                 f"num_heads: {num_heads}."
             )
+
         self.use_alibi_sqrt = use_alibi_sqrt
         self.supports_quant_query_input = current_platform.is_cuda()
 
