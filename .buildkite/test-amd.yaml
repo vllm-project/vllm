@@ -866,7 +866,7 @@ steps:
 
 - label: Language Models Tests (Standard)
   timeout_in_minutes: 25
-  mirror_hardwares: [amdexperimental]
+  mirror_hardwares: [amdexperimental, amdproduction]
   agent_pool: mi325_1
   # grade: Blocking
   torch_nightly: true
