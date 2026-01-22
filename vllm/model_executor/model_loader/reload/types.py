@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-import inspect
 from dataclasses import dataclass, field
+from inspect import BoundArguments
 
 import torch
 
@@ -14,25 +14,20 @@ LayerTensors = tuple[dict[str, torch.Tensor], dict[str, torch.Tensor]]
 @dataclass
 class LayerReloadingInfo:
     # model format (meta), populated by `record_metadata_for_reloading`
-    restore_metadata: LayerTensors
+    restore_metadata: LayerTensors = field(default_factory=lambda: ({}, {}))
 
     # kernel format (device)
-    kernel_tensors: LayerTensors = ({}, {})
+    kernel_tensors: LayerTensors = field(default_factory=lambda: ({}, {}))
 
     # track how many restored elements are ready for loading
     load_numel: int | float = 0
     load_numel_total: int | float = float("inf")
 
     # stores arguments and tensors ready for loading
-    loaded_weights: list[tuple[str, inspect.BoundArguments]] = field(
-        default_factory=list
-    )
+    loaded_weights: list[tuple[str, BoundArguments]] = field(default_factory=list)
 
     def reset(self):
-        self.kernel_tensors = ({}, {})
-        self.load_numel = 0
-        self.load_numel_total = float("inf")
-        self.loaded_weights = list()
+        self.__init__(restore_metadata=self.restore_metadata)  # type: ignore[misc]
 
-    def can_reload(self) -> bool:
+    def can_process(self) -> bool:
         return self.load_numel_total != float("inf")

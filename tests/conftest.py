@@ -1049,8 +1049,8 @@ class VllmRunner:
             assert token_datas[0] is None
 
             token_log_probs = []
-            mask_prefix_len = max(1, mask_prefix_lens[prompt_index])
-            for token_data in token_datas[mask_prefix_len:]:
+            mask_prefix_len = mask_prefix_lens[prompt_index]
+            for token_data in token_datas[mask_prefix_len + 1 :]:
                 assert token_data is not None
                 assert len(token_data) == 1
                 token_log_prob = list(token_data.values())[0].logprob

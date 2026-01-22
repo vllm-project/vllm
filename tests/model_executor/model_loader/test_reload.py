@@ -119,7 +119,7 @@ def test_reload_weights(base_model, mul_model, add_model, tp_size, vllm_runner):
         2,
     ],
 )
-def test_eplb(tp_size, vllm_runner):
+def test_reload_expert_parallelism(tp_size, vllm_runner):
     if cuda_device_count_stateless() < tp_size:
         pytest.skip(reason="Not enough CUDA devices")
 
@@ -128,7 +128,6 @@ def test_eplb(tp_size, vllm_runner):
 
     with vllm_runner(
         model_name=base_model,
-        enable_eplb=True,
         enable_expert_parallel=True,
         tensor_parallel_size=tp_size,
         enable_prefix_caching=False,
