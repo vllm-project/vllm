@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from collections.abc import Iterable
+from contextlib import contextmanager
 from typing import TYPE_CHECKING, Any, TypeVar, cast
 
 import torch
@@ -406,6 +407,43 @@ def _get_language_model_for_seq_cls(model) -> nn.Module:
     return model
 
 
+@contextmanager
+def _disable_seq_cls_loading_on_inner_model(language_model, is_vlm: bool):
+    """
+    Context manager to temporarily disable sequence classification loading
+    on inner VLM models to prevent recursive seq_cls_model_loader calls.
+    """
+    if not is_vlm:
+        yield
+        return
+
+    inner_hf_config = getattr(language_model, "config", None)
+    if inner_hf_config is None:
+        yield
+        return
+
+    inner_text_config = inner_hf_config.get_text_config()
+    original_method = getattr(inner_text_config, "method", None)
+    original_tokens = getattr(inner_text_config, "classifier_from_token", None)
+    original_hf_tokens = getattr(inner_hf_config, "classifier_from_token", None)
+
+    try:
+        if original_method is not None:
+            inner_text_config.method = None
+        if original_tokens is not None:
+            inner_text_config.classifier_from_token = None
+        if original_hf_tokens is not None:
+            inner_hf_config.classifier_from_token = None
+        yield
+    finally:
+        if original_method is not None:
+            inner_text_config.method = original_method
+        if original_tokens is not None:
+            inner_text_config.classifier_from_token = original_tokens
+        if original_hf_tokens is not None:
+            inner_hf_config.classifier_from_token = original_hf_tokens
+
+
 def load_weights_using_from_2_way_softmax(
     model, weights: Iterable[tuple[str, torch.Tensor]]
 ):
@@ -444,40 +482,13 @@ def load_weights_using_from_2_way_softmax(
         )
         language_model.lm_head = language_model.lm_head.tie_weights(embed_tokens)
 
-    inner_hf_config = None
-    inner_text_config = None
-    original_method = None
-    original_tokens = None
-    original_hf_tokens = None
-    if is_vlm:
-        inner_hf_config = getattr(language_model, "config", None)
-        if inner_hf_config is not None:
-            inner_text_config = inner_hf_config.get_text_config()
-            original_method = getattr(inner_text_config, "method", None)
-            if original_method is not None:
-                inner_text_config.method = None
-            original_tokens = getattr(inner_text_config, "classifier_from_token", None)
-            if original_tokens is not None:
-                inner_text_config.classifier_from_token = None
-            original_hf_tokens = getattr(inner_hf_config, "classifier_from_token", None)
-            if original_hf_tokens is not None:
-                inner_hf_config.classifier_from_token = None
-
-    try:
+    with _disable_seq_cls_loading_on_inner_model(language_model, is_vlm):
         # ModelForPooling is dynamically defined inside the _create_pooling_model_cls
         # function, so we need use this hacky method to obtain it.
         pooling_model_cls = next(
             x for x in type(model).__mro__ if x.__name__ == "ModelForPooling"
         )
         loaded_weights = pooling_model_cls.load_weights(model, weights)
-    finally:
-        if inner_text_config is not None:
-            if original_method is not None:
-                inner_text_config.method = original_method
-            if original_tokens is not None:
-                inner_text_config.classifier_from_token = original_tokens
-        if inner_hf_config is not None and original_hf_tokens is not None:
-            inner_hf_config.classifier_from_token = original_hf_tokens
 
     from vllm.tokenizers import get_tokenizer
 
@@ -542,39 +553,12 @@ def load_weights_no_post_processing(model, weights: Iterable[tuple[str, torch.Te
         )
         language_model.lm_head = language_model.lm_head.tie_weights(embed_tokens)
 
-    inner_hf_config = None
-    inner_text_config = None
-    original_method = None
-    original_tokens = None
-    original_hf_tokens = None
-    if is_vlm:
-        inner_hf_config = getattr(language_model, "config", None)
-        if inner_hf_config is not None:
-            inner_text_config = inner_hf_config.get_text_config()
-            original_method = getattr(inner_text_config, "method", None)
-            if original_method is not None:
-                inner_text_config.method = None
-            original_tokens = getattr(inner_text_config, "classifier_from_token", None)
-            if original_tokens is not None:
-                inner_text_config.classifier_from_token = None
-            original_hf_tokens = getattr(inner_hf_config, "classifier_from_token", None)
-            if original_hf_tokens is not None:
-                inner_hf_config.classifier_from_token = None
-
-    try:
+    with _disable_seq_cls_loading_on_inner_model(language_model, is_vlm):
         pooling_model_cls = next(
             x for x in type(model).__mro__ if x.__name__ == "ModelForPooling"
         )
         # Skip ModelForSequenceClassification in MRO to avoid infinite recursion
         loaded_weights = pooling_model_cls.load_weights(model, weights)
-    finally:
-        if inner_text_config is not None:
-            if original_method is not None:
-                inner_text_config.method = original_method
-            if original_tokens is not None:
-                inner_text_config.classifier_from_token = original_tokens
-        if inner_hf_config is not None and original_hf_tokens is not None:
-            inner_hf_config.classifier_from_token = original_hf_tokens
 
     from vllm.tokenizers import get_tokenizer
 
