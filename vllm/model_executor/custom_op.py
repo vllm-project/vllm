@@ -1,34 +1,15 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import contextlib
-
 import torch
 import torch.nn as nn
 
 from vllm.config import get_cached_compilation_config
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
+from vllm.utils.torch_utils import is_inside_opaque_custom_op
 
 logger = init_logger(__name__)
-
-# Global flag to track if we're inside an opaque custom op
-_inside_opaque_custom_op = False
-
-
-@contextlib.contextmanager
-def inside_opaque_custom_op():
-    global _inside_opaque_custom_op
-    old = _inside_opaque_custom_op
-    _inside_opaque_custom_op = True
-    try:
-        yield
-    finally:
-        _inside_opaque_custom_op = old
-
-
-def is_inside_opaque_custom_op() -> bool:
-    return _inside_opaque_custom_op
 
 
 # Dictionary of all custom ops (classes, indexed by registered name).

@@ -31,6 +31,25 @@ import logging
 logger = logging.getLogger(__name__)
 
 
+# Global flag to track if we're inside an opaque custom op
+_inside_opaque_custom_op = False
+
+
+@contextlib.contextmanager
+def inside_opaque_custom_op():
+    global _inside_opaque_custom_op
+    old = _inside_opaque_custom_op
+    _inside_opaque_custom_op = True
+    try:
+        yield
+    finally:
+        _inside_opaque_custom_op = old
+
+
+def is_inside_opaque_custom_op() -> bool:
+    return _inside_opaque_custom_op
+
+
 STR_DTYPE_TO_TORCH_DTYPE = {
     "float32": torch.float32,
     "half": torch.half,
@@ -753,20 +772,20 @@ def direct_register_custom_op(
         dispatch_key = current_platform.dispatch_key
 
     # Wrap op_func to mark execution as inside an opaque custom op
+    my_func = op_func
     if opaque:
-        from vllm.model_executor.custom_op import inside_opaque_custom_op
 
         @functools.wraps(op_func)
         def wrapped_op_func(*args, **kwargs):
             with inside_opaque_custom_op():
                 return op_func(*args, **kwargs)
 
-        op_func = wrapped_op_func
+        my_func = wrapped_op_func
 
-    schema_str = infer_schema(op_func, mutates_args=mutates_args)
+    schema_str = infer_schema(my_func, mutates_args=mutates_args)
 
     my_lib = target_lib or vllm_lib
     my_lib.define(op_name + schema_str, tags=tags)
-    my_lib.impl(op_name, op_func, dispatch_key=dispatch_key)
+    my_lib.impl(op_name, my_func, dispatch_key=dispatch_key)
     if fake_impl is not None:
         my_lib._register_fake(op_name, fake_impl)
