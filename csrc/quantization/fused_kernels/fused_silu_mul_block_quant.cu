@@ -44,7 +44,7 @@ __global__ void silu_and_mul_per_block_quant_kernel(
     
     // Shared memory - FIX 3: Size based
     __shared__ float shared_max[1024];
-    __shared__ float shared_silu_results[128];  
+    __shared__ float shared_silu_results[group_size];  
     
     // Process elements in groups
     for (int group_idx = 0; group_idx < num_groups; group_idx++) {
