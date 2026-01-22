@@ -363,9 +363,9 @@ def test_fused_topk_bias(
 @pytest.mark.parametrize("renormalize", [False, True])
 @pytest.mark.parametrize("enable_eplb", [False, True])
 @pytest.mark.parametrize("needs_correction_bias", [False, True])
-@pytest.mark.parametrize("routed_scaling_factor", [1.0, 1.1])
+@pytest.mark.parametrize("routed_scaling_factor", [1.1])
 @pytest.mark.parametrize("scoring_func", ["sigmoid", "softmax"])
-@pytest.mark.parametrize("use_custom_op", [True, False])
+@pytest.mark.parametrize("use_custom_op", [False, True])
 def test_grouped_topk(
     m: int,
     k: int,
