@@ -75,7 +75,7 @@ class SiluAndMul(CustomOp):
 
     # --8<-- [end:silu_and_mul]
 
-    def __init__(self, *, compile_native=True):
+    def __init__(self, *, compile_native: bool = True):
         super().__init__(compile_native=compile_native)
         if current_platform.is_cuda_alike():
             self.op = torch.ops._C.silu_and_mul
