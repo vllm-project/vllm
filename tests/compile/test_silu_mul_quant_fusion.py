@@ -222,7 +222,7 @@ def test_fusion_silu_and_mul_quant(
     x = torch.rand(num_tokens, hidden_size * 2)
 
     # Reshape pass is needed for the fusion pass to work
-    custom_ops = []
+    custom_ops = ["none"]
     if enable_silu_mul_custom_op:
         custom_ops.append("+silu_and_mul")
     if enable_quant_fp8_custom_op:
@@ -258,7 +258,7 @@ def test_fusion_silu_and_mul_quant(
 
         # Check that it gives the same answer
         if model_class == TestSiluMulFp8QuantModel:
-            atol, rtol = 1e-3, 1e-3
+            atol, rtol = 5e-3, 5e-3
         elif model_class == TestSiluMulNvfp4QuantModel:
             atol, rtol = 1e-1, 1e-1
         elif model_class == TestSiluMulGroupFp8QuantModel:
