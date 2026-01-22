@@ -140,13 +140,12 @@ class OpenAIServingTokenization(OpenAIServing):
             lora_request=lora_request,
         )
 
-        prompt_input = await self.renderer.tokenize_prompt_async(
+        engine_prompt = await self.renderer.tokenize_prompt_async(
             TokensPrompt(prompt_token_ids=request.tokens),
             request.build_tok_params(self.model_config),
         )
-        input_text = prompt_input["prompt"]
 
-        return DetokenizeResponse(prompt=input_text)
+        return DetokenizeResponse(prompt=engine_prompt["prompt"])
 
     async def get_tokenizer_info(
         self,

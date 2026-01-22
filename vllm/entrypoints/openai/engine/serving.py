@@ -1046,14 +1046,10 @@ class OpenAIServing:
         tok_params = request.build_tok_params(self.model_config)
 
         rendered_prompts = await renderer.render_completions_async(
-            prompt_input,
-            prompt_embeds,
+            prompt_input, prompt_embeds
         )
-        engine_prompts = await asyncio.gather(
-            *(
-                renderer.tokenize_prompt_async(prompt, tok_params)
-                for prompt in rendered_prompts
-            )
+        engine_prompts = await renderer.tokenize_prompts_async(
+            rendered_prompts, tok_params
         )
 
         extra_items = {

@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import asyncio
 from typing import TYPE_CHECKING, Any, Protocol
 
 from vllm.inputs import EmbedsPrompt, TextPrompt, TokensPrompt
@@ -141,6 +142,13 @@ class RendererLike(Protocol):
 
         return params.apply_post_tokenization(prompt)
 
+    def tokenize_prompts(
+        self,
+        prompts: list[TextPrompt | TokensPrompt | EmbedsPrompt],
+        params: TokenizeParams,
+    ) -> list[TokensPrompt | EmbedsPrompt]:
+        return [self.tokenize_prompt(prompt, params) for prompt in prompts]
+
     async def tokenize_prompt_async(
         self,
         prompt: TextPrompt | TokensPrompt | EmbedsPrompt,
@@ -168,3 +176,12 @@ class RendererLike(Protocol):
             prompt["prompt"] = prompt_text
 
         return params.apply_post_tokenization(prompt)
+
+    async def tokenize_prompts_async(
+        self,
+        prompts: list[TextPrompt | TokensPrompt | EmbedsPrompt],
+        params: TokenizeParams,
+    ) -> list[TokensPrompt | EmbedsPrompt]:
+        return await asyncio.gather(
+            *(self.tokenize_prompt_async(prompt, params) for prompt in prompts)
+        )
