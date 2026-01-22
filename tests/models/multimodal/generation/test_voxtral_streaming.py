@@ -76,10 +76,10 @@ def test_voxtral_streaming_forward():
     texts = [out.outputs[0].text for out in outputs]
     expected = [
         (
-            ' First words I spoke in the original phonograph. '
-            'A little piece of practical poetry. Mary had a little lamb,'
-            ' it sleeps with quite a snow, and everywhere that Mary went, '
-            'the lamb was sure to go.'
+            " First words I spoke in the original phonograph. "
+            "A little piece of practical poetry. Mary had a little lamb,"
+            " it sleeps with quite a snow, and everywhere that Mary went, "
+            "the lamb was sure to go."
         ),
         (
             " And the 0-1 pitch on the way to Edgar Martinez. Swung on"
@@ -88,6 +88,6 @@ def test_voxtral_streaming_forward():
             "The throw to the plate will be late. The Mariners are going"
             " to play. For the American League Championship, "
             "I don't believe it. It just continues. My oh, my."
-        )
+        ),
     ]
     assert texts == expected

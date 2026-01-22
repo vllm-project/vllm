@@ -10,13 +10,7 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
-from vllm.v1.attention.backend import (
-    AttentionBackend,
-    AttentionMetadata,
-    AttentionType,
-)
 from vllm.attention.layer import Attention
-from vllm.v1.attention.selector import get_attn_backend
 from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.layernorm import RMSNorm
@@ -28,11 +22,15 @@ from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.models.mistral import MistralMLP
 from vllm.model_executor.models.whisper import WhisperPosEmbedType
-from vllm.v1.attention.backends.flash_attn import FlashAttentionBackend
 from vllm.v1.attention.backend import (
+    AttentionBackend,
+    AttentionMetadata,
+    AttentionType,
     CommonAttentionMetadata,
     subclass_attention_backend_with_overrides,
 )
+from vllm.v1.attention.backends.flash_attn import FlashAttentionBackend
+from vllm.v1.attention.selector import get_attn_backend
 from vllm.v1.kv_cache_interface import AttentionSpec
 
 from .utils import make_layers
@@ -457,7 +455,9 @@ class WhisperCausalEncoder(nn.Module):
 
         return hidden_states
 
-    def forward_layers(self, hidden_states: torch.Tensor, positions: torch.Tensor) -> torch.Tensor:
+    def forward_layers(
+        self, hidden_states: torch.Tensor, positions: torch.Tensor
+    ) -> torch.Tensor:
         for encoder_layer in self.layers:
             hidden_states = encoder_layer(hidden_states, positions)
 
