@@ -193,7 +193,7 @@ def _create_pooling_model_cls(orig_cls: _T) -> _T:
         def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
             params_dict = dict(self.named_parameters())
 
-            # We support loading from both `*Model` and `*ForCausalLM`
+            # We support loading from both `*ForCausalLM` and `*Model`
             candidate_prefixes = ["", "model."]
             target_prefix = ""
 
