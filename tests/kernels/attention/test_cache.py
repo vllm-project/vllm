@@ -8,6 +8,7 @@ import torch
 
 from tests.kernels.utils import DEFAULT_OPCHECK_TEST_UTILS, opcheck
 from vllm import _custom_ops as ops
+from vllm.model_executor.layers.quantization.utils.quant_utils import scaled_dequantize
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import set_random_seed
 
@@ -241,41 +242,18 @@ def test_reshape_and_cache_flash(
     value_cache_compact = permute_and_compact(value_cache)
 
     def convert_fp8_local(output, input, scale, kv_dtype):
-        # It seemed too messy to modify convert_fp8 kernel to support per-attn-head
-        # scaling for both NHD and HND layouts, so we manually apply the per-tensor
-        # convert_fp8 kernel with corresponding scale for each attention head.
-        if scale.numel() == 1:  # per-tensor scaling
-            ops.convert_fp8(output, input, scale.item(), kv_dtype)
-        else:  # per-attn-head scaling
-            assert scale.ndim == 1, (
-                f"Scale should be a 1D tensor, got ndim={scale.ndim}"
-            )
-            num_heads = scale.shape[0]
+        fp8_input = input.view(torch.float8_e4m3fn)
+        if scale.numel() == 1:  # per-tensor
+            result = scaled_dequantize(
+                fp8_input.flatten(0, 2), scale, group_shape=None, out_dtype=output.dtype
+            ).reshape(*input.shape)
+        else:  # per-head: broadcast scale along the head dimension
+            # Original code uses dim 2 for NHD, dim 1 for HND
             if kv_cache_layout == "NHD":
-                assert input.shape[2] == num_heads
-                for h in range(num_heads):
-                    # need to make input slice contiguous for the kernel
-                    input_slice = input[:, :, h : h + 1, :].contiguous()
-                    output_slice = torch.empty_like(input_slice, dtype=output.dtype)
-                    ops.convert_fp8(
-                        output_slice,
-                        input_slice,
-                        scale[h].item(),
-                        kv_dtype,
-                    )
-                    output[:, :, h : h + 1, :].copy_(output_slice)
+                result = fp8_input.to(output.dtype) * scale.view(1, 1, -1, 1)
             else:
-                assert input.shape[1] == num_heads
-                for h in range(num_heads):
-                    input_slice = input[:, h : h + 1, :, :].contiguous()
-                    output_slice = torch.empty_like(input_slice, dtype=output.dtype)
-                    ops.convert_fp8(
-                        output_slice,
-                        input_slice,
-                        scale[h].item(),
-                        kv_dtype,
-                    )
-                    output[:, h : h + 1, :, :].copy_(output_slice)
+                result = fp8_input.to(output.dtype) * scale.view(1, -1, 1, 1)
+        output.copy_(result)
 
     # Clone the KV caches.
     if kv_cache_dtype == "fp8":
