@@ -68,7 +68,7 @@ def make_copy_and_call(
         A wrapper function that copies inputs and calls the compiled function
     """
 
-    def copy_and_call(*args):
+    def copy_and_call(*args: Any) -> Any:
         list_args = list(args)
         for i, index in enumerate(sym_tensor_indices):
             runtime_tensor = list_args[index]
