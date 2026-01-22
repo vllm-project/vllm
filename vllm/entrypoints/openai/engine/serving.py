@@ -119,7 +119,6 @@ from vllm.tracing import (
 )
 from vllm.utils import random_uuid
 from vllm.utils.async_utils import (
-    AsyncMicrobatchTokenizer,
     collect_from_async_generator,
     merge_async_iterators,
 )
@@ -267,7 +266,6 @@ class OpenAIServing:
         self.request_logger = request_logger
         self.return_tokens_as_token_ids = return_tokens_as_token_ids
 
-        self._async_tokenizer_pool: dict[TokenizerLike, AsyncMicrobatchTokenizer] = {}
         self.log_error_stack = log_error_stack
 
         self.input_processor = self.models.input_processor
@@ -558,17 +556,6 @@ class OpenAIServing:
             prompt_token_ids=prompt_token_ids,
             prompt_logprobs=None,
         )
-
-    def _get_async_tokenizer(self, tokenizer) -> AsyncMicrobatchTokenizer:
-        """
-        Return (and cache) an `AsyncMicrobatchTokenizer` bound to the
-        given tokenizer.
-        """
-        async_tokenizer = self._async_tokenizer_pool.get(tokenizer)
-        if async_tokenizer is None:
-            async_tokenizer = AsyncMicrobatchTokenizer(tokenizer)
-            self._async_tokenizer_pool[tokenizer] = async_tokenizer
-        return async_tokenizer
 
     async def _preprocess(
         self,
