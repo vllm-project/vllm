@@ -1571,7 +1571,7 @@ class FusedMoE(CustomOp):
             # Can be unavailable or None in unittests
             if (
                 is_forward_context_available()
-                and get_forward_context().all_moe_layers is not None
+                and get_forward_context().remaining_moe_layers is not None
             ):
                 return "from_forward_context"
             return self.layer_name
@@ -1986,17 +1986,13 @@ class FusedMoE(CustomOp):
 def get_layer_from_name(layer_name: str) -> FusedMoE:
     forward_context: ForwardContext = get_forward_context()
     if layer_name == "from_forward_context":
-        all_moe_layers = forward_context.all_moe_layers
-        assert all_moe_layers is not None
-        moe_layer_index = forward_context.moe_layer_index
-        if moe_layer_index >= len(all_moe_layers):
+        if not forward_context.remaining_moe_layers:
             raise AssertionError(
-                "We expected the number of MOE layers in `all_moe_layers` "
+                "We expected the number of MOE layers in `remaining_moe_layers` "
                 "to be equal to the number of "
                 "{vllm.moe_forward, vllm.moe_forward_shared} calls."
             )
-        layer_name = all_moe_layers[moe_layer_index]
-        forward_context.moe_layer_index += 1
+        layer_name = forward_context.remaining_moe_layers.pop()
     self = cast(FusedMoE, forward_context.no_compile_layers[layer_name])
     return self
 
