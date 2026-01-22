@@ -18,6 +18,20 @@ logger = init_logger(__name__)
 ProfilerKind = Literal["torch", "cuda"]
 
 
+def _is_uri_path(path: str) -> bool:
+    """Check if path is a URI (scheme://...), excluding Windows drive letters.
+
+    Supports custom URI schemes like gs://, s3://, hdfs://, etc.
+    These paths should not be converted to absolute paths.
+    """
+    if "://" in path:
+        scheme = path.split("://")[0]
+        # Windows drive letters are single characters (e.g., C://)
+        # Valid URI schemes have more than one character
+        return len(scheme) > 1
+    return False
+
+
 @config
 @dataclass
 class ProfilerConfig:
@@ -54,7 +68,7 @@ class ProfilerConfig:
     Disabled by default."""
 
     ignore_frontend: bool = False
-    """If `True`, disables the front-end profiling of AsyncLLM when using the 
+    """If `True`, disables the front-end profiling of AsyncLLM when using the
     'torch' profiler. This is needed to reduce overhead when using delay/limit options,
     since the front-end profiling does not track iterations and will capture the
     entire range.
@@ -185,15 +199,9 @@ class ProfilerConfig:
         if self.profiler == "torch" and not profiler_dir:
             raise ValueError("torch_profiler_dir must be set when profiler is 'torch'")
 
-        if profiler_dir:
-            is_gs_path = (
-                profiler_dir.startswith("gs://")
-                and profiler_dir[5:]
-                and profiler_dir[5] != "/"
-            )
-            if not is_gs_path:
-                self.torch_profiler_dir = os.path.abspath(
-                    os.path.expanduser(profiler_dir)
-                )
+        # Support any URI scheme (gs://, s3://, hdfs://, etc.)
+        # These paths should not be converted to absolute paths
+        if profiler_dir and not _is_uri_path(profiler_dir):
+            self.torch_profiler_dir = os.path.abspath(os.path.expanduser(profiler_dir))
 
         return self
