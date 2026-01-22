@@ -66,7 +66,7 @@ class TestSiluMulFp8QuantModel(torch.nn.Module):
         self, hidden_size: int, force_kernel: FP8ScaledMMLinearKernel, **kwargs
     ):
         super().__init__()
-        self.silu_and_mul = SiluAndMul(compile_native=False)
+        self.silu_and_mul = SiluAndMul()
 
         self.fp8_linear = TestFP8Layer(
             weight_shape=(hidden_size, hidden_size),
@@ -106,7 +106,7 @@ class TestSiluMulNvfp4QuantModel(torch.nn.Module):
 
         assert silu_and_mul_nvfp4_quant_supported
 
-        self.silu_and_mul = SiluAndMul(compile_native=False)
+        self.silu_and_mul = SiluAndMul()
         self.enable_silu_mul_custom_op = self.silu_and_mul.enabled()
 
         # create nvfp4 weight
@@ -144,7 +144,7 @@ class TestSiluMulNvfp4QuantModel(torch.nn.Module):
 class TestSiluMulGroupFp8QuantModel(torch.nn.Module):
     def __init__(self, hidden_size: int, **kwargs):
         super().__init__()
-        self.silu_and_mul = SiluAndMul(compile_native=False)
+        self.silu_and_mul = SiluAndMul()
         self.w8a8_block_fp8_linear = W8A8BlockFp8LinearOp(
             weight_group_shape=GroupShape(128, 128),
             act_quant_group_shape=GroupShape(1, 128),
@@ -231,6 +231,7 @@ def test_fusion_silu_and_mul_quant(
         compilation_config=CompilationConfig(
             mode=CompilationMode.VLLM_COMPILE,
             custom_ops=custom_ops,
+            backend="eager",  # avoid compilation for SiluAndMul and QuantFP8
             pass_config=PassConfig(fuse_act_quant=True, eliminate_noops=True),
         ),
     )
@@ -258,7 +259,7 @@ def test_fusion_silu_and_mul_quant(
 
         # Check that it gives the same answer
         if model_class == TestSiluMulFp8QuantModel:
-            atol, rtol = 5e-3, 5e-3
+            atol, rtol = 1e-3, 1e-3
         elif model_class == TestSiluMulNvfp4QuantModel:
             atol, rtol = 1e-1, 1e-1
         elif model_class == TestSiluMulGroupFp8QuantModel:
