@@ -1745,17 +1745,17 @@ class Scheduler(SchedulerInterface):
     def has_finished_requests(self) -> bool:
         return len(self.finished_req_ids) > 0
 
-    def get_num_pending_kv_transfers(self) -> int:
-        """Count requests with pending KV transfers (finished but blocks not freed).
+    def has_pending_kv_transfers(self) -> bool:
+        """Check if any requests have pending KV transfers.
 
         When a request finishes with an async KV connector, it may return
         delay_free_blocks=True from request_finished(). In this case the request
-        stays in self.requests until finished_sending arrives. This counts those.
+        stays in self.requests until finished_sending arrives.
         """
         if self.connector is None:
-            return 0
+            return False
         # finished requests still in self.requests are waiting for async KV send
-        return sum(1 for req in self.requests.values() if req.is_finished())
+        return any(req.is_finished() for req in self.requests.values())
 
     def reset_prefix_cache(
         self, reset_running_requests: bool = False, reset_connector: bool = False

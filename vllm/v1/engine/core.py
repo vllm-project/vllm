@@ -615,7 +615,7 @@ class EngineCore:
 
     def has_pending_kv_transfers(self) -> bool:
         """Check if there are pending async KV transfers."""
-        return self.scheduler.get_num_pending_kv_transfers() > 0
+        return self.scheduler.has_pending_kv_transfers()
 
     def sleep(self, level: int = 1):
         self.model_executor.sleep(level)

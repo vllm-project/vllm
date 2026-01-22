@@ -1290,6 +1290,15 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
             )
         )[0]
 
+    async def has_pending_kv_transfers_async(self) -> bool:
+        results = await asyncio.gather(
+            *[
+                self._call_utility_async("has_pending_kv_transfers", engine=engine)
+                for engine in self.core_engines
+            ]
+        )
+        return any(results)
+
     @staticmethod
     async def process_engine_outputs(
         self: "DPLBAsyncMPClient", outputs: EngineCoreOutputs
