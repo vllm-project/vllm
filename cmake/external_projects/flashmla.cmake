@@ -43,8 +43,10 @@ file(WRITE "${FLASHMLA_VENDOR_DIR}/flash_mla_interface.py"
      "${FLASHMLA_INTERFACE_CONTENT}")
 
 # Install the generated flash_mla_interface.py to the wheel
+# Use COMPONENT _flashmla_C to ensure it's installed with the C extension
 install(FILES "${FLASHMLA_VENDOR_DIR}/flash_mla_interface.py"
-        DESTINATION vllm/third_party/flashmla/)
+        DESTINATION vllm/third_party/flashmla/
+        COMPONENT _flashmla_C)
 
 # The FlashMLA kernels only work on hopper and require CUDA 12.3 or later.
 # Only build FlashMLA kernels if we are building for something compatible with 
