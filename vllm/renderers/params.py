@@ -31,8 +31,10 @@ class ChatParams:
 
     @staticmethod
     def merge_kwargs(a: dict[str, Any] | None, b: dict[str, Any] | None):
-        a = a or {}
-        b = b or {}
+        if not a:
+            return b
+        if not b:
+            return a
 
         return a | {k: v for k, v in b.items() if v is not None}
 
