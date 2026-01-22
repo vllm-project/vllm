@@ -37,7 +37,10 @@ def kernel_warmup(worker: "Worker"):
         deep_gemm_warmup(model, max_tokens)
 
     # FlashInfer autotune for Hopper (SM 9.0) and Blackwell (SM 10.0) GPUs
-    if has_flashinfer() and current_platform.has_device_capability(90):
+    if has_flashinfer() and (
+        current_platform.has_device_capability(90)
+        or current_platform.is_device_capability_family(100)
+    ):
         flashinfer_autotune(worker.model_runner)
 
     # FlashInfer attention warmup
