@@ -23,7 +23,6 @@ if TYPE_CHECKING:
     VLLM_FLASH_ATTN_VERSION: int | None = None
     LOCAL_RANK: int = 0
     CUDA_VISIBLE_DEVICES: str | None = None
-    HIP_VISIBLE_DEVICES: str | None = None
     VLLM_ENGINE_ITERATION_TIMEOUT_S: int = 60
     VLLM_ENGINE_READY_TIMEOUT_S: int = 600
     VLLM_API_KEY: str | None = None
@@ -614,8 +613,6 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "LOCAL_RANK": lambda: int(os.environ.get("LOCAL_RANK", "0")),
     # used to control the visible devices in the distributed setting
     "CUDA_VISIBLE_DEVICES": lambda: os.environ.get("CUDA_VISIBLE_DEVICES", None),
-    # used to control the ROCm visible devices in the distributed setting
-    "HIP_VISIBLE_DEVICES": lambda: os.environ.get("HIP_VISIBLE_DEVICES", None),
     # timeout for each iteration in the engine
     "VLLM_ENGINE_ITERATION_TIMEOUT_S": lambda: int(
         os.environ.get("VLLM_ENGINE_ITERATION_TIMEOUT_S", "60")

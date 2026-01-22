@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import os
 import socket
 
 import pytest
@@ -13,39 +14,41 @@ from vllm.distributed.utils import StatelessProcessGroup
 from vllm.platforms import current_platform
 from vllm.utils.network_utils import get_open_port
 from vllm.utils.system_utils import update_environment_variables
+from vllm.utils.torch_utils import cuda_device_count_stateless
 
 from ..utils import multi_gpu_test
 
 
 @ray.remote
-class _DeviceCountStatelessTestActor:
-    def __init__(self, visible_devices_env_var: str):
-        self.visible_devices_env_var = visible_devices_env_var
+class _CUDADeviceCountStatelessTestActor:
+    def __init__(self):
+        if current_platform.is_rocm():
+            # For ROCm, propagate HIP_VISIBLE_DEVICES to CUDA_VISIBLE_DEVICES
+            # via current_platform resolution. Then remove HIP_VISIBLE_DEVICES
+            # so the HIP runtime uses CUDA_VISIBLE_DEVICES.
+            os.environ.pop("HIP_VISIBLE_DEVICES", None)
 
     def get_count(self):
-        return torch.cuda.device_count()
+        return cuda_device_count_stateless()
 
-    def set_visible_devices(self, visible_devices: str):
-        update_environment_variables({self.visible_devices_env_var: visible_devices})
+    def set_cuda_visible_devices(self, cuda_visible_devices: str):
+        update_environment_variables({"CUDA_VISIBLE_DEVICES": cuda_visible_devices})
 
-    def get_visible_devices(self):
-        return envs.__getattr__(self.visible_devices_env_var)
+    def get_cuda_visible_devices(self):
+        return envs.CUDA_VISIBLE_DEVICES
 
 
-def test_device_count_stateless():
-    """Test that torch.cuda.device_count changes return value if
-    CUDA_VISIBLE_DEVICES or HIP_VISIBLE_DEVICES is changed."""
-    visible_devices_env_var = (
-        "HIP_VISIBLE_DEVICES" if current_platform.is_rocm() else "CUDA_VISIBLE_DEVICES"
-    )
-    actor = _DeviceCountStatelessTestActor.options(  # type: ignore
+def test_cuda_device_count_stateless():
+    """Test that cuda_device_count_stateless changes return value if
+    CUDA_VISIBLE_DEVICES is changed."""
+    actor = _CUDADeviceCountStatelessTestActor.options(  # type: ignore
         num_gpus=2
-    ).remote(visible_devices_env_var)
-    assert len(sorted(ray.get(actor.get_visible_devices.remote()).split(","))) == 2
+    ).remote()
+    assert len(sorted(ray.get(actor.get_cuda_visible_devices.remote()).split(","))) == 2
     assert ray.get(actor.get_count.remote()) == 2
-    ray.get(actor.set_visible_devices.remote("0"))
+    ray.get(actor.set_cuda_visible_devices.remote("0"))
     assert ray.get(actor.get_count.remote()) == 1
-    ray.get(actor.set_visible_devices.remote(""))
+    ray.get(actor.set_cuda_visible_devices.remote(""))
     assert ray.get(actor.get_count.remote()) == 0
 
 
