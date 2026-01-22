@@ -273,8 +273,10 @@ async def test_audio_with_max_tokens(mary_had_lamb, client_and_model):
         file=mary_had_lamb,
         response_format="text",
         temperature=0.0,
-        extra_body={"max_completion_tokens": 32769},
-        timeout=600,
+        extra_body={
+            "max_completion_tokens": int(1e6),
+            "repetition_penalty": 1.3,
+        },
     )
     out = json.loads(transcription)
     out_text = out["text"]
