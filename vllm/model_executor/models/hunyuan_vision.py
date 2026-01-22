@@ -860,27 +860,25 @@ class HunYuanVLForConditionalGeneration(
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
         config: HunYuanVLConfig = vllm_config.model_config.hf_config
-        multimodal_config = vllm_config.model_config.multimodal_config
 
         self.config = config
 
-        if multimodal_config.get_limit_per_prompt("image"):
+        with self._mark_tower_model(vllm_config, {"image"}):
             self.visual = HunYuanVisionTransformer(
                 config.vision_config,
                 quant_config=vllm_config.quant_config,
                 prefix=maybe_prefix(prefix, "visual"),
             )
-        else:
-            self.visual = None
 
-        self.language_model = init_vllm_registered_model(
-            vllm_config=vllm_config,
-            prefix=maybe_prefix(prefix, "language_model.model"),
-            architectures=[
-                "HunYuanDenseV1ForCausalLM",
-                "HunYuanMoEV1ForCausalLM",
-            ],
-        )
+        with self._mark_language_model(vllm_config):
+            self.language_model = init_vllm_registered_model(
+                vllm_config=vllm_config,
+                prefix=maybe_prefix(prefix, "language_model.model"),
+                architectures=[
+                    "HunYuanDenseV1ForCausalLM",
+                    "HunYuanMoEV1ForCausalLM",
+                ],
+            )
 
         self.make_empty_intermediate_tensors = (
             self.language_model.make_empty_intermediate_tensors
@@ -949,9 +947,6 @@ class HunYuanVLForConditionalGeneration(
                     **kwargs
                 )
         return mm_input_by_modality
-
-    def get_language_model(self) -> torch.nn.Module:
-        return self.language_model
 
     def embed_multimodal(self, **kwargs: object) -> MultiModalEmbeddings:
         mm_input_by_modality = self._parse_and_validate_multimodal_inputs(**kwargs)
