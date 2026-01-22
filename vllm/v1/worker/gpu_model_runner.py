@@ -178,7 +178,6 @@ from .utils import (
 if TYPE_CHECKING:
     from vllm.model_executor.model_loader.tensorizer import TensorizerConfig
     from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
-    from vllm.v1.spec_decode.ngram_proposer import NgramProposer
 
 logger = init_logger(__name__)
 
@@ -431,6 +430,8 @@ class GPUModelRunner(
         # the last PP rank. This is not ideal if there are many
         # layers in the draft model.
         if self.speculative_config and get_pp_group().is_last_rank:
+            from vllm.v1.spec_decode.ngram_proposer import NgramProposer
+
             self.drafter: (
                 NgramProposer
                 | SuffixDecodingProposer
@@ -439,8 +440,6 @@ class GPUModelRunner(
                 | MedusaProposer
             )
             if self.speculative_config.method == "ngram":
-                from vllm.v1.spec_decode.ngram_proposer import NgramProposer
-
                 self.drafter = NgramProposer(self.vllm_config)
             elif self.speculative_config.uses_draft_model():
                 self.drafter = DraftModelProposer(
