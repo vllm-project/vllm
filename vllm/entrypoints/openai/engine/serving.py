@@ -158,6 +158,7 @@ CompletionLikeRequest: TypeAlias = (
     | ScoreRequest
     | TokenizeCompletionRequest
 )
+
 ChatLikeRequest: TypeAlias = (
     ChatCompletionRequest
     | EmbeddingChatRequest
