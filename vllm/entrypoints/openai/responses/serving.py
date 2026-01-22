@@ -937,9 +937,9 @@ class OpenAIServingResponses(OpenAIServing):
         end_delimiters = None
         if self.reasoning_parser:
             if hasattr(self.reasoning_parser, "start_message"):
-                delimiters = self.reasoning_parser(tokenizer).start_message
+                delimiters = self.reasoning_parser(tokenizer).start_message  # type: ignore[union-attr]
             if hasattr(self.reasoning_parser, "end_message"):
-                end_delimiters = self.reasoning_parser(tokenizer).end_message
+                end_delimiters = self.reasoning_parser(tokenizer).end_message  # type: ignore[union-attr]
 
         # Build set of delimiter token IDs (assuming single-token delimiters)
         delimiter_token_ids: set[int] = set()
