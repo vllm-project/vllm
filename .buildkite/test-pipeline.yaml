@@ -376,7 +376,6 @@ steps:
   source_file_dependencies:
     - vllm/config/attention.py
     - vllm/model_executor/layers/attention
-    - vllm/platforms
     - vllm/v1/attention
     - tests/v1/attention
   commands:
@@ -401,7 +400,6 @@ steps:
   source_file_dependencies:
     - vllm/config/attention.py
     - vllm/model_executor/layers/attention
-    - vllm/platforms
     - vllm/v1/attention
     - tests/v1/attention
   commands:
