@@ -89,34 +89,34 @@ def with_amdsmi_context(fn):
 
 
 @cache
+def on_gfx1x() -> bool:
+    GPU_ARCH = torch.cuda.get_device_properties("cuda").gcnArchName
+    return any(arch in GPU_ARCH for arch in ["gfx11", "gfx12"])
+
+
+@cache
+def on_mi3xx() -> bool:
+    GPU_ARCH = torch.cuda.get_device_properties("cuda").gcnArchName
+    return any(arch in GPU_ARCH for arch in ["gfx942", "gfx950"])
+
+
+@cache
+def on_gfx9() -> bool:
+    GPU_ARCH = torch.cuda.get_device_properties("cuda").gcnArchName
+    return any(arch in GPU_ARCH for arch in ["gfx90a", "gfx942", "gfx950"])
+
+
 @with_amdsmi_context
-def _get_gpu_arch() -> str:
+def on_gfx9_amdsmi() -> bool:
+    # Using amdsmi to get the arch circumvents torch caching CUDA_VISIBLE_DEVICES.
     h = amdsmi_get_processor_handles()[0]
     asic = amdsmi_get_gpu_asic_info(h)
     return asic["target_graphics_version"]
 
 
 @cache
-def on_gfx1x() -> bool:
-    GPU_ARCH = _get_gpu_arch()
-    return any(arch in GPU_ARCH for arch in ["gfx11", "gfx12"])
-
-
-@cache
-def on_mi3xx() -> bool:
-    GPU_ARCH = _get_gpu_arch()
-    return any(arch in GPU_ARCH for arch in ["gfx942", "gfx950"])
-
-
-@cache
-def on_gfx9() -> bool:
-    GPU_ARCH = _get_gpu_arch()
-    return any(arch in GPU_ARCH for arch in ["gfx90a", "gfx942", "gfx950"])
-
-
-@cache
 def on_gfx950() -> bool:
-    GPU_ARCH = _get_gpu_arch()
+    GPU_ARCH = torch.cuda.get_device_properties("cuda").gcnArchName
     return any(arch in GPU_ARCH for arch in ["gfx950"])
 
 
@@ -192,7 +192,7 @@ class RocmPlatform(Platform):
         "torchao",
     ]
     # bitsandbytes not supported on gfx9 (warp size 64 limitation)
-    if not on_gfx9():
+    if not on_gfx9_amdsmi():
         supported_quantization += ["bitsandbytes"]
 
     @classmethod
