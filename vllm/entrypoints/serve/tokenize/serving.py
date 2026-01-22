@@ -144,8 +144,9 @@ class OpenAIServingTokenization(OpenAIServing):
             TokensPrompt(prompt_token_ids=request.tokens),
             request.build_tok_params(self.model_config),
         )
+        prompt_text = engine_prompt["prompt"]  # type: ignore[typeddict-item]
 
-        return DetokenizeResponse(prompt=engine_prompt["prompt"])
+        return DetokenizeResponse(prompt=prompt_text)
 
     async def get_tokenizer_info(
         self,
