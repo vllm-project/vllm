@@ -958,7 +958,15 @@ class rocm_aiter_ops:
     @classmethod
     @if_aiter_supported
     def is_fused_moe_enabled(cls) -> bool:
-        return cls._AITER_ENABLED and cls._FMOE_ENABLED
+        # Auto-enable AITER MoE on supported ROCm platforms (gfx9).
+        # The @if_aiter_supported decorator ensures this is only called
+        # when AITER is available. Users can opt-out with:
+        # - VLLM_ROCM_USE_AITER=0 (disables all AITER features)
+        # - VLLM_ROCM_USE_AITER_MOE=0 (disables only MoE)
+        if not cls._FMOE_ENABLED:
+            return False
+        # If AITER is explicitly disabled, respect that setting
+        return not (envs.is_set("VLLM_ROCM_USE_AITER") and not cls._AITER_ENABLED)
 
     @classmethod
     @if_aiter_supported
