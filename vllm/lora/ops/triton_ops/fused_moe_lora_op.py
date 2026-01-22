@@ -370,6 +370,8 @@ def _fused_moe_lora_shrink(
         slice_c_size=a_intermediate_cache1.stride(0),
         num_slice_a=1,
         num_slice_c=num_slices,
+        # Note: sorted_token_ids stores flattened token indices (token_id * top_k + k)
+        # Division by top_k is required to map back to token rows
         top_k=1 if mul_routed_weight else top_k_num,
         MUL_ROUTED_WEIGHT=False,
         ADD_TO_C=False,
@@ -430,7 +432,8 @@ def _fused_moe_lora_expand(
     out_view = output[:, :, offset : offset + num_slices * N]
     max_loras_total = sorted_token_ids.shape[0]
 
-    grid0 = triton.cdiv(EM, block_size_m) * triton.cdiv(N, block_size_n)
+    # axis-0 grid must include split_k
+    grid0 = split_k * triton.cdiv(EM, block_size_m) * triton.cdiv(N, block_size_n)
     grid = (grid0, len(lora_b_stacked), lora_ids.numel())
 
     # A is 4D; flatten token (M, top_k) row stride is stride(2)
@@ -442,7 +445,7 @@ def _fused_moe_lora_expand(
     out_slice_c_size = N * out_view.stride(2)
 
     if split_k == 1:
-        # ----  fast path: directly ADD_TO_C into output; no b_ws, no memset, no python loop ----
+        # Fast path: directly ADD_TO_C into output; no b_ws, no python loop
         _fused_moe_lora_kernel[grid](
             a_intermediate_cache1,
             b_ptr,
@@ -490,7 +493,7 @@ def _fused_moe_lora_expand(
         )
         return
 
-    # ---- split_k>1 stable path: delta workspace + one-shot add ----
+    # split_k>1 path: delta workspace + one-shot add
     b_ws = _get_b_workspace(
         device=device,
         dtype=output.dtype,
@@ -498,7 +501,7 @@ def _fused_moe_lora_expand(
         M=M,
         top_k_num=top_k_num,
         N=N,
-        must_zero=True,   # Must be zeroed: Mixed / early-return / token_mask all leave unwritten areas.
+        must_zero=True,  # must be zeroed (mixed/early-return leaves holes)
     )
     b_slice_c_size = b_ws.stride(0)
 
@@ -554,7 +557,6 @@ def _fused_moe_lora_expand(
         stride=(out_view.stride(0), out_view.stride(1), out_slice_c_size, out_view.stride(2)),
     )
     out_4d.add_(b_ws.permute(1, 2, 0, 3))
-
 
 @torch.inference_mode()
 def _fused_moe_lora(
