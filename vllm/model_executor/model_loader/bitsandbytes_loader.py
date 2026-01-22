@@ -1078,7 +1078,8 @@ class BitsAndBytesModelLoader(BaseModelLoader):
                     loaded_weight, "fused_moe_weight_loader", None
                 )
 
-                if fused_moe_weight_loader is not None:
-                    if fused_moe_weight_loader(param, loaded_weight):
-                        bnb_loaded_weights.add(param_name)
+                if fused_moe_weight_loader is not None and fused_moe_weight_loader(
+                    param, loaded_weight
+                ):
+                    bnb_loaded_weights.add(param_name)
                 break
