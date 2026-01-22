@@ -500,7 +500,10 @@ class WhisperEncoder(nn.Module):
             embeds = nn.functional.gelu(self.conv1(features))
             embeds = nn.functional.gelu(self.conv2(embeds))
 
-            embeds = embeds.transpose(-1, -2).to(embeds.dtype)
+            embeds = embeds.transpose(-1, -2)
+            embeds = (
+                embeds + self.embed_positions.weight[: embeds.size(-2), :]
+            ).to(embeds.dtype)
 
             hidden_states.append(embeds)
             input_is_batched = embeds.ndim > 2
