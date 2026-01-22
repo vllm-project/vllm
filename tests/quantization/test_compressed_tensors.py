@@ -10,7 +10,6 @@ import torch
 from compressed_tensors.quantization import QuantizationType
 
 from tests.models.utils import check_logprobs_close
-from vllm import envs
 from vllm.model_executor.layers.fused_moe import UnquantizedFusedMoEMethod
 from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors import (  # noqa: E501
     CompressedTensors24,
@@ -34,34 +33,6 @@ from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
 )
 from vllm.platforms import current_platform
 from vllm.v1.attention.backends.fa_utils import get_flash_attn_version
-
-
-def _kv_cache_fp8_per_attn_head_skip_reason() -> str | None:
-    """Per attn_head FP8 KV cache is only supported with FlashAttention v3+"""
-    if not current_platform.is_cuda():
-        return "This test is skipped on non-CUDA platform."
-
-    if (
-        envs.VLLM_ATTENTION_BACKEND is not None
-        and envs.VLLM_ATTENTION_BACKEND != "FLASH_ATTN"
-    ):
-        return (
-            "This test requires FlashAttention v3+, but "
-            f"VLLM_ATTENTION_BACKEND={envs.VLLM_ATTENTION_BACKEND}."
-        )
-
-    try:
-        fa_version = get_flash_attn_version()
-    except Exception:
-        return "This test requires FlashAttention version >= 3 (CUDA init failed)."
-    if fa_version is None or fa_version < 3:
-        return "This test requires FlashAttention version >= 3."
-
-    return None
-
-
-KV_CACHE_FP8_PER_ATTN_HEAD_SKIP_REASON = _kv_cache_fp8_per_attn_head_skip_reason()
-
 
 # AITER only supports per-channel-per-channel INT8 gemm
 # and per-tensor-per-tensor INT8 GEMM.
@@ -398,11 +369,73 @@ def test_compressed_tensors_kv_cache_fp8_per_tensor(vllm_runner):
 
 
 @pytest.mark.skipif(
-    KV_CACHE_FP8_PER_ATTN_HEAD_SKIP_REASON is not None,
-    reason=KV_CACHE_FP8_PER_ATTN_HEAD_SKIP_REASON,
+    not current_platform.is_cuda(), reason="This test is skipped on non-CUDA platform."
 )
 def test_compressed_tensors_kv_cache_fp8_per_attn_head(vllm_runner):
     model_path = "nm-testing/TinyLlama-1.1B-Chat-v1.0-kvcache-fp8-attn_head"
+    # This model uses llm-compressor quantized KV cache (per-attn-head FP8),
+    # which currently requires FlashAttention v3+.
+    # vLLM's attention backend is auto-selected during model init, and `vllm_runner`
+    # may fail before we can skip. So we pre-compute what backend would be selected
+    # for this model/config and skip early when FlashAttention won't be used.
+    from vllm.config import AttentionConfig, ModelConfig
+    from vllm.v1.attention.backends.registry import AttentionBackendEnum
+    from vllm.v1.attention.selector import AttentionSelectorConfig
+
+    forced_backend = AttentionConfig().backend
+    if forced_backend is not None and forced_backend != AttentionBackendEnum.FLASH_ATTN:
+        pytest.skip(
+            "This test requires FlashAttention v3+, but attention backend is set to "
+            f"{forced_backend.name}."
+        )
+
+    model_config = ModelConfig(
+        model=model_path,
+        trust_remote_code=True,
+        dtype="auto",
+        max_model_len=4,
+    )
+    selector_cfg = AttentionSelectorConfig(
+        head_size=model_config.get_head_size(),
+        dtype=model_config.dtype,
+        kv_cache_dtype="fp8",
+        block_size=16,
+        use_mla=getattr(model_config, "use_mla", False),
+        has_sink=False,
+        use_sparse=False,
+        use_mm_prefix=getattr(model_config, "is_mm_prefix_lm", False),
+        attn_type="decoder",
+    )
+
+    try:
+        selected_path = current_platform.get_attn_backend_cls(
+            forced_backend, attn_selector_config=selector_cfg
+        )
+    except Exception as e:
+        pytest.skip(
+            "This test requires FlashAttention v3+, but attention backend selection "
+            f"failed for this config: {type(e).__name__}: {e}"
+        )
+
+    if (
+        forced_backend is None
+        and selected_path != AttentionBackendEnum.FLASH_ATTN.get_path()
+    ):
+        pytest.skip(
+            "This test requires FlashAttention v3+, but auto-selected attention "
+            f"backend is {selected_path}."
+        )
+
+    # Ensure FlashAttention is actually available and is v3+.
+    try:
+        fa_version = get_flash_attn_version()
+    except Exception:
+        pytest.skip(
+            "This test requires FlashAttention version >= 3 (CUDA init failed)."
+        )
+    if fa_version is None or fa_version < 3:
+        pytest.skip("This test requires FlashAttention version >= 3.")
+
     with vllm_runner(model_path) as llm:
         output = llm.generate_greedy("Hello world!", max_tokens=4)
         assert output
