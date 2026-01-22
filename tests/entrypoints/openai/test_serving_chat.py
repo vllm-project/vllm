@@ -107,11 +107,11 @@ def gptoss_speculative_server(default_server_args: list[str]):
         "--speculative-config",
         f'{{"model": "{GPT_OSS_SPECULATOR_NAME}", '
         f'"method": "eagle3", "num_speculative_tokens": 3}}',
-        f"--attention-backend={
-            'TRITON_ATTN'
+        "--attention-backend={}".format(
+            "TRITON_ATTN"
             if not is_aiter_found_and_supported()
-            else 'ROCM_AITER_UNIFIED_ATTN'
-        }",
+            else "ROCM_AITER_UNIFIED_ATTN"
+        ),
     ]
     # gpt-oss requires AITER unified attention on ROCm
     # TODO: Remove after fixing TRITON_ATTN issue on ROCm

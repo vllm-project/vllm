@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-
 import enum
 import time
 from collections.abc import Mapping
@@ -10,6 +9,7 @@ import msgspec
 import numpy as np
 import torch
 
+from vllm.engine.inference_profile import InferenceProfile
 from vllm.lora.request import LoRARequest
 from vllm.multimodal.inputs import MultiModalFeatureSpec
 from vllm.pooling_params import PoolingParams
@@ -63,7 +63,7 @@ class EngineCoreRequest(
     cache_salt: str | None
     data_parallel_rank: int | None
     prompt_embeds: torch.Tensor | None = None
-
+    inference_profile: "InferenceProfile | None" = None
     # Index of the client, used to ensure outputs are sent back to the same
     # client for this request when scaling out the front-end.
     client_index: int = 0
