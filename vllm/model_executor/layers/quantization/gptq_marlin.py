@@ -10,12 +10,12 @@ from safetensors.torch import _TYPES as _SAFETENSORS_TO_TORCH_DTYPE
 import vllm.model_executor.layers.fused_moe  # noqa
 from vllm import _custom_ops as ops
 from vllm.logger import init_logger
+from vllm.model_executor.layers.fused_moe import FusedMoERouter
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
     FusedMoEQuantConfig,
 )
 from vllm.model_executor.layers.fused_moe.fused_marlin_moe import fused_marlin_moe
-from vllm.model_executor.layers.fused_moe.fused_moe_router import FusedMoERouter
 from vllm.model_executor.layers.fused_moe.layer import (
     FusedMoE,
     FusedMoEMethodBase,
@@ -875,6 +875,7 @@ class GPTQMarlinMoEMethod(FusedMoEMethodBase):
             return BatchedMarlinExperts(
                 max_num_tokens=max_num_tokens_per_rank,
                 num_dispatchers=prepare_finalize.num_dispatchers(),
+                moe_config=self.moe,
                 quant_config=self.moe_quant_config,
                 w13_g_idx=w13_g_idx,
                 w2_g_idx=w2_g_idx,
@@ -885,6 +886,7 @@ class GPTQMarlinMoEMethod(FusedMoEMethodBase):
         else:
             # Standard Marlin experts for GPTQ
             return MarlinExperts(
+                moe_config=self.moe,
                 quant_config=self.moe_quant_config,
                 w13_g_idx=w13_g_idx,
                 w2_g_idx=w2_g_idx,

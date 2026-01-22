@@ -20,7 +20,6 @@ from vllm.model_executor.layers.fused_moe.config import (
 from vllm.model_executor.layers.fused_moe.fused_moe_method_base import (
     FusedMoEMethodBase,
 )
-from vllm.model_executor.layers.fused_moe.fused_moe_router import FusedMoERouter
 from vllm.model_executor.layers.fused_moe.modular_kernel import (
     FusedMoEActivationFormat,
     FusedMoEPermuteExpertsUnpermute,
@@ -31,6 +30,9 @@ from vllm.model_executor.layers.fused_moe.oracle.unquantized import (
     convert_to_unquantized_kernel_format,
     make_unquantized_moe_kernel,
     select_unquantized_moe_backend,
+)
+from vllm.model_executor.layers.fused_moe.router.fused_moe_router import (
+    FusedMoERouter,
 )
 from vllm.model_executor.utils import replace_parameter, set_weight_attrs
 from vllm.platforms import current_platform
@@ -94,13 +96,17 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
         ):
             logger.debug("BatchedTritonExperts %s", self.moe)
             return BatchedTritonExperts(
+                moe_config=self.moe,
+                quant_config=self.moe_quant_config,
                 max_num_tokens=self.moe.max_num_tokens,
                 num_dispatchers=prepare_finalize.num_dispatchers(),
-                quant_config=self.moe_quant_config,
             )
         else:
             logger.debug("TritonExperts %s", self.moe)
-            return TritonExperts(self.moe_quant_config)
+            return TritonExperts(
+                moe_config=self.moe,
+                quant_config=self.moe_quant_config,
+            )
 
     def create_weights(
         self,
@@ -190,7 +196,6 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
         assert self.moe_quant_config is not None
 
         self.kernel, self.use_inplace = make_unquantized_moe_kernel(
-            layer=layer,
             backend=self.unquantized_backend,
             quant_config=self.moe_quant_config,
             moe_config=self.moe,
@@ -312,9 +317,9 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         if (
             layer.enable_eplb is not False
-            or layer.expert_load_view is not None
-            or layer.logical_to_physical_map is not None
-            or layer.logical_replica_count is not None
+            or layer.eplb_state.expert_load_view is not None
+            or layer.eplb_state.logical_to_physical_map is not None
+            or layer.eplb_state.logical_replica_count is not None
         ):
             raise NotImplementedError("Expert load balancing is not supported for CPU.")
 
@@ -346,9 +351,9 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         if (
             layer.enable_eplb is not False
-            or layer.expert_load_view is not None
-            or layer.logical_to_physical_map is not None
-            or layer.logical_replica_count is not None
+            or layer.eplb_state.expert_load_view is not None
+            or layer.eplb_state.logical_to_physical_map is not None
+            or layer.eplb_state.logical_replica_count is not None
         ):
             raise NotImplementedError("Expert load balancing is not supported for XPU.")
         return layer.ipex_fusion(
