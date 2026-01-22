@@ -162,7 +162,6 @@ class SpecDecodeBaseProposer:
         self._slot_mapping_buffer = torch.zeros(
             self.max_num_tokens, dtype=torch.int64, device=device
         )
-        self._cached_slot_mapping_views: dict[int, torch.Tensor] = {}
 
         # Determine allowed attention backends once during initialization.
         self.allowed_attn_types: tuple | None = None
@@ -240,7 +239,7 @@ class SpecDecodeBaseProposer:
         num_tokens: int,
         slot_mapping: torch.Tensor | None = None,
     ) -> dict[str, torch.Tensor]:
-        """Return slot_mapping dict using cached view for cudagraph identity.
+        """Return slot_mapping dict for EAGLE layers.
 
         If slot_mapping is provided, copies it into the buffer first.
         """
@@ -250,11 +249,7 @@ class SpecDecodeBaseProposer:
             if num_tokens > num_actual:
                 self._slot_mapping_buffer[num_actual:num_tokens].fill_(PADDING_SLOT_ID)
 
-        if num_tokens not in self._cached_slot_mapping_views:
-            self._cached_slot_mapping_views[num_tokens] = self._slot_mapping_buffer[
-                :num_tokens
-            ]
-        view = self._cached_slot_mapping_views[num_tokens]
+        view = self._slot_mapping_buffer[:num_tokens]
         return {name: view for name in self.attn_layer_names + self.indexer_layer_names}
 
     def initialize_cudagraph_keys(self, cudagraph_mode: CUDAGraphMode) -> None:
