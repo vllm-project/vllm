@@ -177,7 +177,7 @@ class ResponsesRequest(OpenAIBaseModel):
         default=None,
         description=(
             "A key that was used to read from or write to the prompt cache."
-            "Note: Note that this field has not been implemented yet "
+            "Note: This field has not been implemented yet "
             "and vLLM will ignore it."
         ),
     )
