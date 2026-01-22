@@ -34,6 +34,7 @@ def test_voxtral_streaming_forward():
 
     model_name = "mistralai/Voxtral-Mini-3B-Realtime-2602"
     tokenizer = MistralTokenizer.from_hf_hub(model_name)
+    audio_config = tokenizer.instruct_tokenizer.tokenizer.audio
 
     def from_file(file_path: str):
         audio = Audio.from_file(file_path, strict=False)
@@ -55,10 +56,11 @@ def test_voxtral_streaming_forward():
 
     for tokens, audio_array in tokenized_list:
         num_samples = audio_array.shape[0]
-
-        audio_tokens = int((num_samples / 16_000) / 0.08)
-
-        max_tokens = audio_tokens - len(tokens) - 2
+        max_tokens = (
+            audio_config.num_audio_tokens(num_samples)
+            - audio_config.num_delay_tokens
+            - 1
+        )
         sampling_params.append(SamplingParams(temperature=0.0, max_tokens=max_tokens))
 
         input_dict = {
@@ -76,10 +78,10 @@ def test_voxtral_streaming_forward():
     texts = [out.outputs[0].text for out in outputs]
     expected = [
         (
-            " First words I spoke in the original phonograph. "
-            "A little piece of practical poetry. Mary had a little lamb,"
-            " it sleeps with quite a snow, and everywhere that Mary went, "
-            "the lamb was sure to go."
+            ' First words I spoke in the original phonograph. '
+            'A little piece of practical poetry. Mary had a little lamb,'
+            ' it sleeps with quite a snow, and everywhere that Mary went, '
+            'the lamb was sure to go.'
         ),
         (
             " And the 0-1 pitch on the way to Edgar Martinez. Swung on"
@@ -88,6 +90,6 @@ def test_voxtral_streaming_forward():
             "The throw to the plate will be late. The Mariners are going"
             " to play. For the American League Championship, "
             "I don't believe it. It just continues. My oh, my."
-        ),
+        )
     ]
     assert texts == expected
