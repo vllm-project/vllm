@@ -15,8 +15,8 @@ from vllm.entrypoints.logger import RequestLogger
 from vllm.entrypoints.openai.engine.protocol import ErrorResponse, UsageInfo
 from vllm.entrypoints.openai.engine.serving import (
     AnyRequest,
-    EmbeddingServeContext,
     OpenAIServing,
+    ServeContext,
 )
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.entrypoints.pooling.embed.protocol import (
@@ -47,6 +47,9 @@ from vllm.utils.serial_utils import (
 )
 
 logger = init_logger(__name__)
+
+
+EmbeddingServeContext = ServeContext[EmbeddingRequest, PoolingRequestOutput]
 
 
 class OpenAIServingEmbedding(OpenAIServing):
@@ -109,12 +112,13 @@ class OpenAIServingEmbedding(OpenAIServing):
                     default_template_content_format=self.chat_template_content_format,
                     default_template_kwargs=None,
                 )
-            else:
+            elif isinstance(ctx.request, EmbeddingCompletionRequest):
                 ctx.engine_prompts = await self._preprocess_completion(
                     ctx.request,
                     prompt_input=ctx.request.input,
                     prompt_embeds=None,
                 )
+                return self.create_error_response("Invalid classification request type")
 
             return None
         except (ValueError, TypeError) as e:
@@ -125,7 +129,7 @@ class OpenAIServingEmbedding(OpenAIServing):
         self,
         ctx: EmbeddingServeContext,
     ) -> EmbeddingResponse | Response | ErrorResponse:
-        final_res_batch_checked = cast(list[PoolingRequestOutput], ctx.final_res_batch)
+        final_res_batch_checked = ctx.final_res_batch
 
         encoding_format: EncodingFormat = ctx.request.encoding_format
         embed_dtype: EmbedDType = ctx.request.embed_dtype
@@ -530,9 +534,7 @@ class OpenAIServingEmbedding(OpenAIServing):
                     except (ValueError, IndexError):
                         prompt_idx = result_idx  # Fallback to result_idx
 
-                    short_prompts_results[prompt_idx] = cast(
-                        PoolingRequestOutput, result
-                    )
+                    short_prompts_results[prompt_idx] = result
 
             # Finalize aggregated results
             final_res_batch: list[PoolingRequestOutput | EmbeddingRequestOutput] = []
@@ -591,9 +593,7 @@ class OpenAIServingEmbedding(OpenAIServing):
                         f"Result not found for prompt {prompt_idx}"
                     )
 
-            ctx.final_res_batch = cast(
-                list[RequestOutput | PoolingRequestOutput], final_res_batch
-            )
+            ctx.final_res_batch = final_res_batch
 
             return None
 
@@ -622,11 +622,9 @@ class OpenAIServingEmbedding(OpenAIServing):
             raw_request=raw_request,
             model_name=model_name,
             request_id=request_id,
-            chat_template=self.chat_template,
-            chat_template_content_format=self.chat_template_content_format,
         )
 
-        return await super().handle(ctx)  # type: ignore
+        return await self.handle(ctx)  # type: ignore[return-type]
 
     def _create_pooling_params(
         self,

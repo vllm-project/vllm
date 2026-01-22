@@ -1,8 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from http import HTTPStatus
-from typing import Final, cast
+from typing import Final
 
 import jinja2
 import numpy as np
@@ -12,10 +11,7 @@ from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.chat_utils import ChatTemplateContentFormatOption
 from vllm.entrypoints.logger import RequestLogger
 from vllm.entrypoints.openai.engine.protocol import ErrorResponse, UsageInfo
-from vllm.entrypoints.openai.engine.serving import (
-    ClassificationServeContext,
-    OpenAIServing,
-)
+from vllm.entrypoints.openai.engine.serving import OpenAIServing, ServeContext
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.entrypoints.pooling.classify.protocol import (
     ClassificationChatRequest,
@@ -29,6 +25,9 @@ from vllm.outputs import ClassificationOutput, PoolingRequestOutput
 from vllm.pooling_params import PoolingParams
 
 logger = init_logger(__name__)
+
+
+ClassificationServeContext = ServeContext[ClassificationRequest, PoolingRequestOutput]
 
 
 class ServingClassification(OpenAIServing):
@@ -68,42 +67,29 @@ class ServingClassification(OpenAIServing):
             ctx.lora_request = self._maybe_get_adapters(ctx.request)
 
             if isinstance(ctx.request, ClassificationChatRequest):
-                ret = self._validate_chat_template(
+                error_check_ret = self._validate_chat_template(
                     request_chat_template=ctx.request.chat_template,
                     chat_template_kwargs=ctx.request.chat_template_kwargs,
                     trust_request_chat_template=self.trust_request_chat_template,
                 )
-                if ret:
-                    return ret
+                if error_check_ret:
+                    return error_check_ret
 
-                _, engine_prompts = await self._preprocess_chat(
+                _, ctx.engine_prompts = await self._preprocess_chat(
                     ctx.request,
                     ctx.request.messages,
                     default_template=self.chat_template,
                     default_template_content_format=self.chat_template_content_format,
                     default_template_kwargs=None,
                 )
-                ctx.engine_prompts = engine_prompts
-
             elif isinstance(ctx.request, ClassificationCompletionRequest):
-                completion_request = ctx.request
-                input_data = completion_request.input
-                if input_data in (None, ""):
-                    return self.create_error_response(
-                        "Input or messages must be provided",
-                        status_code=HTTPStatus.BAD_REQUEST,
-                    )
-
                 ctx.engine_prompts = await self._preprocess_completion(
                     ctx.request,
-                    prompt_input=input_data,
+                    prompt_input=ctx.request.input,
                     prompt_embeds=None,
                 )
             else:
-                return self.create_error_response(
-                    "Invalid classification request type",
-                    status_code=HTTPStatus.BAD_REQUEST,
-                )
+                return self.create_error_response("Invalid classification request type")
 
             return None
 
@@ -124,7 +110,7 @@ class ServingClassification(OpenAIServing):
         items: list[ClassificationData] = []
         num_prompt_tokens = 0
 
-        final_res_batch_checked = cast(list[PoolingRequestOutput], ctx.final_res_batch)
+        final_res_batch_checked = ctx.final_res_batch
 
         for idx, final_res in enumerate(final_res_batch_checked):
             classify_res = ClassificationOutput.from_base(final_res.outputs)
@@ -172,7 +158,7 @@ class ServingClassification(OpenAIServing):
             request_id=request_id,
         )
 
-        return await super().handle(ctx)  # type: ignore
+        return await self.handle(ctx)  # type: ignore[return-type]
 
     def _create_pooling_params(
         self,
