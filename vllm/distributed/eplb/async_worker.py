@@ -61,6 +61,7 @@ def start_async_worker(
 def run_rebalance_experts(
     model_state: "EplbModelState",
     eplb_state: "EplbState",
+    physical_to_logical_map_cpu: torch.Tensor,
 ) -> None:
     assert model_state.eplb_stats is not None
     eplb_stats = model_state.eplb_stats
@@ -84,7 +85,7 @@ def run_rebalance_experts(
         eplb_stats.num_groups,
         eplb_stats.num_nodes,
         eplb_stats.num_gpus,
-        model_state.physical_to_logical_map,
+        physical_to_logical_map_cpu,
     )
     assert new_physical_to_logical_map.device == torch.device("cpu")
 
@@ -134,7 +135,14 @@ async def transfer_run_periodically(
                             not rebalancing_algorithm_executed
                             or model_state.new_physical_to_logical_map is None
                         ):
-                            run_rebalance_experts(model_state, state)
+                            # Move the physical_to_logical_map to CPU
+                            # for rebalancing and transfer_layer.
+                            physical_to_logical_map_cpu = (
+                                model_state.physical_to_logical_map.cpu()
+                            )
+                            run_rebalance_experts(
+                                model_state, state, physical_to_logical_map_cpu
+                            )
                             rebalancing_algorithm_executed = True
                             logger.info(
                                 "Async worker computed new indices for model %s",
@@ -150,9 +158,7 @@ async def transfer_run_periodically(
                             model_state.buffer_consumed_event = None
 
                         layer_idx = model_state.layer_to_transfer
-                        old_layer_indices = model_state.physical_to_logical_map[
-                            layer_idx
-                        ]
+                        old_layer_indices = physical_to_logical_map_cpu[layer_idx]
                         new_layer_indices = model_state.new_physical_to_logical_map[
                             layer_idx
                         ]
