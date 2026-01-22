@@ -71,9 +71,8 @@ def _start_server(port: int, enable_graceful_shutdown: bool = False):
 
     return subprocess.Popen(
         args,
-        stdout=None if _IS_ROCM else subprocess.PIPE,
-        stderr=None if _IS_ROCM else subprocess.PIPE,
-        text=None if _IS_ROCM else True,
+        stdout=None,
+        stderr=None,
         preexec_fn=lambda: signal.signal(signal.SIGINT, signal.SIG_IGN),
     )
 
