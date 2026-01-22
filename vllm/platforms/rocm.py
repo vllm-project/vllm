@@ -106,6 +106,7 @@ def on_gfx9() -> bool:
     return any(arch in GPU_ARCH for arch in ["gfx90a", "gfx942", "gfx950"])
 
 
+@cache
 @with_amdsmi_context
 def on_gfx9_amdsmi() -> bool:
     # Using amdsmi to get the arch circumvents torch caching CUDA_VISIBLE_DEVICES.
