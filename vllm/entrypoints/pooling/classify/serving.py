@@ -54,8 +54,6 @@ class ClassificationMixin(OpenAIServing):
         """
         ctx = cast(ClassificationServeContext, ctx)
         try:
-            ctx.tokenizer = await self.engine_client.get_tokenizer()
-
             request_obj = ctx.request
 
             if isinstance(request_obj, ClassificationChatRequest):
@@ -76,7 +74,7 @@ class ClassificationMixin(OpenAIServing):
 
                 _, engine_prompts = await self._preprocess_chat(
                     cast(ChatCompletionRequest, chat_request),
-                    ctx.tokenizer,
+                    self.renderer,
                     messages,
                     chat_template=(
                         chat_request.chat_template
@@ -104,7 +102,7 @@ class ClassificationMixin(OpenAIServing):
                     ctx.engine_prompts = []
                     return None
 
-                renderer = self._get_renderer(ctx.tokenizer)
+                renderer = self._get_completion_renderer()
                 prompt_input = cast(str | list[str], input_data)
                 ctx.engine_prompts = await renderer.render_prompt(
                     prompt_or_prompts=prompt_input,
