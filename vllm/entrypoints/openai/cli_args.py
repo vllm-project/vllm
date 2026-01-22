@@ -215,6 +215,11 @@ class FrontendArgs:
     Enable offline FastAPI documentation for air-gapped environments.
     Uses vendored static assets bundled with vLLM.
     """
+    enable_graceful_shutdown: bool = False
+    """Enable graceful shutdown with request draining on SIGTERM."""
+    drain_timeout: int = 120
+    """Seconds to wait for in-flight requests to complete during graceful
+    shutdown."""
 
     @staticmethod
     def add_cli_args(parser: FlexibleArgumentParser) -> FlexibleArgumentParser:
