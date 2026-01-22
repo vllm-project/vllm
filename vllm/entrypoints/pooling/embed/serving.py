@@ -14,9 +14,9 @@ from vllm.entrypoints.chat_utils import ChatTemplateContentFormatOption
 from vllm.entrypoints.logger import RequestLogger
 from vllm.entrypoints.openai.engine.protocol import ErrorResponse, UsageInfo
 from vllm.entrypoints.openai.engine.serving import (
+    AnyRequest,
     EmbeddingServeContext,
     OpenAIServing,
-    ServeContext,
 )
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.entrypoints.pooling.embed.protocol import (
@@ -88,9 +88,8 @@ class OpenAIServingEmbedding(OpenAIServing):
 
     async def _preprocess(
         self,
-        ctx: ServeContext,
+        ctx: EmbeddingServeContext,
     ) -> ErrorResponse | None:
-        ctx = cast(EmbeddingServeContext, ctx)
         try:
             ctx.lora_request = self._maybe_get_adapters(ctx.request)
 
@@ -124,7 +123,7 @@ class OpenAIServingEmbedding(OpenAIServing):
 
     def _build_response(
         self,
-        ctx: ServeContext,
+        ctx: EmbeddingServeContext,
     ) -> EmbeddingResponse | Response | ErrorResponse:
         final_res_batch_checked = cast(list[PoolingRequestOutput], ctx.final_res_batch)
 
@@ -254,7 +253,7 @@ class OpenAIServingEmbedding(OpenAIServing):
 
     def _validate_input(
         self,
-        request,
+        request: AnyRequest,
         input_ids: list[int],
         input_text: str,
     ) -> TokensPrompt:
@@ -357,11 +356,9 @@ class OpenAIServingEmbedding(OpenAIServing):
 
     async def _prepare_generators(
         self,
-        ctx: ServeContext,
+        ctx: EmbeddingServeContext,
     ) -> ErrorResponse | None:
         """Override to support chunked processing."""
-        ctx = cast(EmbeddingServeContext, ctx)
-
         # Check if we should use chunked processing
         use_chunked = self._should_use_chunked_processing(ctx.request)
 
@@ -429,7 +426,7 @@ class OpenAIServingEmbedding(OpenAIServing):
 
     async def _collect_batch(
         self,
-        ctx: ServeContext,
+        ctx: EmbeddingServeContext,
     ) -> ErrorResponse | None:
         """Collect and aggregate batch results
         with support for chunked processing.
@@ -438,7 +435,6 @@ class OpenAIServingEmbedding(OpenAIServing):
         minimize memory usage.
         For regular requests, collects results normally.
         """
-        ctx = cast(EmbeddingServeContext, ctx)
         try:
             if ctx.engine_prompts is None:
                 return self.create_error_response("Engine prompts not available")
@@ -634,7 +630,7 @@ class OpenAIServingEmbedding(OpenAIServing):
 
     def _create_pooling_params(
         self,
-        ctx: ServeContext[EmbeddingRequest],
+        ctx: EmbeddingServeContext,
     ) -> PoolingParams | ErrorResponse:
         pooling_params = super()._create_pooling_params(ctx)
         if isinstance(pooling_params, ErrorResponse):

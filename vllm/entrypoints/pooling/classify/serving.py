@@ -15,7 +15,6 @@ from vllm.entrypoints.openai.engine.protocol import ErrorResponse, UsageInfo
 from vllm.entrypoints.openai.engine.serving import (
     ClassificationServeContext,
     OpenAIServing,
-    ServeContext,
 )
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.entrypoints.pooling.classify.protocol import (
@@ -59,13 +58,12 @@ class ServingClassification(OpenAIServing):
 
     async def _preprocess(
         self,
-        ctx: ServeContext,
+        ctx: ClassificationServeContext,
     ) -> ErrorResponse | None:
         """
         Process classification inputs: tokenize text, resolve adapters,
         and prepare model-specific inputs.
         """
-        ctx = cast(ClassificationServeContext, ctx)
         try:
             ctx.lora_request = self._maybe_get_adapters(ctx.request)
 
@@ -115,7 +113,7 @@ class ServingClassification(OpenAIServing):
 
     def _build_response(
         self,
-        ctx: ServeContext,
+        ctx: ClassificationServeContext,
     ) -> ClassificationResponse | ErrorResponse:
         """
         Convert model outputs to a formatted classification response
@@ -123,7 +121,6 @@ class ServingClassification(OpenAIServing):
         """
         id2label = getattr(self.model_config.hf_config, "id2label", {})
 
-        ctx = cast(ClassificationServeContext, ctx)
         items: list[ClassificationData] = []
         num_prompt_tokens = 0
 
@@ -179,7 +176,7 @@ class ServingClassification(OpenAIServing):
 
     def _create_pooling_params(
         self,
-        ctx: ServeContext[ClassificationRequest],
+        ctx: ClassificationServeContext,
     ) -> PoolingParams | ErrorResponse:
         pooling_params = super()._create_pooling_params(ctx)
         if isinstance(pooling_params, ErrorResponse):
