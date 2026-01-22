@@ -325,6 +325,10 @@ def test_model_text_text(
 
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("dtype", ["half"])
+@pytest.mark.skipif(
+    version.parse(transformers.__version__) == version.parse("4.57.5"),
+    reason="Skipped for transformers==4.57.5, https://github.com/huggingface/transformers/issues/43295",
+)
 def test_model_image_text(
     hf_runner,
     vllm_runner,
@@ -344,6 +348,10 @@ def test_model_image_text(
 
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("dtype", ["half"])
+@pytest.mark.skipif(
+    version.parse(transformers.__version__) == version.parse("4.57.5"),
+    reason="Skipped for transformers==4.57.5, https://github.com/huggingface/transformers/issues/43295",
+)
 def test_model_image_image(
     hf_runner,
     vllm_runner,
@@ -363,6 +371,10 @@ def test_model_image_image(
 
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("dtype", ["half"])
+@pytest.mark.skipif(
+    version.parse(transformers.__version__) == version.parse("4.57.5"),
+    reason="Skipped for transformers==4.57.5, https://github.com/huggingface/transformers/issues/43295",
+)
 def test_model_text_mixed_documents(
     hf_runner,
     vllm_runner,
