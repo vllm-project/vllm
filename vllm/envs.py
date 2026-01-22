@@ -229,6 +229,8 @@ if TYPE_CHECKING:
     VLLM_USE_V2_MODEL_RUNNER: bool = False
     VLLM_LOG_MODEL_INSPECTION: bool = False
     VLLM_DEBUG_MFU_METRICS: bool = False
+    VLLM_OFFLOADING_DISABLE_PIN_MEMORY: bool = False
+    VLLM_OFFLOADING_DISABLE_UVA: bool = False
     VLLM_DISABLE_LOG_LOGO: bool = False
     VLLM_LORA_DISABLE_PDL: bool = False
 
@@ -1531,6 +1533,14 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Debug logging for --enable-mfu-metrics
     "VLLM_DEBUG_MFU_METRICS": lambda: bool(
         int(os.getenv("VLLM_DEBUG_MFU_METRICS", "0"))
+    ),
+    # Disable using pytorch's pin memory for CPU offloading.
+    "VLLM_OFFLOADING_DISABLE_PIN_MEMORY": lambda: bool(
+        int(os.getenv("VLLM_OFFLOADING_DISABLE_PIN_MEMORY", "0"))
+    ),
+    # Disable using UVA (Unified Virtual Addressing) for CPU offloading.
+    "VLLM_OFFLOADING_DISABLE_UVA": lambda: bool(
+        int(os.getenv("VLLM_OFFLOADING_DISABLE_UVA", "0"))
     ),
     # Disable logging of vLLM logo at server startup time.
     "VLLM_DISABLE_LOG_LOGO": lambda: bool(int(os.getenv("VLLM_DISABLE_LOG_LOGO", "0"))),
