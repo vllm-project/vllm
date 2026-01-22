@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-import copy
 from collections import defaultdict
 from collections.abc import Iterable
 from dataclasses import dataclass
@@ -53,9 +52,6 @@ class OffloadingOperationMetrics:
     op_size: int
     op_time: float
 
-    def __getitem__(self, key):
-        return getattr(self, key)
-
 
 @dataclass
 class OffloadingConnectorStats(KVConnectorStats):
@@ -66,11 +62,6 @@ class OffloadingConnectorStats(KVConnectorStats):
 
     def reset(self):
         self.data: dict[str, list[OffloadingOperationMetrics]] = {}
-
-    def clone_and_reset(self) -> "OffloadingConnectorStats":
-        old = copy.copy(self)
-        self.reset()
-        return old
 
     def aggregate(self, other: KVConnectorStats) -> KVConnectorStats:
         if not other.is_empty():
@@ -93,13 +84,14 @@ class OffloadingConnectorStats(KVConnectorStats):
         return_dict: dict[str, int | float] = {}
         for transfer_type, ops_list in self.data.items():
             assert isinstance(ops_list, list)
-            return_dict[f"{transfer_type}_total_bytes"] = sum(
-                op["op_size"] for op in ops_list
-            )
-            return_dict[f"{transfer_type}_total_time"] = sum(
-                op["op_time"] for op in ops_list
-            )
-
+            total_bytes = 0
+            total_time = 0
+            for op in ops_list:
+                assert isinstance(op, dict)
+                total_bytes += op["op_size"]
+                total_time += op["op_time"]
+            return_dict[f"{transfer_type}_total_bytes"] = total_bytes
+            return_dict[f"{transfer_type}_total_time"] = total_time
         return return_dict
 
     def is_empty(self) -> bool:
