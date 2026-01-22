@@ -217,10 +217,7 @@ class OpenAIServingChat(OpenAIServing):
         self,
         request: ChatCompletionRequest,
     ) -> (
-        tuple[
-            list[ConversationMessage],
-            list[TokensPrompt | EmbedsPrompt],
-        ]
+        tuple[list[ConversationMessage], list[TokensPrompt | EmbedsPrompt]]
         | ErrorResponse
     ):
         """
