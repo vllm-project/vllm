@@ -60,7 +60,7 @@ from vllm.v1.attention.backends.utils import (
 )
 from vllm.v1.attention.ops.common import cp_lse_ag_out_rs
 from vllm.v1.attention.ops.merge_attn_states import merge_attn_states
-from vllm.v1.kv_cache_interface import AttentionSpec
+from vllm.v1.kv_cache_interface import AttentionSpec, UniformTypeKVCacheSpecs
 from vllm.v1.utils import CpuGpuBuffer
 
 FLASHINFER_WORKSPACE_BUFFER_SIZE_BATCH_INVARIANT = 2048 * 1024 * 1024
@@ -638,11 +638,21 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         vllm_config: VllmConfig,
         kv_cache_spec: AttentionSpec,
     ) -> AttentionCGSupport:
-        has_trtllm_support = can_use_trtllm_attention(
-            num_qo_heads=vllm_config.model_config.get_num_attention_heads(
-                vllm_config.parallel_config
-            ),
-            num_kv_heads=kv_cache_spec.num_kv_heads,
+        if isinstance(kv_cache_spec, UniformTypeKVCacheSpecs):
+            kv_head_counts = [
+                spec.num_kv_heads for spec in kv_cache_spec.kv_cache_specs.values()
+            ]
+        else:
+            kv_head_counts = [kv_cache_spec.num_kv_heads]
+
+        has_trtllm_support = all(
+            can_use_trtllm_attention(
+                num_qo_heads=vllm_config.model_config.get_num_attention_heads(
+                    vllm_config.parallel_config
+                ),
+                num_kv_heads=num_kv_heads,
+            )
+            for num_kv_heads in kv_head_counts
         )
         if has_trtllm_support:
             return AttentionCGSupport.UNIFORM_BATCH
