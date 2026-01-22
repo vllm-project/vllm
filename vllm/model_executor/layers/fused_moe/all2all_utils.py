@@ -26,8 +26,6 @@ from vllm.model_executor.layers.fused_moe.prepare_finalize import (
 from vllm.platforms import current_platform
 from vllm.utils.import_utils import has_deep_ep, has_mori, has_pplx
 
-logger = init_logger(__name__)
-
 if current_platform.is_cuda_alike():
     if has_pplx():
         from .pplx_prepare_finalize import (
@@ -237,18 +235,6 @@ def maybe_make_prepare_finalize(
             max_tokens_per_rank=moe.max_num_tokens,
             num_dispatchers=all2all_manager.world_size,
             use_fp8_dispatch=use_fp8_dispatch,
-        )
-
-    elif moe.use_fi_all2allv_kernels:
-        assert quant_config is not None
-        prepare_finalize = FlashInferA2APrepareAndFinalize(
-            num_dispatchers=all2all_manager.world_size,
-        )
-
-    elif moe.use_naive_all2all_kernels and allow_new_interface:
-        prepare_finalize = MoEPrepareAndFinalizeNaiveEP(
-            is_sequence_parallel=(moe.moe_parallel_config.is_sequence_parallel),
-            num_dispatchers=all2all_manager.world_size,
         )
 
     return prepare_finalize
