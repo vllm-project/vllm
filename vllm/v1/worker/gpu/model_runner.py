@@ -871,6 +871,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 assert input_batch.mrope_positions is not None
                 positions = input_batch.mrope_positions
             slot_mappings = self.block_tables.compute_slot_mappings(
+                input_batch.idx_mapping,
                 input_batch.query_start_loc,
                 input_batch.positions[: input_batch.num_tokens],
             )
