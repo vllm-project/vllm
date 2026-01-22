@@ -12,7 +12,6 @@ from vllm.v1.attention.backend import (
     AttentionCGSupport,
     AttentionMetadataBuilder,
     CommonAttentionMetadata,
-    backend_name,
 )
 from vllm.v1.attention.backends.utils import (
     PAD_SLOT_ID,
@@ -22,8 +21,11 @@ from vllm.v1.attention.backends.utils import (
 from vllm.v1.kv_cache_interface import AttentionSpec, MambaSpec
 
 
-@backend_name("GDN_ATTN")
 class GDNAttentionBackend(AttentionBackend):
+    @staticmethod
+    def get_name() -> str:
+        return "GDN_ATTN"
+
     @staticmethod
     def get_builder_cls() -> type["GDNAttentionMetadataBuilder"]:
         return GDNAttentionMetadataBuilder
