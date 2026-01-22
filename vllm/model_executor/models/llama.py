@@ -423,7 +423,9 @@ class LlamaModel(nn.Module):
         ):
             if idx in self.aux_hidden_state_layers:
                 aux_hidden_states.append(hidden_states + residual)
-            hidden_states, residual = layer(positions, hidden_states, residual, **extra_layer_kwargs)
+            hidden_states, residual = layer(
+                positions, hidden_states, residual, **extra_layer_kwargs
+            )
 
         if not get_pp_group().is_last_rank:
             return IntermediateTensors(

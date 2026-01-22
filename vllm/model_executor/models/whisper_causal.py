@@ -10,13 +10,13 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
-from vllm.attention.backends.abstract import (
+from vllm.v1.attention.backend import (
     AttentionBackend,
     AttentionMetadata,
     AttentionType,
 )
 from vllm.attention.layer import Attention
-from vllm.attention.selector import get_attn_backend
+from vllm.v1.attention.selector import get_attn_backend
 from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.layernorm import RMSNorm
@@ -26,19 +26,16 @@ from vllm.model_executor.layers.linear import (
 )
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
-from vllm.model_executor.models.llama import LlamaMLP
+from vllm.model_executor.models.mistral import MistralMLP
 from vllm.model_executor.models.whisper import WhisperPosEmbedType
 from vllm.v1.attention.backends.flash_attn import FlashAttentionBackend
-from vllm.v1.attention.backends.utils import (
+from vllm.v1.attention.backend import (
     CommonAttentionMetadata,
     subclass_attention_backend_with_overrides,
 )
 from vllm.v1.kv_cache_interface import AttentionSpec
 
-from .utils import (
-    cast_overflow_tensors,
-    make_layers,
-)
+from .utils import make_layers
 
 CausalRMSNorm = partial(RMSNorm, eps=1e-5)
 
@@ -324,10 +321,9 @@ class WhisperCausalAttention(nn.Module):
     def _init_rotary_emb(self, max_position_embeddings: int) -> None:
         self.rotary_emb = get_rope(
             self.head_dim,
-            rotary_dim=self.head_dim,
             max_position=max_position_embeddings,
-            base=1e6,
             is_neox_style=False,
+            rope_parameters={"rope_theta": 1e6},
         )
 
     def _init_qkv(
@@ -391,7 +387,7 @@ class WhisperCausalEncoderLayer(nn.Module):
         )
         self.self_attn_layer_norm = CausalRMSNorm(self.embed_dim)
 
-        self.mlp = LlamaMLP(
+        self.mlp = MistralMLP(
             hidden_size=config.d_model,
             intermediate_size=config.encoder_ffn_dim,
             hidden_act="silu",
@@ -415,8 +411,6 @@ class WhisperCausalEncoderLayer(nn.Module):
         hidden_states = self.final_layer_norm(hidden_states)
         hidden_states = self.mlp(hidden_states)
         hidden_states = residual + hidden_states
-
-        hidden_states = cast_overflow_tensors(hidden_states)
 
         return hidden_states
 
@@ -463,9 +457,9 @@ class WhisperCausalEncoder(nn.Module):
 
         return hidden_states
 
-    def forward_layers(self, hidden_states: torch.Tensor) -> torch.Tensor:
+    def forward_layers(self, hidden_states: torch.Tensor, positions: torch.Tensor) -> torch.Tensor:
         for encoder_layer in self.layers:
-            hidden_states = encoder_layer(hidden_states)
+            hidden_states = encoder_layer(hidden_states, positions)
 
         hidden_states = self.layer_norm(hidden_states)
         return hidden_states

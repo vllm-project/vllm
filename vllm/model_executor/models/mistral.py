@@ -10,6 +10,12 @@ from transformers import LlamaConfig
 
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
+from vllm.model_executor.layers.activation import SiluAndMul
+from vllm.model_executor.layers.linear import (
+    ColumnParallelLinear,
+    MergedColumnParallelLinear,
+    RowParallelLinear,
+)
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.models.llama import (
     LlamaAttention,
@@ -17,14 +23,8 @@ from vllm.model_executor.models.llama import (
     LlamaForCausalLM,
     LlamaModel,
 )
-from vllm.model_executor.layers.activation import SiluAndMul
-from vllm.model_executor.layers.linear import (
-    ColumnParallelLinear,
-    MergedColumnParallelLinear,
-    RowParallelLinear,
-)
-from vllm.v1.attention.backend import AttentionType
 from vllm.sequence import IntermediateTensors
+from vllm.v1.attention.backend import AttentionType
 
 from .utils import AutoWeightsLoader
 
@@ -184,7 +184,6 @@ class MistralDecoderLayer(LlamaDecoderLayer):
             )
         else:
             self.ada_rms_norm_t_cond = None
-
 
     def forward(
         self,
