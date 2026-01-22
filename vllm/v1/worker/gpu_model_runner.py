@@ -457,7 +457,6 @@ class GPUModelRunner(
 
         self.num_spec_tokens = 0
         self.valid_sampled_token_count_gpu: torch.Tensor | None = None
-        self.async_spec_reqs_to_fix: dict[str, int] = {}
         if self.speculative_config:
             self.num_spec_tokens = self.speculative_config.num_speculative_tokens
             draft_config = self.speculative_config.draft_model_config
@@ -544,6 +543,9 @@ class GPUModelRunner(
             self.max_num_reqs + 1, dtype=torch.int32
         )
         self.seq_lens = self._make_buffer(self.max_num_reqs, dtype=torch.int32)
+        self.num_computed_tokens = self._make_buffer(
+            self.max_num_reqs, dtype=torch.int32
+        )
         self.encoder_seq_lens = self._make_buffer(self.max_num_reqs, dtype=torch.int32)
         if self.dcp_world_size > 1:
             self.dcp_local_seq_lens = self._make_buffer(
@@ -590,6 +592,10 @@ class GPUModelRunner(
             # See page 5 of https://arxiv.org/abs/2409.12191
             self.mrope_positions = self._make_buffer(
                 (3, self.max_num_tokens + 1), dtype=torch.int64
+            )
+            # Per-request mrope_position_delta for GPU-based position computation
+            self.mrope_position_delta = self._make_buffer(
+                self.max_num_reqs, dtype=torch.int64
             )
 
         # Only relevant for models using XD-RoPE (e.g, HunYuan-VL)
@@ -954,8 +960,6 @@ class GPUModelRunner(
         valid_sampled_token_count = []
         if not self.use_async_spec_decode:
             valid_sampled_token_count = self._get_valid_sampled_token_count()
-        else:
-            self.async_spec_reqs_to_fix.clear()
 
         for i, req_id in enumerate(req_data.req_ids):
             req_state = self.requests[req_id]
@@ -982,20 +986,21 @@ class GPUModelRunner(
                 if req_index is None:
                     req_state.prev_num_draft_len = 0
                 else:
-                    # If use_async_spec_decode, assume all tokens are accepted,
-                    # and will adjust the inputs correctly in _adjust_inputs_on_gpu to
-                    # avoid cpu sync, which may cause gpu bubble in async scheduling.
+                    # For async spec decode, we don't add placeholders here.
+                    # The actual accepted tokens will be added in
+                    # update_async_output_token_ids when we know the real count.
+                    # For non-async, we wait for the acceptance count and add
+                    # the correct number of placeholders.
                     if self.use_async_spec_decode:
                         num_accepted = req_state.prev_num_draft_len
                         num_rejected = 0
-                        self.async_spec_reqs_to_fix[req_id] = num_accepted
                     else:
                         assert self.input_batch.prev_req_id_to_index is not None
                         prev_req_index = self.input_batch.prev_req_id_to_index[req_id]
                         num_accepted = valid_sampled_token_count[prev_req_index] - 1
                         num_rejected = req_state.prev_num_draft_len - num_accepted
                         num_computed_tokens -= num_rejected
-                    req_state.output_token_ids.extend([-1] * num_accepted)
+                        req_state.output_token_ids.extend([-1] * num_accepted)
 
             # Update the cached states.
             req_state.num_computed_tokens = num_computed_tokens
@@ -1085,23 +1090,38 @@ class GPUModelRunner(
         # Refresh batch metadata with any pending updates.
         self.input_batch.refresh_metadata()
 
+        # For async spec decode: Initialize num_computed_tokens on GPU for new
+        # requests. Continuing requests already have the correct GPU values from
+        # the previous step's update.
+        if self.use_async_spec_decode and reqs_to_add:
+            prev_req_id_to_index = self.input_batch.prev_req_id_to_index or {}
+            for req in reqs_to_add:
+                req_index = self.input_batch.req_id_to_index.get(req.req_id)
+                if req_index is not None and req.req_id not in prev_req_id_to_index:
+                    self.num_computed_tokens.np[req_index] = req.num_computed_tokens
+                    # Also sync mrope_position_delta for M-RoPE models
+                    if self.uses_mrope and req.mrope_position_delta is not None:
+                        self.mrope_position_delta.np[req_index] = (
+                            req.mrope_position_delta
+                        )
+            self.num_computed_tokens.copy_to_gpu(self.input_batch.num_reqs)
+            if self.uses_mrope:
+                self.mrope_position_delta.copy_to_gpu(self.input_batch.num_reqs)
+
     def _update_states_after_model_execute(
         self, output_token_ids: torch.Tensor
     ) -> None:
         """Update the cached states after model execution.
 
-        This serves two purposes:
-        1. For async scheduling with speculative decoding (EAGLE SPS), fix the
-           CPU-side bookkeeping that optimistically assumed all draft tokens
-           were accepted to avoid earlier CPU synchronizations.
-        2. For hybrid models using MTP/EAGLE, keep track of how many draft
-           tokens were accepted so the next iteration can shift states.
+        For hybrid models using MTP/EAGLE, keep track of how many draft
+        tokens were accepted so the next iteration can shift states.
         """
-
-        if self.use_async_spec_decode:
-            self._finalize_async_spec_cpu_state()
-
         if not self.speculative_config or not self.model_config.is_hybrid:
+            return
+
+        # For async spec decode, skip CPU sync - we'll use
+        # valid_sampled_token_count_gpu directly in _prepare_inputs.
+        if self.use_async_spec_decode:
             return
 
         # Find the number of accepted tokens for each sequence.
@@ -1127,48 +1147,6 @@ class GPUModelRunner(
         )
         for i, num_tokens in enumerate(num_accepted_tokens):
             self.input_batch.num_accepted_tokens_cpu[i] = num_tokens
-
-    def _finalize_async_spec_cpu_state(self) -> None:
-        """Synchronize CPU metadata after deferred speculative acceptance."""
-
-        if not self.async_spec_reqs_to_fix:
-            return
-
-        prev_req_id_to_index = self.input_batch.prev_req_id_to_index
-        assert prev_req_id_to_index is not None
-
-        valid_sampled_token_count = self._get_valid_sampled_token_count()
-        if not valid_sampled_token_count:
-            return
-
-        for req_id, num_draft_len in self.async_spec_reqs_to_fix.items():
-            prev_index = prev_req_id_to_index.get(req_id)
-            assert prev_index is not None and prev_index < len(
-                valid_sampled_token_count
-            ), f"req_id={req_id} not found or index out of range"
-            req_state = self.requests.get(req_id)
-            assert req_state is not None, f"req_id={req_id} not found in requests"
-
-            num_accepted = valid_sampled_token_count[prev_index] - 1
-            assert num_accepted >= 0 and num_accepted <= num_draft_len, (
-                f"Invalid num_accepted={num_accepted}, prev_draft_len={num_draft_len}"
-            )
-            num_rejected = num_draft_len - num_accepted
-            if num_rejected == 0:
-                continue
-            req_state.num_computed_tokens -= num_rejected
-
-            assert len(req_state.output_token_ids) >= num_rejected, (
-                f"output_token_ids length {len(req_state.output_token_ids)} < "
-                f"num_rejected {num_rejected}"
-            )
-            del req_state.output_token_ids[-num_rejected:]
-
-            req_index = self.input_batch.req_id_to_index.get(req_id)
-            assert req_index is not None, (
-                f"req_id={req_id} not found or index out of range"
-            )
-            self.input_batch.num_computed_tokens_cpu[req_index] -= num_rejected
 
     def _init_mrope_positions(self, req_state: CachedRequestState):
         model = self.get_model()
@@ -1407,91 +1385,6 @@ class GPUModelRunner(
 
         return encoder_seq_lens, encoder_seq_lens_cpu
 
-    def _maybe_adjust_inputs_on_gpu(
-        self,
-        num_scheduled_tokens: np.ndarray,
-    ) -> None:
-        """adjust inputs correctly on gpu for async scheduling with spec decode.
-
-        In async scheduling with spec decode, we assume all speculated tokens
-        are accepted in update_states to avoid cpu sync, and will adjust the
-        inputs correctly based on the actual accepted token count in GPU."""
-
-        if not self.use_async_spec_decode:
-            return
-
-        num_reqs = self.input_batch.num_reqs
-        req_indices_flat_cpu = np.repeat(
-            self.arange_np[:num_reqs], num_scheduled_tokens
-        )
-        req_indices_flat_gpu = torch.from_numpy(req_indices_flat_cpu).to(
-            self.device, non_blocking=True
-        )
-
-        req_indices_to_correct = []
-        prev_req_indices = []
-        prev_num_draft_lens = []
-        prev_req_id_to_index = self.input_batch.prev_req_id_to_index
-        if (
-            self.valid_sampled_token_count_gpu is not None
-            and prev_req_id_to_index
-            and self.async_spec_reqs_to_fix
-        ):
-            for i, req_id in enumerate(self.input_batch.req_ids):
-                if req_id not in self.async_spec_reqs_to_fix:
-                    continue
-                num_draft_len = self.async_spec_reqs_to_fix[req_id]
-                prev_index = prev_req_id_to_index.get(req_id)
-                assert prev_index is not None
-                req_indices_to_correct.append(i)
-                prev_req_indices.append(prev_index)
-                prev_num_draft_lens.append(num_draft_len)
-
-        if req_indices_to_correct:
-            assert self.valid_sampled_token_count_gpu is not None
-            req_indices_tensor = torch.tensor(
-                req_indices_to_correct, dtype=torch.int64, pin_memory=self.pin_memory
-            ).to(self.device, non_blocking=True)
-            prev_req_indices_tensor = torch.tensor(
-                prev_req_indices, dtype=torch.int64, pin_memory=self.pin_memory
-            ).to(self.device, non_blocking=True)
-
-            # Compute the diff between optimistic and actual valid tokens cnt.
-            prev_num_draft_len_tensor = torch.tensor(
-                prev_num_draft_lens, dtype=torch.int64, pin_memory=self.pin_memory
-            ).to(self.device, non_blocking=True)
-
-            # fix seq_lens on gpu
-            diff = (
-                prev_num_draft_len_tensor
-                + 1
-                - self.valid_sampled_token_count_gpu[prev_req_indices_tensor].to(
-                    torch.int64
-                )
-            )
-            self.seq_lens.gpu[req_indices_tensor] -= diff.int()
-
-            # fix positions on gpu
-            diff_all_reqs = torch.zeros(num_reqs, dtype=torch.int64, device=self.device)
-            diff_all_reqs[req_indices_tensor] = diff
-            diff_per_token = diff_all_reqs[req_indices_flat_gpu]
-            self.positions.gpu[: req_indices_flat_gpu.shape[0]] -= diff_per_token
-            if self.uses_mrope:
-                for dim in range(3):
-                    self.mrope_positions.gpu[dim, : req_indices_flat_gpu.shape[0]] -= (
-                        diff_per_token
-                    )
-            if self.uses_xdrope_dim > 0:
-                for dim in range(self.uses_xdrope_dim):
-                    self.xdrope_positions.gpu[dim, : req_indices_flat_gpu.shape[0]] -= (
-                        diff_per_token
-                    )
-
-        # Compute slot mapping only on GPU when use_async_spec_decode
-        self.input_batch.block_table.compute_slot_mapping_gpu(
-            req_indices_flat_gpu, self.positions.gpu[: req_indices_flat_gpu.shape[0]]
-        )
-
     def _prepare_inputs(
         self,
         scheduler_output: "SchedulerOutput",
@@ -1522,12 +1415,11 @@ class GPUModelRunner(
         # arange: [0, 1, 0, 1, 2, 3, 4, 0, 1, 2]
         cu_num_tokens, arange = self._get_cumsum_and_arange(num_scheduled_tokens)
 
-        # Get positions.
-        positions_np = self.positions.np[:total_num_scheduled_tokens]
-        np.add(
-            self.input_batch.num_computed_tokens_cpu[req_indices],
-            arange,
-            out=positions_np,
+        # Compute token positions for token lookup. This uses the scheduler's
+        # num_computed_tokens_cpu which is correct for indexing into token_ids_cpu
+        # (the scheduler placed tokens at those positions).
+        token_positions_np = (
+            self.input_batch.num_computed_tokens_cpu[req_indices] + arange
         )
 
         # Calculate M-RoPE positions.
@@ -1540,12 +1432,12 @@ class GPUModelRunner(
         if self.uses_xdrope_dim > 0:
             self._calc_xdrope_positions(scheduler_output)
 
-        # Get token indices.
+        # Get token indices for looking up input tokens.
         # E.g., [0, 1, 0, 1, 2, 3, 4, 0, 1, 2]
         # -> [0, 1, M, M + 1, M + 2, M + 3, M + 4, 2 * M, 2 * M + 1, 2 * M + 2]
         # where M is the max_model_len.
         token_indices = (
-            positions_np + req_indices * self.input_batch.token_ids_cpu.shape[1]
+            token_positions_np + req_indices * self.input_batch.token_ids_cpu.shape[1]
         )
         token_indices_tensor = torch.from_numpy(token_indices)
 
@@ -1605,10 +1497,6 @@ class GPUModelRunner(
 
                 output_idx += num_sched
 
-        if not self.use_async_spec_decode:
-            self.input_batch.block_table.compute_slot_mapping(req_indices, positions_np)
-            self.input_batch.block_table.commit_slot_mapping(total_num_scheduled_tokens)
-
         # Prepare the attention metadata.
         self.query_start_loc.np[0] = 0
         self.query_start_loc.np[1 : num_reqs + 1] = cu_num_tokens
@@ -1618,48 +1506,84 @@ class GPUModelRunner(
         self.query_start_loc.copy_to_gpu()
         query_start_loc = self.query_start_loc.gpu[: num_reqs + 1]
 
-        self.seq_lens.np[:num_reqs] = (
+        # For discard_request_mask, use scheduler's optimistic values (correct for
+        # determining if request is in prefill phase).
+        optimistic_seq_lens_np = (
             self.input_batch.num_computed_tokens_cpu[:num_reqs] + num_scheduled_tokens
         )
-        # Fill unused with 0 for full cuda graph mode.
-        self.seq_lens.np[num_reqs:].fill(0)
-        self.seq_lens.copy_to_gpu()
-
         num_tokens = [self.requests[r].num_tokens for r in self.input_batch.req_ids]
         num_tokens_np = np.array(num_tokens, dtype=np.int32)
 
         # Record which requests should not be sampled,
         # so that we could clear the sampled tokens before returning
-        self.discard_request_mask.np[:num_reqs] = (
-            self.seq_lens.np[:num_reqs] < num_tokens_np
-        )
+        self.discard_request_mask.np[:num_reqs] = optimistic_seq_lens_np < num_tokens_np
         self.discard_request_mask.copy_to_gpu(num_reqs)
+
+        # For non-async mode, sync num_computed_tokens to GPU from CPU.
+        # For async mode, GPU already has the correct values from previous step.
+        if not self.use_async_spec_decode:
+            self.num_computed_tokens.np[:num_reqs] = (
+                self.input_batch.num_computed_tokens_cpu[:num_reqs]
+            )
+            self.num_computed_tokens.copy_to_gpu(num_reqs)
+            # Also sync mrope_position_delta for M-RoPE models
+            if self.uses_mrope:
+                for i, req_id in enumerate(self.input_batch.req_ids):
+                    req = self.requests[req_id]
+                    if req.mrope_position_delta is not None:
+                        self.mrope_position_delta.np[i] = req.mrope_position_delta
+                self.mrope_position_delta.copy_to_gpu(num_reqs)
+
+        # Compute seq_lens and positions on GPU.
+        req_indices_gpu = torch.from_numpy(req_indices).to(
+            self.device, non_blocking=True
+        )
+        arange_gpu = (
+            torch.from_numpy(arange).to(self.device, non_blocking=True).to(torch.int64)
+        )
+        num_scheduled_tokens_gpu = torch.from_numpy(num_scheduled_tokens).to(
+            self.device, non_blocking=True
+        )
+
+        # Compute seq_lens on GPU
+        self.seq_lens.gpu[:num_reqs] = (
+            self.num_computed_tokens.gpu[:num_reqs] + num_scheduled_tokens_gpu
+        )
+        self.seq_lens.gpu[num_reqs:].fill_(0)
+
+        # Compute positions on GPU
+        self.positions.gpu[:total_num_scheduled_tokens] = (
+            self.num_computed_tokens.gpu[req_indices_gpu].to(torch.int64) + arange_gpu
+        )
+
+        # For M-RoPE, compute positions with delta: delta + num_computed + arange
+        # For XD-RoPE, simple incremental: num_computed + arange
+        if self.uses_mrope:
+            mrope_pos = (
+                self.mrope_position_delta.gpu[req_indices_gpu]
+                + self.num_computed_tokens.gpu[req_indices_gpu].to(torch.int64)
+                + arange_gpu
+            )
+            for dim in range(3):
+                self.mrope_positions.gpu[dim, :total_num_scheduled_tokens] = mrope_pos
+        elif self.uses_xdrope_dim > 0:
+            xdrope_pos = (
+                self.num_computed_tokens.gpu[req_indices_gpu].to(torch.int64)
+                + arange_gpu
+            )
+            for dim in range(self.uses_xdrope_dim):
+                self.xdrope_positions.gpu[dim, :total_num_scheduled_tokens] = xdrope_pos
+
+        # Compute slot mapping on GPU
+        self.input_batch.block_table.compute_slot_mapping_gpu(
+            req_indices_gpu, self.positions.gpu[:total_num_scheduled_tokens]
+        )
 
         # Copy the tensors to the GPU.
         self._prepare_input_ids(
             scheduler_output,
             total_num_scheduled_tokens,
             cu_num_tokens,
-        )
-
-        if self.uses_mrope:
-            # Only relevant for models using M-RoPE (e.g, Qwen2-VL)
-            self.mrope_positions.gpu[:, :total_num_scheduled_tokens].copy_(
-                self.mrope_positions.cpu[:, :total_num_scheduled_tokens],
-                non_blocking=True,
-            )
-        elif self.uses_xdrope_dim > 0:
-            # Only relevant for models using XD-RoPE (e.g, HunYuan-VL)
-            self.xdrope_positions.gpu[:, :total_num_scheduled_tokens].copy_(
-                self.xdrope_positions.cpu[:, :total_num_scheduled_tokens],
-                non_blocking=True,
-            )
-        else:
-            # Common case (1D positions)
-            self.positions.copy_to_gpu(total_num_scheduled_tokens)
-
-        self._maybe_adjust_inputs_on_gpu(
-            num_scheduled_tokens,
         )
 
         use_spec_decode = len(scheduler_output.scheduled_spec_decode_tokens) > 0
@@ -1754,11 +1678,27 @@ class GPUModelRunner(
             max_seq_len = self.seq_lens.np[:num_reqs].max().item()
 
         if use_spec_decode:
-            self.num_accepted_tokens.np[:num_reqs] = (
-                self.input_batch.num_accepted_tokens_cpu[:num_reqs]
-            )
-            self.num_accepted_tokens.np[num_reqs:].fill(1)
-            self.num_accepted_tokens.copy_to_gpu()
+            if (
+                self.use_async_spec_decode
+                and self.valid_sampled_token_count_gpu is not None
+            ):
+                # For async spec decode, use valid_sampled_token_count_gpu
+                # directly to avoid CPU sync.
+                num_valid = self.valid_sampled_token_count_gpu.shape[0]
+                self.num_accepted_tokens.gpu[:num_valid] = (
+                    self.valid_sampled_token_count_gpu
+                )
+                if num_valid < num_reqs:
+                    # Fill remaining with 1 (new requests have no prior spec
+                    # decode)
+                    self.num_accepted_tokens.gpu[num_valid:num_reqs].fill_(1)
+            else:
+                # Non-async path or first step: use CPU values
+                self.num_accepted_tokens.np[:num_reqs] = (
+                    self.input_batch.num_accepted_tokens_cpu[:num_reqs]
+                )
+                self.num_accepted_tokens.np[num_reqs:].fill(1)
+                self.num_accepted_tokens.copy_to_gpu()
 
         kv_cache_groups = self.kv_cache_config.kv_cache_groups
 
@@ -3774,6 +3714,10 @@ class GPUModelRunner(
 
         if self.use_async_spec_decode:
             self.valid_sampled_token_count_gpu = valid_sampled_tokens_count
+            # Update num_computed_tokens on GPU with actual accepted tokens.
+            # This makes GPU the source of truth for the next step.
+            num_reqs = valid_sampled_tokens_count.shape[0]
+            self.num_computed_tokens.gpu[:num_reqs] += valid_sampled_tokens_count.int()
         self.input_batch.prev_sampled_token_ids = next_token_ids.unsqueeze(1)
 
     def _get_valid_sampled_token_count(self) -> list[int]:
