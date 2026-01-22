@@ -17,7 +17,7 @@ from vllm.entrypoints.constants import (
     H11_MAX_HEADER_COUNT_DEFAULT,
     H11_MAX_INCOMPLETE_EVENT_SIZE_DEFAULT,
 )
-from vllm.entrypoints.serve.middleware import set_server_unavailable
+from vllm.entrypoints.serve.middleware import set_rejecting_requests
 from vllm.entrypoints.ssl import SSLCertRefresher
 from vllm.logger import init_logger
 from vllm.utils.network_utils import find_process_using_port
@@ -113,7 +113,7 @@ async def serve_http(
             inflight_count,
         )
 
-        set_server_unavailable(True)
+        set_rejecting_requests(True)
 
         async def _drain_operations() -> None:
             # pause generation and wait for in-flight requests

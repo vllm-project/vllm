@@ -806,17 +806,14 @@ class AsyncLLM(EngineClient):
         async with self._pause_cond:
             return self._paused
 
-    async def has_pending_kv_transfers(self) -> bool:
+    async def _has_pending_kv_transfers(self) -> bool:
         """Check if there are pending async KV transfers in the engine."""
-        return await self.engine_core.call_utility_async("has_pending_kv_transfers")
+        return await self.engine_core.has_pending_kv_transfers_async()
 
     async def wait_for_kv_transfers_complete(self, poll_interval: float = 0.1) -> None:
         """Wait until all pending KV transfers complete."""
-        logged = False
-        while await self.has_pending_kv_transfers():
-            if not logged:
-                logger.info("Waiting for pending KV transfers to complete")
-                logged = True
+        while await self._has_pending_kv_transfers():
+            logger.info_once("Waiting for pending KV transfers to complete")
             await asyncio.sleep(poll_interval)
 
     def get_num_unfinished_requests(self) -> int:

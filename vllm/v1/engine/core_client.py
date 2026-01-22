@@ -265,6 +265,9 @@ class EngineCoreClient(ABC):
     async def call_utility_async(self, method: str, *args) -> Any:
         raise NotImplementedError
 
+    async def has_pending_kv_transfers_async(self) -> bool:
+        raise NotImplementedError
+
 
 class InprocClient(EngineCoreClient):
     """
@@ -1044,6 +1047,9 @@ class AsyncMPClient(MPClient):
         return await self.call_utility_async(
             "collective_rpc", method, timeout, args, kwargs
         )
+
+    async def has_pending_kv_transfers_async(self) -> bool:
+        return await self.call_utility_async("has_pending_kv_transfers")
 
 
 class DPAsyncMPClient(AsyncMPClient):
