@@ -251,23 +251,6 @@ class DelegatingParser(Parser):
     values (no reasoning extraction, no tool calls).
     """
 
-    def is_reasoning_end(self, input_ids: list[int]) -> bool:
-        if self._reasoning_parser is None:
-            return True  # No reasoning parser means reasoning is always "done"
-        return self._reasoning_parser.is_reasoning_end(input_ids)
-
-    def is_reasoning_end_streaming(
-        self, input_ids: list[int], delta_ids: list[int]
-    ) -> bool:
-        if self._reasoning_parser is None:
-            return True
-        return self._reasoning_parser.is_reasoning_end_streaming(input_ids, delta_ids)
-
-    def extract_content_ids(self, input_ids: list[int]) -> list[int]:
-        if self._reasoning_parser is None:
-            return input_ids  # All content if no reasoning parser
-        return self._reasoning_parser.extract_content_ids(input_ids)
-
     def extract_reasoning(
         self,
         model_output: str,
@@ -296,11 +279,6 @@ class DelegatingParser(Parser):
             current_token_ids,
             delta_token_ids,
         )
-
-    def adjust_request(self, request: ChatCompletionRequest) -> ChatCompletionRequest:
-        if self._tool_parser is None:
-            return request
-        return self._tool_parser.adjust_request(request)
 
     def extract_tool_calls(
         self,
