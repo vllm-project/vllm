@@ -520,6 +520,18 @@ class FusedMoE(CustomOp):
         self.apply_router_weight_on_input = apply_router_weight_on_input
         self.activation = activation
 
+        self.capture: Callable[[torch.Tensor], None] | None = None
+        if (
+            self.vllm_config.model_config is not None
+            and self.vllm_config.model_config.enable_return_routed_experts
+        ):
+            # In dummy runs, the capturer is not initialized.
+            capturer = RoutedExpertsCapturer.get_instance()
+            if capturer is not None:
+                self.capture = lambda topk_ids: capturer.capture(
+                    self.layer_id, topk_ids
+                )
+
         self.router = create_fused_moe_router(
             top_k=top_k,
             global_num_experts=self.global_num_experts,
@@ -1684,6 +1696,9 @@ class FusedMoE(CustomOp):
                     router_logits=staged_router_logits,
                 )
 
+                if self.capture is not None:
+                    self.capture(topk_ids)
+
                 final_hidden_states = self.quant_method.apply(
                     layer=self,
                     x=staged_hidden_states,
@@ -1875,6 +1890,9 @@ class FusedMoE(CustomOp):
                     hidden_states=x_orig,
                     router_logits=router_logits,
                 )
+
+                if self.capture is not None:
+                    self.capture(topk_ids)
 
                 final_hidden_states = self.quant_method.apply(
                     layer=self,

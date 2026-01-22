@@ -9,7 +9,6 @@ from torch.nn.parameter import Parameter
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.logger import init_logger
-from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
     FusedMoEQuantConfig,
@@ -960,8 +959,8 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
                 f"but got {layer.activation}"
             )
 
-        assert self.moe_mk is not None
-        return self.moe_mk(
+        assert self.kernel is not None
+        return self.kernel(
             x,
             layer.w13_weight,
             layer.w2_weight,

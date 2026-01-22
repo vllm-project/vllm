@@ -178,6 +178,7 @@ class FusedTopKBiasRouter(BaseRouter):
             topk=self.top_k,
             renormalize=self.renormalize,
             scoring_func=self.scoring_func,
+            indices_type=indices_type,
         )
 
         if self.routed_scaling_factor != 1.0:
