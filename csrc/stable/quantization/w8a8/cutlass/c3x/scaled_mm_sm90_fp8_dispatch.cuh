@@ -2,7 +2,9 @@
 
 #include "scaled_mm.cuh"
 #include "cutlass_gemm_caller.cuh"
-#include "cutlass_extensions/epilogue/scaled_mm_epilogues_c3x.hpp"
+#include "stable/cutlass_extensions/epilogue/scaled_mm_epilogues_c3x.hpp"
+#include "stable/torch_utils.h"
+#include <torch/headeronly/core/ScalarType.h>
 
 /**
  * This file defines Gemm kernel configurations for SM90 (fp8) based on the Gemm
@@ -235,8 +237,9 @@ struct sm90_fp8_config_M16_N8192 {
 };
 
 template <typename Gemm, typename... EpilogueArgs>
-void cutlass_gemm_caller_sm90_fp8(torch::Tensor& out, torch::Tensor const& a,
-                                  torch::Tensor const& b,
+void cutlass_gemm_caller_sm90_fp8(torch::stable::Tensor& out,
+                                  torch::stable::Tensor const& a,
+                                  torch::stable::Tensor const& b,
                                   EpilogueArgs&&... epilogue_params) {
   static constexpr bool swap_ab = Gemm::swap_ab;
   using ElementAB = typename Gemm::ElementAB;
@@ -280,15 +283,15 @@ void cutlass_gemm_caller_sm90_fp8(torch::Tensor& out, torch::Tensor const& a,
 
 template <typename InType, typename OutType, bool EnableBias,
           typename... EpilogueArgs>
-inline void cutlass_gemm_sm90_fp8_dispatch(torch::Tensor& out,
-                                           torch::Tensor const& a,
-                                           torch::Tensor const& b,
-                                           torch::Tensor const& a_scales,
-                                           torch::Tensor const& b_scales,
-                                           EpilogueArgs&&... args) {
+inline void cutlass_gemm_sm90_fp8_dispatch(
+    torch::stable::Tensor& out, torch::stable::Tensor const& a,
+    torch::stable::Tensor const& b, torch::stable::Tensor const& a_scales,
+    torch::stable::Tensor const& b_scales, EpilogueArgs&&... args) {
   static_assert(std::is_same<InType, cutlass::float_e4m3_t>());
-  TORCH_CHECK(a.dtype() == torch::kFloat8_e4m3fn);
-  TORCH_CHECK(b.dtype() == torch::kFloat8_e4m3fn);
+  STD_TORCH_CHECK(a.scalar_type() ==
+                  torch::headeronly::ScalarType::Float8_e4m3fn);
+  STD_TORCH_CHECK(b.scalar_type() ==
+                  torch::headeronly::ScalarType::Float8_e4m3fn);
 
   using Cutlass3xGemmDefault =
       typename sm90_fp8_config_default<InType, OutType,
@@ -347,22 +350,24 @@ inline void cutlass_gemm_sm90_fp8_dispatch(torch::Tensor& out,
 }
 
 template <bool EnableBias, typename... EpilogueArgs>
-void cutlass_scaled_mm_sm90_fp8_epilogue(torch::Tensor& out,
-                                         torch::Tensor const& a,
-                                         torch::Tensor const& b,
-                                         torch::Tensor const& a_scales,
-                                         torch::Tensor const& b_scales,
+void cutlass_scaled_mm_sm90_fp8_epilogue(torch::stable::Tensor& out,
+                                         torch::stable::Tensor const& a,
+                                         torch::stable::Tensor const& b,
+                                         torch::stable::Tensor const& a_scales,
+                                         torch::stable::Tensor const& b_scales,
                                          EpilogueArgs&&... epilogue_args) {
-  TORCH_CHECK(a.dtype() == torch::kFloat8_e4m3fn);
-  TORCH_CHECK(b.dtype() == torch::kFloat8_e4m3fn);
+  STD_TORCH_CHECK(a.scalar_type() ==
+                  torch::headeronly::ScalarType::Float8_e4m3fn);
+  STD_TORCH_CHECK(b.scalar_type() ==
+                  torch::headeronly::ScalarType::Float8_e4m3fn);
 
-  if (out.dtype() == torch::kBFloat16) {
+  if (out.scalar_type() == torch::headeronly::ScalarType::BFloat16) {
     return cutlass_gemm_sm90_fp8_dispatch<cutlass::float_e4m3_t,
                                           cutlass::bfloat16_t, EnableBias>(
         out, a, b, a_scales, b_scales,
         std::forward<EpilogueArgs>(epilogue_args)...);
   } else {
-    TORCH_CHECK(out.dtype() == torch::kFloat16);
+    STD_TORCH_CHECK(out.scalar_type() == torch::headeronly::ScalarType::Half);
     return cutlass_gemm_sm90_fp8_dispatch<cutlass::float_e4m3_t,
                                           cutlass::half_t, EnableBias>(
         out, a, b, a_scales, b_scales,

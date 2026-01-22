@@ -8,11 +8,12 @@
 
 #if defined ENABLE_SCALED_MM_SM120 && ENABLE_SCALED_MM_SM120
 
-void cutlass_scaled_mm_sm120(torch::Tensor& c, torch::Tensor const& a,
-                             torch::Tensor const& b,
-                             torch::Tensor const& a_scales,
-                             torch::Tensor const& b_scales,
-                             std::optional<torch::Tensor> const& bias) {
+void cutlass_scaled_mm_sm120(torch::stable::Tensor& c,
+                             torch::stable::Tensor const& a,
+                             torch::stable::Tensor const& b,
+                             torch::stable::Tensor const& a_scales,
+                             torch::stable::Tensor const& b_scales,
+                             std::optional<torch::stable::Tensor> const& bias) {
   dispatch_scaled_mm(c, a, b, a_scales, b_scales, bias,
                      vllm::cutlass_scaled_mm_sm120_fp8,
                      nullptr,  // int8 not supported on SM120

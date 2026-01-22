@@ -1,6 +1,8 @@
 #pragma once
 
 #include <torch/csrc/inductor/aoti_torch/c/shim.h>
+#include <torch/csrc/stable/accelerator.h>
+#include <torch/csrc/stable/tensor.h>
 #include <torch/headeronly/util/shim_utils.h>
 
 #include <cuda_runtime.h>
@@ -18,3 +20,9 @@ inline cudaStream_t get_current_cuda_stream(int32_t device_index) {
 // Automatically generates an error message showing both values if they differ.
 #define STD_TORCH_CHECK_EQ(a, b) \
   STD_TORCH_CHECK((a) == (b), #a " (", (a), ") != " #b " (", (b), ")")
+
+// Stable ABI equivalent of TORCH_CHECK_NOT_IMPLEMENTED.
+// Note: This currently throws a runtime_error. When PyTorch adds
+// NotImplementedError support to the headeronly API, this should be updated.
+#define STD_TORCH_CHECK_NOT_IMPLEMENTED(cond, ...) \
+  STD_TORCH_CHECK(cond, "NotImplementedError: ", __VA_ARGS__)

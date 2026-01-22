@@ -1,11 +1,13 @@
 #pragma once
 
 #include "cutlass_extensions/epilogue/broadcast_load_epilogue_c2x.hpp"
+#include <torch/csrc/stable/tensor.h>
 
 /*
    This file defines custom epilogues for fusing channel scales, token scales,
    bias, and activation zero-points onto a GEMM operation using the
    CUTLASS 2.x API, for sm80 (Ampere) NVIDIA GPUs.
+
 
    Epilogues must contain a public type named EVTCompute of type Sm80EVT,
    as well as a static prepare_args function that constructs an
@@ -52,7 +54,7 @@ struct ScaledEpilogueBase {
   // from a tensor. It can handle both row and column, as well as row/column or
   // scalar cases.
   template <typename Descriptor, typename T>
-  static auto args_from_tensor(torch::Tensor const& tensor) {
+  static auto args_from_tensor(torch::stable::Tensor const& tensor) {
     using Arguments = typename Descriptor::Arguments;
     auto* data_ptr = static_cast<T*>(tensor.data_ptr());
     if constexpr (std::is_same_v<Descriptor, ColOrScalarLoad<T>> ||
@@ -68,7 +70,8 @@ struct ScaledEpilogueBase {
   // This overload handles the case where there might not be a tensor, in which
   // case a nullptr is passed and a constant (0) is used.
   template <typename Descriptor, typename T>
-  static auto args_from_tensor(std::optional<torch::Tensor> const& tensor) {
+  static auto args_from_tensor(
+      std::optional<torch::stable::Tensor> const& tensor) {
     static_assert(std::is_same_v<Descriptor, RowOrZeroLoad<T>>);
     using Arguments = typename Descriptor::Arguments;
     auto* data_ptr = tensor ? static_cast<T*>(tensor->data_ptr()) : nullptr;
@@ -117,8 +120,8 @@ struct ScaledEpilogue
       cutlass::epilogue::threadblock::Sm80EVT<Compute1, ScaleA, EVTCompute0>;
   using ArgumentType = typename EVTCompute::Arguments;
 
-  static ArgumentType prepare_args(torch::Tensor const& a_scales,
-                                   torch::Tensor const& b_scales) {
+  static ArgumentType prepare_args(torch::stable::Tensor const& a_scales,
+                                   torch::stable::Tensor const& b_scales) {
     auto a_args = SUPER::template args_from_tensor<ScaleA, float>(a_scales);
     auto b_args = SUPER::template args_from_tensor<ScaleB, float>(b_scales);
 
@@ -160,9 +163,9 @@ struct ScaledEpilogueBias
   using EVTCompute = cutlass::epilogue::threadblock::Sm80EVT<Compute1, ScaleA,
                                                              EVTCompute0, Bias>;
   using ArgumentType = typename EVTCompute::Arguments;
-  static ArgumentType prepare_args(torch::Tensor const& a_scales,
-                                   torch::Tensor const& b_scales,
-                                   torch::Tensor const& bias) {
+  static ArgumentType prepare_args(torch::stable::Tensor const& a_scales,
+                                   torch::stable::Tensor const& b_scales,
+                                   torch::stable::Tensor const& bias) {
     auto a_args = SUPER::template args_from_tensor<ScaleA, float>(a_scales);
     auto b_args = SUPER::template args_from_tensor<ScaleB, float>(b_scales);
     auto bias_args = SUPER::template args_from_tensor<Bias, ElementD>(bias);
@@ -220,10 +223,11 @@ struct ScaledEpilogueBiasAzp
 
   using ArgumentType = typename EVTCompute::Arguments;
 
-  static ArgumentType prepare_args(torch::Tensor const& a_scales,
-                                   torch::Tensor const& b_scales,
-                                   torch::Tensor const& azp_adj,
-                                   std::optional<torch::Tensor> const& bias) {
+  static ArgumentType prepare_args(
+      torch::stable::Tensor const& a_scales,
+      torch::stable::Tensor const& b_scales,
+      torch::stable::Tensor const& azp_adj,
+      std::optional<torch::stable::Tensor> const& bias) {
     auto a_args = SUPER::template args_from_tensor<ScaleA, float>(a_scales);
     auto b_args = SUPER::template args_from_tensor<ScaleB, float>(b_scales);
     auto bias_args = SUPER::template args_from_tensor<Bias, ElementD>(bias);
@@ -298,11 +302,11 @@ struct ScaledEpilogueBiasAzpToken
 
   using ArgumentType = typename EVTCompute::Arguments;
 
-  static ArgumentType prepare_args(torch::Tensor const& a_scales,
-                                   torch::Tensor const& b_scales,
-                                   torch::Tensor const& azp_adj,
-                                   torch::Tensor const& azp,
-                                   std::optional<torch::Tensor> const& bias) {
+  static ArgumentType prepare_args(
+      torch::stable::Tensor const& a_scales,
+      torch::stable::Tensor const& b_scales,
+      torch::stable::Tensor const& azp_adj, torch::stable::Tensor const& azp,
+      std::optional<torch::stable::Tensor> const& bias) {
     auto a_args = SUPER::template args_from_tensor<ScaleA, float>(a_scales);
     auto b_args = SUPER::template args_from_tensor<ScaleB, float>(b_scales);
     auto bias_args = SUPER::template args_from_tensor<Bias, ElementD>(bias);

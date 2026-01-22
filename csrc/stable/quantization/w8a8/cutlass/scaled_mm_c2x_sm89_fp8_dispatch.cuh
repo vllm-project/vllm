@@ -34,10 +34,12 @@ struct sm89_fp8_config_default {
   template <typename InType, typename OutType,
             template <typename, typename> typename Epilogue,
             typename... EpilogueArgs>
-  static void dispatch(torch::Tensor& out, torch::Tensor const& a,
-                       torch::Tensor const& b, EpilogueArgs&&... args) {
+  static void dispatch(torch::stable::Tensor& out,
+                       torch::stable::Tensor const& a,
+                       torch::stable::Tensor const& b, EpilogueArgs&&... args) {
     static_assert(std::is_same<InType, cutlass::float_e4m3_t>());
-    TORCH_CHECK(a.dtype() == torch::kFloat8_e4m3fn);
+    STD_TORCH_CHECK(a.scalar_type() ==
+                    torch::headeronly::ScalarType::Float8_e4m3fn);
 
     using FallbackGemm =
         typename sm89_fp8_fallback_gemm<InType, OutType,
@@ -84,10 +86,12 @@ struct sm89_fp8_config_M256 {
   template <typename InType, typename OutType,
             template <typename, typename> typename Epilogue,
             typename... EpilogueArgs>
-  static void dispatch(torch::Tensor& out, torch::Tensor const& a,
-                       torch::Tensor const& b, EpilogueArgs&&... args) {
+  static void dispatch(torch::stable::Tensor& out,
+                       torch::stable::Tensor const& a,
+                       torch::stable::Tensor const& b, EpilogueArgs&&... args) {
     static_assert(std::is_same<InType, cutlass::float_e4m3_t>());
-    TORCH_CHECK(a.dtype() == torch::kFloat8_e4m3fn);
+    STD_TORCH_CHECK(a.scalar_type() ==
+                    torch::headeronly::ScalarType::Float8_e4m3fn);
 
     using FallbackGemm =
         typename sm89_fp8_fallback_gemm<InType, OutType,
@@ -125,10 +129,12 @@ struct sm89_fp8_config_M128 {
   template <typename InType, typename OutType,
             template <typename, typename> typename Epilogue,
             typename... EpilogueArgs>
-  static void dispatch(torch::Tensor& out, torch::Tensor const& a,
-                       torch::Tensor const& b, EpilogueArgs&&... args) {
+  static void dispatch(torch::stable::Tensor& out,
+                       torch::stable::Tensor const& a,
+                       torch::stable::Tensor const& b, EpilogueArgs&&... args) {
     static_assert(std::is_same<InType, cutlass::float_e4m3_t>());
-    TORCH_CHECK(a.dtype() == torch::kFloat8_e4m3fn);
+    STD_TORCH_CHECK(a.scalar_type() ==
+                    torch::headeronly::ScalarType::Float8_e4m3fn);
 
     using FallbackGemm =
         typename sm89_fp8_fallback_gemm<InType, OutType,
@@ -173,10 +179,12 @@ struct sm89_fp8_config_M64 {
   template <typename InType, typename OutType,
             template <typename, typename> typename Epilogue,
             typename... EpilogueArgs>
-  static void dispatch(torch::Tensor& out, torch::Tensor const& a,
-                       torch::Tensor const& b, EpilogueArgs&&... args) {
+  static void dispatch(torch::stable::Tensor& out,
+                       torch::stable::Tensor const& a,
+                       torch::stable::Tensor const& b, EpilogueArgs&&... args) {
     static_assert(std::is_same<InType, cutlass::float_e4m3_t>());
-    TORCH_CHECK(a.dtype() == torch::kFloat8_e4m3fn);
+    STD_TORCH_CHECK(a.scalar_type() ==
+                    torch::headeronly::ScalarType::Float8_e4m3fn);
 
     using FallbackGemm =
         typename sm89_fp8_fallback_gemm<InType, OutType,
@@ -227,10 +235,12 @@ struct sm89_fp8_config_M32 {
   template <typename InType, typename OutType,
             template <typename, typename> typename Epilogue,
             typename... EpilogueArgs>
-  static void dispatch(torch::Tensor& out, torch::Tensor const& a,
-                       torch::Tensor const& b, EpilogueArgs&&... args) {
+  static void dispatch(torch::stable::Tensor& out,
+                       torch::stable::Tensor const& a,
+                       torch::stable::Tensor const& b, EpilogueArgs&&... args) {
     static_assert(std::is_same<InType, cutlass::float_e4m3_t>());
-    TORCH_CHECK(a.dtype() == torch::kFloat8_e4m3fn);
+    STD_TORCH_CHECK(a.scalar_type() ==
+                    torch::headeronly::ScalarType::Float8_e4m3fn);
 
     using FallbackGemm =
         typename sm89_fp8_fallback_gemm<InType, OutType,
@@ -280,10 +290,12 @@ struct sm89_fp8_config_M16 {
   template <typename InType, typename OutType,
             template <typename, typename> typename Epilogue,
             typename... EpilogueArgs>
-  static void dispatch(torch::Tensor& out, torch::Tensor const& a,
-                       torch::Tensor const& b, EpilogueArgs&&... args) {
+  static void dispatch(torch::stable::Tensor& out,
+                       torch::stable::Tensor const& a,
+                       torch::stable::Tensor const& b, EpilogueArgs&&... args) {
     static_assert(std::is_same<InType, cutlass::float_e4m3_t>());
-    TORCH_CHECK(a.dtype() == torch::kFloat8_e4m3fn);
+    STD_TORCH_CHECK(a.scalar_type() ==
+                    torch::headeronly::ScalarType::Float8_e4m3fn);
 
     using FallbackGemm =
         typename sm89_fp8_fallback_gemm<InType, OutType,
@@ -326,13 +338,15 @@ struct sm89_fp8_config_M16 {
 template <typename InType, typename OutType,
           template <typename, typename> typename Epilogue,
           typename... EpilogueArgs>
-inline void cutlass_gemm_sm89_fp8_dispatch(torch::Tensor& out,
-                                           torch::Tensor const& a,
-                                           torch::Tensor const& b,
+inline void cutlass_gemm_sm89_fp8_dispatch(torch::stable::Tensor& out,
+                                           torch::stable::Tensor const& a,
+                                           torch::stable::Tensor const& b,
                                            EpilogueArgs&&... args) {
   static_assert(std::is_same<InType, cutlass::float_e4m3_t>());
-  TORCH_CHECK(a.dtype() == torch::kFloat8_e4m3fn);
-  TORCH_CHECK(b.dtype() == torch::kFloat8_e4m3fn);
+  STD_TORCH_CHECK(a.scalar_type() ==
+                  torch::headeronly::ScalarType::Float8_e4m3fn);
+  STD_TORCH_CHECK(b.scalar_type() ==
+                  torch::headeronly::ScalarType::Float8_e4m3fn);
 
   uint32_t const m = a.size(0);
   uint32_t const mp2 =

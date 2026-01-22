@@ -20,7 +20,7 @@
 
 /*
   Epilogues defined in,
-  csrc/cutlass_extensions/epilogue/scaled_mm_epilogues_c3x.hpp,
+  csrc/stable/cutlass_extensions/epilogue/scaled_mm_epilogues_c3x.hpp,
   must contain a public type named EVTCompute of type Sm90EVT, as well as a
   static prepare_args function that constructs an EVTCompute::Arguments struct.
 */

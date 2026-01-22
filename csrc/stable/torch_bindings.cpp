@@ -184,6 +184,78 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C, m) {
       "Tensor slash_indexes, Tensor vertical_indices_count, "
       "Tensor slash_indices_count, int context_size, int block_size_M, "
       "int block_size_N, bool causal) -> ()");
+
+  // CUTLASS w8a8 GEMM, supporting symmetric per-tensor or per-row/column
+  // quantization, as well as bias
+  m.def(
+      "cutlass_scaled_mm(Tensor! out, Tensor a,"
+      "                  Tensor b, Tensor a_scales,"
+      "                  Tensor b_scales, Tensor? bias) -> ()");
+
+  // CUTLASS w8a8 GEMM, supporting asymmetric per-tensor or per-row/column
+  // quantization.
+  m.def(
+      "cutlass_scaled_mm_azp(Tensor! out, Tensor a,"
+      "                  Tensor b, Tensor a_scales,"
+      "                  Tensor b_scales, Tensor azp_adj,"
+      "                  Tensor? azp, Tensor? bias) -> ()");
+
+  // Check if cutlass scaled_mm is supported for CUDA devices of the given
+  // capability
+  m.def("cutlass_scaled_mm_supports_fp8(int cuda_device_capability) -> bool");
+
+  // Check if cutlass grouped gemm is supported for CUDA devices of the given
+  // capability
+  m.def("cutlass_group_gemm_supported(int cuda_device_capability) -> bool");
+
+  // CUTLASS w8a8 grouped GEMM
+  m.def(
+      "cutlass_moe_mm(Tensor! out_tensors, Tensor a_tensors, Tensor b_tensors, "
+      "               Tensor a_scales, Tensor b_scales, Tensor expert_offsets, "
+      "               Tensor problem_sizes, Tensor a_strides, "
+      "               Tensor b_strides, Tensor c_strides, bool per_act_token, "
+      "               bool per_out_ch) -> ()");
+
+  // A function that computes data required to run fused MoE with w8a8 grouped
+  // GEMM. It takes topk_ids as an input, and computes expert_offsets
+  // (token start indices of each expert). In addition to this, it computes
+  // problem sizes for each expert's multiplication used by the two mms called
+  // from fused MoE operation, and arrays with permutations required to shuffle
+  // and de-shuffle the input/output of the fused operation.
+  m.def(
+      "get_cutlass_moe_mm_data(Tensor topk_ids, Tensor! expert_offsets, "
+      "                        Tensor! problem_sizes1, Tensor! problem_sizes2, "
+      "                        Tensor! input_permutation, "
+      "                        Tensor! output_permutation, int num_experts, "
+      "                        int n, int k, Tensor? blockscale_offsets) -> "
+      "()");
+
+  // compute per-expert problem sizes from expert_first_token_offset
+  // produced by vLLM's moe_permute kernel
+  m.def(
+      "get_cutlass_moe_mm_problem_sizes_from_expert_offsets("
+      "    Tensor expert_first_token_offset, "
+      "    Tensor! problem_sizes1, "
+      "    Tensor! problem_sizes2, "
+      "    int n, int k, bool swap_ab) -> ()");
+
+  // A function that computes data required to run fused MoE with w8a8 grouped
+  // GEMM and PPLX. It takes expert_num_tokens and non_zero_expert_idxs
+  // as an input, and computes expert_offsets (token start indices of each
+  // expert). In addition to this, it computes problem sizes for each expert's
+  // multiplication used by the two mms called from fused MoE operation.
+  m.def(
+      "get_cutlass_pplx_moe_mm_data(Tensor! expert_offsets, "
+      "                             Tensor! problem_sizes1, "
+      "                             Tensor! problem_sizes2, "
+      "                             Tensor expert_num_tokens, "
+      "                             int num_local_experts, int padded_m, "
+      "                             int n, int k) -> ()");
+
+  // Check if cutlass scaled_mm supports block quantization (used by DeepSeekV3)
+  m.def(
+      "cutlass_scaled_mm_supports_block_fp8(int cuda_device_capability) -> "
+      "bool");
 #endif
 }
 
@@ -309,6 +381,16 @@ STABLE_TORCH_LIBRARY_IMPL(_C, CUDA, m) {
 #ifndef USE_ROCM
   // Utility ops
   m.impl("permute_cols", TORCH_BOX(&permute_cols));
+
+  // CUTLASS ops
+  m.impl("cutlass_scaled_mm", TORCH_BOX(&cutlass_scaled_mm));
+  m.impl("cutlass_scaled_mm_azp", TORCH_BOX(&cutlass_scaled_mm_azp));
+  m.impl("cutlass_moe_mm", TORCH_BOX(&cutlass_moe_mm));
+  m.impl("get_cutlass_moe_mm_data", TORCH_BOX(&get_cutlass_moe_mm_data));
+  m.impl("get_cutlass_moe_mm_problem_sizes_from_expert_offsets",
+         TORCH_BOX(&get_cutlass_moe_mm_problem_sizes_from_expert_offsets));
+  m.impl("get_cutlass_pplx_moe_mm_data",
+         TORCH_BOX(&get_cutlass_pplx_moe_mm_data));
 #endif
 
   // Quantized activation
@@ -370,5 +452,18 @@ STABLE_TORCH_LIBRARY_IMPL(_C, CPU, m) {
   m.impl("get_cuda_view_from_cpu_tensor",
          TORCH_BOX(&get_cuda_view_from_cpu_tensor));
 }
+
+// CompositeExplicitAutograd is needed for functions that don't take tensor
+// arguments. These are capability-checking functions that only take an int.
+#ifndef USE_ROCM
+STABLE_TORCH_LIBRARY_IMPL(_C, CompositeExplicitAutograd, m) {
+  m.impl("cutlass_scaled_mm_supports_fp8",
+         TORCH_BOX(&cutlass_scaled_mm_supports_fp8));
+  m.impl("cutlass_group_gemm_supported",
+         TORCH_BOX(&cutlass_group_gemm_supported));
+  m.impl("cutlass_scaled_mm_supports_block_fp8",
+         TORCH_BOX(&cutlass_scaled_mm_supports_block_fp8));
+}
+#endif
 
 REGISTER_EXTENSION(_C_stable_libtorch)

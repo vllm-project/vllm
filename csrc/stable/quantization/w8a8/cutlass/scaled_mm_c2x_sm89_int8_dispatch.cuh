@@ -32,10 +32,11 @@ struct sm89_int8_config_default {
   template <typename InType, typename OutType,
             template <typename, typename> typename Epilogue,
             typename... EpilogueArgs>
-  static void dispatch(torch::Tensor& out, torch::Tensor const& a,
-                       torch::Tensor const& b, EpilogueArgs&&... args) {
+  static void dispatch(torch::stable::Tensor& out,
+                       torch::stable::Tensor const& a,
+                       torch::stable::Tensor const& b, EpilogueArgs&&... args) {
     static_assert(std::is_same<InType, int8_t>());
-    TORCH_CHECK(a.dtype() == torch::kInt8);
+    STD_TORCH_CHECK(a.scalar_type() == torch::headeronly::ScalarType::Char);
 
     using FallbackGemm =
         typename sm89_int8_fallback_gemm<InType, OutType,
@@ -88,10 +89,11 @@ struct sm89_int8_config_M256 {
   template <typename InType, typename OutType,
             template <typename, typename> typename Epilogue,
             typename... EpilogueArgs>
-  static void dispatch(torch::Tensor& out, torch::Tensor const& a,
-                       torch::Tensor const& b, EpilogueArgs&&... args) {
+  static void dispatch(torch::stable::Tensor& out,
+                       torch::stable::Tensor const& a,
+                       torch::stable::Tensor const& b, EpilogueArgs&&... args) {
     static_assert(std::is_same<InType, int8_t>());
-    TORCH_CHECK(a.dtype() == torch::kInt8);
+    STD_TORCH_CHECK(a.scalar_type() == torch::headeronly::ScalarType::Char);
 
     using FallbackGemm =
         typename sm89_int8_fallback_gemm<InType, OutType,
@@ -143,10 +145,11 @@ struct sm89_int8_config_M128 {
   template <typename InType, typename OutType,
             template <typename, typename> typename Epilogue,
             typename... EpilogueArgs>
-  static void dispatch(torch::Tensor& out, torch::Tensor const& a,
-                       torch::Tensor const& b, EpilogueArgs&&... args) {
+  static void dispatch(torch::stable::Tensor& out,
+                       torch::stable::Tensor const& a,
+                       torch::stable::Tensor const& b, EpilogueArgs&&... args) {
     static_assert(std::is_same<InType, int8_t>());
-    TORCH_CHECK(a.dtype() == torch::kInt8);
+    STD_TORCH_CHECK(a.scalar_type() == torch::headeronly::ScalarType::Char);
 
     using FallbackGemm =
         typename sm89_int8_fallback_gemm<InType, OutType,
@@ -193,10 +196,11 @@ struct sm89_int8_config_M64 {
   template <typename InType, typename OutType,
             template <typename, typename> typename Epilogue,
             typename... EpilogueArgs>
-  static void dispatch(torch::Tensor& out, torch::Tensor const& a,
-                       torch::Tensor const& b, EpilogueArgs&&... args) {
+  static void dispatch(torch::stable::Tensor& out,
+                       torch::stable::Tensor const& a,
+                       torch::stable::Tensor const& b, EpilogueArgs&&... args) {
     static_assert(std::is_same<InType, int8_t>());
-    TORCH_CHECK(a.dtype() == torch::kInt8);
+    STD_TORCH_CHECK(a.scalar_type() == torch::headeronly::ScalarType::Char);
 
     using FallbackGemm =
         typename sm89_int8_fallback_gemm<InType, OutType,
@@ -234,10 +238,11 @@ struct sm89_int8_config_M32 {
   template <typename InType, typename OutType,
             template <typename, typename> typename Epilogue,
             typename... EpilogueArgs>
-  static void dispatch(torch::Tensor& out, torch::Tensor const& a,
-                       torch::Tensor const& b, EpilogueArgs&&... args) {
+  static void dispatch(torch::stable::Tensor& out,
+                       torch::stable::Tensor const& a,
+                       torch::stable::Tensor const& b, EpilogueArgs&&... args) {
     static_assert(std::is_same<InType, int8_t>());
-    TORCH_CHECK(a.dtype() == torch::kInt8);
+    STD_TORCH_CHECK(a.scalar_type() == torch::headeronly::ScalarType::Char);
 
     using FallbackGemm =
         typename sm89_int8_fallback_gemm<InType, OutType,
@@ -276,10 +281,11 @@ struct sm89_int8_config_M16 {
   template <typename InType, typename OutType,
             template <typename, typename> typename Epilogue,
             typename... EpilogueArgs>
-  static void dispatch(torch::Tensor& out, torch::Tensor const& a,
-                       torch::Tensor const& b, EpilogueArgs&&... args) {
+  static void dispatch(torch::stable::Tensor& out,
+                       torch::stable::Tensor const& a,
+                       torch::stable::Tensor const& b, EpilogueArgs&&... args) {
     static_assert(std::is_same<InType, int8_t>());
-    TORCH_CHECK(a.dtype() == torch::kInt8);
+    STD_TORCH_CHECK(a.scalar_type() == torch::headeronly::ScalarType::Char);
 
     using FallbackGemm =
         typename sm89_int8_fallback_gemm<InType, OutType,
@@ -311,13 +317,13 @@ struct sm89_int8_config_M16 {
 template <typename InType, typename OutType,
           template <typename, typename> typename Epilogue,
           typename... EpilogueArgs>
-inline void cutlass_gemm_sm89_int8_dispatch(torch::Tensor& out,
-                                            torch::Tensor const& a,
-                                            torch::Tensor const& b,
+inline void cutlass_gemm_sm89_int8_dispatch(torch::stable::Tensor& out,
+                                            torch::stable::Tensor const& a,
+                                            torch::stable::Tensor const& b,
                                             EpilogueArgs&&... args) {
   static_assert(std::is_same<InType, int8_t>());
-  TORCH_CHECK(a.dtype() == torch::kInt8);
-  TORCH_CHECK(b.dtype() == torch::kInt8);
+  STD_TORCH_CHECK(a.scalar_type() == torch::headeronly::ScalarType::Char);
+  STD_TORCH_CHECK(b.scalar_type() == torch::headeronly::ScalarType::Char);
 
   uint32_t const m = a.size(0);
   uint32_t const mp2 =

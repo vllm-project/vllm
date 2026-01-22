@@ -15,6 +15,7 @@
 #include "cutlass/epilogue/collective/collective_builder.hpp"
 
 #include "cutlass_gemm_caller.cuh"
+#include "stable/torch_utils.h"
 
 namespace vllm {
 
@@ -130,10 +131,11 @@ struct cutlass_3x_gemm_fp8_blockwise {
 };
 
 template <typename Gemm>
-void cutlass_gemm_caller_blockwise(torch::Tensor& out, torch::Tensor const& a,
-                                   torch::Tensor const& b,
-                                   torch::Tensor const& a_scales,
-                                   torch::Tensor const& b_scales) {
+void cutlass_gemm_caller_blockwise(torch::stable::Tensor& out,
+                                   torch::stable::Tensor const& a,
+                                   torch::stable::Tensor const& b,
+                                   torch::stable::Tensor const& a_scales,
+                                   torch::stable::Tensor const& b_scales) {
   static constexpr bool swap_ab = Gemm::swap_ab;
   using GemmKernel = typename Gemm::GemmKernel;
   using StrideA = typename Gemm::GemmKernel::StrideA;
@@ -195,18 +197,18 @@ void cutlass_gemm_caller_blockwise(torch::Tensor& out, torch::Tensor const& a,
   auto c_ptr = static_cast<ElementD*>(out.data_ptr());
   typename GemmKernel::EpilogueArguments epilogue_args{
       {}, c_ptr, c_stride, c_ptr, c_stride};
-  c3x::cutlass_gemm_caller<GemmKernel>(a.device(), prob_shape, mainloop_args,
-                                       epilogue_args);
+  c3x::cutlass_gemm_caller<GemmKernel>(a.device(), prob_shape,
+                                       mainloop_args, epilogue_args);
 }
 
 template <typename OutType>
-void cutlass_gemm_blockwise_sm100_fp8_dispatch(torch::Tensor& out,
-                                               torch::Tensor const& a,
-                                               torch::Tensor const& b,
-                                               torch::Tensor const& a_scales,
-                                               torch::Tensor const& b_scales) {
+void cutlass_gemm_blockwise_sm100_fp8_dispatch(torch::stable::Tensor& out,
+                                               torch::stable::Tensor const& a,
+                                               torch::stable::Tensor const& b,
+                                               torch::stable::Tensor const& a_scales,
+                                               torch::stable::Tensor const& b_scales) {
   int32_t m = a.size(0), n = b.size(1), k = a.size(1), sms;
-  cudaDeviceGetAttribute(&sms, cudaDevAttrMultiProcessorCount, a.get_device());
+  cudaDeviceGetAttribute(&sms, cudaDevAttrMultiProcessorCount, a.get_device_index());
 
   constexpr int TILE_K = 128;
   // TODO: better heuristics

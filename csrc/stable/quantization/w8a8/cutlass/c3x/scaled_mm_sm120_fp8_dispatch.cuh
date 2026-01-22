@@ -2,10 +2,13 @@
 
 #include "scaled_mm.cuh"
 #include "cutlass_gemm_caller.cuh"
+#include "stable/torch_utils.h"
+#include <torch/headeronly/core/ScalarType.h>
 
 /**
  * This file defines Gemm kernel configurations for SM120 (fp8) based on the
  * Gemm shape.
+ *
  */
 
 namespace vllm {
@@ -28,13 +31,15 @@ struct sm120_fp8_config_default {
 template <typename InType, typename OutType,
           template <typename, typename, typename> typename Epilogue,
           typename... EpilogueArgs>
-inline void cutlass_gemm_sm120_fp8_dispatch(torch::Tensor& out,
-                                            torch::Tensor const& a,
-                                            torch::Tensor const& b,
+inline void cutlass_gemm_sm120_fp8_dispatch(torch::stable::Tensor& out,
+                                            torch::stable::Tensor const& a,
+                                            torch::stable::Tensor const& b,
                                             EpilogueArgs&&... args) {
   static_assert(std::is_same<InType, cutlass::float_e4m3_t>());
-  TORCH_CHECK(a.dtype() == torch::kFloat8_e4m3fn);
-  TORCH_CHECK(b.dtype() == torch::kFloat8_e4m3fn);
+  STD_TORCH_CHECK(a.scalar_type() ==
+                  torch::headeronly::ScalarType::Float8_e4m3fn);
+  STD_TORCH_CHECK(b.scalar_type() ==
+                  torch::headeronly::ScalarType::Float8_e4m3fn);
 
   using Cutlass3xGemmDefault =
       typename sm120_fp8_config_default<InType, OutType,
@@ -45,19 +50,21 @@ inline void cutlass_gemm_sm120_fp8_dispatch(torch::Tensor& out,
 
 template <template <typename, typename, typename> typename Epilogue,
           typename... EpilogueArgs>
-void cutlass_scaled_mm_sm120_fp8_epilogue(torch::Tensor& out,
-                                          torch::Tensor const& a,
-                                          torch::Tensor const& b,
+void cutlass_scaled_mm_sm120_fp8_epilogue(torch::stable::Tensor& out,
+                                          torch::stable::Tensor const& a,
+                                          torch::stable::Tensor const& b,
                                           EpilogueArgs&&... epilogue_args) {
-  TORCH_CHECK(a.dtype() == torch::kFloat8_e4m3fn);
-  TORCH_CHECK(b.dtype() == torch::kFloat8_e4m3fn);
+  STD_TORCH_CHECK(a.scalar_type() ==
+                  torch::headeronly::ScalarType::Float8_e4m3fn);
+  STD_TORCH_CHECK(b.scalar_type() ==
+                  torch::headeronly::ScalarType::Float8_e4m3fn);
 
-  if (out.dtype() == torch::kBFloat16) {
+  if (out.scalar_type() == torch::headeronly::ScalarType::BFloat16) {
     return cutlass_gemm_sm120_fp8_dispatch<cutlass::float_e4m3_t,
                                            cutlass::bfloat16_t, Epilogue>(
         out, a, b, std::forward<EpilogueArgs>(epilogue_args)...);
   } else {
-    TORCH_CHECK(out.dtype() == torch::kFloat16);
+    STD_TORCH_CHECK(out.scalar_type() == torch::headeronly::ScalarType::Half);
     return cutlass_gemm_sm120_fp8_dispatch<cutlass::float_e4m3_t,
                                            cutlass::half_t, Epilogue>(
         out, a, b, std::forward<EpilogueArgs>(epilogue_args)...);

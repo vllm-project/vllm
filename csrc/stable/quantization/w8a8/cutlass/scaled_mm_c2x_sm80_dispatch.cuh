@@ -72,13 +72,13 @@ struct sm80_config_M16 {
 template <typename InType, typename OutType,
           template <typename, typename> typename Epilogue,
           typename... EpilogueArgs>
-inline void cutlass_gemm_sm80_dispatch(torch::Tensor& out,
-                                       torch::Tensor const& a,
-                                       torch::Tensor const& b,
+inline void cutlass_gemm_sm80_dispatch(torch::stable::Tensor& out,
+                                       torch::stable::Tensor const& a,
+                                       torch::stable::Tensor const& b,
                                        EpilogueArgs&&... args) {
   static_assert(std::is_same<InType, int8_t>());
-  TORCH_CHECK(a.dtype() == torch::kInt8);
-  TORCH_CHECK(b.dtype() == torch::kInt8);
+  STD_TORCH_CHECK(a.scalar_type() == torch::headeronly::ScalarType::Char);
+  STD_TORCH_CHECK(b.scalar_type() == torch::headeronly::ScalarType::Char);
 
   using Cutlass2xGemmDefault =
       typename sm80_config_default<InType, OutType, Epilogue>::Cutlass2xGemm;

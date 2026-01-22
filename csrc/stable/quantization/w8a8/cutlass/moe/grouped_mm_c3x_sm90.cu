@@ -1,7 +1,6 @@
 #include <cudaTypedefs.h>
 
-#include <c10/cuda/CUDAGuard.h>
-#include <torch/all.h>
+#include "stable/torch_utils.h"
 
 #include "cutlass/cutlass.h"
 #include "grouped_mm_c3x.cuh"
@@ -103,21 +102,27 @@ struct sm90_fp8_config_N8192 {
 };
 
 template <typename InType, typename OutType>
-void run_cutlass_moe_mm_sm90(
-    torch::Tensor& out_tensors, torch::Tensor const& a_tensors,
-    torch::Tensor const& b_tensors, torch::Tensor const& a_scales,
-    torch::Tensor const& b_scales, torch::Tensor const& expert_offsets,
-    torch::Tensor const& problem_sizes, torch::Tensor const& a_strides,
-    torch::Tensor const& b_strides, torch::Tensor const& c_strides,
-    bool per_act_token, bool per_out_ch) {
-  TORCH_CHECK(a_tensors.size(0) > 0, "No input A tensors provided.");
-  TORCH_CHECK(b_tensors.size(0) > 0, "No input B tensors provided.");
-  TORCH_CHECK(out_tensors.size(0) > 0, "No output tensors provided.");
+void run_cutlass_moe_mm_sm90(torch::stable::Tensor& out_tensors,
+                             torch::stable::Tensor const& a_tensors,
+                             torch::stable::Tensor const& b_tensors,
+                             torch::stable::Tensor const& a_scales,
+                             torch::stable::Tensor const& b_scales,
+                             torch::stable::Tensor const& expert_offsets,
+                             torch::stable::Tensor const& problem_sizes,
+                             torch::stable::Tensor const& a_strides,
+                             torch::stable::Tensor const& b_strides,
+                             torch::stable::Tensor const& c_strides,
+                             bool per_act_token, bool per_out_ch) {
+  STD_TORCH_CHECK(a_tensors.size(0) > 0, "No input A tensors provided.");
+  STD_TORCH_CHECK(b_tensors.size(0) > 0, "No input B tensors provided.");
+  STD_TORCH_CHECK(out_tensors.size(0) > 0, "No output tensors provided.");
 
-  TORCH_CHECK(a_tensors.dtype() == torch::kFloat8_e4m3fn,
-              "A tensors must be of type float8_e4m3fn.");
-  TORCH_CHECK(b_tensors.dtype() == torch::kFloat8_e4m3fn,
-              "B tensors must be of type float8_e4m3fn.");
+  STD_TORCH_CHECK(
+      a_tensors.scalar_type() == torch::headeronly::ScalarType::Float8_e4m3fn,
+      "A tensors must be of type float8_e4m3fn.");
+  STD_TORCH_CHECK(
+      b_tensors.scalar_type() == torch::headeronly::ScalarType::Float8_e4m3fn,
+      "B tensors must be of type float8_e4m3fn.");
 
   using Cutlass3xGemmN8192 = typename sm90_fp8_config_N8192<
       InType, OutType, vllm::c3x::ScaledEpilogueArray>::Cutlass3xGemm;
@@ -163,14 +168,18 @@ void run_cutlass_moe_mm_sm90(
   }
 }
 
-void dispatch_moe_mm_sm90(
-    torch::Tensor& out_tensors, torch::Tensor const& a_tensors,
-    torch::Tensor const& b_tensors, torch::Tensor const& a_scales,
-    torch::Tensor const& b_scales, torch::Tensor const& expert_offsets,
-    torch::Tensor const& problem_sizes, torch::Tensor const& a_strides,
-    torch::Tensor const& b_strides, torch::Tensor const& c_strides,
-    bool per_act_token, bool per_out_ch) {
-  if (out_tensors.dtype() == torch::kBFloat16) {
+void dispatch_moe_mm_sm90(torch::stable::Tensor& out_tensors,
+                          torch::stable::Tensor const& a_tensors,
+                          torch::stable::Tensor const& b_tensors,
+                          torch::stable::Tensor const& a_scales,
+                          torch::stable::Tensor const& b_scales,
+                          torch::stable::Tensor const& expert_offsets,
+                          torch::stable::Tensor const& problem_sizes,
+                          torch::stable::Tensor const& a_strides,
+                          torch::stable::Tensor const& b_strides,
+                          torch::stable::Tensor const& c_strides,
+                          bool per_act_token, bool per_out_ch) {
+  if (out_tensors.scalar_type() == torch::headeronly::ScalarType::BFloat16) {
     run_cutlass_moe_mm_sm90<cutlass::float_e4m3_t, cutlass::bfloat16_t>(
         out_tensors, a_tensors, b_tensors, a_scales, b_scales, expert_offsets,
         problem_sizes, a_strides, b_strides, c_strides, per_act_token,
@@ -185,13 +194,17 @@ void dispatch_moe_mm_sm90(
 
 }  // namespace
 
-void cutlass_moe_mm_sm90(
-    torch::Tensor& out_tensors, torch::Tensor const& a_tensors,
-    torch::Tensor const& b_tensors, torch::Tensor const& a_scales,
-    torch::Tensor const& b_scales, torch::Tensor const& expert_offsets,
-    torch::Tensor const& problem_sizes, torch::Tensor const& a_strides,
-    torch::Tensor const& b_strides, torch::Tensor const& c_strides,
-    bool per_act_token, bool per_out_ch) {
+void cutlass_moe_mm_sm90(torch::stable::Tensor& out_tensors,
+                         torch::stable::Tensor const& a_tensors,
+                         torch::stable::Tensor const& b_tensors,
+                         torch::stable::Tensor const& a_scales,
+                         torch::stable::Tensor const& b_scales,
+                         torch::stable::Tensor const& expert_offsets,
+                         torch::stable::Tensor const& problem_sizes,
+                         torch::stable::Tensor const& a_strides,
+                         torch::stable::Tensor const& b_strides,
+                         torch::stable::Tensor const& c_strides,
+                         bool per_act_token, bool per_out_ch) {
   dispatch_moe_mm_sm90(out_tensors, a_tensors, b_tensors, a_scales, b_scales,
                        expert_offsets, problem_sizes, a_strides, b_strides,
                        c_strides, per_act_token, per_out_ch);

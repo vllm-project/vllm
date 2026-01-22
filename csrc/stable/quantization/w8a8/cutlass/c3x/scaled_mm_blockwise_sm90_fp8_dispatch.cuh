@@ -14,6 +14,7 @@
 #include "cutlass/epilogue/collective/collective_builder.hpp"
 
 #include "cutlass_gemm_caller.cuh"
+#include "stable/torch_utils.h"
 
 namespace vllm {
 
@@ -101,10 +102,11 @@ struct cutlass_3x_gemm_fp8_blockwise {
 };
 
 template <typename Gemm>
-void cutlass_gemm_caller_blockwise(torch::Tensor& out, torch::Tensor const& a,
-                                   torch::Tensor const& b,
-                                   torch::Tensor const& a_scales,
-                                   torch::Tensor const& b_scales) {
+void cutlass_gemm_caller_blockwise(torch::stable::Tensor& out,
+                                   torch::stable::Tensor const& a,
+                                   torch::stable::Tensor const& b,
+                                   torch::stable::Tensor const& a_scales,
+                                   torch::stable::Tensor const& b_scales) {
   using GemmKernel = typename Gemm::GemmKernel;
   using StrideA = typename Gemm::GemmKernel::StrideA;
   using StrideB = typename Gemm::GemmKernel::StrideB;
@@ -120,7 +122,7 @@ void cutlass_gemm_caller_blockwise(torch::Tensor& out, torch::Tensor const& a,
 
   int32_t m = a.size(0), n = b.size(1), k = a.size(1);
 
-  TORCH_CHECK(m % 4 == 0, "m must be divisible by 4");
+  STD_TORCH_CHECK(m % 4 == 0, "m must be divisible by 4");
 
   StrideA a_stride;
   StrideB b_stride;
@@ -132,9 +134,9 @@ void cutlass_gemm_caller_blockwise(torch::Tensor& out, torch::Tensor const& a,
   c_stride =
       cutlass::make_cute_packed_stride(StrideC{}, cute::make_shape(m, n, 1));
 
-  LayoutSFA layout_SFA = 
+  LayoutSFA layout_SFA =
       ScaleConfig::tile_atom_to_shape_SFA(make_shape(m, n, k, 1));
-  LayoutSFB layout_SFB = 
+  LayoutSFB layout_SFB =
       ScaleConfig::tile_atom_to_shape_SFB(make_shape(m, n, k, 1));
 
   auto a_ptr = static_cast<ElementAB const*>(a.data_ptr());
@@ -156,16 +158,16 @@ void cutlass_gemm_caller_blockwise(torch::Tensor& out, torch::Tensor const& a,
   auto c_ptr = static_cast<ElementD*>(out.data_ptr());
   typename GemmKernel::EpilogueArguments epilogue_args{
       {}, c_ptr, c_stride, c_ptr, c_stride};
-  c3x::cutlass_gemm_caller<GemmKernel>(a.device(), prob_shape, mainloop_args,
-                                       epilogue_args);
+  c3x::cutlass_gemm_caller<GemmKernel>(a.device(), prob_shape,
+                                       mainloop_args, epilogue_args);
 }
 
 template <typename OutType>
-void cutlass_gemm_blockwise_sm90_fp8_dispatch(torch::Tensor& out,
-                                              torch::Tensor const& a,
-                                              torch::Tensor const& b,
-                                              torch::Tensor const& a_scales,
-                                              torch::Tensor const& b_scales) {
+void cutlass_gemm_blockwise_sm90_fp8_dispatch(torch::stable::Tensor& out,
+                                              torch::stable::Tensor const& a,
+                                              torch::stable::Tensor const& b,
+                                              torch::stable::Tensor const& a_scales,
+                                              torch::stable::Tensor const& b_scales) {
   // TODO: better heuristics
   cutlass_gemm_caller_blockwise<cutlass_3x_gemm_fp8_blockwise<
       OutType, 1, 128, 128, Shape<_128, _128, _128>,
