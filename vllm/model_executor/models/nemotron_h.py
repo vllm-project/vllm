@@ -207,6 +207,7 @@ class NemotronHMoE(nn.Module):
             enable_eplb=self.enable_eplb,
             num_redundant_experts=self.n_redundant_experts,
             is_sequence_parallel=self.is_sequence_parallel,
+            router_logits_dtype=self.gate.params_dtype,
         )
 
         if self.use_latent_moe:
