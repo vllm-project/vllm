@@ -16,6 +16,7 @@ from fastapi import Request
 from fastapi.responses import JSONResponse, StreamingResponse
 from starlette.background import BackgroundTask, BackgroundTasks
 
+from vllm import envs
 from vllm.config import ModelConfig
 from vllm.engine.arg_utils import EngineArgs
 from vllm.engine.protocol import EngineClient
@@ -343,8 +344,7 @@ def sanitize_message(message: str) -> str:
 
 
 def log_version_and_model(lgr: Logger, version: str, model_name: str) -> None:
-    formatter = current_formatter_type(lgr)
-    if formatter is None:
+    if envs.VLLM_DISABLE_LOG_LOGO or (formatter := current_formatter_type(lgr)) is None:
         message = "vLLM server version %s, serving model %s"
     else:
         logo_template = Template(
