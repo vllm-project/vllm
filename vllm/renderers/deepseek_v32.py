@@ -9,24 +9,23 @@ from vllm.entrypoints.chat_utils import (
     parse_chat_messages,
     parse_chat_messages_async,
 )
-from vllm.inputs import EmbedsPrompt, TextPrompt, TokensPrompt
+from vllm.inputs import TextPrompt, TokensPrompt
 from vllm.logger import init_logger
 from vllm.tokenizers import cached_get_tokenizer
 from vllm.tokenizers.deepseek_v32 import DeepseekV32Tokenizer
 
-from .params import ChatParams
-from .protocol import BaseRenderer
+from .protocol import RendererLike
 
 logger = init_logger(__name__)
 
 
-class DeepseekV32Renderer(BaseRenderer):
+class DeepseekV32Renderer(RendererLike):
     @classmethod
     def from_config(
         cls,
         config: ModelConfig,
         tokenizer_kwargs: dict[str, Any],
-    ) -> "BaseRenderer":
+    ) -> "RendererLike":
         return cls(config, tokenizer_kwargs)
 
     def __init__(
@@ -34,7 +33,9 @@ class DeepseekV32Renderer(BaseRenderer):
         config: ModelConfig,
         tokenizer_kwargs: dict[str, Any],
     ) -> None:
-        super().__init__(config)
+        super().__init__()
+
+        self.config = config
 
         if config.skip_tokenizer_init:
             tokenizer = None
@@ -60,8 +61,8 @@ class DeepseekV32Renderer(BaseRenderer):
     def render_messages(
         self,
         messages: list[ChatCompletionMessageParam],
-        params: ChatParams,
-    ) -> tuple[list[ConversationMessage], TextPrompt | TokensPrompt | EmbedsPrompt]:
+        **kwargs,
+    ) -> tuple[list[ConversationMessage], TextPrompt | TokensPrompt]:
         tokenizer = self.get_tokenizer()
         conversation, mm_data, mm_uuids = parse_chat_messages(
             messages,
@@ -72,22 +73,26 @@ class DeepseekV32Renderer(BaseRenderer):
         prompt_raw = tokenizer.apply_chat_template(
             conversation=conversation,
             messages=messages,
-            **params.get_apply_chat_template_kwargs(),
+            **kwargs,
         )
 
-        prompt = self.render_completion(prompt_raw)
+        prompt = (
+            TextPrompt(prompt=prompt_raw)
+            if isinstance(prompt_raw, str)
+            else TokensPrompt(prompt_token_ids=prompt_raw)
+        )
         if mm_data is not None:
             prompt["multi_modal_data"] = mm_data
         if mm_uuids is not None:
             prompt["multi_modal_uuids"] = mm_uuids
 
-        return conversation, prompt
+        return conversation, prompt  # type: ignore[return-value]
 
     async def render_messages_async(
         self,
         messages: list[ChatCompletionMessageParam],
-        params: ChatParams,
-    ) -> tuple[list[ConversationMessage], TextPrompt | TokensPrompt | EmbedsPrompt]:
+        **kwargs,
+    ) -> tuple[list[ConversationMessage], TextPrompt | TokensPrompt]:
         tokenizer = self.get_tokenizer()
         conversation, mm_data, mm_uuids = await parse_chat_messages_async(
             messages,
@@ -98,13 +103,17 @@ class DeepseekV32Renderer(BaseRenderer):
         prompt_raw = tokenizer.apply_chat_template(
             conversation=conversation,
             messages=messages,
-            **params.get_apply_chat_template_kwargs(),
+            **kwargs,
         )
 
-        prompt = self.render_completion(prompt_raw)
+        prompt = (
+            TextPrompt(prompt=prompt_raw)
+            if isinstance(prompt_raw, str)
+            else TokensPrompt(prompt_token_ids=prompt_raw)
+        )
         if mm_data is not None:
             prompt["multi_modal_data"] = mm_data
         if mm_uuids is not None:
             prompt["multi_modal_uuids"] = mm_uuids
 
-        return conversation, prompt
+        return conversation, prompt  # type: ignore[return-value]

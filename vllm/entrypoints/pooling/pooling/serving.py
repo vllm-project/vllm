@@ -124,6 +124,7 @@ class OpenAIServingPooling(OpenAIServing):
 
                 _, engine_prompts = await self._preprocess_chat(
                     request,
+                    self.renderer,
                     request.messages,
                     chat_template=request.chat_template or self.chat_template,
                     chat_template_content_format=self.chat_template_content_format,
@@ -132,10 +133,10 @@ class OpenAIServingPooling(OpenAIServing):
                     add_special_tokens=request.add_special_tokens,
                 )
             elif isinstance(request, PoolingCompletionRequest):
-                engine_prompts = await self._preprocess_completion(
-                    request,
-                    prompt_input=request.input,
-                    prompt_embeds=None,
+                renderer = self._get_completion_renderer()
+                engine_prompts = await renderer.render_prompt(
+                    prompt_or_prompts=request.input,
+                    config=self._build_render_config(request),
                 )
             else:
                 raise ValueError(f"Unsupported request of type {type(request)}")

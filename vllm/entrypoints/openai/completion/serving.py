@@ -110,9 +110,9 @@ class OpenAIServingCompletion(OpenAIServing):
             )
 
         try:
-            engine_prompts = await self._preprocess_completion(
-                request,
-                prompt_input=request.prompt,
+            renderer = self._get_completion_renderer()
+            engine_prompts = await renderer.render_prompt_and_embeds(
+                prompt_or_prompts=request.prompt,
                 prompt_embeds=request.prompt_embeds,
             )
         except (ValueError, TypeError, RuntimeError, jinja2.TemplateError) as e:

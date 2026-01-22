@@ -94,6 +94,7 @@ class OpenAIServingEmbedding(OpenAIServing):
 
                 _, ctx.engine_prompts = await self._preprocess_chat(
                     ctx.request,
+                    self.renderer,
                     ctx.request.messages,
                     default_template=self.chat_template,
                     default_template_content_format=self.chat_template_content_format,
@@ -106,8 +107,11 @@ class OpenAIServingEmbedding(OpenAIServing):
                     prompt_embeds=None,
                 )
             else:
-                return self.create_error_response("Invalid classification request type")
-
+                renderer = self._get_completion_renderer()
+                ctx.engine_prompts = await renderer.render_prompt(
+                    prompt_or_prompts=ctx.request.input,
+                    config=self._build_render_config(ctx.request),
+                )
             return None
         except (ValueError, TypeError) as e:
             logger.exception("Error in preprocessing prompt inputs")

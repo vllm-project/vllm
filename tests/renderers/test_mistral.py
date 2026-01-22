@@ -9,7 +9,6 @@ import pytest
 from mistral_common.tokens.tokenizers.base import SpecialTokenPolicy
 
 from vllm.config import ModelConfig
-from vllm.renderers import ChatParams
 from vllm.renderers.mistral import MistralRenderer, safe_apply_chat_template
 from vllm.tokenizers.mistral import MistralTokenizer
 
@@ -28,7 +27,7 @@ async def test_async_mistral_tokenizer_does_not_block_event_loop():
     mock_renderer = MistralRenderer(Mock(spec=ModelConfig), tokenizer_kwargs={})
     mock_renderer._tokenizer = mock_tokenizer
 
-    task = mock_renderer.render_messages_async([], ChatParams())
+    task = mock_renderer.render_messages_async([])
 
     # Ensure the event loop is not blocked
     blocked_count = 0

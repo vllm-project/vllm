@@ -23,6 +23,35 @@ import sys
 
 import regex as re
 
+FILES = [
+    "vllm/*.py",
+    "vllm/assets",
+    "vllm/distributed",
+    "vllm/engine",
+    "vllm/entrypoints",
+    "vllm/executor",
+    "vllm/inputs",
+    "vllm/logging_utils",
+    "vllm/multimodal",
+    "vllm/platforms",
+    "vllm/plugins",
+    "vllm/renderers",
+    "vllm/tokenizers",
+    "vllm/transformers_utils",
+    "vllm/triton_utils",
+    "vllm/usage",
+    "vllm/utils",
+    "vllm/worker",
+    "vllm/v1/attention",
+    "vllm/v1/core",
+    "vllm/v1/engine",
+    "vllm/v1/executor",
+    "vllm/v1/metrics",
+    "vllm/v1/pool",
+    "vllm/v1/sample",
+    "vllm/v1/worker",
+]
+
 # After fixing errors resulting from changing follow_imports
 # from "skip" to "silent", remove its directory from SEPARATE_GROUPS.
 SEPARATE_GROUPS = [

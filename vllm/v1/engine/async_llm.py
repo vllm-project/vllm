@@ -24,8 +24,8 @@ from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
 from vllm.outputs import STREAM_FINISHED, PoolingRequestOutput, RequestOutput
 from vllm.plugins.io_processors import get_io_processor
 from vllm.pooling_params import PoolingParams
-from vllm.renderers import BaseRenderer, merge_kwargs
-from vllm.sampling_params import RequestOutputKind, SamplingParams
+from vllm.renderers import RendererLike
+from vllm.sampling_params import SamplingParams
 from vllm.tasks import SupportedTask
 from vllm.tokenizers import TokenizerLike
 from vllm.tracing import init_tracer
@@ -845,7 +845,7 @@ class AsyncLLM(EngineClient):
         return self.input_processor.get_tokenizer()
 
     @property
-    def renderer(self) -> BaseRenderer:
+    def renderer(self) -> RendererLike:
         return self.input_processor.renderer
 
     async def is_tracing_enabled(self) -> bool:

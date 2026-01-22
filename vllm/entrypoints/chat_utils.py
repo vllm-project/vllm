@@ -42,23 +42,13 @@ from vllm.config import ModelConfig
 from vllm.logger import init_logger
 from vllm.model_executor.models import SupportsMultiModal
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalDataDict, MultiModalUUIDDict
-from vllm.multimodal.inputs import (
-    MultiModalBatchedField,
-    MultiModalFlatField,
-    MultiModalSharedField,
-    VisionChunk,
-    VisionChunkImage,
-    VisionChunkVideo,
-)
-from vllm.multimodal.media import MEDIA_CONNECTOR_REGISTRY, MediaConnector
-from vllm.multimodal.processing import BaseMultiModalProcessor
+from vllm.multimodal.utils import MEDIA_CONNECTOR_REGISTRY, MediaConnector
 from vllm.utils import random_uuid
 from vllm.utils.collection_utils import is_list_of
 from vllm.utils.import_utils import LazyLoader
 
 if TYPE_CHECKING:
     import torch
-    import transformers
 else:
     transformers = LazyLoader("transformers", globals(), "transformers")
     torch = LazyLoader("torch", globals(), "torch")
@@ -339,9 +329,7 @@ ChatTemplateContentFormatOption = Literal["auto", "string", "openai"]
 ChatTemplateContentFormat = Literal["string", "openai"]
 
 
-ModalityStr = Literal[
-    "image", "audio", "video", "image_embeds", "audio_embeds", "vision_chunk"
-]
+ModalityStr = Literal["image", "audio", "video", "image_embeds", "audio_embeds"]
 _T = TypeVar("_T")
 
 
@@ -1563,9 +1551,7 @@ async def parse_chat_messages_async(
 
     _postprocess_messages(conversation)
 
-    mm_data, mm_uuids = await mm_tracker.resolve_items()
-
-    return conversation, mm_data, mm_uuids
+    return conversation, await mm_tracker.all_mm_data(), mm_tracker.all_mm_uuids()
 
 
 def get_history_tool_calls_cnt(conversation: list[ConversationMessage]):

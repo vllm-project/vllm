@@ -51,13 +51,21 @@ def init_pooling_state(
     supported_tasks: tuple["SupportedTask", ...],
 ):
     from vllm.entrypoints.chat_utils import load_chat_template
+    from vllm.entrypoints.logger import RequestLogger
     from vllm.entrypoints.pooling.classify.serving import ServingClassification
     from vllm.entrypoints.pooling.embed.serving import OpenAIServingEmbedding
     from vllm.entrypoints.pooling.pooling.serving import OpenAIServingPooling
     from vllm.entrypoints.pooling.score.serving import ServingScores
     from vllm.tasks import POOLING_TASKS
 
+    supported_tasks = await engine_client.get_supported_tasks()
+
     resolved_chat_template = load_chat_template(args.chat_template)
+
+    if args.enable_log_requests:
+        request_logger = RequestLogger(max_log_len=args.max_log_len)
+    else:
+        request_logger = None
 
     state.openai_serving_pooling = (
         (

@@ -287,6 +287,14 @@ class ServingScores(OpenAIServing):
         raw_request: Request | None = None,
     ) -> list[PoolingRequestOutput] | ErrorResponse:
         lora_request = self._maybe_get_adapters(request)
+        tokenizer = self.renderer.get_tokenizer()
+
+        truncate_prompt_tokens = getattr(request, "truncate_prompt_tokens", None)
+
+        tokenization_kwargs: dict[str, Any] = {}
+        _validate_truncation_size(
+            self.max_model_len, truncate_prompt_tokens, tokenization_kwargs
+        )
 
         trace_headers = (
             None
