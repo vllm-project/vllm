@@ -2041,6 +2041,7 @@ def wvSplitK(
     if current_platform.is_rocm():
         logger.warning_once(
             "wvSplitK:Encountered non-contiguous tensor during execution on ROCm."
+            "Making them contiguous, which may incur a performance hit."
         )
         a = a.contiguous()
         b = b.contiguous()
