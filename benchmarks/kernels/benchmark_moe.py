@@ -15,11 +15,18 @@ import ray
 import torch
 from ray.experimental.tqdm_ray import tqdm
 
+from vllm.model_executor.layers.fused_moe import fused_topk
 from vllm.model_executor.layers.fused_moe.config import (
+    FusedMoEConfig,
+    FusedMoEParallelConfig,
     FusedMoEQuantConfig,
+    RoutingMethodType,
     _get_config_dtype_str,
 )
 from vllm.model_executor.layers.fused_moe.fused_moe import *
+from vllm.model_executor.layers.fused_moe.triton_deep_gemm_moe import (
+    TritonOrDeepGemmExperts,
+)
 from vllm.platforms import current_platform
 from vllm.transformers_utils.config import get_config
 from vllm.triton_utils import triton
@@ -48,8 +55,6 @@ def clear_triton_cache():
 
     # Try to clear Triton's runtime cache
     try:
-        import triton
-
         if (
             hasattr(triton, "runtime")
             and hasattr(triton.runtime, "cache")
@@ -196,10 +201,36 @@ def benchmark_config(
             block_shape=block_quant_shape,
         )
 
+        deep_gemm_experts = None
+        if use_deep_gemm:
+            deep_gemm_experts = mk.FusedMoEModularKernel(
+                prepare_finalize=MoEPrepareAndFinalizeNoEP(),
+                fused_experts=TritonOrDeepGemmExperts(
+                    moe_config=FusedMoEConfig(
+                        num_experts=num_experts,
+                        experts_per_token=topk,
+                        hidden_dim=hidden_size,
+                        intermediate_size_per_partition=shard_intermediate_size,
+                        num_local_experts=num_experts,
+                        activation="silu",
+                        moe_parallel_config=FusedMoEParallelConfig.make_no_parallel(),
+                        in_dtype=init_dtype,
+                        routing_method=RoutingMethodType.TopK,
+                        device="cuda",
+                    ),
+                    quant_config=quant_config,
+                ),
+            )
+
         with override_config(config):
             topk_weights, topk_ids, token_expert_indices = fused_topk(
                 x, input_gating, topk, renormalize=not use_deep_gemm
             )
+
+            if use_deep_gemm:
+                return deep_gemm_experts(
+                    x, w1, w2, topk_weights, topk_ids, inplace=True
+                )
             return fused_experts(
                 x,
                 w1,
@@ -208,7 +239,6 @@ def benchmark_config(
                 topk_ids,
                 inplace=True,
                 quant_config=quant_config,
-                allow_deep_gemm=use_deep_gemm,
             )
 
     # JIT compilation & warmup
@@ -645,6 +675,7 @@ def main(args: argparse.Namespace):
         "DeepseekV3ForCausalLM",
         "DeepseekV32ForCausalLM",
         "Glm4MoeForCausalLM",
+        "Glm4MoeLiteForCausalLM",
         "NemotronHForCausalLM",
     ):
         E = config.n_routed_experts

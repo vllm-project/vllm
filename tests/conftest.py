@@ -63,7 +63,7 @@ from vllm.distributed import (
 )
 from vllm.logger import init_logger
 from vllm.logprobs import Logprob
-from vllm.multimodal.base import MediaWithBytes
+from vllm.multimodal.media import MediaWithBytes
 from vllm.multimodal.utils import fetch_image
 from vllm.outputs import RequestOutput
 from vllm.sampling_params import BeamSearchParams
@@ -187,6 +187,17 @@ def dist_init():
     initialize_model_parallel(1, 1)
     yield
     cleanup_dist_env_and_memory()
+
+
+@pytest.fixture
+def default_vllm_config():
+    """Set a default VllmConfig for tests that directly test CustomOps or pathways
+    that use get_current_vllm_config() outside of a full engine context.
+    """
+    from vllm.config import VllmConfig, set_current_vllm_config
+
+    with set_current_vllm_config(VllmConfig()):
+        yield
 
 
 @pytest.fixture()

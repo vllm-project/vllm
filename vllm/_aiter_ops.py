@@ -9,6 +9,10 @@ from torch._ops import OpOverload
 import vllm.envs as envs
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import direct_register_custom_op, is_torch_equal_or_newer
+from vllm.v1.attention.ops.rocm_aiter_mla_sparse import (
+    rocm_aiter_sparse_attn_indexer,
+    rocm_aiter_sparse_attn_indexer_fake,
+)
 
 _FP8_DTYPE = current_platform.fp8_dtype()
 
@@ -196,6 +200,24 @@ def _rocm_aiter_topk_softmax_fake(
     pass
 
 
+def _rocm_aiter_topk_sigmoid_impl(
+    topk_weights: torch.Tensor,
+    topk_indices: torch.Tensor,
+    gating_output: torch.Tensor,
+) -> None:
+    from aiter import topk_sigmoid
+
+    topk_sigmoid(topk_weights, topk_indices, gating_output)
+
+
+def _rocm_aiter_topk_sigmoid_fake(
+    topk_weights: torch.Tensor,
+    topk_indices: torch.Tensor,
+    gating_output: torch.Tensor,
+) -> None:
+    pass
+
+
 def _rocm_aiter_biased_grouped_topk_impl(
     gating_output: torch.Tensor,
     correction_bias: torch.Tensor,
@@ -372,7 +394,7 @@ def _rocm_aiter_gemm_a8w8_impl(
     # gemm_a8w8_CK(a, b, scale_a, scale_b, bias) expects
     # a to be [M, K]
     # b to be [N, K]
-    # CutlassScaledMMLinearKernel prepare weight `w_q` in [K, N] format
+    # CutlassInt8ScaledMMLinearKernel prepare weight `w_q` in [K, N] format
     return gemm_a8w8_CK(A, B, As, Bs, bias, output_dtype)
 
 
@@ -833,9 +855,11 @@ class rocm_aiter_ops:
     _FMOE_ENABLED = envs.VLLM_ROCM_USE_AITER_MOE
     _MLA_ENABLED = envs.VLLM_ROCM_USE_AITER_MLA
     _MHA_ENABLED = envs.VLLM_ROCM_USE_AITER_MHA
+    _SHUFFLE_KV_CACHE_ENABLED = envs.VLLM_ROCM_SHUFFLE_KV_CACHE_LAYOUT
     _TRITON_UNIFIED_ATTN_ENABLED = envs.VLLM_ROCM_USE_AITER_UNIFIED_ATTENTION
     # TODO: Consolidate under _LINEAR_ENABLED
     _FP8BMM_ENABLED = envs.VLLM_ROCM_USE_AITER_FP8BMM
+    _FP4BMM_ENABLED = envs.VLLM_ROCM_USE_AITER_FP4BMM
     # TODO: Consolidate under _LINEAR_ENABLED
     _FP4_GEMM_DYNAMIC_QUANT_ASM = envs.VLLM_ROCM_USE_AITER_FP4_ASM_GEMM
     # TODO: Consolidate under VLLM_ROCM_USE_AITER_ROPE
@@ -859,8 +883,10 @@ class rocm_aiter_ops:
         cls._FMOE_ENABLED = envs.VLLM_ROCM_USE_AITER_MOE
         cls._MLA_ENABLED = envs.VLLM_ROCM_USE_AITER_MLA
         cls._MHA_ENABLED = envs.VLLM_ROCM_USE_AITER_MHA
+        cls._SHUFFLE_KV_CACHE_ENABLED = envs.VLLM_ROCM_SHUFFLE_KV_CACHE_LAYOUT
         cls._TRITON_UNIFIED_ATTN_ENABLED = envs.VLLM_ROCM_USE_AITER_UNIFIED_ATTENTION
         cls._FP8BMM_ENABLED = envs.VLLM_ROCM_USE_AITER_FP8BMM
+        cls._FP4BMM_ENABLED = envs.VLLM_ROCM_USE_AITER_FP4BMM
         cls._FP4_GEMM_DYNAMIC_QUANT_ASM = envs.VLLM_ROCM_USE_AITER_FP4_ASM_GEMM
         cls._TRITON_ROTARY_EMBED = envs.VLLM_ROCM_USE_AITER_TRITON_ROPE
         cls._MOE_SHARED_EXPERTS_ENABLED = envs.VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS
@@ -908,6 +934,11 @@ class rocm_aiter_ops:
 
     @classmethod
     @if_aiter_supported
+    def is_shuffle_kv_cache_enabled(cls) -> bool:
+        return cls._AITER_ENABLED and cls._SHUFFLE_KV_CACHE_ENABLED
+
+    @classmethod
+    @if_aiter_supported
     def is_triton_unified_attn_enabled(cls) -> bool:
         return cls._AITER_ENABLED and cls._TRITON_UNIFIED_ATTN_ENABLED
 
@@ -915,6 +946,11 @@ class rocm_aiter_ops:
     @if_aiter_supported
     def is_fp8bmm_enabled(cls) -> bool:
         return cls._AITER_ENABLED and cls._FP8BMM_ENABLED
+
+    @classmethod
+    @if_aiter_supported
+    def is_fp4bmm_enabled(cls) -> bool:
+        return cls._AITER_ENABLED and cls._FP4BMM_ENABLED
 
     @classmethod
     @if_aiter_supported
@@ -964,6 +1000,14 @@ class rocm_aiter_ops:
                 op_func=_rocm_aiter_topk_softmax_impl,
                 mutates_args=["topk_weights", "topk_indices", "token_expert_indices"],
                 fake_impl=_rocm_aiter_topk_softmax_fake,
+                dispatch_key=current_platform.dispatch_key,
+            )
+
+            direct_register_custom_op(
+                op_name="rocm_aiter_topk_sigmoid",
+                op_func=_rocm_aiter_topk_sigmoid_impl,
+                mutates_args=["topk_weights", "topk_indices"],
+                fake_impl=_rocm_aiter_topk_sigmoid_fake,
                 dispatch_key=current_platform.dispatch_key,
             )
 
@@ -1074,6 +1118,14 @@ class rocm_aiter_ops:
                 op_name="rocm_aiter_per_token_quant",
                 op_func=_rocm_aiter_per_token_quant_impl,
                 fake_impl=_rocm_aiter_per_token_quant_fake,
+                dispatch_key=current_platform.dispatch_key,
+            )
+
+            direct_register_custom_op(
+                op_name="rocm_aiter_sparse_attn_indexer",
+                op_func=rocm_aiter_sparse_attn_indexer,
+                mutates_args=["topk_indices_buffer"],
+                fake_impl=rocm_aiter_sparse_attn_indexer_fake,
                 dispatch_key=current_platform.dispatch_key,
             )
 
@@ -1247,6 +1299,19 @@ class rocm_aiter_ops:
         return topk_weights, topk_indices
 
     @staticmethod
+    def topk_sigmoid(
+        topk_weights: torch.Tensor,
+        topk_indices: torch.Tensor,
+        token_expert_indices: torch.Tensor,
+        gating_output: torch.Tensor,
+        renormalize: bool,
+    ) -> tuple[torch.Tensor, ...]:
+        torch.ops.vllm.rocm_aiter_topk_sigmoid(
+            topk_weights, topk_indices, gating_output
+        )
+        return topk_weights, topk_indices
+
+    @staticmethod
     def biased_grouped_topk(
         gating_output: torch.Tensor,
         correction_bias: torch.Tensor,
@@ -1395,6 +1460,29 @@ class rocm_aiter_ops:
         )
         query = query.view(query_shape)
         key = key.view(key_shape)
+
+    @staticmethod
+    def batched_gemm_a16wfp4(
+        X: torch.Tensor,
+        W: torch.Tensor,
+        w_scale: torch.Tensor,
+        Y: torch.Tensor,
+        transpose_bm: bool | None = False,
+        prequant: bool | None = False,
+        y_scale: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        # ruff: noqa: E501 # isort: skip
+        from aiter.ops.triton.batched_gemm_a16wfp4 import batched_gemm_a16wfp4
+
+        return batched_gemm_a16wfp4(
+            X,
+            W,
+            w_scale,
+            y=Y,
+            transpose_bm=transpose_bm,
+            prequant=prequant,
+            y_scale=y_scale,
+        )
 
     @staticmethod
     def triton_fp8_bmm(

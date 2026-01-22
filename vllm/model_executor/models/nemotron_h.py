@@ -483,6 +483,7 @@ class NemotronHAttention(nn.Module):
             self.scaling,
             num_kv_heads=self.num_kv_heads,
             cache_config=cache_config,
+            quant_config=quant_config,
             prefix=f"{prefix}.attn",
         )
 
@@ -636,6 +637,7 @@ class NemotronHModel(nn.Module):
                 #   what the activation is applied to
                 # - FusedMoe.w3 (aka up_proj) should be ignored since we're
                 #   using non-gated MoE
+                self,
                 ckpt_gate_proj_name="up_proj",
                 ckpt_down_proj_name="down_proj",
                 ckpt_up_proj_name="",
@@ -745,6 +747,9 @@ class NemotronHForCausalLM(
     MixtureOfExperts,
     SupportsMambaPrefixCaching,
 ):
+    # Relevant only if self.has_moe is True
+    is_non_gated_moe: bool = True
+
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_prefix={"backbone": "model"},
         orig_to_new_substr={"A_log": "A", "embeddings": "embed_tokens"},
