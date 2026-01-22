@@ -7,6 +7,7 @@ from itertools import islice
 
 import torch
 from einops import rearrange
+from flashinfer.gdn_prefill import chunk_gated_delta_rule as chunk_gated_delta_rule_fi
 from torch import nn
 from transformers.activations import ACT2FN
 
@@ -30,9 +31,12 @@ from vllm.distributed import (
 from vllm.forward_context import ForwardContext, get_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fla.ops import (
-    chunk_gated_delta_rule,
+    chunk_gated_delta_rule as fla_chunk_gated_delta_rule,
+)
+from vllm.model_executor.layers.fla.ops import (
     fused_recurrent_gated_delta_rule,
 )
+from vllm.model_executor.layers.fla.ops.chunk import l2norm_fwd
 from vllm.model_executor.layers.fused_moe import SharedFusedMoE
 from vllm.model_executor.layers.layernorm import (
     GemmaRMSNorm as Qwen3NextRMSNorm,
@@ -97,6 +101,57 @@ from .utils import (
 logger = init_logger(__name__)
 
 KVCache = tuple[torch.Tensor, torch.Tensor]
+
+
+def chunk_gated_delta_rule(
+    q,
+    k,
+    v,
+    g,
+    beta,
+    initial_state,
+    output_final_state,
+    cu_seqlens,
+    head_first=False,
+    use_qk_l2norm_in_kernel=True,
+):
+    if (
+        current_platform.is_cuda()
+        and current_platform.get_device_capability().major == 9
+    ):
+        if use_qk_l2norm_in_kernel:
+            q = l2norm_fwd(q)
+            k = l2norm_fwd(k)
+
+        # use flashinfer implementation
+        q = rearrange(q, "1 (b t) h d -> (b t) h d").contiguous()
+        k = rearrange(k, "1 (b t) h d -> (b t) h d").contiguous()
+        v = rearrange(v, "1 (b t) h d -> (b t) h d").contiguous()
+        g = rearrange(g, "1 (b t) h -> (b t) h").contiguous()
+        beta = rearrange(beta, "1 (b t) h -> (b t) h").contiguous()
+        return chunk_gated_delta_rule_fi(
+            q=q,
+            k=k,
+            v=v,
+            g=g,
+            beta=beta,
+            initial_state=initial_state,
+            output_final_state=output_final_state,
+            cu_seqlens=cu_seqlens,
+        )
+
+    return fla_chunk_gated_delta_rule(
+        q=q,
+        k=k,
+        v=v,
+        g=g,
+        beta=beta,
+        initial_state=initial_state,
+        output_final_state=output_final_state,
+        cu_seqlens=cu_seqlens,
+        head_first=head_first,
+        use_qk_l2norm_in_kernel=use_qk_l2norm_in_kernel,
+    )
 
 
 class Qwen3NextSparseMoeBlock(nn.Module):
