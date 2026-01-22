@@ -923,10 +923,7 @@ class OpenAIServingResponses(OpenAIServing):
 
         Args:
             output: The CompletionOutput to split
-            delimiters: List of text delimiters (e.g., ["<|start|>", "<|im_start|>"])
             tokenizer: The tokenizer to use for encoding the delimiters
-            end_delimiters: Optional list of end delimiters to strip from segment
-                ends (e.g., ["<|eom|>", "<|eot|>"])
 
         Returns:
             A list of CompletionOutput objects, one for each split segment.
