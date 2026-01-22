@@ -672,6 +672,25 @@ async def test_response_format_json_schema(client: openai.AsyncOpenAI):
 
 
 @pytest.mark.asyncio
+async def test_response_format_text(client: openai.AsyncOpenAI):
+    for _ in range(2):
+        resp = await client.chat.completions.create(
+            model=MODEL_NAME,
+            messages=[
+                {
+                    "role": "user",
+                    "content": "what is 1+1?",
+                }
+            ],
+            max_completion_tokens=10,
+            response_format={"type": "text"},
+        )
+
+        content = resp.choices[0].message.content
+        assert content is not None
+
+
+@pytest.mark.asyncio
 async def test_extra_fields_allowed(client: openai.AsyncOpenAI):
     resp = await client.chat.completions.create(
         model=MODEL_NAME,
