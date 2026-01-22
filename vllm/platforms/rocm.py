@@ -164,6 +164,22 @@ def use_rocm_custom_paged_attention(
         )
 
 
+@cache
+def flash_attn_triton_available() -> bool:
+    if not on_gfx1x():
+        return False
+    try:
+        from importlib.util import find_spec
+        if find_spec("flash_attn") is None:
+            return False
+        if find_spec("flash_attn.flash_attn_triton_amd") is None:
+            return False
+        os.environ["FLASH_ATTENTION_TRITON_AMD_ENABLE"] = "TRUE"
+        return True
+    except ImportError:
+        return False
+
+
 class RocmPlatform(Platform):
     _enum = PlatformEnum.ROCM
     device_name: str = "rocm"
@@ -359,6 +375,17 @@ class RocmPlatform(Platform):
             and (dtype == torch.float16 or dtype == torch.bfloat16)
         ):
             logger.info_once("Using Flash Attention backend for ViT model.")
+            return AttentionBackendEnum.FLASH_ATTN
+
+        # RDNA3/RDNA4 (gfx11xx/gfx12xx): Use Flash Attention Triton backend, CK not supported
+        if (
+            on_gfx1x()
+            and flash_attn_triton_available()
+            and (dtype == torch.float16 or dtype == torch.bfloat16)
+        ):
+            logger.info_once(
+                "Using Flash Attention (Triton backend) for ViT model on RDNA."
+            )
             return AttentionBackendEnum.FLASH_ATTN
 
         logger.info_once("Using Torch SDPA backend for ViT model.")
