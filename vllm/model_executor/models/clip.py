@@ -15,18 +15,18 @@ from transformers import (
 )
 
 from vllm.attention.layer import Attention
-from vllm.attention.layers.mm_encoder_attention import MMEncoderAttention
 from vllm.config import VllmConfig
 from vllm.config.multimodal import BaseDummyOptions, MultiModalConfig
 from vllm.distributed import divide, get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.activation import get_act_fn
+from vllm.model_executor.layers.attention.mm_encoder_attention import MMEncoderAttention
 from vllm.model_executor.layers.conv import Conv2dLayer
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
     QKVParallelLinear,
     RowParallelLinear,
 )
-from vllm.model_executor.layers.pooler import DispatchPooler, Pooler
+from vllm.model_executor.layers.pooler import DispatchPooler
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmbedding
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
@@ -41,13 +41,13 @@ from vllm.multimodal.inputs import (
 )
 from vllm.multimodal.parse import ImageProcessorItems, ImageSize, MultiModalDataItems
 from vllm.multimodal.processing import (
+    BaseDummyInputsBuilder,
     BaseMultiModalProcessor,
     BaseProcessingInfo,
     PromptIndexTargets,
     PromptReplacement,
     PromptUpdate,
 )
-from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from vllm.sequence import IntermediateTensors
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
@@ -145,7 +145,7 @@ class CLIPProcessingInfo(BaseProcessingInfo):
                 image_width=image_width,
                 image_height=image_height,
             ),
-            _get_vision_feature_select_strategy(pooler_config.pooling_type),
+            _get_vision_feature_select_strategy(pooler_config.seq_pooling_type),
         )
 
     def get_image_size_with_most_features(self) -> ImageSize:
@@ -819,7 +819,7 @@ class CLIPVisionModel(nn.Module):
 
 
 # Assume EOS token corresponds to LAST token in text model
-@default_pooling_type("LAST")
+@default_pooling_type(seq_pooling_type="LAST")
 @MULTIMODAL_REGISTRY.register_processor(
     CLIPMultiModalProcessor,
     info=CLIPProcessingInfo,
@@ -853,39 +853,36 @@ class CLIPEmbeddingModel(nn.Module, SupportsMultiModal, SupportsQuant):
         self.text_embed_dim = text_config.hidden_size
         self.vision_embed_dim = vision_config.hidden_size
 
-        self.text_model = CLIPTextTransformer(
-            text_config,
-            quant_config=quant_config,
-            prefix=maybe_prefix(prefix, "text_model"),
-        )
-        self.vision_model = CLIPVisionTransformer(
-            vision_config,
-            quant_config=quant_config,
-            multimodal_config=multimodal_config,
-            prefix=maybe_prefix(prefix, "vision_model"),
-        )
+        with self._mark_language_model(vllm_config):
+            self.text_model = CLIPTextTransformer(
+                text_config,
+                quant_config=quant_config,
+                prefix=maybe_prefix(prefix, "text_model"),
+            )
+            self.text_projection = nn.Linear(
+                self.text_embed_dim,
+                self.projection_dim,
+                bias=False,
+            )
 
-        self.visual_projection = nn.Linear(
-            self.vision_embed_dim,
-            self.projection_dim,
-            bias=False,
-        )
-        self.text_projection = nn.Linear(
-            self.text_embed_dim,
-            self.projection_dim,
-            bias=False,
-        )
+        with self._mark_tower_model(vllm_config, "image"):
+            self.vision_model = CLIPVisionTransformer(
+                vision_config,
+                quant_config=quant_config,
+                multimodal_config=multimodal_config,
+                prefix=maybe_prefix(prefix, "vision_model"),
+            )
+            self.visual_projection = nn.Linear(
+                self.vision_embed_dim,
+                self.projection_dim,
+                bias=False,
+            )
 
         pooler_config = vllm_config.model_config.pooler_config
         assert pooler_config is not None
         self.pooler_config = pooler_config
 
-        self.pooler = DispatchPooler(
-            {
-                "token_embed": Pooler.for_token_embed(pooler_config),
-                "embed": Pooler.for_embed(pooler_config),
-            }
-        )
+        self.pooler = DispatchPooler.for_embedding(pooler_config)
 
         # Assumes that self.forward is called after self.embed_input_ids
         self._is_text_input = True
@@ -913,7 +910,7 @@ class CLIPEmbeddingModel(nn.Module, SupportsMultiModal, SupportsQuant):
     ) -> torch.Tensor:
         if feature_select_strategy is None:
             feature_select_strategy = _get_vision_feature_select_strategy(
-                self.pooler_config.pooling_type
+                self.pooler_config.seq_pooling_type
             )
 
         pooled_output = self.vision_model(
@@ -944,9 +941,6 @@ class CLIPEmbeddingModel(nn.Module, SupportsMultiModal, SupportsQuant):
         pixel_values = inputs["data"]
 
         return self.get_image_features(pixel_values)
-
-    def get_language_model(self) -> torch.nn.Module:
-        return self.text_model
 
     def _embed_text_input_ids(
         self,

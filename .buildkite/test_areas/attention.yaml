@@ -18,4 +18,4 @@ steps:
     - vllm/v1/attention
     - tests/v1/attention
   commands:
-    - VLLM_DISABLE_FLASHINFER_PREFILL=1 pytest -v -s v1/attention # TODO: FI prefill is bugged and causes incorrectness, fix this
+    - pytest -v -s v1/attention

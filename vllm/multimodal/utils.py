@@ -9,23 +9,27 @@ from concurrent.futures import ThreadPoolExecutor
 from itertools import groupby
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, TypeVar
-from urllib.parse import ParseResult, urlparse
 from urllib.request import url2pathname
 
 import numpy as np
 import numpy.typing as npt
 import torch
 from PIL import Image, UnidentifiedImageError
+from urllib3.util import Url, parse_url
 
 import vllm.envs as envs
 from vllm.connections import HTTPConnection, global_http_connection
 from vllm.logger import init_logger
 from vllm.utils.registry import ExtensionManager
 
-from .audio import AudioEmbeddingMediaIO, AudioMediaIO
-from .base import MediaIO
-from .image import ImageEmbeddingMediaIO, ImageMediaIO
-from .video import VideoMediaIO
+from .media import (
+    AudioEmbeddingMediaIO,
+    AudioMediaIO,
+    ImageEmbeddingMediaIO,
+    ImageMediaIO,
+    MediaIO,
+    VideoMediaIO,
+)
 
 if TYPE_CHECKING:
     from .inputs import (
@@ -101,11 +105,14 @@ class MediaConnector:
 
     def _load_data_url(
         self,
-        url_spec: ParseResult,
+        url_spec: Url,
         media_io: MediaIO[_M],
     ) -> _M:  # type: ignore[type-var]
-        data_spec, data = url_spec.path.split(",", 1)
+        url_spec_path = url_spec.path or ""
+        data_spec, data = url_spec_path.split(",", 1)
         media_type, data_type = data_spec.split(";", 1)
+        # media_type starts with a leading "/" (e.g., "/video/jpeg")
+        media_type = media_type.lstrip("/")
 
         if data_type != "base64":
             msg = "Only base64 data URLs are supported for now."
@@ -115,7 +122,7 @@ class MediaConnector:
 
     def _load_file_url(
         self,
-        url_spec: ParseResult,
+        url_spec: Url,
         media_io: MediaIO[_M],
     ) -> _M:  # type: ignore[type-var]
         allowed_local_media_path = self.allowed_local_media_path
@@ -124,7 +131,9 @@ class MediaConnector:
                 "Cannot load local files without `--allowed-local-media-path`."
             )
 
-        filepath = Path(url2pathname(url_spec.netloc + url_spec.path))
+        url_spec_path = url_spec.path or ""
+        url_spec_netloc = url_spec.netloc or ""
+        filepath = Path(url2pathname(url_spec_netloc + url_spec_path))
         if allowed_local_media_path not in filepath.resolve().parents:
             raise ValueError(
                 f"The file path {filepath} must be a subpath "
@@ -133,7 +142,7 @@ class MediaConnector:
 
         return media_io.load_file(filepath)
 
-    def _assert_url_in_allowed_media_domains(self, url_spec: ParseResult) -> None:
+    def _assert_url_in_allowed_media_domains(self, url_spec: Url) -> None:
         if (
             self.allowed_media_domains
             and url_spec.hostname not in self.allowed_media_domains
@@ -151,9 +160,9 @@ class MediaConnector:
         *,
         fetch_timeout: int | None = None,
     ) -> _M:  # type: ignore[type-var]
-        url_spec = urlparse(url)
+        url_spec = parse_url(url)
 
-        if url_spec.scheme.startswith("http"):
+        if url_spec.scheme and url_spec.scheme.startswith("http"):
             self._assert_url_in_allowed_media_domains(url_spec)
 
             connection = self.connection
@@ -181,10 +190,10 @@ class MediaConnector:
         *,
         fetch_timeout: int | None = None,
     ) -> _M:
-        url_spec = urlparse(url)
+        url_spec = parse_url(url)
         loop = asyncio.get_running_loop()
 
-        if url_spec.scheme.startswith("http"):
+        if url_spec.scheme and url_spec.scheme.startswith("http"):
             self._assert_url_in_allowed_media_domains(url_spec)
 
             connection = self.connection

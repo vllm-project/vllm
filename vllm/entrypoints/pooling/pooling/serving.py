@@ -14,12 +14,12 @@ from typing_extensions import assert_never
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.chat_utils import ChatTemplateContentFormatOption
 from vllm.entrypoints.logger import RequestLogger
-from vllm.entrypoints.openai.protocol import (
+from vllm.entrypoints.openai.engine.protocol import (
     ErrorResponse,
     UsageInfo,
 )
-from vllm.entrypoints.openai.serving_engine import OpenAIServing
-from vllm.entrypoints.openai.serving_models import OpenAIServingModels
+from vllm.entrypoints.openai.engine.serving import OpenAIServing
+from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.entrypoints.pooling.pooling.protocol import (
     IOProcessorRequest,
     IOProcessorResponse,
@@ -144,10 +144,8 @@ class OpenAIServingPooling(OpenAIServing):
                     request.messages,
                     chat_template=request.chat_template or self.chat_template,
                     chat_template_content_format=self.chat_template_content_format,
-                    # In pooling requests, we are not generating tokens,
-                    # so there is no need to append extra tokens to the input
-                    add_generation_prompt=False,
-                    continue_final_message=False,
+                    add_generation_prompt=request.add_generation_prompt,
+                    continue_final_message=request.continue_final_message,
                     add_special_tokens=request.add_special_tokens,
                 )
             elif isinstance(request, PoolingCompletionRequest):

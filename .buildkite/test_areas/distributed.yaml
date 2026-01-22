@@ -183,7 +183,7 @@ steps:
     - tests/v1/kv_connector/nixl_integration/
   commands:
     - uv pip install --system -r /vllm-workspace/requirements/kv_connectors.txt
-    - bash v1/kv_connector/nixl_integration/tp_config_sweep_accuracy_test.sh
+    - bash v1/kv_connector/nixl_integration/config_sweep_accuracy_test.sh
 
 - label: DP EP Distributed NixlConnector PD accuracy tests (4 GPUs)
   timeout_in_minutes: 30

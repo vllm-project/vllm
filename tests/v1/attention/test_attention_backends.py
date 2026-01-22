@@ -15,8 +15,6 @@ from tests.v1.attention.utils import (
     create_vllm_config,
     try_get_attention_backend,
 )
-from vllm.attention.backends.abstract import AttentionType
-from vllm.attention.backends.registry import AttentionBackendEnum
 from vllm.config import ModelConfig
 from vllm.platforms import current_platform
 from vllm.utils.math_utils import cdiv
@@ -25,8 +23,9 @@ from vllm.utils.torch_utils import (
     is_torch_equal_or_newer,
     set_random_seed,
 )
+from vllm.v1.attention.backend import AttentionType, CommonAttentionMetadata
+from vllm.v1.attention.backends.registry import AttentionBackendEnum
 from vllm.v1.attention.backends.utils import (
-    CommonAttentionMetadata,
     set_kv_cache_layout,
 )
 from vllm.v1.kv_cache_interface import FullAttentionSpec
@@ -556,7 +555,7 @@ def _test_backend_correctness(
 @pytest.mark.parametrize("model", ["meta-llama/Meta-Llama-3-8B"])
 @pytest.mark.parametrize("tensor_parallel_size", [1, 2, 4])
 def test_causal_backend_correctness(
-    batch_spec_name: str, model: str, tensor_parallel_size: int
+    default_vllm_config, batch_spec_name: str, model: str, tensor_parallel_size: int
 ):
     """Test backend's correctness with causal attention."""
 

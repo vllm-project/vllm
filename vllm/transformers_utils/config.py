@@ -10,9 +10,7 @@ from pathlib import Path
 from typing import Any, Literal, TypeAlias
 
 import huggingface_hub
-from huggingface_hub import (
-    get_safetensors_metadata,
-)
+from huggingface_hub import get_safetensors_metadata
 from packaging.version import Version
 from transformers import GenerationConfig, PretrainedConfig
 from transformers.models.auto.image_processing_auto import get_image_processor_config
@@ -35,7 +33,6 @@ from .gguf_utils import (
     split_remote_gguf,
 )
 from .repo_utils import (
-    _get_hf_token,
     file_or_path_exists,
     get_hf_file_to_dict,
     list_repo_files,
@@ -137,7 +134,6 @@ class HFConfigParser(ConfigParserBase):
             revision=revision,
             code_revision=code_revision,
             trust_remote_code=trust_remote_code,
-            token=_get_hf_token(),
             **kwargs,
         )
         # Use custom model class if it's in our registry
@@ -159,7 +155,6 @@ class HFConfigParser(ConfigParserBase):
                 revision=revision,
                 code_revision=code_revision,
                 trust_remote_code=trust_remote_code,
-                token=_get_hf_token(),
                 **kwargs,
             )
         else:
@@ -170,7 +165,6 @@ class HFConfigParser(ConfigParserBase):
                     trust_remote_code=trust_remote_code,
                     revision=revision,
                     code_revision=code_revision,
-                    token=_get_hf_token(),
                     **kwargs,
                 )
             except ValueError as e:
@@ -220,7 +214,6 @@ class MistralConfigParser(ConfigParserBase):
                 model,
                 revision=revision,
                 code_revision=code_revision,
-                token=_get_hf_token(),
                 **kwargs,
             )
         except OSError:  # Not found
@@ -531,7 +524,6 @@ def maybe_override_with_speculators(
         model if gguf_model_repo is None else gguf_model_repo,
         revision=revision,
         trust_remote_code=trust_remote_code,
-        token=_get_hf_token(),
         **kwargs,
     )
     speculators_config = config_dict.get("speculators_config")
@@ -742,7 +734,10 @@ def get_config(
 
 
 @cache
-def get_pooling_config(model: str, revision: str | None = "main") -> dict | None:
+def get_pooling_config(
+    model: str,
+    revision: str | None = "main",
+) -> dict[str, Any] | None:
     """
     This function gets the pooling and normalize
     config from the model - only applies to
@@ -793,38 +788,40 @@ def get_pooling_config(model: str, revision: str | None = "main") -> dict | None
     )
 
     if pooling:
-        pooling_file_name = "{}/config.json".format(pooling["path"])
-        pooling_dict = get_hf_file_to_dict(pooling_file_name, model, revision)
-        pooling_type_name = next(
-            (item for item, val in pooling_dict.items() if val is True), None
-        )
+        from vllm.config.pooler import SEQ_POOLING_TYPES, TOK_POOLING_TYPES
 
-        if pooling_type_name is not None:
-            pooling_type_name = get_pooling_config_name(pooling_type_name)
+        pooling_file_name = "{}/config.json".format(pooling["path"])
+        pooling_dict = get_hf_file_to_dict(pooling_file_name, model, revision) or {}
 
         logger.info("Found pooling configuration.")
-        return {"pooling_type": pooling_type_name, "normalize": normalize}
+
+        config: dict[str, Any] = {"use_activation": normalize}
+        for key, val in pooling_dict.items():
+            if val is True:
+                pooling_type = parse_pooling_type(key)
+                if pooling_type in SEQ_POOLING_TYPES:
+                    config["seq_pooling_type"] = pooling_type
+                elif pooling_type in TOK_POOLING_TYPES:
+                    config["tok_pooling_type"] = pooling_type
+                else:
+                    logger.debug("Skipping unrelated field: %r=%r", key, val)
+
+        return config
 
     return None
 
 
-def get_pooling_config_name(pooling_name: str) -> str | None:
+def parse_pooling_type(pooling_name: str):
     if "pooling_mode_" in pooling_name:
         pooling_name = pooling_name.replace("pooling_mode_", "")
 
     if "_" in pooling_name:
-        pooling_name = pooling_name.split("_")[0]
+        pooling_name = pooling_name.split("_", 1)[0]
 
     if "lasttoken" in pooling_name:
         pooling_name = "last"
 
-    supported_pooling_types = ["LAST", "ALL", "CLS", "STEP", "MEAN"]
-    pooling_type_name = pooling_name.upper()
-
-    if pooling_type_name in supported_pooling_types:
-        return pooling_type_name
-
-    raise NotImplementedError(f"Pooling type {pooling_type_name} not supported")
+    return pooling_name.upper()
 
 
 @cache
@@ -868,9 +865,7 @@ def get_sentence_transformer_tokenizer_config(
     if not encoder_dict and not Path(model).is_absolute():
         try:
             # If model is on HuggingfaceHub, get the repo files
-            repo_files = list_repo_files(
-                model, revision=revision, token=_get_hf_token()
-            )
+            repo_files = list_repo_files(model, revision=revision)
         except Exception:
             repo_files = []
 
@@ -1039,10 +1034,7 @@ def try_get_safetensors_metadata(
     revision: str | None = None,
 ):
     get_safetensors_metadata_partial = partial(
-        get_safetensors_metadata,
-        model,
-        revision=revision,
-        token=_get_hf_token(),
+        get_safetensors_metadata, model, revision=revision
     )
 
     try:
