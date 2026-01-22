@@ -207,7 +207,6 @@ def test_eagle3_acceptance_length(
 
     with monkeypatch.context() as m:
         m.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
-        m.setenv("VLLM_ATTENTION_BACKEND", attention_backend)
 
         with VllmRunner(
             model_name=model_config.verifier,
@@ -216,6 +215,7 @@ def test_eagle3_acceptance_length(
                 "model": model_config.drafter,
                 "num_speculative_tokens": num_spec_tokens,
             },
+            attention_config={"backend": attention_backend},
             tensor_parallel_size=tp_size,
             gpu_memory_utilization=0.7,
             disable_log_stats=False,
