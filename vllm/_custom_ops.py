@@ -44,7 +44,7 @@ def paged_attention_v1(
     alibi_slopes: torch.Tensor | None,
     kv_cache_dtype: str,
     k_scale: torch.Tensor,
-    o_scale: torch.Tensor,
+    v_scale: torch.Tensor,
     tp_rank: int = 0,
     blocksparse_local_blocks: int = 0,
     blocksparse_vert_stride: int = 0,
