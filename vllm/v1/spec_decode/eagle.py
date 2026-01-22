@@ -1272,12 +1272,12 @@ class SpecDecodeBaseProposer:
                 if num_tokens_across_dp is not None:
                     num_tokens_across_dp[self.dp_rank] = num_input_tokens
 
-            use_eagle_buffer = (
+            # Make sure to use EAGLE's own buffer during cudagraph capture.
+            if (
                 self.attn_layer_names
                 and slot_mappings is not None
                 and self.attn_layer_names[0] in slot_mappings
-            )
-            if use_eagle_buffer:
+            ):
                 slot_mapping_dict = self._get_slot_mapping(num_input_tokens)
             else:
                 slot_mapping_dict = slot_mappings or {}
