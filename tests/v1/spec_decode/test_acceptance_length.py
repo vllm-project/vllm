@@ -61,9 +61,12 @@ EAGLE3_MODEL_CONFIGS = [
         expected_acceptance_length=2.56,
         expected_acceptance_lengths_per_pos=[0.7165, 0.5120, 0.3337],
         id="gpt-oss-20b-eagle3",
-        # FLASHINFER incompatible: gpt-oss-20b uses sink attention which
-        # FLASHINFER does not support ("sink setting not supported")
-        excluded_backends={AttentionBackendEnum.FLASHINFER},
+        # gpt-oss-20b uses sink attention which FLASHINFER and
+        # ROCM_AITER_FA do not support ("sink setting not supported")
+        excluded_backends={
+            AttentionBackendEnum.FLASHINFER,
+            AttentionBackendEnum.ROCM_AITER_FA,
+        },
     ),
 ]
 
@@ -83,7 +86,10 @@ EXCLUDED_BACKENDS = {AttentionBackendEnum.FLEX_ATTENTION}
 
 
 def get_available_attention_backends() -> list[str]:
-    if not hasattr(current_platform, "get_valid_backends"):
+    if current_platform.is_rocm():
+        return ["TRITON_ATTN", "ROCM_AITER_FA"]
+
+    if current_platform.get_valid_backends is None:
         return ["FLASH_ATTN"]
 
     device_capability = current_platform.get_device_capability()
@@ -207,6 +213,9 @@ def test_eagle3_acceptance_length(
 
     with monkeypatch.context() as m:
         m.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
+        m.setenv("VLLM_ATTENTION_BACKEND", attention_backend)
+        if attention_backend == "ROCM_AITER_FA":
+            m.setenv("VLLM_ROCM_USE_AITER", "1")
 
         with VllmRunner(
             model_name=model_config.verifier,
