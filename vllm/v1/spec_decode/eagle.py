@@ -112,7 +112,9 @@ class SpecDecodeBaseProposer:
         self.input_ids = torch.zeros(
             self.max_num_tokens, dtype=torch.int32, device=device
         )
-        self.uses_mrope = self.vllm_config.model_config.uses_mrope
+        # Use draft model's M-RoPE setting, not target model's
+        # Draft models may be text-only even if target is multimodal
+        self.uses_mrope = self.draft_model_config.uses_mrope
         if self.uses_mrope:
             # NOTE: `mrope_positions` is implemented with one additional dummy
             # position on purpose to make it non-contiguous so that it can work
@@ -221,6 +223,11 @@ class SpecDecodeBaseProposer:
         if self.uses_mrope:
             self.mrope_positions[:, :num_tokens] = positions
         else:
+            # Convert M-RoPE positions if target model uses M-RoPE
+            # but draft doesn't, For text inputs, all M-RoPE
+            # dimensions are identical
+            if self.vllm_config.model_config.uses_mrope:
+                positions = positions[0]
             self.positions[:num_tokens] = positions
 
     def initialize_cudagraph_keys(self, cudagraph_mode: CUDAGraphMode) -> None:
@@ -1080,6 +1087,7 @@ class SpecDecodeBaseProposer:
             if self.get_model_name(target_model) in [
                 "Qwen2_5_VLForConditionalGeneration",
                 "Qwen3VLForConditionalGeneration",
+                "Qwen3VLMoeForConditionalGeneration",
             ]:
                 self.model.config.image_token_index = target_model.config.image_token_id
             elif self.get_model_name(target_model) == "PixtralForConditionalGeneration":
@@ -1214,10 +1222,14 @@ class SpecDecodeBaseProposer:
                 num_tokens_dp_padded, num_tokens_across_dp = self._pad_batch_across_dp(
                     num_tokens_unpadded=num_tokens, num_tokens_padded=num_tokens
                 )
-                cudagraph_runtime_mode, batch_desc = self.cudagraph_dispatcher.dispatch(
-                    num_tokens_dp_padded
-                )
-                num_input_tokens = batch_desc.num_tokens
+                if use_cudagraphs:
+                    cudagraph_runtime_mode, batch_desc = (
+                        self.cudagraph_dispatcher.dispatch(num_tokens_dp_padded)
+                    )
+                    num_input_tokens = batch_desc.num_tokens
+                else:
+                    cudagraph_runtime_mode = CUDAGraphMode.NONE
+                    num_input_tokens = num_tokens_dp_padded
                 if num_tokens_across_dp is not None:
                     num_tokens_across_dp[self.dp_rank] = num_input_tokens
 
