@@ -86,7 +86,7 @@ class RendererLike(Protocol):
 
         if prompt_embeds is not None:
             if isinstance(prompt_embeds, torch.Tensor):
-                prompt_embeds.append(prompt_embeds)
+                prompts_raw.append(prompt_embeds)
             else:
                 prompts_raw.extend(prompt_embeds)
 
@@ -137,10 +137,10 @@ class RendererLike(Protocol):
                 raise RuntimeError("Cannot run detokenization on embeddings")
 
             tokenizer = self.get_tokenizer()
-            prompt_text = tokenizer.decode(prompt["prompt_token_ids"])
-            prompt["prompt"] = prompt_text
+            prompt_text = tokenizer.decode(prompt["prompt_token_ids"])  # type: ignore[typeddict-item]
+            prompt["prompt"] = prompt_text  # type: ignore[typeddict-unknown-key]
 
-        return params.apply_post_tokenization(prompt)
+        return params.apply_post_tokenization(prompt)  # type: ignore[arg-type]
 
     def tokenize_prompts(
         self,
@@ -172,10 +172,10 @@ class RendererLike(Protocol):
                 raise RuntimeError("Cannot run detokenization on embeddings")
 
             tokenizer = self.get_async_tokenizer()
-            prompt_text = await tokenizer.decode(prompt["prompt_token_ids"])
-            prompt["prompt"] = prompt_text
+            prompt_text = await tokenizer.decode(prompt["prompt_token_ids"])  # type: ignore[typeddict-item]
+            prompt["prompt"] = prompt_text  # type: ignore[typeddict-unknown-key]
 
-        return params.apply_post_tokenization(prompt)
+        return params.apply_post_tokenization(prompt)  # type: ignore[arg-type]
 
     async def tokenize_prompts_async(
         self,
