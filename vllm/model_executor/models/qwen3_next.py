@@ -119,23 +119,29 @@ def chunk_gated_delta_rule(
         current_platform.is_cuda()
         and current_platform.get_device_capability().major == 9
     ):
+        logger.info_once(
+            "Using FlashInfer GDN prefill kernel on CUDA compute capability 9.x"
+        )
         if use_qk_l2norm_in_kernel:
             q = l2norm_fwd(q)
             k = l2norm_fwd(k)
 
         # use flashinfer implementation
-        q = rearrange(q, "1 (b t) h d -> (b t) h d").contiguous()
-        k = rearrange(k, "1 (b t) h d -> (b t) h d").contiguous()
-        v = rearrange(v, "1 (b t) h d -> (b t) h d").contiguous()
-        g = rearrange(g, "1 (b t) h -> (b t) h").contiguous()
-        beta = rearrange(beta, "1 (b t) h -> (b t) h").contiguous()
+        q = rearrange(q, "1 l h d -> l h d").contiguous()
+        k = rearrange(k, "1 l h d -> l h d").contiguous()
+        v = rearrange(v, "1 l h d -> l h d").contiguous()
+        g = rearrange(g, "1 b h -> b h").contiguous()
+        beta = rearrange(beta, "1 b h -> b h").contiguous()
+        fi_state = initial_state.to(torch.float32)
+        fi_g = g.to(torch.float32)
+        fi_beta = beta.to(torch.float32)
         return chunk_gated_delta_rule_fi(
             q=q,
             k=k,
             v=v,
-            g=g,
-            beta=beta,
-            initial_state=initial_state,
+            g=fi_g,
+            beta=fi_beta,
+            initial_state=fi_state,
             output_final_state=output_final_state,
             cu_seqlens=cu_seqlens,
         )
