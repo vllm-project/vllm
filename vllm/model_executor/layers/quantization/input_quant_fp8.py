@@ -11,6 +11,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     GroupShape,
     get_fp8_min_max,
     group_broadcast,
+    prep_scale_for_group_broadcast,
 )
 from vllm.platforms import current_platform
 
@@ -40,7 +41,7 @@ class QuantFP8(CustomOp):
         """
         :param static: static or dynamic quantization
         :param group_shape: quantization group shape (PER_TOKEN, PER_TENSOR,
-            or arbitrary block size)
+            PER_CHANNEL, or arbitrary block size)
         :param num_token_padding: Pad the token dimension of output to this
             size
         :param column_major_scales: For group quantization, output scales in
@@ -157,6 +158,8 @@ class QuantFP8(CustomOp):
                 x_max = x.abs().max().unsqueeze(-1).to(torch.float32)
 
             scale = (x_max / _FP8_MAX).clamp(min=_FP8_MIN_SCALING_FACTOR)
+        else:
+            scale = prep_scale_for_group_broadcast(scale, x, self.group_shape)
 
         # Even for dynamic per-token scales,
         # reciprocal performs slightly better than division
