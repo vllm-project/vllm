@@ -38,7 +38,7 @@ except ImportError:
 
 def collect_mm_processor_stats(
     llm_engine: Any,
-    warmup_requests: int = 0,
+    num_warmup_reqs: int = 0,
 ) -> dict[str, list[float]]:
     """
     Collect multimodal processor timing stats.
@@ -55,7 +55,7 @@ def collect_mm_processor_stats(
     }
 
     # Skip warmup requests
-    stats_list = list(all_stats.values())[warmup_requests:]
+    stats_list = list(all_stats.values())[num_warmup_reqs:]
 
     for stats_dict in stats_list:
         stats_by_stage["hf_processor_time"].append(
@@ -177,13 +177,7 @@ def benchmark_multimodal_processor(
         warmup_prompts = [req.prompt for req in warmup_requests]
         warmup_output_lens = [req.expected_output_len for req in warmup_requests]
         warmup_sampling_params = [
-            SamplingParams(
-                n=1,
-                temperature=0.0,
-                max_tokens=output_len,
-                detokenize=True,
-            )
-            for output_len in warmup_output_lens
+            SamplingParams(max_tokens=output_len) for output_len in warmup_output_lens
         ]
         llm.chat(
             warmup_prompts,
