@@ -7,7 +7,6 @@ from pydantic import field_validator
 from pydantic.dataclasses import dataclass
 
 from vllm.config.utils import CompileFactors, config, get_compile_factors
-from vllm.logger import init_logger
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 

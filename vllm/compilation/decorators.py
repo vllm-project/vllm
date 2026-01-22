@@ -25,14 +25,12 @@ from vllm.config import (
     set_current_vllm_config,
 )
 from vllm.config.compilation import DynamicShapesType
-from vllm.config.utils import hash_factors
 from vllm.forward_context import get_forward_context, is_forward_context_available
 from vllm.logger import init_logger
 from vllm.sequence import IntermediateTensors
 from vllm.utils.import_utils import resolve_obj_by_qualname
 from vllm.utils.torch_utils import is_torch_equal_or_newer
 
-from .caching import compute_env_and_config_hashes
 from .monitor import start_monitoring_torch_compile
 
 if TYPE_CHECKING:

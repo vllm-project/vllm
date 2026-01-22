@@ -7,7 +7,7 @@ import os
 import pickle
 from collections.abc import Callable, Sequence
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, Protocol
 from unittest.mock import patch
 
 import torch
@@ -17,16 +17,13 @@ import vllm.envs as envs
 from vllm.compilation.compiler_interface import get_inductor_factors
 from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.config.utils import hash_factors
-from vllm.compilation.decorators import VllmSerializableFunction
 from vllm.logger import init_logger
 from vllm.utils.hashing import safe_hash
 
-try:
-    from torch._dynamo.aot_compile import SerializableCallable
-except ImportError:
-    SerializableCallable = object
 
-assert isinstance(SerializableCallable, type)
+class SerializableCallable(Protocol):
+    def __call__(self, *args: Any, **kwargs: Any) -> Any: ...
+
 
 logger = init_logger(__name__)
 
@@ -164,6 +161,7 @@ class StandaloneCompiledArtifacts:
         self.submodule_bytes = state["submodule_bytes"]
         self.submodule_bytes_store = state["submodule_bytes_store"]
         self.loaded_submodule_store = {}
+
 
 class VllmSerializableFunction(SerializableCallable):
     """
@@ -368,6 +366,8 @@ def compute_env_and_config_hashes(
     config_factors = vllm_config.compile_factors()
     config_hash = hash_factors(config_factors)
     return env_hash, config_hash, env_factors, config_factors
+
+
 def reconstruct_serializable_fn_from_mega_artifact(
     state: dict[str, Any],
     standalone_compile_artifacts: "StandaloneCompiledArtifacts",

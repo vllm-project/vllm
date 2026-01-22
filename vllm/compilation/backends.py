@@ -743,10 +743,6 @@ class VllmBackend:
         self.inductor_config[self.pass_key] = self.pass_manager
 
     def __call__(self, graph: fx.GraphModule, example_inputs: Sequence[Any]) -> Any:
-        from .caching import (
-            VllmSerializableFunction,
-        )
-
         vllm_config = self.vllm_config
         # Minimal hashing here with existing utilities, reused below.
 
