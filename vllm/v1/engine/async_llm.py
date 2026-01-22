@@ -23,9 +23,10 @@ from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
 from vllm.outputs import PoolingRequestOutput, RequestOutput
 from vllm.plugins.io_processors import get_io_processor
 from vllm.pooling_params import PoolingParams
+from vllm.renderers import RendererLike
 from vllm.sampling_params import SamplingParams
 from vllm.tasks import SupportedTask
-from vllm.tokenizers import TokenizerLike, cached_tokenizer_from_config
+from vllm.tokenizers import TokenizerLike
 from vllm.tracing import init_tracer
 from vllm.transformers_utils.config import maybe_register_config_serialize_by_value
 from vllm.usage.usage_lib import UsageContext
@@ -106,9 +107,7 @@ class AsyncLLM(EngineClient):
                 "enabling logging without default stat loggers."
             )
 
-        tokenizer = cached_tokenizer_from_config(self.model_config)
-
-        self.input_processor = InputProcessor(self.vllm_config, tokenizer)
+        self.input_processor = InputProcessor(self.vllm_config)
         self.io_processor = get_io_processor(
             self.vllm_config,
             self.model_config.io_processor_plugin,
@@ -709,13 +708,12 @@ class AsyncLLM(EngineClient):
     def tokenizer(self) -> TokenizerLike | None:
         return self.input_processor.tokenizer
 
-    async def get_tokenizer(self) -> TokenizerLike:
-        if self.tokenizer is None:
-            raise ValueError(
-                "Unable to get tokenizer because `skip_tokenizer_init=True`"
-            )
+    def get_tokenizer(self) -> TokenizerLike:
+        return self.input_processor.get_tokenizer()
 
-        return self.tokenizer
+    @property
+    def renderer(self) -> RendererLike:
+        return self.input_processor.renderer
 
     async def is_tracing_enabled(self) -> bool:
         return self.observability_config.otlp_traces_endpoint is not None  # type: ignore
