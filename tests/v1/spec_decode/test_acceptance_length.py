@@ -83,8 +83,16 @@ EXCLUDED_BACKENDS = {AttentionBackendEnum.FLEX_ATTENTION}
 
 
 def get_available_attention_backends() -> list[str]:
-    if not hasattr(current_platform, "get_valid_backends"):
-        return ["FLASH_ATTN"]
+    # Check if get_valid_backends is actually defined in the platform class
+    # (not just returning None from __getattr__)
+    get_valid_backends = getattr(current_platform.__class__, "get_valid_backends", None)
+    if get_valid_backends is None:
+        if current_platform.is_rocm():
+            # ROCm uses Triton as its default attention backend since
+            # Flash Attention is not supported.
+            return ["TRITON_ATTN"]
+        else:
+            return ["FLASH_ATTN"]
 
     device_capability = current_platform.get_device_capability()
     if device_capability is None:
@@ -207,7 +215,6 @@ def test_eagle3_acceptance_length(
 
     with monkeypatch.context() as m:
         m.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
-        m.setenv("VLLM_ATTENTION_BACKEND", attention_backend)
 
         with VllmRunner(
             model_name=model_config.verifier,
@@ -216,6 +223,7 @@ def test_eagle3_acceptance_length(
                 "model": model_config.drafter,
                 "num_speculative_tokens": num_spec_tokens,
             },
+            attention_config={"backend": attention_backend},
             tensor_parallel_size=tp_size,
             gpu_memory_utilization=0.7,
             disable_log_stats=False,

@@ -34,6 +34,7 @@ import vllm.envs as envs
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.anthropic.serving import AnthropicServingMessages
+from vllm.entrypoints.chat_utils import load_chat_template
 from vllm.entrypoints.launcher import serve_http
 from vllm.entrypoints.logger import RequestLogger
 from vllm.entrypoints.mcp.tool_server import DemoToolServer, MCPToolServer, ToolServer
@@ -63,7 +64,6 @@ from vllm.entrypoints.serve.tokenize.serving import OpenAIServingTokenization
 from vllm.entrypoints.utils import (
     cli_env_setup,
     log_non_default_args,
-    process_chat_template,
     process_lora_modules,
     sanitize_message,
 )
@@ -691,9 +691,7 @@ async def init_app_state(
     supported_tasks = await engine_client.get_supported_tasks()
     logger.info("Supported tasks: %s", supported_tasks)
 
-    resolved_chat_template = await process_chat_template(
-        args.chat_template, engine_client, vllm_config.model_config
-    )
+    resolved_chat_template = load_chat_template(args.chat_template)
 
     if args.tool_server == "demo":
         tool_server: ToolServer | None = DemoToolServer()
@@ -992,6 +990,7 @@ async def run_server_worker(
             ssl_certfile=args.ssl_certfile,
             ssl_ca_certs=args.ssl_ca_certs,
             ssl_cert_reqs=args.ssl_cert_reqs,
+            ssl_ciphers=args.ssl_ciphers,
             h11_max_incomplete_event_size=args.h11_max_incomplete_event_size,
             h11_max_header_count=args.h11_max_header_count,
             **uvicorn_kwargs,
