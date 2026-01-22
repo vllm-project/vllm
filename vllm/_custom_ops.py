@@ -44,7 +44,7 @@ def paged_attention_v1(
     alibi_slopes: torch.Tensor | None,
     kv_cache_dtype: str,
     k_scale: torch.Tensor,
-    v_scale: torch.Tensor,
+    o_scale: torch.Tensor,
     tp_rank: int = 0,
     blocksparse_local_blocks: int = 0,
     blocksparse_vert_stride: int = 0,
@@ -2032,7 +2032,7 @@ def selective_scan_fwd(
 # tensors.  It might be a good TODO(rasmith) to augment these kernels
 # to be able to handle non-contiguous kernels for better performance.
 def rocm_enforce_contiguous_skinny_gemm_inputs(
-    function_name: str, a: torch.Tensor, b: torch.Tensor
+    a: torch.Tensor, b: torch.Tensor
 ) -> tuple[torch.Tensor, torch.Tensor]:
     a = a.contiguous()  # no-op if already contiguous, else clone
     b = b.contiguous()  # no-op if already contiguous, else clone
@@ -2041,21 +2041,21 @@ def rocm_enforce_contiguous_skinny_gemm_inputs(
 
 # ROCm skinny gemms
 def LLMM1(a: torch.Tensor, b: torch.Tensor, rows_per_block: int) -> torch.Tensor:
-    a, b = rocm_enforce_contiguous_skinny_gemm_inputs("LLM1", a, b)
+    a, b = rocm_enforce_contiguous_skinny_gemm_inputs(a, b)
     return torch.ops._rocm_C.LLMM1(a, b, rows_per_block)
 
 
 def wvSplitK(
     a: torch.Tensor, b: torch.Tensor, cu_count: int, bias: torch.Tensor = None
 ) -> torch.Tensor:
-    a, b = rocm_enforce_contiguous_skinny_gemm_inputs("wvSplitK", a, b)
+    a, b = rocm_enforce_contiguous_skinny_gemm_inputs(a, b)
     return torch.ops._rocm_C.wvSplitK(a, b, bias, cu_count)
 
 
 def wvSplitKrc(
     a: torch.Tensor, b: torch.Tensor, cu_count: int, bias: torch.Tensor = None
 ) -> torch.Tensor:
-    a, b = rocm_enforce_contiguous_skinny_gemm_inputs("wvSplitKrc", a, b)
+    a, b = rocm_enforce_contiguous_skinny_gemm_inputs(a, b)
     return torch.ops._rocm_C.wvSplitKrc(a, b, bias, cu_count)
 
 
@@ -2068,7 +2068,7 @@ def wvSplitKQ(
     cu_count: int,
     bias: torch.Tensor = None,
 ) -> torch.Tensor:
-    a, b = rocm_enforce_contiguous_skinny_gemm_inputs("wvSplitKQ", a, b)
+    a, b = rocm_enforce_contiguous_skinny_gemm_inputs(a, b)
     out = torch.empty((b.shape[0], a.shape[0]), dtype=out_dtype, device=b.device)
     torch.ops._rocm_C.wvSplitKQ(a, b, bias, out, scale_a, scale_b, cu_count)
     return out
