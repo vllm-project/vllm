@@ -15,6 +15,7 @@ import ray
 import torch
 from ray.experimental.tqdm_ray import tqdm
 
+from vllm.model_executor.layers.fused_moe import fused_topk
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
     FusedMoEParallelConfig,
@@ -200,23 +201,26 @@ def benchmark_config(
             block_shape=block_quant_shape,
         )
 
-        deep_gemm_experts = mk.FusedMoEModularKernel(
-            prepare_finalize=MoEPrepareAndFinalizeNoEP(),
-            fused_experts=TritonOrDeepGemmExperts(
-                moe_config=FusedMoEConfig(
-                    num_experts=num_experts,
-                    experts_per_token=topk,
-                    hidden_dim=hidden_size,
-                    intermediate_size_per_partition=shard_intermediate_size,
-                    num_local_experts=num_experts,
-                    activation="silu",
-                    parallel_config=FusedMoEParallelConfig.make_no_parallel(),
-                    in_dtype=init_dtype,
-                    routing_method=RoutingMethodType.TopK,
+        deep_gemm_experts = None
+        if use_deep_gemm:
+            deep_gemm_experts = mk.FusedMoEModularKernel(
+                prepare_finalize=MoEPrepareAndFinalizeNoEP(),
+                fused_experts=TritonOrDeepGemmExperts(
+                    moe_config=FusedMoEConfig(
+                        num_experts=num_experts,
+                        experts_per_token=topk,
+                        hidden_dim=hidden_size,
+                        intermediate_size_per_partition=shard_intermediate_size,
+                        num_local_experts=num_experts,
+                        activation="silu",
+                        moe_parallel_config=FusedMoEParallelConfig.make_no_parallel(),
+                        in_dtype=init_dtype,
+                        routing_method=RoutingMethodType.TopK,
+                        device="cuda",
+                    ),
+                    quant_config=quant_config,
                 ),
-                quant_config=quant_config,
-            ),
-        )
+            )
 
         with override_config(config):
             topk_weights, topk_ids, token_expert_indices = fused_topk(
