@@ -107,6 +107,12 @@ def on_gfx9() -> bool:
 
 
 @cache
+def on_gfx942() -> bool:
+    GPU_ARCH = torch.cuda.get_device_properties("cuda").gcnArchName
+    return any(arch in GPU_ARCH for arch in ["gfx942"])
+
+
+@cache
 def on_gfx950() -> bool:
     GPU_ARCH = torch.cuda.get_device_properties("cuda").gcnArchName
     return any(arch in GPU_ARCH for arch in ["gfx950"])
@@ -287,7 +293,10 @@ class RocmPlatform(Platform):
                 return AttentionBackendEnum.ROCM_AITER_FA.get_path()
 
             # Priority 3: Check for ROCM_ATTN (prefill-decode split)
-            if envs.VLLM_V1_USE_PREFILL_DECODE_ATTENTION:
+            from vllm.config import get_current_vllm_config
+
+            vllm_config = get_current_vllm_config()
+            if vllm_config.attention_config.use_prefill_decode_attention:
                 logger.info("Using Rocm Attention backend.")
                 return AttentionBackendEnum.ROCM_ATTN.get_path()
 
@@ -479,6 +488,9 @@ class RocmPlatform(Platform):
             and "-grouped_topk" not in compilation_config.custom_ops
         ):
             compilation_config.custom_ops.append("+grouped_topk")
+
+        # Default dispatch to rocm's sparse_attn_indexer implementation
+        compilation_config.custom_ops.append("+sparse_attn_indexer")
 
     @classmethod
     def verify_model_arch(cls, model_arch: str) -> None:

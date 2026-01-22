@@ -35,6 +35,7 @@ FILES = [
     "vllm/multimodal",
     "vllm/platforms",
     "vllm/plugins",
+    "vllm/renderers",
     "vllm/tokenizers",
     "vllm/transformers_utils",
     "vllm/triton_utils",

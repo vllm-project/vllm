@@ -5,12 +5,7 @@ import os
 from typing import TYPE_CHECKING, Optional
 
 import huggingface_hub
-from huggingface_hub.utils import (
-    EntryNotFoundError,
-    HfHubHTTPError,
-    HFValidationError,
-    RepositoryNotFoundError,
-)
+from huggingface_hub.utils import HfHubHTTPError, HFValidationError
 from torch import nn
 from transformers import PretrainedConfig
 
@@ -243,12 +238,7 @@ def get_adapter_absolute_path(lora_path: str) -> str:
     # If the path does not exist locally, assume it's a Hugging Face repo.
     try:
         local_snapshot_path = huggingface_hub.snapshot_download(repo_id=lora_path)
-    except (
-        HfHubHTTPError,
-        RepositoryNotFoundError,
-        EntryNotFoundError,
-        HFValidationError,
-    ):
+    except (HfHubHTTPError, HFValidationError):
         # Handle errors that may occur during the download
         # Return original path instead of throwing error here
         logger.exception("Error downloading the HuggingFace model")

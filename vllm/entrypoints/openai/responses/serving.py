@@ -121,6 +121,7 @@ from vllm.logger import init_logger
 from vllm.logprobs import Logprob as SampleLogprob
 from vllm.logprobs import SampleLogprobs
 from vllm.outputs import CompletionOutput
+from vllm.renderers import RendererLike
 from vllm.sampling_params import SamplingParams, StructuredOutputsParams
 from vllm.tokenizers import TokenizerLike
 from vllm.utils import random_uuid
@@ -380,7 +381,8 @@ class OpenAIServingResponses(OpenAIServing):
         try:
             lora_request = self._maybe_get_adapters(request)
             model_name = self.models.model_name(lora_request)
-            tokenizer = await self.engine_client.get_tokenizer()
+            renderer = self.engine_client.renderer
+            tokenizer = renderer.get_tokenizer()
 
             if self.use_harmony:
                 messages, engine_prompts = self._make_request_with_harmony(
@@ -388,7 +390,7 @@ class OpenAIServingResponses(OpenAIServing):
                 )
             else:
                 messages, engine_prompts = await self._make_request(
-                    request, prev_response, tokenizer
+                    request, prev_response, renderer
                 )
 
         except (
@@ -454,7 +456,7 @@ class OpenAIServingResponses(OpenAIServing):
                         # tokens during generation instead of at the end
                         context = ParsableContext(
                             response_messages=messages,
-                            tokenizer=tokenizer,
+                            renderer=renderer,
                             reasoning_parser_cls=self.reasoning_parser,
                             request=request,
                             tool_parser_cls=self.tool_parser,
@@ -585,7 +587,7 @@ class OpenAIServingResponses(OpenAIServing):
         self,
         request: ResponsesRequest,
         prev_response: ResponsesResponse | None,
-        tokenizer: TokenizerLike,
+        renderer: RendererLike,
     ):
         tool_dicts = construct_tool_dicts(request.tools, request.tool_choice)
         # Construct the input messages.
@@ -607,7 +609,7 @@ class OpenAIServingResponses(OpenAIServing):
 
         _, engine_prompts = await self._preprocess_chat(
             request,
-            tokenizer,
+            renderer,
             messages,
             tool_dicts=tool_dicts,
             tool_parser=self.tool_parser,
@@ -631,6 +633,7 @@ class OpenAIServingResponses(OpenAIServing):
             raise NotImplementedError(
                 "Only 'auto' tool_choice is supported in response API with Harmony"
             )
+
         messages = self._construct_input_messages_with_harmony(request, prev_response)
         prompt_token_ids = render_for_completion(messages)
         engine_prompt = TokensPrompt(prompt_token_ids=prompt_token_ids)
