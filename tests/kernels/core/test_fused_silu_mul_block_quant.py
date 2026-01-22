@@ -167,14 +167,21 @@ def test_silu_and_mul_per_block_quant(
     assert ref_out.dtype == quant_dtype
     assert ops_out.dtype == quant_dtype
 
-    # Check scale correctness
-    assert torch.allclose(ref_scales, ops_scales, rtol=1e-5, atol=1e-5), \
-        f"Scale mismatch: max diff = {(ref_scales - ops_scales).abs().max()}"
+    # Check scale correctness - normalize layout before comparison
+    if is_scale_transposed:
+        # Kernel returns [num_groups, num_tokens], ref is [num_tokens, num_groups]
+        ops_scales_for_comparison = ops_scales.t()
+    else:
+        # Both are [num_tokens, num_groups]
+        ops_scales_for_comparison = ops_scales
+
+    assert torch.allclose(ref_scales, ops_scales_for_comparison, rtol=1e-5, atol=1e-5), \
+        f"Scale mismatch: max diff = {(ref_scales - ops_scales_for_comparison).abs().max()}"
 
     # Check output correctness
     a = ref_out.to(dtype=torch.float32)
     b = ops_out.to(dtype=torch.float32)
-    ok = torch.allclose(a, b, atol=1.0, rtol=0.0)  # Allow ±1 quantization error
+    ok = torch.allclose(a, b, atol=1.0, rtol=0.0)
     
     if not ok:
         # Fallback: compare dequantized values
