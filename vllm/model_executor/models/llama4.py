@@ -506,6 +506,8 @@ class Llama4Model(LlamaModel):
                         .flatten()
                         .to(new_loaded_weight.device)
                     )
+                    # Workaround for FP8 CPU indexing on older PyTorch:
+                    # https://github.com/vllm-project/vllm/issues/32862
                     is_fp8_dtype = new_loaded_weight.dtype == (
                         current_platform.fp8_dtype()
                     ) or (
