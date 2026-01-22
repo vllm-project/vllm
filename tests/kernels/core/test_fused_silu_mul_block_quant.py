@@ -195,6 +195,20 @@ def test_silu_and_mul_per_block_quant(
         ref_scales_expanded = ref_scales_row_major.repeat_interleave(group_size, dim=1)
         ops_scales_expanded = ops_scales_row_major.repeat_interleave(group_size, dim=1)
         
+        # ========== ADD DEBUG PRINTS HERE ==========
+        print(f"\n=== DEBUG INFO ===")
+        print(f"num_tokens={num_tokens}, hidden_size={hidden_size}, group_size={group_size}")
+        print(f"is_scale_transposed={is_scale_transposed}")
+        print(f"a.shape: {a.shape}")
+        print(f"b.shape: {b.shape}")
+        print(f"ref_scales.shape: {ref_scales.shape}")
+        print(f"ops_scales.shape: {ops_scales.shape}")
+        print(f"ref_scales_row_major.shape: {ref_scales_row_major.shape}")
+        print(f"ops_scales_row_major.shape: {ops_scales_row_major.shape}")
+        print(f"ref_scales_expanded.shape: {ref_scales_expanded.shape}")
+        print(f"ops_scales_expanded.shape: {ops_scales_expanded.shape}")
+        # ===========================================
+        
         a_deq = a * ref_scales_expanded
         b_deq = b * ops_scales_expanded
         ok = torch.allclose(a_deq, b_deq, rtol=5e-2, atol=5e-2)
