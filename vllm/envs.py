@@ -257,6 +257,7 @@ if TYPE_CHECKING:
     VLLM_USE_V2_MODEL_RUNNER: bool = False
     VLLM_LOG_MODEL_INSPECTION: bool = False
     VLLM_DEBUG_MFU_METRICS: bool = False
+    VLLM_LORA_DISABLE_PDL: bool = False
 
 
 def get_default_cache_root():
@@ -1674,6 +1675,9 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_DEBUG_MFU_METRICS": lambda: bool(
         int(os.getenv("VLLM_DEBUG_MFU_METRICS", "0"))
     ),
+    # Disable PDL for LoRA, as enabling PDL with LoRA on SM100 causes
+    # Triton compilation to fail.
+    "VLLM_LORA_DISABLE_PDL": lambda: bool(int(os.getenv("VLLM_LORA_DISABLE_PDL", "0"))),
 }
 
 # --8<-- [end:env-vars-definition]
