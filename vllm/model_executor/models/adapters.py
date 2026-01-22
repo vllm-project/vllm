@@ -16,10 +16,12 @@ from vllm.transformers_utils.config import (
 )
 from vllm.transformers_utils.repo_utils import get_hf_file_bytes
 
+from .interfaces import supports_multimodal
 from .interfaces_base import VllmModelForPooling, is_pooling_model
 
 if TYPE_CHECKING:
     from vllm.config import ModelConfig, VllmConfig
+    from vllm.model_executor.layers.pooler import Pooler
 
 _T = TypeVar("_T", bound=type[nn.Module])
 
@@ -151,19 +153,22 @@ def _create_pooling_model_cls(orig_cls: _T) -> _T:
 
             # If the model already defines a pooler instance, don't overwrite it
             pooler = getattr(self, "pooler", None)
-            if not pooler:
-                from .interfaces import supports_multimodal
-
-                if supports_multimodal(self):
-                    # Try to get the pooler from the LM backbone
-                    language_model = self.get_language_model()
-                    if hasattr(language_model, "pooler"):
-                        self.pooler = pooler = language_model.pooler
+            if not pooler and supports_multimodal(self):
+                # Try to get the pooler from the LM backbone
+                language_model = self.get_language_model()
+                if hasattr(language_model, "pooler"):
+                    pooler = language_model.pooler
 
             if not pooler:
-                self._init_pooler(vllm_config, prefix=prefix)
+                pooler = self._init_pooler(vllm_config, prefix=prefix)
 
-        def _init_pooler(self, vllm_config: "VllmConfig", prefix: str = ""):
+            self.pooler = pooler
+
+        def _init_pooler(
+            self,
+            vllm_config: "VllmConfig",
+            prefix: str = "",
+        ) -> "Pooler":
             raise NotImplementedError
 
         def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
@@ -236,11 +241,15 @@ def as_embedding_model(cls: _T) -> _T:
     from vllm.model_executor.layers.pooler import DispatchPooler
 
     class ModelForEmbedding(_create_pooling_model_cls(cls)):
-        def _init_pooler(self, vllm_config: "VllmConfig", prefix: str = ""):
+        def _init_pooler(
+            self,
+            vllm_config: "VllmConfig",
+            prefix: str = "",
+        ) -> "Pooler":
             pooler_config = vllm_config.model_config.pooler_config
             assert pooler_config is not None
 
-            self.pooler = DispatchPooler.for_embedding(pooler_config)
+            return DispatchPooler.for_embedding(pooler_config)
 
     ModelForEmbedding.__name__ = _get_pooling_model_name(cls.__name__, "ForEmbedding")
 
@@ -273,7 +282,11 @@ def as_seq_cls_model(cls: _T) -> _T:
     class ModelForSequenceClassification(
         _create_pooling_model_cls(cls), SupportsCrossEncoding
     ):
-        def _init_pooler(self, vllm_config: "VllmConfig", prefix: str = ""):
+        def _init_pooler(
+            self,
+            vllm_config: "VllmConfig",
+            prefix: str = "",
+        ) -> "Pooler":
             text_config = vllm_config.model_config.hf_config.get_text_config()
             model_config = vllm_config.model_config
             quant_config = vllm_config.quant_config
@@ -291,9 +304,7 @@ def as_seq_cls_model(cls: _T) -> _T:
             pooler_config = vllm_config.model_config.pooler_config
             assert pooler_config is not None
 
-            self.pooler = DispatchPooler.for_seq_cls(
-                pooler_config, classifier=self.score
-            )
+            return DispatchPooler.for_seq_cls(pooler_config, classifier=self.score)
 
         def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
             hf_config = self.config
