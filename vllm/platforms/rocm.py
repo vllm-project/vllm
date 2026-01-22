@@ -170,6 +170,7 @@ def flash_attn_triton_available() -> bool:
         return False
     try:
         from importlib.util import find_spec
+
         if find_spec("flash_attn") is None:
             return False
         if find_spec("flash_attn.flash_attn_triton_amd") is None:
