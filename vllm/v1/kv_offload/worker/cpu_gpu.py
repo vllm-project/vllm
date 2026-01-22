@@ -102,6 +102,7 @@ class SingleDirectionOffloadingHandler(OffloadingHandler):
             tensor.element_size() * tensor.stride(0) * min_block_size_factor
             for tensor in src_tensors
         ]
+        self.total_block_size_in_bytes = sum(self.block_size_in_bytes)
 
         assert len(src_tensors) > 0
         self.gpu_to_cpu: bool = self.src_tensors[0].is_cuda
@@ -183,7 +184,7 @@ class SingleDirectionOffloadingHandler(OffloadingHandler):
                 stream=stream,
                 start_event=start_event,
                 end_event=end_event,
-                num_bytes=dst_sub_block_count * self.block_size_in_bytes,
+                num_bytes=dst_sub_block_count * self.total_block_size_in_bytes,
             )
         )
 

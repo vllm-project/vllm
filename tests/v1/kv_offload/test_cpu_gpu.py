@@ -168,6 +168,7 @@ def test_transfer(
     orig_dst_caches = [x.clone() for x in handler.dst_tensors]
 
     # call transfer function
+    start_time = time.time()
     assert handler.transfer_async(1, (src_spec, dst_spec))
     assert set({x.job_id for x in handler._transfers}) == {1}
 
@@ -185,10 +186,12 @@ def test_transfer(
             )
             assert (
                 finished[0].transfer_size
-                == handler.block_size_in_bytes
+                == handler.total_block_size_in_bytes
                 * handler.dst_block_size_factor
                 * len(dst_blocks)
             )
+            assert finished[0].transfer_time > 0
+            assert finished[0].transfer_time < (time.time() - start_time)
             break
         time.sleep(0.1)
 

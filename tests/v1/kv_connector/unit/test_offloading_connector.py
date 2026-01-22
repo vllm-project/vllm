@@ -90,9 +90,9 @@ class MockOffloadingHandler(OffloadingHandler):
                 result = TransferResult(
                     job_id=job_id,
                     success=True,
-                    transfer_size=None,  # For now - just to get the test working
-                    transfer_time=None,  # For now - just to get the test working
-                    transfer_type=None,  # For now - just to get the test working
+                    transfer_size=None,
+                    transfer_time=None,
+                    transfer_type=None,
                 )
                 self.completed_transfers.append(result)
 
@@ -728,7 +728,7 @@ def test_concurrent_lookups_of_the_same_prefix(request_runner):
 
 
 class TestOffloadingConnectorStats:
-    """Tests for MultiConnector stats reconstruction and operations."""
+    """Tests for OffloadingConnector stats reconstruction and operations."""
 
     def test_build_kv_connector_stats_with_none(self):
         """Test that build_kv_connector_stats returns empty stats when given None."""
