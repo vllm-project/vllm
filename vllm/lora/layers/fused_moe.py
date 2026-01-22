@@ -56,6 +56,7 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
         # since there's only up_proj (w1), not gate_proj + up_proj (w1 + w3)
         self._w13_slices = 2 if base_layer.moe_config.is_act_and_mul else 1
         self._inject_lora_into_fused_moe()
+        self._one = torch.tensor([1], dtype=torch.int, device=self.device)
 
     def _normalize_keys(self, config: dict[str, int | None]) -> dict[str, int | None]:
         normalized_config = {}

@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+
 import pytest
 
 import vllm
@@ -118,5 +119,67 @@ def test_gpt_oss_lora_tp2(
             ),
         )
 
+        generate_and_test(llm, gptoss20b_lora_files, lora_id=1)
+        generate_and_test(llm, gptoss20b_lora_files, lora_id=2)
+
+
+def test_gpt_oss_lora_async_loading(
+    monkeypatch: pytest.MonkeyPatch, gptoss20b_lora_files
+):
+    """Test async LoRA loading synchronization"""
+    with monkeypatch.context() as m:
+        m.setenv("VLLM_LORA_REQUEST_ASYNC_LOADING_CUDA", "1")
+
+        llm = vllm.LLM(
+            MODEL_PATH,
+            max_model_len=1024,
+            enable_lora=True,
+            max_loras=1,
+            max_cpu_loras=4,
+            max_lora_rank=8,
+            max_num_seqs=2,
+            max_num_batched_tokens=2048,
+            compilation_config=vllm.config.CompilationConfig(
+                cudagraph_specialize_lora=False,
+            ),
+        )
+
+        # Test LoRA switching with eviction/reload
+        generate_and_test(llm, gptoss20b_lora_files, lora_id=1)
+        generate_and_test(llm, gptoss20b_lora_files, lora_id=2)
+        generate_and_test(llm, gptoss20b_lora_files, lora_id=1)
+
+
+@multi_gpu_test(num_gpus=2)
+@pytest.mark.parametrize("fully_sharded_loras", [False, True])
+@pytest.mark.parametrize("mxfp4_use_marlin", [True, False])
+def test_gpt_oss_lora_async_loading_tp2(
+    monkeypatch: pytest.MonkeyPatch,
+    gptoss20b_lora_files,
+    fully_sharded_loras,
+    mxfp4_use_marlin,
+):
+    """Test async LoRA loading synchronization with TP=2 sharding."""
+    with monkeypatch.context() as m:
+        m.setenv("VLLM_LORA_REQUEST_ASYNC_LOADING_CUDA", "1")
+        m.setenv("VLLM_MXFP4_USE_MARLIN", "1" if mxfp4_use_marlin else "0")
+
+        llm = vllm.LLM(
+            MODEL_PATH,
+            max_model_len=1024,
+            enable_lora=True,
+            max_loras=2,
+            max_cpu_loras=4,
+            max_num_seqs=2,
+            max_num_batched_tokens=2048,
+            tensor_parallel_size=2,
+            gpu_memory_utilization=0.8,
+            fully_sharded_loras=fully_sharded_loras,
+            compilation_config=vllm.config.CompilationConfig(
+                cudagraph_specialize_lora=False,
+            ),
+        )
+
+        # Test LoRA switching with eviction/reload across TP ranks
         generate_and_test(llm, gptoss20b_lora_files, lora_id=1)
         generate_and_test(llm, gptoss20b_lora_files, lora_id=2)

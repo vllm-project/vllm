@@ -1580,18 +1580,15 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_DEBUG_MFU_METRICS": lambda: bool(
         int(os.getenv("VLLM_DEBUG_MFU_METRICS", "0"))
     ),
-<<<<<<< HEAD
     # Disable logging of vLLM logo at server startup time.
     "VLLM_DISABLE_LOG_LOGO": lambda: bool(int(os.getenv("VLLM_DISABLE_LOG_LOGO", "0"))),
     # Disable PDL for LoRA, as enabling PDL with LoRA on SM100 causes
     # Triton compilation to fail.
     "VLLM_LORA_DISABLE_PDL": lambda: bool(int(os.getenv("VLLM_LORA_DISABLE_PDL", "0"))),
-=======
     # enable LORA per Request Async Loading for GPU Accelerators
     "VLLM_LORA_REQUEST_ASYNC_LOADING_CUDA": lambda: bool(
         int(os.getenv("VLLM_LORA_REQUEST_ASYNC_LOADING_CUDA", "0"))
     ),
->>>>>>> 3895436b0 (Added Unit Tests)
 }
 
 
