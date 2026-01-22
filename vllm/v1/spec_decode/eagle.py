@@ -280,7 +280,9 @@ class SpecDecodeBaseProposer:
         sampling_metadata: SamplingMetadata,
         mm_embed_inputs: tuple[list[torch.Tensor], torch.Tensor] | None = None,
         num_rejected_tokens_gpu: torch.Tensor | None = None,
-        slot_mappings: dict[str, torch.Tensor] | None = None,
+        slot_mappings: dict[str, torch.Tensor]
+        | list[dict[str, torch.Tensor]]
+        | None = None,
     ) -> torch.Tensor:
         batch_size = common_attn_metadata.batch_size()
 
@@ -788,7 +790,9 @@ class SpecDecodeBaseProposer:
         # [num_tokens, hidden_size]
         hidden_states: torch.Tensor,
         common_attn_metadata: CommonAttentionMetadata,
-        slot_mappings: dict[str, torch.Tensor] | None = None,
+        slot_mappings: dict[str, torch.Tensor]
+        | list[dict[str, torch.Tensor]]
+        | None = None,
     ) -> list[torch.Tensor]:
         tree_attn_metadata_builder = self.runner.attn_groups[0][
             0

@@ -35,7 +35,9 @@ class SuffixDecodingProposer:
         self,
         input_batch: InputBatch,
         sampled_token_ids: list[list[int]],
-        slot_mappings: dict[str, torch.Tensor] | None = None,  # unused
+        slot_mappings: dict[str, torch.Tensor]
+        | list[dict[str, torch.Tensor]]
+        | None = None,  # unused
     ) -> list[list[int]]:
         """
         Propose speculative tokens for each request in the input batch. Suffix Decoding
