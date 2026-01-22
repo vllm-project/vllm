@@ -474,19 +474,6 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "()");
   ops.impl("get_cutlass_moe_mm_data", torch::kCUDA, &get_cutlass_moe_mm_data);
 
-  // A function that computes problem sizes for each expert's multiplication
-  // used by the two mms called from fused MoE operation. It takes topk_ids as
-  // an input, and computes problem_sizes1 and problem_sizes2 only.
-  ops.def(
-      "get_cutlass_moe_mm_problem_sizes(Tensor topk_ids, "
-      "                                 Tensor! problem_sizes1, "
-      "                                 Tensor! problem_sizes2, "
-      "                                 int num_experts, int n, int k, "
-      "                                 Tensor? blockscale_offsets, "
-      "                                 bool? force_swap_ab) -> ()");
-  ops.impl("get_cutlass_moe_mm_problem_sizes", torch::kCUDA,
-           &get_cutlass_moe_mm_problem_sizes);
-
   // compute per-expert problem sizes from expert_first_token_offset
   // produced by vLLM's moe_permute kernel
   ops.def(
@@ -705,7 +692,8 @@ TORCH_LIBRARY_EXPAND(CONCAT(TORCH_EXTENSION_NAME, _cache_ops), cache_ops) {
   // Cache ops
   // Swap in (out) the cache blocks from src to dst.
   cache_ops.def(
-      "swap_blocks(Tensor src, Tensor! dst, Tensor block_mapping) -> ()");
+      "swap_blocks(Tensor src, Tensor! dst,"
+      "            int block_size_in_bytes, Tensor block_mapping) -> ()");
   cache_ops.impl("swap_blocks", torch::kCUDA, &swap_blocks);
 
   // Reshape the key and value tensors and cache them.
