@@ -87,6 +87,9 @@ def is_layer_gptq_quantized(
 ) -> bool:
     # prefix: model.layers.0.self_attn.q_proj
     # proj_name: q_proj
+    # FIXME: need figure out how to pass for gptq moe case.
+    if len(quantized_layers) == 0:
+        quantized_layers = ["self_attn.qkv_proj", "self_attn.o_proj"]
 
     # GPTQ's `modules_in_block_to_quantize`:
     # Substr: ["self_attn.k_proj", "self_attn.v_proj", "self_attn.q_proj"]

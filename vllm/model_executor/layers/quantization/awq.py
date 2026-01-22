@@ -20,6 +20,7 @@ from vllm.model_executor.layers.quantization.base_config import (
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import is_layer_skipped
 from vllm.model_executor.parameter import GroupQuantScaleParameter, PackedvLLMParameter
+from vllm.platforms import current_platform
 from vllm.transformers_utils.config import get_safetensors_params_metadata
 
 if TYPE_CHECKING:
@@ -251,6 +252,23 @@ class AWQLinearMethod(LinearMethodBase):
         layer.qweight = torch.nn.Parameter(layer.qweight.data, requires_grad=False)
         layer.qzeros = torch.nn.Parameter(layer.qzeros.data, requires_grad=False)
         layer.scales = torch.nn.Parameter(layer.scales.data, requires_grad=False)
+        if current_platform.is_xpu():
+            from vllm_xpu_kernels.quantization._quantize_convert import (
+                AWQUtils,
+                transpose_onednn_woq_format,
+            )
+
+            layer.xpu_output_size = (
+                layer.qweight.size(1) * self.quant_config.pack_factor
+            )
+            qweight_new, qzeros_new = AWQUtils.repack(layer.qweight, layer.qzeros)
+            if qweight_new.shape != layer.qweight.data.shape:
+                layer.qweight.data = layer.qweight.data.view_as(qweight_new)
+            if qzeros_new.shape != layer.qzeros.data.shape:
+                layer.qzeros.data = layer.qzeros.data.view_as(qzeros_new)
+            layer.qweight.data.copy_(qweight_new)
+            layer.qzeros.data.copy_(qzeros_new)
+            transpose_onednn_woq_format(layer, "awq", False)
 
     def apply(
         self,
@@ -258,6 +276,20 @@ class AWQLinearMethod(LinearMethodBase):
         x: torch.Tensor,
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
+        if current_platform.is_xpu():
+            reshaped_x = x.reshape(-1, x.shape[-1])
+            out = torch.ops._xpu_C.int4_gemm_w4a16(
+                reshaped_x,
+                layer.qweight,
+                bias,
+                layer.scales,
+                layer.qzeros,
+                self.quant_config.group_size,
+                None,
+            )
+            out_shape = x.shape[:-1] + (layer.xpu_output_size,)
+            return out.reshape(out_shape)
+
         qweight = layer.qweight
         scales = layer.scales
         qzeros = layer.qzeros
