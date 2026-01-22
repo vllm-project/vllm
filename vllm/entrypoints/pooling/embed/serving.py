@@ -571,8 +571,7 @@ class OpenAIServingEmbedding(OpenAIServing):
                                 "token IDs"
                             )
 
-                        original_prompt = cast(TokensPrompt, original_prompt)
-                        original_token_ids = original_prompt["prompt_token_ids"]
+                        original_token_ids = original_prompt["prompt_token_ids"]  # type: ignore[typeddict-item]
 
                         pooling_request_output = PoolingRequestOutput(
                             request_id=aggregator["request_id"],
