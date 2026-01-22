@@ -43,6 +43,7 @@ from vllm.entrypoints.openai.responses.protocol import (
 from vllm.entrypoints.openai.responses.utils import construct_tool_dicts
 from vllm.outputs import RequestOutput
 from vllm.reasoning.abs_reasoning_parsers import ReasoningParser
+from vllm.renderers import RendererLike
 from vllm.tokenizers import TokenizerLike
 from vllm.tool_parsers.abstract_tool_parser import ToolParser
 from vllm.utils import random_uuid
@@ -260,7 +261,7 @@ class ParsableContext(ConversationContext):
         self,
         *,
         response_messages: list[ResponseInputOutputItem],
-        tokenizer: TokenizerLike,
+        renderer: RendererLike,
         reasoning_parser_cls: Callable[[TokenizerLike], ReasoningParser] | None,
         request: ResponsesRequest,
         available_tools: list[str] | None,
@@ -279,6 +280,7 @@ class ParsableContext(ConversationContext):
         if reasoning_parser_cls is None:
             raise ValueError("reasoning_parser_cls must be provided.")
 
+        tokenizer = renderer.get_tokenizer()
         self.parser = get_responses_parser_for_simple_context(
             tokenizer=tokenizer,
             reasoning_parser_cls=reasoning_parser_cls,
@@ -288,6 +290,7 @@ class ParsableContext(ConversationContext):
         )
         self.tool_parser_cls = tool_parser_cls
         self.request = request
+        self.renderer = renderer
         self.tokenizer = tokenizer
 
         self.available_tools = available_tools or []

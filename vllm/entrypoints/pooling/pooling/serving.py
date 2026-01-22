@@ -94,12 +94,6 @@ class OpenAIServingPooling(OpenAIServing):
         try:
             lora_request = self._maybe_get_adapters(request)
 
-            if self.model_config.skip_tokenizer_init:
-                tokenizer = None
-            else:
-                tokenizer = await self.engine_client.get_tokenizer()
-            renderer = self._get_renderer(tokenizer)
-
             if getattr(request, "dimensions", None) is not None:
                 return self.create_error_response(
                     "dimensions is currently not supported"
@@ -140,7 +134,7 @@ class OpenAIServingPooling(OpenAIServing):
 
                 _, engine_prompts = await self._preprocess_chat(
                     request,
-                    tokenizer,
+                    self.renderer,
                     request.messages,
                     chat_template=request.chat_template or self.chat_template,
                     chat_template_content_format=self.chat_template_content_format,
@@ -149,6 +143,7 @@ class OpenAIServingPooling(OpenAIServing):
                     add_special_tokens=request.add_special_tokens,
                 )
             elif isinstance(request, PoolingCompletionRequest):
+                renderer = self._get_completion_renderer()
                 engine_prompts = await renderer.render_prompt(
                     prompt_or_prompts=request.input,
                     config=self._build_render_config(request),
