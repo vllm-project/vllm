@@ -288,11 +288,53 @@ async def test_chat_request(server: RemoteOpenAIServer, model_name: str):
 
 
 @pytest.mark.asyncio
-async def test_invocations(server: RemoteOpenAIServer):
+async def test_invocations_completion_request(server: RemoteOpenAIServer):
     request_args = {
         "model": MODEL_NAME,
         "input": input_text,
     }
+
+    classification_response = requests.post(
+        server.url_for("classify"), json=request_args
+    )
+    classification_response.raise_for_status()
+
+    invocation_response = requests.post(
+        server.url_for("invocations"), json=request_args
+    )
+    invocation_response.raise_for_status()
+
+    classification_output = classification_response.json()
+    invocation_output = invocation_response.json()
+
+    assert classification_output.keys() == invocation_output.keys()
+    for classification_data, invocation_data in zip(
+        classification_output["data"], invocation_output["data"]
+    ):
+        assert classification_data.keys() == invocation_data.keys()
+        assert classification_data["probs"] == pytest.approx(
+            invocation_data["probs"], rel=0.01
+        )
+
+
+@pytest.mark.asyncio
+async def test_invocations_chat_request(server: RemoteOpenAIServer):
+    messages = [
+        {
+            "role": "user",
+            "content": "The cat sat on the mat.",
+        },
+        {
+            "role": "assistant",
+            "content": "A feline was resting on a rug.",
+        },
+        {
+            "role": "user",
+            "content": "Stars twinkle brightly in the night sky.",
+        },
+    ]
+
+    request_args = {"model": MODEL_NAME, "messages": messages}
 
     classification_response = requests.post(
         server.url_for("classify"), json=request_args

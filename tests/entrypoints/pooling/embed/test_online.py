@@ -412,7 +412,9 @@ async def test_chat_request(
 
 
 @pytest.mark.asyncio
-async def test_invocations(server: RemoteOpenAIServer, client: openai.AsyncOpenAI):
+async def test_invocations_completion_request(
+    server: RemoteOpenAIServer, client: openai.AsyncOpenAI
+):
     request_args = {
         "model": MODEL_NAME,
         "input": input_text,
@@ -443,7 +445,7 @@ async def test_invocations(server: RemoteOpenAIServer, client: openai.AsyncOpenA
 
 
 @pytest.mark.asyncio
-async def test_invocations_conversation(server: RemoteOpenAIServer):
+async def test_invocations_chat_request(server: RemoteOpenAIServer):
     messages = [
         {
             "role": "user",

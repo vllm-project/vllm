@@ -493,7 +493,7 @@ async def test_params_not_supported(
 
 
 @pytest.mark.asyncio
-async def test_invocations(server: RemoteOpenAIServer):
+async def test_invocations_chat_request(server: RemoteOpenAIServer):
     request_args = {
         "model": MODEL_NAME,
         "input": input_text,
@@ -525,7 +525,7 @@ async def test_invocations(server: RemoteOpenAIServer):
 
 
 @pytest.mark.asyncio
-async def test_invocations_conversation(server: RemoteOpenAIServer):
+async def test_invocations_conversation_chat_request(server: RemoteOpenAIServer):
     messages = [
         {
             "role": "user",
