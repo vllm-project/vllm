@@ -620,6 +620,7 @@ class AttentionImpl(ABC, Generic[T]):
     # TODO add support to more backends:
     # https://github.com/vllm-project/vllm/issues/25584
     supports_quant_query_input: bool = False
+    supports_per_head_quant_scales: bool = False
 
     dcp_world_size: int
     dcp_rank: int
