@@ -57,7 +57,6 @@ WEIGHT_LOADER_V2_SUPPORTED = [
     "ModelOptFp8PbWoLinearMethod",
     "IPEXAWQLinearMethod",
     "IPEXGPTQLinearMethod",
-    "HQQMarlinMethod",
     "QuarkLinearMethod",
     "ModelOptNvFp4LinearMethod",
     "PetitNvFp4LinearMethod",
@@ -78,6 +77,14 @@ def adjust_marlin_shard(param, shard_size, shard_offset):
         return shard_size, shard_offset
 
     return shard_size * marlin_tile_size, shard_offset * marlin_tile_size
+
+
+def adjust_block_scale_shard(weight_block_size, shard_size, shard_offset):
+    assert weight_block_size is not None
+    block_n = weight_block_size[0]
+    shard_offset = (shard_offset + block_n - 1) // block_n
+    shard_size = (shard_size + block_n - 1) // block_n
+    return shard_size, shard_offset
 
 
 def adjust_bitsandbytes_4bit_shard(
@@ -296,6 +303,7 @@ class LinearBase(CustomOp):
                 param.tp_size = self.tp_size
 
 
+# --8<-- [start:replicated_linear]
 @CustomOp.register("replicated_linear")
 class ReplicatedLinear(LinearBase):
     """Replicated linear layer.
@@ -312,6 +320,8 @@ class ReplicatedLinear(LinearBase):
         return_bias: If true, return bias together with outputs in forward pass.
         disable_tp: Take no effect for replicated linear layers.
     """
+
+    # --8<-- [end:replicated_linear]
 
     def __init__(
         self,
@@ -400,10 +410,10 @@ class ReplicatedLinear(LinearBase):
         assert self.quant_method is not None
 
         output = self.quant_method.apply(self, x, bias)
-        output_bias = self.bias if self.skip_bias_add else None
 
         if not self.return_bias:
             return output
+        output_bias = self.bias if self.skip_bias_add else None
         return output, output_bias
 
     def extra_repr(self) -> str:
@@ -413,6 +423,7 @@ class ReplicatedLinear(LinearBase):
         return s
 
 
+# --8<-- [start:column_parallel_linear]
 @CustomOp.register("column_parallel_linear")
 class ColumnParallelLinear(LinearBase):
     """Linear layer with column parallelism.
@@ -432,13 +443,13 @@ class ColumnParallelLinear(LinearBase):
                        skip adding bias but instead return it.
         params_dtype: Data type for the parameters.
         quant_config: Quantization configure.
-        output_sizes: list of output sizes packed into one output, like for QKV
-                       the list would be size 3.
         prefix: The name of the layer in the state dict, including all parents
                         (e.g. model.layers.0.qkv_proj)
         return_bias: If true, return bias together with outputs in forward pass.
         disable_tp: If true, weights matrix won't be sharded through tp rank.
     """
+
+    # --8<-- [end:column_parallel_linear]
 
     def __init__(
         self,
@@ -449,7 +460,6 @@ class ColumnParallelLinear(LinearBase):
         skip_bias_add: bool = False,
         params_dtype: torch.dtype | None = None,
         quant_config: QuantizationConfig | None = None,
-        output_sizes: list[int] | None = None,
         prefix: str = "",
         *,
         return_bias: bool = True,
@@ -480,9 +490,6 @@ class ColumnParallelLinear(LinearBase):
 
         self._maybe_allow_fp8_block_shape_mismatch()
         self.gather_output = gather_output
-
-        if output_sizes is None:
-            output_sizes = [output_size]
 
         assert self.quant_method is not None
         self.quant_method.create_weights(
@@ -600,9 +607,10 @@ class ColumnParallelLinear(LinearBase):
             output = tensor_model_parallel_all_gather(output_parallel)
         else:
             output = output_parallel
-        output_bias = self.bias if self.skip_bias_add else None
+
         if not self.return_bias:
             return output
+        output_bias = self.bias if self.skip_bias_add else None
         return output, output_bias
 
     def extra_repr(self) -> str:
@@ -763,8 +771,18 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
 
         assert loaded_shard_id < len(self.output_sizes)
         if output_dim is not None:
-            shard_offset = sum(self.output_sizes[:loaded_shard_id]) // self.tp_size
-            shard_size = self.output_sizes[loaded_shard_id] // self.tp_size
+            shard_offset = sum(self.output_sizes[:loaded_shard_id])
+            shard_size = self.output_sizes[loaded_shard_id]
+
+            if isinstance(param, BlockQuantScaleParameter):
+                weight_block_size = getattr(self, "weight_block_size", None)
+                shard_size, shard_offset = adjust_block_scale_shard(
+                    weight_block_size, shard_size, shard_offset
+                )
+
+            shard_offset //= self.tp_size
+            shard_size //= self.tp_size
+
             # Special case for quantization.
             # If quantized, we need to adjust the offset and size to account
             # for the packing.
@@ -867,24 +885,17 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
 
         assert loaded_shard_id < len(self.output_sizes)
 
+        shard_offset = sum(self.output_sizes[:loaded_shard_id])
+        shard_size = self.output_sizes[loaded_shard_id]
+
         if isinstance(param, BlockQuantScaleParameter):
-            assert self.quant_method is not None
-            # Assume the weight block size has been set by quant method
-            assert hasattr(self, "weight_block_size")
-            weight_block_size = self.weight_block_size
-            assert weight_block_size is not None
-            block_n, _ = weight_block_size[0], weight_block_size[1]
-            shard_offset = (
-                (sum(self.output_sizes[:loaded_shard_id]) + block_n - 1) // block_n
-            ) // self.tp_size
-            shard_size = (
-                (self.output_sizes[loaded_shard_id] + block_n - 1)
-                // block_n
-                // self.tp_size
+            weight_block_size = getattr(self, "weight_block_size", None)
+            shard_size, shard_offset = adjust_block_scale_shard(
+                weight_block_size, shard_size, shard_offset
             )
-        else:
-            shard_offset = sum(self.output_sizes[:loaded_shard_id]) // self.tp_size
-            shard_size = self.output_sizes[loaded_shard_id] // self.tp_size
+
+        shard_offset //= self.tp_size
+        shard_size //= self.tp_size
 
         param.load_merged_column_weight(
             loaded_weight=loaded_weight,
@@ -1066,16 +1077,11 @@ class QKVParallelLinear(ColumnParallelLinear):
         shard_offset = self._get_shard_offset_mapping(loaded_shard_id)
         shard_size = self._get_shard_size_mapping(loaded_shard_id)
 
-        # Note(simon): This is needed for Qwen3's fp8 quantization.
         if isinstance(param, BlockQuantScaleParameter):
-            assert self.quant_method is not None
-            # Assume the weight block size has been set by quant method
-            assert hasattr(self, "weight_block_size")
-            weight_block_size = self.weight_block_size
-            assert weight_block_size is not None
-            block_n, _ = weight_block_size[0], weight_block_size[1]
-            shard_offset = (shard_offset + block_n - 1) // block_n
-            shard_size = (shard_size + block_n - 1) // block_n
+            weight_block_size = getattr(self, "weight_block_size", None)
+            shard_size, shard_offset = adjust_block_scale_shard(
+                weight_block_size, shard_size, shard_offset
+            )
 
         param.load_qkv_weight(
             loaded_weight=loaded_weight,
@@ -1208,6 +1214,13 @@ class QKVParallelLinear(ColumnParallelLinear):
             elif loaded_shard_id == "v":
                 shard_offset = (self.num_heads + self.num_kv_heads) * self.head_size
                 shard_size = self.num_kv_heads * self.v_head_size
+
+            if isinstance(param, BlockQuantScaleParameter):
+                weight_block_size = getattr(self, "weight_block_size", None)
+                shard_size, shard_offset = adjust_block_scale_shard(
+                    weight_block_size, shard_size, shard_offset
+                )
+
             # Special case for Quantized Weights.
             # If quantized, we need to adjust the offset and size to account
             # for the packing.
@@ -1276,6 +1289,7 @@ class QKVParallelLinear(ColumnParallelLinear):
         param_data.copy_(loaded_weight)
 
 
+# --8<-- [start:row_parallel_linear]
 @CustomOp.register("row_parallel_linear")
 class RowParallelLinear(LinearBase):
     """Linear layer with row parallelism.
@@ -1309,6 +1323,8 @@ class RowParallelLinear(LinearBase):
         return_bias: If true, return bias together with outputs in forward pass.
         disable_tp: If true, weights matrix won't be sharded through tp rank.
     """
+
+    # --8<-- [end:row_parallel_linear]
 
     def __init__(
         self,
@@ -1447,10 +1463,9 @@ class RowParallelLinear(LinearBase):
         else:
             output = output_parallel
 
-        output_bias = self.bias if self.skip_bias_add else None
-
         if not self.return_bias:
             return output
+        output_bias = self.bias if self.skip_bias_add else None
         return output, output_bias
 
     def extra_repr(self) -> str:

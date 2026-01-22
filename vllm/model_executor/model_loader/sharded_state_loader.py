@@ -110,8 +110,8 @@ class ShardedStateLoader(BaseModelLoader):
         from vllm.distributed import get_tensor_model_parallel_rank
 
         model_weights = model_config.model
-        if hasattr(model_config, "model_weights"):
-            model_weights = model_config.model_weights
+        if model_weights_override := model_config.model_weights:
+            model_weights = model_weights_override
         local_model_path = model_weights
 
         rank = get_tensor_model_parallel_rank()

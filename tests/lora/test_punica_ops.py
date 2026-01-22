@@ -9,7 +9,7 @@ import vllm.lora.ops.torch_ops as torch_ops
 import vllm.lora.ops.triton_ops as triton_ops
 from vllm.lora.ops.triton_ops import LoRAKernelMeta
 from vllm.lora.ops.triton_ops.utils import _LORA_A_PTR_DICT, _LORA_B_PTR_DICT
-from vllm.platforms import current_platform
+from vllm.utils.torch_utils import set_random_seed
 
 from .utils import PunicaTensors, assert_close, generate_data_for_nslices
 
@@ -395,7 +395,7 @@ def test_kernels(
     Tests LoRA kernels.
     """
     torch.set_default_device(device)
-    current_platform.seed_everything(seed)
+    set_random_seed(seed)
 
     if op_type == "shrink":
         check_lora_shrink_kernel(
@@ -447,7 +447,7 @@ def test_kernels_hidden_size(
     Tests SGMV and LoRA kernels.
     """
     torch.set_default_device(device)
-    current_platform.seed_everything(seed)
+    set_random_seed(seed)
 
     if op_type == "shrink":
         check_lora_shrink_kernel(
