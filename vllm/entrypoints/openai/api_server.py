@@ -251,7 +251,6 @@ async def show_version():
     return JSONResponse(content=ver)
 
 
-@router.post("/slow_down")
 async def slow_down(request: SlowDownRequest, raw_request: Request):
     """
     Slow down forward passes deliberately. Only for benchmarking.
@@ -264,6 +263,8 @@ async def slow_down(request: SlowDownRequest, raw_request: Request):
         curl -X POST http://localhost:8000/slow_down \
             -H "Content-Type: application/json" \
             -d '{"forward_sleep_time": 120.0}'
+
+    Note: This endpoint is only available when --enable-dev-endpoints is set.
     """
     engine_client: EngineClient = raw_request.app.state.engine_client
     await engine_client.slow_down(request.forward_sleep_time)
@@ -549,6 +550,12 @@ def build_app(args: Namespace) -> FastAPI:
     from vllm.entrypoints.sagemaker.routes import register_sagemaker_routes
 
     register_sagemaker_routes(router)
+
+    # Register dev/benchmarking endpoints only when explicitly enabled.
+    # These endpoints are not authenticated and could be used for DoS attacks.
+    if args.enable_dev_endpoints:
+        router.add_api_route("/slow_down", slow_down, methods=["POST"])
+
     app.include_router(router)
 
     app.root_path = args.root_path
