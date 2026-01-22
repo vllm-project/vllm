@@ -475,7 +475,7 @@ class WhisperEncoder(nn.Module):
         ):
             raise ValueError(
                 "Only sinusoidal or learned position embeddings are supported "
-                f"for causal models, but got {self.pos_embed_type}"
+                f"for non-causal models, but got {self.pos_embed_type}"
             )
 
         maybe_fp32_init_ctx = (
