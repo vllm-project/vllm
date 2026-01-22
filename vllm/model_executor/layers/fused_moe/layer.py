@@ -542,36 +542,6 @@ class FusedMoE(CustomOp):
             capture=capture,
         )
         self.routing_method_type: RoutingMethodType = self.router.routing_method_type
-
-        self.moe_config: FusedMoEConfig = FusedMoEConfig(
-            num_experts=self.global_num_experts,
-            experts_per_token=top_k,
-            hidden_dim=hidden_size,
-            intermediate_size_per_partition=self.intermediate_size_per_partition,
-            num_local_experts=self.local_num_experts,
-            moe_parallel_config=self.moe_parallel_config,
-            in_dtype=moe_in_dtype,
-            router_logits_dtype=router_logits_dtype,
-            max_num_tokens=envs.VLLM_MOE_DP_CHUNK_SIZE,
-            has_bias=has_bias,
-            is_act_and_mul=is_act_and_mul,
-            is_lora_enabled=vllm_config.lora_config is not None,
-            activation=activation,
-            device=vllm_config.device_config.device,
-            routing_method=self.routing_method_type,
-        )
-        self.moe_config_use_flashinfer_cutlass_kernels = (
-            self.moe_config.use_flashinfer_cutlass_kernels
-        )
-        if self.use_mori_kernels:
-            assert self.rocm_aiter_fmoe_enabled, (
-                "Mori needs to be used with aiter fused_moe for now."
-            )
-            assert not self.aiter_fmoe_shared_expert_enabled, (
-                "Mori does not support fusion shared expert now. "
-                "Turn it off by setting VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS=0"
-            )
-
         self.quant_config = quant_config
 
         def _create_moe_config(hidden_dim: int) -> FusedMoEConfig:
@@ -580,6 +550,7 @@ class FusedMoE(CustomOp):
                 num_experts=self.global_num_experts,
                 experts_per_token=top_k,
                 hidden_dim=hidden_dim,
+                intermediate_size_per_partition=self.intermediate_size_per_partition,
                 num_local_experts=self.local_num_experts,
                 moe_parallel_config=self.moe_parallel_config,
                 in_dtype=moe_in_dtype,
@@ -588,6 +559,9 @@ class FusedMoE(CustomOp):
                 has_bias=has_bias,
                 is_act_and_mul=is_act_and_mul,
                 is_lora_enabled=vllm_config.lora_config is not None,
+                activation=activation,
+                device=vllm_config.device_config.device,
+                routing_method=self.routing_method_type,
             )
 
         def _get_quant_method() -> FusedMoEMethodBase:
@@ -609,6 +583,15 @@ class FusedMoE(CustomOp):
         self.moe_config_use_flashinfer_cutlass_kernels = (
             self.moe_config.use_flashinfer_cutlass_kernels
         )
+
+        if self.use_mori_kernels:
+            assert self.rocm_aiter_fmoe_enabled, (
+                "Mori needs to be used with aiter fused_moe for now."
+            )
+            assert not self.aiter_fmoe_shared_expert_enabled, (
+                "Mori does not support fusion shared expert now. "
+                "Turn it off by setting VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS=0"
+            )
 
         # Note: get_quant_method will look at the layer's local_num_experts
         # for heuristic purposes, so it must be initialized first.
