@@ -279,16 +279,18 @@ class FlashInferExperts(mk.FusedMoEPermuteExpertsUnpermute):
 
         if expert_map is not None:
             # Mask out experts that are not assigned to this rank
-            # expert_map contains global->local mapping, with -1 for invalid experts
-            # topk_ids contains global expert IDs
-            
+            # expert_map contains global->local mapping, with -1 for invalid
+            # experts. topk_ids contains global expert IDs.
+
             # Map global expert IDs to local IDs or -1 using expert_map
-            # Note: We need to handle potential out-of-bounds access if topk_ids contains invalid values
-            # but generally topk_ids should be within [0, global_num_experts)
+            # Note: We need to handle potential out-of-bounds access if
+            # topk_ids contains invalid values but generally topk_ids
+            # should be within [0, global_num_experts)
             # FlashInfer documentation says:
             # token_selected_experts: int32 tensor of shape [num_tokens, top_k]
 
-            # If we pass -1 for experts not on this rank, FlashInfer should ignore them.
+            # If we pass -1 for experts not on this rank, FlashInfer should
+            # ignore them.
 
             topk_ids = expert_map[topk_ids.long()].to(topk_ids.dtype)
 

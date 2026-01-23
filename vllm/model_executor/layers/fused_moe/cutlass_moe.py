@@ -17,7 +17,7 @@ from vllm.model_executor.layers.fused_moe.moe_permute_unpermute import (
     moe_unpermute,
 )
 from vllm.model_executor.layers.fused_moe.prepare_finalize import (
-    MoEPrepareAndFinalizeNoEP,
+    MoEPrepareAndFinalizeNoDPEP,
 )
 from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceDelegate,

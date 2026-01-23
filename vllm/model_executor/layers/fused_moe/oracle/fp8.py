@@ -18,7 +18,7 @@ from vllm.model_executor.layers.fused_moe.flashinfer_trtllm_moe import (
     is_supported_config_trtllm,
 )
 from vllm.model_executor.layers.fused_moe.prepare_finalize import (
-    MoEPrepareAndFinalizeNoEP,
+    MoEPrepareAndFinalizeNoDPEP,
 )
 from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
     FlashinferMoeBackend,
@@ -500,7 +500,7 @@ def make_fp8_moe_kernel(
         )
 
     # Create Prepare/Finalize.
-    prepare_finalize = MoEPrepareAndFinalizeNoEP(
+    prepare_finalize = MoEPrepareAndFinalizeNoDPEP(
         defer_input_quant=experts_cls.expects_unquantized_inputs(
             moe_config, moe_quant_config
         ),
