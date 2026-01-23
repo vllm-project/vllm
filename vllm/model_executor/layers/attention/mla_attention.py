@@ -202,6 +202,7 @@ from vllm._aiter_ops import rocm_aiter_ops
 from vllm.config import ModelConfig, VllmConfig, get_current_vllm_config
 from vllm.distributed.parallel_state import get_dcp_group, is_global_first_rank
 from vllm.logger import init_logger
+from vllm.model_executor.custom_op import CustomOp
 from vllm.model_executor.layers.batch_invariant import (
     vllm_is_batch_invariant,
 )
@@ -213,7 +214,6 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     GroupShape,
     get_and_maybe_dequant_weights,
 )
-from vllm.model_executor.utils import maybe_disable_graph_partition
 from vllm.platforms import current_platform
 from vllm.utils.flashinfer import has_nvidia_artifactory
 from vllm.utils.math_utils import cdiv, round_down
@@ -235,7 +235,6 @@ from vllm.v1.attention.backends.utils import (
 from vllm.v1.attention.ops.common import cp_lse_ag_out_rs
 from vllm.v1.attention.ops.merge_attn_states import merge_attn_states
 from vllm.v1.kv_cache_interface import AttentionSpec
-from vllm.model_executor.custom_op import CustomOp
 
 
 class QueryLenSupport(Enum):
@@ -302,6 +301,7 @@ class _DecodeConcatQuantFP8(QuantFP8):
 
     def _make_forward(quant_fn):  # noqa: N805
         """Factory to create forward methods that concat before quantization."""
+
         def forward(
             self,
             decode_ql_nope: torch.Tensor,
@@ -313,6 +313,7 @@ class _DecodeConcatQuantFP8(QuantFP8):
             decode_q_flat = decode_q0.reshape(decode_q0.shape[0], -1)
             decode_q, _ = quant_fn(self, decode_q_flat, scale, scale_ub)
             return decode_q.view(decode_q0.shape)
+
         return forward
 
     forward_native = _make_forward(QuantFP8.forward_native)  # type: ignore[arg-type]
