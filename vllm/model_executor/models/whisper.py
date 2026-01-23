@@ -82,6 +82,11 @@ class WhisperPosEmbedType(enum.Enum):
     LEARNED = "learned"
 
 
+def should_torch_compile_encoder(vllm_config: VllmConfig) -> bool:
+    """Callable to be passed to `@support_torch_compile`'s `enable_if` argument."""
+    return vllm_config.compilation_config.compile_mm_encoder
+
+
 class WhisperAudioInputs(TensorSchema):
     """
     Dimensions:
@@ -98,6 +103,9 @@ class WhisperAudioInputs(TensorSchema):
 
 class WhisperEncoderAttention(MMEncoderAttention):
     """Multi-headed attention for Whisper encoder with 2D tensor support."""
+
+    def __init__(self, num_heads: int, head_size: int, scale: float, num_kv_heads: int):
+        super().__init__(num_heads, head_size, scale, num_kv_heads)
 
     def forward(
         self,
@@ -348,7 +356,12 @@ class WhisperMLP(nn.Module):
 
 
 class WhisperEncoderLayer(nn.Module):
-    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
+    def __init__(
+        self,
+        *,
+        vllm_config: VllmConfig,
+        prefix: str = "",
+    ):
         super().__init__()
         config = vllm_config.model_config.hf_config
         is_causal = getattr(config, "is_causal", False)
@@ -391,7 +404,9 @@ class WhisperEncoderLayer(nn.Module):
         hidden_states = self.mlp(hidden_states)
         hidden_states = residual + hidden_states
 
-        hidden_states = cast_overflow_tensors(hidden_states)
+        # Not compatible with torch.compile
+        if not torch.compiler.is_compiling():
+            hidden_states = cast_overflow_tensors(hidden_states)
 
         return hidden_states
 
@@ -455,6 +470,11 @@ class WhisperDecoderLayer(nn.Module):
         return hidden_states
 
 
+@support_torch_compile(
+    dynamic_arg_dims={"input_features": 0},
+    enable_if=should_torch_compile_encoder,
+    mark_unbacked_dims={"input_features": 0},
+)
 class WhisperEncoder(nn.Module):
     def __init__(
         self, *, vllm_config: VllmConfig, prefix: str = "", init_in_fp32: bool = False
@@ -470,10 +490,8 @@ class WhisperEncoder(nn.Module):
         self.max_source_positions = config.max_source_positions
         self.embed_scale = math.sqrt(embed_dim) if config.scale_embedding else 1.0
 
-        self.is_causal = getattr(config, "is_causal", False)
-        Conv1d = (
-            WhisperCausalConv1d if self.is_causal else partial(nn.Conv1d, padding=1)
-        )
+        is_causal = getattr(config, "is_causal", False)
+        Conv1d = WhisperCausalConv1d if is_causal else partial(nn.Conv1d, padding=1)
 
         self.conv1 = Conv1d(self.num_mel_bins, embed_dim, kernel_size=3)
         self.conv2 = Conv1d(embed_dim, embed_dim, stride=2, kernel_size=3)
@@ -482,13 +500,14 @@ class WhisperEncoder(nn.Module):
         self.start_layer, self.end_layer, self.layers = make_layers(
             config.encoder_layers,
             lambda prefix: WhisperEncoderLayer(
-                vllm_config=vllm_config, prefix=f"{prefix}.layers"
+                vllm_config=vllm_config,
+                prefix=f"{prefix}.layers",
             ),
             prefix=f"{prefix}.layers",
         )
         self.layer_norm = nn.LayerNorm(config.d_model)
 
-        if self.is_causal and self.pos_embed_type != WhisperPosEmbedType.NOPE:
+        if is_causal and self.pos_embed_type != WhisperPosEmbedType.NOPE:
             raise ValueError(
                 "Only NOPE position embeddings are supported "
                 f"for causal models, but got {self.pos_embed_type}"
@@ -514,40 +533,18 @@ class WhisperEncoder(nn.Module):
                     sinusoids(*self.embed_positions.weight.shape)
                 )
 
-    def forward_conv(
-        self, input_features: torch.Tensor | list[torch.Tensor]
-    ) -> torch.Tensor:
-        hidden_states = []
-        input_is_batched = False
-        for features in input_features:
-            embeds = nn.functional.gelu(self.conv1(features))
-            embeds = nn.functional.gelu(self.conv2(embeds))
+    def forward_conv(self, input_features: torch.Tensor) -> torch.Tensor:
+        embeds = nn.functional.gelu(self.conv1(input_features))
+        embeds = nn.functional.gelu(self.conv2(embeds))
+        embeds = embeds.transpose(-1, -2)
 
-            if self.pos_embed_type in (
-                WhisperPosEmbedType.SINUSOIDAL,
-                WhisperPosEmbedType.LEARNED,
-            ):
-                embeds = embeds.transpose(-1, -2)
-                embeds = (
-                    embeds + self.embed_positions.weight[: embeds.size(-2), :]
-                ).to(embeds.dtype)
-            elif self.pos_embed_type == WhisperPosEmbedType.NOPE:
-                embeds = embeds.transpose(-1, -2).to(embeds.dtype)
-            else:
-                raise ValueError(f"Unknown pos_embed_type: {self.pos_embed_type}")
+        if self.pos_embed_type == WhisperPosEmbedType.NOPE:
+            return embeds
 
-            hidden_states.append(embeds)
-            input_is_batched = embeds.ndim > 2
         # Input to MHA must be B x T x D
-        if input_is_batched or self.is_causal:
-            # Models using WhisperEncoder may handle batching internally.
-            # If WhisperEncoder is causal, sequences
-            # are not padded to have identical seq length (T)
-            # => concat over feature dim
-            hidden_states = torch.cat(hidden_states)
-        else:
-            hidden_states = torch.stack(hidden_states, dim=0)
-
+        hidden_states = (embeds + self.embed_positions.weight[: embeds.size(-2), :]).to(
+            embeds.dtype
+        )
         return hidden_states
 
     def forward_layers(self, hidden_states: torch.Tensor) -> torch.Tensor:
@@ -557,7 +554,7 @@ class WhisperEncoder(nn.Module):
         hidden_states = self.layer_norm(hidden_states)
         return hidden_states
 
-    def forward(self, input_features: torch.Tensor | list[torch.Tensor]):
+    def forward(self, input_features: torch.Tensor):
         hidden_states = self.forward_conv(input_features)
         return self.forward_layers(hidden_states)
 
@@ -637,7 +634,7 @@ class WhisperModel(nn.Module):
 
     def get_encoder_outputs(
         self,
-        input_features: torch.Tensor | list[torch.Tensor] | None,
+        input_features: torch.Tensor | None,
     ) -> torch.Tensor | None:
         if input_features is None:
             return None
@@ -967,7 +964,6 @@ class WhisperForConditionalGeneration(
 
         if input_features is not None:
             input_features = json_map_leaves(lambda x: x.to(self.dtype), input_features)
-
         return WhisperAudioInputs(input_features=input_features)
 
     def compute_logits(self, hidden_states: torch.Tensor) -> torch.Tensor:
