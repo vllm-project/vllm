@@ -1431,7 +1431,7 @@ steps:
   - tests/v1/spec_decode/test_speculators_eagle3.py
   commands:
     - export VLLM_ALLOW_INSECURE_SERIALIZATION=1
-    - pytest -v -s v1/spec_decode/test_speculators_eagle3.py -m optional
+    - pytest -v -s v1/spec_decode/test_speculators_eagle3.py -m optional --optional
 
 - label: LM Eval Large Models # optional
   gpu: a100
