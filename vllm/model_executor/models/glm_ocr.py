@@ -64,9 +64,7 @@ from vllm.model_executor.models.glm4_1v import (
 )
 from vllm.multimodal import MULTIMODAL_REGISTRY
 
-from .utils import (
-    AutoWeightsLoader,
-)
+from .utils import AutoWeightsLoader, WeightsMapper
 
 logger = init_logger(__name__)
 
@@ -404,6 +402,14 @@ class GlmOcrVisionTransformer(Glm4vVisionTransformer):
     dummy_inputs=Glm4vDummyInputsBuilder,
 )
 class GlmOcrForConditionalGeneration(Glm4vForConditionalGeneration):
+    hf_to_vllm_mapper = WeightsMapper(
+        orig_to_new_prefix={
+            "lm_head.": "language_model.lm_head.",
+            "model.language_model.": "language_model.model.",
+            "model.visual.": "visual.",
+        }
+    )
+
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         loader = AutoWeightsLoader(self)
         return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
