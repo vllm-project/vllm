@@ -603,6 +603,7 @@ class FlashAttentionImpl(AttentionImpl):
         - FlashAttention 3
         - Hopper GPUs (sm90+)
         - FP8 static tensor quantization
+        - FP8 KV cache (required for FP8 computation)
 
         Note: For DCP and cascade attention, quantization is applied after
         the attention merge step rather than being fused into the kernel.
@@ -619,7 +620,11 @@ class FlashAttentionImpl(AttentionImpl):
             return False
 
         # Only FP8 static tensor quantization is supported
-        return quant_key == kFp8StaticTensorSym
+        if quant_key != kFp8StaticTensorSym:
+            return False
+
+        # FP8 output requires FP8 computation (FP8 KV cache)
+        return self.kv_cache_dtype.startswith("fp8")
 
     def forward(
         self,
@@ -915,6 +920,10 @@ class FlashAttentionImpl(AttentionImpl):
         )
 
         # Apply FP8 output quantization after merging if requested.
+        # DCP attention merges outputs from multiple attention computations,
+        # which requires high-precision arithmetic.
+        # Fused quantization is not supported at the kernel level,
+        # so quantization happens after the merge step.
         if output_scale is not None:
             from vllm import _custom_ops as ops
 
@@ -1164,6 +1173,10 @@ def cascade_attention(
     merge_attn_states(output, prefix_output, prefix_lse, suffix_output, suffix_lse)
 
     # Apply FP8 output quantization after merging if requested.
+    # Cascade attention merges prefix and suffix outputs,
+    # which requires high-precision arithmetic.
+    # Fused quantization is not supported at the kernel level,
+    # so quantization happens after the merge step.
     if output_scale is not None:
         from vllm import _custom_ops as ops
 
