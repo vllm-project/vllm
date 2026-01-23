@@ -6,10 +6,6 @@ import pytest
 import torch
 
 from vllm.distributed.eplb.eplb_state import EplbLayerState
-from vllm.model_executor.layers.fused_moe.router.fused_topk_bias_router import (
-    fused_topk_bias,
-)
-from vllm.model_executor.layers.fused_moe.router.fused_topk_router import fused_topk
 from vllm.model_executor.layers.fused_moe.router.router_factory import (
     create_fused_moe_router,
 )
@@ -164,7 +160,6 @@ def baseline_fused_topk_bias(
 
 
 def baseline_grouped_topk(
-    hidden_states: torch.Tensor,
     router_logits: torch.Tensor,
     top_k: int,
     num_expert_group: int,
@@ -187,26 +182,7 @@ def baseline_grouped_topk(
     7. Optionally renormalize
     """
     num_token, num_experts = router_logits.shape
-
-    if num_expert_group == num_experts:
-        if e_score_correction_bias is not None:
-            return fused_topk_bias(
-                hidden_states=hidden_states,
-                gating_output=router_logits,
-                e_score_correction_bias=e_score_correction_bias,
-                topk=top_k,
-                renormalize=renormalize,
-                scoring_func=scoring_func,
-            )
-        else:
-            topk_weights, topk_ids, _ = fused_topk(
-                hidden_states=hidden_states,
-                gating_output=router_logits,
-                topk=top_k,
-                renormalize=renormalize,
-                scoring_func=scoring_func,
-            )
-            return topk_weights, topk_ids
+    assert num_expert_group < num_experts
 
     # Apply scoring function
     if scoring_func == "softmax":
@@ -221,12 +197,8 @@ def baseline_grouped_topk(
         original_scores = scores
         scores = scores + e_score_correction_bias.unsqueeze(0)
         # For bias case, use sum of top-2 scores in each group
-        experts_per_group = num_experts // num_expert_group
-        topk_per_group = min(2, experts_per_group)
         group_scores = (
-            scores.view(num_token, num_expert_group, -1)
-            .topk(topk_per_group, dim=-1)[0]
-            .sum(dim=-1)
+            scores.view(num_token, num_expert_group, -1).topk(2, dim=-1)[0].sum(dim=-1)
         )
     else:
         # Use max score in each group
@@ -381,7 +353,6 @@ def test_fused_topk_bias(
     [
         (64, 8, 4),  # 8 groups of 8 experts, select 4 groups
         (32, 4, 2),  # 4 groups of 8 experts, select 2 groups
-        (8, 8, 2),  # 8 groups of 8 experts, select 4 groups
     ],
 )
 @pytest.mark.parametrize("renormalize", [False, True])
@@ -408,8 +379,7 @@ def test_grouped_topk(
     if top_k > global_num_experts:
         pytest.skip(f"top_k ({top_k}) > global_num_experts ({global_num_experts})")
 
-    if top_k > topk_group * (global_num_experts / num_expert_group):
-        pytest.skip("top_k > topk_group * (global_num_experts / num_expert_groups)")
+    assert top_k <= topk_group * (global_num_experts / num_expert_group)
 
     monkeypatch.setenv("VLLM_USE_FUSED_MOE_GROUPED_TOPK", "1" if use_custom_op else "0")
 
@@ -441,7 +411,6 @@ def test_grouped_topk(
 
     # Compute baseline
     baseline_weights, baseline_ids = baseline_grouped_topk(
-        hidden_states,
         router_logits,
         top_k,
         num_expert_group,

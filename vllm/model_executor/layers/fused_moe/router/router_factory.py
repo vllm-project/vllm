@@ -110,7 +110,7 @@ def create_fused_moe_router(
         # Check if num_experts is greater than or equal to num_expert_group
         # and is divisible by num_expert_group
         assert (
-            global_num_experts >= num_expert_group
+            global_num_experts > num_expert_group
             and global_num_experts % num_expert_group == 0
         )
 

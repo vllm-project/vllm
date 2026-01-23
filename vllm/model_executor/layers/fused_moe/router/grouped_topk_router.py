@@ -18,10 +18,6 @@ from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (
     rocm_aiter_grouped_topk,
 )
 from vllm.model_executor.layers.fused_moe.router.base_router import BaseRouter
-from vllm.model_executor.layers.fused_moe.router.fused_topk_bias_router import (
-    fused_topk_bias,
-)
-from vllm.model_executor.layers.fused_moe.router.fused_topk_router import fused_topk
 from vllm.model_executor.utils import maybe_disable_graph_partition
 from vllm.platforms import current_platform
 
@@ -90,14 +86,14 @@ def grouped_topk(
     routed_scaling_factor: float = 1.0,
     e_score_correction_bias: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
+    assert num_expert_group < gating_output.size(1)
+
     if (
         envs.VLLM_USE_FUSED_MOE_GROUPED_TOPK
         and current_platform.is_cuda()
         and num_expert_group <= 32
         and topk <= 32
         and e_score_correction_bias is not None
-        and num_expert_group
-        < gating_output.shape[-1]  # Disable kernel for 1-expert-per-group case
     ):
         return fused_grouped_topk(
             hidden_states=hidden_states,
@@ -112,31 +108,6 @@ def grouped_topk(
         )
 
     assert hidden_states.size(0) == gating_output.size(0), "Number of tokens mismatch"
-    num_experts = gating_output.shape[-1]
-
-    # This section of code where num_expert_group == num_experts is needed so
-    # that tests/v1/e2e/test_spec_decode.py::test_mtp_correctness[deepseek].
-    # will pass. The model in this test appears artificially created just for
-    # testing this case and it is unclear if this occurs in practice.
-    if num_expert_group == num_experts:
-        if e_score_correction_bias is not None:
-            return fused_topk_bias(
-                hidden_states=hidden_states,
-                gating_output=gating_output,
-                e_score_correction_bias=e_score_correction_bias,
-                topk=topk,
-                renormalize=renormalize,
-                scoring_func=scoring_func,
-            )
-        else:
-            topk_weights, topk_ids, _ = fused_topk(
-                hidden_states=hidden_states,
-                gating_output=gating_output,
-                topk=topk,
-                renormalize=renormalize,
-                scoring_func=scoring_func,
-            )
-            return topk_weights, topk_ids
 
     if scoring_func == "softmax":
         scores = torch.softmax(gating_output, dim=-1)
