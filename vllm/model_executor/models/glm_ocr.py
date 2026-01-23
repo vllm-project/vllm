@@ -100,6 +100,11 @@ class GlmOcrVisionAttention(nn.Module):
             num_heads, self.tp_size
         )
 
+        self.head_dim = embed_dim // num_heads
+
+        self.q_norm = RMSNorm(self.head_dim, eps=1e-5)
+        self.k_norm = RMSNorm(self.head_dim, eps=1e-5)
+
         self.qkv = QKVParallelLinear(
             hidden_size=embed_dim,
             head_size=self.hidden_size_per_attention_head,
@@ -126,9 +131,6 @@ class GlmOcrVisionAttention(nn.Module):
             scale=self.hidden_size_per_attention_head**-0.5,
             multimodal_config=multimodal_config,
         )
-
-        self.q_norm = RMSNorm(embed_dim, eps=1e-5)
-        self.k_norm = RMSNorm(embed_dim, eps=1e-5)
         self.apply_rotary_emb = ApplyRotaryEmb(enforce_enable=True)
 
     def split_qkv(self, qkv: torch.Tensor) -> tuple[torch.Tensor, ...]:

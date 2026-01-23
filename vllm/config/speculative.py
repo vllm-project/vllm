@@ -221,6 +221,17 @@ class SpeculativeConfig:
                 }
             )
 
+        if hf_config.architectures[0] == "GlmOcrForConditionalGeneration":
+            hf_config.model_type = "glm_ocr_mtp"
+            n_predict = getattr(hf_config, "num_nextn_predict_layers", None)
+            hf_config.update(
+                {
+                    "num_hidden_layers": 0,
+                    "n_predict": n_predict,
+                    "architectures": ["GlmOcrMTPModel"],
+                }
+            )
+
         if hf_config.model_type == "ernie4_5_moe":
             hf_config.model_type = "ernie_mtp"
         if hf_config.model_type == "ernie_mtp":
