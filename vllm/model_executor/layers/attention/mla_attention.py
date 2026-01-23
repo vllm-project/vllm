@@ -2067,8 +2067,6 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
                 decode_ql_nope = decode_ql_nope.transpose(0, 1)
 
             if fp8_attention:
-                ql_nope_shape = decode_ql_nope.shape
-                q_pe_shape = decode_q_pe.shape
                 assert decode_ql_nope.shape[0] == decode_q_pe.shape[0]
                 assert decode_ql_nope.shape[1] == decode_q_pe.shape[1]
                 decode_q = self._decode_concat_quant_fp8_op(
