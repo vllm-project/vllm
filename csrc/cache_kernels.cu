@@ -407,7 +407,7 @@ __global__ void concat_and_cache_ds_mla_kernel(
   }
 
   // Compute the scale for the tile
-  float tile_scale = fmaxf(tile_scale / kFp8ScaleDivisor, FLT_MIN);
+  float tile_scale = fmaxf(max_abs / kFp8ScaleDivisor, FLT_MIN);
 
   // The first lane of each half-warp writes the scale to kv_cache
   if ((lane_idx == 0) || (lane_idx == 16)) {
