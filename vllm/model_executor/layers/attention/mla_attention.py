@@ -208,9 +208,12 @@ from vllm.model_executor.layers.batch_invariant import (
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
 )
+from vllm.model_executor.layers.quantization.input_quant_fp8 import QuantFP8
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    GroupShape,
     get_and_maybe_dequant_weights,
 )
+from vllm.model_executor.utils import maybe_disable_graph_partition
 from vllm.platforms import current_platform
 from vllm.utils.flashinfer import has_nvidia_artifactory
 from vllm.utils.math_utils import cdiv, round_down
@@ -286,6 +289,28 @@ def dynamic_per_batched_tensor_quant(
 
 
 logger = init_logger(__name__)
+
+
+class _DecodeConcatQuantFP8(QuantFP8):
+    def _forward_with(
+        self,
+        op,
+        decode_ql_nope: torch.Tensor,
+        decode_q_pe: torch.Tensor,
+        scale: torch.Tensor,
+        scale_ub: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        decode_q0 = torch.cat((decode_ql_nope, decode_q_pe), dim=-1)
+        decode_q_flat = decode_q0.reshape(decode_q0.shape[0], -1)
+        decode_q, _ = op(self, decode_q_flat, scale, scale_ub=scale_ub)
+        return decode_q.view(decode_q0.shape)
+
+    forward_native = functools.partialmethod(
+        _forward_with, QuantFP8.forward_native
+    )
+    forward_cuda = functools.partialmethod(_forward_with, QuantFP8.forward_cuda)
+    forward_hip = functools.partialmethod(_forward_with, QuantFP8.forward_hip)
+
 
 CUDNN_WORKSPACE_SIZE = 12800
 
@@ -1379,6 +1404,11 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
         self.cp_kv_cache_interleave_size: int = (
             get_current_vllm_config().parallel_config.cp_kv_cache_interleave_size
         )
+        self._decode_concat_quant_fp8_op = _DecodeConcatQuantFP8(
+            static=True,
+            group_shape=GroupShape.PER_TENSOR,
+            compile_native=True,
+        )
 
     def _flash_attn_varlen_diff_headdims(
         self, q, k, v, return_softmax_lse=False, softmax_scale=None, **kwargs
@@ -2033,25 +2063,9 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
                 q_pe_shape = decode_q_pe.shape
                 assert decode_ql_nope.shape[0] == decode_q_pe.shape[0]
                 assert decode_ql_nope.shape[1] == decode_q_pe.shape[1]
-                decode_q_shape = (
-                    ql_nope_shape[0],
-                    ql_nope_shape[1],
-                    ql_nope_shape[2] + q_pe_shape[2],
+                decode_q = self._decode_concat_quant_fp8_op(
+                    decode_ql_nope, decode_q_pe, layer._q_scale
                 )
-                # Using empty and copy since torch.cat introduces significant overhead.
-                decode_q0 = torch.empty(
-                    decode_q_shape,
-                    device=decode_ql_nope.device,
-                    dtype=decode_ql_nope.dtype,
-                )
-                decode_q0[..., : ql_nope_shape[2]].copy_(decode_ql_nope)
-                decode_q0[..., ql_nope_shape[2] :].copy_(decode_q_pe)
-
-                decode_q, _ = ops.scaled_fp8_quant(
-                    decode_q0.view(decode_q_shape[0], -1),
-                    layer._q_scale,
-                )
-                decode_q = decode_q.view(decode_q_shape)
             else:
                 decode_q = (decode_ql_nope, decode_q_pe)
             if self.dcp_world_size > 1:
