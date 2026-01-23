@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from typing import ClassVar
+from typing import TYPE_CHECKING, ClassVar
 
 import torch
 from flashinfer.decode import trtllm_batch_decode_with_kv_cache_mla
@@ -23,6 +23,9 @@ from vllm.v1.attention.backend import (
     MultipleOf,
 )
 from vllm.v1.attention.backends.utils import KVCacheLayoutType
+
+if TYPE_CHECKING:
+    from vllm.config import VllmConfig
 
 logger = init_logger(__name__)
 
@@ -61,6 +64,32 @@ class FlashInferMLABackend(MLACommonBackend):
     @classmethod
     def supports_compute_capability(cls, capability: DeviceCapability) -> bool:
         return capability.major == 10
+
+    @classmethod
+    def supports_combination(
+        cls,
+        head_size: int,
+        dtype: torch.dtype,
+        kv_cache_dtype: CacheDType | None,
+        block_size: int,
+        use_mla: bool,
+        has_sink: bool,
+        use_sparse: bool,
+        device_capability: DeviceCapability,
+    ) -> str | None:
+        # FlashInfer MLA kernel requires qk_nope_head_dim == 128
+        from vllm.config import get_current_vllm_config
+
+        vllm_config: VllmConfig = get_current_vllm_config()
+        if vllm_config.model_config is not None:
+            hf_text_config = vllm_config.model_config.hf_text_config
+            qk_nope_head_dim = getattr(hf_text_config, "qk_nope_head_dim", 128)
+            if qk_nope_head_dim != 128:
+                return (
+                    f"FlashInfer MLA kernel requires qk_nope_head_dim == 128, "
+                    f"but got {qk_nope_head_dim}"
+                )
+        return None
 
     @classmethod
     def get_required_kv_cache_layout(cls) -> "KVCacheLayoutType | None":
