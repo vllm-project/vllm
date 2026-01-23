@@ -13,7 +13,7 @@ from vllm.v1.attention.backend import AttentionBackend
 from vllm.v1.kv_offload.spec import OffloadingSpec
 from vllm.v1.kv_offload.worker.worker import OffloadingWorker, TransferSpec
 
-from .metadata import ReqId, LoomConnectorMetadata
+from .metadata import ReqId, LoomConnectorMetadata, LoomSharedPrefixHandshake
 from ..logger import get_loom_logger
 
 logger = get_loom_logger(__name__)
@@ -233,6 +233,30 @@ class LoomConnectorWorker:
             str(path),
         )
         self._shared_prefix_ingested = True
+
+    def get_handshake_metadata(self) -> LoomSharedPrefixHandshake | None:
+        self._maybe_ingest_shared_prefixes()
+        manager = self._shared_prefix_manager
+        directory = getattr(manager, "shared_prefix_directory", None)
+        if not isinstance(directory, dict) or not directory:
+            return None
+
+        extents: list[dict[str, int]] = []
+        for (prefix_id, layer_group_id), extent in directory.items():
+            base_block_id = int(getattr(extent, "base_block_id"))
+            num_blocks = int(getattr(extent, "num_blocks"))
+            layout_version = int(getattr(extent, "layout_version", 0))
+            extents.append(
+                {
+                    "prefix_id": int(prefix_id),
+                    "layer_group_id": int(layer_group_id),
+                    "base_block_id": base_block_id,
+                    "num_blocks": num_blocks,
+                    "layout_version": layout_version,
+                }
+            )
+
+        return LoomSharedPrefixHandshake(extents=extents)
 
     def _generate_job_id(self) -> int:
         job_id = self._job_counter

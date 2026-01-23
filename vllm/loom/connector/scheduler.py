@@ -20,7 +20,12 @@ from vllm.v1.kv_offload.worker.worker import TransferSpec
 from vllm.v1.outputs import KVConnectorOutput
 from vllm.v1.request import Request
 
-from .metadata import ReqId, RequestPhase, LoomConnectorMetadata
+from .metadata import (
+    LoomConnectorMetadata,
+    LoomSharedPrefixHandshake,
+    ReqId,
+    RequestPhase,
+)
 from .policy import LoomPolicy
 from ..logger import get_loom_logger
 
@@ -101,6 +106,80 @@ class LoomConnectorScheduler:
             ) from e
         if self._loom_recompute_log_every_steps < 0:
             raise ValueError("loom_recompute_log_every_steps must be >= 0")
+
+    def set_xfer_handshake_metadata(self, metadata: dict[int, object]) -> None:
+        """Receive worker-side handshake metadata.
+
+        For Loom, workers ingest shared-prefix KV into pinned CXL/DRAM buffers
+        and allocate extents via LoomManager. The scheduler must learn the
+        (prefix_id, layer_group_id) -> (base_block_id, num_blocks) mapping so
+        prefix lookup/load can be planned.
+        """
+
+        # Merge all ranks' handshake payloads.
+        extents: list[dict[str, int]] = []
+        for tp_rank, payload in (metadata or {}).items():
+            if payload is None:
+                continue
+            if not isinstance(payload, LoomSharedPrefixHandshake):
+                # Ignore other connector payloads.
+                continue
+            extents.extend(payload.extents)
+
+        if not extents:
+            return
+
+        manager = self.manager
+        directory = getattr(manager, "shared_prefix_directory", None)
+        if not isinstance(directory, dict):
+            logger.warning(
+                "Loom scheduler cannot apply shared prefix handshake: manager has no shared_prefix_directory"
+            )
+            return
+
+        # Populate directory and reserve block ranges.
+        reserved_total = 0
+        for ent in extents:
+            try:
+                prefix_id = int(ent["prefix_id"])
+                layer_group_id = int(ent["layer_group_id"])
+                base_block_id = int(ent["base_block_id"])
+                num_blocks = int(ent["num_blocks"])
+                layout_version = int(ent.get("layout_version", 0))
+            except Exception:
+                continue
+
+            key = (prefix_id, layer_group_id)
+            if key not in directory:
+                # Create SharedPrefixExtent using the manager's class.
+                extent_cls = type(next(iter(directory.values()))) if directory else None
+                if extent_cls is not None:
+                    directory[key] = extent_cls(
+                        base_block_id=base_block_id,
+                        num_blocks=num_blocks,
+                        layout_version=layout_version,
+                    )
+                else:
+                    # Fallback: import local dataclass type.
+                    from ..kv_offload.manager import SharedPrefixExtent
+
+                    directory[key] = SharedPrefixExtent(
+                        base_block_id=base_block_id,
+                        num_blocks=num_blocks,
+                        layout_version=layout_version,
+                    )
+
+            backend = getattr(manager, "cxl_backend", None)
+            reserve_fn = getattr(backend, "reserve_extent", None)
+            if callable(reserve_fn):
+                reserve_fn(base_block_id, num_blocks)
+                reserved_total += num_blocks
+
+        logger.debug(
+            "Loom shared prefix handshake applied: extents=%d reserved_blocks=%d",
+            len(extents),
+            reserved_total,
+        )
 
     def _should_force_recompute(self, req_id: ReqId) -> bool:
         forced = self._loom_force_recompute.get(req_id)
@@ -212,27 +291,27 @@ class LoomConnectorScheduler:
             if full_block_tokens - num_computed_tokens < self.offloaded_block_size:
                 return 0, False
             start_block_idx = num_computed_tokens // self.offloaded_block_size
-            # logger.debug(
-            #     "Loom prefix lookup: req_id=%s prefix_id=%d prefix_len=%d start_block_idx=%d num_blocks=%d computed_tokens=%d",
-            #     request.request_id,
-            #     shared_prefix_id,
-            #     shared_prefix_len,
-            #     start_block_idx,
-            #     num_blocks,
-            #     num_computed_tokens,
-            # )
+            logger.debug(
+                "Loom prefix lookup: req_id=%s prefix_id=%d prefix_len=%d start_block_idx=%d num_blocks=%d computed_tokens=%d",
+                request.request_id,
+                shared_prefix_id,
+                shared_prefix_len,
+                start_block_idx,
+                num_blocks,
+                num_computed_tokens,
+            )
             hits = self.manager.lookup_prefix(
                 prefix_id=shared_prefix_id,
                 start_block_idx=start_block_idx,
                 num_blocks=num_blocks,
                 extra=kv_params,
             )
-            # logger.debug(
-            #     "Loom prefix lookup result: req_id=%s prefix_id=%d hits=%d",
-            #     request.request_id,
-            #     shared_prefix_id,
-            #     hits,
-            # )
+            logger.debug(
+                "Loom prefix lookup result: req_id=%s prefix_id=%d hits=%d",
+                request.request_id,
+                shared_prefix_id,
+                hits,
+            )
         else:
             num_blocks = request.num_tokens // self.offloaded_block_size
 
@@ -352,17 +431,37 @@ class LoomConnectorScheduler:
 
         if shared_prefix_id is not None and shared_prefix_len is not None:
             src_block_ids = getattr(src_spec, "block_ids", None)
-            if isinstance(src_block_ids, list) and src_block_ids:
+            src_summary = f"{type(src_spec).__name__}"
+            if isinstance(src_block_ids, (list, tuple)) and len(src_block_ids) > 0:
                 src_summary = (
                     f"{type(src_spec).__name__}(n={len(src_block_ids)} first={src_block_ids[0]} last={src_block_ids[-1]})"
                 )
-            else:
-                src_summary = f"{type(src_spec).__name__}"
+            elif src_block_ids is not None:
+                try:
+                    n_src = len(src_block_ids)
+                except TypeError:
+                    n_src = None
+                if n_src is not None and n_src > 0:
+                    try:
+                        first = src_block_ids[0]
+                        last = src_block_ids[-1]
+                    except Exception:
+                        first = None
+                        last = None
+                    src_summary = (
+                        f"{type(src_spec).__name__}(n={n_src} first={first} last={last})"
+                    )
+
+            dst_block_ids = getattr(dst_spec, "block_ids", None)
+            try:
+                dst_len = 0 if dst_block_ids is None else len(dst_block_ids)
+            except TypeError:
+                dst_len = 0
             logger.debug(
                 "Loom prefix load plan: req_id=%s src=%s dst_gpu_blocks=%d",
                 request.request_id,
                 src_summary,
-                len(getattr(dst_spec, "block_ids", []) or []),
+                dst_len,
             )
 
         self._reqs_to_load[request.request_id] = (src_spec, dst_spec)
@@ -405,13 +504,13 @@ class LoomConnectorScheduler:
                 num_decode += 1
             else:
                 num_prefill += 1
-        if scheduler_output.num_scheduled_tokens:
-            logger.debug(
-                "Loom request phase stats: prefill=%d decode=%d total=%d",
-                num_prefill,
-                num_decode,
-                num_prefill + num_decode,
-            )
+        # if scheduler_output.num_scheduled_tokens:
+        #     logger.debug(
+        #         "Loom request phase stats: prefill=%d decode=%d total=%d",
+        #         num_prefill,
+        #         num_decode,
+        #         num_prefill + num_decode,
+        #     )
 
         if self._loom_load_only:
             reqs_to_store = {}
@@ -501,7 +600,7 @@ class LoomConnectorScheduler:
                 stats["load_ms"] = (load_done_ts - load_enqueue_ts) * 1e3
             if isinstance(decode_start_ts, float) and isinstance(finish_ts, float):
                 stats["decode_wall_ms"] = (finish_ts - decode_start_ts) * 1e3
-            logger.info("loom_timing %s", json.dumps({"req_id": req_id, **stats}, sort_keys=True))
+            # logger.info("loom_timing %s", json.dumps({"req_id": req_id, **stats}, sort_keys=True))
 
         self._requests.pop(req_id, None)
         self._request_phases.pop(req_id, None)

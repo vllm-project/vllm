@@ -73,6 +73,24 @@ class LoomCXLBackend(Backend):
 
         return base_block_id, num_blocks
 
+    def reserve_extent(self, base_block_id: int, num_blocks: int) -> None:
+        if num_blocks <= 0:
+            raise ValueError(f"num_blocks must be > 0, got {num_blocks}")
+        start = int(base_block_id)
+        end = start + int(num_blocks)
+        reserved = set(range(start, end))
+        if not reserved:
+            return
+        free = self.allocated_blocks_free_list
+        new_free = deque([bid for bid in free if bid not in reserved])
+        if len(new_free) + len(reserved) != len(free):
+            missing = [bid for bid in reserved if bid not in free]
+            raise RuntimeError(
+                "Attempted to reserve blocks that are not free in LoomCXLBackend: "
+                f"missing={missing[:16]} (n_missing={len(missing)})"
+            )
+        self.allocated_blocks_free_list = new_free
+
     def free(self, block: BlockStatus):
         assert isinstance(block, LoomCXLBlockStatus)
         self.allocated_blocks_free_list.append(block.block_id)

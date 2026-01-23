@@ -12,7 +12,10 @@ from vllm.distributed.kv_transfer.kv_connector.v1 import (
     KVConnectorBase_V1,
     KVConnectorRole,
 )
-from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorMetadata
+from vllm.distributed.kv_transfer.kv_connector.v1.base import (
+    KVConnectorHandshakeMetadata,
+    KVConnectorMetadata,
+)
 from vllm.forward_context import ForwardContext
 from vllm.v1.attention.backend import AttentionBackend, AttentionMetadata
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks
@@ -128,3 +131,15 @@ class LoomConnector(KVConnectorBase_V1):
     def take_events(self) -> Iterable[KVCacheEvent]:
         assert self.connector_scheduler is not None
         return self.connector_scheduler.take_events()
+
+    def get_handshake_metadata(self) -> KVConnectorHandshakeMetadata | None:
+        if self.connector_worker is None:
+            return None
+        return self.connector_worker.get_handshake_metadata()
+
+    def set_xfer_handshake_metadata(
+        self, metadata: dict[int, KVConnectorHandshakeMetadata]
+    ) -> None:
+        if self.connector_scheduler is None:
+            return
+        self.connector_scheduler.set_xfer_handshake_metadata(metadata)
