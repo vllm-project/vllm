@@ -25,30 +25,6 @@ class FlashinferMoeBackend(Enum):
     CUTEDSL = "CUTEDSL"
 
 
-def calculate_tile_tokens_dim(num_tokens, top_k, num_experts):
-    from flashinfer import next_positive_power_of_2
-
-    # FlashInfer 0.2.10 has issues with larger tile sizes. Set to 8 for now.
-    # TODO: Revert this to dynamic calculation once a new version of FlashInfer
-    # with the necessary kernels is released.
-    tile_tokens_dim = 8
-
-    # A factor considering tokens are not perfectly balanced among experts.
-    imbalance_factor = 1.3
-    # Calculate the number of tokens per expert
-    # assuming perfect distribution.
-    num_tokens_per_expert = (num_tokens * top_k) // num_experts
-    # Apply the imbalance factor.
-    num_tokens_per_expert = int(num_tokens_per_expert * imbalance_factor)
-    # And pad the number to the next power of 2.
-    tile_tokens_dim = next_positive_power_of_2(num_tokens_per_expert)
-    # Cap to 8-max_tile_tokens_dim tokens per CTA tile
-    # as it's the range supported by the kernel.
-    tile_tokens_dim = min(max(tile_tokens_dim, 8), 64)
-
-    return tile_tokens_dim
-
-
 def swap_w13_to_w31(x: torch.Tensor) -> torch.Tensor:
     return (
         x.reshape(-1, 2, x.shape[-2] // 2, x.shape[-1]).flip(dims=[1]).reshape(x.shape)

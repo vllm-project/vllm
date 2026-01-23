@@ -451,3 +451,13 @@ def has_helion() -> bool:
             # use helion...
     """
     return _has_module("helion")
+
+
+def has_aiter() -> bool:
+    """Whether the optional `aiter` package is available."""
+    return _has_module("aiter")
+
+
+def has_mori() -> bool:
+    """Whether the optional `mori` package is available."""
+    return _has_module("mori")

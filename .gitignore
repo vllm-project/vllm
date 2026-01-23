@@ -7,6 +7,9 @@ vllm/vllm_flash_attn/*
 # OpenAI triton kernels copied from source
 vllm/third_party/triton_kernels/*
 
+# FlashMLA interface copied from source
+vllm/third_party/flashmla/flash_mla_interface.py
+
 # triton jit
 .triton
 
@@ -190,6 +193,9 @@ CLAUDE.md
 # Codex
 AGENTS.md
 .codex/
+
+# Cursor
+.cursor/
 
 # DS Store
 .DS_Store

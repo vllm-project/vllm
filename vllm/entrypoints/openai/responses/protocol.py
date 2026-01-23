@@ -173,6 +173,14 @@ class ResponsesRequest(OpenAIBaseModel):
     user: str | None = None
     skip_special_tokens: bool = True
     include_stop_str_in_output: bool = False
+    prompt_cache_key: str | None = Field(
+        default=None,
+        description=(
+            "A key that was used to read from or write to the prompt cache."
+            "Note: This field has not been implemented yet "
+            "and vLLM will ignore it."
+        ),
+    )
 
     # --8<-- [start:responses-extra-params]
     request_id: str = Field(

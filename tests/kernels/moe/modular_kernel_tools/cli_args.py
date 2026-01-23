@@ -141,7 +141,7 @@ def make_config(args: argparse.Namespace) -> Config:
 
     quant_config = None
     if args.quant_dtype is not None:
-        quant_config = FusedMoEQuantConfig(
+        quant_config = FusedMoEQuantConfig.make(
             quant_dtype=args.quant_dtype,
             per_act_token_quant=args.per_token_quantized_activations,
             per_out_ch_quant=args.per_channel_quantized_weights,

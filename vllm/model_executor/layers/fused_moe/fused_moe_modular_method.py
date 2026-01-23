@@ -16,9 +16,6 @@ from vllm.model_executor.layers.fused_moe.modular_kernel import (
     FusedMoEModularKernel,
     FusedMoEPrepareAndFinalize,
 )
-from vllm.model_executor.layers.fused_moe.router.fused_moe_router import (
-    FusedMoERouter,
-)
 
 logger = init_logger(__name__)
 
@@ -40,6 +37,7 @@ class FusedMoEModularMethod(FusedMoEMethodBase, CustomOp):
             not self.fused_experts.supports_expert_map(),
         )
         self.old_quant_method = old_quant_method
+        assert not self.old_quant_method.is_monolithic
         logger.debug("Swapping out %s", self.old_quant_method.__class__.__name__)
 
     @staticmethod
@@ -94,16 +92,11 @@ class FusedMoEModularMethod(FusedMoEMethodBase, CustomOp):
     def apply(
         self,
         layer: "FusedMoE",  # type: ignore[name-defined] # noqa: F821
-        router: FusedMoERouter,
         x: torch.Tensor,
-        router_logits: torch.Tensor,
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        topk_weights, topk_ids = router.select_experts(
-            hidden_states=x,
-            router_logits=router_logits,
-        )
-
-        result = self.fused_experts(
+        return self.fused_experts(
             hidden_states=x,
             w1=layer.w13_weight,
             w2=layer.w2_weight,
@@ -115,5 +108,3 @@ class FusedMoEModularMethod(FusedMoEMethodBase, CustomOp):
             apply_router_weight_on_input=layer.apply_router_weight_on_input,
             expert_map=None if self.disable_expert_map else layer.expert_map,
         )
-
-        return result

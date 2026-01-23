@@ -127,7 +127,6 @@ class BaseRouter(FusedMoERouter):
         self.eplb_state = eplb_state
         self.enable_eplb = enable_eplb
         self.indices_type_getter = indices_type_getter
-        self.capture: Callable[[torch.tensor], None] | None = None
 
     def _validate_eplb_state(self) -> None:
         """Validate that EPLB state is properly initialized if EPLB is enabled."""
@@ -237,9 +236,5 @@ class BaseRouter(FusedMoERouter):
 
         # Step 5: Convert indices dtype
         topk_ids = self._convert_indices_dtype(topk_ids, indices_type)
-
-        # TODO(bnell): temporary hack until select_experts is moved into FusedMoE
-        if self.capture is not None:
-            self.capture(topk_ids)
 
         return topk_weights, topk_ids

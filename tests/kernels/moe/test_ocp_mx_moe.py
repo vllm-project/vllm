@@ -30,7 +30,6 @@ if TRTLLM_GEN_MXFP4_AVAILABLE:
     from flashinfer import (
         fp4_quantize,
         mxfp8_quantize,
-        next_positive_power_of_2,
         reorder_rows_for_gated_act_gemm,
         shuffle_matrix_a,
         shuffle_matrix_sf_a,
@@ -186,30 +185,6 @@ def reference_moe(
     t = torch.einsum("bec,be->bc", t, expert_weights)
     assert t.shape == hidden_states.shape
     return t.to(torch.bfloat16)
-
-
-def get_tile_tokens_dim(x: torch.Tensor, top_k: int, num_experts: int):
-    # Number of tokens in the input tensor.
-    num_tokens = x.shape[0]
-    # Factor to account for the imbalance of the experts.
-    # factor equals to the
-    # max_real_num_tokens_per_expert / perfect_num_tokens_per_expert
-    # - 1.0 means perfect expert distribution.
-    # - > 1.0 means some experts have more
-    #     tokens than the perfect distribution.
-    # - < 1.0 does not make sense.
-    imbalance_factor = 1.3
-    # Calculate the number of tokens per expert
-    # assuming perfect distribution.
-    num_tokens_per_expert = (num_tokens * top_k) // num_experts
-    # Apply the imbalance factor.
-    num_tokens_per_expert = int(num_tokens_per_expert * imbalance_factor)
-    # And pad the number to the next power of 2.
-    tile_tokens_dim = next_positive_power_of_2(num_tokens_per_expert)
-    # Cap to 8-64 tokens per CTA tile
-    # as it's the range supported by the kernel.
-    tile_tokens_dim = min(max(tile_tokens_dim, 8), 64)
-    return tile_tokens_dim
 
 
 def tg_mxfp4_moe(
@@ -460,7 +435,6 @@ def tg_mxfp4_moe(
         local_expert_offset=0,
         local_num_experts=num_experts,
         routed_scaling_factor=None,
-        tile_tokens_dim=get_tile_tokens_dim(hidden_states, topk, num_experts),
         routing_method_type=1,  # renormalize
         do_finalize=True,
     )[0]
