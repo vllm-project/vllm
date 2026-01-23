@@ -136,6 +136,7 @@ if TYPE_CHECKING:
     K_SCALE_CONSTANT: int = 200
     V_SCALE_CONSTANT: int = 100
     VLLM_SERVER_DEV_MODE: bool = False
+    VLLM_ENABLE_STEP_VL_IMG_PATCH: bool = True
     VLLM_V1_OUTPUT_PROC_CHUNK_SIZE: int = 128
     VLLM_MLA_DISABLE: bool = False
     VLLM_RAY_PER_WORKER_GPUS: float = 1.0
@@ -809,6 +810,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
         ["blake3", "sha256", "sha512"],
         case_sensitive=False,
     ),
+
+    # Enable patch for step vl model to support image inputs
+    "VLLM_ENABLE_STEP_VL_IMG_PATCH": lambda: bool(
+        int(os.getenv("VLLM_ENABLE_STEP_VL_IMG_PATCH", "1"))
+    ),  
     # Path to the XLA persistent cache directory.
     # Only used for XLA devices such as TPUs.
     "VLLM_XLA_CACHE_PATH": lambda: os.path.expanduser(

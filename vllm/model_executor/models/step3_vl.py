@@ -14,7 +14,7 @@ from PIL import Image
 from torchvision import transforms
 from torchvision.transforms.functional import InterpolationMode
 from transformers import BatchFeature, PretrainedConfig, TensorType
-
+from vllm import envs
 from vllm.config import VllmConfig
 from vllm.config.multimodal import BaseDummyOptions
 from vllm.distributed import get_tensor_model_parallel_world_size
@@ -277,7 +277,7 @@ class ImagePatcher:
             max(new_img_height, new_img_width), min(new_img_height, new_img_width)
         )
 
-        if window_size == 0:
+        if window_size == 0 or not envs.VLLM_ENABLE_STEP_VL_IMG_PATCH:
             return img, [], None
         else:
             new_img_width, new_img_height = self.get_image_size_for_crop(
