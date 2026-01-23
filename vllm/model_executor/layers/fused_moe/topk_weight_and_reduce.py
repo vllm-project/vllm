@@ -61,7 +61,7 @@ class TopKWeightAndReduceNoOP(mk.TopKWeightAndReduce):
         if output is None:
             return fused_expert_output
 
-        # MoEPrepareAndFinalizeNoEP needs the output to be in the `output`
+        # MoEPrepareAndFinalizeNoDPEP needs the output to be in the `output`
         # tensor.
         assert output.size() == fused_expert_output.size(), (
             "output shape is expected to match the fused_expert_output shape. "
