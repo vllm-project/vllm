@@ -951,7 +951,6 @@ The following [pooling parameters][vllm.PoolingParams] are supported.
 --8<-- "vllm/pooling_params.py:classify-pooling-params"
 ```
 
-
 The following parameters are supported:
 
 ```python
