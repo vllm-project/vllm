@@ -1043,13 +1043,12 @@ class VllmRunner:
         )
 
         perplexities = []
-        for prompt_index, output in enumerate(outputs):
+        for output, mask_prefix_len in zip(outputs, mask_prefix_lens):
             output = cast(TokensTextLogprobsPromptLogprobs, output)
             token_datas = cast(list[dict[int, Logprob] | None], output[3])
             assert token_datas[0] is None
 
             token_log_probs = []
-            mask_prefix_len = mask_prefix_lens[prompt_index]
             for token_data in token_datas[mask_prefix_len + 1 :]:
                 assert token_data is not None
                 assert len(token_data) == 1

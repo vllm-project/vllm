@@ -66,7 +66,6 @@ def test_model_cleanup(dist_init, default_vllm_config):
         WeakKeyDictionary()
     )
     mock_info_dict[layer] = info
-
     layer_ref = ref(layer)
 
     del layer
@@ -119,7 +118,11 @@ def test_reload_weights(base_model, mul_model, add_model, tp_size, vllm_runner):
     if "FP8" in base_model and not current_platform.supports_fp8():
         pytest.skip(reason="Requires FP8 support")
 
-    with vllm_runner(model_name=base_model, tensor_parallel_size=tp_size) as llm:
+    with vllm_runner(
+        model_name=base_model,
+        tensor_parallel_size=tp_size,
+        enable_prefix_caching=False,
+    ) as llm:
         assert llm.generate_prompt_perplexity(["3 4 = 12"], mask=["3 4 ="])[0] > 1.1
         assert llm.generate_prompt_perplexity(["3 4 = 7"], mask=["3 4 ="])[0] > 1.1
 
@@ -132,12 +135,7 @@ def test_reload_weights(base_model, mul_model, add_model, tp_size, vllm_runner):
         assert llm.generate_prompt_perplexity(["3 4 = 7"], mask=["3 4 ="])[0] <= 1.1
 
 
-@pytest.mark.parametrize(
-    "tp_size",
-    [
-        2,
-    ],
-)
+@pytest.mark.parametrize("tp_size", [2])
 def test_reload_expert_parallelism(tp_size, vllm_runner):
     if cuda_device_count_stateless() < tp_size:
         pytest.skip(reason="Not enough CUDA devices")

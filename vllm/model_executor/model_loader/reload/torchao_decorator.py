@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING
 
 import torch
 
+from .helpers import model_apply
 from .layerwise import (
     finalize_layerwise_reload,
     initialize_layerwise_reload,
@@ -34,17 +35,17 @@ def support_quantized_model_reload_from_hp_weights(original_load_weights: Functi
     def patched_model_load_weights(
         self: "AutoWeightsLoader",
         weights: Iterable[tuple[str, torch.Tensor]],
-        *,
-        mapper=None,
+        *args,
+        **kwargs,
     ):
         model = self.module
 
         if not getattr(model, "_do_torchao_reload", False):
-            return original_load_weights(self, weights, mapper=mapper)
+            return original_load_weights(self, weights, *args, **kwargs)
 
-        model.apply(initialize_layerwise_reload)
-        loaded_weights = original_load_weights(self, weights, mapper=mapper)
-        model.apply(finalize_layerwise_reload)
+        model_apply(model, initialize_layerwise_reload)
+        loaded_weights = original_load_weights(self, weights, *args, **kwargs)
+        model_apply(model, finalize_layerwise_reload)
 
         return loaded_weights
 

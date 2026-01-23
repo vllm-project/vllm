@@ -4228,7 +4228,7 @@ class GPUModelRunner(
         :param weights_iterator: weights to load into model
         :param weights_path: path to load weights from if weights_iterator is not
             provided. Use path of original model if neither is provided.
-        :param checkpoint_format: set to False if weights have already been process
+        :param checkpoint_format: set to False if weights have already been processed
             into kernel format (repacking, renaming, ect.)
         """
         # TODO(@kylesayrs): generalize to all runners and loaders

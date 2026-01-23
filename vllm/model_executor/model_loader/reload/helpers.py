@@ -34,5 +34,6 @@ def get_layer_size(layer: torch.nn.Module) -> int:
 
 
 def model_apply(model: torch.nn.Module, fn: Callable, remove_duplicate: bool = True):
+    """model.apply, but supports modules which have overriden the `apply` method"""
     for _, module in model.named_modules(remove_duplicate=remove_duplicate):
         fn(module)
