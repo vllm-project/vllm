@@ -58,6 +58,7 @@ from vllm.model_executor.models.glm4_1v import (
     Glm4vMultiModalProcessor,
     Glm4vPatchMerger,
     Glm4vProcessingInfo,
+    Glm4vVisionBlock,
     Glm4vVisionMLP,
     Glm4vVisionPatchEmbed,
     Glm4vVisionTransformer,
@@ -197,7 +198,7 @@ class GlmOcrVisionAttention(nn.Module):
         return output
 
 
-class GlmOcrVisionBlock(nn.Module):
+class GlmOcrVisionBlock(Glm4vVisionBlock):
     def __init__(
         self,
         dim: int,
@@ -229,26 +230,6 @@ class GlmOcrVisionBlock(nn.Module):
             multimodal_config=multimodal_config,
             prefix=f"{prefix}.mlp",
         )
-
-    def forward(
-        self,
-        x: torch.Tensor,
-        cu_seqlens: torch.Tensor,
-        rotary_pos_emb_cos: torch.Tensor,
-        rotary_pos_emb_sin: torch.Tensor,
-        max_seqlen: int | None = None,  # Only used for Flash Attention
-    ) -> torch.Tensor:
-        x_attn = self.attn(
-            self.norm1(x),
-            cu_seqlens=cu_seqlens,
-            rotary_pos_emb_cos=rotary_pos_emb_cos,
-            rotary_pos_emb_sin=rotary_pos_emb_sin,
-            max_seqlen=max_seqlen,
-        )
-        x_fused_norm, residual = self.norm2(x, residual=x_attn)
-        x = residual + self.mlp(x_fused_norm)
-
-        return x
 
 
 class GlmOcrVisionPatchEmbed(Glm4vVisionPatchEmbed):
