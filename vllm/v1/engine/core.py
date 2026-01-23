@@ -72,6 +72,7 @@ logger = init_logger(__name__)
 
 POLLING_TIMEOUT_S = 2.5
 HANDSHAKE_TIMEOUT_MINS = 5
+_OUTPUT_THREAD_FLUSH_TIMEOUT = 5.0
 
 _R = TypeVar("_R")  # Return type for collective_rpc
 
@@ -685,10 +686,35 @@ class EngineCore:
         return req, request.current_wave
 
 
+class ParentDeathMonitor:
+    """Monitors parent process via death pipe, signals when parent exits."""
+
+    def __init__(self, death_pipe, input_queue: queue.Queue):
+        self.parent_died = threading.Event()
+        self._death_pipe = death_pipe
+        self._input_queue = input_queue
+        self._thread: threading.Thread | None = None
+
+    def start(self):
+        self._thread = threading.Thread(target=self._monitor, daemon=True)
+        self._thread.start()
+
+    def _monitor(self):
+        try:
+            self._death_pipe.recv()
+        except EOFError:
+            logger.info("Parent exited, terminating EngineCore")
+            self.parent_died.set()
+            self._input_queue.put_nowait(None)
+        finally:
+            self._death_pipe.close()
+
+
 class EngineCoreProc(EngineCore):
     """ZMQ-wrapper for running EngineCore in background process."""
 
     ENGINE_CORE_DEAD = b"ENGINE_CORE_DEAD"
+    READY_TO_EXIT = b"READY_TO_EXIT"
 
     @instrument(span_name="EngineCoreProc init")
     def __init__(
@@ -711,6 +737,7 @@ class EngineCoreProc(EngineCore):
         self.engine_index = engine_index
         identity = self.engine_index.to_bytes(length=2, byteorder="little")
         self.engines_running = False
+        self._graceful_shutdown_requested = False
 
         with self._perform_handshakes(
             handshake_address,
@@ -935,42 +962,16 @@ class EngineCoreProc(EngineCore):
         *args,
         dp_rank: int = 0,
         local_dp_rank: int = 0,
-        enable_graceful_shutdown: bool = False,
         death_pipe=None,
         **kwargs,
     ):
         """Launch EngineCore busy loop in background process."""
-        shutdown_requested = False
         maybe_register_config_serialize_by_value()
 
-        def signal_handler(signum, frame):
-            nonlocal shutdown_requested
-            if not shutdown_requested:
-                shutdown_requested = True
-                raise SystemExit()
+        signal.signal(signal.SIGINT, signal.SIG_IGN)
+        signal.signal(signal.SIGTERM, signal.SIG_IGN)
 
-        signal.signal(signal.SIGINT, signal_handler)
-        signal.signal(
-            signal.SIGTERM,
-            signal.SIG_IGN if enable_graceful_shutdown else signal_handler,
-        )
-
-        if death_pipe:
-
-            def monitor():
-                nonlocal shutdown_requested
-                try:
-                    death_pipe.recv()
-                except EOFError:
-                    logger.info("Parent exited, terminating EngineCore")
-                    if not shutdown_requested:
-                        shutdown_requested = True
-                        os.kill(os.getpid(), signal.SIGINT)
-                finally:
-                    death_pipe.close()
-
-            threading.Thread(target=monitor, daemon=True).start()
-
+        death_monitor: ParentDeathMonitor | None = None
         engine_core: EngineCoreProc | None = None
         try:
             vllm_config: VllmConfig = kwargs["vllm_config"]
@@ -1019,11 +1020,16 @@ class EngineCoreProc(EngineCore):
                 engine_core = EngineCoreProc(*args, engine_index=dp_rank, **kwargs)
 
             assert engine_core is not None
-            engine_core.run_busy_loop()
+            if death_pipe:
+                death_monitor = ParentDeathMonitor(death_pipe, engine_core.input_queue)
+                death_monitor.start()
+
+            parent_died = death_monitor.parent_died if death_monitor else None
+            engine_core.run_busy_loop(parent_died)
 
         except SystemExit:
-            logger.debug("EngineCore exiting.")
-            raise
+            # raised by SHUTDOWN request; normal shutdown path
+            pass
         except Exception as e:
             if engine_core is None:
                 logger.exception("EngineCore failed to start.")
@@ -1034,22 +1040,35 @@ class EngineCoreProc(EngineCore):
         finally:
             if engine_core is not None:
                 engine_core.shutdown()
+                if death_monitor is None or not death_monitor.parent_died.is_set():
+                    engine_core._send_ready_to_exit()
 
     def _init_data_parallel(self, vllm_config: VllmConfig):
         pass
 
-    def run_busy_loop(self):
+    def run_busy_loop(self, parent_died: threading.Event | None = None):
         """Core busy loop of the EngineCore."""
 
-        # Loop until process is sent a SIGINT or SIGTERM
-        while True:
+        # Loop until SHUTDOWN received or parent dies
+        while parent_died is None or not parent_died.is_set():
             # 1) Poll the input queue until there is work to do.
-            self._process_input_queue()
+            if not self._process_input_queue():
+                break
             # 2) Step the engine core and return the outputs.
             self._process_engine_step()
 
-    def _process_input_queue(self):
-        """Exits when an engine step needs to be performed."""
+            # 3) Check if graceful shutdown is complete.
+            if (
+                self._graceful_shutdown_requested
+                and not self.scheduler.has_requests()
+                and not self.scheduler.has_pending_kv_transfers()
+            ):
+                logger.info("Drain complete, exiting")
+                break
+
+    def _process_input_queue(self) -> bool:
+        """Exits when an engine step needs to be performed.
+        Returns False if poison pill received (parent died)."""
 
         waited = False
         while (
@@ -1066,6 +1085,8 @@ class EngineCoreProc(EngineCore):
                     logger.debug("EngineCore waiting for work.")
                     waited = True
             req = self.input_queue.get()
+            if req is None:
+                return False
             self._handle_client_request(*req)
 
         if waited:
@@ -1074,7 +1095,11 @@ class EngineCoreProc(EngineCore):
         # Handle any more client requests.
         while not self.input_queue.empty():
             req = self.input_queue.get_nowait()
+            if req is None:
+                return False
             self._handle_client_request(*req)
+
+        return True
 
     def _process_engine_step(self) -> bool:
         """Called only when there are unfinished local requests."""
@@ -1123,6 +1148,12 @@ class EngineCoreProc(EngineCore):
             )
         elif request_type == EngineCoreRequestType.EXECUTOR_FAILED:
             raise RuntimeError("Executor failed.")
+        elif request_type == EngineCoreRequestType.SHUTDOWN:
+            logger.debug("Received SHUTDOWN request from parent.")
+            raise SystemExit()
+        elif request_type == EngineCoreRequestType.GRACEFUL_SHUTDOWN:
+            logger.info("Received GRACEFUL_SHUTDOWN, draining requests...")
+            self._graceful_shutdown_requested = True
         else:
             logger.error(
                 "Unrecognized input request type encountered: %s", request_type
@@ -1158,6 +1189,16 @@ class EngineCoreProc(EngineCore):
                 "vLLM shutdown signal from EngineCore failed "
                 "to send. Please report this issue."
             )
+
+    def _send_ready_to_exit(self):
+        """Send ready-to-exit notification after graceful shutdown."""
+
+        self.output_queue.put_nowait(EngineCoreProc.READY_TO_EXIT)
+
+        # wait for daemon to flush before we exit
+        self.output_thread.join(timeout=_OUTPUT_THREAD_FLUSH_TIMEOUT)
+        if self.output_thread.is_alive():
+            logger.warning("Ready-to-exit message may not have been sent.")
 
     def process_input_sockets(
         self,
@@ -1279,7 +1320,10 @@ class EngineCoreProc(EngineCore):
 
             while True:
                 output = self.output_queue.get()
-                if output == EngineCoreProc.ENGINE_CORE_DEAD:
+                if output in (
+                    EngineCoreProc.ENGINE_CORE_DEAD,
+                    EngineCoreProc.READY_TO_EXIT,
+                ):
                     for socket in sockets:
                         socket.send(output)
                     break
@@ -1429,13 +1473,14 @@ class DPEngineCoreProc(EngineCoreProc):
             )
             self.output_queue.put_nowait((-1, EngineCoreOutputs(scheduler_stats=stats)))
 
-    def run_busy_loop(self):
+    def run_busy_loop(self, parent_died: threading.Event | None = None):
         """Core busy loop of the EngineCore for data parallel case."""
 
-        # Loop until process is sent a SIGINT or SIGTERM
-        while True:
+        # Loop until SHUTDOWN received or parent dies
+        while parent_died is None or not parent_died.is_set():
             # 1) Poll the input queue until there is work to do.
-            self._process_input_queue()
+            if not self._process_input_queue():
+                break
 
             # 2) Step the engine core.
             executed = self._process_engine_step()
@@ -1475,6 +1520,15 @@ class DPEngineCoreProc(EngineCoreProc):
                 # Increment wave count and reset step counter.
                 self.current_wave += 1
                 self.step_counter = 0
+
+            # 4) Check if graceful shutdown is complete.
+            if (
+                self._graceful_shutdown_requested
+                and not self.scheduler.has_requests()
+                and not self.scheduler.has_pending_kv_transfers()
+            ):
+                logger.info("Drain complete, exiting")
+                break
 
     def _has_global_unfinished_reqs(self, local_unfinished: bool) -> bool:
         # Optimization - only perform finish-sync all-reduce every 32 steps.

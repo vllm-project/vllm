@@ -5,13 +5,14 @@ import contextlib
 import multiprocessing
 import queue
 import sys
+import threading
 import uuid
 import weakref
 from abc import ABC, abstractmethod
 from collections import defaultdict, deque
 from collections.abc import Awaitable, Callable, Sequence
 from concurrent.futures import Future
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from threading import Thread
 from typing import Any, TypeAlias, TypeVar
 
@@ -383,6 +384,11 @@ class BackgroundResources:
     # processing threads can access it without holding a ref to the client.
     engine_dead: bool = False
 
+    # graceful shutdown coordination
+    ready_to_exit_event: threading.Event = field(default_factory=threading.Event)
+    ready_to_exit_count: int = 0
+    expected_engine_count: int = 0
+
     def __call__(self):
         """Clean up background resources."""
 
@@ -444,6 +450,19 @@ class BackgroundResources:
         if len(frames) == 1 and (frames[0].buffer == EngineCoreProc.ENGINE_CORE_DEAD):
             self.engine_dead = True
             raise EngineDeadError()
+
+    def is_ready_to_exit(self, frames: Sequence[zmq.Frame]) -> bool:
+        if len(frames) == 1 and frames[0].buffer == EngineCoreProc.READY_TO_EXIT:
+            self.ready_to_exit_count += 1
+            logger.info(
+                "Received READY_TO_EXIT from engine (%d/%d)",
+                self.ready_to_exit_count,
+                self.expected_engine_count,
+            )
+            if self.ready_to_exit_count >= self.expected_engine_count:
+                self.ready_to_exit_event.set()
+            return True
+        return False
 
 
 class MPClient(EngineCoreClient):
@@ -560,6 +579,9 @@ class MPClient(EngineCoreClient):
             # underlying data.
             self.pending_messages = deque[tuple[zmq.MessageTracker, Any]]()
 
+            # Track expected engine count for graceful shutdown
+            self.resources.expected_engine_count = len(self.core_engines)
+
             # Start monitoring engine core processes for unexpected failures
             self.start_engine_core_monitor()
 
@@ -569,8 +591,39 @@ class MPClient(EngineCoreClient):
                 self._finalizer()
 
     def shutdown(self):
+        # send explicit SHUTDOWN to engines before closing resources
+        self._send_shutdown_to_engines()
         # Terminate background resources.
         self._finalizer()
+
+    def _send_shutdown_to_engines(self):
+        """Send SHUTDOWN message to all engine cores via ZMQ."""
+        if self.resources.engine_dead:
+            return
+        try:
+            for engine_id in self.core_engines:
+                self.input_socket.send_multipart(
+                    [engine_id, EngineCoreRequestType.SHUTDOWN.value],
+                    flags=zmq.NOBLOCK,
+                )
+        except Exception:
+            logger.debug_once("Failed to send SHUTDOWN, engines may be gone")
+
+    def _send_graceful_shutdown_to_engines(self):
+        """Send GRACEFUL_SHUTDOWN message to all engine cores via ZMQ."""
+        if self.resources.engine_dead:
+            return
+        try:
+            logger.info(
+                "Sending GRACEFUL_SHUTDOWN to %d engine(s)", len(self.core_engines)
+            )
+            for engine_id in self.core_engines:
+                self.input_socket.send_multipart(
+                    [engine_id, EngineCoreRequestType.GRACEFUL_SHUTDOWN.value],
+                    flags=zmq.NOBLOCK,
+                )
+        except Exception:
+            logger.debug_once("Failed to send GRACEFUL_SHUTDOWN, engines may be gone")
 
     def _format_exception(self, e: Exception) -> Exception:
         """If errored, use EngineDeadError so root cause is clear."""
@@ -703,6 +756,8 @@ class SyncMPClient(MPClient):
 
                     frames = out_socket.recv_multipart(copy=False)
                     resources.validate_alive(frames)
+                    if resources.is_ready_to_exit(frames):
+                        break
                     outputs: EngineCoreOutputs = decoder.decode(frames)
                     if outputs.utility_output:
                         _process_utility_output(outputs.utility_output, utility_results)
@@ -882,6 +937,8 @@ class AsyncMPClient(MPClient):
                 while True:
                     frames = await output_socket.recv_multipart(copy=False)
                     resources.validate_alive(frames)
+                    if resources.is_ready_to_exit(frames):
+                        return
                     outputs: EngineCoreOutputs = decoder.decode(frames)
                     if outputs.utility_output:
                         _process_utility_output(outputs.utility_output, utility_results)

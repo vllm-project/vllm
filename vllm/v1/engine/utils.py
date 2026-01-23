@@ -104,7 +104,6 @@ class CoreEngineProcManager:
         executor_class: type[Executor],
         log_stats: bool,
         client_handshake_address: str | None = None,
-        enable_graceful_shutdown: bool = False,
     ):
         context = get_mp_context()
         common_kwargs = {
@@ -113,7 +112,6 @@ class CoreEngineProcManager:
             "handshake_address": handshake_address,
             "executor_class": executor_class,
             "log_stats": log_stats,
-            "enable_graceful_shutdown": enable_graceful_shutdown,
         }
 
         if client_handshake_address:
@@ -934,7 +932,6 @@ def launch_core_engines(
                 local_engine_count=local_engine_count,
                 start_index=dp_rank,
                 local_start_index=local_start_index or 0,
-                enable_graceful_shutdown=enable_graceful_shutdown,
             )
         else:
             local_engine_manager = None

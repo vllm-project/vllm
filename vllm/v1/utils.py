@@ -39,6 +39,9 @@ logger = init_logger(__name__)
 
 T = TypeVar("T")
 
+# process shutdown timeout
+_SHUTDOWN_NATURAL_EXIT_TIMEOUT = 2.0
+
 
 class ConstantList(Generic[T], Sequence):
     def __init__(self, x: list[T]) -> None:
@@ -300,13 +303,9 @@ def wait_for_completion_or_failure(
 # Note(rob): shutdown function cannot be a bound method,
 # else the gc cannot collect the object.
 def shutdown(procs: list[BaseProcess]):
-    # Shutdown the process.
-    for proc in procs:
-        if proc.is_alive():
-            proc.terminate()
-
-    # Allow 5 seconds for remaining procs to terminate.
-    deadline = time.monotonic() + 5
+    # engines already exited after receiving SHUTDOWN via IPC
+    # just wait briefly for cleanup then force-kill stragglers
+    deadline = time.monotonic() + _SHUTDOWN_NATURAL_EXIT_TIMEOUT
     for proc in procs:
         remaining = deadline - time.monotonic()
         if remaining <= 0:
@@ -314,6 +313,7 @@ def shutdown(procs: list[BaseProcess]):
         if proc.is_alive():
             proc.join(remaining)
 
+    # any process still alive at this point, force-kill
     for proc in procs:
         if proc.is_alive() and (pid := proc.pid) is not None:
             kill_process_tree(pid)
