@@ -107,7 +107,9 @@ class TritonAttentionMetadata:
             for r in range_lists
         ]
 
-        return torch.nested.nested_tensor(range_tensors).to_padded_tensor(0)
+        return torch.nested.nested_tensor(
+            range_tensors, layout=torch.jagged
+        ).to_padded_tensor(0)
 
 
 class TritonAttentionMetadataBuilder(AttentionMetadataBuilder[TritonAttentionMetadata]):
