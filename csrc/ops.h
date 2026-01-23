@@ -100,20 +100,6 @@ torch::Tensor gptq_gemm(torch::Tensor a, torch::Tensor b_q_weight,
 
 void gptq_shuffle(torch::Tensor q_weight, torch::Tensor q_perm, int64_t bit);
 
-void selective_scan_fwd(
-    const torch::Tensor& u, const torch::Tensor& delta, const torch::Tensor& A,
-    const torch::Tensor& B, const torch::Tensor& C,
-    const std::optional<torch::Tensor>& D_,
-    const std::optional<torch::Tensor>& z_,
-    const std::optional<torch::Tensor>& delta_bias_, bool delta_softplus,
-    const std::optional<torch::Tensor>& query_start_loc,
-    const std::optional<torch::Tensor>& cache_indices,
-    const std::optional<torch::Tensor>& has_initial_state,
-    const torch::Tensor& ssm_states, int64_t pad_slot_id, int64_t block_size,
-    const std::optional<torch::Tensor>& block_idx_first_scheduled_token,
-    const std::optional<torch::Tensor>& block_idx_last_scheduled_token,
-    const std::optional<torch::Tensor>& initial_state_idx);
-
 torch::Tensor dynamic_4bit_int_moe_cpu(
     torch::Tensor x, torch::Tensor topk_ids, torch::Tensor topk_weights,
     torch::Tensor w13_packed, torch::Tensor w2_packed, int64_t H, int64_t I,
@@ -138,8 +124,6 @@ std::tuple<int64_t, torch::Tensor> allocate_shared_buffer_and_handle(
     int64_t size);
 int64_t open_mem_handle(torch::Tensor& mem_handle);
 void free_shared_buffer(int64_t buffer);
-
-torch::Tensor hadacore_transform(torch::Tensor& x, bool inplace);
 
 #ifdef USE_ROCM
 fptr_t init_custom_qr(int64_t rank, int64_t world_size,

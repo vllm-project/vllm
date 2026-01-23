@@ -8,21 +8,22 @@ Redistribution and use in source and binary forms, with or without modification,
 1. Redistributions of source code must retain the above copyright notice, this list of conditions and the following disclaimer.
 2. Redistributions in binary form must reproduce the above copyright notice, this list of conditions and the following disclaimer in the documentation and/or other materials provided with the distribution.
 3. Neither the name of the copyright holder nor the names of its contributors may be used to endorse or promote products derived from this software without specific prior written permission.
-THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS “AS IS” AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 ***********/
 
-#include <torch/all.h>
+#include <torch/csrc/stable/library.h>
+#include <torch/csrc/stable/ops.h>
+#include <torch/csrc/stable/macros.h>
+#include <torch/csrc/stable/accelerator.h>
+#include <torch/headeronly/core/ScalarType.h>
+
 #include <stdint.h>
 #include <cuda_runtime.h>
 #include <mma.h>
 #include <cuda/annotated_ptr>
-#include <c10/cuda/CUDAException.h>
 
-#include <ATen/cuda/CUDAContext.h>
-#include <c10/cuda/CUDAGuard.h>
-
-#include "core/registration.h"
-#include "dispatch_utils.h"
+#include "../../../torch_utils.h"
+#include "../../../dispatch_utils.h"
 
 namespace hadacore {
 
@@ -40,37 +41,37 @@ using b32 = uint32_t;
 constexpr int launch_configs_big[7][3] = {
     // default
     {2, 1, 24},
-    {2, 2, 16}, 
-    {2, 4, 8}, 
-    {2, 8, 4}, 
+    {2, 2, 16},
+    {2, 4, 8},
+    {2, 8, 4},
     {2, 16, 3},
     {4, 16, 2},
     {8, 16, 1}
     // // extra coalescing
     // {2, 1, 24},
-    // {2, 2, 16}, 
-    // {2, 4, 8}, 
-    // {2, 8, 4}, 
+    // {2, 2, 16},
+    // {2, 4, 8},
+    // {2, 8, 4},
     // {4, 8, 3},
     // {8, 8, 2},
     // {16, 8, 1}
     // // less coalescing
     // {2, 1, 24},
-    // {2, 2, 16}, 
-    // {2, 4, 8}, 
-    // {2, 8, 4}, 
+    // {2, 2, 16},
+    // {2, 4, 8},
+    // {2, 8, 4},
     // {1, 32, 1},
     // {2, 32, 1},
     // {4, 32, 1}
 };
 
 // a 4x2, b 2x2, c 2x2
-template <torch::ScalarType dtype>
+template <torch::headeronly::ScalarType dtype>
 __device__ __forceinline__ void mma_m16_n8_k16_b16_b16_b16_noacc(b32 a0, b32 a1, b32 a2, b32 a3, b32 b0, b32 b1, b32& c0, b32& c1){
-    static_assert(dtype == torch::ScalarType::Half || dtype == torch::ScalarType::BFloat16);
+    static_assert(dtype == torch::headeronly::ScalarType::Half || dtype == torch::headeronly::ScalarType::BFloat16);
     // d, a, b, c
     b32 zero = 0;
-    if constexpr(dtype == torch::ScalarType::Half) {
+    if constexpr(dtype == torch::headeronly::ScalarType::Half) {
         asm (
             "mma.sync.aligned.m16n8k16.row.col.f16.f16.f16.f16 "
             "{%0, %1}, {%2, %3, %4, %5}, {%6, %7}, {%8, %9};\n\t"
@@ -89,7 +90,7 @@ __device__ __forceinline__ void mma_m16_n8_k16_b16_b16_b16_noacc(b32 a0, b32 a1,
 }
 
 // a 4x2, b 4x2, c 4x2
-template <torch::ScalarType dtype>
+template <torch::headeronly::ScalarType dtype>
 __device__ __forceinline__ void mma_m16_n16_k16_b16_b16_b16_noacc(b32 a0, b32 a1, b32 a2, b32 a3, b32 b0, b32 b1, b32 b2, b32 b3, b32& c0, b32& c1, b32& c2, b32& c3){
     mma_m16_n8_k16_b16_b16_b16_noacc<dtype>(a0, a1, a2, a3, b0, b1, c0, c1);
     mma_m16_n8_k16_b16_b16_b16_noacc<dtype>(a0, a1, a2, a3, b2, b3, c2, c3);
@@ -108,11 +109,11 @@ __device__ __forceinline__ void matrix_transpose_m8_n8_b16_inplace(b32& a0) {
 #define n_p(i) ((val_1n[i] & 0x0000FFFF) | val_1p[i] << 16)
 #define n_n(i) ((val_1n[i] & 0x0000FFFF) | val_1n[i] << 16)
 
-template<int64_t num_chunks, int64_t warps_per_block, int64_t log_had_size, int64_t blocks_per_sm, bool enable_mask, torch::ScalarType dtype>
+template<int64_t num_chunks, int64_t warps_per_block, int64_t log_had_size, int64_t blocks_per_sm, bool enable_mask, torch::headeronly::ScalarType dtype>
 __global__ void __launch_bounds__(32 * warps_per_block, blocks_per_sm)
 // a is column major, b is row major
 hadamard_transform_kernel(b16* a, b16* out, int total_num_chunks) {
-    static_assert(dtype == torch::ScalarType::Half || dtype == torch::ScalarType::BFloat16, "Only fp16 and bf16 supported currently");
+    static_assert(dtype == torch::headeronly::ScalarType::Half || dtype == torch::headeronly::ScalarType::BFloat16, "Only fp16 and bf16 supported currently");
 
     b32 b_frag_all[num_chunks][4]; // for all chunks, holds matrix fragment (which takes 4 regs of b16x2 * 32 threads)
 
@@ -162,8 +163,8 @@ hadamard_transform_kernel(b16* a, b16* out, int total_num_chunks) {
     constexpr b16 bf16_1p[4] = {0b0011111100110101, 0b0011111100000000, 0b0011111010110101, 0b0011111010000000};
     constexpr b16 bf16_1n[4] = {0b1011111100110101, 0b1011111100000000, 0b1011111010110101, 0b1011111010000000};
 
-    #define val_type_1p(i) (((dtype) == torch::ScalarType::Half) ? (fp16_1p[i]) : (bf16_1p[i]))
-    #define val_type_1n(i) (((dtype) == torch::ScalarType::Half) ? (fp16_1n[i]) : (bf16_1n[i]))
+    #define val_type_1p(i) (((dtype) == torch::headeronly::ScalarType::Half) ? (fp16_1p[i]) : (bf16_1p[i]))
+    #define val_type_1n(i) (((dtype) == torch::headeronly::ScalarType::Half) ? (fp16_1n[i]) : (bf16_1n[i]))
     constexpr b16 val_1p[4] = {val_type_1p(0), val_type_1p(1), val_type_1p(2), val_type_1p(3)};
     constexpr b16 val_1n[4] = {val_type_1n(0), val_type_1n(1), val_type_1n(2), val_type_1n(3)};
 
@@ -295,7 +296,7 @@ hadamard_transform_kernel(b16* a, b16* out, int total_num_chunks) {
                         for (int64_t k = 0; k < num_chunks; k++) {
                             // here, j represents register, and k represents 8-offset/chunk
                             uint64_t real_chunk_num = (num_chunks - (threadid % num_chunks) + k) % num_chunks; // chunk at which you have target thread #'s data
-                            
+
                             int64_t real_thread_id = (threadid / num_chunks) * num_chunks + k; // target thread #
                             int64_t chunk_idx = 128 * real_chunk_num; // index due to fetching from another chunk (chunk in which this thread has the target thread's original data)
                             int64_t thread_group_idx = (real_thread_id / 4) * 16; // index due to fetching from another group of num_chunk threads (since shuffle is between num_chunk threads)
@@ -649,7 +650,7 @@ hadamard_transform_kernel(b16* a, b16* out, int total_num_chunks) {
                 for (int64_t i = 0; i < num_chunks; i++) {
                     if (real_chunk_num == i) data = b_frag_all[i][j];
                 }
-                
+
                 int64_t real_thread_id = (threadid / num_chunks) * num_chunks + k; // target thread #
                 int64_t chunk_idx = 128 * real_chunk_num; // index due to fetching from another chunk (chunk in which this thread has the target thread's original data)
                 int64_t thread_group_idx = (real_thread_id / 4) * 16; // index due to fetching from another group of num_chunk threads (since shuffle is between num_chunk threads)
@@ -684,16 +685,16 @@ constexpr int64_t ceil_div(int64_t a, int64_t b) {
     return (a + b - 1) / b;
 }
 
-template <torch::ScalarType dtype, int64_t chunks_per_warp, int64_t warps_per_block, int64_t log_had_size, int64_t blocks_per_sm, bool check_masking = false>
+template <torch::headeronly::ScalarType dtype, int64_t chunks_per_warp, int64_t warps_per_block, int64_t log_had_size, int64_t blocks_per_sm, bool check_masking = false>
 void __forceinline__ run_kernel(b16* a_mat, b16* out, int64_t num_chunks, cudaStream_t stream) {
     int64_t shared_size = chunks_per_warp * warps_per_block * 128 * 4;
     dim3 block_size = 32 * warps_per_block;
 
     #define CHECK_SHARED_LIM() {                                                                              \
         if (shared_size > 48 * 1024) {                                                                        \
-            C10_CUDA_CHECK(cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, 65536)); \
+            STD_CUDA_CHECK(cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, 65536)); \
         }                                                                                                     \
-    }                                                                                                         \
+    }
 
     if constexpr(check_masking) {
         if (num_chunks % (chunks_per_warp * warps_per_block) != 0) {
@@ -713,11 +714,11 @@ void __forceinline__ run_kernel(b16* a_mat, b16* out, int64_t num_chunks, cudaSt
         CHECK_SHARED_LIM();
         kernel<<<dim3(grid_size), dim3(block_size), shared_size, stream>>>(a_mat, out, num_chunks);
     }
-    
-    C10_CUDA_KERNEL_LAUNCH_CHECK();
+
+    STD_CUDA_KERNEL_LAUNCH_CHECK();
 }
 
-template <torch::ScalarType dtype>
+template <torch::headeronly::ScalarType dtype>
 void run_fht(void* a_mat_ptr, void* out_ptr, int64_t numel, int64_t had_size, cudaStream_t stream) {
     int64_t num_chunks = numel / 256; // caller required to ensure divisible by 256
     // for size 256, use (2, 1)
@@ -764,54 +765,55 @@ void run_fht(void* a_mat_ptr, void* out_ptr, int64_t numel, int64_t had_size, cu
     }
 }
 
-template void run_fht<torch::ScalarType::Half>(void* a_mat_ptr, void* out_ptr, int64_t numel, int64_t had_size, cudaStream_t stream);
-template void run_fht<torch::ScalarType::BFloat16>(void* a_mat_ptr, void* out_ptr, int64_t numel, int64_t had_size, cudaStream_t stream);
+template void run_fht<torch::headeronly::ScalarType::Half>(void* a_mat_ptr, void* out_ptr, int64_t numel, int64_t had_size, cudaStream_t stream);
+template void run_fht<torch::headeronly::ScalarType::BFloat16>(void* a_mat_ptr, void* out_ptr, int64_t numel, int64_t had_size, cudaStream_t stream);
 
 }  // namespace hadacore
 
 constexpr bool is_power_of_two(int x) { return x && !(x & (x - 1)); }
 
-torch::Tensor hadacore_transform(torch::Tensor& x, bool inplace) {
+torch::stable::Tensor hadacore_transform(torch::stable::Tensor& x, bool inplace) {
     auto dtype = x.scalar_type();
-    TORCH_CHECK(dtype == torch::ScalarType::Half || dtype == torch::ScalarType::BFloat16, "Only fp16 and bf16 supported currently");
-    TORCH_CHECK(x.is_cuda());
-    
+    STD_TORCH_CHECK(dtype == torch::headeronly::ScalarType::Half || dtype == torch::headeronly::ScalarType::BFloat16, "Only fp16 and bf16 supported currently");
+    STD_TORCH_CHECK(x.is_cuda());
+
     const int had_size = x.size(-1);
-    TORCH_CHECK(is_power_of_two(had_size) && (had_size <= (1U << 15)),
+    STD_TORCH_CHECK(is_power_of_two(had_size) && (had_size <= (1U << 15)),
         "Only power of two Hadamard sizes up to 2^15 are supported, got ", had_size);
-    
+
     const auto res_shape = x.sizes();
-    x = x.reshape({-1, had_size});
-    
+    x = torch::stable::reshape(x, {-1, had_size});
+
     auto numel = x.numel();
     if (numel % 256 != 0) {
-        x = torch::nn::functional::pad(x, torch::nn::functional::PadFuncOptions({0, 0, 0, (256 - numel % 256) / had_size}));
+        x = torch::stable::pad(x, {0, 0, 0, (256 - numel % 256) / had_size});
     }
-    
+
     if (x.stride(-1) != 1) {
-        x = x.contiguous();
+        x = torch::stable::contiguous(x);
     }
-    torch::Tensor out = inplace ? x : torch::empty_like(x);
+    torch::stable::Tensor out = inplace ? x : torch::stable::empty_like(x);
 
-    at::cuda::CUDAGuard device_guard{(char)x.get_device()};
-    auto stream = at::cuda::getCurrentCUDAStream().stream();
+    int32_t device_index = x.get_device_index();
+    const torch::stable::accelerator::DeviceGuard device_guard(device_index);
+    auto stream = get_current_cuda_stream(device_index);
 
-    VLLM_DISPATCH_HALF_TYPES(x.scalar_type(), "hadacore_transform_runfht", [&] {
-      auto constexpr SCALAR_TYPE = c10::CppTypeToScalarType<scalar_t>::value;
+    VLLM_STABLE_DISPATCH_HALF_TYPES(x.scalar_type(), "hadacore_transform_runfht", [&] {
+      auto constexpr SCALAR_TYPE = torch::headeronly::CppTypeToScalarType<scalar_t>::value;
       hadacore::run_fht<SCALAR_TYPE>(x.data_ptr(), x.data_ptr(), x.numel(), had_size, stream);
     });
 
     if (numel % 256 != 0) {
-        out = out.narrow(0, 0, numel / had_size);
+        out = torch::stable::narrow(out, 0, 0, numel / had_size);
     }
 
     if (inplace && out.data_ptr() != x.data_ptr()) {
-        x.copy_(out.view(res_shape));
+        torch::stable::copy_(x, torch::stable::view(out, res_shape));
         return x;
     }
-    return out.reshape(res_shape);
+    return torch::stable::reshape(out, res_shape);
 }
 
-TORCH_LIBRARY_IMPL_EXPAND(TORCH_EXTENSION_NAME, CUDA, m) {
-    m.impl("hadacore_transform", &hadacore_transform);
+STABLE_TORCH_LIBRARY_IMPL(_C, CUDA, m) {
+    m.impl("hadacore_transform", TORCH_BOX(&hadacore_transform));
 }

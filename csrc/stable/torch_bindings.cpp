@@ -344,6 +344,25 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C, m) {
       ") -> Tensor");
   // conditionally compiled so impl registration is in source file
 
+  // Hadacore (Hadamard transforms)
+  m.def("hadacore_transform(Tensor! x, bool inplace) -> Tensor");
+
+  // Mamba selective scan kernel
+  m.def(
+      "selective_scan_fwd(Tensor! u, Tensor! delta,"
+      "Tensor! A, Tensor! B, Tensor! C,"
+      "Tensor? D_, Tensor!? z_, Tensor? delta_bias_,"
+      "bool delta_softplus,"
+      "Tensor? query_start_loc,"
+      "Tensor? cache_indices,"
+      "Tensor? has_initial_state,"
+      "Tensor! ssm_states,"
+      "int pad_slot_id,"
+      "int block_size,"
+      "Tensor? block_idx_first_scheduled_token,"
+      "Tensor? block_idx_last_scheduled_token,"
+      "Tensor? initial_state_idx) -> ()");
+
   // SM100 CUTLASS MLA decode
   m.def(
       "sm100_cutlass_mla_decode(Tensor! out, Tensor! lse, Tensor q_nope,"
@@ -591,6 +610,9 @@ STABLE_TORCH_LIBRARY_IMPL(_C, CUDA, m) {
   m.impl("convert_vertical_slash_indexes_mergehead",
          TORCH_BOX(&convert_vertical_slash_indexes_mergehead));
 #endif
+
+  // Mamba selective scan
+  m.impl("selective_scan_fwd", TORCH_BOX(&selective_scan_fwd));
 }
 
 STABLE_TORCH_LIBRARY_IMPL(_C_cache_ops, CUDA, m) {

@@ -280,7 +280,6 @@ endif()
 #
 
 set(VLLM_EXT_SRC
-  "csrc/mamba/mamba_ssm/selective_scan_fwd.cu"
   "csrc/quantization/gptq/q_gemm.cu"
   "csrc/quantization/gguf/gguf_kernel.cu"
   "csrc/cuda_utils_kernels.cu"
@@ -498,16 +497,8 @@ list(APPEND VLLM_EXT_SRC
   # Machete kernels - MIGRATED to stable ABI (csrc/stable/quantization/machete/)
   # See the VLLM_STABLE_EXT_SRC section for the stable ABI version
 
-  # Hadacore kernels
-  cuda_archs_loose_intersection(HADACORE_ARCHS "8.0+PTX;9.0+PTX" "${CUDA_ARCHS}")
-  if(HADACORE_ARCHS)
-    set(SRCS "csrc/quantization/hadamard/hadacore/hadamard_transform_cuda.cu")
-    set_gencode_flags_for_srcs(
-      SRCS "${SRCS}"
-      CUDA_ARCHS "${HADACORE_ARCHS}")
-    list(APPEND VLLM_EXT_SRC "${SRCS}")
-    message(STATUS "Building hadacore")
-  endif()
+  # Hadacore kernels - MIGRATED to stable ABI (csrc/stable/quantization/hadamard/hadacore/)
+  # See the VLLM_STABLE_EXT_SRC section for the stable ABI version
 
 # if CUDA endif
 endif()
@@ -913,6 +904,27 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
                      "found in CUDA target architectures")
     endif()
   endif()
+
+  #
+  # Stable Hadacore kernels (SM80+)
+  #
+  cuda_archs_loose_intersection(STABLE_HADACORE_ARCHS "8.0+PTX;9.0+PTX" "${CUDA_ARCHS}")
+  if(STABLE_HADACORE_ARCHS)
+    set(SRCS "csrc/stable/quantization/hadamard/hadacore/hadamard_transform_cuda.cu")
+    set_gencode_flags_for_srcs(
+      SRCS "${SRCS}"
+      CUDA_ARCHS "${STABLE_HADACORE_ARCHS}")
+    list(APPEND VLLM_STABLE_EXT_SRC "${SRCS}")
+    message(STATUS "Building stable Hadacore kernels for archs: ${STABLE_HADACORE_ARCHS}")
+  else()
+    message(STATUS "Not building stable Hadacore kernels as no compatible archs found")
+  endif()
+
+  #
+  # Stable Mamba kernels
+  #
+  list(APPEND VLLM_STABLE_EXT_SRC "csrc/stable/mamba/mamba_ssm/selective_scan_fwd.cu")
+  message(STATUS "Building stable Mamba kernels")
 
   message(STATUS "Enabling C_stable extension.")
   define_extension_target(

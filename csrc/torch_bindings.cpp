@@ -134,24 +134,12 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   ops.impl("gptq_shuffle", torch::kCUDA, &gptq_shuffle);
 
   // Mamba selective scan kernel
-  ops.def(
-      "selective_scan_fwd(Tensor! u, Tensor! delta,"
-      "Tensor! A, Tensor! B, Tensor! C,"
-      "Tensor? D_, Tensor!? z_, Tensor? delta_bias_,"
-      "bool delta_softplus,"
-      "Tensor? query_start_loc,"
-      "Tensor? cache_indices,"
-      "Tensor? has_initial_state,"
-      "Tensor! ssm_states,"
-      "int pad_slot_id,"
-      "int block_size,"
-      "Tensor? block_idx_first_scheduled_token,"
-      "Tensor? block_idx_last_scheduled_token,"
-      "Tensor? initial_state_idx) -> ()");
-  ops.impl("selective_scan_fwd", torch::kCUDA, &selective_scan_fwd);
+  // MIGRATED TO STABLE ABI: See csrc/stable/mamba/mamba_ssm/selective_scan_fwd.cu
+  // Schema is in torch_bindings_stable.cpp
 
   // Hadamard transforms
-  ops.def("hadacore_transform(Tensor! x, bool inplace) -> Tensor");
+  // MIGRATED TO STABLE ABI: See csrc/stable/quantization/hadamard/hadacore/hadamard_transform_cuda.cu
+  // Schema is in torch_bindings_stable.cpp
 
 #ifndef USE_ROCM
   // reorder weight for AllSpark Ampere W8A16 Fused Gemm kernel
