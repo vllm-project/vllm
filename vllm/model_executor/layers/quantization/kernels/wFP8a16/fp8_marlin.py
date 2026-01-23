@@ -31,17 +31,24 @@ class FP8MarlinLinearKernel(FP8WoQLinearKernel):
 
     @classmethod
     def can_implement(cls, c: FP8WoQLinearLayerConfig) -> tuple[bool, str | None]:
-        if not current_platform.is_cuda():
-            return False, "requires CUDA."
-        # Check if platform supports FP8 Marlin
-        if not is_fp8_marlin_supported():
-            return False, "FP8 Marlin requires compute capability 8.0 or higher"
         per_tensor_weight_scales = c.weight_quant_key.scale.group_shape.is_per_tensor()
         per_channel_weight_scales = (
             c.weight_quant_key.scale.group_shape.is_per_channel()
         )
         if not (per_tensor_weight_scales or per_channel_weight_scales):
             return False, "requires per tensor or per channel weight scales."
+        return True, None
+
+    @classmethod
+    def is_supported(
+        cls, compute_capability: int | None = None
+    ) -> tuple[bool, str | None]:
+        if not current_platform.is_cuda():
+            return False, "requires CUDA."
+        # Check if platform supports FP8 Marlin
+        if not is_fp8_marlin_supported():
+            return False, "FP8 Marlin requires compute capability 8.0 or higher"
+
         return True, None
 
     def __init__(
