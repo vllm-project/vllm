@@ -57,7 +57,7 @@ def init_attn_backend(
         )
         attn_metadata_builders.append(attn_metadata_builder)  # type: ignore
 
-        if "FLASHINFER" in attn_backend.get_name():
+        if attn_backend.get_name() == "FLASHINFER":
             if flashinfer_workspace is None:
                 flashinfer_workspace = attn_metadata_builder._get_workspace_buffer()
             else:
@@ -133,10 +133,11 @@ def init_kv_cache(
     kv_cache_config: KVCacheConfig,
     attn_backends: dict[str, AttentionBackend],
     device: torch.device,
-) -> None:
+) -> dict[str, torch.Tensor]:
     kv_cache_raw_tensors = _allocate_kv_cache(kv_cache_config, device)
     kv_caches = _reshape_kv_cache(kv_cache_config, kv_cache_raw_tensors, attn_backends)
     bind_kv_cache(kv_caches, forward_context, runner_kv_caches)
+    return kv_caches
 
 
 def build_attn_metadata(
