@@ -4,12 +4,14 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
+from vllm.config import ModelConfig
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionLogProbs
 from vllm.entrypoints.openai.engine.protocol import (
     SamplingParams,
     StreamOptions,
 )
 from vllm.logprobs import Logprob
+from vllm.renderers import TokenizeParams
 from vllm.utils import random_uuid
 
 
@@ -61,6 +63,12 @@ class GenerateRequest(BaseModel):
         default=None,
         description="KVTransfer parameters used for disaggregated serving.",
     )
+
+    def build_tok_params(self, model_config: ModelConfig) -> TokenizeParams:
+        return TokenizeParams.from_config(
+            model_config,
+            max_length=model_config.max_model_len,
+        )
 
 
 class GenerateResponseChoice(BaseModel):

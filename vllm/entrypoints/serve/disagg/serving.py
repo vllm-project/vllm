@@ -101,12 +101,11 @@ class ServingTokens(OpenAIServing):
 
         # TODO(NickLucche): Change to EngineCoreRequest once Renderer work is
         # completed
-        engine_prompt = TokensPrompt(prompt_token_ids=request.token_ids)
-        if request.features is not None:
-            engine_prompt["multi_modal_data"] = None
-
-        if hasattr(request, "cache_salt") and request.cache_salt is not None:
-            engine_prompt["cache_salt"] = request.cache_salt
+        engine_prompt = self._preprocess_completion(
+            request,
+            prompt_input=request.token_ids,
+            prompt_embeds=None,
+        )
 
         # Schedule the request and get the result generator.
         result_generator: AsyncGenerator[RequestOutput, None] | None = None
