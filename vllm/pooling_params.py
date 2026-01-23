@@ -38,17 +38,17 @@ class PoolingParams(
     # --8<-- [end:common-pooling-params]
 
     ## for embeddings models
-    # --8<-- [start:embedding-pooling-params]
+    # --8<-- [start:embed-pooling-params]
     dimensions: int | None = None
     normalize: bool | None = None
-    # --8<-- [end:embedding-pooling-params]
+    # --8<-- [end:embed-pooling-params]
 
     ## for classification, scoring and rerank
-    # --8<-- [start:classification-pooling-params]
+    # --8<-- [start:classify-pooling-params]
     softmax: bool | None = None
     activation: bool | None = None
     use_activation: bool | None = None
-    # --8<-- [end:classification-pooling-params]
+    # --8<-- [end:classify-pooling-params]
 
     ## for step pooling models
     step_tag_id: int | None = None
