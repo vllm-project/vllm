@@ -63,6 +63,7 @@ from vllm.entrypoints.serve.tokenize.serving import OpenAIServingTokenization
 from vllm.entrypoints.utils import (
     cli_env_setup,
     log_non_default_args,
+    log_version_and_model,
     process_lora_modules,
     sanitize_message,
 )
@@ -867,7 +868,7 @@ def setup_server(args):
     """Validate API server args, set up signal handler, create socket
     ready to serve."""
 
-    logger.info("vLLM API server version %s", VLLM_VERSION)
+    log_version_and_model(logger, VLLM_VERSION, args.model)
     log_non_default_args(args)
 
     if args.tool_parser_plugin and len(args.tool_parser_plugin) > 3:
