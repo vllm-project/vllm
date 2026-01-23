@@ -70,15 +70,6 @@ QUANT_CONFIGS = [
         "thread_m_blocks": THREAD_M_BLOCKS,
         "group_blocks": [-1, 2, 4, 8],
     },
-    # HQQ
-    {
-        "a_type": ["kFloat16"],
-        "b_type": "kU4",
-        "thread_configs": THREAD_CONFIGS,
-        "thread_m_blocks": THREAD_M_BLOCKS,
-        "group_blocks": [4],
-        "is_zp_float": True,
-    },
     # GPTQ-INT4
     {
         "b_type": "kU4B8",

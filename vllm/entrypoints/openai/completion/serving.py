@@ -83,19 +83,16 @@ class OpenAIServingCompletion(OpenAIServing):
                 self.default_sampling_params,
             )
 
-    async def create_completion(
+    async def render_completion_request(
         self,
         request: CompletionRequest,
-        raw_request: Request | None = None,
-    ) -> AsyncGenerator[str, None] | CompletionResponse | ErrorResponse:
-        """Completion API similar to OpenAI's API.
+    ) -> list[TokensPrompt | EmbedsPrompt] | ErrorResponse:
+        """
+        render completion request by validating and preprocessing inputs.
 
-        See https://platform.openai.com/docs/api-reference/completions/create
-        for the API specification. This API mimics the OpenAI Completion API.
-
-        NOTE: Currently we do not support the following feature:
-            - suffix (the language models we currently support do not support
-            suffix)
+        Returns:
+            A list of engine_prompts on success,
+            or an ErrorResponse on failure.
         """
         error_check_ret = await self._check_model(request)
         if error_check_ret is not None:
@@ -119,6 +116,39 @@ class OpenAIServingCompletion(OpenAIServing):
                 "prompt_logprobs is not compatible with prompt embeds."
             )
 
+        try:
+            renderer = self._get_completion_renderer()
+            engine_prompts = await renderer.render_prompt_and_embeds(
+                prompt_or_prompts=request.prompt,
+                prompt_embeds=request.prompt_embeds,
+                config=self._build_render_config(request),
+            )
+        except (ValueError, TypeError, RuntimeError, jinja2.TemplateError) as e:
+            logger.exception("Error in preprocessing prompt inputs")
+            return self.create_error_response(e)
+
+        return engine_prompts
+
+    async def create_completion(
+        self,
+        request: CompletionRequest,
+        raw_request: Request | None = None,
+    ) -> AsyncGenerator[str, None] | CompletionResponse | ErrorResponse:
+        """Completion API similar to OpenAI's API.
+
+        See https://platform.openai.com/docs/api-reference/completions/create
+        for the API specification. This API mimics the OpenAI Completion API.
+
+        NOTE: Currently we do not support the following feature:
+            - suffix (the language models we currently support do not support
+            suffix)
+        """
+        result = await self.render_completion_request(request)
+        if isinstance(result, ErrorResponse):
+            return result
+
+        engine_prompts = result
+
         request_id = f"cmpl-{self._base_request_id(raw_request, request.request_id)}"
         created_time = int(time.time())
 
@@ -128,29 +158,8 @@ class OpenAIServingCompletion(OpenAIServing):
 
         try:
             lora_request = self._maybe_get_adapters(request)
-
-            if self.model_config.skip_tokenizer_init:
-                tokenizer = None
-            else:
-                tokenizer = await self.engine_client.get_tokenizer()
-            renderer = self._get_renderer(tokenizer)
-
-            engine_prompts = await renderer.render_prompt_and_embeds(
-                prompt_or_prompts=request.prompt,
-                prompt_embeds=request.prompt_embeds,
-                config=self._build_render_config(request),
-            )
-        except ValueError as e:
-            logger.exception("Error in preprocessing prompt inputs")
-            return self.create_error_response(e)
-        except TypeError as e:
-            logger.exception("Error in preprocessing prompt inputs")
-            return self.create_error_response(e)
-        except RuntimeError as e:
-            logger.exception("Error in preprocessing prompt inputs")
-            return self.create_error_response(e)
-        except jinja2.TemplateError as e:
-            logger.exception("Error in preprocessing prompt inputs")
+        except (ValueError, TypeError, RuntimeError) as e:
+            logger.exception("Error preparing request components")
             return self.create_error_response(e)
 
         # Extract data_parallel_rank from header (router can inject it)
@@ -261,6 +270,8 @@ class OpenAIServingCompletion(OpenAIServing):
         stream = request.stream and not request.use_beam_search
 
         # Streaming response
+        tokenizer = self.renderer.tokenizer
+
         if stream:
             return self.completion_stream_generator(
                 request,
