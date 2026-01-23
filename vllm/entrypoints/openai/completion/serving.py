@@ -7,6 +7,7 @@ from collections.abc import AsyncGenerator, AsyncIterator
 from collections.abc import Sequence as GenericSequence
 from typing import cast
 
+import jinja2
 from fastapi import Request
 
 from vllm.engine.protocol import EngineClient
@@ -115,11 +116,17 @@ class OpenAIServingCompletion(OpenAIServing):
                 "prompt_logprobs is not compatible with prompt embeds."
             )
 
-        return await self._preprocess_completion(
-            request,
-            prompt_input=request.prompt,
-            prompt_embeds=request.prompt_embeds,
-        )
+        try:
+            engine_prompts = await self._preprocess_completion(
+                request,
+                prompt_input=request.prompt,
+                prompt_embeds=request.prompt_embeds,
+            )
+        except (ValueError, TypeError, RuntimeError, jinja2.TemplateError) as e:
+            logger.exception("Error in preprocessing prompt inputs")
+            return self.create_error_response(e)
+
+        return engine_prompts
 
     async def create_completion(
         self,
