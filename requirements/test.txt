@@ -155,6 +155,10 @@ coverage==7.10.6
     # via pytest-cov
 cramjam==2.9.0
     # via fastparquet
+cuda-bindings==12.9.4
+    # via torch
+cuda-pathfinder==1.3.3
+    # via cuda-bindings
 cupy-cuda12x==13.6.0
     # via ray
 cycler==0.12.1
