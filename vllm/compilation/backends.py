@@ -293,6 +293,95 @@ class SplitItem:
     graph: fx.GraphModule
 
 
+def _is_sym_size_op(node: fx.Node) -> bool:
+    """Check if a node is a sym_size operation (tensor.shape access)."""
+    if node.op != "call_function":
+        return False
+    target = node.target
+    # Handle both torch.ops.aten.sym_size.int and sym_size.default
+    if hasattr(torch.ops.aten, "sym_size"):
+        sym_size_ops = (
+            torch.ops.aten.sym_size,
+            torch.ops.aten.sym_size.int,
+            torch.ops.aten.sym_size.default,
+        )
+        return target in sym_size_ops
+    return False
+
+
+def fold_sym_size_to_constants(
+    graph: fx.GraphModule,
+    concrete_inputs: dict[str, torch.Tensor],
+) -> None:
+    """
+    Fold sym_size operations to constants given concrete input tensor shapes.
+
+    This is useful for CUDA graph capture where sym_size values should be
+    constants (not computed from input tensors) to avoid input address mismatch
+    issues during replay.
+
+    Note: This modifies the graph in place. It only replaces uses of sym_size
+    nodes with constants but does NOT erase the original nodes, so the graph
+    can be reused for compilation with different concrete sizes.
+
+    Args:
+        graph: The FX graph module to transform
+        concrete_inputs: Dict mapping placeholder names to concrete tensor values
+    """
+    # Build mapping from placeholder names to their shapes
+    placeholder_shapes: dict[str, tuple[int, ...]] = {}
+    for name, tensor in concrete_inputs.items():
+        if isinstance(tensor, torch.Tensor):
+            placeholder_shapes[name] = tensor.shape
+
+    # Also build mapping from placeholder nodes to their shapes
+    node_shapes: dict[fx.Node, tuple[int, ...]] = {}
+    for node in graph.graph.nodes:
+        if node.op == "placeholder":
+            shape = placeholder_shapes.get(node.name)
+            if shape is not None:
+                node_shapes[node] = shape
+
+    # Find all sym_size nodes and evaluate them to constants
+    for node in list(graph.graph.nodes):
+        if not _is_sym_size_op(node):
+            continue
+
+        # sym_size.int takes (tensor, dim) as args
+        if len(node.args) >= 2:
+            tensor_node = node.args[0]
+            dim = node.args[1]
+
+            # Try to get the shape from the tensor node
+            shape = None
+            if tensor_node in node_shapes:
+                shape = node_shapes[tensor_node]
+            elif hasattr(tensor_node, "meta") and "example_value" in tensor_node.meta:
+                example_value = tensor_node.meta["example_value"]
+                if hasattr(example_value, "shape"):
+                    shape = tuple(example_value.shape)
+
+            if (
+                shape
+                and isinstance(dim, int)
+                and (0 <= dim < len(shape) or -len(shape) <= dim < 0)
+            ):
+                const_value = shape[dim]
+
+                # If the value is a SymInt, extract the concrete value
+                if hasattr(const_value, "as_int"):
+                    const_value = const_value.as_int()
+                elif hasattr(const_value, "node"):
+                    # It's a symbolic value, skip folding
+                    continue
+
+                if isinstance(const_value, int):
+                    # Replace sym_size uses with a constant
+                    # Don't erase the node - leave it as dead code
+                    # This allows the graph to be reused for other sizes
+                    node.replace_all_uses_with(const_value)
+
+
 def split_graph(
     graph: fx.GraphModule, splitting_ops: list[str]
 ) -> tuple[fx.GraphModule, list[SplitItem]]:

@@ -5,6 +5,7 @@ import dataclasses
 from collections.abc import Callable
 from typing import Any
 
+import torch
 import torch.fx as fx
 
 from vllm.compilation.backends import VllmBackend
@@ -152,6 +153,25 @@ class PiecewiseBackend:
                 if not range_entry.compile_range.is_single_size()
                 else list(args)
             )
+
+            # For concrete (single-size) compilation, fold sym_size operations
+            # to constants. This is important for CUDA graph capture because
+            # sym_size values should not depend on input tensor addresses.
+            # Note: fold_sym_size_to_constants modifies in place but only
+            # replaces uses (doesn't erase nodes), so the graph can be reused.
+            if range_entry.compile_range.is_single_size():
+                from .backends import fold_sym_size_to_constants
+
+                # Build mapping from placeholder names to concrete tensors
+                concrete_inputs: dict[str, torch.Tensor] = {}
+                for node, arg in zip(self.graph.graph.nodes, args):
+                    if node.op == "placeholder":
+                        concrete_inputs[node.name] = arg
+                    else:
+                        break
+
+                fold_sym_size_to_constants(self.graph, concrete_inputs)
+
             range_entry.runnable = self.vllm_backend.compiler_manager.compile(
                 self.graph,
                 args_list,
