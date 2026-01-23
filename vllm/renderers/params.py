@@ -8,9 +8,12 @@ import torch
 from vllm.entrypoints.chat_utils import ChatTemplateContentFormatOption
 from vllm.exceptions import VLLMValidationError
 from vllm.inputs import EmbedsPrompt, TextPrompt, TokensPrompt
+from vllm.logger import init_logger
 
 if TYPE_CHECKING:
     from vllm.config import ModelConfig
+
+logger = init_logger(__name__)
 
 
 _S = TypeVar("_S", bound=list[int] | torch.Tensor)
@@ -145,12 +148,14 @@ class TokenizeParams:
             elif truncation in (False, "do_not_truncate"):
                 truncate_prompt_tokens = None
             else:
-                # To raise the below NotImplementedError
+                # To emit the below warning
                 tokenization_kwargs["truncation"] = truncation
 
         if tokenization_kwargs:
-            raise NotImplementedError(
-                f"Unsupported tokenization arguments: {tokenization_kwargs}"
+            logger.warning(
+                "The following tokenization arguments are not supported "
+                "by vLLM Renderer and will be ignored: %s",
+                tokenization_kwargs,
             )
 
         return TokenizeParams(
