@@ -137,7 +137,7 @@ def bench_run(
     )
 
     fn = mk.FusedMoEModularKernel(
-        MoEPrepareAndFinalizeNoEP(),
+        MoEPrepareAndFinalizeNoEP(CutlassExpertsFp8.expects_unquantized_inputs()),
         CutlassExpertsFp8(
             moe_config=make_dummy_moe_config(
                 num_experts=num_experts,
