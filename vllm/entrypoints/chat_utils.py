@@ -336,7 +336,6 @@ def _extract_embeds(tensors: list[torch.Tensor]):
         return tensors
 
     if len(tensors) == 1:
-        tensors[0]._is_single_item = True  # type: ignore
         return tensors[0]  # To keep backwards compatibility for single item input
 
     first_shape = tensors[0].shape

@@ -14,7 +14,12 @@ from vllm.inputs.preprocess import InputPreprocessor
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
-from vllm.multimodal.inputs import MultiModalFeatureSpec, MultiModalUUIDDict
+from vllm.multimodal.inputs import (
+    MultiModalDataDict,
+    MultiModalFeatureSpec,
+    MultiModalUUIDDict,
+)
+from vllm.multimodal.parse import MultiModalDataItems
 from vllm.multimodal.processing.context import set_request_id
 from vllm.multimodal.utils import argsort_mm_positions
 from vllm.pooling_params import PoolingParams
@@ -187,40 +192,9 @@ class InputProcessor:
         self._validate_sampling_params(params)
         self._validate_supported_sampling_params(params)
 
-    def _iter_mm_items(self, items: object):
-        import torch
-
-        if items is None:
-            return
-
-        if isinstance(items, dict):  # Embedding inputs
-            if items:
-                k_ref = next(iter(items))
-
-                yield from (
-                    {k: items[k][i] for k in items}
-                    for i in range(self._get_num_mm_items(items[k_ref]))
-                )
-
-            return
-
-        if isinstance(items, list):
-            yield from items
-            return
-
-        if isinstance(items, torch.Tensor):
-            # To keep backwards compatibility for single item embedding input
-            if getattr(items, "_is_single_item", False):
-                yield items[0]
-            else:
-                yield from items
-
-            return
-
-        raise NotImplementedError(type(items))
-
-    def _get_num_mm_items(self, items: object) -> int:
-        return len(tuple(self._iter_mm_items(items)))
+    def _parse_mm_items(self, mm_data: MultiModalDataDict) -> MultiModalDataItems:
+        mm_processor = self.input_preprocessor._get_mm_processor()
+        return mm_processor.data_parser.parse_mm_data(mm_data)
 
     def _validate_multi_modal_uuids(self, prompt: PromptType) -> None:
         """
@@ -239,9 +213,10 @@ class InputProcessor:
             if not mm_data and not mm_uuids:
                 return
 
-            for modality, items in mm_data.items():
-                data_items = list(self._iter_mm_items(items))
-                uuid_items = list(self._iter_mm_items(mm_uuids.get(modality)))
+            mm_items = self._parse_mm_items(mm_data)
+
+            for modality, data_items in mm_items.items():
+                uuid_items = mm_uuids.get(modality, [])
 
                 if data_items:
                     if uuid_items and len(data_items) != len(uuid_items):
@@ -442,12 +417,11 @@ class InputProcessor:
         if not mm_data:
             return None
 
+        mm_items = self._parse_mm_items(mm_data)
+
         return {
-            modality: [
-                f"{request_id}-{modality}-{i}"
-                for i in range(self._get_num_mm_items(data))
-            ]
-            for modality, data in mm_data.items()
+            modality: [f"{request_id}-{modality}-{i}" for i in range(data_count)]
+            for modality, data_count in mm_items.get_all_counts().items()
         }
 
     def _get_mm_identifier(
