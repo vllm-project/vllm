@@ -234,7 +234,11 @@ if current_platform.is_cuda():
             TestAttentionNvfp4QuantPatternModel,
         )
     ]
-    BACKENDS_FP8 = [AttentionBackendEnum.TRITON_ATTN, AttentionBackendEnum.FLASHINFER]
+    BACKENDS_FP8 = [
+        AttentionBackendEnum.TRITON_ATTN,
+        AttentionBackendEnum.FLASHINFER,
+        AttentionBackendEnum.FLASH_ATTN,
+    ]
     BACKENDS_FP4 = [AttentionBackendEnum.FLASHINFER]
 
 elif current_platform.is_rocm():
@@ -292,6 +296,12 @@ def test_attention_quant_pattern(
     ):
         # This also captures the FP4 case
         pytest.skip("FlashInfer attn fusion requires Blackwell and flashinfer")
+    if backend == AttentionBackendEnum.FLASH_ATTN and (
+        not current_platform.is_device_capability((9, 0))
+    ):
+        pytest.skip("FlashAttention 3 FP8 output fusion requires Hopper (SM90+)")
+    if "Llama-4-Scout" in model_name and cuda_device_count_stateless() < 2:
+        pytest.skip("Llama-4-Scout requires at least 2 GPUs")
 
     custom_ops_list = custom_ops.split(",") if custom_ops else []
 
