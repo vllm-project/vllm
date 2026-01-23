@@ -19,8 +19,8 @@ from vllm.model_executor.layers.quantization.base_config import (
     QuantizeMethodBase,
 )
 from vllm.model_executor.model_loader.reload import (
-    model_apply,
     record_metadata_for_reloading,
+    set_torchao_reload_attrs,
 )
 from vllm.model_executor.models.interfaces import SupportsQuant
 from vllm.utils.platform_utils import is_pin_memory_available
@@ -50,7 +50,7 @@ def initialize_model(
         # new-style model class
         with set_current_vllm_config(vllm_config, check_compile=True, prefix=prefix):
             model = model_class(vllm_config=vllm_config, prefix=prefix)
-            model_apply(model, record_metadata_for_reloading)
+            record_metadata_for_reloading(model)
             return model
 
     msg = (
@@ -82,7 +82,7 @@ def initialize_model(
         kwargs["scheduler_config"] = vllm_config.scheduler_config
     with set_current_vllm_config(vllm_config, check_compile=True, prefix=prefix):
         model = model_class(**kwargs)
-        model_apply(model, record_metadata_for_reloading)
+        record_metadata_for_reloading(model)
 
     return model
 
@@ -114,7 +114,7 @@ def process_weights_after_loading(
     # Needed for torchao model reloading via model.reload_weights
     # @kylesayrs @jerryzh168 this can be removed if callers move to `reload_weights`
     if model_config.quantization == "torchao":
-        model._do_torchao_reload = True
+        set_torchao_reload_attrs(model, model_config)
 
 
 @contextmanager

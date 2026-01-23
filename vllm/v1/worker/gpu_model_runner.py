@@ -62,7 +62,6 @@ from vllm.model_executor.model_loader import TensorizerLoader, get_model_loader
 from vllm.model_executor.model_loader.reload import (
     finalize_layerwise_reload,
     initialize_layerwise_reload,
-    model_apply,
 )
 from vllm.model_executor.models.interfaces import (
     MultiModalEmbeddings,
@@ -4271,9 +4270,9 @@ class GPUModelRunner(
                 model._do_torchao_reload = False
 
                 # load weights from checkpoint/ original model format
-                model_apply(model, initialize_layerwise_reload)
+                initialize_layerwise_reload(model)
                 loaded_weights = model.load_weights(weights_iterator)
-                model_apply(model, finalize_layerwise_reload)
+                finalize_layerwise_reload(model, self.model_config)
 
             else:
                 # load weights from kernel format

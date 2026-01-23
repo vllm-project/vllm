@@ -8,6 +8,7 @@ from weakref import WeakKeyDictionary
 import torch
 
 from vllm.attention.layer import Attention, MLAAttention
+from vllm.config import ModelConfig
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.base_config import QuantizeMethodBase
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
@@ -47,19 +48,20 @@ def get_layerwise_info(layer: torch.nn.Module) -> LayerReloadingInfo:
     return LAYERWISE_INFO[layer]
 
 
-def record_metadata_for_reloading(layer: torch.nn.Module) -> None:
+def record_metadata_for_reloading(model: torch.nn.Module):
     """
     Record layer metadata needed for later reloading.
 
     Stores parameter and buffer metadata as meta tensors for restoration.
     Must be called before `initialize_layerwise_reload`.
     """
-    info = get_layerwise_info(layer)
-    info.restore_metadata = capture_layer_to_meta(layer)
+    for layer in model.modules():
+        info = get_layerwise_info(layer)
+        info.restore_metadata = capture_layer_to_meta(layer)
 
 
 @torch.no_grad()
-def initialize_layerwise_reload(layer: torch.nn.Module) -> None:
+def initialize_layerwise_reload(model: torch.nn.Module):
     """
     Set up layerwise weight loading with deferred processing.
 
@@ -74,27 +76,28 @@ def initialize_layerwise_reload(layer: torch.nn.Module) -> None:
     3. Run quantization processing if applicable
     4. Copy processed values back to original tensor storage
     """
-    info = get_layerwise_info(layer)
+    for layer in model.modules():
+        info = get_layerwise_info(layer)
 
-    # Skip if the layer has already been initialized
-    if info.can_process():
-        return
+        # Skip if the layer has already been initialized
+        if info.can_process():
+            continue
 
-    # Save current tensors for later copying
-    info.kernel_tensors = get_layer_params_buffers(layer)
+        # Save current tensors for later copying
+        info.kernel_tensors = get_layer_params_buffers(layer)
 
-    # Restore layer parameters/buffers onto meta device
-    restore_layer_on_meta(layer, info)
+        # Restore layer parameters/buffers onto meta device
+        restore_layer_on_meta(layer, info)
 
-    # Track loading progress to determine when to process/copy
-    info.load_numel = 0
-    info.load_numel_total = get_layer_size(layer)
+        # Track loading progress to determine when to process/copy
+        info.load_numel = 0
+        info.load_numel_total = get_layer_size(layer)
 
-    # Wrap each parameter's weight loader
-    # Note that nested wrapping will occur for shared tensors
-    for name, tensor in get_layer_tensors(layer).items():
-        if _get_weight_loader(tensor).__name__ != "online_process_loader":
-            tensor.weight_loader = make_online_process_loader(layer, name)
+        # Wrap each parameter's weight loader
+        # Note that nested wrapping will occur for shared tensors
+        for name, tensor in get_layer_tensors(layer).items():
+            if _get_weight_loader(tensor).__name__ != "online_process_loader":
+                tensor.weight_loader = make_online_process_loader(layer, name)
 
 
 def make_online_process_loader(layer: torch.nn.Module, param_name: str) -> Callable:
@@ -150,7 +153,7 @@ def make_online_process_loader(layer: torch.nn.Module, param_name: str) -> Calla
     return online_process_loader
 
 
-def finalize_layerwise_reload(layer: torch.nn.Module) -> None:
+def finalize_layerwise_reload(model: torch.nn.Module, model_config: ModelConfig):
     """
     Remove the outermost layer of weight loading wrappers.
 
@@ -159,33 +162,34 @@ def finalize_layerwise_reload(layer: torch.nn.Module) -> None:
 
     Also processes Attention/MLA layers, which must be processed after all other layers
     """
-    info = get_layerwise_info(layer)
+    for layer in model.modules():
+        info = get_layerwise_info(layer)
 
-    # Attention/MLA layers are processed after all other layers
-    if isinstance(layer, (Attention, MLAAttention)) and info.load_numel > 0:
-        # when implementing, remember to unwrap layerwise loaders
-        raise NotImplementedError("Layerwise reloading of Q/K/V scale weights")
+        # Attention/MLA layers are processed after all other layers
+        if isinstance(layer, (Attention, MLAAttention)) and info.load_numel > 0:
+            raise NotImplementedError("Layerwise reloading of Q/K/V scale weights")
+            # layer.process_weights_after_loading(model_config.dtype)
 
-    # Process non-attention layers which did not load all elements. This can happen
-    # if the created weight has extra padding elements which are not loaded
-    # Having too many of these delayed layers can lead to execess memory usage
-    # see Limitations(4)
-    elif info.load_numel > 0 and info.load_numel < info.load_numel_total:
-        logger.debug("%s: Delayed processing", layer.__class__.__name__)
-        _layerwise_process(layer, info)
+        # Process non-attention layers which did not load all elements. This can happen
+        # if the created weight has extra padding elements which are not loaded
+        # Having too many of these delayed layers can lead to execess memory usage
+        # see Limitations(4)
+        elif info.load_numel > 0 and info.load_numel < info.load_numel_total:
+            logger.debug("%s: Delayed processing", layer.__class__.__name__)
+            _layerwise_process(layer, info)
 
-    # No weights were loaded, place kernel tensors back
-    elif info.can_process():
-        for name in get_layer_tensors(layer):
-            delattr(layer, name)
+        # No weights were loaded, place kernel tensors back
+        elif info.can_process():
+            for name in get_layer_tensors(layer):
+                delattr(layer, name)
 
-        parameters, buffers = info.kernel_tensors
-        for name, param in parameters.items():
-            layer.register_parameter(name, param)
-        for name, buffer in buffers.items():
-            layer.register_buffer(name, buffer)
+            parameters, buffers = info.kernel_tensors
+            for name, param in parameters.items():
+                layer.register_parameter(name, param)
+            for name, buffer in buffers.items():
+                layer.register_buffer(name, buffer)
 
-    info.reset()
+        info.reset()
 
 
 def _layerwise_process(layer: torch.nn.Module, info: LayerReloadingInfo):
