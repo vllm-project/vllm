@@ -110,6 +110,7 @@ from vllm.v1.attention.backend import (
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadataBuilder
 from vllm.v1.attention.backends.utils import (
     create_fast_prefill_custom_backend,
+    get_kv_cache_layout,
     get_dcp_local_seq_lens,
     reorder_batch_to_split_decodes_and_prefills,
 )
@@ -5566,6 +5567,28 @@ class GPUModelRunner(
             )
             self.cross_layers_kv_cache = cross_layers_kv_cache
             self.cross_layers_attn_backend = attn_backend
+
+            log_once = getattr(logger, "info_once", logger.info)
+            try:
+                layout = get_kv_cache_layout()
+            except Exception as e:
+                layout = f"<unknown:{type(e).__name__}>"
+            try:
+                stride_order = attn_backend.get_kv_cache_stride_order(
+                    include_num_layers_dimension=True
+                )
+            except Exception as e:
+                stride_order = f"<unknown:{type(e).__name__}>"
+            log_once(
+                "GPU KVCache布局检查: cross_layer=1 layout=%s env_VLLM_KV_CACHE_LAYOUT=%r shape=%s stride=%s dtype=%s device=%s stride_order=%s",
+                layout,
+                envs.VLLM_KV_CACHE_LAYOUT,
+                tuple(cross_layers_kv_cache.shape),
+                tuple(cross_layers_kv_cache.stride()),
+                str(cross_layers_kv_cache.dtype),
+                str(cross_layers_kv_cache.device),
+                stride_order,
+            )
         else:
             # Fallback to the general case
             # Initialize the memory buffer for KV cache
@@ -5575,6 +5598,31 @@ class GPUModelRunner(
             kv_caches = self._reshape_kv_cache_tensors(
                 kv_cache_config, kv_cache_raw_tensors, kernel_block_sizes
             )
+
+            log_once = getattr(logger, "info_once", logger.info)
+            try:
+                layout = get_kv_cache_layout()
+            except Exception as e:
+                layout = f"<unknown:{type(e).__name__}>"
+            example_layer_name = next(iter(kv_caches.keys())) if kv_caches else None
+            example = kv_caches.get(example_layer_name) if example_layer_name else None
+            if example is not None:
+                log_once(
+                    "GPU KVCache布局检查: cross_layer=0 layout=%s env_VLLM_KV_CACHE_LAYOUT=%r example_layer=%s shape=%s stride=%s dtype=%s device=%s",
+                    layout,
+                    envs.VLLM_KV_CACHE_LAYOUT,
+                    example_layer_name,
+                    tuple(example.shape),
+                    tuple(example.stride()),
+                    str(example.dtype),
+                    str(example.device),
+                )
+            else:
+                log_once(
+                    "GPU KVCache布局检查: cross_layer=0 layout=%s env_VLLM_KV_CACHE_LAYOUT=%r (kv_caches为空)",
+                    layout,
+                    envs.VLLM_KV_CACHE_LAYOUT,
+                )
 
         # Set up cross-layer KV cache sharing
         for layer_name, target_layer_name in self.shared_kv_cache_layers.items():
