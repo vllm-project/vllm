@@ -15,6 +15,8 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
 )
 from vllm.entrypoints.openai.engine.protocol import (
     DeltaMessage,
+)
+from vllm.entrypoints.openai.responses.protocol import (
     ResponsesRequest,
 )
 from vllm.logger import init_logger
@@ -240,7 +242,7 @@ class Olmo3ReasoningParser(ReasoningParser):
             think_start=self.think_start, think_end=self.think_end
         )
 
-    def is_reasoning_end(self, input_ids: list[int]) -> bool:
+    def is_reasoning_end(self, input_ids: Sequence[int]) -> bool:
         text = self.model_tokenizer.decode(input_ids)
         return self.think_end in text
 

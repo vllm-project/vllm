@@ -23,7 +23,7 @@ from vllm.entrypoints.openai.engine.serving import (
     OpenAIServing,
     ServeContext,
 )
-from vllm.entrypoints.openai.serving_models import OpenAIServingModels
+from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.entrypoints.pooling.classify.protocol import (
     ClassificationChatRequest,
     ClassificationCompletionRequest,
@@ -54,8 +54,6 @@ class ClassificationMixin(OpenAIServing):
         """
         ctx = cast(ClassificationServeContext, ctx)
         try:
-            ctx.tokenizer = await self.engine_client.get_tokenizer()
-
             request_obj = ctx.request
 
             if isinstance(request_obj, ClassificationChatRequest):
@@ -76,7 +74,7 @@ class ClassificationMixin(OpenAIServing):
 
                 _, engine_prompts = await self._preprocess_chat(
                     cast(ChatCompletionRequest, chat_request),
-                    ctx.tokenizer,
+                    self.renderer,
                     messages,
                     chat_template=(
                         chat_request.chat_template
@@ -86,8 +84,8 @@ class ClassificationMixin(OpenAIServing):
                         ChatTemplateContentFormatOption,
                         getattr(self, "chat_template_content_format", "auto"),
                     ),
-                    add_generation_prompt=False,
-                    continue_final_message=False,
+                    add_generation_prompt=chat_request.add_generation_prompt,
+                    continue_final_message=chat_request.continue_final_message,
                     add_special_tokens=chat_request.add_special_tokens,
                 )
                 ctx.engine_prompts = engine_prompts
@@ -104,7 +102,7 @@ class ClassificationMixin(OpenAIServing):
                     ctx.engine_prompts = []
                     return None
 
-                renderer = self._get_renderer(ctx.tokenizer)
+                renderer = self._get_completion_renderer()
                 prompt_input = cast(str | list[str], input_data)
                 ctx.engine_prompts = await renderer.render_prompt(
                     prompt_or_prompts=prompt_input,
