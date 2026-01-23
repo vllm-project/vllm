@@ -336,6 +336,7 @@ class MatcherQuantFP8(MatcherCustomOp):
             quant_key.scale.group_shape,
             column_major_scales=has_col_major_scales,
             use_ue8m0=is_e8m0,
+            compile_native=False,
         )
 
     def forward_rocm_aiter(
