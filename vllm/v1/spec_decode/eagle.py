@@ -567,9 +567,6 @@ class SpecDecodeBaseProposer:
         # (i.e., not the first proposal).
         if self.num_speculative_tokens > 1 and num_rejected_tokens_gpu is not None:
             common_attn_metadata.seq_lens -= num_rejected_tokens_gpu
-            # Invalidate the CPU-side shadows to avoid H<>D sync.
-            common_attn_metadata._seq_lens_cpu = None
-            common_attn_metadata._num_computed_tokens_cpu = None
 
         for token_index in range(self.num_speculative_tokens - 1):
             # Update the inputs.
@@ -612,13 +609,6 @@ class SpecDecodeBaseProposer:
             common_attn_metadata.max_seq_len = min(
                 common_attn_metadata.max_seq_len + 1, self.max_model_len
             )
-
-            # Also update the CPU-side shadow; NOTE: this is hacky and should be
-            # removed in when common_attn_metadata.seq_lens_cpu is deprecated.
-            if common_attn_metadata._seq_lens_cpu is not None:
-                common_attn_metadata._seq_lens_cpu += 1
-            if common_attn_metadata._num_computed_tokens_cpu is not None:
-                common_attn_metadata._num_computed_tokens_cpu += 1
 
             # Compute the slot mapping.
             block_size = attn_metadata_builder.kv_cache_spec.block_size
