@@ -119,6 +119,8 @@ def _topk_topp_kernel(
                 hi = mid
 
         # Refine to exact k-th largest value.
+        # After binary search: lo < k-th value <= hi (approximately).
+        # Find the actual logit values at these boundaries.
         count_gt_lo = tl.zeros([1], dtype=tl.int32)
         min_above_lo = float("inf")
         max_at_or_below_hi = float("-inf")
@@ -359,8 +361,10 @@ def apply_top_k_top_p_triton(
         p_ptr = logits  # Dummy pointer (won't be read)
 
     BLOCK_SIZE = 1024
-    K_ITERS = 16
-    P_ITERS = 16  # TODO or 12
+    # K_ITERS must be large enough to distinguish adjacent logit values.
+    # With randn logits (range ~8), 20 iterations gives precision ~8/2^19 ≈ 1.5e-5
+    K_ITERS = 18
+    P_ITERS = 14
 
     _topk_topp_kernel[(n,)](
         logits,
