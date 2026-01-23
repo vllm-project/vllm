@@ -123,7 +123,7 @@ class ChatRequestMixin(OpenAIBaseModel):
 class EncodingRequestMixin(OpenAIBaseModel):
     # --8<-- [start:encoding-params]
     encoding_format: EncodingFormat = "float"
-    # --8<-- [start:encoding-params]
+    # --8<-- [end:encoding-params]
 
     # --8<-- [end:encoding-extra-params]
     embed_dtype: EmbedDType = Field(
