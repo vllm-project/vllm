@@ -17,16 +17,18 @@ Key features:
 - EOI token handling for multimodal inputs
 """
 
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping, Sequence
 from itertools import islice
+from typing import Annotated, Any, Literal, TypeAlias
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from transformers import T5Gemma2Config
+from transformers import BatchFeature, T5Gemma2Config
 
 from vllm.attention.layer import Attention
 from vllm.config import CacheConfig, VllmConfig
+from vllm.config.multimodal import BaseDummyOptions
 from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
 from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import (
@@ -44,12 +46,30 @@ from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.interfaces import (
+    MultiModalEmbeddings,
     SupportsLoRA,
     SupportsMultiModal,
     SupportsPP,
 )
 from vllm.model_executor.models.siglip import SiglipVisionModel
+from vllm.multimodal import MULTIMODAL_REGISTRY
+from vllm.multimodal.inputs import (
+    MultiModalFieldConfig,
+    MultiModalKwargsItems,
+)
+from vllm.multimodal.parse import (
+    ImageSize,
+    MultiModalDataItems,
+)
+from vllm.multimodal.processing import (
+    BaseDummyInputsBuilder,
+    BaseMultiModalProcessor,
+    BaseProcessingInfo,
+    PromptReplacement,
+    PromptUpdate,
+)
 from vllm.sequence import IntermediateTensors
+from vllm.utils.tensor_schema import TensorSchema, TensorShape
 from vllm.v1.attention.backend import AttentionType
 
 from .utils import (
@@ -275,33 +295,12 @@ class T5Gemma2Attention(nn.Module):
             quant_config=quant_config,
             prefix=f"{prefix}.k_proj",
         )
-        self.v_proj = ColumnParallelLinear(
-            hidden_size,
-            self.total_num_kv_heads * self.head_dim,
-            bias=False,
-            quant_config=quant_config,
-            prefix=f"{prefix}.v_proj",
-        )
-        self.o_proj = RowParallelLinear(
-            self.total_num_heads * self.head_dim,
-            hidden_size,
-            bias=False,
-            quant_config=quant_config,
-            prefix=f"{prefix}.o_proj",
-        )
-
-        # Add q_norm and k_norm for attention head normalization (matches transformers)
-        self.q_norm = GemmaRMSNorm(self.head_dim, eps=1e-6)
-        self.k_norm = GemmaRMSNorm(self.head_dim, eps=1e-6)
-
         if rope_parameters:
             self.rotary_emb = get_rope(
                 self.head_dim,
-                rotary_dim=self.head_dim,
                 max_position=max_position_embeddings,
-                base=rope_parameters["rope_theta"],
                 is_neox_style=True,
-                rope_scaling=None,
+                rope_parameters=rope_parameters,
             )
 
         # Use MMEncoderAttention for encoder (no KV cache), Attention for decoder
@@ -428,11 +427,9 @@ class T5Gemma2MergedAttention(nn.Module):
         if rope_parameters:
             self.rotary_emb = get_rope(
                 self.head_dim,
-                rotary_dim=self.head_dim,
                 max_position=max_position_embeddings,
-                base=rope_parameters["rope_theta"],
                 is_neox_style=True,
-                rope_scaling=None,
+                rope_parameters=rope_parameters,
             )
 
         # Merged attention uses DECODER attention type
@@ -520,6 +517,10 @@ class T5Gemma2EncoderLayer(nn.Module):
         sliding_window = config["sliding_window"] if is_sliding else None
 
         self.hidden_size = config["hidden_size"]
+        rope_parameters = config.get("rope_parameters")
+        if rope_parameters and self.attention_type in rope_parameters:
+            rope_parameters = rope_parameters[self.attention_type]
+
         self.self_attn = T5Gemma2Attention(
             hidden_size=self.hidden_size,
             num_heads=config["num_attention_heads"],
@@ -531,7 +532,7 @@ class T5Gemma2EncoderLayer(nn.Module):
             cache_config=cache_config,
             quant_config=quant_config,
             prefix=f"{prefix}.self_attn",
-            rope_parameters=config.get("rope_parameters"),
+            rope_parameters=rope_parameters,
         )
         self.mlp = T5Gemma2MLP(
             hidden_size=self.hidden_size,
@@ -889,6 +890,10 @@ class T5Gemma2DecoderLayer(nn.Module):
 
         self.hidden_size = config["hidden_size"]
 
+        rope_parameters = config.get("rope_parameters")
+        if rope_parameters and self.attention_type in rope_parameters:
+            rope_parameters = rope_parameters[self.attention_type]
+
         # Merged attention (self + cross attention)
         self.self_attn = T5Gemma2MergedAttention(
             hidden_size=self.hidden_size,
@@ -902,7 +907,7 @@ class T5Gemma2DecoderLayer(nn.Module):
             cache_config=cache_config,
             quant_config=quant_config,
             prefix=f"{prefix}.self_attn",
-            rope_parameters=config.get("rope_parameters"),
+            rope_parameters=rope_parameters,
         )
 
         self.mlp = T5Gemma2MLP(
@@ -1184,10 +1189,118 @@ class T5Gemma2Model(nn.Module):
         return loaded_params
 
 
+class T5Gemma2ImagePixelInputs(TensorSchema):
+    type: Literal["pixel_values"] = "pixel_values"
+    pixel_values: Annotated[torch.Tensor, TensorShape("bn", "c", "h", "w")]
+
+
+T5Gemma2ImageInputs: TypeAlias = T5Gemma2ImagePixelInputs
+
+
+class T5Gemma2ProcessingInfo(BaseProcessingInfo):
+    def get_hf_config(self) -> T5Gemma2Config:
+        return self.ctx.get_hf_config(T5Gemma2Config)
+
+    def get_supported_mm_limits(self) -> Mapping[str, int | None]:
+        return {"image": None}
+
+    def get_num_image_tokens(
+        self,
+        *,
+        image_width: int,
+        image_height: int,
+    ) -> int:
+        hf_config = self.get_hf_config()
+        vision_config = hf_config.encoder.vision_config
+        # Logic from T5Gemma2VisionEncoder
+        patches_per_image = int(vision_config.image_size // vision_config.patch_size)
+        mm_tokens_per_image = int(patches_per_image**0.5) ** 2
+        return mm_tokens_per_image
+
+    def get_image_size_with_most_features(self) -> ImageSize:
+        hf_config = self.get_hf_config()
+        vision_config = hf_config.encoder.vision_config
+        return ImageSize(
+            width=vision_config.image_size, height=vision_config.image_size
+        )
+
+
+class T5Gemma2DummyInputsBuilder(BaseDummyInputsBuilder[T5Gemma2ProcessingInfo]):
+    def get_dummy_text(self, mm_counts: Mapping[str, int]) -> str:
+        num_images = mm_counts.get("image", 0)
+        processor = self.info.ctx.get_hf_processor()
+        # Prefer boi_token (Gemma3), then image_token, then <image>
+        image_token = getattr(
+            processor, "boi_token", getattr(processor, "image_token", "<image>")
+        )
+        return image_token * num_images
+
+    def get_dummy_mm_data(
+        self,
+        seq_len: int,
+        mm_counts: Mapping[str, int],
+        mm_options: Mapping[str, BaseDummyOptions] | None = None,
+    ) -> dict[str, Any]:
+        target_width, target_height = self.info.get_image_size_with_most_features()
+        num_images = mm_counts.get("image", 0)
+        return {
+            "image": self._get_dummy_images(
+                width=target_width,
+                height=target_height,
+                num_images=num_images,
+            )
+        }
+
+
+class T5Gemma2MultiModalProcessor(BaseMultiModalProcessor[T5Gemma2ProcessingInfo]):
+    def _get_mm_fields_config(
+        self,
+        hf_inputs: BatchFeature,
+        hf_processor_mm_kwargs: Mapping[str, object],
+    ) -> Mapping[str, MultiModalFieldConfig]:
+        return dict(
+            pixel_values=MultiModalFieldConfig.batched("image"),
+        )
+
+    def _get_prompt_updates(
+        self,
+        mm_items: MultiModalDataItems,
+        hf_processor_mm_kwargs: Mapping[str, object],
+        out_mm_kwargs: MultiModalKwargsItems,
+    ) -> Sequence[PromptUpdate]:
+        hf_config = self.info.get_hf_config()
+        image_token_id = hf_config.image_token_index
+        processor = self.info.ctx.get_hf_processor()
+        image_token = getattr(
+            processor, "boi_token", getattr(processor, "image_token", "<image>")
+        )
+
+        def get_replacement(item_idx: int):
+            num_image_tokens = self.info.get_num_image_tokens(
+                image_width=0, image_height=0
+            )
+            return [image_token_id] * num_image_tokens
+
+        return [
+            PromptReplacement(
+                modality="image",
+                target=image_token,
+                replacement=get_replacement,
+            ),
+        ]
+
+
+@MULTIMODAL_REGISTRY.register_processor(
+    T5Gemma2MultiModalProcessor,
+    info=T5Gemma2ProcessingInfo,
+    dummy_inputs=T5Gemma2DummyInputsBuilder,
+)
 class T5Gemma2ForConditionalGeneration(
     nn.Module, SupportsMultiModal, SupportsLoRA, SupportsPP
 ):
     """T5Gemma2 for conditional generation (seq2seq)."""
+
+    supports_multimodal_raw_input_only = True
 
     packed_modules_mapping = {
         # No packed modules - we use separate projections for all layers
@@ -1214,6 +1327,29 @@ class T5Gemma2ForConditionalGeneration(
             self.model.decoder.make_empty_intermediate_tensors
         )
 
+    @classmethod
+    def get_placeholder_str(cls, modality: str, i: int) -> str | None:
+        if modality.startswith("image"):
+            return "<image>"
+        return None
+
+    def embed_multimodal(self, **kwargs: object) -> MultiModalEmbeddings:
+        pixel_values = kwargs.get("pixel_values")
+        if pixel_values is None:
+            return []
+        return [
+            torch.tensor([], device=pixel_values.device).reshape(0, 0)
+            for _ in range(len(pixel_values))
+        ]
+
+    def embed_input_ids(
+        self,
+        input_ids: torch.Tensor,
+        multimodal_embeddings: MultiModalEmbeddings | None = None,
+        **kwargs,
+    ) -> torch.Tensor:
+        return self.model.decoder.embed_input_ids(input_ids)
+
     def get_language_model(self) -> nn.Module:
         return self.model.decoder
 
@@ -1228,9 +1364,6 @@ class T5Gemma2ForConditionalGeneration(
             positions=positions,
             pixel_values=pixel_values,
         )
-
-    def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
-        return self.model.decoder.embed_input_ids(input_ids)
 
     def forward(
         self,
