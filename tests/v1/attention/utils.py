@@ -67,15 +67,7 @@ def create_common_attn_metadata(
 
     # Create sequence lengths
     seq_lens = torch.tensor(batch_spec.seq_lens, dtype=torch.int32, device=device)
-    seq_lens_cpu = seq_lens.cpu()
-    max_seq_len = int(seq_lens_cpu.max())
-
-    # Create computed tokens (context length for each sequence)
-    context_lens = [
-        batch_spec.seq_lens[i] - batch_spec.query_lens[i]
-        for i in range(batch_spec.batch_size)
-    ]
-    num_computed_tokens_cpu = torch.tensor(context_lens, dtype=torch.int32)
+    max_seq_len = int(seq_lens.max().item())
 
     # Create block table and slot mapping
     max_blocks = (max(batch_spec.seq_lens) + block_size - 1) // block_size
@@ -106,8 +98,6 @@ def create_common_attn_metadata(
         query_start_loc=query_start_loc,
         query_start_loc_cpu=query_start_loc_cpu,
         seq_lens=seq_lens,
-        _seq_lens_cpu=seq_lens_cpu,
-        _num_computed_tokens_cpu=num_computed_tokens_cpu,
         num_reqs=batch_spec.batch_size,
         num_actual_tokens=num_tokens,
         max_query_len=max_query_len,
