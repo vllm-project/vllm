@@ -385,6 +385,10 @@ class MultiModalMixin(SupportsMultiModal, SupportsMRoPE):
                 vision_embeddings = vision_embeddings.pooler_output
 
             if isinstance(vision_embeddings, torch.Tensor):
+                if vision_embeddings.ndim == 2:
+                    vision_embeddings = vision_embeddings.unsqueeze(0)
+
+            if isinstance(vision_embeddings, torch.Tensor):
                 split_sizes = num_image_patches.flatten().tolist()
                 total_patches = sum(split_sizes)
 
