@@ -171,6 +171,35 @@ class MinimaxM2ToolParser(ToolParser):
             return name_str[1:-1]
         return name_str
 
+    def _parse_name_from_attributes(self, attr_section: str) -> str:
+        """Helper to extract name from attribute section string.
+        Handles quoted and unquoted names, ignoring extra attributes."""
+        # Check for quoted name first
+        if attr_section.startswith('"'):
+            # Find closing quote
+            close_quote = attr_section.find('"', 1)
+            if close_quote != -1:
+                name_raw = attr_section[: close_quote + 1]
+            else:
+                name_raw = attr_section
+        elif attr_section.startswith("'"):
+            # Find closing single quote
+            close_quote = attr_section.find("'", 1)
+            if close_quote != -1:
+                name_raw = attr_section[: close_quote + 1]
+            else:
+                name_raw = attr_section
+        else:
+            # Unquoted name - take until first whitespace
+            space_idx = -1
+            for i, c in enumerate(attr_section):
+                if c.isspace():
+                    space_idx = i
+                    break
+            name_raw = attr_section[:space_idx] if space_idx != -1 else attr_section
+
+        return self._extract_name(name_raw)
+
     def _convert_param_value(self, value: str, param_type: str) -> Any:
         """Convert parameter value to the correct type (legacy single-type version)."""
         return self._convert_param_value_with_types(value, [param_type])
@@ -351,14 +380,22 @@ class MinimaxM2ToolParser(ToolParser):
             function_name = self._extract_name(invoke_str[0])
             invoke_content = invoke_str[1] if len(invoke_str) > 1 else ""
         else:
-            # Legacy format: full string after '<invoke name='
-            name_match = re.search(r"^([^>]+)", invoke_str)
-            if not name_match:
-                return None
-            function_name = self._extract_name(name_match.group(1))
-            # Extract content after the closing '>'
-            content_match = re.search(r"^[^>]+>(.*)", invoke_str, re.DOTALL)
-            invoke_content = content_match.group(1) if content_match else ""
+            # Fallback for unexpected string input
+            # (should generally be tuple from regex)
+            # Try to extract similarly to tuple case
+            match = self.invoke_complete_regex.search(invoke_str)
+            if match:
+                function_name = self._extract_name(match.group(1))
+                invoke_content = match.group(2)
+            else:
+                # Basic fallback if regex doesn't match
+                name_match = re.search(r"^([^>]+)", invoke_str)
+                if not name_match:
+                    return None
+                function_name = self._extract_name(name_match.group(1))
+                # Extract content after the closing '>'
+                content_match = re.search(r"^[^>]+>(.*)", invoke_str, re.DOTALL)
+                invoke_content = content_match.group(1) if content_match else ""
 
         # Get parameter configuration
         param_config = {}
@@ -593,33 +630,9 @@ class MinimaxM2ToolParser(ToolParser):
                     # Found complete function name
                     # Handle cases where model may add extra attributes after name
                     attr_section = tool_text[func_start:func_end]
-
-                    # Extract only the name value, ignoring any additional attributes
-                    if attr_section.startswith('"'):
-                        close_quote = attr_section.find('"', 1)
-                        if close_quote != -1:
-                            function_name_raw = attr_section[: close_quote + 1]
-                        else:
-                            function_name_raw = attr_section
-                    elif attr_section.startswith("'"):
-                        close_quote = attr_section.find("'", 1)
-                        if close_quote != -1:
-                            function_name_raw = attr_section[: close_quote + 1]
-                        else:
-                            function_name_raw = attr_section
-                    else:
-                        # Unquoted name - take until first whitespace
-                        space_idx = -1
-                        for i, c in enumerate(attr_section):
-                            if c.isspace():
-                                space_idx = i
-                                break
-                        if space_idx != -1:
-                            function_name_raw = attr_section[:space_idx]
-                        else:
-                            function_name_raw = attr_section
-
-                    self.current_function_name = self._extract_name(function_name_raw)
+                    self.current_function_name = self._parse_name_from_attributes(
+                        attr_section
+                    )
                     self.current_tool_id = self._generate_tool_call_id()
                     self.header_sent = True
                     self.in_function = True
@@ -765,35 +778,9 @@ class MinimaxM2ToolParser(ToolParser):
                     name_end = remaining.find(">")
                     attr_section = remaining[:name_end]
 
-                    # Extract only the name value, ignoring any additional attributes
-                    # Check for quoted name first
-                    if attr_section.startswith('"'):
-                        # Find closing quote
-                        close_quote = attr_section.find('"', 1)
-                        if close_quote != -1:
-                            param_name_raw = attr_section[: close_quote + 1]
-                        else:
-                            param_name_raw = attr_section
-                    elif attr_section.startswith("'"):
-                        # Find closing single quote
-                        close_quote = attr_section.find("'", 1)
-                        if close_quote != -1:
-                            param_name_raw = attr_section[: close_quote + 1]
-                        else:
-                            param_name_raw = attr_section
-                    else:
-                        # Unquoted name - take until first whitespace
-                        space_idx = -1
-                        for i, c in enumerate(attr_section):
-                            if c.isspace():
-                                space_idx = i
-                                break
-                        if space_idx != -1:
-                            param_name_raw = attr_section[:space_idx]
-                        else:
-                            param_name_raw = attr_section
-
-                    self.current_param_name = self._extract_name(param_name_raw)
+                    self.current_param_name = self._parse_name_from_attributes(
+                        attr_section
+                    )
 
                     # Find the parameter value
                     value_start = param_start + name_end + 1
