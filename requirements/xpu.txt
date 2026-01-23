@@ -10,6 +10,9 @@ wheel
 jinja2>=3.1.6
 datasets # for benchmark scripts
 numba == 0.61.2 # Required for N-gram speculative decoding
+
+# XPU is behind on torch versions, but eventually transition this to
+# remove here and `-r torchlibs.txt` at the top of this file
 --extra-index-url=https://download.pytorch.org/whl/xpu
 torch==2.9.0+xpu
 torchaudio
