@@ -4,7 +4,6 @@ import argparse
 import contextlib
 import json
 import shlex
-import time
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -44,14 +43,7 @@ def run_server(
         return
 
     with ServerProcess(server_cmd, after_bench_cmd, show_stdout=show_stdout) as server:
-        start_time = time.monotonic()
-        while not server.is_server_ready():
-            if time.monotonic() - start_time > server_ready_timeout:
-                raise TimeoutError(
-                    "Server failed to become ready within "
-                    f"{server_ready_timeout} seconds."
-                )
-            time.sleep(1)
+        server.wait_until_ready(timeout=server_ready_timeout)
         yield server
 
     print("[END SERVER]")
