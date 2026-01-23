@@ -20,10 +20,7 @@ from vllm.utils.mem_utils import DeviceMemoryProfiler, format_gib
 from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
 from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig
-from vllm.v1.outputs import (
-    EMPTY_MODEL_RUNNER_OUTPUT,
-    ModelRunnerOutput,
-)
+from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.worker.gpu.async_utils import AsyncOutput
 from vllm.v1.worker.gpu.attn_utils import (
     build_attn_metadata,
@@ -54,7 +51,6 @@ from vllm.v1.worker.gpu.kv_connector import (
     KVConnector,
     get_kv_connector,
 )
-from vllm.v1.worker.gpu.lora_utils import LoraState
 from vllm.v1.worker.gpu.mm.encoder_runner import EncoderRunner
 from vllm.v1.worker.gpu.mm.mrope_utils import MRopeState
 from vllm.v1.worker.gpu.sample.output import SamplerOutput
@@ -175,6 +171,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.draft_tokens_handler = DraftTokensHandler(self.device)
 
         # KV Connector if configured.
+        self.kv_connector: KVConnector = NO_OP_KV_CONNECTOR
+
         self.kv_connector: KVConnector = NO_OP_KV_CONNECTOR
 
     def update_max_model_len(self, max_model_len: int) -> None:
