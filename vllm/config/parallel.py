@@ -43,6 +43,7 @@ All2AllBackend = Literal[
     "pplx",
     "deepep_high_throughput",
     "deepep_low_latency",
+    "mori",
     "allgather_reducescatter",
     "flashinfer_all2allv",
 ]
@@ -158,6 +159,7 @@ class ParallelConfig:
     - "pplx": Use pplx kernels\n
     - "deepep_high_throughput": Use deepep high-throughput kernels\n
     - "deepep_low_latency": Use deepep low-latency kernels\n
+    - "mori": Use mori kernels\n
     - "flashinfer_all2allv": Use flashinfer alltoallv kernels for mnnvl"""
 
     max_parallel_loading_workers: int | None = None
@@ -443,6 +445,7 @@ class ParallelConfig:
                 "naive",
                 "deepep_high_throughput",
                 "deepep_low_latency",
+                "mori",
             )
             and self.enable_expert_parallel
             and self.tensor_parallel_size > 1
