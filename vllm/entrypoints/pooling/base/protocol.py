@@ -145,7 +145,7 @@ class EncodingRequestMixin(OpenAIBaseModel):
     # --8<-- [end:encoding-extra-params]
 
 
-class EmbedRequestMixin(OpenAIBaseModel, EncodingRequestMixin):
+class EmbedRequestMixin(EncodingRequestMixin):
     # --8<-- [start:embed-params]
     dimensions: int | None = None
     # --8<-- [end:embed-params]
