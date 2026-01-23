@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import time
-from typing import Generic, TypeAlias, TypeVar, Any
+from typing import Any, Generic, TypeAlias, TypeVar
 
 from pydantic import (
     Field,
@@ -47,7 +47,6 @@ class PoolingChatRequest(
         default=None,
         description=("Additional kwargs to pass to the HF processor."),
     )
-
 
     def to_pooling_params(self):
         return PoolingParams(

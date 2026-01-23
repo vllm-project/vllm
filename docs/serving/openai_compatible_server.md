@@ -951,7 +951,7 @@ The following [pooling parameters][vllm.PoolingParams] are supported.
 --8<-- "vllm/pooling_params.py:classify-pooling-params"
 ```
 
-```
+
 The following parameters are supported:
 
 ```python
@@ -959,8 +959,6 @@ The following parameters are supported:
 --8<-- "vllm/entrypoints/pooling/score/protocol.py:score-extra-params"
 ```
 
-
-```
 The following extra parameters are supported:
 
 ```python
@@ -1043,14 +1041,12 @@ The following [pooling parameters][vllm.PoolingParams] are supported.
 --8<-- "vllm/pooling_params.py:classify-pooling-params"
 ```
 
-```
 The following parameters are supported:
 
 ```python
 --8<-- "vllm/entrypoints/pooling/base/protocol.py:pooling-common-params"
 --8<-- "vllm/entrypoints/pooling/score/protocol.py:score-extra-params"
 ```
-
 
 The following extra parameters are supported:
 
