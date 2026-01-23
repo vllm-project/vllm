@@ -66,7 +66,7 @@ Install vLLM with `uv` (recommended) or `pip`. For source builds and other platf
 # Recommended: using uv (https://docs.astral.sh/uv/)
 uv pip install vllm --torch-backend=auto
 
-# Alternative: using pip
+# Alternative: using pip (see installation guide for GPU setup)
 pip install vllm
 ```
 
