@@ -4,7 +4,7 @@
 import itertools
 import warnings
 from collections.abc import Callable, Sequence
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any, TypeAlias, cast
 
 import cloudpickle
 import torch.nn as nn
@@ -51,12 +51,13 @@ from vllm.entrypoints.utils import log_non_default_args
 from vllm.inputs import (
     DataPrompt,
     EmbedsPrompt,
+    ExplicitEncoderDecoderPrompt,
     PromptType,
     SingletonPrompt,
     TextPrompt,
     TokensPrompt,
 )
-from vllm.inputs.parse import get_prompt_components
+from vllm.inputs.parse import get_prompt_components, is_explicit_encoder_decoder_prompt
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.model_executor.layers.quantization import QuantizationMethods
@@ -86,6 +87,11 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 _R = TypeVar("_R", default=Any)
+
+_TokenizedPrompt: TypeAlias = TokensPrompt | EmbedsPrompt
+_TokenizedEncDecPrompt: TypeAlias = ExplicitEncoderDecoderPrompt[
+    _TokenizedPrompt, _TokenizedPrompt
+]
 
 
 class LLM:
@@ -374,6 +380,7 @@ class LLM:
         use_tqdm: bool | Callable[..., tqdm] = True,
         lora_request: list[LoRARequest] | LoRARequest | None = None,
         priority: list[int] | None = None,
+        tokenization_kwargs: dict[str, Any] | None = None,
     ) -> list[RequestOutput]:
         """Generates the completions for the input prompts.
 
@@ -400,6 +407,7 @@ class LLM:
                 If provided, must be a list of integers matching the length
                 of `prompts`, where each priority value corresponds to the prompt
                 at the same index.
+            tokenization_kwargs: Overrides for `tokenizer.encode`.
 
         Returns:
             A list of `RequestOutput` objects containing the
@@ -415,18 +423,15 @@ class LLM:
             )
 
         if sampling_params is None:
-            # Use default sampling params.
             sampling_params = self.get_default_sampling_params()
-
-        # Add any modality specific loras to the corresponding prompts
-        lora_request = self._get_modality_specific_lora_reqs(prompts, lora_request)
 
         self._validate_and_add_requests(
             prompts=prompts,
             params=sampling_params,
             use_tqdm=use_tqdm,
-            lora_request=lora_request,
+            lora_request=self._get_modality_specific_lora_reqs(prompts, lora_request),
             priority=priority,
+            tokenization_kwargs=tokenization_kwargs,
         )
 
         outputs = self._run_engine(use_tqdm=use_tqdm)
@@ -768,13 +773,40 @@ class LLM:
 
         return outputs
 
+    def _tokenize_singleton_prompt(
+        self,
+        prompt: SingletonPrompt,
+        tok_params: TokenizeParams,
+    ) -> _TokenizedPrompt:
+        renderer = self.llm_engine.renderer
+
+        return renderer.tokenize_prompt(
+            TextPrompt(prompt=prompt) if isinstance(prompt, str) else prompt,
+            tok_params,
+        )
+
+    def _tokenize_enc_dec_prompt(
+        self,
+        prompt: ExplicitEncoderDecoderPrompt,
+        tok_params: TokenizeParams,
+    ) -> _TokenizedEncDecPrompt:
+        enc_prompt = prompt["encoder_prompt"]
+        dec_prompt = prompt["decoder_prompt"]
+
+        return _TokenizedEncDecPrompt(
+            encoder_prompt=self._tokenize_singleton_prompt(enc_prompt, tok_params),
+            decoder_prompt=(
+                None
+                if dec_prompt is None
+                else self._tokenize_singleton_prompt(dec_prompt, tok_params)
+            ),
+        )
+
     def _preprocess_completion(
         self,
-        prompt_input: str | list[str] | list[int] | list[list[int]] | None,
-        prompt_embeds: bytes | list[bytes] | None,
+        prompts: PromptType | Sequence[PromptType],
         tokenization_kwargs: dict[str, Any] | None = None,
-        mm_processor_kwargs: dict[str, Any] | None = None,
-    ) -> list[TokensPrompt | EmbedsPrompt]:
+    ) -> list[_TokenizedPrompt | _TokenizedEncDecPrompt]:
         """
         Convert prompt inputs from LLM APIs (other than [LLM.chat][]) into
         a format that can be pasesed to [LLM._process_inputs][].
@@ -785,19 +817,18 @@ class LLM:
             A list of `TokensPrompts` objects containing the tokenized prompt
             after chat template interpolation, and the raw multi-modal inputs.
         """
-        model_config = self.model_config
-        renderer = self.llm_engine.renderer
-
-        tok_params = TokenizeParams.from_config(model_config).with_kwargs(
+        tok_params = TokenizeParams.from_config(self.model_config).with_kwargs(
             tokenization_kwargs
         )
 
-        prompts = renderer.render_completions(prompt_input, prompt_embeds)
-        out_prompts = renderer.tokenize_prompts(prompts, tok_params)
+        out_prompts = list[_TokenizedPrompt | _TokenizedEncDecPrompt]()
+        for prompt in prompts if isinstance(prompts, Sequence) else [prompts]:
+            if is_explicit_encoder_decoder_prompt(prompt):
+                out_prompt = self._tokenize_enc_dec_prompt(prompt, tok_params)
+            else:
+                out_prompt = self._tokenize_singleton_prompt(prompt, tok_params)
 
-        for prompt in out_prompts:
-            if mm_processor_kwargs is not None:
-                prompt["mm_processor_kwargs"] = mm_processor_kwargs
+            out_prompts.append(out_prompt)
 
         return out_prompts
 
@@ -810,8 +841,9 @@ class LLM:
         add_generation_prompt: bool = True,
         continue_final_message: bool = False,
         tools: list[dict[str, Any]] | None = None,
+        tokenization_kwargs: dict[str, Any] | None = None,
         mm_processor_kwargs: dict[str, Any] | None = None,
-    ) -> list[TokensPrompt | EmbedsPrompt]:
+    ) -> list[_TokenizedPrompt]:
         """
         Convert a list of conversations into prompts so that they can then
         be used as input for other LLM APIs.
@@ -822,7 +854,6 @@ class LLM:
             A list of `TokensPrompts` objects containing the tokenized prompt
             after chat template interpolation, and the raw multi-modal inputs.
         """
-        model_config = self.model_config
         renderer = self.llm_engine.renderer
 
         chat_params = ChatParams(
@@ -838,17 +869,19 @@ class LLM:
                 ),
             ),
         )
-        tok_params = TokenizeParams.from_config(model_config)
+        tok_params = TokenizeParams.from_config(self.model_config).with_kwargs(
+            tokenization_kwargs
+        )
 
-        out_prompts = list[TokensPrompt | EmbedsPrompt]()
+        out_prompts = list[_TokenizedPrompt]()
         for conversation in conversations:
             _, prompt = renderer.render_messages(conversation, chat_params)
             if mm_processor_kwargs is not None:
                 prompt["mm_processor_kwargs"] = mm_processor_kwargs
 
-            prompt = renderer.tokenize_prompt(prompt, tok_params)
+            out_prompt = renderer.tokenize_prompt(prompt, tok_params)
 
-            out_prompts.append(prompt)
+            out_prompts.append(out_prompt)
 
         return out_prompts
 
@@ -865,6 +898,7 @@ class LLM:
         continue_final_message: bool = False,
         tools: list[dict[str, Any]] | None = None,
         chat_template_kwargs: dict[str, Any] | None = None,
+        tokenization_kwargs: dict[str, Any] | None = None,
         mm_processor_kwargs: dict[str, Any] | None = None,
     ) -> list[RequestOutput]:
         """
@@ -910,8 +944,8 @@ class LLM:
                 `True` if `add_generation_prompt` is also `True`.
             chat_template_kwargs: Additional kwargs to pass to the chat
                 template.
-            mm_processor_kwargs: Multimodal processor kwarg overrides for this
-                chat request. Only used for offline requests.
+            tokenization_kwargs: Overrides for `tokenizer.encode`.
+            mm_processor_kwargs: Overrides for `processor.__call__`.
 
         Returns:
             A list of `RequestOutput` objects containing the generated
@@ -928,6 +962,7 @@ class LLM:
             add_generation_prompt=add_generation_prompt,
             continue_final_message=continue_final_message,
             tools=tools,
+            tokenization_kwargs=tokenization_kwargs,
             mm_processor_kwargs=mm_processor_kwargs,
         )
 
@@ -936,6 +971,7 @@ class LLM:
             sampling_params=sampling_params,
             use_tqdm=use_tqdm,
             lora_request=lora_request,
+            tokenization_kwargs=tokenization_kwargs,
         )
 
     def encode(
@@ -968,8 +1004,7 @@ class LLM:
                 If `False`, no progress bar is created.
             lora_request: LoRA request to use for generation, if any.
             pooling_task: Override the pooling task to use.
-            tokenization_kwargs: overrides tokenization_kwargs set in
-                pooling_params
+            tokenization_kwargs: Overrides for `tokenizer.encode`.
 
         Returns:
             A list of `PoolingRequestOutput` objects containing the
@@ -1113,6 +1148,7 @@ class LLM:
                 it is used to create the progress bar.
                 If `False`, no progress bar is created.
             lora_request: LoRA request to use for generation, if any.
+            tokenization_kwargs: Overrides for `tokenizer.encode`.
 
         Returns:
             A list of `EmbeddingRequestOutput` objects containing the
@@ -1145,8 +1181,8 @@ class LLM:
         self,
         prompts: PromptType | Sequence[PromptType],
         *,
-        use_tqdm: bool | Callable[..., tqdm] = True,
         pooling_params: PoolingParams | Sequence[PoolingParams] | None = None,
+        use_tqdm: bool | Callable[..., tqdm] = True,
         lora_request: list[LoRARequest] | LoRARequest | None = None,
         tokenization_kwargs: dict[str, Any] | None = None,
     ) -> list[ClassificationRequestOutput]:
@@ -1161,13 +1197,15 @@ class LLM:
             prompts: The prompts to the LLM. You may pass a sequence of prompts
                 for batch inference. See [PromptType][vllm.inputs.PromptType]
                 for more details about the format of each prompt.
+            pooling_params: The pooling parameters for pooling. If None, we
+                use the default pooling parameters.
             use_tqdm: If `True`, shows a tqdm progress bar.
                 If a callable (e.g., `functools.partial(tqdm, leave=False)`),
                 it is used to create the progress bar.
                 If `False`, no progress bar is created.
             lora_request: LoRA request to use for generation, if any.
-            pooling_params: The pooling parameters for pooling. If None, we
-                use the default pooling parameters.
+            tokenization_kwargs: Overrides for `tokenizer.encode`.
+
         Returns:
             A list of `ClassificationRequestOutput` objects containing the
             embedding vectors in the same order as the input prompts.
@@ -1194,9 +1232,9 @@ class LLM:
         prompts: PromptType | Sequence[PromptType],
         /,
         *,
+        pooling_params: PoolingParams | Sequence[PoolingParams] | None = None,
         truncate_prompt_tokens: int | None = None,
         use_tqdm: bool | Callable[..., tqdm] = True,
-        pooling_params: PoolingParams | Sequence[PoolingParams] | None = None,
         lora_request: list[LoRARequest] | LoRARequest | None = None,
         tokenization_kwargs: dict[str, Any] | None = None,
     ) -> list[PoolingRequestOutput]:
@@ -1207,13 +1245,15 @@ class LLM:
             prompts: The prompts to the LLM. You may pass a sequence of prompts
                 for batch inference. See [PromptType][vllm.inputs.PromptType]
                 for more details about the format of each prompt.
+            pooling_params: The pooling parameters for pooling. If None, we
+                use the default pooling parameters.
             use_tqdm: If `True`, shows a tqdm progress bar.
                 If a callable (e.g., `functools.partial(tqdm, leave=False)`),
                 it is used to create the progress bar.
                 If `False`, no progress bar is created.
             lora_request: LoRA request to use for generation, if any.
-            pooling_params: The pooling parameters for pooling. If None, we
-                use the default pooling parameters.
+            tokenization_kwargs: Overrides for `tokenizer.encode`.
+
         Returns:
             A list of `PoolingRequestOutput` objects containing the
             pooled hidden states in the same order as the input prompts.
@@ -1366,15 +1406,16 @@ class LLM:
                 the LLM. Can be text or multi-modal data. See [PromptType]
                 [vllm.inputs.PromptType] for more details about the format of
                 each prompt.
+            pooling_params: The pooling parameters for pooling. If None, we
+                use the default pooling parameters.
             use_tqdm: If `True`, shows a tqdm progress bar.
                 If a callable (e.g., `functools.partial(tqdm, leave=False)`),
                 it is used to create the progress bar.
                 If `False`, no progress bar is created.
             lora_request: LoRA request to use for generation, if any.
-            pooling_params: The pooling parameters for pooling. If None, we
-                use the default pooling parameters.
             chat_template: The chat template to use for the scoring. If None, we
                 use the model's default chat template.
+            tokenization_kwargs: Overrides for `tokenizer.encode`.
         Returns:
             A list of `ScoringRequestOutput` objects containing the
             generated scores in the same order as the input prompts.
@@ -1557,14 +1598,39 @@ class LLM:
         | Sequence[PoolingParams],
         *,
         use_tqdm: bool | Callable[..., tqdm] = True,
-        lora_request: Sequence[LoRARequest] | LoRARequest | None,
+        lora_request: Sequence[LoRARequest | None] | LoRARequest | None,
         priority: list[int] | None = None,
         tokenization_kwargs: dict[str, Any] | None = None,
     ) -> None:
-        if isinstance(prompts, str):
-            prompts = TextPrompt(prompt=prompts)
+        if any(
+            p.truncate_prompt_tokens is not None
+            for p in ([params] if not isinstance(params, Sequence) else params)
+        ):
+            # Remove this after deprecating params.truncate_prompt_tokens
+            all_prompts = [
+                out_p
+                for in_prompt, in_param in zip(
+                    (
+                        [prompts]
+                        if isinstance(prompts, str) or not isinstance(prompts, Sequence)
+                        else prompts
+                    ),
+                    ([params] if not isinstance(params, Sequence) else params),
+                )
+                for out_p in self._preprocess_completion(
+                    [in_prompt],
+                    tokenization_kwargs=merge_kwargs(
+                        tokenization_kwargs,
+                        dict(truncate_prompt_tokens=in_param.truncate_prompt_tokens),
+                    ),
+                )
+            ]
+        else:
+            all_prompts = self._preprocess_completion(
+                prompts,
+                tokenization_kwargs=tokenization_kwargs,
+            )
 
-        all_prompts = prompts if isinstance(prompts, Sequence) else [prompts]
         num_requests = len(all_prompts)
 
         if isinstance(params, Sequence):
