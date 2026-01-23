@@ -208,8 +208,8 @@ class InputProcessor:
             if not isinstance(single_prompt, dict):
                 return
 
-            mm_data = single_prompt.get("multi_modal_data") or {}
-            mm_uuids = single_prompt.get("multi_modal_uuids") or {}
+            mm_data: MultiModalDataDict = single_prompt.get("multi_modal_data") or {}
+            mm_uuids: MultiModalUUIDDict = single_prompt.get("multi_modal_uuids") or {}
             if not mm_data and not mm_uuids:
                 return
 
