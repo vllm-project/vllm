@@ -148,14 +148,9 @@ class CompressedTensorsMoEMethod(FusedMoEMethodBase):
         weight_quant = scheme_dict.get("weights")
         input_quant = scheme_dict.get("input_activations")
         format = scheme_dict.get("format")
-        
-        if layer.moe_config.moe_parallel_config.tp_rank == 0:
-            print(f"moe scheme_dict: {scheme_dict}, \
-                input_quant: {input_quant}, layer: {layer}, layer.moe_config: {layer.moe_config}")
+
         if quant_config._is_xpu_w8a16_fp8(weight_quant, input_quant):
             return XPUFp8MoEMethod(quant_config, layer.moe_config, layer)
-
-            #return XPUFp8MoEMethod(weight_quant, input_quant, layer.moe_config)
 
         if quant_config._is_mxfp4(weight_quant):
             return CompressedTensorsW4A4Mxfp4MoEMethod(layer.moe_config)
