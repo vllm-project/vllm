@@ -29,7 +29,6 @@ from vllm.model_executor.layers.fused_moe.router.fused_moe_router import (
 )
 from vllm.model_executor.layers.fused_moe.runner.moe_runner import MoERunner
 from vllm.platforms import current_platform
-from vllm.utils.flashinfer import has_flashinfer_trtllm_fused_moe
 from vllm.utils.math_utils import cdiv
 from vllm.utils.torch_utils import (
     aux_stream,
@@ -163,6 +162,7 @@ class DefaultMoERunner(MoERunner):
         return (
             self.moe_config.use_pplx_kernels
             or self.moe_config.use_deepep_ll_kernels
+            or self.moe_config.use_mori_kernels
             or (self.moe_config.dp_size > 1 and self.use_flashinfer_cutlass_kernels)
         ) and envs.VLLM_ENABLE_MOE_DP_CHUNK
 
@@ -454,9 +454,11 @@ class DefaultMoERunner(MoERunner):
             and self.shared_experts is not None
         )
 
+        use_chunked_impl = self.use_dp_chunking
+
         use_shared_experts_stream, hidden_states_clone = (
             self._maybe_setup_shared_experts_stream(
-                hidden_states, has_separate_shared_experts, self.use_dp_chunking
+                hidden_states, has_separate_shared_experts, use_chunked_impl
             )
         )
 
@@ -467,7 +469,7 @@ class DefaultMoERunner(MoERunner):
         if self.gate is not None:
             router_logits, _ = self.gate(hidden_states)
 
-        if self.use_dp_chunking:
+        if use_chunked_impl:
             return self.forward_impl_chunked(
                 layer, hidden_states, router_logits, has_separate_shared_experts
             )
@@ -510,17 +512,19 @@ class DefaultMoERunner(MoERunner):
                 )
                 if extra_tensors is not None:
                     (
-                        orig_hidden_states_combined,
+                        orig_hidden_states,
                         router_logits,
                         extra_tensors_combined,
                     ) = dispatch_res
                     hidden_states_combined = (
-                        orig_hidden_states_combined,
+                        orig_hidden_states,
                         extra_tensors_combined[0],
                     )
                 else:
                     hidden_states_combined, router_logits = dispatch_res
                     orig_hidden_states = hidden_states_combined
+            else:
+                orig_hidden_states = hidden_states
 
             # Run shared experts before matrix multiply.
             # because matrix multiply maybe modify the hidden_states.
@@ -543,7 +547,8 @@ class DefaultMoERunner(MoERunner):
 
             # Matrix multiply.
             x = hidden_states_combined if do_naive_dispatch_combine else hidden_states
-            # TODO(bnell): deal with fp4 flashinfer tuple hidden states hack (#30014)
+
+            # TODO(bnell): deal with fp4 flashinfer tuple hidden states hack (#30014).
             # Figure out nicer way to do this.
             x_orig = orig_hidden_states if do_naive_dispatch_combine else hidden_states
 
