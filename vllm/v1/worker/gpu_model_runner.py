@@ -1165,40 +1165,6 @@ class GPUModelRunner(
                 self.model.get_mamba_state_copy_func(),
             )
 
-    def _update_streaming_request(
-        self, req_id: str, new_req_data: NewRequestData
-    ) -> CachedRequestState:
-        """Updates streaming session request from `scheduled_new_reqs`.
-
-        Removes the request from InputBatch (if present), updates the cached
-        state, and prepares it for re-addition to the batch.
-
-        NOTE: prompt_token_ids includes intermediate output tokens - tokens
-        previously generated but now are input context (part of the prompt).
-        """
-        self.input_batch.remove_request(req_id)
-        req_state = self.requests[req_id]
-
-        req_state.prompt_token_ids = new_req_data.prompt_token_ids
-        req_state.mm_features = new_req_data.mm_features
-        req_state.prompt_embeds = new_req_data.prompt_embeds
-        req_state.sampling_params = new_req_data.sampling_params
-        req_state.pooling_params = new_req_data.pooling_params
-        req_state.block_ids = new_req_data.block_ids
-        req_state.num_computed_tokens = new_req_data.num_computed_tokens
-        req_state.num_prompt_tokens = length_from_prompt_token_ids_or_embeds(
-            req_state.prompt_token_ids, req_state.prompt_embeds
-        )
-
-        # Clear `output_token_ids` as previous output tokens are now part of
-        # `prompt_token_ids`.
-        req_state.output_token_ids.clear()
-
-        if self.uses_mrope:
-            self._init_mrope_positions(req_state)
-
-        return req_state
-
     def _init_mrope_positions(self, req_state: CachedRequestState):
         model = self.get_model()
         assert supports_mrope(model), "M-RoPE support is not implemented."
@@ -3660,12 +3626,6 @@ class GPUModelRunner(
         self._update_states_after_model_execute(
             sampler_output.sampled_token_ids, scheduler_output
         )
-        if self.use_async_scheduling:
-            pp = get_pp_group()
-            if pp.world_size > 1 and pp.is_last_rank:
-                self._pp_broadcast_prev_sampled_token_ids(
-                    sampler_output.sampled_token_ids
-                )
 
         self._draft_token_ids = None
         self._draft_token_req_ids = None
