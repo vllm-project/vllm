@@ -296,18 +296,9 @@ class Eagle3LlamaForCausalLM(LlamaForCausalLM):
             requires_grad=False,
         )
 
-        # Buffer for parallel drafting mask hidden state (loaded from checkpoint)
-        # Size depends on whether model uses aux hidden states (3x hidden_size)
-        eagle_config = getattr(self.config, "eagle_config", None)
-        use_aux = True  # Default for EAGLE3
-        if eagle_config is not None and "use_aux_hidden_state" in eagle_config:
-            use_aux = eagle_config["use_aux_hidden_state"]
-        mask_hidden_size = (
-            self.config.hidden_size * 3 if use_aux else self.config.hidden_size
-        )
         self.register_buffer(
             "mask_hidden",
-            torch.zeros(1, mask_hidden_size),
+            torch.zeros(1, self.config.hidden_size),
             persistent=False,
         )
 

@@ -5,14 +5,10 @@ import torch.nn as nn
 
 from vllm.config import CUDAGraphMode, VllmConfig
 from vllm.forward_context import set_forward_context
-from vllm.logger import init_logger
-from vllm.model_executor.models.llama_eagle3 import Eagle3LlamaForCausalLM
 from vllm.triton_utils import tl, triton
 from vllm.v1.attention.backend import CommonAttentionMetadata
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.spec_decode.eagle import EagleProposer
-
-logger = init_logger(__name__)
 
 
 @triton.jit
@@ -104,12 +100,18 @@ def ptd_prepare_inputs_kernel(
             slot = tl.load(original_slot_mapping_ptr + in_start + local_idx)
         else:
             last_pos = tl.load(target_positions_ptr + in_start + last_idx)
-            draft_pos = last_pos + (local_idx - last_idx)
-            draft_pos = tl.where(draft_pos >= max_model_len, 0, draft_pos)
+            raw_draft_pos = last_pos + (local_idx - last_idx)
+            is_overflow = raw_draft_pos >= max_model_len
+            # Clamp to 0 for block table lookup (but will use -1 for actual slot)
+            draft_pos = tl.where(is_overflow, 0, raw_draft_pos)
             block_num = draft_pos // block_size
             block_offset = draft_pos % block_size
             block_id = tl.load(block_table_ptr + req_idx * max_blocks + block_num)
-            slot = block_id * block_size + block_offset
+            computed_slot = (block_id * block_size + block_offset).to(tl.int64)
+            # Use PADDING_SLOT_ID (-1) for overflow positions to avoid KV cache writes
+            # Cast -1 to int64 via arithmetic: 0 - 1 on int64 tensor
+            padding_slot_id = computed_slot * 0 - 1
+            slot = tl.where(is_overflow, padding_slot_id, computed_slot)
         tl.store(out_slot_mapping_ptr + token_idx, slot)
 
     # All tiles copy their portion of hidden states
@@ -168,14 +170,7 @@ class PtdEagleProposer(EagleProposer):
             )
         self.mask_token_id = int(self.mask_token_id)
 
-        # Get mask_hidden from model (loaded during weight loading)
         self.mask_hidden = self.model.mask_hidden
-
-        if self.method == "eagle3" and self.eagle3_use_aux_hidden_state:
-            expected_aux_size = self.hidden_size * 3
-            if self.mask_hidden.shape[-1] == expected_aux_size:
-                self.mask_hidden = self.model.combine_hidden_states(self.mask_hidden)
-                logger.info("Transformed mask_hidden from aux format to hidden_size")
 
     def propose(
         self,
@@ -200,7 +195,6 @@ class PtdEagleProposer(EagleProposer):
             last_token_indices = common_attn_metadata.query_start_loc[1:] - 1
 
         if self.method == "eagle3":
-            assert isinstance(self.model, Eagle3LlamaForCausalLM)
             target_hidden_states = self.model.combine_hidden_states(
                 target_hidden_states
             )
