@@ -1,3 +1,11 @@
+#######
+#
+# THIS FILE IS DEPRECATED AND WILL BE REMOVED SHORTLY
+#
+# Please use the standard Dockerfile with PYTORCH_NIGHTLY=1 instead
+#
+#######
+
 # The vLLM Dockerfile is used to construct vLLM image against torch nightly that can be directly used for testing
 
 # for torch nightly, cuda >=12.6 is required,
