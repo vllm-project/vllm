@@ -24,7 +24,7 @@ if rocm_aiter_ops.is_enabled():
 
 if current_platform.is_cuda_alike():
     from .activation_quant_fusion import ActivationQuantFusionPass
-    from .fusion import RMSNormQuantFusionPass, SiluAndMulQuantFusionPass
+    from .fusion import RMSNormQuantFusionPass
     from .fusion_attn import AttnFusionPass
     from .qk_norm_rope_fusion import QKNormRoPEFusionPass
     from .sequence_parallelism import SequenceParallelismPass
@@ -127,7 +127,6 @@ class PostGradPassManager(CustomGraphPass):  # type: ignore[misc]
                     ]
             if self.pass_config.fuse_act_quant:
                 self.passes += [ActivationQuantFusionPass(config)]
-                self.passes += [SiluAndMulQuantFusionPass(config)]
                 if rocm_aiter_ops.is_enabled():
                     self.passes += [RocmAiterSiluMulFp8GroupQuantFusionPass(config)]
 
