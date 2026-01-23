@@ -14,10 +14,10 @@ from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 
 from .helpers import get_layer_params_buffers, get_layer_size, get_layer_tensors
 from .meta import (
+    capture_layer_to_meta,
     get_numel_loaded,
     materialize_layer,
     restore_layer_on_meta,
-    to_meta_tensor,
 )
 from .types import LayerReloadingInfo
 
@@ -55,11 +55,7 @@ def record_metadata_for_reloading(layer: torch.nn.Module) -> None:
     Must be called before `initialize_layerwise_reload`.
     """
     info = get_layerwise_info(layer)
-    params, buffers = get_layer_params_buffers(layer)
-    info.restore_metadata = (
-        {name: to_meta_tensor(param) for name, param in params.items()},
-        {name: to_meta_tensor(buffer) for name, buffer in buffers.items()},
-    )
+    info.restore_metadata = capture_layer_to_meta(layer)
 
 
 @torch.no_grad()

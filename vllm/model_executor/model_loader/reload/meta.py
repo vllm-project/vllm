@@ -6,12 +6,14 @@ from collections.abc import Callable
 import torch
 from torch.utils._python_dispatch import TorchDispatchMode
 
-from .helpers import get_layer_tensors
-from .types import LayerReloadingInfo
+from .helpers import get_layer_params_buffers, get_layer_tensors
+from .sanitize import restore_layer_refs, sanitize_layer_refs
+from .types import LayerReloadingInfo, LayerTensors
 
 __all__ = [
     "to_meta_tensor",
     "materialize_meta_tensor",
+    "capture_layer_to_meta",
     "restore_layer_on_meta",
     "materialize_layer",
     "get_numel_loaded",
@@ -52,6 +54,25 @@ def materialize_meta_tensor(meta_tensor: torch.Tensor) -> torch.Tensor:
     return tensor
 
 
+def capture_layer_to_meta(layer: torch.nn.Module) -> LayerTensors:
+    if layer.__class__.__name__ in SKIP_MODULES:
+        return ({}, {})
+
+    params, buffers = get_layer_params_buffers(layer)
+    return (
+        {
+            name: sanitize_layer_refs(to_meta_tensor(param), layer)
+            for name, param in params.items()
+            if name not in SKIP_TENSORS
+        },
+        {
+            name: sanitize_layer_refs(to_meta_tensor(buffer), layer)
+            for name, buffer in buffers.items()
+            if name not in SKIP_TENSORS
+        },
+    )
+
+
 def restore_layer_on_meta(layer: torch.nn.Module, info: LayerReloadingInfo):
     """Restore a layer to model format with tensors on the meta device"""
     if layer.__class__.__name__ in SKIP_MODULES:
@@ -64,9 +85,12 @@ def restore_layer_on_meta(layer: torch.nn.Module, info: LayerReloadingInfo):
     restore_params, restore_buffers = info.restore_metadata
     for name, param in restore_params.items():
         if name not in SKIP_TENSORS:
+            param = restore_layer_refs(param, layer)
             layer.register_parameter(name, param)
+
     for name, buffer in restore_buffers.items():
         if name not in SKIP_TENSORS:
+            buffer = restore_layer_refs(buffer, layer)
             layer.register_buffer(name, buffer)
 
 
