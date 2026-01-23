@@ -17,7 +17,7 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
 from vllm.entrypoints.openai.engine.protocol import (
     OpenAIBaseModel,
 )
-from vllm.renderers import ChatParams, TokenizeParams
+from vllm.renderers import ChatParams, TokenizeParams, merge_kwargs
 
 
 class TokenizeCompletionRequest(OpenAIBaseModel):
@@ -126,7 +126,7 @@ class TokenizeChatRequest(OpenAIBaseModel):
         return ChatParams(
             chat_template=self.chat_template or default_template,
             chat_template_content_format=default_template_content_format,
-            chat_template_kwargs=ChatParams.merge_kwargs(
+            chat_template_kwargs=merge_kwargs(
                 self.chat_template_kwargs,
                 dict(
                     add_generation_prompt=self.add_generation_prompt,

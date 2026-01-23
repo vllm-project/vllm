@@ -27,7 +27,6 @@ from vllm.entrypoints.pooling.pooling.protocol import (
     PoolingResponse,
     PoolingResponseData,
 )
-from vllm.entrypoints.utils import _validate_truncation_size
 from vllm.logger import init_logger
 from vllm.outputs import PoolingRequestOutput
 from vllm.tasks import PoolingTask, SupportedTask
@@ -94,11 +93,6 @@ class OpenAIServingPooling(OpenAIServing):
                 return self.create_error_response(
                     "dimensions is currently not supported"
                 )
-
-            truncate_prompt_tokens = getattr(request, "truncate_prompt_tokens", None)
-            truncate_prompt_tokens = _validate_truncation_size(
-                self.max_model_len, truncate_prompt_tokens
-            )
 
             if is_io_processor_request:
                 if self.io_processor is None:

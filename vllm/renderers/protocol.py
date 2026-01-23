@@ -120,9 +120,7 @@ class RendererLike(Protocol):
             tokenizer = self.get_tokenizer()
             prompt_token_ids = tokenizer.encode(
                 prompt["prompt"],
-                truncation=params.truncate_prompt_tokens is not None,
-                max_length=params.truncate_prompt_tokens,
-                add_special_tokens=params.add_special_tokens,
+                **params.get_tokenization_kwargs(),
             )
 
             prompt = TokensPrompt(prompt_token_ids=prompt_token_ids, **prompt)
@@ -155,9 +153,7 @@ class RendererLike(Protocol):
             tokenizer = self.get_async_tokenizer()
             prompt_token_ids = await tokenizer.encode(
                 prompt["prompt"],
-                truncation=params.truncate_prompt_tokens is not None,
-                max_length=params.truncate_prompt_tokens,
-                add_special_tokens=params.add_special_tokens,
+                **params.get_tokenization_kwargs(),
             )
 
             prompt = TokensPrompt(prompt_token_ids=prompt_token_ids, **prompt)

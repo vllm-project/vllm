@@ -68,6 +68,7 @@ from vllm.outputs import (
 )
 from vllm.platforms import current_platform
 from vllm.pooling_params import PoolingParams
+from vllm.renderers import ChatParams, TokenizeParams, merge_kwargs
 from vllm.sampling_params import BeamSearchParams, RequestOutputKind, SamplingParams
 from vllm.tasks import PoolingTask
 from vllm.tokenizers import TokenizerLike
@@ -772,57 +773,87 @@ class LLM:
 
         return outputs
 
-    def preprocess_chat(
+    def _preprocess_completion(
         self,
-        messages: list[ChatCompletionMessageParam]
-        | list[list[ChatCompletionMessageParam]],
+        prompt_input: str | list[str] | list[int] | list[list[int]] | None,
+        prompt_embeds: bytes | list[bytes] | None,
+        params: SamplingParams | PoolingParams,
+        mm_processor_kwargs: dict[str, Any] | None = None,
+    ) -> list[TokensPrompt | EmbedsPrompt]:
+        """
+        Convert prompt inputs from LLM APIs (other than [LLM.chat][]) into
+        a format that can be pasesed to [LLM._process_inputs][].
+
+        Refer to [LLM.chat][] for a complete description of the arguments.
+
+        Returns:
+            A list of `TokensPrompts` objects containing the tokenized prompt
+            after chat template interpolation, and the raw multi-modal inputs.
+        """
+        renderer = self.llm_engine.renderer
+        tok_params = TokenizeParams(
+            truncate_prompt_tokens=params.truncate_prompt_tokens,
+        )
+
+        rendered_prompts = renderer.render_completions(prompt_input, prompt_embeds)
+        engine_prompts = renderer.tokenize_prompts(rendered_prompts, tok_params)
+
+        for prompt in engine_prompts:
+            if mm_processor_kwargs is not None:
+                prompt["mm_processor_kwargs"] = mm_processor_kwargs
+
+        return engine_prompts
+
+    def _preprocess_chat(
+        self,
+        conversations: list[list[ChatCompletionMessageParam]],
         chat_template: str | None = None,
         chat_template_content_format: ChatTemplateContentFormatOption = "auto",
+        chat_template_kwargs: dict[str, Any] | None = None,
         add_generation_prompt: bool = True,
         continue_final_message: bool = False,
         tools: list[dict[str, Any]] | None = None,
-        chat_template_kwargs: dict[str, Any] | None = None,
         mm_processor_kwargs: dict[str, Any] | None = None,
     ) -> list[TextPrompt | TokensPrompt | EmbedsPrompt]:
         """
-        Generate prompt for a chat conversation. The pre-processed
-        prompt can then be used as input for the other LLM methods.
+        Convert a list of conversations into prompts so that they can then
+        be used as input for other LLM APIs.
 
-        Refer to `chat` for a complete description of the arguments.
+        Refer to [LLM.chat][] for a complete description of the arguments.
+
         Returns:
-            A list of `TokensPrompts` objects containing the tokenized
-            prompt after chat template interpolation, and the
-            pre-processed multi-modal inputs.
+            A list of `TokensPrompts` objects containing the tokenized prompt
+            after chat template interpolation, and the raw multi-modal inputs.
         """
-        list_of_messages: list[list[ChatCompletionMessageParam]]
-
-        # Handle multi and single conversations
-        if is_list_of(messages, list):
-            # messages is list[list[...]]
-            list_of_messages = cast(list[list[ChatCompletionMessageParam]], messages)
-        else:
-            # messages is list[...]
-            list_of_messages = [cast(list[ChatCompletionMessageParam], messages)]
-
         renderer = self.llm_engine.renderer
-
-        chat_template_kwargs = {
-            "chat_template": chat_template,
-            "add_generation_prompt": add_generation_prompt,
-            "continue_final_message": continue_final_message,
-            "tools": tools,
-            **(chat_template_kwargs or {}),
-        }
+        chat_params = ChatParams(
+            chat_template=chat_template,
+            chat_template_content_format=chat_template_content_format,
+            chat_template_kwargs=merge_kwargs(
+                chat_template_kwargs,
+                dict(
+                    add_generation_prompt=add_generation_prompt,
+                    continue_final_message=continue_final_message,
+                    tools=tools,
+                ),
+            ),
+        )
+        chat_template_kwargs = chat_params.chat_template_kwargs or {}
+        tokenize = chat_template_kwargs.pop("tokenize", False) or isinstance(
+            renderer.tokenizer, MistralTokenizer
+        )
 
         prompts = list[TextPrompt | TokensPrompt | EmbedsPrompt]()
 
-        for msgs in list_of_messages:
+        for conversation in conversations:
             # NOTE: renderer.render_messages() currently doesn't
             # handle mm_processor_kwargs, since there is no implementation in
             # the chat message parsing for it.
             _, prompt = renderer.render_messages(
-                msgs,
-                chat_template_content_format=chat_template_content_format,
+                conversation,
+                chat_template=chat_params.chat_template,
+                chat_template_content_format=chat_params.chat_template_content_format,
+                tokenize=tokenize,
                 **chat_template_kwargs,
             )
             if mm_processor_kwargs is not None:
@@ -897,15 +928,17 @@ class LLM:
             A list of `RequestOutput` objects containing the generated
             responses in the same order as the input messages.
         """
+        if not is_list_of(messages, list):
+            messages = [messages]
 
-        prompts = self.preprocess_chat(
-            messages=messages,
+        prompts = self._preprocess_chat(
+            messages,
             chat_template=chat_template,
             chat_template_content_format=chat_template_content_format,
+            chat_template_kwargs=chat_template_kwargs,
             add_generation_prompt=add_generation_prompt,
             continue_final_message=continue_final_message,
             tools=tools,
-            chat_template_kwargs=chat_template_kwargs,
             mm_processor_kwargs=mm_processor_kwargs,
         )
 
@@ -1653,13 +1686,11 @@ class LLM:
         tokenization_kwargs: dict[str, Any] | None = None,
     ) -> tuple[EngineCoreRequest, dict[str, Any]]:
         """Use the Processor to process inputs for LLMEngine."""
-
-        local_kwargs = tokenization_kwargs or {}
-        tokenization_kwargs = local_kwargs.copy()
-        _validate_truncation_size(
-            self.model_config.max_model_len,
-            params.truncate_prompt_tokens,
+        tokenization_kwargs = merge_kwargs(
             tokenization_kwargs,
+            TokenizeParams(
+                truncate_prompt_tokens=params.truncate_prompt_tokens,
+            ).get_tokenization_kwargs(),
         )
 
         engine_request = self.input_processor.process_inputs(

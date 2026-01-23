@@ -16,6 +16,19 @@ if TYPE_CHECKING:
 _S = TypeVar("_S", bound=list[int] | torch.Tensor)
 
 
+def merge_kwargs(
+    a: dict[str, Any] | None,
+    b: dict[str, Any] | None,
+    /,
+) -> dict[str, Any]:
+    if not a:
+        return b or {}
+    if not b:
+        return a or {}
+
+    return a | {k: v for k, v in b.items() if v is not None}
+
+
 @dataclass(frozen=True)
 class ChatParams:
     """Configuration to control how to parse chat messages."""
@@ -29,15 +42,6 @@ class ChatParams:
     chat_template_kwargs: dict[str, Any] | None = None
     """The kwargs to pass to the chat template."""
 
-    @staticmethod
-    def merge_kwargs(a: dict[str, Any] | None, b: dict[str, Any] | None):
-        if not a:
-            return b
-        if not b:
-            return a
-
-        return a | {k: v for k, v in b.items() if v is not None}
-
     def with_defaults(self, default_chat_template_kwargs: dict[str, Any] | None):
         if not default_chat_template_kwargs:
             return self
@@ -45,7 +49,7 @@ class ChatParams:
         return ChatParams(
             chat_template=self.chat_template,
             chat_template_content_format=self.chat_template_content_format,
-            chat_template_kwargs=self.merge_kwargs(
+            chat_template_kwargs=merge_kwargs(
                 default_chat_template_kwargs,
                 self.chat_template_kwargs,
             ),
@@ -104,6 +108,13 @@ class TokenizeParams:
                 parameter="truncate_prompt_tokens",
                 value=truncate_prompt_tokens,
             )
+
+    def get_tokenization_kwargs(self) -> dict[str, Any]:
+        return dict(
+            truncation=self.truncate_prompt_tokens is not None,
+            max_length=self.truncate_prompt_tokens,
+            add_special_tokens=self.add_special_tokens,
+        )
 
     def apply_pre_tokenization(self, prompt: TextPrompt) -> TextPrompt:
         """

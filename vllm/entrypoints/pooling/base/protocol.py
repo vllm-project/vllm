@@ -11,7 +11,7 @@ from vllm.entrypoints.chat_utils import (
     ChatTemplateContentFormatOption,
 )
 from vllm.entrypoints.openai.engine.protocol import OpenAIBaseModel
-from vllm.renderers import ChatParams
+from vllm.renderers import ChatParams, merge_kwargs
 from vllm.utils import random_uuid
 
 
@@ -121,7 +121,7 @@ class ChatRequestMixin(OpenAIBaseModel):
         return ChatParams(
             chat_template=self.chat_template or default_template,
             chat_template_content_format=default_template_content_format,
-            chat_template_kwargs=ChatParams.merge_kwargs(
+            chat_template_kwargs=merge_kwargs(
                 self.chat_template_kwargs,
                 dict(
                     add_generation_prompt=self.add_generation_prompt,

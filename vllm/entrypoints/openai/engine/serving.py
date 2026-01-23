@@ -92,7 +92,7 @@ from vllm.entrypoints.serve.tokenize.protocol import (
     TokenizeCompletionRequest,
     TokenizeResponse,
 )
-from vllm.entrypoints.utils import _validate_truncation_size, sanitize_message
+from vllm.entrypoints.utils import sanitize_message
 from vllm.exceptions import VLLMValidationError
 from vllm.inputs.data import EmbedsPrompt, PromptType, TokensPrompt
 from vllm.inputs.parse import (
@@ -107,7 +107,7 @@ from vllm.multimodal import MultiModalDataDict
 from vllm.outputs import CompletionOutput, PoolingRequestOutput, RequestOutput
 from vllm.pooling_params import PoolingParams
 from vllm.reasoning import ReasoningParser, ReasoningParserManager
-from vllm.renderers import ChatParams, TokenizeParams
+from vllm.renderers import ChatParams, TokenizeParams, merge_kwargs
 from vllm.sampling_params import BeamSearchParams, SamplingParams
 from vllm.tokenizers import TokenizerLike
 from vllm.tool_parsers import ToolParser, ToolParserManager
@@ -1054,9 +1054,10 @@ class OpenAIServing:
         tool_dicts: list[dict[str, Any]] | None = None,
         tool_parser: Callable[[TokenizerLike], ToolParser] | None = None,
     ) -> tuple[list[ConversationMessage], list[TokensPrompt | EmbedsPrompt]]:
-        default_template_kwargs = dict(default_template_kwargs or {})
-        if tool_dicts:
-            default_template_kwargs["tools"] = tool_dicts
+        default_template_kwargs = merge_kwargs(
+            default_template_kwargs,
+            dict(tools=tool_dicts),
+        )
 
         renderer = self.renderer
         tok_params = request.build_tok_params(self.model_config)
@@ -1071,7 +1072,7 @@ class OpenAIServing:
         from vllm.tokenizers.mistral import MistralTokenizer
 
         chat_template_kwargs = chat_params.chat_template_kwargs or {}
-        conversation, rendered_prompt = await renderer.render_messages_async(
+        rendered_conv, rendered_prompt = await renderer.render_messages_async(
             messages,
             chat_template=chat_params.chat_template,
             chat_template_content_format=chat_params.chat_template_content_format,
@@ -1109,7 +1110,7 @@ class OpenAIServing:
                 tokenizer = renderer.get_tokenizer()
                 request = tool_parser(tokenizer).adjust_request(request=request)  # type: ignore[arg-type]
 
-        return conversation, [engine_prompt]
+        return rendered_conv, [engine_prompt]
 
     async def _process_inputs(
         self,
@@ -1123,10 +1124,9 @@ class OpenAIServing:
         data_parallel_rank: int | None = None,
     ) -> tuple[EngineCoreRequest, dict[str, Any]]:
         """Use the Processor to process inputs for AsyncLLM."""
-        tokenization_kwargs: dict[str, Any] = {}
-        _validate_truncation_size(
-            self.max_model_len, params.truncate_prompt_tokens, tokenization_kwargs
-        )
+        tokenization_kwargs = TokenizeParams(
+            truncate_prompt_tokens=params.truncate_prompt_tokens,
+        ).get_tokenization_kwargs()
 
         engine_request = self.input_processor.process_inputs(
             request_id,
