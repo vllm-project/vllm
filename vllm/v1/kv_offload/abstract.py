@@ -30,6 +30,7 @@ The class provides the following primitives:
 from abc import ABC, abstractmethod
 from collections.abc import Iterable
 from dataclasses import dataclass
+from typing import Any, Mapping
 
 from vllm.v1.core.kv_cache_utils import BlockHash
 
@@ -81,6 +82,28 @@ class OffloadingManager(ABC):
             are currently offloaded.
         """
         pass
+
+    def lookup_prefix(
+        self,
+        *,
+        prefix_id: int,
+        start_block_idx: int,
+        num_blocks: int,
+        extra: Mapping[str, Any] | None = None,
+    ) -> int:
+        return 0
+
+    def prepare_load_prefix(
+        self,
+        *,
+        prefix_id: int,
+        start_block_idx: int,
+        num_blocks: int,
+        extra: Mapping[str, Any] | None = None,
+    ) -> LoadStoreSpec:
+        raise NotImplementedError(
+            f"{type(self).__name__} does not implement prepare_load_prefix()"
+        )
 
     @abstractmethod
     def prepare_load(self, block_hashes: Iterable[BlockHash]) -> LoadStoreSpec:

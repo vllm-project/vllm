@@ -185,22 +185,56 @@ class LoomConnectorScheduler:
         if self._should_force_recompute(request.request_id):
             return 0, False
 
-        num_blocks = request.num_tokens // self.offloaded_block_size
+        kv_params = getattr(request, "kv_transfer_params", None)
+        shared_prefix_id: int | None = None
+        shared_prefix_len: int | None = None
+        if isinstance(kv_params, dict):
+            pid = kv_params.get("shared_prefix_id")
+            plen = kv_params.get("shared_prefix_len")
+            if pid is not None:
+                try:
+                    shared_prefix_id = int(pid)
+                except (TypeError, ValueError):
+                    shared_prefix_id = None
+            if plen is not None:
+                try:
+                    shared_prefix_len = int(plen)
+                except (TypeError, ValueError):
+                    shared_prefix_len = None
 
-        assert len(request.block_hashes) // self.block_size_factor == num_blocks
-        block_hashes = self._get_block_hashes(request)
+        if shared_prefix_id is not None and shared_prefix_len is not None:
+            if shared_prefix_len <= 0:
+                return 0, False
+            num_blocks = shared_prefix_len // self.offloaded_block_size
+            if num_blocks <= 0:
+                return 0, False
+            full_block_tokens = self.offloaded_block_size * num_blocks
+            if full_block_tokens - num_computed_tokens < self.offloaded_block_size:
+                return 0, False
+            start_block_idx = num_computed_tokens // self.offloaded_block_size
+            hits = self.manager.lookup_prefix(
+                prefix_id=shared_prefix_id,
+                start_block_idx=start_block_idx,
+                num_blocks=num_blocks,
+                extra=kv_params,
+            )
+        else:
+            num_blocks = request.num_tokens // self.offloaded_block_size
 
-        self.manager.touch(block_hashes)
+            assert len(request.block_hashes) // self.block_size_factor == num_blocks
+            block_hashes = self._get_block_hashes(request)
 
-        full_block_tokens = self.offloaded_block_size * num_blocks
-        if full_block_tokens - num_computed_tokens < self.offloaded_block_size:
-            # we can load less than a block, skip
-            return 0, False
+            self.manager.touch(block_hashes)
 
-        start_block_idx = num_computed_tokens // self.offloaded_block_size
-        hits = self.manager.lookup(
-            self._get_block_hashes(request, start_idx=start_block_idx)
-        )
+            full_block_tokens = self.offloaded_block_size * num_blocks
+            if full_block_tokens - num_computed_tokens < self.offloaded_block_size:
+                # we can load less than a block, skip
+                return 0, False
+
+            start_block_idx = num_computed_tokens // self.offloaded_block_size
+            hits = self.manager.lookup(
+                self._get_block_hashes(request, start_idx=start_block_idx)
+            )
         if hits == 0:
             return 0, False
 
@@ -259,20 +293,44 @@ class LoomConnectorScheduler:
         start_block_idx = num_computed_tokens // self.offloaded_block_size
         num_blocks = full_block_tokens // self.offloaded_block_size
 
-        assert len(request.block_hashes) // self.block_size_factor >= num_blocks
-        block_hashes = self._get_block_hashes(
-            request, start_idx=start_block_idx, end_idx=num_blocks
-        )
+        kv_params = getattr(request, "kv_transfer_params", None)
+        shared_prefix_id: int | None = None
+        shared_prefix_len: int | None = None
+        if isinstance(kv_params, dict):
+            pid = kv_params.get("shared_prefix_id")
+            plen = kv_params.get("shared_prefix_len")
+            if pid is not None:
+                try:
+                    shared_prefix_id = int(pid)
+                except (TypeError, ValueError):
+                    shared_prefix_id = None
+            if plen is not None:
+                try:
+                    shared_prefix_len = int(plen)
+                except (TypeError, ValueError):
+                    shared_prefix_len = None
 
-        src_spec = self.manager.prepare_load(block_hashes)
+        if shared_prefix_id is not None and shared_prefix_len is not None:
+            src_spec = self.manager.prepare_load_prefix(
+                prefix_id=shared_prefix_id,
+                start_block_idx=start_block_idx,
+                num_blocks=num_blocks,
+                extra=kv_params,
+            )
+            block_hashes = ()
+        else:
+            assert len(request.block_hashes) // self.block_size_factor >= num_blocks
+            block_hashes = self._get_block_hashes(
+                request, start_idx=start_block_idx, end_idx=num_blocks
+            )
+            src_spec = self.manager.prepare_load(block_hashes)
         dst_spec = GPULoadStoreSpec(block_ids[num_computed_gpu_blocks:])
 
-        block_hashes = self._get_block_hashes(
-            request, start_idx=start_block_idx, end_idx=num_blocks
-        )
-
         self._reqs_to_load[request.request_id] = (src_spec, dst_spec)
-        self._reqs_being_loaded[request.request_id].update(block_hashes)
+        if block_hashes:
+            self._reqs_being_loaded[request.request_id].update(block_hashes)
+        else:
+            self._reqs_being_loaded.setdefault(request.request_id, set())
         self._next_stored_block_idx[request.request_id] = num_blocks
 
         stats = self._timing.get(request.request_id)

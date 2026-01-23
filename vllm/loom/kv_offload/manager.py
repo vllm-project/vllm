@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
-from typing import Iterable
+from typing import Any, Iterable, Mapping
 
 from vllm.v1.core.kv_cache_utils import BlockHash
 from vllm.v1.kv_offload.abstract import (
@@ -12,6 +12,7 @@ from vllm.v1.kv_offload.abstract import (
     PrepareStoreOutput,
 )
 from vllm.v1.kv_offload.backend import Backend, BlockStatus
+from vllm.v1.kv_offload.mediums import CXLLoadStoreSpec
 
 
 class Tier(str, Enum):
@@ -77,6 +78,90 @@ class LoomManager(OffloadingManager):
         self, *, prefix_id: int, layer_group_id: int
     ) -> SharedPrefixExtent | None:
         return self.shared_prefix_directory.get((prefix_id, layer_group_id))
+
+    def lookup_prefix(
+        self,
+        *,
+        prefix_id: int,
+        start_block_idx: int,
+        num_blocks: int,
+        extra: Mapping[str, Any] | None = None,
+    ) -> int:
+        if start_block_idx < 0:
+            raise ValueError(f"start_block_idx must be >= 0, got {start_block_idx}")
+        if num_blocks <= 0:
+            return 0
+        if start_block_idx >= num_blocks:
+            return 0
+
+        group_ids: set[int] = set()
+        min_blocks: int | None = None
+        for (pid, layer_group_id), extent in self.shared_prefix_directory.items():
+            if pid != prefix_id:
+                continue
+            group_ids.add(int(layer_group_id))
+            blocks = int(extent.num_blocks)
+            min_blocks = blocks if min_blocks is None else min(min_blocks, blocks)
+
+        if not group_ids:
+            return 0
+
+        max_group_id = max(group_ids)
+        if min(group_ids) != 0 or len(group_ids) != max_group_id + 1:
+            return 0
+
+        if min_blocks is None or min_blocks < num_blocks:
+            return 0
+
+        return num_blocks - start_block_idx
+
+    def prepare_load_prefix(
+        self,
+        *,
+        prefix_id: int,
+        start_block_idx: int,
+        num_blocks: int,
+        extra: Mapping[str, Any] | None = None,
+    ) -> LoadStoreSpec:
+        if start_block_idx < 0:
+            raise ValueError(f"start_block_idx must be >= 0, got {start_block_idx}")
+        if num_blocks <= 0:
+            raise ValueError(f"num_blocks must be > 0, got {num_blocks}")
+        if start_block_idx >= num_blocks:
+            raise ValueError(
+                "start_block_idx must be < num_blocks for prepare_load_prefix: "
+                f"start_block_idx={start_block_idx} num_blocks={num_blocks}"
+            )
+
+        group_ids: set[int] = set()
+        for (pid, layer_group_id) in self.shared_prefix_directory:
+            if pid == prefix_id:
+                group_ids.add(int(layer_group_id))
+        if not group_ids:
+            raise ValueError(f"shared prefix not found in directory: prefix_id={prefix_id}")
+
+        # Phase-2 MVP: only support a single layer-group (group_id=0) so that
+        # block-wise swapping does not overwrite non-target layers.
+        if group_ids != {0}:
+            raise RuntimeError(
+                "prepare_load_prefix currently requires a single layer-group (id=0); "
+                f"got group_ids={sorted(group_ids)} for prefix_id={prefix_id}"
+            )
+
+        extent = self.get_shared_prefix_extent(prefix_id=prefix_id, layer_group_id=0)
+        if extent is None:
+            raise ValueError(
+                f"shared prefix extent missing for prefix_id={prefix_id} layer_group_id=0"
+            )
+        if int(extent.num_blocks) < num_blocks:
+            raise ValueError(
+                "shared prefix extent too small for requested load: "
+                f"prefix_id={prefix_id} extent_blocks={extent.num_blocks} need_num_blocks={num_blocks}"
+            )
+
+        base = int(extent.base_block_id)
+        block_ids = list(range(base + start_block_idx, base + num_blocks))
+        return CXLLoadStoreSpec(block_ids)
 
     def lookup(self, block_hashes: Iterable[BlockHash]) -> int:
         hit_count = 0
