@@ -1159,7 +1159,7 @@ class AiterFlashAttentionImpl(AttentionImpl):
                         device=query.device,
                     )
                     max_logits = torch.empty_like(exp_sums)
-                    num_blocks, block_size, num_kv_heads, head_size = key_cache.shape
+                    num_blocks, block_size, num_kv_heads, _ = key_cache.shape
                     x = 16 // key_cache.element_size()
                     k_cache_template = torch.empty(
                         [num_blocks, num_kv_heads, head_size // x, block_size, x],
@@ -1173,20 +1173,16 @@ class AiterFlashAttentionImpl(AttentionImpl):
                     )
                     new_key_cache = key_cache.view_as(k_cache_template)
                     new_value_cache = value_cache.view_as(v_cache_template)
-
-                    k_qscale_asm = layer._k_scale
-                    v_qscale_asm = layer._v_scale
-                    if attn_metadata.k_scale is not None:
-                        if isinstance(attn_metadata.k_scale, dict):
-                            k_qscale_asm = attn_metadata.k_scale[layer.layer_name]
-                        else:
-                            k_qscale_asm = attn_metadata.k_scale
-                    if attn_metadata.v_scale is not None:
-                        if isinstance(attn_metadata.v_scale, dict):
-                            v_qscale_asm = attn_metadata.v_scale[layer.layer_name]
-                        else:
-                            v_qscale_asm = attn_metadata.v_scale
-
+                    k_qscale_asm = (
+                        layer._k_scale
+                        if attn_metadata.k_scale is None
+                        else attn_metadata.k_scale
+                    )
+                    v_qscale_asm = (
+                        layer._v_scale
+                        if attn_metadata.v_scale is None
+                        else attn_metadata.v_scale
+                    )
                     rocm_aiter_ops.paged_attention_common(
                         Q=query[:num_decode_tokens],
                         K=new_key_cache,
