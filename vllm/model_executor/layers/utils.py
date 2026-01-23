@@ -218,6 +218,7 @@ def dispatch_cpu_unquantized_gemm(
 ) -> None:
     # skip for missing layers
     if layer.weight.is_meta:
+        layer.cpu_linear = torch.nn.functional.linear
         return
 
     N, K = layer.weight.size()
