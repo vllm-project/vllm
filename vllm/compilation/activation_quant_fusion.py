@@ -177,43 +177,31 @@ class SiluMulNvfp4QuantPattern(ActivationQuantPattern):
 class SiluMulBlockQuantPattern:
     """
     This pattern fuses silu_and_mul & block quantization.
-    
-    Fuses:
-        silu_and_mul(input) → per_token_group_quant_fp8(output, group_size)
-    Into:
-        silu_and_mul_per_block_quant(input, group_size)
-    
-    This is the GROUP/BLOCK quantization version (one scale per group of elements).
-    For PER-TOKEN quantization (one scale per entire token), use SiluMulFp8StaticQuantPattern.
     """
     def __init__(
         self, 
-        group_shape: GroupShape,  # Keep as GroupShape
+        group_shape: GroupShape,
         has_col_major_scales: bool = False,
         is_e8m0: bool = False,
     ):
-        # Validate that it's per-token quantization (group_m must be 1)
         assert group_shape[0] == 1, (
             f"SiluMulBlockQuantPattern only supports per-token quantization "
             f"(group_m=1), got group_shape={group_shape}"
         )
         
         self.group_shape = group_shape
-        self.group_size = group_shape[1]  # Extract for convenience
+        self.group_size = group_shape[1]
         self.has_col_major_scales = has_col_major_scales
         self.is_e8m0 = is_e8m0
         self.quant_dtype = FP8_DTYPE
         
-        # Get current config for model dtype
         from vllm.config import get_current_vllm_config
         config = get_current_vllm_config()
         self.model_dtype = config.model_config.dtype if config.model_config else None
         
-        # Matchers for pattern detection
         from .matcher_utils import MatcherSiluAndMul, MatcherQuantFP8
         self.silu_and_mul_matcher = MatcherSiluAndMul()
         
-        # Create quant matcher for group quantization
         scale = ScaleDesc(torch.float32, False, group_shape)
         quant_key = QuantKey(dtype=FP8_DTYPE, scale=scale, symmetric=True)
         self.quant_matcher = MatcherQuantFP8(
@@ -223,23 +211,16 @@ class SiluMulBlockQuantPattern:
         )
     
     def register(self, pm_pass: PatternMatcherPass) -> None:
-        """Register this pattern with the pattern matcher."""
-        
-        # DEFINE THE PATTERN TO MATCH
         def pattern(input: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-            # Pattern: silu_and_mul → group_quant
             result_silu_mul = self.silu_and_mul_matcher(input)
             result_quant, scale = self.quant_matcher(result_silu_mul)
             return result_quant, scale
         
-        # DEFINE THE REPLACEMENT (fused operation)
         def replacement(input: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-            print(f"FUSED KERNEL MATCHED! input shape: {input.shape}")
-            # Convert to model dtype if needed
+            
             if self.model_dtype is not None:
                 input = input.to(dtype=self.model_dtype)
             
-            # Allocate output tensors
             output_shape = list(input.shape)
             output_shape[-1] = output_shape[-1] // 2
             
@@ -249,25 +230,23 @@ class SiluMulBlockQuantPattern:
                 dtype=self.quant_dtype
             )
             
-            # Create scale tensor with proper layout
             scale = self.quant_matcher.make_scale(
                 torch.empty(output_shape, device=input.device),
                 transposed=self.has_col_major_scales
             )
             
-            # Call the fused operation directly (no auto_functionalized)
-            torch.ops._C.silu_and_mul_per_block_quant(
-                result,
-                input,
-                scale,
-                self.group_size,
-                None,  # scale_ub
-                self.has_col_major_scales,
+            at = auto_functionalized(
+                torch.ops._C.silu_and_mul_per_block_quant.default,
+                result=result,
+                input=input,
+                scale=scale,
+                group_size=self.group_size,
+                scale_ub=None,
+                is_scale_transposed=self.has_col_major_scales,
             )
             
-            return result, scale
+            return at[1], at[2]  # result, scale
         
-        # REGISTER THE PATTERN
         inputs = self.silu_and_mul_matcher.inputs()
         register_replacement(
             pattern,
