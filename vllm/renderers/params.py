@@ -17,18 +17,18 @@ _S = TypeVar("_S", bound=list[int] | torch.Tensor)
 
 
 def merge_kwargs(
-    a: dict[str, Any] | None,
-    b: dict[str, Any] | None,
+    defaults: dict[str, Any] | None,
+    overrides: dict[str, Any] | None,
     /,
     *,
     unset_values: tuple[object, ...] = (None, "auto"),
 ) -> dict[str, Any]:
-    if a is None:
-        a = {}
-    if b is None:
-        b = {}
+    if defaults is None:
+        defaults = {}
+    if overrides is None:
+        overrides = {}
 
-    return a | {k: v for k, v in b.items() if v not in unset_values}
+    return defaults | {k: v for k, v in overrides.items() if v not in unset_values}
 
 
 @dataclass(frozen=True)
@@ -72,13 +72,13 @@ class TokenizeParams:
     """Maximum allowable total input token length. If provided,
     token inputs longer than this raise `ValueError`."""
 
-    add_special_tokens: bool = True
-    """Whether to add special tokens."""
-
     truncate_prompt_tokens: int | None = None
     """Number of tokens to keep. `None` means no truncation.
     `0` yields an empty list (and skips embeds).
     `-1` maps to `model_config.max_model_len`."""
+
+    add_special_tokens: bool = True
+    """Whether to add special tokens."""
 
     needs_detokenization: bool = False
     """Whether the output prompt needs to contain text."""
@@ -86,6 +86,7 @@ class TokenizeParams:
     @staticmethod
     def from_config(
         model_config: "ModelConfig",
+        *,
         max_length: int | None = None,
         truncate_prompt_tokens: int | None = None,
         add_special_tokens: bool = True,
@@ -116,6 +117,48 @@ class TokenizeParams:
                 parameter="truncate_prompt_tokens",
                 value=truncate_prompt_tokens,
             )
+
+    def with_kwargs(self, tokenization_kwargs: dict[str, Any] | None):
+        if not tokenization_kwargs:
+            return self
+
+        max_length = self.max_length
+        truncate_prompt_tokens = self.truncate_prompt_tokens
+        add_special_tokens = self.add_special_tokens
+        needs_detokenization = self.needs_detokenization
+
+        max_length = tokenization_kwargs.pop("max_length", max_length)
+        truncate_prompt_tokens = tokenization_kwargs.pop(
+            "truncate_prompt_tokens", truncate_prompt_tokens
+        )
+        add_special_tokens = tokenization_kwargs.pop(
+            "add_special_tokens", add_special_tokens
+        )
+        needs_detokenization = tokenization_kwargs.pop(
+            "needs_detokenization", needs_detokenization
+        )
+
+        # https://huggingface.co/docs/transformers/en/pad_truncation
+        if truncation := tokenization_kwargs.pop("truncation", None):
+            if truncation in (True, "longest_first"):
+                truncate_prompt_tokens = max_length
+            elif truncation in (False, "do_not_truncate"):
+                truncate_prompt_tokens = None
+            else:
+                # To raise the below NotImplementedError
+                tokenization_kwargs["truncation"] = truncation
+
+        if tokenization_kwargs:
+            raise NotImplementedError(
+                f"Unsupported tokenization arguments: {tokenization_kwargs}"
+            )
+
+        return TokenizeParams(
+            max_length=max_length,
+            truncate_prompt_tokens=truncate_prompt_tokens,
+            add_special_tokens=add_special_tokens,
+            needs_detokenization=needs_detokenization,
+        )
 
     def get_encode_kwargs(self) -> dict[str, Any]:
         return dict(

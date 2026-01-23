@@ -6,7 +6,7 @@ import dataclasses
 import functools
 import os
 from argparse import Namespace
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 import regex as re
 from fastapi import Request
@@ -177,33 +177,6 @@ def cli_env_setup():
     if "VLLM_WORKER_MULTIPROC_METHOD" not in os.environ:
         logger.debug("Setting VLLM_WORKER_MULTIPROC_METHOD to 'spawn'")
         os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
-
-
-def _validate_truncation_size(
-    max_model_len: int,
-    truncate_prompt_tokens: int | None,
-    tokenization_kwargs: dict[str, Any] | None = None,
-) -> int | None:
-    if truncate_prompt_tokens is not None:
-        if truncate_prompt_tokens <= -1:
-            truncate_prompt_tokens = max_model_len
-
-        if truncate_prompt_tokens > max_model_len:
-            raise ValueError(
-                f"truncate_prompt_tokens value ({truncate_prompt_tokens}) "
-                f"is greater than max_model_len ({max_model_len})."
-                f" Please, select a smaller truncation size."
-            )
-
-        if tokenization_kwargs is not None:
-            tokenization_kwargs["truncation"] = True
-            tokenization_kwargs["max_length"] = truncate_prompt_tokens
-
-    else:
-        if tokenization_kwargs is not None:
-            tokenization_kwargs["truncation"] = False
-
-    return truncate_prompt_tokens
 
 
 def get_max_tokens(

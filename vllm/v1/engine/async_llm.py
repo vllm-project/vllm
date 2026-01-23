@@ -15,7 +15,6 @@ import vllm.envs as envs
 from vllm.config import VllmConfig
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.protocol import EngineClient
-from vllm.entrypoints.utils import _validate_truncation_size
 from vllm.inputs import PromptType
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
@@ -23,7 +22,7 @@ from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
 from vllm.outputs import PoolingRequestOutput, RequestOutput
 from vllm.plugins.io_processors import get_io_processor
 from vllm.pooling_params import PoolingParams
-from vllm.renderers import RendererLike
+from vllm.renderers import RendererLike, TokenizeParams
 from vllm.sampling_params import SamplingParams
 from vllm.tasks import SupportedTask
 from vllm.tokenizers import TokenizerLike
@@ -289,13 +288,11 @@ class AsyncLLM(EngineClient):
                 "prompt logprobs"
             )
 
-        if tokenization_kwargs is None:
-            tokenization_kwargs = {}
-        _validate_truncation_size(
-            self.model_config.max_model_len,
-            params.truncate_prompt_tokens,
-            tokenization_kwargs,
-        )
+        tok_params = TokenizeParams.from_config(
+            self.model_config,
+            truncate_prompt_tokens=params.truncate_prompt_tokens,
+        ).with_kwargs(tokenization_kwargs)
+        encode_kwargs = tok_params.get_encode_kwargs()
 
         # Convert Input --> Request.
         if isinstance(prompt, EngineCoreRequest):
@@ -315,12 +312,12 @@ class AsyncLLM(EngineClient):
                 request_id,
                 prompt,
                 params,
-                arrival_time,
-                lora_request,
-                tokenization_kwargs,
-                trace_headers,
-                priority,
-                data_parallel_rank,
+                arrival_time=arrival_time,
+                lora_request=lora_request,
+                tokenization_kwargs=encode_kwargs,
+                trace_headers=trace_headers,
+                priority=priority,
+                data_parallel_rank=data_parallel_rank,
             )
             if isinstance(prompt, str):
                 prompt_text = prompt

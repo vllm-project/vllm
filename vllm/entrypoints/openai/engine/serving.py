@@ -1110,21 +1110,24 @@ class OpenAIServing:
         data_parallel_rank: int | None = None,
     ) -> tuple[EngineCoreRequest, dict[str, Any]]:
         """Use the Processor to process inputs for AsyncLLM."""
-        tokenization_kwargs = TokenizeParams(
+        tok_params = TokenizeParams.from_config(
+            self.model_config,
             truncate_prompt_tokens=params.truncate_prompt_tokens,
-        ).get_encode_kwargs()
+        )
 
+        encode_kwargs = tok_params.get_encode_kwargs()
         engine_request = self.input_processor.process_inputs(
             request_id,
             engine_prompt,
             params,
             lora_request=lora_request,
-            tokenization_kwargs=tokenization_kwargs,
+            tokenization_kwargs=encode_kwargs,
             trace_headers=trace_headers,
             priority=priority,
             data_parallel_rank=data_parallel_rank,
         )
-        return engine_request, tokenization_kwargs
+
+        return engine_request, encode_kwargs
 
     async def _render_next_turn(
         self,
@@ -1174,7 +1177,7 @@ class OpenAIServing:
                 lora_request=lora_request,
             )
             trace_headers = kwargs.get("trace_headers")
-            engine_request, tokenization_kwargs = await self._process_inputs(
+            engine_request, encode_kwargs = await self._process_inputs(
                 sub_request_id,
                 engine_prompt,
                 sampling_params,
@@ -1190,7 +1193,7 @@ class OpenAIServing:
                 lora_request=lora_request,
                 priority=priority,
                 prompt_text=prompt_text,
-                tokenization_kwargs=tokenization_kwargs,
+                tokenization_kwargs=encode_kwargs,
                 **kwargs,
             )
 

@@ -9,6 +9,7 @@ from pydantic import (
 )
 
 from vllm import PoolingParams
+from vllm.config import ModelConfig
 from vllm.config.pooler import get_use_activation
 from vllm.entrypoints.openai.engine.protocol import OpenAIBaseModel, UsageInfo
 from vllm.entrypoints.pooling.base.protocol import PoolingBasicRequestMixin
@@ -16,6 +17,7 @@ from vllm.entrypoints.pooling.score.utils import (
     ScoreContentPartParam,
     ScoreMultiModalParam,
 )
+from vllm.renderers import TokenizeParams
 from vllm.utils import random_uuid
 
 
@@ -42,6 +44,13 @@ class ScoreRequestMixin(PoolingBasicRequestMixin):
         "Default is True.",
     )
     # --8<-- [end:score-extra-params]
+
+    def build_tok_params(self, model_config: ModelConfig) -> TokenizeParams:
+        return TokenizeParams.from_config(
+            model_config,
+            max_length=model_config.max_model_len,
+            truncate_prompt_tokens=self.truncate_prompt_tokens,
+        )
 
     def to_pooling_params(self):
         return PoolingParams(
@@ -112,6 +121,13 @@ class RerankRequest(PoolingBasicRequestMixin):
         "Default is True.",
     )
     # --8<-- [end:rerank-extra-params]
+
+    def build_tok_params(self, model_config: ModelConfig) -> TokenizeParams:
+        return TokenizeParams.from_config(
+            model_config,
+            max_length=model_config.max_model_len,
+            truncate_prompt_tokens=self.truncate_prompt_tokens,
+        )
 
     def to_pooling_params(self):
         return PoolingParams(
