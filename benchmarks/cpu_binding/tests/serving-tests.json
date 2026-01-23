@@ -1,6 +1,6 @@
 [
     {
-        "test_name": "serving_llama405B_tp8_sharegpt",
+        "test_name": "serving_llama405B_tp8_random_2048_2048",
         "qps_list": ["inf"],
         "max_concurrency_list": [12, 16, 24, 32, 64, 128, 200],
         "server_parameters": {
