@@ -715,9 +715,12 @@ class Qwen3VLProcessingInfo(Qwen2VLProcessingInfo):
         mm_counts: Mapping[str, int],
     ) -> int:
         video_processor = self.get_video_processor()
-        video_max_pixels = video_processor.size['longest_edge']
-        # video_max_pixels contains the temporal compression factor(2), so we divide by 2 to get the maximum number of image pixels.
-        target_width, target_height = self.get_image_size_with_most_features(max_pixels=video_max_pixels // video_processor.temporal_patch_size)
+        video_max_pixels = video_processor.size["longest_edge"]
+        # video_max_pixels contains the temporal compression factor,
+        # so we divide by 2 to get the maximum number of image pixels.
+        target_width, target_height = self.get_image_size_with_most_features(
+            max_pixels=video_max_pixels // video_processor.temporal_patch_size
+        )
         num_video_soft_tokens = self.get_num_video_tokens(
             image_width=target_width,
             image_height=target_height,
@@ -804,7 +807,9 @@ class Qwen3VLDummyInputsBuilder(BaseDummyInputsBuilder[Qwen3VLProcessingInfo]):
         image_overrides = mm_options.get("image") if mm_options else None
         video_overrides = mm_options.get("video") if mm_options else None
 
-        target_image_width, target_image_height = self.info.get_image_size_with_most_features()
+        target_image_width, target_image_height = (
+            self.info.get_image_size_with_most_features()
+        )
 
         # treat videos as special images
         target_num_frames = 2
@@ -829,9 +834,14 @@ class Qwen3VLDummyInputsBuilder(BaseDummyInputsBuilder[Qwen3VLProcessingInfo]):
         target_num_frames = max(target_num_frames, 2)
 
         video_processor = self.info.get_video_processor()
-        video_max_pixels = video_processor.size['longest_edge']
-        # video_max_pixels contains the temporal compression factor, so we divide by 2 to get the maximum number of image pixels.
-        target_video_width, target_video_height = self.info.get_image_size_with_most_features(max_pixels=video_max_pixels // video_processor.temporal_patch_size)
+        video_max_pixels = video_processor.size["longest_edge"]
+        # video_max_pixels contains the temporal compression factor,
+        # so we divide by 2 to get the maximum number of image pixels.
+        target_video_width, target_video_height = (
+            self.info.get_image_size_with_most_features(
+                max_pixels=video_max_pixels // video_processor.temporal_patch_size
+            )
+        )
         target_video_size, _ = self.info._get_vision_info(
             image_width=target_video_width,
             image_height=target_video_height,
@@ -840,7 +850,10 @@ class Qwen3VLDummyInputsBuilder(BaseDummyInputsBuilder[Qwen3VLProcessingInfo]):
         )
         # NOTE: we need to do this check here since Qwen3-VL resizes video
         # frames depending on how many frames there are.
-        target_video_width, target_video_height = target_video_size.width, target_video_size.height
+        target_video_width, target_video_height = (
+            target_video_size.width,
+            target_video_size.height,
+        )
         if video_overrides:
             assert isinstance(video_overrides, VideoDummyOptions)
             width_override = video_overrides.width
