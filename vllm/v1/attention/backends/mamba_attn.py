@@ -219,21 +219,24 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
         if num_prefills > 0:
             if num_computed_tokens is None:
                 num_computed_tokens = common_attn_metadata.compute_num_computed_tokens()
-            num_computed_tokens_cpu = num_computed_tokens.cpu()
 
+            query_start_loc_p_cpu = (
+                common_attn_metadata.query_start_loc_cpu[-num_prefills - 1 :]
+                - num_decode_tokens
+            )
             query_start_loc_p = (
                 common_attn_metadata.query_start_loc[-num_prefills - 1 :]
                 - num_decode_tokens
             )
-            has_initial_states_cpu = (
-                num_computed_tokens_cpu[num_reqs - num_prefills : num_reqs] > 0
-            )
-            has_initial_states_p = has_initial_states_cpu.to(
-                common_attn_metadata.query_start_loc.device
+            has_initial_states_p = (
+                num_computed_tokens[num_reqs - num_prefills : num_reqs] > 0
             )
 
             nums_dict, batch_ptr, token_chunk_offset_ptr = (
-                compute_causal_conv1d_metadata(query_start_loc_p)
+                compute_causal_conv1d_metadata(
+                    query_start_loc_p_cpu,
+                    device=common_attn_metadata.query_start_loc.device,
+                )
             )
 
             if self.vllm_config.cache_config.enable_prefix_caching:
