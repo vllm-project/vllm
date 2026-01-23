@@ -10,7 +10,6 @@ from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 from copy import copy, deepcopy
 from functools import reduce
-from itertools import product
 from typing import TYPE_CHECKING, Any, NamedTuple, TypeAlias, cast
 
 import numpy as np
@@ -152,7 +151,11 @@ from vllm.v1.spec_decode.ngram_proposer import NgramProposer
 from vllm.v1.spec_decode.suffix_decoding import SuffixDecodingProposer
 from vllm.v1.structured_output.utils import apply_grammar_bitmask
 from vllm.v1.utils import CpuGpuBuffer, record_function_or_nullcontext
-from vllm.v1.worker.cp_utils import check_attention_cp_compatibility
+from vllm.v1.worker import mamba_utils
+from vllm.v1.worker.cp_utils import (
+    check_attention_cp_compatibility,
+    get_total_cp_world_size,
+)
 from vllm.v1.worker.dp_utils import coordinate_batch_across_dp
 from vllm.v1.worker.ec_connector_model_runner_mixin import ECConnectorModelRunnerMixin
 from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
@@ -688,6 +691,7 @@ class GPUModelRunner(
         # Ephemeral state transferred between execute_model() and sample_tokens().
         self.execute_model_state: ExecuteModelState | None = None
         self.kv_connector_output: KVConnectorOutput | None = None
+        self.mamba_state_idx: dict[str, int] = {}
         self.layerwise_nvtx_hooks_registered = False
 
     def update_max_model_len(self, max_model_len: int) -> None:
@@ -1075,7 +1079,7 @@ class GPUModelRunner(
         self.input_batch.refresh_metadata()
 
     def _update_states_after_model_execute(
-        self, output_token_ids: torch.Tensor
+        self, output_token_ids: torch.Tensor, scheduler_output: "SchedulerOutput"
     ) -> None:
         """Update the cached states after model execution.
 
@@ -1111,6 +1115,16 @@ class GPUModelRunner(
         )
         for i, num_tokens in enumerate(num_accepted_tokens):
             self.input_batch.num_accepted_tokens_cpu[i] = num_tokens
+        if self.cache_config.mamba_cache_mode == "align":
+            mamba_utils.postprocess_mamba(
+                scheduler_output,
+                self.kv_cache_config,
+                self.input_batch,
+                self.requests,
+                self.mamba_state_idx,
+                self.compilation_config.static_forward_context,
+                self.model.get_mamba_state_copy_func(),
+            )
 
     def _init_mrope_positions(self, req_state: CachedRequestState):
         model = self.get_model()
@@ -2751,7 +2765,6 @@ class GPUModelRunner(
             logits,
             sampling_metadata,
         )
-        self._update_states_after_model_execute(sampler_output.sampled_token_ids)
         return sampler_output
 
     def _bookkeeping_sync(
@@ -3237,6 +3250,18 @@ class GPUModelRunner(
 
             pad_attn = cudagraph_mode == CUDAGraphMode.FULL
 
+            if self.cache_config.mamba_cache_mode == "align":
+                mamba_utils.preprocess_mamba(
+                    scheduler_output,
+                    self.kv_cache_config,
+                    self.cache_config,
+                    self.mamba_state_idx,
+                    self.input_batch,
+                    self.requests,
+                    self.compilation_config.static_forward_context,
+                    self.model.get_mamba_state_copy_func(),
+                )
+
             use_spec_decode = len(scheduler_output.scheduled_spec_decode_tokens) > 0
             ubatch_slices_attn = ubatch_slices_padded if pad_attn else ubatch_slices
 
@@ -3422,6 +3447,10 @@ class GPUModelRunner(
 
         with record_function_or_nullcontext("gpu_model_runner: sample"):
             sampler_output = self._sample(logits, spec_decode_metadata)
+
+        self._update_states_after_model_execute(
+            sampler_output.sampled_token_ids, scheduler_output
+        )
 
         self._draft_token_ids = None
         self._draft_token_req_ids = None
@@ -4809,50 +4838,14 @@ class GPUModelRunner(
         set_cudagraph_capturing_enabled(True)
         with freeze_gc(), graph_capture(device=self.device):
             start_free_gpu_memory = torch.cuda.mem_get_info()[0]
-            cudagraph_mode = self.compilation_config.cudagraph_mode
-            assert cudagraph_mode is not None
 
-            if self.lora_config:
-                if self.compilation_config.cudagraph_specialize_lora:
-                    lora_cases = [True, False]
-                else:
-                    lora_cases = [True]
-            else:
-                lora_cases = [False]
-
-            if cudagraph_mode.mixed_mode() != CUDAGraphMode.NONE:
-                cudagraph_runtime_mode = cudagraph_mode.mixed_mode()
-                # make sure we capture the largest batch size first
-                compilation_cases = list(
-                    product(reversed(self.cudagraph_batch_sizes), lora_cases)
-                )
+            for (
+                runtime_mode,
+                batch_descs,
+            ) in self.cudagraph_dispatcher.get_capture_descs():
                 self._capture_cudagraphs(
-                    compilation_cases,
-                    cudagraph_runtime_mode=cudagraph_runtime_mode,
-                    uniform_decode=False,
-                )
-
-            # Capture full cudagraph for uniform decode batches if we
-            # don't already have full mixed prefill-decode cudagraphs.
-            if (
-                cudagraph_mode.decode_mode() == CUDAGraphMode.FULL
-                and cudagraph_mode.separate_routine()
-            ):
-                max_num_tokens = (
-                    self.scheduler_config.max_num_seqs * self.uniform_decode_query_len
-                )
-                decode_cudagraph_batch_sizes = [
-                    x
-                    for x in self.cudagraph_batch_sizes
-                    if max_num_tokens >= x >= self.uniform_decode_query_len
-                ]
-                compilation_cases_decode = list(
-                    product(reversed(decode_cudagraph_batch_sizes), lora_cases)
-                )
-                self._capture_cudagraphs(
-                    compilation_cases=compilation_cases_decode,
-                    cudagraph_runtime_mode=CUDAGraphMode.FULL,
-                    uniform_decode=True,
+                    batch_descriptors=batch_descs,
+                    cudagraph_runtime_mode=runtime_mode,
                 )
 
             torch.cuda.synchronize()
@@ -4883,19 +4876,32 @@ class GPUModelRunner(
 
     def _capture_cudagraphs(
         self,
-        compilation_cases: list[tuple[int, bool]],
+        batch_descriptors: list[BatchDescriptor],
         cudagraph_runtime_mode: CUDAGraphMode,
-        uniform_decode: bool,
     ):
         assert (
             cudagraph_runtime_mode != CUDAGraphMode.NONE
             and cudagraph_runtime_mode.valid_runtime_modes()
         ), f"Invalid cudagraph runtime mode: {cudagraph_runtime_mode}"
 
+        if not batch_descriptors:
+            return
+
+        uniform_decode = batch_descriptors[0].uniform
+        force_attention = cudagraph_runtime_mode == CUDAGraphMode.FULL
+
+        dummy_run = functools.partial(
+            self._dummy_run,
+            uniform_decode=uniform_decode,
+            skip_eplb=True,
+            remove_lora=False,
+            force_attention=force_attention,
+        )
+
         # Only rank 0 should print progress bar during capture
         if is_global_first_rank():
-            compilation_cases = tqdm(
-                compilation_cases,
+            batch_descriptors = tqdm(
+                batch_descriptors,
                 disable=not self.load_config.use_tqdm_on_load,
                 desc="Capturing CUDA graphs ({}, {})".format(
                     "decode" if uniform_decode else "mixed prefill-decode",
@@ -4904,7 +4910,10 @@ class GPUModelRunner(
             )
 
         # We skip EPLB here since we don't want to record dummy metrics
-        for num_tokens, activate_lora in compilation_cases:
+        for batch_desc in batch_descriptors:
+            num_tokens = batch_desc.num_tokens
+            activate_lora = batch_desc.has_lora
+
             # We currently only capture ubatched graphs when its a FULL
             # cudagraph, a uniform decode batch, and the number of tokens
             # is above the threshold. Otherwise we just capture a non-ubatched
@@ -4922,28 +4931,22 @@ class GPUModelRunner(
 
             for _ in range(self.compilation_config.cudagraph_num_of_warmups):
                 # Use CUDAGraphRuntimeStyle.NONE (default) for warmup.
-                # But be careful, warm up with `NONE`is orthogonal to
+                # But be careful, warm up with `NONE` is orthogonal to
                 # if we want to warm up attention or not. This is
                 # different from the case where `FULL` implies capture
                 # attention while `PIECEWISE` implies no attention.
-                force_attention = cudagraph_runtime_mode == CUDAGraphMode.FULL
-                self._dummy_run(
+                dummy_run(
                     num_tokens,
                     cudagraph_runtime_mode=CUDAGraphMode.NONE,
-                    force_attention=force_attention,
-                    uniform_decode=uniform_decode,
                     allow_microbatching=allow_microbatching,
-                    skip_eplb=True,
-                    remove_lora=False,
                     activate_lora=activate_lora,
                 )
-            self._dummy_run(
+
+            # Capture run
+            dummy_run(
                 num_tokens,
                 cudagraph_runtime_mode=cudagraph_runtime_mode,
-                uniform_decode=uniform_decode,
                 allow_microbatching=allow_microbatching,
-                skip_eplb=True,
-                remove_lora=False,
                 activate_lora=activate_lora,
                 is_graph_capturing=True,
             )
@@ -5322,6 +5325,24 @@ class GPUModelRunner(
             for kv_cache_group in kv_cache_config.kv_cache_groups
             if not isinstance(kv_cache_group.kv_cache_spec, EncoderOnlyAttentionSpec)
         ]
+        max_num_blocks = []
+        max_model_len = max(self.max_model_len, self.max_encoder_len)
+        for i, kv_cache_group in enumerate(kv_cache_config.kv_cache_groups):
+            if isinstance(kv_cache_group.kv_cache_spec, EncoderOnlyAttentionSpec):
+                continue
+            max_num_blocks_per_req = cdiv(
+                max_model_len, block_sizes[i] * get_total_cp_world_size()
+            )
+            if isinstance(kv_cache_group.kv_cache_spec, MambaSpec):
+                mamba_blocks_per_req = (
+                    max_num_blocks_per_req
+                    if self.cache_config.enable_prefix_caching
+                    else 1
+                ) + kv_cache_group.kv_cache_spec.num_speculative_blocks
+                max_num_blocks_per_req = max(
+                    max_num_blocks_per_req, mamba_blocks_per_req
+                )
+            max_num_blocks.append(max_num_blocks_per_req)
 
         if block_sizes != [self.cache_config.block_size] or kernel_block_sizes != [
             self.cache_config.block_size
@@ -5333,18 +5354,18 @@ class GPUModelRunner(
             )
             self.input_batch = InputBatch(
                 max_num_reqs=self.max_num_reqs,
-                max_model_len=max(self.max_model_len, self.max_encoder_len),
+                max_model_len=max_model_len,
                 max_num_batched_tokens=self.max_num_tokens,
                 device=self.device,
                 pin_memory=self.pin_memory,
                 vocab_size=self.model_config.get_vocab_size(),
                 block_sizes=block_sizes,
                 kernel_block_sizes=kernel_block_sizes,
+                max_num_blocks_per_req=max_num_blocks,
                 is_spec_decode=bool(self.vllm_config.speculative_config),
                 logitsprocs=self.input_batch.logitsprocs,
                 logitsprocs_need_output_token_ids=self.input_batch.logitsprocs_need_output_token_ids,
                 is_pooling_model=self.is_pooling_model,
-                num_speculative_tokens=self.num_spec_tokens,
             )
 
     def _allocate_kv_cache_tensors(
