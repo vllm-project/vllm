@@ -1049,6 +1049,7 @@ class EngineCoreProc(EngineCore):
             not self.engines_running
             and not self.scheduler.has_requests()
             and not self.batch_queue
+            and not self._graceful_shutdown_requested
         ):
             if self.input_queue.empty():
                 # Drain aborts queue; all aborts are also processed via input_queue.
@@ -1241,6 +1242,12 @@ class EngineCoreProc(EngineCore):
                         except Exception:
                             self._handle_request_preproc_error(req)
                             continue
+                    elif request_type in (
+                        EngineCoreRequestType.SHUTDOWN,
+                        EngineCoreRequestType.GRACEFUL_SHUTDOWN,
+                    ):
+                        # these have no payload
+                        request = None
                     else:
                         request = generic_decoder.decode(data_frames)
 

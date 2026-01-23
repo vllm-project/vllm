@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import asyncio
+import contextlib
 import signal
 import socket
 import time
@@ -124,16 +125,14 @@ async def serve_http(
             if core is not None and hasattr(core, "_send_graceful_shutdown_to_engines"):
                 core._send_graceful_shutdown_to_engines()
 
-                # poll for ready_to_exit with short sleeps so CancelledError
-                # can interrupt us promptly on second signal
-                deadline = time.monotonic() + drain_timeout
-                while time.monotonic() < deadline:
-                    if (
-                        core.resources.engine_dead
-                        or core.resources.ready_to_exit_event.is_set()
-                    ):
-                        break
-                    await asyncio.sleep(0.5)
+                # wait for ready_to_exit event (set when engines finish draining)
+                with contextlib.suppress(asyncio.TimeoutError):
+                    await asyncio.wait_for(
+                        asyncio.to_thread(
+                            core.resources.ready_to_exit_event.wait, drain_timeout
+                        ),
+                        timeout=drain_timeout + 1,
+                    )
 
                 elapsed = time.monotonic() - start_time
                 if core.resources.ready_to_exit_event.is_set():
@@ -186,6 +185,9 @@ async def serve_http(
         shutting_down = True
 
         if enable_graceful:
+            # reset should_exit to keep uvicorn's serve loop running during drain
+            server.should_exit = False
+
             drain_timeout = getattr(
                 args, "shutdown_drain_timeout", FrontendArgs.shutdown_drain_timeout
             )
