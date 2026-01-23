@@ -591,8 +591,8 @@ if hasattr(torch.ops._C, "gptq_marlin_24_gemm"):
     ) -> torch.Tensor:
         return torch.empty((size_m, size_n), device=a.device, dtype=a.dtype)
 
-    @register_fake("_C::gptq_marlin_gemm")
-    def _gptq_marlin_gemm_fake(
+    @register_fake("_C::marlin_gemm")
+    def _marlin_gemm_fake(
         a: torch.Tensor,
         c: torch.Tensor | None,
         b_q_weight: torch.Tensor,
@@ -1312,7 +1312,7 @@ def marlin_int4_fp8_preprocess(
     return torch.ops._C.marlin_int4_fp8_preprocess(qweight, qzeros_or_none, inplace)
 
 
-def gptq_marlin_gemm(
+def marlin_gemm(
     a: torch.Tensor,
     c: torch.Tensor | None,
     b_q_weight: torch.Tensor,
@@ -1333,7 +1333,7 @@ def gptq_marlin_gemm(
     use_fp32_reduce: bool = False,
     is_zp_float: bool = False,
 ) -> torch.Tensor:
-    return torch.ops._C.gptq_marlin_gemm(
+    return torch.ops._C.marlin_gemm(
         a,
         c,
         b_q_weight,

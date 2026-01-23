@@ -121,7 +121,7 @@ def apply_fp4_marlin_linear(
 
         inputs, a_scales = marlin_quant_input(inputs, torch.float8_e4m3fn)
 
-    output = ops.gptq_marlin_gemm(
+    output = ops.marlin_gemm(
         a=inputs,
         c=None,
         b_q_weight=weight,

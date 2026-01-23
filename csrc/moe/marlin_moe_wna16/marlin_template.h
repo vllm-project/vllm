@@ -23,10 +23,10 @@
   #define MARLIN_NAMESPACE_NAME marlin_moe_wna16
 #endif
 
-#include "quantization/gptq_marlin/marlin.cuh"
-#include "quantization/gptq_marlin/marlin_dtypes.cuh"
-#include "quantization/gptq_marlin/dequant.h"
-#include "quantization/gptq_marlin/marlin_mma.h"
+#include "quantization/marlin/marlin.cuh"
+#include "quantization/marlin/marlin_dtypes.cuh"
+#include "quantization/marlin/dequant.h"
+#include "quantization/marlin/marlin_mma.h"
 #include "core/scalar_type.hpp"
 
 #define STATIC_ASSERT_SCALAR_TYPE_VALID(scalar_t)               \
