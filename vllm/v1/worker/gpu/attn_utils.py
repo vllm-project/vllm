@@ -9,6 +9,7 @@ from vllm.config import VllmConfig, get_layers_from_vllm_config
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.v1.attention.backend import (
     AttentionBackend,
+    AttentionCGSupport,
     AttentionMetadataBuilder,
     CommonAttentionMetadata,
 )
@@ -35,10 +36,19 @@ def init_attn_backend(
     kv_cache_config: KVCacheConfig,
     vllm_config: VllmConfig,
     device: torch.device,
-):
+) -> tuple[dict[str, type[AttentionBackend]], list[AttentionMetadataBuilder]]:
     attn_backends: dict[str, type[AttentionBackend]] = {}
     attn_metadata_builders: list[AttentionMetadataBuilder] = []
     flashinfer_workspace: torch.Tensor | None = None
+    # Find minimum cudagraph support across all attention backends
+    min_cg_support = AttentionCGSupport.ALWAYS
+    min_cg_backend_name = None
+    uniform_decode_query_len = 1
+    if vllm_config.speculative_config is not None:
+        uniform_decode_query_len += (
+            vllm_config.speculative_config.num_speculative_tokens
+        )
+
     for kv_cache_group_spec in kv_cache_config.kv_cache_groups:
         layer_names = kv_cache_group_spec.layer_names
         any_layer_name = next(iter(layer_names))
@@ -62,6 +72,23 @@ def init_attn_backend(
                 flashinfer_workspace = attn_metadata_builder._get_workspace_buffer()
             else:
                 attn_metadata_builder.set_workspace_buffer(flashinfer_workspace)
+
+        cg_support = attn_metadata_builder.get_cudagraph_support(
+            vllm_config,
+            kv_cache_group_spec.kv_cache_spec,
+        )
+        if cg_support.value < min_cg_support.value:
+            min_cg_support = cg_support
+            min_cg_backend_name = attn_backend.__name__
+
+    # Resolve cudagraph mode based on attention backend support.
+    assert vllm_config.compilation_config is not None
+    vllm_config.compilation_config.resolve_cudagraph_mode(
+        min_cg_support,
+        min_cg_backend_name,
+        uniform_decode_query_len,
+    )
+
     return attn_backends, attn_metadata_builders
 
 
@@ -88,7 +115,7 @@ def _allocate_kv_cache(
 def _reshape_kv_cache(
     kv_cache_config: KVCacheConfig,
     kv_cache_raw_tensors: dict[str, torch.Tensor],
-    attn_backends: dict[str, AttentionBackend],
+    attn_backends: dict[str, type[AttentionBackend]],
 ) -> dict[str, torch.Tensor]:
     kv_caches: dict[str, torch.Tensor] = {}
     for kv_cache_group_spec in kv_cache_config.kv_cache_groups:
@@ -131,7 +158,7 @@ def init_kv_cache(
     runner_kv_caches: list[torch.Tensor],
     forward_context: dict[str, Any],
     kv_cache_config: KVCacheConfig,
-    attn_backends: dict[str, AttentionBackend],
+    attn_backends: dict[str, type[AttentionBackend]],
     device: torch.device,
 ) -> None:
     kv_cache_raw_tensors = _allocate_kv_cache(kv_cache_config, device)

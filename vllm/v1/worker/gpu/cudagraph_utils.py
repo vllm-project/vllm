@@ -38,7 +38,15 @@ class CudaGraphManager:
         self.dp_size = vllm_config.parallel_config.data_parallel_size
         self.compilation_config = vllm_config.compilation_config
         assert self.compilation_config is not None
-        self.cudagraph_mode: CUDAGraphMode
+        # cudagraph mode and sizes will be set in set_cudagraph_mode_and_sizes
+        self.cudagraph_mode = CUDAGraphMode.NONE
+        self.cudagraph_sizes: dict[int, int] = {}
+
+        self.graphs: dict[int, torch.cuda.CUDAGraph] = {}
+        self.pool = torch.cuda.graph_pool_handle()
+        self.hidden_states: torch.Tensor | None = None
+
+    def set_cudagraph_mode_and_sizes(self) -> None:
         if self.compilation_config.cudagraph_mode is None:
             self.cudagraph_mode = CUDAGraphMode.NONE
         else:
@@ -49,10 +57,6 @@ class CudaGraphManager:
             self.max_num_tokens,
             self.cudagraph_mode,
         )
-
-        self.graphs: dict[int, torch.cuda.CUDAGraph] = {}
-        self.pool = torch.cuda.graph_pool_handle()
-        self.hidden_states: torch.Tensor | None = None
 
     def needs_capture(self) -> bool:
         return len(self.cudagraph_sizes) > 0

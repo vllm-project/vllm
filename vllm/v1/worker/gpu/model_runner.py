@@ -135,6 +135,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             self.do_spec_decode = False
             self.num_speculative_steps = 0
             self.speculator = None
+        self.uniform_decode_query_len = 1 + self.num_speculative_steps
 
         self.req_states = RequestState(
             max_num_reqs=self.max_num_reqs,
@@ -257,6 +258,24 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         )
         # Attention groups are not supported.
         self.attn_groups = []  # type: ignore
+
+        # Adjust cudagraph sizes for spec decode if needed
+        cudagraph_mode = self.compilation_config.cudagraph_mode
+        assert cudagraph_mode is not None
+        if (
+            cudagraph_mode.decode_mode() == CUDAGraphMode.FULL
+            and cudagraph_mode.separate_routine()
+            and self.uniform_decode_query_len > 1
+        ):
+            self.compilation_config.adjust_cudagraph_sizes_for_spec_decode(
+                self.uniform_decode_query_len,
+                self.parallel_config.tensor_parallel_size,
+            )
+
+        # Set cudagraph manager mode and sizes from the resolved config
+        self.cudagraph_manager.set_cudagraph_mode_and_sizes()
+        if self.do_spec_decode:
+            self.speculator.cudagraph_manager.set_cudagraph_mode_and_sizes()
 
     def prepare_dummy_attn_metadata(self, input_batch: InputBatch) -> None:
         block_tables = self.block_tables.get_dummy_block_tables(input_batch.num_reqs)
