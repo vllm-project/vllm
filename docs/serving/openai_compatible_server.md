@@ -381,7 +381,7 @@ The following [pooling parameters][vllm.PoolingParams] are supported.
 --8<-- "vllm/pooling_params.py:embed-pooling-params"
 ```
 
-The following parameters are supported:
+The following Embeddings API parameters are supported:
 
 ??? code
 
@@ -692,7 +692,7 @@ The following [pooling parameters][vllm.PoolingParams] are supported.
 --8<-- "vllm/pooling_params.py:classify-pooling-params"
 ```
 
-The following parameters are supported:
+The following Classification API parameters are supported:
 
 ??? code
 
@@ -712,7 +712,7 @@ The following extra parameters are supported:
     --8<-- "vllm/entrypoints/pooling/base/protocol.py:classify-extra-params"
     ```
 
-The following extra parameters are supported by default:
+For chat-like input (i.e. if `messages` is passed), the following parameters are supported:
 
 ??? code
 
@@ -721,8 +721,6 @@ The following extra parameters are supported by default:
     --8<-- "vllm/entrypoints/pooling/base/protocol.py:chat-params"
     --8<-- "vllm/entrypoints/pooling/base/protocol.py:classify-params"
     ```
-
-For chat-like input (i.e. if `messages` is passed), the following parameters are supported:
 
 these extra parameters are supported instead:
 
@@ -951,7 +949,7 @@ The following [pooling parameters][vllm.PoolingParams] are supported.
 --8<-- "vllm/pooling_params.py:classify-pooling-params"
 ```
 
-The following parameters are supported:
+The following Score API parameters are supported:
 
 ```python
 --8<-- "vllm/entrypoints/pooling/base/protocol.py:pooling-common-params"
@@ -1041,7 +1039,7 @@ The following [pooling parameters][vllm.PoolingParams] are supported.
 --8<-- "vllm/pooling_params.py:classify-pooling-params"
 ```
 
-The following parameters are supported:
+The following Re-rank API parameters are supported:
 
 ```python
 --8<-- "vllm/entrypoints/pooling/base/protocol.py:pooling-common-params"

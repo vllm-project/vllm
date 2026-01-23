@@ -18,7 +18,7 @@ class PoolingBasicRequestMixin(OpenAIBaseModel):
     # --8<-- [start:pooling-common-params]
     model: str | None = None
     user: str | None = None
-    # --8<-- [end:end-common-params]
+    # --8<-- [end:pooling-common-params]
 
     # --8<-- [start:pooling-common-extra-params]
     truncate_prompt_tokens: Annotated[int, Field(ge=-1)] | None = None
