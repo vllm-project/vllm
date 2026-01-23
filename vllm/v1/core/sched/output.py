@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from functools import cached_property
 from typing import TYPE_CHECKING
 
@@ -18,7 +18,7 @@ if TYPE_CHECKING:
     from vllm.multimodal.inputs import MultiModalFeatureSpec
     from vllm.pooling_params import PoolingParams
     from vllm.sampling_params import SamplingParams
-    from vllm.v1.request import Request
+    from vllm.v1.request import AbortRequest, Request
 else:
     ECConnectorMetadata = object
     KVConnectorMetadata = object
@@ -237,6 +237,9 @@ class SchedulerOutput:
 
     # EC Cache Connector metadata
     ec_connector_metadata: ECConnectorMetadata | None = None
+
+    # List of all abort request (cause by any errors of the backend)
+    aborted_reqs: list[AbortRequest] = field(default_factory=list)
 
     @classmethod
     def make_empty(cls) -> "SchedulerOutput":
