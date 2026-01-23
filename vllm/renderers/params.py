@@ -20,13 +20,15 @@ def merge_kwargs(
     a: dict[str, Any] | None,
     b: dict[str, Any] | None,
     /,
+    *,
+    unset_values: tuple[object, ...] = (None, "auto"),
 ) -> dict[str, Any]:
     if not a:
         return b or {}
     if not b:
         return a or {}
 
-    return a | {k: v for k, v in b.items() if v is not None}
+    return a | {k: v for k, v in b.items() if v not in unset_values}
 
 
 @dataclass(frozen=True)
