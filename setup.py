@@ -557,7 +557,7 @@ class precompiled_wheel_utils:
            VLLM_PRECOMPILED_WHEEL_LOCATION)
         2. user-specified variant (VLLM_PRECOMPILED_WHEEL_VARIANT) from nightly repo
            or auto-detected CUDA variant based on system (torch, nvidia-smi)
-        4. the default variant from nightly repo
+        3. the default variant from nightly repo
 
         If downloading from the nightly repo, the commit can be specified via
         VLLM_PRECOMPILED_WHEEL_COMMIT; otherwise, the head commit in the main branch
@@ -578,8 +578,9 @@ class precompiled_wheel_utils:
             arch = platform.machine()
             # try to fetch the wheel metadata from the nightly wheel repo,
             # detecting CUDA variant from system if not specified
-            detected_variant = precompiled_wheel_utils.detect_system_cuda_variant()
-            variant = os.getenv("VLLM_PRECOMPILED_WHEEL_VARIANT", detected_variant)
+            variant = os.getenv("VLLM_PRECOMPILED_WHEEL_VARIANT", None)
+            if variant is None:
+                variant = precompiled_wheel_utils.detect_system_cuda_variant()
             commit = os.getenv("VLLM_PRECOMPILED_WHEEL_COMMIT", "").lower()
             if not commit or len(commit) != 40:
                 print(
