@@ -337,8 +337,6 @@ def test_attention_quant_pattern(
         not current_platform.is_device_capability((9, 0))
     ):
         pytest.skip("FlashAttention 3 FP8 output fusion requires Hopper (SM90+)")
-    if "Llama-4-Scout" in model_name and cuda_device_count_stateless() < 2:
-        pytest.skip("Llama-4-Scout requires at least 2 GPUs")
 
     custom_ops_list = custom_ops.split(",") if custom_ops else []
 
