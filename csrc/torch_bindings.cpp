@@ -114,6 +114,12 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "silu_and_mul_nvfp4_quant(Tensor! result, Tensor! result_block_scale, "
       "Tensor input, Tensor input_global_scale) -> ()");
   ops.impl("silu_and_mul_nvfp4_quant", torch::kCUDA, &silu_and_mul_nvfp4_quant);
+
+  // Fused RMSNorm + NVFP4 quantization
+  ops.def(
+      "rms_norm_nvfp4_quant(Tensor! result, Tensor! result_scale, "
+      "Tensor input, Tensor weight, Tensor input_scale, float epsilon) -> ()");
+  ops.impl("rms_norm_nvfp4_quant", torch::kCUDA, &rms_norm_nvfp4_quant);
 #endif
 
   ops.def("mul_and_silu(Tensor! out, Tensor input) -> ()");

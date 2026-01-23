@@ -657,7 +657,8 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
       "csrc/quantization/fp4/activation_nvfp4_quant_fusion_kernels.cu"
       "csrc/quantization/fp4/nvfp4_experts_quant.cu"
       "csrc/quantization/fp4/nvfp4_scaled_mm_sm120_kernels.cu"
-      "csrc/quantization/fp4/nvfp4_blockwise_moe_kernel.cu")
+      "csrc/quantization/fp4/nvfp4_blockwise_moe_kernel.cu"
+      "csrc/quantization/fp4/rmsnorm_nvfp4_quant_kernels.cu")
     set_gencode_flags_for_srcs(
       SRCS "${SRCS}"
       CUDA_ARCHS "${FP4_ARCHS}")
@@ -683,7 +684,8 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
       "csrc/quantization/fp4/activation_nvfp4_quant_fusion_kernels.cu"
       "csrc/quantization/fp4/nvfp4_experts_quant.cu"
       "csrc/quantization/fp4/nvfp4_scaled_mm_kernels.cu"
-      "csrc/quantization/fp4/nvfp4_blockwise_moe_kernel.cu")
+      "csrc/quantization/fp4/nvfp4_blockwise_moe_kernel.cu"
+      "csrc/quantization/fp4/rmsnorm_nvfp4_quant_kernels.cu")
     set_gencode_flags_for_srcs(
       SRCS "${SRCS}"
       CUDA_ARCHS "${FP4_ARCHS}")

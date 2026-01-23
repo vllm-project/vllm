@@ -51,6 +51,14 @@ void silu_and_mul_scaled_fp4_experts_quant_sm1xxa(
     torch::Tensor const& output_scale_offset_by_experts);
 #endif
 
+#if (defined(ENABLE_NVFP4_SM100) && ENABLE_NVFP4_SM100) || \
+    (defined(ENABLE_NVFP4_SM120) && ENABLE_NVFP4_SM120)
+void rms_norm_nvfp4_quant_sm1xxa(torch::Tensor& output,
+                                 torch::Tensor& output_scale,
+                                 torch::Tensor& input, torch::Tensor& weight,
+                                 torch::Tensor& input_scale, double epsilon);
+#endif
+
 void scaled_fp4_quant(torch::Tensor& output, torch::Tensor const& input,
                       torch::Tensor& output_sf, torch::Tensor const& input_sf,
                       bool is_sf_swizzled_layout) {
@@ -100,4 +108,16 @@ void silu_and_mul_scaled_fp4_experts_quant(
 #endif
   TORCH_CHECK_NOT_IMPLEMENTED(
       false, "No compiled silu_and_mul nvfp4 experts quantization kernel");
+}
+
+void rms_norm_nvfp4_quant(torch::Tensor& output, torch::Tensor& output_scale,
+                          torch::Tensor& input, torch::Tensor& weight,
+                          torch::Tensor& input_scale, double epsilon) {
+#if (defined(ENABLE_NVFP4_SM100) && ENABLE_NVFP4_SM100) || \
+    (defined(ENABLE_NVFP4_SM120) && ENABLE_NVFP4_SM120)
+  return rms_norm_nvfp4_quant_sm1xxa(output, output_scale, input, weight,
+                                     input_scale, epsilon);
+#endif
+  TORCH_CHECK_NOT_IMPLEMENTED(false,
+                              "No compiled rms_norm nvfp4 quantization kernel");
 }
