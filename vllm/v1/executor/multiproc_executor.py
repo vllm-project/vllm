@@ -385,18 +385,14 @@ class MultiprocExecutor(Executor):
                 time.sleep(0.1)
             return False
 
-        active_procs = lambda: [proc for proc in worker_procs if proc.is_alive()]
-
-        # Give processes time to clean themselves up properly
-        if wait_for_termination(active_procs(), 4):
-            return
-
         # Send SIGTERM if still running
-        for p in active_procs():
+        active_procs = [proc for proc in worker_procs if proc.is_alive()]
+        for p in active_procs:
             p.terminate()
-        if not wait_for_termination(active_procs(), 4):
+        if not wait_for_termination(active_procs, 4):
             # Send SIGKILL if still running
-            for p in active_procs():
+            active_procs = [p for p in active_procs if p.is_alive()]
+            for p in active_procs:
                 p.kill()
 
     def shutdown(self):
@@ -697,7 +693,6 @@ class WorkerProc:
             nonlocal shutdown_requested
             if not shutdown_requested:
                 shutdown_requested = True
-                logger.debug("Raising SystemExit() while handling signal %d", signum)
                 raise SystemExit()
 
         # Either SIGTERM or SIGINT will terminate the worker
@@ -776,13 +771,7 @@ class WorkerProc:
             # any worker dies. Set this value so we don't re-throw
             # SystemExit() to avoid zmq exceptions in __del__.
             shutdown_requested = True
-        except SystemExit as e:
-            # If proper shutdown does not succeed, the worker processes are sent
-            # a SIGTERM and finally a SIGKILL, which should raise a
-            # SystemExit() exception
-            logger.warning("WorkerProc was terminated")
-            # SystemExit must never be ignored
-            raise e
+
         finally:
             if ready_writer is not None:
                 ready_writer.close()
