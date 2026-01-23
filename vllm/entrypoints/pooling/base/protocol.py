@@ -22,7 +22,6 @@ class PoolingBasicRequestMixin(OpenAIBaseModel):
 
     # --8<-- [start:pooling-common-extra-params]
     truncate_prompt_tokens: Annotated[int, Field(ge=-1)] | None = None
-
     request_id: str = Field(
         default_factory=random_uuid,
         description=(
@@ -31,7 +30,6 @@ class PoolingBasicRequestMixin(OpenAIBaseModel):
             "through out the inference process and return in response."
         ),
     )
-
     priority: int = Field(
         default=0,
         description=(
@@ -73,7 +71,6 @@ class ChatRequestMixin(OpenAIBaseModel):
             "model."
         ),
     )
-
     continue_final_message: bool = Field(
         default=False,
         description=(
@@ -84,7 +81,6 @@ class ChatRequestMixin(OpenAIBaseModel):
             "Cannot be used at the same time as `add_generation_prompt`."
         ),
     )
-
     add_special_tokens: bool = Field(
         default=False,
         description=(
@@ -95,7 +91,6 @@ class ChatRequestMixin(OpenAIBaseModel):
             "default)."
         ),
     )
-
     chat_template: str | None = Field(
         default=None,
         description=(
@@ -105,7 +100,6 @@ class ChatRequestMixin(OpenAIBaseModel):
             "does not define one."
         ),
     )
-
     chat_template_kwargs: dict[str, Any] | None = Field(
         default=None,
         description=(
@@ -177,12 +171,10 @@ class ClassifyRequestMixin(OpenAIBaseModel):
         default=None,
         description="softmax will be deprecated, please use use_activation instead.",
     )
-
     activation: bool | None = Field(
         default=None,
         description="activation will be deprecated, please use use_activation instead.",
     )
-
     use_activation: bool | None = Field(
         default=None,
         description="Whether to use activation for classification outputs. "

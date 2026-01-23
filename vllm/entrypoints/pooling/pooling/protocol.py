@@ -14,18 +14,14 @@ from vllm.entrypoints.pooling.base.protocol import (
     ClassifyRequestMixin,
     EmbedRequestMixin,
     EncodingRequestMixin,
-    PoolingBasicRequestMixin,
-)
-from vllm.entrypoints.pooling.embed.protocol import (
-    EmbeddingChatRequest,
-    EmbeddingCompletionRequest,
+    PoolingBasicRequestMixin, CompletionRequestMixin, ChatRequestMixin,
 )
 from vllm.tasks import PoolingTask
 from vllm.utils import random_uuid
 
 
 class PoolingCompletionRequest(
-    EmbeddingCompletionRequest, EmbedRequestMixin, ClassifyRequestMixin
+    PoolingBasicRequestMixin, CompletionRequestMixin, EmbedRequestMixin, ClassifyRequestMixin
 ):
     task: PoolingTask | None = None
 
@@ -37,7 +33,7 @@ class PoolingCompletionRequest(
         )
 
 
-class PoolingChatRequest(EmbeddingChatRequest, EmbedRequestMixin, ClassifyRequestMixin):
+class PoolingChatRequest(    PoolingBasicRequestMixin, ChatRequestMixin, EmbedRequestMixin, ClassifyRequestMixin):
     task: PoolingTask | None = None
 
     def to_pooling_params(self):
