@@ -198,22 +198,6 @@ OutputT = TypeVar("OutputT", bound=RequestOutput | PoolingRequestOutput)
 
 
 @dataclass(kw_only=True)
-class RequestProcessingMixin:
-    """
-    Mixin for request processing,
-    handling prompt preparation and engine input.
-    """
-
-
-@dataclass(kw_only=True)
-class ResponseGenerationMixin:
-    """
-    Mixin for response generation,
-    managing result generators and final batch results.
-    """
-
-
-@dataclass(kw_only=True)
 class ServeContext(Generic[RequestT, OutputT]):
     request: RequestT
     raw_request: Request | None = None
