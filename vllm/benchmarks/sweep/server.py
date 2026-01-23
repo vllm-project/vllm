@@ -88,6 +88,14 @@ class ServerProcess:
 
         return f"http://{host}:{port}"
 
+    def is_server_ready(self) -> bool:
+        server_address = self._get_vllm_server_address()
+        try:
+            response = requests.get(f"{server_address}/health")
+            return response.status_code == 200
+        except requests.RequestException:
+            return False
+
     def reset_caches(self) -> None:
         server_cmd = self.server_cmd
 
