@@ -18,9 +18,21 @@ e.g.
 """
 
 import argparse
+import base64
 import json
 
 import requests
+
+
+def encode_base64_content_from_url(content_url: str) -> dict[str, str]:
+    """Encode a content retrieved from a remote url to base64 format."""
+
+    with requests.get(content_url, headers=headers) as response:
+        response.raise_for_status()
+        result = base64.b64encode(response.content).decode("utf-8")
+
+    return {"url": f"data:image/jpeg;base64,{result}"}
+
 
 headers = {"accept": "application/json", "Content-Type": "application/json"}
 
@@ -30,8 +42,8 @@ documents = {
         {
             "type": "text",
             "text": (
-                "A woman shares a joyful moment with her golden retriever on a sun-drenched beach at sunset, "  # noqa: E501
-                "as the dog offers its paw in a heartwarming display of companionship and trust."  # noqa: E501
+                "A woman shares a joyful moment with her golden retriever on a sun-drenched beach at sunset, "
+                "as the dog offers its paw in a heartwarming display of companionship and trust."
             ),
         },
         {
@@ -39,6 +51,12 @@ documents = {
             "image_url": {
                 "url": "https://qianwen-res.oss-cn-beijing.aliyuncs.com/Qwen-VL/assets/demo.jpeg"
             },
+        },
+        {
+            "type": "image_url",
+            "image_url": encode_base64_content_from_url(
+                "https://qianwen-res.oss-cn-beijing.aliyuncs.com/Qwen-VL/assets/demo.jpeg"
+            ),
         },
     ]
 }
