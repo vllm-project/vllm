@@ -958,9 +958,6 @@ class rocm_aiter_ops:
     @classmethod
     @if_aiter_supported
     def is_fused_moe_enabled(cls) -> bool:
-        # AITER MoE requires the master AITER flag to be enabled.
-        # Users must set VLLM_ROCM_USE_AITER=1 to enable AITER features,
-        # then can optionally disable MoE with VLLM_ROCM_USE_AITER_MOE=0.
         return cls._AITER_ENABLED and cls._FMOE_ENABLED
 
     @classmethod
