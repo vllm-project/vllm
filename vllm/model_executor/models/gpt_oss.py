@@ -412,16 +412,8 @@ class GptOssModel(nn.Module):
             if load_kv_cache_scale_completed:
                 continue
 
-            if "sinks" in name:
-                # Handle attention sinks (distributed across ranks)
-                param = params_dict[name]
-                narrow_weight = loaded_weight.narrow(0, head_start, heads_per_rank)
-                param.data.copy_(narrow_weight)
-                loaded_params.add(name)
-                continue
-
             # mapping to convert individual experts input_scale into fused_moe.
-            elif (
+            if (
                 all(key in name for key in ["input_scale", "mlp.experts"])
                 and expert_id is not None
             ):
@@ -431,44 +423,91 @@ class GptOssModel(nn.Module):
                 loaded_params.add(fused_name)
                 continue
 
-            elif name.endswith(".w13_weight_scale") and moe_quant_method == "mxfp4":
-                param = params_dict[fused_name]
+            # Unified handler for mxfp4 weights and scales
+            elif moe_quant_method == "mxfp4" and any(
+                name.endswith(suffix)
+                for suffix in [
+                    ".w13_weight_scale",
+                    ".w2_weight_scale",
+                    ".w13_weight",
+                    ".w2_weight",
+                ]
+            ):
+                # Determine weight type
+                is_w13 = ".w13_" in name
+                is_scale = "_scale" in name
 
-                # Handle MLP gate and up projection weights scale
-                if use_ep:
-                    narrow_weight = loaded_weight[ep_rank_start:ep_rank_end, ...]
-                else:
-                    if expert_id is None:
-                        narrow_weight = loaded_weight[
-                            :, 2 * tp_rank_start : 2 * tp_rank_end, ...
-                        ]
+                # Reshape weight for mxfp4 if needed (not for scales)
+                if not is_scale and expert_id is None:
+                    if is_w13:
+                        # w13_weight: (E, 2 * N, block_size,
+                        # entry_per_block) -> (E, 2 * N, -1)
+                        # Validate shape before reshape
+                        if loaded_weight.dim() < 3:
+                            raise ValueError(
+                                f"Expected w13_weight to have at least 3 "
+                                f"dimensions, got shape "
+                                f"{loaded_weight.shape}"
+                            )
+                        if loaded_weight.shape[0] != num_experts:
+                            raise ValueError(
+                                f"Expected w13_weight first dimension to be "
+                                f"{num_experts}, got "
+                                f"{loaded_weight.shape[0]}"
+                            )
+                        loaded_weight = loaded_weight.view(
+                            num_experts, 2 * intermediate_size, -1
+                        ).contiguous()
                     else:
-                        narrow_weight = loaded_weight[
-                            2 * tp_rank_start : 2 * tp_rank_end, ...
-                        ]
+                        # w2_weight: flatten and divide by 2
+                        # (2 mxfp4 values packed in 1 uint8)
+                        # Validate shape before reshape
+                        if loaded_weight.dim() < 3:
+                            raise ValueError(
+                                f"Expected w2_weight to have at least 3 "
+                                f"dimensions, got shape "
+                                f"{loaded_weight.shape}"
+                            )
+                        if loaded_weight.shape[0] != num_experts:
+                            raise ValueError(
+                                f"Expected w2_weight first dimension to be "
+                                f"{num_experts}, got "
+                                f"{loaded_weight.shape[0]}"
+                            )
+                        loaded_weight = loaded_weight.view(
+                            num_experts, -1, intermediate_size // 2
+                        ).contiguous()
 
-                param = params_dict[fused_name]
-                weight_loader = getattr(param, "weight_loader", default_weight_loader)
-                weight_loader(
-                    param,
-                    narrow_weight,
-                    weight_name=fused_name,
-                    shard_id=None,
-                    expert_id=expert_id,
-                    mxfp4_or_bias=True,
-                )
-                loaded_params.add(fused_name)
-                continue
-
-            elif name.endswith(".w2_weight_scale") and moe_quant_method == "mxfp4":
+                # Slice for EP or TP
+                # Note: For mxfp4, parameter may be rounded larger than checkpoint size
+                # The weight_loader will handle padding if needed
                 if use_ep:
                     narrow_weight = loaded_weight[ep_rank_start:ep_rank_end, ...]
                 else:
-                    narrow_weight = loaded_weight[
-                        ...,
-                        tp_rank_start // OCP_MX_BLOCK_SIZE : tp_rank_end
-                        // OCP_MX_BLOCK_SIZE,
-                    ]
+                    if is_w13:
+                        # w13: slice along intermediate_size dimension (dim 1)
+                        if expert_id is None:
+                            narrow_weight = loaded_weight[
+                                :, 2 * tp_rank_start : 2 * tp_rank_end, ...
+                            ]
+                        else:
+                            narrow_weight = loaded_weight[
+                                2 * tp_rank_start : 2 * tp_rank_end, ...
+                            ]
+                    else:
+                        # w2: slice along the last dimension
+                        if is_scale:
+                            # w2_weight_scale: divide by OCP_MX_BLOCK_SIZE
+                            narrow_weight = loaded_weight[
+                                ...,
+                                tp_rank_start // OCP_MX_BLOCK_SIZE : tp_rank_end
+                                // OCP_MX_BLOCK_SIZE,
+                            ]
+                        else:
+                            # w2_weight: divide by 2 (packed)
+                            narrow_weight = loaded_weight[
+                                ..., tp_rank_start // 2 : tp_rank_end // 2
+                            ]
 
                 param = params_dict[fused_name]
                 weight_loader = getattr(param, "weight_loader", default_weight_loader)
@@ -483,83 +522,84 @@ class GptOssModel(nn.Module):
                 loaded_params.add(fused_name)
                 continue
 
-            elif name.endswith(".w13_weight") and moe_quant_method == "mxfp4":
+            # Unified handler for Quark FP8 weights and scales
+            elif moe_quant_method == "fp8" and any(
+                name.endswith(suffix)
+                for suffix in [".w13_weight", ".w13_weight_scale", ".w13_input_scale"]
+            ):
+                assert fused_name is not None
+                param = params_dict[fused_name]
+
+                # Determine if slicing is needed
+                is_input_scale = ".w13_input_scale" in name
+                is_weight_scale = ".w13_weight_scale" in name
+                is_weight = ".w13_weight" in name
+
+                if is_input_scale:
+                    # Input scale: per-expert scalar, no TP sharding
+                    narrow_weight = loaded_weight
+                elif is_weight_scale:
+                    # Weight scale: check if per-channel or per-tensor
+                    if loaded_weight.numel() > 1 and loaded_weight.dim() == 1:
+                        # Per-channel scale: needs TP sharding
+                        if use_ep:
+                            narrow_weight = loaded_weight[
+                                ep_rank_start:ep_rank_end, ...
+                            ]
+                        else:
+                            narrow_weight = loaded_weight[
+                                2 * tp_rank_start : 2 * tp_rank_end
+                            ]
+                    else:
+                        # Per-tensor scale: no TP sharding needed
+                        narrow_weight = loaded_weight
+                elif is_weight:
+                    # w13_weight: combined gate_up_proj, needs TP sharding
+                    if use_ep:
+                        narrow_weight = loaded_weight[ep_rank_start:ep_rank_end, ...]
+                    else:
+                        if expert_id is None:
+                            # All experts: [num_experts, 2*intermediate_size, hidden]
+                            narrow_weight = loaded_weight[
+                                :, 2 * tp_rank_start : 2 * tp_rank_end, :
+                            ]
+                        else:
+                            # Single expert: [2*intermediate_size, hidden]
+                            narrow_weight = loaded_weight[
+                                2 * tp_rank_start : 2 * tp_rank_end, :
+                            ]
+
+                # Copy the data directly
                 if expert_id is None:
-                    # Handle MLP gate and up projection weights
-                    # flat weight from (E, 2 * N, block_size, entry_per_block)
-                    # to (E, 2 * N, -1), shouldn't trigger copy for contiguous
-                    loaded_weight = loaded_weight.view(
-                        num_experts, 2 * intermediate_size, -1
-                    ).contiguous()
-
-                # Extract gate and up projection parts
-                # since the weight is shuffled, we can slice directly
-                if use_ep:
-                    narrow_weight = loaded_weight[ep_rank_start:ep_rank_end, ...]
+                    param.data.copy_(narrow_weight)
                 else:
-                    if expert_id is None:
-                        narrow_weight = loaded_weight[
-                            :, 2 * tp_rank_start : 2 * tp_rank_end, ...
-                        ]
-                    else:
-                        narrow_weight = loaded_weight[
-                            2 * tp_rank_start : 2 * tp_rank_end, ...
-                        ]
+                    param.data[expert_id].copy_(narrow_weight)
 
-                param = params_dict[fused_name]
-                weight_loader = getattr(param, "weight_loader", default_weight_loader)
-                weight_loader(
-                    param,
-                    narrow_weight,
-                    weight_name=fused_name,
-                    shard_id=None,
-                    expert_id=expert_id,
-                    mxfp4_or_bias=True,
-                )
                 loaded_params.add(fused_name)
                 continue
 
-            elif name.endswith(".w2_weight") and moe_quant_method == "mxfp4":
-                if expert_id is None:
-                    # Handle MLP down projection weights
-                    # same flatten here, but since 2 mx4 value are packed in 1
-                    # uint8, divide by 2
-                    loaded_weight = loaded_weight.view(
-                        num_experts, -1, intermediate_size // 2
-                    ).contiguous()
+            # Unified handler for bias loading (w13_bias and w2_bias)
+            elif name.endswith(".w13_bias") or name.endswith(".w2_bias"):
+                is_w13_bias = name.endswith(".w13_bias")
 
                 if use_ep:
                     narrow_weight = loaded_weight[ep_rank_start:ep_rank_end, ...]
                 else:
-                    narrow_weight = loaded_weight[
-                        ..., tp_rank_start // 2 : tp_rank_end // 2
-                    ]
-
-                param = params_dict[fused_name]
-                weight_loader = getattr(param, "weight_loader", default_weight_loader)
-                weight_loader(
-                    param,
-                    narrow_weight,
-                    weight_name=fused_name,
-                    shard_id=None,
-                    expert_id=expert_id,
-                    mxfp4_or_bias=True,
-                )
-                loaded_params.add(fused_name)
-                continue
-
-            elif name.endswith(".w13_bias"):
-                if use_ep:
-                    narrow_weight = loaded_weight[ep_rank_start:ep_rank_end, ...]
-                else:
-                    if expert_id is None:
-                        narrow_weight = loaded_weight[
-                            :, 2 * tp_rank_start : 2 * tp_rank_end
-                        ]
+                    if is_w13_bias:
+                        # w13_bias: slice along intermediate_size dimension
+                        if expert_id is None:
+                            narrow_weight = loaded_weight[
+                                :, 2 * tp_rank_start : 2 * tp_rank_end
+                            ]
+                        else:
+                            narrow_weight = loaded_weight[
+                                2 * tp_rank_start : 2 * tp_rank_end
+                            ]
                     else:
-                        narrow_weight = loaded_weight[
-                            2 * tp_rank_start : 2 * tp_rank_end
-                        ]
+                        # w2_bias: only load on rank 0 to avoid duplication
+                        narrow_weight = loaded_weight
+                        if tp_rank != 0:
+                            narrow_weight = narrow_weight.zero_()
 
                 assert fused_name is not None
                 param = params_dict[fused_name]
@@ -573,29 +613,14 @@ class GptOssModel(nn.Module):
                     mxfp4_or_bias=True,
                 )
                 loaded_params.add(fused_name)
-
                 continue
 
-            elif name.endswith(".w2_bias"):
-                if use_ep:
-                    loaded_weight = loaded_weight[ep_rank_start:ep_rank_end, ...]
-                else:
-                    # (only load on rank 0 to avoid duplication)
-                    if tp_rank != 0:
-                        loaded_weight.zero_()
-
-                assert fused_name is not None
-                param = params_dict[fused_name]
-                weight_loader = getattr(param, "weight_loader", default_weight_loader)
-                weight_loader(
-                    param,
-                    loaded_weight,
-                    weight_name=fused_name,
-                    shard_id=None,
-                    expert_id=expert_id,
-                    mxfp4_or_bias=True,
-                )
-                loaded_params.add(fused_name)
+            elif "sinks" in name:
+                # Handle attention sinks (distributed across ranks)
+                param = params_dict[name]
+                narrow_weight = loaded_weight.narrow(0, head_start, heads_per_rank)
+                param.data.copy_(narrow_weight)
+                loaded_params.add(name)
                 continue
 
             for param_name, weight_name, shard_id in stacked_params_mapping:
