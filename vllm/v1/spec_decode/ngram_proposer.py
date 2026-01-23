@@ -3,13 +3,49 @@
 import os
 
 import numpy as np
-from numba import get_num_threads, jit, njit, prange, set_num_threads
+
+# Make numba optional - not available on all platforms
+# (e.g., ppc64le with numpy conflicts)
+try:
+    from numba import get_num_threads, jit, njit, prange, set_num_threads
+
+    NUMBA_AVAILABLE = True
+except ImportError as e:
+    NUMBA_AVAILABLE = False
+    _NUMBA_IMPORT_ERROR = str(e)
+
+    # Provide stubs so the module can be imported
+    def get_num_threads():
+        return 1
+
+    def set_num_threads(n):
+        pass
+
+    def jit(*args, **kwargs):
+        def decorator(fn):
+            return fn
+
+        return decorator if args and callable(args[0]) else decorator
+
+    def njit(*args, **kwargs):
+        return jit(*args, **kwargs)
+
+    def prange(*args):
+        return range(*args)
+
 
 from vllm.config import VllmConfig
 
 
 class NgramProposer:
     def __init__(self, vllm_config: VllmConfig):
+        if not NUMBA_AVAILABLE:
+            raise ImportError(
+                f"NgramProposer requires numba, but it failed to import: "
+                f"{_NUMBA_IMPORT_ERROR}. Speculative decoding with ngram "
+                "proposer is not available on this platform. Please disable "
+                "speculative decoding or install a compatible numba version."
+            )
         assert vllm_config.speculative_config is not None
         assert vllm_config.speculative_config.prompt_lookup_min is not None
         assert vllm_config.speculative_config.prompt_lookup_max is not None

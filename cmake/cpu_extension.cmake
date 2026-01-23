@@ -99,6 +99,7 @@ else()
     find_isa(${CPUINFO} "Power11" POWER11_FOUND)
     find_isa(${CPUINFO} "POWER10" POWER10_FOUND)
     find_isa(${CPUINFO} "POWER9" POWER9_FOUND)
+    find_isa(${CPUINFO} "POWER8" POWER8_FOUND)
     find_isa(${CPUINFO} "asimd" ASIMD_FOUND) # Check for ARM NEON support
     find_isa(${CPUINFO} "bf16" ARM_BF16_FOUND) # Check for ARM BF16 support
     find_isa(${CPUINFO} "S390" S390_FOUND)
@@ -162,9 +163,16 @@ elseif (AVX2_FOUND)
     list(APPEND CXX_COMPILE_FLAGS "-mavx2")
     message(WARNING "vLLM CPU backend using AVX2 ISA")
     
-elseif (POWER9_FOUND OR POWER10_FOUND OR POWER11_FOUND)
+elseif (POWER8_FOUND OR POWER9_FOUND OR POWER10_FOUND OR POWER11_FOUND)
     message(STATUS "PowerPC detected")
-    if (POWER9_FOUND)
+    if (POWER8_FOUND)
+        message(STATUS "POWER8 detected - using VSX/AltiVec optimizations")
+        list(APPEND CXX_COMPILE_FLAGS
+            "-mvsx"
+            "-maltivec"
+            "-mcpu=power8"
+            "-mtune=power8")
+    elseif (POWER9_FOUND)
         list(APPEND CXX_COMPILE_FLAGS
             "-mvsx"
             "-mcpu=power9"
@@ -202,12 +210,12 @@ elseif (CMAKE_SYSTEM_PROCESSOR MATCHES "riscv64")
         list(APPEND CXX_COMPILE_FLAGS "-march=rv64gc")
     endif()
 else()
-    message(FATAL_ERROR "vLLM CPU backend requires AVX512, AVX2, Power9+ ISA, S390X ISA, ARMv8 or RISC-V support.")
+    message(FATAL_ERROR "vLLM CPU backend requires AVX512, AVX2, POWER8+ ISA, S390X ISA, ARMv8 or RISC-V support.")
 endif()
 
 
-# Build oneDNN for GEMM kernels (only for x86-AVX512 /ARM platforms)
-if ((AVX512_FOUND AND NOT AVX512_DISABLED) OR (ASIMD_FOUND AND NOT APPLE_SILICON_FOUND) OR POWER9_FOUND OR POWER10_FOUND OR POWER11_FOUND)
+# Build oneDNN for GEMM kernels (only for x86-AVX512 /ARM/PowerPC platforms)
+if ((AVX512_FOUND AND NOT AVX512_DISABLED) OR (ASIMD_FOUND AND NOT APPLE_SILICON_FOUND) OR POWER8_FOUND OR POWER9_FOUND OR POWER10_FOUND OR POWER11_FOUND)
     # Fetch and build Arm Compute Library (ACL) as oneDNN's backend for AArch64
     # TODO [fadara01]: remove this once ACL can be fetched and built automatically as a dependency of oneDNN
     set(ONEDNN_AARCH64_USE_ACL OFF CACHE BOOL "")

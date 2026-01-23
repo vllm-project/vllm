@@ -1,3 +1,5 @@
+[![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://opensource.org/licenses/Apache-2.0) [![POWER8](https://img.shields.io/badge/IBM-POWER8-red)](https://github.com/Scottcjn/vllm) [![vLLM](https://img.shields.io/badge/vLLM-Fork-green)](https://github.com/Scottcjn/vllm)
+
 <!-- markdownlint-disable MD001 MD041 -->
 <p align="center">
   <picture>
