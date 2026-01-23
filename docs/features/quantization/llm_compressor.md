@@ -1,6 +1,6 @@
 # LLM Compressor
 
-LLM Compressor is a library for optimizing models for deployment with vLLM.
+[LLM Compressor](https://docs.vllm.ai/projects/llm-compressor/en/latest/) is a library for optimizing models for deployment with vLLM.
 It provides a comprehensive set of quantization algorithms, including support for techniques such as FP8, INT8, and INT4 weight-only quantization.
 
 ## Why use LLM Compressor?
@@ -18,19 +18,14 @@ LLM Compressor handles the complexity of quantization, calibration, and format c
 
 ## Key features
 
-- **Multiple Quantization Methods**: Support for FP8, INT8, INT4, and mixed-precision quantization
+- **Multiple Quantization Algorithms**: Support for AWQ, GPTQ, AutoRound, and Round-to-Nearest.
+Also includes support for QuIP and SpinQuant-style transforms as well as KV cache and attention quantization.
+- **Multiple Quantization Methods**: Support for FP8, INT8, INT4, NVFP4, MXFP4, and mixed-precision quantization
 - **One-Shot Quantization**: Quantize models quickly with minimal calibration data
-- **vLLM Integration**: Seamlessly deploy quantized models with vLLM
+- **vLLM Integration**: Seamlessly deploy quantized models with vLLM using the compressed-tensors format
 - **Hugging Face Compatibility**: Works with models from the Hugging Face Hub
-
-## Documentation
-
-For the latest documentation, including installation guides, tutorials, and API reference, visit:
-
-**[LLM Compressor Documentation](https://docs.vllm.ai/projects/llm-compressor/en/latest/)**
 
 ## Resources
 
-- [LLM Compressor Documentation](https://docs.vllm.ai/projects/llm-compressor/en/latest/)
+- [LLM Compressor examples](https://github.com/vllm-project/llm-compressor/tree/main/examples)
 - [GitHub Repository](https://github.com/vllm-project/llm-compressor)
-- [Quantization Guide](../features/quantization/README.md) - Using quantized models with vLLM
