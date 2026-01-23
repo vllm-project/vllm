@@ -810,11 +810,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
         ["blake3", "sha256", "sha512"],
         case_sensitive=False,
     ),
-
     # Enable patch for step vl model to support image inputs
     "VLLM_ENABLE_STEP_VL_IMG_PATCH": lambda: bool(
         int(os.getenv("VLLM_ENABLE_STEP_VL_IMG_PATCH", "1"))
-    ),  
+    ), 
     # Path to the XLA persistent cache directory.
     # Only used for XLA devices such as TPUs.
     "VLLM_XLA_CACHE_PATH": lambda: os.path.expanduser(
