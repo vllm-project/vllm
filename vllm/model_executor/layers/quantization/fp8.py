@@ -613,9 +613,7 @@ class Fp8OnlineLinearMethod(Fp8LinearMethod):
 
         if self.use_fp8_woq:
             # Activations not quantized for woq.
-            self.fp8_linear.process_weights_after_loading(
-                layer, size_k_first=True, input_dtype=self.marlin_input_dtype
-            )
+            self.fp8_linear.process_weights_after_loading(layer)
 
 
 class Fp8MoEMethod(FusedMoEMethodBase):
