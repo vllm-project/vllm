@@ -399,6 +399,12 @@ class MultiModalMixin(SupportsMultiModal, SupportsMRoPE):
                 # expected sizes from num_image_patches
                 actual_size = vision_embeddings.shape[0]
                 if actual_size != total_expected and total_expected > 0:
+                    if actual_size == 0:
+                        raise ValueError(
+                            "Vision encoder returned empty embeddings. "
+                            f"Expected {total_expected} tokens from "
+                            f"num_image_patches={split_sizes}"
+                        )
                     if actual_size < total_expected:
                         repeat_factor = (
                             total_expected + actual_size - 1
