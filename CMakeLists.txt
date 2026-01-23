@@ -458,6 +458,7 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
     endif()
 
     set(MARLIN_SRCS
+       "csrc/quantization/marlin/sparse/marlin_24_cuda_kernel.cu"
        "csrc/quantization/marlin/marlin.cu"
        "csrc/quantization/marlin/marlin_int4_fp8_preprocess.cu"
        "csrc/quantization/marlin/gptq_marlin_repack.cu"
