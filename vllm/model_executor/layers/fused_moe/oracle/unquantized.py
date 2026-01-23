@@ -56,6 +56,7 @@ def select_unquantized_moe_backend(
     moe_config: FusedMoEConfig,
     use_ep: bool,
     use_dp: bool,
+    is_lora_enabled: bool = False,
 ) -> UnquantizedMoeBackend:
     """
     Select the primary Unquantized MoE backend
@@ -64,6 +65,11 @@ def select_unquantized_moe_backend(
 
     def _make_log_backend(backend: UnquantizedMoeBackend):
         return f"Using {backend.value} backend for Unquantized MoE"
+
+    # LoRA requires TRITON backend for moe_sum support (LoRA weight injection)
+    if is_lora_enabled:
+        logger.info_once(_make_log_backend(UnquantizedMoeBackend.TRITON), scope="local")
+        return UnquantizedMoeBackend.TRITON
 
     rocm_aiter_moe_enabled = rocm_aiter_ops.is_fused_moe_enabled()
 

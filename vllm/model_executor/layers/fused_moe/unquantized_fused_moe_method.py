@@ -61,6 +61,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
             moe_config=self.moe,
             use_ep=self.moe.moe_parallel_config.use_ep,
             use_dp=self.moe.moe_parallel_config.dp_size > 1,
+            is_lora_enabled=self.moe.is_lora_enabled,
         )
 
         # AITER only supports gated activations (silu/gelu), so disable it
