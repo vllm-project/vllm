@@ -367,7 +367,7 @@ def _fused_moe_lora_expand(
     max_loras_total = sorted_token_ids.shape[0]  # <<< PR2: new
 
     grid = lambda META: (
-        split_k * triton.cdiv(EM, META["BLOCK_SIZE_M"]) * triton.cdiv(N, META["BLOCK_SIZE_N"]),
+        triton.cdiv(EM, META["BLOCK_SIZE_M"]) * triton.cdiv(N, META["BLOCK_SIZE_N"]),
         len(lora_b_stacked),
         lora_ids.numel(),  # <<< PR2: was lora_b_stacked[0].shape[0]
     )
