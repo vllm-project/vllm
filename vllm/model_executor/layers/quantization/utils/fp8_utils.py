@@ -378,7 +378,7 @@ class W8A8BlockFp8LinearOp:
                 False,
                 self.act_quant_group_shape,
                 column_major_scales=True,
-                tma_aligned_scales=True,
+                tma_aligned_scales=envs.VLLM_USE_DEEP_GEMM_TMA_ALIGNED_SCALES,
                 use_ue8m0=self.use_deep_gemm_e8m0,
             )
             if self.is_deep_gemm_supported
