@@ -35,6 +35,9 @@ class IncrementalDetokenizer:
     def output_token_ids(self) -> list[int]:
         return self.token_ids
 
+    def num_output_tokens(self) -> int:
+        return len(self.token_ids)
+
     def update(self, new_token_ids: list[int], stop_terminated: bool) -> str | None:
         self.token_ids.extend(new_token_ids)
         return None
@@ -112,15 +115,22 @@ class BaseIncrementalDetokenizer(IncrementalDetokenizer, ABC):
             skipped_stop_token_id = None
 
         # 1) Detokenize the new token ids incrementally.
-        # TODO(woosuk): This method becomes very inefficient when the number of
-        # new_token_ids is more than 1. We need to optimize this.
-        stop_check_offset = len(self.output_text)
+        # accumulate pieces and join once.
+        base_len = len(self.output_text)
+        new_chars_len = 0
+        stop_check_offset = base_len
+        pieces: list[str] = []
         for new_token_id in new_token_ids:
             self.token_ids.append(new_token_id)
-            self.output_text += self.decode_next(new_token_id)
+            piece = self.decode_next(new_token_id)
+            pieces.append(piece)
+            new_chars_len += len(piece)
             # Support min_tokens, see https://github.com/vllm-project/vllm/pull/22014
-            if self.min_tokens and len(self.output_token_ids) <= self.min_tokens:
-                stop_check_offset = len(self.output_text)
+            if self.min_tokens and self.num_output_tokens() <= self.min_tokens:
+                stop_check_offset = base_len + new_chars_len
+
+        if pieces:
+            self.output_text += "".join(pieces)
 
         if skipped_stop_token_id is not None:
             # Cleanup after skipping detokenization.
@@ -128,7 +138,7 @@ class BaseIncrementalDetokenizer(IncrementalDetokenizer, ABC):
 
         # 2) Evaluate stop strings.
         stop_string = None
-        if self.stop and len(self.output_token_ids) > self.min_tokens:
+        if self.stop and self.num_output_tokens() > self.min_tokens:
             stop = check_stop_strings(
                 output_text=self.output_text,
                 new_char_count=len(self.output_text) - stop_check_offset,
@@ -293,6 +303,13 @@ class SlowIncrementalDetokenizer(BaseIncrementalDetokenizer):
             self.token_ids
             if not self.prompt_len
             else (self.token_ids[self.prompt_len :])
+        )
+
+    def num_output_tokens(self) -> int:
+        return (
+            len(self.token_ids) - self.prompt_len
+            if self.prompt_len
+            else len(self.token_ids)
         )
 
     def decode_next(self, next_token_id: int) -> str:
