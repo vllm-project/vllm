@@ -436,6 +436,7 @@ class OpenAIServingResponses(OpenAIServing):
                 sampling_params = request.to_sampling_params(
                     default_max_tokens, self.default_sampling_params
                 )
+                tok_params = request.build_tok_params(self.model_config)
 
                 trace_headers = (
                     None
@@ -485,6 +486,7 @@ class OpenAIServingResponses(OpenAIServing):
                     request_id=request.request_id,
                     engine_prompt=engine_prompt,
                     sampling_params=sampling_params,
+                    tok_params=tok_params,
                     context=context,
                     lora_request=lora_request,
                     priority=request.priority,

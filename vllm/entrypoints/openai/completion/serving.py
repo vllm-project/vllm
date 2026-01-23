@@ -198,6 +198,8 @@ class OpenAIServingCompletion(OpenAIServing):
                         sampling_params,
                     )
 
+                tok_params = request.build_tok_params(self.model_config)
+
                 request_id_item = f"{request_id}-{i}"
 
                 self._log_inputs(
@@ -226,6 +228,7 @@ class OpenAIServingCompletion(OpenAIServing):
                         request_id_item,
                         engine_prompt,
                         sampling_params,
+                        tok_params,
                         lora_request=lora_request,
                         trace_headers=trace_headers,
                         priority=request.priority,

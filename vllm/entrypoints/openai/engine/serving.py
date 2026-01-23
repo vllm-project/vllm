@@ -1107,6 +1107,7 @@ class OpenAIServing:
         request_id: str,
         engine_prompt: PromptType,
         params: SamplingParams | PoolingParams,
+        tok_params: TokenizeParams,
         *,
         lora_request: LoRARequest | None,
         trace_headers: Mapping[str, str] | None,
@@ -1114,11 +1115,6 @@ class OpenAIServing:
         data_parallel_rank: int | None = None,
     ) -> tuple[EngineCoreRequest, dict[str, Any]]:
         """Use the Processor to process inputs for AsyncLLM."""
-        tok_params = TokenizeParams.from_config(
-            self.model_config,
-            truncate_prompt_tokens=params.truncate_prompt_tokens,
-        )
-
         encode_kwargs = tok_params.get_encode_kwargs()
         engine_request = self.input_processor.process_inputs(
             request_id,
@@ -1162,6 +1158,7 @@ class OpenAIServing:
         request_id: str,
         engine_prompt: TokensPrompt,
         sampling_params: SamplingParams,
+        tok_params: TokenizeParams,
         context: ConversationContext,
         lora_request: LoRARequest | None = None,
         priority: int = 0,
@@ -1185,6 +1182,7 @@ class OpenAIServing:
                 sub_request_id,
                 engine_prompt,
                 sampling_params,
+                tok_params,
                 lora_request=lora_request,
                 trace_headers=trace_headers,
                 priority=priority,

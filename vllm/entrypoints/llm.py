@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import itertools
+import warnings
 from collections.abc import Callable, Sequence
 from typing import TYPE_CHECKING, Any, cast
 
@@ -404,11 +405,6 @@ class LLM:
         Returns:
             A list of `RequestOutput` objects containing the
             generated completions in the same order as the input prompts.
-
-        Note:
-            Using `prompts` and `prompt_token_ids` as keyword parameters is
-            considered legacy and may be deprecated in the future. You should
-            instead pass them via the `inputs` parameter.
         """
         model_config = self.model_config
         runner_type = model_config.runner_type
@@ -799,17 +795,12 @@ class LLM:
         if not isinstance(params, Sequence):
             params = [params]
 
+        tok_params = TokenizeParams.from_config(model_config).with_kwargs(
+            tokenization_kwargs
+        )
+
         prompts = renderer.render_completions(prompt_input, prompt_embeds)
-        prompts = [
-            renderer.tokenize_prompt(
-                prompt,
-                TokenizeParams.from_config(
-                    model_config,
-                    truncate_prompt_tokens=params.truncate_prompt_tokens,
-                ).with_kwargs(tokenization_kwargs),
-            )
-            for prompt, params in zip(prompts, params, strict=True)
-        ]
+        prompts = renderer.tokenize_prompts(prompts, tok_params)
 
         for prompt in prompts:
             if mm_processor_kwargs is not None:
@@ -827,7 +818,7 @@ class LLM:
         continue_final_message: bool = False,
         tools: list[dict[str, Any]] | None = None,
         mm_processor_kwargs: dict[str, Any] | None = None,
-    ) -> list[TextPrompt | TokensPrompt | EmbedsPrompt]:
+    ) -> list[TokensPrompt | EmbedsPrompt]:
         """
         Convert a list of conversations into prompts so that they can then
         be used as input for other LLM APIs.
@@ -838,6 +829,7 @@ class LLM:
             A list of `TokensPrompts` objects containing the tokenized prompt
             after chat template interpolation, and the raw multi-modal inputs.
         """
+        model_config = self.model_config
         renderer = self.llm_engine.renderer
 
         chat_params = ChatParams(
@@ -853,12 +845,15 @@ class LLM:
                 ),
             ),
         )
+        tok_params = TokenizeParams.from_config(model_config)
 
-        prompts = list[TextPrompt | TokensPrompt | EmbedsPrompt]()
+        prompts = list[TokensPrompt | EmbedsPrompt]()
         for conversation in conversations:
             _, prompt = renderer.render_messages(conversation, chat_params)
             if mm_processor_kwargs is not None:
                 prompt["mm_processor_kwargs"] = mm_processor_kwargs
+
+            prompt = renderer.tokenize_prompt(prompt, tok_params)
 
             prompts.append(prompt)
 
@@ -986,31 +981,24 @@ class LLM:
         Returns:
             A list of `PoolingRequestOutput` objects containing the
             pooled hidden states in the same order as the input prompts.
-
-        Note:
-            Using `prompts` and `prompt_token_ids` as keyword parameters is
-            considered legacy and may be deprecated in the future. You should
-            instead pass them via the `inputs` parameter.
         """
 
-        error_str = (
-            "pooling_task required for `LLM.encode`\n"
-            "Please use one of the more specific methods or set the "
-            "pooling_task when using `LLM.encode`:\n"
-            "  - For embeddings, use `LLM.embed(...)` "
-            'or `pooling_task="embed"`.\n'
-            "  - For classification logits, use `LLM.classify(...)` "
-            'or `pooling_task="classify"`.\n'
-            "  - For similarity scores, use `LLM.score(...)`.\n"
-            "  - For rewards, use `LLM.reward(...)` "
-            'or `pooling_task="token_classify"`\n'
-            "  - For token classification, "
-            'use `pooling_task="token_classify"`\n'
-            '  - For multi-vector retrieval, use `pooling_task="token_embed"`'
-        )
-
         if pooling_task is None:
-            raise ValueError(error_str)
+            raise ValueError(
+                "pooling_task required for `LLM.encode`\n"
+                "Please use one of the more specific methods or set the "
+                "pooling_task when using `LLM.encode`:\n"
+                "  - For embeddings, use `LLM.embed(...)` "
+                'or `pooling_task="embed"`.\n'
+                "  - For classification logits, use `LLM.classify(...)` "
+                'or `pooling_task="classify"`.\n'
+                "  - For similarity scores, use `LLM.score(...)`.\n"
+                "  - For rewards, use `LLM.reward(...)` "
+                'or `pooling_task="token_classify"`\n'
+                "  - For token classification, "
+                'use `pooling_task="token_classify"`\n'
+                '  - For multi-vector retrieval, use `pooling_task="token_embed"`'
+            )
 
         model_config = self.model_config
         runner_type = model_config.runner_type
@@ -1019,6 +1007,12 @@ class LLM:
                 "LLM.encode() is only supported for pooling models. "
                 "Try passing `--runner pooling` to use the model as a "
                 "pooling model."
+            )
+
+        if truncate_prompt_tokens is not None:
+            tokenization_kwargs = merge_kwargs(
+                tokenization_kwargs,
+                dict(truncate_prompt_tokens=truncate_prompt_tokens),
             )
 
         io_processor_prompt = False
@@ -1062,9 +1056,6 @@ class LLM:
 
         for param in as_iter(pooling_params):
             param.verify(pooling_task, model_config)
-            # for backwards compatibility
-            if truncate_prompt_tokens is not None:
-                param.truncate_prompt_tokens = truncate_prompt_tokens
 
         self._validate_and_add_requests(
             prompts=prompts,
@@ -1140,9 +1131,14 @@ class LLM:
                 "Try converting the model using `--convert embed`."
             )
 
+        if truncate_prompt_tokens is not None:
+            tokenization_kwargs = merge_kwargs(
+                tokenization_kwargs,
+                dict(truncate_prompt_tokens=truncate_prompt_tokens),
+            )
+
         items = self.encode(
             prompts,
-            truncate_prompt_tokens=truncate_prompt_tokens,
             use_tqdm=use_tqdm,
             pooling_params=pooling_params,
             lora_request=lora_request,
@@ -1244,7 +1240,6 @@ class LLM:
         self,
         text_1: list[str | TextPrompt | TokensPrompt | EmbedsPrompt],
         text_2: list[str | TextPrompt | TokensPrompt | EmbedsPrompt],
-        truncate_prompt_tokens: int | None = None,
         use_tqdm: bool | Callable[..., tqdm] = True,
         pooling_params: PoolingParams | None = None,
         lora_request: list[LoRARequest] | LoRARequest | None = None,
@@ -1254,7 +1249,6 @@ class LLM:
 
         encoded_output: list[PoolingRequestOutput] = self.encode(
             text_1 + text_2,
-            truncate_prompt_tokens=truncate_prompt_tokens,
             use_tqdm=use_tqdm,
             lora_request=lora_request,
             pooling_params=pooling_params,
@@ -1281,7 +1275,6 @@ class LLM:
         self,
         data_1: list[str] | list[ScoreContentPartParam],
         data_2: list[str] | list[ScoreContentPartParam],
-        truncate_prompt_tokens: int | None = None,
         use_tqdm: bool | Callable[..., tqdm] = True,
         pooling_params: PoolingParams | None = None,
         lora_request: list[LoRARequest] | LoRARequest | None = None,
@@ -1303,10 +1296,9 @@ class LLM:
         pooling_params.verify("score", model_config)
         pooling_params_list = list[PoolingParams]()
 
-        tok_params = TokenizeParams.from_config(
-            self.model_config,
-            truncate_prompt_tokens=truncate_prompt_tokens,
-        ).with_kwargs(tokenization_kwargs)
+        tok_params = TokenizeParams.from_config(model_config).with_kwargs(
+            tokenization_kwargs
+        )
         encode_kwargs = tok_params.get_encode_kwargs()
 
         prompts = list[PromptType]()
@@ -1351,10 +1343,10 @@ class LLM:
         data_2: SingletonPrompt | Sequence[SingletonPrompt] | ScoreMultiModalParam,
         /,
         *,
-        truncate_prompt_tokens: int | None = None,
         use_tqdm: bool | Callable[..., tqdm] = True,
         pooling_params: PoolingParams | None = None,
         lora_request: list[LoRARequest] | LoRARequest | None = None,
+        tokenization_kwargs: dict[str, Any] | None = None,
         chat_template: str | None = None,
     ) -> list[ScoringRequestOutput]:
         """Generate similarity scores for all pairs `<text,text_pair>` or
@@ -1486,20 +1478,20 @@ class LLM:
             return self._cross_encoding_score(
                 data_1,  # type: ignore[arg-type]
                 data_2,  # type: ignore[arg-type]
-                truncate_prompt_tokens,
                 use_tqdm,
                 pooling_params,
                 lora_request,
+                tokenization_kwargs=tokenization_kwargs,
                 score_template=chat_template,
             )
         else:
             return self._embedding_score(
                 data_1,  # type: ignore[arg-type]
                 data_2,  # type: ignore[arg-type]
-                truncate_prompt_tokens,
                 use_tqdm,
                 pooling_params,
                 lora_request,
+                tokenization_kwargs=tokenization_kwargs,
             )
 
     def start_profile(self) -> None:
@@ -1580,7 +1572,6 @@ class LLM:
             prompts = TextPrompt(prompt=prompts)
 
         all_prompts = prompts if isinstance(prompts, Sequence) else [prompts]
-
         num_requests = len(all_prompts)
 
         if isinstance(params, Sequence):
@@ -1647,17 +1638,12 @@ class LLM:
         request_id: str,
         engine_prompt: PromptType,
         params: SamplingParams | PoolingParams,
+        tok_params: TokenizeParams,
         *,
         lora_request: LoRARequest | None,
         priority: int,
-        tokenization_kwargs: dict[str, Any] | None = None,
     ) -> tuple[EngineCoreRequest, dict[str, Any]]:
         """Use the Processor to process inputs for LLMEngine."""
-        tok_params = TokenizeParams.from_config(
-            self.model_config,
-            truncate_prompt_tokens=params.truncate_prompt_tokens,
-        ).with_kwargs(tokenization_kwargs)
-
         encode_kwargs = tok_params.get_encode_kwargs()
         engine_request = self.input_processor.process_inputs(
             request_id,
@@ -1681,13 +1667,32 @@ class LLM:
         prompt_text, _, _ = get_prompt_components(prompt)
         request_id = str(next(self.request_counter))
 
+        if params.truncate_prompt_tokens is not None:
+            params_type = type(params).__name__
+            warnings.warn(
+                f"The `truncate_prompt_tokens` parameter in `{params_type}` "
+                "is deprecated and will be removed in v0.16. "
+                "Please pass it via `tokenization_kwargs` instead.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+
+            tokenization_kwargs = merge_kwargs(
+                tokenization_kwargs,
+                dict(truncate_prompt_tokens=params.truncate_prompt_tokens),
+            )
+
+        tok_params = TokenizeParams.from_config(self.model_config).with_kwargs(
+            tokenization_kwargs
+        )
+
         engine_request, encode_kwargs = self._process_inputs(
             request_id,
             prompt,
             params,
+            tok_params,
             lora_request=lora_request,
             priority=priority,
-            tokenization_kwargs=tokenization_kwargs,
         )
 
         self.llm_engine.add_request(
