@@ -9,7 +9,7 @@ from vllm.utils.async_utils import AsyncMicrobatchTokenizer
 from vllm.utils.collection_utils import is_list_of
 
 from .embed_utils import safe_load_prompt_embeds
-from .params import TokenizeParams
+from .params import ChatParams, TokenizeParams
 
 if TYPE_CHECKING:
     from vllm.config import ModelConfig
@@ -97,16 +97,16 @@ class RendererLike(Protocol):
     def render_messages(
         self,
         messages: list["ChatCompletionMessageParam"],
-        **kwargs,
+        params: ChatParams,
     ) -> tuple[list["ConversationMessage"], TextPrompt | TokensPrompt | EmbedsPrompt]:
         raise NotImplementedError
 
     async def render_messages_async(
         self,
         messages: list["ChatCompletionMessageParam"],
-        **kwargs,
+        params: ChatParams,
     ) -> tuple[list["ConversationMessage"], TextPrompt | TokensPrompt | EmbedsPrompt]:
-        return self.render_messages(messages, **kwargs)
+        return self.render_messages(messages, params)
 
     # Step 2: Tokenize prompts if necessary
     def tokenize_prompt(
@@ -120,7 +120,7 @@ class RendererLike(Protocol):
             tokenizer = self.get_tokenizer()
             prompt_token_ids = tokenizer.encode(
                 prompt["prompt"],
-                **params.get_tokenization_kwargs(),
+                **params.get_encode_kwargs(),
             )
 
             prompt = TokensPrompt(prompt_token_ids=prompt_token_ids, **prompt)
@@ -153,7 +153,7 @@ class RendererLike(Protocol):
             tokenizer = self.get_async_tokenizer()
             prompt_token_ids = await tokenizer.encode(
                 prompt["prompt"],
-                **params.get_tokenization_kwargs(),
+                **params.get_encode_kwargs(),
             )
 
             prompt = TokensPrompt(prompt_token_ids=prompt_token_ids, **prompt)

@@ -1027,22 +1027,18 @@ class OpenAIServing:
         renderer = self.renderer
         tok_params = request.build_tok_params(self.model_config)
 
-        rendered_prompts = await renderer.render_completions_async(
-            prompt_input, prompt_embeds
-        )
-        engine_prompts = await renderer.tokenize_prompts_async(
-            rendered_prompts, tok_params
-        )
+        prompts = await renderer.render_completions_async(prompt_input, prompt_embeds)
+        prompts = await renderer.tokenize_prompts_async(prompts, tok_params)
 
         extra_items = {
             k: v
             for k in ("mm_processor_kwargs", "cache_salt")
             if (v := getattr(request, k, None)) is not None
         }
-        for prompt in engine_prompts:
+        for prompt in prompts:
             prompt.update(extra_items)  # type: ignore
 
-        return engine_prompts
+        return prompts
 
     async def _preprocess_chat(
         self,
@@ -1054,37 +1050,27 @@ class OpenAIServing:
         tool_dicts: list[dict[str, Any]] | None = None,
         tool_parser: Callable[[TokenizerLike], ToolParser] | None = None,
     ) -> tuple[list[ConversationMessage], list[TokensPrompt | EmbedsPrompt]]:
-        default_template_kwargs = merge_kwargs(
-            default_template_kwargs,
-            dict(tools=tool_dicts),
-        )
+        from vllm.tokenizers.mistral import MistralTokenizer
 
         renderer = self.renderer
+
+        default_template_kwargs = merge_kwargs(
+            default_template_kwargs,
+            dict(
+                tools=tool_dicts,
+                tokenize=isinstance(renderer.tokenizer, MistralTokenizer),
+            ),
+        )
+
         tok_params = request.build_tok_params(self.model_config)
         chat_params = request.build_chat_params(
             default_template, default_template_content_format
         ).with_defaults(default_template_kwargs)
 
-        # Use the async tokenizer in `OpenAIServing` if possible.
-        # Later we can move it into the renderer so that we can return both
-        # text and token IDs in the same prompt from `render_messages_async`
-        # which is used for logging and `enable_response_messages`.
-        from vllm.tokenizers.mistral import MistralTokenizer
-
-        chat_template_kwargs = chat_params.chat_template_kwargs or {}
-        rendered_conv, rendered_prompt = await renderer.render_messages_async(
-            messages,
-            chat_template=chat_params.chat_template,
-            chat_template_content_format=chat_params.chat_template_content_format,
-            tokenize=(
-                chat_template_kwargs.pop("tokenize", False)
-                or isinstance(renderer.tokenizer, MistralTokenizer)
-            ),
-            **chat_template_kwargs,
+        conversation, prompt = await renderer.render_messages_async(
+            messages, chat_params
         )
-        engine_prompt = await renderer.tokenize_prompt_async(
-            rendered_prompt, tok_params
-        )
+        engine_prompt = await renderer.tokenize_prompt_async(prompt, tok_params)
 
         extra_items = {
             k: v
@@ -1110,7 +1096,7 @@ class OpenAIServing:
                 tokenizer = renderer.get_tokenizer()
                 request = tool_parser(tokenizer).adjust_request(request=request)  # type: ignore[arg-type]
 
-        return rendered_conv, [engine_prompt]
+        return conversation, [engine_prompt]
 
     async def _process_inputs(
         self,
@@ -1126,7 +1112,7 @@ class OpenAIServing:
         """Use the Processor to process inputs for AsyncLLM."""
         tokenization_kwargs = TokenizeParams(
             truncate_prompt_tokens=params.truncate_prompt_tokens,
-        ).get_tokenization_kwargs()
+        ).get_encode_kwargs()
 
         engine_request = self.input_processor.process_inputs(
             request_id,

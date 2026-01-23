@@ -16,6 +16,7 @@ from vllm.tokenizers import cached_get_tokenizer
 from vllm.tokenizers.mistral import MistralTokenizer
 from vllm.utils.async_utils import make_async
 
+from .params import ChatParams
 from .protocol import RendererLike
 
 logger = init_logger(__name__)
@@ -95,7 +96,7 @@ class MistralRenderer(RendererLike):
     def render_messages(
         self,
         messages: list[ChatCompletionMessageParam],
-        **kwargs,
+        params: ChatParams,
     ) -> tuple[list[ConversationMessage], TextPrompt | TokensPrompt | EmbedsPrompt]:
         tokenizer = self.get_tokenizer()
         conversation, mm_data, mm_uuids = parse_chat_messages(
@@ -104,7 +105,11 @@ class MistralRenderer(RendererLike):
             content_format="string",
         )
 
-        prompt_raw = safe_apply_chat_template(tokenizer, messages, **kwargs)
+        prompt_raw = safe_apply_chat_template(
+            tokenizer,
+            messages,
+            **params.get_apply_chat_template_kwargs(),
+        )
 
         prompt = self.render_completion(prompt_raw)
         if mm_data is not None:
@@ -117,7 +122,7 @@ class MistralRenderer(RendererLike):
     async def render_messages_async(
         self,
         messages: list[ChatCompletionMessageParam],
-        **kwargs,
+        params: ChatParams,
     ) -> tuple[list[ConversationMessage], TextPrompt | TokensPrompt | EmbedsPrompt]:
         tokenizer = self.get_tokenizer()
         conversation, mm_data, mm_uuids = await parse_chat_messages_async(
@@ -127,7 +132,9 @@ class MistralRenderer(RendererLike):
         )
 
         prompt_raw = await self._apply_chat_template_async(
-            tokenizer, messages, **kwargs
+            tokenizer,
+            messages,
+            **params.get_apply_chat_template_kwargs(),
         )
 
         prompt = self.render_completion(prompt_raw)

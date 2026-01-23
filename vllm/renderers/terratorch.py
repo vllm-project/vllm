@@ -13,6 +13,7 @@ from vllm.inputs import EmbedsPrompt, TextPrompt, TokensPrompt
 from vllm.logger import init_logger
 from vllm.tokenizers import TokenizerLike
 
+from .params import ChatParams
 from .protocol import RendererLike
 
 logger = init_logger(__name__)
@@ -45,7 +46,7 @@ class TerratorchRenderer(RendererLike):
     def render_messages(
         self,
         messages: list[ChatCompletionMessageParam],
-        **kwargs,
+        params: ChatParams,
     ) -> tuple[list[ConversationMessage], TextPrompt | TokensPrompt | EmbedsPrompt]:
         model_config = self.config
 
@@ -66,7 +67,7 @@ class TerratorchRenderer(RendererLike):
     async def render_messages_async(
         self,
         messages: list[ChatCompletionMessageParam],
-        **kwargs,
+        params: ChatParams,
     ) -> tuple[list[ConversationMessage], TextPrompt | TokensPrompt | EmbedsPrompt]:
         model_config = self.config
 

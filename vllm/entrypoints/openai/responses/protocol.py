@@ -67,7 +67,7 @@ from vllm.entrypoints.chat_utils import (
 from vllm.entrypoints.openai.engine.protocol import OpenAIBaseModel
 from vllm.exceptions import VLLMValidationError
 from vllm.logger import init_logger
-from vllm.renderers import ChatParams, TokenizeParams
+from vllm.renderers import ChatParams, TokenizeParams, merge_kwargs
 from vllm.sampling_params import (
     RequestOutputKind,
     SamplingParams,
@@ -250,10 +250,13 @@ class ResponsesRequest(OpenAIBaseModel):
         return ChatParams(
             chat_template=default_template,
             chat_template_content_format=default_template_content_format,
-            chat_template_kwargs=dict(
-                add_generation_prompt=not continue_final,
-                continue_final_message=continue_final,
-                reasoning_effort=None if reasoning is None else reasoning.effort,
+            chat_template_kwargs=merge_kwargs(  # To remove unset values
+                {},
+                dict(
+                    add_generation_prompt=not continue_final,
+                    continue_final_message=continue_final,
+                    reasoning_effort=None if reasoning is None else reasoning.effort,
+                ),
             ),
         )
 

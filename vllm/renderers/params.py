@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, TypeVar
 
 import torch
@@ -23,10 +23,10 @@ def merge_kwargs(
     *,
     unset_values: tuple[object, ...] = (None, "auto"),
 ) -> dict[str, Any]:
-    if not a:
-        return b or {}
-    if not b:
-        return a or {}
+    if a is None:
+        a = {}
+    if b is None:
+        b = {}
 
     return a | {k: v for k, v in b.items() if v not in unset_values}
 
@@ -41,7 +41,7 @@ class ChatParams:
     chat_template_content_format: ChatTemplateContentFormatOption = "auto"
     """The format of the chat template."""
 
-    chat_template_kwargs: dict[str, Any] | None = None
+    chat_template_kwargs: dict[str, Any] = field(default_factory=dict)
     """The kwargs to pass to the chat template."""
 
     def with_defaults(self, default_chat_template_kwargs: dict[str, Any] | None):
@@ -55,6 +55,12 @@ class ChatParams:
                 default_chat_template_kwargs,
                 self.chat_template_kwargs,
             ),
+        )
+
+    def get_apply_chat_template_kwargs(self) -> dict[str, Any]:
+        return merge_kwargs(
+            self.chat_template_kwargs,
+            dict(chat_template=self.chat_template),
         )
 
 
@@ -111,7 +117,7 @@ class TokenizeParams:
                 value=truncate_prompt_tokens,
             )
 
-    def get_tokenization_kwargs(self) -> dict[str, Any]:
+    def get_encode_kwargs(self) -> dict[str, Any]:
         return dict(
             truncation=self.truncate_prompt_tokens is not None,
             max_length=self.truncate_prompt_tokens,

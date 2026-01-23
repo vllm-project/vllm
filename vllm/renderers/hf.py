@@ -32,6 +32,7 @@ from vllm.transformers_utils.chat_templates import get_chat_template_fallback_pa
 from vllm.transformers_utils.processor import cached_get_processor
 from vllm.utils.func_utils import supports_kw
 
+from .params import ChatParams
 from .protocol import RendererLike
 
 logger = init_logger(__name__)
@@ -522,8 +523,7 @@ class HfRenderer(RendererLike):
     def render_messages(
         self,
         messages: list[ChatCompletionMessageParam],
-        chat_template_content_format: ChatTemplateContentFormatOption = "auto",
-        **kwargs,
+        params: ChatParams,
     ) -> tuple[list[ConversationMessage], TextPrompt | TokensPrompt | EmbedsPrompt]:
         model_config = self.config
         tokenizer = self.get_tokenizer()
@@ -532,9 +532,9 @@ class HfRenderer(RendererLike):
             messages,
             model_config,
             content_format=resolve_chat_template_content_format(
-                chat_template=kwargs.get("chat_template"),
-                tools=kwargs.get("tools"),
-                given_format=chat_template_content_format,
+                chat_template=params.chat_template,
+                tools=params.chat_template_kwargs.get("tools"),
+                given_format=params.chat_template_content_format,
                 tokenizer=tokenizer,
                 model_config=model_config,
             ),
@@ -544,7 +544,7 @@ class HfRenderer(RendererLike):
             model_config,
             tokenizer,
             conversation,
-            **kwargs,
+            **params.get_apply_chat_template_kwargs(),
         )
 
         prompt = self.render_completion(prompt_raw)
@@ -558,8 +558,7 @@ class HfRenderer(RendererLike):
     async def render_messages_async(
         self,
         messages: list[ChatCompletionMessageParam],
-        chat_template_content_format: ChatTemplateContentFormatOption = "auto",
-        **kwargs,
+        params: ChatParams,
     ) -> tuple[list[ConversationMessage], TextPrompt | TokensPrompt | EmbedsPrompt]:
         model_config = self.config
         tokenizer = self.get_tokenizer()
@@ -568,9 +567,9 @@ class HfRenderer(RendererLike):
             messages,
             model_config,
             content_format=resolve_chat_template_content_format(
-                chat_template=kwargs.get("chat_template"),
-                tools=kwargs.get("tools"),
-                given_format=chat_template_content_format,
+                chat_template=params.chat_template,
+                tools=params.chat_template_kwargs.get("tools"),
+                given_format=params.chat_template_content_format,
                 tokenizer=tokenizer,
                 model_config=model_config,
             ),
@@ -580,7 +579,7 @@ class HfRenderer(RendererLike):
             model_config,
             tokenizer,
             conversation,
-            **kwargs,
+            **params.get_apply_chat_template_kwargs(),
         )
 
         prompt = self.render_completion(prompt_raw)

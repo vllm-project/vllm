@@ -14,6 +14,7 @@ from vllm.logger import init_logger
 from vllm.tokenizers import cached_get_tokenizer
 from vllm.tokenizers.grok2 import Grok2Tokenizer
 
+from .params import ChatParams
 from .protocol import RendererLike
 
 logger = init_logger(__name__)
@@ -61,7 +62,7 @@ class Grok2Renderer(RendererLike):
     def render_messages(
         self,
         messages: list[ChatCompletionMessageParam],
-        **kwargs,
+        params: ChatParams,
     ) -> tuple[list[ConversationMessage], TextPrompt | TokensPrompt | EmbedsPrompt]:
         tokenizer = self.get_tokenizer()
         conversation, mm_data, mm_uuids = parse_chat_messages(
@@ -73,7 +74,7 @@ class Grok2Renderer(RendererLike):
         prompt_raw = tokenizer.apply_chat_template(
             conversation=conversation,
             messages=messages,
-            **kwargs,
+            **params.get_apply_chat_template_kwargs(),
         )
 
         prompt = self.render_completion(prompt_raw)
@@ -87,7 +88,7 @@ class Grok2Renderer(RendererLike):
     async def render_messages_async(
         self,
         messages: list[ChatCompletionMessageParam],
-        **kwargs,
+        params: ChatParams,
     ) -> tuple[list[ConversationMessage], TextPrompt | TokensPrompt | EmbedsPrompt]:
         tokenizer = self.get_tokenizer()
         conversation, mm_data, mm_uuids = await parse_chat_messages_async(
@@ -99,7 +100,7 @@ class Grok2Renderer(RendererLike):
         prompt_raw = tokenizer.apply_chat_template(
             conversation=conversation,
             messages=messages,
-            **kwargs,
+            **params.get_apply_chat_template_kwargs(),
         )
 
         prompt = self.render_completion(prompt_raw)

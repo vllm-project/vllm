@@ -835,12 +835,9 @@ class LLM:
                     add_generation_prompt=add_generation_prompt,
                     continue_final_message=continue_final_message,
                     tools=tools,
+                    tokenize=isinstance(renderer.tokenizer, MistralTokenizer),
                 ),
             ),
-        )
-        chat_template_kwargs = chat_params.chat_template_kwargs or {}
-        tokenize = chat_template_kwargs.pop("tokenize", False) or isinstance(
-            renderer.tokenizer, MistralTokenizer
         )
 
         prompts = list[TextPrompt | TokensPrompt | EmbedsPrompt]()
@@ -849,13 +846,7 @@ class LLM:
             # NOTE: renderer.render_messages() currently doesn't
             # handle mm_processor_kwargs, since there is no implementation in
             # the chat message parsing for it.
-            _, prompt = renderer.render_messages(
-                conversation,
-                chat_template=chat_params.chat_template,
-                chat_template_content_format=chat_params.chat_template_content_format,
-                tokenize=tokenize,
-                **chat_template_kwargs,
-            )
+            _, prompt = renderer.render_messages(conversation, chat_params)
             if mm_processor_kwargs is not None:
                 prompt["mm_processor_kwargs"] = mm_processor_kwargs
 
@@ -1686,11 +1677,11 @@ class LLM:
         tokenization_kwargs: dict[str, Any] | None = None,
     ) -> tuple[EngineCoreRequest, dict[str, Any]]:
         """Use the Processor to process inputs for LLMEngine."""
-        tokenization_kwargs = merge_kwargs(
+        tokenization_kwargs_ = merge_kwargs(
             tokenization_kwargs,
             TokenizeParams(
                 truncate_prompt_tokens=params.truncate_prompt_tokens,
-            ).get_tokenization_kwargs(),
+            ).get_encode_kwargs(),
         )
 
         engine_request = self.input_processor.process_inputs(
@@ -1698,10 +1689,10 @@ class LLM:
             engine_prompt,
             params,
             lora_request=lora_request,
-            tokenization_kwargs=tokenization_kwargs,
+            tokenization_kwargs=tokenization_kwargs_,
             priority=priority,
         )
-        return engine_request, tokenization_kwargs
+        return engine_request, tokenization_kwargs_
 
     def _add_request(
         self,
