@@ -3,26 +3,32 @@
 
 import io
 from dataclasses import dataclass
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock
 
 import pybase64
 import pytest
 import torch
 
-from vllm.entrypoints.renderer import CompletionRenderer, RenderConfig
 from vllm.inputs.data import is_embeds_prompt
+from vllm.renderers import TokenizeParams
+from vllm.renderers.hf import HfRenderer
+from vllm.tokenizers.registry import tokenizer_args_from_config
+
+MODEL_NAME = "openai-community/gpt2"
 
 
 @dataclass
 class MockModelConfig:
+    runner_type = "generate"
+    model: str = MODEL_NAME
+    tokenizer: str = MODEL_NAME
+    trust_remote_code: bool = False
     max_model_len: int = 100
+    tokenizer_revision = None
+    tokenizer_mode = "auto"
     encoder_config: dict | None = None
     enable_prompt_embeds: bool = True
-
-
-class MockTokenizerResult:
-    def __init__(self, input_ids):
-        self.input_ids = input_ids
+    skip_tokenizer_init: bool = False
 
 
 @pytest.fixture
@@ -31,23 +37,17 @@ def mock_model_config():
 
 
 @pytest.fixture
-def mock_tokenizer():
-    tokenizer = MagicMock()
-    return tokenizer
-
-
-@pytest.fixture
 def mock_async_tokenizer():
-    async_tokenizer = AsyncMock()
-    return async_tokenizer
+    return AsyncMock()
 
 
 @pytest.fixture
-def renderer(mock_model_config, mock_tokenizer):
-    return CompletionRenderer(
-        model_config=mock_model_config,
-        tokenizer=mock_tokenizer,
-        async_tokenizer_pool={},
+def renderer(mock_model_config):
+    _, tokenizer_name, _, kwargs = tokenizer_args_from_config(mock_model_config)
+
+    return HfRenderer(
+        mock_model_config,
+        tokenizer_kwargs={**kwargs, "tokenizer_name": tokenizer_name},
     )
 
 
@@ -57,8 +57,9 @@ class TestRenderPrompt:
     @pytest.mark.asyncio
     async def test_token_input(self, renderer):
         tokens = [101, 7592, 2088]
-        results = await renderer.render_prompt(
-            prompt_or_prompts=tokens, config=RenderConfig(max_length=100)
+        prompts = await renderer.render_completions_async(tokens)
+        results = await renderer.tokenize_prompts_async(
+            prompts, TokenizeParams.from_config(renderer.config, max_length=100)
         )
 
         assert len(results) == 1
@@ -67,8 +68,9 @@ class TestRenderPrompt:
     @pytest.mark.asyncio
     async def test_token_list_input(self, renderer):
         token_lists = [[101, 7592, 2088], [102, 1234, 5678, 9012], [103, 4567]]
-        results = await renderer.render_prompt(
-            prompt_or_prompts=token_lists, config=RenderConfig(max_length=100)
+        prompts = await renderer.render_completions_async(token_lists)
+        results = await renderer.tokenize_prompts_async(
+            prompts, TokenizeParams.from_config(renderer.config, max_length=100)
         )
 
         assert len(results) == 3
@@ -78,43 +80,46 @@ class TestRenderPrompt:
 
     @pytest.mark.asyncio
     async def test_text_input(self, renderer, mock_async_tokenizer):
-        mock_async_tokenizer.return_value = MockTokenizerResult([101, 7592, 2088])
-        renderer.async_tokenizer_pool[renderer.tokenizer] = mock_async_tokenizer
+        mock_async_tokenizer.encode.return_value = [101, 7592, 2088]
+        renderer._async_tokenizer = mock_async_tokenizer
 
-        results = await renderer.render_prompt(
-            prompt_or_prompts="Hello world", config=RenderConfig(max_length=100)
+        prompts = await renderer.render_completions_async("Hello world")
+        results = await renderer.tokenize_prompts_async(
+            prompts, TokenizeParams.from_config(renderer.config, max_length=100)
         )
 
         assert len(results) == 1
         assert results[0]["prompt_token_ids"] == [101, 7592, 2088]
-        mock_async_tokenizer.assert_called_once()
+        mock_async_tokenizer.encode.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_text_list_input(self, renderer, mock_async_tokenizer):
-        mock_async_tokenizer.return_value = MockTokenizerResult([101, 7592, 2088])
-        renderer.async_tokenizer_pool[renderer.tokenizer] = mock_async_tokenizer
+        mock_async_tokenizer.encode.return_value = [101, 7592, 2088]
+        renderer._async_tokenizer = mock_async_tokenizer
 
         text_list_input = ["Hello world", "How are you?", "Good morning"]
-        results = await renderer.render_prompt(
-            prompt_or_prompts=text_list_input, config=RenderConfig(max_length=100)
+        prompts = await renderer.render_completions_async(text_list_input)
+        results = await renderer.tokenize_prompts_async(
+            prompts, TokenizeParams.from_config(renderer.config, max_length=100)
         )
 
         assert len(results) == 3
         for result in results:
             assert result["prompt_token_ids"] == [101, 7592, 2088]
-        assert mock_async_tokenizer.call_count == 3
+        assert mock_async_tokenizer.encode.call_count == 3
 
     @pytest.mark.asyncio
     async def test_no_truncation(self, renderer, mock_async_tokenizer):
-        mock_async_tokenizer.return_value = MockTokenizerResult([101, 7592, 2088])
-        renderer.async_tokenizer_pool[renderer.tokenizer] = mock_async_tokenizer
+        mock_async_tokenizer.encode.return_value = [101, 7592, 2088]
+        renderer._async_tokenizer = mock_async_tokenizer
 
-        results = await renderer.render_prompt(
-            prompt_or_prompts="Hello world", config=RenderConfig(max_length=100)
+        prompts = await renderer.render_completions_async("Hello world")
+        results = await renderer.tokenize_prompts_async(
+            prompts, TokenizeParams.from_config(renderer.config, max_length=100)
         )
 
         assert len(results) == 1
-        call_args = mock_async_tokenizer.call_args
+        call_args = mock_async_tokenizer.encode.call_args
         assert (
             "truncation" not in call_args.kwargs
             or call_args.kwargs["truncation"] is False
@@ -122,36 +127,42 @@ class TestRenderPrompt:
 
     @pytest.mark.asyncio
     async def test_truncation_positive(self, renderer, mock_async_tokenizer):
-        mock_async_tokenizer.return_value = MockTokenizerResult(
-            [101, 7592, 2088]
-        )  # Truncated
-        renderer.async_tokenizer_pool[renderer.tokenizer] = mock_async_tokenizer
+        mock_async_tokenizer.encode.return_value = [101, 7592, 2088]  # Truncated
+        renderer._async_tokenizer = mock_async_tokenizer
 
-        results = await renderer.render_prompt(
-            prompt_or_prompts="Hello world",
-            config=RenderConfig(max_length=100, truncate_prompt_tokens=50),
+        prompts = await renderer.render_completions_async("Hello world")
+        results = await renderer.tokenize_prompts_async(
+            prompts,
+            TokenizeParams.from_config(
+                renderer.config, max_length=200, truncate_prompt_tokens=50
+            ),
         )
 
         assert len(results) == 1
-        call_args = mock_async_tokenizer.call_args
+        call_args = mock_async_tokenizer.encode.call_args
         assert call_args.kwargs["truncation"] is True
         assert call_args.kwargs["max_length"] == 50
 
     @pytest.mark.asyncio
     async def test_truncation_negative(self, renderer, mock_async_tokenizer):
         # Test that negative truncation uses model's max_model_len
-        mock_async_tokenizer.return_value = MockTokenizerResult(
-            [101, 7592, 2088]
-        )  # Truncated to max_model_len
-        renderer.async_tokenizer_pool[renderer.tokenizer] = mock_async_tokenizer
+        mock_async_tokenizer.encode.return_value = [
+            101,
+            7592,
+            2088,
+        ]  # Truncated to max_model_len
+        renderer._async_tokenizer = mock_async_tokenizer
 
-        results = await renderer.render_prompt(
-            prompt_or_prompts="Hello world",
-            config=RenderConfig(max_length=200, truncate_prompt_tokens=-1),
+        prompts = await renderer.render_completions_async("Hello world")
+        results = await renderer.tokenize_prompts_async(
+            prompts,
+            TokenizeParams.from_config(
+                renderer.config, max_length=200, truncate_prompt_tokens=-1
+            ),
         )
 
         assert len(results) == 1
-        call_args = mock_async_tokenizer.call_args
+        call_args = mock_async_tokenizer.encode.call_args
         assert call_args.kwargs["truncation"] is True
         assert call_args.kwargs["max_length"] == 100  # model's max_model_len
 
@@ -159,9 +170,12 @@ class TestRenderPrompt:
     async def test_token_truncation_last_elements(self, renderer):
         # Test that token truncation keeps the last N elements
         long_tokens = [100, 101, 102, 103, 104, 105, 106, 107, 108, 109]  # 10 tokens
-        results = await renderer.render_prompt(
-            prompt_or_prompts=long_tokens,
-            config=RenderConfig(max_length=100, truncate_prompt_tokens=5),
+        prompts = await renderer.render_completions_async(long_tokens)
+        results = await renderer.tokenize_prompts_async(
+            prompts,
+            TokenizeParams.from_config(
+                renderer.config, max_length=100, truncate_prompt_tokens=5
+            ),
         )
 
         assert len(results) == 1
@@ -172,20 +186,28 @@ class TestRenderPrompt:
     async def test_max_length_exceeded(self, renderer):
         long_tokens = list(range(150))  # Exceeds max_model_len=100
 
+        prompts = await renderer.render_completions_async(long_tokens)
+
         with pytest.raises(ValueError, match="maximum context length"):
-            await renderer.render_prompt(
-                prompt_or_prompts=long_tokens, config=RenderConfig(max_length=100)
+            await renderer.tokenize_prompts_async(
+                prompts, TokenizeParams.from_config(renderer.config, max_length=100)
             )
 
     @pytest.mark.asyncio
-    async def test_no_tokenizer_for_text(self, mock_model_config):
-        renderer_no_tokenizer = CompletionRenderer(
-            model_config=mock_model_config, tokenizer=None, async_tokenizer_pool={}
+    async def test_no_tokenizer_for_text(self, renderer):
+        renderer_no_tokenizer = HfRenderer.from_config(
+            MockModelConfig(skip_tokenizer_init=True),
+            tokenizer_kwargs={},
         )
 
-        with pytest.raises(ValueError, match="No tokenizer available"):
-            await renderer_no_tokenizer.render_prompt(
-                prompt_or_prompts="Hello world", config=RenderConfig(max_length=100)
+        prompts = await renderer_no_tokenizer.render_completions_async("Hello world")
+
+        with pytest.raises(ValueError, match="`skip_tokenizer_init=True`"):
+            await renderer_no_tokenizer.tokenize_prompts_async(
+                prompts,
+                TokenizeParams.from_config(
+                    renderer_no_tokenizer.config, max_length=100
+                ),
             )
 
     @pytest.mark.asyncio
@@ -196,12 +218,13 @@ class TestRenderPrompt:
         # use the async tokenizer to decode and include the original text
         # in the returned prompt object.
         mock_async_tokenizer.decode = AsyncMock(return_value="decoded text")
-        renderer.async_tokenizer_pool[renderer.tokenizer] = mock_async_tokenizer
+        renderer._async_tokenizer = mock_async_tokenizer
 
         tokens = [1, 2, 3, 4]
-        results = await renderer.render_prompt(
-            prompt_or_prompts=tokens,
-            config=RenderConfig(needs_detokenization=True),
+        prompts = await renderer.render_completions_async(tokens)
+        results = await renderer.tokenize_prompts_async(
+            prompts,
+            TokenizeParams.from_config(renderer.config, needs_detokenization=True),
         )
 
         assert len(results) == 1
@@ -224,15 +247,14 @@ class TestRenderEmbedPrompt:
         test_tensor = torch.randn(10, 768, dtype=torch.float32)
         embed_bytes = self._create_test_embed_bytes(test_tensor)
 
-        results = await renderer.render_prompt_and_embeds(
-            prompt_embeds=embed_bytes,
-            config=RenderConfig(cache_salt="test_salt"),
+        prompts = await renderer.render_completions_async(prompt_embeds=embed_bytes)
+        results = await renderer.tokenize_prompts_async(
+            prompts, TokenizeParams.from_config(renderer.config)
         )
 
         assert len(results) == 1
         assert is_embeds_prompt(results[0])
         assert torch.allclose(results[0]["prompt_embeds"], test_tensor)
-        assert results[0]["cache_salt"] == "test_salt"
 
     @pytest.mark.asyncio
     async def test_multiple_prompt_embeds(self, renderer):
@@ -243,9 +265,11 @@ class TestRenderEmbedPrompt:
         ]
         embed_bytes_list = [self._create_test_embed_bytes(t) for t in test_tensors]
 
-        results = await renderer.render_prompt_and_embeds(
-            prompt_embeds=embed_bytes_list,
-            config=RenderConfig(),
+        prompts = await renderer.render_completions_async(
+            prompt_embeds=embed_bytes_list
+        )
+        results = await renderer.tokenize_prompts_async(
+            prompts, TokenizeParams.from_config(renderer.config)
         )
 
         assert len(results) == 2
@@ -259,9 +283,10 @@ class TestRenderEmbedPrompt:
         test_tensor = torch.randn(20, 768, dtype=torch.float32)
         embed_bytes = self._create_test_embed_bytes(test_tensor)
 
-        results = await renderer.render_prompt_and_embeds(
-            prompt_embeds=embed_bytes,
-            config=RenderConfig(truncate_prompt_tokens=10),
+        prompts = await renderer.render_completions_async(prompt_embeds=embed_bytes)
+        results = await renderer.tokenize_prompts_async(
+            prompts,
+            TokenizeParams.from_config(renderer.config, truncate_prompt_tokens=10),
         )
 
         assert len(results) == 1
@@ -278,9 +303,9 @@ class TestRenderEmbedPrompt:
             test_tensor = torch.randn(5, 256, dtype=dtype)
             embed_bytes = self._create_test_embed_bytes(test_tensor)
 
-            results = await renderer.render_prompt_and_embeds(
-                prompt_embeds=embed_bytes,
-                config=RenderConfig(),
+            prompts = await renderer.render_completions_async(prompt_embeds=embed_bytes)
+            results = await renderer.tokenize_prompts_async(
+                prompts, TokenizeParams.from_config(renderer.config)
             )
 
             assert len(results) == 1
@@ -292,9 +317,9 @@ class TestRenderEmbedPrompt:
         test_tensor = torch.randn(1, 10, 768, dtype=torch.float32)
         embed_bytes = self._create_test_embed_bytes(test_tensor)
 
-        results = await renderer.render_prompt_and_embeds(
-            prompt_embeds=embed_bytes,
-            config=RenderConfig(),
+        prompts = await renderer.render_completions_async(prompt_embeds=embed_bytes)
+        results = await renderer.tokenize_prompts_async(
+            prompts, TokenizeParams.from_config(renderer.config)
         )
 
         assert len(results) == 1
@@ -304,17 +329,19 @@ class TestRenderEmbedPrompt:
     @pytest.mark.asyncio
     async def test_both_prompts_and_embeds(self, renderer, mock_async_tokenizer):
         # Set up text tokenization
-        mock_async_tokenizer.return_value = MockTokenizerResult([101, 102, 103])
-        renderer.async_tokenizer_pool[renderer.tokenizer] = mock_async_tokenizer
+        mock_async_tokenizer.encode.return_value = [101, 102, 103]
+        renderer._async_tokenizer = mock_async_tokenizer
 
         # Create embed
         test_tensor = torch.randn(5, 256, dtype=torch.float32)
         embed_bytes = self._create_test_embed_bytes(test_tensor)
 
-        results = await renderer.render_prompt_and_embeds(
-            prompt_or_prompts="Hello world",
+        prompts = await renderer.render_completions_async(
+            "Hello world",
             prompt_embeds=embed_bytes,
-            config=RenderConfig(),
+        )
+        results = await renderer.tokenize_prompts_async(
+            prompts, TokenizeParams.from_config(renderer.config)
         )
 
         assert len(results) == 2

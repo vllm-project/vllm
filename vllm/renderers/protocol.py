@@ -73,17 +73,17 @@ class RendererLike(Protocol):
     ) -> list[TextPrompt | TokensPrompt | EmbedsPrompt]:
         prompts_raw = list[str | list[int] | bytes]()
 
+        if prompt_embeds is not None:  # embeds take higher priority
+            if isinstance(prompt_embeds, bytes):
+                prompts_raw.append(prompt_embeds)
+            else:
+                prompts_raw.extend(prompt_embeds)
+
         if prompt_input is not None:
             if isinstance(prompt_input, str) or is_list_of(prompt_input, int):
                 prompts_raw.append(prompt_input)  # type: ignore[arg-type]
             else:
                 prompts_raw.extend(prompt_input)  # type: ignore[arg-type]
-
-        if prompt_embeds is not None:
-            if isinstance(prompt_embeds, bytes):
-                prompts_raw.append(prompt_embeds)
-            else:
-                prompts_raw.extend(prompt_embeds)
 
         return [self.render_completion(prompt) for prompt in prompts_raw]
 
