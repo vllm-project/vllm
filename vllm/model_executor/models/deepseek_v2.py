@@ -32,6 +32,7 @@ import torch
 from torch import nn
 from transformers import DeepseekV2Config, DeepseekV3Config
 
+from vllm import envs
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.attention.layer import Attention
 from vllm.compilation.decorators import support_torch_compile
@@ -58,6 +59,7 @@ from vllm.model_executor.layers.linear import (
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.mla import MLAModules, MultiHeadLatentAttentionWrapper
 from vllm.model_executor.layers.quantization import QuantizationConfig
+from vllm.model_executor.layers.quantization.fp8 import Fp8Config
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     per_token_group_quant_fp8,
 )
@@ -74,6 +76,7 @@ from vllm.model_executor.model_loader.weight_utils import (
 from vllm.model_executor.models.utils import sequence_parallel_chunk
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
+from vllm.utils.deep_gemm import per_block_cast_to_fp8
 from vllm.v1.attention.backend import AttentionBackend
 from vllm.v1.attention.backends.mla.indexer import (
     DeepseekV32IndexerBackend,
@@ -90,6 +93,9 @@ from .utils import (
 )
 
 logger = init_logger(__name__)
+
+# MLA projection modules that should be quantized to FP8 when VLLM_MLA_FP8_PROJ=1
+MLA_FP8_PROJ_MODULES = ["q_b_proj"]
 
 
 class DeepseekAttention(nn.Module):
@@ -720,6 +726,30 @@ class DeepseekV2MLAAttention(nn.Module):
         vllm/v1/attention/backends/mla/utils.py
     """
 
+    @staticmethod
+    def _get_mla_proj_quant_config(
+        quant_config: QuantizationConfig | None,
+    ) -> QuantizationConfig | None:
+        """
+        Get the quantization config for MLA projection layers (q_b_proj).
+
+        When VLLM_MLA_FP8_PROJ=1, this forces FP8 block quantization for these
+        layers even if the checkpoint excludes them from quantization.
+        This enables DeepGEMM FP8 kernels for better performance.
+
+        The weights are quantized from BF16 to FP8 during loading in load_weights().
+        """
+        if not envs.VLLM_MLA_FP8_PROJ:
+            return quant_config
+
+        # Force FP8 block quant for MLA projections
+        # is_checkpoint_fp8_serialized=True because we'll quantize weights
+        # in load_weights() before they're loaded
+        return Fp8Config(
+            is_checkpoint_fp8_serialized=True,
+            weight_block_size=[128, 128],
+        )
+
     def __init__(
         self,
         vllm_config: VllmConfig,
@@ -779,7 +809,7 @@ class DeepseekV2MLAAttention(nn.Module):
                 self.q_lora_rank,
                 self.num_heads * self.qk_head_dim,
                 bias=False,
-                quant_config=quant_config,
+                quant_config=self._get_mla_proj_quant_config(quant_config),
                 prefix=f"{prefix}.q_b_proj",
             )
         else:
@@ -1284,7 +1314,45 @@ class DeepseekV2ForCausalLM(
             num_redundant_experts=0,
         )
 
+    def _maybe_quantize_mla_proj_weights_to_fp8(
+        self, weights: Iterable[tuple[str, torch.Tensor]]
+    ) -> Iterable[tuple[str, torch.Tensor]]:
+        """
+        Quantize MLA projection weights (q_b_proj) from BF16 to FP8 block quant
+        when VLLM_MLA_FP8_PROJ=1.
+        """
+        if not envs.VLLM_MLA_FP8_PROJ:
+            return weights
+
+        weights_dict = dict(weights)
+        weight_block_size = [128, 128]
+
+        # Build list of weights to quantize
+        layers_to_quantize = []
+        for layer_id in range(self.config.num_hidden_layers):
+            for module in MLA_FP8_PROJ_MODULES:
+                layers_to_quantize.append(f"model.layers.{layer_id}.self_attn.{module}")
+
+        # Quantize each weight
+        for layer_name in layers_to_quantize:
+            weight_name = f"{layer_name}.weight"
+            if weight_name not in weights_dict:
+                continue
+
+            original_weight = weights_dict[weight_name]
+            # Quantize BF16 -> FP8 with block quantization
+            fp8_weight, fp8_scale = per_block_cast_to_fp8(
+                original_weight, block_size=weight_block_size, use_ue8m0=True
+            )
+            weights_dict[weight_name] = fp8_weight
+            weights_dict[f"{layer_name}.weight_scale_inv"] = fp8_scale
+
+        return list(weights_dict.items())
+
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
+        # Quantize MLA projection weights to FP8 if enabled
+        weights = self._maybe_quantize_mla_proj_weights_to_fp8(weights)
+
         rocm_aiter_moe_shared_expert_enabled = (
             rocm_aiter_ops.is_fusion_moe_shared_experts_enabled()
         )
