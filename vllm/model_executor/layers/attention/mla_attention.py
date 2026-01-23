@@ -1182,7 +1182,7 @@ def use_trtllm_ragged_deepseek_prefill() -> bool:
 
     vllm_config = get_current_vllm_config()
     if not (
-        has_flashinfer()
+        flashinfer_available
         and vllm_config.attention_config.use_trtllm_ragged_deepseek_prefill
         and current_platform.is_device_capability_family(100)
     ):
