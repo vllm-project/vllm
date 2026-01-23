@@ -20,7 +20,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8DynamicTensorSym,
     kFp8DynamicTokenSym,
     kFp8StaticTensorSym,
-    kNvfp4Dynamic,
+    kNvfp4Quant,
     kStaticTensorScale,
 )
 from vllm.platforms import current_platform
@@ -30,7 +30,6 @@ from .matcher_utils import (
     MatcherFusedAddRMSNorm,
     MatcherQuantFP8,
     MatcherRMSNorm,
-    MatcherSiluAndMul
 )
 from .vllm_inductor_pass import VllmInductorPass, VllmPatternMatcherPass
 
@@ -64,7 +63,7 @@ QUANT_OPS: dict[QuantKey, OpOverload] = {
     kFp8DynamicTokenSym: torch.ops._C.dynamic_per_token_scaled_fp8_quant.default,  # noqa: E501
 }
 if current_platform.is_cuda() and hasattr(torch.ops._C, "scaled_fp4_quant"):
-    QUANT_OPS[kNvfp4Dynamic] = torch.ops._C.scaled_fp4_quant.default
+    QUANT_OPS[kNvfp4Quant] = torch.ops._C.scaled_fp4_quant.default
 if current_platform.is_cuda():
     QUANT_OPS[kFp8Dynamic128Sym] = torch.ops._C.per_token_group_fp8_quant.default  # noqa: E501
     QUANT_OPS[kFp8Dynamic64Sym] = torch.ops._C.per_token_group_fp8_quant.default  # noqa: E501
@@ -113,8 +112,6 @@ FUSED_OPS: dict[FusedRMSQuantKey, OpOverload] = {
         kFp8Dynamic64Sym, True
     ): torch.ops._C.rms_norm_per_block_quant.default,  # noqa: E501
 }
-
-SILU_MUL_BLOCK_QUANT_OP = torch.ops._C.silu_and_mul_per_block_quant.default
 
 
 class RMSNormQuantPattern:
@@ -385,84 +382,6 @@ class RMSNormGroupQuantPattern(RMSNormQuantPattern):
             pm_pass,
         )
 
-class SiluAndMulBlockQuantPattern:
-    """Pattern for fusing SiLU+Mul with block quantization."""
-    
-    def __init__(
-        self,
-        quant_dtype: torch.dtype,
-        group_shape: GroupShape,
-        symmetric: bool = True,
-        has_col_major_scales: bool = False,
-    ) -> None:
-        scale = ScaleDesc(torch.float32, False, group_shape)
-        self.quant_key = QuantKey(
-            dtype=quant_dtype, scale=scale, symmetric=symmetric
-        )
-        self.group_shape = group_shape
-        self.has_col_major_scales = has_col_major_scales
-        
-        config = get_current_vllm_config()
-        self.model_dtype = config.model_config.dtype if config.model_config else None
-        
-        # No need for local imports anymore
-        self.silu_mul_matcher = MatcherSiluAndMul()
-        self.quant_matcher = MatcherQuantFP8(
-            self.quant_key,
-            has_col_major_scales=has_col_major_scales,
-        )
-    
-    def register(self, pm_pass: PatternMatcherPass) -> None:
-        def pattern(
-            input: torch.Tensor,
-        ) -> tuple[torch.Tensor, torch.Tensor]:
-            # Match: SiLU+Mul followed by block quantization
-            silu_out = self.silu_mul_matcher(input)
-            result, scale = self.quant_matcher(silu_out)
-            return result, scale
-        
-        def replacement(
-            input: torch.Tensor,
-        ) -> tuple[torch.Tensor, torch.Tensor]:
-            # Convert to model dtype if needed
-            input = input.to(dtype=self.model_dtype)
-            
-            hidden_size = input.shape[-1] // 2
-            
-            # Allocate output tensor
-            result = torch.empty(
-                input.shape[:-1] + (hidden_size,),
-                dtype=self.quant_key.dtype,
-                device=input.device,
-            )
-            
-            # Allocate scale tensor (use helper for correct shape)
-            scale = self.quant_matcher.make_scale(
-                result,  # Result has shape (batch, hidden_size)
-                transposed=self.has_col_major_scales
-            )
-            
-            # Call fused kernel
-            at = auto_functionalized(
-                SILU_MUL_BLOCK_QUANT_OP,
-                result=result,
-                input=input,
-                scale=scale,
-                group_size=self.group_shape[1],
-                scale_ub=None,
-                is_scale_transposed=self.has_col_major_scales,
-            )
-            
-            # result, scale
-            return at[1], at[2]
-        
-        pm.register_replacement(
-            pattern,
-            replacement,
-            self.silu_mul_matcher.inputs(),
-            pm.fwd_only,
-            pm_pass,
-        )
 
 class RMSNormDynamicQuantPattern(RMSNormQuantPattern):
     def __init__(
@@ -648,42 +567,4 @@ class RMSNormQuantFusionPass(VllmPatternMatcherPass):
             FusedAddRMSNormStaticQuantPattern,
             FusedAddRMSNormDynamicQuantPattern,
             FusedAddRMSNormGroupQuantPattern,
-        )
-
-class SiluAndMulQuantFusionPass(VllmPatternMatcherPass):
-    """
-    This pass fuses silu_and_mul + quant ops into a fused silu_and_mul_quant op.
-    Specifically targets the MLP activation pattern: SiLU(gate) * up + quantization.
-    """
-
-    @enable_fake_mode
-    def __init__(self, config: VllmConfig) -> None:
-        super().__init__(config)
-
-        self.patterns: PatternMatcherPass = PatternMatcherPass(
-            pass_name="silu_and_mul_quant_fusion_pass"
-        )
-
-        # Only register on CUDA where the C++ op exists
-        if current_platform.is_cuda():
-            for group_shape in [GroupShape(1, 128), GroupShape(1, 64)]:
-                for has_col_major_scales in [True, False]:
-                    # Fuse SiLU+Mul + FP8 block quantization
-                    SiluAndMulBlockQuantPattern(
-                        FP8_DTYPE,
-                        group_shape=group_shape,
-                        has_col_major_scales=has_col_major_scales,
-                    ).register(self.patterns)
-
-        self.dump_patterns(config, self.patterns)
-
-    @VllmInductorPass.time_and_log
-    def __call__(self, graph: fx.Graph) -> None:
-        self.matched_count = self.patterns.apply(graph)
-        logger.debug("Replaced %s SiLU+Mul+Quant patterns", self.matched_count)
-
-    def uuid(self) -> str:
-        return self.hash_source(
-            self,
-            SiluAndMulBlockQuantPattern,
         )
