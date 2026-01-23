@@ -5,6 +5,7 @@ import json
 import pytest
 import requests
 
+from tests.entrypoints.test_utils import encode_base64_content_from_url
 from tests.utils import RemoteOpenAIServer
 from vllm.entrypoints.pooling.classify.protocol import ClassificationResponse
 from vllm.multimodal.utils import encode_image_url, fetch_image
@@ -19,7 +20,7 @@ HF_OVERRIDES = {
 }
 input_text = "This product was excellent and exceeded my expectations"
 image_url = "https://vllm-public-assets.s3.us-west-2.amazonaws.com/multimodal_asset/cat_snow.jpg"
-image_base64 = {"url": encode_image_url(fetch_image(image_url))}
+image_base64 = encode_base64_content_from_url(image_url)
 video_url = "https://www.bogotobogo.com/python/OpenCV_Python/images/mean_shift_tracking/slow_traffic_small.mp4"
 
 

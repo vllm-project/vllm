@@ -21,8 +21,6 @@ from vllm.renderers import TokenizeParams
 from vllm.tasks import PoolingTask
 from vllm.utils import random_uuid
 
-logger = init_logger(__name__)
-
 
 class PoolingCompletionRequest(
     PoolingBasicRequestMixin,
@@ -31,18 +29,6 @@ class PoolingCompletionRequest(
     ClassifyRequestMixin,
 ):
     task: PoolingTask | None = None
-
-    def build_tok_params(self, model_config: ModelConfig) -> TokenizeParams:
-        encoder_config = model_config.encoder_config or {}
-
-        return TokenizeParams(
-            max_total_tokens=model_config.max_model_len,
-            max_output_tokens=0,
-            truncate_prompt_tokens=self.truncate_prompt_tokens,
-            do_lower_case=encoder_config.get("do_lower_case", False),
-            add_special_tokens=self.add_special_tokens,
-            max_total_tokens_param="max_model_len",
-        )
 
     def to_pooling_params(self):
         if self.normalize is not None:
