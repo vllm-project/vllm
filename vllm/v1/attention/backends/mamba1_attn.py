@@ -12,6 +12,10 @@ from vllm.v1.attention.backends.mamba_attn import (
 
 class Mamba1AttentionBackend(AttentionBackend):
     @staticmethod
+    def get_name() -> str:
+        return "MAMBA1_ATTN"
+
+    @staticmethod
     def get_builder_cls() -> type["Mamba1AttentionMetadataBuilder"]:
         return Mamba1AttentionMetadataBuilder
 

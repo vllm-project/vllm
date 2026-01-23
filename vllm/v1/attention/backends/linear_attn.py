@@ -17,6 +17,10 @@ from vllm.v1.kv_cache_interface import AttentionSpec, MambaSpec
 
 class LinearAttentionBackend(AttentionBackend):
     @staticmethod
+    def get_name() -> str:
+        return "LINEAR_ATTN"
+
+    @staticmethod
     def get_builder_cls() -> type["LinearAttentionMetadataBuilder"]:
         return LinearAttentionMetadataBuilder
 
