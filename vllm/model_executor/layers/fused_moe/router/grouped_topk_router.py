@@ -18,6 +18,10 @@ from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (
     rocm_aiter_grouped_topk,
 )
 from vllm.model_executor.layers.fused_moe.router.base_router import BaseRouter
+from vllm.model_executor.layers.fused_moe.router.fused_topk_bias_router import (
+    fused_topk_bias,
+)
+from vllm.model_executor.layers.fused_moe.router.fused_topk_router import fused_topk
 from vllm.model_executor.utils import maybe_disable_graph_partition
 from vllm.platforms import current_platform
 
@@ -34,6 +38,7 @@ def fused_grouped_topk(
     routed_scaling_factor: float = 1.0,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     assert hidden_states.size(0) == gating_output.size(0), "Number of tokens mismatch"
+    assert num_expert_group < gating_output.size(1)
 
     if scoring_func == "sigmoid":
         # Fully fused kernel path for sigmoid
@@ -107,6 +112,31 @@ def grouped_topk(
         )
 
     assert hidden_states.size(0) == gating_output.size(0), "Number of tokens mismatch"
+    num_experts = gating_output.shape[-1]
+
+    # This section of code where num_expert_group == num_experts is needed so
+    # that tests/v1/e2e/test_spec_decode.py::test_mtp_correctness[deepseek].
+    # will pass. The model in this test appears artificially created just for
+    # testing this case and it is unclear if this occurs in practice.
+    if num_expert_group == num_experts:
+        if e_score_correction_bias is not None:
+            return fused_topk_bias(
+                hidden_states=hidden_states,
+                gating_output=gating_output,
+                e_score_correction_bias=e_score_correction_bias,
+                topk=topk,
+                renormalize=renormalize,
+                scoring_func=scoring_func,
+            )
+        else:
+            topk_weights, topk_ids, _ = fused_topk(
+                hidden_states=hidden_states,
+                gating_output=gating_output,
+                topk=topk,
+                renormalize=renormalize,
+                scoring_func=scoring_func,
+            )
+            return topk_weights, topk_ids
 
     if scoring_func == "softmax":
         scores = torch.softmax(gating_output, dim=-1)
@@ -114,35 +144,6 @@ def grouped_topk(
         scores = gating_output.sigmoid()
     else:
         raise ValueError(f"Unsupported scoring function: {scoring_func}")
-
-    num_experts = gating_output.shape[-1]
-    if num_expert_group == num_experts:
-        if e_score_correction_bias is not None:
-            scores_for_choice = scores.view(
-                -1, num_experts
-            ) + e_score_correction_bias.unsqueeze(0)
-        else:
-            scores_for_choice = scores
-
-        use_sorted = vllm_is_batch_invariant()
-
-        # First select top topk_group experts (since each expert is its own group)
-        group_topk_values, group_topk_indices = torch.topk(
-            scores_for_choice, k=topk_group, dim=-1, sorted=use_sorted
-        )
-
-        # Then select final top-k from those selected groups
-        final_topk = min(topk, topk_group)
-        topk_indices = group_topk_indices[:, :final_topk]
-        topk_weights = scores.gather(1, topk_indices)
-
-        if renormalize:
-            topk_weights = topk_weights / topk_weights.sum(dim=-1, keepdim=True)
-
-        if routed_scaling_factor != 1.0:
-            topk_weights = topk_weights * routed_scaling_factor
-
-        return topk_weights.to(torch.float32), topk_indices.to(torch.int32)
 
     num_token = scores.size(0)
     if e_score_correction_bias is not None:

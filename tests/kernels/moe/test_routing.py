@@ -6,6 +6,10 @@ import pytest
 import torch
 
 from vllm.distributed.eplb.eplb_state import EplbLayerState
+from vllm.model_executor.layers.fused_moe.router.fused_topk_bias_router import (
+    fused_topk_bias,
+)
+from vllm.model_executor.layers.fused_moe.router.fused_topk_router import fused_topk
 from vllm.model_executor.layers.fused_moe.router.router_factory import (
     create_fused_moe_router,
 )
@@ -160,6 +164,7 @@ def baseline_fused_topk_bias(
 
 
 def baseline_grouped_topk(
+    hidden_states: torch.Tensor,
     router_logits: torch.Tensor,
     top_k: int,
     num_expert_group: int,
@@ -181,10 +186,29 @@ def baseline_grouped_topk(
     6. Apply scaling factor
     7. Optionally renormalize
     """
-    num_token = router_logits.shape[0]
+    num_token, num_experts = router_logits.shape
+
+    if num_expert_group == num_experts:
+        if e_score_correction_bias is not None:
+            return fused_topk_bias(
+                hidden_states=hidden_states,
+                gating_output=router_logits,
+                e_score_correction_bias=e_score_correction_bias,
+                topk=top_k,
+                renormalize=renormalize,
+                scoring_func=scoring_func,
+            )
+        else:
+            topk_weights, topk_ids, _ = fused_topk(
+                hidden_states=hidden_states,
+                gating_output=router_logits,
+                topk=top_k,
+                renormalize=renormalize,
+                scoring_func=scoring_func,
+            )
+            return topk_weights, topk_ids
 
     # Apply scoring function
-    num_experts = router_logits.shape[-1]
     if scoring_func == "softmax":
         scores = torch.softmax(router_logits, dim=-1, dtype=torch.float32)
     elif scoring_func == "sigmoid":
@@ -417,6 +441,7 @@ def test_grouped_topk(
 
     # Compute baseline
     baseline_weights, baseline_ids = baseline_grouped_topk(
+        hidden_states,
         router_logits,
         top_k,
         num_expert_group,
