@@ -198,8 +198,14 @@ def parse_args():
     # Backward compatibility: If --port is set, use it for metrics_port
     # This handles the case where users were using --port for metrics before
     # FrontendArgs was introduced.
-    port_explicit = any(arg in sys.argv for arg in ["--port", "--port="])
-    if port_explicit and hasattr(args, "port"):
+    # Only apply backward compatibility if --metrics-port was not explicitly provided.
+    metrics_port_explicit = any(
+        arg == "--metrics-port" or arg.startswith("--metrics-port=") for arg in sys.argv
+    )
+    port_explicit = any(
+        arg == "--port" or arg.startswith("--port=") for arg in sys.argv
+    )
+    if port_explicit and hasattr(args, "port") and not metrics_port_explicit:
         args.metrics_port = args.port
         logger.warning_once(
             "Using --port for metrics is deprecated. "
@@ -209,8 +215,12 @@ def parse_args():
     # Backward compatibility: If --url is set, use it for metrics_url
     # This handles the case where users were using --url for metrics before
     # FrontendArgs was introduced.
-    url_explicit = any(arg in sys.argv for arg in ["--url", "--url="])
-    if url_explicit:
+    # Only apply backward compatibility if --metrics-url was not explicitly provided.
+    metrics_url_explicit = any(
+        arg == "--metrics-url" or arg.startswith("--metrics-url=") for arg in sys.argv
+    )
+    url_explicit = any(arg == "--url" or arg.startswith("--url=") for arg in sys.argv)
+    if url_explicit and not metrics_url_explicit:
         args.metrics_url = args.url
         logger.warning_once(
             "Using --url for metrics is deprecated. Please use --metrics-url instead."
