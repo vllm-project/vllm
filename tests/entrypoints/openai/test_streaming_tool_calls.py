@@ -39,7 +39,9 @@ def server():
         yield remote_server
 
 
-@pytest.mark.parametrize("stream_interval", [1, 8, 9, 10, 18, 19, 20])
+@pytest.mark.parametrize(
+    "stream_interval", [1, 8, 9, 10, 18, 19, 20, 100, 1000, 1_000_000]
+)
 def test_streaming_tool_calls_with_different_intervals(stream_interval: int):
     """
     Test that streaming tool calls work correctly with different stream intervals.

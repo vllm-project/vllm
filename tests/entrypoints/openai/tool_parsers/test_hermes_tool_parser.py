@@ -406,7 +406,9 @@ def test_hermes_parser_streaming_different_intervals_tool_1(
 "San Francisco, California, United States", "unit": "celsius"}}\
 </tool_call>'
     tokens = qwen_tokenizer.encode(text)
-    for interval in range(1, 21):
+    interval_sizes = list(range(1, 21))
+    interval_sizes.extend([100, 1000, 10_000, 100_000, 1_000_000, 10_000_000])
+    for interval in interval_sizes:
         previous_text = ""
         delta_messages = []
 
@@ -490,7 +492,9 @@ def test_hermes_parser_streaming_different_intervals_tool_2(
     ]
     assert tokens == expected_tokens
 
-    for interval in range(1, 21):
+    interval_sizes = list(range(1, 21))
+    interval_sizes.extend([100, 1000, 10_000, 100_000, 1_000_000, 10_000_000])
+    for interval in interval_sizes:
         # The first token is processed separately to simulate server behavior
         previous_text = ""
         delta_messages = []
@@ -558,7 +562,9 @@ def test_hermes_parser_streaming_different_intervals_bug_30229(
 </tool_call>"""
     tokens = qwen_tokenizer.encode(text)
 
-    for interval in range(1, 21):
+    interval_sizes = list(range(1, 21))
+    interval_sizes.extend([100, 1000, 10_000, 100_000, 1_000_000, 10_000_000])
+    for interval in interval_sizes:
         # The first token is processed separately to simulate server behavior
         previous_text = ""
         delta_messages = []

@@ -224,7 +224,31 @@ class Hermes2ProToolParser(ToolParser):
                 logger.debug("Generating text content! skipping tool parsing.")
                 return DeltaMessage(content=delta_text)
 
-            if self.tool_call_end_token in delta_text:
+            # multiple tool calls in different delta_text are supported, but
+            # multiple tool calls in one delta_text cases are not supported yet.
+            # only handle special case where one delta_text has complete tool call
+            # i.e. <start>tool call content<end>
+            if (
+                self.tool_call_start_token in delta_text
+                and self.tool_call_end_token in delta_text
+                and delta_text.index(self.tool_call_start_token)
+                < delta_text.index(self.tool_call_end_token)
+            ):
+                logger.debug(
+                    "both tool_call_start_token and tool_call_end_token in delta_text"
+                )
+
+                tool_call_portion = (
+                    delta_text.split(self.tool_call_start_token)[-1]
+                    .split(self.tool_call_end_token)[0]
+                    .rstrip()
+                )
+                self.current_tool_id += 1
+                self.current_tool_name_sent = False
+                self.streamed_args_for_tool.append("")
+                self.prev_tool_call_arr.append({})
+
+            elif self.tool_call_end_token in delta_text:
                 logger.debug("tool_call_end_token in delta_text")
                 full_text = current_text + delta_text
                 tool_call_portion = (
