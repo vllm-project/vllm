@@ -3,7 +3,7 @@
 
 from __future__ import annotations
 
-from vllm import EngineArgs, LLM
+from vllm import LLM, EngineArgs
 from vllm.config import ProfilerConfig
 from vllm.utils.argparse_utils import FlexibleArgumentParser
 
