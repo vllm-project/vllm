@@ -424,9 +424,9 @@ def test_metrics_exist_run_batch():
                 "--model",
                 "intfloat/multilingual-e5-small",
                 "--enable-metrics",
-                "--url",
+                "--metrics-url",
                 base_url,
-                "--port",
+                "--metrics-port",
                 port,
             ],
         )

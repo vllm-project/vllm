@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import asyncio
+import sys
 import tempfile
 from argparse import Namespace
 from collections.abc import Awaitable, Callable
@@ -14,31 +15,31 @@ import torch
 from prometheus_client import start_http_server
 from pydantic import TypeAdapter, field_validator
 from pydantic_core.core_schema import ValidationInfo
+from starlette.datastructures import State
 from tqdm import tqdm
 
-from vllm.engine.arg_utils import AsyncEngineArgs, optional_type
+from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.protocol import EngineClient
-from vllm.entrypoints.logger import RequestLogger
+from vllm.entrypoints.openai.api_server import init_app_state
 from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionRequest,
     ChatCompletionResponse,
 )
-from vllm.entrypoints.openai.chat_completion.serving import OpenAIServingChat
+from vllm.entrypoints.openai.cli_args import FrontendArgs
 from vllm.entrypoints.openai.engine.protocol import (
     ErrorResponse,
     OpenAIBaseModel,
 )
-from vllm.entrypoints.openai.models.protocol import BaseModelPath
-from vllm.entrypoints.openai.models.serving import OpenAIServingModels
-from vllm.entrypoints.pooling.embed.protocol import EmbeddingRequest, EmbeddingResponse
-from vllm.entrypoints.pooling.embed.serving import OpenAIServingEmbedding
+from vllm.entrypoints.pooling.embed.protocol import (
+    EmbeddingRequest,
+    EmbeddingResponse,
+)
 from vllm.entrypoints.pooling.score.protocol import (
     RerankRequest,
     RerankResponse,
     ScoreRequest,
     ScoreResponse,
 )
-from vllm.entrypoints.pooling.score.serving import ServingScores
 from vllm.logger import init_logger
 from vllm.reasoning import ReasoningParserManager
 from vllm.utils import random_uuid
@@ -127,6 +128,9 @@ class BatchRequestOutput(OpenAIBaseModel):
 
 
 def make_arg_parser(parser: FlexibleArgumentParser):
+    parser = AsyncEngineArgs.add_cli_args(parser)
+    parser = FrontendArgs.add_cli_args(parser)
+
     parser.add_argument(
         "-i",
         "--input-file",
@@ -153,52 +157,35 @@ def make_arg_parser(parser: FlexibleArgumentParser):
         "to the output URL.",
     )
     parser.add_argument(
-        "--response-role",
-        type=optional_type(str),
-        default="assistant",
-        help="The role name to return if `request.add_generation_prompt=True`.",
-    )
-
-    parser = AsyncEngineArgs.add_cli_args(parser)
-
-    parser.add_argument(
-        "--max-log-len",
-        type=int,
-        default=None,
-        help="Max number of prompt characters or prompt "
-        "ID numbers being printed in log."
-        "\n\nDefault: Unlimited",
-    )
-
-    parser.add_argument(
-        "--enable-metrics", action="store_true", help="Enable Prometheus metrics"
+        "--enable-metrics",
+        action="store_true",
+        help="Enable Prometheus metrics",
     )
     parser.add_argument(
-        "--url",
+        "--metrics-url",
         type=str,
         default="0.0.0.0",
         help="URL to the Prometheus metrics server "
         "(only needed if enable-metrics is set).",
     )
+    # Note: Since FrontendArgs also adds --port, we delete --port here instead of
+    # deprecating it (avoiding conflicting option string).
+    # For metrics, use --metrics-port instead.
+    # We handle backward compatibility in parse_args().
     parser.add_argument(
-        "--port",
+        "--metrics-port",
         type=int,
         default=8000,
         help="Port number for the Prometheus metrics server "
         "(only needed if enable-metrics is set).",
     )
     parser.add_argument(
-        "--enable-prompt-tokens-details",
-        action="store_true",
-        default=False,
-        help="If set to True, enable prompt_tokens_details in usage.",
-    )
-    parser.add_argument(
-        "--enable-force-include-usage",
-        action="store_true",
-        default=False,
-        help="If set to True, include usage on every request "
-        "(even when stream_options is not specified)",
+        "--url",
+        type=str,
+        default="0.0.0.0",
+        help="[DEPRECATED] URL to the Prometheus metrics server "
+        "(only needed if enable-metrics is set). Use --metrics-url instead.",
+        deprecated=True,
     )
 
     return parser
@@ -206,7 +193,29 @@ def make_arg_parser(parser: FlexibleArgumentParser):
 
 def parse_args():
     parser = FlexibleArgumentParser(description="vLLM OpenAI-Compatible batch runner.")
-    return make_arg_parser(parser).parse_args()
+    args = make_arg_parser(parser).parse_args()
+
+    # Backward compatibility: If --port is set, use it for metrics_port
+    # This handles the case where users were using --port for metrics before
+    # FrontendArgs was introduced.
+    port_explicit = any(arg in sys.argv for arg in ["--port", "--port="])
+    if port_explicit and hasattr(args, "port"):
+        args.metrics_port = args.port
+        logger.warning_once(
+            "Using --port for metrics is deprecated. "
+            "Please use --metrics-port instead. "
+        )
+
+    # Backward compatibility: If --url is set, use it for metrics_url
+    # This handles the case where users were using --url for metrics before
+    # FrontendArgs was introduced.
+    url_explicit = any(arg in sys.argv for arg in ["--url", "--url="])
+    if url_explicit:
+        args.metrics_url = args.url
+        logger.warning_once(
+            "Using --url for metrics is deprecated. Please use --metrics-url instead."
+        )
+    return args
 
 
 # explicitly use pure text format, with a newline at the end
@@ -435,77 +444,18 @@ async def run_batch(
     engine_client: EngineClient,
     args: Namespace,
 ) -> None:
-    if args.served_model_name is not None:
-        served_model_names = args.served_model_name
-    else:
-        served_model_names = [args.model]
+    # Create a state object to hold serving objects
+    state = State()
 
-    if args.enable_log_requests:
-        request_logger = RequestLogger(max_log_len=args.max_log_len)
-    else:
-        request_logger = None
+    # Initialize all serving objects using init_app_state
+    # This provides full functionality including chat template processing,
+    # LoRA support, tool servers, etc.
+    await init_app_state(engine_client, state, args)
 
-    base_model_paths = [
-        BaseModelPath(name=name, model_path=args.model) for name in served_model_names
-    ]
-
-    model_config = engine_client.model_config
-    supported_tasks = await engine_client.get_supported_tasks()
-    logger.info("Supported tasks: %s", supported_tasks)
-
-    # Create the openai serving objects.
-    openai_serving_models = OpenAIServingModels(
-        engine_client=engine_client,
-        base_model_paths=base_model_paths,
-        lora_modules=None,
-    )
-
-    openai_serving_chat = (
-        OpenAIServingChat(
-            engine_client,
-            openai_serving_models,
-            args.response_role,
-            request_logger=request_logger,
-            chat_template=None,
-            chat_template_content_format="auto",
-            reasoning_parser=args.structured_outputs_config.reasoning_parser,
-            enable_prompt_tokens_details=args.enable_prompt_tokens_details,
-            enable_force_include_usage=args.enable_force_include_usage,
-            default_chat_template_kwargs=getattr(
-                args, "default_chat_template_kwargs", None
-            ),
-        )
-        if "generate" in supported_tasks
-        else None
-    )
-
-    openai_serving_embedding = (
-        OpenAIServingEmbedding(
-            engine_client,
-            openai_serving_models,
-            request_logger=request_logger,
-            chat_template=None,
-            chat_template_content_format="auto",
-        )
-        if "embed" in supported_tasks
-        else None
-    )
-
-    enable_serving_reranking = (
-        "classify" in supported_tasks
-        and getattr(model_config.hf_config, "num_labels", 0) == 1
-    )
-
-    openai_serving_scores = (
-        ServingScores(
-            engine_client,
-            openai_serving_models,
-            request_logger=request_logger,
-            score_template=None,
-        )
-        if ("embed" in supported_tasks or enable_serving_reranking)
-        else None
-    )
+    # Get serving objects from state
+    openai_serving_chat = state.openai_serving_chat
+    openai_serving_embedding = state.openai_serving_embedding
+    openai_serving_scores = state.openai_serving_scores
 
     tracker = BatchProgressTracker()
     logger.info("Reading batch from %s...", args.input_file)
@@ -631,7 +581,7 @@ if __name__ == "__main__":
     # to publish metrics at the /metrics endpoint.
     if args.enable_metrics:
         logger.info("Prometheus metrics enabled")
-        start_http_server(port=args.port, addr=args.url)
+        start_http_server(port=args.metrics_port, addr=args.metrics_url)
     else:
         logger.info("Prometheus metrics disabled")
 
