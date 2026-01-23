@@ -241,7 +241,7 @@ class ImagePatcher:
         window_size = self.determine_window_size(
             max(img_height, img_width), min(img_height, img_width)
         )
-        if window_size == 0:
+        if window_size == 0 or not envs.VLLM_ENABLE_STEP_VL_IMG_PATCH:
             return 0, 0
         else:
             img_width, img_height = self.get_image_size_for_crop(
