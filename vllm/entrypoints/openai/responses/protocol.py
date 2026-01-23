@@ -266,9 +266,9 @@ class ResponsesRequest(OpenAIBaseModel):
         # Validate max_tokens before using it
         if max_tokens is not None and max_tokens > model_config.max_model_len:
             raise VLLMValidationError(
-                f"'max_tokens' ({max_tokens}) cannot be greater than the "
+                f"'max_output_tokens' ({max_tokens}) cannot be greater than the "
                 f"model's maximum context length ({model_config.max_model_len}).",
-                parameter="max_tokens",
+                parameter="max_output_tokens",
                 value=max_tokens,
             )
 

@@ -163,9 +163,6 @@ class OpenAIServingCompletion(OpenAIServing):
             for i, engine_prompt in enumerate(engine_prompts):
                 prompt_text, _, _ = get_prompt_components(engine_prompt)
 
-                if self.default_sampling_params is None:
-                    self.default_sampling_params = {}
-
                 max_tokens = get_max_tokens(
                     max_model_len=self.max_model_len,
                     request=request,

@@ -34,11 +34,13 @@ if TYPE_CHECKING:
         StreamOptions,
     )
     from vllm.entrypoints.openai.models.protocol import LoRAModulePath
+    from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
 else:
     ChatCompletionRequest = object
     CompletionRequest = object
     StreamOptions = object
     LoRAModulePath = object
+    ResponsesRequest = object
 
 
 logger = init_logger(__name__)
@@ -186,14 +188,20 @@ def cli_env_setup():
 
 def get_max_tokens(
     max_model_len: int,
-    request: "ChatCompletionRequest | CompletionRequest",
+    request: "CompletionRequest | ChatCompletionRequest | ResponsesRequest",
     prompt: TokensPrompt | EmbedsPrompt,
     default_sampling_params: dict,
 ) -> int:
-    max_tokens = getattr(request, "max_completion_tokens", None) or request.max_tokens
+    if isinstance(request, CompletionRequest):
+        max_tokens = request.max_tokens
+    elif isinstance(request, ChatCompletionRequest):
+        max_tokens = request.max_completion_tokens or request.max_tokens
+    else:
+        max_tokens = request.max_output_tokens
+
     input_length = length_from_prompt_token_ids_or_embeds(
-        prompt.get("prompt_token_ids"),
-        prompt.get("prompt_embeds"),
+        prompt.get("prompt_token_ids"),  # type: ignore[arg-type]
+        prompt.get("prompt_embeds"),  # type: ignore[arg-type]
     )
 
     default_max_tokens = max_model_len - input_length

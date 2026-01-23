@@ -94,7 +94,7 @@ from vllm.entrypoints.serve.tokenize.protocol import (
     TokenizeCompletionRequest,
     TokenizeResponse,
 )
-from vllm.entrypoints.utils import sanitize_message
+from vllm.entrypoints.utils import get_max_tokens, sanitize_message
 from vllm.exceptions import VLLMValidationError
 from vllm.inputs.data import EmbedsPrompt, PromptType, TokensPrompt
 from vllm.inputs.parse import (
@@ -1129,13 +1129,13 @@ class OpenAIServing:
     async def _generate_with_builtin_tools(
         self,
         request_id: str,
-        engine_prompt: TokensPrompt,
+        engine_prompt: TokensPrompt | EmbedsPrompt,
         sampling_params: SamplingParams,
         tok_params: TokenizeParams,
         context: ConversationContext,
         lora_request: LoRARequest | None = None,
         priority: int = 0,
-        **kwargs,
+        trace_headers: Mapping[str, str] | None = None,
     ):
         prompt_text, _, _ = get_prompt_components(engine_prompt)
 
@@ -1144,13 +1144,13 @@ class OpenAIServing:
         while True:
             # Ensure that each sub-request has a unique request id.
             sub_request_id = f"{request_id}_{sub_request}"
+
             self._log_inputs(
                 sub_request_id,
                 engine_prompt,
                 params=sampling_params,
                 lora_request=lora_request,
             )
-            trace_headers = kwargs.get("trace_headers")
 
             tokenization_kwargs = tok_params.get_encode_kwargs()
             engine_request = self.input_processor.process_inputs(
@@ -1168,10 +1168,10 @@ class OpenAIServing:
                 sampling_params,
                 sub_request_id,
                 lora_request=lora_request,
+                trace_headers=trace_headers,
                 priority=priority,
                 prompt_text=prompt_text,
                 tokenization_kwargs=tokenization_kwargs,
-                **kwargs,
             )
 
             async for res in generator:
@@ -1208,9 +1208,13 @@ class OpenAIServing:
                 prompt_text, _, _ = get_prompt_components(engine_prompt)
 
             # Update the sampling params.
-            sampling_params.max_tokens = self.max_model_len - len(
-                engine_prompt["prompt_token_ids"]
+            sampling_params.max_tokens = get_max_tokens(
+                self.max_model_len,
+                context.request,
+                engine_prompt,
+                self.default_sampling_params,  # type: ignore
             )
+
             # OPTIMIZATION
             priority = orig_priority - 1
             sub_request += 1

@@ -369,9 +369,6 @@ class OpenAIServingChat(OpenAIServing):
                     request_id if len(engine_prompts) == 1 else f"{request_id}_{i}"
                 )
 
-                if self.default_sampling_params is None:
-                    self.default_sampling_params = {}
-
                 max_tokens = get_max_tokens(
                     max_model_len=self.max_model_len,
                     request=request,
