@@ -4,12 +4,13 @@ import itertools
 from typing import Any
 
 import torch
+import triton
+import triton.language as tl
 
 from vllm.config import CacheConfig
 from vllm.model_executor.layers.mamba.mamba_utils import (
     MambaStateCopyFunc,
 )
-from vllm.triton_utils import tl, triton
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig, MambaSpec
 from vllm.v1.worker.gpu_input_batch import CachedRequestState
