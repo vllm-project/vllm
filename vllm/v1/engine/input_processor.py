@@ -15,7 +15,6 @@ from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
 from vllm.multimodal.inputs import MultiModalFeatureSpec, MultiModalUUIDDict
-from vllm.multimodal.parse import MultiModalDataParser
 from vllm.multimodal.processing.context import set_request_id
 from vllm.multimodal.utils import argsort_mm_positions
 from vllm.pooling_params import PoolingParams
@@ -188,6 +187,41 @@ class InputProcessor:
         self._validate_sampling_params(params)
         self._validate_supported_sampling_params(params)
 
+    def _iter_mm_items(self, items: object):
+        import torch
+
+        if items is None:
+            return
+
+        if isinstance(items, dict):  # Embedding inputs
+            if items:
+                k_ref = next(iter(items))
+
+                yield from (
+                    {k: items[k][i] for k in items}
+                    for i in range(self._get_num_mm_items(items[k_ref]))
+                )
+
+            return
+
+        if isinstance(items, list):
+            yield from items
+            return
+
+        if isinstance(items, torch.Tensor):
+            # To keep backwards compatibility for single item embedding input
+            if getattr(items, "_is_single_item", False):
+                yield items[0]
+            else:
+                yield from items
+
+            return
+
+        raise NotImplementedError(type(items))
+
+    def _get_num_mm_items(self, items: object) -> int:
+        return len(tuple(self._iter_mm_items(items)))
+
     def _validate_multi_modal_uuids(self, prompt: PromptType) -> None:
         """
         Validate that user-provided multi_modal_uuids align with
@@ -200,40 +234,42 @@ class InputProcessor:
             if not isinstance(single_prompt, dict):
                 return
 
-            mm_data = single_prompt.get("multi_modal_data")
-            mm_uuids = single_prompt.get("multi_modal_uuids")
-            if not mm_data or not mm_uuids:
+            mm_data = single_prompt.get("multi_modal_data") or {}
+            mm_uuids = single_prompt.get("multi_modal_uuids") or {}
+            if not mm_data and not mm_uuids:
                 return
 
-            import torch
-
-            def _get_len(items: object):
-                if isinstance(items, dict):  # Embedding inputs
-                    return _get_len(next(iter(items.values()))) if items else 1
-
-                if isinstance(items, list):
-                    return len(items)
-                if isinstance(items, torch.Tensor):
-                    # To keep backwards compatibility for single item embedding input
-                    return 1 if getattr(items, "_is_single_item", False) else len(items)
-
-                return 1
-
             for modality, items in mm_data.items():
-                if modality in mm_uuids:
-                    data_len = _get_len(items)
-                    uuid_len = _get_len(mm_uuids[modality])
-                    if uuid_len != data_len:
+                data_items = list(self._iter_mm_items(items))
+                uuid_items = list(self._iter_mm_items(mm_uuids.get(modality)))
+
+                if data_items:
+                    if uuid_items and len(data_items) != len(uuid_items):
                         raise ValueError(
-                            f"multi_modal_uuids for modality {modality!r} "
-                            "must have same length as data: got "
-                            f"{uuid_len} uuids vs {data_len} items."
+                            f"If given, multi_modal_uuids[{modality}] must have "
+                            f"same length as multi_modal_data[{modality}], but "
+                            f"got {len(uuid_items)} vs {len(data_items)}."
                         )
+
+                    for i, item in enumerate(data_items):
+                        if item is None:
+                            if not uuid_items:
+                                raise ValueError(
+                                    f"multi_modal_data[{modality}][{i}] is None but "
+                                    f"multi_modal_uuids[{modality}] is missing."
+                                )
+
+                            if uuid_items[i] is None:
+                                raise ValueError(
+                                    f"multi_modal_data[{modality}][{i}] is None but "
+                                    f"multi_modal_uuids[{modality}][{i}] is missing."
+                                )
                 else:
-                    raise ValueError(
-                        f"multi_modal_uuids for modality {modality!r} must "
-                        "be provided if multi_modal_data is provided."
-                    )
+                    if not uuid_items:
+                        raise ValueError(
+                            f"multi_modal_data[{modality}] is None but "
+                            f"multi_modal_uuids[{modality}] is missing."
+                        )
 
         # Handle explicit encoder/decoder prompts or singleton prompt
         if isinstance(prompt, dict) and "encoder_prompt" in prompt:
@@ -406,16 +442,13 @@ class InputProcessor:
         if not mm_data:
             return None
 
-        mm_uuids: dict[str, list[str | None] | str] = {}
-        for modality, data in mm_data.items():
-            # Hash each item for embedding inputs.
-            n = (
-                len(data)
-                if isinstance(data, list) or MultiModalDataParser.is_embeddings(data)
-                else 1
-            )
-            mm_uuids[modality] = [f"{request_id}-{modality}-{i}" for i in range(n)]
-        return mm_uuids
+        return {
+            modality: [
+                f"{request_id}-{modality}-{i}"
+                for i in range(self._get_num_mm_items(data))
+            ]
+            for modality, data in mm_data.items()
+        }
 
     def _get_mm_identifier(
         self,
