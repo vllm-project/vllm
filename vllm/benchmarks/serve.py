@@ -807,6 +807,16 @@ async def benchmark(
             request.multi_modal_data,
             request.request_id,
         )
+
+        req_extra_body = extra_body
+        extra_from_req = getattr(request, "extra_body", None)
+        if extra_from_req:
+            if not isinstance(extra_from_req, dict):
+                raise TypeError(
+                    "SampleRequest.extra_body must be a dict when provided, got: "
+                    f"{type(extra_from_req).__name__}"
+                )
+            req_extra_body = {**extra_body, **extra_from_req}
         req_model_id, req_model_name = model_id, model_name
         if lora_modules:
             req_lora_module = next(lora_modules)
@@ -823,7 +833,7 @@ async def benchmark(
             multi_modal_content=mm_content,
             ignore_eos=ignore_eos,
             extra_headers=extra_headers,
-            extra_body=extra_body,
+            extra_body=req_extra_body,
             request_id=request_id,
         )
         tasks.append(

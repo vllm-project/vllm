@@ -224,6 +224,10 @@ def main() -> None:
                     "num_prefixes": args.num_prefixes,
                     "request_id": str(req_id),
                     "prefix_id": prefix_id,
+                    "kv_transfer_params": {
+                        "shared_prefix_id": int(prefix_id),
+                        "shared_prefix_len": int(args.prefix_len),
+                    },
                     "prompt_token_ids": prompt_token_ids,
                     "suffix_token_ids": suffix_token_ids,
                 }

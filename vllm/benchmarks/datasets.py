@@ -75,12 +75,13 @@ class SampleRequest:
     Represents a single inference request for benchmarking.
     """
 
-    prompt: str | list[str]
+    prompt: str | list[str] | list[int] | list[list[int]]
     prompt_len: int
     expected_output_len: int
     multi_modal_data: MultiModalDataDict | dict | list[dict] | None = None
     lora_request: LoRARequest | None = None
     request_id: str | None = None
+    extra_body: dict[str, Any] | None = None
 
 
 # -----------------------------------------------------------------------------
@@ -1987,9 +1988,10 @@ class CustomDataset(BenchmarkDataset):
         if self.dataset_path.endswith(".jsonl"):
             jsonl_data = pd.read_json(path_or_buf=self.dataset_path, lines=True)
 
-            # check if the JSONL file has a 'prompt' column
-            if "prompt" not in jsonl_data.columns:
-                raise ValueError("JSONL file must contain a 'prompt' column.")
+            if "prompt" not in jsonl_data.columns and "prompt_token_ids" not in jsonl_data.columns:
+                raise ValueError(
+                    "JSONL file must contain either a 'prompt' column or a 'prompt_token_ids' column."
+                )
 
             # Convert each row to a dictionary and append to self.data
             # This will convert the DataFrame to a list of dictionaries
@@ -2033,7 +2035,13 @@ class CustomDataset(BenchmarkDataset):
         for i, item in enumerate(self.data):
             if len(sampled_requests) >= num_requests:
                 break
-            prompt = item["prompt"]
+            prompt = item.get("prompt")
+            prompt_token_ids = item.get("prompt_token_ids")
+
+            if prompt is None and prompt_token_ids is None:
+                raise ValueError(
+                    "Custom dataset JSONL must contain either 'prompt' or 'prompt_token_ids'."
+                )
 
             new_output_len = output_len
             if output_len is None or output_len == -1:
@@ -2052,21 +2060,60 @@ class CustomDataset(BenchmarkDataset):
                         f"'{item['output_tokens']}'. Must be an integer."
                     ) from e
 
-            # apply template
-            if not skip_chat_template:
-                prompt = tokenizer.apply_chat_template(
-                    [{"role": "user", "content": prompt}],
-                    add_generation_prompt=True,
-                    tokenize=False,
-                )
+            prompt_value: str | list[int]
+            if prompt_token_ids is not None:
+                if not isinstance(prompt_token_ids, list) or not all(
+                    isinstance(x, int) for x in prompt_token_ids
+                ):
+                    raise ValueError(
+                        "'prompt_token_ids' must be a list[int] in custom dataset."
+                    )
+                prompt_value = prompt_token_ids
+                prompt_len = len(prompt_token_ids)
+            else:
+                assert isinstance(prompt, str)
+                # apply template
+                if not skip_chat_template:
+                    prompt = tokenizer.apply_chat_template(
+                        [{"role": "user", "content": prompt}],
+                        add_generation_prompt=True,
+                        tokenize=False,
+                    )
+                prompt_value = prompt
+                prompt_len = len(tokenizer(prompt).input_ids)
 
-            prompt_len = len(tokenizer(prompt).input_ids)
+            extra_body = item.get("extra_body")
+            if extra_body is None:
+                kv_params = item.get("kv_transfer_params")
+                if kv_params is None:
+                    shared_prefix_id = item.get("shared_prefix_id", item.get("prefix_id"))
+                    shared_prefix_len = item.get("shared_prefix_len", item.get("prefix_len"))
+                    if shared_prefix_id is not None and shared_prefix_len is not None:
+                        try:
+                            kv_params = {
+                                "shared_prefix_id": int(shared_prefix_id),
+                                "shared_prefix_len": int(shared_prefix_len),
+                            }
+                        except (TypeError, ValueError):
+                            kv_params = None
+
+                if kv_params is not None:
+                    if not isinstance(kv_params, dict):
+                        raise ValueError("'kv_transfer_params' must be a dict if provided.")
+                    extra_body = {"kv_transfer_params": kv_params}
+            elif not isinstance(extra_body, dict):
+                raise ValueError("'extra_body' must be a dict if provided.")
+
+            req_id = item.get("request_id")
+            if req_id is None:
+                req_id = request_id_prefix + str(i)
             sampled_requests.append(
                 SampleRequest(
-                    prompt=prompt,
+                    prompt=prompt_value,
                     prompt_len=prompt_len,
                     expected_output_len=new_output_len,
-                    request_id=request_id_prefix + str(i),
+                    request_id=str(req_id),
+                    extra_body=extra_body,
                 )
             )
         self.maybe_oversample_requests(
