@@ -61,6 +61,7 @@ class OpenAIServingModels:
 
         self.input_processor = self.engine_client.input_processor
         self.io_processor = self.engine_client.io_processor
+        self.renderer = self.engine_client.renderer
         self.model_config = self.engine_client.model_config
         self.max_model_len = self.model_config.max_model_len
 
@@ -132,9 +133,16 @@ class OpenAIServingModels:
                 return error_check_ret
 
             lora_path = request.lora_path
-            unique_id = self.lora_id_counter.inc(1)
+            lora_int_id = (
+                self.lora_requests[lora_name].lora_int_id
+                if lora_name in self.lora_requests
+                else self.lora_id_counter.inc(1)
+            )
             lora_request = LoRARequest(
-                lora_name=lora_name, lora_int_id=unique_id, lora_path=lora_path
+                lora_name=lora_name,
+                lora_int_id=lora_int_id,
+                lora_path=lora_path,
+                load_inplace=request.load_inplace,
             )
             if base_model_name is not None and self.is_base_model(base_model_name):
                 lora_request.base_model_name = base_model_name
@@ -187,11 +195,13 @@ class OpenAIServingModels:
                 status_code=HTTPStatus.BAD_REQUEST,
             )
 
+        # If not loading inplace
         # Check if the lora adapter with the given name already exists
-        if request.lora_name in self.lora_requests:
+        if not request.load_inplace and request.lora_name in self.lora_requests:
             return create_error_response(
                 message=f"The lora adapter '{request.lora_name}' has already been "
-                "loaded.",
+                "loaded. If you want to load the adapter in place, set 'load_inplace'"
+                " to True.",
                 err_type="InvalidUserInput",
                 status_code=HTTPStatus.BAD_REQUEST,
             )

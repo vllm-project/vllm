@@ -661,7 +661,7 @@ class NemotronHModel(nn.Module):
         params_dict = dict(self.named_parameters())
         loaded_params: set[str] = set()
         for name, loaded_weight in weights:
-            if "scale" in name:
+            if "scale" in name or "zero_point" in name:
                 # Remapping the name of FP8 kv-scale.
                 name = maybe_remap_kv_scale_name(name, params_dict)
                 if name is None:
@@ -747,6 +747,9 @@ class NemotronHForCausalLM(
     MixtureOfExperts,
     SupportsMambaPrefixCaching,
 ):
+    # Relevant only if self.has_moe is True
+    is_non_gated_moe: bool = True
+
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_prefix={"backbone": "model"},
         orig_to_new_substr={"A_log": "A", "embeddings": "embed_tokens"},
