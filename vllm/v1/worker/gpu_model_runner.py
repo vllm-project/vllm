@@ -3840,6 +3840,7 @@ class GPUModelRunner(
                         and self.parallel_config.enable_eplb
                     ):
                         spec_config = self.vllm_config.speculative_config
+                        assert hasattr(self.drafter, "model")
                         assert spec_config is not None
                         assert spec_config.draft_model_config is not None
                         logger.info_once(
