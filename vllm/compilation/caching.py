@@ -7,7 +7,7 @@ import os
 import pickle
 from collections.abc import Callable, Sequence
 from pathlib import Path
-from typing import Any, Literal, Protocol
+from typing import Any, Literal
 from unittest.mock import patch
 
 import torch
@@ -20,9 +20,12 @@ from vllm.config.utils import hash_factors
 from vllm.logger import init_logger
 from vllm.utils.hashing import safe_hash
 
+try:
+    from torch._dynamo.aot_compile import SerializableCallable
+except ImportError:
+    SerializableCallable = object
 
-class SerializableCallable(Protocol):
-    def __call__(self, *args: Any, **kwargs: Any) -> Any: ...
+assert isinstance(SerializableCallable, type)
 
 
 logger = init_logger(__name__)
@@ -163,7 +166,7 @@ class StandaloneCompiledArtifacts:
         self.loaded_submodule_store = {}
 
 
-class VllmSerializableFunction(SerializableCallable):
+class VllmSerializableFunction(SerializableCallable):  # type: ignore[misc]
     """
     A wrapper around a compiled function by vllm. It will forward the tensor
     inputs to the compiled function and return the result.

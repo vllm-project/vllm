@@ -185,12 +185,16 @@ class SchedulerConfig:
         excluding anything before input ids/embeddings and after
         the final hidden states.
         """
-        # Only surface scheduler knobs that influence compiled shapes. Legacy
-        # scheduler hashing fed a list of factors (currently just
-        # max_num_batched_tokens) into safe_hash. The compile cache now hashes
-        # the nested factors dict via JSON, so we expose a dict payload to
-        # satisfy the CompileFactors protocol while keeping the factor content
-        # minimal to avoid unnecessary cache key churn.
+        # max_num_batched_tokens need to be included in the hash due
+        # to two reasons:
+        # 1. LoRA creates static buffers based on max_num_batched_tokens.
+        #   The tensor sizes and strides get captured in the torch.compile
+        #   graph explicitly.
+        # 2. Inductor decides whether using 32-bit or 64-bit indexing integer
+        #   based on the data sizes. `max_num_batched_tokens` has an
+        #   impact on that. For more details, please check
+        #   https://github.com/vllm-project/vllm/issues/29585
+
         return {"max_num_batched_tokens": self.max_num_batched_tokens}
 
     @field_validator("scheduler_cls", "async_scheduling", mode="wrap")

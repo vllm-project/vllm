@@ -45,20 +45,6 @@ class AttentionConfig:
     disable_flashinfer_q_quantization: bool = False
     """If set, when using fp8 kv, do not quantize Q to fp8."""
 
-    def compute_hash(self) -> str:
-        """
-        Provide a hash that uniquely identifies all the configs
-        that affect the structure of the computation
-        graph from input ids/embeddings to the final hidden states,
-        excluding anything before input ids/embeddings and after
-        the final hidden states.
-        """
-        from vllm.config.utils import get_hash_factors, hash_factors
-
-        ignored_factors: list[str] = []
-        factors = get_hash_factors(self, ignored_factors)
-        return hash_factors(factors)
-
     def compile_factors(self) -> CompileFactors:
         """
         Provide the factors that affect the compiled computation graph.
