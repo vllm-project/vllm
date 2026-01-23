@@ -238,6 +238,13 @@ class SchedulerOutput:
     # EC Cache Connector metadata
     ec_connector_metadata: ECConnectorMetadata | None = None
 
+    # Monotonically increasing scheduler iteration counter.
+    # Increments once per invocation of Scheduler.schedule().
+    # Starts at 1 for first schedule() call. May advance during idle periods
+    # when the engine ticks the scheduler. Not the same as decode step - this
+    # tracks scheduler invocations, not token generation steps.
+    scheduler_step: int = 0
+
     @classmethod
     def make_empty(cls) -> "SchedulerOutput":
         return cls(

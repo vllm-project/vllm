@@ -187,7 +187,6 @@ cython_debug/
 .vscode/
 
 # Claude
-CLAUDE.md
 .claude/
 
 # Codex

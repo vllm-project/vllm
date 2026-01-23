@@ -73,6 +73,53 @@ def test_get_num_unfinished_requests():
         assert scheduler.get_num_unfinished_requests() == len(requests) - i - 1
 
 
+def test_scheduler_step_counter():
+    """Test that scheduler_step counter increments monotonically.
+
+    Verifies that:
+    1. First schedule() call produces scheduler_step=1
+    2. Second schedule() call produces scheduler_step=2
+    3. Empty schedules (no requests) still increment the counter
+    4. reset_prefix_cache() does not reset the counter
+    """
+    scheduler = create_scheduler()
+
+    # Test first schedule() call with no requests (empty schedule)
+    out1 = scheduler.schedule()
+    assert out1.scheduler_step == 1, "First schedule() should produce step=1"
+
+    # Test second schedule() call with no requests (empty schedule)
+    out2 = scheduler.schedule()
+    assert out2.scheduler_step == 2, "Second schedule() should produce step=2"
+
+    # Add some requests and schedule
+    requests = create_requests(num_requests=2)
+    for request in requests:
+        scheduler.add_request(request)
+
+    out3 = scheduler.schedule()
+    assert out3.scheduler_step == 3, "Third schedule() should produce step=3"
+
+    # Schedule again with same requests
+    out4 = scheduler.schedule()
+    assert out4.scheduler_step == 4, "Fourth schedule() should produce step=4"
+
+    # Reset prefix cache and verify counter continues monotonically
+    scheduler.reset_prefix_cache(reset_running_requests=True)
+
+    out5 = scheduler.schedule()
+    assert out5.scheduler_step == 5, (
+        "After reset_prefix_cache(), counter should continue at step=5"
+    )
+
+    # Schedule a few more times to verify continued monotonicity
+    out6 = scheduler.schedule()
+    assert out6.scheduler_step == 6, "Sixth schedule() should produce step=6"
+
+    out7 = scheduler.schedule()
+    assert out7.scheduler_step == 7, "Seventh schedule() should produce step=7"
+
+
 @pytest.mark.parametrize(
     "enable_prefix_caching, prompt_logprobs",
     [

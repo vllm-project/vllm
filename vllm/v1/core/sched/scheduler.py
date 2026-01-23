@@ -99,6 +99,11 @@ class Scheduler(SchedulerInterface):
         )
         self.prev_step_scheduled_req_ids: set[str] = set()
 
+        # Monotonically increasing scheduler iteration counter.
+        # Increments once per invocation of schedule(), never reset.
+        # Initialized to 0 so first schedule() call produces step=1.
+        self.scheduler_step_counter: int = 0
+
         # Scheduling constraints.
         self.max_num_running_reqs = self.scheduler_config.max_num_seqs
         self.max_num_scheduled_tokens = self.scheduler_config.max_num_batched_tokens
@@ -251,6 +256,12 @@ class Scheduler(SchedulerInterface):
             )
 
     def schedule(self) -> SchedulerOutput:
+        # Increment the scheduler step counter at the start of each schedule call.
+        # This ensures every scheduling iteration increments the counter,
+        # including early returns and empty schedules.
+        self.scheduler_step_counter += 1
+        curr_step = self.scheduler_step_counter
+
         # NOTE(woosuk) on the scheduling algorithm:
         # There's no "decoding phase" nor "prefill phase" in the scheduler.
         # Each request just has the num_computed_tokens and
@@ -782,6 +793,7 @@ class Scheduler(SchedulerInterface):
             # the previous and the current steps.
             finished_req_ids=self.finished_req_ids,
             free_encoder_mm_hashes=self.encoder_cache_manager.get_freed_mm_hashes(),
+            scheduler_step=curr_step,
         )
 
         # NOTE(Kuntai): this function is designed for multiple purposes:
