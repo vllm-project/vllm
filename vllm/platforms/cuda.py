@@ -406,6 +406,13 @@ class CudaPlatformBase(Platform):
         return AttentionBackendEnum.TORCH_SDPA
 
     @classmethod
+    def use_fp8_woq(cls) -> bool:
+        return (
+            not cls.has_device_capability(89)
+            or os.environ.get("VLLM_TEST_FORCE_FP8_MARLIN") == "1"
+        )
+
+    @classmethod
     def get_punica_wrapper(cls) -> str:
         return "vllm.lora.punica_wrapper.punica_gpu.PunicaWrapperGPU"
 

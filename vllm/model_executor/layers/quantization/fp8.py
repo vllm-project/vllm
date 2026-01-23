@@ -7,7 +7,6 @@ import torch
 from torch.nn import Module
 from torch.utils._python_dispatch import TorchDispatchMode
 
-import vllm.envs as envs
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm import _custom_ops as ops
 from vllm._aiter_ops import rocm_aiter_ops
@@ -49,6 +48,9 @@ from vllm.model_executor.layers.quantization.base_config import (
 from vllm.model_executor.layers.quantization.kernels.scaled_mm import (
     init_fp8_linear_kernel,
 )
+from vllm.model_executor.layers.quantization.kernels.wFP8a16 import (
+    init_wfp8a16_kernels,
+)
 from vllm.model_executor.layers.quantization.kv_cache import BaseKVCacheMethod
 from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
     apply_fi_trtllm_fp8_per_tensor_moe,
@@ -67,10 +69,6 @@ from vllm.model_executor.layers.quantization.utils.fp8_utils import (
 )
 from vllm.model_executor.layers.quantization.utils.marlin_utils import (
     get_marlin_input_dtype,
-)
-from vllm.model_executor.layers.quantization.utils.marlin_utils_fp8 import (
-    apply_fp8_marlin_linear,
-    prepare_fp8_layer_for_marlin,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     GroupShape,
@@ -314,15 +312,9 @@ class Fp8LinearMethod(LinearMethodBase):
         # For GPUs that lack FP8 hardware support, we can leverage the Marlin
         # kernel for fast weight-only FP8 quantization
         self.marlin_input_dtype = None
-        self.use_marlin = (
-            not current_platform.has_device_capability(89)
-            or envs.VLLM_TEST_FORCE_FP8_MARLIN
-        )
-        # Disable marlin for rocm
-        if current_platform.is_rocm():
-            self.use_marlin = False
+        self.use_fp8_woq = current_platform.use_fp8_woq()
         if vllm_is_batch_invariant():
-            self.use_marlin = False
+            self.use_fp8_woq = False
 
         self.use_aiter_and_is_supported = rocm_aiter_ops.is_linear_fp8_enabled()
         self.use_deep_gemm = is_deep_gemm_supported()
@@ -331,7 +323,13 @@ class Fp8LinearMethod(LinearMethodBase):
         self.block_quant = self.weight_block_size is not None
         self.act_q_static = self.quant_config.activation_scheme == "static"
 
-        if self.block_quant:
+        if self.use_fp8_woq:
+            self.fp8_linear = init_wfp8a16_kernels(
+                weight_quant_key=kFp8StaticTensorSym,
+                input_dtype=self.marlin_input_dtype,
+                module_name=self.__class__.__name__,
+            )
+        elif self.block_quant:
             assert not self.act_q_static
             assert self.weight_block_size is not None
             self.w8a8_block_fp8_linear = W8A8BlockFp8LinearOp(
@@ -423,12 +421,10 @@ class Fp8LinearMethod(LinearMethodBase):
             layer.register_parameter("input_scale", scale)
 
     def process_weights_after_loading(self, layer: Module) -> None:
-        size_k_first = True
         input_scale = None
         # TODO(rob): refactor block quant into separate class.
         if self.block_quant:
             assert not self.act_q_static
-            size_k_first = False
 
             weight, weight_scale_inv = process_fp8_weight_block_strategy(
                 layer.weight, layer.weight_scale_inv
@@ -447,7 +443,7 @@ class Fp8LinearMethod(LinearMethodBase):
 
             # If using w8a8, torch._scaled_mm needs per tensor, so
             # requantize the logical shards as a single weight.
-            if not self.use_marlin:
+            if not self.use_fp8_woq:
                 weight, weight_scale, input_scale = process_fp8_weight_tensor_strategy(
                     weight,
                     weight_scale,
@@ -468,10 +464,8 @@ class Fp8LinearMethod(LinearMethodBase):
         else:
             layer.input_scale = None
 
-        if self.use_marlin:
-            prepare_fp8_layer_for_marlin(
-                layer, size_k_first, input_dtype=self.marlin_input_dtype
-            )
+        if self.use_fp8_woq:
+            self.kernel.process_weights_after_loading(layer)
             # Activations not quantized for marlin.
             del layer.input_scale
             return
@@ -521,21 +515,16 @@ class Fp8LinearMethod(LinearMethodBase):
                         weight_bf16 = weight_fp8 * weight_scale
                 return torch.nn.functional.linear(x, weight_bf16.t(), bias)
 
-        if self.use_marlin:
+        if self.use_fp8_woq:
             if self.block_quant:
                 weight_scale = layer.weight_scale_inv
             else:
                 weight_scale = layer.weight_scale
 
-            return apply_fp8_marlin_linear(
-                input=x,
-                weight=layer.weight,
-                weight_scale=weight_scale,
-                workspace=layer.workspace,
-                size_n=layer.output_size_per_partition,
-                size_k=layer.input_size_per_partition,
-                input_dtype=self.marlin_input_dtype,
-                bias=bias,
+            return self.kernel.apply_weights(
+                layer,
+                x,
+                bias,
             )
 
         if self.block_quant:
@@ -627,12 +616,11 @@ class Fp8OnlineLinearMethod(Fp8LinearMethod):
         replace_parameter(layer, "weight", weight.data)
         replace_parameter(layer, "weight_scale", weight_scale.data)
 
-        if self.use_marlin:
-            size_k_first = True
-            prepare_fp8_layer_for_marlin(
-                layer, size_k_first, input_dtype=self.marlin_input_dtype
+        if self.use_fp8_woq:
+            # Activations not quantized for woq.
+            self.kernel.process_weights_after_loading(
+                layer, size_k_first=True, input_dtype=self.marlin_input_dtype
             )
-            # Activations not quantized for marlin.
 
 
 class Fp8MoEMethod(FusedMoEMethodBase):
