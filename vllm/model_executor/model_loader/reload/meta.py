@@ -17,7 +17,9 @@ __all__ = [
     "get_numel_loaded",
 ]
 
-SKIP_RESTORE_ATTRS: set[str] = {
+SKIP_MODULES: set[str] = {"HadamardTransform"}
+
+SKIP_TENSORS: set[str] = {
     "_expert_map",
     "expert_mask",
     "expert_global_to_physical",
@@ -52,26 +54,29 @@ def materialize_meta_tensor(meta_tensor: torch.Tensor) -> torch.Tensor:
 
 def restore_layer_on_meta(layer: torch.nn.Module, info: LayerReloadingInfo):
     """Restore a layer to model format with tensors on the meta device"""
-    # print(f"(restore) deleting: {get_layer_tensors(layer).keys()}")
+    if layer.__class__.__name__ in SKIP_MODULES:
+        return
+
     for name in get_layer_tensors(layer):
-        if name not in SKIP_RESTORE_ATTRS:
+        if name not in SKIP_TENSORS:
             delattr(layer, name)
 
     restore_params, restore_buffers = info.restore_metadata
     for name, param in restore_params.items():
-        if name not in SKIP_RESTORE_ATTRS:
+        if name not in SKIP_TENSORS:
             layer.register_parameter(name, param)
     for name, buffer in restore_buffers.items():
-        if name not in SKIP_RESTORE_ATTRS:
+        if name not in SKIP_TENSORS:
             layer.register_buffer(name, buffer)
-
-    # print(f"(restore) restored: {get_layer_tensors(layer).keys()}")
 
 
 def materialize_layer(layer: torch.nn.Module) -> None:
     """Materialize all meta tensors in a layer to actual tensors."""
+    if layer.__class__.__name__ in SKIP_MODULES:
+        return
+
     for name, tensor in get_layer_tensors(layer).items():
-        if name not in SKIP_RESTORE_ATTRS:
+        if name not in SKIP_TENSORS:
             setattr(layer, name, materialize_meta_tensor(tensor))
 
 
