@@ -1269,16 +1269,17 @@ class LLM:
 
     def _embedding_score(
         self,
-        text_1: list[str | TextPrompt | TokensPrompt | EmbedsPrompt],
-        text_2: list[str | TextPrompt | TokensPrompt | EmbedsPrompt],
-        use_tqdm: bool | Callable[..., tqdm] = True,
-        pooling_params: PoolingParams | None = None,
-        lora_request: list[LoRARequest] | LoRARequest | None = None,
-        tokenization_kwargs: dict[str, Any] | None = None,
+        text_1: list[SingletonPrompt],
+        text_2: list[SingletonPrompt],
+        *,
+        use_tqdm: bool | Callable[..., tqdm],
+        pooling_params: PoolingParams | None,
+        lora_request: list[LoRARequest] | LoRARequest | None,
+        tokenization_kwargs: dict[str, Any],
     ) -> list[ScoringRequestOutput]:
         tokenizer = self.llm_engine.get_tokenizer()
 
-        encoded_output: list[PoolingRequestOutput] = self.encode(
+        encoded_output = self.encode(
             text_1 + text_2,
             use_tqdm=use_tqdm,
             lora_request=lora_request,
@@ -1287,8 +1288,8 @@ class LLM:
             tokenization_kwargs=tokenization_kwargs,
         )
 
-        encoded_output_1: list[PoolingRequestOutput] = encoded_output[0 : len(text_1)]
-        encoded_output_2: list[PoolingRequestOutput] = encoded_output[len(text_1) :]
+        encoded_output_1 = encoded_output[0 : len(text_1)]
+        encoded_output_2 = encoded_output[len(text_1) :]
 
         if len(encoded_output_1) == 1:
             encoded_output_1 = encoded_output_1 * len(encoded_output_2)
@@ -1306,11 +1307,12 @@ class LLM:
         self,
         data_1: list[str] | list[ScoreContentPartParam],
         data_2: list[str] | list[ScoreContentPartParam],
-        use_tqdm: bool | Callable[..., tqdm] = True,
-        pooling_params: PoolingParams | None = None,
-        lora_request: list[LoRARequest] | LoRARequest | None = None,
-        tokenization_kwargs: dict[str, Any] | None = None,
-        score_template: str | None = None,
+        *,
+        use_tqdm: bool | Callable[..., tqdm],
+        pooling_params: PoolingParams | None,
+        lora_request: list[LoRARequest] | LoRARequest | None,
+        tokenization_kwargs: dict[str, Any],
+        score_template: str | None,
     ) -> list[ScoringRequestOutput]:
         model_config = self.model_config
         tokenizer = self.llm_engine.get_tokenizer()
@@ -1510,9 +1512,9 @@ class LLM:
             return self._cross_encoding_score(
                 data_1,  # type: ignore[arg-type]
                 data_2,  # type: ignore[arg-type]
-                use_tqdm,
-                pooling_params,
-                lora_request,
+                use_tqdm=use_tqdm,
+                pooling_params=pooling_params,
+                lora_request=lora_request,
                 tokenization_kwargs=encode_kwargs,
                 score_template=chat_template,
             )
@@ -1520,9 +1522,9 @@ class LLM:
             return self._embedding_score(
                 data_1,  # type: ignore[arg-type]
                 data_2,  # type: ignore[arg-type]
-                use_tqdm,
-                pooling_params,
-                lora_request,
+                use_tqdm=use_tqdm,
+                pooling_params=pooling_params,
+                lora_request=lora_request,
                 tokenization_kwargs=encode_kwargs,
             )
 
