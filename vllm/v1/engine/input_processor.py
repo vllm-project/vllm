@@ -221,8 +221,8 @@ class InputProcessor:
                 if data_items:
                     if uuid_items and len(data_items) != len(uuid_items):
                         raise ValueError(
-                            f"If given, multi_modal_uuids[{modality}] must have "
-                            f"same length as multi_modal_data[{modality}], but "
+                            f"If given, multi_modal_uuids[{modality!r}] must have "
+                            f"same length as multi_modal_data[{modality!r}], but "
                             f"got {len(uuid_items)} vs {len(data_items)}."
                         )
 
@@ -230,20 +230,20 @@ class InputProcessor:
                         if item is None:
                             if not uuid_items:
                                 raise ValueError(
-                                    f"multi_modal_data[{modality}][{i}] is None but "
-                                    f"multi_modal_uuids[{modality}] is missing."
+                                    f"multi_modal_data[{modality!r}][{i}] is None but "
+                                    f"multi_modal_uuids[{modality!r}] is missing."
                                 )
 
                             if uuid_items[i] is None:
                                 raise ValueError(
-                                    f"multi_modal_data[{modality}][{i}] is None but "
-                                    f"multi_modal_uuids[{modality}][{i}] is missing."
+                                    f"multi_modal_data[{modality!r}][{i}] is None but "
+                                    f"multi_modal_uuids[{modality!r}][{i}] is missing."
                                 )
                 else:
                     if not uuid_items:
                         raise ValueError(
-                            f"multi_modal_data[{modality}] is None but "
-                            f"multi_modal_uuids[{modality}] is missing."
+                            f"multi_modal_data[{modality!r}] is None but "
+                            f"multi_modal_uuids[{modality!r}] is missing."
                         )
 
         # Handle explicit encoder/decoder prompts or singleton prompt
