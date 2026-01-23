@@ -123,7 +123,6 @@ from vllm.utils.async_utils import (
     collect_from_async_generator,
     merge_async_iterators,
 )
-from vllm.v1.engine import EngineCoreRequest
 
 
 class GenerationError(Exception):
@@ -1102,33 +1101,6 @@ class OpenAIServing:
 
         return conversation, [engine_prompt]
 
-    async def _process_inputs(
-        self,
-        request_id: str,
-        engine_prompt: PromptType,
-        params: SamplingParams | PoolingParams,
-        tok_params: TokenizeParams,
-        *,
-        lora_request: LoRARequest | None,
-        trace_headers: Mapping[str, str] | None,
-        priority: int,
-        data_parallel_rank: int | None = None,
-    ) -> tuple[EngineCoreRequest, dict[str, Any]]:
-        """Use the Processor to process inputs for AsyncLLM."""
-        encode_kwargs = tok_params.get_encode_kwargs()
-        engine_request = self.input_processor.process_inputs(
-            request_id,
-            engine_prompt,
-            params,
-            lora_request=lora_request,
-            tokenization_kwargs=encode_kwargs,
-            trace_headers=trace_headers,
-            priority=priority,
-            data_parallel_rank=data_parallel_rank,
-        )
-
-        return engine_request, encode_kwargs
-
     async def _render_next_turn(
         self,
         request: ResponsesRequest,
@@ -1178,12 +1150,14 @@ class OpenAIServing:
                 lora_request=lora_request,
             )
             trace_headers = kwargs.get("trace_headers")
-            engine_request, encode_kwargs = await self._process_inputs(
+
+            tokenization_kwargs = tok_params.get_encode_kwargs()
+            engine_request = self.input_processor.process_inputs(
                 sub_request_id,
                 engine_prompt,
                 sampling_params,
-                tok_params,
                 lora_request=lora_request,
+                tokenization_kwargs=tokenization_kwargs,
                 trace_headers=trace_headers,
                 priority=priority,
             )
@@ -1195,7 +1169,7 @@ class OpenAIServing:
                 lora_request=lora_request,
                 priority=priority,
                 prompt_text=prompt_text,
-                tokenization_kwargs=encode_kwargs,
+                tokenization_kwargs=tokenization_kwargs,
                 **kwargs,
             )
 

@@ -77,7 +77,6 @@ from vllm.tokenizers.mistral import MistralTokenizer
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils.collection_utils import as_iter, is_list_of
 from vllm.utils.counter import Counter
-from vllm.v1.engine import EngineCoreRequest
 from vllm.v1.engine.llm_engine import LLMEngine
 from vllm.v1.sample.logits_processor import LogitsProcessor
 
@@ -1299,7 +1298,7 @@ class LLM:
         tok_params = TokenizeParams.from_config(model_config).with_kwargs(
             tokenization_kwargs
         )
-        encode_kwargs = tok_params.get_encode_kwargs()
+        tokenization_kwargs = tok_params.get_encode_kwargs()
 
         prompts = list[PromptType]()
 
@@ -1311,7 +1310,7 @@ class LLM:
                 data_1=q,
                 data_2=d,
                 tokenizer=tokenizer,
-                tokenization_kwargs=encode_kwargs,
+                tokenization_kwargs=tokenization_kwargs,
                 score_template=score_template,
             )
 
@@ -1633,29 +1632,6 @@ class LLM:
                 self.llm_engine.abort_request(added_request_ids, internal=True)
             raise e
 
-    def _process_inputs(
-        self,
-        request_id: str,
-        engine_prompt: PromptType,
-        params: SamplingParams | PoolingParams,
-        tok_params: TokenizeParams,
-        *,
-        lora_request: LoRARequest | None,
-        priority: int,
-    ) -> tuple[EngineCoreRequest, dict[str, Any]]:
-        """Use the Processor to process inputs for LLMEngine."""
-        encode_kwargs = tok_params.get_encode_kwargs()
-        engine_request = self.input_processor.process_inputs(
-            request_id,
-            engine_prompt,
-            params,
-            lora_request=lora_request,
-            tokenization_kwargs=encode_kwargs,
-            priority=priority,
-        )
-
-        return engine_request, encode_kwargs
-
     def _add_request(
         self,
         prompt: PromptType,
@@ -1686,12 +1662,13 @@ class LLM:
             tokenization_kwargs
         )
 
-        engine_request, encode_kwargs = self._process_inputs(
+        tokenization_kwargs = tok_params.get_encode_kwargs()
+        engine_request = self.input_processor.process_inputs(
             request_id,
             prompt,
             params,
-            tok_params,
             lora_request=lora_request,
+            tokenization_kwargs=tokenization_kwargs,
             priority=priority,
         )
 
@@ -1700,7 +1677,7 @@ class LLM:
             engine_request,
             params,
             lora_request=lora_request,
-            tokenization_kwargs=encode_kwargs,
+            tokenization_kwargs=tokenization_kwargs,
             priority=priority,
             prompt_text=prompt_text,
         )

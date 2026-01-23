@@ -306,7 +306,7 @@ class AsyncLLM(EngineClient):
         tok_params = TokenizeParams.from_config(self.model_config).with_kwargs(
             tokenization_kwargs
         )
-        encode_kwargs = tok_params.get_encode_kwargs()
+        tokenization_kwargs = tok_params.get_encode_kwargs()
 
         # Convert Input --> Request.
         if isinstance(prompt, EngineCoreRequest):
@@ -328,7 +328,7 @@ class AsyncLLM(EngineClient):
                 params,
                 arrival_time=arrival_time,
                 lora_request=lora_request,
-                tokenization_kwargs=encode_kwargs,
+                tokenization_kwargs=tokenization_kwargs,
                 trace_headers=trace_headers,
                 priority=priority,
                 data_parallel_rank=data_parallel_rank,

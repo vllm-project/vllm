@@ -224,12 +224,13 @@ class OpenAIServingCompletion(OpenAIServing):
                         trace_headers=trace_headers,
                     )
                 else:
-                    engine_request, tokenization_kwargs = await self._process_inputs(
+                    tokenization_kwargs = tok_params.get_encode_kwargs()
+                    engine_request = self.input_processor.process_inputs(
                         request_id_item,
                         engine_prompt,
                         sampling_params,
-                        tok_params,
                         lora_request=lora_request,
+                        tokenization_kwargs=tokenization_kwargs,
                         trace_headers=trace_headers,
                         priority=request.priority,
                         data_parallel_rank=data_parallel_rank,

@@ -84,9 +84,9 @@ class ServingScores(OpenAIServing):
 
         input_texts = data_1 + data_2
 
-        tok_kwargs = request.build_tok_params(model_config).get_encode_kwargs()
+        tokenization_kwargs = request.build_tok_params(model_config).get_encode_kwargs()
         tokenized_prompts = await asyncio.gather(
-            *(encode_async(t, **tok_kwargs) for t in input_texts)
+            *(encode_async(t, **tokenization_kwargs) for t in input_texts)
         )
 
         engine_prompts: list[TokensPrompt] = []
