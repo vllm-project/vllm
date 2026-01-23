@@ -138,9 +138,7 @@ class CompressedTensorsMoEMethod(FusedMoEMethodBase):
                 "quantization scheme but found multiple"
             )
 
-
         if scheme_dict is None:  # ignored layer
-            print("CT MOE UnquantizedFusedMoEMethod")
             return UnquantizedFusedMoEMethod(layer.moe_config)
 
         # TODO: @dsikka: refactor this to use schemes as other kernels
@@ -325,52 +323,53 @@ class XPUFp8MoEMethod(CompressedTensorsMoEMethod):
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         """
         Post-processing logic to align loaded weights with XPU kernel requirements.
-        
-        Primary Goal: Resolve the conflict between separate W1/W3 scales found in 
-        standard FP8 checkpoints and the XPU kernel's requirement for a unified 
+
+        Primary Goal: Resolve the conflict between separate W1/W3 scales found in
+        standard FP8 checkpoints and the XPU kernel's requirement for a unified
         per-tensor scale.
         """
-
 
         fp8_dtype = torch.float8_e4m3fn
         assert layer.w13_weight.dtype == fp8_dtype
 
         # Handle Split Scales for W13 (Gate + Up)
         # Check if scales are split [Num_Experts, 2] and merge them.
-        if layer.w13_weight_scale.dim() == 2 and layer.w13_weight_scale.shape[1] == 2:    
+        if layer.w13_weight_scale.dim() == 2 and layer.w13_weight_scale.shape[1] == 2:
             num_experts = layer.num_experts
             full_inter_dim = layer.w13_weight.shape[1]
             inter_dim = full_inter_dim // 2
-            
+
             # 1. Extract original independent scales
             old_scales = layer.w13_weight_scale.to(torch.float32)
             w1_scales = old_scales[:, 0].reshape(num_experts, 1, 1)
             w3_scales = old_scales[:, 1].reshape(num_experts, 1, 1)
-            
+
             # 2. Calculate the new unified scale (Max of W1 and W3)
             # This ensures the range covers both distributions to prevent overflow.
             unified_scales, _ = torch.max(old_scales, dim=1, keepdim=True)
             unified_scales_expanded = unified_scales.reshape(num_experts, 1, 1)
-            
+
             # 3. Calculate Correction Factors
             # Logic: We must adjust the weight values to compensate for the scale change.
             # Real_Value = FP8_Old * Old_Scale
             # New_FP8    = Real_Value / New_Scale
             # Therefore: New_FP8 = FP8_Old * (Old_Scale / New_Scale)
-            w1_correction = w1_scales / (unified_scales_expanded + 1e-6) # Add epsilon to avoid div-by-zero
+            w1_correction = w1_scales / (
+                unified_scales_expanded + 1e-6
+            )  # Add epsilon to avoid div-by-zero
             w3_correction = w3_scales / (unified_scales_expanded + 1e-6)
-            
+
             # 4. Extract current FP8 weight shards
             w1_weight_fp8 = layer.w13_weight[:, :inter_dim, :]
             w3_weight_fp8 = layer.w13_weight[:, inter_dim:, :]
 
             # 5. Re-align weights (Dequantize -> Scale -> Requantize logic)
             # Note: We perform the multiplication in FP32 for precision.
-            w1_aligned = (w1_weight_fp8.to(torch.float32) * w1_correction)
-            w3_aligned = (w3_weight_fp8.to(torch.float32) * w3_correction)
+            w1_aligned = w1_weight_fp8.to(torch.float32) * w1_correction
+            w3_aligned = w3_weight_fp8.to(torch.float32) * w3_correction
 
             # 6. Concatenate and cast back to FP8
-            # Workaround: XPU `torch.cat` may not support FP8 inputs directly, 
+            # Workaround: XPU `torch.cat` may not support FP8 inputs directly,
             # so we concatenate in FP32 and then cast to the target FP8 dtype.
             w13_new = torch.cat([w1_aligned, w3_aligned], dim=1).to(fp8_dtype)
 
@@ -381,16 +380,15 @@ class XPUFp8MoEMethod(CompressedTensorsMoEMethod):
             layer.w13_weight_scale = torch.nn.Parameter(
                 unified_scales.squeeze(), requires_grad=False
             )
-            
+
         # Logic 2: Handle W2 (Down) Scales
         # Ensure W2 scales are strictly 1D [Num_Experts] as required by the kernel.
         if layer.w2_weight_scale.dim() > 1:
-             layer.w2_weight_scale.data = layer.w2_weight_scale.data.squeeze()
+            layer.w2_weight_scale.data = layer.w2_weight_scale.data.squeeze()
 
         device = layer.w13_weight.device
         layer.w13_weight_scale.data = layer.w13_weight_scale.data.to(device)
         layer.w2_weight_scale.data = layer.w2_weight_scale.data.to(device)
-
 
     def get_fused_moe_quant_config(
         self, layer: torch.nn.Module
@@ -403,21 +401,20 @@ class XPUFp8MoEMethod(CompressedTensorsMoEMethod):
         router: FusedMoERouter,
         x: torch.Tensor,
         router_logits: torch.Tensor,
-        ) -> torch.Tensor:
+    ) -> torch.Tensor:
         """
         Execute the MoE Layer: Router -> Expert Computation (XPU Kernel).
         """
-        
+
         # 1. Router: Select the top-k experts for each token
         routing_weights, selected_experts = router.select_experts(
-                hidden_states=x,
-                router_logits=router_logits
-            )
+            hidden_states=x, router_logits=router_logits
+        )
 
         # 2. Expert Computation: Invoke the XPU Fused MoE Kernel
         # Lazy import to prevent ImportError on non-XPU environments
         from vllm_xpu_kernels.fused_moe_interface import xpu_fused_moe
-        
+
         return xpu_fused_moe(
             hidden_states=x,
             w13=layer.w13_weight,
@@ -427,15 +424,17 @@ class XPUFp8MoEMethod(CompressedTensorsMoEMethod):
             w2_scales=layer.w2_weight_scale,
             w2_bias=layer.w2_bias if self.moe.has_bias else None,
             topk_weights=routing_weights,
-            topk_ids=selected_experts, # Contains the selected expert indices
+            topk_ids=selected_experts,  # Contains the selected expert indices
             n_experts_per_token=layer.top_k,
             activation=layer.activation,
             # Calculate local number of experts per partition
-            num_experts=layer.global_num_experts // self.moe.moe_parallel_config.ep_size,
+            num_experts=layer.global_num_experts
+            // self.moe.moe_parallel_config.ep_size,
             ep_rank=self.moe.moe_parallel_config.ep_rank,
             ep_size=self.moe.moe_parallel_config.ep_size,
             is_fp8=True,
         )
+
 
 class CompressedTensorsW4A4Mxfp4MoEMethod(CompressedTensorsMoEMethod):
     def __init__(self, moe):
@@ -1499,9 +1498,9 @@ class CompressedTensorsWNA16MarlinMoEMethod(CompressedTensorsMoEMethod):
         super().__init__(moe)
         self.weight_quant = weight_quant
         self.input_quant = input_quant
-        assert weight_quant.symmetric, (
-            "Only symmetric quantization is supported for MoE"
-        )
+        assert (
+            weight_quant.symmetric
+        ), "Only symmetric quantization is supported for MoE"
         # Extract properties from weight_quant
         self.num_bits = weight_quant.num_bits
         self.packed_factor = 32 // weight_quant.num_bits
@@ -1881,9 +1880,9 @@ class CompressedTensorsWNA16MoEMethod(CompressedTensorsMoEMethod):
         self.group_size = weight_quant.group_size
         # grouped actorder isn't supported by this kernel
         assert weight_quant.actorder != "group"
-        assert weight_quant.symmetric, (
-            "Only symmetric quantization is supported for MoE"
-        )
+        assert (
+            weight_quant.symmetric
+        ), "Only symmetric quantization is supported for MoE"
 
     def create_weights(
         self,
@@ -2381,9 +2380,11 @@ class CompressedTensorsW4A8Int8MoEMethod(CompressedTensorsMoEMethod):
         router_logits: torch.Tensor,
     ) -> torch.Tensor:
         assert not layer.enable_eplb, "EPLB not supported for W4A8-int MoE yet."
-        assert layer.activation in ("silu", "swigluoai", "swiglu"), (
-            "Only SiLU/SwiGLUGU/SwiGLUUG are supported."
-        )
+        assert layer.activation in (
+            "silu",
+            "swigluoai",
+            "swiglu",
+        ), "Only SiLU/SwiGLUGU/SwiGLUUG are supported."
         assert layer.expert_map is None, """expert_map/EP not implemented
         for CPU dyn-4bit MoE."""
 
@@ -2437,9 +2438,9 @@ class CompressedTensorsW4A8Fp8MoEMethod(CompressedTensorsMoEMethod):
         self.num_bits = self.weight_quant.num_bits
         self.packed_factor = 32 // self.num_bits
 
-        assert self.weight_quant.symmetric, (
-            "Only symmetric quantization is supported for W4A8 MoE"
-        )
+        assert (
+            self.weight_quant.symmetric
+        ), "Only symmetric quantization is supported for W4A8 MoE"
         assert self.weight_quant.actorder != "group"
         assert self.group_size == 128, "Only group size 128 supported for W4A8 MoE"
 
@@ -2470,9 +2471,9 @@ class CompressedTensorsW4A8Fp8MoEMethod(CompressedTensorsMoEMethod):
 
         # requirement for CUTLASS reorder_tensor
         assert hidden_size % 256 == 0, f"{hidden_size=} must be divisible by 256"
-        assert intermediate_size_per_partition % 256 == 0, (
-            f"{intermediate_size_per_partition=} must be divisible by 256"
-        )
+        assert (
+            intermediate_size_per_partition % 256 == 0
+        ), f"{intermediate_size_per_partition=} must be divisible by 256"
         # storage type, pack 8xint4 into int32
         params_dtype = torch.int32
 
