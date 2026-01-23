@@ -399,7 +399,7 @@ class MultiprocExecutor(Executor):
         # Send SIGTERM if still running
         for p in active_procs():
             p.terminate()
-        if not wait_for_termination(active_procs, 4):
+        if not wait_for_termination(active_procs(), 4):
             # Send SIGKILL if still running
             for p in active_procs():
                 p.kill()
