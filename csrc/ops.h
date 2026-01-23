@@ -58,12 +58,6 @@ void gelu_fast(torch::Tensor& out, torch::Tensor& input);
 
 void gelu_quick(torch::Tensor& out, torch::Tensor& input);
 
-void cutlass_mla_decode(torch::Tensor const& out, torch::Tensor const& q_nope,
-                        torch::Tensor const& q_pe,
-                        torch::Tensor const& kv_c_and_k_pe_cache,
-                        torch::Tensor const& seq_lens,
-                        torch::Tensor const& page_table, double scale);
-
 #ifndef USE_ROCM
 
 torch::Tensor awq_gemm(torch::Tensor _in_feats, torch::Tensor _kernel,
