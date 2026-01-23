@@ -124,7 +124,9 @@ def fused_topk_bias(
     topk_weights = scores.gather(1, topk_indices)
     if renormalize:
         topk_weights = topk_weights / topk_weights.sum(dim=-1, keepdim=True)
-    return topk_weights.to(torch.float32), topk_indices.to(torch.int32)
+    return topk_weights.to(torch.float32), topk_indices.to(
+        torch.int32 if indices_type is None else indices_type
+    )
 
 
 class FusedTopKBiasRouter(BaseRouter):
@@ -176,6 +178,7 @@ class FusedTopKBiasRouter(BaseRouter):
             topk=self.top_k,
             renormalize=self.renormalize,
             scoring_func=self.scoring_func,
+            indices_type=indices_type,
         )
 
         if self.routed_scaling_factor != 1.0:
