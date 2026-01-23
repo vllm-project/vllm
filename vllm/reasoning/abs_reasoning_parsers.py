@@ -51,7 +51,7 @@ class ReasoningParser:
         return self.model_tokenizer.get_vocab()
 
     @abstractmethod
-    def is_reasoning_end(self, input_ids: list[int]) -> bool:
+    def is_reasoning_end(self, input_ids: Sequence[int]) -> bool:
         """
         Check if the reasoning content ends in the input_ids.
 
@@ -68,7 +68,7 @@ class ReasoningParser:
         """
 
     def is_reasoning_end_streaming(
-        self, input_ids: list[int], delta_ids: list[int]
+        self, input_ids: Sequence[int], delta_ids: Sequence[int]
     ) -> bool:
         """
         Check if the reasoning content ends in the input_ids on a
