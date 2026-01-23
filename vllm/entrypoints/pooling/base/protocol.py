@@ -60,7 +60,7 @@ class CompletionRequestMixin(OpenAIBaseModel):
 class ChatRequestMixin(OpenAIBaseModel):
     # --8<-- [start:chat-params]
     messages: list[ChatCompletionMessageParam]
-    # --8<-- [start:chat-params]
+    # --8<-- [end:chat-params]
 
     # --8<-- [start:chat-extra-params]
     add_generation_prompt: bool = Field(
