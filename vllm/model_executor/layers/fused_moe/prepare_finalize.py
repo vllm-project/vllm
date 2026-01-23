@@ -12,7 +12,7 @@ from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
 from vllm.model_executor.layers.fused_moe.utils import moe_kernel_quantize_input
 
 
-class MoEPrepareAndFinalizeNoEP(mk.FusedMoEPrepareAndFinalize):
+class MoEPrepareAndFinalizeNoDPEP(mk.FusedMoEPrepareAndFinalize):
     def __init__(self, defer_input_quant: bool = False) -> None:
         super().__init__()
         self.defer_input_quant = defer_input_quant

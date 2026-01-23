@@ -14,11 +14,8 @@ from vllm.model_executor.layers.fused_moe.config import (
     nvfp4_moe_quant_config,
     nvfp4_w4a16_moe_quant_config,
 )
-from vllm.model_executor.layers.fused_moe.flashinfer_cutlass_prepare_finalize import (  # noqa: E501
-    create_flashinfer_prepare_finalize,
-)
 from vllm.model_executor.layers.fused_moe.prepare_finalize import (
-    MoEPrepareAndFinalizeNoEP,
+    MoEPrepareAndFinalizeNoDPEP,
 )
 from vllm.model_executor.layers.quantization.utils.flashinfer_fp4_moe import (
     is_supported_config_trtllm,
@@ -437,12 +434,10 @@ def make_nvfp4_moe_kernel(
 
     # Create Prepare/Finalize.
     # Create Prepare/Finalize.
-    ep_size = moe_config.moe_parallel_config.ep_size
-    prepare_finalize = create_flashinfer_prepare_finalize(
-        use_dp=(ep_size > 1),
-        use_nvfp4=True,
-        enable_alltoallv=(ep_size > 1),
-        use_deepseek_fp8_block_scale=moe_quant_config.is_block_quantized,
+    prepare_finalize = MoEPrepareAndFinalizeNoDPEP(
+        defer_input_quant=experts_cls.expects_unquantized_inputs(
+            moe_config, moe_quant_config
+        ),
     )
 
     # Create Experts.

@@ -154,7 +154,7 @@ class FlashInferExperts(mk.FusedMoEPermuteExpertsUnpermute):
         return mk.FusedMoEActivationFormat.Standard
 
     def supports_expert_map(self) -> bool:
-        return False
+        return True
 
     def supports_chunking(self) -> bool:
         # This refers to TP chunking; DP chunking is handled separately.
@@ -276,6 +276,21 @@ class FlashInferExperts(mk.FusedMoEPermuteExpertsUnpermute):
             a1q_scale = None
             fc1_expert_weights = w1
             fc2_expert_weights = w2
+
+        if expert_map is not None:
+            # Mask out experts that are not assigned to this rank
+            # expert_map contains global->local mapping, with -1 for invalid experts
+            # topk_ids contains global expert IDs
+            
+            # Map global expert IDs to local IDs or -1 using expert_map
+            # Note: We need to handle potential out-of-bounds access if topk_ids contains invalid values
+            # but generally topk_ids should be within [0, global_num_experts)
+            # FlashInfer documentation says:
+            # token_selected_experts: int32 tensor of shape [num_tokens, top_k]
+
+            # If we pass -1 for experts not on this rank, FlashInfer should ignore them.
+
+            topk_ids = expert_map[topk_ids.long()].to(topk_ids.dtype)
 
         _ = flashinfer_cutlass_fused_moe(
             input=hidden_states,

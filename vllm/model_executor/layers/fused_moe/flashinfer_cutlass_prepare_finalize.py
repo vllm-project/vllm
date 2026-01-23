@@ -11,7 +11,7 @@ from vllm.distributed.device_communicators.base_device_communicator import (
 from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
 from vllm.model_executor.layers.fused_moe.prepare_finalize import (
-    MoEPrepareAndFinalizeNoEP,
+    MoEPrepareAndFinalizeNoDPEP,
 )
 from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceNoOP,
@@ -353,7 +353,7 @@ def create_flashinfer_prepare_finalize(
     use_nvfp4: bool = False,
     enable_alltoallv: bool = False,
     use_deepseek_fp8_block_scale: bool = False,
-) -> FlashInferCutlassMoEPrepareAndFinalize | MoEPrepareAndFinalizeNoEP:
+) -> FlashInferCutlassMoEPrepareAndFinalize | MoEPrepareAndFinalizeNoDPEP:
     """Factory function to create the appropriate FlashInfer implementation."""
 
     if use_dp:
@@ -368,4 +368,4 @@ def create_flashinfer_prepare_finalize(
         # CUTLASS FP8 BLOCK and CUTLASS NVFP4 apply input quantization
         # in a single call with the MoE experts kernel.
         defer_input_quant = use_deepseek_fp8_block_scale or use_nvfp4
-        return MoEPrepareAndFinalizeNoEP(defer_input_quant=defer_input_quant)
+        return MoEPrepareAndFinalizeNoDPEP(defer_input_quant=defer_input_quant)
