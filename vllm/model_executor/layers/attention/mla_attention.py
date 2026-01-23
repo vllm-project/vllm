@@ -315,9 +315,9 @@ class _DecodeConcatQuantFP8(QuantFP8):
             return decode_q.view(decode_q0.shape)
         return forward
 
-    forward_native = _make_forward(QuantFP8.forward_native)
-    forward_cuda = _make_forward(QuantFP8.forward_cuda)
-    forward_hip = _make_forward(QuantFP8.forward_hip)
+    forward_native = _make_forward(QuantFP8.forward_native)  # type: ignore[arg-type]
+    forward_cuda = _make_forward(QuantFP8.forward_cuda)  # type: ignore[arg-type]
+    forward_hip = _make_forward(QuantFP8.forward_hip)  # type: ignore[arg-type]
 
 
 CUDNN_WORKSPACE_SIZE = 12800
