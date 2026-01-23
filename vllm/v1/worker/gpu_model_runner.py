@@ -64,7 +64,6 @@ from vllm.model_executor.models.interfaces import (
     SupportsMultiModal,
     SupportsXDRoPE,
     get_mixture_of_experts_model,
-    is_mixture_of_experts,
     supports_eagle3,
     supports_mm_encoder_only,
     supports_mrope,
@@ -3830,16 +3829,24 @@ class GPUModelRunner(
                 if hasattr(self, "drafter"):
                     logger.info_once("Loading drafter model...")
                     self.drafter.load_model(self.model)
+                    drafter_moe_model = (
+                        get_mixture_of_experts_model(self.drafter.model)
+                        if hasattr(self.drafter, "model")
+                        else None
+                    )
+
                     if (
-                        hasattr(self.drafter, "model")
-                        and is_mixture_of_experts(self.drafter.model)
+                        drafter_moe_model is not None
                         and self.parallel_config.enable_eplb
                     ):
                         spec_config = self.vllm_config.speculative_config
                         assert spec_config is not None
                         assert spec_config.draft_model_config is not None
                         logger.info_once(
-                            "EPLB is enabled for drafter model %s.",
+                            "EPLB is enabled for %s drafter model %s.",
+                            ""
+                            if drafter_moe_model == self.drafter.model
+                            else "MoE part of",
                             spec_config.draft_model_config.model,
                         )
 
@@ -3858,7 +3865,7 @@ class GPUModelRunner(
                                 self.parallel_config, self.device
                             )
                         self.eplb_state.add_model(
-                            self.drafter.model,
+                            drafter_moe_model,
                             spec_config.draft_model_config,
                             global_expert_load,
                             old_global_expert_indices,
