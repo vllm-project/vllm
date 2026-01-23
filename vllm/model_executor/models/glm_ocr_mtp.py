@@ -1,8 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-# Copyright 2025 The ZhipuAI Team.
-# Copyright 2023 The vLLM team.
+# Copyright 2026 The ZhipuAI Team.
+# Copyright 2026 The vLLM team.
 # Copyright 2022 EleutherAI and the HuggingFace Inc. team. All rights reserved.
 #
 # This code is based on EleutherAI's GPT-NeoX library and the GPT-NeoX
@@ -21,7 +21,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Inference-only GLM-4.7-Flash MTP model compatible with HuggingFace weights."""
+"""Inference-only GLM-OCR MTP model compatible with HuggingFace weights."""
 
 from collections.abc import Iterable
 
