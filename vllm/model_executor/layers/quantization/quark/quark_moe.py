@@ -155,14 +155,11 @@ class QuarkW8A8Fp8MoEMethod(QuarkMoEMethod):
         layer.weight_block_size = None
         params_dtype = torch.float8_e4m3fn
 
-        combined_w13 = self.model_type == "gpt_oss"
-        w13_size_coefficient = 4 if combined_w13 else 2
-
         # WEIGHTS
         w13_weight = torch.nn.Parameter(
             torch.empty(
                 num_experts,
-                w13_size_coefficient * intermediate_size_per_partition,
+                2 * intermediate_size_per_partition,
                 hidden_size,
                 dtype=params_dtype,
             ),
@@ -210,26 +207,14 @@ class QuarkW8A8Fp8MoEMethod(QuarkMoEMethod):
             set_weight_attrs(w2_weight_scale, extra_weight_attrs)
         elif self.weight_qscheme == "per_channel":
             # quark's scale is 1 dim.
-            if self.model_type != "gpt_oss":
-                w13_weight_scale = torch.nn.Parameter(
-                    torch.ones(
-                        num_experts,
-                        2 * intermediate_size_per_partition,
-                        dtype=torch.float32,
-                    ),
-                    requires_grad=False,
-                )
-            else:
-                # For gpt_oss, the w1(gate) & w3(up) are fused as one.
-                # For per-channel quantization, each output channel needs its own scale.
-                w13_weight_scale = torch.nn.Parameter(
-                    torch.ones(
-                        num_experts,
-                        4 * intermediate_size_per_partition,
-                        dtype=torch.float32,
-                    ),
-                    requires_grad=False,
-                )
+            w13_weight_scale = torch.nn.Parameter(
+                torch.ones(
+                    num_experts,
+                    2 * intermediate_size_per_partition,
+                    dtype=torch.float32,
+                ),
+                requires_grad=False,
+            )
             layer.register_parameter("w13_weight_scale", w13_weight_scale)
             w2_weight_scale = torch.nn.Parameter(
                 torch.ones(num_experts, hidden_size, dtype=torch.float32),
@@ -264,7 +249,7 @@ class QuarkW8A8Fp8MoEMethod(QuarkMoEMethod):
             w13_bias = torch.nn.Parameter(
                 torch.zeros(
                     num_experts,
-                    w13_size_coefficient * intermediate_size_per_partition,
+                    2 * intermediate_size_per_partition,
                     dtype=torch.float32,
                 ),
                 requires_grad=False,
@@ -340,11 +325,13 @@ class QuarkW8A8Fp8MoEMethod(QuarkMoEMethod):
             shard_size = layer.intermediate_size_per_partition
             max_w13_scales = layer.w13_weight_scale.max(dim=1).values
 
-            # For gpt_oss, w1 and w3 are fused into a single tensor with 4x size
-            # and only one scale. Process the entire weight tensor as one shard.
+            # For gpt_oss, w1 and w3 are fused into a single combined
+            # gate_up_proj tensor with size 2*intermediate_size_per_partition
+            # and only one scale per expert.
+            # Process the entire weight tensor as one shard.
             if self.model_type == "gpt_oss":
                 for expert_id in range(layer.local_num_experts):
-                    # Process all 4*intermediate_size_per_partition rows at once
+                    # Process all 2*intermediate_size_per_partition rows at once
                     dq_weight = per_tensor_dequantize(
                         layer.w13_weight[expert_id],
                         layer.w13_weight_scale[expert_id][0],
