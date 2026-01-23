@@ -505,6 +505,15 @@ class AsyncLLM(EngineClient):
                         IterationStats() if (log_stats and num_outputs) else None
                     )
 
+                    # Distribute journey events ONCE before chunking to prevent loss
+                    # Events for requests without outputs must be accumulated
+                    if outputs.journey_events:
+                        for event in outputs.journey_events:
+                            if req_state := output_processor.request_states.get(
+                                event.request_id
+                            ):
+                                req_state.journey_events.append(event)
+
                     # Split outputs into chunks of at most
                     # VLLM_V1_OUTPUT_PROC_CHUNK_SIZE, so that we don't block the
                     # event loop for too long.
@@ -512,9 +521,11 @@ class AsyncLLM(EngineClient):
                     for start in range(0, num_outputs, chunk_size):
                         end = start + chunk_size
                         outputs_slice = engine_core_outputs[start:end]
-                        # 2) Process EngineCoreOutputs.
+                        # 2) Process EngineCoreOutputs (no journey_events here)
                         processed_outputs = output_processor.process_outputs(
-                            outputs_slice, outputs.timestamp, iteration_stats
+                            outputs_slice,
+                            outputs.timestamp,
+                            iteration_stats,
                         )
                         # NOTE: RequestOutputs are pushed to their queues.
                         assert not processed_outputs.request_outputs

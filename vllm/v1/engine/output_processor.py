@@ -21,6 +21,7 @@ from vllm.sampling_params import RequestOutputKind
 from vllm.tokenizers import TokenizerLike
 from vllm.tracing import SpanAttributes, SpanKind, Tracer, extract_trace_context
 from vllm.utils import length_from_prompt_token_ids_or_embeds
+from vllm.v1.core.sched.journey_events import RequestJourneyEvent
 from vllm.v1.engine import EngineCoreOutput, EngineCoreRequest, FinishReason
 from vllm.v1.engine.detokenizer import IncrementalDetokenizer
 from vllm.v1.engine.logprobs import LogprobsProcessor
@@ -145,6 +146,9 @@ class RequestState:
         # Stream Interval
         self.stream_interval = stream_interval
         self.sent_tokens_offset = 0  # Offset of sent tokens
+
+        # Journey events for OTEL tracing
+        self.journey_events: list[RequestJourneyEvent] = []
 
     @classmethod
     def from_new_request(
@@ -491,6 +495,7 @@ class OutputProcessor:
         engine_core_outputs: list[EngineCoreOutput],
         engine_core_timestamp: float | None = None,
         iteration_stats: IterationStats | None = None,
+        journey_events: list[RequestJourneyEvent] | None = None,
     ) -> OutputProcessorOutput:
         """
         Process the EngineCoreOutputs:
@@ -516,12 +521,26 @@ class OutputProcessor:
 
         request_outputs: list[RequestOutput | PoolingRequestOutput] = []
         reqs_to_abort: list[str] = []
+
+        # Collect journey events by request_id for distribution
+        journey_events_by_req: dict[str, list[RequestJourneyEvent]] = {}
+        if journey_events:
+            for event in journey_events:
+                if event.request_id not in journey_events_by_req:
+                    journey_events_by_req[event.request_id] = []
+                journey_events_by_req[event.request_id].append(event)
+
         for engine_core_output in engine_core_outputs:
             req_id = engine_core_output.request_id
             req_state = self.request_states.get(req_id)
             if req_state is None:
                 # Ignore output for already-aborted request.
                 continue
+
+            # Accumulate journey events for this request (consume to prevent duplication)
+            events = journey_events_by_req.pop(req_id, None)
+            if events:
+                req_state.journey_events.extend(events)
 
             # 1) Compute stats for this iteration.
             self._update_stats_from_output(
@@ -594,6 +613,16 @@ class OutputProcessor:
                 )
                 if self.tracer:
                     self.do_tracing(engine_core_output, req_state, iteration_stats)
+                    # Note: do_tracing() clears journey_events after export
+                else:
+                    # If no tracer, clear events on finish to prevent memory leak
+                    req_state.journey_events.clear()
+
+        # Handle events for requests without outputs in this iteration
+        # (e.g., QUEUED events for requests added but not scheduled)
+        for req_id, events in journey_events_by_req.items():
+            if req_state := self.request_states.get(req_id):
+                req_state.journey_events.extend(events)
 
         return OutputProcessorOutput(
             request_outputs=request_outputs,
@@ -667,6 +696,40 @@ class OutputProcessor:
                 )
             if req_state.n:
                 span.set_attribute(SpanAttributes.GEN_AI_REQUEST_N, req_state.n)
+
+            # Add journey events as span events
+            if req_state.journey_events:
+                if span is not None and span.is_recording():
+                    for event in req_state.journey_events:
+                        # Build event attributes (exclude None values)
+                        attributes = {
+                            "event.type": event.event_type.name,
+                            "ts.monotonic": event.ts_monotonic,
+                            "phase": event.phase,
+                            "prefill.done_tokens": event.prefill_done_tokens,
+                            "prefill.total_tokens": event.prefill_total_tokens,
+                            "decode.done_tokens": event.decode_done_tokens,
+                            "decode.max_tokens": event.decode_max_tokens,
+                            "num_preemptions": event.num_preemptions_so_far,
+                        }
+
+                        # Add optional fields (only if not None)
+                        if event.scheduler_step is not None:
+                            attributes["scheduler.step"] = event.scheduler_step
+                        if event.schedule_kind is not None:
+                            attributes["schedule.kind"] = event.schedule_kind.name
+                        if event.finish_status is not None:
+                            attributes["finish.status"] = event.finish_status
+
+                        # Add as span event (timestamp omitted, will use current time)
+                        span.add_event(
+                            name=f"journey.{event.event_type.name}",
+                            attributes=attributes,
+                        )
+
+                # Clear events after export to prevent duplicate exports in subsequent iterations
+                # (whether exported or not, we've processed them for this iteration)
+                req_state.journey_events.clear()
 
     def _update_stats_from_output(
         self,

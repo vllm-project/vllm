@@ -65,7 +65,41 @@ Each event includes a **complete progress snapshot** with accurate token counts 
 
 **Note**: Journey tracing is a **v1 engine-core feature**. It is configured at the scheduler/engine level, not via the high-level `LLM` API.
 
-### Enable Journey Tracing
+### Enable Journey Tracing via CLI (Recommended)
+
+The easiest way to enable journey tracing is using the `--enable-journey-tracing` flag with `vllm serve`:
+
+```bash
+# Start vLLM server with journey tracing enabled
+vllm serve meta-llama/Llama-3.2-1B-Instruct --enable-journey-tracing
+
+# Enable journey tracing WITH OTEL export (recommended for production)
+vllm serve meta-llama/Llama-3.2-1B-Instruct \
+    --enable-journey-tracing \
+    --otlp-traces-endpoint http://localhost:4317
+
+# Combine with other observability flags
+vllm serve meta-llama/Llama-3.2-1B-Instruct \
+    --enable-journey-tracing \
+    --otlp-traces-endpoint http://localhost:4317 \
+    --enable-mfu-metrics \
+    --enable-logging-iteration-details
+```
+
+**Note**: Journey tracing is **disabled by default**. Simply omit the `--enable-journey-tracing` flag to keep it off.
+
+**🎯 OTEL Integration**: When `--enable-journey-tracing` is enabled and OTEL tracing is configured (e.g., via `--otlp-traces-endpoint` or other trace exporters), journey events are **automatically exported** as OTEL span events. This means you can view journey lifecycle events (QUEUED, SCHEDULED, FIRST_TOKEN, PREEMPTED, FINISHED) in any OTEL-compatible backend (Jaeger, Tempo, Zipkin, etc.) without writing custom export code.
+
+Journey events are attached to request spans when:
+- Journey tracing is enabled (`--enable-journey-tracing`)
+- OTEL tracing is active (spans are being recorded)
+- This typically requires configuring an OTEL exporter, with `--otlp-traces-endpoint` being the most common method
+
+**Without OTEL**: If you only enable `--enable-journey-tracing` without configuring trace export, events are collected internally and available via `EngineCoreOutputs.journey_events` for custom integration (see [Custom Integration](#custom-integration) below).
+
+### Enable Journey Tracing Programmatically
+
+For advanced use cases or custom engine integrations, you can enable journey tracing programmatically:
 
 ```python
 from vllm.config import ObservabilityConfig, VllmConfig
@@ -87,10 +121,53 @@ scheduler = Scheduler(
 )
 ```
 
-### Access Events in Engine/Scheduler Integration Code
+## OTEL Integration (Automatic Export)
+
+When you enable both journey tracing and OTEL tracing, journey events are automatically exported as span events within your request spans.
+
+### Setup
+
+```bash
+# Start vLLM with OTEL endpoint
+vllm serve meta-llama/Llama-3.2-1B-Instruct \
+    --enable-journey-tracing \
+    --otlp-traces-endpoint http://localhost:4317
+```
+
+### What Gets Exported
+
+Each journey event becomes an OTEL span event with:
+
+- **Event name**: `journey.QUEUED`, `journey.SCHEDULED`, `journey.FIRST_TOKEN`, `journey.PREEMPTED`, `journey.FINISHED`
+- **Timestamp**: Export time (OTEL SDK timestamp); original monotonic timestamp available as attribute `ts.monotonic`
+- **Attributes**:
+  - `event.type`: Event type name (QUEUED, SCHEDULED, etc.)
+  - `ts.monotonic`: Original monotonic timestamp from when the event occurred
+  - `scheduler.step`: Scheduler iteration counter (omitted if None)
+  - `phase`: PREFILL or DECODE
+  - `prefill.done_tokens`: Tokens processed in prefill
+  - `prefill.total_tokens`: Total prefill tokens
+  - `decode.done_tokens`: Output tokens generated
+  - `decode.max_tokens`: Maximum decode tokens
+  - `num_preemptions`: Preemption count
+  - `schedule.kind`: FIRST or RESUME (SCHEDULED events only)
+  - `finish.status`: stopped/length/aborted/error (FINISHED events only)
+
+### Viewing in Jaeger/Tempo
+
+When you view a request trace in Jaeger or Tempo, you'll see:
+
+1. **Main span**: `llm_request` with aggregate metrics (TTFT, latency, token counts)
+2. **Span events**: Timeline of journey events showing the request's lifecycle through the scheduler
+
+This provides both high-level metrics AND detailed lifecycle visibility in a single trace.
+
+### Custom Integration (Advanced)
+
+**Note**: If you're using OTEL (see above), you don't need custom integration - events are automatically exported. This section is for advanced use cases where you want to process events directly.
 
 ```python
-# In your engine/scheduler integration code
+# In your engine/scheduler integration code (v1 only)
 engine_outputs = scheduler.update_from_output(scheduler_output, model_output)
 
 for client_idx, eco in engine_outputs.items():
@@ -609,7 +686,7 @@ Even after preemption, `num_output_tokens` is preserved.
 Journey tracing is **disabled by default** with near-zero overhead:
 
 - **CPU**: Single boolean check per emission point (6 checks per request)
-- **Memory**: 0 bytes (no data structures allocated when disabled)
+- **Memory**: Minimal (empty list per request in OutputProcessor: ~56 bytes per request)
 - **Throughput impact**: Negligible
 
 **How?** Single boolean check at each emission point:
@@ -655,6 +732,44 @@ def _emit_journey_event(...):
 - Memory is extremely constrained
 
 **Production Note**: Sampling (tracking a subset of requests) can be implemented in your event consumer/exporter if you want to reduce overhead. The feature itself currently traces all requests when enabled.
+
+---
+
+## Event Delivery Guarantees & Caveats
+
+### Delivery Semantics
+
+**When events are delivered:**
+- Events are accumulated in memory as they occur during request processing
+- With OTEL integration: Events are exported as OTEL span events when the request **finishes**
+- Without OTEL: Events are available via `EngineCoreOutputs.journey_events` but are accumulated in `RequestState` until request completion
+
+**Important caveats:**
+
+1. **Events accumulate until request completion**: For long-running streaming requests, journey events (QUEUED, SCHEDULED, FIRST_TOKEN, etc.) are buffered in memory until the request finishes. This is bounded by O(5 + 2*preemptions) events per request.
+
+2. **OTEL export happens at request finish**: Journey events are exported to OTEL spans only when a request completes. For streaming requests generating tokens over minutes, you won't see journey events in your traces until the final token.
+
+3. **Event order is preserved**: Events for a single request are emitted and exported in chronological order.
+
+4. **No event sampling**: When enabled, ALL requests are traced. There is no built-in sampling mechanism. If you need sampling in production, implement it in your OTEL exporter configuration.
+
+### Observability Trade-offs
+
+**What you get:**
+- Complete lifecycle visibility for every request
+- Accurate progress tracking that survives preemption
+- Low overhead event emission
+
+**What to be aware of:**
+- Events buffered until request completion (memory grows with request duration and preemption count)
+- No real-time event streaming (batch export at finish)
+- All-or-nothing: no per-request or probabilistic sampling
+
+**Recommendations:**
+- For production monitoring at scale, use OTEL sampling at the exporter level
+- For debugging specific requests, enable tracing for the duration of investigation
+- Monitor memory usage for workloads with high preemption rates or very long requests
 
 ---
 
@@ -798,6 +913,34 @@ if event.event_type == RequestJourneyEventType.FINISHED:
 
 ## FAQ
 
+### Q: How do I enable journey tracing?
+
+**A**: Enable journey tracing via CLI flag:
+
+```bash
+# Enable collection only (for custom integration)
+vllm serve meta-llama/Llama-3.2-1B-Instruct --enable-journey-tracing
+
+# Enable with automatic OTEL export (recommended)
+vllm serve meta-llama/Llama-3.2-1B-Instruct \
+    --enable-journey-tracing \
+    --otlp-traces-endpoint http://localhost:4317
+```
+
+For programmatic API:
+```python
+from vllm.config import ObservabilityConfig
+
+observability_config = ObservabilityConfig(
+    enable_journey_tracing=True,
+    otlp_traces_endpoint="http://localhost:4317"  # Optional, for OTEL export
+)
+```
+
+Journey tracing is **disabled by default** with near-zero overhead when off.
+
+---
+
 ### Q: What's the difference between journey events and EngineCoreEvent?
 
 **A**: They serve different purposes:
@@ -835,28 +978,22 @@ Journey events are designed for **production observability**, while EngineCoreEv
 
 ### Q: How do I export events to Prometheus/OpenTelemetry?
 
-**A**: Journey tracing provides raw events attached to `EngineCoreOutputs`. Export is **not built-in**; you need to integrate with your existing telemetry stack:
+**A**: Journey events are **automatically exported to OpenTelemetry** when you set both flags:
 
-1. Collect events from `EngineCoreOutputs.journey_events`
-2. Transform to your observability format
-3. Export using your telemetry client library
-
-Example integration with Prometheus:
-```python
-from prometheus_client import Counter, Histogram
-
-ttft_histogram = Histogram('vllm_ttft_seconds', 'Time to first token')
-preemption_counter = Counter('vllm_preemptions_total', 'Total preemptions')
-
-def export_to_prometheus(event):
-    if event.event_type == RequestJourneyEventType.FIRST_TOKEN:
-        # Calculate TTFT from stored QUEUED event
-        ttft = calculate_ttft(event.request_id)
-        ttft_histogram.observe(ttft)
-
-    if event.event_type == RequestJourneyEventType.PREEMPTED:
-        preemption_counter.inc()
+```bash
+vllm serve MODEL \
+    --enable-journey-tracing \
+    --otlp-traces-endpoint http://localhost:4317
 ```
+
+Events appear as **span events** within the `llm_request` span and are sent to any OTEL collector endpoint you configure. From there, they can be:
+- Stored in Jaeger, Tempo, or other OTEL-compatible backends
+- Processed by OTEL collectors and exported to other systems
+- Visualized in tracing UIs alongside request metrics
+
+**For Prometheus**: Journey events are lifecycle events, not metrics. For Prometheus metrics:
+1. Use the existing `--enable-mfu-metrics` and other vLLM metric flags
+2. Or, write a custom OTEL collector processor to transform journey span events into Prometheus metrics
 
 ---
 
@@ -893,10 +1030,12 @@ def export_to_prometheus(event):
 
 ## Additional Resources
 
+- **CLI Flag**: Use `vllm serve --help` to see all observability options
 - **Source Code**: `vllm/v1/core/sched/journey_events.py`
 - **Implementation**: `vllm/v1/core/sched/scheduler.py` (search for `_emit_journey_event`)
 - **Tests**: `tests/v1/core/test_journey_events.py`
 - **Configuration**: `vllm/config/observability.py`
+- **CLI Arguments**: `vllm/engine/arg_utils.py` (EngineArgs and CLI registration)
 
 ---
 

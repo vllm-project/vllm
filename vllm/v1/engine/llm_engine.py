@@ -296,6 +296,7 @@ class LLMEngine:
                 outputs.outputs,
                 engine_core_timestamp=outputs.timestamp,
                 iteration_stats=iteration_stats,
+                journey_events=outputs.journey_events,
             )
             self.output_processor.update_scheduler_stats(outputs.scheduler_stats)
 

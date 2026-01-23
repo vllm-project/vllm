@@ -525,3 +525,33 @@ def test_human_readable_model_len():
     for invalid in ["1a", "pwd", "10.24", "1.23M", "1.22T"]:
         with pytest.raises(ArgumentError):
             parser.parse_args(["--max-model-len", invalid])
+
+
+def test_enable_journey_tracing_parsing():
+    """Test that --enable-journey-tracing is parsed correctly"""
+    parser = EngineArgs.add_cli_args(FlexibleArgumentParser())
+
+    # Test default value
+    args = parser.parse_args([])
+    assert args.enable_journey_tracing is False
+
+    # Test flag can be set
+    args = parser.parse_args(["--enable-journey-tracing"])
+    assert args.enable_journey_tracing is True
+
+
+def test_enable_journey_tracing_config_plumbing():
+    """Test that --enable-journey-tracing flows through to ObservabilityConfig"""
+    parser = EngineArgs.add_cli_args(FlexibleArgumentParser())
+
+    # Test default (disabled)
+    args = parser.parse_args([])
+    engine_args = EngineArgs.from_cli_args(args)
+    vllm_config = engine_args.create_engine_config()
+    assert vllm_config.observability_config.enable_journey_tracing is False
+
+    # Test enabled via CLI flag
+    args = parser.parse_args(["--enable-journey-tracing"])
+    engine_args = EngineArgs.from_cli_args(args)
+    vllm_config = engine_args.create_engine_config()
+    assert vllm_config.observability_config.enable_journey_tracing is True
