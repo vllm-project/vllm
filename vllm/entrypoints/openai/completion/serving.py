@@ -34,6 +34,7 @@ from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.entrypoints.utils import get_max_tokens, should_include_usage
 from vllm.exceptions import VLLMValidationError
 from vllm.inputs.data import EmbedsPrompt, TokensPrompt, is_embeds_prompt
+from vllm.inputs.parse import get_prompt_components
 from vllm.logger import init_logger
 from vllm.logprobs import Logprob
 from vllm.outputs import RequestOutput
@@ -160,8 +161,8 @@ class OpenAIServingCompletion(OpenAIServing):
         generators: list[AsyncGenerator[RequestOutput, None]] = []
         try:
             for i, engine_prompt in enumerate(engine_prompts):
-                prompt_text, prompt_token_ids, prompt_embeds = (
-                    self._get_prompt_components(engine_prompt)
+                prompt_text, prompt_token_ids, prompt_embeds = get_prompt_components(
+                    engine_prompt
                 )
 
                 input_length = None

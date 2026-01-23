@@ -98,7 +98,6 @@ from vllm.entrypoints.utils import sanitize_message
 from vllm.exceptions import VLLMValidationError
 from vllm.inputs.data import EmbedsPrompt, PromptType, TokensPrompt
 from vllm.inputs.parse import (
-    PromptComponents,
     get_prompt_components,
     is_explicit_encoder_decoder_prompt,
 )
@@ -1138,7 +1137,7 @@ class OpenAIServing:
         priority: int = 0,
         **kwargs,
     ):
-        prompt_text, _, _ = self._get_prompt_components(engine_prompt)
+        prompt_text, _, _ = get_prompt_components(engine_prompt)
 
         orig_priority = priority
         sub_request = 0
@@ -1206,7 +1205,7 @@ class OpenAIServing:
                     context.chat_template_content_format,
                 )
                 engine_prompt = engine_prompts[0]
-                prompt_text, _, _ = self._get_prompt_components(engine_prompt)
+                prompt_text, _, _ = get_prompt_components(engine_prompt)
 
             # Update the sampling params.
             sampling_params.max_tokens = self.max_model_len - len(
@@ -1215,9 +1214,6 @@ class OpenAIServing:
             # OPTIMIZATION
             priority = orig_priority - 1
             sub_request += 1
-
-    def _get_prompt_components(self, prompt: PromptType) -> PromptComponents:
-        return get_prompt_components(prompt)
 
     def _log_inputs(
         self,
@@ -1229,7 +1225,7 @@ class OpenAIServing:
         if self.request_logger is None:
             return
 
-        prompt, prompt_token_ids, prompt_embeds = self._get_prompt_components(inputs)
+        prompt, prompt_token_ids, prompt_embeds = get_prompt_components(inputs)
 
         self.request_logger.log_inputs(
             request_id,
