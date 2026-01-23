@@ -617,44 +617,12 @@ class FlashAttentionImpl(AttentionImpl):
                 "heads in the layer"
             )
         self.supports_quant_query_input = True
-
-<<<<<<< HEAD
-        self.supports_quant_query_input = True
-=======
-    def fused_output_quant_supported(self, quant_key: QuantKey) -> bool:
-        """
-        Check if fused output quantization is supported.
-
-        For FlashAttention, we support fused output FP8 quantization on:
-        - FlashAttention 3
-        - Hopper GPUs (sm90+)
-        - FP8 static tensor quantization
-
-        Note: For DCP and cascade attention, quantization is applied after
-        the attention merge step rather than being fused into the kernel.
-        This is transparent to the fusion pass.
-        """
-        from vllm.platforms import current_platform
-
-        # Only FA3 supports fused output quant
-        if self.vllm_flash_attn_version != 3:
-            return False
-
-        # Only Hopper (sm90+) supports this feature
-        if not current_platform.has_device_capability(90):
-            return False
-
-        # Only FP8 static tensor quantization is supported
-        return quant_key == kFp8StaticTensorSym
-
-    def supports_quant_query_input(self) -> bool:
-        return True
->>>>>>> 8c9f9b267 (Lint fixes)
         self.supports_per_head_quant_scales = (
             self.vllm_flash_attn_version >= 3
             if self.vllm_flash_attn_version is not None
             else False
         )
+
 
         vllm_config = get_current_vllm_config_or_none()
         dcp_a2a = (
@@ -673,7 +641,9 @@ class FlashAttentionImpl(AttentionImpl):
         - Hopper GPUs (sm90+)
         - FP8 static tensor quantization
 
-        This fusion avoids a separate quantization pass after attention.
+        Note: For DCP and cascade attention, quantization is applied after
+        the attention merge step rather than being fused into the kernel.
+        This is transparent to the fusion pass.
         """
         from vllm.platforms import current_platform
 
