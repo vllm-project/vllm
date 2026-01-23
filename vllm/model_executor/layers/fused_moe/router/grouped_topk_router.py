@@ -151,12 +151,8 @@ def grouped_topk(
         # scores for expert selection but original scores for routing weights
         original_scores = scores
         scores = scores + e_score_correction_bias.unsqueeze(0)
-        experts_per_group = num_experts // num_expert_group
-        topk_per_group = min(2, experts_per_group)
         group_scores = (
-            scores.view(num_token, num_expert_group, -1)
-            .topk(topk_per_group, dim=-1)[0]
-            .sum(dim=-1)
+            scores.view(num_token, num_expert_group, -1).topk(2, dim=-1)[0].sum(dim=-1)
         )
     else:
         group_scores = (
