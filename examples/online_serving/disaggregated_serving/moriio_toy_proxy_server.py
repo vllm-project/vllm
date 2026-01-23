@@ -207,6 +207,7 @@ async def handle_request():
 
         req_data = await request.get_json()
         request_id = str(uuid.uuid4())
+        transfer_id = f"xfer-{request_id}"
 
         prefill_instance_endpoint = None
         decode_instance_endpoint = None
@@ -238,6 +239,7 @@ async def handle_request():
         req_data_to_prefill = copy.deepcopy(req_data)
         req_data_to_prefill["kv_transfer_params"] = {}
         req_data["kv_transfer_params"] = {}
+        req_data_to_prefill["kv_transfer_params"]["transfer_id"] = transfer_id
         req_data_to_prefill["kv_transfer_params"]["remote_dp_size"] = (
             decode_instance_endpoint["dp_size"]
         )
@@ -261,6 +263,7 @@ async def handle_request():
         req_data["max_tokens"] -= 1
 
         req_data["kv_transfer_params"] = {
+            "transfer_id": transfer_id,
             "do_remote_decode": False,
             "do_remote_prefill": True,
             "remote_handshake_port": prefill_instance_endpoint["handshake_port"],
