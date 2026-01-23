@@ -79,7 +79,7 @@ class HunyuanA13BReasoningParser(ReasoningParser):
         self.token_buffer = []
         self.text_buffer = ""
 
-    def is_reasoning_end(self, input_ids: list[int]) -> bool:
+    def is_reasoning_end(self, input_ids: Sequence[int]) -> bool:
         return self.current_state == "response"
 
     def extract_content_ids(self, input_ids: list[int]) -> list[int]:
