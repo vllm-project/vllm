@@ -78,6 +78,12 @@ class ObservabilityConfig:
     This includes number of context/generation requests and tokens
     and the elapsed cpu time for the iteration."""
 
+    enable_journey_tracing: bool = False
+    """Enable request journey event tracing. When enabled, emits sparse lifecycle
+    events (QUEUED, SCHEDULED, FIRST_TOKEN, PREEMPTED, FINISHED) for each request
+    with full progress snapshots. Disabled by default. Near-zero overhead when off.
+    Events are delivered via EngineCoreOutputs.journey_events."""
+
     @cached_property
     def collect_model_forward_time(self) -> bool:
         """Whether to collect model forward time for the request."""

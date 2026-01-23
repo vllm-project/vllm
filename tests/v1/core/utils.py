@@ -9,6 +9,7 @@ from vllm.config import (
     ECTransferConfig,
     KVTransferConfig,
     ModelConfig,
+    ObservabilityConfig,
     ParallelConfig,
     SchedulerConfig,
     SpeculativeConfig,
@@ -57,6 +58,7 @@ def create_scheduler(
     pipeline_parallel_size: int = 1,
     use_ec_connector: bool = False,
     ec_role: str | None = None,
+    enable_journey_tracing: bool = False,
 ) -> Scheduler | AsyncScheduler:
     """Create scheduler under test.
 
@@ -131,6 +133,10 @@ def create_scheduler(
         else None
     )
 
+    observability_config = ObservabilityConfig(
+        enable_journey_tracing=enable_journey_tracing
+    )
+
     vllm_config = VllmConfig(
         scheduler_config=scheduler_config,
         model_config=model_config,
@@ -139,6 +145,7 @@ def create_scheduler(
         kv_transfer_config=kv_transfer_config,
         speculative_config=speculative_config,
         ec_transfer_config=ec_transfer_config,
+        observability_config=observability_config,
     )
     kv_cache_config = KVCacheConfig(
         num_blocks=num_blocks,  # A large number of blocks to hold all requests

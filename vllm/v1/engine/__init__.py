@@ -14,6 +14,7 @@ from vllm.lora.request import LoRARequest
 from vllm.multimodal.inputs import MultiModalFeatureSpec
 from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import SamplingParams
+from vllm.v1.core.sched.journey_events import RequestJourneyEvent
 from vllm.v1.metrics.stats import SchedulerStats
 from vllm.v1.outputs import LogprobsLists, LogprobsTensors
 from vllm.v1.serial_utils import UtilityResult
@@ -180,6 +181,7 @@ class EngineCoreOutputs(
 
     utility_output: UtilityOutput | None = None
     finished_requests: set[str] | None = None
+    journey_events: list[RequestJourneyEvent] | None = None
 
     # In DP case, used to signal that the current wave of requests
     # has finished and the engines are paused.

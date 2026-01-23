@@ -122,6 +122,7 @@ class SchedulerInterface(ABC):
         self,
         request_ids: str | Iterable[str],
         finished_status: "RequestStatus",
+        scheduler_step: int | None = None,
     ) -> None:
         """Finish the requests in the scheduler's internal queue. If the request
         is not in the queue, this method will do nothing.
@@ -134,6 +135,8 @@ class SchedulerInterface(ABC):
         Args:
             request_ids: A single or a list of request IDs.
             finished_status: The finished status of the given requests.
+            scheduler_step: Optional scheduler step counter for journey event
+                correlation. None when called from external contexts (e.g., abort).
         """
         raise NotImplementedError
 

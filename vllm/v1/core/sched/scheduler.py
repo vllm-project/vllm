@@ -38,6 +38,12 @@ from vllm.v1.core.encoder_cache_manager import (
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks, KVCacheManager
 from vllm.v1.core.kv_cache_metrics import KVCacheMetricsCollector
 from vllm.v1.core.sched.interface import SchedulerInterface
+from vllm.v1.core.sched.journey_events import (
+    RequestJourneyEvent,
+    RequestJourneyEventType,
+    ScheduleKind,
+    _map_finish_status,
+)
 from vllm.v1.core.sched.output import (
     CachedRequestData,
     GrammarOutput,
@@ -103,6 +109,24 @@ class Scheduler(SchedulerInterface):
         # Increments once per invocation of schedule(), never reset.
         # Initialized to 0 so first schedule() call produces step=1.
         self.scheduler_step_counter: int = 0
+
+        # Journey tracing: Request lifecycle event tracking
+        # INVARIANT: When _enable_journey_tracing is True, ALL journey tracing
+        # data structures are initialized and ready. This ensures
+        # _emit_journey_event() is always safe to call.
+        self._enable_journey_tracing = (
+            self.observability_config.enable_journey_tracing
+        )
+        if self._enable_journey_tracing:
+            # Per-client event buffers (flushed in update_from_output)
+            self._journey_events_buffer_by_client: dict[
+                int, list[RequestJourneyEvent]
+            ] = defaultdict(list)
+            # Track which requests have emitted FIRST_TOKEN (dedup)
+            self._first_token_emitted: set[str] = set()
+            # Prefill progress high-water marks (survives preemption)
+            # request_id → number of prompt tokens processed
+            self._journey_prefill_hiwater: dict[str, int] = {}
 
         # Scheduling constraints.
         self.max_num_running_reqs = self.scheduler_config.max_num_seqs
@@ -413,7 +437,9 @@ class Scheduler(SchedulerInterface):
                     else:
                         preempted_req = self.running.pop()
 
-                    self._preempt_request(preempted_req, scheduled_timestamp)
+                    self._preempt_request(
+                        preempted_req, scheduled_timestamp, scheduler_step=curr_step
+                    )
                     preempted_reqs.append(preempted_req)
                     if preempted_req == request:
                         # No more request to preempt. Cannot schedule this request.
@@ -696,11 +722,44 @@ class Scheduler(SchedulerInterface):
                 )
                 num_scheduled_tokens[request.request_id] = num_new_tokens
                 token_budget -= num_new_tokens
+
+                # Capture previous status for journey event
+                prev_status = request.status
+
                 request.status = RequestStatus.RUNNING
                 request.num_computed_tokens = num_computed_tokens
                 # Count the number of prefix cached tokens.
                 if request.num_cached_tokens < 0:
                     request.num_cached_tokens = num_computed_tokens
+
+                # Journey tracking: Update prefill progress high-water mark
+                # (survives preemption)
+                if self._enable_journey_tracing and request.num_output_tokens == 0:
+                    # Still in prefill phase, update high-water mark (never decreases)
+                    prompt_len = len(request.prompt_token_ids)
+                    prefill_done = min(num_computed_tokens, prompt_len)
+                    self._journey_prefill_hiwater[request.request_id] = max(
+                        self._journey_prefill_hiwater.get(request.request_id, 0),
+                        prefill_done,
+                    )
+
+                # Journey event: SCHEDULED
+                # Only emit for known transitions to avoid mislabeling
+                schedule_kind = None
+                if prev_status == RequestStatus.WAITING:
+                    schedule_kind = ScheduleKind.FIRST
+                elif prev_status == RequestStatus.PREEMPTED:
+                    schedule_kind = ScheduleKind.RESUME
+                # If schedule_kind is None (unexpected state), skip emission
+                # to avoid incorrect labeling in production
+
+                if self._enable_journey_tracing and schedule_kind is not None:
+                    self._emit_journey_event(
+                        request,
+                        RequestJourneyEventType.SCHEDULED,
+                        scheduler_step=curr_step,
+                        schedule_kind=schedule_kind,
+                    )
                 # Encoder-related.
                 if encoder_inputs_to_schedule:
                     scheduled_encoder_inputs[request.request_id] = (
@@ -817,11 +876,22 @@ class Scheduler(SchedulerInterface):
             self._update_after_schedule(scheduler_output)
         return scheduler_output
 
-    def _preempt_request(self, request: Request, timestamp: float) -> None:
+    def _preempt_request(
+        self,
+        request: Request,
+        timestamp: float,
+        scheduler_step: int | None = None,
+    ) -> None:
         """Preempt a request and put it back to the waiting queue.
 
         NOTE: The request should be popped from the running queue outside of this
         method.
+
+        Args:
+            request: The request to preempt
+            timestamp: Current timestamp for event recording
+            scheduler_step: Optional scheduler step counter for journey event
+                correlation. None when called outside schedule() context.
         """
         assert request.status == RequestStatus.RUNNING, (
             "Only running requests can be preempted"
@@ -834,6 +904,13 @@ class Scheduler(SchedulerInterface):
         request.num_preemptions += 1
         if self.log_stats:
             request.record_event(EngineCoreEventType.PREEMPTED, timestamp)
+
+        # Journey event: PREEMPTED
+        self._emit_journey_event(
+            request,
+            RequestJourneyEventType.PREEMPTED,
+            scheduler_step=scheduler_step,
+        )
 
         # Put the request back to the waiting queue.
         self.waiting.prepend_request(request)
@@ -1199,9 +1276,27 @@ class Scheduler(SchedulerInterface):
 
             # Check for stop and update request status.
             if new_token_ids:
+                # Capture output tokens BEFORE update for FIRST_TOKEN detection
+                prev_output_tokens = request.num_output_tokens
+
                 new_token_ids, stopped = self._update_request_with_output(
                     request, new_token_ids
                 )
+
+                # Journey event: FIRST_TOKEN detection
+                # Emit exactly once when first decode token is generated
+                if (
+                    self._enable_journey_tracing
+                    and prev_output_tokens == 0
+                    and request.num_output_tokens > 0
+                    and request.request_id not in self._first_token_emitted
+                ):
+                    self._first_token_emitted.add(request.request_id)
+                    self._emit_journey_event(
+                        request,
+                        RequestJourneyEventType.FIRST_TOKEN,
+                        scheduler_step=scheduler_output.scheduler_step,
+                    )
             elif request.pooling_params and pooler_output is not None:
                 # Pooling stops as soon as there is output.
                 request.status = RequestStatus.FINISHED_STOPPED
@@ -1278,7 +1373,11 @@ class Scheduler(SchedulerInterface):
 
         if failed_kv_load_req_ids and not self.recompute_kv_load_failures:
             requests = [self.requests[req_id] for req_id in failed_kv_load_req_ids]
-            self.finish_requests(failed_kv_load_req_ids, RequestStatus.FINISHED_ERROR)
+            self.finish_requests(
+                failed_kv_load_req_ids,
+                RequestStatus.FINISHED_ERROR,
+                scheduler_step=scheduler_output.scheduler_step,
+            )
             for request in requests:
                 outputs[request.client_index].append(
                     EngineCoreOutput(
@@ -1332,6 +1431,29 @@ class Scheduler(SchedulerInterface):
                         finished_requests=finished_set
                     )
             finished_req_ids.clear()
+
+        # Flush journey events for all clients with buffered events
+        # This ensures SCHEDULED/PREEMPTED events reach output even if
+        # no tokens generated
+        if self._enable_journey_tracing:
+            for (
+                client_index,
+                buffered_events,
+            ) in self._journey_events_buffer_by_client.items():
+                if buffered_events:
+                    journey_events = buffered_events.copy()
+                    buffered_events.clear()
+
+                    # Get or create EngineCoreOutputs for this client
+                    if client_index in engine_core_outputs:
+                        engine_core_outputs[client_index].journey_events = (
+                            journey_events
+                        )
+                    else:
+                        # Create new EngineCoreOutputs just for events
+                        engine_core_outputs[client_index] = EngineCoreOutputs(
+                            journey_events=journey_events
+                        )
 
         if (
             stats := self.make_stats(
@@ -1476,14 +1598,27 @@ class Scheduler(SchedulerInterface):
         self.requests[request.request_id] = request
         if self.log_stats:
             request.record_event(EngineCoreEventType.QUEUED)
+        # Journey event: QUEUED (before first schedule, so step=None)
+        self._emit_journey_event(
+            request, RequestJourneyEventType.QUEUED, scheduler_step=None
+        )
 
     def finish_requests(
-        self, request_ids: str | Iterable[str], finished_status: RequestStatus
+        self,
+        request_ids: str | Iterable[str],
+        finished_status: RequestStatus,
+        scheduler_step: int | None = None,
     ) -> None:
         """Handles the finish signal from outside the scheduler.
 
         For example, the API server can abort a request when the client
         disconnects.
+
+        Args:
+            request_ids: A single or a list of request IDs.
+            finished_status: The finished status of the given requests.
+            scheduler_step: Optional scheduler step counter for journey event
+                correlation. None when called from external contexts (e.g., abort).
         """
         assert RequestStatus.is_finished(finished_status)
         if isinstance(request_ids, str):
@@ -1517,6 +1652,21 @@ class Scheduler(SchedulerInterface):
         # Second pass: set status and free requests
         for request in valid_requests:
             request.status = finished_status
+
+            # Journey event: FINISHED
+            finish_status_str = _map_finish_status(finished_status)
+            self._emit_journey_event(
+                request,
+                RequestJourneyEventType.FINISHED,
+                scheduler_step=scheduler_step,
+                finish_status=finish_status_str,
+            )
+
+            # Cleanup journey tracing state
+            if self._enable_journey_tracing:
+                self._first_token_emitted.discard(request.request_id)
+                self._journey_prefill_hiwater.pop(request.request_id, None)
+
             self._free_request(request)
 
     def _free_request(self, request: Request) -> dict[str, Any] | None:
@@ -1962,3 +2112,99 @@ class Scheduler(SchedulerInterface):
         self.failed_recving_kv_req_ids |= async_failed_req_ids
         # Return sync affected IDs to skip in update_from_output
         return sync_failed_req_ids
+
+    def _compute_progress_snapshot(self, request: Request) -> dict:
+        """Compute progress snapshot using counters that survive preemption.
+
+        CRITICAL: num_cached_tokens is CACHE-HIT LENGTH (from OTHER requests),
+        NOT true prefill progress. We use _journey_prefill_hiwater dict which
+        tracks the high-water mark of prompt tokens processed by THIS request.
+        num_computed_tokens is also reset to 0 on preemption, so cannot be used.
+
+        Args:
+            request: The request to compute progress for
+
+        Returns:
+            Dictionary with progress fields:
+            - prefill_done_tokens: Prompt tokens processed (high-water mark)
+            - prefill_total_tokens: Total prompt tokens
+            - decode_done_tokens: Output tokens generated
+            - decode_max_tokens: Max generation tokens
+            - phase: "PREFILL" or "DECODE"
+        """
+        num_prompt_tokens = len(request.prompt_token_ids)
+
+        # Prefill progress using scheduler-side hi-water dict
+        # (survives preemption)
+        if self._enable_journey_tracing:
+            hiwater = self._journey_prefill_hiwater.get(request.request_id, 0)
+            prefill_done = min(hiwater, num_prompt_tokens)
+        else:
+            # Should never happen (only called when tracing enabled),
+            # but safe default
+            prefill_done = 0
+
+        prefill_total = num_prompt_tokens
+
+        # Decode progress (num_output_tokens = len(_output_token_ids),
+        # survives preemption)
+        decode_done = request.num_output_tokens
+        decode_max = request.max_tokens
+
+        # Phase detection
+        phase = "PREFILL" if request.num_output_tokens == 0 else "DECODE"
+
+        return {
+            "prefill_done_tokens": prefill_done,
+            "prefill_total_tokens": prefill_total,
+            "decode_done_tokens": decode_done,
+            "decode_max_tokens": decode_max,
+            "phase": phase,
+        }
+
+    def _emit_journey_event(
+        self,
+        request: Request,
+        event_type: RequestJourneyEventType,
+        scheduler_step: int | None,
+        schedule_kind: ScheduleKind | None = None,
+        finish_status: str | None = None,
+    ) -> None:
+        """Emit journey event and buffer per-client.
+
+        This is the central emission point for all journey events. Events are
+        buffered per-client and flushed in update_from_output().
+
+        Args:
+            request: The request this event is for
+            event_type: Type of lifecycle event
+            scheduler_step: Scheduler step counter (None for QUEUED only)
+            schedule_kind: FIRST or RESUME (SCHEDULED events only)
+            finish_status: Terminal status string (FINISHED events only)
+        """
+        if not self._enable_journey_tracing:
+            return  # Near-zero overhead: single boolean check
+
+        # Compute progress snapshot (handles preemption correctly)
+        progress = self._compute_progress_snapshot(request)
+
+        # Create event
+        event = RequestJourneyEvent(
+            request_id=request.request_id,
+            event_type=event_type,
+            ts_monotonic=time.monotonic(),
+            scheduler_step=scheduler_step,
+            prefill_done_tokens=progress["prefill_done_tokens"],
+            prefill_total_tokens=progress["prefill_total_tokens"],
+            decode_done_tokens=progress["decode_done_tokens"],
+            decode_max_tokens=progress["decode_max_tokens"],
+            phase=progress["phase"],
+            num_preemptions_so_far=request.num_preemptions,
+            schedule_kind=schedule_kind,
+            finish_status=finish_status,
+        )
+
+        # Buffer per-client
+        self._journey_events_buffer_by_client[request.client_index].append(
+            event
+        )
