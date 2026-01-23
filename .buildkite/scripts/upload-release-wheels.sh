@@ -16,7 +16,7 @@ else
     echo "Git version for commit $BUILDKITE_COMMIT: $GIT_VERSION"
 fi
 # sanity check for version mismatch
-if [ "v$RELEASE_VERSION" != "$GIT_VERSION" ]; then
+if [ "$RELEASE_VERSION" != "$GIT_VERSION" ]; then
   if [ "$FORCE_RELEASE_IGNORE_VERSION_MISMATCH" == "true" ]; then
     echo "[WARNING] Force release and ignore version mismatch"
   else
@@ -82,7 +82,7 @@ aws s3 ls "$S3_COMMIT_PREFIX"
 echo "Copying wheels to local directory"
 mkdir -p $DIST_DIR
 # include only wheels for the release version, ignore all files with "dev" or "rc" in the name
-aws s3 cp --recursive --exclude "*" --include "vllm-${RELEASE_VERSION}*.whl" --exclude "*dev*" --exclude "*rc*" "$S3_COMMIT_PREFIX" $DIST_DIR
+aws s3 cp --recursive --exclude "*" --include "vllm-${RELEASE_VERSION}*.whl" --exclude "*dev*" --exclude "*rc[0-9]*" "$S3_COMMIT_PREFIX" $DIST_DIR
 echo "Wheels copied to local directory"
 # generate source tarball
 git archive --format=tar.gz --output="$DIST_DIR/vllm-${RELEASE_VERSION}.tar.gz" $BUILDKITE_COMMIT
