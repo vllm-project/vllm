@@ -386,19 +386,30 @@ class MultiModalMixin(SupportsMultiModal, SupportsMRoPE):
                 vision_embeddings = vision_embeddings.pooler_output
 
             if isinstance(vision_embeddings, torch.Tensor):
-                if vision_embeddings.ndim == 2:
-                    vision_embeddings = vision_embeddings.unsqueeze(0)
+                split_sizes = num_image_patches.flatten().tolist()
+                total_expected = sum(split_sizes)
 
-                # Embeddings have to be 2D tensors of length `num_images`
-                # but transformers returns concat tensors if each patch
-                # is of different size. We split it back to make vLLM happy
-                vision_embeddings = torch.split(
-                    vision_embeddings, num_image_patches.flatten().tolist()
+                # Flatten to 2D: [total_tokens, hidden_dim]
+                if vision_embeddings.ndim == 3:
+                    vision_embeddings = vision_embeddings.view(
+                        -1, vision_embeddings.shape[-1]
+                    )
+
+                # Handle profiling case where dummy embeddings may not match
+                # expected sizes from num_image_patches
+                actual_size = vision_embeddings.shape[0]
+                if actual_size != total_expected and total_expected > 0:
+                    if actual_size < total_expected:
+                        repeat_factor = (
+                            total_expected + actual_size - 1
+                        ) // actual_size
+                        vision_embeddings = vision_embeddings.repeat(repeat_factor, 1)
+                    vision_embeddings = vision_embeddings[:total_expected]
+
+                # Split into per-image embeddings (returns views, no copy)
+                vision_embeddings = list(
+                    torch.split(vision_embeddings, split_sizes, dim=0)
                 )
-                vision_embeddings = [
-                    embed.flatten(start_dim=0, end_dim=-2)
-                    for embed in vision_embeddings
-                ]
 
             return vision_embeddings
         else:
