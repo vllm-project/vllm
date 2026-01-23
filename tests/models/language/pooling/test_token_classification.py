@@ -51,6 +51,7 @@ def test_bert_models(
 
 @pytest.mark.parametrize("model", ["disham993/electrical-ner-ModernBERT-base"])
 @pytest.mark.parametrize("dtype", ["float"])
+@pytest.mark.flaky(reruns=3)
 @torch.inference_mode
 def test_modernbert_models(
     hf_runner,
@@ -59,6 +60,15 @@ def test_modernbert_models(
     model: str,
     dtype: str,
 ) -> None:
+    # NOTE: https://github.com/vllm-project/vllm/pull/32403
+    # `disham993/electrical-ner-ModernBERT-base` is a randomly initialized
+    # model, which can cause numerical precision variance and edge cases.
+    # We use @flaky(reruns=3) to mitigate intermittent failures.
+    print(
+        f"\n[NOTE] Testing {model} (randomly initialized weights) - "
+        "flaky tolerance enabled due to numerical precision variance."
+    )
+
     with vllm_runner(model, max_model_len=None, dtype=dtype) as vllm_model:
         vllm_outputs = vllm_model.token_classify(example_prompts)
 
