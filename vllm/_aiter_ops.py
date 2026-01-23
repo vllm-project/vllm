@@ -9,6 +9,10 @@ from torch._ops import OpOverload
 import vllm.envs as envs
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import direct_register_custom_op, is_torch_equal_or_newer
+from vllm.v1.attention.ops.rocm_aiter_mla_sparse import (
+    rocm_aiter_sparse_attn_indexer,
+    rocm_aiter_sparse_attn_indexer_fake,
+)
 
 _FP8_DTYPE = current_platform.fp8_dtype()
 
@@ -75,6 +79,8 @@ def _rocm_aiter_fused_moe_impl(
     w2_scale: torch.Tensor | None = None,
     a1_scale: torch.Tensor | None = None,
     a2_scale: torch.Tensor | None = None,
+    num_local_tokens: torch.Tensor | None = None,
+    output_dtype: torch.dtype | None = None,
 ) -> torch.Tensor:
     from aiter import ActivationType, QuantType
     from aiter.fused_moe import fused_moe
@@ -96,6 +102,8 @@ def _rocm_aiter_fused_moe_impl(
         w2_scale,
         a1_scale,
         a2_scale,
+        num_local_tokens=num_local_tokens,
+        dtype=output_dtype,
     )
 
 
@@ -113,7 +121,11 @@ def _rocm_aiter_fused_moe_fake(
     w2_scale: torch.Tensor | None = None,
     a1_scale: torch.Tensor | None = None,
     a2_scale: torch.Tensor | None = None,
+    num_local_tokens: torch.Tensor | None = None,
+    output_dtype: torch.dtype | None = None,
 ) -> torch.Tensor:
+    if output_dtype is not None:
+        return torch.empty_like(hidden_states, dtype=output_dtype)
     return torch.empty_like(hidden_states)
 
 
@@ -192,6 +204,24 @@ def _rocm_aiter_topk_softmax_fake(
     token_expert_indices: torch.Tensor,
     gating_output: torch.Tensor,
     renormalize: bool,
+) -> None:
+    pass
+
+
+def _rocm_aiter_topk_sigmoid_impl(
+    topk_weights: torch.Tensor,
+    topk_indices: torch.Tensor,
+    gating_output: torch.Tensor,
+) -> None:
+    from aiter import topk_sigmoid
+
+    topk_sigmoid(topk_weights, topk_indices, gating_output)
+
+
+def _rocm_aiter_topk_sigmoid_fake(
+    topk_weights: torch.Tensor,
+    topk_indices: torch.Tensor,
+    gating_output: torch.Tensor,
 ) -> None:
     pass
 
@@ -982,6 +1012,14 @@ class rocm_aiter_ops:
             )
 
             direct_register_custom_op(
+                op_name="rocm_aiter_topk_sigmoid",
+                op_func=_rocm_aiter_topk_sigmoid_impl,
+                mutates_args=["topk_weights", "topk_indices"],
+                fake_impl=_rocm_aiter_topk_sigmoid_fake,
+                dispatch_key=current_platform.dispatch_key,
+            )
+
+            direct_register_custom_op(
                 op_name="rocm_aiter_biased_grouped_topk",
                 op_func=_rocm_aiter_biased_grouped_topk_impl,
                 mutates_args=["topk_weights", "topk_ids"],
@@ -1088,6 +1126,14 @@ class rocm_aiter_ops:
                 op_name="rocm_aiter_per_token_quant",
                 op_func=_rocm_aiter_per_token_quant_impl,
                 fake_impl=_rocm_aiter_per_token_quant_fake,
+                dispatch_key=current_platform.dispatch_key,
+            )
+
+            direct_register_custom_op(
+                op_name="rocm_aiter_sparse_attn_indexer",
+                op_func=rocm_aiter_sparse_attn_indexer,
+                mutates_args=["topk_indices_buffer"],
+                fake_impl=rocm_aiter_sparse_attn_indexer_fake,
                 dispatch_key=current_platform.dispatch_key,
             )
 
@@ -1198,6 +1244,8 @@ class rocm_aiter_ops:
         w2_scale: torch.Tensor | None = None,
         a1_scale: torch.Tensor | None = None,
         a2_scale: torch.Tensor | None = None,
+        num_local_tokens: torch.Tensor | None = None,
+        output_dtype: torch.dtype | None = None,
     ) -> torch.Tensor:
         return torch.ops.vllm.rocm_aiter_fused_moe(
             hidden_states,
@@ -1213,6 +1261,8 @@ class rocm_aiter_ops:
             w2_scale,
             a1_scale,
             a2_scale,
+            num_local_tokens,
+            output_dtype,
         )
 
     @staticmethod
@@ -1257,6 +1307,19 @@ class rocm_aiter_ops:
     ) -> tuple[torch.Tensor, ...]:
         torch.ops.vllm.rocm_aiter_topk_softmax(
             topk_weights, topk_indices, token_expert_indices, gating_output, renormalize
+        )
+        return topk_weights, topk_indices
+
+    @staticmethod
+    def topk_sigmoid(
+        topk_weights: torch.Tensor,
+        topk_indices: torch.Tensor,
+        token_expert_indices: torch.Tensor,
+        gating_output: torch.Tensor,
+        renormalize: bool,
+    ) -> tuple[torch.Tensor, ...]:
+        torch.ops.vllm.rocm_aiter_topk_sigmoid(
+            topk_weights, topk_indices, gating_output
         )
         return topk_weights, topk_indices
 

@@ -8,7 +8,11 @@ import torch
 
 import vllm._custom_ops as ops
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
-from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
+from vllm.model_executor.layers.fused_moe.config import (
+    FusedMoEConfig,
+    FusedMoEParallelConfig,
+    FusedMoEQuantConfig,
+)
 from vllm.model_executor.layers.fused_moe.moe_align_block_size import (
     batched_moe_align_block_size,
     moe_align_block_size,
@@ -26,6 +30,13 @@ from vllm.model_executor.layers.quantization.utils.marlin_utils import (
     marlin_make_workspace_new,
     marlin_moe_intermediate_size,
     marlin_quant_input,
+)
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    QuantKey,
+    kFp8Static128BlockSym,
+    kFp8StaticChannelSym,
+    kFp8StaticTensorSym,
+    kNvfp4Static,
 )
 from vllm.platforms import current_platform
 from vllm.scalar_type import ScalarType, scalar_types
@@ -199,7 +210,6 @@ def fused_marlin_moe(
     bias2: torch.Tensor | None,
     w1_scale: torch.Tensor,
     w2_scale: torch.Tensor,
-    gating_output: torch.Tensor | None,
     topk_weights: torch.Tensor,
     topk_ids: torch.Tensor,
     quant_type_id: int,
@@ -239,8 +249,6 @@ def fused_marlin_moe(
     - w2 (torch.Tensor): The second set of expert weights.
     - w1_scale (torch.Tensor): Scale to be used for w1.
     - w2_scale (torch.Tensor): Scale to be used for w2.
-    - gating_output (torch.Tensor|None): The output of the gating
-        operation (before softmax).
     - g_idx1 (torch.Tensor|None): The first set of act_order indices.
     - g_idx2 (torch.Tensor|None): The second set of act_order indices.
     - sort_indices1 (torch.Tensor|None): The first act_order input
@@ -281,8 +289,6 @@ def fused_marlin_moe(
     topk = topk_ids.size(1)
 
     # Check constraints.
-    if gating_output is not None:
-        assert gating_output.size(0) == M, "Number of tokens mismatch"
     assert w1.size(1) * 16 == K, "Hidden size mismatch w1"
     assert w2.size(2) // (num_bits // 2) == K, "Hidden size mismatch w2"
     assert hidden_states.is_contiguous(), "Hidden_states must be contiguous"
@@ -370,7 +376,6 @@ def batched_fused_marlin_moe(
     bias2: torch.Tensor | None,
     w1_scale: torch.Tensor,
     w2_scale: torch.Tensor,
-    gating_output: torch.Tensor | None,
     quant_type_id: int,
     apply_router_weight_on_input: bool = False,
     global_num_experts: int = -1,
@@ -522,7 +527,10 @@ def batched_fused_marlin_moe(
 class MarlinExpertsBase(mk.FusedMoEPermuteExpertsUnpermute):
     def __init__(
         self,
+        moe_config: FusedMoEConfig,
         quant_config: FusedMoEQuantConfig,
+        max_num_tokens: int | None = None,
+        num_dispatchers: int | None = None,
         w13_g_idx: torch.Tensor | None = None,
         w2_g_idx: torch.Tensor | None = None,
         w13_g_idx_sort_indices: torch.Tensor | None = None,
@@ -541,7 +549,51 @@ class MarlinExpertsBase(mk.FusedMoEPermuteExpertsUnpermute):
         self.w13_g_idx_sort_indices = w13_g_idx_sort_indices
         self.w2_g_idx_sort_indices = w2_g_idx_sort_indices
         self.is_k_full = is_k_full
-        super().__init__(quant_config)
+        super().__init__(
+            moe_config=moe_config,
+            quant_config=quant_config,
+            max_num_tokens=max_num_tokens,
+            num_dispatchers=num_dispatchers,
+        )
+
+    @staticmethod
+    def _supports_current_device() -> bool:
+        p = current_platform
+        return p.is_cuda() and p.has_device_capability((7, 5))
+
+    @staticmethod
+    def _supports_no_act_and_mul() -> bool:
+        return False
+
+    @staticmethod
+    def _supports_quant_scheme(
+        weight_key: QuantKey | None,
+        activation_key: QuantKey | None,
+    ) -> bool:
+        # TODO(rob): add int4, mxfp4, int8 as integrations
+        # are migrated to use the oracle one-by-one.
+        SUPPORTED_W = [
+            kFp8Static128BlockSym,
+            kFp8StaticChannelSym,
+            kFp8StaticTensorSym,
+            kNvfp4Static,
+        ]
+        return weight_key in SUPPORTED_W
+
+    @staticmethod
+    def _supports_activation(activation: str) -> bool:
+        return activation in [
+            "silu",
+            "gelu",
+            "swigluoai",
+            "silu_no_mul",
+            "gelu_no_mul",
+            "relu2_no_mul",
+        ]
+
+    @staticmethod
+    def _supports_parallel_config(moe_parallel_config: FusedMoEParallelConfig) -> bool:
+        return True
 
     @property
     def quant_type_id(self) -> int:
@@ -587,38 +639,15 @@ class MarlinExpertsBase(mk.FusedMoEPermuteExpertsUnpermute):
 
 
 class MarlinExperts(MarlinExpertsBase):
-    def __init__(
-        self,
-        quant_config: FusedMoEQuantConfig,
-        w13_g_idx: torch.Tensor | None = None,
-        w2_g_idx: torch.Tensor | None = None,
-        w13_g_idx_sort_indices: torch.Tensor | None = None,
-        w2_g_idx_sort_indices: torch.Tensor | None = None,
-        is_k_full: bool = True,
-    ):
-        super().__init__(
-            quant_config,
-            w13_g_idx,
-            w2_g_idx,
-            w13_g_idx_sort_indices,
-            w2_g_idx_sort_indices,
-            is_k_full,
-        )
-
     def supports_expert_map(self) -> bool:
         return True
 
     def finalize_weight_and_reduce_impl(self) -> mk.TopKWeightAndReduce:
         return TopKWeightAndReduceNoOP()
 
-    @property
-    def activation_formats(
-        self,
-    ) -> tuple[mk.FusedMoEActivationFormat, mk.FusedMoEActivationFormat]:
-        return (
-            mk.FusedMoEActivationFormat.Standard,
-            mk.FusedMoEActivationFormat.Standard,
-        )
+    @staticmethod
+    def activation_format() -> mk.FusedMoEActivationFormat:
+        return mk.FusedMoEActivationFormat.Standard
 
     def supports_chunking(self) -> bool:
         return True
@@ -683,7 +712,6 @@ class MarlinExperts(MarlinExpertsBase):
             bias2=self.w2_bias,
             w1_scale=self.w1_scale,
             w2_scale=self.w2_scale,
-            gating_output=None,
             topk_weights=topk_weights,
             topk_ids=topk_ids,
             global_scale1=self.g1_alphas,
@@ -714,9 +742,10 @@ class MarlinExperts(MarlinExpertsBase):
 class BatchedMarlinExperts(MarlinExpertsBase):
     def __init__(
         self,
+        moe_config: FusedMoEConfig,
+        quant_config: FusedMoEQuantConfig,
         max_num_tokens: int,
         num_dispatchers: int,
-        quant_config: FusedMoEQuantConfig,
         w13_g_idx: torch.Tensor | None = None,
         w2_g_idx: torch.Tensor | None = None,
         w13_g_idx_sort_indices: torch.Tensor | None = None,
@@ -724,15 +753,16 @@ class BatchedMarlinExperts(MarlinExpertsBase):
         is_k_full: bool = True,
     ):
         super().__init__(
-            quant_config,
-            w13_g_idx,
-            w2_g_idx,
-            w13_g_idx_sort_indices,
-            w2_g_idx_sort_indices,
-            is_k_full,
+            moe_config=moe_config,
+            quant_config=quant_config,
+            max_num_tokens=max_num_tokens,
+            num_dispatchers=num_dispatchers,
+            w13_g_idx=w13_g_idx,
+            w2_g_idx=w2_g_idx,
+            w13_g_idx_sort_indices=w13_g_idx_sort_indices,
+            w2_g_idx_sort_indices=w2_g_idx_sort_indices,
+            is_k_full=is_k_full,
         )
-        self.max_num_tokens = max_num_tokens
-        self.num_dispatchers = num_dispatchers
 
     def supports_expert_map(self) -> bool:
         return True
@@ -740,14 +770,9 @@ class BatchedMarlinExperts(MarlinExpertsBase):
     def finalize_weight_and_reduce_impl(self) -> mk.TopKWeightAndReduce:
         return TopKWeightAndReduceDelegate()
 
-    @property
-    def activation_formats(
-        self,
-    ) -> tuple[mk.FusedMoEActivationFormat, mk.FusedMoEActivationFormat]:
-        return (
-            mk.FusedMoEActivationFormat.BatchedExperts,
-            mk.FusedMoEActivationFormat.BatchedExperts,
-        )
+    @staticmethod
+    def activation_format() -> mk.FusedMoEActivationFormat:
+        return mk.FusedMoEActivationFormat.BatchedExperts
 
     def supports_chunking(self) -> bool:
         return False
@@ -763,9 +788,11 @@ class BatchedMarlinExperts(MarlinExpertsBase):
         expert_tokens_meta: mk.ExpertTokensMetadata | None,
         activation: str,
     ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...]]:
+        assert self.num_dispatchers is not None
+        assert self.max_num_tokens is not None
         num_dispatchers = self.num_dispatchers
         num_experts = local_num_experts
-        max_num_tokens = M if self.max_num_tokens is None else self.max_num_tokens
+        max_num_tokens = self.max_num_tokens
         workspace13 = (num_experts * max_num_tokens * num_dispatchers, max(K, N * 2))
         workspace2 = (num_experts * max_num_tokens * num_dispatchers, N)
         output = (num_experts, max_num_tokens * num_dispatchers, K)
@@ -799,7 +826,6 @@ class BatchedMarlinExperts(MarlinExpertsBase):
             bias2=self.w2_bias,
             w1_scale=self.w1_scale,
             w2_scale=self.w2_scale,
-            gating_output=None,
             quant_type_id=self.quant_type_id,
             apply_router_weight_on_input=apply_router_weight_on_input,
             global_num_experts=global_num_experts,
