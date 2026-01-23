@@ -13,9 +13,6 @@ from vllm.model_executor.layers.quantization.utils.marlin_utils_fp8 import (
     is_fp8_marlin_supported,
     prepare_fp8_layer_for_marlin,
 )
-from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
-    convert_to_channelwise,
-)
 from vllm.platforms import current_platform
 
 
@@ -68,18 +65,12 @@ class FP8MarlinLinearKernel(FP8WoQLinearKernel):
         self.size_k_first = not self.is_block_quant
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
-        if self.per_tensor_weight_scales:
-            ws_channelwise = convert_to_channelwise(
-                layer.weight_scale, layer.logical_widths
-            )
-            layer.weight_scale = torch.nn.Parameter(ws_channelwise, requires_grad=False)
-        elif self.per_channel_weight_scales:
-            # required by torch.compile to be torch.nn.Parameter
-            layer.weight_scale = torch.nn.Parameter(
-                layer.weight_scale.data, requires_grad=False
-            )
-        # Weights must be transposed for marlin
-        layer.weight = torch.nn.Parameter(layer.weight.t(), requires_grad=False)
+        # TODO: only need convert_to_channelwise if per tensor scales and fused module!
+
+        layer.weight_scale = torch.nn.Parameter(
+            layer.weight_scale.data, requires_grad=False
+        )
+        # Assumption here is weights is already transposed, do need extra handling.
 
         prepare_fp8_layer_for_marlin(
             layer, size_k_first=self.size_k_first, input_dtype=self.input_dtype
