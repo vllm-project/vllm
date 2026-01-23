@@ -374,17 +374,17 @@ class XPUFp8MoEMethod(CompressedTensorsMoEMethod):
             w13_new = torch.cat([w1_aligned, w3_aligned], dim=1).to(fp8_dtype)
 
             # 7. Update the Layer Parameters
-            layer.w13_weight.data = w13_new
+            replace_parameter(layer, "w13_weight", w13_new)
 
             # Update the scale to the single unified value [Num_Experts]
-            layer.w13_weight_scale = torch.nn.Parameter(
-                unified_scales.squeeze(), requires_grad=False
-            )
+            replace_parameter(layer, "w13_weight_scale", unified_scales.squeeze())
 
         # Logic 2: Handle W2 (Down) Scales
         # Ensure W2 scales are strictly 1D [Num_Experts] as required by the kernel.
         if layer.w2_weight_scale.dim() > 1:
-            layer.w2_weight_scale.data = layer.w2_weight_scale.data.squeeze()
+            replace_parameter(
+                layer, "w2_weight_scale", layer.w2_weight_scale.data.squeeze()
+            )
 
         device = layer.w13_weight.device
         layer.w13_weight_scale.data = layer.w13_weight_scale.data.to(device)

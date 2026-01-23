@@ -708,7 +708,6 @@ class CompressedTensorsConfig(QuantizationConfig):
         """
 
         # Use the new get_quant_args method to extract QuantizationArgs
-        # print(f"layer: {layer}, layer_name : {layer_name}")
         scheme_dict = self.get_scheme_dict(layer, layer_name)
 
         weight_quant = None
