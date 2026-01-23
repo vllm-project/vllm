@@ -1356,10 +1356,6 @@ def marlin_gemm(
     )
 
 
-# NOTE: backward compatibility alias for marlin_gemm
-gptq_marlin_gemm = marlin_gemm
-
-
 # machete
 def machete_supported_schedules(
     a_type: torch.dtype,
