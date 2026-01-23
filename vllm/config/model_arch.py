@@ -55,3 +55,18 @@ class ModelArchitectureConfig:
 
     derived_max_model_len_and_key: tuple[float, str | None]
     """Derived maximum model length and key from the hf config."""
+
+    # RoPE-related fields
+    uses_mrope: bool
+    """Whether the model uses M-RoPE (multi-dimensional rotary position embedding)."""
+
+    uses_xdrope_dim: int
+    """Number of dimensions for XD-RoPE. 0 if not used."""
+
+    rope_parameters: dict[str, Any] | None
+    """RoPE parameters dictionary containing RoPE configuration.
+       Can be None if the model doesn't use RoPE."""
+
+    original_max_position_embeddings: int | None
+    """Original maximum position embeddings before any RoPE scaling.
+       Used for models with extended context via RoPE scaling."""

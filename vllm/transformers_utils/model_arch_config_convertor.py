@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from typing import final
+from typing import Any, final
 
 import torch
 from safetensors.torch import _TYPES as _SAFETENSORS_TO_TORCH_DTYPE
@@ -15,6 +15,8 @@ from vllm.config.utils import getattr_iter
 from vllm.logger import init_logger
 from vllm.transformers_utils.config import (
     try_get_safetensors_metadata,
+    uses_mrope,
+    uses_xdrope_dim,
 )
 from vllm.utils.torch_utils import common_broadcastable_dtype
 
@@ -241,6 +243,31 @@ class ModelArchConfigConvertorBase:
             derived_max_model_len = tmp_max_len
         return derived_max_model_len, max_len_key
 
+    def get_uses_mrope(self) -> bool:
+        return uses_mrope(self.hf_config)
+
+    def get_uses_xdrope_dim(self) -> int:
+        """Get the number of dimensions for XD-RoPE. Returns 0 if not used."""
+        return uses_xdrope_dim(self.hf_config)
+
+    def get_rope_parameters(self) -> dict[str, Any] | None:
+        """Get the RoPE parameters from the config."""
+        rope_params = getattr(self.hf_text_config, "rope_parameters", None)
+        if rope_params is not None:
+            return dict(rope_params)
+        return None
+
+    def get_original_max_position_embeddings(self) -> int | None:
+        """Get the original max position embeddings before RoPE scaling."""
+        ompe = getattr(self.hf_text_config, "original_max_position_embeddings", None)
+        if ompe is not None:
+            return ompe
+        # Also check rope_parameters for this field
+        rope_params = getattr(self.hf_text_config, "rope_parameters", None)
+        if rope_params is not None:
+            return rope_params.get("original_max_position_embeddings")
+        return None
+
     def convert(self) -> ModelArchitectureConfig:
         model_arch_config = ModelArchitectureConfig(
             architectures=self.get_architectures(),
@@ -256,6 +283,11 @@ class ModelArchConfigConvertorBase:
             quantization_config=self.get_quantization_config(),
             is_deepseek_mla=self.is_deepseek_mla(),
             derived_max_model_len_and_key=self.derive_max_model_len_and_key(),
+            # RoPE-related fields
+            uses_mrope=self.get_uses_mrope(),
+            uses_xdrope_dim=self.get_uses_xdrope_dim(),
+            rope_parameters=self.get_rope_parameters(),
+            original_max_position_embeddings=self.get_original_max_position_embeddings(),
         )
 
         return model_arch_config

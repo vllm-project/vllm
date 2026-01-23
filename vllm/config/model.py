@@ -33,8 +33,6 @@ from vllm.transformers_utils.config import (
     try_get_dense_modules,
     try_get_generation_config,
     try_get_tokenizer_config,
-    uses_mrope,
-    uses_xdrope_dim,
 )
 from vllm.transformers_utils.gguf_utils import (
     is_gguf,
@@ -1407,11 +1405,11 @@ class ModelConfig:
 
     @property
     def uses_mrope(self) -> bool:
-        return uses_mrope(self.hf_config)
+        return self.model_arch_config.uses_mrope
 
     @property
     def uses_xdrope_dim(self) -> int:
-        return uses_xdrope_dim(self.hf_config)
+        return self.model_arch_config.uses_xdrope_dim
 
     @property
     def is_multimodal_model(self) -> bool:
@@ -1962,15 +1960,16 @@ def _get_and_verify_max_len(
         )
         derived_max_model_len = default_max_len
 
+    # Get rope_parameters from model_arch_config
     # In Transformers v5 rope_parameters could be TypedDict or dict[str, TypedDict].
     # To simplify the verification, we convert it to dict[str, TypedDict].
-    rope_parameters = getattr(hf_config, "rope_parameters", None)
+    rope_parameters = model_arch_config.rope_parameters
     if rope_parameters and not is_rope_parameters_nested(rope_parameters):
         rope_parameters = {"": rope_parameters}
 
     # NOTE(woosuk): Gemma3's max_model_len (128K) is already scaled by RoPE
     # scaling, so we skip applying the scaling factor again.
-    if rope_parameters is not None and "gemma3" not in hf_config.model_type:
+    if rope_parameters is not None and "gemma3" not in model_arch_config.model_type:
         scaling_factor = 1.0
         for rp in rope_parameters.values():
             # No need to consider "type" key because of patch_rope_parameters when
@@ -1999,11 +1998,11 @@ def _get_and_verify_max_len(
         if rope_parameters is not None and any(
             rp["rope_type"] == "longrope" for rp in rope_parameters.values()
         ):
-            max_model_len = int(
-                getattr(
-                    hf_config, "original_max_position_embeddings", derived_max_model_len
-                )
-            )
+            original_max_pos = model_arch_config.original_max_position_embeddings
+            if original_max_pos is not None:
+                max_model_len = int(original_max_pos)
+            else:
+                max_model_len = int(derived_max_model_len)
         else:
             max_model_len = int(derived_max_model_len)
         max_model_len = current_platform.check_max_model_len(max_model_len)
@@ -2014,6 +2013,8 @@ def _get_and_verify_max_len(
         # Some models might have a separate key for specifying model_max_length
         # that will be bigger than derived_max_model_len. We compare user input
         # with model_max_length and allow this override when it's smaller.
+        # NOTE: model_max_length is not consolidated into model_arch_config
+        # as it's primarily used for tokenizer limits, not model architecture.
         model_max_length = getattr(hf_config, "model_max_length", None)
         if model_max_length is None or max_model_len > model_max_length:
             msg = (
