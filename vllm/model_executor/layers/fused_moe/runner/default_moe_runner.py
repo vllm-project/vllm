@@ -95,22 +95,6 @@ class DefaultMoERunner(MoERunner):
         ) -> tuple[torch.Tensor, torch.Tensor]:
             return self.forward_impl(layer, hidden_states, router_logits)
 
-        direct_register_custom_op(
-            op_name=f"moe_forward{lname}",
-            op_func=_moe_forward,
-            mutates_args=["hidden_states"],
-            fake_impl=DefaultMoERunner._moe_forward_fake,
-            tags=(torch.Tag.needs_fixed_stride_order,),
-        )
-
-        direct_register_custom_op(
-            op_name=f"moe_forward_shared{lname}",
-            op_func=_moe_forward_shared,
-            mutates_args=["hidden_states"],
-            fake_impl=DefaultMoERunner._moe_forward_shared_fake,
-            tags=(torch.Tag.needs_fixed_stride_order,),
-        )
-
         if current_platform.is_tpu() or current_platform.is_cpu():
             # TODO: Once the OOM issue for the TPU backend is resolved, we
             # will switch to using the moe_forward custom op.
@@ -121,8 +105,22 @@ class DefaultMoERunner(MoERunner):
                 self.moe_forward = _moe_forward_shared
         else:
             if self.shared_experts is None:
+                direct_register_custom_op(
+                    op_name=f"moe_forward{lname}",
+                    op_func=_moe_forward,
+                    mutates_args=["hidden_states"],
+                    fake_impl=DefaultMoERunner._moe_forward_fake,
+                    tags=(torch.Tag.needs_fixed_stride_order,),
+                )
                 self.moe_forward = eval(f"torch.ops.vllm.moe_forward{lname}")
             else:
+                direct_register_custom_op(
+                    op_name=f"moe_forward_shared{lname}",
+                    op_func=_moe_forward_shared,
+                    mutates_args=["hidden_states"],
+                    fake_impl=DefaultMoERunner._moe_forward_shared_fake,
+                    tags=(torch.Tag.needs_fixed_stride_order,),
+                )
                 self.moe_forward = eval(f"torch.ops.vllm.moe_forward_shared{lname}")
 
         self.moe_config_use_flashinfer_cutlass_kernels = (
