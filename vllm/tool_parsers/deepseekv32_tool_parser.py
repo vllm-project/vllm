@@ -261,6 +261,64 @@ class DeepSeekV32ToolParser(ToolParser):
 
         return delta_tool_calls
 
+    def _extract_name(self, name_str: str) -> str:
+        """Extract name from quoted string."""
+        name_str = name_str.strip()
+        if (
+            name_str.startswith('"')
+            and name_str.endswith('"')
+            or name_str.startswith("'")
+            and name_str.endswith("'")
+        ):
+            return name_str[1:-1]
+        return name_str
+
+    def _extract_param_name(self, input_str: str) -> str:
+        """Extract param name"""
+        start = input_str.find('"') + 1
+        end = input_str.find('"', start)
+        return input_str[start:end] if start > 0 and end > start else input_str
+
+    def _convert_param_value_checked(
+        self, value: str, param_type: str | list[str]
+    ) -> Any:
+        """Convert parameter value to the correct type."""
+        if value.lower() == "null":
+            return None
+
+        param_type = param_type.lower()
+        if param_type in ["string", "str", "text"]:
+            return value
+        elif param_type in ["integer", "int"]:
+            return int(value)
+        elif param_type in ["number", "float"]:
+            val = float(value)
+            return val if val != int(val) else int(val)
+        elif param_type in ["boolean", "bool"]:
+            value = value.strip()
+            if value.lower() not in ["false", "0", "true", "1"]:
+                raise ValueError("Invalid boolean value")
+            return value.lower() in ["true", "1"]
+        elif param_type in ["object", "array"]:
+            return json.loads(value)
+        else:
+            return json.loads(value)
+
+    def _convert_param_value(self, value: str, param_type: str | list[str]) -> Any:
+        """Convert parameter value to the correct type."""
+        if isinstance(param_type, list):
+            for current_type in param_type:
+                try:
+                    return self._convert_param_value_checked(value, current_type)
+                except Exception:
+                    continue
+            # raise last type cast exception
+            return value
+        try:
+            return self._convert_param_value_checked(value, param_type)
+        except Exception:
+            return value
+
     def extract_tool_calls_streaming(
         self,
         previous_text: str,
