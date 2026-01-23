@@ -47,7 +47,9 @@ from vllm.scalar_type import scalar_types
 
 if current_platform.is_rocm():
     pytest.skip(
-        "These tests require marlin, which is not supported on ROCm.",
+        "These tests require gptq_marlin_repack,"
+        "marlin_int4_fp8_preprocess, gptq_marlin_24_gemm,"
+        "or marlin_gemm which are not supported on ROCm.",
         allow_module_level=True,
     )
 
