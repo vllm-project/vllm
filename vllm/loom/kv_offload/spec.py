@@ -75,6 +75,10 @@ def _parse_ratio_or_auto(name: str, value: Any) -> float | Literal["auto"]:
 class LoomOffloadingConfig:
     seed_pool_size_GB: int = 0
     cxl_kvcache_size_GB: int = 0
+    offloaded_block_size: int | None = None
+    layer_group_size: int | None = None
+    shared_prefix_kvcache_path: str | None = None
+    shared_prefix_layout_version: int = 1
     # Loom (MVP-0): request-level recompute baseline knobs.
     loom_recompute_ratio: float | Literal["auto"] = 0.0
     loom_disable_store_for_recompute: bool = False
@@ -100,6 +104,37 @@ class LoomOffloadingConfig:
             )
         else:
             cxl_kvcache_size_GB = defaults.cxl_kvcache_size_GB
+
+        offloaded_block_size = defaults.offloaded_block_size
+        if "offloaded_block_size" in raw:
+            offloaded_block_size = _coerce_int(
+                "offloaded_block_size", raw["offloaded_block_size"]
+            )
+            if offloaded_block_size <= 0:
+                raise ValueError("offloaded_block_size must be > 0")
+
+        layer_group_size = defaults.layer_group_size
+        if "layer_group_size" in raw:
+            layer_group_size = _coerce_int("layer_group_size", raw["layer_group_size"])
+            if layer_group_size <= 0:
+                raise ValueError("layer_group_size must be > 0")
+
+        shared_prefix_kvcache_path = defaults.shared_prefix_kvcache_path
+        if "shared_prefix_kvcache_path" in raw:
+            if raw["shared_prefix_kvcache_path"] is None:
+                shared_prefix_kvcache_path = None
+            else:
+                shared_prefix_kvcache_path = _coerce_str(
+                    "shared_prefix_kvcache_path", raw["shared_prefix_kvcache_path"]
+                )
+
+        shared_prefix_layout_version = defaults.shared_prefix_layout_version
+        if "shared_prefix_layout_version" in raw:
+            shared_prefix_layout_version = _coerce_int(
+                "shared_prefix_layout_version", raw["shared_prefix_layout_version"]
+            )
+            if shared_prefix_layout_version <= 0:
+                raise ValueError("shared_prefix_layout_version must be > 0")
 
         loom_recompute_ratio = defaults.loom_recompute_ratio
         if "loom_recompute_ratio" in raw:
@@ -154,6 +189,10 @@ class LoomOffloadingConfig:
         return cls(
             seed_pool_size_GB=seed_pool_size_GB,
             cxl_kvcache_size_GB=cxl_kvcache_size_GB,
+            offloaded_block_size=offloaded_block_size,
+            layer_group_size=layer_group_size,
+            shared_prefix_kvcache_path=shared_prefix_kvcache_path,
+            shared_prefix_layout_version=shared_prefix_layout_version,
             loom_recompute_ratio=loom_recompute_ratio,
             loom_disable_store_for_recompute=loom_disable_store_for_recompute,
             loom_load_only=loom_load_only,
@@ -184,6 +223,68 @@ class LoomOffloadingSpec(OffloadingSpec):
                 "loom offloading config must be a dict-like mapping or "
                 f"LoomOffloadingConfig, got {type(extra).__name__}"
             )
+
+        # Normalize and validate Loom layout knobs.
+        # NOTE: vLLM base OffloadingSpec reads `block_size` from kv_connector_extra_config.
+        # We expose it as `offloaded_block_size` in LoomOffloadingConfig and enforce
+        # consistency if both are provided.
+        if self.loom_config.offloaded_block_size is not None:
+            base_offloaded_block_size = int(
+                self.extra_config.get("block_size", self.gpu_block_size)
+            )
+            if base_offloaded_block_size != self.loom_config.offloaded_block_size:
+                raise ValueError(
+                    "Conflicting offloaded block size configuration: "
+                    f"kv_connector_extra_config['block_size']={base_offloaded_block_size} "
+                    f"but loom.offloaded_block_size={self.loom_config.offloaded_block_size}. "
+                    "Please set only one, or set them to the same value."
+                )
+
+            self.offloaded_block_size = int(self.loom_config.offloaded_block_size)
+            if self.offloaded_block_size % self.gpu_block_size != 0:
+                raise ValueError(
+                    "offloaded_block_size must be a multiple of gpu_block_size: "
+                    f"offloaded_block_size={self.offloaded_block_size}, "
+                    f"gpu_block_size={self.gpu_block_size}"
+                )
+        else:
+            # Make the effective offloaded_block_size visible to downstream Loom code.
+            self.loom_config.offloaded_block_size = int(self.offloaded_block_size)
+
+        if self.loom_config.layer_group_size is not None:
+            if kv_cache_config is None:
+                raise ValueError(
+                    "layer_group_size is set but kv_cache_config is None; "
+                    "unable to validate num_layers"
+                )
+            num_layers = len(kv_cache_config.kv_cache_tensors)
+            if num_layers <= 0:
+                raise ValueError(f"Invalid num_layers={num_layers} for layer grouping")
+            if self.loom_config.layer_group_size > num_layers:
+                raise ValueError(
+                    "layer_group_size must be <= num_layers: "
+                    f"layer_group_size={self.loom_config.layer_group_size}, "
+                    f"num_layers={num_layers}"
+                )
+            if num_layers % self.loom_config.layer_group_size != 0:
+                raise ValueError(
+                    "layer_group_size must evenly divide num_layers for MVP layout: "
+                    f"layer_group_size={self.loom_config.layer_group_size}, "
+                    f"num_layers={num_layers}"
+                )
+        else:
+            # Default to a single group spanning all layers.
+            if kv_cache_config is not None:
+                self.loom_config.layer_group_size = len(kv_cache_config.kv_cache_tensors)
+
+        log_once = getattr(logger, "info_once", logger.info)
+        log_once(
+            "Loom layout knobs: offloaded_block_size=%s gpu_block_size=%s block_size_factor=%s layer_group_size=%s",
+            self.loom_config.offloaded_block_size,
+            self.gpu_block_size,
+            self.offloaded_block_size // self.gpu_block_size,
+            self.loom_config.layer_group_size,
+        )
 
         # Scheduler-side
         self._manager: OffloadingManager | None = None
