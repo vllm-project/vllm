@@ -1083,7 +1083,7 @@ class FusedMoEParallelConfig:
             dp_rank=0,
             ep_size=1,
             ep_rank=0,
-            sp_size=0,
+            sp_size=1,
             use_ep=False,
             all2all_backend="naive",
             enable_eplb=False,

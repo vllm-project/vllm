@@ -105,23 +105,27 @@ class DefaultMoERunner(MoERunner):
                 self.moe_forward = _moe_forward_shared
         else:
             if self.shared_experts is None:
-                direct_register_custom_op(
-                    op_name=f"moe_forward{lname}",
-                    op_func=_moe_forward,
-                    mutates_args=["hidden_states"],
-                    fake_impl=DefaultMoERunner._moe_forward_fake,
-                    tags=(torch.Tag.needs_fixed_stride_order,),
-                )
-                self.moe_forward = eval(f"torch.ops.vllm.moe_forward{lname}")
+                op_name = f"moe_forward{lname}"
+                if not hasattr(torch.ops.vllm, op_name):
+                    direct_register_custom_op(
+                        op_name=op_name,
+                        op_func=_moe_forward,
+                        mutates_args=["hidden_states"],
+                        fake_impl=DefaultMoERunner._moe_forward_fake,
+                        tags=(torch.Tag.needs_fixed_stride_order,),
+                    )
+                self.moe_forward = getattr(torch.ops.vllm, op_name)
             else:
-                direct_register_custom_op(
-                    op_name=f"moe_forward_shared{lname}",
-                    op_func=_moe_forward_shared,
-                    mutates_args=["hidden_states"],
-                    fake_impl=DefaultMoERunner._moe_forward_shared_fake,
-                    tags=(torch.Tag.needs_fixed_stride_order,),
-                )
-                self.moe_forward = eval(f"torch.ops.vllm.moe_forward_shared{lname}")
+                op_name = f"moe_forward_shared{lname}"
+                if not hasattr(torch.ops.vllm, op_name):
+                    direct_register_custom_op(
+                        op_name=op_name,
+                        op_func=_moe_forward_shared,
+                        mutates_args=["hidden_states"],
+                        fake_impl=DefaultMoERunner._moe_forward_shared_fake,
+                        tags=(torch.Tag.needs_fixed_stride_order,),
+                    )
+                self.moe_forward = getattr(torch.ops.vllm, op_name)
 
         self.moe_config_use_flashinfer_cutlass_kernels = (
             self.moe_config.use_flashinfer_cutlass_kernels
