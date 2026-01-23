@@ -240,6 +240,15 @@ class CompressedTensorsMoEMethod(FusedMoEMethodBase):
 
 
 class XPUFp8MoEMethod(CompressedTensorsMoEMethod):
+    """
+    MoE method for FP8 quantization on Intel XPU hardware.
+
+    This class handles the initialization, weight loading, and execution of
+    FP8 MoE layers. It specifically addresses the compatibility between
+    checkpoint formats (often split scales for W1/W3) and XPU kernel
+    requirements (unified scales).
+    """
+
     def __init__(self, quant_config, moe_config, layer: torch.nn.Module):
         super().__init__(moe_config)
         self.quant_config = quant_config
@@ -253,21 +262,10 @@ class XPUFp8MoEMethod(CompressedTensorsMoEMethod):
         params_dtype: torch.dtype,
         **extra_weight_attrs,
     ):
-        if layer.moe_config.moe_parallel_config.tp_rank == 0:
-            print(f"--------------------XPUFP8 create_weights-params_dtype: {params_dtype}, \
-                extra_weight_attrs: {extra_weight_attrs}--------------------------")
-
-        # # ### 改动点 1: 智能判断权重类型 ###
-        # # 如果配置显示这是 FP8 Checkpoint，我们直接申请 FP8 内存
-        # if self.quant_config.is_checkpoint_fp8_serialized:
-        #     # 获取当前平台的 FP8 类型，通常是 torch.float8_e4m3fn
-        #     # 也可以写死 torch.float8_e4m3fn，或者从 config 获取
-        #     weight_dtype = torch.float8_e4m3fn 
-        #     print(f"XPU: Allocating FP8 weights directly (W8A16 Mode)")
-        # else:
-        #     # 否则（在线量化模式），先申请 BF16/FP16
-        #     weight_dtype = params_dtype
-        #     print(f"XPU: Allocating {params_dtype} weights for Online Quantization")
+        """
+        Allocate weights and scales for the MoE layer.
+        """
+        # Currently defaults to e4m3fn
         weight_dtype = torch.float8_e4m3fn
 
         layer.intermediate_size_per_partition = intermediate_size_per_partition
@@ -275,7 +273,9 @@ class XPUFp8MoEMethod(CompressedTensorsMoEMethod):
         layer.num_experts = num_experts
         layer.orig_dtype = params_dtype
         layer.weight_block_size = None
-        # WEIGHTS
+
+        # --- Weight Allocation ---
+        # W13: The fused Gate (W1) and Up (W3) projections.
         w13_weight = torch.nn.Parameter(
             torch.empty(
                 num_experts,
@@ -288,6 +288,7 @@ class XPUFp8MoEMethod(CompressedTensorsMoEMethod):
         layer.register_parameter("w13_weight", w13_weight)
         set_weight_attrs(w13_weight, extra_weight_attrs)
 
+        # W2: The Down projection.
         w2_weight = torch.nn.Parameter(
             torch.empty(
                 num_experts,
@@ -300,8 +301,10 @@ class XPUFp8MoEMethod(CompressedTensorsMoEMethod):
         layer.register_parameter("w2_weight", w2_weight)
         set_weight_attrs(w2_weight, extra_weight_attrs)
 
-        # Allocate 2 scales for w1 and w3 respectively.
-        # They will be combined to a single scale after weight loading.
+        # --- Scale Allocation ---
+        # allocate 2 scales for W13 (Gate+Up)
+        # with checkpoints where W1 and W3 are quantized separately.
+        # These will be merged into a single unified scale during `process_weights_after_loading`.
         w13_weight_scale = torch.nn.Parameter(
             torch.ones(num_experts, 2, dtype=torch.float32), requires_grad=False
         )
@@ -311,122 +314,92 @@ class XPUFp8MoEMethod(CompressedTensorsMoEMethod):
         layer.register_parameter("w13_weight_scale", w13_weight_scale)
         layer.register_parameter("w2_weight_scale", w2_weight_scale)
 
+        # Update attributes to indicate Tensor-wise quantization
         extra_weight_attrs.update(
             {"quant_method": FusedMoeWeightScaleSupported.TENSOR.value}
         )
-        
+
+        # Apply attributes to scales (crucial for correct loading logic)
         set_weight_attrs(w13_weight_scale, extra_weight_attrs)
         set_weight_attrs(w2_weight_scale, extra_weight_attrs)
-        # INPUT_SCALES
+
+        # Input scales are not used in Weight-Only quantization (W8A16)
         layer.w13_input_scale = None
         layer.w2_input_scale = None
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
-        # only for non-fp8 model, such as BF16
-        # if not self.quant_config.is_checkpoint_fp8_serialized:
+        """
+        Post-processing logic to align loaded weights with XPU kernel requirements.
         
-        if layer.moe_config.moe_parallel_config.tp_rank == 0:
-            print("--------------------XPUFP8 process_weights_after_loading-----------------------------")
+        Primary Goal: Resolve the conflict between separate W1/W3 scales found in 
+        standard FP8 checkpoints and the XPU kernel's requirement for a unified 
+        per-tensor scale.
+        """
+
 
         fp8_dtype = torch.float8_e4m3fn
         assert layer.w13_weight.dtype == fp8_dtype
+
+        # Handle Split Scales for W13 (Gate + Up)
+        # Check if scales are split [Num_Experts, 2] and merge them.
         if layer.w13_weight_scale.dim() == 2 and layer.w13_weight_scale.shape[1] == 2:    
             num_experts = layer.num_experts
-            # W13 的形状是 [Num_Experts, 2 * Inter, Hidden]
-            # 我们需要切分出中间维度
             full_inter_dim = layer.w13_weight.shape[1]
             inter_dim = full_inter_dim // 2
             
-            # 1. 提取旧的 Scales
-            # w1_scales: [Num_Experts]
-            # w3_scales: [Num_Experts]
+            # 1. Extract original independent scales
             old_scales = layer.w13_weight_scale.to(torch.float32)
             w1_scales = old_scales[:, 0].reshape(num_experts, 1, 1)
             w3_scales = old_scales[:, 1].reshape(num_experts, 1, 1)
             
-            # 2. 计算新的统一 Scale (Max)
-            # new_scales: [Num_Experts, 1, 1]
+            # 2. Calculate the new unified scale (Max of W1 and W3)
+            # This ensures the range covers both distributions to prevent overflow.
             unified_scales, _ = torch.max(old_scales, dim=1, keepdim=True)
             unified_scales_expanded = unified_scales.reshape(num_experts, 1, 1)
             
-            # 3. 提取权重切片 (FP8)
-            # 注意：切片是 View，不会立即复制内存
-            w1_weight_fp8 = layer.w13_weight[:, :inter_dim, :]
-            w3_weight_fp8 = layer.w13_weight[:, inter_dim:, :]
-            
-            # 4. 执行“重对齐” (Re-alignment)
-            # 逻辑：Real_Value = FP8 * Old_Scale
-            #       New_FP8    = Real_Value / New_Scale
-            #       New_FP8    = FP8 * (Old_Scale / New_Scale)
-            # 计算修正因子 (FP32)
-            w1_correction = w1_scales / (unified_scales_expanded + 1e-6) # 加上 1e-6 防止除0
+            # 3. Calculate Correction Factors
+            # Logic: We must adjust the weight values to compensate for the scale change.
+            # Real_Value = FP8_Old * Old_Scale
+            # New_FP8    = Real_Value / New_Scale
+            # Therefore: New_FP8 = FP8_Old * (Old_Scale / New_Scale)
+            w1_correction = w1_scales / (unified_scales_expanded + 1e-6) # Add epsilon to avoid div-by-zero
             w3_correction = w3_scales / (unified_scales_expanded + 1e-6)
             
-            # 转换 W1 (FP8 -> FP32 -> Rescale -> FP8)
+            # 4. Extract current FP8 weight shards
+            w1_weight_fp8 = layer.w13_weight[:, :inter_dim, :]
+            w3_weight_fp8 = layer.w13_weight[:, inter_dim:, :]
+
+            # 5. Re-align weights (Dequantize -> Scale -> Requantize logic)
+            # Note: We perform the multiplication in FP32 for precision.
             w1_aligned = (w1_weight_fp8.to(torch.float32) * w1_correction)
-            
-            # 转换 W3 (FP8 -> FP32 -> Rescale -> FP8)
             w3_aligned = (w3_weight_fp8.to(torch.float32) * w3_correction)
-            
-            # 5. 拼回 W13
-            # 创建一个新的容器来存放合并后的权重
+
+            # 6. Concatenate and cast back to FP8
+            # Workaround: XPU `torch.cat` may not support FP8 inputs directly, 
+            # so we concatenate in FP32 and then cast to the target FP8 dtype.
             w13_new = torch.cat([w1_aligned, w3_aligned], dim=1).to(fp8_dtype)
-            
-            # 6. 更新 Layer 的 Parameter
+
+            # 7. Update the Layer Parameters
             layer.w13_weight.data = w13_new
-            # 将 Scale 更新为统一后的值 [Num_Experts]
-            # 注意要去掉最后那个为 1 的维度，变成 [Num_Experts] 或 [Num_Experts, 1] 取决于 Kernel 要求
-            # 这里假设 Kernel 需要 [Num_Experts]
+
+            # Update the scale to the single unified value [Num_Experts]
             layer.w13_weight_scale = torch.nn.Parameter(
                 unified_scales.squeeze(), requires_grad=False
             )
             
-            print(f"XPU MoE: Successfully merged W1/W3 scales for {num_experts} experts.")
-
-        # =========================================================
-        # 处理 W2 (Down) - 比较简单
-        # =========================================================
-        # W2 通常只有一个 Scale，只需要确保数据类型和设备正确
+        # Logic 2: Handle W2 (Down) Scales
+        # Ensure W2 scales are strictly 1D [Num_Experts] as required by the kernel.
         if layer.w2_weight_scale.dim() > 1:
              layer.w2_weight_scale.data = layer.w2_weight_scale.data.squeeze()
 
-        # 确保所有东西都在正确的 Device 上
         device = layer.w13_weight.device
         layer.w13_weight_scale.data = layer.w13_weight_scale.data.to(device)
         layer.w2_weight_scale.data = layer.w2_weight_scale.data.to(device)
 
 
-        if False:
-            fp8_dtype = current_platform.fp8_dtype()
-            w13_weight = torch.empty_like(layer.w13_weight.data, dtype=fp8_dtype)
-            w2_weight = torch.empty_like(layer.w2_weight.data, dtype=fp8_dtype)
-
-            # Re-initialize w13_scale because we directly quantize
-            # merged w13 weights and generate a single scaling factor.
-            layer.w13_weight_scale = torch.nn.Parameter(
-                torch.ones(
-                    layer.local_num_experts,
-                    dtype=torch.float32,
-                    device=w13_weight.device,
-                ),
-                requires_grad=False,
-            )
-            for expert in range(layer.local_num_experts):
-                w13_weight[expert, :, :], layer.w13_weight_scale[expert] = (
-                    ops.scaled_fp8_quant(layer.w13_weight.data[expert, :, :])
-                )
-                w2_weight[expert, :, :], layer.w2_weight_scale[expert] = (
-                    ops.scaled_fp8_quant(layer.w2_weight.data[expert, :, :])
-                )
-            layer.w13_weight = torch.nn.Parameter(w13_weight, requires_grad=False)
-            layer.w2_weight = torch.nn.Parameter(w2_weight, requires_grad=False)
-
     def get_fused_moe_quant_config(
         self, layer: torch.nn.Module
     ) -> FusedMoEQuantConfig | None:
-        
-        if layer.moe_config.moe_parallel_config.tp_rank == 0:
-            print("--------------------XPUFP8 get_fused_moe_quant_config-----------------------------")
         return None
 
     def apply(
@@ -436,73 +409,20 @@ class XPUFp8MoEMethod(CompressedTensorsMoEMethod):
         x: torch.Tensor,
         router_logits: torch.Tensor,
         ) -> torch.Tensor:
-
-        # 1
+        """
+        Execute the MoE Layer: Router -> Expert Computation (XPU Kernel).
+        """
+        
+        # 1. Router: Select the top-k experts for each token
         routing_weights, selected_experts = router.select_experts(
                 hidden_states=x,
                 router_logits=router_logits
             )
 
-        if layer.moe_config.moe_parallel_config.tp_rank == 0:
-            print(f"--------------------XPUFP8 apply-x.device: {x.device}----routing_weights.shape:{routing_weights.shape}, selected_experts:{selected_experts}------------------------")
-
-        # 2        
-        # M, _ = x.size()
-        # routing_weights = torch.empty(
-        #     M, layer.top_k, dtype=torch.float32, device=x.device
-        # )
-        # selected_experts = torch.empty(
-        #     M, layer.top_k, dtype=torch.int32, device=x.device
-        # )
-        # token_expert_indices = torch.empty(
-        #     M, layer.top_k, dtype=torch.int32, device=x.device
-        # )
-        # if layer.use_grouped_topk:
-        #     routing_weights, selected_experts = torch.ops._moe_C.fused_grouped_topk(
-        #         x,
-        #         router_logits,
-        #         layer.top_k,
-        #         layer.renormalize,
-        #         n_expert_group=layer.num_expert_group,
-        #         n_topk_group=layer.topk_group,
-        #         scoring_func=layer.scoring_func,
-        #         routed_scaling_factor=layer.routed_scaling_factor,
-        #         bias=layer.e_score_correction_bias,
-        #     )
-        # else:
-        #     torch.ops._moe_C.topk_softmax(
-        #         routing_weights,
-        #         selected_experts,
-        #         token_expert_indices,
-        #         router_logits,
-        #         layer.renormalize,
-        #     )
-        
-        # # -----------------------------------
-        # # 1. Softmax (在全部专家上做)
-        # # router_logits: [Batch, Num_Experts]
-        # routing_weights = torch.nn.functional.softmax(
-        #     router_logits, dim=-1, dtype=torch.float32
-        # )
-
-        # # 2. TopK Selection
-        # # 选出分数最高的 K 个专家
-        # # topk_weights: [Batch, TopK]
-        # # topk_ids: [Batch, TopK]
-        # topk_weights, topk_ids = torch.topk(
-        #     routing_weights, layer.top_k, dim=-1
-        # )
-        
-        # # 3. Renormalize (可选，但推荐)
-        # # 重新归一化，让选中的 K 个权重之和为 1
-        # if layer.renormalize:
-        #     topk_weights = topk_weights / topk_weights.sum(dim=-1, keepdim=True)
-        # # -----------------------------------
-
+        # 2. Expert Computation: Invoke the XPU Fused MoE Kernel
+        # Lazy import to prevent ImportError on non-XPU environments
         from vllm_xpu_kernels.fused_moe_interface import xpu_fused_moe
-        if layer.moe_config.moe_parallel_config.tp_rank == 0:
-            print("xpu_fused_moe imported")
-
+        
         return xpu_fused_moe(
             hidden_states=x,
             w13=layer.w13_weight,
@@ -512,10 +432,10 @@ class XPUFp8MoEMethod(CompressedTensorsMoEMethod):
             w2_scales=layer.w2_weight_scale,
             w2_bias=layer.w2_bias if self.moe.has_bias else None,
             topk_weights=routing_weights,
-            # topk_ids=topk_ids.to(torch.int32), # 确保转成 int32 传给 Kerne
-            topk_ids=selected_experts,
+            topk_ids=selected_experts, # Contains the selected expert indices
             n_experts_per_token=layer.top_k,
             activation=layer.activation,
+            # Calculate local number of experts per partition
             num_experts=layer.global_num_experts // self.moe.moe_parallel_config.ep_size,
             ep_rank=self.moe.moe_parallel_config.ep_rank,
             ep_size=self.moe.moe_parallel_config.ep_size,
@@ -2816,171 +2736,3 @@ class CompressedTensorsW4A8Fp8MoEMethod(CompressedTensorsMoEMethod):
     @property
     def supports_eplb(self) -> bool:
         return False
-
-class CompressedTensorsW8A16MoEMethodForXPU(CompressedTensorsMoEMethod):
-    def __init__(
-        self,
-        weight_quant: QuantizationArgs,
-        input_quant: QuantizationArgs | None,
-        moe_config,
-    ):
-        super().__init__(moe_config)
-        self.weight_quant = weight_quant
-        self.input_quant = input_quant
-
-        # 校验：确保是 8-bit 且为 float (FP8) 类型
-        assert weight_quant.num_bits == 8
-        assert weight_quant.type == "float" or weight_quant.zp_dtype == torch.float8_e4m3fn
-        
-        # 记录 FP8 的具体 dtype，默认为 e4m3fn，这是 XPU 目前主要支持的推理格式
-        self.fp8_dtype = torch.float8_e4m3fn
-
-
-    def create_weights(
-            self,
-            layer: torch.nn.Module,
-            num_experts: int,
-            hidden_size: int,
-            intermediate_size_per_partition: int,
-            params_dtype: torch.dtype,
-            **extra_weight_attrs,
-        ):
-            # 1. 注册基本属性
-            extra_weight_attrs.update({"quant_method": self.weight_quant.strategy})
-            
-            # 2. 创建权重
-            # 注意：这里我们直接申请 fp8_dtype 的权重。
-            # 如果加载的是 BF16 checkpoint，vLLM 的 loader 需要支持 cast，
-            # 或者我们在 process_weights_after_loading 里做手动量化。
-            w13_weight = torch.nn.Parameter(
-                torch.empty(
-                    num_experts,
-                    2 * intermediate_size_per_partition,
-                    hidden_size,
-                    dtype=self.fp8_dtype, # 直接使用 FP8
-                ),
-                requires_grad=False,
-            )
-            layer.register_parameter("w13_weight", w13_weight)
-            set_weight_attrs(w13_weight, extra_weight_attrs)
-
-            w2_weight = torch.nn.Parameter(
-                torch.empty(
-                    num_experts,
-                    hidden_size,
-                    intermediate_size_per_partition,
-                    dtype=self.fp8_dtype, # 直接使用 FP8
-                ),
-                requires_grad=False,
-            )
-            layer.register_parameter("w2_weight", w2_weight)
-            set_weight_attrs(w2_weight, extra_weight_attrs)
-
-            # 3. 创建 Scales (缩放因子)
-            # 根据 config 中的 strategy (通常是 tensor) 来决定 shape
-            # XPU 内核通常需要每个 Expert 有独立的 Scale，或者 Per-Tensor
-            # 这里参照 XPUFp8MoEMethod 的逻辑，给每个 Expert 分配
-            
-            # W13 Scales: [num_experts, 2] 或者 [num_experts, 2 * inter_size] 取决于粒度
-            # 假设是 Per-Tensor (Per-Expert 粒度)
-            w13_weight_scale = torch.nn.Parameter(
-                torch.ones(num_experts, 2, dtype=torch.float32), 
-                requires_grad=False
-            )
-            
-            w2_weight_scale = torch.nn.Parameter(
-                torch.ones(num_experts, dtype=torch.float32), 
-                requires_grad=False
-            )
-            
-            layer.register_parameter("w13_weight_scale", w13_weight_scale)
-            layer.register_parameter("w2_weight_scale", w2_weight_scale)
-            set_weight_attrs(w13_weight_scale, extra_weight_attrs)
-            set_weight_attrs(w2_weight_scale, extra_weight_attrs)
-
-            # 占位，不需要 input scale，因为是 W8A16
-            layer.w13_input_scale = None
-            layer.w2_input_scale = None
-
-    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
-        """
-        如果在加载时，权重是从 BF16 checkpoint 读入的，可以在这里进行在线量化。
-        如果是直接加载的 FP8 checkpoint，则这里可能什么都不用做，或者做简单的 layout 调整。
-        """
-        
-        # 检查是否需要在线量化 (仿照 XPUFp8MoEMethod)
-        # 如果当前权重类型不是 FP8，说明加载的是原始精度权重
-        if layer.w13_weight.dtype != self.fp8_dtype:
-            # 获取 XPU 设备
-            device = layer.w13_weight.device
-            
-            # 创建临时 FP8 buffer
-            w13_fp8 = torch.empty_like(layer.w13_weight, dtype=self.fp8_dtype)
-            w2_fp8 = torch.empty_like(layer.w2_weight, dtype=self.fp8_dtype)
-            
-            # 重新初始化 scale (以防万一)
-            layer.w13_weight_scale.data.fill_(1.0)
-            layer.w2_weight_scale.data.fill_(1.0)
-
-            # 执行在线量化 (模拟 XPUFp8MoEMethod 的逻辑)
-            # 注意：实际代码需确保 ops.scaled_fp8_quant 可用
-            local_num_experts = layer.w13_weight.shape[0]
-            
-            for expert in range(local_num_experts):
-                # 量化 W13
-                q_w13, s_w13 = torch.ops.xpu.scaled_fp8_quant(
-                    layer.w13_weight.data[expert]
-                )
-                w13_fp8[expert] = q_w13
-                layer.w13_weight_scale.data[expert] = s_w13
-
-                # 量化 W2
-                q_w2, s_w2 = torch.ops.xpu.scaled_fp8_quant(
-                    layer.w2_weight.data[expert]
-                )
-                w2_fp8[expert] = q_w2
-                layer.w2_weight_scale.data[expert] = s_w2
-
-            # 替换回 layer 属性
-            layer.w13_weight = torch.nn.Parameter(w13_fp8, requires_grad=False)
-            layer.w2_weight = torch.nn.Parameter(w2_fp8, requires_grad=False)
-            
-            # 释放旧内存
-            torch.cuda.empty_cache()
-
-    def apply(
-            self,
-            layer: FusedMoE,
-            router: FusedMoERouter,
-            x: torch.Tensor,
-            router_logits: torch.Tensor,
-        ) -> torch.Tensor:
-            
-            # 1. 路由计算 (Routing) - 复用 XPUFp8MoEMethod 的逻辑
-            # 这里简化处理，直接调用 pytorch ops 或 router 方法
-            topk_weights, topk_ids = router.select_experts(
-                hidden_states=x,
-                router_logits=router_logits,
-            )
-
-            # 2. 调用 XPU Fused MoE Kernel
-            # 这里的调用签名需要匹配 vllm-xpu-kernel 的定义
-            from vllm_xpu_kernels.fused_moe_interface import xpu_fused_moe
-
-            return xpu_fused_moe(
-                hidden_states=x,
-                w13=layer.w13_weight,
-                w13_scales=layer.w13_weight_scale,
-                w13_bias=getattr(layer, "w13_bias", None),
-                w2=layer.w2_weight,
-                w2_scales=layer.w2_weight_scale,
-                w2_bias=getattr(layer, "w2_bias", None),
-                topk_weights=topk_weights,
-                topk_ids=topk_ids,
-                n_experts_per_token=layer.top_k,
-                activation=layer.activation,
-                num_experts=layer.global_num_experts // self.moe_config.moe_parallel_config.ep_size,
-                ep_rank=self.moe_config.moe_parallel_config.ep_rank,
-                ep_size=self.moe_config.moe_parallel_config.ep_size,
-                is_fp8=True, # 关键：开启 FP8 模式
-            )

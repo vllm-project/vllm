@@ -719,7 +719,6 @@ class CompressedTensorsConfig(QuantizationConfig):
             input_quant = scheme_dict.get("input_activations")
             format = scheme_dict.get("format")
 
-        print(f"CT Config scheme_dict: {scheme_dict}, layer_name: {layer_name}")
         # Find the sparsity scheme of the layer
         # assume that fused layers inherit first component's sparsity scheme
         sparsity_targets = self.sparsity_scheme_map.keys() - set(
