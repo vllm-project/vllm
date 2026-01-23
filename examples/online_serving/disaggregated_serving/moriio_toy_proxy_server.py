@@ -166,27 +166,6 @@ async def stream_decode_response(session, response, request_id):
         await session.close()
 
 
-async def send_request_to_decode(endpoint, req_data, request_id):
-    async with aiohttp.ClientSession(
-        timeout=aiohttp.ClientTimeout(total=6 * 6000 * 6000)
-    ) as session:
-        headers = {
-            "Authorization": f"Bearer {os.environ.get('OPENAI_API_KEY')}",
-            "X-Request-Id": request_id,
-        }
-        async with session.post(
-            url=endpoint, json=req_data, headers=headers
-        ) as response:
-            if response.status == 200:
-                async for chunk_bytes in response.content.iter_chunked(1024):
-                    yield chunk_bytes
-            else:
-                raise RuntimeError(
-                    "send_request_to_decode response.status != 200,response.statuus = ",
-                    response.status,
-                )
-
-
 def example_round_robin_dp_loader(request_number, dp_size):
     return request_nums % dp_size
 
@@ -233,7 +212,6 @@ async def handle_request():
             )
 
         dip, dport = extract_ip_port_fast(decode_instance_endpoint["request_address"])
-        ip, port = extract_ip_port_fast(prefill_instance_endpoint["request_address"])
 
         req_data_to_prefill = copy.deepcopy(req_data)
         req_data_to_prefill["kv_transfer_params"] = {}
