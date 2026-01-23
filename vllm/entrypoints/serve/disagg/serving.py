@@ -101,11 +101,13 @@ class ServingTokens(OpenAIServing):
 
         # TODO(NickLucche): Change to EngineCoreRequest once Renderer work is
         # completed
-        engine_prompt = self._preprocess_completion(
+        engine_prompts = await self._preprocess_completion(
             request,
             prompt_input=request.token_ids,
             prompt_embeds=None,
         )
+        assert len(engine_prompts) == 1
+        engine_prompt = engine_prompts[0]
 
         # Schedule the request and get the result generator.
         result_generator: AsyncGenerator[RequestOutput, None] | None = None
