@@ -109,7 +109,7 @@ class ProfilerConfig:
             value = getattr(envs, env_var_name)
             logger.warning_once(
                 "Using %s environment variable is deprecated and will be removed in "
-                "v0.14.0 or v1.0.0, whichever is soonest. Please use "
+                "v0.15.0 or v1.0.0, whichever is soonest. Please use "
                 "--profiler-config.%s command line argument or "
                 "ProfilerConfig(%s=...) config field instead.",
                 env_var_name,
