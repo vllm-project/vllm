@@ -54,17 +54,26 @@ class RendererLike(Protocol):
         self,
         prompt_raw: str | list[int] | bytes,
     ) -> TextPrompt | TokensPrompt | EmbedsPrompt:
+        error_msg = "Each prompt must be a string or an array of tokens"
+
         if isinstance(prompt_raw, str):
             encoder_config = self.config.encoder_config or {}
             if encoder_config.get("do_lower_case", False):
                 prompt_raw = prompt_raw.lower()
 
             return TextPrompt(prompt=prompt_raw)
+
         if isinstance(prompt_raw, list):
+            if not is_list_of(prompt_raw, int):
+                raise TypeError(error_msg)
+
             return TokensPrompt(prompt_token_ids=prompt_raw)
 
-        embeds = safe_load_prompt_embeds(self.config, prompt_raw)
-        return EmbedsPrompt(prompt_embeds=embeds)
+        if isinstance(prompt_raw, bytes):
+            embeds = safe_load_prompt_embeds(self.config, prompt_raw)
+            return EmbedsPrompt(prompt_embeds=embeds)
+
+        raise TypeError(error_msg)
 
     def render_completions(
         self,
@@ -80,10 +89,15 @@ class RendererLike(Protocol):
                 prompts_raw.extend(prompt_embeds)
 
         if prompt_input is not None:
-            if isinstance(prompt_input, str) or is_list_of(prompt_input, int):
+            if isinstance(prompt_input, str) or (
+                len(prompt_input) > 0 and is_list_of(prompt_input, int)
+            ):
                 prompts_raw.append(prompt_input)  # type: ignore[arg-type]
             else:
                 prompts_raw.extend(prompt_input)  # type: ignore[arg-type]
+
+        if len(prompts_raw) == 0:
+            raise ValueError("You must pass at least one prompt")
 
         return [self.render_completion(prompt) for prompt in prompts_raw]
 

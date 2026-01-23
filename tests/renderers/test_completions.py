@@ -51,9 +51,58 @@ def renderer(mock_model_config):
     )
 
 
-class TestRenderPrompt:
-    """Test Category A: Basic Functionality Tests"""
+class TestValidatePrompt:
+    STRING_INPUTS = [
+        "",
+        "foo",
+        "foo bar",
+        "foo baz bar",
+        "foo bar qux baz",
+    ]
 
+    TOKEN_INPUTS = [
+        [-1],
+        [1],
+        [1, 2],
+        [1, 3, 4],
+        [1, 2, 4, 3],
+    ]
+
+    INPUTS_SLICES = [
+        slice(None, None, -1),
+        slice(None, None, 2),
+        slice(None, None, -2),
+    ]
+
+    # Test that a nested mixed-type list of lists raises a TypeError.
+    def test_empty_input(self, renderer):
+        with pytest.raises(ValueError, match="at least one prompt"):
+            renderer.render_completions([])
+
+    def test_invalid_type(self, renderer):
+        with pytest.raises(TypeError, match="string or an array of tokens"):
+            renderer.render_completions([[1, 2], ["foo", "bar"]])
+
+    @pytest.mark.parametrize("string_input", STRING_INPUTS)
+    def test_string_consistent(self, renderer, string_input: str):
+        assert renderer.render_completions(string_input) == renderer.render_completions(
+            [string_input]
+        )
+
+    @pytest.mark.parametrize("token_input", TOKEN_INPUTS)
+    def test_token_consistent(self, renderer, token_input: list[int]):
+        assert renderer.render_completions(token_input) == renderer.render_completions(
+            [token_input]
+        )
+
+    @pytest.mark.parametrize("inputs_slice", INPUTS_SLICES)
+    def test_string_slice(self, renderer, inputs_slice: slice):
+        assert renderer.render_completions(self.STRING_INPUTS)[
+            inputs_slice
+        ] == renderer.render_completions(self.STRING_INPUTS[inputs_slice])
+
+
+class TestRenderPrompt:
     @pytest.mark.asyncio
     async def test_token_input(self, renderer):
         tokens = [101, 7592, 2088]
