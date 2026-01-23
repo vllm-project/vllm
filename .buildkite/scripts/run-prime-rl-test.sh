@@ -50,9 +50,6 @@ sed -i '/vllm==/d' pyproject.toml
 echo "Installing Prime-RL dependencies..."
 uv sync --inexact && uv sync --inexact --all-extras
 
-# override torch installation, make sure right version is installed
-uv pip install torch torchvision --index-url https://download.pytorch.org/whl/test/cu129 --force-reinstall
-
 # Verify installation
 echo "Verifying installations..."
 uv run python -c "import vllm; print(f'vLLM version: {vllm.__version__}')"

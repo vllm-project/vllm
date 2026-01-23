@@ -38,7 +38,7 @@ repos:
   rev: 0.9.1
   hooks:
     - id: pip-compile
-      args: [requirements/test.in, -o, requirements/test.txt, --index-strategy, unsafe-best-match, --extra-index-url, https://download.pytorch.org/whl/test/cu129, --python-platform, x86_64-manylinux_2_28, --python-version, "3.12"]
+      args: [requirements/test.in, -o, requirements/test.txt, --index-strategy, unsafe-best-match, --torch-backend, cu129, --python-platform, x86_64-manylinux_2_28, --python-version, "3.12"]
       files: ^requirements/test\.(in|txt)$
 - repo: local
   hooks:
