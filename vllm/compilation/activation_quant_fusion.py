@@ -217,7 +217,7 @@ class SiluMulBlockQuantPattern:
             return result_quant, scale
         
         def replacement(input: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-            
+            print(f"FUSED KERNEL TRIGGERED! input.shape={input.shape}")
             if self.model_dtype is not None:
                 input = input.to(dtype=self.model_dtype)
             

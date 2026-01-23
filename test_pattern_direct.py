@@ -122,7 +122,7 @@ with set_current_vllm_config(config):
     )
     
     print("\n3. Running compiled version...")
-    print("   (Watch for '🔥 FUSED KERNEL TRIGGERED!' message)\n")
+    print("   (Watch for 'FUSED KERNEL TRIGGERED!' message)\n")
     
     with torch.no_grad():
         compiled_out, compiled_scales = compiled_fn(x)
