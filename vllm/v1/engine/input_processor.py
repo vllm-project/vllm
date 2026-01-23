@@ -3,6 +3,7 @@
 
 import os
 import time
+from collections import UserDict
 from collections.abc import Mapping
 from typing import Any, Literal, cast
 
@@ -19,7 +20,6 @@ from vllm.multimodal.parse import MultiModalDataParser
 from vllm.multimodal.processing.context import set_request_id
 from vllm.multimodal.utils import argsort_mm_positions
 from vllm.pooling_params import PoolingParams
-from vllm.renderers import RendererLike
 from vllm.sampling_params import _SAMPLING_EPS, SamplingParams
 from vllm.tokenizers import TokenizerLike
 from vllm.tokenizers.mistral import MistralTokenizer
@@ -46,6 +46,7 @@ class InputProcessor:
     def __init__(
         self,
         vllm_config: VllmConfig,
+        tokenizer: TokenizerLike | None,
         mm_registry: MultiModalRegistry = MULTIMODAL_REGISTRY,
     ) -> None:
         self.vllm_config = vllm_config
@@ -61,7 +62,8 @@ class InputProcessor:
 
         self.input_preprocessor = InputPreprocessor(
             self.model_config,
-            vllm_config.observability_config,
+            tokenizer,
+            self.vllm_config.observability_config,
             mm_registry,
             mm_processor_cache=self.mm_processor_cache,
         )
@@ -69,13 +71,6 @@ class InputProcessor:
     @property
     def tokenizer(self) -> TokenizerLike | None:
         return self.input_preprocessor.tokenizer
-
-    def get_tokenizer(self) -> TokenizerLike:
-        return self.input_preprocessor.get_tokenizer()
-
-    @property
-    def renderer(self) -> RendererLike:
-        return self.input_preprocessor.renderer
 
     def _validate_logprobs(
         self,
@@ -539,6 +534,9 @@ class InputProcessor:
             prompt_embeds = decoder_inputs["prompt_embeds"]
         else:
             prompt_token_ids = decoder_inputs["prompt_token_ids"]
+            if isinstance(prompt_token_ids, UserDict):
+                # For transformers v5 compatibility
+                prompt_token_ids = prompt_token_ids["input_ids"]
             prompt_embeds = None
 
         sampling_params = None
@@ -626,6 +624,9 @@ class InputProcessor:
             if prompt_inputs["type"] == "embeds"
             else prompt_inputs["prompt_token_ids"]
         )
+        if isinstance(prompt_ids, UserDict):
+            # For transformers v5 compatibility
+            prompt_ids = prompt_ids["input_ids"]
         prompt_embeds = (
             prompt_inputs["prompt_embeds"]
             if prompt_inputs["type"] == "embeds"
@@ -642,11 +643,7 @@ class InputProcessor:
 
         tokenizer = self.tokenizer
         if tokenizer is not None:
-            # NOTE: Cast to int to handle cases where token IDs may be returned
-            # as strings (e.g., transformers >= 5.0).
-            max_input_id = max(
-                (int(x) for x in prompt_ids) if prompt_ids else (), default=0
-            )
+            max_input_id = max(prompt_ids or (), default=0)
 
             # NOTE: tokenizer.max_token_id is the tokenizer's vocab size while
             # self.model_config.get_vocab_size() is the model's vocab size.
