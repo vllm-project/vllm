@@ -1436,12 +1436,8 @@ class GPUModelRunner(
         # arange: [0, 1, 0, 1, 2, 3, 4, 0, 1, 2]
         cu_num_tokens, arange = self._get_cumsum_and_arange(num_scheduled_tokens)
 
-        # Compute token positions for token lookup. This uses the scheduler's
-        # num_computed_tokens_cpu which is correct for indexing into token_ids_cpu
-        # (the scheduler placed tokens at those positions).
-        token_positions_np = (
-            self.input_batch.num_computed_tokens_cpu[req_indices] + arange
-        )
+        # Get positions.
+        positions_np = self.input_batch.num_computed_tokens_cpu[req_indices] + arange
 
         # Calculate M-RoPE positions.
         # Only relevant for models using M-RoPE (e.g, Qwen2-VL)
@@ -1453,12 +1449,12 @@ class GPUModelRunner(
         if self.uses_xdrope_dim > 0:
             self._calc_xdrope_positions(scheduler_output)
 
-        # Get token indices for looking up input tokens.
+        # Get token indices.
         # E.g., [0, 1, 0, 1, 2, 3, 4, 0, 1, 2]
         # -> [0, 1, M, M + 1, M + 2, M + 3, M + 4, 2 * M, 2 * M + 1, 2 * M + 2]
         # where M is the max_model_len.
         token_indices = (
-            token_positions_np + req_indices * self.input_batch.token_ids_cpu.shape[1]
+            positions_np + req_indices * self.input_batch.token_ids_cpu.shape[1]
         )
         token_indices_tensor = torch.from_numpy(token_indices)
 
@@ -3805,8 +3801,6 @@ class GPUModelRunner(
 
         if self.use_async_spec_decode:
             self.valid_sampled_token_count_gpu = valid_sampled_tokens_count
-            # Update num_computed_tokens on GPU with actual accepted tokens.
-            # This makes GPU the source of truth for the next step.
             num_reqs = valid_sampled_tokens_count.shape[0]
             self.num_computed_tokens.gpu[:num_reqs] += valid_sampled_tokens_count.int()
         self.input_batch.prev_sampled_token_ids = next_token_ids.unsqueeze(1)

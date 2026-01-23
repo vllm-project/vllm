@@ -960,12 +960,10 @@ class InputBatch:
                 assert self.async_copy_ready_event is not None
                 self.async_copy_ready_event.synchronize()
                 sampled_token_ids = self.sampled_token_ids_cpu.tolist()
-
+            # Replace placeholder token id(s) with actual sampled id(s).
             new_ids: list[int] = sampled_token_ids[prev_index]
             if not new_ids:
                 continue
-
-            # Find how many valid tokens were sampled (-1 is padding).
             num_sampled_ids = len(new_ids) if new_ids[-1] != -1 else new_ids.index(-1)
             if num_sampled_ids == 0:
                 continue
