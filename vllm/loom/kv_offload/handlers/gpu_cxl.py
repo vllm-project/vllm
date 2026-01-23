@@ -152,6 +152,12 @@ class LoomGPUCxlOffloadingHandlers:
 
         pin_memory = is_pin_memory_available()
 
+        log_once = getattr(logger, "info_once", logger.info)
+        log_once(
+            "CXL/DRAM CPU buffers pin_memory=%s (for faster H2D/D2H DMA)",
+            pin_memory,
+        )
+
         logger.info("Allocating %d CXL tensors...", len(gpu_caches))
         gpu_tensors: list[torch.Tensor] = []
         cxl_tensors: list[torch.Tensor] = []
