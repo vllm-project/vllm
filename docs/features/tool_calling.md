@@ -412,7 +412,9 @@ Olmo 3 models output tool calls in a format that is very similar to the one expe
 Supported models:
 
 * `allenai/Olmo-3-7B-Instruct`
-* `allenai/Olmo-3.1-32B-Think`
+* `allenai/Olmo-3.1-32B-Instruct`
+
+Note: OLMo 3 **Think** models (e.g., `Olmo-3.1-32B-Think`) do **not** support tool calling. Only the **Instruct** models listed above are supported.
 
 vLLM provides a tool chat template for Olmo 3 models:
 
