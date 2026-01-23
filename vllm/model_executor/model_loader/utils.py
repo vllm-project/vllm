@@ -20,6 +20,7 @@ from vllm.model_executor.layers.quantization.base_config import (
 )
 from vllm.model_executor.models.interfaces import SupportsQuant
 from vllm.utils.platform_utils import is_pin_memory_available
+from vllm.utils.torch_utils import get_cuda_view_from_cpu_tensor
 
 logger = init_logger(__name__)
 
@@ -115,7 +116,8 @@ def process_weights_after_loading(
         ):
             # TODO(lucas): see if there is a way to unify the signatures
             # of process_weights_after_loading
-            module.process_weights_after_loading(model_config.dtype)
+            with device_loading_context(module, target_device):
+                module.process_weights_after_loading(model_config.dtype)
 
 
 @contextmanager
@@ -126,19 +128,24 @@ def device_loading_context(module: torch.nn.Module, target_device: torch.device)
         return
 
     original_device_states: dict[str, torch.device] = {}
+    uva_offloaded_parameters: list[str] = []
 
     # Store original device states and move parameters to GPU if they're on CPU
+    # Record UVA offloaded parameters for later re-offloading
     for name, p in module.named_parameters():
         if p.device.type == "cpu":
             original_device_states[name] = p.device
             p.data = p.data.to(target_device)
+        if getattr(p, "_vllm_is_uva_offloaded", False):
+            uva_offloaded_parameters.append(name)
         # Parameters already on target device are not touched
 
     try:
         yield module
 
     finally:
-        # Restore parameters to their original devices, ignoring new parameters
+        # Restore parameters to their original devices and
+        # re-offload UVA offloaded parameters
         pin_memory = is_pin_memory_available()
         for name, p in module.named_parameters():
             if name in original_device_states:
@@ -157,7 +164,15 @@ def device_loading_context(module: torch.nn.Module, target_device: torch.device)
                     p.data = cpu_data
                 else:
                     p.data = p.data.to(original_device)
-        # New parameters or parameters already on target device are untouched
+
+            # parameter was UVA offloaded but replaced by a new tensor
+            # during `process_weights_after_loading` so now it is on device
+            # need to re-offload it to CPU using UVA
+            if name in uva_offloaded_parameters:
+                assert pin_memory, "UVA offloaded parameters must be pinned"
+                cpu_data = p.data.to("cpu").pin_memory()
+                p.data = get_cuda_view_from_cpu_tensor(cpu_data)
+                p._vllm_is_uva_offloaded = True
 
 
 _MODEL_ARCH_BY_HASH = dict[int, tuple[type[nn.Module], str]]()

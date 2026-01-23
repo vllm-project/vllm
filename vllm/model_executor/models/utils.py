@@ -661,8 +661,7 @@ def maybe_offload_to_cpu(module: torch.nn.Module) -> torch.nn.Module:
         if not uva_offloading:
             p.data = cpu_data
         else:
-            # keep the cpu data alive
-            p._vllm_offloaded_cpu_data = cpu_data
+            p._vllm_is_uva_offloaded = True
             p.data = get_cuda_view_from_cpu_tensor(cpu_data)
         _CPU_OFFLOAD_BYTES += p.data.numel() * p.data.element_size()
         offloaded_parameters = True
