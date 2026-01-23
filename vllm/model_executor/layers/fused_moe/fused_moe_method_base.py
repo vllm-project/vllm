@@ -75,7 +75,6 @@ class FusedMoEMethodBase(QuantizeMethodBase):
         self,
         layer: "FusedMoE",  # type: ignore[name-defined] # noqa: F821
         hidden_states: torch.Tensor,
-        router_logits: torch.Tensor,
     ) -> tuple[torch.Tensor, list[torch.Tensor]]:
         """Hook to prepare tensors and extra tensors for DP allgather + EP dispatch."""
         raise NotImplementedError(

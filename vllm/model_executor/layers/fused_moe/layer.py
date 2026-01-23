@@ -1813,13 +1813,13 @@ class FusedMoE(CustomOp):
                 if post_quant_allgather:
                     hidden_states_to_dispatch, extra_tensors = (
                         self.quant_method.prepare_dp_allgather_tensor(
-                            self, hidden_states, router_logits
+                            self, hidden_states
                         )
                     )
                 else:
                     hidden_states_to_dispatch = hidden_states
 
-                dispatch_res = get_ep_group().dispatch(
+                dispatch_res = get_ep_group().dispatch_router_logits(
                     hidden_states_to_dispatch,
                     router_logits,
                     self.is_sequence_parallel,
