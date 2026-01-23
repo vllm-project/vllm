@@ -51,6 +51,28 @@ class LoomCXLBackend(Backend):
 
         return blocks
 
+    def allocate_extent(self, num_blocks: int) -> tuple[int, int]:
+        if num_blocks <= 0:
+            raise ValueError(f"num_blocks must be > 0, got {num_blocks}")
+        if len(self.allocated_blocks_free_list) < num_blocks:
+            raise ValueError(
+                "Not enough free blocks for extent allocation: "
+                f"need={num_blocks} have={len(self.allocated_blocks_free_list)}"
+            )
+
+        base_block_id = self.allocated_blocks_free_list.popleft()
+        last_block_id = base_block_id
+        for _ in range(num_blocks - 1):
+            last_block_id = self.allocated_blocks_free_list.popleft()
+
+        if last_block_id != base_block_id + num_blocks - 1:
+            raise RuntimeError(
+                "Non-contiguous block ids encountered during extent allocation: "
+                f"base={base_block_id} last={last_block_id} num_blocks={num_blocks}"
+            )
+
+        return base_block_id, num_blocks
+
     def free(self, block: BlockStatus):
         assert isinstance(block, LoomCXLBlockStatus)
         self.allocated_blocks_free_list.append(block.block_id)
