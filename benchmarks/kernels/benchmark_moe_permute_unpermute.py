@@ -179,7 +179,9 @@ def benchmark_unpermute(
                 sorted_token_ids,
                 expert_ids,
                 inv_perm,
-            ) = _moe_permute(qhidden_states, None, topk_ids, num_experts, None, 16)
+            ) = _moe_permute(
+                qhidden_states, None, topk_ids, num_experts, None, block_m=16
+            )
             # convert to fp16/bf16 as gemm output
             return (
                 permuted_qhidden_states.to(dtype),
