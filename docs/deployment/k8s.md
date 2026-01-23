@@ -395,8 +395,8 @@ For production deployments, vLLM supports graceful shutdown to enable zero-downt
 
 When vLLM receives a `SIGTERM` signal (sent by Kubernetes during pod termination):
 
-1. A `vllm:server_draining` Prometheus metric is set to `1.0` to signal drain state
-2. The server stops accepting new requests (returns `503 Service Unavailable`)
+1. The server stops accepting new requests (returns `503 Service Unavailable`)
+2. The frontend process sends a graceful shutdown notification to the engine
 3. In-flight requests continue processing until completion or timeout
 4. If using async KV transfer connectors, pending transfers complete before shutdown
 5. The `/live` and `/metrics` endpoints remain accessible during drain
@@ -464,23 +464,7 @@ spec:
 
 - **`terminationGracePeriodSeconds`**: Set this to at least `drain-timeout` plus a buffer (e.g., 30 seconds) to ensure Kubernetes doesn't force-kill the pod before draining completes.
 
-- **Load Balancer Integration**: External load balancers can query the `/metrics` endpoint and check the `vllm:server_draining` metric to detect pods that are draining and stop routing new traffic to them.
-
 - **Readiness vs Liveness**: The `/health` endpoint returns `503` during drain (good for readiness probes to remove the pod from service), while `/live` remains accessible (good for liveness probes to avoid restarts during drain).
-
-### Monitoring Drain State
-
-You can query the draining metric via Prometheus:
-
-```promql
-vllm:server_draining{model_name="mistralai/Mistral-7B-Instruct-v0.3"} == 1
-```
-
-Or directly via curl during a rolling update:
-
-```bash
-curl -s http://<pod-ip>:8000/metrics | grep server_draining
-```
 
 ## Troubleshooting
 
