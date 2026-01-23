@@ -1030,18 +1030,20 @@ class OpenAIServing:
         renderer = self.renderer
         tok_params = request.build_tok_params(self.model_config)
 
-        prompts = await renderer.render_completions_async(prompt_input, prompt_embeds)
-        prompts = await renderer.tokenize_prompts_async(prompts, tok_params)
+        in_prompts = await renderer.render_completions_async(
+            prompt_input, prompt_embeds
+        )
+        engine_prompts = await renderer.tokenize_prompts_async(in_prompts, tok_params)
 
         extra_items = {
             k: v
             for k in ("mm_processor_kwargs", "cache_salt")
             if (v := getattr(request, k, None)) is not None
         }
-        for prompt in prompts:
+        for prompt in engine_prompts:
             prompt.update(extra_items)  # type: ignore
 
-        return prompts
+        return engine_prompts
 
     async def _preprocess_chat(
         self,

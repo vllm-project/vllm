@@ -821,16 +821,16 @@ class LLM:
             tokenization_kwargs
         )
 
-        out_prompts = list[_TokenizedPrompt | _TokenizedEncDecPrompt]()
+        engine_prompts = list[_TokenizedPrompt | _TokenizedEncDecPrompt]()
         for prompt in prompts if isinstance(prompts, Sequence) else [prompts]:
             if is_explicit_encoder_decoder_prompt(prompt):
-                out_prompt = self._tokenize_enc_dec_prompt(prompt, tok_params)
+                engine_prompts.append(self._tokenize_enc_dec_prompt(prompt, tok_params))
             else:
-                out_prompt = self._tokenize_singleton_prompt(prompt, tok_params)
+                engine_prompts.append(
+                    self._tokenize_singleton_prompt(prompt, tok_params)
+                )
 
-            out_prompts.append(out_prompt)
-
-        return out_prompts
+        return engine_prompts
 
     def _preprocess_chat(
         self,
@@ -873,17 +873,15 @@ class LLM:
             tokenization_kwargs
         )
 
-        out_prompts = list[_TokenizedPrompt]()
+        engine_prompts = list[_TokenizedPrompt]()
         for conversation in conversations:
-            _, prompt = renderer.render_messages(conversation, chat_params)
+            _, in_prompt = renderer.render_messages(conversation, chat_params)
             if mm_processor_kwargs is not None:
-                prompt["mm_processor_kwargs"] = mm_processor_kwargs
+                in_prompt["mm_processor_kwargs"] = mm_processor_kwargs
 
-            out_prompt = renderer.tokenize_prompt(prompt, tok_params)
+            engine_prompts.append(renderer.tokenize_prompt(in_prompt, tok_params))
 
-            out_prompts.append(out_prompt)
-
-        return out_prompts
+        return engine_prompts
 
     def chat(
         self,
@@ -1329,11 +1327,6 @@ class LLM:
         pooling_params.verify("score", model_config)
         pooling_params_list = list[PoolingParams]()
 
-        tok_params = TokenizeParams.from_config(model_config).with_kwargs(
-            tokenization_kwargs
-        )
-        tokenization_kwargs = tok_params.get_encode_kwargs()
-
         prompts = list[PromptType]()
 
         input_pairs = [(t1, t2) for t1, t2 in zip(data_1, data_2)]
@@ -1508,6 +1501,11 @@ class LLM:
 
         _validate_score_input_lens(data_1, data_2)  # type: ignore[arg-type]
 
+        tok_params = TokenizeParams.from_config(model_config).with_kwargs(
+            tokenization_kwargs
+        )
+        encode_kwargs = tok_params.get_encode_kwargs()
+
         if model_config.is_cross_encoder:
             return self._cross_encoding_score(
                 data_1,  # type: ignore[arg-type]
@@ -1515,7 +1513,7 @@ class LLM:
                 use_tqdm,
                 pooling_params,
                 lora_request,
-                tokenization_kwargs=tokenization_kwargs,
+                tokenization_kwargs=encode_kwargs,
                 score_template=chat_template,
             )
         else:
@@ -1525,7 +1523,7 @@ class LLM:
                 use_tqdm,
                 pooling_params,
                 lora_request,
-                tokenization_kwargs=tokenization_kwargs,
+                tokenization_kwargs=encode_kwargs,
             )
 
     def start_profile(self) -> None:
@@ -1680,7 +1678,7 @@ class LLM:
         try:
             for i, prompt in enumerate(it):
                 request_id = self._add_request(
-                    prompt,
+                    prompt,  # type: ignore[arg-type]
                     all_params[i],
                     lora_request=all_lora_requests[i],
                     priority=priority[i],
