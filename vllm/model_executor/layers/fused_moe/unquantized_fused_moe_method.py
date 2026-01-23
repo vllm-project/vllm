@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from collections.abc import Callable
 
 import torch
 import torch.nn.functional as F
@@ -30,9 +31,6 @@ from vllm.model_executor.layers.fused_moe.oracle.unquantized import (
     convert_to_unquantized_kernel_format,
     make_unquantized_moe_kernel,
     select_unquantized_moe_backend,
-)
-from vllm.model_executor.layers.fused_moe.router.fused_moe_router import (
-    FusedMoERouter,
 )
 from vllm.model_executor.utils import replace_parameter, set_weight_attrs
 from vllm.platforms import current_platform
@@ -66,6 +64,11 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
             rocm_aiter_ops.is_fused_moe_enabled() and moe.is_act_and_mul
         )
         self.kernel: mk.FusedMoEModularKernel | None = None
+        self._is_monolithic = current_platform.is_cpu() or current_platform.is_xpu()
+
+    @property
+    def is_monolithic(self) -> bool:
+        return self._is_monolithic
 
     @property
     def supports_eplb(self) -> bool:
@@ -212,7 +215,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
             import intel_extension_for_pytorch as ipex
 
             ep_rank_start = self.moe.ep_rank * self.moe.num_local_experts
-            layer.ipex_fusion = ipex.llm.modules.GatedMLPMOE(
+            self.ipex_fusion = ipex.llm.modules.GatedMLPMOE(
                 layer.w13_weight,
                 layer.w2_weight,
                 use_prepack=True,
@@ -244,11 +247,11 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
                     )
                     assert packed_w2_weight.size() == layer.w2_weight.size()
                     layer.w2_weight.copy_(packed_w2_weight)
-                    layer.cpu_fused_moe = cpu_fused_moe.SGLFusedMOE(layer)
+                    self.cpu_fused_moe: Callable = cpu_fused_moe.SGLFusedMOE(layer)
                 else:
-                    layer.cpu_fused_moe = cpu_fused_moe.CPUFusedMOE(layer)
+                    self.cpu_fused_moe = cpu_fused_moe.CPUFusedMOE(layer)
             else:
-                layer.cpu_fused_moe = cpu_fused_moe.CPUFusedMOE(layer)
+                self.cpu_fused_moe = cpu_fused_moe.CPUFusedMOE(layer)
         elif current_platform.is_cuda_alike():
             self._setup_kernel(
                 layer=layer,
@@ -259,15 +262,15 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
     def apply(
         self,
         layer: "FusedMoE",  # type: ignore[name-defined] # noqa: F821
-        router: FusedMoERouter,
         x: torch.Tensor,
-        router_logits: torch.Tensor,
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         return self.forward(
-            router=router,
             layer=layer,
             x=x,
-            router_logits=router_logits,
+            topk_weights=topk_weights,
+            topk_ids=topk_ids,
         )
 
     def get_fused_moe_quant_config(self, layer: torch.nn.Module) -> FusedMoEQuantConfig:
@@ -282,18 +285,12 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
     def forward_cuda(
         self,
         layer: "FusedMoE",  # type: ignore[name-defined] # noqa: F821
-        router: FusedMoERouter,
         x: torch.Tensor,
-        router_logits: torch.Tensor,
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        assert self.kernel
-
-        topk_weights, topk_ids = router.select_experts(
-            hidden_states=x,
-            router_logits=router_logits,
-        )
-
-        result = self.kernel(
+        assert self.kernel is not None
+        return self.kernel(
             hidden_states=x,
             w1=layer.w13_weight,
             w2=layer.w2_weight,
@@ -306,24 +303,13 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
             expert_map=layer.expert_map,
         )
 
-        return result
-
-    def forward_cpu(
+    def forward_monolithic_cpu(
         self,
         layer: "FusedMoE",  # type: ignore[name-defined] # noqa: F821
-        router: FusedMoERouter,
         x: torch.Tensor,
         router_logits: torch.Tensor,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        if (
-            layer.enable_eplb is not False
-            or layer.eplb_state.expert_load_view is not None
-            or layer.eplb_state.logical_to_physical_map is not None
-            or layer.eplb_state.logical_replica_count is not None
-        ):
-            raise NotImplementedError("Expert load balancing is not supported for CPU.")
-
-        return layer.cpu_fused_moe(
+        return self.cpu_fused_moe(
             layer,
             x,
             layer.use_grouped_topk,
@@ -342,21 +328,13 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
             layer.activation,
         )
 
-    def forward_xpu(
+    def forward_monolithic_xpu(
         self,
         layer: "FusedMoE",  # type: ignore[name-defined] # noqa: F821
-        router: FusedMoERouter,
         x: torch.Tensor,
         router_logits: torch.Tensor,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        if (
-            layer.enable_eplb is not False
-            or layer.eplb_state.expert_load_view is not None
-            or layer.eplb_state.logical_to_physical_map is not None
-            or layer.eplb_state.logical_replica_count is not None
-        ):
-            raise NotImplementedError("Expert load balancing is not supported for XPU.")
-        return layer.ipex_fusion(
+        return self.ipex_fusion(
             x,
             layer.use_grouped_topk,
             layer.top_k,
@@ -368,8 +346,10 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
         )
 
     if current_platform.is_cpu():
-        forward_native = forward_cpu
+        forward_native: Callable = forward_monolithic_cpu
+        apply_monolithic = forward_monolithic_cpu
     elif current_platform.is_xpu():
-        forward_native = forward_xpu
+        forward_native = forward_monolithic_xpu
+        apply_monolithic = forward_monolithic_xpu
     else:
         forward_native = forward_cuda
