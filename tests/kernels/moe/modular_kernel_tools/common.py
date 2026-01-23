@@ -585,6 +585,7 @@ def make_modular_kernel(
         tp_size_=get_tensor_model_parallel_world_size(),
         pcp_size_=get_pcp_group().world_size,
         dp_size_=get_dp_group().world_size,
+        sp_size_=1,
         vllm_parallel_config=vllm_config.parallel_config,
     )
 

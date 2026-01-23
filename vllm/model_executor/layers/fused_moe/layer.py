@@ -542,7 +542,7 @@ class FusedMoE(CustomOp):
             # TODO: in_dtype == out_dtype?
             disable_inplace=disable_inplace() or has_shared_experts,
         )
-        if self.use_mori_kernels:
+        if self.moe_config.use_mori_kernels:
             assert self.rocm_aiter_fmoe_enabled, (
                 "Mori needs to be used with aiter fused_moe for now."
             )
@@ -1442,7 +1442,7 @@ class FusedMoE(CustomOp):
         assert all(
             weight.is_contiguous()
             for name, weight in weights
-            if not (name.startswith("_shared_experts.") or name.startswith("_gate"))
+            if not (name.startswith("_shared_experts.") or name.startswith("_gate."))
         )
 
         # Filter out the non-expert weights.
