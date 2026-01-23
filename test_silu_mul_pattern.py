@@ -57,6 +57,9 @@ with pass_context(Range(start=1, end=8)):
             print(f"  ✓ Found: {type(pass_obj).__name__}")
             if hasattr(pass_obj, 'patterns'):
                 print(f"    Patterns: {len(pass_obj.patterns.patterns)}")
+                # NEW: Print what patterns are registered
+                for i, pattern in enumerate(pass_obj.patterns.patterns):
+                    print(f"      Pattern {i}: {pattern}")
 
 # Create test function
 def silu_mul_then_quant(x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
