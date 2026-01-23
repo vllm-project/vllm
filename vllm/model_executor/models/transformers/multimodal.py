@@ -376,6 +376,15 @@ class MultiModalMixin(SupportsMultiModal, SupportsMRoPE):
                     pixel_values, **kwargs
                 )
 
+            # Transformers `v5`, `self.get_image_features` returns a tuple
+            # containing the features and optionally attentions/hidden_states
+            # After v5 is settled, we can enable qwen3-vl with several outputs
+            # from `self.get_image_features`
+            if isinstance(vision_embeddings, tuple):
+                vision_embeddings = vision_embeddings[0]
+            elif isinstance(vision_embeddings, dict):
+                vision_embeddings = vision_embeddings.pooler_output
+
             if isinstance(vision_embeddings, torch.Tensor):
                 if vision_embeddings.ndim == 2:
                     vision_embeddings = vision_embeddings.unsqueeze(0)
