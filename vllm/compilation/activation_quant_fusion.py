@@ -286,15 +286,23 @@ class ActivationQuantFusionPass(VllmPatternMatcherPass):
         # =====================================================================
         if current_platform.is_cuda():
             # Register patterns for different group sizes and layouts
+            print(f"Registering block quant patterns...")
             for group_shape in [GroupShape(1, 128), GroupShape(1, 64)]:
                 for has_col_major_scales in [True, False]:
                     for is_e8m0 in [True, False]:
-                        pattern_silu_mul_block = SiluMulBlockQuantPattern(
-                            group_shape=group_shape,
-                            has_col_major_scales=has_col_major_scales,
-                            is_e8m0=is_e8m0,
-                        )
-                        pattern_silu_mul_block.register(self.patterns)
+                        try:
+                            print(f"Registering: group_shape={group_shape}, col_major={has_col_major_scales}, e8m0={is_e8m0}")
+                            pattern_silu_mul_block = SiluMulBlockQuantPattern(
+                                group_shape=group_shape,
+                                has_col_major_scales=has_col_major_scales,
+                                is_e8m0=is_e8m0,
+                            )
+                            pattern_silu_mul_block.register(self.patterns)
+                            print(f"✓ Registered successfully")
+                        except Exception as e:
+                            print(f"✗ Failed: {e}")
+                            import traceback
+                            traceback.print_exc()
 
         self.dump_patterns(config, self.patterns)
 
