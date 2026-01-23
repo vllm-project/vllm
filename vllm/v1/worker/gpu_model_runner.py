@@ -1526,56 +1526,59 @@ class GPUModelRunner(
         self.discard_request_mask.copy_to_gpu(num_reqs)
 
         # Sync num_computed_tokens to GPU.
-        # For non-async mode: just copy from CPU.
-        # For async mode: start with optimistic CPU values, then adjust for
-        # rejected tokens using valid_sampled_token_count_gpu.
-        self.num_computed_tokens.np[:num_reqs] = (
-            self.input_batch.num_computed_tokens_cpu[:num_reqs]
-        )
-        self.num_computed_tokens.copy_to_gpu(num_reqs)
-
-        # For async spec decode, adjust for rejected tokens from previous step.
-        # The CPU values are optimistic (assume all draft tokens accepted).
-        # We need to subtract the rejected count for continuing requests.
+        # For async spec decode: compute cumulatively on GPU for continuing
+        # requests (old_value + valid_sampled_count), bypassing CPU's optimistic
+        # values entirely. This avoids needing prev_num_draft_len.
+        # For new requests and non-async mode: copy from CPU.
         prev_req_id_to_index = self.input_batch.prev_req_id_to_index
         if (
             self.use_async_spec_decode
             and self.valid_sampled_token_count_gpu is not None
             and prev_req_id_to_index
         ):
-            # Build index mapping for continuing requests that had draft tokens
+            # Build index mapping for continuing requests
             current_indices = []
             prev_indices = []
-            prev_draft_lens = []
             for i, req_id in enumerate(self.input_batch.req_ids):
                 prev_index = prev_req_id_to_index.get(req_id)
-                if prev_index is None:
-                    continue
-                req_state = self.requests.get(req_id)
-                if req_state is None or req_state.prev_num_draft_len == 0:
-                    continue
-                current_indices.append(i)
-                prev_indices.append(prev_index)
-                prev_draft_lens.append(req_state.prev_num_draft_len)
+                if prev_index is not None:
+                    current_indices.append(i)
+                    prev_indices.append(prev_index)
 
             if current_indices:
-                current_indices_gpu = torch.tensor(
-                    current_indices, dtype=torch.int64, device=self.device
-                )
                 prev_indices_gpu = torch.tensor(
                     prev_indices, dtype=torch.int64, device=self.device
                 )
-                prev_draft_lens_gpu = torch.tensor(
-                    prev_draft_lens, dtype=torch.int32, device=self.device
+                # Gather old GPU values BEFORE copying from CPU
+                # old_value is the correct num_computed_tokens from previous step
+                old_num_computed = self.num_computed_tokens.gpu[prev_indices_gpu]
+                valid_counts = self.valid_sampled_token_count_gpu[prev_indices_gpu]
+                # New value = old + accepted tokens (valid_sampled_count)
+                new_num_computed = old_num_computed + valid_counts.int()
+
+                # Copy from CPU for all requests (handles new requests)
+                self.num_computed_tokens.np[:num_reqs] = (
+                    self.input_batch.num_computed_tokens_cpu[:num_reqs]
                 )
-                # num_rejected = prev_draft_len + 1 - valid_sampled_count
-                # (valid_sampled_count includes the target token, so +1)
-                num_rejected = (
-                    prev_draft_lens_gpu
-                    + 1
-                    - self.valid_sampled_token_count_gpu[prev_indices_gpu].int()
+                self.num_computed_tokens.copy_to_gpu(num_reqs)
+
+                # Overwrite continuing requests with GPU-computed values
+                current_indices_gpu = torch.tensor(
+                    current_indices, dtype=torch.int64, device=self.device
                 )
-                self.num_computed_tokens.gpu[current_indices_gpu] -= num_rejected
+                self.num_computed_tokens.gpu[current_indices_gpu] = new_num_computed
+            else:
+                # No continuing requests, just copy from CPU
+                self.num_computed_tokens.np[:num_reqs] = (
+                    self.input_batch.num_computed_tokens_cpu[:num_reqs]
+                )
+                self.num_computed_tokens.copy_to_gpu(num_reqs)
+        else:
+            # Non-async or first step: copy from CPU
+            self.num_computed_tokens.np[:num_reqs] = (
+                self.input_batch.num_computed_tokens_cpu[:num_reqs]
+            )
+            self.num_computed_tokens.copy_to_gpu(num_reqs)
 
         # Also sync mrope_position_delta for M-RoPE models (non-async only)
         if not self.use_async_spec_decode and self.uses_mrope:
