@@ -330,9 +330,7 @@ def select_fp8_moe_backend(
         else:
             logger.debug_once(_make_log_unsupported(backend, reason), scope="local")
 
-    raise NotImplementedError(
-        "No FP8 MoE backend supports the deployment configuration."
-    )
+    return Fp8MoeBackend.NONE, None
 
 
 def convert_to_fp8_moe_kernel_format(
