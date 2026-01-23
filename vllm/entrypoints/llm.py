@@ -1618,7 +1618,7 @@ class LLM:
                             is None
                         ):
                             raise ValueError(
-                                f"Multi-modal data for {modality} is None "
+                                f"Multi-modal data for {modality}[{i}] is None "
                                 f"but UUID is not provided"
                             )
                         else:
@@ -1627,7 +1627,7 @@ class LLM:
                                 or multi_modal_uuids[modality][i] is None
                             ):
                                 raise ValueError(
-                                    f"Multi-modal data for {modality} is None "
+                                    f"Multi-modal data for {modality}[{i}] is None "
                                     f"but UUID is not provided"
                                 )
             else:
