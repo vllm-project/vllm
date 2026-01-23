@@ -212,12 +212,27 @@ class LoomConnectorScheduler:
             if full_block_tokens - num_computed_tokens < self.offloaded_block_size:
                 return 0, False
             start_block_idx = num_computed_tokens // self.offloaded_block_size
+            # logger.debug(
+            #     "Loom prefix lookup: req_id=%s prefix_id=%d prefix_len=%d start_block_idx=%d num_blocks=%d computed_tokens=%d",
+            #     request.request_id,
+            #     shared_prefix_id,
+            #     shared_prefix_len,
+            #     start_block_idx,
+            #     num_blocks,
+            #     num_computed_tokens,
+            # )
             hits = self.manager.lookup_prefix(
                 prefix_id=shared_prefix_id,
                 start_block_idx=start_block_idx,
                 num_blocks=num_blocks,
                 extra=kv_params,
             )
+            # logger.debug(
+            #     "Loom prefix lookup result: req_id=%s prefix_id=%d hits=%d",
+            #     request.request_id,
+            #     shared_prefix_id,
+            #     hits,
+            # )
         else:
             num_blocks = request.num_tokens // self.offloaded_block_size
 
@@ -311,6 +326,15 @@ class LoomConnectorScheduler:
                     shared_prefix_len = None
 
         if shared_prefix_id is not None and shared_prefix_len is not None:
+            logger.debug(
+                "Loom prefix prepare_load: req_id=%s prefix_id=%d prefix_len=%d start_block_idx=%d num_blocks=%d num_external_tokens=%d",
+                request.request_id,
+                shared_prefix_id,
+                shared_prefix_len,
+                start_block_idx,
+                num_blocks,
+                num_external_tokens,
+            )
             src_spec = self.manager.prepare_load_prefix(
                 prefix_id=shared_prefix_id,
                 start_block_idx=start_block_idx,
@@ -325,6 +349,21 @@ class LoomConnectorScheduler:
             )
             src_spec = self.manager.prepare_load(block_hashes)
         dst_spec = GPULoadStoreSpec(block_ids[num_computed_gpu_blocks:])
+
+        if shared_prefix_id is not None and shared_prefix_len is not None:
+            src_block_ids = getattr(src_spec, "block_ids", None)
+            if isinstance(src_block_ids, list) and src_block_ids:
+                src_summary = (
+                    f"{type(src_spec).__name__}(n={len(src_block_ids)} first={src_block_ids[0]} last={src_block_ids[-1]})"
+                )
+            else:
+                src_summary = f"{type(src_spec).__name__}"
+            logger.debug(
+                "Loom prefix load plan: req_id=%s src=%s dst_gpu_blocks=%d",
+                request.request_id,
+                src_summary,
+                len(getattr(dst_spec, "block_ids", []) or []),
+            )
 
         self._reqs_to_load[request.request_id] = (src_spec, dst_spec)
         if block_hashes:
