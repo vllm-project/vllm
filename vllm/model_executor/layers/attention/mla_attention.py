@@ -1495,7 +1495,7 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
         return output
 
     def _run_prefill_context_chunk_fa(
-        self, prefill: MLACommonPrefillMetadata, chunk_idx: int, q, k, v
+        self, prefill: MLACommonPrefillMetadata, chunk_idx: int, q, k, v, sync
     ):
         assert prefill.chunked_context is not None
         return self._flash_attn_varlen_diff_headdims(
@@ -1512,7 +1512,7 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
         )
 
     def _run_prefill_context_chunk_fi(
-        self, prefill: MLACommonPrefillMetadata, chunk_idx: int, q, k, v
+        self, prefill: MLACommonPrefillMetadata, chunk_idx: int, q, k, v, sync
     ):
         assert isinstance(prefill, FlashInferPrefillMetadata)
 
@@ -1527,7 +1527,7 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
         return attn_out, lse.transpose(0, 1).contiguous()
 
     def _run_prefill_context_chunk_cudnn(
-        self, prefill: MLACommonPrefillMetadata, chunk_idx: int, q, k, v
+        self, prefill: MLACommonPrefillMetadata, chunk_idx: int, q, k, v, sync
     ):
         assert isinstance(prefill, CudnnPrefillMetadata)
         assert prefill.chunked_context is not None
@@ -1552,7 +1552,12 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
         )
 
     def _run_prefill_new_tokens_trtllm_ragged(
-        self, prefill: MLACommonPrefillMetadata, q, k, v, return_softmax_lse
+        self,
+        prefill: MLACommonPrefillMetadata,
+        q,
+        k,
+        v,
+        return_softmax_lse,
     ):
         """TRT-LLM ragged attention for new tokens (causal)."""
         from flashinfer.prefill import trtllm_ragged_attention_deepseek
@@ -1585,8 +1590,12 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
             return ret[0], ret[1].transpose(0, 1).contiguous()
         return ret
 
+    def _zero_prefill_workspace(self, buffer: torch.Tensor):
+        """Zero out the TRT-LLM ragged attention workspace."""
+        buffer.fill_(0)
+
     def _run_prefill_context_chunk_trtllm_ragged(
-        self, prefill: MLACommonPrefillMetadata, chunk_idx: int, q, k, v
+        self, prefill: MLACommonPrefillMetadata, chunk_idx: int, q, k, v, sync
     ):
         """TRT-LLM ragged attention for context chunks (non-causal)."""
         from flashinfer.prefill import trtllm_ragged_attention_deepseek
@@ -1602,7 +1611,7 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
             device=q.device,
             dtype=q.dtype,
         )
-        prefill.workspace_buffer.fill_(0)
+        sync()
 
         attn_out, lse = trtllm_ragged_attention_deepseek(
             query=q,
@@ -1670,6 +1679,13 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
         iters = len(prefill_metadata.chunked_context.seq_tot)
         workspace = prefill_metadata.chunked_context.workspace
         for i in range(iters):
+            NEEDS_WORKSPACE_ZEROING = True
+            from vllm.utils.torch_utils import in_aux_stream
+
+            if NEEDS_WORKSPACE_ZEROING:
+                with in_aux_stream() as sync:
+                    self._zero_prefill_workspace(prefill_metadata.workspace_buffer)
+
             toks = prefill_metadata.chunked_context.seq_tot[i]
             ops.gather_and_maybe_dequant_cache(
                 src_cache=kv_c_and_k_pe_cache,
@@ -1699,6 +1715,7 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
                 q=q,
                 k=k,
                 v=v,
+                sync=sync,
             )
 
             if output is None:
@@ -1803,6 +1820,7 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
                 q=q,
                 k=k,
                 v=v,
+                sync=None,
             )
 
             if output is None:

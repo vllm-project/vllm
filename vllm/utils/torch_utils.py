@@ -565,6 +565,38 @@ def aux_stream() -> torch.cuda.Stream | None:
     return _aux_stream
 
 
+@contextlib.contextmanager
+def in_aux_stream():
+    """Context manager with bidirectional synchronization.
+
+    Records an event when entering (so aux stream waits for default stream)
+    and provides sync() to make default stream wait for aux stream.
+    """
+    stream = aux_stream()
+    if stream is None:
+        yield lambda: None
+        return
+
+    done_event = torch.cuda.Event()
+    synced = False
+
+    # Make aux stream wait for any pending work on default stream
+    wait_event = torch.cuda.Event()
+    wait_event.record(current_stream())
+    stream.wait_event(wait_event)
+
+    def sync():
+        nonlocal synced
+        if not synced:
+            # Make default stream wait for aux stream to finish
+            current_stream().wait_event(done_event)
+            synced = True
+
+    with torch.cuda.stream(stream):
+        yield sync
+        done_event.record(stream)
+
+
 @lru_cache(maxsize=8)
 def _cuda_device_count_stateless(cuda_visible_devices: str | None = None) -> int:
     # Note: cuda_visible_devices is not used, but we keep it as an argument for
