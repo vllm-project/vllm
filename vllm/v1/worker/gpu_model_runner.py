@@ -4781,6 +4781,7 @@ class GPUModelRunner(
             self.seq_lens.copy_to_gpu()
 
             cum_num_tokens, _ = self._get_cumsum_and_arange(num_scheduled_tokens)
+            self.query_start_loc.np[0] = 0
             self.query_start_loc.np[1 : num_reqs + 1] = cum_num_tokens
             # Note: pad query_start_loc to be non-decreasing, as kernels
             # like FlashAttention requires that
