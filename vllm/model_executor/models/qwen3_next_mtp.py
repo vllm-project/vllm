@@ -234,9 +234,11 @@ class Qwen3NextMTP(nn.Module, QwenNextMixtureOfExperts):
         config = vllm_config.model_config.hf_config
         self.vllm_config = vllm_config
         cache_config = vllm_config.cache_config
-        assert not cache_config.enable_prefix_caching, (
-            "Qwen3NextMTP currently does not support prefix caching"
-        )
+        if cache_config.mamba_cache_mode == "all":
+            raise NotImplementedError(
+                "Qwen3NextMTP currently does not support 'all' prefix caching, "
+                "please use '--mamba-cache-mode=align' instead"
+            )
 
         self.quant_config = vllm_config.quant_config
 
