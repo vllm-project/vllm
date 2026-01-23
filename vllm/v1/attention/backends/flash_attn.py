@@ -589,6 +589,11 @@ class FlashAttentionImpl(AttentionImpl):
                 "heads in the layer"
             )
         self.supports_quant_query_input = True
+        self.supports_per_head_quant_scales = (
+            self.vllm_flash_attn_version >= 3
+            if self.vllm_flash_attn_version is not None
+            else False
+        )
 
     def fused_output_quant_supported(self, quant_key: QuantKey) -> bool:
         """
@@ -615,14 +620,6 @@ class FlashAttentionImpl(AttentionImpl):
 
         # Only FP8 static tensor quantization is supported
         return quant_key == kFp8StaticTensorSym
-
-    def supports_quant_query_input(self) -> bool:
-        return True
-        self.supports_per_head_quant_scales = (
-            self.vllm_flash_attn_version >= 3
-            if self.vllm_flash_attn_version is not None
-            else False
-        )
 
     def forward(
         self,
