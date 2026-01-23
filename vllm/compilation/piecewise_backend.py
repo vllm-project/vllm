@@ -25,7 +25,7 @@ logger = init_logger(__name__)
 class RangeEntry:
     compile_range: Range
     compiled: bool = False
-    runnable: Callable = None  # type: ignore
+    runnable: Callable[..., Any] = None  # type: ignore
 
 
 class PiecewiseBackend:
@@ -38,7 +38,7 @@ class PiecewiseBackend:
         sym_shape_indices: list[int],
         vllm_backend: VllmBackend,
         returns_tuple: bool,
-        compiled_runnables: dict[str, Callable] | None = None,
+        compiled_runnables: dict[str, Callable[..., Any]] | None = None,
     ):
         """
         The backend for piecewise compilation.
@@ -138,8 +138,10 @@ class PiecewiseBackend:
 
         self.on_compilation_complete = _on_compilation_complete_callback.get()
 
-    def get_compiled_graph_wrapper(self, compiled_graph):
-        def compiled_graph_wrapper(*args):
+    def get_compiled_graph_wrapper(
+        self, compiled_graph: Callable[..., Any]
+    ) -> Callable[..., Any]:
+        def compiled_graph_wrapper(*args: Any) -> Any:
             graph_output = compiled_graph(*args)
             # unpack the tuple if needed
             # TODO(rzou): the implication is that we're not
@@ -163,7 +165,7 @@ class PiecewiseBackend:
 
     def to_bytes(self) -> dict[str, bytes]:
         class StandaloneCompiledArtifactsPickler(Pickler):
-            def reducer_override(self, obj):
+            def reducer_override(self, obj: object) -> Any:
                 if isinstance(obj, CachingAutotuner):
                     obj.prepare_for_pickle()
                     return pickle.loads, (
@@ -173,7 +175,7 @@ class PiecewiseBackend:
                     )
                 return NotImplemented
 
-        def serialize(fn) -> bytes:
+        def serialize(fn: Callable[..., Any]) -> bytes:
             assert hasattr(fn, "serialize"), "fn must have serialize method"
             with torch._functorch.config.patch("bundled_autograd_cache", True):
                 entry = fn.serialize()
