@@ -107,7 +107,9 @@ class TritonAttentionMetadata:
             for r in range_lists
         ]
 
-        return torch.nested.nested_tensor(range_tensors).to_padded_tensor(0)
+        return torch.nested.nested_tensor(
+            range_tensors, layout=torch.jagged
+        ).to_padded_tensor(0)
 
 
 class TritonAttentionMetadataBuilder(AttentionMetadataBuilder[TritonAttentionMetadata]):
@@ -259,6 +261,7 @@ class TritonAttentionBackend(AttentionBackend):
     ]
     supported_kv_cache_dtypes: ClassVar[list[CacheDType]] = [
         "auto",
+        "bfloat16",
         "fp8",
         "fp8_e4m3",
         "fp8_e5m2",
