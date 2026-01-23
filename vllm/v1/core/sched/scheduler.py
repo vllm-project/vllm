@@ -102,6 +102,9 @@ class Scheduler(SchedulerInterface):
         # Scheduling constraints.
         self.max_num_running_reqs = self.scheduler_config.max_num_seqs
         self.max_num_scheduled_tokens = self.scheduler_config.max_num_batched_tokens
+        self.prefill_max_num_scheduled_tokens = (
+            self.scheduler_config.prefill_max_num_batched_tokens
+        )
         self.max_model_len = vllm_config.model_config.max_model_len
         self.enable_kv_cache_events = (
             self.kv_events_config is not None
@@ -250,6 +253,94 @@ class Scheduler(SchedulerInterface):
                 vllm_config=self.vllm_config,
             )
 
+        # Track whether there are any decode requests in the running queue
+        self._has_decode_reqs: bool = False
+
+        # Schedule capacity profiling
+        self.enable_schedule_capacity_profiling = (
+            self.scheduler_config.enable_schedule_capacity_profiling
+        )
+        if self.enable_schedule_capacity_profiling:
+            # Track capacity statistics for each scheduling step
+            # Each entry: (token_demand, memory_capacity, actual_scheduled, bottleneck)
+            # bottleneck: "token_demand" or "memory_capacity"
+            self.capacity_profile_data: list[tuple[int, int, int, str]] = []
+
+    def _calculate_schedule_capacity(self) -> tuple[int, int]:
+        """Calculate the maximum schedulable tokens based on token demand
+        and memory capacity.
+
+        Returns:
+            Tuple of (token_demand, memory_capacity):
+            - token_demand: Total tokens that could be scheduled from
+                running + waiting queues
+            - memory_capacity: Max additional tokens that can fit in
+                available memory
+        """
+        # Calculate token demand from running and waiting requests
+        token_demand = 0
+
+        # Running requests:
+        # decode requests (1 token each) + prefill requests (remaining tokens)
+        for request in self.running:
+            if self._check_request_is_decode(request):
+                # Decode request: 1 token per step
+                token_demand += 1
+            else:
+                # Prefill request: remaining prompt tokens
+                remaining_tokens = (
+                    request.num_prompt_tokens - request.num_computed_tokens
+                )
+                token_demand += remaining_tokens
+
+        # Waiting requests: all prompt tokens
+        for request in self.waiting:
+            token_demand += request.num_prompt_tokens
+
+        # Calculate memory capacity
+        # Memory = model_weights + activation + kv_cache
+        # Activation is pre-reserved for max_num_scheduled_tokens
+        # Available memory = unused KV cache blocks
+
+        # Get available KV cache blocks
+        available_blocks = self.kv_cache_manager.block_pool.get_num_free_blocks()
+
+        # Each token needs: 1 KV cache block / block_size + activation memory
+        # Activation memory for 1 token:
+        # total_activation_memory / max_num_scheduled_tokens
+        # Since activation is pre-reserved, we only need to check KV cache capacity
+
+        # Available tokens from KV cache capacity
+        tokens_from_kv_cache = available_blocks * self.block_size
+
+        # For activation, we check how much of the pre-reserved budget is unused
+        # This is approximated by the current token budget vs max budget
+        # Note: This is a simplified calculation; actual memory usage may vary
+        memory_capacity = tokens_from_kv_cache
+
+        return token_demand, memory_capacity
+
+    def _check_request_is_decode(self, request: Request) -> bool:
+        """Check if a request is in the decode phase.
+
+        Criteria:
+        The request has completed prompt computation and is generating output tokens
+        i.e., num_computed_tokens >= num_prompt_tokens
+        """
+        return request.num_computed_tokens >= request.num_prompt_tokens
+
+    def _update_has_decode_requests_flag(self) -> None:
+        """Update the _has_decode_reqs flag by checking all running requests.
+
+        This should only be called when we're uncertain about the flag's state,
+        such as after a batch of requests are preempted or resumed.
+        """
+        for request in self.running:
+            if self._check_request_is_decode(request):
+                self._has_decode_reqs = True
+                return
+        self._has_decode_reqs = False
+
     def schedule(self) -> SchedulerOutput:
         # NOTE(woosuk) on the scheduling algorithm:
         # There's no "decoding phase" nor "prefill phase" in the scheduler.
@@ -262,6 +353,14 @@ class Scheduler(SchedulerInterface):
         # chunked prefills, prefix caching, speculative decoding,
         # and the "jump decoding" optimization in the future.
 
+        # Calculate schedule capacity profiling if enabled
+        capacity_token_demand = 0
+        capacity_memory_limit = 0
+        if self.enable_schedule_capacity_profiling:
+            capacity_token_demand, capacity_memory_limit = (
+                self._calculate_schedule_capacity()
+            )
+
         scheduled_new_reqs: list[Request] = []
         scheduled_resumed_reqs: list[Request] = []
         scheduled_running_reqs: list[Request] = []
@@ -269,7 +368,18 @@ class Scheduler(SchedulerInterface):
 
         req_to_new_blocks: dict[str, KVCacheBlocks] = {}
         num_scheduled_tokens: dict[str, int] = {}
+
         token_budget = self.max_num_scheduled_tokens
+        # Check if there are any requests in the decode phase in the running queue.
+        # If no decode requests and prefill_max_num_batched_tokens is larger,
+        # use the larger budget for better throughput.
+        has_decode_requests = self._has_decode_reqs
+        if (
+            not has_decode_requests
+            and self.prefill_max_num_scheduled_tokens > self.max_num_scheduled_tokens
+        ):
+            token_budget = self.prefill_max_num_scheduled_tokens
+
         # Encoder-related.
         scheduled_encoder_inputs: dict[str, list[int]] = {}
         encoder_compute_budget = self.max_num_encoder_input_tokens
@@ -451,6 +561,10 @@ class Scheduler(SchedulerInterface):
                     self.encoder_cache_manager.allocate(request, i)
                     if self.ec_connector is not None:
                         self.ec_connector.update_state_after_alloc(request, i)
+
+        # Update decode flag after preemptions if any decode requests were preempted
+        if preempted_reqs and self._has_decode_reqs:
+            self._update_has_decode_requests_flag()
 
         # Record the LoRAs in scheduled_running_reqs
         scheduled_loras: set[int] = set()
@@ -711,8 +825,13 @@ class Scheduler(SchedulerInterface):
 
         # Check if the scheduling constraints are satisfied.
         total_num_scheduled_tokens = sum(num_scheduled_tokens.values())
-        assert total_num_scheduled_tokens <= self.max_num_scheduled_tokens
-
+        if (
+            not has_decode_requests
+            and self.prefill_max_num_scheduled_tokens > self.max_num_scheduled_tokens
+        ):
+            assert total_num_scheduled_tokens <= self.prefill_max_num_scheduled_tokens
+        else:
+            assert total_num_scheduled_tokens <= self.max_num_scheduled_tokens
         assert token_budget >= 0
         assert len(self.running) <= self.max_num_running_reqs
         # Since some requests in the RUNNING queue may not be scheduled in
@@ -794,6 +913,24 @@ class Scheduler(SchedulerInterface):
             )
             scheduler_output.kv_connector_metadata = meta
 
+        # Record schedule capacity profiling data
+        if self.enable_schedule_capacity_profiling:
+            # Calculate actual scheduled tokens
+            actual_scheduled = sum(num_scheduled_tokens.values())
+            # Determine bottleneck
+            if capacity_token_demand <= capacity_memory_limit:
+                bottleneck = "token_demand"
+            else:
+                bottleneck = "memory_capacity"
+            # Record data point
+            self.capacity_profile_data.append(
+                (
+                    capacity_token_demand,
+                    capacity_memory_limit,
+                    actual_scheduled,
+                    bottleneck,
+                )
+            )
         # Build the connector meta for ECConnector
         if self.ec_connector is not None:
             ec_meta: ECConnectorMetadata = self.ec_connector.build_connector_meta(
@@ -840,6 +977,13 @@ class Scheduler(SchedulerInterface):
         for req_id, num_scheduled_token in num_scheduled_tokens.items():
             request = self.requests[req_id]
             request.num_computed_tokens += num_scheduled_token
+
+            # Check if any request transitioned to decode phase
+            if (
+                not self._has_decode_reqs
+                and request.num_computed_tokens >= request.num_prompt_tokens
+            ):
+                self._has_decode_reqs = True
 
             # NOTE: _free_encoder_inputs relies on num_computed_tokens, which
             # may be updated again in _update_from_output for speculative
@@ -1260,6 +1404,13 @@ class Scheduler(SchedulerInterface):
         # Remove the stopped requests from the running and waiting queues.
         if stopped_running_reqs:
             self.running = remove_all(self.running, stopped_running_reqs)
+            # Update decode flag if we removed any decode requests
+            if self._has_decode_reqs:
+                for req in stopped_running_reqs:
+                    if self._check_request_is_decode(req):
+                        # A decode request was removed, need to re-check the flag
+                        self._update_has_decode_requests_flag()
+                        break
         if stopped_preempted_reqs:
             # This is a rare case and unlikely to impact performance.
             self.waiting.remove_requests(stopped_preempted_reqs)
@@ -1647,6 +1798,9 @@ class Scheduler(SchedulerInterface):
         return spec_decoding_stats
 
     def shutdown(self) -> None:
+        # Log schedule capacity profiling statistics
+        self.log_schedule_capacity_profile()
+
         if self.kv_event_publisher:
             self.kv_event_publisher.shutdown()
         if self.connector is not None:
@@ -1672,6 +1826,84 @@ class Scheduler(SchedulerInterface):
         stats = self.connector_prefix_cache_stats
         self.connector_prefix_cache_stats = PrefixCacheStats()
         return stats
+
+    def log_schedule_capacity_profile(self) -> None:
+        """Log the schedule capacity profiling statistics at shutdown."""
+        if not self.enable_schedule_capacity_profiling:
+            return
+
+        if not self.capacity_profile_data:
+            logger.info("Schedule capacity profiling: No data collected")
+            return
+
+        # Calculate statistics
+        total_steps = len(self.capacity_profile_data)
+        token_demand_bottleneck_count = sum(
+            1 for _, _, _, b in self.capacity_profile_data if b == "token_demand"
+        )
+        memory_bottleneck_count = sum(
+            1 for _, _, _, b in self.capacity_profile_data if b == "memory_capacity"
+        )
+
+        # Calculate percentiles for token demand and memory capacity
+        token_demands = [td for td, _, _, _ in self.capacity_profile_data]
+        memory_capacities = [mc for _, mc, _, _ in self.capacity_profile_data]
+        actual_scheduled = [a for _, _, a, _ in self.capacity_profile_data]
+
+        token_demands.sort()
+        memory_capacities.sort()
+        actual_scheduled.sort()
+
+        def get_percentile(data: list[int], p: float) -> int:
+            if not data:
+                return 0
+            idx = int(len(data) * p)
+            return data[min(idx, len(data) - 1)]
+
+        logger.info("=" * 80)
+        logger.info("Schedule Capacity Profiling Statistics")
+        logger.info("=" * 80)
+        logger.info("Total scheduling steps profiled: %d", total_steps)
+        logger.info("")
+        logger.info("Bottleneck Analysis:")
+        logger.info(
+            "  Token demand limited:    %6d steps (%5.1f%%)",
+            token_demand_bottleneck_count,
+            100.0 * token_demand_bottleneck_count / total_steps,
+        )
+        logger.info(
+            "  Memory capacity limited: %6d steps (%5.1f%%)",
+            memory_bottleneck_count,
+            100.0 * memory_bottleneck_count / total_steps,
+        )
+        logger.info("")
+        logger.info("Token Demand Distribution (tokens):")
+        logger.info("  Min:  %8d", min(token_demands))
+        logger.info("  P25:  %8d", get_percentile(token_demands, 0.25))
+        logger.info("  P50:  %8d", get_percentile(token_demands, 0.50))
+        logger.info("  P75:  %8d", get_percentile(token_demands, 0.75))
+        logger.info("  P95:  %8d", get_percentile(token_demands, 0.95))
+        logger.info("  Max:  %8d", max(token_demands))
+        logger.info("  Mean: %8d", sum(token_demands) // len(token_demands))
+        logger.info("")
+        logger.info("Memory Capacity Distribution (tokens):")
+        logger.info("  Min:  %8d", min(memory_capacities))
+        logger.info("  P25:  %8d", get_percentile(memory_capacities, 0.25))
+        logger.info("  P50:  %8d", get_percentile(memory_capacities, 0.50))
+        logger.info("  P75:  %8d", get_percentile(memory_capacities, 0.75))
+        logger.info("  P95:  %8d", get_percentile(memory_capacities, 0.95))
+        logger.info("  Max:  %8d", max(memory_capacities))
+        logger.info("  Mean: %8d", sum(memory_capacities) // len(memory_capacities))
+        logger.info("")
+        logger.info("Actual Scheduled Distribution (tokens):")
+        logger.info("  Min:  %8d", min(actual_scheduled))
+        logger.info("  P25:  %8d", get_percentile(actual_scheduled, 0.25))
+        logger.info("  P50:  %8d", get_percentile(actual_scheduled, 0.50))
+        logger.info("  P75:  %8d", get_percentile(actual_scheduled, 0.75))
+        logger.info("  P95:  %8d", get_percentile(actual_scheduled, 0.95))
+        logger.info("  Max:  %8d", max(actual_scheduled))
+        logger.info("  Mean: %8d", sum(actual_scheduled) // len(actual_scheduled))
+        logger.info("=" * 80)
 
     def get_kv_connector(self) -> KVConnectorBase_V1 | None:
         return self.connector

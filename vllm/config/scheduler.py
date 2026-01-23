@@ -54,6 +54,11 @@ class SchedulerConfig:
     In real usage, this should be set in `EngineArgs.create_engine_config`.
     """
 
+    prefill_max_num_batched_tokens: int = Field(default=None, ge=1)
+    """Maximum number of tokens to be processed in a single iteration when there
+    are no decode requests. If not set (None), defaults to max_num_batched_tokens.
+    Must satisfy: prefill_max_num_batched_tokens >= max_num_batched_tokens."""
+
     max_num_seqs: int = Field(default=DEFAULT_MAX_NUM_SEQS, ge=1)
     """Maximum number of sequences to be processed in a single iteration.
 
@@ -135,6 +140,12 @@ class SchedulerConfig:
     avoid gaps in GPU utilization, leading to better latency and throughput.
     """
 
+    enable_schedule_capacity_profiling: bool = False
+    """If set to True, profile the maximum schedulable tokens at each step.
+    This tracks both the token demand (from running and waiting requests) and
+    the memory capacity limit (based on available KV cache memory). Statistics
+    will be logged at shutdown showing the distribution of bottlenecks."""
+
     stream_interval: int = Field(default=1, ge=1)
     """The interval (or buffer size) for streaming in terms of token length.
     A smaller value (1) makes streaming smoother by sending each token immediately,
@@ -202,7 +213,12 @@ class SchedulerConfig:
         hash_str = safe_hash(str(factors).encode(), usedforsecurity=False).hexdigest()
         return hash_str
 
-    @field_validator("scheduler_cls", "async_scheduling", mode="wrap")
+    @field_validator(
+        "scheduler_cls",
+        "async_scheduling",
+        "prefill_max_num_batched_tokens",
+        mode="wrap",
+    )
     @classmethod
     def _skip_none_validation(cls, value: Any, handler: Callable) -> Any:
         """Skip validation if the value is `None` when initialisation is delayed."""
@@ -218,6 +234,11 @@ class SchedulerConfig:
                 "Encoder-decoder models do not support chunked prefill nor"
                 " prefix caching; disabling both."
             )
+
+        # Initialize prefill_max_num_batched_tokens based on user input
+        if self.prefill_max_num_batched_tokens is None:
+            # Default to max_num_batched_tokens
+            self.prefill_max_num_batched_tokens = self.max_num_batched_tokens
 
         self.max_num_encoder_input_tokens = self.max_num_batched_tokens
         self.encoder_cache_size = self.max_num_batched_tokens
@@ -290,6 +311,15 @@ class SchedulerConfig:
             raise ValueError(
                 f"{self.max_long_partial_prefills=} must be less than or equal to "
                 f"{self.max_num_partial_prefills=}."
+            )
+
+        # Validate prefill_max_num_batched_tokens
+        if self.prefill_max_num_batched_tokens < self.max_num_batched_tokens:
+            raise ValueError(
+                f"prefill_max_num_batched_tokens "
+                f"({self.prefill_max_num_batched_tokens}) must be greater "
+                f"than or equal to max_num_batched_tokens "
+                f"({self.max_num_batched_tokens})."
             )
 
         return self
