@@ -427,34 +427,20 @@ class Siglip2VisionTransformer(nn.Module):
         spatial_shapes: torch.LongTensor,
         cu_seqlens: torch.Tensor,
         max_seqlen: torch.Tensor,
-        select_layers: list[int] | None = None,
     ) -> torch.Tensor:
         r"""
         spatial_shapes (`torch.LongTensor` of shape `(batch_size, 2)`):
             Tensor containing the spatial dimensions (height, width)
         of the input images.
-        select_layers (`list[int]` or `None`, defaults to `None`):
-            Layer indices to select hidden states from. Supports negative
-            indices (e.g., -1 for last layer, -2 for second-to-last).
-            If None, returns the last layer output.
         """
         hidden_states = self.embeddings(pixel_values_packed, spatial_shapes)
-
         encoder_outputs = self.encoder(
             inputs_embeds=hidden_states,
             cu_seqlens=cu_seqlens,
             max_seqlen=max_seqlen,
             return_all_hidden_states=select_layers is not None,
         )
-
-        encoder_outputs = resolve_visual_encoder_outputs(
-            encoder_outputs,
-            self.post_layernorm,
-            select_layers=select_layers,
-            max_possible_layers=self.config.num_hidden_layers,
-        )
-
-        return encoder_outputs
+        return self.post_layernorm(encoder_outputs)
 
 
 class Siglip2Model(torch.nn.Module):
@@ -482,7 +468,6 @@ class Siglip2Model(torch.nn.Module):
         spatial_shapes: torch.LongTensor,
         cu_seqlens: torch.Tensor,
         max_seqlen: torch.Tensor,
-        select_layers: list[int] | None = None,
     ) -> torch.Tensor:
         """Forward pass through the vision model.
 
