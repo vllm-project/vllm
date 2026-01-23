@@ -23,6 +23,13 @@ class _Entry:
     cxl: BlockStatus
 
 
+@dataclass(frozen=True)
+class SharedPrefixExtent:
+    base_block_id: int
+    num_blocks: int
+    layout_version: int
+
+
 class LoomManager(OffloadingManager):
     def __init__(
         self,
@@ -33,6 +40,43 @@ class LoomManager(OffloadingManager):
         self.cxl_backend = cxl_backend
         self.entries: dict[BlockHash, _Entry] = {}
         self.events: list[OffloadingEvent] | None = [] if enable_events else None
+        self.shared_prefix_directory: dict[tuple[int, int], SharedPrefixExtent] = {}
+
+    def allocate_shared_prefix_extent(
+        self,
+        *,
+        prefix_id: int,
+        layer_group_id: int,
+        num_blocks: int,
+        layout_version: int,
+    ) -> SharedPrefixExtent:
+        key = (prefix_id, layer_group_id)
+        if key in self.shared_prefix_directory:
+            raise ValueError(
+                "shared prefix extent already allocated: "
+                f"prefix_id={prefix_id} layer_group_id={layer_group_id}"
+            )
+
+        allocate_extent = getattr(self.cxl_backend, "allocate_extent", None)
+        if allocate_extent is None:
+            raise RuntimeError(
+                "CXL backend does not support allocate_extent(); "
+                "unable to use bump allocator for shared prefixes."
+            )
+
+        base_block_id, num_blocks = allocate_extent(num_blocks)
+        extent = SharedPrefixExtent(
+            base_block_id=int(base_block_id),
+            num_blocks=int(num_blocks),
+            layout_version=int(layout_version),
+        )
+        self.shared_prefix_directory[key] = extent
+        return extent
+
+    def get_shared_prefix_extent(
+        self, *, prefix_id: int, layer_group_id: int
+    ) -> SharedPrefixExtent | None:
+        return self.shared_prefix_directory.get((prefix_id, layer_group_id))
 
     def lookup(self, block_hashes: Iterable[BlockHash]) -> int:
         hit_count = 0
