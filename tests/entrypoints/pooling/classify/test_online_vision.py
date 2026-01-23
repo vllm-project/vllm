@@ -51,7 +51,7 @@ def test_chat_text_request(server: RemoteOpenAIServer, model_name: str):
         {
             "role": "user",
             "content": input_text,
-        }
+        },
     ]
 
     response = requests.post(

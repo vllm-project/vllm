@@ -161,7 +161,7 @@ class EmbedRequestMixin(EncodingRequestMixin):
         return PoolingParams(
             dimensions=self.dimensions,
             use_activation=self.normalize,
-            truncate_prompt_tokens=self.truncate_prompt_tokens,
+            truncate_prompt_tokens=getattr(self, "truncate_prompt_tokens", None),
         )
 
 
@@ -184,6 +184,6 @@ class ClassifyRequestMixin(OpenAIBaseModel):
 
     def to_pooling_params(self):
         return PoolingParams(
-            truncate_prompt_tokens=self.truncate_prompt_tokens,
             use_activation=get_use_activation(self),
+            truncate_prompt_tokens=getattr(self, "truncate_prompt_tokens", None),
         )
