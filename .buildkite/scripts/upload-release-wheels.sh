@@ -83,7 +83,7 @@ aws s3 ls "$S3_COMMIT_PREFIX"
 echo "Copying wheels to local directory"
 mkdir -p $DIST_DIR
 # include only wheels for the release version, ignore all files with "dev" or "rc" in the name (without excluding 'aarch64')
-aws s3 cp --recursive --exclude "*" --include "vllm-${PURE_VERSION}*.whl" --exclude "*dev*" --exclude "*[!a]rc[!h]*" "$S3_COMMIT_PREFIX" $DIST_DIR
+aws s3 cp --recursive --exclude "*" --include "vllm-${PURE_VERSION}*.whl" --exclude "*dev*" --exclude "*rc[0-9]*" "$S3_COMMIT_PREFIX" $DIST_DIR
 echo "Wheels copied to local directory"
 # generate source tarball
 git archive --format=tar.gz --output="$DIST_DIR/vllm-${PURE_VERSION}.tar.gz" $BUILDKITE_COMMIT
