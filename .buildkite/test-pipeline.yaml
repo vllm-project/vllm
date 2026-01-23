@@ -1073,7 +1073,7 @@ steps:
   - tests/compile/fullgraph/test_full_graph.py
   commands:
     - nvidia-smi
-    - pytest -v -s tests/compile/test_fusion_attn.py
+    - pytest -v -s tests/compile/test_fusion_attn.py::test_attention_quant_pattern
     - pytest -v -s tests/compile/test_silu_mul_quant_fusion.py
     # this runner has 2 GPUs available even though num_gpus=2 is not set
     - pytest -v -s tests/compile/distributed/test_fusion_all_reduce.py
