@@ -1193,8 +1193,10 @@ class OpenAIServing:
             # Create inputs for the next turn.
             # Render the next prompt token ids.
             if isinstance(context, (HarmonyContext, StreamingHarmonyContext)):
-                prompt_token_ids = context.render_for_completion()
-                engine_prompt = TokensPrompt(prompt_token_ids=prompt_token_ids)
+                token_ids = context.render_for_completion()
+                engine_prompt = TokensPrompt(prompt_token_ids=token_ids)
+
+                sampling_params.max_tokens = self.max_model_len - len(token_ids)
             elif isinstance(context, ParsableContext):
                 engine_prompts = await self._render_next_turn(
                     context.request,
@@ -1207,13 +1209,12 @@ class OpenAIServing:
                 engine_prompt = engine_prompts[0]
                 prompt_text, _, _ = get_prompt_components(engine_prompt)
 
-            # Update the sampling params.
-            sampling_params.max_tokens = get_max_tokens(
-                self.max_model_len,
-                context.request,
-                engine_prompt,
-                self.default_sampling_params,  # type: ignore
-            )
+                sampling_params.max_tokens = get_max_tokens(
+                    self.max_model_len,
+                    context.request,
+                    engine_prompt,
+                    self.default_sampling_params,  # type: ignore
+                )
 
             # OPTIMIZATION
             priority = orig_priority - 1
