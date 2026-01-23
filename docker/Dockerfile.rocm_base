@@ -36,7 +36,18 @@ RUN apt-get update -y \
 RUN python3 -m venv /opt/python --system-site-packages
 ENV PATH=/opt/python/bin:$PATH
 
-RUN pip install -U packaging 'cmake<4' ninja wheel 'setuptools<80' pybind11
+# Install UV
+RUN curl -LsSf https://astral.sh/uv/install.sh | env UV_INSTALL_DIR="/usr/local/bin" sh
+ENV UV_PYTHON=/opt/python/bin/python
+# This timeout (in seconds) is necessary when installing some dependencies via uv since it's likely to time out
+# Reference: https://github.com/astral-sh/uv/pull/1694
+ENV UV_HTTP_TIMEOUT=500
+ENV UV_INDEX_STRATEGY="unsafe-best-match"
+# Use copy mode to avoid hardlink failures with Docker cache mounts
+ENV UV_LINK_MODE=copy
+
+
+RUN uv pip install -U packaging 'cmake<4' ninja wheel 'setuptools<80' pybind11
 RUN apt-get update && apt-get install -y libjpeg-dev libsox-dev libsox-fmt-all sox && rm -rf /var/lib/apt/lists/*
 
 # Install sccache if USE_SCCACHE is enabled (for release builds)
@@ -86,14 +97,14 @@ ENV SCCACHE_IDLE_TIMEOUT=${USE_SCCACHE:+0}
 ### TheROCK install
 ###
 ARG PIP_EXTRA_INDEX_URL=https://rocm.nightlies.amd.com/v2-staging/gfx94X-dcgpu/
-ARG PIP_EXTRA_INDEX_URL=${PIP_EXTRA_INDEX_URL}
-RUN pip install --index-url ${PIP_EXTRA_INDEX_URL} "rocm[libraries,devel]" \
+ENV PIP_EXTRA_INDEX_URL=${PIP_EXTRA_INDEX_URL}
+RUN uv pip install --index-url ${PIP_EXTRA_INDEX_URL} "rocm[libraries,devel]" \
     && rocm-sdk init \
-    && pip install --index-url ${PIP_EXTRA_INDEX_URL} 'torch==2.9.1' torchaudio torchvision triton
+    && uv pip install --index-url ${PIP_EXTRA_INDEX_URL} 'torch==2.9.1' torchaudio torchvision triton
 ENV SITE_PACKAGES=/opt/python/lib/python3.12/site-packages
 ENV ROCM_PATH="$SITE_PACKAGES/_rocm_sdk_devel"
 ENV HIP_DEVICE_LIB_PATH="$SITE_PACKAGES/_rocm_sdk_core/lib/llvm/amdgcn/bitcode"
-RUN cd $SITE_PACKAGES/_rocm_sdk_core/share/amd_smi && pip install . \
+RUN cd $SITE_PACKAGES/_rocm_sdk_core/share/amd_smi && uv pip install . \
     && sed -i 's/rtld_global: bool = True/rtld_global: bool = False/g' $SITE_PACKAGES/rocm_sdk/__init__.py
 ENV PYTHONPATH=$SITE_PACKAGES/_rocm_sdk_core/share/amd_smi:$PYTHONPATH
 
@@ -128,8 +139,8 @@ RUN git clone --recursive ${AITER_REPO}
 RUN cd aiter \
     && git checkout ${AITER_BRANCH} \
     && git submodule update --init --recursive \
-    && pip install -r requirements.txt
-RUN pip install pyyaml && cd aiter \
+    && uv pip install -r requirements.txt
+RUN uv pip install pyyaml && cd aiter \
     && if [ "$USE_SCCACHE" = "1" ]; then \
            export HIP_CLANG_PATH=/opt/sccache-wrappers \
            && sccache --show-stats; \
@@ -161,7 +172,7 @@ RUN --mount=type=bind,from=build_aiter,src=/app/install/,target=/install \
 
 FROM base AS final
 RUN --mount=type=bind,from=debs,src=/app/debs,target=/install \
-    pip install /install/*.whl
+    uv pip install /install/*.whl
 
 ARG BASE_IMAGE
 ARG FA_BRANCH
