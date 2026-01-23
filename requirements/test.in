@@ -33,7 +33,7 @@ matplotlib # required for qwen-vl test
 mistral_common[image,audio] >= 1.8.8 # required for voxtral test
 num2words # required for smolvlm test
 open_clip_torch==2.32.0 # Required for nemotron_vl test, Nemotron Parse in test_common.py
-opencv-python-headless >= 4.11.0 # required for video test
+opencv-python-headless >= 4.13.0 # required for video test
 datamodel_code_generator # required for minicpm3 test
 lm-eval[api]>=0.4.9.2 # required for model evaluation test
 mteb[bm25s]>=2, <3 # required for mteb test
@@ -45,8 +45,8 @@ bitsandbytes==0.46.1
 buildkite-test-collector==0.1.9
 
 
-genai_perf==0.0.8
-tritonclient==2.51.0
+genai_perf>=0.0.8
+tritonclient>=2.51.0
 
 arctic-inference == 0.1.1 # Required for suffix decoding test
 numba == 0.61.2 # Required for N-gram speculative decoding
