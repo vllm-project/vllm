@@ -29,7 +29,7 @@ def is_supported_and_can_implement_kernel(
     compute_capability: int | None,
 ) -> tuple[bool, str]:
     # TODO: Fetch `VLLM_DISABLED_KERNELS` from vllm.envs instead.
-    if kernel.__name__ in envs.VLLM_DISABLED_KERNELS.split(","):
+    if kernel.__name__ in envs.VLLM_DISABLED_KERNELS:
         return False, f" {kernel.__name__} is disabled by environment variable"
 
     if compute_capability is None:
