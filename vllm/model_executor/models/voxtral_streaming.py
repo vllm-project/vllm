@@ -188,7 +188,7 @@ class VoxtralStreamingGeneration(VoxtralForConditionalGeneration):
         )
 
         whisper_positions = _expand_tensor(positions, pool_size)
-        audio_hidden_states = self.whisper_encoder.whisper_encoder.forward_layers(
+        audio_hidden_states = self.whisper_encoder.whisper_encoder(
             inputs_embeds, whisper_positions
         )
 

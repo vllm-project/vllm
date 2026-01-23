@@ -455,7 +455,7 @@ class WhisperCausalEncoder(nn.Module):
 
         return hidden_states
 
-    def forward_layers(
+    def forward(
         self, hidden_states: torch.Tensor, positions: torch.Tensor
     ) -> torch.Tensor:
         for encoder_layer in self.layers:
