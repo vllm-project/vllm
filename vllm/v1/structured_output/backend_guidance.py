@@ -284,6 +284,9 @@ def serialize_guidance_grammar(
 def validate_guidance_grammar(
     sampling_params: SamplingParams, tokenizer: llguidance.LLTokenizer | None = None
 ) -> None:
+    # if structured output is not enabled, there is nothing to validate
+    if sampling_params.structured_outputs is None:
+        return
     tp, grm = get_structured_output_key(sampling_params.structured_outputs)
     guidance_grm = serialize_guidance_grammar(tp, grm)
     err = llguidance.LLMatcher.validate_grammar(guidance_grm, tokenizer)
