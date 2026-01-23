@@ -66,7 +66,8 @@ class CudaGraphManager:
         if self.use_decode_full_cudagraph:
             max_decode_tokens = self.max_num_reqs * self.uniform_decode_query_len
             self.decode_full_cudagraph_sizes = {
-                k: v for k, v in self.cudagraph_sizes.items()
+                k: v
+                for k, v in self.cudagraph_sizes.items()
                 if v <= max_decode_tokens and v >= self.uniform_decode_query_len
             }
 

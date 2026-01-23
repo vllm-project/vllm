@@ -365,9 +365,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
     ) -> tuple[CUDAGraphMode, int | None]:
         # Determine if this is a uniform decode batch
         num_reqs = len(scheduler_output.num_scheduled_tokens)
-        max_num_scheduled_tokens = max(
-            scheduler_output.num_scheduled_tokens.values()
-        )
+        max_num_scheduled_tokens = max(scheduler_output.num_scheduled_tokens.values())
         is_uniform_decode = (
             max_num_scheduled_tokens == self.uniform_decode_query_len
         ) and (
