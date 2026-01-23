@@ -42,9 +42,9 @@ print("✓ Config created")
 
 # Create test function
 def silu_mul_then_quant(x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-    hidden = x.shape[-1] // 2
-    gate, up = x.split(hidden, dim=-1)
-    silu_out = F.silu(gate) * up
+    # Match the pattern exactly
+    d = x.shape[-1] // 2
+    silu_out = F.silu(x[..., :d]) * x[..., d:]
     result, scales = per_token_group_quant_fp8(silu_out, group_size=128, use_ue8m0=False)
     return result, scales
 
