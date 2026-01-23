@@ -54,7 +54,7 @@ class MooncakeBootstrapServer:
         # engine_id0_dp0 dp_rank=0
         # engine_id0_dp1 dp_rank=1
         # engine_id1_dp0 dp_rank=2
-        # engine_id3_dp1 dp_rank=3
+        # engine_id1_dp1 dp_rank=3
         #
         # Hybrid LB (non-Moe models):
         # engine_id0 dp_rank=0
