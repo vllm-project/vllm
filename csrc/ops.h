@@ -43,13 +43,6 @@ void rotary_embedding(torch::Tensor& positions, torch::Tensor& query,
 
 void silu_and_mul(torch::Tensor& out, torch::Tensor& input);
 
-#ifndef USE_ROCM
-void silu_and_mul_nvfp4_quant(torch::Tensor& out,
-                              torch::Tensor& output_block_scale,
-                              torch::Tensor& input,
-                              torch::Tensor& input_global_scale);
-#endif
-
 void gelu_and_mul(torch::Tensor& out, torch::Tensor& input);
 
 void gelu_tanh_and_mul(torch::Tensor& out, torch::Tensor& input);
@@ -105,50 +98,6 @@ torch::Tensor ggml_moe_a8_vec(torch::Tensor X, torch::Tensor W,
                               int64_t type, int64_t row, int64_t tokens);
 
 int64_t ggml_moe_get_block_size(int64_t type);
-
-#ifndef USE_ROCM
-
-bool cutlass_scaled_mm_supports_fp4(int64_t cuda_device_capability);
-
-void cutlass_scaled_fp4_mm(torch::Tensor& D, torch::Tensor const& A,
-                           torch::Tensor const& B, torch::Tensor const& A_sf,
-                           torch::Tensor const& B_sf,
-                           torch::Tensor const& alpha);
-
-void cutlass_fp4_group_mm(
-    torch::Tensor& output, const torch::Tensor& a, const torch::Tensor& b,
-    const torch::Tensor& a_blockscale, const torch::Tensor& b_blockscales,
-    const torch::Tensor& alphas, const torch::Tensor& problem_sizes,
-    const torch::Tensor& expert_offsets, const torch::Tensor& sf_offsets);
-
-bool cutlass_sparse_scaled_mm_supported(int64_t cuda_device_capability);
-
-void cutlass_scaled_sparse_mm(torch::Tensor& out, torch::Tensor const& a,
-                              torch::Tensor const& b, torch::Tensor const& e,
-                              torch::Tensor const& a_scales,
-                              torch::Tensor const& b_scales,
-                              std::optional<torch::Tensor> const& bias);
-
-std::vector<torch::Tensor> cutlass_sparse_compress(torch::Tensor const& a);
-
-void scaled_fp4_quant(torch::Tensor& output, torch::Tensor const& input,
-                      torch::Tensor& output_scale,
-                      torch::Tensor const& input_scale,
-                      bool is_sf_swizzled_layout);
-
-void scaled_fp4_experts_quant(
-    torch::Tensor& output, torch::Tensor& output_scale,
-    torch::Tensor const& input, torch::Tensor const& input_global_scale,
-    torch::Tensor const& input_offset_by_experts,
-    torch::Tensor const& output_scale_offset_by_experts);
-
-void silu_and_mul_scaled_fp4_experts_quant(
-    torch::Tensor& output, torch::Tensor& output_scale,
-    torch::Tensor const& input, torch::Tensor const& input_global_scale,
-    torch::Tensor const& input_offset_by_experts,
-    torch::Tensor const& output_scale_offset_by_experts);
-
-#endif
 
 torch::Tensor gptq_gemm(torch::Tensor a, torch::Tensor b_q_weight,
                         torch::Tensor b_gptq_qzeros,

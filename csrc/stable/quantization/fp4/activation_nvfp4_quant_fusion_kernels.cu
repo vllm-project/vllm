@@ -14,16 +14,17 @@
  * limitations under the License.
  */
 
-#include <torch/all.h>
+#include <torch/csrc/stable/library.h>
+#include <torch/csrc/stable/tensor.h>
+#include <torch/csrc/stable/accelerator.h>
+#include <torch/headeronly/core/ScalarType.h>
+#include "../../torch_utils.h"
 
 #include <cuda_runtime_api.h>
 #include <cuda_runtime.h>
 
-#include <ATen/cuda/CUDAContext.h>
-#include <c10/cuda/CUDAGuard.h>
-
 #include <cuda_fp8.h>
-#include "dispatch_utils.h"
+#include "../../dispatch_utils.h"
 
 #include "cuda_utils.h"
 #include "launch_bounds_utils.h"
@@ -116,17 +117,19 @@ __global__ void __launch_bounds__(512, VLLM_BLOCKS_PER_SM(512))
 
 }  // namespace vllm
 
-void silu_and_mul_nvfp4_quant_sm1xxa(torch::Tensor& output,  // [..., d]
-                                     torch::Tensor& output_sf,
-                                     torch::Tensor& input,  // [..., 2 * d]
-                                     torch::Tensor& input_sf) {
+void silu_and_mul_nvfp4_quant_sm1xxa(
+    torch::stable::Tensor& output,  // [..., d]
+    torch::stable::Tensor& output_sf,
+    torch::stable::Tensor& input,  // [..., 2 * d]
+    torch::stable::Tensor& input_sf) {
   int32_t m = input.size(0);
   int32_t n = input.size(1) / 2;
 
-  TORCH_CHECK(n % 16 == 0, "The N dimension must be multiple of 16.");
-  TORCH_CHECK(input.scalar_type() == at::ScalarType::Half ||
-                  input.scalar_type() == at::ScalarType::BFloat16,
-              "Unsupported input data type for quantize_to_fp4.");
+  STD_TORCH_CHECK(n % 16 == 0, "The N dimension must be multiple of 16.");
+  STD_TORCH_CHECK(
+      input.scalar_type() == torch::headeronly::ScalarType::Half ||
+          input.scalar_type() == torch::headeronly::ScalarType::BFloat16,
+      "Unsupported input data type for quantize_to_fp4.");
 
   int multiProcessorCount =
       get_device_attribute(cudaDevAttrMultiProcessorCount, -1);
@@ -134,8 +137,9 @@ void silu_and_mul_nvfp4_quant_sm1xxa(torch::Tensor& output,  // [..., d]
   auto input_sf_ptr = static_cast<float const*>(input_sf.data_ptr());
   auto sf_out = static_cast<int32_t*>(output_sf.data_ptr());
   auto output_ptr = static_cast<int64_t*>(output.data_ptr());
-  const at::cuda::OptionalCUDAGuard device_guard(device_of(input));
-  auto stream = at::cuda::getCurrentCUDAStream(input.get_device());
+  torch::stable::accelerator::DeviceGuard device_guard(
+      input.get_device_index());
+  auto stream = get_current_cuda_stream(input.get_device_index());
   dim3 block(std::min(int(n / ELTS_PER_THREAD), 512));
   int const numBlocksPerSM =
       vllm_runtime_blocks_per_sm(static_cast<int>(block.x));
@@ -147,7 +151,7 @@ void silu_and_mul_nvfp4_quant_sm1xxa(torch::Tensor& output,  // [..., d]
       int(m), std::max(1, (multiProcessorCount * numBlocksPerSM) / grid_y));
   dim3 grid(grid_x, grid_y);
 
-  VLLM_DISPATCH_HALF_TYPES(
+  VLLM_STABLE_DISPATCH_HALF_TYPES(
       input.scalar_type(), "silu_and_mul_nvfp4_quant_kernel", [&] {
         using cuda_type = vllm::CUDATypeConverter<scalar_t>::Type;
         auto input_ptr = static_cast<cuda_type const*>(input.data_ptr());

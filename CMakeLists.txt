@@ -320,12 +320,9 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
   endif()
   FetchContent_MakeAvailable(cutlass)
 
-  list(APPEND VLLM_EXT_SRC
+list(APPEND VLLM_EXT_SRC
     "csrc/quantization/awq/gemm_kernels.cu"
-    "csrc/quantization/fp4/nvfp4_quant_entry.cu"
-    "csrc/quantization/fp4/nvfp4_scaled_mm_entry.cu"
-    "csrc/sparse/cutlass/sparse_scaled_mm_entry.cu"
-    "csrc/cutlass_extensions/common.cpp")
+    "csrc/stable/cutlass_extensions/common.cpp")
 
   set_gencode_flags_for_srcs(
     SRCS "${VLLM_EXT_SRC}"
@@ -475,81 +472,15 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
 
   #
   # 2:4 Sparse Kernels
+  # NOTE: Migrated to csrc/stable/sparse/cutlass/ for libtorch stable ABI.
+  # Build logic is in the _C_stable_libtorch section below.
+  #
 
-  # The 2:4 sparse kernels cutlass_scaled_sparse_mm and cutlass_compressor
-  # require CUDA 12.2 or later (and only work on Hopper).
-  cuda_archs_loose_intersection(SCALED_MM_ARCHS "9.0a;" "${CUDA_ARCHS}")
-  if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 12.2 AND SCALED_MM_ARCHS)
-    set(SRCS "csrc/sparse/cutlass/sparse_scaled_mm_c3x.cu")
-    set_gencode_flags_for_srcs(
-      SRCS "${SRCS}"
-      CUDA_ARCHS "${SCALED_MM_ARCHS}")
-    list(APPEND VLLM_EXT_SRC "${SRCS}")
-    list(APPEND VLLM_GPU_FLAGS "-DENABLE_SPARSE_SCALED_MM_C3X=1")
-    message(STATUS "Building sparse_scaled_mm_c3x for archs: ${SCALED_MM_ARCHS}")
-  else()
-    if (NOT ${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 12.2 AND SCALED_MM_ARCHS)
-      message(STATUS "Not building sparse_scaled_mm_c3x kernels as CUDA Compiler version is "
-                     "not >= 12.2, we recommend upgrading to CUDA 12.2 or later "
-                     "if you intend on running FP8 sparse quantized models on Hopper.")
-    else()
-      message(STATUS "Not building sparse_scaled_mm_c3x as no compatible archs found "
-                     "in CUDA target architectures")
-    endif()
-  endif()
-
-  # The nvfp4_scaled_mm_sm120 kernels for Geforce Blackwell SM120 require
-  # CUDA 12.8 or later
-  if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 13.0)
-    cuda_archs_loose_intersection(FP4_ARCHS "12.0f" "${CUDA_ARCHS}")
-  else()
-    cuda_archs_loose_intersection(FP4_ARCHS "12.0a" "${CUDA_ARCHS}")
-  endif()
-  if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 12.8 AND FP4_ARCHS)
-    set(SRCS
-      "csrc/quantization/fp4/nvfp4_quant_kernels.cu"
-      "csrc/quantization/fp4/activation_nvfp4_quant_fusion_kernels.cu"
-      "csrc/quantization/fp4/nvfp4_experts_quant.cu"
-      "csrc/quantization/fp4/nvfp4_scaled_mm_sm120_kernels.cu"
-      "csrc/quantization/fp4/nvfp4_blockwise_moe_kernel.cu")
-    set_gencode_flags_for_srcs(
-      SRCS "${SRCS}"
-      CUDA_ARCHS "${FP4_ARCHS}")
-    list(APPEND VLLM_EXT_SRC "${SRCS}")
-    list(APPEND VLLM_GPU_FLAGS "-DENABLE_NVFP4_SM120=1")
-    list(APPEND VLLM_GPU_FLAGS "-DENABLE_CUTLASS_MOE_SM120=1")
-    message(STATUS "Building NVFP4 for archs: ${FP4_ARCHS}")
-  else()
-    message(STATUS "Not building NVFP4 as no compatible archs were found.")
-    # clear FP4_ARCHS
-    set(FP4_ARCHS)
-  endif()
-
-  # FP4 Archs and flags
-  if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 13.0)
-    cuda_archs_loose_intersection(FP4_ARCHS "10.0f;11.0f" "${CUDA_ARCHS}")
-  else()
-    cuda_archs_loose_intersection(FP4_ARCHS "10.0a;10.1a;10.3a" "${CUDA_ARCHS}")
-  endif()
-  if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 12.8 AND FP4_ARCHS)
-    set(SRCS
-      "csrc/quantization/fp4/nvfp4_quant_kernels.cu"
-      "csrc/quantization/fp4/activation_nvfp4_quant_fusion_kernels.cu"
-      "csrc/quantization/fp4/nvfp4_experts_quant.cu"
-      "csrc/quantization/fp4/nvfp4_scaled_mm_kernels.cu"
-      "csrc/quantization/fp4/nvfp4_blockwise_moe_kernel.cu")
-    set_gencode_flags_for_srcs(
-      SRCS "${SRCS}"
-      CUDA_ARCHS "${FP4_ARCHS}")
-    list(APPEND VLLM_EXT_SRC "${SRCS}")
-    list(APPEND VLLM_GPU_FLAGS "-DENABLE_NVFP4_SM100=1")
-    list(APPEND VLLM_GPU_FLAGS "-DENABLE_CUTLASS_MOE_SM100=1")
-    message(STATUS "Building NVFP4 for archs: ${FP4_ARCHS}")
-  else()
-    message(STATUS "Not building NVFP4 as no compatible archs were found.")
-    # clear FP4_ARCHS
-    set(FP4_ARCHS)
-  endif()
+  #
+  # NVFP4 Kernels
+  # NOTE: Migrated to csrc/stable/quantization/fp4/ for libtorch stable ABI.
+  # Build logic is in the _C_stable_libtorch section below.
+  #
 
   # CUTLASS MLA Archs and flags
   if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 13.0)
@@ -651,35 +582,6 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
     endif()
   endif()
 
-  # Only build W4A8 kernels if we are building for something compatible with sm90a
-  cuda_archs_loose_intersection(W4A8_ARCHS "9.0a" "${CUDA_ARCHS}")
-  if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 12.0 AND W4A8_ARCHS)
-    set(SRCS
-       "csrc/quantization/cutlass_w4a8/w4a8_mm_entry.cu"
-       "csrc/quantization/cutlass_w4a8/w4a8_grouped_mm_entry.cu"
-       "csrc/quantization/cutlass_w4a8/w4a8_utils.cu"
-       )
-
-    set_gencode_flags_for_srcs(
-      SRCS "${SRCS}"
-      CUDA_ARCHS "${W4A8_ARCHS}")
-
-    list(APPEND VLLM_EXT_SRC "${SRCS}")
-
-    message(STATUS "Building W4A8 kernels for archs: ${W4A8_ARCHS}")
-  else()
-    if (NOT ${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 12.0
-        AND W4A8_ARCHS)
-      message(STATUS "Not building W4A8 kernels as CUDA Compiler version is "
-                     "not >= 12.0, we recommend upgrading to CUDA 12.0 or "
-                     "later if you intend on running w4a16 quantized models on "
-                     "Hopper.")
-    else()
-      message(STATUS "Not building W4A8 kernels as no compatible archs "
-                     "found in CUDA target architectures")
-    endif()
-  endif()
-
   # Hadacore kernels
   cuda_archs_loose_intersection(HADACORE_ARCHS "8.0+PTX;9.0+PTX" "${CUDA_ARCHS}")
   if(HADACORE_ARCHS)
@@ -727,6 +629,7 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
   # _C_stable_libtorch extension (ops registered via STABLE_TORCH_LIBRARY)
   #
   set(VLLM_STABLE_EXT_SRC
+    "csrc/cuda_utils_kernels.cu"
     "csrc/stable/activation_kernels.cu"
     "csrc/stable/cache_kernels.cu"
     "csrc/stable/cache_kernels_fused.cu"
@@ -752,7 +655,39 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
     "csrc/stable/quantization/w8a8/fp8/per_token_group_quant.cu"
     "csrc/stable/quantization/w8a8/int8/per_token_group_quant.cu"
     "csrc/stable/quantization/w8a8/cutlass/scaled_mm_entry.cu"
-    "csrc/cutlass_extensions/common.cpp")
+    "csrc/stable/quantization/fp4/nvfp4_quant_entry.cu"
+    "csrc/stable/quantization/fp4/nvfp4_scaled_mm_entry.cu"
+"csrc/stable/sparse/cutlass/sparse_scaled_mm_entry.cu"
+    "csrc/stable/cutlass_extensions/common.cpp")
+  endif()
+
+  # Only build W4A8 kernels if we are building for something compatible with sm90a
+  cuda_archs_loose_intersection(W4A8_ARCHS "9.0a" "${CUDA_ARCHS}")
+  if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 12.0 AND W4A8_ARCHS)
+    set(SRCS
+       "csrc/stable/quantization/cutlass_w4a8/w4a8_mm_entry.cu"
+       "csrc/stable/quantization/cutlass_w4a8/w4a8_grouped_mm_entry.cu"
+       "csrc/stable/quantization/cutlass_w4a8/w4a8_utils.cu"
+       )
+
+    set_gencode_flags_for_srcs(
+      SRCS "${SRCS}"
+      CUDA_ARCHS "${W4A8_ARCHS}")
+
+    list(APPEND VLLM_STABLE_EXT_SRC "${SRCS}")
+
+    message(STATUS "Building W4A8 kernels for archs: ${W4A8_ARCHS}")
+  else()
+    if (NOT ${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 12.0
+        AND W4A8_ARCHS)
+      message(STATUS "Not building W4A8 kernels as CUDA Compiler version is "
+                     "not >= 12.0, we recommend upgrading to CUDA 12.0 or "
+                     "later if you intend on running w4a16 quantized models on "
+                     "Hopper.")
+    else()
+      message(STATUS "Not building W4A8 kernels as no compatible archs "
+                     "found in CUDA target architectures")
+    endif()
   endif()
 
   if(VLLM_GPU_LANG STREQUAL "CUDA")
@@ -897,6 +832,81 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
     message(STATUS "Building stable moe_data for archs: ${STABLE_MOE_DATA_ARCHS}")
   else()
     message(STATUS "Not building stable moe_data")
+  endif()
+
+  #
+  # Stable 2:4 Sparse Kernels (SM90)
+  #
+  cuda_archs_loose_intersection(STABLE_SPARSE_MM_ARCHS "9.0a;" "${CUDA_ARCHS}")
+  if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 12.2 AND STABLE_SPARSE_MM_ARCHS)
+    set(SRCS "csrc/stable/sparse/cutlass/sparse_scaled_mm_c3x.cu")
+    set_gencode_flags_for_srcs(
+      SRCS "${SRCS}"
+      CUDA_ARCHS "${STABLE_SPARSE_MM_ARCHS}")
+    list(APPEND VLLM_STABLE_EXT_SRC "${SRCS}")
+    list(APPEND VLLM_STABLE_GPU_FLAGS "-DENABLE_SPARSE_SCALED_MM_C3X=1")
+    message(STATUS "Building stable sparse_scaled_mm_c3x for archs: ${STABLE_SPARSE_MM_ARCHS}")
+  else()
+    if (NOT ${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 12.2 AND STABLE_SPARSE_MM_ARCHS)
+      message(STATUS "Not building stable sparse_scaled_mm_c3x kernels as CUDA Compiler version is "
+                     "not >= 12.2, we recommend upgrading to CUDA 12.2 or later "
+                     "if you intend on running FP8 sparse quantized models on Hopper.")
+    else()
+      message(STATUS "Not building stable sparse_scaled_mm_c3x as no compatible archs found "
+                     "in CUDA target architectures")
+    endif()
+  endif()
+
+  #
+  # Stable NVFP4 kernels for Geforce Blackwell SM120
+  #
+  if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 13.0)
+    cuda_archs_loose_intersection(STABLE_FP4_SM120_ARCHS "12.0f" "${CUDA_ARCHS}")
+  else()
+    cuda_archs_loose_intersection(STABLE_FP4_SM120_ARCHS "12.0a" "${CUDA_ARCHS}")
+  endif()
+  if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 12.8 AND STABLE_FP4_SM120_ARCHS)
+    set(SRCS
+      "csrc/stable/quantization/fp4/nvfp4_quant_kernels.cu"
+      "csrc/stable/quantization/fp4/activation_nvfp4_quant_fusion_kernels.cu"
+      "csrc/stable/quantization/fp4/nvfp4_experts_quant.cu"
+      "csrc/stable/quantization/fp4/nvfp4_scaled_mm_sm120_kernels.cu"
+      "csrc/stable/quantization/fp4/nvfp4_blockwise_moe_kernel.cu")
+    set_gencode_flags_for_srcs(
+      SRCS "${SRCS}"
+      CUDA_ARCHS "${STABLE_FP4_SM120_ARCHS}")
+    list(APPEND VLLM_STABLE_EXT_SRC "${SRCS}")
+    list(APPEND VLLM_STABLE_GPU_FLAGS "-DENABLE_NVFP4_SM120=1")
+    list(APPEND VLLM_STABLE_GPU_FLAGS "-DENABLE_CUTLASS_MOE_SM120=1")
+    message(STATUS "Building stable NVFP4 SM120 for archs: ${STABLE_FP4_SM120_ARCHS}")
+  else()
+    message(STATUS "Not building stable NVFP4 SM120 as no compatible archs were found.")
+  endif()
+
+  #
+  # Stable NVFP4 kernels for Blackwell SM100
+  #
+  if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 13.0)
+    cuda_archs_loose_intersection(STABLE_FP4_SM100_ARCHS "10.0f;11.0f" "${CUDA_ARCHS}")
+  else()
+    cuda_archs_loose_intersection(STABLE_FP4_SM100_ARCHS "10.0a;10.1a;10.3a" "${CUDA_ARCHS}")
+  endif()
+  if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 12.8 AND STABLE_FP4_SM100_ARCHS)
+    set(SRCS
+      "csrc/stable/quantization/fp4/nvfp4_quant_kernels.cu"
+      "csrc/stable/quantization/fp4/activation_nvfp4_quant_fusion_kernels.cu"
+      "csrc/stable/quantization/fp4/nvfp4_experts_quant.cu"
+      "csrc/stable/quantization/fp4/nvfp4_scaled_mm_kernels.cu"
+      "csrc/stable/quantization/fp4/nvfp4_blockwise_moe_kernel.cu")
+    set_gencode_flags_for_srcs(
+      SRCS "${SRCS}"
+      CUDA_ARCHS "${STABLE_FP4_SM100_ARCHS}")
+    list(APPEND VLLM_STABLE_EXT_SRC "${SRCS}")
+    list(APPEND VLLM_STABLE_GPU_FLAGS "-DENABLE_NVFP4_SM100=1")
+    list(APPEND VLLM_STABLE_GPU_FLAGS "-DENABLE_CUTLASS_MOE_SM100=1")
+    message(STATUS "Building stable NVFP4 SM100 for archs: ${STABLE_FP4_SM100_ARCHS}")
+  else()
+    message(STATUS "Not building stable NVFP4 SM100 as no compatible archs were found.")
   endif()
 
   message(STATUS "Enabling C_stable extension.")

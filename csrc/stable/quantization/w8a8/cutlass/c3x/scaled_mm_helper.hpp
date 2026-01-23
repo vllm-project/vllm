@@ -4,7 +4,7 @@
 
 #include "stable/torch_utils.h"
 #include "cuda_utils.h"
-#include "cutlass_extensions/common.hpp"
+#include "stable/cutlass_extensions/common.hpp"
 
 template <typename Fp8Func, typename Int8Func, typename BlockwiseFunc>
 void dispatch_scaled_mm(torch::stable::Tensor& c,

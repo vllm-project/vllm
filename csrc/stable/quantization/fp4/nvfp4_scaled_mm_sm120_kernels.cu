@@ -14,12 +14,14 @@
  * limitations under the License.
  */
 
-#include <torch/all.h>
+#include <torch/csrc/stable/library.h>
+#include <torch/csrc/stable/tensor.h>
+#include <torch/csrc/stable/accelerator.h>
+#include <torch/csrc/stable/ops.h>
+#include <torch/headeronly/core/ScalarType.h>
+#include "../../torch_utils.h"
 
-#include <ATen/cuda/CUDAContext.h>
-#include <c10/cuda/CUDAGuard.h>
-
-#include "cutlass_extensions/common.hpp"
+#include "stable/cutlass_extensions/common.hpp"
 
 #include "cutlass/cutlass.h"
 
@@ -35,18 +37,18 @@
 using namespace cute;
 
 #define CHECK_TYPE(x, st, m) \
-  TORCH_CHECK(x.scalar_type() == st, ": Inconsistency of Tensor type:", m)
+  STD_TORCH_CHECK(x.scalar_type() == st, ": Inconsistency of Tensor type:", m)
 #define CHECK_TH_CUDA(x, m) \
-  TORCH_CHECK(x.is_cuda(), m, ": must be a CUDA tensor")
+  STD_TORCH_CHECK(x.is_cuda(), m, ": must be a CUDA tensor")
 #define CHECK_CONTIGUOUS(x, m) \
-  TORCH_CHECK(x.is_contiguous(), m, ": must be contiguous")
+  STD_TORCH_CHECK(x.is_contiguous(), m, ": must be contiguous")
 #define CHECK_INPUT(x, st, m) \
   CHECK_TH_CUDA(x, m);        \
   CHECK_CONTIGUOUS(x, m);     \
   CHECK_TYPE(x, st, m)
 
-constexpr auto FLOAT4_E2M1X2 = at::ScalarType::Byte;
-constexpr auto SF_DTYPE = at::ScalarType::Float8_e4m3fn;
+constexpr auto FLOAT4_E2M1X2 = torch::headeronly::ScalarType::Byte;
+constexpr auto SF_DTYPE = torch::headeronly::ScalarType::Float8_e4m3fn;
 
 struct sm120_fp4_config_M256 {
   using ClusterShape = Shape<_1, _1, _1>;
@@ -109,12 +111,13 @@ struct Fp4GemmSm120 {
 };
 
 template <typename Gemm>
-typename Gemm::Arguments args_from_options(at::Tensor& D, at::Tensor const& A,
-                                           at::Tensor const& B,
-                                           at::Tensor const& A_sf,
-                                           at::Tensor const& B_sf,
-                                           torch::Tensor const& alpha, int M,
-                                           int N, int K) {
+typename Gemm::Arguments args_from_options(torch::stable::Tensor& D,
+                                           torch::stable::Tensor const& A,
+                                           torch::stable::Tensor const& B,
+                                           torch::stable::Tensor const& A_sf,
+                                           torch::stable::Tensor const& B_sf,
+                                           torch::stable::Tensor const& alpha,
+                                           int M, int N, int K) {
   using ElementA = typename Gemm::ElementA;
   using ElementB = typename Gemm::ElementB;
   using ElementD = typename Gemm::ElementD;
@@ -158,18 +161,19 @@ typename Gemm::Arguments args_from_options(at::Tensor& D, at::Tensor const& A,
 }
 
 template <typename Gemm>
-void runGemm(at::Tensor& D, at::Tensor const& A, at::Tensor const& B,
-             at::Tensor const& A_sf, at::Tensor const& B_sf,
-             torch::Tensor const& alpha, int M, int N, int K,
+void runGemm(torch::stable::Tensor& D, torch::stable::Tensor const& A,
+             torch::stable::Tensor const& B, torch::stable::Tensor const& A_sf,
+             torch::stable::Tensor const& B_sf,
+             torch::stable::Tensor const& alpha, int M, int N, int K,
              cudaStream_t stream) {
   Gemm gemm;
 
   auto arguments = args_from_options<Gemm>(D, A, B, A_sf, B_sf, alpha, M, N, K);
 
   size_t workspace_size = Gemm::get_workspace_size(arguments);
-  auto const workspace_options =
-      torch::TensorOptions().dtype(torch::kUInt8).device(A.device());
-  auto workspace = torch::empty(workspace_size, workspace_options);
+  auto workspace =
+      torch::stable::empty(workspace_size, torch::headeronly::ScalarType::Byte,
+                           std::nullopt, A.device());
 
   CUTLASS_CHECK(gemm.can_implement(arguments));
 
@@ -178,12 +182,13 @@ void runGemm(at::Tensor& D, at::Tensor const& A, at::Tensor const& B,
   CUTLASS_CHECK(gemm.run(arguments, workspace.data_ptr(), stream));
 }
 
-void cutlass_fp4_bf16_gemm_dispatch(torch::Tensor& D, torch::Tensor const& A,
-                                    torch::Tensor const& B,
-                                    torch::Tensor const& A_sf,
-                                    torch::Tensor const& B_sf,
-                                    torch::Tensor const& alpha, int m, int n,
-                                    int k, cudaStream_t stream) {
+void cutlass_fp4_bf16_gemm_dispatch(torch::stable::Tensor& D,
+                                    torch::stable::Tensor const& A,
+                                    torch::stable::Tensor const& B,
+                                    torch::stable::Tensor const& A_sf,
+                                    torch::stable::Tensor const& B_sf,
+                                    torch::stable::Tensor const& alpha, int m,
+                                    int n, int k, cudaStream_t stream) {
   uint32_t const mp2 = std::max(static_cast<uint32_t>(16), next_pow_2(m));
   if (mp2 <= 256) {
     runGemm<Fp4GemmSm120<sm120_fp4_config_M256, cutlass::bfloat16_t>::Gemm>(
@@ -194,12 +199,13 @@ void cutlass_fp4_bf16_gemm_dispatch(torch::Tensor& D, torch::Tensor const& A,
   }
 }
 
-void cutlass_fp4_f16_gemm_dispatch(torch::Tensor& D, torch::Tensor const& A,
-                                   torch::Tensor const& B,
-                                   torch::Tensor const& A_sf,
-                                   torch::Tensor const& B_sf,
-                                   torch::Tensor const& alpha, int m, int n,
-                                   int k, cudaStream_t stream) {
+void cutlass_fp4_f16_gemm_dispatch(torch::stable::Tensor& D,
+                                   torch::stable::Tensor const& A,
+                                   torch::stable::Tensor const& B,
+                                   torch::stable::Tensor const& A_sf,
+                                   torch::stable::Tensor const& B_sf,
+                                   torch::stable::Tensor const& alpha, int m,
+                                   int n, int k, cudaStream_t stream) {
   uint32_t const mp2 = std::max(static_cast<uint32_t>(16), next_pow_2(m));
   if (mp2 <= 256) {
     runGemm<Fp4GemmSm120<sm120_fp4_config_M256, cutlass::half_t>::Gemm>(
@@ -210,11 +216,12 @@ void cutlass_fp4_f16_gemm_dispatch(torch::Tensor& D, torch::Tensor const& A,
   }
 }
 
-void cutlass_scaled_fp4_mm_sm120a(torch::Tensor& D, torch::Tensor const& A,
-                                  torch::Tensor const& B,
-                                  torch::Tensor const& A_sf,
-                                  torch::Tensor const& B_sf,
-                                  torch::Tensor const& alpha) {
+void cutlass_scaled_fp4_mm_sm120a(torch::stable::Tensor& D,
+                                  torch::stable::Tensor const& A,
+                                  torch::stable::Tensor const& B,
+                                  torch::stable::Tensor const& A_sf,
+                                  torch::stable::Tensor const& B_sf,
+                                  torch::stable::Tensor const& alpha) {
 #if defined(CUTLASS_ARCH_MMA_SM120_SUPPORTED)
   CHECK_INPUT(A, FLOAT4_E2M1X2, "a");
   CHECK_INPUT(B, FLOAT4_E2M1X2, "b");
@@ -222,24 +229,25 @@ void cutlass_scaled_fp4_mm_sm120a(torch::Tensor& D, torch::Tensor const& A,
   CHECK_INPUT(A_sf, SF_DTYPE, "scale_a");
   CHECK_INPUT(B_sf, SF_DTYPE, "scale_b");
 
-  CHECK_INPUT(alpha, at::ScalarType::Float, "alpha");
+  CHECK_INPUT(alpha, torch::headeronly::ScalarType::Float, "alpha");
 
-  TORCH_CHECK(A.dim() == 2, "a must be a matrix");
-  TORCH_CHECK(B.dim() == 2, "b must be a matrix");
-  TORCH_CHECK(A.sizes()[1] == B.sizes()[1],
-              "a and b shapes cannot be multiplied (", A.sizes()[0], "x",
-              A.sizes()[1], " and ", B.sizes()[0], "x", B.sizes()[1], ")");
+  STD_TORCH_CHECK(A.dim() == 2, "a must be a matrix");
+  STD_TORCH_CHECK(B.dim() == 2, "b must be a matrix");
+  STD_TORCH_CHECK(A.size(1) == B.size(1),
+                  "a and b shapes cannot be multiplied (", A.size(0), "x",
+                  A.size(1), " and ", B.size(0), "x", B.size(1), ")");
 
-  auto const m = A.sizes()[0];
-  auto const n = B.sizes()[0];
-  auto const k = A.sizes()[1] * 2;
+  auto const m = A.size(0);
+  auto const n = B.size(0);
+  auto const k = A.size(1) * 2;
 
   constexpr int alignment = 32;
-  TORCH_CHECK(k % alignment == 0, "Expected k to be divisible by ", alignment,
-              ", but got a shape: (", A.sizes()[0], "x", A.sizes()[1],
-              "), k: ", k, ".");
-  TORCH_CHECK(n % alignment == 0, "Expected n to be divisible by ", alignment,
-              ", but got b shape: (", B.sizes()[0], "x", B.sizes()[1], ").");
+  STD_TORCH_CHECK(k % alignment == 0, "Expected k to be divisible by ",
+                  alignment, ", but got a shape: (", A.size(0), "x", A.size(1),
+                  "), k: ", k, ".");
+  STD_TORCH_CHECK(n % alignment == 0, "Expected n to be divisible by ",
+                  alignment, ", but got b shape: (", B.size(0), "x", B.size(1),
+                  ").");
 
   auto round_up = [](int x, int y) { return (x + y - 1) / y * y; };
   int rounded_m = round_up(m, 128);
@@ -248,38 +256,37 @@ void cutlass_scaled_fp4_mm_sm120a(torch::Tensor& D, torch::Tensor const& A,
   // integer.
   int rounded_k = round_up(k / 16, 4);
 
-  TORCH_CHECK(A_sf.dim() == 2, "scale_a must be a matrix");
-  TORCH_CHECK(B_sf.dim() == 2, "scale_b must be a matrix");
-  TORCH_CHECK(A_sf.sizes()[1] == B_sf.sizes()[1],
-              "scale_a and scale_b shapes cannot be multiplied (",
-              A_sf.sizes()[0], "x", A_sf.sizes()[1], " and ", B_sf.sizes()[0],
-              "x", B_sf.sizes()[1], ")");
-  TORCH_CHECK(A_sf.sizes()[0] == rounded_m && A_sf.sizes()[1] == rounded_k,
-              "scale_a must be padded and swizzled to a shape (", rounded_m,
-              "x", rounded_k, "), but got a shape (", A_sf.sizes()[0], "x",
-              A_sf.sizes()[1], ")");
-  TORCH_CHECK(B_sf.sizes()[0] == rounded_n && B_sf.sizes()[1] == rounded_k,
-              "scale_b must be padded and swizzled to a shape (", rounded_n,
-              "x", rounded_k, "), but got a shape (", B_sf.sizes()[0], "x",
-              B_sf.sizes()[1], ")");
+  STD_TORCH_CHECK(A_sf.dim() == 2, "scale_a must be a matrix");
+  STD_TORCH_CHECK(B_sf.dim() == 2, "scale_b must be a matrix");
+  STD_TORCH_CHECK(A_sf.size(1) == B_sf.size(1),
+                  "scale_a and scale_b shapes cannot be multiplied (",
+                  A_sf.size(0), "x", A_sf.size(1), " and ", B_sf.size(0), "x",
+                  B_sf.size(1), ")");
+  STD_TORCH_CHECK(A_sf.size(0) == rounded_m && A_sf.size(1) == rounded_k,
+                  "scale_a must be padded and swizzled to a shape (", rounded_m,
+                  "x", rounded_k, "), but got a shape (", A_sf.size(0), "x",
+                  A_sf.size(1), ")");
+  STD_TORCH_CHECK(B_sf.size(0) == rounded_n && B_sf.size(1) == rounded_k,
+                  "scale_b must be padded and swizzled to a shape (", rounded_n,
+                  "x", rounded_k, "), but got a shape (", B_sf.size(0), "x",
+                  B_sf.size(1), ")");
 
-  auto out_dtype = D.dtype();
-  const at::cuda::OptionalCUDAGuard device_guard(device_of(A));
-  const cudaStream_t stream = at::cuda::getCurrentCUDAStream(A.get_device());
+  auto out_dtype = D.scalar_type();
+  torch::stable::accelerator::DeviceGuard device_guard(A.get_device_index());
+  const cudaStream_t stream = get_current_cuda_stream(A.get_device_index());
 
-  if (out_dtype == at::ScalarType::BFloat16) {
+  if (out_dtype == torch::headeronly::ScalarType::BFloat16) {
     return cutlass_fp4_bf16_gemm_dispatch(D, A, B, A_sf, B_sf, alpha, m, n, k,
                                           stream);
-  } else if (out_dtype == at::ScalarType::Half) {
+  } else if (out_dtype == torch::headeronly::ScalarType::Half) {
     return cutlass_fp4_f16_gemm_dispatch(D, A, B, A_sf, B_sf, alpha, m, n, k,
                                          stream);
   } else {
-    TORCH_CHECK(false, "Unsupported output data type of nvfp4 mm sm120 (",
-                out_dtype, ")");
+    STD_TORCH_CHECK(false, "Unsupported output data type of nvfp4 mm sm120");
   }
 #else
-  TORCH_CHECK(false,
-              "Unsupported CUTLASS version. Set VLLM_CUTLASS_SRC_DIR to "
-              "a CUTLASS 3.8 source directory to enable support.");
+  STD_TORCH_CHECK(false,
+                  "Unsupported CUTLASS version. Set VLLM_CUTLASS_SRC_DIR to "
+                  "a CUTLASS 3.8 source directory to enable support.");
 #endif  // defined(CUTLASS_ARCH_MMA_SM120_SUPPORTED)
 }

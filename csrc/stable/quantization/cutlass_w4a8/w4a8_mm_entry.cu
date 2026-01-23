@@ -3,13 +3,13 @@
 //   https://github.com/NVIDIA/cutlass/blob/main/examples/55_hopper_mixed_dtype_gemm/55_hopper_int4_fp8_gemm.cu
 //
 
-#include <ATen/cuda/CUDAContext.h>
-#include <c10/cuda/CUDAGuard.h>
-#include <torch/all.h>
-#include "cutlass_extensions/torch_utils.hpp"
+#include <torch/csrc/stable/library.h>
+#include <torch/csrc/stable/tensor.h>
+#include <torch/csrc/stable/accelerator.h>
+#include <torch/csrc/stable/ops.h>
+#include "../../torch_utils.h"
+#include "stable/cutlass_extensions/torch_utils.hpp"
 #include "w4a8_utils.cuh"
-
-#include "core/registration.h"
 
 #include "cutlass/cutlass.h"
 #include <limits>
@@ -23,8 +23,8 @@
 #include "cutlass/util/packed_stride.hpp"
 #include "cutlass/util/mixed_dtype_utils.hpp"
 
-#include "cutlass_extensions/common.hpp"
-#include "cutlass_extensions/epilogue/scaled_mm_epilogues_c3x.hpp"
+#include "stable/cutlass_extensions/common.hpp"
+#include "stable/cutlass_extensions/epilogue/scaled_mm_epilogues_c3x.hpp"
 
 #include <cuda_runtime.h>
 
@@ -161,31 +161,30 @@ struct W4A8GemmKernel {
   using StrideD = typename GemmKernelShuffled::StrideD;
   using StrideS = typename CollectiveMainloopShuffled::StrideScale;
 
-  static torch::Tensor mm(torch::Tensor const& A,
-                          torch::Tensor const& B,             // already packed
-                          torch::Tensor const& group_scales,  // already packed
-                          int64_t group_size,
-                          torch::Tensor const& channel_scales,
-                          torch::Tensor const& token_scales,
-                          std::optional<at::ScalarType> const& maybe_out_type) {
+  static torch::stable::Tensor mm(
+      torch::stable::Tensor const& A,
+      torch::stable::Tensor const& B,             // already packed
+      torch::stable::Tensor const& group_scales,  // already packed
+      int64_t group_size, torch::stable::Tensor const& channel_scales,
+      torch::stable::Tensor const& token_scales,
+      std::optional<torch::headeronly::ScalarType> const& maybe_out_type) {
     // TODO: param validation
     int m = A.size(0);
     int k = A.size(1);
     int n = B.size(1);
 
     // safely cast group_size to int
-    TORCH_CHECK(group_size > 0 && group_size <= std::numeric_limits<int>::max(),
-                "group_size out of supported range for int: ", group_size);
+    STD_TORCH_CHECK(
+        group_size > 0 && group_size <= std::numeric_limits<int>::max(),
+        "group_size out of supported range for int: ", group_size);
     int const group_size_int = static_cast<int>(group_size);
 
     // Allocate output
-    const at::cuda::OptionalCUDAGuard device_guard(device_of(A));
-    auto device = A.device();
-    auto stream = at::cuda::getCurrentCUDAStream(device.index());
-    torch::Tensor D =
-        torch::empty({m, n}, torch::TensorOptions()
-                                 .dtype(equivalent_scalar_type_v<ElementD>)
-                                 .device(device));
+    torch::stable::accelerator::DeviceGuard device_guard(A.get_device_index());
+    auto stream = get_current_cuda_stream(A.get_device_index());
+    torch::stable::Tensor D =
+        torch::stable::new_empty(A, {m, n}, equivalent_scalar_type_v<ElementD>);
+
     // prepare arg pointers
     auto A_ptr = static_cast<MmaType const*>(A.const_data_ptr());
     auto B_ptr = static_cast<QuantType const*>(B.const_data_ptr());
@@ -237,9 +236,9 @@ struct W4A8GemmKernel {
 
     // Workspace
     size_t workspace_size = GemmShuffled::get_workspace_size(arguments);
-    torch::Tensor workspace =
-        torch::empty(workspace_size,
-                     torch::TensorOptions().dtype(torch::kU8).device(device));
+    torch::stable::Tensor workspace =
+        torch::stable::new_empty(A, {static_cast<int64_t>(workspace_size)},
+                                 torch::headeronly::ScalarType::Byte);
 
     // Run GEMM
     GemmShuffled gemm;
@@ -269,14 +268,14 @@ using Kernel_128x64_1x1x1 = W4A8GemmKernel<Shape<_128, _64>, Shape<_1, _1, _1>>;
 using Kernel_128x32_1x1x1 = W4A8GemmKernel<Shape<_128, _32>, Shape<_1, _1, _1>>;
 using Kernel_128x16_1x1x1 = W4A8GemmKernel<Shape<_128, _16>, Shape<_1, _1, _1>>;
 
-torch::Tensor mm_dispatch(torch::Tensor const& A,
-                          torch::Tensor const& B,             // already packed
-                          torch::Tensor const& group_scales,  // already packed
-                          int64_t group_size,
-                          torch::Tensor const& channel_scales,
-                          torch::Tensor const& token_scales,
-                          std::optional<at::ScalarType> const& maybe_out_type,
-                          const std::string& schedule) {
+torch::stable::Tensor mm_dispatch(
+    torch::stable::Tensor const& A,
+    torch::stable::Tensor const& B,             // already packed
+    torch::stable::Tensor const& group_scales,  // already packed
+    int64_t group_size, torch::stable::Tensor const& channel_scales,
+    torch::stable::Tensor const& token_scales,
+    std::optional<torch::headeronly::ScalarType> const& maybe_out_type,
+    const std::string& schedule) {
   if (schedule == "256x128_1x1x1") {
     return Kernel_256x128_1x1x1::mm(A, B, group_scales, group_size,
                                     channel_scales, token_scales,
@@ -318,17 +317,18 @@ torch::Tensor mm_dispatch(torch::Tensor const& A,
                                    channel_scales, token_scales,
                                    maybe_out_type);
   }
-  TORCH_CHECK(false, "Unknown W4A8 schedule: ", schedule);
+  STD_TORCH_CHECK(false, "Unknown W4A8 schedule: ", schedule);
   return {};
 }
 
-torch::Tensor mm(torch::Tensor const& A,
-                 torch::Tensor const& B,             // already packed
-                 torch::Tensor const& group_scales,  // already packed
-                 int64_t group_size, torch::Tensor const& channel_scales,
-                 torch::Tensor const& token_scales,
-                 std::optional<at::ScalarType> const& maybe_out_type,
-                 std::optional<std::string> maybe_schedule) {
+torch::stable::Tensor mm(
+    torch::stable::Tensor const& A,
+    torch::stable::Tensor const& B,             // already packed
+    torch::stable::Tensor const& group_scales,  // already packed
+    int64_t group_size, torch::stable::Tensor const& channel_scales,
+    torch::stable::Tensor const& token_scales,
+    std::optional<torch::headeronly::ScalarType> const& maybe_out_type,
+    std::optional<std::string> maybe_schedule) {
   // requested a specific schedule
   if (maybe_schedule) {
     return mm_dispatch(A, B, group_scales, group_size, channel_scales,
@@ -378,14 +378,14 @@ torch::Tensor mm(torch::Tensor const& A,
 // ----------------------------------------------------------------------------
 // Pre-processing utils
 // ----------------------------------------------------------------------------
-torch::Tensor pack_scale_fp8(torch::Tensor const& scales) {
-  TORCH_CHECK(scales.dtype() == torch::kFloat8_e4m3fn);
-  TORCH_CHECK(scales.is_contiguous());
-  TORCH_CHECK(scales.is_cuda());
+torch::stable::Tensor pack_scale_fp8(torch::stable::Tensor const& scales) {
+  STD_TORCH_CHECK(scales.scalar_type() ==
+                  torch::headeronly::ScalarType::Float8_e4m3fn);
+  STD_TORCH_CHECK(scales.is_contiguous());
+  STD_TORCH_CHECK(scales.device().is_cuda());
 
-  auto packed_scales = torch::empty(
-      {scales.numel() * ScalePackSize},
-      torch::TensorOptions().dtype(scales.dtype()).device(scales.device()));
+  auto packed_scales =
+      torch::stable::new_empty(scales, {scales.numel() * ScalePackSize});
   auto scales_ptr = static_cast<MmaType const*>(scales.const_data_ptr());
   auto packed_scales_ptr =
       static_cast<cutlass::Array<ElementScale, ScalePackSize>*>(
@@ -396,15 +396,16 @@ torch::Tensor pack_scale_fp8(torch::Tensor const& scales) {
   return packed_scales;
 }
 
-torch::Tensor encode_and_reorder_int4b(torch::Tensor const& B) {
-  TORCH_CHECK(B.dtype() == torch::kInt32);
-  TORCH_CHECK(B.dim() == 2);
+torch::stable::Tensor encode_and_reorder_int4b(torch::stable::Tensor const& B) {
+  STD_TORCH_CHECK(B.scalar_type() == torch::headeronly::ScalarType::Int);
+  STD_TORCH_CHECK(B.dim() == 2);
 
-  torch::Tensor B_packed = torch::empty_like(B);
+  torch::stable::Tensor B_packed = torch::stable::empty_like(B);
 
   int k = B.size(0) * PackFactor;  // logical k
   int n = B.size(1);
-  TORCH_CHECK((n * k) % 32 == 0, "need multiples of 32 int4s for 16B chunks");
+  STD_TORCH_CHECK((n * k) % 32 == 0,
+                  "need multiples of 32 int4s for 16B chunks");
 
   auto B_ptr = static_cast<QuantType const*>(B.const_data_ptr());
   auto B_packed_ptr = static_cast<QuantType*>(B_packed.data_ptr());
@@ -415,16 +416,22 @@ torch::Tensor encode_and_reorder_int4b(torch::Tensor const& B) {
 
   bool ok = vllm::cutlass_w4a8_utils::unified_encode_int4b(B_ptr, B_packed_ptr,
                                                            n * k);
-  TORCH_CHECK(ok, "unified_encode_int4b failed");
+  STD_TORCH_CHECK(ok, "unified_encode_int4b failed");
   cutlass::reorder_tensor(B_packed_ptr, layout_B, layout_B_reordered);
 
   return B_packed;
 }
 
-TORCH_LIBRARY_IMPL_EXPAND(TORCH_EXTENSION_NAME, CUDA, m) {
-  m.impl("cutlass_w4a8_mm", &mm);
-  m.impl("cutlass_pack_scale_fp8", &pack_scale_fp8);
-  m.impl("cutlass_encode_and_reorder_int4b", &encode_and_reorder_int4b);
-}
-
 }  // namespace vllm::cutlass_w4a8
+
+// Self-registration: register implementations when this file is compiled
+// (only happens when architecture requirements are met)
+#include "core/registration.h"
+
+STABLE_TORCH_LIBRARY_IMPL(_C, CUDA, m) {
+  m.impl("cutlass_w4a8_mm", TORCH_BOX(&vllm::cutlass_w4a8::mm));
+  m.impl("cutlass_pack_scale_fp8",
+         TORCH_BOX(&vllm::cutlass_w4a8::pack_scale_fp8));
+  m.impl("cutlass_encode_and_reorder_int4b",
+         TORCH_BOX(&vllm::cutlass_w4a8::encode_and_reorder_int4b));
+}

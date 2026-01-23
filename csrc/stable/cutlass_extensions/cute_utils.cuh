@@ -1,7 +1,7 @@
 #pragma once
 
 #include <cute/tensor.hpp>
-#include <torch/all.h>
+
 namespace cute {
 
 ////////////////////////////////////////////////////////////////////

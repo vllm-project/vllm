@@ -15,19 +15,24 @@
 // clang-format on
 
 using namespace cute;
-using namespace vllm;
 
-using CompressorResult = std::tuple<torch::Tensor, torch::Tensor>;
+using CompressorResult =
+    std::tuple<torch::stable::Tensor, torch::stable::Tensor>;
+
 /// Make A structured sparse by replacing elements with 0 and compress it
 template <typename Gemm>
-CompressorResult cutlass_sparse_compress(torch::Tensor const& a) {
+CompressorResult cutlass_sparse_compress(torch::stable::Tensor const& a) {
   // Checks for conformality
-  TORCH_CHECK(a.dtype() == torch::kInt8 || a.dtype() == torch::kFloat8_e4m3fn ||
-              a.dtype() == torch::kFloat16 || a.dtype() == torch::kBFloat16);
-  TORCH_CHECK(a.dim() == 2)
+  STD_TORCH_CHECK(a.scalar_type() == torch::headeronly::ScalarType::Char ||
+                  a.scalar_type() ==
+                      torch::headeronly::ScalarType::Float8_e4m3fn ||
+                  a.scalar_type() == torch::headeronly::ScalarType::Half ||
+                  a.scalar_type() == torch::headeronly::ScalarType::BFloat16);
+  STD_TORCH_CHECK(a.dim() == 2)
   // Check for strides and alignment
-  TORCH_CHECK(a.stride(0) % 4 == 0)  // Required for semi-structured sparsity
-  TORCH_CHECK(a.stride(1) == 1)
+  STD_TORCH_CHECK(a.stride(0) % 4 ==
+                  0)  // Required for semi-structured sparsity
+  STD_TORCH_CHECK(a.stride(1) == 1)
 
   using GemmKernel = typename Gemm::KernelType;
   using ElementA = typename Gemm::ElementAB;
@@ -51,20 +56,17 @@ CompressorResult cutlass_sparse_compress(torch::Tensor const& a) {
   int MC = compressor_utility.get_tensorA_m_physical();
   int KC = compressor_utility.get_tensorA_k_physical();
 
-  auto const a_meta_options =
-      torch::TensorOptions().dtype(torch::kUInt8).device(a.device());
-  auto const a_nzs_options =
-      torch::TensorOptions().dtype(a.dtype()).device(a.device());
-
-  auto a_meta = torch::zeros({ME, KE}, a_meta_options);
-  auto a_nzs = torch::zeros({MC, KC}, a_nzs_options);
+  // Create output tensors using stable API
+  auto a_meta = torch::stable::new_zeros(a, {ME, KE},
+                                         torch::headeronly::ScalarType::Byte);
+  auto a_nzs = torch::stable::new_zeros(a, {MC, KC});
 
   auto a_ptr = static_cast<ElementA*>(a.data_ptr());
   auto a_nzs_ptr = static_cast<ElementA*>(a_nzs.data_ptr());
   auto a_meta_ptr = static_cast<ElementE*>(a_meta.data_ptr());
 
   cutlass::KernelHardwareInfo hw_info;
-  hw_info.device_id = a.device().index();
+  hw_info.device_id = a.get_device_index();
   hw_info.sm_count =
       cutlass::KernelHardwareInfo::query_device_multiprocessor_count(
           hw_info.device_id);
@@ -75,9 +77,9 @@ CompressorResult cutlass_sparse_compress(torch::Tensor const& a) {
 
   Compressor compressor_op;
   size_t workspace_size = Compressor::get_workspace_size(arguments);
-  auto const workspace_options =
-      torch::TensorOptions().dtype(torch::kUInt8).device(a.device());
-  auto workspace = torch::empty(workspace_size, workspace_options);
+  auto workspace =
+      torch::stable::new_empty(a, {static_cast<int64_t>(workspace_size)},
+                               torch::headeronly::ScalarType::Byte);
 
   CUTLASS_CHECK(compressor_op.can_implement(arguments));
   CUTLASS_CHECK(compressor_op.initialize(arguments, workspace.data_ptr()));

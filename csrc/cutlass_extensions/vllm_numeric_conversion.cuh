@@ -2,7 +2,7 @@
 
 #include "cutlass/numeric_conversion.h"
 #include "cutlass_extensions/vllm_custom_types.cuh"
-#include "cutlass_extensions/cute_utils.cuh"
+#include "stable/cutlass_extensions/cute_utils.cuh"
 #include "cutlass_extensions/vllm_type_utils.cuh"
 
 // this file extends:

@@ -14,16 +14,17 @@
  * limitations under the License.
  */
 
-#include <torch/all.h>
+#include <torch/csrc/stable/library.h>
+#include <torch/csrc/stable/tensor.h>
+#include <torch/csrc/stable/accelerator.h>
+#include <torch/headeronly/core/ScalarType.h>
+#include "../../torch_utils.h"
 
 #include <cuda_runtime_api.h>
 #include <cuda_runtime.h>
 
-#include <ATen/cuda/CUDAContext.h>
-#include <c10/cuda/CUDAGuard.h>
-
 #include <cuda_fp8.h>
-#include "dispatch_utils.h"
+#include "../../dispatch_utils.h"
 
 #include "cuda_utils.h"
 #include "nvfp4_utils.cuh"
@@ -327,25 +328,28 @@ void quant_impl(void* output, void* output_scale, void* input,
 }  // namespace vllm
 
 /*Quantization entry for fp4 experts quantization*/
-#define CHECK_TH_CUDA(x, m) TORCH_CHECK(x.is_cuda(), m, "must be a CUDA tensor")
+#define CHECK_TH_CUDA(x, m) \
+  STD_TORCH_CHECK(x.is_cuda(), m, "must be a CUDA tensor")
 #define CHECK_CONTIGUOUS(x, m) \
-  TORCH_CHECK(x.is_contiguous(), m, "must be contiguous")
+  STD_TORCH_CHECK(x.is_contiguous(), m, "must be contiguous")
 #define CHECK_INPUT(x, m) \
   CHECK_TH_CUDA(x, m);    \
   CHECK_CONTIGUOUS(x, m);
 
-constexpr auto HALF = at::ScalarType::Half;
-constexpr auto BF16 = at::ScalarType::BFloat16;
-constexpr auto FLOAT = at::ScalarType::Float;
-constexpr auto INT = at::ScalarType::Int;
-constexpr auto UINT8 = at::ScalarType::Byte;
+constexpr auto HALF = torch::headeronly::ScalarType::Half;
+constexpr auto BF16 = torch::headeronly::ScalarType::BFloat16;
+constexpr auto FLOAT = torch::headeronly::ScalarType::Float;
+constexpr auto INT = torch::headeronly::ScalarType::Int;
+constexpr auto UINT8 = torch::headeronly::ScalarType::Byte;
 
 // Common validation for fp4 experts quantization entry points.
 static void validate_fp4_experts_quant_inputs(
-    torch::Tensor const& output, torch::Tensor const& output_scale,
-    torch::Tensor const& input, torch::Tensor const& input_global_scale,
-    torch::Tensor const& input_offset_by_experts,
-    torch::Tensor const& output_scale_offset_by_experts, int64_t m_topk,
+    torch::stable::Tensor const& output,
+    torch::stable::Tensor const& output_scale,
+    torch::stable::Tensor const& input,
+    torch::stable::Tensor const& input_global_scale,
+    torch::stable::Tensor const& input_offset_by_experts,
+    torch::stable::Tensor const& output_scale_offset_by_experts, int64_t m_topk,
     int64_t k) {
   CHECK_INPUT(output, "output");
   CHECK_INPUT(output_scale, "output_scale");
@@ -354,41 +358,42 @@ static void validate_fp4_experts_quant_inputs(
   CHECK_INPUT(input_offset_by_experts, "input_offset_by_experts");
   CHECK_INPUT(output_scale_offset_by_experts, "output_scale_offset_by_experts");
 
-  TORCH_CHECK(output.dim() == 2);
-  TORCH_CHECK(output_scale.dim() == 2);
-  TORCH_CHECK(input.dim() == 2);
-  TORCH_CHECK(input_global_scale.dim() == 1);
-  TORCH_CHECK(input_offset_by_experts.dim() == 1);
-  TORCH_CHECK(output_scale_offset_by_experts.dim() == 1);
+  STD_TORCH_CHECK(output.dim() == 2);
+  STD_TORCH_CHECK(output_scale.dim() == 2);
+  STD_TORCH_CHECK(input.dim() == 2);
+  STD_TORCH_CHECK(input_global_scale.dim() == 1);
+  STD_TORCH_CHECK(input_offset_by_experts.dim() == 1);
+  STD_TORCH_CHECK(output_scale_offset_by_experts.dim() == 1);
 
-  TORCH_CHECK(input.scalar_type() == HALF || input.scalar_type() == BF16);
-  TORCH_CHECK(input_global_scale.scalar_type() == FLOAT);
-  TORCH_CHECK(input_offset_by_experts.scalar_type() == INT);
-  TORCH_CHECK(output_scale_offset_by_experts.scalar_type() == INT);
+  STD_TORCH_CHECK(input.scalar_type() == HALF || input.scalar_type() == BF16);
+  STD_TORCH_CHECK(input_global_scale.scalar_type() == FLOAT);
+  STD_TORCH_CHECK(input_offset_by_experts.scalar_type() == INT);
+  STD_TORCH_CHECK(output_scale_offset_by_experts.scalar_type() == INT);
   // output is uint8 (two nvfp4 values are packed into one uint8)
   // output_scale is int32 (four fp8 values are packed into one int32)
-  TORCH_CHECK(output.scalar_type() == UINT8);
-  TORCH_CHECK(output_scale.scalar_type() == INT);
+  STD_TORCH_CHECK(output.scalar_type() == UINT8);
+  STD_TORCH_CHECK(output_scale.scalar_type() == INT);
 
   const int BLOCK_SIZE = 16;
-  TORCH_CHECK(k % BLOCK_SIZE == 0, "k must be a multiple of 16");
+  STD_TORCH_CHECK(k % BLOCK_SIZE == 0, "k must be a multiple of 16");
   auto n_experts = input_global_scale.size(0);
-  TORCH_CHECK(input_offset_by_experts.size(0) == n_experts + 1);
-  TORCH_CHECK(output_scale_offset_by_experts.size(0) == n_experts + 1);
-  TORCH_CHECK(output.size(0) == m_topk);
-  TORCH_CHECK(output.size(1) == k / 2);
+  STD_TORCH_CHECK(input_offset_by_experts.size(0) == n_experts + 1);
+  STD_TORCH_CHECK(output_scale_offset_by_experts.size(0) == n_experts + 1);
+  STD_TORCH_CHECK(output.size(0) == m_topk);
+  STD_TORCH_CHECK(output.size(1) == k / 2);
   int scales_k = k / BLOCK_SIZE;
   // 4 means the swizzle requirement by nvidia nvfp4.
   int padded_k = (scales_k + (4 - 1)) / 4 * 4;
   // 4 means 4 fp8 values are packed into one int32
-  TORCH_CHECK(output_scale.size(1) * 4 == padded_k);
+  STD_TORCH_CHECK(output_scale.size(1) * 4 == padded_k);
 }
 
 void scaled_fp4_experts_quant_sm1xxa(
-    torch::Tensor& output, torch::Tensor& output_scale,
-    torch::Tensor const& input, torch::Tensor const& input_global_scale,
-    torch::Tensor const& input_offset_by_experts,
-    torch::Tensor const& output_scale_offset_by_experts) {
+    torch::stable::Tensor& output, torch::stable::Tensor& output_scale,
+    torch::stable::Tensor const& input,
+    torch::stable::Tensor const& input_global_scale,
+    torch::stable::Tensor const& input_offset_by_experts,
+    torch::stable::Tensor const& output_scale_offset_by_experts) {
   auto m_topk = input.size(0);
   auto k = input.size(1);
 
@@ -397,11 +402,11 @@ void scaled_fp4_experts_quant_sm1xxa(
                                     output_scale_offset_by_experts, m_topk, k);
 
   auto n_experts = input_global_scale.size(0);
-  const at::cuda::OptionalCUDAGuard device_guard(device_of(input));
-  const cudaStream_t stream =
-      at::cuda::getCurrentCUDAStream(input.get_device());
+  torch::stable::accelerator::DeviceGuard device_guard(
+      input.get_device_index());
+  const cudaStream_t stream = get_current_cuda_stream(input.get_device_index());
 
-  VLLM_DISPATCH_HALF_TYPES(
+  VLLM_STABLE_DISPATCH_HALF_TYPES(
       input.scalar_type(), "nvfp4_experts_quant_kernel", [&] {
         using cuda_type = vllm::CUDATypeConverter<scalar_t>::Type;
         vllm::quant_impl<cuda_type, /*FUSE_SILU_MUL=*/false>(
@@ -413,14 +418,15 @@ void scaled_fp4_experts_quant_sm1xxa(
 }
 
 void silu_and_mul_scaled_fp4_experts_quant_sm1xxa(
-    torch::Tensor& output, torch::Tensor& output_scale,
-    torch::Tensor const& input, torch::Tensor const& input_global_scale,
-    torch::Tensor const& input_offset_by_experts,
-    torch::Tensor const& output_scale_offset_by_experts) {
+    torch::stable::Tensor& output, torch::stable::Tensor& output_scale,
+    torch::stable::Tensor const& input,
+    torch::stable::Tensor const& input_global_scale,
+    torch::stable::Tensor const& input_offset_by_experts,
+    torch::stable::Tensor const& output_scale_offset_by_experts) {
   auto m_topk = input.size(0);
   // Input has gate || up layout, so k = input.size(1) / 2
   auto k_times_2 = input.size(1);
-  TORCH_CHECK(k_times_2 % 2 == 0, "input width must be even (gate || up)");
+  STD_TORCH_CHECK(k_times_2 % 2 == 0, "input width must be even (gate || up)");
   auto k = k_times_2 / 2;
 
   validate_fp4_experts_quant_inputs(output, output_scale, input,
@@ -428,11 +434,11 @@ void silu_and_mul_scaled_fp4_experts_quant_sm1xxa(
                                     output_scale_offset_by_experts, m_topk, k);
 
   auto n_experts = input_global_scale.size(0);
-  const at::cuda::OptionalCUDAGuard device_guard(device_of(input));
-  const cudaStream_t stream =
-      at::cuda::getCurrentCUDAStream(input.get_device());
+  torch::stable::accelerator::DeviceGuard device_guard(
+      input.get_device_index());
+  const cudaStream_t stream = get_current_cuda_stream(input.get_device_index());
 
-  VLLM_DISPATCH_HALF_TYPES(
+  VLLM_STABLE_DISPATCH_HALF_TYPES(
       input.scalar_type(), "silu_mul_nvfp4_experts_quant_kernel", [&] {
         using cuda_type = vllm::CUDATypeConverter<scalar_t>::Type;
         vllm::quant_impl<cuda_type, /*FUSE_SILU_MUL=*/true>(

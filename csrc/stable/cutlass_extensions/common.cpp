@@ -1,4 +1,4 @@
-#include "cutlass_extensions/common.hpp"
+#include "common.hpp"
 
 int32_t get_sm_version_num() {
   int32_t major_capability, minor_capability;

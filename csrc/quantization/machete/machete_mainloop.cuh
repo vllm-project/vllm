@@ -46,7 +46,7 @@
 #include "cutlass/detail/collective.hpp"
 // clang-format on
 
-#include "cutlass_extensions/cute_utils.cuh"
+#include "stable/cutlass_extensions/cute_utils.cuh"
 
 namespace machete {
 
@@ -480,7 +480,7 @@ struct MacheteCollectiveMma {
   // easier comparison
   //  with `RealInternalElementA` -> `ElementA` since we support `SwapAB` logic
   // clang-format off
-  static constexpr size_t SmemAlignmentA = cutlass::detail::alignment_for_swizzle(SmemLayoutA{}); 
+  static constexpr size_t SmemAlignmentA = cutlass::detail::alignment_for_swizzle(SmemLayoutA{});
 
   static constexpr size_t SmemAlignmentB = cutlass::detail::alignment_for_swizzle(SmemLayoutB{});
 
@@ -627,7 +627,7 @@ struct MacheteCollectiveMma {
     constexpr int tma_alignment_bits = 128;
     auto problem_shape_MNKL = append<4>(problem_shape, 1);
     auto [M,N,K,L] = problem_shape_MNKL;
-    
+
     bool implementable = true;
     constexpr int min_tma_aligned_elements_A = tma_alignment_bits / cutlass::sizeof_bits<ElementA>::value;
     implementable = implementable && cutlass::detail::check_alignment<min_tma_aligned_elements_A>(cute::make_shape(M,K,L), StrideA{});
@@ -637,7 +637,7 @@ struct MacheteCollectiveMma {
     if constexpr (KernelConversionMode == ConversionMode::DirectConvert) {
       implementable = implementable && (args.ptr_S == nullptr);
       implementable = implementable && (args.ptr_Z == nullptr);
-    } 
+    }
     else if constexpr (ModeHasScales) {
       const int scale_mn = M;
       const int scale_k = (K + args.group_size - 1) / args.group_size;
@@ -654,7 +654,7 @@ struct MacheteCollectiveMma {
         constexpr int min_tma_aligned_elements_zero = tma_alignment_bits / cutlass::sizeof_bits<ElementZero>::value;
         implementable = implementable && cutlass::detail::check_alignment<min_tma_aligned_elements_zero>(cute::make_shape(scale_mn,scale_k,L), StrideScale{});
         implementable = implementable && (args.ptr_Z != nullptr);
-      } 
+      }
       else {
         static_assert(cutlass::detail::dependent_false<KernelSchedule>, "Conversion mode not handled in can_implement.");
       }
@@ -682,18 +682,18 @@ struct MacheteCollectiveMma {
 
     if constexpr (KernelConversionMode == ConversionMode::DirectConvert) {
       // Nothing extra to do
-    } 
+    }
     else if constexpr (KernelConversionMode == ConversionMode::ConvertAndScale) {
       cute::prefetch_tma_descriptor(mainloop_params.tma_load_scale.get_tma_descriptor());
     }
     else if constexpr (KernelConversionMode == ConversionMode::ConvertAndScaleWithZero) {
       cute::prefetch_tma_descriptor(mainloop_params.tma_load_scale.get_tma_descriptor());
       cute::prefetch_tma_descriptor(mainloop_params.tma_load_zero.get_tma_descriptor());
-    }  
+    }
     else {
       static_assert(cutlass::detail::dependent_false<KernelSchedule>, "Conversion mode not handled in TMA prefetch.");
     }
-    
+
   }
   // clang-format off
 
@@ -778,7 +778,7 @@ struct MacheteCollectiveMma {
   CUTLASS_DEVICE void
   load(
       Params const& mainloop_params,
-      MainloopPipeline pipeline, 
+      MainloopPipeline pipeline,
       PipelineState smem_pipe_write,
       cute::tuple<Ts...> const& load_inputs,
       BlockCoord const& blk_coord,
@@ -788,13 +788,13 @@ struct MacheteCollectiveMma {
       TensorStorage& shared_tensors) {
     if constexpr (KernelConversionMode == ConversionMode::DirectConvert) {
       static_assert(sizeof... (Ts) == 2, "Direct convert needs two inputs");
-    } 
+    }
     else if constexpr (KernelConversionMode == ConversionMode::ConvertAndScale) {
       static_assert(sizeof... (Ts) == 3, "Scaled convert needs three inputs");
-    } 
+    }
     else if constexpr (KernelConversionMode == ConversionMode::ConvertAndScaleWithZero) {
       static_assert(sizeof... (Ts) == 4, "Scaled and zero convert needs four inputs");
-    } 
+    }
     else {
       static_assert(cutlass::detail::dependent_false<KernelSchedule>, "Conversion mode not handled in TMA load.");
     }
@@ -810,7 +810,7 @@ struct MacheteCollectiveMma {
       //
       // Prepare the TMA loads for A, B and Scales
       //
-      
+
       constexpr uint32_t cluster_shape_x = get<0>(ClusterShape());
       uint2 cluster_local_block_id = {block_rank_in_cluster % cluster_shape_x, block_rank_in_cluster / cluster_shape_x};
 
@@ -888,7 +888,7 @@ struct MacheteCollectiveMma {
 
           if constexpr (KernelConversionMode == ConversionMode::ConvertAndScale) {
             // Nothing extra to do
-          } 
+          }
           else if constexpr (KernelConversionMode == ConversionMode::ConvertAndScaleWithZero) {
             auto tZgZ = get<2>(extra_input_partitions);
             auto tZsZ = get<3>(extra_input_partitions);
@@ -896,8 +896,8 @@ struct MacheteCollectiveMma {
           }
           else {
             static_assert(cutlass::detail::dependent_false<KernelSchedule>, "Conversion mode not handled for TMA copy op.");
-          } 
-        } 
+          }
+        }
         else {
           static_assert(cutlass::detail::dependent_false<KernelSchedule>, "Conversion mode not handled for TMA copy op.");
         }
@@ -922,9 +922,9 @@ struct MacheteCollectiveMma {
     // Issue the epilogue waits
     if (lane_predicate) {
       /* This helps avoid early exit of blocks in Cluster
-       * Waits for all stages to either be released (all 
+       * Waits for all stages to either be released (all
        * Consumer UNLOCKs), or if the stage was never used
-       * then would just be acquired since the phase was 
+       * then would just be acquired since the phase was
        * still inverted from make_producer_start_state
        */
       pipeline.producer_tail(smem_pipe_write);
@@ -1204,12 +1204,12 @@ struct MacheteCollectiveMma {
     cute::tuple<Ts...> const& load_inputs,
     TensorStorage& shared_tensors,
     uint2 const& cluster_local_block_id,
-    int const m_coord, 
+    int const m_coord,
     int const l_coord) {
 
     if constexpr (KernelConversionMode == ConversionMode::DirectConvert) {
       return cute::make_tuple();
-    } 
+    }
     else if constexpr (ModeHasScales) {
       Tensor sS  = make_tensor(make_smem_ptr(shared_tensors.smem_scale.begin()), SmemLayoutScale{}); // (BLK_M,BLK_K,PIPE)
       Tensor gS_mkl = get<2>(load_inputs);
@@ -1220,7 +1220,7 @@ struct MacheteCollectiveMma {
       Tensor tSsS = block_tma_s.partition_D(sS);                                              // (TMA,TMA_M,TMA_K,PIPE)
       if constexpr (KernelConversionMode == ConversionMode::ConvertAndScale) {
         return cute::make_tuple(tSgS, tSsS);
-      } 
+      }
       else if constexpr (KernelConversionMode == ConversionMode::ConvertAndScaleWithZero) {
         Tensor sZ  = make_tensor(make_smem_ptr(shared_tensors.smem_zero.begin()), SmemLayoutScale{}); // (BLK_M,BLK_K,PIPE)
         Tensor gZ_mkl = get<3>(load_inputs);
@@ -1229,14 +1229,14 @@ struct MacheteCollectiveMma {
 
         Tensor tZgZ = block_tma_z.partition_S(gZ);                                            // (TMA,TMA_M,TMA_K,k)
         Tensor tZsZ = block_tma_z.partition_D(sZ);                                            // (TMA,TMA_M,TMA_K,PIPE)
-        return cute::make_tuple(tSgS, tSsS, tZgZ, tZsZ);          
+        return cute::make_tuple(tSgS, tSsS, tZgZ, tZsZ);
       }
       else {
-        static_assert(cutlass::detail::dependent_false<KernelSchedule>, "Conversion mode not handled for input partitioning.");      
+        static_assert(cutlass::detail::dependent_false<KernelSchedule>, "Conversion mode not handled for input partitioning.");
       }
     }
     else {
-      static_assert(cutlass::detail::dependent_false<KernelSchedule>, "Conversion mode not handled for input partitioning.");      
+      static_assert(cutlass::detail::dependent_false<KernelSchedule>, "Conversion mode not handled for input partitioning.");
     }
   }
   // clang-format off
@@ -1246,7 +1246,7 @@ struct MacheteCollectiveMma {
   // clang-format off
   /// Utilities for partitioning extra inputs for loading from smem in the mainloop.
   template <class ThreadMma>
-  CUTLASS_DEVICE 
+  CUTLASS_DEVICE
   auto partition_extra_mma_info(
     ThreadMma const& mma_thread_slice,
     TensorStorage& shared_tensors) {
@@ -1258,7 +1258,7 @@ struct MacheteCollectiveMma {
     else if constexpr (ModeHasScales) {
       Tensor sS = make_tensor(make_smem_ptr(shared_tensors.smem_scale.begin()), SmemLayoutScale{});// (BLK_M,BLK_SCALE_K,PIPE)
       Tensor tCsS = mma_thread_slice.partition_A(sS);
-      Tensor tCrS = make_tensor<ElementScale>(mma_thread_slice.partition_fragment_A(sS(_,_,Int<0>{})).shape()); 
+      Tensor tCrS = make_tensor<ElementScale>(mma_thread_slice.partition_fragment_A(sS(_,_,Int<0>{})).shape());
 
       if constexpr (KernelConversionMode == ConversionMode::ConvertAndScale) {
         return cute::make_tuple(tCsS, tCrS);
@@ -1266,13 +1266,13 @@ struct MacheteCollectiveMma {
       else if constexpr (KernelConversionMode == ConversionMode::ConvertAndScaleWithZero) {
         Tensor sZ = make_tensor(make_smem_ptr(shared_tensors.smem_zero.begin()), SmemLayoutScale{});// (BLK_M,BLK_SCALE_K,PIPE)
         Tensor tCsZ = mma_thread_slice.partition_A(sZ);
-        Tensor tCrZ = make_tensor<ElementZero>(mma_thread_slice.partition_fragment_A(sZ(_,_,Int<0>{})).shape()); 
+        Tensor tCrZ = make_tensor<ElementZero>(mma_thread_slice.partition_fragment_A(sZ(_,_,Int<0>{})).shape());
         return cute::make_tuple(tCsS, tCrS, tCsZ, tCrZ);
       }
       else {
         static_assert(cutlass::detail::dependent_false<KernelSchedule>, "Conversion mode not handled in A -> RF path.");
       }
-    } 
+    }
     else {
       static_assert(cutlass::detail::dependent_false<KernelSchedule>, "Conversion mode not handled in A -> RF path.");
     }
@@ -1298,18 +1298,18 @@ struct MacheteCollectiveMma {
       auto smem_tiled_copy_S = make_tiled_copy_A(SmemCopyAtomScale{}, tiled_mma);
       auto smem_thr_copy_S   = smem_tiled_copy_S.get_thread_slice(warp_group_thread_idx);
       Tensor tCrS_copy_view  = smem_thr_copy_S.retile_D(cute::get<1>(partitioned_extra_info));        // (CPY,CPY_M,CPY_K)
-      
+
       if constexpr (KernelConversionMode == ConversionMode::ConvertAndScale) {
         return cute::make_tuple(smem_tiled_copy_S, tCrS_copy_view);
-      } 
+      }
       else if constexpr (KernelConversionMode == ConversionMode::ConvertAndScaleWithZero) {
         Tensor tCrZ_copy_view  = smem_thr_copy_S.retile_D(cute::get<3>(partitioned_extra_info));      // (CPY,CPY_M,CPY_K)
         return cute::make_tuple(smem_tiled_copy_S, tCrS_copy_view, tCrZ_copy_view);
-      } 
+      }
       else {
         static_assert(cutlass::detail::dependent_false<KernelSchedule>, "Conversion mode not handled in A -> RF path.");
       }
-    } 
+    }
     else {
       static_assert(cutlass::detail::dependent_false<KernelSchedule>, "Conversion mode not handled in A -> RF path.");
     }

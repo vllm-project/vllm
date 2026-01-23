@@ -16,13 +16,16 @@
 
 #include "core/registration.h"
 
-#include <torch/all.h>
+#include <torch/csrc/stable/library.h>
+#include <torch/csrc/stable/tensor.h>
+#include <torch/csrc/stable/accelerator.h>
+#include <torch/csrc/stable/ops.h>
+#include <torch/headeronly/core/ScalarType.h>
+#include "../../torch_utils.h"
+
 #include <cutlass/arch/arch.h>
 
-#include <ATen/cuda/CUDAContext.h>
-#include <c10/cuda/CUDAGuard.h>
-#include <c10/cuda/CUDAStream.h>
-#include "cutlass_extensions/common.hpp"
+#include "stable/cutlass_extensions/common.hpp"
 
 #include "cute/tensor.hpp"
 #include "cutlass/tensor_ref.h"
@@ -122,7 +125,7 @@ __global__ void __get_group_gemm_starts(
 #define __CALL_GET_STARTS_KERNEL_BLOCKSCALE(ELEMENT_AB_TYPE, SF_TYPE,         \
                                             TENSOR_C_TYPE, C_TYPE, LayoutSFA, \
                                             LayoutSFB, ScaleConfig)           \
-  else if (out_tensors.dtype() == TENSOR_C_TYPE) {                            \
+  else if (out_tensors.scalar_type() == TENSOR_C_TYPE) {                      \
     __get_group_gemm_starts<ELEMENT_AB_TYPE, C_TYPE, SF_TYPE, float,          \
                             LayoutSFA, LayoutSFB, ScaleConfig>                \
         <<<1, num_experts, 0, stream>>>(                                      \
@@ -150,50 +153,64 @@ __global__ void __get_group_gemm_starts(
   }
 
 template <typename LayoutSFA, typename LayoutSFB, typename ScaleConfig>
-void run_get_group_gemm_starts(
-    const torch::Tensor& a_starts, const torch::Tensor& b_starts,
-    const torch::Tensor& out_starts, const torch::Tensor& a_scales_starts,
-    const torch::Tensor& b_scales_starts, const torch::Tensor& alpha_starts,
-    const torch::Tensor& layout_sfa, const torch::Tensor& layout_sfb,
-    const torch::Tensor& a_strides, const torch::Tensor& b_strides,
-    const torch::Tensor& c_strides, int64_t a_stride_val, int64_t b_stride_val,
-    int64_t c_stride_val,
-    /*these are used for their base addresses*/
-    torch::Tensor const& a_tensors, torch::Tensor const& b_tensors,
-    torch::Tensor const& out_tensors, torch::Tensor const& a_scales,
-    torch::Tensor const& b_scales, torch::Tensor const& alphas,
-    torch::Tensor const& expert_offsets, torch::Tensor const& sf_offsets,
-    torch::Tensor const& problem_sizes, int M, int N, int K) {
+void run_get_group_gemm_starts(torch::stable::Tensor const& a_starts,
+                               torch::stable::Tensor const& b_starts,
+                               torch::stable::Tensor const& out_starts,
+                               torch::stable::Tensor const& a_scales_starts,
+                               torch::stable::Tensor const& b_scales_starts,
+                               torch::stable::Tensor const& alpha_starts,
+                               torch::stable::Tensor const& layout_sfa,
+                               torch::stable::Tensor const& layout_sfb,
+                               torch::stable::Tensor const& a_strides,
+                               torch::stable::Tensor const& b_strides,
+                               torch::stable::Tensor const& c_strides,
+                               int64_t a_stride_val, int64_t b_stride_val,
+                               int64_t c_stride_val,
+                               /*these are used for their base addresses*/
+                               torch::stable::Tensor const& a_tensors,
+                               torch::stable::Tensor const& b_tensors,
+                               torch::stable::Tensor const& out_tensors,
+                               torch::stable::Tensor const& a_scales,
+                               torch::stable::Tensor const& b_scales,
+                               torch::stable::Tensor const& alphas,
+                               torch::stable::Tensor const& expert_offsets,
+                               torch::stable::Tensor const& sf_offsets,
+                               torch::stable::Tensor const& problem_sizes,
+                               int M, int N, int K) {
   int num_experts = (int)expert_offsets.size(0);
-  auto stream = at::cuda::getCurrentCUDAStream(a_tensors.device().index());
+  auto stream = get_current_cuda_stream(a_tensors.get_device_index());
 
-  TORCH_CHECK(out_tensors.size(1) == N,
-              "Output tensor shape doesn't match expected shape");
-  TORCH_CHECK(K / 2 == b_tensors.size(2),
-              "b_tensors(dim = 2) and a_tensors(dim = 1) trailing"
-              " dimension must match");
+  STD_TORCH_CHECK(out_tensors.size(1) == N,
+                  "Output tensor shape doesn't match expected shape");
+  STD_TORCH_CHECK(K / 2 == b_tensors.size(2),
+                  "b_tensors(dim = 2) and a_tensors(dim = 1) trailing"
+                  " dimension must match");
   if (false) {
   }
   //(ELEMENT_AB_TYPE, BS_TYPE, TENSOR_C_TYPE, C_TYPE, LayoutSFA, LayoutSFB,
   // ScaleConfig)
   __CALL_GET_STARTS_KERNEL_BLOCKSCALE(
-      cutlass::float_e2m1_t, cutlass::float_ue4m3_t, torch::kBFloat16,
-      cutlass::bfloat16_t, LayoutSFA, LayoutSFB, ScaleConfig)
+      cutlass::float_e2m1_t, cutlass::float_ue4m3_t,
+      torch::headeronly::ScalarType::BFloat16, cutlass::bfloat16_t, LayoutSFA,
+      LayoutSFB, ScaleConfig)
   __CALL_GET_STARTS_KERNEL_BLOCKSCALE(cutlass::float_e2m1_t,
-                                      cutlass::float_ue4m3_t, torch::kFloat16,
-                                      half, LayoutSFA, LayoutSFB, ScaleConfig)
+                                      cutlass::float_ue4m3_t,
+                                      torch::headeronly::ScalarType::Half, half,
+                                      LayoutSFA, LayoutSFB, ScaleConfig)
   else {
-    TORCH_CHECK(false, "Invalid output type (must be float16 or bfloat16)");
+    STD_TORCH_CHECK(false, "Invalid output type (must be float16 or bfloat16)");
   }
 }
 
 template <typename OutType>
 void run_fp4_blockwise_scaled_group_mm_sm100(
-    torch::Tensor& output, const torch::Tensor& a, const torch::Tensor& b,
-    const torch::Tensor& a_blockscale, const torch::Tensor& b_blockscales,
-    const torch::Tensor& alphas, const torch::Tensor& problem_sizes,
-    const torch::Tensor& expert_offsets, const torch::Tensor& sf_offsets, int M,
-    int N, int K) {
+    torch::stable::Tensor& output, torch::stable::Tensor const& a,
+    torch::stable::Tensor const& b, torch::stable::Tensor const& a_blockscale,
+    torch::stable::Tensor const& b_blockscales,
+    torch::stable::Tensor const& alphas,
+    torch::stable::Tensor const& problem_sizes,
+    torch::stable::Tensor const& expert_offsets,
+    torch::stable::Tensor const& sf_offsets, int M, int N, int K) {
   using ProblemShape =
       cutlass::gemm::GroupProblemShape<Shape<int32_t, int32_t, int32_t>>;
   using ElementType = cutlass::float_e2m1_t;
@@ -272,20 +289,40 @@ void run_fp4_blockwise_scaled_group_mm_sm100(
 
   using UnderlyingProblemShape = ProblemShape::UnderlyingProblemShape;
   int num_experts = static_cast<int>(expert_offsets.size(0));
-  auto options_int =
-      torch::TensorOptions().dtype(torch::kInt64).device(a.device());
 
-  torch::Tensor a_ptrs = torch::empty(num_experts, options_int);
-  torch::Tensor b_ptrs = torch::empty(num_experts, options_int);
-  torch::Tensor out_ptrs = torch::empty(num_experts, options_int);
-  torch::Tensor a_scales_ptrs = torch::empty(num_experts, options_int);
-  torch::Tensor b_scales_ptrs = torch::empty(num_experts, options_int);
-  torch::Tensor alpha_ptrs = torch::empty(num_experts, options_int);
-  torch::Tensor layout_sfa = torch::empty({num_experts, 5}, options_int);
-  torch::Tensor layout_sfb = torch::empty({num_experts, 5}, options_int);
-  torch::Tensor a_strides1 = torch::empty(num_experts, options_int);
-  torch::Tensor b_strides1 = torch::empty(num_experts, options_int);
-  torch::Tensor c_strides1 = torch::empty(num_experts, options_int);
+  auto a_ptrs =
+      torch::stable::empty(num_experts, torch::headeronly::ScalarType::Long,
+                           std::nullopt, a.device());
+  auto b_ptrs =
+      torch::stable::empty(num_experts, torch::headeronly::ScalarType::Long,
+                           std::nullopt, a.device());
+  auto out_ptrs =
+      torch::stable::empty(num_experts, torch::headeronly::ScalarType::Long,
+                           std::nullopt, a.device());
+  auto a_scales_ptrs =
+      torch::stable::empty(num_experts, torch::headeronly::ScalarType::Long,
+                           std::nullopt, a.device());
+  auto b_scales_ptrs =
+      torch::stable::empty(num_experts, torch::headeronly::ScalarType::Long,
+                           std::nullopt, a.device());
+  auto alpha_ptrs =
+      torch::stable::empty(num_experts, torch::headeronly::ScalarType::Long,
+                           std::nullopt, a.device());
+  auto layout_sfa = torch::stable::empty({num_experts, 5},
+                                         torch::headeronly::ScalarType::Long,
+                                         std::nullopt, a.device());
+  auto layout_sfb = torch::stable::empty({num_experts, 5},
+                                         torch::headeronly::ScalarType::Long,
+                                         std::nullopt, a.device());
+  auto a_strides1 =
+      torch::stable::empty(num_experts, torch::headeronly::ScalarType::Long,
+                           std::nullopt, a.device());
+  auto b_strides1 =
+      torch::stable::empty(num_experts, torch::headeronly::ScalarType::Long,
+                           std::nullopt, a.device());
+  auto c_strides1 =
+      torch::stable::empty(num_experts, torch::headeronly::ScalarType::Long,
+                           std::nullopt, a.device());
 
   run_get_group_gemm_starts<LayoutSFA, LayoutSFB, ScaleConfig>(
       a_ptrs, b_ptrs, out_ptrs, a_scales_ptrs, b_scales_ptrs, alpha_ptrs,
@@ -308,7 +345,7 @@ void run_fp4_blockwise_scaled_group_mm_sm100(
           typename ProblemShape::UnderlyingProblemShape>::RasterOrderOptions;
   typename Gemm::GemmKernel::TileSchedulerArguments scheduler;
   scheduler.raster_order = RasterOrderOptions::AlongM;
-  hw_info.device_id = a.get_device();
+  hw_info.device_id = a.get_device_index();
   static std::unordered_map<int, int> cached_sm_counts;
   if (cached_sm_counts.find(hw_info.device_id) == cached_sm_counts.end()) {
     cached_sm_counts[hw_info.device_id] =
@@ -350,32 +387,35 @@ void run_fp4_blockwise_scaled_group_mm_sm100(
       scheduler};
 
   size_t workspace_size = Gemm::get_workspace_size(args);
-  auto const workspace_options =
-      torch::TensorOptions().dtype(torch::kUInt8).device(a.device());
-  auto workspace = torch::empty(workspace_size, workspace_options);
-  const cudaStream_t stream = at::cuda::getCurrentCUDAStream(a.get_device());
+  auto workspace =
+      torch::stable::empty(workspace_size, torch::headeronly::ScalarType::Byte,
+                           std::nullopt, a.device());
+  const cudaStream_t stream = get_current_cuda_stream(a.get_device_index());
 
   auto can_implement_status = gemm_op.can_implement(args);
-  TORCH_CHECK(can_implement_status == cutlass::Status::kSuccess,
-              "Failed to implement GEMM: status=", (int)can_implement_status);
+  STD_TORCH_CHECK(
+      can_implement_status == cutlass::Status::kSuccess,
+      "Failed to implement GEMM: status=", (int)can_implement_status);
 
   // Run the GEMM
   auto status = gemm_op.initialize(args, workspace.data_ptr());
-  TORCH_CHECK(status == cutlass::Status::kSuccess,
-              "Failed to initialize GEMM: status=", (int)status,
-              " workspace_size=", workspace_size, " num_experts=", num_experts,
-              " M=", M, " N=", N, " K=", K);
+  STD_TORCH_CHECK(status == cutlass::Status::kSuccess,
+                  "Failed to initialize GEMM: status=", (int)status,
+                  " workspace_size=", workspace_size,
+                  " num_experts=", num_experts, " M=", M, " N=", N, " K=", K);
 
   status = gemm_op.run(args, workspace.data_ptr(), stream);
-  TORCH_CHECK(status == cutlass::Status::kSuccess, "Failed to run GEMM");
+  STD_TORCH_CHECK(status == cutlass::Status::kSuccess, "Failed to run GEMM");
 }
 
 void run_fp4_blockwise_scaled_group_mm_sm120(
-    torch::Tensor& output, const torch::Tensor& a, const torch::Tensor& b,
-    const torch::Tensor& a_blockscale, const torch::Tensor& b_blockscales,
-    const torch::Tensor& alphas, const torch::Tensor& problem_sizes,
-    const torch::Tensor& expert_offsets, const torch::Tensor& sf_offsets, int M,
-    int N, int K) {
+    torch::stable::Tensor& output, torch::stable::Tensor const& a,
+    torch::stable::Tensor const& b, torch::stable::Tensor const& a_blockscale,
+    torch::stable::Tensor const& b_blockscales,
+    torch::stable::Tensor const& alphas,
+    torch::stable::Tensor const& problem_sizes,
+    torch::stable::Tensor const& expert_offsets,
+    torch::stable::Tensor const& sf_offsets, int M, int N, int K) {
   using ProblemShape =
       cutlass::gemm::GroupProblemShape<Shape<int32_t, int32_t, int32_t>>;
   using ElementType = cutlass::float_e2m1_t;
@@ -446,20 +486,40 @@ void run_fp4_blockwise_scaled_group_mm_sm120(
 
   using UnderlyingProblemShape = ProblemShape::UnderlyingProblemShape;
   int num_experts = static_cast<int>(expert_offsets.size(0));
-  auto options_int =
-      torch::TensorOptions().dtype(torch::kInt64).device(a.device());
 
-  torch::Tensor a_ptrs = torch::empty(num_experts, options_int);
-  torch::Tensor b_ptrs = torch::empty(num_experts, options_int);
-  torch::Tensor out_ptrs = torch::empty(num_experts, options_int);
-  torch::Tensor a_scales_ptrs = torch::empty(num_experts, options_int);
-  torch::Tensor b_scales_ptrs = torch::empty(num_experts, options_int);
-  torch::Tensor alpha_ptrs = torch::empty(num_experts, options_int);
-  torch::Tensor layout_sfa = torch::empty({num_experts, 5}, options_int);
-  torch::Tensor layout_sfb = torch::empty({num_experts, 5}, options_int);
-  torch::Tensor a_strides1 = torch::empty(num_experts, options_int);
-  torch::Tensor b_strides1 = torch::empty(num_experts, options_int);
-  torch::Tensor c_strides1 = torch::empty(num_experts, options_int);
+  auto a_ptrs =
+      torch::stable::empty(num_experts, torch::headeronly::ScalarType::Long,
+                           std::nullopt, a.device());
+  auto b_ptrs =
+      torch::stable::empty(num_experts, torch::headeronly::ScalarType::Long,
+                           std::nullopt, a.device());
+  auto out_ptrs =
+      torch::stable::empty(num_experts, torch::headeronly::ScalarType::Long,
+                           std::nullopt, a.device());
+  auto a_scales_ptrs =
+      torch::stable::empty(num_experts, torch::headeronly::ScalarType::Long,
+                           std::nullopt, a.device());
+  auto b_scales_ptrs =
+      torch::stable::empty(num_experts, torch::headeronly::ScalarType::Long,
+                           std::nullopt, a.device());
+  auto alpha_ptrs =
+      torch::stable::empty(num_experts, torch::headeronly::ScalarType::Long,
+                           std::nullopt, a.device());
+  auto layout_sfa = torch::stable::empty({num_experts, 5},
+                                         torch::headeronly::ScalarType::Long,
+                                         std::nullopt, a.device());
+  auto layout_sfb = torch::stable::empty({num_experts, 5},
+                                         torch::headeronly::ScalarType::Long,
+                                         std::nullopt, a.device());
+  auto a_strides1 =
+      torch::stable::empty(num_experts, torch::headeronly::ScalarType::Long,
+                           std::nullopt, a.device());
+  auto b_strides1 =
+      torch::stable::empty(num_experts, torch::headeronly::ScalarType::Long,
+                           std::nullopt, a.device());
+  auto c_strides1 =
+      torch::stable::empty(num_experts, torch::headeronly::ScalarType::Long,
+                           std::nullopt, a.device());
 
   run_get_group_gemm_starts<LayoutSFA, LayoutSFB, ScaleConfig>(
       a_ptrs, b_ptrs, out_ptrs, a_scales_ptrs, b_scales_ptrs, alpha_ptrs,
@@ -480,7 +540,7 @@ void run_fp4_blockwise_scaled_group_mm_sm120(
   using RasterOrderOptions = cutlass::gemm::kernel::detail::RasterOrderOptions;
   typename Gemm::GemmKernel::TileSchedulerArguments scheduler;
   scheduler.raster_order = RasterOrderOptions::AlongM;
-  hw_info.device_id = a.get_device();
+  hw_info.device_id = a.get_device_index();
   static std::unordered_map<int, int> cached_sm_counts;
   if (cached_sm_counts.find(hw_info.device_id) == cached_sm_counts.end()) {
     cached_sm_counts[hw_info.device_id] =
@@ -523,33 +583,36 @@ void run_fp4_blockwise_scaled_group_mm_sm120(
       scheduler};
 
   size_t workspace_size = Gemm::get_workspace_size(args);
-  auto const workspace_options =
-      torch::TensorOptions().dtype(torch::kUInt8).device(a.device());
-  auto workspace = torch::empty(workspace_size, workspace_options);
-  const cudaStream_t stream = at::cuda::getCurrentCUDAStream(a.get_device());
+  auto workspace =
+      torch::stable::empty(workspace_size, torch::headeronly::ScalarType::Byte,
+                           std::nullopt, a.device());
+  const cudaStream_t stream = get_current_cuda_stream(a.get_device_index());
 
   auto can_implement_status = gemm_op.can_implement(args);
-  TORCH_CHECK(can_implement_status == cutlass::Status::kSuccess,
-              "Failed to implement GEMM: status=", (int)can_implement_status);
+  STD_TORCH_CHECK(
+      can_implement_status == cutlass::Status::kSuccess,
+      "Failed to implement GEMM: status=", (int)can_implement_status);
 
   // Run the GEMM
   auto status = gemm_op.initialize(args, workspace.data_ptr());
-  TORCH_CHECK(status == cutlass::Status::kSuccess,
-              "Failed to initialize GEMM: status=", (int)status,
-              " workspace_size=", workspace_size, " num_experts=", num_experts,
-              " M=", M, " N=", N, " K=", K);
+  STD_TORCH_CHECK(status == cutlass::Status::kSuccess,
+                  "Failed to initialize GEMM: status=", (int)status,
+                  " workspace_size=", workspace_size,
+                  " num_experts=", num_experts, " M=", M, " N=", N, " K=", K);
 
   status = gemm_op.run(args, workspace.data_ptr(), stream);
-  TORCH_CHECK(status == cutlass::Status::kSuccess, "Failed to run GEMM");
+  STD_TORCH_CHECK(status == cutlass::Status::kSuccess, "Failed to run GEMM");
 }
 
 template <typename OutType>
 void run_fp4_blockwise_scaled_group_mm(
-    torch::Tensor& output, const torch::Tensor& a, const torch::Tensor& b,
-    const torch::Tensor& a_blockscale, const torch::Tensor& b_blockscales,
-    const torch::Tensor& alphas, const torch::Tensor& problem_sizes,
-    const torch::Tensor& expert_offsets, const torch::Tensor& sf_offsets, int M,
-    int N, int K) {
+    torch::stable::Tensor& output, torch::stable::Tensor const& a,
+    torch::stable::Tensor const& b, torch::stable::Tensor const& a_blockscale,
+    torch::stable::Tensor const& b_blockscales,
+    torch::stable::Tensor const& alphas,
+    torch::stable::Tensor const& problem_sizes,
+    torch::stable::Tensor const& expert_offsets,
+    torch::stable::Tensor const& sf_offsets, int M, int N, int K) {
   int32_t version_num = get_sm_version_num();
 #if defined ENABLE_NVFP4_SM120 && ENABLE_NVFP4_SM120
   if (version_num >= 120 && version_num < 130) {
@@ -567,7 +630,7 @@ void run_fp4_blockwise_scaled_group_mm(
     return;
   }
 #endif
-  TORCH_CHECK_NOT_IMPLEMENTED(
+  STD_TORCH_CHECK_NOT_IMPLEMENTED(
       false,
       "No compiled cutlass_fp4_group_mm kernel for CUDA device capability: ",
       version_num, ". Required capability: 100 or 120");
@@ -575,26 +638,30 @@ void run_fp4_blockwise_scaled_group_mm(
 
 #if (defined ENABLE_NVFP4_SM100 && ENABLE_NVFP4_SM100) || \
     (defined ENABLE_NVFP4_SM120 && ENABLE_NVFP4_SM120)
-constexpr auto FLOAT4_E2M1X2 = at::ScalarType::Byte;
-constexpr auto SF_DTYPE = at::ScalarType::Float8_e4m3fn;
+constexpr auto FLOAT4_E2M1X2 = torch::headeronly::ScalarType::Byte;
+constexpr auto SF_DTYPE = torch::headeronly::ScalarType::Float8_e4m3fn;
 #endif
 
 #define CHECK_TYPE(x, st, m) \
-  TORCH_CHECK(x.scalar_type() == st, ": Inconsistency of Tensor type:", m)
+  STD_TORCH_CHECK(x.scalar_type() == st, ": Inconsistency of Tensor type:", m)
 #define CHECK_TH_CUDA(x, m) \
-  TORCH_CHECK(x.is_cuda(), m, ": must be a CUDA tensor.")
+  STD_TORCH_CHECK(x.is_cuda(), m, ": must be a CUDA tensor.")
 #define CHECK_CONTIGUOUS(x, m) \
-  TORCH_CHECK(x.is_contiguous(), m, ": must be contiguous.")
+  STD_TORCH_CHECK(x.is_contiguous(), m, ": must be contiguous.")
 #define CHECK_INPUT(x, st, m) \
   CHECK_TH_CUDA(x, m);        \
   CHECK_CONTIGUOUS(x, m);     \
   CHECK_TYPE(x, st, m)
 
-void cutlass_fp4_group_mm(
-    torch::Tensor& output, const torch::Tensor& a, const torch::Tensor& b,
-    const torch::Tensor& a_blockscale, const torch::Tensor& b_blockscales,
-    const torch::Tensor& alphas, const torch::Tensor& problem_sizes,
-    const torch::Tensor& expert_offsets, const torch::Tensor& sf_offsets) {
+void cutlass_fp4_group_mm(torch::stable::Tensor& output,
+                          torch::stable::Tensor const& a,
+                          torch::stable::Tensor const& b,
+                          torch::stable::Tensor const& a_blockscale,
+                          torch::stable::Tensor const& b_blockscales,
+                          torch::stable::Tensor const& alphas,
+                          torch::stable::Tensor const& problem_sizes,
+                          torch::stable::Tensor const& expert_offsets,
+                          torch::stable::Tensor const& sf_offsets) {
 #if (defined ENABLE_NVFP4_SM100 && ENABLE_NVFP4_SM100) || \
     (defined ENABLE_NVFP4_SM120 && ENABLE_NVFP4_SM120)
   // Input validation
@@ -602,30 +669,34 @@ void cutlass_fp4_group_mm(
   CHECK_INPUT(b, FLOAT4_E2M1X2, "b");
   CHECK_INPUT(a_blockscale, SF_DTYPE, "a_blockscale");
   CHECK_INPUT(b_blockscales, SF_DTYPE, "b_blockscales");
-  CHECK_INPUT(alphas, at::ScalarType::Float, "alphas");
+  CHECK_INPUT(alphas, torch::headeronly::ScalarType::Float, "alphas");
 
-  TORCH_CHECK(a_blockscale.dim() == 2,
-              "expected a_blockscale to be of shape [num_experts, rounded_m,"
-              " k // group_size], observed rank: ",
-              a_blockscale.dim())
-  TORCH_CHECK(b_blockscales.dim() == 3,
-              "expected b_blockscale to be of shape: "
-              " [num_experts, n, k // group_size], observed rank: ",
-              b_blockscales.dim())
-  TORCH_CHECK(problem_sizes.dim() == 2, "problem_sizes must be  a 2D tensor");
-  TORCH_CHECK(problem_sizes.size(1) == 3,
-              "problem_sizes must have the shape (num_experts, 3)");
-  TORCH_CHECK(problem_sizes.size(0) == expert_offsets.size(0),
-              "Number of experts in problem_sizes must match expert_offsets");
-  TORCH_CHECK(problem_sizes.dtype() == torch::kInt32,
-              "problem_sizes must be int32.");
+  STD_TORCH_CHECK(
+      a_blockscale.dim() == 2,
+      "expected a_blockscale to be of shape [num_experts, rounded_m,"
+      " k // group_size], observed rank: ",
+      a_blockscale.dim())
+  STD_TORCH_CHECK(b_blockscales.dim() == 3,
+                  "expected b_blockscale to be of shape: "
+                  " [num_experts, n, k // group_size], observed rank: ",
+                  b_blockscales.dim())
+  STD_TORCH_CHECK(problem_sizes.dim() == 2,
+                  "problem_sizes must be  a 2D tensor");
+  STD_TORCH_CHECK(problem_sizes.size(1) == 3,
+                  "problem_sizes must have the shape (num_experts, 3)");
+  STD_TORCH_CHECK(
+      problem_sizes.size(0) == expert_offsets.size(0),
+      "Number of experts in problem_sizes must match expert_offsets");
+  STD_TORCH_CHECK(
+      problem_sizes.scalar_type() == torch::headeronly::ScalarType::Int,
+      "problem_sizes must be int32.");
 
   int M = static_cast<int>(a.size(0));
   int N = static_cast<int>(b.size(1));
   int E = static_cast<int>(b.size(0));
   int K = static_cast<int>(2 * b.size(2));
 
-  if (output.scalar_type() == torch::kBFloat16) {
+  if (output.scalar_type() == torch::headeronly::ScalarType::BFloat16) {
     run_fp4_blockwise_scaled_group_mm<cutlass::bfloat16_t>(
         output, a, b, a_blockscale, b_blockscales, alphas, problem_sizes,
         expert_offsets, sf_offsets, M, N, K);
@@ -633,9 +704,8 @@ void cutlass_fp4_group_mm(
   #if defined ENABLE_NVFP4_SM120 && ENABLE_NVFP4_SM120
     int32_t version_num = get_sm_version_num();
     if (version_num >= 120 && version_num < 130) {
-      TORCH_CHECK_NOT_IMPLEMENTED(
-          false, "SM120 NVFP4 MOE only supports bfloat16 output, got: ",
-          output.scalar_type());
+      STD_TORCH_CHECK_NOT_IMPLEMENTED(
+          false, "SM120 NVFP4 MOE only supports bfloat16 output");
     }
   #endif
     run_fp4_blockwise_scaled_group_mm<cutlass::half_t>(
@@ -643,7 +713,7 @@ void cutlass_fp4_group_mm(
         expert_offsets, sf_offsets, M, N, K);
   }
 #else
-  TORCH_CHECK_NOT_IMPLEMENTED(
+  STD_TORCH_CHECK_NOT_IMPLEMENTED(
       false,
       "No compiled cutlass_fp4_group_mm kernel, vLLM must "
       "be compiled with ENABLE_NVFP4_SM100 or ENABLE_NVFP4_SM120 for SM100/120 "
@@ -651,6 +721,6 @@ void cutlass_fp4_group_mm(
 #endif
 }
 
-TORCH_LIBRARY_IMPL_EXPAND(TORCH_EXTENSION_NAME, CUDA, m) {
-  m.impl("cutlass_fp4_group_mm", &cutlass_fp4_group_mm);
+STABLE_TORCH_LIBRARY_IMPL(_C, CUDA, m) {
+  m.impl("cutlass_fp4_group_mm", TORCH_BOX(&cutlass_fp4_group_mm));
 }

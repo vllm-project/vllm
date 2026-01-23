@@ -14,16 +14,17 @@
  * limitations under the License.
  */
 
-#include <torch/all.h>
+#include <torch/csrc/stable/library.h>
+#include <torch/csrc/stable/tensor.h>
+#include <torch/csrc/stable/accelerator.h>
+#include <torch/headeronly/core/ScalarType.h>
+#include "../../torch_utils.h"
 
 #include <cuda_runtime_api.h>
 #include <cuda_runtime.h>
 
-#include <ATen/cuda/CUDAContext.h>
-#include <c10/cuda/CUDAGuard.h>
-
 #include <cuda_fp8.h>
-#include "dispatch_utils.h"
+#include "../../dispatch_utils.h"
 
 #include "cuda_utils.h"
 #include "launch_bounds_utils.h"
@@ -172,18 +173,19 @@ __global__ void __launch_bounds__(512, VLLM_BLOCKS_PER_SM(512))
 
 }  // namespace vllm
 
-void scaled_fp4_quant_sm1xxa(torch::Tensor const& output,
-                             torch::Tensor const& input,
-                             torch::Tensor const& output_sf,
-                             torch::Tensor const& input_sf,
+void scaled_fp4_quant_sm1xxa(torch::stable::Tensor const& output,
+                             torch::stable::Tensor const& input,
+                             torch::stable::Tensor const& output_sf,
+                             torch::stable::Tensor const& input_sf,
                              bool is_sf_swizzled_layout) {
   int32_t m = input.size(0);
   int32_t n = input.size(1);
 
-  TORCH_CHECK(n % 16 == 0, "The N dimension must be multiple of 16.");
-  TORCH_CHECK(input.scalar_type() == at::ScalarType::Half ||
-                  input.scalar_type() == at::ScalarType::BFloat16,
-              "Unsupported input data type for quantize_to_fp4.");
+  STD_TORCH_CHECK(n % 16 == 0, "The N dimension must be multiple of 16.");
+  STD_TORCH_CHECK(
+      input.scalar_type() == torch::headeronly::ScalarType::Half ||
+          input.scalar_type() == torch::headeronly::ScalarType::BFloat16,
+      "Unsupported input data type for quantize_to_fp4.");
 
   int multiProcessorCount =
       get_device_attribute(cudaDevAttrMultiProcessorCount, -1);
@@ -191,8 +193,9 @@ void scaled_fp4_quant_sm1xxa(torch::Tensor const& output,
   auto input_sf_ptr = static_cast<float const*>(input_sf.data_ptr());
   auto sf_out = static_cast<int32_t*>(output_sf.data_ptr());
   auto output_ptr = static_cast<int64_t*>(output.data_ptr());
-  const at::cuda::OptionalCUDAGuard device_guard(device_of(input));
-  auto stream = at::cuda::getCurrentCUDAStream(input.get_device());
+  torch::stable::accelerator::DeviceGuard device_guard(
+      input.get_device_index());
+  auto stream = get_current_cuda_stream(input.get_device_index());
 
   int sf_n_unpadded = int(n / CVT_FP4_SF_VEC_SIZE);
 
@@ -212,30 +215,32 @@ void scaled_fp4_quant_sm1xxa(torch::Tensor const& output,
                  std::max(1, (multiProcessorCount * numBlocksPerSM) / grid_y));
     dim3 grid(grid_x, grid_y);
 
-    VLLM_DISPATCH_HALF_TYPES(input.scalar_type(), "nvfp4_quant_kernel", [&] {
-      using cuda_type = vllm::CUDATypeConverter<scalar_t>::Type;
-      auto input_ptr = static_cast<cuda_type const*>(input.data_ptr());
-      // NOTE: We don't support e8m0 scales at this moment.
-      vllm::cvt_fp16_to_fp4<cuda_type, false><<<grid, block, 0, stream>>>(
-          m, n, num_padded_cols, input_ptr, input_sf_ptr,
-          reinterpret_cast<uint32_t*>(output_ptr),
-          reinterpret_cast<uint32_t*>(sf_out));
-    });
+    VLLM_STABLE_DISPATCH_HALF_TYPES(
+        input.scalar_type(), "nvfp4_quant_kernel", [&] {
+          using cuda_type = vllm::CUDATypeConverter<scalar_t>::Type;
+          auto input_ptr = static_cast<cuda_type const*>(input.data_ptr());
+          // NOTE: We don't support e8m0 scales at this moment.
+          vllm::cvt_fp16_to_fp4<cuda_type, false><<<grid, block, 0, stream>>>(
+              m, n, num_padded_cols, input_ptr, input_sf_ptr,
+              reinterpret_cast<uint32_t*>(output_ptr),
+              reinterpret_cast<uint32_t*>(sf_out));
+        });
   } else {
     int grid_y = vllm::div_round_up(sf_n_unpadded, static_cast<int>(block.x));
     int grid_x = std::min(
         m, std::max(1, (multiProcessorCount * numBlocksPerSM) / grid_y));
     dim3 grid(grid_x, grid_y);
 
-    VLLM_DISPATCH_HALF_TYPES(input.scalar_type(), "nvfp4_quant_kernel", [&] {
-      using cuda_type = vllm::CUDATypeConverter<scalar_t>::Type;
-      auto input_ptr = static_cast<cuda_type const*>(input.data_ptr());
-      // NOTE: We don't support e8m0 scales at this moment.
-      vllm::cvt_fp16_to_fp4_sf_major<cuda_type, false>
-          <<<grid, block, 0, stream>>>(m, n, sf_n_unpadded, input_ptr,
-                                       input_sf_ptr,
-                                       reinterpret_cast<uint32_t*>(output_ptr),
-                                       reinterpret_cast<uint32_t*>(sf_out));
-    });
+    VLLM_STABLE_DISPATCH_HALF_TYPES(
+        input.scalar_type(), "nvfp4_quant_kernel", [&] {
+          using cuda_type = vllm::CUDATypeConverter<scalar_t>::Type;
+          auto input_ptr = static_cast<cuda_type const*>(input.data_ptr());
+          // NOTE: We don't support e8m0 scales at this moment.
+          vllm::cvt_fp16_to_fp4_sf_major<cuda_type, false>
+              <<<grid, block, 0, stream>>>(
+                  m, n, sf_n_unpadded, input_ptr, input_sf_ptr,
+                  reinterpret_cast<uint32_t*>(output_ptr),
+                  reinterpret_cast<uint32_t*>(sf_out));
+        });
   }
 }

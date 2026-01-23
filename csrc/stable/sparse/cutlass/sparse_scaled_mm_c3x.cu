@@ -3,7 +3,7 @@
 #include <cudaTypedefs.h>
 
 #if defined CUDA_VERSION && CUDA_VERSION >= 12020
-#include "sparse_scaled_mm_c3x.cuh"
+#include "sparse_compressor_c3x.cuh"
 // clang-format on
 
 using namespace cute;
@@ -188,59 +188,63 @@ typename DispatchFunc::return_type cutlass_gemm_sm90_int8_dispatch(
 // Dispatch to GEMM implementations based on element types
 template <template <typename, typename, typename> typename Epilogue,
           typename... EpilogueArgs>
-void cutlass_scaled_sparse_mm_sm90_epilogue(torch::Tensor& out,
-                                            torch::Tensor const& a,
-                                            torch::Tensor const& bt_nzs,
-                                            torch::Tensor const& bt_meta,
-                                            EpilogueArgs&&... epilogue_args) {
+void cutlass_scaled_sparse_mm_sm90_epilogue(
+    torch::stable::Tensor& out, torch::stable::Tensor const& a,
+    torch::stable::Tensor const& bt_nzs, torch::stable::Tensor const& bt_meta,
+    EpilogueArgs&&... epilogue_args) {
   uint32_t const m = out.size(0);
   uint32_t const n = out.size(1);
 
   // TODO: add dispatch functions to all of these
-  TORCH_CHECK(bt_meta.dtype() == torch::kUInt8);
-  if (a.dtype() == torch::kInt8) {
-    TORCH_CHECK(bt_nzs.dtype() == torch::kInt8);
+  STD_TORCH_CHECK(bt_meta.scalar_type() == torch::headeronly::ScalarType::Byte);
+  if (a.scalar_type() == torch::headeronly::ScalarType::Char) {
+    STD_TORCH_CHECK(bt_nzs.scalar_type() ==
+                    torch::headeronly::ScalarType::Char);
 
-    if (out.dtype() == torch::kBFloat16) {
+    if (out.scalar_type() == torch::headeronly::ScalarType::BFloat16) {
       return cutlass_gemm_sm90_int8_dispatch<int8_t, cutlass::bfloat16_t,
                                              Epilogue, GemmCallerTraits>(
           m, n, out, a, bt_nzs, bt_meta,
           std::forward<EpilogueArgs>(epilogue_args)...);
     } else {
-      TORCH_CHECK(out.dtype() == torch::kFloat16);
+      STD_TORCH_CHECK(out.scalar_type() == torch::headeronly::ScalarType::Half);
       return cutlass_gemm_sm90_int8_dispatch<int8_t, cutlass::half_t, Epilogue,
                                              GemmCallerTraits>(
           m, n, out, a, bt_nzs, bt_meta,
           std::forward<EpilogueArgs>(epilogue_args)...);
     }
-  } else if (a.dtype() == torch::kFloat8_e4m3fn) {
-    TORCH_CHECK(bt_nzs.dtype() == torch::kFloat8_e4m3fn);
+  } else if (a.scalar_type() == torch::headeronly::ScalarType::Float8_e4m3fn) {
+    STD_TORCH_CHECK(bt_nzs.scalar_type() ==
+                    torch::headeronly::ScalarType::Float8_e4m3fn);
 
-    if (out.dtype() == torch::kBFloat16) {
+    if (out.scalar_type() == torch::headeronly::ScalarType::BFloat16) {
       return cutlass_gemm_sm90_fp8_dispatch<cutlass::float_e4m3_t,
                                             cutlass::bfloat16_t, Epilogue,
                                             GemmCallerTraits>(
           m, n, out, a, bt_nzs, bt_meta,
           std::forward<EpilogueArgs>(epilogue_args)...);
     } else {
-      TORCH_CHECK(out.dtype() == torch::kFloat16);
+      STD_TORCH_CHECK(out.scalar_type() == torch::headeronly::ScalarType::Half);
       return cutlass_gemm_sm90_fp8_dispatch<
           cutlass::float_e4m3_t, cutlass::half_t, Epilogue, GemmCallerTraits>(
           m, n, out, a, bt_nzs, bt_meta,
           std::forward<EpilogueArgs>(epilogue_args)...);
     }
-  } else if (a.dtype() == torch::kFloat16) {
-    TORCH_CHECK(bt_nzs.dtype() == torch::kFloat16);
-    TORCH_CHECK(out.dtype() == torch::kFloat16);
+  } else if (a.scalar_type() == torch::headeronly::ScalarType::Half) {
+    STD_TORCH_CHECK(bt_nzs.scalar_type() ==
+                    torch::headeronly::ScalarType::Half);
+    STD_TORCH_CHECK(out.scalar_type() == torch::headeronly::ScalarType::Half);
 
     return cutlass_gemm_sm90_16bit_dispatch<cutlass::half_t, cutlass::half_t,
                                             Epilogue, GemmCallerTraits>(
         m, n, out, a, bt_nzs, bt_meta,
         std::forward<EpilogueArgs>(epilogue_args)...);
   } else {  // a.dtype() == torch::kBFloat16
-    TORCH_CHECK(a.dtype() == torch::kBFloat16);
-    TORCH_CHECK(bt_nzs.dtype() == torch::kBFloat16);
-    TORCH_CHECK(out.dtype() == torch::kBFloat16);
+    STD_TORCH_CHECK(a.scalar_type() == torch::headeronly::ScalarType::BFloat16);
+    STD_TORCH_CHECK(bt_nzs.scalar_type() ==
+                    torch::headeronly::ScalarType::BFloat16);
+    STD_TORCH_CHECK(out.scalar_type() ==
+                    torch::headeronly::ScalarType::BFloat16);
 
     return cutlass_gemm_sm90_16bit_dispatch<
         cutlass::bfloat16_t, cutlass::bfloat16_t, Epilogue, GemmCallerTraits>(
@@ -249,20 +253,21 @@ void cutlass_scaled_sparse_mm_sm90_epilogue(torch::Tensor& out,
   }
 }
 
-void cutlass_scaled_sparse_mm_sm90(torch::Tensor& out, torch::Tensor const& a,
-                                   torch::Tensor const& bt_nzs,
-                                   torch::Tensor const& bt_meta,
-                                   torch::Tensor const& a_scales,
-                                   torch::Tensor const& b_scales,
-                                   std::optional<torch::Tensor> const& bias) {
-  TORCH_CHECK(bt_meta.dtype() == torch::kUInt8);
-  TORCH_CHECK(a_scales.dtype() == torch::kFloat32);
-  TORCH_CHECK(b_scales.dtype() == torch::kFloat32);
+void cutlass_scaled_sparse_mm_sm90(
+    torch::stable::Tensor& out, torch::stable::Tensor const& a,
+    torch::stable::Tensor const& bt_nzs, torch::stable::Tensor const& bt_meta,
+    torch::stable::Tensor const& a_scales,
+    torch::stable::Tensor const& b_scales,
+    std::optional<torch::stable::Tensor> const& bias) {
+  STD_TORCH_CHECK(bt_meta.scalar_type() == torch::headeronly::ScalarType::Byte);
+  STD_TORCH_CHECK(a_scales.scalar_type() ==
+                  torch::headeronly::ScalarType::Float);
+  STD_TORCH_CHECK(b_scales.scalar_type() ==
+                  torch::headeronly::ScalarType::Float);
 
   if (bias) {
-    TORCH_CHECK(bias->dtype() == out.dtype(),
-                "CUTLASS scaled_mm bias dtype must match output dtype ",
-                out.dtype());
+    STD_TORCH_CHECK(bias->scalar_type() == out.scalar_type(),
+                    "CUTLASS scaled_mm bias dtype must match output dtype");
     return cutlass_scaled_sparse_mm_sm90_epilogue<
         c3x::ScaledEpilogueColumnBias>(out, a, bt_nzs, bt_meta, b_scales,
                                        a_scales, *bias);
@@ -272,7 +277,7 @@ void cutlass_scaled_sparse_mm_sm90(torch::Tensor& out, torch::Tensor const& a,
   }
 }
 
-CompressorResult cutlass_sparse_compress_sm90(torch::Tensor const& a) {
+CompressorResult cutlass_sparse_compress_sm90(torch::stable::Tensor const& a) {
   // These m and n variables are fordispatching to different GEMM algorithms.
   uint32_t const m = 1;  // Set M to 1 for compression
   uint32_t const n = a.size(1);
@@ -282,22 +287,23 @@ CompressorResult cutlass_sparse_compress_sm90(torch::Tensor const& a) {
   //  - Whether output dtype is fp16 or bf16
   //  - CUTLASS epilogues
 
-  if (a.dtype() == torch::kInt8) {
+  if (a.scalar_type() == torch::headeronly::ScalarType::Char) {
     return cutlass_gemm_sm90_int8_dispatch<int8_t, cutlass::bfloat16_t,
                                            c3x::TrivialEpilogue,
                                            GemmCompressorTraits>(m, n, a);
-  } else if (a.dtype() == torch::kFloat8_e4m3fn) {
+  } else if (a.scalar_type() == torch::headeronly::ScalarType::Float8_e4m3fn) {
     return cutlass_gemm_sm90_fp8_dispatch<
         cutlass::float_e4m3_t, cutlass::bfloat16_t, c3x::TrivialEpilogue,
         GemmCompressorTraits>(m, n, a);
-  } else if (a.dtype() == torch::kFloat16) {
+  } else if (a.scalar_type() == torch::headeronly::ScalarType::Half) {
     return cutlass_gemm_sm90_16bit_dispatch<
         cutlass::bfloat16_t, cutlass::bfloat16_t, c3x::TrivialEpilogue,
         GemmCompressorTraits>(m, n, a);
   } else {
-    TORCH_CHECK(a.dtype() == torch::kBFloat16,
-                "cutlass_sparse_compress only supports int8, fp8_e4m3, fp16, "
-                "and bf16 datatypes");
+    STD_TORCH_CHECK(
+        a.scalar_type() == torch::headeronly::ScalarType::BFloat16,
+        "cutlass_sparse_compress only supports int8, fp8_e4m3, fp16, "
+        "and bf16 datatypes");
     return cutlass_gemm_sm90_16bit_dispatch<cutlass::half_t, cutlass::half_t,
                                             c3x::TrivialEpilogue,
                                             GemmCompressorTraits>(m, n, a);

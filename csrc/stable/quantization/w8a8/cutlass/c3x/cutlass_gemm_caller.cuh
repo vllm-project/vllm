@@ -20,7 +20,7 @@
 #include "cutlass/util/packed_stride.hpp"
 
 #include "core/math.hpp"
-#include "cutlass_extensions/common.hpp"
+#include "stable/cutlass_extensions/common.hpp"
 #include "stable/torch_utils.h"
 // clang-format on
 

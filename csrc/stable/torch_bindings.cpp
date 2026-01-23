@@ -256,6 +256,107 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C, m) {
   m.def(
       "cutlass_scaled_mm_supports_block_fp8(int cuda_device_capability) -> "
       "bool");
+
+  // CUTLASS nvfp4 block scaled GEMM
+  m.def(
+      "cutlass_scaled_fp4_mm(Tensor! out, Tensor a, Tensor b,"
+      "                      Tensor block_scale_a, Tensor block_scale_b,"
+      "                      Tensor alpha) -> ()");
+
+  // Compute NVFP4 block quantized tensor
+  m.def(
+      "scaled_fp4_quant(Tensor! output, Tensor input,"
+      "                 Tensor! output_scale, Tensor input_scale, bool "
+      "is_sf_swizzled_layout) -> ()");
+
+  // Compute NVFP4 experts quantization
+  m.def(
+      "scaled_fp4_experts_quant(Tensor! output, Tensor! output_scale,"
+      "Tensor input, Tensor input_global_scale, Tensor input_offset_by_experts,"
+      "Tensor output_scale_offset_by_experts) -> ()");
+
+  // Fused SiLU+Mul+NVFP4 quantization
+  m.def(
+      "silu_and_mul_nvfp4_quant(Tensor! result, Tensor! result_block_scale, "
+      "Tensor input, Tensor input_global_scale) -> ()");
+
+  // Fused SiLU+Mul+NVFP4 experts quantization
+  m.def(
+      "silu_and_mul_scaled_fp4_experts_quant(Tensor! output, Tensor! "
+      "output_scale,"
+      "Tensor input, Tensor input_global_scale, Tensor input_offset_by_experts,"
+      "Tensor output_scale_offset_by_experts) -> ()");
+
+  // Check if cutlass scaled_mm_fp4 is supported for CUDA devices
+  m.def("cutlass_scaled_mm_supports_fp4(int cuda_device_capability) -> bool");
+
+  // cutlass nvfp4 block scaled group GEMM
+  m.def(
+      "cutlass_fp4_group_mm(Tensor! out, Tensor a, Tensor b,"
+      " Tensor a_blockscale, Tensor b_blockscales, Tensor alphas,"
+      " Tensor problem_sizes, Tensor expert_offsets, Tensor sf_offsets) -> ()");
+  // conditionally compiled so impl registration is in source file
+
+  // Check if cutlass sparse scaled_mm is supported for CUDA devices
+  m.def(
+      "cutlass_sparse_scaled_mm_supported(int cuda_device_capability) -> bool");
+
+  // CUTLASS sparse GEMM
+  m.def(
+      "cutlass_scaled_sparse_mm(Tensor! out, Tensor a,"
+      "                         Tensor bt_nzs,"
+      "                         Tensor bt_meta, Tensor a_scales,"
+      "                         Tensor b_scales, Tensor? bias) -> ()");
+
+  // CUTLASS sparse matrix compressor
+  m.def("cutlass_sparse_compress(Tensor a) -> Tensor[]");
+
+  // CUTLASS w4a8 GEMM
+  //  conditionally compiled so impl in source file
+  m.def(
+      "cutlass_w4a8_mm("
+      "   Tensor A,"
+      "   Tensor B,"
+      "   Tensor group_scales,"
+      "   int    group_size,"
+      "   Tensor channel_scales,"
+      "   Tensor token_scales,"
+      "   ScalarType? out_type,"
+      "   str?   maybe_schedule"
+      ") -> Tensor");
+
+  // pack scales
+  //  conditionally compiled so impl in source file
+  m.def("cutlass_pack_scale_fp8(Tensor scales) -> Tensor");
+
+  // encode and reorder weight matrix
+  //  conditionally compiled so impl in source file
+  m.def("cutlass_encode_and_reorder_int4b(Tensor B) -> Tensor");
+
+  // CUTLASS w4a8 grouped GEMM
+  //  conditionally compiled so impl in source file
+  m.def(
+      "cutlass_w4a8_moe_mm("
+      "   Tensor! out_tensors,"
+      "   Tensor a_tensors,"
+      "   Tensor b_tensors,"
+      "   Tensor a_scales,"
+      "   Tensor b_scales,"
+      "   Tensor b_group_scales,"
+      "   int b_group_size,"
+      "   Tensor expert_offsets,"
+      "   Tensor problem_sizes,"
+      "   Tensor a_strides,"
+      "   Tensor b_strides,"
+      "   Tensor c_strides,"
+      "   Tensor group_scale_strides,"
+      "   str? maybe_schedule"
+      ") -> ()");
+
+  //  conditionally compiled so impl in source file
+  m.def(
+      "cutlass_encode_and_reorder_int4b_grouped(Tensor b_tensors) -> (Tensor, "
+      "Tensor)");
 #endif
 }
 
@@ -391,6 +492,20 @@ STABLE_TORCH_LIBRARY_IMPL(_C, CUDA, m) {
          TORCH_BOX(&get_cutlass_moe_mm_problem_sizes_from_expert_offsets));
   m.impl("get_cutlass_pplx_moe_mm_data",
          TORCH_BOX(&get_cutlass_pplx_moe_mm_data));
+
+  // NVFP4 quantization ops
+  m.impl("scaled_fp4_quant", TORCH_BOX(&scaled_fp4_quant));
+  m.impl("scaled_fp4_experts_quant", TORCH_BOX(&scaled_fp4_experts_quant));
+  m.impl("silu_and_mul_nvfp4_quant", TORCH_BOX(&silu_and_mul_nvfp4_quant));
+  m.impl("silu_and_mul_scaled_fp4_experts_quant",
+         TORCH_BOX(&silu_and_mul_scaled_fp4_experts_quant));
+
+  // NVFP4 scaled mm ops
+  m.impl("cutlass_scaled_fp4_mm", TORCH_BOX(&cutlass_scaled_fp4_mm));
+
+  // Sparse CUTLASS ops
+  m.impl("cutlass_scaled_sparse_mm", TORCH_BOX(&cutlass_scaled_sparse_mm));
+  m.impl("cutlass_sparse_compress", TORCH_BOX(&cutlass_sparse_compress));
 #endif
 
   // Quantized activation
@@ -463,6 +578,10 @@ STABLE_TORCH_LIBRARY_IMPL(_C, CompositeExplicitAutograd, m) {
          TORCH_BOX(&cutlass_group_gemm_supported));
   m.impl("cutlass_scaled_mm_supports_block_fp8",
          TORCH_BOX(&cutlass_scaled_mm_supports_block_fp8));
+  m.impl("cutlass_scaled_mm_supports_fp4",
+         TORCH_BOX(&cutlass_scaled_mm_supports_fp4));
+  m.impl("cutlass_sparse_scaled_mm_supported",
+         TORCH_BOX(&cutlass_sparse_scaled_mm_supported));
 }
 #endif
 

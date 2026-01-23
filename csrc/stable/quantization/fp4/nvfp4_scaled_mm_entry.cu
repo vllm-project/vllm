@@ -14,32 +14,38 @@
  * limitations under the License.
  */
 
-#include <torch/all.h>
-#include <c10/cuda/CUDAGuard.h>
-#include "cutlass_extensions/common.hpp"
+#include <torch/csrc/stable/library.h>
+#include <torch/csrc/stable/tensor.h>
+#include <torch/csrc/stable/accelerator.h>
+#include "../../torch_utils.h"
+#include "stable/cutlass_extensions/common.hpp"
 
 #if defined ENABLE_NVFP4_SM100 && ENABLE_NVFP4_SM100
-void cutlass_scaled_fp4_mm_sm100a(torch::Tensor& D, torch::Tensor const& A,
-                                  torch::Tensor const& B,
-                                  torch::Tensor const& A_sf,
-                                  torch::Tensor const& B_sf,
-                                  torch::Tensor const& alpha);
+void cutlass_scaled_fp4_mm_sm100a(torch::stable::Tensor& D,
+                                  torch::stable::Tensor const& A,
+                                  torch::stable::Tensor const& B,
+                                  torch::stable::Tensor const& A_sf,
+                                  torch::stable::Tensor const& B_sf,
+                                  torch::stable::Tensor const& alpha);
 #endif
 
 #if defined ENABLE_NVFP4_SM120 && ENABLE_NVFP4_SM120
-void cutlass_scaled_fp4_mm_sm120a(torch::Tensor& D, torch::Tensor const& A,
-                                  torch::Tensor const& B,
-                                  torch::Tensor const& A_sf,
-                                  torch::Tensor const& B_sf,
-                                  torch::Tensor const& alpha);
+void cutlass_scaled_fp4_mm_sm120a(torch::stable::Tensor& D,
+                                  torch::stable::Tensor const& A,
+                                  torch::stable::Tensor const& B,
+                                  torch::stable::Tensor const& A_sf,
+                                  torch::stable::Tensor const& B_sf,
+                                  torch::stable::Tensor const& alpha);
 #endif
 
-void cutlass_scaled_fp4_mm(torch::Tensor& D, const torch::Tensor& A,
-                           const torch::Tensor& B, const torch::Tensor& A_sf,
-                           const torch::Tensor& B_sf,
-                           const torch::Tensor& alpha) {
-  // Make sure we’re on A’s device.
-  const c10::cuda::OptionalCUDAGuard device_guard(device_of(A));
+void cutlass_scaled_fp4_mm(torch::stable::Tensor& D,
+                           torch::stable::Tensor const& A,
+                           torch::stable::Tensor const& B,
+                           torch::stable::Tensor const& A_sf,
+                           torch::stable::Tensor const& B_sf,
+                           torch::stable::Tensor const& alpha) {
+  // Make sure we're on A's device.
+  torch::stable::accelerator::DeviceGuard device_guard(A.get_device_index());
   const int32_t sm = get_sm_version_num();
 
 #if defined(ENABLE_NVFP4_SM100) && ENABLE_NVFP4_SM100
@@ -56,8 +62,9 @@ void cutlass_scaled_fp4_mm(torch::Tensor& D, const torch::Tensor& A,
   }
 #endif
 
-  TORCH_CHECK_NOT_IMPLEMENTED(false, "No compiled nvfp4 mm kernel for SM ", sm,
-                              ". Recompile with CUDA >= 12.8 and CC >= 100.");
+  STD_TORCH_CHECK_NOT_IMPLEMENTED(
+      false, "No compiled nvfp4 mm kernel for SM ", sm,
+      ". Recompile with CUDA >= 12.8 and CC >= 100.");
 }
 
 bool cutlass_scaled_mm_supports_fp4(int64_t cuda_device_capability) {

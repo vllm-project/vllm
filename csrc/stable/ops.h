@@ -266,4 +266,88 @@ void get_cutlass_pplx_moe_mm_data(
     const torch::stable::Tensor& expert_num_tokens,
     const int64_t num_local_experts, const int64_t padded_m, const int64_t n,
     const int64_t k);
+
+// NVFP4 quantization functions
+void scaled_fp4_quant(torch::stable::Tensor& output,
+                      torch::stable::Tensor const& input,
+                      torch::stable::Tensor& output_scale,
+                      torch::stable::Tensor const& input_scale,
+                      bool is_sf_swizzled_layout);
+
+void scaled_fp4_experts_quant(
+    torch::stable::Tensor& output, torch::stable::Tensor& output_scale,
+    torch::stable::Tensor const& input,
+    torch::stable::Tensor const& input_global_scale,
+    torch::stable::Tensor const& input_offset_by_experts,
+    torch::stable::Tensor const& output_scale_offset_by_experts);
+
+void silu_and_mul_nvfp4_quant(torch::stable::Tensor& output,
+                              torch::stable::Tensor& output_sf,
+                              torch::stable::Tensor& input,
+                              torch::stable::Tensor& input_sf);
+
+void silu_and_mul_scaled_fp4_experts_quant(
+    torch::stable::Tensor& output, torch::stable::Tensor& output_scale,
+    torch::stable::Tensor const& input,
+    torch::stable::Tensor const& input_global_scale,
+    torch::stable::Tensor const& input_offset_by_experts,
+    torch::stable::Tensor const& output_scale_offset_by_experts);
+
+void cutlass_scaled_fp4_mm(torch::stable::Tensor& D,
+                           torch::stable::Tensor const& A,
+                           torch::stable::Tensor const& B,
+                           torch::stable::Tensor const& A_sf,
+                           torch::stable::Tensor const& B_sf,
+                           torch::stable::Tensor const& alpha);
+
+bool cutlass_scaled_mm_supports_fp4(int64_t cuda_device_capability);
+
+// Sparse CUTLASS functions
+bool cutlass_sparse_scaled_mm_supported(int64_t cuda_device_capability);
+
+void cutlass_scaled_sparse_mm(torch::stable::Tensor& c,
+                              torch::stable::Tensor const& a,
+                              torch::stable::Tensor const& bt_nzs,
+                              torch::stable::Tensor const& bt_meta,
+                              torch::stable::Tensor const& a_scales,
+                              torch::stable::Tensor const& b_scales,
+                              std::optional<torch::stable::Tensor> const& bias);
+
+std::vector<torch::stable::Tensor> cutlass_sparse_compress(
+    torch::stable::Tensor const& a);
+
+// W4A8 CUTLASS functions (in namespace vllm::cutlass_w4a8)
+namespace vllm::cutlass_w4a8 {
+torch::stable::Tensor mm(
+    torch::stable::Tensor const& A, torch::stable::Tensor const& B,
+    torch::stable::Tensor const& group_scales, int64_t group_size,
+    torch::stable::Tensor const& channel_scales,
+    torch::stable::Tensor const& token_scales,
+    std::optional<torch::headeronly::ScalarType> const& maybe_out_type,
+    std::optional<std::string> maybe_schedule);
+
+torch::stable::Tensor pack_scale_fp8(torch::stable::Tensor const& scales);
+
+torch::stable::Tensor encode_and_reorder_int4b(torch::stable::Tensor const& B);
+}  // namespace vllm::cutlass_w4a8
+
+// W4A8 MoE CUTLASS functions (in namespace vllm::cutlass_w4a8_moe)
+namespace vllm::cutlass_w4a8_moe {
+void mm(torch::stable::Tensor& out_tensors,
+        torch::stable::Tensor const& a_tensors,
+        torch::stable::Tensor const& b_tensors,
+        torch::stable::Tensor const& a_scales,
+        torch::stable::Tensor const& b_scales,
+        torch::stable::Tensor const& b_group_scales, int64_t const b_group_size,
+        torch::stable::Tensor const& expert_offsets,
+        torch::stable::Tensor const& problem_sizes,
+        torch::stable::Tensor const& a_strides,
+        torch::stable::Tensor const& b_strides,
+        torch::stable::Tensor const& c_strides,
+        torch::stable::Tensor const& group_scale_strides,
+        std::optional<std::string> maybe_schedule);
+
+std::tuple<torch::stable::Tensor, torch::stable::Tensor>
+encode_and_reorder_int4b(torch::stable::Tensor const& b_tensors);
+}  // namespace vllm::cutlass_w4a8_moe
 #endif
