@@ -153,7 +153,12 @@ try:
         fake_impl=gemm_with_dynamic_quant_fake,
         dispatch_key=current_platform.dispatch_key,
     )
-except (ImportError, AttributeError):
+except (ImportError, AttributeError, RuntimeError):
+    if current_platform.is_rocm():
+        logger.warning(
+            "AITER is not found or QuarkOCP_MX is not supported on the current "
+            "platform. QuarkOCP_MX quantization will not be available."
+        )
     dynamic_mxfp4_quant = gemm_afp4wfp4 = None
 
 

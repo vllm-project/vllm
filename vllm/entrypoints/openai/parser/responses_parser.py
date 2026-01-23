@@ -16,12 +16,14 @@ from openai.types.responses.response_reasoning_item import (
 )
 
 from vllm.entrypoints.constants import MCP_PREFIX
-from vllm.entrypoints.openai.protocol import ResponseInputOutputItem, ResponsesRequest
+from vllm.entrypoints.openai.responses.protocol import (
+    ResponseInputOutputItem,
+    ResponsesRequest,
+)
 from vllm.outputs import CompletionOutput
 from vllm.reasoning.abs_reasoning_parsers import ReasoningParser
-from vllm.tokenizers.protocol import TokenizerLike
+from vllm.tokenizers import TokenizerLike
 from vllm.tool_parsers.abstract_tool_parser import ToolParser
-from vllm.transformers_utils.tokenizer import AnyTokenizer
 from vllm.utils import random_uuid
 
 logger = logging.getLogger(__name__)
@@ -33,8 +35,8 @@ class ResponsesParser:
     def __init__(
         self,
         *,
-        tokenizer: AnyTokenizer,
-        reasoning_parser_cls: Callable[[AnyTokenizer], ReasoningParser],
+        tokenizer: TokenizerLike,
+        reasoning_parser_cls: Callable[[TokenizerLike], ReasoningParser],
         response_messages: list[ResponseInputOutputItem],
         request: ResponsesRequest,
         tool_parser_cls: Callable[[TokenizerLike], ToolParser] | None,
@@ -52,7 +54,13 @@ class ResponsesParser:
         if tool_parser_cls is not None:
             self.tool_parser_instance = tool_parser_cls(tokenizer)
 
+        # Store the last finish_reason to determine response status
+        self.finish_reason: str | None = None
+
     def process(self, output: CompletionOutput) -> "ResponsesParser":
+        # Store the finish_reason from the output
+        self.finish_reason = output.finish_reason
+
         reasoning_content, content = self.reasoning_parser_instance.extract_reasoning(
             output.text, request=self.request
         )
@@ -150,8 +158,8 @@ class ResponsesParser:
 
 def get_responses_parser_for_simple_context(
     *,
-    tokenizer: AnyTokenizer,
-    reasoning_parser_cls: Callable[[AnyTokenizer], ReasoningParser],
+    tokenizer: TokenizerLike,
+    reasoning_parser_cls: Callable[[TokenizerLike], ReasoningParser],
     response_messages: list[ResponseInputOutputItem],
     request: ResponsesRequest,
     tool_parser_cls,

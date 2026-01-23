@@ -276,7 +276,7 @@ class GPTQMarlinConfig(QuantizationConfig):
         sym = quant_config.get("sym")
         desc_act = quant_config.get("desc_act")
 
-        if not current_platform.is_cuda():
+        if not (current_platform.is_cuda() or current_platform.is_cpu()):
             return False
 
         if quant_method != "gptq":
@@ -874,6 +874,7 @@ class GPTQMarlinMoEMethod(FusedMoEMethodBase):
             return BatchedMarlinExperts(
                 max_num_tokens=max_num_tokens_per_rank,
                 num_dispatchers=prepare_finalize.num_dispatchers(),
+                moe_config=self.moe,
                 quant_config=self.moe_quant_config,
                 w13_g_idx=w13_g_idx,
                 w2_g_idx=w2_g_idx,
@@ -884,6 +885,7 @@ class GPTQMarlinMoEMethod(FusedMoEMethodBase):
         else:
             # Standard Marlin experts for GPTQ
             return MarlinExperts(
+                moe_config=self.moe,
                 quant_config=self.moe_quant_config,
                 w13_g_idx=w13_g_idx,
                 w2_g_idx=w2_g_idx,
@@ -896,15 +898,9 @@ class GPTQMarlinMoEMethod(FusedMoEMethodBase):
         self,
         layer: FusedMoE,
         x: torch.Tensor,
-        router_logits: torch.Tensor,
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        assert layer.activation == "silu", "Only SiLU activation is supported."
-
-        topk_weights, topk_ids = layer.select_experts(
-            hidden_states=x,
-            router_logits=router_logits,
-        )
-
         return fused_marlin_moe(
             x,
             layer.w13_qweight,
@@ -913,7 +909,6 @@ class GPTQMarlinMoEMethod(FusedMoEMethodBase):
             getattr(layer, "w2_bias", None),
             layer.w13_scales,
             layer.w2_scales,
-            router_logits,
             topk_weights,
             topk_ids,
             input_global_scale1=getattr(layer, "w13_input_global_scale", None),

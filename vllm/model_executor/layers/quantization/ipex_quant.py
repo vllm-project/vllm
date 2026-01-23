@@ -381,7 +381,11 @@ class XPUFp8MoEMethod(Fp8OnlineMoEMethod):
     ) -> FusedMoEQuantConfig | None:
         return None
 
-    def apply(
+    @property
+    def is_monolithic(self) -> bool:
+        return True
+
+    def apply_monolithic(
         self,
         layer: torch.nn.Module,
         x: torch.Tensor,

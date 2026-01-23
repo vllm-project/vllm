@@ -8,10 +8,6 @@ import torch.nn as nn
 from torch.nn import LayerNorm
 from transformers.models.qwen2_vl import Qwen2VLProcessor
 
-from vllm.attention.backends.registry import AttentionBackendEnum
-from vllm.attention.layers.mm_encoder_attention import (
-    MMEncoderAttention,
-)
 from vllm.config import MultiModalConfig, VllmConfig
 from vllm.config.multimodal import BaseDummyOptions
 from vllm.distributed import utils as dist_utils
@@ -20,6 +16,9 @@ from vllm.distributed.parallel_state import (
     get_tensor_model_parallel_world_size,
 )
 from vllm.model_executor.layers.activation import SiluAndMul
+from vllm.model_executor.layers.attention.mm_encoder_attention import (
+    MMEncoderAttention,
+)
 from vllm.model_executor.layers.conv import Conv2dLayer
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
@@ -59,6 +58,7 @@ from vllm.multimodal.inputs import MultiModalDataDict
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.configs.dotsocr import DotsOCRConfig, DotsVisionConfig
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
+from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 from .vision import run_dp_sharded_mrope_vision_model
 
@@ -271,6 +271,7 @@ class DotsVisionAttention(nn.Module):
         self.attn = MMEncoderAttention(
             num_heads=self.num_attention_heads_per_partition,
             head_size=self.hidden_size_per_attention_head,
+            scale=self.hidden_size_per_attention_head**-0.5,
             multimodal_config=multimodal_config,
             prefix=f"{prefix}.attn",
         )
@@ -688,18 +689,21 @@ class DotsOCRForCausalLM(nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA
         else:
             vision_config = self.config.vision_config
 
-        self.vision_tower = DotsVisionTransformer(
-            vision_config,
-            quant_config=self.quant_config,
-            multimodal_config=multimodal_config,
-            prefix=maybe_prefix(prefix, "vision_tower"),
-        )
-        self.language_model: Qwen2ForCausalLM = init_vllm_registered_model(
-            vllm_config=vllm_config,
-            hf_config=self.config,
-            prefix=maybe_prefix(prefix, "language_model"),
-            architectures=["Qwen2ForCausalLM"],
-        )
+        with self._mark_tower_model(vllm_config, "image"):
+            self.vision_tower = DotsVisionTransformer(
+                vision_config,
+                quant_config=self.quant_config,
+                multimodal_config=multimodal_config,
+                prefix=maybe_prefix(prefix, "vision_tower"),
+            )
+
+        with self._mark_language_model(vllm_config):
+            self.language_model: Qwen2ForCausalLM = init_vllm_registered_model(
+                vllm_config=vllm_config,
+                hf_config=self.config,
+                prefix=maybe_prefix(prefix, "language_model"),
+                architectures=["Qwen2ForCausalLM"],
+            )
 
         self.make_empty_intermediate_tensors = (
             self.language_model.make_empty_intermediate_tensors
@@ -762,8 +766,13 @@ class DotsOCRForCausalLM(nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA
 
         return image_embeds.split(sizes)
 
-    def get_language_model(self) -> torch.nn.Module:
-        return self.language_model
+    def get_num_mm_encoder_tokens(self, num_image_tokens: int) -> int:
+        merge_size = self.vision_tower.spatial_merge_size
+        return num_image_tokens * (merge_size**2)
+
+    def get_num_mm_connector_tokens(self, num_vision_tokens: int) -> int:
+        merge_size = self.vision_tower.spatial_merge_size
+        return num_vision_tokens // (merge_size**2)
 
     def embed_multimodal(self, **kwargs: object) -> MultiModalEmbeddings:
         image_input = self._parse_and_validate_image_input(**kwargs)
@@ -782,14 +791,6 @@ class DotsOCRForCausalLM(nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA
     ) -> torch.Tensor | IntermediateTensors:
         if intermediate_tensors is not None:
             inputs_embeds = None
-        elif inputs_embeds is None:
-            vision_embeddings = self.embed_multimodal(**kwargs)
-            inputs_embeds = self.embed_input_ids(
-                input_ids,
-                vision_embeddings,
-                is_multimodal=input_ids == self.config.image_token_id,
-            )
-            input_ids = None
 
         hidden_states = self.language_model(
             input_ids=input_ids,

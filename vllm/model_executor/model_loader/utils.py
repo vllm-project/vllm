@@ -18,7 +18,7 @@ from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig,
     QuantizeMethodBase,
 )
-from vllm.model_executor.models.interfaces import SupportsQuant, supports_multimodal
+from vllm.model_executor.models.interfaces import SupportsQuant
 from vllm.utils.platform_utils import is_pin_memory_available
 
 logger = init_logger(__name__)
@@ -165,11 +165,7 @@ _MODEL_ARCH_BY_HASH = dict[int, tuple[type[nn.Module], str]]()
 
 
 def _get_model_architecture(model_config: ModelConfig) -> tuple[type[nn.Module], str]:
-    from vllm.model_executor.models.adapters import (
-        as_embedding_model,
-        as_seq_cls_model,
-        try_create_mm_pooling_model_cls,
-    )
+    from vllm.model_executor.models.adapters import as_embedding_model, as_seq_cls_model
 
     architectures = getattr(model_config.hf_config, "architectures", [])
 
@@ -189,24 +185,8 @@ def _get_model_architecture(model_config: ModelConfig) -> tuple[type[nn.Module],
             )
 
     convert_type = model_config.convert_type
-    if convert_type not in ["none", "mm_encoder_only"] and supports_multimodal(
-        model_cls
-    ):
-        logger.debug_once("Detected conversion of Multi Modal model.")
-        converted = try_create_mm_pooling_model_cls(model_cls)
-        if converted is not None:
-            logger.debug_once("Creating wrapper class to forward pooler.")
-            return converted, arch
-        else:
-            logger.debug_once("Attempting direct conversion.")
-
     if convert_type == "none":
         pass
-    elif convert_type == "mm_encoder_only":
-        logger.debug_once("Converting to mm encoder only model.")
-        from vllm.model_executor.models.adapters import as_mm_encoder_only_model
-
-        model_cls = as_mm_encoder_only_model(model_cls)
     elif convert_type == "embed":
         logger.debug_once("Converting to embedding model.")
         model_cls = as_embedding_model(model_cls)

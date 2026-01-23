@@ -16,13 +16,13 @@ from transformers.feature_extraction_utils import BatchFeature
 from transformers.modeling_outputs import BaseModelOutput, BaseModelOutputWithPooling
 from transformers.utils import torch_int
 
-from vllm.attention.layers.mm_encoder_attention import (
-    MMEncoderAttention,
-)
 from vllm.config import MultiModalConfig, VllmConfig
 from vllm.config.multimodal import BaseDummyOptions
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.logger import init_logger
+from vllm.model_executor.layers.attention.mm_encoder_attention import (
+    MMEncoderAttention,
+)
 from vllm.model_executor.layers.conv import Conv2dLayer
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
@@ -56,12 +56,12 @@ from vllm.multimodal.parse import (
     MultiModalDataParser,
 )
 from vllm.multimodal.processing import (
+    BaseDummyInputsBuilder,
     BaseMultiModalProcessor,
     BaseProcessingInfo,
     PromptReplacement,
     PromptUpdate,
 )
-from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from vllm.sequence import IntermediateTensors
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
@@ -339,14 +339,10 @@ def apply_rotary_pos_emb_flashatt(
     k: torch.Tensor,
     cos: torch.Tensor,
     sin: torch.Tensor,
+    apply_rotary_emb: ApplyRotaryEmb,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     cos = cos.chunk(2, dim=-1)[0].contiguous()
     sin = sin.chunk(2, dim=-1)[0].contiguous()
-
-    apply_rotary_emb = ApplyRotaryEmb(
-        enforce_enable=True,
-        enable_fp32_compute=True,
-    )
 
     q_embed = apply_rotary_emb(q, cos, sin)
     k_embed = apply_rotary_emb(k, cos, sin)
@@ -404,9 +400,15 @@ class KeyeSiglipAttention(nn.Module):
         self.attn = MMEncoderAttention(
             num_heads=self.num_heads,
             head_size=self.head_dim,
+            scale=self.scale,
             num_kv_heads=self.num_kv_heads,
             prefix=f"{prefix}.attn",
             multimodal_config=multimodal_config,
+        )
+
+        self.apply_rotary_emb = ApplyRotaryEmb(
+            enforce_enable=True,
+            enable_fp32_compute=True,
         )
 
     def forward(
@@ -447,7 +449,7 @@ class KeyeSiglipAttention(nn.Module):
                 self.num_kv_heads,
                 self.head_dim,
             )
-            q, k = apply_rotary_pos_emb_flashatt(q, k, cos, sin)
+            q, k = apply_rotary_pos_emb_flashatt(q, k, cos, sin, self.apply_rotary_emb)
             v = v.view(
                 *v.shape[:-1],
                 self.num_kv_heads,
@@ -511,6 +513,7 @@ class KeyeSiglipEncoderLayer(nn.Module):
         self.mlp = SiglipMLP(
             config,
             quant_config=quant_config,
+            multimodal_config=multimodal_config,
             prefix=f"{prefix}.mlp",
         )
 
@@ -1239,7 +1242,7 @@ class KeyeMultiModalProcessor(BaseMultiModalProcessor[KeyeProcessingInfo]):
         return _keye_field_config(hf_inputs)
 
 
-class BaseKeyeModule(nn.Module):
+class BaseKeyeModule(nn.Module, SupportsMultiModal):
     packed_modules_mapping = {
         "qkv_proj": [
             "q_proj",
@@ -1277,25 +1280,26 @@ class BaseKeyeModule(nn.Module):
         self.config = config
         self.multimodal_config = multimodal_config
 
-        self.visual = KeyeSiglipVisionModel(
-            config.vision_config,
-            quant_config=quant_config,
-            multimodal_config=multimodal_config,
-            prefix=maybe_prefix(prefix, "visual"),
-        )
+        with self._mark_tower_model(vllm_config, {"image", "video"}):
+            self.visual = KeyeSiglipVisionModel(
+                config.vision_config,
+                quant_config=quant_config,
+                multimodal_config=multimodal_config,
+                prefix=maybe_prefix(prefix, "visual"),
+            )
+            self.mlp_AR = self._build_projector(
+                config,
+                config.vision_config,
+                quant_config=quant_config,
+                prefix=maybe_prefix(prefix, "mlp_AR"),
+            )
 
-        self.mlp_AR = self._build_projector(
-            config,
-            config.vision_config,
-            quant_config=quant_config,
-            prefix=maybe_prefix(prefix, "mlp_AR"),
-        )
-
-        self.language_model = init_vllm_registered_model(
-            vllm_config=vllm_config,
-            prefix=maybe_prefix(prefix, "language_model"),
-            architectures=["Qwen3ForCausalLM"],
-        )
+        with self._mark_language_model(vllm_config):
+            self.language_model = init_vllm_registered_model(
+                vllm_config=vllm_config,
+                prefix=maybe_prefix(prefix, "language_model"),
+                architectures=["Qwen3ForCausalLM"],
+            )
 
         self.make_empty_intermediate_tensors = (
             self.language_model.make_empty_intermediate_tensors
@@ -1309,7 +1313,7 @@ class BaseKeyeModule(nn.Module):
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
     ) -> nn.Module:
-        raise ValueError("Need projector")
+        raise NotImplementedError("Need projector")
 
     def _process_image_input(self, image_input: Any) -> tuple[torch.Tensor, ...]:
         siglip_position_ids = list()
@@ -1425,9 +1429,6 @@ class BaseKeyeModule(nn.Module):
                 modalities["videos"] = self._parse_and_validate_video_input(**kwargs)
 
         return modalities
-
-    def get_language_model(self) -> torch.nn.Module:
-        return self.language_model
 
     def embed_multimodal(self, **kwargs: object) -> MultiModalEmbeddings | None:
         modalities = self._parse_and_validate_multimodal_inputs(**kwargs)
