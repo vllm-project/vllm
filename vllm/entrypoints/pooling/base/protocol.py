@@ -18,7 +18,7 @@ class PoolingBasicRequestMixin(OpenAIBaseModel):
     # --8<-- [start:pooling-common-params]
     model: str | None = None
     user: str | None = None
-    # --8<-- [start:end-common-params]
+    # --8<-- [end:end-common-params]
 
     # --8<-- [start:pooling-common-extra-params]
     truncate_prompt_tokens: Annotated[int, Field(ge=-1)] | None = None
@@ -125,7 +125,7 @@ class EncodingRequestMixin(OpenAIBaseModel):
     encoding_format: EncodingFormat = "float"
     # --8<-- [end:encoding-params]
 
-    # --8<-- [end:encoding-extra-params]
+    # --8<-- [start:encoding-extra-params]
     embed_dtype: EmbedDType = Field(
         default="float32",
         description=(
