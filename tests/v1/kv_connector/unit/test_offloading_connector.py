@@ -213,7 +213,6 @@ class RequestRunner:
         )
 
     def new_request(self, token_ids: list[int]):
-        assert not self.scheduler.requests
         self.req_id += 1
 
         req = Request(
@@ -338,10 +337,19 @@ class RequestRunner:
                 token_id=token_id or 0,
             )
 
+            prev_token_id = token_id
             if self.scheduler.running:
                 token_id = next(tokens_iter, None)
 
             self.scheduler.update_from_output(scheduler_output, model_runner_output)
+
+            if (
+                prev_token_id is EOS_TOKEN_ID
+                and prev_token_id != token_id
+                and self.scheduler.requests
+            ):
+                # continue for one more step to allow offloading to kick off
+                continue
 
             if token_id is None:
                 break
@@ -651,3 +659,61 @@ def test_request_preemption(request_runner):
         decoded_tokens=[EOS_TOKEN_ID],
         expected_stored_gpu_block_indexes=(9, 10, 11),
     )
+
+
+def test_concurrent_lookups_of_the_same_prefix(request_runner):
+    offloaded_block_size = 12
+    gpu_block_size = 4
+    num_gpu_blocks = 100
+
+    runner = request_runner(
+        offloaded_block_size=offloaded_block_size,
+        gpu_block_size=gpu_block_size,
+        num_gpu_blocks=num_gpu_blocks,
+    )
+
+    # store 1 blocks
+    runner.new_request(token_ids=[0] * offloaded_block_size)
+    runner.manager.prepare_store.side_effect = (
+        lambda block_hashes: generate_store_output(block_hashes)
+    )
+    runner.run(
+        decoded_tokens=[EOS_TOKEN_ID],
+        expected_stored_gpu_block_indexes=(0, 1, 2),
+    )
+
+    # start a request to load the first block, but don't complete
+    runner.scheduler.reset_prefix_cache()
+    runner.new_request(token_ids=[0] * offloaded_block_size)
+    runner.manager.lookup.return_value = 1
+    runner.run(
+        decoded_tokens=[],
+        complete_transfers=False,
+    )
+
+    # request triggered a load
+    transfer_jobs = list(runner.offloading_spec.handler.transfer_specs)
+    assert transfer_jobs
+
+    # start a new request to load the same first block
+    runner.new_request(token_ids=[0] * offloaded_block_size)
+    runner.manager.lookup.return_value = 1
+    runner.run(
+        decoded_tokens=[],
+        complete_transfers=False,
+    )
+
+    # request did not trigger a load
+    assert transfer_jobs == list(runner.offloading_spec.handler.transfer_specs)
+
+    # complete transfers
+    runner.manager.prepare_store.side_effect = (
+        lambda block_hashes: generate_store_output([])
+    )
+    runner.run(
+        decoded_tokens=[EOS_TOKEN_ID],
+        expected_loaded_gpu_block_indexes=(0, 1, 2),
+    )
+
+    # second request will use the GPU prefix cache
+    assert transfer_jobs == list(runner.offloading_spec.handler.transfer_specs)

@@ -9,7 +9,7 @@ from collections import deque
 from collections.abc import AsyncGenerator, AsyncIterator, Callable, Sequence
 from contextlib import AsyncExitStack
 from copy import copy
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from http import HTTPStatus
 from typing import Final
 
@@ -64,14 +64,8 @@ from vllm.entrypoints.chat_utils import (
     ChatCompletionMessageParam,
     ChatTemplateContentFormatOption,
 )
-from vllm.entrypoints.context import (
-    ConversationContext,
-    HarmonyContext,
-    ParsableContext,
-    SimpleContext,
-    StreamingHarmonyContext,
-)
 from vllm.entrypoints.logger import RequestLogger
+from vllm.entrypoints.mcp.tool_server import ToolServer
 from vllm.entrypoints.openai.engine.protocol import (
     DeltaMessage,
     ErrorResponse,
@@ -94,6 +88,13 @@ from vllm.entrypoints.openai.parser.harmony_utils import (
     parse_response_input,
     render_for_completion,
 )
+from vllm.entrypoints.openai.responses.context import (
+    ConversationContext,
+    HarmonyContext,
+    ParsableContext,
+    SimpleContext,
+    StreamingHarmonyContext,
+)
 from vllm.entrypoints.openai.responses.protocol import (
     InputTokensDetails,
     OutputTokensDetails,
@@ -108,19 +109,19 @@ from vllm.entrypoints.openai.responses.protocol import (
     ResponseUsage,
     StreamingResponsesResponse,
 )
-from vllm.entrypoints.responses_utils import (
+from vllm.entrypoints.openai.responses.utils import (
     construct_input_messages,
     construct_tool_dicts,
     extract_tool_types,
     should_continue_final_message,
 )
-from vllm.entrypoints.tool_server import ToolServer
 from vllm.exceptions import VLLMValidationError
 from vllm.inputs.data import TokensPrompt
 from vllm.logger import init_logger
 from vllm.logprobs import Logprob as SampleLogprob
 from vllm.logprobs import SampleLogprobs
 from vllm.outputs import CompletionOutput
+from vllm.renderers import RendererLike
 from vllm.sampling_params import SamplingParams, StructuredOutputsParams
 from vllm.tokenizers import TokenizerLike
 from vllm.utils import random_uuid
@@ -380,7 +381,8 @@ class OpenAIServingResponses(OpenAIServing):
         try:
             lora_request = self._maybe_get_adapters(request)
             model_name = self.models.model_name(lora_request)
-            tokenizer = await self.engine_client.get_tokenizer()
+            renderer = self.engine_client.renderer
+            tokenizer = renderer.get_tokenizer()
 
             if self.use_harmony:
                 messages, engine_prompts = self._make_request_with_harmony(
@@ -388,7 +390,7 @@ class OpenAIServingResponses(OpenAIServing):
                 )
             else:
                 messages, engine_prompts = await self._make_request(
-                    request, prev_response, tokenizer
+                    request, prev_response, renderer
                 )
 
         except (
@@ -454,7 +456,7 @@ class OpenAIServingResponses(OpenAIServing):
                         # tokens during generation instead of at the end
                         context = ParsableContext(
                             response_messages=messages,
-                            tokenizer=tokenizer,
+                            renderer=renderer,
                             reasoning_parser_cls=self.reasoning_parser,
                             request=request,
                             tool_parser_cls=self.tool_parser,
@@ -467,15 +469,18 @@ class OpenAIServingResponses(OpenAIServing):
 
                 if self.reasoning_parser is not None:
                     reasoning_parser = self.reasoning_parser(tokenizer)
-                    if sampling_params.structured_outputs is None:
-                        sampling_params.structured_outputs = StructuredOutputsParams()
-                    struct_out = sampling_params.structured_outputs
-                    if struct_out.all_non_structural_tag_constraints_none():
-                        sampling_params.structured_outputs.structural_tag = (
-                            reasoning_parser.prepare_structured_tag(
-                                sampling_params.structured_outputs.structural_tag,
-                                self.tool_server,
-                            )
+                    if (
+                        isinstance(
+                            struct_out := sampling_params.structured_outputs,
+                            StructuredOutputsParams,
+                        )
+                        and struct_out.all_non_structural_tag_constraints_none()
+                    ):
+                        sampling_params.structured_outputs = replace(
+                            struct_out,
+                            structural_tag=reasoning_parser.prepare_structured_tag(
+                                struct_out.structural_tag, self.tool_server
+                            ),
                         )
                 generator = self._generate_with_builtin_tools(
                     request_id=request.request_id,
@@ -582,7 +587,7 @@ class OpenAIServingResponses(OpenAIServing):
         self,
         request: ResponsesRequest,
         prev_response: ResponsesResponse | None,
-        tokenizer: TokenizerLike,
+        renderer: RendererLike,
     ):
         tool_dicts = construct_tool_dicts(request.tools, request.tool_choice)
         # Construct the input messages.
@@ -604,7 +609,7 @@ class OpenAIServingResponses(OpenAIServing):
 
         _, engine_prompts = await self._preprocess_chat(
             request,
-            tokenizer,
+            renderer,
             messages,
             tool_dicts=tool_dicts,
             tool_parser=self.tool_parser,
@@ -628,6 +633,7 @@ class OpenAIServingResponses(OpenAIServing):
             raise NotImplementedError(
                 "Only 'auto' tool_choice is supported in response API with Harmony"
             )
+
         messages = self._construct_input_messages_with_harmony(request, prev_response)
         prompt_token_ids = render_for_completion(messages)
         engine_prompt = TokensPrompt(prompt_token_ids=prompt_token_ids)
