@@ -51,6 +51,12 @@ def main() -> None:
         required=True,
     )
     parser.add_argument(
+        "--kv-cache-block-size",
+        dest="kv_cache_block_size",
+        type=int,
+        default=None,
+    )
+    parser.add_argument(
         "--prefix-repetition-suffix-len",
         dest="suffix_len",
         type=int,
@@ -95,6 +101,16 @@ def main() -> None:
     parser.add_argument("--trust-remote-code", action="store_true", default=False)
 
     args = parser.parse_args()
+
+    if args.kv_cache_block_size is not None:
+        if args.kv_cache_block_size <= 0:
+            raise ValueError("--kv-cache-block-size must be > 0")
+        if args.prefix_len % args.kv_cache_block_size != 0:
+            raise ValueError(
+                "--prefix-repetition-prefix-len must be a multiple of "
+                f"--kv-cache-block-size: prefix_len={args.prefix_len}, "
+                f"kv_cache_block_size={args.kv_cache_block_size}"
+            )
 
     if args.prefix_len % 8 != 0:
         warnings.warn(
@@ -171,6 +187,7 @@ def main() -> None:
         "model": args.model,
         "seed": args.seed,
         "prefix_len": args.prefix_len,
+        "kv_cache_block_size": args.kv_cache_block_size,
         "num_prefixes": args.num_prefixes,
         "dtype": str(model.dtype),
         "prefixes": prefixes,
