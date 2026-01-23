@@ -382,6 +382,8 @@ class MultiModalMixin(SupportsMultiModal, SupportsMRoPE):
             # from `self.get_image_features`
             if isinstance(vision_embeddings, tuple):
                 vision_embeddings = vision_embeddings[0]
+            elif isinstance(vision_embeddings, dict):
+                vision_embeddings = vision_embeddings.pooler_output
 
             if isinstance(vision_embeddings, torch.Tensor):
                 if vision_embeddings.ndim == 2:
