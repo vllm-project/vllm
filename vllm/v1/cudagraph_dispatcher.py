@@ -119,6 +119,22 @@ class CudagraphDispatcher:
             # No specialization: only capture graphs with LoRA active
             return [lora_config.max_loras + 1]
 
+    def _compute_bs_to_padded_vit_graph_size(self) -> None:
+        """pre-compute the mapping from batch size to ViT padded graph size."""
+        max_size = self.compilation_config.max_vit_cudagraph_capture_size
+        capture_sizes = self.compilation_config.vit_cudagraph_capture_sizes
+        self._bs_to_padded_vit_graph_size: list[int] = [0] * (max_size + 1)
+        for end, start in zip(
+            capture_sizes + [max_size + 1],
+            [0] + capture_sizes,
+        ):
+            for bs in range(start, end):
+                if bs == start:
+                    self._bs_to_padded_vit_graph_size[bs] = start
+                else:
+                    self._bs_to_padded_vit_graph_size[bs] = end
+        
+
     def _create_padded_batch_descriptor(
         self,
         num_tokens: int,
@@ -130,7 +146,7 @@ class CudagraphDispatcher:
         max_num_seqs = self.vllm_config.scheduler_config.max_num_seqs
         uniform_decode_query_len = self.uniform_decode_query_len
         if is_vit:
-            num_tokens_padded = self.vllm_config.pad_for_vit_cudagraph(num_tokens)
+            num_tokens_padded = self._bs_to_padded_vit_graph_size[num_tokens]
         else:
             num_tokens_padded = self._bs_to_padded_graph_size[num_tokens]
 
@@ -171,6 +187,7 @@ class CudagraphDispatcher:
             return
 
         self._compute_bs_to_padded_graph_size()
+        self._compute_bs_to_padded_vit_graph_size()
 
         # Get LoRA cases to capture
         lora_cases = self._get_lora_cases()

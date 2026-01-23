@@ -372,18 +372,6 @@ class VllmConfig:
         # i.e., batch_size <= self.compilation_config.max_cudagraph_capture_size
         return self.compilation_config.bs_to_padded_graph_size[batch_size]
 
-    def pad_for_vit_cudagraph(self, batch_size: int) -> int:
-        if (
-            self.compilation_config.cudagraph_mode != CUDAGraphMode.NONE
-            and hasattr(self.compilation_config, "max_vit_cudagraph_capture_size")
-            and self.compilation_config.max_vit_cudagraph_capture_size
-            and batch_size <= self.compilation_config.max_vit_cudagraph_capture_size
-        ):
-            # Use CUDA graphs.
-            # Add padding to the batch size.
-            return self.compilation_config.bs_to_padded_vit_graph_size[batch_size]
-        return batch_size
-    
     @property
     def needs_dp_coordinator(self) -> bool:
         """
@@ -1468,8 +1456,6 @@ class VllmConfig:
             # no cudagraph in use
             self.compilation_config.max_vit_cudagraph_capture_size = 0
             self.compilation_config.vit_cudagraph_capture_sizes = []
-
-        self.compilation_config.compute_bs_to_padded_vit_graph_size()
 
     def try_verify_and_update_config(self):
         if self.model_config is None:

@@ -1169,19 +1169,3 @@ class CompilationConfig:
             Range(start=s + 1, end=e)
             for s, e in zip([0] + split_points[:-1], split_points)
         ]
-
-    def compute_bs_to_padded_vit_graph_size(self):
-        # pre-compute the mapping from batch size to padded graph size
-        self.bs_to_padded_vit_graph_size = [
-            0 for i in range(self.max_vit_cudagraph_capture_size + 1)
-        ]
-        for end, start in zip(
-            self.vit_cudagraph_capture_sizes
-            + [self.max_vit_cudagraph_capture_size + 1],
-            [0] + self.vit_cudagraph_capture_sizes,
-        ):
-            for bs in range(start, end):
-                if bs == start:
-                    self.bs_to_padded_vit_graph_size[bs] = start
-                else:
-                    self.bs_to_padded_vit_graph_size[bs] = end

@@ -584,11 +584,11 @@ class Qwen3_VisionTransformer(nn.Module):
             hidden_states = x.to(device=self.device, dtype=self.dtype, non_blocking=True)
 
         from vllm.compilation.backends import (
-            set_is_first_graph_in_sequence,
-            set_is_last_graph_in_sequence,
+            set_is_first_graph_in_vit_sequence,
+            set_is_last_graph_in_vit_sequence,
         )
 
-        with set_is_first_graph_in_sequence(True), set_is_last_graph_in_sequence(False):
+        with set_is_first_graph_in_vit_sequence(True), set_is_last_graph_in_vit_sequence(False):
             hidden_states = self.patch_embed(hidden_states)
 
         if isinstance(grid_thw, list):
@@ -639,8 +639,8 @@ class Qwen3_VisionTransformer(nn.Module):
 
         deepstack_feature_lists = []
         with (
-            set_is_first_graph_in_sequence(False),
-            set_is_last_graph_in_sequence(False),
+            set_is_first_graph_in_vit_sequence(False),
+            set_is_last_graph_in_vit_sequence(False),
         ):
             for layer_num, blk in enumerate(self.blocks):
                 hidden_states = blk(
@@ -656,7 +656,7 @@ class Qwen3_VisionTransformer(nn.Module):
                         hidden_states
                 )
                     deepstack_feature_lists.append(deepstack_feature)
-        with set_is_first_graph_in_sequence(False), set_is_last_graph_in_sequence(True):
+        with set_is_first_graph_in_vit_sequence(False), set_is_last_graph_in_vit_sequence(True):
             hidden_states = self.merger(hidden_states)
         hidden_states = torch.cat(
             [hidden_states] + deepstack_feature_lists, dim=1
