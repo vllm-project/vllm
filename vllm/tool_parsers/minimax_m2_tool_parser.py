@@ -76,16 +76,40 @@ class MinimaxM2ToolParser(ToolParser):
         # Improved regex: capture only the name attribute value (quoted or unquoted)
         # and ignore any additional attributes that may follow
         self.invoke_complete_regex = re.compile(
-            r"<invoke\s+name=(\"[^\"]+\"|'[^']+'|[^\s>]+)(?:\s+[^>]*)?\s*>"
-            r"(.*?)</invoke>",
-            re.DOTALL,
+            r"""
+            <invoke\s+name=          # Match tag start and name attribute key
+            (                        # Start Group 1: Name value
+                "[^"]+"              # Double-quoted string
+                |                    # OR
+                '[^']+'              # Single-quoted string
+                |                    # OR
+                [^\s>]+              # Unquoted value (no whitespace or >)
+            )                        # End Group 1
+            (?:\s+[^>]*)?            # Optional: Extra attributes (ignored)
+            \s*>                     # Closing bracket of opening tag
+            (.*?)                    # Group 2: Content (non-greedy)
+            </invoke>                # Closing tag
+            """,
+            re.VERBOSE | re.DOTALL,
         )
         # Improved regex for parameters: capture name attribute and content separately
         # Handles cases where model may include description text in attributes
         self.parameter_complete_regex = re.compile(
-            r"<parameter\s+name=(\"[^\"]+\"|'[^']+'|[^\s>]+)(?:\s+[^>]*)?\s*>"
-            r"(.*?)</parameter>",
-            re.DOTALL,
+            r"""
+            <parameter\s+name=       # Match tag start and name attribute key
+            (                        # Start Group 1: Name value
+                "[^"]+"              # Double-quoted string
+                |                    # OR
+                '[^']+'              # Single-quoted string
+                |                    # OR
+                [^\s>]+              # Unquoted value (no whitespace or >)
+            )                        # End Group 1
+            (?:\s+[^>]*)?            # Optional: Extra attributes (ignored)
+            \s*>                     # Closing bracket of opening tag
+            (.*?)                    # Group 2: Content (non-greedy)
+            </parameter>             # Closing tag
+            """,
+            re.VERBOSE | re.DOTALL,
         )
 
         if not self.model_tokenizer:
