@@ -75,7 +75,9 @@ from vllm.entrypoints.pooling.embed.protocol import (
 )
 from vllm.entrypoints.pooling.pooling.protocol import (
     IOProcessorRequest,
-    PoolingResponse, PoolingCompletionRequest, PoolingChatRequest,
+    PoolingChatRequest,
+    PoolingCompletionRequest,
+    PoolingResponse,
 )
 from vllm.entrypoints.pooling.score.protocol import (
     RerankRequest,
