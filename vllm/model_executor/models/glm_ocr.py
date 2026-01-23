@@ -26,7 +26,7 @@
 # limitations under the License.
 """Inference-only GLM-OCR model compatible with HuggingFace weights."""
 
-from collections.abc import Callable, Iterable
+from collections.abc import Callable
 from functools import partial
 
 import torch
@@ -34,13 +34,14 @@ import torch.nn as nn
 from einops import rearrange
 from transformers.models.glm_ocr.configuration_glm_ocr import GlmOcrVisionConfig
 
-from vllm.config import MultiModalConfig
+from vllm.config import MultiModalConfig, VllmConfig
 from vllm.distributed import get_tensor_model_parallel_world_size, parallel_state
 from vllm.distributed import utils as dist_utils
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention.mm_encoder_attention import (
     MMEncoderAttention,
 )
+from vllm.model_executor.layers.conv import Conv2dLayer
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
     QKVParallelLinear,
@@ -51,7 +52,6 @@ from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.rotary_embedding.common import (
     ApplyRotaryEmb,
 )
-from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.glm4_1v import (
     Glm4vDummyInputsBuilder,
     Glm4vForConditionalGeneration,
@@ -64,7 +64,13 @@ from vllm.model_executor.models.glm4_1v import (
 )
 from vllm.multimodal import MULTIMODAL_REGISTRY
 
-from .utils import AutoWeightsLoader, WeightsMapper
+from .utils import (
+    init_vllm_registered_model,
+    maybe_prefix,
+)
+from .vision import (
+    get_vit_attn_backend,
+)
 
 logger = init_logger(__name__)
 
@@ -268,8 +274,6 @@ class GlmOcrVisionTransformer(Glm4vVisionTransformer):
 
         assert multimodal_config is not None, "multimodal_config must be provided"
 
-        assert multimodal_config is not None, "multimodal_config must be provided"
-
         patch_size = vision_config.patch_size
         temporal_patch_size = vision_config.temporal_patch_size
         in_channels = vision_config.in_channels
@@ -319,6 +323,25 @@ class GlmOcrVisionTransformer(Glm4vVisionTransformer):
             prefix=f"{prefix}.merger",
         )
 
+        self.post_conv_layernorm = RMSNorm(
+            vision_config.hidden_size, eps=vision_config.rms_norm_eps
+        )
+        self.downsample = Conv2dLayer(
+            in_channels=vision_config.hidden_size,
+            out_channels=vision_config.out_hidden_size,
+            kernel_size=vision_config.spatial_merge_size,
+            stride=vision_config.spatial_merge_size,
+        )
+        self.post_layernorm = RMSNorm(
+            vision_config.hidden_size, eps=vision_config.rms_norm_eps
+        )
+
+        self.attn_backend = get_vit_attn_backend(
+            head_size=head_dim,
+            dtype=torch.get_default_dtype(),
+            attn_backend_override=multimodal_config.mm_encoder_attn_backend,
+        )
+
     def forward(
         self,
         x: torch.Tensor,
@@ -366,35 +389,6 @@ class GlmOcrVisionTransformer(Glm4vVisionTransformer):
 
         return x
 
-    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        stacked_params_mapping = [
-            # (param_name, shard_name, shard_id)
-            ("attn.qkv.", "attn.q.", "q"),
-            ("attn.qkv.", "attn.k.", "k"),
-            ("attn.qkv.", "attn.v.", "v"),
-            ("gate_up_proj", "gate_proj", 0),
-            ("gate_up_proj", "up_proj", 1),
-        ]
-        params_dict = dict(self.named_parameters(remove_duplicate=False))
-        loaded_params: set[str] = set()
-
-        for name, loaded_weight in weights:
-            for param_name, weight_name, shard_id in stacked_params_mapping:
-                if weight_name not in name:
-                    continue
-                name = name.replace(weight_name, param_name)
-
-                param = params_dict[name]
-                weight_loader = param.weight_loader
-                weight_loader(param, loaded_weight, shard_id)
-                break
-            else:
-                param = params_dict[name]
-                weight_loader = getattr(param, "weight_loader", default_weight_loader)
-                weight_loader(param, loaded_weight)
-            loaded_params.add(name)
-        return loaded_params
-
 
 @MULTIMODAL_REGISTRY.register_processor(
     Glm4vMultiModalProcessor,
@@ -402,14 +396,33 @@ class GlmOcrVisionTransformer(Glm4vVisionTransformer):
     dummy_inputs=Glm4vDummyInputsBuilder,
 )
 class GlmOcrForConditionalGeneration(Glm4vForConditionalGeneration):
-    hf_to_vllm_mapper = WeightsMapper(
-        orig_to_new_prefix={
-            "lm_head.": "language_model.lm_head.",
-            "model.language_model.": "language_model.model.",
-            "model.visual.": "visual.",
-        }
-    )
+    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
+        super().__init__()
+        config = vllm_config.model_config.hf_config
+        quant_config = vllm_config.quant_config
+        multimodal_config = vllm_config.model_config.multimodal_config
 
-    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        loader = AutoWeightsLoader(self)
-        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
+        self.config = config
+        self.multimodal_config = multimodal_config
+        self.use_data_parallel = multimodal_config.mm_encoder_tp_mode == "data"
+
+        with self._mark_tower_model(vllm_config, {"image", "video"}):
+            self.visual = GlmOcrVisionTransformer(
+                config.vision_config,
+                norm_eps=getattr(config, "rms_norm_eps", 1e-5),
+                quant_config=quant_config,
+                multimodal_config=multimodal_config,
+                prefix=maybe_prefix(prefix, "visual"),
+            )
+
+        with self._mark_language_model(vllm_config):
+            self.language_model = init_vllm_registered_model(
+                vllm_config=vllm_config,
+                hf_config=config.text_config,
+                prefix=maybe_prefix(prefix, "language_model"),
+                architectures=["Glm4ForCausalLM"],
+            )
+
+        self.make_empty_intermediate_tensors = (
+            self.language_model.make_empty_intermediate_tensors
+        )
