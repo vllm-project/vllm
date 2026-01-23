@@ -465,7 +465,7 @@ class Fp8LinearMethod(LinearMethodBase):
             layer.input_scale = None
 
         if self.use_fp8_woq:
-            self.kernel.process_weights_after_loading(layer)
+            self.fp8_linear.process_weights_after_loading(layer)
             # Activations not quantized for marlin.
             del layer.input_scale
             return
@@ -516,12 +516,7 @@ class Fp8LinearMethod(LinearMethodBase):
                 return torch.nn.functional.linear(x, weight_bf16.t(), bias)
 
         if self.use_fp8_woq:
-            if self.block_quant:
-                weight_scale = layer.weight_scale_inv
-            else:
-                weight_scale = layer.weight_scale
-
-            return self.kernel.apply_weights(
+            return self.fp8_linear.apply_weights(
                 layer,
                 x,
                 bias,
@@ -618,7 +613,7 @@ class Fp8OnlineLinearMethod(Fp8LinearMethod):
 
         if self.use_fp8_woq:
             # Activations not quantized for woq.
-            self.kernel.process_weights_after_loading(
+            self.fp8_linear.process_weights_after_loading(
                 layer, size_k_first=True, input_dtype=self.marlin_input_dtype
             )
 
