@@ -149,7 +149,6 @@ def native_w8a8_block_matmul(
             c = C_tiles[j]
             s = As_tiles[i] * Bs[j][i]
             c[:, :] += torch.matmul(a, b.t()) * s
-            # c[:, :] += torch.matmul(a * As_tiles[i], b.t() * Bs[j][i])
 
     C = C.reshape(origin_C_shape).to(output_dtype)
     return C
