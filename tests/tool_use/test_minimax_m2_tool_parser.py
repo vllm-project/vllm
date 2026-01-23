@@ -212,12 +212,12 @@ def test_non_streaming_with_extra_attributes(minimax_m2_tool_parser):
         tools = None
 
     model_output = (
-        '<minimax:tool_call>'
+        "<minimax:tool_call>"
         '<invoke name="test_func" extra="ignored">'
         '<parameter name="arg1" type="string">value1</parameter>'
         '<parameter name="arg2" description="(e.g. example)">value2</parameter>'
-        '</invoke>'
-        '</minimax:tool_call>'
+        "</invoke>"
+        "</minimax:tool_call>"
     )
 
     result = parser.extract_tool_calls(model_output, MockRequest())
