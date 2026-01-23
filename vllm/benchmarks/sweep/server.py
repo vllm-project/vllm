@@ -100,6 +100,12 @@ class ServerProcess:
     def wait_until_ready(self, timeout: int) -> None:
         start_time = time.monotonic()
         while not self.is_server_ready():
+            # Check if server process has crashed
+            if self._server_process.poll() is not None:
+                returncode = self._server_process.returncode
+                raise RuntimeError(
+                    f"Server process crashed with return code {returncode}"
+                )
             if time.monotonic() - start_time > timeout:
                 raise TimeoutError(
                     f"Server failed to become ready within {timeout} seconds."
