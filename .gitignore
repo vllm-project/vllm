@@ -3,6 +3,7 @@
 
 # vllm-flash-attn built from source
 vllm/vllm_flash_attn/*
+!vllm/vllm_flash_attn/flash_attn_interface.py
 
 # OpenAI triton kernels copied from source
 vllm/third_party/triton_kernels/*
