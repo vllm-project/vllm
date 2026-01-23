@@ -22,6 +22,80 @@ _IS_ROCM = current_platform.is_rocm()
 _SERVER_STARTUP_TIMEOUT = 120
 _PROCESS_EXIT_TIMEOUT = 30
 _DRAIN_DETECTION_TIMEOUT = 10
+_CHILD_CLEANUP_TIMEOUT = 10
+
+try:
+    import psutil
+
+    _HAS_PSUTIL = True
+except ImportError:
+    _HAS_PSUTIL = False
+
+
+def _cleanup_orphaned_vllm_processes():
+    """Kill any orphaned vLLM processes from previous test runs."""
+    if not _HAS_PSUTIL:
+        return
+    for proc in psutil.process_iter(["pid", "name", "cmdline"]):
+        try:
+            cmdline = proc.info.get("cmdline") or []
+            cmdline_str = " ".join(cmdline)
+            # kill orphaned api_server or EngineCore processes using our test model
+            if MODEL_NAME in cmdline_str or "VLLM::EngineCore" in proc.info.get(
+                "name", ""
+            ):
+                proc.kill()
+                proc.wait(timeout=5)
+        except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.TimeoutExpired):
+            pass
+
+
+@pytest.fixture(autouse=True)
+def cleanup_before_test():
+    """Ensure no orphaned processes from previous runs interfere."""
+    _cleanup_orphaned_vllm_processes()
+    yield
+    # also cleanup after in case test fails mid-run
+    _cleanup_orphaned_vllm_processes()
+
+
+def _get_child_pids(parent_pid: int) -> list[int]:
+    """Get all child process PIDs recursively."""
+    if not _HAS_PSUTIL:
+        return []
+    try:
+        parent = psutil.Process(parent_pid)
+        return [c.pid for c in parent.children(recursive=True)]
+    except psutil.NoSuchProcess:
+        return []
+
+
+async def _assert_children_cleaned_up(
+    child_pids: list[int],
+    timeout: float = _CHILD_CLEANUP_TIMEOUT,
+):
+    """Wait for child processes to exit and fail if any remain."""
+    if not _HAS_PSUTIL or not child_pids:
+        return
+
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        still_alive = []
+        for pid in child_pids:
+            try:
+                p = psutil.Process(pid)
+                if p.is_running() and p.status() != psutil.STATUS_ZOMBIE:
+                    still_alive.append(pid)
+            except psutil.NoSuchProcess:
+                pass
+        if not still_alive:
+            return
+        await asyncio.sleep(0.5)
+
+    pytest.fail(
+        f"Child processes {still_alive} still alive after {timeout}s. "
+        f"Process cleanup may not be working correctly."
+    )
 
 
 @dataclass
@@ -35,7 +109,7 @@ class DrainState:
 
 def _start_server(
     port: int,
-    enable_graceful_shutdown: bool = False,
+    shutdown_mode: str = "immediate",
     capture_output: bool = False,
 ):
     args = [
@@ -56,10 +130,12 @@ def _start_server(
         "--max-num-seqs",
         "4",
         "--disable-frontend-multiprocessing",
+        "--shutdown-mode",
+        shutdown_mode,
     ]
 
-    if enable_graceful_shutdown:
-        args.extend(["--enable-graceful-shutdown", "--drain-timeout", "30"])
+    if shutdown_mode == "drain":
+        args.extend(["--shutdown-drain-timeout", "30"])
 
     return subprocess.Popen(
         args,
@@ -95,8 +171,8 @@ async def _concurrent_request_loop(
             try:
                 await client.completions.create(
                     model=MODEL_NAME,
-                    prompt="Write a long detailed story about a robot: ",
-                    max_tokens=500,
+                    prompt="Write a story: ",
+                    max_tokens=200,
                 )
                 if sigterm_sent is not None and sigterm_sent.is_set():
                     state.requests_after_sigterm += 1
@@ -127,7 +203,7 @@ async def _concurrent_request_loop(
 async def test_graceful_shutdown_drains_requests():
     """Verify graceful shutdown: 503s returned, in-flight requests complete."""
     port = get_open_port()
-    proc = _start_server(port, enable_graceful_shutdown=True)
+    proc = _start_server(port, shutdown_mode="drain")
 
     try:
         client = openai.AsyncOpenAI(
@@ -141,6 +217,8 @@ async def test_graceful_shutdown_drains_requests():
             proc.terminate()
             proc.wait(timeout=_PROCESS_EXIT_TIMEOUT)
             pytest.fail(f"Server failed to start in {_SERVER_STARTUP_TIMEOUT}s")
+
+        child_pids = _get_child_pids(proc.pid)
 
         state = DrainState()
         sigterm_sent = asyncio.Event()
@@ -173,6 +251,8 @@ async def test_graceful_shutdown_drains_requests():
             f"conn_errors: {state.connection_errors}, errors: {state.errors}"
         )
 
+        await _assert_children_cleaned_up(child_pids)
+
     finally:
         if proc.poll() is None:
             proc.terminate()
@@ -184,7 +264,7 @@ async def test_graceful_shutdown_drains_requests():
 async def test_immediate_shutdown_on_second_signal():
     """Verify that sending two signals triggers immediate shutdown."""
     port = get_open_port()
-    proc = _start_server(port, enable_graceful_shutdown=True, capture_output=True)
+    proc = _start_server(port, shutdown_mode="drain", capture_output=True)
 
     try:
         client = openai.AsyncOpenAI(
@@ -198,6 +278,8 @@ async def test_immediate_shutdown_on_second_signal():
             proc.terminate()
             proc.wait(timeout=_PROCESS_EXIT_TIMEOUT)
             pytest.fail(f"Server failed to start in {_SERVER_STARTUP_TIMEOUT}s")
+
+        child_pids = _get_child_pids(proc.pid)
 
         state = DrainState()
 
@@ -232,6 +314,45 @@ async def test_immediate_shutdown_on_second_signal():
             f"Immediate shutdown log message not found. Output:\n{output[-3000:]}"
         )
         assert proc.returncode in (0, -15, None), f"Unexpected: {proc.returncode}"
+
+        await _assert_children_cleaned_up(child_pids)
+
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait(timeout=5)
+
+
+@pytest.mark.asyncio
+async def test_child_processes_exit_on_parent_crash():
+    """Verify child processes exit cleanly when parent is killed with SIGKILL."""
+    pytest.importorskip("psutil")
+
+    port = get_open_port()
+    proc = _start_server(port, shutdown_mode="drain")
+
+    try:
+        client = openai.AsyncOpenAI(
+            base_url=f"http://localhost:{port}/v1",
+            api_key="dummy",
+            max_retries=0,
+            timeout=30,
+        )
+
+        if not await _wait_for_server_ready(client, _SERVER_STARTUP_TIMEOUT):
+            proc.terminate()
+            proc.wait(timeout=_PROCESS_EXIT_TIMEOUT)
+            pytest.fail(f"Server failed to start in {_SERVER_STARTUP_TIMEOUT}s")
+
+        await asyncio.sleep(1.0)
+
+        child_pids = _get_child_pids(proc.pid)
+        assert len(child_pids) > 0, "Expected child processes (EngineCore, Workers)"
+
+        proc.send_signal(signal.SIGKILL)
+        proc.wait(timeout=5)
+
+        await _assert_children_cleaned_up(child_pids)
 
     finally:
         if proc.poll() is None:

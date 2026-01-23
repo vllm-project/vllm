@@ -74,8 +74,8 @@ async def serve_http(
 
     args = getattr(app.state, "args", None)
     engine_client: EngineClient = app.state.engine_client
-    enable_graceful = args is not None and getattr(
-        args, "enable_graceful_shutdown", False
+    enable_graceful = (
+        args is not None and getattr(args, "shutdown_mode", "immediate") == "drain"
     )
 
     config = uvicorn.Config(app, **uvicorn_kwargs)
@@ -105,7 +105,9 @@ async def serve_http(
 
     async def graceful_drain() -> None:
         """Perform graceful drain before shutdown."""
-        drain_timeout = getattr(args, "drain_timeout", FrontendArgs.drain_timeout)
+        drain_timeout = getattr(
+            args, "shutdown_drain_timeout", FrontendArgs.shutdown_drain_timeout
+        )
 
         inflight_count = engine_client.get_num_unfinished_requests()
         logger.info(
@@ -115,34 +117,43 @@ async def serve_http(
 
         set_rejecting_requests(True)
 
-        async def _drain_operations() -> None:
-            # pause generation and wait for in-flight requests
-            await engine_client.pause_generation(
-                wait_for_inflight_requests=True,
-                clear_cache=False,
-            )
-            # wait for pending async KV transfers to complete
-            if engine_client.vllm_config.kv_transfer_config is not None:
-                await engine_client.wait_for_kv_transfers_complete()
-
         start_time = time.monotonic()
         try:
-            await asyncio.wait_for(_drain_operations(), timeout=drain_timeout)
-            elapsed = time.monotonic() - start_time
-            logger.info(
-                "Graceful shutdown: drain complete, drained %d requests in %.1fs",
-                inflight_count,
-                elapsed,
-            )
-        except asyncio.TimeoutError:
-            elapsed = time.monotonic() - start_time
-            remaining = engine_client.get_num_unfinished_requests()
-            logger.warning(
-                "Graceful shutdown: drain timed out after %.1fs, "
-                "%d requests remaining, proceeding with shutdown",
-                elapsed,
-                remaining,
-            )
+            # send graceful shutdown to engines via IPC
+            core = getattr(engine_client, "engine_core", None)
+            if core is not None and hasattr(core, "_send_graceful_shutdown_to_engines"):
+                core._send_graceful_shutdown_to_engines()
+
+                # poll for ready_to_exit with short sleeps so CancelledError
+                # can interrupt us promptly on second signal
+                deadline = time.monotonic() + drain_timeout
+                while time.monotonic() < deadline:
+                    if (
+                        core.resources.engine_dead
+                        or core.resources.ready_to_exit_event.is_set()
+                    ):
+                        break
+                    await asyncio.sleep(0.5)
+
+                elapsed = time.monotonic() - start_time
+                if core.resources.ready_to_exit_event.is_set():
+                    logger.info(
+                        "Graceful shutdown: drain complete in %.1fs",
+                        elapsed,
+                    )
+                elif core.resources.engine_dead:
+                    logger.warning("Graceful shutdown: engine died during drain")
+                else:
+                    remaining = engine_client.get_num_unfinished_requests()
+                    logger.warning(
+                        "Graceful shutdown: drain timed out after %.1fs, "
+                        "%d requests remaining, proceeding with shutdown",
+                        elapsed,
+                        remaining,
+                    )
+            else:
+                # fallback for non-MP clients
+                logger.info("Graceful shutdown: no engine core, proceeding")
         except Exception as e:
             logger.warning("Graceful shutdown: drain failed: %s", e)
 
@@ -175,7 +186,9 @@ async def serve_http(
         shutting_down = True
 
         if enable_graceful:
-            drain_timeout = getattr(args, "drain_timeout", FrontendArgs.drain_timeout)
+            drain_timeout = getattr(
+                args, "shutdown_drain_timeout", FrontendArgs.shutdown_drain_timeout
+            )
             logger.info(
                 "Graceful shutdown initiated (timeout: %ds). "
                 "Send SIGTERM again to force immediate shutdown.",
