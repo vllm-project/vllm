@@ -772,9 +772,6 @@ class LLM:
         self,
         prompt_input: str | list[str] | list[int] | list[list[int]] | None,
         prompt_embeds: bytes | list[bytes] | None,
-        params: SamplingParams
-        | PoolingParams
-        | Sequence[SamplingParams | PoolingParams],
         tokenization_kwargs: dict[str, Any] | None = None,
         mm_processor_kwargs: dict[str, Any] | None = None,
     ) -> list[TokensPrompt | EmbedsPrompt]:
@@ -790,9 +787,6 @@ class LLM:
         """
         model_config = self.model_config
         renderer = self.llm_engine.renderer
-
-        if not isinstance(params, Sequence):
-            params = [params]
 
         tok_params = TokenizeParams.from_config(model_config).with_kwargs(
             tokenization_kwargs
