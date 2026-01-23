@@ -13,7 +13,7 @@ from vllm.config import (
     VllmConfig,
     get_layers_from_vllm_config,
 )
-from vllm.distributed.parallel_state import get_pp_group
+from vllm.distributed import get_pp_group, get_tp_group
 from vllm.forward_context import set_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
@@ -213,6 +213,8 @@ class SpecDecodeBaseProposer:
         self.tree_draft_pos_offsets = torch.arange(
             1, len(self.tree_choices) + 1, device=device, dtype=torch.int32
         ).repeat(max_batch_size, 1)
+        # Store original tp group for resharding
+        self.tp_group = get_tp_group()
 
     def _get_positions(self, num_tokens: int):
         if self.uses_mrope:
@@ -1153,9 +1155,22 @@ class SpecDecodeBaseProposer:
                 )
 
             if share_embeddings:
-                if hasattr(self.model.model, "embed_tokens"):
-                    del self.model.model.embed_tokens
-                self.model.model.embed_tokens = target_embed_tokens
+                eagle_shape = self.model.model.embed_tokens.weight.shape
+                target_shape = target_embed_tokens.weight.shape
+                if eagle_shape == target_shape:
+                    self.model.model.embed_tokens = target_embed_tokens
+                else:
+                    target_name = (
+                        "embed_tokens"
+                        if hasattr(target_language_model.model, "embed_tokens")
+                        else "embedding"
+                    )
+                    resharded_tensor = self._reshard_draft_tp_tensor(
+                        target_language_model, target_name
+                    )
+                    self.model.model.embed_tokens.weight = nn.Parameter(
+                        resharded_tensor, requires_grad=False
+                    )
         else:
             logger.info(
                 "The draft model's vocab embedding will be loaded separately"
@@ -1202,9 +1217,17 @@ class SpecDecodeBaseProposer:
             )
 
         if share_lm_head and hasattr(target_language_model, "lm_head"):
-            if hasattr(self.model, "lm_head"):
-                del self.model.lm_head
-            self.model.lm_head = target_language_model.lm_head
+            eagle_shape = self.model.lm_head.weight.shape
+            target_shape = target_language_model.lm_head.weight.shape
+            if eagle_shape == target_shape:
+                self.model.lm_head = target_language_model.lm_head
+            else:
+                resharded_tensor = self._reshard_draft_tp_tensor(
+                    target_language_model, "lm_head"
+                )
+                self.model.lm_head.weight = nn.Parameter(
+                    resharded_tensor, requires_grad=False
+                )
 
     @torch.inference_mode()
     def dummy_run(
@@ -1342,6 +1365,48 @@ class SpecDecodeBaseProposer:
         if num_toks_across_dp is not None:
             num_tokens_dp_padded = int(num_toks_across_dp[self.dp_rank].item())
         return num_tokens_dp_padded, num_toks_across_dp
+
+    def _reshard_draft_tp_tensor(
+        self,
+        target_model: nn.Module,
+        target_name: str,
+    ) -> torch.Tensor:
+        """
+        Support different tp size between main model and draft model.
+        """
+        from vllm.distributed import get_tensor_model_parallel_rank
+
+        tp_rank = get_tensor_model_parallel_rank()
+        sd = target_model.state_dict()
+        dst_tensor = None
+        draft_tp_size = self.speculative_config.draft_tensor_parallel_size
+        for name, param in self.model.named_parameters():
+            if target_name in name:
+                src_tensor = sd[name]
+                if draft_tp_size == self.tp_group.world_size:
+                    return src_tensor
+
+                full_tensor_shape = (
+                    draft_tp_size * param.shape[0],
+                    *param.shape[1:],
+                )
+                full_tensor = torch.empty(
+                    full_tensor_shape, dtype=src_tensor.dtype, device=src_tensor.device
+                )
+                torch.distributed.all_gather_into_tensor(
+                    full_tensor, src_tensor, group=self.tp_group.device_group
+                )
+                dst_tensor = full_tensor[
+                    tp_rank * param.shape[0] : (tp_rank + 1) * param.shape[0]
+                ]
+                logger.debug(
+                    "Draft tp reshard %s, src_tensor:%s, dst_tensor:%s",
+                    target_name,
+                    src_tensor.shape,
+                    dst_tensor.shape,
+                )
+                break
+        return dst_tensor
 
 
 class EagleProposer(SpecDecodeBaseProposer):

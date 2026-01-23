@@ -599,14 +599,6 @@ class SpeculativeConfig:
                 speculative_draft_tensor_parallel_size = (
                     target_parallel_config.tensor_parallel_size
                 )
-        elif speculative_draft_tensor_parallel_size not in (
-            1,
-            target_parallel_config.tensor_parallel_size,
-        ):
-            raise ValueError(
-                f"{speculative_draft_tensor_parallel_size=} cannot be "
-                f"other value than 1 or target model tensor_parallel_size"
-            )
         return speculative_draft_tensor_parallel_size
 
     @staticmethod

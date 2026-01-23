@@ -39,7 +39,9 @@ from vllm.distributed.parallel_state import (
     get_pp_group,
     get_tp_group,
     graph_capture,
+    init_model_parallel_group,
     is_global_first_rank,
+    patch_tensor_parallel_group,
     prepare_communication_buffer_for_model,
 )
 from vllm.forward_context import (
@@ -467,6 +469,19 @@ class GPUModelRunner(
                     f"{self.speculative_config.method}"
                 )
             self.rejection_sampler = RejectionSampler(self.sampler)
+            # Initialize model parallel group for draft tensor parallelism.
+            world_size = torch.distributed.get_world_size()
+            draft_tp_size = (
+                self.speculative_config.draft_tensor_parallel_size
+                if self.speculative_config.draft_tensor_parallel_size is not None
+                else self.vllm_config.parallel_config.tensor_parallel_size
+            )
+            group_ranks = torch.arange(world_size).reshape(-1, draft_tp_size).tolist()
+            local_rank = get_tp_group().local_rank
+            tp_backend = torch.distributed.get_backend(get_tp_group().device_group)
+            self.draft_tp_group = init_model_parallel_group(
+                group_ranks, local_rank, tp_backend
+            )
 
         self.num_spec_tokens = 0
         if self.speculative_config:
@@ -3816,17 +3831,18 @@ class GPUModelRunner(
             else:
                 mm_embed_inputs = None
 
-            draft_token_ids = self.drafter.propose(
-                target_token_ids=target_token_ids,
-                target_positions=target_positions,
-                target_hidden_states=target_hidden_states,
-                next_token_ids=next_token_ids,
-                last_token_indices=token_indices_to_sample,
-                sampling_metadata=sampling_metadata,
-                common_attn_metadata=common_attn_metadata,
-                mm_embed_inputs=mm_embed_inputs,
-                num_rejected_tokens_gpu=num_rejected_tokens_gpu,
-            )
+            with patch_tensor_parallel_group(self.draft_tp_group):
+                draft_token_ids = self.drafter.propose(
+                    target_token_ids=target_token_ids,
+                    target_positions=target_positions,
+                    target_hidden_states=target_hidden_states,
+                    next_token_ids=next_token_ids,
+                    last_token_indices=token_indices_to_sample,
+                    sampling_metadata=sampling_metadata,
+                    common_attn_metadata=common_attn_metadata,
+                    mm_embed_inputs=mm_embed_inputs,
+                    num_rejected_tokens_gpu=num_rejected_tokens_gpu,
+                )
 
         return draft_token_ids
 
@@ -3874,7 +3890,8 @@ class GPUModelRunner(
                     )
                 if hasattr(self, "drafter"):
                     logger.info_once("Loading drafter model...")
-                    self.drafter.load_model(self.model)
+                    with patch_tensor_parallel_group(self.draft_tp_group):
+                        self.drafter.load_model(self.model)
                     if (
                         hasattr(self.drafter, "model")
                         and is_mixture_of_experts(self.drafter.model)
@@ -4541,11 +4558,12 @@ class GPUModelRunner(
                 if self.compilation_config.cudagraph_specialize_lora and activate_lora:
                     use_cudagraphs = False
 
-                self.drafter.dummy_run(
-                    num_tokens,
-                    use_cudagraphs=use_cudagraphs,
-                    is_graph_capturing=is_graph_capturing,
-                )
+                with patch_tensor_parallel_group(self.draft_tp_group):
+                    self.drafter.dummy_run(
+                        num_tokens,
+                        use_cudagraphs=use_cudagraphs,
+                        is_graph_capturing=is_graph_capturing,
+                    )
 
         # We register layerwise NVTX hooks here after the first dynamo tracing is
         # done to avoid nvtx operations in hook functions being traced by
