@@ -44,23 +44,6 @@ config = VllmConfig(
 
 print("✓ Config created")
 
-# Set up pass manager (like the test does)
-with pass_context(Range(start=1, end=8)):
-    pass_manager = PostGradPassManager()
-    pass_manager.configure(config)
-
-    print(f"✓ Pass manager configured with {len(pass_manager.passes)} passes")
-
-    # Check for ActivationQuantFusionPass
-    for pass_obj in pass_manager.passes:
-        if "ActivationQuant" in type(pass_obj).__name__:
-            print(f"  ✓ Found: {type(pass_obj).__name__}")
-            if hasattr(pass_obj, 'patterns'):
-                print(f"    Patterns: {len(pass_obj.patterns.patterns)}")
-                # NEW: Print what patterns are registered
-                for i, pattern in enumerate(pass_obj.patterns.patterns):
-                    print(f"      Pattern {i}: {pattern}")
-
 # Create test function
 def silu_mul_then_quant(x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
     hidden = x.shape[-1] // 2
