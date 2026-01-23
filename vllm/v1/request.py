@@ -39,7 +39,6 @@ class StreamingUpdate:
 
     mm_features: list[MultiModalFeatureSpec] | None
     prompt_token_ids: list[int] | None
-    prompt_embeds: torch.Tensor | None
     max_tokens: int
     arrival_time: float
     sampling_params: SamplingParams | None
@@ -51,7 +50,6 @@ class StreamingUpdate:
         return cls(
             mm_features=request.mm_features,
             prompt_token_ids=request.prompt_token_ids,
-            prompt_embeds=request.prompt_embeds,
             max_tokens=request.max_tokens,
             arrival_time=request.arrival_time,
             sampling_params=request.sampling_params,

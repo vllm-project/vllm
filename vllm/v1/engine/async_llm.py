@@ -430,17 +430,7 @@ class AsyncLLM(EngineClient):
         priority: int = 0,
         data_parallel_rank: int | None = None,
     ) -> RequestOutputCollector:
-        if (
-            isinstance(sampling_params, PoolingParams)
-            or sampling_params.n > 1
-            or sampling_params.output_kind == RequestOutputKind.FINAL_ONLY
-            or sampling_params.stop
-        ):
-            raise ValueError(
-                "Input streaming not currently supported "
-                "for pooling models, n > 1, request_kind = FINAL_ONLY "
-                "or with stop strings."
-            )
+        self._validate_streaming_input_sampling_params(sampling_params)
 
         inputs = dict(
             arrival_time=arrival_time,
@@ -472,7 +462,11 @@ class AsyncLLM(EngineClient):
             cancelled = False
             try:
                 async for input_chunk in input_stream:
-                    sp = input_chunk.sampling_params or sampling_params
+                    sp = input_chunk.sampling_params
+                    if sp:
+                        self._validate_streaming_input_sampling_params(sp)
+                    else:
+                        sp = sampling_params
                     req = self.input_processor.process_inputs(
                         request_id=internal_req_id,
                         prompt=input_chunk.prompt,
@@ -481,6 +475,10 @@ class AsyncLLM(EngineClient):
                         **inputs,  # type: ignore[arg-type]
                     )
                     req.external_req_id = request_id
+                    if req.prompt_embeds is not None:
+                        raise ValueError(
+                            "prompt_embeds not supported for streaming inputs"
+                        )
                     prompt_text = get_prompt_text(input_chunk.prompt)
                     await self._add_request(req, prompt_text, None, 0, queue)
             except (asyncio.CancelledError, GeneratorExit):
@@ -501,6 +499,22 @@ class AsyncLLM(EngineClient):
 
         queue._input_stream_task = asyncio.create_task(handle_inputs())
         return queue
+
+    @staticmethod
+    def _validate_streaming_input_sampling_params(
+        params: SamplingParams | PoolingParams,
+    ):
+        if (
+            not isinstance(params, SamplingParams)
+            or params.n > 1
+            or params.output_kind == RequestOutputKind.FINAL_ONLY
+            or params.stop
+        ):
+            raise ValueError(
+                "Input streaming not currently supported "
+                "for pooling models, n > 1, request_kind = FINAL_ONLY "
+                "or with stop strings."
+            )
 
     # TODO: we should support multiple prompts in one call, as you
     # can do with LLM.generate. So that for multi-prompt completion

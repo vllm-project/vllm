@@ -117,7 +117,6 @@ class StreamingUpdate:
 
     prompt: str | None
     prompt_token_ids: list[int] | None
-    prompt_embeds: torch.Tensor | None
     arrival_time: float
     final: bool = False
 
@@ -184,24 +183,18 @@ class RequestState:
     def apply_streaming_update(self, update: StreamingUpdate) -> None:
         # Apply the update to the request state.
         self.streaming_input = not update.final
+        # TODO also include relevant output tokens in new prompt here
+        #     (match scheduler behavior).
         if update.prompt:
             self.prompt = (
                 (self.prompt + update.prompt) if self.prompt else update.prompt
             )
-        if update.prompt_token_ids:
-            if self.prompt_token_ids:
-                self.prompt_token_ids.extend(update.prompt_token_ids)
-            else:
-                self.prompt_token_ids = update.prompt_token_ids
-        if update.prompt_embeds is not None:
-            self.prompt_embeds = (
-                update.prompt_embeds
-                if not self.prompt_embeds
-                else (torch.cat((self.prompt_embeds, update.prompt_embeds)))
-            )
-        self.prompt_len = length_from_prompt_token_ids_or_embeds(
-            self.prompt_token_ids, self.prompt_embeds
-        )
+        if self.prompt_token_ids:
+            self.prompt_token_ids.extend(update.prompt_token_ids or ())
+        else:
+            self.prompt_token_ids = update.prompt_token_ids or []
+        assert self.prompt_token_ids is not None
+        self.prompt_len = len(self.prompt_token_ids)
         if self.stats is not None:
             self.stats.arrival_time = update.arrival_time
         self.is_prefilling = True
@@ -570,7 +563,6 @@ class OutputProcessor:
         update = StreamingUpdate(
             prompt=prompt,
             prompt_token_ids=request.prompt_token_ids,
-            prompt_embeds=request.prompt_embeds,
             arrival_time=request.arrival_time,
         )
 

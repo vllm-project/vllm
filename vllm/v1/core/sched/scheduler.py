@@ -8,7 +8,6 @@ from dataclasses import replace
 from typing import Any
 
 import numpy as np
-import torch
 
 from vllm import envs
 from vllm.compilation.cuda_graph import CUDAGraphStat
@@ -32,7 +31,6 @@ from vllm.model_executor.layers.fused_moe.routed_experts_capturer import (
     RoutedExpertsReader,
 )
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
-from vllm.utils import length_from_prompt_token_ids_or_embeds
 from vllm.v1.core.encoder_cache_manager import (
     EncoderCacheManager,
     EncoderDecoderCacheManager,
@@ -52,10 +50,7 @@ from vllm.v1.core.sched.utils import check_stop, remove_all
 from vllm.v1.engine import EngineCoreEventType, EngineCoreOutput, EngineCoreOutputs
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.metrics.perf import ModelMetrics, PerfStats
-from vllm.v1.metrics.stats import (
-    PrefixCacheStats,
-    SchedulerStats,
-)
+from vllm.v1.metrics.stats import PrefixCacheStats, SchedulerStats
 from vllm.v1.outputs import DraftTokenIds, KVConnectorOutput, ModelRunnerOutput
 from vllm.v1.request import Request, RequestStatus, StreamingUpdate
 from vllm.v1.spec_decode.metrics import SpecDecodingStats
@@ -874,24 +869,24 @@ class Scheduler(SchedulerInterface):
         """
         Updates the waiting session with the next streaming update.
 
-        Discards all output tokens from `_all_token_ids` since they have already
-        been returned to the user and should not be part of the next sub-request's
-        prompt. The KV cache entries for these tokens become orphaned but this is
-        acceptable. Resets `num_computed_tokens` to reflect just the accumulated
-        prompt tokens (which are still valid in the KV cache).
+        Discards the last sampled output token from the prior input chunk.
         """
         if update is None:
             # Streaming-input request finished.
             self.finish_requests(session.request_id, RequestStatus.FINISHED_ABORTED)
             return
 
-        # Discard output tokens - they've been returned to user but shouldn't
-        # be part of the next sub-request's context. KV cache for these tokens
-        # becomes orphaned.
-        old_prompt_len = session.num_prompt_tokens
-        del session._all_token_ids[old_prompt_len:]
+        # Current streaming input behaviour: Keep only computed output tokens
+        # (discard final sampled output token).
+        num_computed_tokens = session.num_computed_tokens
+        kept_output_tokens = session._all_token_ids[
+            session.num_prompt_tokens : num_computed_tokens
+        ]
+        del session._all_token_ids[num_computed_tokens:]
         session._output_token_ids.clear()
-        session.num_computed_tokens = old_prompt_len
+        assert session.prompt_token_ids is not None
+        # Extend prompt with kept output tokens.
+        session.prompt_token_ids.extend(kept_output_tokens)
 
         if update.mm_features:
             base = session.num_tokens
@@ -902,23 +897,12 @@ class Scheduler(SchedulerInterface):
             session.mm_features.extend(update.mm_features)
 
         session._all_token_ids.extend(update.prompt_token_ids or ())
-        if session.prompt_token_ids is None:
-            session.prompt_token_ids = []
         session.prompt_token_ids.extend(update.prompt_token_ids or ())
         # Update block hashes for the new tokens
         # (mirrors Request.append_output_token_ids)
         if session.get_hash_new_full_blocks is not None:
             session.block_hashes.extend(session.get_hash_new_full_blocks())
-        if session.prompt_embeds is not None and update.prompt_embeds is not None:
-            session.prompt_embeds = torch.cat(
-                (session.prompt_embeds, update.prompt_embeds)
-            )
-        elif update.prompt_embeds is not None:
-            session.prompt_embeds = update.prompt_embeds
-        session.num_prompt_tokens = length_from_prompt_token_ids_or_embeds(
-            session.prompt_token_ids, session.prompt_embeds
-        )
-        session.max_tokens = session.num_output_tokens + update.max_tokens
+        session.num_prompt_tokens = len(session.prompt_token_ids)
         session.arrival_time = update.arrival_time
         session.sampling_params = update.sampling_params
         if session.status == RequestStatus.WAITING_FOR_STREAMING_REQ:

@@ -296,17 +296,19 @@ class TestStreamingScheduler(unittest.TestCase):
         update = StreamingUpdate.from_request(new_request)
         scheduler._update_request_as_session(session, update)
 
-        # _update_request_as_session discards ALL output tokens (they've been
-        # returned to user and shouldn't be part of next sub-request's context).
-        # Only prompt tokens remain, plus new prompt tokens are appended.
-        assert session._all_token_ids == [1, 2, 3, 4, 5]
-        assert session.prompt_token_ids == [1, 2, 3, 4, 5]
+        # _update_request_as_session keeps computed output tokens (they become
+        # part of the prompt) and only discards the final uncomputed sampled
+        # token. Computed output token 10 is kept, uncomputed token 11 is
+        # discarded.
+        assert session._all_token_ids == [1, 2, 3, 10, 4, 5]
+        assert session.prompt_token_ids == [1, 2, 3, 10, 4, 5]
         # Output tokens list is cleared
         assert session._output_token_ids == []
-        # num_computed_tokens is reset to the prompt length (KV cache still valid)
-        assert session.num_computed_tokens == 3
+        # num_computed_tokens is unchanged (KV cache still valid for computed
+        # tokens)
+        assert session.num_computed_tokens == 4
         # Verify that the next schedule will only process the new prompt tokens
-        # num_new_tokens = num_tokens - num_computed_tokens = 5 - 3 = 2
+        # num_new_tokens = num_tokens - num_computed_tokens = 6 - 4 = 2
         num_new_tokens = session.num_tokens - session.num_computed_tokens
         assert num_new_tokens == 2
 
@@ -533,10 +535,10 @@ class TestStreamingScheduler(unittest.TestCase):
         assert (
             scheduler_output_cycle3.num_scheduled_tokens[session.request_id] == 2
         )  # Only new tokens [4, 5]
-        # All output tokens are discarded from _all_token_ids (they've been
-        # returned to user and shouldn't be part of next sub-request's context)
-        assert session._all_token_ids == [1, 2, 3, 4, 5]
-        assert session.prompt_token_ids == [1, 2, 3, 4, 5]  # Only prompts
+        # Computed output tokens are kept (become part of prompt), only the
+        # final uncomputed sampled token (STOP_TOKEN) is discarded
+        assert session._all_token_ids == [1, 2, 3, 10, 4, 5]
+        assert session.prompt_token_ids == [1, 2, 3, 10, 4, 5]  # Includes kept output
         assert session._output_token_ids == []  # Output tokens are cleared
 
         # Step 14: Model runner caches NEW prompt_token_ids reference
