@@ -954,8 +954,6 @@ class InputBatch:
             if prev_index is None:
                 continue
             req_output_token_ids = output_token_ids[index]
-
-            # Synchronize on first use.
             if sampled_token_ids is None:
                 assert self.async_copy_ready_event is not None
                 self.async_copy_ready_event.synchronize()

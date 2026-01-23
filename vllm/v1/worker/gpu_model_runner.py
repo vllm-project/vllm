@@ -607,7 +607,6 @@ class GPUModelRunner(
             self.mrope_positions = self._make_buffer(
                 (3, self.max_num_tokens + 1), dtype=torch.int64
             )
-            # Per-request mrope_position_delta for GPU-based position computation
             self.mrope_position_delta = self._make_buffer(
                 self.max_num_reqs, dtype=torch.int64
             )
