@@ -29,7 +29,10 @@ class CpuCommunicator(DeviceCommunicatorBase):
         self.dist_module = torch.distributed
 
         if (
-            (current_platform.get_cpu_architecture() == CpuArchEnum.X86)
+            (
+                current_platform.get_cpu_architecture() == CpuArchEnum.X86
+                or current_platform.get_cpu_architecture() == CpuArchEnum.ARM
+            )
             and hasattr(torch.ops._C, "init_shm_manager")
             and (unique_name.startswith("tp") or unique_name.startswith("pp"))
         ):
@@ -134,7 +137,10 @@ class CpuCommunicator(DeviceCommunicatorBase):
         topk_ids: torch.Tensor,
         is_sequence_parallel: bool = False,
         extra_tensors: list[torch.Tensor] | None = None,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
+    ) -> (
+        tuple[torch.Tensor, torch.Tensor, torch.Tensor]
+        | tuple[torch.Tensor, torch.Tensor, torch.Tensor, list[torch.Tensor]]
+    ):
         assert self.all2all_manager is not None
         return self.all2all_manager.dispatch(
             hidden_states,
