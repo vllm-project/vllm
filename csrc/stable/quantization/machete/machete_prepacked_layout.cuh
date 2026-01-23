@@ -1,9 +1,5 @@
 #pragma once
 
-#include <ATen/cuda/CUDAContext.h>
-#include <c10/cuda/CUDAGuard.h>
-#include <torch/all.h>
-
 // clang-format off
 // The cutlass include order matters (annoyingly)
 

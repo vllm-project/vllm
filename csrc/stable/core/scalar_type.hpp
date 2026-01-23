@@ -1,7 +1,13 @@
 #pragma once
 
-// For TORCH_CHECK
-#include <torch/library.h>
+#include <cstdint>
+#include <string>
+#include <tuple>
+#include <utility>
+#include <variant>
+
+// For STD_TORCH_CHECK (stable ABI equivalent of TORCH_CHECK)
+#include <torch/headeronly/util/shim_utils.h>
 
 namespace vllm {
 
@@ -45,7 +51,7 @@ class ScalarType {
   // IEEE 754 compliant floating point type
   static constexpr ScalarType float_IEEE754(uint8_t exponent,
                                             uint8_t mantissa) {
-    TORCH_CHECK(mantissa > 0 && exponent > 0);
+    STD_TORCH_CHECK(mantissa > 0 && exponent > 0);
     return ScalarType(exponent, mantissa, true, 0, false, NAN_IEEE_754);
   }
 
@@ -53,11 +59,12 @@ class ScalarType {
   static constexpr ScalarType float_(uint8_t exponent, uint8_t mantissa,
                                      bool finite_values_only,
                                      NanRepr nan_repr) {
-    TORCH_CHECK(nan_repr < NAN_REPR_ID_MAX, "Invalid NanRepr");
-    TORCH_CHECK(mantissa > 0 && exponent > 0);
-    TORCH_CHECK(nan_repr != NAN_IEEE_754,
-                "use `float_IEEE754` constructor for floating point types that "
-                "follow IEEE 754 conventions");
+    STD_TORCH_CHECK(nan_repr < NAN_REPR_ID_MAX, "Invalid NanRepr");
+    STD_TORCH_CHECK(mantissa > 0 && exponent > 0);
+    STD_TORCH_CHECK(
+        nan_repr != NAN_IEEE_754,
+        "use `float_IEEE754` constructor for floating point types that "
+        "follow IEEE 754 conventions");
     return ScalarType(exponent, mantissa, true, 0, finite_values_only,
                       nan_repr);
   }
@@ -176,8 +183,8 @@ class ScalarType {
 
  private:
   double _floating_point_max() const {
-    TORCH_CHECK(mantissa <= 52 && exponent <= 11,
-                "Cannot represent max/min as a double for type ", str());
+    STD_TORCH_CHECK(mantissa <= 52 && exponent <= 11,
+                    "Cannot represent max/min as a double for type ", str());
 
     uint64_t max_mantissa = (uint64_t(1) << mantissa) - 1;
     if (nan_repr == NAN_EXTD_RANGE_MAX_MIN) {
@@ -186,8 +193,8 @@ class ScalarType {
 
     uint64_t max_exponent = (uint64_t(1) << exponent) - 2;
     if (nan_repr == NAN_EXTD_RANGE_MAX_MIN || nan_repr == NAN_NONE) {
-      TORCH_CHECK(exponent < 11,
-                  "Cannot represent max/min as a double for type ", str());
+      STD_TORCH_CHECK(exponent < 11,
+                      "Cannot represent max/min as a double for type ", str());
       max_exponent += 1;
     }
 
@@ -216,16 +223,17 @@ class ScalarType {
     if (is_floating_point()) {
       return {_floating_point_max()};
     } else {
-      TORCH_CHECK(size_bits() < 64 || size_bits() == 64 && is_signed(),
-                  "Cannot represent max as a int64_t");
+      STD_TORCH_CHECK(size_bits() < 64 || size_bits() == 64 && is_signed(),
+                      "Cannot represent max as a int64_t");
       return {(int64_t(1) << mantissa) - 1};
     }
   }
 
   constexpr std::variant<int64_t, double> _raw_min() const {
     if (is_floating_point()) {
-      TORCH_CHECK(is_signed(),
-                  "We currently assume all floating point types are signed");
+      STD_TORCH_CHECK(
+          is_signed(),
+          "We currently assume all floating point types are signed");
       constexpr uint64_t sign_bit_double = (uint64_t(1) << 63);
 
       double max = _floating_point_max();
@@ -233,8 +241,8 @@ class ScalarType {
       uint64_t min_raw = max_raw | sign_bit_double;
       return {*reinterpret_cast<double*>(&min_raw)};
     } else {
-      TORCH_CHECK(!is_signed() || size_bits() <= 64,
-                  "Cannot represent min as a int64_t");
+      STD_TORCH_CHECK(!is_signed() || size_bits() <= 64,
+                      "Cannot represent min as a int64_t");
       if (is_signed()) {
         // set the top bit to 1 (i.e. INT64_MIN) and the rest to 0
         // then perform an arithmetic shift right to set all the bits above

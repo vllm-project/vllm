@@ -2,7 +2,7 @@
 
 #include "machete_mm_kernel.cuh"
 #include "stable/cutlass_extensions/cute_utils.cuh"
-#include "cutlass_extensions/torch_utils.hpp"
+#include "stable/cutlass_extensions/torch_utils.hpp"
 
 namespace machete {
 
@@ -60,8 +60,8 @@ static void prepack_B_template(
   auto ilvd_NKbNbKL_to_offset =
       PrepackedLayoutB::ilvd_NKbNbKL_to_offset(shape(B_layout));
 
-  TORCH_CHECK(size<0>(B_layout) % size<0>(TileShapeNKL{}) == 0);
-  TORCH_CHECK(size<1>(B_layout) % size<1>(TileShapeNKL{}) == 0);
+  STD_TORCH_CHECK(size<0>(B_layout) % size<0>(TileShapeNKL{}) == 0);
+  STD_TORCH_CHECK(size<1>(B_layout) % size<1>(TileShapeNKL{}) == 0);
 
   auto N_tiles = size<0>(B_layout) / size<0>(TileShapeNKL{});
   auto K_tiles = size<1>(B_layout) / size<1>(TileShapeNKL{});

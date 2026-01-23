@@ -51,37 +51,9 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   // https://docs.google.com/document/d/18fBMPuOJ0fY5ZQ6YyrHUppw9FA332CpNtgB6SOIgyuA
 
   // Machete (Dense) Optimized Mixed Precision GEMM for Hopper.
-  ops.def(
-      "machete_supported_schedules("
-      "   ScalarType a_type,"
-      "   int b_type,"
-      "   ScalarType? maybe_group_scales_type,"
-      "   ScalarType? maybe_group_zeros_type,"
-      "   ScalarType? maybe_channel_scales_type,"
-      "   ScalarType? maybe_token_scales_type,"
-      "   ScalarType? maybe_out_type"
-      ") -> str[]");
-  ops.def(
-      "machete_mm("
-      "   Tensor A,"
-      "   Tensor B,"
-      "   int b_type,"
-      "   ScalarType? out_type,"
-      "   Tensor? group_scales,"
-      "   Tensor? group_zeros,"
-      "   int?    group_size,"
-      "   Tensor? channel_scales,"
-      "   Tensor? token_scales,"
-      "   str?    schedule"
-      ") -> Tensor");
-  ops.def(
-      "machete_prepack_B("
-      "   Tensor B,"
-      "   ScalarType a_type,"
-      "   int b_type,"
-      "   ScalarType? group_scales_type"
-      ") -> Tensor");
-  // conditionally compiled so impl registration is in source file
+  // MIGRATED TO STABLE ABI: Machete ops have been migrated to
+  // csrc/stable/quantization/machete/. Schema definitions are in
+  // torch_bindings_stable.cpp, implementations in machete_pytorch.cu.
 
   // Marlin Optimized Quantized GEMM (supports GPTQ, AWQ, FP8, NVFP4, MXFP4).
   ops.def(

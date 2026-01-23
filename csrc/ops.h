@@ -5,7 +5,7 @@
 #include <torch/library.h>
 #include <torch/torch.h>
 
-#include "core/scalar_type.hpp"
+#include "stable/core/scalar_type.hpp"
 
 #include <vector>
 

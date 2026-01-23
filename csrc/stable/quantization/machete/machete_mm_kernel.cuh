@@ -1,8 +1,7 @@
 #pragma once
 
-#include <ATen/cuda/CUDAContext.h>
-#include <c10/cuda/CUDAGuard.h>
-#include <torch/all.h>
+#include <torch/csrc/stable/tensor.h>
+#include <torch/headeronly/core/ScalarType.h>
 
 // clang-format off
 // The cutlass include order matters (annoyingly)
@@ -21,8 +20,8 @@
 
 #include "stable/cutlass_extensions/cute_utils.cuh"
 #include "cutlass_extensions/vllm_numeric_conversion.cuh"
-#include "cutlass_extensions/epilogue/scaled_mm_epilogues_c3x.hpp"
-#include "cutlass_extensions/torch_utils.hpp"
+#include "stable/cutlass_extensions/epilogue/scaled_mm_epilogues_c3x.hpp"
+#include "stable/cutlass_extensions/torch_utils.hpp"
 #include "machete_collective_builder.cuh"
 #include "machete_prepacked_layout.cuh"
 #include "machete_interleaving_utils.cuh"
@@ -175,19 +174,23 @@ struct MacheteKernelTemplate {
 
   static Arguments create_arguments(
       cudaStream_t stream,
-      torch::Tensor const& A,  // MxK matrix
-      torch::Tensor const& B,  // KxN prepacked matrix
-      torch::Tensor& D,        // MxN matrix
-      std::optional<torch::Tensor> const& maybe_g_scales,  // scale_KxN matrix
-      std::optional<torch::Tensor> const& maybe_g_zeros,   // scale_KxN matrix
+      torch::stable::Tensor const& A,  // MxK matrix
+      torch::stable::Tensor const& B,  // KxN prepacked matrix
+      torch::stable::Tensor& D,        // MxN matrix
+      std::optional<torch::stable::Tensor> const&
+          maybe_g_scales,  // scale_KxN matrix
+      std::optional<torch::stable::Tensor> const&
+          maybe_g_zeros,  // scale_KxN matrix
       std::optional<int64_t> maybe_group_size,
-      std::optional<torch::Tensor> const& maybe_ch_scales,   // len N vector
-      std::optional<torch::Tensor> const& maybe_tok_scales)  // len M vector
+      std::optional<torch::stable::Tensor> const&
+          maybe_ch_scales,  // len N vector
+      std::optional<torch::stable::Tensor> const&
+          maybe_tok_scales)  // len M vector
   {
     static_assert(!with_group_zeropoints || with_group_scales);
 
     int M = A.size(0), N = B.size(1), K = A.size(1);
-    TORCH_CHECK(D.size(0) == M && D.size(1) == N);
+    STD_TORCH_CHECK(D.size(0) == M && D.size(1) == N);
 
     auto layout_A = make_cute_layout<StrideA>(A, "A");
     auto layout_D = make_cute_layout<StrideD>(D, "D");
@@ -216,29 +219,29 @@ struct MacheteKernelTemplate {
         maybe_group_size == -1 ? K : maybe_group_size.value_or(K);
     int const scale_k = (K + group_size - 1) / group_size;
 
-    TORCH_CHECK(size<0>(layout_A) == M && size<1>(layout_A) == K);
-    TORCH_CHECK(size<0>(layout_D) == M && size<1>(layout_D) == N);
+    STD_TORCH_CHECK(size<0>(layout_A) == M && size<1>(layout_A) == K);
+    STD_TORCH_CHECK(size<0>(layout_D) == M && size<1>(layout_D) == N);
 
     if constexpr (with_group_scales) {
-      TORCH_CHECK(S_group_ptr && layout_S_group);
-      TORCH_CHECK((size<0>(*layout_S_group) == scale_k &&
-                   size<1>(*layout_S_group) == N));
+      STD_TORCH_CHECK(S_group_ptr && layout_S_group);
+      STD_TORCH_CHECK((size<0>(*layout_S_group) == scale_k &&
+                       size<1>(*layout_S_group) == N));
     } else {
-      TORCH_CHECK(!S_group_ptr, "Scales not supported");
+      STD_TORCH_CHECK(!S_group_ptr, "Scales not supported");
     }
 
     if constexpr (with_group_zeropoints) {
-      TORCH_CHECK(Z_group_ptr && layout_Z_group);
-      TORCH_CHECK((size<0>(*layout_Z_group) == scale_k &&
-                   size<1>(*layout_Z_group) == N));
-      TORCH_CHECK(layout_S_group && *layout_Z_group == *layout_S_group,
-                  "Scales and zeros must have the same layout");
+      STD_TORCH_CHECK(Z_group_ptr && layout_Z_group);
+      STD_TORCH_CHECK((size<0>(*layout_Z_group) == scale_k &&
+                       size<1>(*layout_Z_group) == N));
+      STD_TORCH_CHECK(layout_S_group && *layout_Z_group == *layout_S_group,
+                      "Scales and zeros must have the same layout");
     } else {
-      TORCH_CHECK(!Z_group_ptr, "Zeropoints not supported");
+      STD_TORCH_CHECK(!Z_group_ptr, "Zeropoints not supported");
     }
 
     if constexpr (with_channel_scales || with_token_scales) {
-      TORCH_CHECK(
+      STD_TORCH_CHECK(
           (maybe_ch_scales->numel() == N || maybe_ch_scales->numel() == 1) &&
           (maybe_tok_scales->numel() == M || maybe_tok_scales->numel() == 1));
     }
@@ -298,11 +301,12 @@ struct MacheteKernelTemplate {
     Gemm gemm_op;
 
     cutlass::Status status = gemm_op.initialize(args, workspace, stream);
-    TORCH_CHECK(status == cutlass::Status::kSuccess,
-                "Machete kernel failed to initialize workspace");
+    STD_TORCH_CHECK(status == cutlass::Status::kSuccess,
+                    "Machete kernel failed to initialize workspace");
 
     status = gemm_op.run(stream);
-    TORCH_CHECK(status == cutlass::Status::kSuccess, "Machete kernel failed");
+    STD_TORCH_CHECK(status == cutlass::Status::kSuccess,
+                    "Machete kernel failed");
   }
 };
 

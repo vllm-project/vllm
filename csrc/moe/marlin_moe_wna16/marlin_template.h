@@ -27,7 +27,7 @@
 #include "quantization/marlin/marlin_dtypes.cuh"
 #include "quantization/marlin/dequant.h"
 #include "quantization/marlin/marlin_mma.h"
-#include "core/scalar_type.hpp"
+#include "stable/core/scalar_type.hpp"
 
 #define STATIC_ASSERT_SCALAR_TYPE_VALID(scalar_t)               \
   static_assert(std::is_same<scalar_t, half>::value ||          \

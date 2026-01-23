@@ -21,8 +21,8 @@ from vllm_cutlass_library_extension import (
     VLLMDataType,
     VLLMDataTypeNames,
     VLLMDataTypeSize,
+    VLLMDataTypeStableTorchDataTypeTag,
     VLLMDataTypeTag,
-    VLLMDataTypeTorchDataTypeTag,
     VLLMDataTypeVLLMScalarTypeTag,
     VLLMKernelScheduleTag,
 )
@@ -36,13 +36,15 @@ DISPATCH_TEMPLATE = """
 
 namespace machete {
 
+using torch::headeronly::toString;
+
 {% for impl_config in impl_configs %}
 {% set type_sig = gen_type_sig(impl_config.types) -%}
 {% for s in impl_config.schedules %}
-extern torch::Tensor impl_{{type_sig}}_sch_{{gen_sch_sig(s)}}(MMArgs);
+extern torch::stable::Tensor impl_{{type_sig}}_sch_{{gen_sch_sig(s)}}(MMArgs);
 {%- endfor %}
 
-torch::Tensor mm_dispatch_{{type_sig}}(MMArgs args) {
+torch::stable::Tensor mm_dispatch_{{type_sig}}(MMArgs args) {
   [[maybe_unused]] auto M = args.A.size(0);
   [[maybe_unused]] auto N = args.B.size(1);
   [[maybe_unused]] auto K = args.A.size(1);
@@ -59,14 +61,14 @@ torch::Tensor mm_dispatch_{{type_sig}}(MMArgs args) {
   if (*args.maybe_schedule == "{{ gen_sch_sig(s) }}")
     return impl_{{type_sig}}_sch_{{ gen_sch_sig(s) }}(args);
   {%- endfor %}
-  TORCH_CHECK_NOT_IMPLEMENTED(false, "machete_gemm(..) is not implemented for "
+  STD_TORCH_CHECK_NOT_IMPLEMENTED(false, "machete_gemm(..) is not implemented for "
                                      "schedule = ", *args.maybe_schedule);
 }
 {%- endfor %}
 
 
-static inline std::optional<at::ScalarType> maybe_scalartype(
-    std::optional<at::Tensor> const& t) {
+static inline std::optional<torch::headeronly::ScalarType> maybe_scalartype(
+    std::optional<torch::stable::Tensor> const& t) {
     if (!t) {
       return std::nullopt;
     } else {
@@ -74,7 +76,7 @@ static inline std::optional<at::ScalarType> maybe_scalartype(
     };
 }
 
-torch::Tensor mm_dispatch(MMArgs args) {
+torch::stable::Tensor mm_dispatch(MMArgs args) {
   auto out_type = args.maybe_out_type.value_or(args.A.scalar_type());
   auto a_type = args.A.scalar_type();
   auto maybe_g_scales_type = maybe_scalartype(args.maybe_group_scales);
@@ -86,26 +88,26 @@ torch::Tensor mm_dispatch(MMArgs args) {
   {% set t = impl_config.types -%}
   {% set type_sig = gen_type_sig(t) -%}
   if (args.b_type == {{VLLMScalarTypeTag[t.b]}}
-      && a_type == {{TorchTypeTag[t.a]}}
-      && out_type == {{TorchTypeTag[t.out]}}
+      && a_type == {{StableTorchTypeTag[t.a]}}
+      && out_type == {{StableTorchTypeTag[t.out]}}
       && {%if t.b_group_scale != void -%}
-      maybe_g_scales_type == {{TorchTypeTag[t.b_group_scale]}}
+      maybe_g_scales_type == {{StableTorchTypeTag[t.b_group_scale]}}
       {%- else %}!maybe_g_scales_type{%endif%}
       && {%if t.b_group_zeropoint != void -%}
-      maybe_g_zeros_type == {{TorchTypeTag[t.b_group_zeropoint]}}
+      maybe_g_zeros_type == {{StableTorchTypeTag[t.b_group_zeropoint]}}
       {%- else %}!maybe_g_zeros_type{%endif%}
       && {%if t.b_channel_scale != void -%}
-      maybe_ch_scales_type == {{TorchTypeTag[t.b_channel_scale]}}
+      maybe_ch_scales_type == {{StableTorchTypeTag[t.b_channel_scale]}}
       {%- else %}!maybe_ch_scales_type{%endif%}
       && {%if t.a_token_scale != void -%}
-      maybe_tok_scales_type == {{TorchTypeTag[t.a_token_scale]}}
+      maybe_tok_scales_type == {{StableTorchTypeTag[t.a_token_scale]}}
       {%- else %}!maybe_tok_scales_type{%endif%}
   ) {
       return mm_dispatch_{{type_sig}}(args);
   }
   {%- endfor %}
   
-  TORCH_CHECK_NOT_IMPLEMENTED(
+  STD_TORCH_CHECK_NOT_IMPLEMENTED(
     false, "machete_mm(..) is not implemented for "
     "a_type=", args.A.scalar_type(),
     ", b_type=", args.b_type.str(),
@@ -134,13 +136,13 @@ std::vector<std::string> supported_schedules_dispatch(
     {% set t = impl_config.types -%}
     {% set schs = impl_config.schedules -%}
     if (args.b_type == {{VLLMScalarTypeTag[t.b]}}
-        && args.a_type == {{TorchTypeTag[t.a]}}
-        && out_type == {{TorchTypeTag[t.out]}}
+        && args.a_type == {{StableTorchTypeTag[t.a]}}
+        && out_type == {{StableTorchTypeTag[t.out]}}
         && {%if t.b_group_scale != void -%}
-        args.maybe_group_scales_type == {{TorchTypeTag[t.b_group_scale]}}
+        args.maybe_group_scales_type == {{StableTorchTypeTag[t.b_group_scale]}}
         {%- else %}!args.maybe_group_scales_type{%endif%}
         && {%if t.b_group_zeropoint != void-%}
-        args.maybe_group_zeros_type == {{TorchTypeTag[t.b_group_zeropoint]}}
+        args.maybe_group_zeros_type == {{StableTorchTypeTag[t.b_group_zeropoint]}}
         {%- else %}!args.maybe_group_zeros_type{%endif%}
     ) {
         return {
@@ -197,7 +199,7 @@ using Kernel_{{type_sig}} = MacheteKernelTemplate<
 
 {% for sch in schs %}
 {% set sch_sig = gen_sch_sig(sch) -%}
-torch::Tensor 
+torch::stable::Tensor 
 impl_{{type_sig}}_sch_{{sch_sig}}(MMArgs args) {
   return run_impl<Kernel_{{type_sig}}<sch_{{sch_sig}}>>(args);
 }
@@ -209,16 +211,19 @@ impl_{{type_sig}}_sch_{{sch_sig}}(MMArgs args) {
 
 PREPACK_TEMPLATE = """
 #include "../machete_prepack_launcher.cuh"
+#include <torch/headeronly/core/ScalarType.h>
 
 namespace machete {
 
-torch::Tensor prepack_B_dispatch(PrepackBArgs args) {
+using torch::headeronly::toString;
+
+torch::stable::Tensor prepack_B_dispatch(PrepackBArgs args) {
   auto convert_type = args.maybe_group_scales_type.value_or(args.a_type);
   {%- for t in types %}
   {% set b_type = unsigned_type_with_bitwidth(t.b_num_bits) %}
-  if (args.a_type == {{TorchTypeTag[t.a]}}
+  if (args.a_type == {{StableTorchTypeTag[t.a]}}
       && args.b_type.size_bits() == {{t.b_num_bits}} 
-      && convert_type == {{TorchTypeTag[t.convert]}}) {
+      && convert_type == {{StableTorchTypeTag[t.convert]}}) {
     return prepack_impl<
       PrepackedLayoutBTemplate<
         {{DataTypeTag[t.a]}}, // ElementA
@@ -231,7 +236,7 @@ torch::Tensor prepack_B_dispatch(PrepackBArgs args) {
   }
   {%- endfor %}
   
-  TORCH_CHECK_NOT_IMPLEMENTED(false, 
+  STD_TORCH_CHECK_NOT_IMPLEMENTED(false, 
     "prepack_B_dispatch(..) is not implemented for "
     "atype = ", args.a_type,
     ", b_type = ", args.b_type.str(),
@@ -381,7 +386,7 @@ template_globals = {
     "void": DataType.void,
     "DataTypeTag": VLLMDataTypeTag,
     "VLLMScalarTypeTag": VLLMDataTypeVLLMScalarTypeTag,
-    "TorchTypeTag": VLLMDataTypeTorchDataTypeTag,
+    "StableTorchTypeTag": VLLMDataTypeStableTorchDataTypeTag,
     "KernelScheduleTag": VLLMKernelScheduleTag,
     "EpilogueScheduleTag": EpilogueScheduleTag,
     "TileSchedulerTag": TileSchedulerTag,
