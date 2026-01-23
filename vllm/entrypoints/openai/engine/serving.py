@@ -75,6 +75,8 @@ from vllm.entrypoints.pooling.embed.protocol import (
 )
 from vllm.entrypoints.pooling.pooling.protocol import (
     IOProcessorRequest,
+    PoolingChatRequest,
+    PoolingCompletionRequest,
     PoolingResponse,
 )
 from vllm.entrypoints.pooling.score.protocol import (
@@ -151,19 +153,21 @@ class RendererChatRequest(RendererRequest, Protocol):
 
 CompletionLikeRequest: TypeAlias = (
     CompletionRequest
+    | TokenizeCompletionRequest
     | DetokenizeRequest
     | EmbeddingCompletionRequest
-    | RerankRequest
     | ClassificationCompletionRequest
+    | RerankRequest
     | ScoreRequest
-    | TokenizeCompletionRequest
+    | PoolingCompletionRequest
 )
 
 ChatLikeRequest: TypeAlias = (
     ChatCompletionRequest
-    | EmbeddingChatRequest
     | TokenizeChatRequest
+    | EmbeddingChatRequest
     | ClassificationChatRequest
+    | PoolingChatRequest
 )
 
 SpeechToTextRequest: TypeAlias = TranscriptionRequest | TranslationRequest

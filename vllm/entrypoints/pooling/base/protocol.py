@@ -6,6 +6,8 @@ from typing import Annotated, Any
 
 from pydantic import Field, model_validator
 
+from vllm import PoolingParams
+from vllm.config.pooler import get_use_activation
 from vllm.entrypoints.chat_utils import (
     ChatCompletionMessageParam,
     ChatTemplateContentFormatOption,
@@ -13,13 +15,17 @@ from vllm.entrypoints.chat_utils import (
 from vllm.entrypoints.openai.engine.protocol import OpenAIBaseModel
 from vllm.renderers import ChatParams, merge_kwargs
 from vllm.utils import random_uuid
+from vllm.utils.serial_utils import EmbedDType, EncodingFormat, Endianness
 
 
 class PoolingBasicRequestMixin(OpenAIBaseModel):
+    # --8<-- [start:pooling-common-params]
     model: str | None = None
     user: str | None = None
-    truncate_prompt_tokens: Annotated[int, Field(ge=-1)] | None = None
+    # --8<-- [end:pooling-common-params]
 
+    # --8<-- [start:pooling-common-extra-params]
+    truncate_prompt_tokens: Annotated[int, Field(ge=-1)] | None = None
     request_id: str = Field(
         default_factory=random_uuid,
         description=(
@@ -28,7 +34,6 @@ class PoolingBasicRequestMixin(OpenAIBaseModel):
             "through out the inference process and return in response."
         ),
     )
-
     priority: int = Field(
         default=0,
         description=(
@@ -37,11 +42,15 @@ class PoolingBasicRequestMixin(OpenAIBaseModel):
             "if the served model does not use priority scheduling."
         ),
     )
+    # --8<-- [end:pooling-common-extra-params]
 
 
 class CompletionRequestMixin(OpenAIBaseModel):
+    # --8<-- [start:completion-params]
     input: list[int] | list[list[int]] | str | list[str]
+    # --8<-- [end:completion-params]
 
+    # --8<-- [start:completion-extra-params]
     add_special_tokens: bool = Field(
         default=True,
         description=(
@@ -49,11 +58,15 @@ class CompletionRequestMixin(OpenAIBaseModel):
             "the prompt."
         ),
     )
+    # --8<-- [end:completion-extra-params]
 
 
 class ChatRequestMixin(OpenAIBaseModel):
+    # --8<-- [start:chat-params]
     messages: list[ChatCompletionMessageParam]
+    # --8<-- [end:chat-params]
 
+    # --8<-- [start:chat-extra-params]
     add_generation_prompt: bool = Field(
         default=False,
         description=(
@@ -62,7 +75,6 @@ class ChatRequestMixin(OpenAIBaseModel):
             "model."
         ),
     )
-
     continue_final_message: bool = Field(
         default=False,
         description=(
@@ -73,7 +85,6 @@ class ChatRequestMixin(OpenAIBaseModel):
             "Cannot be used at the same time as `add_generation_prompt`."
         ),
     )
-
     add_special_tokens: bool = Field(
         default=False,
         description=(
@@ -84,7 +95,6 @@ class ChatRequestMixin(OpenAIBaseModel):
             "default)."
         ),
     )
-
     chat_template: str | None = Field(
         default=None,
         description=(
@@ -94,7 +104,6 @@ class ChatRequestMixin(OpenAIBaseModel):
             "does not define one."
         ),
     )
-
     chat_template_kwargs: dict[str, Any] | None = Field(
         default=None,
         description=(
@@ -102,6 +111,7 @@ class ChatRequestMixin(OpenAIBaseModel):
             "Will be accessible by the chat template."
         ),
     )
+    # --8<-- [end:chat-extra-params]
 
     @model_validator(mode="before")
     @classmethod
@@ -128,4 +138,73 @@ class ChatRequestMixin(OpenAIBaseModel):
                     continue_final_message=self.continue_final_message,
                 ),
             ),
+        )
+
+
+class EncodingRequestMixin(OpenAIBaseModel):
+    # --8<-- [start:encoding-params]
+    encoding_format: EncodingFormat = "float"
+    # --8<-- [end:encoding-params]
+
+    # --8<-- [start:encoding-extra-params]
+    embed_dtype: EmbedDType = Field(
+        default="float32",
+        description=(
+            "What dtype to use for encoding. Default to using float32 for base64 "
+            "encoding to match the OpenAI python client behavior. "
+            "This parameter will affect base64 and binary_response."
+        ),
+    )
+    endianness: Endianness = Field(
+        default="native",
+        description=(
+            "What endianness to use for encoding. Default to using native for "
+            "base64 encoding to match the OpenAI python client behavior."
+            "This parameter will affect base64 and binary_response."
+        ),
+    )
+    # --8<-- [end:encoding-extra-params]
+
+
+class EmbedRequestMixin(EncodingRequestMixin):
+    # --8<-- [start:embed-params]
+    dimensions: int | None = None
+    # --8<-- [end:embed-params]
+
+    # --8<-- [start:embed-extra-params]
+    normalize: bool | None = Field(
+        default=None,
+        description="Whether to normalize the embeddings outputs. Default is True.",
+    )
+    # --8<-- [end:embed-extra-params]
+
+    def to_pooling_params(self):
+        return PoolingParams(
+            dimensions=self.dimensions,
+            use_activation=self.normalize,
+            truncate_prompt_tokens=getattr(self, "truncate_prompt_tokens", None),
+        )
+
+
+class ClassifyRequestMixin(OpenAIBaseModel):
+    # --8<-- [start:classify-extra-params]
+    softmax: bool | None = Field(
+        default=None,
+        description="softmax will be deprecated, please use use_activation instead.",
+    )
+    activation: bool | None = Field(
+        default=None,
+        description="activation will be deprecated, please use use_activation instead.",
+    )
+    use_activation: bool | None = Field(
+        default=None,
+        description="Whether to use activation for classification outputs. "
+        "Default is True.",
+    )
+    # --8<-- [end:classify-extra-params]
+
+    def to_pooling_params(self):
+        return PoolingParams(
+            use_activation=get_use_activation(self),
+            truncate_prompt_tokens=getattr(self, "truncate_prompt_tokens", None),
         )

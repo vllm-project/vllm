@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import time
-from typing import Generic, TypeAlias, TypeVar
+from typing import Any, Generic, TypeAlias, TypeVar
 
 from pydantic import Field
 
@@ -9,33 +9,26 @@ from vllm import PoolingParams
 from vllm.config import ModelConfig
 from vllm.config.pooler import get_use_activation
 from vllm.entrypoints.openai.engine.protocol import OpenAIBaseModel, UsageInfo
-from vllm.entrypoints.pooling.base.protocol import PoolingBasicRequestMixin
-from vllm.entrypoints.pooling.embed.protocol import (
-    EmbeddingChatRequest,
-    EmbeddingCompletionRequest,
+from vllm.entrypoints.pooling.base.protocol import (
+    ChatRequestMixin,
+    ClassifyRequestMixin,
+    CompletionRequestMixin,
+    EmbedRequestMixin,
+    EncodingRequestMixin,
+    PoolingBasicRequestMixin,
 )
 from vllm.renderers import TokenizeParams
 from vllm.tasks import PoolingTask
 from vllm.utils import random_uuid
-from vllm.utils.serial_utils import EmbedDType, EncodingFormat, Endianness
 
 
-class PoolingCompletionRequest(EmbeddingCompletionRequest):
+class PoolingCompletionRequest(
+    PoolingBasicRequestMixin,
+    CompletionRequestMixin,
+    EmbedRequestMixin,
+    ClassifyRequestMixin,
+):
     task: PoolingTask | None = None
-    softmax: bool | None = Field(
-        default=None,
-        description="softmax will be deprecated, please use use_activation instead.",
-    )
-    activation: bool | None = Field(
-        default=None,
-        description="activation will be deprecated, please use use_activation instead.",
-    )
-    use_activation: bool | None = Field(
-        default=None,
-        description="Whether to use activation for classification outputs. "
-        "If it is a classify or token_classify task, the default is True; "
-        "for other tasks, this value should be None.",
-    )
 
     def build_tok_params(self, model_config: ModelConfig) -> TokenizeParams:
         return TokenizeParams.from_config(
@@ -53,21 +46,14 @@ class PoolingCompletionRequest(EmbeddingCompletionRequest):
         )
 
 
-class PoolingChatRequest(EmbeddingChatRequest):
+class PoolingChatRequest(
+    PoolingBasicRequestMixin, ChatRequestMixin, EmbedRequestMixin, ClassifyRequestMixin
+):
     task: PoolingTask | None = None
-    softmax: bool | None = Field(
+
+    mm_processor_kwargs: dict[str, Any] | None = Field(
         default=None,
-        description="softmax will be deprecated, please use use_activation instead.",
-    )
-    activation: bool | None = Field(
-        default=None,
-        description="activation will be deprecated, please use use_activation instead.",
-    )
-    use_activation: bool | None = Field(
-        default=None,
-        description="Whether to use activation for classification outputs. "
-        "If it is a classify or token_classify task, the default is True; "
-        "for other tasks, this value should be None.",
+        description=("Additional kwargs to pass to the HF processor."),
     )
 
     def build_tok_params(self, model_config: ModelConfig) -> TokenizeParams:
@@ -89,26 +75,9 @@ class PoolingChatRequest(EmbeddingChatRequest):
 T = TypeVar("T")
 
 
-class IOProcessorRequest(PoolingBasicRequestMixin, Generic[T]):
+class IOProcessorRequest(PoolingBasicRequestMixin, EncodingRequestMixin, Generic[T]):
     data: T
     task: PoolingTask = "plugin"
-    encoding_format: EncodingFormat = "float"
-    embed_dtype: EmbedDType = Field(
-        default="float32",
-        description=(
-            "What dtype to use for encoding. Default to using float32 for base64 "
-            "encoding to match the OpenAI python client behavior. "
-            "This parameter will affect base64 and binary_response."
-        ),
-    )
-    endianness: Endianness = Field(
-        default="native",
-        description=(
-            "What endianness to use for encoding. Default to using native for "
-            "base64 encoding to match the OpenAI python client behavior."
-            "This parameter will affect base64 and binary_response."
-        ),
-    )
 
     def to_pooling_params(self):
         return PoolingParams()
