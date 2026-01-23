@@ -76,7 +76,7 @@ def test_chat_image_url_request(server: RemoteOpenAIServer, model_name: str):
             "role": "user",
             "content": [
                 {"type": "text", "text": "Please classify this image."},
-                {"type": "image_url", "image_url": image_url},
+                {"type": "image_url", "image_url": {"url": image_url}},
             ],
         }
     ]
