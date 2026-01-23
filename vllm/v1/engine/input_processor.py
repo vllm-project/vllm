@@ -649,7 +649,11 @@ class InputProcessor:
 
         tokenizer = self.tokenizer
         if tokenizer is not None:
-            max_input_id = max(prompt_ids or (), default=0)
+            # NOTE: Cast to int to handle cases where token IDs may be returned
+            # as strings (transformers >= 5.0).
+            max_input_id = max(
+                (int(x) for x in prompt_ids) if prompt_ids else (), default=0
+            )
 
             # NOTE: tokenizer.max_token_id is the tokenizer's vocab size while
             # self.model_config.get_vocab_size() is the model's vocab size.
