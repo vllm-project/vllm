@@ -44,6 +44,7 @@ from vllm.entrypoints.serve.tokenize.serving import OpenAIServingTokenization
 from vllm.entrypoints.utils import (
     cli_env_setup,
     log_non_default_args,
+    log_version_and_model,
     process_lora_modules,
 )
 from vllm.logger import init_logger
