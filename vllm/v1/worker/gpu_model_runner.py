@@ -3800,8 +3800,6 @@ class GPUModelRunner(
 
         if self.use_async_spec_decode:
             self.valid_sampled_token_count_gpu = valid_sampled_tokens_count
-            num_reqs = valid_sampled_tokens_count.shape[0]
-            self.num_computed_tokens.gpu[:num_reqs] += valid_sampled_tokens_count.int()
         self.input_batch.prev_sampled_token_ids = next_token_ids.unsqueeze(1)
 
     def _get_valid_sampled_token_count(self) -> list[int]:
