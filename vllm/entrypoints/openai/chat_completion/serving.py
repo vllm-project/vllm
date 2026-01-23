@@ -361,9 +361,7 @@ class OpenAIServingChat(OpenAIServing):
         generators: list[AsyncGenerator[RequestOutput, None]] = []
         try:
             for i, engine_prompt in enumerate(engine_prompts):
-                prompt_text, prompt_ids, prompt_embeds = get_prompt_components(
-                    engine_prompt
-                )
+                prompt_text, _, _ = get_prompt_components(engine_prompt)
 
                 # If we are creating sub requests for multiple prompts, ensure that they
                 # have unique request ids.
@@ -374,17 +372,10 @@ class OpenAIServingChat(OpenAIServing):
                 if self.default_sampling_params is None:
                     self.default_sampling_params = {}
 
-                if prompt_ids is not None:
-                    input_length = len(prompt_ids)
-                elif prompt_embeds is not None:
-                    input_length = len(prompt_embeds)
-                else:
-                    raise AssertionError(engine_prompt.keys())
-
                 max_tokens = get_max_tokens(
                     max_model_len=self.max_model_len,
                     request=request,
-                    input_length=input_length,
+                    prompt=engine_prompt,
                     default_sampling_params=self.default_sampling_params,
                 )
 
