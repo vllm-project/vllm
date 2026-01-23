@@ -793,13 +793,13 @@ class LLM:
         )
 
         prompts = renderer.render_completions(prompt_input, prompt_embeds)
-        prompts = renderer.tokenize_prompts(prompts, tok_params)
+        out_prompts = renderer.tokenize_prompts(prompts, tok_params)
 
-        for prompt in prompts:
+        for prompt in out_prompts:
             if mm_processor_kwargs is not None:
                 prompt["mm_processor_kwargs"] = mm_processor_kwargs
 
-        return prompts
+        return out_prompts
 
     def _preprocess_chat(
         self,
@@ -840,7 +840,7 @@ class LLM:
         )
         tok_params = TokenizeParams.from_config(model_config)
 
-        prompts = list[TokensPrompt | EmbedsPrompt]()
+        out_prompts = list[TokensPrompt | EmbedsPrompt]()
         for conversation in conversations:
             _, prompt = renderer.render_messages(conversation, chat_params)
             if mm_processor_kwargs is not None:
@@ -848,9 +848,9 @@ class LLM:
 
             prompt = renderer.tokenize_prompt(prompt, tok_params)
 
-            prompts.append(prompt)
+            out_prompts.append(prompt)
 
-        return prompts
+        return out_prompts
 
     def chat(
         self,
@@ -1585,7 +1585,7 @@ class LLM:
                     f"and lora_request ({len(lora_request)}) must be the same."
                 )
 
-            all_lora_requests = lora_request
+            all_lora_requests: Sequence[LoRARequest | None] = lora_request
         else:
             all_lora_requests = [lora_request] * num_requests
 

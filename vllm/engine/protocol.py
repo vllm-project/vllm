@@ -72,14 +72,9 @@ class EngineClient(ABC):
         lora_request: LoRARequest | None = None,
         trace_headers: Mapping[str, str] | None = None,
         priority: int = 0,
-        truncate_prompt_tokens: int | None = None,
         tokenization_kwargs: dict[str, Any] | None = None,
     ) -> AsyncGenerator[PoolingRequestOutput, None]:
-        """Generate outputs for a request from a pooling model.
-
-        NOTE: truncate_prompt_tokens is deprecated in v0.14.
-        TODO: Remove this argument in v0.15.
-        """
+        """Generate outputs for a request from a pooling model."""
         ...
 
     @abstractmethod
