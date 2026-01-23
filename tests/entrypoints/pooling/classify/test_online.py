@@ -167,7 +167,8 @@ def test_truncate_prompt_tokens(server: RemoteOpenAIServer, model_name: str):
 
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
 def test_add_special_tokens(server: RemoteOpenAIServer, model_name: str):
-    # FIXME: The add_special_tokens parameter doesn't seem to be working.
+    # The add_special_tokens parameter doesn't seem to be working with this model.
+    # working with papluca/xlm-roberta-base-language-detection
     response = requests.post(
         server.url_for("classify"),
         json={"model": model_name, "input": input_text, "add_special_tokens": False},
@@ -184,11 +185,156 @@ def test_add_special_tokens(server: RemoteOpenAIServer, model_name: str):
 
 
 @pytest.mark.asyncio
-async def test_invocations(server: RemoteOpenAIServer):
+@pytest.mark.parametrize("model_name", [MODEL_NAME])
+async def test_chat_request(server: RemoteOpenAIServer, model_name: str):
+    messages = [
+        {
+            "role": "user",
+            "content": "The cat sat on the mat.",
+        },
+        {
+            "role": "assistant",
+            "content": "A feline was resting on a rug.",
+        },
+        {
+            "role": "user",
+            "content": "Stars twinkle brightly in the night sky.",
+        },
+    ]
+
+    # test chat request basic usage
+    response = requests.post(
+        server.url_for("classify"),
+        json={"model": model_name, "messages": messages},
+    )
+
+    response.raise_for_status()
+    output = ClassificationResponse.model_validate(response.json())
+
+    assert output.object == "list"
+    assert output.model == MODEL_NAME
+    assert len(output.data) == 1
+    assert hasattr(output.data[0], "label")
+    assert hasattr(output.data[0], "probs")
+    assert output.usage.prompt_tokens == 51
+
+    # test add_generation_prompt
+    response = requests.post(
+        server.url_for("classify"),
+        json={"model": model_name, "messages": messages, "add_generation_prompt": True},
+    )
+
+    response.raise_for_status()
+    output = ClassificationResponse.model_validate(response.json())
+
+    assert output.object == "list"
+    assert output.model == MODEL_NAME
+    assert len(output.data) == 1
+    assert hasattr(output.data[0], "label")
+    assert hasattr(output.data[0], "probs")
+    assert output.usage.prompt_tokens == 54
+
+    # test continue_final_message
+    response = requests.post(
+        server.url_for("classify"),
+        json={
+            "model": model_name,
+            "messages": messages,
+            "continue_final_message": True,
+        },
+    )
+
+    response.raise_for_status()
+    output = ClassificationResponse.model_validate(response.json())
+
+    assert output.object == "list"
+    assert output.model == MODEL_NAME
+    assert len(output.data) == 1
+    assert hasattr(output.data[0], "label")
+    assert hasattr(output.data[0], "probs")
+    assert output.usage.prompt_tokens == 49
+
+    # test add_special_tokens
+    # The add_special_tokens parameter doesn't seem to be working with this model.
+    response = requests.post(
+        server.url_for("classify"),
+        json={"model": model_name, "messages": messages, "add_special_tokens": True},
+    )
+
+    response.raise_for_status()
+    output = ClassificationResponse.model_validate(response.json())
+
+    assert output.object == "list"
+    assert output.model == MODEL_NAME
+    assert len(output.data) == 1
+    assert hasattr(output.data[0], "label")
+    assert hasattr(output.data[0], "probs")
+    assert output.usage.prompt_tokens == 51
+
+    # test continue_final_message with add_generation_prompt
+    response = requests.post(
+        server.url_for("classify"),
+        json={
+            "model": model_name,
+            "messages": messages,
+            "continue_final_message": True,
+            "add_generation_prompt": True,
+        },
+    )
+    assert (
+        "Cannot set both `continue_final_message` and `add_generation_prompt` to True."
+        in response.json()["error"]["message"]
+    )
+
+
+@pytest.mark.asyncio
+async def test_invocations_completion_request(server: RemoteOpenAIServer):
     request_args = {
         "model": MODEL_NAME,
         "input": input_text,
     }
+
+    classification_response = requests.post(
+        server.url_for("classify"), json=request_args
+    )
+    classification_response.raise_for_status()
+
+    invocation_response = requests.post(
+        server.url_for("invocations"), json=request_args
+    )
+    invocation_response.raise_for_status()
+
+    classification_output = classification_response.json()
+    invocation_output = invocation_response.json()
+
+    assert classification_output.keys() == invocation_output.keys()
+    for classification_data, invocation_data in zip(
+        classification_output["data"], invocation_output["data"]
+    ):
+        assert classification_data.keys() == invocation_data.keys()
+        assert classification_data["probs"] == pytest.approx(
+            invocation_data["probs"], rel=0.01
+        )
+
+
+@pytest.mark.asyncio
+async def test_invocations_chat_request(server: RemoteOpenAIServer):
+    messages = [
+        {
+            "role": "user",
+            "content": "The cat sat on the mat.",
+        },
+        {
+            "role": "assistant",
+            "content": "A feline was resting on a rug.",
+        },
+        {
+            "role": "user",
+            "content": "Stars twinkle brightly in the night sky.",
+        },
+    ]
+
+    request_args = {"model": MODEL_NAME, "messages": messages}
 
     classification_response = requests.post(
         server.url_for("classify"), json=request_args
