@@ -25,7 +25,7 @@ MODEL_ACCURACIES = {
     # Full quantization: attention linears and MoE linears
     "amd/gpt-oss-20b-WFP8-AFP8-KVFP8": 0.89,
     # MoE linears only quantization
-    # "amd/gpt-oss-20b-MoE-Quant-W-MXFP4-A-FP8-KV-FP8": 0.89,
+    "amd/gpt-oss-20b-MoE-Quant-W-MXFP4-A-FP8-KV-FP8": 0.89,
     # MoE linears only quantization
     # "amd/gpt-oss-20b-MoE-Quant-W-MXFP4-A-MXFP4-KV-FP8": 0.90,
 }
@@ -103,7 +103,7 @@ def test_gpt_oss_attention_quantization(
         lm_eval_out["results"]["gsm8k_platinum"]["exact_match,flexible-extract"]
     )
 
-    rtol = 0.05
+    rtol = 0.02
     assert (
         measured_accuracy - rtol < expected_accuracy
         and measured_accuracy + rtol > expected_accuracy
