@@ -55,9 +55,15 @@ def get_flash_attn_version(requires_alibi: bool = False) -> int | None:
         assert device_capability is not None
 
         # 1. default version depending on platform
-        fa_version = (
-            3 if (device_capability.major == 9 and is_fa_version_supported(3)) else 2
-        )
+        if device_capability.major == 9 and is_fa_version_supported(3):
+            # Hopper (SM90): prefer FA3
+            fa_version = 3
+        elif device_capability.major >= 10 and is_fa_version_supported(4):
+            # Blackwell (SM100+): prefer FA4
+            fa_version = 4
+        else:
+            # Fallback to FA2
+            fa_version = 2
 
         # 2. override if passed by environment or config
         from vllm.config import get_current_vllm_config_or_none
@@ -70,12 +76,12 @@ def get_flash_attn_version(requires_alibi: bool = False) -> int | None:
             fa_version = vllm_config.attention_config.flash_attn_version
 
         # 3. fallback for unsupported combinations
-        if device_capability.major == 10 and fa_version == 3:
+        if device_capability.major >= 10 and fa_version == 3:
             logger.warning_once(
                 "Cannot use FA version 3 on Blackwell platform, "
-                "defaulting to FA version 2."
+                "defaulting to FA version 4 if supported, otherwise FA2."
             )
-            fa_version = 2
+            fa_version = 4 if is_fa_version_supported(4) else 2
 
         if requires_alibi and fa_version == 3:
             logger.warning_once(
