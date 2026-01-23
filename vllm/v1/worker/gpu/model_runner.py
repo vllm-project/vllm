@@ -363,30 +363,31 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         self,
         scheduler_output: SchedulerOutput,
     ) -> tuple[CUDAGraphMode, int | None]:
-        # Get cudagraph_size for local num_tokens (single lookup)
-        local_cudagraph_size = self.cudagraph_manager.get_cudagraph_size(
-            scheduler_output.total_num_scheduled_tokens
+        # Determine if this is a uniform decode batch
+        num_reqs = len(scheduler_output.num_scheduled_tokens)
+        max_num_scheduled_tokens = max(
+            scheduler_output.num_scheduled_tokens.values()
         )
+        is_uniform_decode = (
+            max_num_scheduled_tokens == self.uniform_decode_query_len
+        ) and (
+            scheduler_output.total_num_scheduled_tokens
+            == max_num_scheduled_tokens * num_reqs
+        )
+
+        # Get local_cudagraph_size using the local token count
+        local_cudagraph_size = self.cudagraph_manager.get_cudagraph_size(
+            scheduler_output.total_num_scheduled_tokens,
+            uniform_decode=is_uniform_decode,
+        )
+
+        cudagraph_mode = self.cudagraph_manager.cudagraph_mode
         if local_cudagraph_size is None:
             local_cudagraph_runtime_mode = CUDAGraphMode.NONE
+        elif is_uniform_decode:
+            local_cudagraph_runtime_mode = cudagraph_mode.decode_mode()
         else:
-            cudagraph_mode = self.cudagraph_manager.cudagraph_mode
-
-            num_reqs = len(scheduler_output.num_scheduled_tokens)
-            max_num_scheduled_tokens = max(
-                scheduler_output.num_scheduled_tokens.values()
-            )
-            is_uniform_decode = (
-                max_num_scheduled_tokens == self.uniform_decode_query_len
-            ) and (
-                scheduler_output.total_num_scheduled_tokens
-                == max_num_scheduled_tokens * num_reqs
-            )
-
-            if is_uniform_decode:
-                local_cudagraph_runtime_mode = cudagraph_mode.decode_mode()
-            else:
-                local_cudagraph_runtime_mode = cudagraph_mode.mixed_mode()
+            local_cudagraph_runtime_mode = cudagraph_mode.mixed_mode()
 
         return local_cudagraph_runtime_mode, local_cudagraph_size
 

@@ -57,6 +57,19 @@ class CudaGraphManager:
         if spec_config is not None:
             self.uniform_decode_query_len = 1 + spec_config.num_speculative_tokens
 
+        # Compute decode-specific cudagraph sizes (for FULL decode cudagraphs).
+        self.decode_full_cudagraph_sizes: dict[int, int] = {}
+        self.use_decode_full_cudagraph = (
+            self.cudagraph_mode.decode_mode() == CUDAGraphMode.FULL
+            and self.cudagraph_mode.separate_routine()
+        )
+        if self.use_decode_full_cudagraph:
+            max_decode_tokens = self.max_num_reqs * self.uniform_decode_query_len
+            self.decode_full_cudagraph_sizes = {
+                k: v for k, v in self.cudagraph_sizes.items()
+                if v <= max_decode_tokens and v >= self.uniform_decode_query_len
+            }
+
         self.graphs: dict[int, torch.cuda.CUDAGraph] = {}
         self.pool = torch.cuda.graph_pool_handle()
         self.hidden_states: torch.Tensor | None = None
@@ -67,7 +80,10 @@ class CudaGraphManager:
     def get_cudagraph_size(
         self,
         num_tokens: int,
+        uniform_decode: bool = False,
     ) -> int | None:
+        if uniform_decode and self.use_decode_full_cudagraph:
+            return self.decode_full_cudagraph_sizes.get(num_tokens)
         return self.cudagraph_sizes.get(num_tokens)
 
     def capture_graph(
@@ -261,12 +277,9 @@ class CudaGraphManager:
         # Phase 2: Capture FULL graphs for uniform decode batches if needed.
         # This is only needed if we use a separate routine for decode batches
         # and the decode_mode is FULL.
-        if (
-            self.cudagraph_mode.decode_mode() == CUDAGraphMode.FULL
-            and self.cudagraph_mode.separate_routine()
-        ):
+        if self.use_decode_full_cudagraph:
             capture_graphs(
-                cudagraph_sizes=self.cudagraph_sizes,
+                cudagraph_sizes=self.decode_full_cudagraph_sizes,
                 device=self.device,
                 capture_fn=self.capture_graph,
                 capture_cudagraph_mode=CUDAGraphMode.FULL,
