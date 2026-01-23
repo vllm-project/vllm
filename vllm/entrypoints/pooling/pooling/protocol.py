@@ -11,17 +11,22 @@ from vllm import PoolingParams
 from vllm.config.pooler import get_use_activation
 from vllm.entrypoints.openai.engine.protocol import OpenAIBaseModel, UsageInfo
 from vllm.entrypoints.pooling.base.protocol import (
+    ChatRequestMixin,
     ClassifyRequestMixin,
+    CompletionRequestMixin,
     EmbedRequestMixin,
     EncodingRequestMixin,
-    PoolingBasicRequestMixin, CompletionRequestMixin, ChatRequestMixin,
+    PoolingBasicRequestMixin,
 )
 from vllm.tasks import PoolingTask
 from vllm.utils import random_uuid
 
 
 class PoolingCompletionRequest(
-    PoolingBasicRequestMixin, CompletionRequestMixin, EmbedRequestMixin, ClassifyRequestMixin
+    PoolingBasicRequestMixin,
+    CompletionRequestMixin,
+    EmbedRequestMixin,
+    ClassifyRequestMixin,
 ):
     task: PoolingTask | None = None
 
@@ -33,7 +38,9 @@ class PoolingCompletionRequest(
         )
 
 
-class PoolingChatRequest(    PoolingBasicRequestMixin, ChatRequestMixin, EmbedRequestMixin, ClassifyRequestMixin):
+class PoolingChatRequest(
+    PoolingBasicRequestMixin, ChatRequestMixin, EmbedRequestMixin, ClassifyRequestMixin
+):
     task: PoolingTask | None = None
 
     def to_pooling_params(self):

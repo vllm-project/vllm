@@ -5,7 +5,7 @@ import json
 import pytest
 import requests
 
-from tests.entrypoints.pooling.utils import encode_base64_content_from_url
+from tests.entrypoints.test_utils import encode_base64_content_from_url
 from tests.utils import RemoteOpenAIServer
 from vllm.entrypoints.pooling.classify.protocol import ClassificationResponse
 
@@ -17,7 +17,6 @@ HF_OVERRIDES = {
         "architectures": ["Qwen2_5_VLForSequenceClassification"],
     },
 }
-
 input_text = "This product was excellent and exceeded my expectations"
 image_url = "https://vllm-public-assets.s3.us-west-2.amazonaws.com/multimodal_asset/cat_snow.jpg"
 image_base64 = encode_base64_content_from_url(image_url)
@@ -46,10 +45,12 @@ def server():
 def test_chat_text_request(server: RemoteOpenAIServer, model_name: str):
     messages = [
         {
+            "role": "assistant",
+            "content": "Please classify this text request.",
+        },
+        {
             "role": "user",
-            "content": [
-                {"type": "text", "text": "Please classify this text request."},
-            ],
+            "content": input_text,
         }
     ]
 
@@ -65,7 +66,7 @@ def test_chat_text_request(server: RemoteOpenAIServer, model_name: str):
     assert output.model == model_name
     assert len(output.data) == 1
     assert len(output.data[0].probs) == 2
-    assert output.usage.prompt_tokens == 22
+    assert output.usage.prompt_tokens == 35
 
 
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
