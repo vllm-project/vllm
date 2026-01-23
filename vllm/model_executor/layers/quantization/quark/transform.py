@@ -42,7 +42,7 @@ class OrthogonalTransform(torch.nn.Module):
         rotation_size = None
 
         if (
-            quant_config["algo_config"] is not None
+            quant_config.get("algo_config") is not None
             and len(quant_config["algo_config"]) > 0
             and quant_config["algo_config"][0]["name"] == "rotation"
         ):
@@ -64,9 +64,7 @@ class OrthogonalTransform(torch.nn.Module):
         return use_online_rotation, rotation_config, rotation_size
 
     def post_process_transform(self):
-        if self.rotation_config is not None and not self.rotation_config.get(
-            "trainable", False
-        ):
+        if self.rotation_config is not None and not self.rotation_config["trainable"]:
             # In case hadamard transform is used (non-trained case), it is
             # serialized as torch.int8 with only `-1` and `1` values.
             self.input_rotation.data = self.input_rotation.data.to(
