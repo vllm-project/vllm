@@ -29,7 +29,7 @@ _FP8ParamsT = tuple[
 ]
 
 
-class FP8WoQLinearKernel(FP8WoQLinearLayerConfig, _FP8ParamsT, ABC):
+class FP8WoQLinearKernel(ABC):
     """
     FP8 WoQ kernel for GPUs that lack FP8 hardware support.
     Leverages the Marlin kernel for fast weight-only FP8 quantization.
