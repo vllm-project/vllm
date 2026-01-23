@@ -244,6 +244,8 @@ async def test_audio_with_timestamp(mary_had_lamb, whisper_client):
     )
     assert transcription.segments is not None
     assert len(transcription.segments) > 0
+    assert transcription.segments[0].avg_logprob is not None
+    assert transcription.segments[0].compression_ratio is not None
 
 
 @pytest.mark.asyncio

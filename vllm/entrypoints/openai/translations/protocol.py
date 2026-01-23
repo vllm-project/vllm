@@ -271,13 +271,13 @@ class TranscriptionSegment(OpenAIBaseModel):
     id: int
     """Unique identifier of the segment."""
 
-    avg_logprob: float | None = None
+    avg_logprob: float
     """Average logprob of the segment.
 
     If the value is lower than -1, consider the logprobs failed.
     """
 
-    compression_ratio: float | None = None
+    compression_ratio: float
     """Compression ratio of the segment.
 
     If the value is greater than 2.4, consider the compression failed.
@@ -487,13 +487,13 @@ class TranslationSegment(OpenAIBaseModel):
     id: int
     """Unique identifier of the segment."""
 
-    avg_logprob: float | None = None
+    avg_logprob: float
     """Average logprob of the segment.
 
     If the value is lower than -1, consider the logprobs failed.
     """
 
-    compression_ratio: float | None = None
+    compression_ratio: float
     """Compression ratio of the segment.
 
     If the value is greater than 2.4, consider the compression failed.
