@@ -35,7 +35,7 @@ from vllm.model_executor.layers.fused_moe.modular_kernel import (
     FusedMoEModularKernel,
 )
 from vllm.model_executor.layers.fused_moe.prepare_finalize import (
-    MoEPrepareAndFinalizeNoEP,
+    MoEPrepareAndFinalizeNoDPEP,
 )
 
 from .utils import _get_lora_device, try_get_optimal_moe_lora_config
@@ -130,7 +130,7 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
         self.base_layer.ensure_moe_quant_config_init()
         quant_config = self.base_layer.quant_method.moe_quant_config
 
-        prepare_finalize = MoEPrepareAndFinalizeNoEP()
+        prepare_finalize = MoEPrepareAndFinalizeNoDPEP()
         m_fused_moe_fn = FusedMoEModularKernel(
             prepare_finalize,
             self.base_layer.quant_method.select_gemm_impl(

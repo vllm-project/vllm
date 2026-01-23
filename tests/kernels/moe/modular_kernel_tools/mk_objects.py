@@ -23,7 +23,7 @@ from vllm.model_executor.layers.fused_moe.fused_batched_moe import (
     NaiveBatchedExperts,
 )
 from vllm.model_executor.layers.fused_moe.prepare_finalize import (
-    MoEPrepareAndFinalizeNoEP,
+    MoEPrepareAndFinalizeNoDPEP,
 )
 from vllm.model_executor.layers.fused_moe.triton_deep_gemm_moe import (
     TritonOrDeepGemmExperts,
@@ -166,7 +166,7 @@ def expert_info(kind) -> ExpertInfo:
 
 
 register_prepare_and_finalize(
-    MoEPrepareAndFinalizeNoEP,
+    MoEPrepareAndFinalizeNoDPEP,
     standard_format,
     common_float_types,
     blocked_quantization_support=True,
@@ -444,7 +444,7 @@ def make_prepare_finalize(
             use_dp=moe.moe_parallel_config.dp_size > 1
         )
     else:
-        return MoEPrepareAndFinalizeNoEP()
+        return MoEPrepareAndFinalizeNoDPEP()
 
 
 def _slice(rank: int, num_local_experts: int, t: torch.Tensor) -> torch.Tensor:

@@ -19,7 +19,7 @@ from vllm.model_executor.layers.fused_moe.cutlass_moe import (
     CutlassExpertsFp4,
 )
 from vllm.model_executor.layers.fused_moe.prepare_finalize import (
-    MoEPrepareAndFinalizeNoEP,
+    MoEPrepareAndFinalizeNoDPEP,
 )
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import set_random_seed
@@ -90,7 +90,7 @@ def test_cutlass_fp4_moe_no_graph(
         )
 
         kernel = mk.FusedMoEModularKernel(
-            MoEPrepareAndFinalizeNoEP(defer_input_quant=True),
+            MoEPrepareAndFinalizeNoDPEP(defer_input_quant=True),
             CutlassExpertsFp4(
                 moe_config=make_dummy_moe_config(),
                 quant_config=quant_config,

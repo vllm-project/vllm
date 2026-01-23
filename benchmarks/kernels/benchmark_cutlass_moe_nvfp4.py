@@ -24,7 +24,7 @@ from vllm.model_executor.layers.fused_moe.cutlass_moe import (
 )
 from vllm.model_executor.layers.fused_moe.fused_moe import fused_experts, fused_topk
 from vllm.model_executor.layers.fused_moe.prepare_finalize import (
-    MoEPrepareAndFinalizeNoEP,
+    MoEPrepareAndFinalizeNoDPEP,
 )
 from vllm.scalar_type import scalar_types
 from vllm.utils.argparse_utils import FlexibleArgumentParser
@@ -197,7 +197,7 @@ def bench_run(
         )
 
         kernel = mk.FusedMoEModularKernel(
-            MoEPrepareAndFinalizeNoEP(defer_input_quant=True),
+            MoEPrepareAndFinalizeNoDPEP(defer_input_quant=True),
             CutlassExpertsFp4(
                 make_dummy_moe_config(),
                 quant_config=quant_config,
@@ -242,7 +242,7 @@ def bench_run(
         )
 
         kernel = mk.FusedMoEModularKernel(
-            MoEPrepareAndFinalizeNoEP(defer_input_quant=True),
+            MoEPrepareAndFinalizeNoDPEP(defer_input_quant=True),
             CutlassExpertsFp4(
                 make_dummy_moe_config(),
                 quant_config=quant_config,

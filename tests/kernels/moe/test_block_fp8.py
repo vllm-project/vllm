@@ -30,7 +30,7 @@ from vllm.model_executor.layers.fused_moe.fused_moe import (
     modular_triton_fused_moe,
 )
 from vllm.model_executor.layers.fused_moe.prepare_finalize import (
-    MoEPrepareAndFinalizeNoEP,
+    MoEPrepareAndFinalizeNoDPEP,
 )
 from vllm.model_executor.layers.fused_moe.triton_deep_gemm_moe import (
     TritonOrDeepGemmExperts,
@@ -256,7 +256,7 @@ def test_w8a8_block_fp8_deep_gemm_fused_moe(M, N, K, E, topk, seed, monkeypatch)
     )
 
     deep_gemm_experts = mk.FusedMoEModularKernel(
-        prepare_finalize=MoEPrepareAndFinalizeNoEP(),
+        prepare_finalize=MoEPrepareAndFinalizeNoDPEP(),
         fused_experts=TritonOrDeepGemmExperts(
             moe_config=make_dummy_moe_config(),
             quant_config=quant_config,

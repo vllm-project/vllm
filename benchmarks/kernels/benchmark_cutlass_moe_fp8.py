@@ -15,7 +15,7 @@ from vllm.model_executor.layers.fused_moe.config import fp8_w8a8_moe_quant_confi
 from vllm.model_executor.layers.fused_moe.cutlass_moe import CutlassExpertsFp8
 from vllm.model_executor.layers.fused_moe.fused_moe import fused_experts, fused_topk
 from vllm.model_executor.layers.fused_moe.prepare_finalize import (
-    MoEPrepareAndFinalizeNoEP,
+    MoEPrepareAndFinalizeNoDPEP,
 )
 from vllm.platforms import current_platform
 from vllm.utils.argparse_utils import FlexibleArgumentParser
@@ -137,7 +137,7 @@ def bench_run(
     )
 
     fn = mk.FusedMoEModularKernel(
-        MoEPrepareAndFinalizeNoEP(),
+        MoEPrepareAndFinalizeNoDPEP(),
         CutlassExpertsFp8(
             moe_config=make_dummy_moe_config(
                 num_experts=num_experts,

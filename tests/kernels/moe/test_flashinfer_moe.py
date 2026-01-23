@@ -24,7 +24,7 @@ from vllm.model_executor.layers.fused_moe.flashinfer_cutlass_moe import (
 )
 from vllm.model_executor.layers.fused_moe.modular_kernel import FusedMoEModularKernel
 from vllm.model_executor.layers.fused_moe.prepare_finalize import (
-    MoEPrepareAndFinalizeNoEP,
+    MoEPrepareAndFinalizeNoDPEP,
 )
 from vllm.platforms import current_platform
 from vllm.utils.flashinfer import has_flashinfer_cutlass_fused_moe
@@ -106,7 +106,7 @@ def test_flashinfer_fp4_moe_no_graph(
         )
 
         flashinfer_experts = FusedMoEModularKernel(
-            MoEPrepareAndFinalizeNoEP(
+            MoEPrepareAndFinalizeNoDPEP(
                 defer_input_quant=FlashInferExperts.expects_unquantized_inputs(
                     moe_config=moe_config,
                     quant_config=quant_config,
