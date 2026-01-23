@@ -155,8 +155,8 @@ class EmbedRequestMixin(OpenAIBaseModel, EncodingRequestMixin):
         default=None,
         description="Whether to normalize the embeddings outputs. Default is True.",
     )
-
     # --8<-- [end:embed-extra-params]
+
     def to_pooling_params(self):
         return PoolingParams(
             dimensions=self.dimensions,

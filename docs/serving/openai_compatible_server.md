@@ -404,7 +404,11 @@ The following extra parameters are supported:
     ```
 
 
-The following extra parameters are supported by default:
+
+
+For chat-like input (i.e. if `messages` is passed), the following parameters are supported:
+
+The following parameters are supported by default:
 
 ??? code
 
@@ -414,8 +418,6 @@ The following extra parameters are supported by default:
     --8<-- "vllm/entrypoints/pooling/base/protocol.py:encoding-params"
     --8<-- "vllm/entrypoints/pooling/base/protocol.py:embed-params"
     ```
-
-For chat-like input (i.e. if `messages` is passed), the following parameters are supported:
 
 these extra parameters are supported instead:
 
