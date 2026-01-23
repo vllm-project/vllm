@@ -29,6 +29,7 @@ def run_server(
     show_stdout: bool,
     serve_overrides: ParameterSweepItem,
     dry_run: bool,
+    server_ready_timeout: int = 300,
 ):
     server_cmd = serve_overrides.apply_to_cmd(serve_cmd)
 
@@ -42,6 +43,7 @@ def run_server(
         return
 
     with ServerProcess(server_cmd, after_bench_cmd, show_stdout=show_stdout) as server:
+        server.wait_until_ready(timeout=server_ready_timeout)
         yield server
 
     print("[END SERVER]")
@@ -212,6 +214,7 @@ def run_combs(
     num_runs: int,
     dry_run: bool,
     links: list[tuple[str, str]],
+    server_ready_timeout: int = 300,
 ):
     all_data = list[dict[str, object]]()
     for serve_comb in serve_params:
@@ -222,6 +225,7 @@ def run_combs(
                 show_stdout=show_stdout,
                 serve_overrides=serve_comb,
                 dry_run=dry_run,
+                server_ready_timeout=server_ready_timeout,
             )
             if _comb_needs_server(serve_comb, bench_params, output_dir)
             else contextlib.nullcontext()
@@ -272,6 +276,7 @@ class SweepServeArgs:
     dry_run: bool
     resume: str | None
     link_vars: list[tuple[str, str]] | None
+    server_ready_timeout: int
 
     parser_name: ClassVar[str] = "serve"
     parser_help: ClassVar[str] = "Run vLLM server benchmark under multiple settings."
@@ -312,6 +317,7 @@ class SweepServeArgs:
             dry_run=args.dry_run,
             resume=args.resume,
             link_vars=link_vars,
+            server_ready_timeout=args.server_ready_timeout,
         )
 
     @classmethod
@@ -340,6 +346,12 @@ class SweepServeArgs:
             action="store_true",
             help="If set, logs the standard output of subcommands. "
             "Useful for debugging but can be quite spammy.",
+        )
+        parser.add_argument(
+            "--server-ready-timeout",
+            type=int,
+            default=300,
+            help="Timeout in seconds to wait for the server to become ready.",
         )
         parser.add_argument(
             "--serve-params",
@@ -431,6 +443,7 @@ def run_main(args: SweepServeArgs):
             num_runs=args.num_runs,
             dry_run=args.dry_run,
             links=args.link_vars,
+            server_ready_timeout=args.server_ready_timeout,
         )
     except BaseException as exc:
         raise RuntimeError(
