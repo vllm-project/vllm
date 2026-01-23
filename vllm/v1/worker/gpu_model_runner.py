@@ -6,7 +6,7 @@ import gc
 import itertools
 import time
 from collections import defaultdict
-from collections.abc import Iterable, Iterator, Sequence
+from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 from copy import copy, deepcopy
 from functools import reduce
@@ -4860,7 +4860,6 @@ class GPUModelRunner(
         uniform_decode = batch_descriptors[0].uniform
         force_attention = cudagraph_runtime_mode == CUDAGraphMode.FULL
 
-        # Create partial with common args
         dummy_run = functools.partial(
             self._dummy_run,
             uniform_decode=uniform_decode,
@@ -4870,9 +4869,8 @@ class GPUModelRunner(
         )
 
         # Only rank 0 should print progress bar during capture
-        batch_desc_iter: Iterable[BatchDescriptor] = batch_descriptors
         if is_global_first_rank():
-            batch_desc_iter = tqdm(
+            batch_descriptors = tqdm(
                 batch_descriptors,
                 disable=not self.load_config.use_tqdm_on_load,
                 desc="Capturing CUDA graphs ({}, {})".format(
@@ -4882,7 +4880,7 @@ class GPUModelRunner(
             )
 
         # We skip EPLB here since we don't want to record dummy metrics
-        for batch_desc in batch_desc_iter:
+        for batch_desc in batch_descriptors:
             num_tokens = batch_desc.num_tokens
             activate_lora = batch_desc.has_lora
 
@@ -4901,7 +4899,6 @@ class GPUModelRunner(
                 )
             )
 
-            # Warmup runs
             for _ in range(self.compilation_config.cudagraph_num_of_warmups):
                 # Use CUDAGraphRuntimeStyle.NONE (default) for warmup.
                 # But be careful, warm up with `NONE` is orthogonal to
@@ -4923,7 +4920,6 @@ class GPUModelRunner(
                 activate_lora=activate_lora,
                 is_graph_capturing=True,
             )
-
         self.maybe_remove_all_loras(self.lora_config)
 
     def initialize_attn_backend(self, kv_cache_config: KVCacheConfig) -> None:
