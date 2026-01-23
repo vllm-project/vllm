@@ -22,7 +22,7 @@ def set_rejecting_requests(value: bool) -> None:
     _rejecting_requests = value
 
 
-class ScalingMiddleware:
+class ServiceUnavailableMiddleware:
     """
     Middleware that checks if the server is currently unavailable
     (e.g., scaling or draining) and returns a 503 Service Unavailable.
