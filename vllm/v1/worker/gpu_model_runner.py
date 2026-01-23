@@ -432,7 +432,7 @@ class GPUModelRunner(
         # layers in the draft model.
         if self.speculative_config and get_pp_group().is_last_rank:
             self.drafter: (
-                NgramProposer
+                NgramProposer  # noqa: F823
                 | SuffixDecodingProposer
                 | EagleProposer
                 | DraftModelProposer
