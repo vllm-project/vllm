@@ -9,11 +9,13 @@ from transformers import PretrainedConfig
 
 from vllm import envs
 from vllm.config.model_arch import (
+    DerivedMaxModelLenInfo,
     ModelArchitectureConfig,
 )
 from vllm.config.utils import getattr_iter
 from vllm.logger import init_logger
 from vllm.transformers_utils.config import (
+    is_rope_parameters_nested,
     try_get_safetensors_metadata,
     uses_mrope,
     uses_xdrope_dim,
@@ -208,8 +210,15 @@ class ModelArchConfigConvertorBase:
             )
         return False
 
-    def derive_max_model_len_and_key(self) -> tuple[float, str | None]:
-        derived_max_model_len = float("inf")
+    def derive_max_model_len_info(self) -> DerivedMaxModelLenInfo:
+        """Derive maximum model length including RoPE scaling factors.
+
+        This method computes the derived max model length by:
+        1. Finding the base max length from various config keys
+        2. Applying RoPE scaling factors (linear, dynamic, yarn, etc.)
+        3. Detecting LongRoPE for special handling
+        """
+        derived_max_model_len: float = float("inf")
         possible_keys = [
             # OPT
             "max_position_embeddings",
@@ -229,7 +238,7 @@ class ModelArchConfigConvertorBase:
             "seq_len",
         ]
         # Choose the smallest "max_length" from the possible keys
-        max_len_key = None
+        max_len_key: str | None = None
         for key in possible_keys:
             max_len = getattr(self.hf_text_config, key, None)
             if max_len is not None:
@@ -241,32 +250,71 @@ class ModelArchConfigConvertorBase:
         if tmp_max_len := getattr(self.hf_text_config, "model_max_length", None):
             max_len_key = "model_max_length"
             derived_max_model_len = tmp_max_len
-        return derived_max_model_len, max_len_key
+
+        # Get rope_parameters and apply RoPE scaling
+        rope_parameters = getattr(self.hf_text_config, "rope_parameters", None)
+        is_longrope = False
+        original_max_position_embeddings: int | None = None
+
+        # Get original_max_position_embeddings from config or rope_parameters
+        original_max_position_embeddings = getattr(
+            self.hf_text_config, "original_max_position_embeddings", None
+        )
+        if original_max_position_embeddings is None and rope_parameters is not None:
+            original_max_position_embeddings = rope_parameters.get(
+                "original_max_position_embeddings"
+            )
+
+        if rope_parameters is not None:
+            # In Transformers v5 rope_parameters could be TypedDict or
+            # dict[str, TypedDict]. Normalize to dict[str, TypedDict].
+            if not is_rope_parameters_nested(rope_parameters):
+                rope_params_dict: dict[str, dict[str, Any]] = {"": rope_parameters}
+            else:
+                rope_params_dict = rope_parameters
+
+            # Check if any layer uses longrope
+            is_longrope = any(
+                rp.get("rope_type") == "longrope" for rp in rope_params_dict.values()
+            )
+
+            # NOTE(woosuk): Gemma3's max_model_len (128K) is already scaled by RoPE
+            # scaling, so we skip applying the scaling factor again.
+            model_type = getattr(self.hf_config, "model_type", "")
+            if "gemma3" not in model_type:
+                scaling_factor = 1.0
+                for rp in rope_params_dict.values():
+                    rope_type = rp.get("rope_type", "default")
+
+                    if rope_type not in ("su", "longrope", "llama3"):
+                        # NOTE: rope_type == "default" does not define factor
+                        # NOTE: This assumes all layer types have the same
+                        # scaling factor.
+                        scaling_factor = rp.get("factor", scaling_factor)
+
+                        if rope_type == "yarn":
+                            # For yarn, use original_max_position_embeddings
+                            # from rope_parameters
+                            yarn_ompe = rp.get("original_max_position_embeddings")
+                            if yarn_ompe is not None:
+                                derived_max_model_len = yarn_ompe
+
+                # Apply scaling factor outside the loop since all layer types
+                # should have the same scaling
+                derived_max_model_len *= scaling_factor
+
+        return DerivedMaxModelLenInfo(
+            derived_max_model_len=derived_max_model_len,
+            max_len_key=max_len_key,
+            is_longrope=is_longrope,
+            original_max_position_embeddings=original_max_position_embeddings,
+        )
 
     def get_uses_mrope(self) -> bool:
         return uses_mrope(self.hf_config)
 
     def get_uses_xdrope_dim(self) -> int:
-        """Get the number of dimensions for XD-RoPE. Returns 0 if not used."""
         return uses_xdrope_dim(self.hf_config)
-
-    def get_rope_parameters(self) -> dict[str, Any] | None:
-        """Get the RoPE parameters from the config."""
-        rope_params = getattr(self.hf_text_config, "rope_parameters", None)
-        if rope_params is not None:
-            return dict(rope_params)
-        return None
-
-    def get_original_max_position_embeddings(self) -> int | None:
-        """Get the original max position embeddings before RoPE scaling."""
-        ompe = getattr(self.hf_text_config, "original_max_position_embeddings", None)
-        if ompe is not None:
-            return ompe
-        # Also check rope_parameters for this field
-        rope_params = getattr(self.hf_text_config, "rope_parameters", None)
-        if rope_params is not None:
-            return rope_params.get("original_max_position_embeddings")
-        return None
 
     def convert(self) -> ModelArchitectureConfig:
         model_arch_config = ModelArchitectureConfig(
@@ -282,12 +330,10 @@ class ModelArchConfigConvertorBase:
             num_experts=self.get_num_experts(),
             quantization_config=self.get_quantization_config(),
             is_deepseek_mla=self.is_deepseek_mla(),
-            derived_max_model_len_and_key=self.derive_max_model_len_and_key(),
+            derived_max_model_len_info=self.derive_max_model_len_info(),
             # RoPE-related fields
             uses_mrope=self.get_uses_mrope(),
             uses_xdrope_dim=self.get_uses_xdrope_dim(),
-            rope_parameters=self.get_rope_parameters(),
-            original_max_position_embeddings=self.get_original_max_position_embeddings(),
         )
 
         return model_arch_config

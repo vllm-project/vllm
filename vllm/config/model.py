@@ -29,7 +29,6 @@ from vllm.transformers_utils.config import (
     get_pooling_config,
     get_sentence_transformer_tokenizer_config,
     is_encoder_decoder,
-    is_rope_parameters_nested,
     try_get_dense_modules,
     try_get_generation_config,
     try_get_tokenizer_config,
@@ -1918,9 +1917,10 @@ def _get_and_verify_max_len(
     encoder_config: Any | None = None,
 ) -> int:
     """Get and verify the model's maximum length."""
-    (derived_max_model_len, max_len_key) = (
-        model_arch_config.derived_max_model_len_and_key
-    )
+    # Get pre-computed derived max model len info (includes RoPE scaling)
+    max_len_info = model_arch_config.derived_max_model_len_info
+    derived_max_model_len = max_len_info.derived_max_model_len
+    max_len_key = max_len_info.max_len_key
 
     # If sliding window is manually disabled, max_length should be less
     # than the sliding window length in the model config.
@@ -1960,32 +1960,6 @@ def _get_and_verify_max_len(
         )
         derived_max_model_len = default_max_len
 
-    # Get rope_parameters from model_arch_config
-    # In Transformers v5 rope_parameters could be TypedDict or dict[str, TypedDict].
-    # To simplify the verification, we convert it to dict[str, TypedDict].
-    rope_parameters = model_arch_config.rope_parameters
-    if rope_parameters and not is_rope_parameters_nested(rope_parameters):
-        rope_parameters = {"": rope_parameters}
-
-    # NOTE(woosuk): Gemma3's max_model_len (128K) is already scaled by RoPE
-    # scaling, so we skip applying the scaling factor again.
-    if rope_parameters is not None and "gemma3" not in model_arch_config.model_type:
-        scaling_factor = 1.0
-        for rp in rope_parameters.values():
-            # No need to consider "type" key because of patch_rope_parameters when
-            # loading HF config
-            rope_type = rp["rope_type"]
-
-            if rope_type not in ("su", "longrope", "llama3"):
-                # NOTE: rope_type == "default" does not define factor https://github.com/huggingface/transformers/blob/v4.45.2/src/transformers/modeling_rope_utils.py
-                # NOTE: This assumes all layer types have the same scaling factor.
-                scaling_factor = rp.get("factor", scaling_factor)
-
-                if rope_type == "yarn":
-                    derived_max_model_len = rp["original_max_position_embeddings"]
-        # Do this outside loop since all layer types should have the same scaling
-        derived_max_model_len *= scaling_factor
-
     if encoder_config and "max_seq_length" in encoder_config:
         derived_max_model_len = encoder_config["max_seq_length"]
 
@@ -1995,10 +1969,8 @@ def _get_and_verify_max_len(
     if max_model_len is None or max_model_len == -1:
         # For LongRoPE, default to original_max_position_embeddings to avoid
         # performance degradation for shorter sequences
-        if rope_parameters is not None and any(
-            rp["rope_type"] == "longrope" for rp in rope_parameters.values()
-        ):
-            original_max_pos = model_arch_config.original_max_position_embeddings
+        if max_len_info.is_longrope:
+            original_max_pos = max_len_info.original_max_position_embeddings
             if original_max_pos is not None:
                 max_model_len = int(original_max_pos)
             else:
