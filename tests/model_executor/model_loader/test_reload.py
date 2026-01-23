@@ -1,13 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import gc
 import inspect
-from itertools import chain
+from weakref import WeakKeyDictionary, ref
 
 import pytest
 import torch
 
-from vllm.model_executor.model_loader.reload.helpers import get_layer_params_buffers
+from vllm.model_executor.layers.linear import QKVParallelLinear
+from vllm.model_executor.model_loader.reload.helpers import get_layer_tensors
 from vllm.model_executor.model_loader.reload.meta import (
+    capture_layer_to_meta,
     get_numel_loaded,
     materialize_layer,
     materialize_meta_tensor,
@@ -33,15 +36,12 @@ def test_move_metatensors():
     assert tensor.__dict__ == meta_tensor.__dict__ == materialized_tensor.__dict__
 
 
-def test_materialize_layer():
+def test_reload_lifecycle():
     layer = torch.nn.Linear(2, 3)
-    params, buffers = get_layer_params_buffers(layer)
-    params = {name: to_meta_tensor(param) for name, param in params.items()}
-    buffers = {name: to_meta_tensor(buffer) for name, buffer in buffers.items()}
-    info = LayerReloadingInfo(restore_metadata=(params, buffers))
+    info = LayerReloadingInfo(restore_metadata=capture_layer_to_meta(layer))
 
     restore_layer_on_meta(layer, info)
-    for name, tensor in chain(params.items(), buffers.items()):
+    for name, tensor in get_layer_tensors(layer).items():
         meta_tensor = getattr(layer, name)
         assert tensor.dtype == meta_tensor.dtype
         assert tensor.shape == meta_tensor.shape
@@ -49,12 +49,31 @@ def test_materialize_layer():
         assert tensor.__dict__ == meta_tensor.__dict__
 
     materialize_layer(layer)
-    for name, tensor in chain(params.items(), buffers.items()):
+    for name, tensor in get_layer_tensors(layer).items():
         materialized_tensor = getattr(layer, name)
         assert tensor.dtype == materialized_tensor.dtype
         assert tensor.shape == materialized_tensor.shape
         assert tensor.__class__ == materialized_tensor.__class__
         assert tensor.__dict__ == materialized_tensor.__dict__
+
+
+def test_model_cleanup(dist_init, default_vllm_config):
+    layer = QKVParallelLinear(2, 3, 4)
+    assert layer.weight.weight_loader.__self__ is layer
+    info = LayerReloadingInfo(restore_metadata=capture_layer_to_meta(layer))
+
+    mock_info_dict: WeakKeyDictionary[torch.nn.Module, LayerReloadingInfo] = (
+        WeakKeyDictionary()
+    )
+    mock_info_dict[layer] = info
+
+    layer_ref = ref(layer)
+
+    del layer
+    gc.collect()
+
+    assert layer_ref() is None
+    assert len(mock_info_dict) == 0
 
 
 def test_get_numel_loaded():
