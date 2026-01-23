@@ -255,7 +255,8 @@ class BlockPool:
         )
         for i, blk in enumerate(new_full_blocks):
             # Some blocks may be null blocks when enabling sparse attention like
-            # sliding window attention. We skip null blocks here.
+            # sliding window attention, or Mamba models with prefix-caching in
+            # align mode. We skip null blocks here.
             if blk.is_null:
                 continue
             assert blk.block_hash is None
