@@ -104,9 +104,6 @@ def create_cross_attention_backend(
             # needed here to know how many tokens to attend to from the cached
             # cross-attention KV cache.
             new_metadata.seq_lens = common_attn_metadata.encoder_seq_lens
-            new_metadata._seq_lens_cpu = torch.from_numpy(
-                common_attn_metadata.encoder_seq_lens_cpu
-            )
 
             # NOTE (NickLucche) use `new_metadata` instead of `common_*` (initial) here
             slot_mapping = _get_cross_slot_mapping(
