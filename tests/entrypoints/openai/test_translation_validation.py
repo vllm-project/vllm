@@ -267,12 +267,16 @@ async def test_audio_with_max_tokens(mary_had_lamb, client_and_model):
     out_tokens = tok(out_text, add_special_tokens=False)["input_ids"]
     assert len(out_tokens) == 1
     # max_completion_tokens > max_model_len
+    # max_model_len=32768 for Gemma-3n-E2B-it
     transcription = await client.audio.transcriptions.create(
         model=model_name,
         file=mary_had_lamb,
         response_format="text",
         temperature=0.0,
-        extra_body={"max_completion_tokens": int(1e6)},
+        extra_body={
+            "max_completion_tokens": int(1e6),
+            "repetition_penalty": 1.3,
+        },
     )
     out = json.loads(transcription)
     out_text = out["text"]
