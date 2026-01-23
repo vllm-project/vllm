@@ -108,6 +108,8 @@ def _fused_moe_lora_kernel(
         return
 
     max_loras = MAX_LORAS_TOTAL  # <<< : was tl.num_programs(axis=2)
+    if lora_id >= max_loras:
+        return
     grid_k = tl.cdiv(K, BLOCK_SIZE_K * SPLIT_K)
 
     # calculate pid_m,pid_n
@@ -137,10 +139,10 @@ def _fused_moe_lora_kernel(
     cur_c_ptr = c_ptr + (slice_id % num_slice_c) * slice_c_size
 
     # remove modulo wrap-around
-    offs_bn = pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N).to(tl.int64)
+    offs_bn = pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N).to(tl.int32)
     offs_k = pid_sk * BLOCK_SIZE_K + tl.arange(0, BLOCK_SIZE_K)
 
-    offs_token_id = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M).to(tl.int64)
+    offs_token_id = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M).to(tl.int32)
     token_ind = stride_tl * lora_id + offs_token_id
     offs_token = tl.load(
         sorted_token_ids_ptr + token_ind, token_ind < max_loras * stride_tl, 0
