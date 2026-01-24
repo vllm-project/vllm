@@ -20,27 +20,23 @@ __all__ = [
 logger = init_logger(__name__)
 
 
-@functools.lru_cache(maxsize=1)
+@functools.cache
 def is_flashinfer_mxint4_moe_available() -> bool:
     """Return `True` when FlashInfer MxInt4 kernels can be used."""
-    use_flashinfer_mxint4_moe = (
+    return (
         envs.VLLM_USE_FLASHINFER_MOE_INT4
         and has_flashinfer_trtllm_fused_moe()
         and current_platform.is_cuda()
         and current_platform.is_device_capability_family(100)
     )
-    logger.debug_once(
-        f"Using FlashInfer MxInt4 MoE: {use_flashinfer_mxint4_moe}", scope="local"
-    )
-    return use_flashinfer_mxint4_moe
 
 
 def prepare_static_weights_for_trtllm_mxint4_moe(
-    gemm1_weights,
-    gemm1_scales,
-    gemm2_weights,
-    gemm2_scales,
-):
+    gemm1_weights: torch.Tensor,
+    gemm1_scales: torch.Tensor,
+    gemm2_weights: torch.Tensor,
+    gemm2_scales: torch.Tensor,
+) -> dict[str, torch.Tensor]:
     """
     Prepare MxInt4 weights for TRT-LLM kernel.
 
@@ -53,7 +49,8 @@ def prepare_static_weights_for_trtllm_mxint4_moe(
         gemm2_scales: [num_experts, hidden_size, intermediate_size//32] bf16
 
     Returns:
-        Tuple of shuffled/packed weights and scales ready for kernel
+        Dict with keys 'gemm1_weights', 'gemm1_scales', 'gemm2_weights',
+            'gemm2_scales' containing shuffled/packed tensors ready for kernel
     """
     from flashinfer import block_scale_interleave
     from flashinfer.fused_moe import (
@@ -178,67 +175,89 @@ def prepare_static_weights_for_trtllm_mxint4_moe(
 
 
 def flashinfer_trtllm_mxint4_moe(
-    layer: torch.nn.Module,
     x: torch.Tensor,
     router_logits: torch.Tensor,
+    w13_weight_packed: torch.Tensor,
+    w13_weight_scale: torch.Tensor,
+    w2_weight_packed: torch.Tensor,
+    w2_weight_scale: torch.Tensor,
+    global_num_experts: int,
+    top_k: int,
+    intermediate_size_per_partition: int,
+    local_num_experts: int,
+    ep_rank: int = 0,
+    num_expert_group: int | None = None,
+    topk_group: int | None = None,
+    e_score_correction_bias: torch.Tensor | None = None,
+    routing_method_type: int | None = None,
 ) -> torch.Tensor:
     """
     Apply FlashInfer TensorRT-LLM MxInt4 MoE kernel.
 
     Args:
-        layer: MoE layer with mxint4 weights and BF16 scales
-        x: Input tensor (bf16)
-        router_logits: Router logits for expert selection
+        x: Input hidden states. dtype: bfloat16
+        router_logits: Router logits for expert selection. dtype: bfloat16/float32
+        w13_weight_packed: Packed gate+up weights. dtype: uint8
+        w13_weight_scale: Scales for gate+up weights. dtype: bfloat16
+        w2_weight_packed: Packed down weights. dtype: uint8
+        w2_weight_scale: Scales for down weights. dtype: bfloat16
+        global_num_experts: Total number of experts across all ranks
+        top_k: Number of experts to select per token
+        intermediate_size_per_partition: Intermediate size per partition
+        local_num_experts: Number of experts on this rank
+        ep_rank: Expert parallelism rank (default: 0)
+        num_expert_group: Number of expert groups (default: None -> 0)
+        topk_group: Top-k within groups (default: None -> 0)
+        e_score_correction_bias: Optional routing bias. dtype: bfloat16
+        routing_method_type: FlashInfer RoutingMethodType enum value
 
     Returns:
-        Output tensor from MoE layer
+        Output tensor from MoE layer. dtype: same as x (bfloat16)
     """
     from flashinfer import RoutingMethodType
     from flashinfer.fused_moe import trtllm_mxint4_block_scale_moe
 
-    assert x.dtype == torch.bfloat16
-    assert layer.w13_weight_packed.dtype == torch.uint8, (
-        f"w13_weight_packed dtype: {layer.w13_weight_packed.dtype}"
+    assert x.dtype == torch.bfloat16, f"x dtype must be bfloat16, got {x.dtype}"
+    assert w13_weight_packed.dtype == torch.uint8, (
+        f"w13_weight_packed dtype must be uint8, got {w13_weight_packed.dtype}"
     )
-    assert layer.w13_weight_scale.dtype == torch.bfloat16, (
-        f"w13_weight_scale dtype: {layer.w13_weight_scale.dtype}"
+    assert w13_weight_scale.dtype == torch.bfloat16, (
+        f"w13_weight_scale dtype must be bfloat16, got {w13_weight_scale.dtype}"
     )
-    assert layer.w2_weight_packed.dtype == torch.uint8, (
-        f"w2_weight_packed dtype: {layer.w2_weight_packed.dtype}"
+    assert w2_weight_packed.dtype == torch.uint8, (
+        f"w2_weight_packed dtype must be uint8, got {w2_weight_packed.dtype}"
     )
-    assert layer.w2_weight_scale.dtype == torch.bfloat16, (
-        f"w2_weight_scale dtype: {layer.w2_weight_scale.dtype}"
+    assert w2_weight_scale.dtype == torch.bfloat16, (
+        f"w2_weight_scale dtype must be bfloat16, got {w2_weight_scale.dtype}"
     )
 
     routing_bias = None
-    if layer.e_score_correction_bias is not None:
-        routing_bias = layer.e_score_correction_bias.to(torch.bfloat16)
+    if e_score_correction_bias is not None:
+        routing_bias = e_score_correction_bias.to(torch.bfloat16)
 
-    if layer.routing_method_type == RoutingMethodType.DeepSeekV3:
+    if routing_method_type == RoutingMethodType.DeepSeekV3:
         router_logits = router_logits.to(torch.float32)
 
     out = trtllm_mxint4_block_scale_moe(
         routing_logits=router_logits,
         routing_bias=routing_bias,
         hidden_states=x,
-        gemm1_weights=layer.w13_weight_packed.data,
-        gemm1_weights_scale=layer.w13_weight_scale.data,
-        gemm1_alpha=layer.gemm1_alpha.data if hasattr(layer, "gemm1_alpha") else None,
-        gemm1_beta=layer.gemm1_beta.data if hasattr(layer, "gemm1_beta") else None,
-        gemm1_clamp_limit=layer.gemm1_clamp_limit.data
-        if hasattr(layer, "gemm1_clamp_limit")
-        else None,
-        gemm2_weights=layer.w2_weight_packed.data,
-        gemm2_weights_scale=layer.w2_weight_scale.data,
-        num_experts=layer.global_num_experts,
-        top_k=layer.top_k,
-        n_group=layer.num_expert_group if layer.num_expert_group is not None else 0,
-        topk_group=layer.topk_group if layer.topk_group is not None else 0,
-        intermediate_size=layer.intermediate_size_per_partition,
-        local_expert_offset=layer.ep_rank * layer.local_num_experts,
-        local_num_experts=layer.local_num_experts,
+        gemm1_weights=w13_weight_packed.data,
+        gemm1_weights_scale=w13_weight_scale.data,
+        gemm1_alpha=None,
+        gemm1_beta=None,
+        gemm1_clamp_limit=None,
+        gemm2_weights=w2_weight_packed.data,
+        gemm2_weights_scale=w2_weight_scale.data,
+        num_experts=global_num_experts,
+        top_k=top_k,
+        n_group=num_expert_group if num_expert_group is not None else 0,
+        topk_group=topk_group if topk_group is not None else 0,
+        intermediate_size=intermediate_size_per_partition,
+        local_expert_offset=ep_rank * local_num_experts,
+        local_num_experts=local_num_experts,
         routed_scaling_factor=None,
-        routing_method_type=layer.routing_method_type,
+        routing_method_type=routing_method_type,
         enable_pdl=None,
         output=None,
         tune_max_num_tokens=8192,

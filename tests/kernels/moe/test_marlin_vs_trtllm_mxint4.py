@@ -113,7 +113,12 @@ def marlin_quantize_moe_weights(
     return weights_marlin, scales_marlin
 
 
-@pytest.mark.skipif(current_platform.is_rocm(), reason="Skip for rocm")
+TRTLLM_GEN_AVAILABLE = (
+    current_platform.is_cuda() and current_platform.is_device_capability_family(100)
+)
+
+
+@pytest.mark.skipif(not TRTLLM_GEN_AVAILABLE, reason="Skip for non SM100")
 @pytest.mark.parametrize("m", [1, 33])
 @pytest.mark.parametrize("n", [7168])
 @pytest.mark.parametrize("k", [512])
