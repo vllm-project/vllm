@@ -8,8 +8,14 @@ from typing import Any, Literal, cast
 
 from vllm.config import VllmConfig
 from vllm.exceptions import VLLMValidationError
-from vllm.inputs import ProcessorInputs, PromptType, SingletonInputs, SingletonPrompt
-from vllm.inputs.parse import split_enc_dec_inputs
+from vllm.inputs import (
+    ExplicitEncoderDecoderPrompt,
+    ProcessorInputs,
+    PromptType,
+    SingletonInputs,
+    SingletonPrompt,
+)
+from vllm.inputs.parse import is_explicit_encoder_decoder_prompt, split_enc_dec_inputs
 from vllm.inputs.preprocess import InputPreprocessor
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
@@ -196,6 +202,57 @@ class InputProcessor:
         mm_processor = self.input_preprocessor._get_mm_processor()
         return mm_processor.data_parser.parse_mm_data(mm_data)
 
+    def _validate_singleton_mm_uuids(self, prompt: SingletonPrompt) -> None:
+        if isinstance(prompt, str):
+            return
+
+        mm_data = prompt.get("multi_modal_data") or {}
+        mm_uuids = prompt.get("multi_modal_uuids") or {}
+        if not mm_data and not mm_uuids:
+            return
+
+        mm_items = self._parse_mm_items(mm_data)
+
+        for modality, data_items in mm_items.items():
+            uuid_items = mm_uuids.get(modality, [])
+
+            if data_items:
+                if uuid_items and len(data_items) != len(uuid_items):
+                    raise ValueError(
+                        f"If given, multi_modal_uuids[{modality!r}] must have "
+                        f"same length as multi_modal_data[{modality!r}], but "
+                        f"got {len(uuid_items)} vs {len(data_items)}."
+                    )
+
+                for i, item in enumerate(data_items):
+                    if item is None:
+                        if not uuid_items:
+                            raise ValueError(
+                                f"multi_modal_data[{modality!r}][{i}] is None but "
+                                f"multi_modal_uuids[{modality!r}] is missing."
+                            )
+
+                        if uuid_items[i] is None:
+                            raise ValueError(
+                                f"multi_modal_data[{modality!r}][{i}] is None but "
+                                f"multi_modal_uuids[{modality!r}][{i}] is missing."
+                            )
+            else:
+                if not uuid_items:
+                    raise ValueError(
+                        f"multi_modal_data[{modality!r}] is None but "
+                        f"multi_modal_uuids[{modality!r}] is missing."
+                    )
+
+    def _validate_enc_dec_mm_uuids(self, prompt: ExplicitEncoderDecoderPrompt) -> None:
+        enc_prompt = prompt["encoder_prompt"]
+        dec_prompt = prompt["decoder_prompt"]
+
+        self._validate_singleton_mm_uuids(enc_prompt)
+
+        if dec_prompt is not None:
+            self._validate_singleton_mm_uuids(dec_prompt)
+
     def _validate_multi_modal_uuids(self, prompt: PromptType) -> None:
         """
         Validate that user-provided multi_modal_uuids align with
@@ -204,58 +261,10 @@ class InputProcessor:
         auto-hashed downstream.
         """
 
-        def _validate_single_prompt(single_prompt: SingletonPrompt) -> None:
-            if not isinstance(single_prompt, dict):
-                return
-
-            mm_data: MultiModalDataDict = single_prompt.get("multi_modal_data") or {}
-            mm_uuids: MultiModalUUIDDict = single_prompt.get("multi_modal_uuids") or {}
-            if not mm_data and not mm_uuids:
-                return
-
-            mm_items = self._parse_mm_items(mm_data)
-
-            for modality, data_items in mm_items.items():
-                uuid_items = mm_uuids.get(modality, [])
-
-                if data_items:
-                    if uuid_items and len(data_items) != len(uuid_items):
-                        raise ValueError(
-                            f"If given, multi_modal_uuids[{modality!r}] must have "
-                            f"same length as multi_modal_data[{modality!r}], but "
-                            f"got {len(uuid_items)} vs {len(data_items)}."
-                        )
-
-                    for i, item in enumerate(data_items):
-                        if item is None:
-                            if not uuid_items:
-                                raise ValueError(
-                                    f"multi_modal_data[{modality!r}][{i}] is None but "
-                                    f"multi_modal_uuids[{modality!r}] is missing."
-                                )
-
-                            if uuid_items[i] is None:
-                                raise ValueError(
-                                    f"multi_modal_data[{modality!r}][{i}] is None but "
-                                    f"multi_modal_uuids[{modality!r}][{i}] is missing."
-                                )
-                else:
-                    if not uuid_items:
-                        raise ValueError(
-                            f"multi_modal_data[{modality!r}] is None but "
-                            f"multi_modal_uuids[{modality!r}] is missing."
-                        )
-
-        # Handle explicit encoder/decoder prompts or singleton prompt
-        if isinstance(prompt, dict) and "encoder_prompt" in prompt:
-            enc = prompt.get("encoder_prompt")
-            dec = prompt.get("decoder_prompt")
-            if enc is not None:
-                _validate_single_prompt(enc)
-            if dec is not None:
-                _validate_single_prompt(dec)
+        if is_explicit_encoder_decoder_prompt(prompt):
+            self._validate_enc_dec_mm_uuids(prompt)
         else:
-            _validate_single_prompt(prompt)  # type: ignore[arg-type]
+            self._validate_singleton_mm_uuids(prompt)
 
     def _validate_lora(self, lora_request: LoRARequest | None) -> None:
         if lora_request is None:

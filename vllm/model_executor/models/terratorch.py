@@ -18,7 +18,7 @@
 """Wrapper around `Terratorch` models"""
 
 from collections import OrderedDict
-from collections.abc import Callable, Iterable, Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from typing import Any
 
 import torch
@@ -69,28 +69,28 @@ from .interfaces_base import attn_type
 logger = init_logger(__name__)
 
 
-def _terratorch_field_names(pretrained_cfg: dict):
-    input_definition = InputDefinition(**pretrained_cfg["input"])
+def _terratorch_field_names(input_definition: InputDefinition):
     return set(input_definition.data.keys())
 
 
-def _terratorch_field_factory(
-    pretrained_cfg: dict,
-) -> Callable[
-    [Mapping[str, torch.Tensor]],
-    Mapping[str, MultiModalFieldConfig],
-]:
-    def _terratorch_field_config(hf_inputs: Mapping[str, torch.Tensor]):
-        input_definition = InputDefinition(**pretrained_cfg["input"])
-        fields = {}
+def _terratorch_field_factory(input_definition: InputDefinition):
+    def _terratorch_field_config(
+        hf_inputs: Mapping[str, torch.Tensor],
+    ) -> Mapping[str, MultiModalFieldConfig]:
+        fields = dict[str, MultiModalFieldConfig]()
         for input_name, input in input_definition.data.items():
+            modality = "image"
             if input.type == InputTypeEnum.tensor:
-                fields[input_name] = "image"
+                if input.shape[0] == 1:
+                    field = MultiModalFieldConfig.shared(modality, batch_size=1)
+                elif input.shape[0] > 1:
+                    field = MultiModalFieldConfig.batched(modality)
+                else:
+                    raise NotImplementedError({input_name: input})
 
-        return {
-            field_name: MultiModalFieldConfig.batched(modality=field_modality)
-            for field_name, field_modality in fields.items()
-        }
+                fields[input_name] = field
+
+        return fields
 
     return _terratorch_field_config
 
@@ -131,7 +131,7 @@ class TerratorchInputBuilder(BaseDummyInputsBuilder[TerratorchProcessingInfo]):
 
 class TerratorchMultiModalDataParser(MultiModalDataParser):
     def __init__(self, pretrained_cfg: dict, *args, **kwargs):
-        self._pretrained_cfg = pretrained_cfg
+        self._input_definition = InputDefinition(**pretrained_cfg["input"])
         super().__init__(*args, **kwargs)
 
     def _parse_image_data(
@@ -139,13 +139,11 @@ class TerratorchMultiModalDataParser(MultiModalDataParser):
         data: dict[str, torch.Tensor] | ModalityData[ImageItem],
     ) -> ModalityDataItems[Any, Any] | None:
         if isinstance(data, dict):
-            terratorch_fields = _terratorch_field_names(self._pretrained_cfg)
-
             return DictEmbeddingItems(
                 data,
                 modality="image",
-                required_fields=terratorch_fields,
-                fields_factory=_terratorch_field_factory(self._pretrained_cfg),
+                required_fields=_terratorch_field_names(self._input_definition),
+                fields_factory=_terratorch_field_factory(self._input_definition),
             )
 
         return super()._parse_image_data(data)
