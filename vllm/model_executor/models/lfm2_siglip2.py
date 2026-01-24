@@ -22,11 +22,7 @@ from vllm.model_executor.layers.linear import (
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 
-from .vision import (
-    is_vit_use_data_parallel,
-    resolve_visual_encoder_outputs,
-    should_torch_compile_mm_vit,
-)
+from .vision import is_vit_use_data_parallel, should_torch_compile_mm_vit
 
 
 class Siglip2VisionEmbeddings(nn.Module):
@@ -335,7 +331,6 @@ class Siglip2Encoder(nn.Module):
         self,
         config: Siglip2VisionConfig,
         quant_config: QuantizationConfig | None = None,
-        num_hidden_layers_override: int | None = None,
         prefix: str = "",
     ):
         super().__init__()
@@ -385,8 +380,6 @@ class Siglip2VisionTransformer(nn.Module):
         self,
         config: Siglip2VisionConfig,
         quant_config: QuantizationConfig | None = None,
-        num_hidden_layers_override: int | None = None,
-        require_post_norm: bool | None = None,
         prefix: str = "",
     ):
         super().__init__()
@@ -400,7 +393,6 @@ class Siglip2VisionTransformer(nn.Module):
             self.encoder = Siglip2Encoder(
                 config,
                 quant_config=quant_config,
-                num_hidden_layers_override=num_hidden_layers_override,
                 prefix=f"{prefix}.encoder",
             )
         num_hidden_layers = config.num_hidden_layers
@@ -448,8 +440,6 @@ class Siglip2Model(torch.nn.Module):
         self,
         config: Siglip2VisionConfig,
         quant_config: QuantizationConfig | None = None,
-        num_hidden_layers_override: int | None = None,
-        require_post_norm: bool | None = None,
         prefix: str = "",
     ):
         super().__init__()
@@ -457,8 +447,6 @@ class Siglip2Model(torch.nn.Module):
         self.vision_model = Siglip2VisionTransformer(
             config,
             quant_config=quant_config,
-            num_hidden_layers_override=num_hidden_layers_override,
-            require_post_norm=require_post_norm,
             prefix=f"{prefix}.vision_model",
         )
 
