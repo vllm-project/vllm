@@ -203,23 +203,28 @@ def benchmark_config(
 
         deep_gemm_experts = None
         if use_deep_gemm:
+            moe_config = FusedMoEConfig(
+                num_experts=num_experts,
+                experts_per_token=topk,
+                hidden_dim=hidden_size,
+                intermediate_size_per_partition=shard_intermediate_size,
+                num_local_experts=num_experts,
+                activation="silu",
+                moe_parallel_config=FusedMoEParallelConfig.make_no_parallel(),
+                in_dtype=init_dtype,
+                routing_method=RoutingMethodType.TopK,
+                device="cuda",
+            )
+
             deep_gemm_experts = mk.FusedMoEModularKernel(
                 prepare_finalize=MoEPrepareAndFinalizeNoEP(
-                    TritonOrDeepGemmExperts.expects_unquantized_inputs()
+                    TritonOrDeepGemmExperts.expects_unquantized_inputs(
+                        moe_config=moe_config,
+                        quant_config=quant_config,
+                    )
                 ),
                 fused_experts=TritonOrDeepGemmExperts(
-                    moe_config=FusedMoEConfig(
-                        num_experts=num_experts,
-                        experts_per_token=topk,
-                        hidden_dim=hidden_size,
-                        intermediate_size_per_partition=shard_intermediate_size,
-                        num_local_experts=num_experts,
-                        activation="silu",
-                        moe_parallel_config=FusedMoEParallelConfig.make_no_parallel(),
-                        in_dtype=init_dtype,
-                        routing_method=RoutingMethodType.TopK,
-                        device="cuda",
-                    ),
+                    moe_config=moe_config,
                     quant_config=quant_config,
                 ),
             )

@@ -7,9 +7,6 @@ import torch
 # Fused experts and PrepareFinalize imports
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.model_executor.layers.fused_moe import TritonExperts
-from vllm.model_executor.layers.fused_moe.all2all_utils import (
-    maybe_make_prepare_finalize,
-)
 from vllm.model_executor.layers.fused_moe.batched_deep_gemm_moe import (
     BatchedDeepGemmExperts,
 )
@@ -426,20 +423,6 @@ if cutlass_fp4_supported() or has_flashinfer_cutlass_fused_moe():
             block_shape=None,
         ),
     ]
-
-
-def make_prepare_finalize(
-    prepare_finalize_type: mk.FusedMoEPrepareAndFinalize,
-    backend: str | None,
-    moe: FusedMoEConfig,
-    quant_config: FusedMoEQuantConfig,
-) -> mk.FusedMoEPrepareAndFinalize:
-    if backend != "naive" and backend is not None:
-        prepare_finalize = maybe_make_prepare_finalize(moe, quant_config)
-        assert prepare_finalize is not None
-        return prepare_finalize
-    else:
-        return MoEPrepareAndFinalizeNoEP()  # defer input quant
 
 
 def _slice(rank: int, num_local_experts: int, t: torch.Tensor) -> torch.Tensor:

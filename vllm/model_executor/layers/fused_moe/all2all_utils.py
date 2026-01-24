@@ -129,7 +129,8 @@ def maybe_make_prepare_finalize(
         handle = all2all_manager.get_handle(all_to_all_args)
 
         prepare_finalize = PplxPrepareAndFinalize(
-            handle,
+            defer_input_quant=defer_input_quant,
+            a2a=handle,
             max_num_tokens=moe.max_num_tokens,
             num_local_experts=moe.num_local_experts,
             num_dispatchers=num_dispatchers,
@@ -173,7 +174,8 @@ def maybe_make_prepare_finalize(
         )
 
         prepare_finalize = DeepEPLLPrepareAndFinalize(
-            handle,
+            defer_input_quant=defer_input_quant,
+            buffer=handle,
             max_tokens_per_rank=moe.max_num_tokens,
             num_dispatchers=all2all_manager.world_size,
             use_fp8_dispatch=use_fp8_dispatch,
@@ -207,7 +209,8 @@ def maybe_make_prepare_finalize(
         handle = all2all_manager.get_handle(all_to_all_args)
 
         prepare_finalize = MoriPrepareAndFinalize(
-            handle,
+            defer_input_quant=defer_input_quant,
+            mori_op=handle,
             max_tokens_per_rank=moe.max_num_tokens,
             num_dispatchers=all2all_manager.world_size,
             use_fp8_dispatch=use_fp8_dispatch,

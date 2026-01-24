@@ -19,16 +19,22 @@ class MoriPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
 
     def __init__(
         self,
+        defer_input_quant: bool,
         mori_op: mori.ops.EpDispatchCombineOp,
         max_tokens_per_rank: int,
         num_dispatchers: int,
         use_fp8_dispatch: bool = False,
     ):
-        super().__init__()
+        super().__init__(defer_input_quant)
         self.mori_op = mori_op
         self.num_dispatchers_ = num_dispatchers
         self.max_tokens_per_rank = max_tokens_per_rank
         self.use_fp8_dispatch = use_fp8_dispatch
+
+        if defer_input_quant:
+            raise NotImplementedError(
+                "MoriPrepareAndFinalize does not support defer_input_quant=True."
+            )
 
     @property
     def activation_format(self) -> mk.FusedMoEActivationFormat:

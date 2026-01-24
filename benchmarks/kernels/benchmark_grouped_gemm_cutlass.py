@@ -131,16 +131,22 @@ def bench_run(
             w2_scale=w2_scale,
             per_act_token_quant=per_act_token,
         )
+        moe_config = make_dummy_moe_config(
+            num_experts=w2.shape[0],
+            hidden_dim=w2.shape[1],
+            intermediate_size_per_partition=w2.shape[2],
+            in_dtype=a.dtype,
+        )
 
         fn = mk.FusedMoEModularKernel(
-            MoEPrepareAndFinalizeNoEP(),
+            MoEPrepareAndFinalizeNoEP(
+                defer_input_quant=CutlassExpertsFp8.expects_unquantized_inputs(
+                    moe_config=moe_config,
+                    quant_config=quant_config,
+                )
+            ),
             CutlassExpertsFp8(
-                moe_config=make_dummy_moe_config(
-                    num_experts=w2.shape[0],
-                    hidden_dim=w2.shape[1],
-                    intermediate_size_per_partition=w2.shape[2],
-                    in_dtype=a.dtype,
-                ),
+                moe_config=moe_config,
                 quant_config=quant_config,
             ),
         )
@@ -163,16 +169,22 @@ def bench_run(
             w2_scale=w2_scale,
             per_act_token_quant=per_act_token,
         )
+        moe_config = make_dummy_moe_config(
+            num_experts=w2.shape[0],
+            hidden_dim=w2.shape[1],
+            intermediate_size_per_partition=w2.shape[2],
+            in_dtype=a.dtype,
+        )
 
         fn = mk.FusedMoEModularKernel(
-            MoEPrepareAndFinalizeNoEP(),
+            MoEPrepareAndFinalizeNoEP(
+                CutlassExpertsFp8.expects_unquantized_inputs(
+                    moe_config=moe_config,
+                    quant_config=quant_config,
+                )
+            ),
             CutlassExpertsFp8(
-                moe_config=make_dummy_moe_config(
-                    num_experts=w2.shape[0],
-                    hidden_dim=w2.shape[1],
-                    intermediate_size_per_partition=w2.shape[2],
-                    in_dtype=a.dtype,
-                ),
+                moe_config=moe_config,
                 quant_config=quant_config,
             ),
         )

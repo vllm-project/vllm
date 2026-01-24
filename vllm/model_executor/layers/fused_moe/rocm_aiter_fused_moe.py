@@ -293,7 +293,7 @@ class AiterExperts(mk.FusedMoEPermuteExpertsUnpermute):
 
     @staticmethod
     def expects_unquantized_inputs(
-        fused_moe_config: mk.FusedMoEConfig, quant_config: FusedMoEQuantConfig
+        moe_config: mk.FusedMoEConfig, quant_config: FusedMoEQuantConfig
     ) -> bool:
         # AITER fused MoE kernels handle input quantization internally.
         return True
