@@ -23,6 +23,10 @@ if [ "$(id -u)" -ne 0 ]; then
   SUDO="sudo"
 fi
 
+# Write outputs here (host-visible via your compose volume mount)
+RESULTS_DIR="/workspace/benchmarks/results"
+mkdir -p "${RESULTS_DIR}"
+
 # --- Functions -------------------------------------------------------------
 
 print_header() {
@@ -132,11 +136,6 @@ if [[ "$DEBUG_MAP" == "1" ]]; then
   echo
 fi
 
-# Sanity sample (direct query)
-#echo "Sample (CPU 0-15):"
-#get_assoc_for_cpulist "0-15" | sed -n '1,20p'
-#echo
-
 # Distribution by CLOS (robust; normalize digits)
 echo "CLOS distribution (count by clos id):"
 python3 - <<'PY' "$tmp_map"
@@ -160,6 +159,7 @@ echo
 # Print target CLOS list as compressed ranges (single Python pass; no tmp_target, no piping)
 print_header "CPU list for TARGET_CLOS=${TARGET_CLOS}"
 
+CLOS_LINE="$(
 python3 - <<'PY' "$tmp_map" "$TARGET_CLOS"
 import re,sys
 path=sys.argv[1]
@@ -196,6 +196,22 @@ while i<len(cpus):
 
 print(f"clos:{target} CPU list: {','.join(res)}")
 PY
+)"
+
+# Always print the same line as before
+echo "${CLOS_LINE}"
+
+# Write the list to a host-visible file
+# - If TARGET_CLOS=0 (default), file will be: ./results/clos0_cpulist.txt
+if [[ "${CLOS_LINE}" =~ ^clos:${TARGET_CLOS}[[:space:]]CPU[[:space:]]list:\ (.*)$ ]]; then
+  CLOS_LIST="${BASH_REMATCH[1]}"
+  OUT_FILE="${RESULTS_DIR}/clos${TARGET_CLOS}_cpulist.txt"
+  echo "${CLOS_LIST}" > "${OUT_FILE}"
+  echo "Wrote clos:${TARGET_CLOS} CPU list to ${OUT_FILE}"
+else
+  echo "WARNING: Did not write clos list file (unexpected output): ${CLOS_LINE}" >&2
+fi
+
 echo
 
 # --- 5. Friendly summary --------------------------------------------------
