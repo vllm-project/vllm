@@ -197,16 +197,12 @@ class SiluMulBlockQuantPattern:
     
     def register(self, pm_pass: PatternMatcherPass) -> None:
         def pattern(input: torch.Tensor) -> torch.Tensor:
-            # Match just silu_mul
-            d = input.shape[-1] // 2
-            gate = input[..., :d]
-            silu = torch.nn.functional.silu(gate)
-            up = input[..., d:]
-            silu_out = silu * up
+            # Use the existing matcher
+            silu_out = self.silu_and_mul_matcher(input)
             return silu_out
         
         def replacement(input: torch.Tensor) -> torch.Tensor:
-            print(f"🔥 SILU+MUL PATTERN TRIGGERED! input.shape={input.shape}")
+            print(f"🔥 SILU+MUL MATCHER PATTERN TRIGGERED! input.shape={input.shape}")
             # Just return the pattern for now
             d = input.shape[-1] // 2
             gate = input[..., :d]
@@ -214,7 +210,7 @@ class SiluMulBlockQuantPattern:
             up = input[..., d:]
             return silu * up
         
-        input = torch.empty(5, 256, dtype=torch.float16, device='cuda')  # 256 = 128*2
+        input = torch.empty(5, 256, dtype=torch.float16, device='cuda')
         pattern(input)
         
         register_replacement(pattern, replacement, [input], fwd_only, pm_pass)
