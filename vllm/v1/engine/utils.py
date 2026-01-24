@@ -4,12 +4,12 @@
 import contextlib
 import os
 import weakref
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Mapping
 from dataclasses import dataclass
 from enum import Enum, auto
 from multiprocessing import Process, connection
 from multiprocessing.process import BaseProcess
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, cast
 from unittest.mock import patch
 
 import msgspec
@@ -226,8 +226,12 @@ def get_device_indices(
     return value
 
 
-def get_prompt_text(prompt: PromptType) -> str | None:
-    return get_prompt_components(prompt)[0]
+def get_prompt_text(prompt: Any) -> str | None:
+    if isinstance(prompt, str):
+        return prompt
+    if isinstance(prompt, Mapping):
+        return cast(str | None, prompt.get("prompt"))
+    return None
 
 
 class CoreEngineActorManager:

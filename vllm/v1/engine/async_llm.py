@@ -7,6 +7,7 @@ import time
 import warnings
 from collections.abc import AsyncGenerator, Iterable, Mapping
 from copy import copy
+from dataclasses import dataclass
 from typing import Any
 
 import torch
@@ -25,7 +26,7 @@ from vllm.outputs import STREAM_FINISHED, PoolingRequestOutput, RequestOutput
 from vllm.plugins.io_processors import get_io_processor
 from vllm.pooling_params import PoolingParams
 from vllm.renderers import RendererLike
-from vllm.sampling_params import SamplingParams
+from vllm.sampling_params import RequestOutputKind, SamplingParams
 from vllm.tasks import SupportedTask
 from vllm.tokenizers import TokenizerLike
 from vllm.tracing import init_tracer
@@ -50,6 +51,18 @@ from vllm.v1.metrics.prometheus import shutdown_prometheus
 from vllm.v1.metrics.stats import IterationStats
 
 logger = init_logger(__name__)
+
+
+@dataclass
+class StreamingInput:
+    """Input data for a streaming generation request.
+
+    This is used with generate() to support multi-turn streaming sessions
+    where inputs are provided via an async generator.
+    """
+
+    prompt: PromptType
+    sampling_params: SamplingParams | None = None
 
 
 class InputStreamError(Exception):
@@ -316,6 +329,20 @@ class AsyncLLM(EngineClient):
             tokenization_kwargs = merge_kwargs(
                 tokenization_kwargs,
                 dict(truncate_prompt_tokens=params.truncate_prompt_tokens),
+            )
+
+        if isinstance(prompt, AsyncGenerator):
+            # Streaming input case.
+            return await self._add_streaming_input_request(
+                request_id,
+                prompt,
+                params,
+                arrival_time,
+                lora_request,
+                tokenization_kwargs,
+                trace_headers,
+                priority,
+                data_parallel_rank,
             )
 
         if isinstance(prompt, AsyncGenerator):
