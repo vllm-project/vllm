@@ -1534,6 +1534,7 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
                 moe_config=self.moe,
                 experts_cls=self.experts_cls,
             )
+        print(f"{self.mk_moe=}")
 
     @property
     def do_post_quant_allgather(self):
