@@ -139,3 +139,84 @@ async def test_chat_full_of_tool_and_reasoning(client: openai.AsyncOpenAI):
     assert len(tool_calls.choices[0].message.reasoning) > 0
     assert tool_calls.choices[0].message.tool_calls[0].function.name == FUNC_NAME
     assert tool_calls.choices[0].message.tool_calls[0].function.arguments == FUNC_ARGS
+
+
+# test that content does not leak into final chunk when finish_reason=tool_calls
+@pytest.mark.asyncio
+async def test_no_content_leak_when_finish_reason_tool_calls(
+    client: openai.AsyncOpenAI,
+):
+    """
+    Test that when finish_reason='tool_calls', the final chunk does not
+    contain any content field. This prevents reasoning_content from leaking
+    into content, which violates OpenAI's schema contract.
+
+    This test specifically targets the bug where leftover reasoning buffers
+    (especially from speculative decoding) were incorrectly flushed into
+    the content field in the final streamed chunk.
+    """
+    stream = await client.chat.completions.create(
+        model=MODEL_NAME,
+        messages=MESSAGES,
+        tools=TOOLS,
+        temperature=0.0,
+        stream=True,
+        tool_choice="auto",
+        include_reasoning=True,
+    )
+
+    chunks = []
+    final_chunk = None
+    async for chunk in stream:
+        chunks.append(chunk)
+        # Track the final chunk with finish_reason
+        if chunk.choices and chunk.choices[0].finish_reason:
+            final_chunk = chunk
+
+    # Ensure we got a final chunk with tool_calls
+    assert final_chunk is not None, "Expected a final chunk with finish_reason"
+    assert final_chunk.choices[0].finish_reason == "tool_calls", (
+        "Expected finish_reason to be 'tool_calls'"
+    )
+
+    delta = final_chunk.choices[0].delta
+
+    # Per OpenAI spec, when finish_reason='tool_calls', content must be null/absent
+    # This is the core fix: prevent reasoning_content from leaking into content
+    assert delta.content is None or delta.content == "", (
+        f"Final chunk with finish_reason='tool_calls' must not have content. "
+        f"Got content='{delta.content}'. This indicates reasoning_content leaked "
+        f"into content field."
+    )
+
+    # Also ensure reasoning fields are not present in final chunk
+    # (they should only appear in earlier chunks)
+    reasoning = getattr(delta, "reasoning", None)
+    reasoning_content = getattr(delta, "reasoning_content", None)
+    assert reasoning is None or reasoning == "", (
+        "Final chunk with tool_calls should not have reasoning field"
+    )
+    assert reasoning_content is None or reasoning_content == "", (
+        "Final chunk with tool_calls should not have reasoning_content field"
+    )
+
+    # Verify tool_calls are present (the expected behavior)
+    assert delta.tool_calls is not None and len(delta.tool_calls) > 0, (
+        "Final chunk with finish_reason='tool_calls' must have tool_calls"
+    )
+
+    # Verify reasoning was streamed in earlier chunks (not in final)
+    reasoning_found_in_earlier_chunks = False
+    for chunk in chunks[:-1]:  # All chunks except the final one
+        if chunk.choices:
+            delta = chunk.choices[0].delta
+            if hasattr(delta, "reasoning") and delta.reasoning:
+                reasoning_found_in_earlier_chunks = True
+                break
+            if hasattr(delta, "reasoning_content") and delta.reasoning_content:
+                reasoning_found_in_earlier_chunks = True
+                break
+
+    assert reasoning_found_in_earlier_chunks, (
+        "Reasoning should be streamed in earlier chunks, not in final chunk"
+    )
