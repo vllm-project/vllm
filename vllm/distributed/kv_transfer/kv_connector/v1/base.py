@@ -543,6 +543,25 @@ class KVConnectorBase_V1(ABC):
             )
         return None
 
+    @classmethod
+    def _get_raw_copy_required_layout(cls, vllm_config: "VllmConfig") -> str | None:
+        if vllm_config.model_config is None:
+            logger.warning_once(
+                "Unable to detect current VLLM config. "
+                "Fallback to default kv cache layout."
+            )
+            return None
+
+        use_mla = vllm_config.model_config.use_mla
+        if use_mla:
+            return None
+
+        logger.info_once(
+            "%s setting KV cache layout to HND to ensure P/D layout compatibility.",
+            cls.__name__,
+        )
+        return "HND"
+
     def get_finished_count(self) -> int | None:
         """
         Get the count of requests expected to complete send/receive operations

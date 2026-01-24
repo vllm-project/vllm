@@ -137,20 +137,7 @@ class MooncakeConnector(KVConnectorBase_V1):
     ############################################################
     @classmethod
     def get_required_kvcache_layout(cls, vllm_config: VllmConfig) -> str | None:
-        if vllm_config.model_config is None:
-            logger.warning_once(
-                "Unable to detect current VLLM config. "
-                "Fallback to default kv cache layout."
-            )
-            return None
-        use_mla = vllm_config.model_config.use_mla
-        if use_mla:
-            return None
-        logger.info_once(
-            "MooncakeConnector setting KV cache layout to HND to ensure "
-            "P/D layout compatibility."
-        )
-        return "HND"
+        return cls._get_raw_copy_required_layout(vllm_config)
 
     ############################################################
     # Scheduler Side Methods

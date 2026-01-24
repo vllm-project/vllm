@@ -339,23 +339,8 @@ class NixlConnector(KVConnectorBase_V1):
     # Class Methods
     ############################################################
     @classmethod
-    def get_required_kvcache_layout(cls, vllm_config: VllmConfig):
-        if vllm_config.model_config is None:
-            logger.warning_once(
-                "Unable to detect current VLLM config. "
-                "Fallback to default kv cache layout."
-            )
-            return None
-        use_mla = vllm_config.model_config.use_mla
-        if use_mla:
-            # return None when we have mla
-            # as the layout should not matter in that case,
-            # which fallback to the default behavior.
-            return None
-        logger.info_once(
-            "NixlConnector setting KV cache layout to HND for better xfer performance."
-        )
-        return "HND"
+    def get_required_kvcache_layout(cls, vllm_config: VllmConfig) -> str | None:
+        return cls._get_raw_copy_required_layout(vllm_config)
 
     ############################################################
     # Scheduler Side Methods
