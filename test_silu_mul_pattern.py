@@ -20,6 +20,7 @@ compilation_config = CompilationConfig(
     custom_ops=["+quant_fp8"],
     pass_config={
         "fuse_act_quant": True,
+        "eliminate_noops": True, 
     }
 )
 model_config = ModelConfig(
