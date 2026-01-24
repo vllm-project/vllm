@@ -331,7 +331,7 @@ class FusedMoE(CustomOp):
         enable_eplb: bool = False,
         num_redundant_experts: int = 0,
         has_bias: bool = False,
-        is_sequence_parallel: bool = False,
+        is_sequence_parallel=False,
         expert_mapping: list[tuple[str, str, int, str]] | None = None,
         n_shared_experts: int | None = None,
         router_logits_dtype: torch.dtype | None = None,
@@ -643,10 +643,10 @@ class FusedMoE(CustomOp):
     # This is called after all weight loading and post-processing, so it
     # should be safe to swap out the quant_method.
     def maybe_init_modular_kernel(self) -> None:
-        # TODO: switch to check if the quant method is holding an MK.
-        if True:
-            logger.info_once("DEBUG: SKIPPING MK INIT: Handled Internally!!!!")
-            return
+        # NOTE(rob): this is a temporary check until all quant_method
+        # managed the modular kernels internally (in progress refactor).
+        if self.quant_method.supports_internal_mk:
+            return None
 
         self.ensure_moe_quant_config_init()
         # routing_tables only needed for round-robin expert placement with
@@ -1792,7 +1792,11 @@ class FusedMoE(CustomOp):
                 hidden_states, router_logits, has_separate_shared_experts
             )
 
-        do_naive_dispatch_combine = self.dp_size > 1 and not is_mk
+        # NOTE(rob): WIP refactor for quant_methods to hold the MK,
+        # removes need for naive dispatch/combine in FusedMoE.forward()
+        do_naive_dispatch_combine = (
+            self.dp_size > 1 and not self.quant_method.supports_internal_mk
+        )
 
         ctx = get_forward_context()
         sp_ctx = (

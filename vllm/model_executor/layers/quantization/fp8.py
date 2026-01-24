@@ -677,15 +677,6 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             allow_vllm_cutlass=False,
         )
 
-        # Delay creation of the kernel until after process-weights.
-        self.kernel: mk.FusedMoEModularKernel | None = None
-
-    @property
-    def topk_indices_dtype(self) -> torch.dtype | None:
-        if self.kernel is not None:
-            return self.kernel.prepare_finalize.topk_indices_dtype()
-        return None
-
     def create_weights(
         self,
         layer: Module,

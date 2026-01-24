@@ -732,15 +732,6 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
             activation_key=kFp8StaticTensorSym,
         )
 
-        # Delay creation of the kernel until after process-weights.
-        self.kernel: mk.FusedMoEModularKernel | None = None
-
-    @property
-    def topk_indices_dtype(self) -> torch.dtype | None:
-        if self.kernel is not None:
-            return self.kernel.prepare_finalize.topk_indices_dtype()
-        return None
-
     def maybe_make_prepare_finalize(
         self,
         routing_tables: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
@@ -871,7 +862,7 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
         self.moe_quant_config = self.get_fused_moe_quant_config(layer)
         if self.moe_quant_config:
             assert self.experts_cls is not None
-            self.kernel, self.use_inplace = make_fp8_moe_kernel(
+            self.mk_moe, self.use_inplace = make_fp8_moe_kernel(
                 moe_quant_config=self.moe_quant_config,
                 moe_config=self.moe,
                 fp8_backend=self.fp8_backend,
@@ -976,8 +967,8 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
                 f"but got {layer.activation}"
             )
 
-        assert self.kernel is not None
-        return self.kernel(
+        assert self.mk_moe is not None
+        return self.mk_moe(
             x,
             layer.w13_weight,
             layer.w2_weight,
@@ -1339,18 +1330,9 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
             activation_key=kNvfp4Dynamic,
         )
 
-        # Delay creation of the kernel until after process-weights.
-        self.kernel: mk.FusedMoEModularKernel | None = None
-
         self.use_global_sf = is_global_sf_supported_for_nvfp4_backend(
             self.nvfp4_backend
         )
-
-    @property
-    def topk_indices_dtype(self) -> torch.dtype | None:
-        if self.kernel is not None:
-            return self.kernel.prepare_finalize.topk_indices_dtype()
-        return None
 
     def maybe_make_prepare_finalize(
         self,
@@ -1547,7 +1529,7 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
         self.moe_quant_config = self.get_fused_moe_quant_config(layer)
         if self.moe_quant_config:
             assert self.experts_cls is not None
-            self.kernel = make_nvfp4_moe_kernel(
+            self.mk_moe = make_nvfp4_moe_kernel(
                 moe_quant_config=self.moe_quant_config,
                 moe_config=self.moe,
                 experts_cls=self.experts_cls,
@@ -1650,8 +1632,8 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
                 global_num_experts=layer.global_num_experts,
             )
         else:
-            assert self.kernel is not None
-            return self.kernel(
+            assert self.mk_moe is not None
+            return self.mk_moe(
                 x,
                 layer.w13_weight,
                 layer.w2_weight,
