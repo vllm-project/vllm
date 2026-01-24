@@ -39,6 +39,7 @@ Launch Claude Code with environment variables pointing to your vLLM server:
 ```bash
 ANTHROPIC_BASE_URL=http://localhost:8000 \
 ANTHROPIC_API_KEY=dummy \
+ANTHROPIC_AUTH_TOKEN=dummy \
 ANTHROPIC_DEFAULT_OPUS_MODEL=my-model \
 ANTHROPIC_DEFAULT_SONNET_MODEL=my-model \
 ANTHROPIC_DEFAULT_HAIKU_MODEL=my-model \
@@ -51,6 +52,7 @@ The environment variables:
 | -------------------------------- | --------------------------------------------------------------------- |
 | `ANTHROPIC_BASE_URL`             | Points to your vLLM server (default port is 8000)                     |
 | `ANTHROPIC_API_KEY`              | Can be any value since vLLM doesn't require authentication by default |
+| `ANTHROPIC_AUTH_TOKEN`           | Is required. Can be any value.                                        |
 | `ANTHROPIC_DEFAULT_OPUS_MODEL`   | Model name for Opus-tier requests                                     |
 | `ANTHROPIC_DEFAULT_SONNET_MODEL` | Model name for Sonnet-tier requests                                   |
 | `ANTHROPIC_DEFAULT_HAIKU_MODEL`  | Model name for Haiku-tier requests                                    |
@@ -73,3 +75,4 @@ If the model responds correctly, your setup is working. You can now use Claude C
 **Tool calls not working**: Verify that your model supports tool calling and that you've enabled it with the correct `--tool-call-parser` flag. See [Tool Calling](../../features/tool_calling.md).
 
 **Model not found**: Ensure the `--served-model-name` matches the model names in your environment variables. You cannot use model names with `/` in them, such as `openai/gpt-oss-120b` directly from Huggingface, so beware of that limitation with Claude Code.
+
