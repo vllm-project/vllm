@@ -83,7 +83,11 @@ class GlmOcrMultiTokenPredictorLayer(nn.Module):
     ) -> torch.Tensor:
         assert inputs_embeds is not None
         # masking inputs at position 0, as not needed by MTP
-        inputs_embeds[positions.flatten() == 0] = 0
+        if positions.dim() == 1:
+            inputs_embeds[positions == 0] = 0
+        else:
+            inputs_embeds[positions.flatten() == 0] = 0
+
         inputs_embeds = self.enorm(inputs_embeds)
         previous_hidden_states = self.hnorm(previous_hidden_states)
 
