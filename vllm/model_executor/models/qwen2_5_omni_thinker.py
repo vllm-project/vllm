@@ -399,14 +399,19 @@ class Qwen2_5OmniThinkerMultiModalProcessor(
         tokenizer = self.info.get_tokenizer()
         processor = self.info.get_hf_processor()
         audio_token_id = tokenizer.get_vocab()[processor.audio_token]
+        video_token_id = tokenizer.get_vocab()[processor.video_token]
 
         result_placeholders = dict(placeholders)
         audio_placeholders = []
+        video_placeholders = []
 
         # Each video is paired with one audio
         for video_idx, video_placeholder in enumerate(placeholders["video"]):
             # Create is_embed mask selecting only audio tokens
             audio_is_embed = torch.tensor(video_placeholder.tokens) == audio_token_id
+
+            # Create is_embed mask selecting only video tokens
+            video_is_embed = torch.tensor(video_placeholder.tokens) == video_token_id
 
             audio_placeholder = PlaceholderFeaturesInfo(
                 modality="audio",
@@ -417,7 +422,18 @@ class Qwen2_5OmniThinkerMultiModalProcessor(
             )
             audio_placeholders.append(audio_placeholder)
 
+            # Update video placeholder with is_embed mask
+            video_placeholder_with_mask = PlaceholderFeaturesInfo(
+                modality="video",
+                item_idx=video_idx,
+                start_idx=video_placeholder.start_idx,
+                tokens=video_placeholder.tokens,
+                is_embed=video_is_embed,
+            )
+            video_placeholders.append(video_placeholder_with_mask)
+
         result_placeholders["audio"] = audio_placeholders
+        result_placeholders["video"] = video_placeholders
         return result_placeholders
 
     def _maybe_apply_prompt_updates(
