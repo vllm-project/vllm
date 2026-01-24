@@ -8,6 +8,9 @@ from vllm.config.utils import Range
 from vllm.model_executor.layers.quantization.utils.fp8_utils import per_token_group_quant_fp8
 import torch._inductor.config as inductor_config
 
+from vllm.model_executor.layers.quantization.input_quant_fp8 import QuantFP8
+from vllm.model_executor.layers.quantization.utils.quant_utils import GroupShape
+
 print("="*80)
 print("TESTING SILU+MUL+BLOCK QUANT PATTERN")
 print("="*80)
@@ -40,12 +43,21 @@ config = VllmConfig(
 )
 print("✓ Config created")
 
+quant_fp8 = QuantFP8(
+    static=False,  # Dynamic quantization
+    group_shape=GroupShape(1, 128),  # Per-token with group_size=128
+    column_major_scales=False,
+    use_ue8m0=False,
+)
+
 # Create test function
 def silu_mul_then_quant(x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-    # Match the pattern exactly
+    # Match the pattern exactly as MatcherSiluAndMul + MatcherQuantFP8 would generate
     d = x.shape[-1] // 2
     silu_out = F.silu(x[..., :d]) * x[..., d:]
-    result, scales = per_token_group_quant_fp8(silu_out, group_size=128, use_ue8m0=False)
+    
+    # Use QuantFP8 directly (what MatcherQuantFP8 wraps)
+    result, scales = quant_fp8(silu_out)
     return result, scales
 
 # Create a debug backend to see the graph
