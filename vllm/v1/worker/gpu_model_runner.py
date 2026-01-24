@@ -2345,7 +2345,7 @@ class GPUModelRunner(
     def _gather_mm_embeddings(
         self,
         scheduler_output: "SchedulerOutput",
-        shift_computed_tokens: int = 0, 
+        shift_computed_tokens: int = 0,
     ) -> tuple[list[torch.Tensor], list[torch.Tensor]]:
         total_num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
 
@@ -2416,7 +2416,9 @@ class GPUModelRunner(
                     True if is_embed is None else is_embed
                 )
                 mm_embeds_req.append(mm_embeds_item)
-                is_mm_embeds.append(is_mm_embed[:total_num_scheduled_tokens].to(self.device))
+                is_mm_embeds.append(
+                    is_mm_embed[:total_num_scheduled_tokens].to(self.device)
+                )
                 is_mm_embed[:total_num_scheduled_tokens] = False
 
             if self.is_multimodal_pruning_enabled and self.uses_mrope:
@@ -2435,9 +2437,13 @@ class GPUModelRunner(
 
             mm_embeds.extend(mm_embeds_req)
             req_start_idx += num_scheduled_tokens
-            
+
             if not mm_embeds_req:
-                is_mm_embeds.append(torch.tensor([False] * total_num_scheduled_tokens, device=self.device))
+                is_mm_embeds.append(
+                    torch.tensor(
+                        [False] * total_num_scheduled_tokens, device=self.device
+                    )
+                )
                 mm_embeds.append(torch.empty((0, 0), device=self.device))
 
         if should_sync_mrope_positions:
