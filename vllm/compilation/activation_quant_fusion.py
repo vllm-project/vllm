@@ -29,11 +29,6 @@ from .inductor_pass import enable_fake_mode
 from .matcher_utils import MatcherQuantFP8, MatcherSiluAndMul
 from .vllm_inductor_pass import VllmInductorPass, VllmPatternMatcherPass
 
-print(f"\n📋 QUANT_OPS contains:")
-for k, v in QUANT_OPS.items():
-    print(f"   {k} -> {v}")
-print()
-
 logger = init_logger(__name__)
 
 FP8_DTYPE = current_platform.fp8_dtype()
@@ -202,9 +197,21 @@ class SiluMulBlockQuantPattern:
     
     def register(self, pm_pass: PatternMatcherPass) -> None:
         def pattern(input: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-            result_silu_mul = self.silu_and_mul_matcher(input)
-            result_quant, scale = self.quant_matcher(result_silu_mul)
-            return result_quant, scale
+            # Match silu_mul
+            d = input.shape[-1] // 2
+            gate = input[..., :d]
+            silu = F.silu(gate)
+            up = input[..., d:]
+            silu_out = silu * up
+            
+            # Match the EXACT pattern from the graph
+            x_q = torch.empty(silu_out.shape, dtype=FP8_DTYPE, device=input.device)
+            num_groups = silu_out.shape[-1] // 128
+            x_s = torch.empty((silu_out.shape[0], num_groups), dtype=torch.float32, device=input.device)
+            
+            torch.ops._C.per_token_group_fp8_quant(silu_out, x_q, x_s, 128, 1e-10, -448.0, 448.0, False)
+            
+            return x_q, x_s
         
         def replacement(input: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
             print(f"🔥 FUSED KERNEL TRIGGERED! input.shape={input.shape}")
