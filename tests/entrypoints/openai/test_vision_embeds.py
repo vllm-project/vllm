@@ -72,10 +72,7 @@ def test_stacked_fields(model_name: str):
 @pytest.mark.parametrize("model_name", ["Qwen/Qwen3-VL-2B-Instruct"])
 def test_mixed_fields(model_name: str):
     args = [
-        "--runner",
-        "pooling",
         "--enforce-eager",
-        "--trust-remote-code",
         "--max-num-seqs",
         "32",
         "--max-model-len",
