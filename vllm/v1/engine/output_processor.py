@@ -703,23 +703,23 @@ class OutputProcessor:
                     for event in req_state.journey_events:
                         # Build event attributes (exclude None values)
                         attributes = {
-                            "event.type": event.event_type.name,
-                            "ts.monotonic": event.ts_monotonic,
-                            "phase": event.phase,
-                            "prefill.done_tokens": event.prefill_done_tokens,
-                            "prefill.total_tokens": event.prefill_total_tokens,
-                            "decode.done_tokens": event.decode_done_tokens,
-                            "decode.max_tokens": event.decode_max_tokens,
-                            "num_preemptions": event.num_preemptions_so_far,
+                            SpanAttributes.JOURNEY_EVENT_TYPE: event.event_type.name,
+                            SpanAttributes.JOURNEY_TS_MONOTONIC: event.ts_monotonic,
+                            SpanAttributes.JOURNEY_PHASE: event.phase,
+                            SpanAttributes.JOURNEY_PREFILL_DONE_TOKENS: event.prefill_done_tokens,
+                            SpanAttributes.JOURNEY_PREFILL_TOTAL_TOKENS: event.prefill_total_tokens,
+                            SpanAttributes.JOURNEY_DECODE_DONE_TOKENS: event.decode_done_tokens,
+                            SpanAttributes.JOURNEY_DECODE_MAX_TOKENS: event.decode_max_tokens,
+                            SpanAttributes.JOURNEY_NUM_PREEMPTIONS: event.num_preemptions_so_far,
                         }
 
                         # Add optional fields (only if not None)
                         if event.scheduler_step is not None:
-                            attributes["scheduler.step"] = event.scheduler_step
+                            attributes[SpanAttributes.JOURNEY_SCHEDULER_STEP] = event.scheduler_step
                         if event.schedule_kind is not None:
-                            attributes["schedule.kind"] = event.schedule_kind.name
+                            attributes[SpanAttributes.JOURNEY_SCHEDULE_KIND] = event.schedule_kind.name
                         if event.finish_status is not None:
-                            attributes["finish.status"] = event.finish_status
+                            attributes[SpanAttributes.JOURNEY_FINISH_STATUS] = event.finish_status
 
                         # Add as span event (timestamp omitted, will use current time)
                         span.add_event(

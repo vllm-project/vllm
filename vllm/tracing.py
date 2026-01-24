@@ -124,6 +124,18 @@ class SpanAttributes:
     GEN_AI_LATENCY_TIME_IN_MODEL_PREFILL = "gen_ai.latency.time_in_model_prefill"
     GEN_AI_LATENCY_TIME_IN_MODEL_DECODE = "gen_ai.latency.time_in_model_decode"
     GEN_AI_LATENCY_TIME_IN_MODEL_INFERENCE = "gen_ai.latency.time_in_model_inference"
+    # Journey event attributes (for request lifecycle span events)
+    JOURNEY_EVENT_TYPE = "event.type"
+    JOURNEY_TS_MONOTONIC = "ts.monotonic"
+    JOURNEY_PHASE = "phase"
+    JOURNEY_PREFILL_DONE_TOKENS = "prefill.done_tokens"
+    JOURNEY_PREFILL_TOTAL_TOKENS = "prefill.total_tokens"
+    JOURNEY_DECODE_DONE_TOKENS = "decode.done_tokens"
+    JOURNEY_DECODE_MAX_TOKENS = "decode.max_tokens"
+    JOURNEY_NUM_PREEMPTIONS = "num_preemptions"
+    JOURNEY_SCHEDULER_STEP = "scheduler.step"
+    JOURNEY_SCHEDULE_KIND = "schedule.kind"
+    JOURNEY_FINISH_STATUS = "finish.status"
 
 
 def contains_trace_headers(headers: Mapping[str, str]) -> bool:

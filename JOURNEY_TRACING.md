@@ -1030,6 +1030,7 @@ Events appear as **span events** within the `llm_request` span and are sent to a
 
 ## Additional Resources
 
+- **Getting started using Claude Code for developers/contributors**: Start a Claude Code session and prompt as follows: "I would like to understand the request journey feature. I can look into the codebase, but tell me where to look step by step.  Start with the CLI entry point for enabling this feature, and take me all the way to how the request traces get shipped to OTEL receivers."
 - **CLI Flag**: Use `vllm serve --help` to see all observability options
 - **Source Code**: `vllm/v1/core/sched/journey_events.py`
 - **Implementation**: `vllm/v1/core/sched/scheduler.py` (search for `_emit_journey_event`)
