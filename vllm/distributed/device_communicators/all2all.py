@@ -290,10 +290,7 @@ class PPLXAll2AllManager(All2AllManagerBase):
         router_logits: torch.Tensor,
         is_sequence_parallel: bool = False,
         extra_tensors: list[torch.Tensor] | None = None,
-    ) -> (
-        tuple[torch.Tensor, torch.Tensor]
-        | tuple[torch.Tensor, torch.Tensor, list[torch.Tensor]]
-    ):
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         raise NotImplementedError
 
     def dispatch(
@@ -354,10 +351,7 @@ class DeepEPAll2AllManagerBase(All2AllManagerBase):
         router_logits: torch.Tensor,
         is_sequence_parallel: bool = False,
         extra_tensors: list[torch.Tensor] | None = None,
-    ) -> (
-        tuple[torch.Tensor, torch.Tensor]
-        | tuple[torch.Tensor, torch.Tensor, list[torch.Tensor]]
-    ):
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         raise NotImplementedError
 
     def dispatch(
