@@ -888,7 +888,7 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
             layer.w13_input_scale = None
             layer.w2_input_scale = None
 
-    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+    def process_weights_after_loading(self, layer: FusedMoE) -> None:
         # Allow for accessing weights and scales in standard way.
         w13 = layer.w13_weight
         w2 = layer.w2_weight
@@ -957,6 +957,8 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
                 moe_config=self.moe,
                 fp8_backend=self.fp8_backend,
                 experts_cls=self.experts_cls,
+                routing_tables=layer._maybe_init_expert_routing_tables(),
+                shared_experts=layer.shared_experts,
             )
 
     def maybe_make_prepare_finalize(

@@ -395,12 +395,14 @@ def make_nvfp4_moe_kernel(
     moe_quant_config: FusedMoEQuantConfig,
     moe_config: FusedMoEConfig,
     experts_cls: type[mk.FusedMoEPermuteExpertsUnpermute],
+    routing_tables: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
+    shared_experts: torch.nn.Module | None = None,
 ) -> mk.FusedMoEModularKernel:
     # Create Prepare/Finalize.
     prepare_finalize = maybe_make_prepare_finalize(
         moe=moe_config,
         quant_config=moe_quant_config,
-        routing_tables=None,
+        routing_tables=routing_tables,
         defer_input_quant=experts_cls.expects_unquantized_inputs(
             moe_config=moe_config,
             quant_config=moe_quant_config,
@@ -433,7 +435,11 @@ def make_nvfp4_moe_kernel(
     kernel = mk.FusedMoEModularKernel(
         prepare_finalize,
         experts,
-        shared_experts=None,
+        shared_experts=(
+            shared_experts
+            if moe_config.moe_parallel_config.use_all2all_kernels
+            else None
+        ),
         moe_parallel_config=moe_config.moe_parallel_config,
     )
 

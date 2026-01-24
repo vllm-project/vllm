@@ -832,7 +832,7 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
 
     def _setup_kernel(
         self,
-        layer: torch.nn.Module,
+        layer: FusedMoE,
         w13: torch.Tensor,
         w2: torch.Tensor,
         w13_scale: torch.Tensor,
@@ -867,6 +867,8 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
                 moe_config=self.moe,
                 fp8_backend=self.fp8_backend,
                 experts_cls=self.experts_cls,
+                routing_tables=layer._maybe_init_expert_routing_tables(),
+                shared_experts=layer.shared_experts,
             )
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
