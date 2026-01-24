@@ -180,6 +180,20 @@ def _fused_moe_lora_kernel(
 ):
     pid = tl.program_id(axis=0)
     slice_id = tl.program_id(axis=1)
+    lora_idx = tl.program_id(axis=2)
+    lora_id = tl.load(lora_ids + lora_idx)
+
+    if lora_id == -1:
+        # Early exit for the no-lora case.
+        return
+    moe_enabled = tl.load(adapter_enabled + lora_id)
+    if moe_enabled == 0:
+        # Early exit for the no moe lora case.
+        return
+    # The grid size on axis 2 is (max_loras + 1) to handle the no-lora case
+    # (lora_id == -1), but sorted_token_ids and expert_ids are allocated with
+    # shape (max_loras, ...). Use (num_programs - 1) for correct bounds checking.
+    max_loras = tl.num_programs(axis=2) - 1
     grid_k = tl.cdiv(K, BLOCK_SIZE_K * SPLIT_K)
 
     # calculate pid_m,pid_n
@@ -388,7 +402,8 @@ def _fused_moe_lora_shrink(
         * triton.cdiv(EM, META["BLOCK_SIZE_M"])
         * triton.cdiv(N, META["BLOCK_SIZE_N"]),
         len(lora_a_stacked),
-        grid_lora_dim,
+        ## max_loras + 1 to handle the no-lora case (lora_id == -1)
+        lora_a_stacked[0].shape[0] + 1,
     )
     _fused_moe_lora_kernel[grid](
         qcurr_hidden_states,
@@ -498,7 +513,8 @@ def _fused_moe_lora_expand(
     grid = lambda META: (
         triton.cdiv(EM, META["BLOCK_SIZE_M"]) * triton.cdiv(N, META["BLOCK_SIZE_N"]),
         len(lora_b_stacked),
-        grid_lora_dim,
+        ## max_loras + 1 to handle the no-lora case (lora_id == -1)
+        lora_b_stacked[0].shape[0] + 1,
     )
 
     # Fast path: directly accumulate into the corresponding slice interval of output.
