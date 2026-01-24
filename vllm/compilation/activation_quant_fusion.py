@@ -212,8 +212,8 @@ class SiluMulBlockQuantPattern:
     
     def register(self, pm_pass: PatternMatcherPass) -> None:
         def pattern(input: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-            result_silu_mul = self.silu_and_mul_matcher(input)
-            result_quant, scale = self.quant_matcher(result_silu_mul)
+            result_silu_mul = self.silu_and_mul_matcher.forward_native(input)
+            result_quant, scale = self.quant_matcher.forward_native(result_silu_mul)
             return result_quant, scale
         
         def replacement(input: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
