@@ -273,8 +273,12 @@ class Scheduler(SchedulerInterface):
         assert num_external_computed_tokens == 0, (
             "External KV connector is not verified yet"
         )
-        # TODO: need check for resume requests
-        if request.num_output_tokens == 0:  # prefill
+        num_computed_tokens = (
+            request.num_computed_tokens
+            + num_new_local_computed_tokens
+            + num_external_computed_tokens
+        )
+        if num_computed_tokens < request.num_prompt_tokens:  # prefill
             # To enable block-aligned caching of the Mamba state, `num_new_tokens`
             # must be a multiple of `block_size`.
             # As an exception, if `num_new_tokens` is less than `block_size`, the
@@ -289,11 +293,6 @@ class Scheduler(SchedulerInterface):
             # eagle prune
             if self.use_eagle:
                 last_cache_position = max(last_cache_position - block_size, 0)
-            num_computed_tokens = (
-                request.num_computed_tokens
-                + num_new_local_computed_tokens
-                + num_external_computed_tokens
-            )
             num_computed_tokens_after_sched = num_computed_tokens + num_new_tokens
             if num_computed_tokens_after_sched < last_cache_position:
                 # align to block_size
