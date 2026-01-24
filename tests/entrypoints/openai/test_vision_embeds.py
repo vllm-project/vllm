@@ -13,7 +13,6 @@ from vllm.utils.serial_utils import tensor2base64
 from ...utils import RemoteOpenAIServer
 
 
-@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "model_name", ["ibm-nasa-geospatial/Prithvi-EO-2.0-300M-TL-Sen1Floods11"]
 )
@@ -68,7 +67,6 @@ def test_stacked_fields(model_name: str):
         assert len(np_response) == 524288
 
 
-@pytest.mark.asyncio
 @pytest.mark.parametrize("model_name", ["Qwen/Qwen3-VL-2B-Instruct"])
 def test_mixed_fields(model_name: str):
     args = [
