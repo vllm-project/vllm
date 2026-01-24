@@ -8,6 +8,18 @@ import os
 from typing import Any
 
 
+def use_compile(args: argparse.Namespace) -> bool:
+    """
+    Check if the benchmark is run with torch.compile
+    """
+    return not (
+        args.enforce_eager
+        or args.compilation_config.mode == 0
+        or "eager" in args.output_json
+        or "eager" in args.result_filename
+    )
+
+
 def convert_to_pytorch_benchmark_format(
     args: argparse.Namespace, metrics: dict[str, list], extra_info: dict[str, Any]
 ) -> list:
@@ -26,6 +38,7 @@ def convert_to_pytorch_benchmark_format(
                 "name": "vLLM benchmark",
                 "extra_info": {
                     "args": vars(args),
+                    "use_compile": use_compile(args),
                 },
             },
             "model": {
