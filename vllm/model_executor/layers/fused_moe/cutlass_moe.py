@@ -104,7 +104,13 @@ def run_cutlass_moe_fp8(
     ), "Intermediate scale shape mismatch"
     assert out_dtype in [torch.half, torch.bfloat16], "Invalid output dtype"
 
-    if expert_map is not None:
+    # NOTE(rob): the expert_map is used for the STANDARD case and
+    # the batched format is used by the BATCHED case.
+    # TODO(rob): update the MK interface to only pass the expert_map
+    # during the STANDARD case to make this clearer across all kernels.
+    if use_batched_format:
+        assert expert_num_tokens is not None
+    else:
         assert expert_num_tokens is None
 
     # We have two modes: batched experts and non-batched experts.
