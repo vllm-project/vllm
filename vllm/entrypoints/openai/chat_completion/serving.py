@@ -145,6 +145,11 @@ class OpenAIServingChat(OpenAIServing):
         self.enable_prompt_tokens_details = enable_prompt_tokens_details
         self.enable_force_include_usage = enable_force_include_usage
         self.default_sampling_params = self.model_config.get_diff_sampling_param()
+        if self.model_config.hf_config.model_type == "kimi_k2":
+            self.tool_call_id_type = "kimi_k2"
+        else:
+            self.tool_call_id_type = "random"
+
         self.use_harmony = self.model_config.hf_config.model_type == "gpt_oss"
         if self.use_harmony:
             if "stop_token_ids" not in self.default_sampling_params:
