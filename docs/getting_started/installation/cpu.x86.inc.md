@@ -187,6 +187,10 @@ docker run \
 
 ## Building for your target CPU
 
+vLLM supports building Docker images for x86 CPU platforms with automatic instruction set detection.
+
+### Basic build command
+
 ```bash
 docker build -f docker/Dockerfile.cpu \
         --build-arg VLLM_CPU_DISABLE_AVX512=<false (default)|true> \
@@ -199,21 +203,29 @@ docker build -f docker/Dockerfile.cpu \
         --target vllm-openai .
 ```
 
-!!! note "Auto-detection by default"
-    By default, CPU instruction sets (AVX512, AVX2, etc.) are automatically detected from the build system's CPU flags. Build arguments like `VLLM_CPU_AVX2`, `VLLM_CPU_AVX512`, `VLLM_CPU_AVX512BF16`, `VLLM_CPU_AVX512VNNI`, and `VLLM_CPU_AMXBF16` are used for cross-compilation:
+!!! note "Instruction set auto-detection"
+    By default, vLLM will auto-detect CPU instruction sets (AVX512, AVX2, etc.) from the build system's CPU flags. Build arguments like `VLLM_CPU_AVX2`, `VLLM_CPU_AVX512`, `VLLM_CPU_AVX512BF16`, `VLLM_CPU_AVX512VNNI`, and `VLLM_CPU_AMXBF16` are primarily used for **cross-compilation** or for building container images on systems that don't have the target platforms ISA:
 
-    - `VLLM_CPU_{ISA}=true` - Force-enable the instruction set (build with ISA regardless of build system capabilities)
-    - `VLLM_CPU_{ISA}=false` - Rely on auto-detection (default)
+    - Set `VLLM_CPU_{ISA}=true` to force-enable an instruction set (for cross-compilation to target platforms with that ISA)
+    - Set `VLLM_CPU_{ISA}=false` to rely on auto-detection
+    - When an ISA build arg is set to `true`, vLLM will build with that instruction set regardless of the build system's CPU capabilities
 
-### Examples
+### Build examples
 
-**Auto-detection build (default)**
+**Example 1: Auto-detection (native build)**
+
+Build on a machine with the same CPU as your target deployment:
 
 ```bash
-docker build -f docker/Dockerfile.cpu --tag vllm-cpu-env --target vllm-openai .
+# Auto-detects all CPU features from the build system
+docker build -f docker/Dockerfile.cpu \
+        --tag vllm-cpu-env \
+        --target vllm-openai .
 ```
 
-**Cross-compile for AVX512**
+**Example 2: Cross-compilation for AVX512 deployment**
+
+Build an AVX512 image on any x86_64 system (even without AVX512):
 
 ```bash
 docker build -f docker/Dockerfile.cpu \
@@ -224,7 +236,9 @@ docker build -f docker/Dockerfile.cpu \
         --target vllm-openai .
 ```
 
-**Cross-compile for AVX2**
+**Example 3: Cross-compilation for AVX2 deployment**
+
+Build an AVX2 image for older CPUs:
 
 ```bash
 docker build -f docker/Dockerfile.cpu \
