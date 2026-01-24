@@ -3,7 +3,7 @@ import torch
 import torch.nn.functional as F
 from vllm.compilation.pass_manager import PostGradPassManager
 from vllm.compilation.inductor_pass import pass_context
-from vllm.config import VllmConfig, ModelConfig, CacheConfig, ParallelConfig, SchedulerConfig, CompilationConfig
+from vllm.config import VllmConfig, ModelConfig, CacheConfig, ParallelConfig, SchedulerConfig, CompilationConfig, set_current_vllm_config
 from vllm.config.utils import Range
 from vllm.model_executor.layers.quantization.utils.fp8_utils import per_token_group_quant_fp8
 import torch._inductor.config as inductor_config
@@ -43,17 +43,17 @@ config = VllmConfig(
 )
 print("✓ Config created")
 
-# Create test function
-# Create test function
-def silu_mul_then_quant(x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-    # Create QuantFP8 inside the function
+with set_current_vllm_config(config):
     quant_fp8 = QuantFP8(
         static=False,
         group_shape=GroupShape(1, 128),
         column_major_scales=False,
         use_ue8m0=False,
     )
-    
+
+# Create test function
+# Create test function
+def silu_mul_then_quant(x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
     d = x.shape[-1] // 2
     silu_out = F.silu(x[..., :d]) * x[..., d:]
     result, scales = quant_fp8(silu_out)
