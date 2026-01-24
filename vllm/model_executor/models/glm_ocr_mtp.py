@@ -31,9 +31,11 @@ from transformers import PretrainedConfig
 
 from vllm.config import VllmConfig
 from vllm.model_executor.layers.layernorm import RMSNorm
+from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
+    VocabParallelEmbedding,
 )
 from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader,
@@ -74,18 +76,19 @@ class SharedHead(nn.Module):
         return self.norm(hidden_states)
 
 
-class GlmOcrMultiTokenPredictorLayer(Glm4MoeLiteMultiTokenPredictorLayer):
+class GlmOcrMultiTokenPredictorLayer(nn.Module):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
-        super().__init__(vllm_config=vllm_config, prefix=prefix)
-        config = vllm_config.speculative_config.draft_model_config.hf_config
+        super().__init__()
+
+        config = vllm_config.speculative_config.draft_model_config.hf_config.text_config
         self.config = config
         quant_config = vllm_config.quant_config
 
         self.enorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.hnorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.eh_proj = nn.Linear(config.hidden_size * 2, config.hidden_size, bias=False)
-        self.device = current_platform.device_type
 
+        self.device = current_platform.device_type
         self.shared_head = SharedHead(
             config=config, prefix=prefix, quant_config=quant_config
         )
@@ -93,16 +96,40 @@ class GlmOcrMultiTokenPredictorLayer(Glm4MoeLiteMultiTokenPredictorLayer):
             vllm_config=vllm_config, prefix=prefix, config=self.config
         )
 
+    def forward(
+        self,
+        input_ids: torch.Tensor,
+        positions: torch.Tensor,
+        previous_hidden_states: torch.Tensor,
+        inputs_embeds: torch.Tensor | None = None,
+        spec_step_index: int = 0,
+    ) -> torch.Tensor:
+        assert inputs_embeds is not None
+        # masking inputs at position 0, as not needed by MTP
+        inputs_embeds[positions == 0] = 0
+        inputs_embeds = self.enorm(inputs_embeds)
+        previous_hidden_states = self.hnorm(previous_hidden_states)
 
-class GlmOcrMultiTokenPredictor(Glm4MoeLiteMultiTokenPredictor):
+        hidden_states = self.eh_proj(
+            torch.cat([inputs_embeds, previous_hidden_states], dim=-1)
+        )
+
+        hidden_states, residual = self.mtp_block(
+            positions=positions, hidden_states=hidden_states, residual=None
+        )
+        hidden_states = residual + hidden_states
+        return hidden_states
+
+
+class GlmOcrMultiTokenPredictor(Glm4MoeLiteMultiTokenPredictor, nn.Module):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
-        super().__init__(vllm_config=vllm_config, prefix=prefix)
-        config = vllm_config.model_config.hf_config
+        nn.Module.__init__(self)
+        config = vllm_config.model_config.hf_config.get_text_config()
         self.mtp_start_layer_idx = config.num_hidden_layers
         self.num_mtp_layers = config.num_nextn_predict_layers
         self.layers = torch.nn.ModuleDict(
             {
-                str(idx): GlmOcrMultiTokenPredictorLayer(
+                str(idx): Glm4MoeLiteMultiTokenPredictorLayer(
                     vllm_config=vllm_config,
                     prefix=f"{prefix}.layers.{idx}",
                 )
@@ -112,12 +139,17 @@ class GlmOcrMultiTokenPredictor(Glm4MoeLiteMultiTokenPredictor):
                 )
             }
         )
+        self.embed_tokens = VocabParallelEmbedding(
+            config.vocab_size,
+            config.hidden_size,
+        )
+        self.logits_processor = LogitsProcessor(config.vocab_size)
 
 
 class GlmOcrMTP(nn.Module, SupportsPP):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
-        self.config = vllm_config.model_config.hf_config
+        self.config = vllm_config.model_config.hf_config.text_config
         self.model = GlmOcrMultiTokenPredictor(
             vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model")
         )
