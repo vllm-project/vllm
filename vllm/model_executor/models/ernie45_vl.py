@@ -1303,27 +1303,28 @@ class Ernie4_5_VLMoeForConditionalGeneration(
         self.config = config
         self.multimodal_config = multimodal_config
 
-        self.vision_model = Ernie4_5_VisionTransformer(
-            config.vision_config,
-            norm_eps=getattr(config, "rms_norm_eps", 1e-6),
-            quant_config=quant_config,
-            multimodal_config=multimodal_config,
-            prefix=maybe_prefix(prefix, "vision_model"),
-        )
+        with self._mark_tower_model(vllm_config, {"image", "video"}):
+            self.vision_model = Ernie4_5_VisionTransformer(
+                config.vision_config,
+                norm_eps=getattr(config, "rms_norm_eps", 1e-6),
+                quant_config=quant_config,
+                multimodal_config=multimodal_config,
+                prefix=maybe_prefix(prefix, "vision_model"),
+            )
+            self.resampler_model = VariableResolutionResamplerModel(
+                self.config.pixel_hidden_size,
+                self.config.hidden_size,
+                self.config.spatial_conv_size,
+                self.config.temporal_conv_size,
+                config=self.config,
+                prefix=maybe_prefix(prefix, "resampler_model"),
+            )
 
-        self.language_model = Ernie4_5_VLMoeForCausalLM(
-            vllm_config=vllm_config,
-            prefix=maybe_prefix(prefix, "language_model"),
-        )
-
-        self.resampler_model = VariableResolutionResamplerModel(
-            self.config.pixel_hidden_size,
-            self.config.hidden_size,
-            self.config.spatial_conv_size,
-            self.config.temporal_conv_size,
-            config=self.config,
-            prefix=maybe_prefix(prefix, "resampler_model"),
-        )
+        with self._mark_language_model(vllm_config):
+            self.language_model = Ernie4_5_VLMoeForCausalLM(
+                vllm_config=vllm_config,
+                prefix=maybe_prefix(prefix, "language_model"),
+            )
 
         self.visual_token_mask = None
         self.make_empty_intermediate_tensors = (
@@ -1521,9 +1522,6 @@ class Ernie4_5_VLMoeForConditionalGeneration(
         llm_positions = torch.cat(llm_pos_ids_list, dim=1).reshape(3, -1)
         mrope_position_delta = (llm_positions.max() + 1 - len(input_tokens)).item()
         return llm_positions, mrope_position_delta
-
-    def get_language_model(self) -> torch.nn.Module:
-        return self.language_model
 
     def _parse_and_validate_image_input(
         self, **kwargs: object
