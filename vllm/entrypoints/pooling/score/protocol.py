@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import time
-from typing import Any
+from typing import Any, TypeAlias
 
 from pydantic import (
     BaseModel,
@@ -11,7 +11,10 @@ from pydantic import (
 from vllm import PoolingParams
 from vllm.config.pooler import get_use_activation
 from vllm.entrypoints.openai.engine.protocol import OpenAIBaseModel, UsageInfo
-from vllm.entrypoints.pooling.base.protocol import PoolingBasicRequestMixin
+from vllm.entrypoints.pooling.base.protocol import (
+    ClassifyRequestMixin,
+    PoolingBasicRequestMixin,
+)
 from vllm.entrypoints.pooling.score.utils import (
     ScoreContentPartParam,
     ScoreMultiModalParam,
@@ -19,30 +22,11 @@ from vllm.entrypoints.pooling.score.utils import (
 from vllm.utils import random_uuid
 
 
-class ScoreRequest(PoolingBasicRequestMixin):
-    text_1: list[str] | str | ScoreMultiModalParam
-    text_2: list[str] | str | ScoreMultiModalParam
-
+class ScoreRequestMixin(PoolingBasicRequestMixin, ClassifyRequestMixin):
     # --8<-- [start:score-extra-params]
     mm_processor_kwargs: dict[str, Any] | None = Field(
         default=None,
         description=("Additional kwargs to pass to the HF processor."),
-    )
-
-    softmax: bool | None = Field(
-        default=None,
-        description="softmax will be deprecated, please use use_activation instead.",
-    )
-
-    activation: bool | None = Field(
-        default=None,
-        description="activation will be deprecated, please use use_activation instead.",
-    )
-
-    use_activation: bool | None = Field(
-        default=None,
-        description="Whether to use activation for classification outputs. "
-        "Default is True.",
     )
     # --8<-- [end:score-extra-params]
 
@@ -53,7 +37,43 @@ class ScoreRequest(PoolingBasicRequestMixin):
         )
 
 
-class RerankRequest(PoolingBasicRequestMixin):
+class ScoreDataRequest(ScoreRequestMixin):
+    data_1: list[str] | str | ScoreMultiModalParam
+    data_2: list[str] | str | ScoreMultiModalParam
+
+
+class ScoreQueriesDocumentsRequest(ScoreRequestMixin):
+    queries: list[str] | str | ScoreMultiModalParam
+    documents: list[str] | str | ScoreMultiModalParam
+
+    @property
+    def data_1(self):
+        return self.queries
+
+    @property
+    def data_2(self):
+        return self.documents
+
+
+class ScoreTextRequest(ScoreRequestMixin):
+    text_1: list[str] | str | ScoreMultiModalParam
+    text_2: list[str] | str | ScoreMultiModalParam
+
+    @property
+    def data_1(self):
+        return self.text_1
+
+    @property
+    def data_2(self):
+        return self.text_2
+
+
+ScoreRequest: TypeAlias = (
+    ScoreQueriesDocumentsRequest | ScoreDataRequest | ScoreTextRequest
+)
+
+
+class RerankRequest(PoolingBasicRequestMixin, ClassifyRequestMixin):
     query: str | ScoreMultiModalParam
     documents: list[str] | ScoreMultiModalParam
     top_n: int = Field(default_factory=lambda: 0)
@@ -63,28 +83,7 @@ class RerankRequest(PoolingBasicRequestMixin):
         default=None,
         description=("Additional kwargs to pass to the HF processor."),
     )
-    softmax: bool | None = Field(
-        default=None,
-        description="softmax will be deprecated, please use use_activation instead.",
-    )
-
-    activation: bool | None = Field(
-        default=None,
-        description="activation will be deprecated, please use use_activation instead.",
-    )
-
-    use_activation: bool | None = Field(
-        default=None,
-        description="Whether to use activation for classification outputs. "
-        "Default is True.",
-    )
     # --8<-- [end:rerank-extra-params]
-
-    def to_pooling_params(self):
-        return PoolingParams(
-            truncate_prompt_tokens=self.truncate_prompt_tokens,
-            use_activation=get_use_activation(self),
-        )
 
 
 class RerankDocument(BaseModel):

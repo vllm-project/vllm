@@ -11,7 +11,7 @@ import torch.fx as fx
 from torch._inductor.pattern_matcher import PatternMatcherPass
 
 from vllm.config import VllmConfig
-from vllm.config.compilation import Range
+from vllm.config.utils import Range
 from vllm.distributed import get_tp_group, tensor_model_parallel_all_reduce
 from vllm.distributed.parallel_state import get_tensor_model_parallel_world_size
 from vllm.logger import init_logger
@@ -358,7 +358,10 @@ class SequenceParallelismPass(VllmPatternMatcherPass):
         ):
             return True
         tp_size = get_tensor_model_parallel_world_size()
-        return (compile_range.is_single_size()) and (compile_range.end % tp_size == 0)
+        result: bool = (compile_range.is_single_size()) and (
+            compile_range.end % tp_size == 0
+        )
+        return result
 
     @VllmInductorPass.time_and_log
     def __call__(self, graph: fx.Graph) -> None:

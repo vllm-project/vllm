@@ -143,14 +143,6 @@ class OpenAIServingChat(OpenAIServing):
         self.enable_prompt_tokens_details = enable_prompt_tokens_details
         self.enable_force_include_usage = enable_force_include_usage
         self.default_sampling_params = self.model_config.get_diff_sampling_param()
-        if self.default_sampling_params:
-            source = self.model_config.generation_config
-            source = "model" if source == "auto" else source
-            logger.info(
-                "Using default chat sampling params from %s: %s",
-                source,
-                self.default_sampling_params,
-            )
         if self.model_config.hf_config.model_type == "kimi_k2":
             self.tool_call_id_type = "kimi_k2"
         else:
@@ -186,8 +178,7 @@ class OpenAIServingChat(OpenAIServing):
         start_time = time.perf_counter()
 
         try:
-            # Get the tokenizer from the engine
-            tokenizer = await self.engine_client.get_tokenizer()
+            renderer = self.engine_client.renderer
 
             # Create a minimal dummy request
             dummy_request = ChatCompletionRequest(
@@ -203,7 +194,7 @@ class OpenAIServingChat(OpenAIServing):
             # 3. Tokenizer initialization for chat
             await self._preprocess_chat(
                 dummy_request,
-                tokenizer,
+                renderer,
                 dummy_request.messages,
                 chat_template=self.chat_template,
                 chat_template_content_format=self.chat_template_content_format,
@@ -224,17 +215,16 @@ class OpenAIServingChat(OpenAIServing):
             # Log but don't fail server startup if warmup fails
             logger.exception("Chat template warmup failed")
 
-    async def create_chat_completion(
+    async def render_chat_request(
         self,
         request: ChatCompletionRequest,
-        raw_request: Request | None = None,
-    ) -> AsyncGenerator[str, None] | ChatCompletionResponse | ErrorResponse:
+    ) -> tuple[list[ConversationMessage], list[Any]] | ErrorResponse:
         """
-        Chat Completion API similar to OpenAI's API.
+        render chat request by validating and preprocessing inputs.
 
-        See https://platform.openai.com/docs/api-reference/chat/create
-        for the API specification. This API mimics the OpenAI
-        Chat Completion API.
+        Returns:
+            A tuple of (conversation, engine_prompts) on success,
+            or an ErrorResponse on failure.
         """
         error_check_ret = await self._check_model(request)
         if error_check_ret is not None:
@@ -248,13 +238,8 @@ class OpenAIServingChat(OpenAIServing):
             raise self.engine_client.dead_error
 
         try:
-            lora_request = self._maybe_get_adapters(
-                request, supports_default_mm_loras=True
-            )
-
-            model_name = self.models.model_name(lora_request)
-
-            tokenizer = await self.engine_client.get_tokenizer()
+            renderer = self.engine_client.renderer
+            tokenizer = renderer.tokenizer
 
             tool_parser = self.tool_parser
 
@@ -315,7 +300,7 @@ class OpenAIServingChat(OpenAIServing):
 
                 conversation, engine_prompts = await self._preprocess_chat(
                     request,
-                    tokenizer,
+                    renderer,
                     request.messages,
                     chat_template=request.chat_template or self.chat_template,
                     chat_template_content_format=self.chat_template_content_format,
@@ -336,7 +321,27 @@ class OpenAIServingChat(OpenAIServing):
                 )
         except (ValueError, TypeError, RuntimeError, jinja2.TemplateError) as e:
             logger.exception("Error in preprocessing prompt inputs")
-            return self.create_error_response(f"{e} {e.__cause__}")
+            return self.create_error_response(e)
+
+        return conversation, engine_prompts
+
+    async def create_chat_completion(
+        self,
+        request: ChatCompletionRequest,
+        raw_request: Request | None = None,
+    ) -> AsyncGenerator[str, None] | ChatCompletionResponse | ErrorResponse:
+        """
+        Chat Completion API similar to OpenAI's API.
+
+        See https://platform.openai.com/docs/api-reference/chat/create
+        for the API specification. This API mimics the OpenAI
+        Chat Completion API.
+        """
+        result = await self.render_chat_request(request)
+        if isinstance(result, ErrorResponse):
+            return result
+
+        conversation, engine_prompts = result
 
         request_id = (
             f"chatcmpl-{self._base_request_id(raw_request, request.request_id)}"
@@ -345,6 +350,16 @@ class OpenAIServingChat(OpenAIServing):
         request_metadata = RequestResponseMetadata(request_id=request_id)
         if raw_request:
             raw_request.state.request_metadata = request_metadata
+
+        try:
+            lora_request = self._maybe_get_adapters(
+                request, supports_default_mm_loras=True
+            )
+
+            model_name = self.models.model_name(lora_request)
+        except (ValueError, TypeError, RuntimeError) as e:
+            logger.exception("Error preparing request components")
+            return self.create_error_response(e)
 
         # Extract data_parallel_rank from header (router can inject it)
         data_parallel_rank = self._get_data_parallel_rank(raw_request)
@@ -438,6 +453,8 @@ class OpenAIServingChat(OpenAIServing):
         (result_generator,) = generators
 
         # Streaming response
+        tokenizer = self.renderer.tokenizer
+
         if request.stream:
             return self.chat_completion_stream_generator(
                 request,
@@ -1759,7 +1776,7 @@ class OpenAIServingChat(OpenAIServing):
                 else:
                     if tokenizer is None:
                         raise ValueError(
-                            "Tokenizer not available when `skip_tokenizer_init=True`"
+                            "Unable to get tokenizer because `skip_tokenizer_init=True`"
                         )
 
                     token = tokenizer.decode(token_id)

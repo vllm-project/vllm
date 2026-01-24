@@ -48,7 +48,7 @@ from transformers import __version__ as TRANSFORMERS_VERSION
 # isort: on
 
 from vllm.compilation.decorators import support_torch_compile
-from vllm.config import MultiModalConfig, VllmConfig
+from vllm.config import VllmConfig
 from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
 from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import _ACTIVATION_REGISTRY
@@ -157,7 +157,6 @@ class Qwen3OmniMoeAudioAttention(nn.Module):
     def __init__(
         self,
         config: Qwen3OmniMoeAudioEncoderConfig,
-        multimodal_config: MultiModalConfig | None = None,
         prefix: str = "",
     ):
         super().__init__()
@@ -195,7 +194,6 @@ class Qwen3OmniMoeAudioAttention(nn.Module):
             num_heads=self.num_local_heads,
             head_size=self.head_dim,
             scale=self.scaling,
-            multimodal_config=multimodal_config,
         )
 
     def forward(
@@ -230,13 +228,12 @@ class Qwen3OmniMoeAudioEncoderLayer(nn.Module):
     def __init__(
         self,
         config: Qwen3OmniMoeAudioEncoderConfig,
-        multimodal_config: MultiModalConfig | None = None,
         prefix: str = "",
     ):
         super().__init__()
         self.embed_dim = config.d_model
         self.self_attn = Qwen3OmniMoeAudioAttention(
-            config, multimodal_config=multimodal_config, prefix=f"{prefix}.self_attn"
+            config, prefix=f"{prefix}.self_attn"
         )
         self.self_attn_layer_norm = nn.LayerNorm(self.embed_dim)
         self.activation_fn = _ACTIVATION_REGISTRY[config.activation_function]
@@ -298,7 +295,6 @@ class Qwen3OmniMoeAudioEncoder(nn.Module):
     def __init__(
         self,
         config: Qwen3OmniMoeAudioEncoderConfig,
-        multimodal_config: MultiModalConfig | None = None,
         prefix: str = "",
     ):
         super().__init__()
@@ -342,7 +338,6 @@ class Qwen3OmniMoeAudioEncoder(nn.Module):
             [
                 Qwen3OmniMoeAudioEncoderLayer(
                     config,
-                    multimodal_config=multimodal_config,
                     prefix=f"{prefix}.layers.{i}",
                 )
                 for i in range(config.encoder_layers)
@@ -356,15 +351,9 @@ class Qwen3OmniMoeAudioEncoder(nn.Module):
         self.proj2 = nn.Linear(config.d_model, config.output_dim)
 
         # Get attention backend
-        attn_backend_override = (
-            multimodal_config.mm_encoder_attn_backend
-            if multimodal_config is not None
-            else None
-        )
         self.attn_backend = get_vit_attn_backend(
             head_size=config.d_model // config.encoder_attention_heads,
             dtype=torch.get_default_dtype(),
-            attn_backend_override=attn_backend_override,
         )
 
     def compute_attn_mask_seqlen(self, cu_seqlens: torch.Tensor) -> torch.Tensor | None:
@@ -598,7 +587,6 @@ class Qwen3_VisionBlock(nn.Module):
         mlp_hidden_dim: int,
         act_fn: Callable[[torch.Tensor], torch.Tensor] = F.silu,
         norm_layer: Callable[[int], nn.Module] | None = None,
-        multimodal_config: MultiModalConfig | None = None,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
     ) -> None:
@@ -612,7 +600,6 @@ class Qwen3_VisionBlock(nn.Module):
             num_heads=num_heads,
             projection_size=dim,
             quant_config=quant_config,
-            multimodal_config=multimodal_config,
             prefix=f"{prefix}.attn",
         )
         self.mlp = Qwen3_VisionMLP(
@@ -707,7 +694,6 @@ class Qwen3Omni_VisionTransformer(nn.Module):
         vision_config,
         norm_eps: float = 1e-6,
         quant_config: QuantizationConfig | None = None,
-        multimodal_config: MultiModalConfig | None = None,
         prefix: str = "",
     ) -> None:
         super().__init__()
@@ -755,7 +741,6 @@ class Qwen3Omni_VisionTransformer(nn.Module):
                     act_fn=_ACTIVATION_REGISTRY[vision_config.hidden_act],
                     norm_layer=norm_layer,
                     quant_config=quant_config,
-                    multimodal_config=multimodal_config,
                     prefix=f"{prefix}.blocks.{layer_idx}",
                 )
                 for layer_idx in range(vision_config.depth)
@@ -785,16 +770,9 @@ class Qwen3Omni_VisionTransformer(nn.Module):
                 ]
             )
 
-        attn_backend_override = (
-            multimodal_config.mm_encoder_attn_backend
-            if multimodal_config is not None
-            else None
-        )
-
         self.attn_backend = get_vit_attn_backend(
             head_size=head_dim,
             dtype=torch.get_default_dtype(),
-            attn_backend_override=attn_backend_override,
         )
 
     @property
@@ -1609,32 +1587,13 @@ class Qwen3OmniMoeThinkerForConditionalGeneration(
         multimodal_config = vllm_config.model_config.multimodal_config
         self.config = thinker_config
         self.multimodal_config = multimodal_config
-
-        self.audio_tower = Qwen3OmniMoeAudioEncoder(
-            thinker_config.audio_config,
-            multimodal_config=multimodal_config,
-            prefix=maybe_prefix(prefix, "audio_tower"),
-        )
-
-        self.visual = Qwen3Omni_VisionTransformer(
-            vision_config=thinker_config.vision_config,
-            norm_eps=getattr(thinker_config.text_config, "rms_norm_eps", 1e-6),
-            quant_config=quant_config,
-            prefix=maybe_prefix(prefix, "visual"),
-            multimodal_config=multimodal_config,
-        )
         self.quant_config = quant_config
 
-        self.language_model = Qwen3MoeLLMForCausalLM(
-            vllm_config=vllm_config.with_hf_config(
-                thinker_config.text_config, architectures=["Qwen3MoeForCausalLM"]
-            ),
-            prefix=maybe_prefix(prefix, "language_model"),
-        )
-
-        self.make_empty_intermediate_tensors = (
-            self.language_model.make_empty_intermediate_tensors
-        )
+        with self._mark_tower_model(vllm_config, "audio"):
+            self.audio_tower = Qwen3OmniMoeAudioEncoder(
+                thinker_config.audio_config,
+                prefix=maybe_prefix(prefix, "audio_tower"),
+            )
 
         self.use_deepstack = hasattr(
             thinker_config.vision_config, "deepstack_visual_indexes"
@@ -1644,22 +1603,47 @@ class Qwen3OmniMoeThinkerForConditionalGeneration(
             if self.use_deepstack
             else 0
         )
-        # register buffer for deepstack
-        self.deepstack_input_embeds = (
-            [
-                torch.zeros(
-                    vllm_config.scheduler_config.max_num_batched_tokens,
-                    thinker_config.text_config.hidden_size,
-                )
-                for _ in range(self.deepstack_num_level)
-            ]
-            if self.use_deepstack
-            else None
-        )
         self.visual_dim = thinker_config.vision_config.out_hidden_size
         self.multiscale_dim = self.visual_dim * self.deepstack_num_level
 
-    def _get_deepstack_input_embeds(self, num_tokens: int) -> IntermediateTensors:
+        with self._mark_tower_model(vllm_config, {"image", "video"}):
+            self.visual = Qwen3Omni_VisionTransformer(
+                vision_config=thinker_config.vision_config,
+                norm_eps=getattr(thinker_config.text_config, "rms_norm_eps", 1e-6),
+                quant_config=quant_config,
+                prefix=maybe_prefix(prefix, "visual"),
+            )
+
+            # register buffer for deepstack
+            if self.use_deepstack:
+                self.deepstack_input_embeds = [
+                    torch.zeros(
+                        vllm_config.scheduler_config.max_num_batched_tokens,
+                        thinker_config.text_config.hidden_size,
+                    )
+                    for _ in range(self.deepstack_num_level)
+                ]
+
+        with self._mark_language_model(vllm_config):
+            self.language_model = Qwen3MoeLLMForCausalLM(
+                vllm_config=vllm_config.with_hf_config(
+                    thinker_config.text_config,
+                    architectures=["Qwen3MoeForCausalLM"],
+                ),
+                prefix=maybe_prefix(prefix, "language_model"),
+            )
+
+        self.make_empty_intermediate_tensors = (
+            self.language_model.make_empty_intermediate_tensors
+        )
+
+    def _get_deepstack_input_embeds(
+        self,
+        num_tokens: int,
+    ) -> IntermediateTensors | None:
+        if not getattr(self, "deepstack_input_embeds", None):
+            return None  # If vision tower is skipped
+
         # get deepstack_input_embeds from buffer, and clear the buffer
         return IntermediateTensors(
             {
@@ -1671,6 +1655,9 @@ class Qwen3OmniMoeThinkerForConditionalGeneration(
         )
 
     def _set_deepstack_input_embeds(self, deepstack_input_embeds: torch.Tensor) -> None:
+        if not getattr(self, "deepstack_input_embeds", None):
+            return
+
         # set deepstack_input_embeds to buffer
         num_tokens = deepstack_input_embeds.size(1)
         if num_tokens > self.deepstack_input_embeds[0].size(0):
@@ -1689,6 +1676,9 @@ class Qwen3OmniMoeThinkerForConditionalGeneration(
             )
 
     def _clear_deepstack_input_embeds(self, num_tokens: int) -> None:
+        if not getattr(self, "deepstack_input_embeds", None):
+            return
+
         # clear deepstack_input_embeds in buffer
         if num_tokens > 0:
             for idx in range(self.deepstack_num_level):
@@ -1722,9 +1712,6 @@ class Qwen3OmniMoeThinkerForConditionalGeneration(
                     **kwargs
                 )
         return mm_input_by_modality
-
-    def get_language_model(self) -> torch.nn.Module:
-        return self.language_model
 
     def embed_multimodal(self, **kwargs: object) -> MultiModalEmbeddings | None:
         mm_input_by_modality = self._parse_and_validate_multimodal_inputs(**kwargs)
@@ -1841,11 +1828,7 @@ class Qwen3OmniMoeThinkerForConditionalGeneration(
         if intermediate_tensors is not None:
             inputs_embeds = None
 
-        if (
-            self.use_deepstack
-            and inputs_embeds is not None
-            and get_pp_group().is_first_rank
-        ):
+        if inputs_embeds is not None and get_pp_group().is_first_rank:
             deepstack_input_embeds = self._get_deepstack_input_embeds(
                 inputs_embeds.size(0)
             )
