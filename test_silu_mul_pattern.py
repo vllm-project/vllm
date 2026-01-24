@@ -43,13 +43,6 @@ config = VllmConfig(
 )
 print("✓ Config created")
 
-quant_fp8 = QuantFP8(
-    static=False,  # Dynamic quantization
-    group_shape=GroupShape(1, 128),  # Per-token with group_size=128
-    column_major_scales=False,
-    use_ue8m0=False,
-)
-
 # Create test function
 def silu_mul_then_quant(x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
     # Match the pattern exactly as MatcherSiluAndMul + MatcherQuantFP8 would generate
@@ -91,6 +84,13 @@ print(f"   Output: {baseline_out.shape}, Scales: {baseline_scales.shape}")
 print("\n2. Setting up compilation with custom passes...")
 
 print("\n3. Compiling and running inside pass_context...")
+
+quant_fp8 = QuantFP8(
+    static=False,  # Dynamic quantization
+    group_shape=GroupShape(1, 128),  # Per-token with group_size=128
+    column_major_scales=False,
+    use_ue8m0=False,
+)
 
 with pass_context(Range(start=1, end=8)):
     pass_manager = PostGradPassManager()
