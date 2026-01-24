@@ -196,38 +196,25 @@ class SiluMulBlockQuantPattern:
         self.quant_matcher = MatcherQuantFP8(quant_key, has_col_major_scales=False, is_e8m0=False)
     
     def register(self, pm_pass: PatternMatcherPass) -> None:
-        def pattern(input: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-            # Manually write the full pattern with actual torch ops
-            # This is what QuantFP8._quantize_group_native does
-            
-            orig_shape = input.shape
-            hidden_dim = input.shape[-1]
-            group_size = 128
-            num_groups = (hidden_dim + group_size - 1) // group_size
-            
-            # Reshape for group quantization
-            x_grouped = input.view(-1, num_groups, group_size)
-            
-            # Compute scales
-            absmax = x_grouped.abs().max(dim=-1, keepdim=True)[0].float()
-            scales_raw = absmax / 448.0  # FP8_MAX
-            scales = scales_raw.clamp(min=1e-12)  # FP8_MIN_SCALING_FACTOR
-            
-            # Quantize
-            x_scaled = x_grouped / scales
-            x_quant = x_scaled.clamp(-448.0, 448.0).to(FP8_DTYPE)
-            
-            # Reshape back
-            x_quant = x_quant.view(orig_shape)
-            scales = scales.squeeze(-1).reshape(orig_shape[:-1] + (num_groups,))
-            
-            return x_quant, scales
+        def pattern(input: torch.Tensor) -> torch.Tensor:
+            # Match just silu_mul
+            d = input.shape[-1] // 2
+            gate = input[..., :d]
+            silu = torch.nn.functional.silu(gate)
+            up = input[..., d:]
+            silu_out = silu * up
+            return silu_out
         
-        def replacement(input: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-            print(f"🔥 QUANT PATTERN TRIGGERED! input.shape={input.shape}")
-            return input, input  # Dummy
+        def replacement(input: torch.Tensor) -> torch.Tensor:
+            print(f"🔥 SILU+MUL PATTERN TRIGGERED! input.shape={input.shape}")
+            # Just return the pattern for now
+            d = input.shape[-1] // 2
+            gate = input[..., :d]
+            silu = torch.nn.functional.silu(gate)
+            up = input[..., d:]
+            return silu * up
         
-        input = torch.empty(5, 128, dtype=torch.float16, device='cuda')
+        input = torch.empty(5, 256, dtype=torch.float16, device='cuda')  # 256 = 128*2
         pattern(input)
         
         register_replacement(pattern, replacement, [input], fwd_only, pm_pass)
