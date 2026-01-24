@@ -118,7 +118,7 @@ rms_norm_nvfp4_quant_supported = current_platform.is_cuda() and hasattr(
     torch.ops._C, "rms_norm_nvfp4_quant"
 )
 if rms_norm_nvfp4_quant_supported:
-    FUSED_OPS[FusedRMSQuantKey(kNvfp4Quant, False)] = (
+    FUSED_OPS[FusedRMSQuantKey(kNvfp4Dynamic, False)] = (
         torch.ops._C.rms_norm_nvfp4_quant.default
     )  # noqa: E501
 
@@ -513,8 +513,8 @@ class RMSNormNvfp4QuantPattern:
         config = get_current_vllm_config()
         self.model_dtype = config.model_config.dtype if config.model_config else None
         self.rmsnorm_matcher = MatcherRMSNorm(epsilon)
-        self.QUANT_OP = QUANT_OPS[kNvfp4Quant]
-        self.FUSED_OP = FUSED_OPS[FusedRMSQuantKey(kNvfp4Quant, False)]
+        self.QUANT_OP = QUANT_OPS[kNvfp4Dynamic]
+        self.FUSED_OP = FUSED_OPS[FusedRMSQuantKey(kNvfp4Dynamic, False)]
 
     def get_inputs(self) -> list[torch.Tensor]:
         # result (uint8), output_scale (int32)
