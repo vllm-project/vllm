@@ -91,10 +91,11 @@ class NaiveAll2AllManager(All2AllManagerBase):
         topk_ids: torch.Tensor,
         is_sequence_parallel: bool = False,
         extra_tensors: list[torch.Tensor] | None = None,
-    ) -> (
-        tuple[torch.Tensor, torch.Tensor, torch.Tensor]
-        | tuple[torch.Tensor, torch.Tensor, torch.Tensor, list[torch.Tensor]]
-    ):
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        if extra_tensors is not None:
+            raise NotImplementedError(
+                "extra_tensors is not supported for NaiveAll2AllManager"
+            )
         sp_size = self.tp_group.world_size if is_sequence_parallel else 1
         dp_metadata = get_forward_context().dp_metadata
         assert dp_metadata is not None
@@ -109,14 +110,7 @@ class NaiveAll2AllManager(All2AllManagerBase):
         topk_ids = self.naive_multicast(
             topk_ids, cu_tokens_across_sp_cpu, is_sequence_parallel
         )
-        if extra_tensors is None:
-            return hidden_states, topk_weights, topk_ids
-
-        extra_tensors = [
-            self.naive_multicast(t, cu_tokens_across_sp_cpu, is_sequence_parallel)
-            for t in extra_tensors
-        ]
-        return hidden_states, topk_weights, topk_ids, extra_tensors
+        return hidden_states, topk_weights, topk_ids
 
     def combine(
         self, hidden_states: torch.Tensor, is_sequence_parallel: bool = False
