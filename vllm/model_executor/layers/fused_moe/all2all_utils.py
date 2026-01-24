@@ -81,7 +81,21 @@ def maybe_make_prepare_finalize(
     allow_new_interface: bool = False,
 ) -> FusedMoEPrepareAndFinalize | None:
     # TODO
-    # A) what is DP>1 and EP=1?
+    # TODO: what is DP>1 and EP=1?
+    # NOTE(rob): we are migrating each quant_method to hold the MK
+    # in all cases. The allow_new_interface=False flag allow us to fall
+    # back to the old method for methods that have not yet been migrated.
+    #
+    # In old method:
+    #   * maybe_init_modular_kernel() calls this function. If we are
+    #     using no Dp/Ep or naive all2all, we return None this function
+    #     returns None and no ModularKernelMethod is created. If non-naive
+    #     all2all is used, this returns a PrepareAndFinalize object and
+    #     a ModularKernelMethod is created.
+    # In new method:
+    #   * maybe_make_prepare_finalize() is called from the oracle. We
+    #     always return a PrepareAndFinalize object and the quant method
+    #     holds the ModularKernel.
     if not moe.moe_parallel_config.use_all2all_kernels:
         if allow_new_interface:
             return MoEPrepareAndFinalizeNoEP(defer_input_quant)
