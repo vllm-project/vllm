@@ -511,7 +511,9 @@ class PixtralForConditionalGeneration(
             )
 
         def is_patch_merger(weight: tuple[str, torch.Tensor]):
-            return weight[0].startswith("patch_merger")
+            return weight[0].startswith(
+                ("patch_merger", "multi_modal_projector.patch_merger")
+            )
 
         def is_pre_mm_projector_norm(weight: tuple[str, torch.Tensor]):
             return weight[0].startswith("pre_mm_projector_norm")
@@ -555,17 +557,19 @@ class PixtralForConditionalGeneration(
                         continue
                     # Load vision patch merger weights directly
                     trimmed_name = ".".join(name.split(".")[1:])
-                    param = patch_merger_dict[trimmed_name]
-                    with torch.no_grad():
-                        default_weight_loader(param, w)
+                    param = patch_merger_dict.get(trimmed_name)
+                    if param is not None:
+                        with torch.no_grad():
+                            default_weight_loader(param, w)
                 elif is_pre_mm_projector_norm((name, w)):
                     if self.pre_mm_projector_norm is None:
                         continue
                     # Load vision pre_mm_projector_norm weights directly
                     trimmed_name = ".".join(name.split(".")[1:])
-                    param = pre_mm_projector_norm_dict[trimmed_name]
-                    with torch.no_grad():
-                        default_weight_loader(param, w)
+                    param = pre_mm_projector_norm_dict.get(trimmed_name)
+                    if param is not None:
+                        with torch.no_grad():
+                            default_weight_loader(param, w)
                 elif is_vision_lang_adapter_weights((name, w)):
                     if self.vision_language_adapter is None:
                         continue
