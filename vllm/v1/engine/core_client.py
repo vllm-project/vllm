@@ -1040,6 +1040,7 @@ class AsyncMPClientNoInference(MPClient):
 
     async def get_output_async(self) -> EngineCoreOutputs:
         await asyncio.get_running_loop().create_future()
+        raise AssertionError("unreachable")
 
     async def get_supported_tasks_async(self) -> tuple[SupportedTask, ...]:
         return ("generate",)
