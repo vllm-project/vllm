@@ -19,7 +19,7 @@ from transformers.models.llava import LlavaProcessor
 from transformers.models.pixtral import PixtralProcessor
 
 from vllm.config import VllmConfig
-from vllm.config.multimodal import BaseDummyOptions, MultiModalConfig
+from vllm.config.multimodal import BaseDummyOptions
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.linear import ColumnParallelLinear, RowParallelLinear
 from vllm.model_executor.layers.quantization import QuantizationConfig
@@ -456,7 +456,6 @@ def _get_num_hidden_layers(hf_config: LlavaLikeConfig) -> int:
 def init_vision_tower_for_llava(
     hf_config: LlavaLikeConfig,
     quant_config: QuantizationConfig | None,
-    multimodal_config: MultiModalConfig | None,
     *,
     require_post_norm: bool | None = None,
     prefix: str = "",
@@ -470,7 +469,6 @@ def init_vision_tower_for_llava(
         return CLIPVisionModel(
             vision_config,
             quant_config=quant_config,
-            multimodal_config=multimodal_config,
             num_hidden_layers_override=num_hidden_layers,
             require_post_norm=require_post_norm,
             prefix=prefix,
@@ -479,7 +477,6 @@ def init_vision_tower_for_llava(
         return SiglipVisionModel(
             vision_config,
             quant_config=quant_config,
-            multimodal_config=multimodal_config,
             num_hidden_layers_override=num_hidden_layers,
             require_post_norm=require_post_norm,
             prefix=prefix,
@@ -488,7 +485,6 @@ def init_vision_tower_for_llava(
         return PixtralHFVisionModel(
             vision_config,
             quant_config=quant_config,
-            multimodal_config=multimodal_config,
             num_hidden_layers_override=num_hidden_layers,
             require_post_norm=require_post_norm,
             prefix=prefix,
@@ -562,7 +558,6 @@ class LlavaForConditionalGeneration(
             self.vision_tower = init_vision_tower_for_llava(
                 config,
                 quant_config=quant_config,
-                multimodal_config=multimodal_config,
                 require_post_norm=False,
                 prefix=maybe_prefix(prefix, "vision_tower"),
             )
