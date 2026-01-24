@@ -862,7 +862,7 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
         self.moe_quant_config = self.get_fused_moe_quant_config(layer)
         if self.moe_quant_config:
             assert self.experts_cls is not None
-            self.mk_moe, self.use_inplace = make_fp8_moe_kernel(
+            self.moe_mk, self.use_inplace = make_fp8_moe_kernel(
                 moe_quant_config=self.moe_quant_config,
                 moe_config=self.moe,
                 fp8_backend=self.fp8_backend,
@@ -967,8 +967,8 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
                 f"but got {layer.activation}"
             )
 
-        assert self.mk_moe is not None
-        return self.mk_moe(
+        assert self.moe_mk is not None
+        return self.moe_mk(
             x,
             layer.w13_weight,
             layer.w2_weight,
@@ -1529,12 +1529,12 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
         self.moe_quant_config = self.get_fused_moe_quant_config(layer)
         if self.moe_quant_config:
             assert self.experts_cls is not None
-            self.mk_moe = make_nvfp4_moe_kernel(
+            self.moe_mk = make_nvfp4_moe_kernel(
                 moe_quant_config=self.moe_quant_config,
                 moe_config=self.moe,
                 experts_cls=self.experts_cls,
             )
-        print(f"{self.mk_moe=}")
+        print(f"{self.moe_mk=}")
 
     @property
     def do_post_quant_allgather(self):
@@ -1634,8 +1634,8 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
                 global_num_experts=layer.global_num_experts,
             )
         else:
-            assert self.mk_moe is not None
-            return self.mk_moe(
+            assert self.moe_mk is not None
+            return self.moe_mk(
                 x,
                 layer.w13_weight,
                 layer.w2_weight,

@@ -836,7 +836,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         self.moe_quant_config = self.get_fused_moe_quant_config(layer)
         if self.moe_quant_config:
             assert self.experts_cls is not None
-            self.mk_moe, self.use_inplace = make_fp8_moe_kernel(
+            self.moe_mk, self.use_inplace = make_fp8_moe_kernel(
                 moe_quant_config=self.moe_quant_config,
                 moe_config=self.moe,
                 fp8_backend=self.fp8_backend,
@@ -1009,9 +1009,9 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        assert self.mk_moe is not None
+        assert self.moe_mk is not None
         assert not self.is_monolithic
-        return self.mk_moe(
+        return self.moe_mk(
             x,
             layer.w13_weight,
             layer.w2_weight,

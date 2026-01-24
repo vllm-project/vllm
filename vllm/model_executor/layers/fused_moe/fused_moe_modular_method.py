@@ -30,11 +30,11 @@ class FusedMoEModularMethod(FusedMoEMethodBase, CustomOp):
     ):
         super().__init__(old_quant_method.moe)
         self.moe_quant_config = old_quant_method.moe_quant_config
-        self.mk_moe = experts
+        self.moe_mk = experts
         self.disable_expert_map = getattr(
             old_quant_method,
             "disable_expert_map",
-            not self.mk_moe.supports_expert_map(),
+            not self.moe_mk.supports_expert_map(),
         )
         self.old_quant_method = old_quant_method
         assert not self.old_quant_method.is_monolithic
@@ -92,7 +92,8 @@ class FusedMoEModularMethod(FusedMoEMethodBase, CustomOp):
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        return self.mk_moe(
+        assert self.moe_mk is not None
+        return self.moe_mk(
             hidden_states=x,
             w1=layer.w13_weight,
             w2=layer.w2_weight,
