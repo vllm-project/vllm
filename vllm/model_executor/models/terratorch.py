@@ -130,9 +130,10 @@ class TerratorchInputBuilder(BaseDummyInputsBuilder[TerratorchProcessingInfo]):
 
 
 class TerratorchMultiModalDataParser(MultiModalDataParser):
-    def __init__(self, pretrained_cfg: dict, *args, **kwargs):
-        self._input_definition = InputDefinition(**pretrained_cfg["input"])
+    def __init__(self, input_definition: InputDefinition, *args, **kwargs):
         super().__init__(*args, **kwargs)
+
+        self.input_definition = input_definition
 
     def _parse_image_data(
         self,
@@ -142,8 +143,8 @@ class TerratorchMultiModalDataParser(MultiModalDataParser):
             return DictEmbeddingItems(
                 data,
                 modality="image",
-                required_fields=_terratorch_field_names(self._input_definition),
-                fields_factory=_terratorch_field_factory(self._input_definition),
+                required_fields=_terratorch_field_names(self.input_definition),
+                fields_factory=_terratorch_field_factory(self.input_definition),
             )
 
         return super()._parse_image_data(data)
@@ -157,18 +158,20 @@ class TerratorchMultiModalProcessor(BaseMultiModalProcessor):
         *,
         cache: MultiModalProcessorOnlyCache | None = None,
     ) -> None:
-        self.pretrained_cfg = info.get_hf_config().to_dict()["pretrained_cfg"]
+        pretrained_cfg = info.get_hf_config().to_dict()["pretrained_cfg"]
+        self._input_definition = InputDefinition(**pretrained_cfg["input"])
+
         super().__init__(info=info, dummy_inputs=dummy_inputs, cache=cache)
 
     def _get_data_parser(self) -> MultiModalDataParser:
-        return TerratorchMultiModalDataParser(pretrained_cfg=self.pretrained_cfg)
+        return TerratorchMultiModalDataParser(self._input_definition)
 
     def _get_mm_fields_config(
         self,
         hf_inputs: BatchFeature,
         hf_processor_mm_kwargs: Mapping[str, object],
     ) -> Mapping[str, MultiModalFieldConfig]:
-        return _terratorch_field_factory(self.pretrained_cfg)(hf_inputs)
+        return _terratorch_field_factory(self._input_definition)(hf_inputs)
 
     def _get_prompt_updates(
         self,
