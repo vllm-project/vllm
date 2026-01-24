@@ -22,6 +22,7 @@ from transformers import BatchFeature
 from transformers.processing_utils import ProcessorMixin
 
 from vllm.config import VllmConfig
+from vllm.config.multimodal import BaseDummyOptions
 from vllm.distributed import get_pp_group
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe import SharedFusedMoE
@@ -50,13 +51,13 @@ from vllm.multimodal.inputs import (
 )
 from vllm.multimodal.parse import MultiModalDataItems, VisionChunkProcessorItems
 from vllm.multimodal.processing import (
+    BaseDummyInputsBuilder,
     BaseMultiModalProcessor,
     BaseProcessingInfo,
     InputProcessingContext,
     PromptReplacement,
     PromptUpdate,
 )
-from vllm.multimodal.profiling import BaseDummyInputsBuilder, BaseDummyOptions
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.configs import KimiK25Config
 from vllm.transformers_utils.processor import cached_get_image_processor

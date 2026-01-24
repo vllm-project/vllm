@@ -18,11 +18,11 @@ import torch.nn as nn
 import torch.nn.functional as F
 from transformers.activations import GELUActivation
 
-from vllm.attention.layers.mm_encoder_attention import MMEncoderAttention
 from vllm.config import MultiModalConfig
 from vllm.distributed import divide, get_tensor_model_parallel_world_size
 from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import get_act_fn
+from vllm.model_executor.layers.attention.mm_encoder_attention import MMEncoderAttention
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
     QKVParallelLinear,
