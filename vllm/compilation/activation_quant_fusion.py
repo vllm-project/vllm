@@ -197,10 +197,16 @@ class SiluMulBlockQuantPattern:
     
     def register(self, pm_pass: PatternMatcherPass) -> None:
         def pattern(input: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-            # Use both matchers - this should now match the test function!
             silu_out = self.silu_and_mul_matcher(input)
-            result_quant, scale = self.quant_matcher(silu_out)
-            return result_quant, scale
+            
+            # Match the in-place pattern from the graph
+            x_q = torch.empty(silu_out.shape, dtype=FP8_DTYPE, device=input.device)
+            num_groups = silu_out.shape[-1] // 128
+            x_s = torch.empty((silu_out.shape[0], num_groups), dtype=torch.float32, device=input.device)
+            
+            torch.ops._C.per_token_group_fp8_quant(silu_out, x_q, x_s, 128, 1e-10, -448.0, 448.0, False)
+            
+            return x_q, x_s  # Return the mutated tensors
         
         def replacement(input: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
             print(f"🔥 FUSED KERNEL TRIGGERED! input.shape={input.shape}")
