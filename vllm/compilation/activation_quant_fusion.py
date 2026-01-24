@@ -197,6 +197,8 @@ class SiluMulBlockQuantPattern:
     
     def register(self, pm_pass: PatternMatcherPass) -> None:
         def pattern(input: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+            print(f"🔍 PATTERN EXECUTING - input device: {input.device}, dtype: {input.dtype}, shape: {input.shape}")
+
             # Write the FULL pattern explicitly - no matchers
             d = input.shape[-1] // 2
             gate = input[..., :d]
