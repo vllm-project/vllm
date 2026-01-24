@@ -43,21 +43,22 @@ config = VllmConfig(
 )
 print("✓ Config created")
 
-with set_current_vllm_config(config):
+# Create test function
+# Create test function
+def silu_mul_then_quant(x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    # Create it fresh each time (inside the function when config is set)
     quant_fp8 = QuantFP8(
         static=False,
         group_shape=GroupShape(1, 128),
         column_major_scales=False,
         use_ue8m0=False,
     )
-
-# Create test function
-# Create test function
-def silu_mul_then_quant(x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    
     d = x.shape[-1] // 2
     silu_out = F.silu(x[..., :d]) * x[..., d:]
     result, scales = quant_fp8(silu_out)
     return result, scales
+
 
 # Create a debug backend to see the graph
 def debug_backend(gm: torch.fx.GraphModule, example_inputs):
@@ -82,8 +83,9 @@ x = torch.randn(16, 4096 * 2, dtype=torch.float16, device="cuda")
 
 # Baseline
 print("\n1. Baseline (no compilation)...")
-with torch.no_grad():
-    baseline_out, baseline_scales = silu_mul_then_quant(x)
+with set_current_vllm_config(config):
+    with torch.no_grad():
+        baseline_out, baseline_scales = silu_mul_then_quant(x)
 print(f"   Output: {baseline_out.shape}, Scales: {baseline_scales.shape}")
 
 # Compiled
@@ -110,8 +112,9 @@ with pass_context(Range(start=1, end=8)):
     
     print("\n4. Running compiled function...")
     
-    with torch.no_grad():
-        compiled_out, compiled_scales = compiled_fn(x)
+    with set_current_vllm_config(config):
+        with torch.no_grad():
+            compiled_out, compiled_scales = compiled_fn(x)
 
 print(f"\n   Output: {compiled_out.shape}, Scales: {compiled_scales.shape}")
 
