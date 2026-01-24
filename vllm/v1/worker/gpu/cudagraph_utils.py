@@ -171,6 +171,7 @@ class CudaGraphManager:
             inputs_embeds=inputs_embeds,
             num_tokens_across_dp=num_tokens_across_dp,
             attn_metadata=attn_metadata,
+            slot_mappings_by_layer=slot_mappings_by_layer,
             has_lora=has_lora,
         )
 
@@ -184,6 +185,7 @@ class CudaGraphManager:
         inputs_embeds: torch.Tensor | None,
         num_tokens_across_dp: torch.Tensor,
         attn_metadata: dict[str, Any] | None,
+        slot_mappings_by_layer: dict[str, torch.Tensor] | None,
         has_lora: bool = False,
     ) -> None:
         assert attn_metadata is not None
@@ -220,6 +222,7 @@ class CudaGraphManager:
         inputs_embeds: torch.Tensor | None,
         num_tokens_across_dp: torch.Tensor,
         attn_metadata: dict[str, Any] | None,
+        slot_mappings_by_layer: dict[str, torch.Tensor] | None,
         has_lora: bool = False,
     ) -> None:
         # create batch descriptor for piecewise cudagraph dispatch key
@@ -238,6 +241,7 @@ class CudaGraphManager:
             cudagraph_runtime_mode=CUDAGraphMode.PIECEWISE,
             num_tokens_across_dp=num_tokens_across_dp,
             batch_descriptor=batch_descriptor,
+            slot_mapping=slot_mappings_by_layer,
         ):
             hidden_states = model(
                 input_ids=input_ids,
