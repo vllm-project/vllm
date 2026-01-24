@@ -66,6 +66,7 @@ class AsyncLLM(EngineClient):
         client_addresses: dict[str, str] | None = None,
         client_count: int = 1,
         client_index: int = 0,
+        disable_inference: bool = False,
     ) -> None:
         """
         Create an AsyncLLM.
@@ -132,6 +133,7 @@ class AsyncLLM(EngineClient):
             client_addresses=client_addresses,
             client_count=client_count,
             client_index=client_index,
+            disable_inference=disable_inference,
         )
 
         # Loggers.
@@ -196,6 +198,7 @@ class AsyncLLM(EngineClient):
         client_addresses: dict[str, str] | None = None,
         client_count: int = 1,
         client_index: int = 0,
+        disable_inference: bool = False,
     ) -> "AsyncLLM":
         # Create the LLMEngine.
         return cls(
@@ -210,6 +213,7 @@ class AsyncLLM(EngineClient):
             client_addresses=client_addresses,
             client_count=client_count,
             client_index=client_index,
+            disable_inference=disable_inference,
         )
 
     @classmethod
