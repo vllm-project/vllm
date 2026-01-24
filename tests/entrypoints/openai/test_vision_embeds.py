@@ -47,10 +47,10 @@ def test_stacked_fields(model_name: str):
                                 "type": "image_embeds",
                                 "image_embeds": {
                                     "pixel_values": tensor2base64(
-                                        torch.ones((6, 512, 512))
+                                        torch.ones((6, 512, 512), dtype=torch.float16)
                                     ),
                                     "location_coords": tensor2base64(
-                                        torch.ones((1, 2))
+                                        torch.ones((1, 2), dtype=torch.float16)
                                     ),
                                 },
                             },
