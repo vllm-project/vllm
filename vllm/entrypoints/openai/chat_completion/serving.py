@@ -143,14 +143,6 @@ class OpenAIServingChat(OpenAIServing):
         self.enable_prompt_tokens_details = enable_prompt_tokens_details
         self.enable_force_include_usage = enable_force_include_usage
         self.default_sampling_params = self.model_config.get_diff_sampling_param()
-        if self.default_sampling_params:
-            source = self.model_config.generation_config
-            source = "model" if source == "auto" else source
-            logger.info(
-                "Using default chat sampling params from %s: %s",
-                source,
-                self.default_sampling_params,
-            )
         if self.model_config.hf_config.model_type == "kimi_k2":
             self.tool_call_id_type = "kimi_k2"
         else:
