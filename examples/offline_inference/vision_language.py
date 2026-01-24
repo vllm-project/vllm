@@ -744,9 +744,9 @@ def run_interns1_pro(questions: list[str], modality: str) -> ModelRequestData:
     )
 
     if modality == "image":
-        placeholder = "<|image_pad|>"
+        placeholder = "<|vision_start|><|image_pad|><|vision_end|>"
     elif modality == "video":
-        placeholder = "<|video_pad|>"
+        placeholder = "<|vision_start|><|video_pad|><|vision_end|>"
 
     tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
     messages = [
