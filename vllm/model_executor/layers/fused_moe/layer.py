@@ -1806,9 +1806,7 @@ class FusedMoE(CustomOp):
                 if post_quant_allgather:
                     hidden_states_to_dispatch, extra_tensors = (
                         self.quant_method.prepare_dp_allgather_tensor(
-                            self,
-                            hidden_states,
-                            router_logits,
+                            self, hidden_states, router_logits
                         )
                     )
                 else:
