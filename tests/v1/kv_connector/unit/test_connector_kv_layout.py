@@ -38,13 +38,17 @@ def _make_config(*, use_mla: bool | None):
     [
         "vllm.distributed.kv_transfer.kv_connector.v1.p2p.p2p_nccl_connector.P2pNcclConnector",
         "vllm.distributed.kv_transfer.kv_connector.v1.nixl_connector.NixlConnector",
+        "vllm.distributed.kv_transfer.kv_connector.v1.mooncake_connector.MooncakeConnector",
     ],
 )
 class TestRawCopyConnectorLayout:
     @staticmethod
     def _import_connector(connector_path: str):
         module_path, class_name = connector_path.rsplit(".", 1)
-        module = __import__(module_path, fromlist=[class_name])
+        try:
+            module = __import__(module_path, fromlist=[class_name])
+        except ImportError as exc:
+            pytest.skip(f"Skipping {connector_path}: {exc}")
         return getattr(module, class_name)
 
     def test_non_mla_requires_hnd(self, connector_path):
