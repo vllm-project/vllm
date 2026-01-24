@@ -272,7 +272,7 @@ class CudaCommunicator(DeviceCommunicatorBase):
             self.ca_comm = None
         if self.all2all_manager is not None:
             self.all2all_manager.destroy()
-            self.all2all_manager = None  # type: ignore[assignment]
+            self.all2all_manager = None
 
     def all_gatherv(
         self,
