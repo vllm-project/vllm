@@ -76,8 +76,7 @@ class SharedHead(nn.Module):
 
 class GlmOcrMultiTokenPredictorLayer(Glm4MoeLiteMultiTokenPredictorLayer):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
-        super().__init__()
-
+        super().__init__(vllm_config=vllm_config, prefix=prefix)
         config = vllm_config.speculative_config.draft_model_config.hf_config
         self.config = config
         quant_config = vllm_config.quant_config
@@ -97,7 +96,7 @@ class GlmOcrMultiTokenPredictorLayer(Glm4MoeLiteMultiTokenPredictorLayer):
 
 class GlmOcrMultiTokenPredictor(Glm4MoeLiteMultiTokenPredictor):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
-        super().__init__()
+        super().__init__(vllm_config=vllm_config, prefix=prefix)
         config = vllm_config.model_config.hf_config
         self.mtp_start_layer_idx = config.num_hidden_layers
         self.num_mtp_layers = config.num_nextn_predict_layers
