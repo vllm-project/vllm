@@ -1,13 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 import numpy as np
 import torch
 
 from vllm.lora.request import LoRARequest
-from vllm.sampling_params import SamplingParams
-from vllm.v1.outputs import LogprobsTensors
 from vllm.v1.worker.gpu.buffer_utils import StagedWriteTensor, UvaBackedTensor
 
 NO_LORA_ID = 0
@@ -76,8 +74,6 @@ class RequestState:
         self.lora_ids = np.zeros(self.max_num_reqs, dtype=np.int32)
         self.lora_ids.fill(NO_LORA_ID)
 
-        self.needs_prompt_logprobs = np.zeros(self.max_num_reqs, dtype=bool)
-
     @property
     def num_reqs(self) -> int:
         return len(self.req_id_to_index)
@@ -88,7 +84,6 @@ class RequestState:
         prompt_len: int,
         prefill_token_ids: list[int],
         num_computed_tokens: int,
-        sampling_params: SamplingParams,
         lora_request: LoRARequest | None,
     ) -> None:
         assert len(self.free_indices) > 0, "No free indices"
@@ -111,10 +106,6 @@ class RequestState:
             self.lora_ids[req_idx] = lora_request.lora_int_id
         else:
             self.lora_ids[req_idx] = NO_LORA_ID
-
-        # For now, only support prompt logprobs for the prompt tokens.
-        needs_prompt_logprobs = sampling_params.prompt_logprobs is not None
-        self.needs_prompt_logprobs[req_idx] = needs_prompt_logprobs
 
     def apply_staged_writes(self) -> None:
         self.prefill_len.copy_to_uva()
@@ -151,4 +142,3 @@ class RequestState:
 @dataclass
 class ExtraData:
     lora_request: LoRARequest | None
-    in_progress_prompt_logprobs: list[LogprobsTensors] = field(default_factory=list)
