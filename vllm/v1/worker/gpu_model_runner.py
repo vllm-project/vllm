@@ -2345,8 +2345,8 @@ class GPUModelRunner(
     def _gather_mm_embeddings(
         self,
         scheduler_output: "SchedulerOutput",
-        shift_computed_tokens: int = 0,
-    ) -> tuple[list[torch.Tensor], torch.Tensor]:
+        shift_computed_tokens: int = 0, 
+    ) -> tuple[list[torch.Tensor], list[torch.Tensor]]:
         total_num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
 
         # Swap to the other buffer to avoid race condition with previous
@@ -2355,6 +2355,7 @@ class GPUModelRunner(
         is_mm_embed_buf = self.is_mm_embed_buffers[self.is_mm_embed_idx]
 
         mm_embeds = list[torch.Tensor]()
+        is_mm_embeds = list[torch.Tensor]()
         is_mm_embed = is_mm_embed_buf.cpu
         is_mm_embed[:total_num_scheduled_tokens] = False
 
@@ -2415,6 +2416,8 @@ class GPUModelRunner(
                     True if is_embed is None else is_embed
                 )
                 mm_embeds_req.append(mm_embeds_item)
+                is_mm_embeds.append(is_mm_embed[:total_num_scheduled_tokens].to(self.device))
+                is_mm_embed[:total_num_scheduled_tokens] = False
 
             if self.is_multimodal_pruning_enabled and self.uses_mrope:
                 assert req_state.mrope_positions is not None
@@ -2432,8 +2435,10 @@ class GPUModelRunner(
 
             mm_embeds.extend(mm_embeds_req)
             req_start_idx += num_scheduled_tokens
-
-        is_mm_embed = is_mm_embed_buf.copy_to_gpu(total_num_scheduled_tokens)
+            
+            if not mm_embeds_req:
+                is_mm_embeds.append(torch.tensor([False] * total_num_scheduled_tokens, device=self.device))
+                mm_embeds.append(torch.empty((0, 0), device=self.device))
 
         if should_sync_mrope_positions:
             self._calc_mrope_positions(scheduler_output)
@@ -2443,7 +2448,7 @@ class GPUModelRunner(
             self._calc_xdrope_positions(scheduler_output)
             self.xdrope_positions.copy_to_gpu(total_num_scheduled_tokens)
 
-        return mm_embeds, is_mm_embed
+        return mm_embeds, is_mm_embeds
 
     def get_model(self) -> nn.Module:
         # get raw model out of the cudagraph wrapper.
@@ -2645,7 +2650,7 @@ class GPUModelRunner(
                 encoder_cache=self.encoder_cache,
             ) as ec_connector_output:
                 self._execute_mm_encoder(scheduler_output)
-                mm_embeds, is_mm_embed = self._gather_mm_embeddings(scheduler_output)
+                mm_embeds, is_mm_embeds = self._gather_mm_embeddings(scheduler_output)
 
             # NOTE(woosuk): To unify token ids and soft tokens (vision
             # embeddings), we always use embeddings (rather than token ids)
@@ -2653,7 +2658,7 @@ class GPUModelRunner(
             inputs_embeds_scheduled = self.model.embed_input_ids(
                 self.input_ids.gpu[:num_scheduled_tokens],
                 multimodal_embeddings=mm_embeds,
-                is_multimodal=is_mm_embed,
+                is_multimodals=is_mm_embeds,
             )
 
             # TODO(woosuk): Avoid the copy. Optimize.

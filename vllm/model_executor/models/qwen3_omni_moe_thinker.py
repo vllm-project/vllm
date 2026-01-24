@@ -23,7 +23,7 @@
 """Inference-only Qwen3-Omni-Moe model (thinker part)."""
 
 from collections.abc import Callable, Iterable, Mapping, Sequence
-from functools import partial
+from functools import partial, reduce
 from typing import Any
 
 import numpy as np
@@ -1769,9 +1769,11 @@ class Qwen3OmniMoeThinkerForConditionalGeneration(
         input_ids: torch.Tensor,
         multimodal_embeddings: MultiModalEmbeddings | None = None,
         *,
-        is_multimodal: torch.Tensor | None = None,
+        is_multimodals: list[torch.Tensor] | None = None,
         handle_oov_mm_token: bool = False,
     ) -> torch.Tensor:
+        is_multimodal = reduce(torch.logical_or, is_multimodals)
+        
         inputs_embeds = self._embed_text_input_ids(
             input_ids,
             self.language_model.embed_input_ids,
@@ -1785,7 +1787,7 @@ class Qwen3OmniMoeThinkerForConditionalGeneration(
         deepstack_input_embeds = None
         # split the feat dim to obtain multi-scale visual feature
         has_vision_embeddings = [
-            embeddings.shape[-1] != self.config.text_config.hidden_size
+            embeddings.shape[-1] > 0 and embeddings.shape[-1] != self.config.text_config.hidden_size
             for embeddings in multimodal_embeddings
         ]
         if self.visual.deepstack_visual_indexes is not None and any(
@@ -1794,13 +1796,12 @@ class Qwen3OmniMoeThinkerForConditionalGeneration(
             multiscale_len = len(self.visual.deepstack_visual_indexes)
             multimodal_embeddings_multiscale = []
             is_vision = torch.zeros_like(is_multimodal)
-            mm_positions = torch.nonzero(is_multimodal, as_tuple=True)[0]
-            mm_position_idx = 0
+           
             for index, embeddings in enumerate(multimodal_embeddings):
-                num_tokens = embeddings.shape[0]
-                current_positions = mm_positions[
-                    mm_position_idx : mm_position_idx + num_tokens
-                ]
+                if len(embeddings) == 0:
+                    continue
+                
+                _is_multimodal = is_multimodals[index]
 
                 # Vision embeddings
                 if embeddings.shape[-1] != self.config.text_config.hidden_size:
@@ -1811,13 +1812,7 @@ class Qwen3OmniMoeThinkerForConditionalGeneration(
                     )
                     multimodal_embeddings[index] = embeddings_main
                     multimodal_embeddings_multiscale.append(embeddings_multiscale)
-                    is_vision[current_positions] = True
-
-                # Audio embeddings
-                else:
-                    is_vision[current_positions] = False
-
-                mm_position_idx += num_tokens
+                    is_vision[_is_multimodal] = True
 
             deepstack_input_embeds = inputs_embeds.new_zeros(
                 inputs_embeds.size(0), multiscale_len * inputs_embeds.size(1)
@@ -1836,11 +1831,12 @@ class Qwen3OmniMoeThinkerForConditionalGeneration(
             )
             self._set_deepstack_input_embeds(deepstack_input_embeds)
 
-        inputs_embeds = _merge_multimodal_embeddings(
-            inputs_embeds=inputs_embeds,
-            multimodal_embeddings=multimodal_embeddings,
-            is_multimodal=is_multimodal,
-        )
+        for is_multimodal, multimodal_embedding in zip(is_multimodals, multimodal_embeddings):
+            inputs_embeds = _merge_multimodal_embeddings(
+                inputs_embeds=inputs_embeds,
+                multimodal_embeddings=multimodal_embedding,
+                is_multimodal=is_multimodal,
+            )
 
         return inputs_embeds
 
