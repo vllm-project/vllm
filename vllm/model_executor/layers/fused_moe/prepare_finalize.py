@@ -11,6 +11,7 @@ from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceDelegate,
 )
 from vllm.model_executor.layers.fused_moe.utils import moe_kernel_quantize_input
+from vllm.utils.flashinfer import nvfp4_block_scale_interleave
 
 
 class MoEPrepareAndFinalizeNaiveEP(mk.FusedMoEPrepareAndFinalize):
@@ -70,7 +71,11 @@ class MoEPrepareAndFinalizeNaiveEP(mk.FusedMoEPrepareAndFinalize):
                 quant_config.quant_dtype,
                 quant_config.per_act_token_quant,
                 quant_config.block_shape,
-                is_fp4_scale_swizzled=True,
+                # NOTE: swizzling pads the scales to multiple of 128
+                # which makes the scales tensor different shape than
+                # the hidden states, breaking the A2A kernel. So, we
+                # delay the swizzling until after the A2A.
+                is_fp4_scale_swizzled=False,
             )
 
         # TODO - this is just for deepgemm?
@@ -95,6 +100,8 @@ class MoEPrepareAndFinalizeNaiveEP(mk.FusedMoEPrepareAndFinalize):
             a1q, topk_weights, topk_ids, scales = res
             assert scales is not None and len(scales) == 1
             a1q_scale = scales[0]
+            if quant_config.quant_dtype == "nvfp4":
+                a1q_scale = nvfp4_block_scale_interleave(a1q_scale)
 
         return a1q, a1q_scale, expert_tokens_meta, topk_ids, topk_weights
 

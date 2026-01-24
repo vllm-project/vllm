@@ -162,8 +162,10 @@ def flashinfer_alltoall_dispatch(
             quant_config.quant_dtype,
             quant_config.per_act_token_quant,
             quant_config.block_shape,
-            # NOTE: the kernel crashes with swizzled scales
-            # so we disable it until after the A2A below.
+            # NOTE: swizzling pads the scales to multiple of 128
+            # which makes the scales tensor different shape than
+            # the hidden states, breaking the A2A kernel. So, we
+            # delay the swizzling until after the A2A.
             is_fp4_scale_swizzled=False,
         )
 
