@@ -1543,6 +1543,7 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
         self,
         layer: FusedMoE,
         hidden_states: torch.Tensor,
+        router_logits: torch.Tensor,
     ) -> tuple[torch.Tensor, list[torch.Tensor]]:
         """Optionally prepare extra tensors to carry through DP allgather/EP."""
         if self.nvfp4_backend != NvFp4MoeBackend.FLASHINFER_TRTLLM:
