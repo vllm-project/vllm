@@ -934,7 +934,7 @@ The following example demonstrates how to pass image embeddings to the OpenAI se
     model = "llava-hf/llava-1.5-7b-hf"
     embeds = {
         "type": "image_embeds",
-        "image_embeds": f"{tensor2base64(torch.load(...))}",  # Shape: (image_feature_size, hidden_size)
+        "image_embeds": tensor2base64(torch.load(...)),  # Shape: (image_feature_size, hidden_size)
         "uuid": image_url,  # Optional
     }
 
@@ -944,8 +944,8 @@ The following example demonstrates how to pass image embeddings to the OpenAI se
     embeds = {
         "type": "image_embeds",
         "image_embeds": {
-            "image_embeds": f"{tensor2base64(torch.load(...))}",  # Shape: (image_feature_size, hidden_size)
-            "image_grid_thw": f"{tensor2base64(torch.load(...))}",  # Shape: (3,)
+            "image_embeds": tensor2base64(torch.load(...)),  # Shape: (image_feature_size, hidden_size)
+            "image_grid_thw": tensor2base64(torch.load(...)),  # Shape: (3,)
         },
         "uuid": image_url,  # Optional
     }
@@ -954,8 +954,8 @@ The following example demonstrates how to pass image embeddings to the OpenAI se
     embeds = {
         "type": "image_embeds",
         "image_embeds": {
-            "image_embeds": f"{tensor2base64(torch.load(...))}",  # Shape: (num_slices, hidden_size)
-            "image_sizes": f"{tensor2base64(torch.load(...))}",  # Shape: (2,)
+            "image_embeds": tensor2base64(torch.load(...)),  # Shape: (num_slices, hidden_size)
+            "image_sizes": tensor2base64(torch.load(...)),  # Shape: (2,)
         },
         "uuid": image_url,  # Optional
     }
