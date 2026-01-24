@@ -303,11 +303,21 @@ class ModelArchConfigConvertorBase:
                 # should have the same scaling
                 derived_max_model_len *= scaling_factor
 
+        # Compute default_max_model_len:
+        # For LongRoPE, use original_max_position_embeddings to avoid
+        # performance degradation for shorter sequences.
+        # For non-LongRoPE, return None (caller should use derived_max_model_len).
+        if is_longrope and original_max_position_embeddings is not None:
+            default_max_model_len: float | None = float(
+                original_max_position_embeddings
+            )
+        else:
+            default_max_model_len = None
+
         return DerivedMaxModelLenInfo(
-            derived_max_model_len=derived_max_model_len,
-            max_len_key=max_len_key,
-            is_longrope=is_longrope,
-            original_max_position_embeddings=original_max_position_embeddings,
+            derived=derived_max_model_len,
+            derived_key=max_len_key,
+            default=default_max_model_len,
         )
 
     def get_uses_mrope(self) -> bool:

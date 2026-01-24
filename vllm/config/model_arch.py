@@ -13,17 +13,19 @@ logger = init_logger(__name__)
 class DerivedMaxModelLenInfo(NamedTuple):
     """Information about the derived maximum model length."""
 
-    derived_max_model_len: float
-    """The derived maximum model length after applying RoPE scaling."""
+    derived: float
+    """Maximum supported sequence length after RoPE scaling.
+    Used for:
+    1. Validation - user-specified max_model_len cannot exceed this.
+    2. Default for non-LongRoPE models (with sliding_window/tokenizer caps)."""
 
-    max_len_key: str | None
-    """The key in the config that was used to derive the max length."""
+    derived_key: str | None
+    """The config key used to derive the max length (for error messages)."""
 
-    is_longrope: bool
-    """Whether the model uses LongRoPE (affects default max_model_len selection)."""
-
-    original_max_position_embeddings: int | None
-    """Original max position embeddings before RoPE scaling (for LongRoPE models)."""
+    default: float | None
+    """For LongRoPE models only: original_max_position_embeddings.
+    Used as the default max_model_len to avoid performance degradation.
+    None for non-LongRoPE models (derived is used instead)."""
 
 
 @dataclass(config=ConfigDict(arbitrary_types_allowed=True))

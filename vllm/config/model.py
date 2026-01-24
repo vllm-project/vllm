@@ -1919,8 +1919,8 @@ def _get_and_verify_max_len(
     """Get and verify the model's maximum length."""
     # Get pre-computed derived max model len info (includes RoPE scaling)
     max_len_info = model_arch_config.derived_max_model_len_info
-    derived_max_model_len = max_len_info.derived_max_model_len
-    max_len_key = max_len_info.max_len_key
+    derived_max_model_len = max_len_info.derived
+    max_len_key = max_len_info.derived_key
 
     # If sliding window is manually disabled, max_length should be less
     # than the sliding window length in the model config.
@@ -1967,15 +1967,12 @@ def _get_and_verify_max_len(
     # then use that derived from the model config as a default value.
     # When -1 is specified, the engine will later auto-fit to available memory.
     if max_model_len is None or max_model_len == -1:
-        # For LongRoPE, default to original_max_position_embeddings to avoid
-        # performance degradation for shorter sequences
-        if max_len_info.is_longrope:
-            original_max_pos = max_len_info.original_max_position_embeddings
-            if original_max_pos is not None:
-                max_model_len = int(original_max_pos)
-            else:
-                max_model_len = int(derived_max_model_len)
+        if max_len_info.default is not None:
+            # For LongRoPE, default to original_max_position_embeddings to avoid
+            # performance degradation for shorter sequences
+            max_model_len = int(max_len_info.default)
         else:
+            # Non-LongRoPE: use derived_max_model_len with caps applied
             max_model_len = int(derived_max_model_len)
         max_model_len = current_platform.check_max_model_len(max_model_len)
 
