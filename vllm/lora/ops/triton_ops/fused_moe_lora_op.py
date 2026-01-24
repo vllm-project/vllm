@@ -36,6 +36,20 @@ def _get_ptr(lora_weights: list[torch.Tensor], device: torch.device):
     return _LORA_PTR_DICT.get(key)
 
 
+def _adjust_kernel_input(
+    max_loras: int,
+    sorted_token_ids: torch.Tensor | None,
+    expert_ids: torch.Tensor,
+):
+    if sorted_token_ids is None:
+        stride_tl = 0
+        stride_el = 0
+    else:
+        stride_tl = sorted_token_ids.stride(0)
+        stride_el = expert_ids.stride(0)
+    return max_loras if sorted_token_ids is not None else 1, stride_tl, stride_el
+
+
 @triton.jit(
     do_not_specialize=[
         "num_valid_tokens",
@@ -269,7 +283,9 @@ def _fused_moe_lora_shrink(
 
     b_ptr = _get_ptr(lora_a_stacked, device)
 
-    grid_lora_dim = 1 if naive_block_assignment else lora_a_stacked[0].shape[0]
+    grid_lora_dim, stride_tl, stride_el = _adjust_kernel_input(
+        w1_lora_a_stacked.shape[0], sorted_token_ids, expert_ids
+    )
     grid = lambda META: (
         split_k
         * triton.cdiv(EM, META["BLOCK_SIZE_M"])
@@ -277,12 +293,6 @@ def _fused_moe_lora_shrink(
         len(lora_a_stacked),
         grid_lora_dim,
     )
-    if sorted_token_ids is None:
-        stride_tl = 0
-        stride_el = 0
-    else:
-        stride_tl = sorted_token_ids.stride(0)
-        stride_el = expert_ids.stride(0)
     _fused_moe_lora_kernel[grid](
         qcurr_hidden_states,
         b_ptr,
@@ -383,18 +393,15 @@ def _fused_moe_lora_expand(
         "launch_pdl": use_gdc,  # triton kernel metadata
     }
 
-    grid_lora_dim = 1 if naive_block_assignment else lora_b_stacked[0].shape[0]
+    grid_lora_dim, stride_tl, stride_el = _adjust_kernel_input(
+        w1_lora_b_stacked.shape[0], sorted_token_ids, expert_ids
+    )
+
     grid = lambda META: (
         triton.cdiv(EM, META["BLOCK_SIZE_M"]) * triton.cdiv(N, META["BLOCK_SIZE_N"]),
         len(lora_b_stacked),
         grid_lora_dim,
     )
-    if sorted_token_ids is None:
-        stride_tl = 0
-        stride_el = 0
-    else:
-        stride_tl = sorted_token_ids.stride(0)
-        stride_el = expert_ids.stride(0)
     _fused_moe_lora_kernel[grid](
         a_intermediate_cache1,
         b_ptr,
@@ -504,12 +511,12 @@ def _fused_moe_lora(
     K = qcurr_hidden_states.shape[1]
     num_tokens = M * top_k_num
     w1_output_dim_size = w1_lora_b_stacked.shape[2]
-    if sorted_token_ids is None:
-        em_shrink = num_tokens * shrink_block_size_m
-        em_expand = num_tokens * expand_block_size_m
-    else:
-        em_shrink = sorted_token_ids.shape[1]
-        em_expand = em_shrink
+    assert shrink_block_size_m == expand_block_size_m
+    EM = (
+        sorted_token_ids.shape[1]
+        if sorted_token_ids is not None
+        else num_tokens * shrink_block_size_m
+    )
 
     a_intermediate_cache1 = torch.zeros(
         (num_slices, M, top_k_num, max_lora_rank),
@@ -539,7 +546,7 @@ def _fused_moe_lora(
         device,
         N,
         M,
-        em_shrink,
+        EM,
         K,
         num_tokens,
         num_experts,
@@ -586,7 +593,7 @@ def _fused_moe_lora(
         device,
         N,
         M,
-        em_expand,
+        EM,
         K,
         num_tokens,
         num_experts,
