@@ -13,8 +13,7 @@ def use_compile(args: argparse.Namespace) -> bool:
     Check if the benchmark is run with torch.compile
     """
     return not (
-        args.enforce_eager
-        or args.compilation_config.mode == 0
+        args.compilation_config.mode == 0
         or "eager" in getattr(args, "output_json", "")
         or "eager" in getattr(args, "result_filename", "")
     )
@@ -38,6 +37,9 @@ def convert_to_pytorch_benchmark_format(
                 "name": "vLLM benchmark",
                 "extra_info": {
                     "args": vars(args),
+                    "enforce_eager": args.enforce_eager,
+                    "compilation_mode": args.compilation_config.mode,
+                    # A boolean field used by vLLM benchmark HUD dashboard
                     "use_compile": use_compile(args),
                 },
             },
