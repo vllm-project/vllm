@@ -120,7 +120,7 @@ class TerratorchInputBuilder(BaseDummyInputsBuilder[TerratorchProcessingInfo]):
                 "They are ignored for now."
             )
 
-        return {"image": self.dummy_data_generator.get_dummy_mm_data()}
+        return self.dummy_data_generator.get_dummy_mm_data()
 
 
 class TerratorchMultiModalDataParser(MultiModalDataParser):
@@ -142,6 +142,12 @@ class TerratorchMultiModalDataParser(MultiModalDataParser):
             )
 
         return super()._parse_image_data(data)
+
+    def parse_mm_data(self, mm_data: MultiModalDataDict) -> MultiModalDataItems:
+        if "image" not in mm_data:
+            mm_data = {"image": mm_data}
+
+        return super().parse_mm_data(mm_data)
 
 
 class TerratorchMultiModalProcessor(BaseMultiModalProcessor):
