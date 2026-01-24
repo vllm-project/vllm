@@ -478,11 +478,18 @@ def make_fp8_moe_kernel(
 
     logger.info_once("Using %s", prepare_finalize.__class__.__name__)
 
+    kwargs = {
+        "moe_config": moe_config,
+        "quant_config": moe_quant_config,
+    }
+    if prepare_finalize.activation_format == mk.FusedMoEActivationFormat.BatchedExperts:
+        max_num_tokens = prepare_finalize.max_num_tokens_per_rank()
+        assert max_num_tokens is not None
+        kwargs["max_num_tokens"] = max_num_tokens
+        kwargs["num_dispatchers"] = prepare_finalize.num_dispatchers()
+
     # Create Experts.
-    experts = experts_cls(
-        moe_config=moe_config,
-        quant_config=moe_quant_config,
-    )
+    experts = experts_cls(**kwargs)
 
     # NOTE(rob): we only want the mk to control the shared_expert
     # if using all2all (for SBO). bnell is making this explict in

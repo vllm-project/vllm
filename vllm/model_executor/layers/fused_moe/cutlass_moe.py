@@ -103,6 +103,7 @@ def run_cutlass_moe_fp8(
         or a2_scale.size(0) == a1q.shape[0]
     ), "Intermediate scale shape mismatch"
     assert out_dtype in [torch.half, torch.bfloat16], "Invalid output dtype"
+
     if expert_map is not None:
         assert expert_num_tokens is None
 
@@ -379,7 +380,10 @@ class CutlassExpertsFp8(CutlassExpertsFp8Base):
         # needed for STANDARD activation format kernels in DP/EP mode.
         # Note that the BATCHED activation format does not use
         # the expert map for identifying experts.
-        return not moe_parallel_config.use_all2all_kernels
+        return not (
+            moe_parallel_config.use_fi_all2allv_kernels
+            or moe_parallel_config.use_deepep_ht_kernels
+        )
 
     def supports_chunking(self) -> bool:
         return True
