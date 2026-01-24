@@ -209,7 +209,10 @@ class RequestRunner:
         self._block_hasher = get_request_block_hasher(gpu_block_size, sha256)
 
         self._dummy_ctx: ForwardContext = ForwardContext(
-            no_compile_layers={}, attn_metadata={}, virtual_engine=0
+            no_compile_layers={},
+            attn_metadata={},
+            virtual_engine=0,
+            slot_mapping={},
         )
 
     def new_request(self, token_ids: list[int]):

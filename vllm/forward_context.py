@@ -189,6 +189,7 @@ class ForwardContext:
     # copy from vllm_config.compilation_config.static_forward_context
     no_compile_layers: dict[str, Any]
     attn_metadata: dict[str, AttentionMetadata] | list[dict[str, AttentionMetadata]]
+    slot_mapping: dict[str, torch.Tensor] | list[dict[str, torch.Tensor]]
     """
     Type Dict[str, AttentionMetadata] for v1, map from layer_name of each 
     attention layer to its attention metadata
@@ -266,6 +267,7 @@ def create_forward_context(
     cudagraph_runtime_mode: CUDAGraphMode = CUDAGraphMode.NONE,
     batch_descriptor: BatchDescriptor | None = None,
     ubatch_slices: UBatchSlices | None = None,
+    slot_mapping: dict[str, torch.Tensor] | None = None,
     additional_kwargs: dict[str, Any] | None = None,
     skip_compiled: bool = False,
 ):
@@ -282,6 +284,7 @@ def create_forward_context(
         remaining_moe_layers=remaining_moe_layers,
         virtual_engine=virtual_engine,
         attn_metadata=attn_metadata,
+        slot_mapping=slot_mapping or {},
         dp_metadata=dp_metadata,
         cudagraph_runtime_mode=cudagraph_runtime_mode,
         batch_descriptor=batch_descriptor,
@@ -316,6 +319,7 @@ def set_forward_context(
     cudagraph_runtime_mode: CUDAGraphMode = CUDAGraphMode.NONE,
     batch_descriptor: BatchDescriptor | None = None,
     ubatch_slices: UBatchSlices | None = None,
+    slot_mapping: dict[str, torch.Tensor] | list[dict[str, torch.Tensor]] | None = None,
     skip_compiled: bool = False,
 ):
     """A context manager that stores the current forward context,
@@ -374,6 +378,7 @@ def set_forward_context(
         cudagraph_runtime_mode,
         batch_descriptor,
         ubatch_slices,
+        slot_mapping,
         additional_kwargs,
         skip_compiled,
     )
