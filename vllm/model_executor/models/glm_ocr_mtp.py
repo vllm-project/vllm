@@ -44,7 +44,6 @@ from vllm.sequence import IntermediateTensors
 from .glm4 import Glm4DecoderLayer, get_spec_layer_idx_from_weight_name
 from .glm4_moe_lite_mtp import (
     Glm4MoeLiteMultiTokenPredictor,
-    Glm4MoeLiteMultiTokenPredictorLayer,
     SharedHead,
 )
 from .interfaces import SupportsPP
@@ -54,7 +53,7 @@ from .utils import (
 )
 
 
-class GlmOcrMultiTokenPredictorLayer(Glm4MoeLiteMultiTokenPredictorLayer):
+class GlmOcrMultiTokenPredictorLayer(nn.Module):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         nn.Module.__init__(self)
 
@@ -73,6 +72,30 @@ class GlmOcrMultiTokenPredictorLayer(Glm4MoeLiteMultiTokenPredictorLayer):
         self.mtp_block = Glm4DecoderLayer(
             vllm_config=vllm_config, prefix=prefix, config=self.config
         )
+
+    def forward(
+        self,
+        input_ids: torch.Tensor,
+        positions: torch.Tensor,
+        previous_hidden_states: torch.Tensor,
+        inputs_embeds: torch.Tensor | None = None,
+        spec_step_index: int = 0,
+    ) -> torch.Tensor:
+        assert inputs_embeds is not None
+        # masking inputs at position 0, as not needed by MTP
+        inputs_embeds[positions.flatten() == 0] = 0
+        inputs_embeds = self.enorm(inputs_embeds)
+        previous_hidden_states = self.hnorm(previous_hidden_states)
+
+        hidden_states = self.eh_proj(
+            torch.cat([inputs_embeds, previous_hidden_states], dim=-1)
+        )
+
+        hidden_states, residual = self.mtp_block(
+            positions=positions, hidden_states=hidden_states, residual=None
+        )
+        hidden_states = residual + hidden_states
+        return hidden_states
 
 
 class GlmOcrMultiTokenPredictor(Glm4MoeLiteMultiTokenPredictor):
