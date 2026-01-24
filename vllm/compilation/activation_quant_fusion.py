@@ -212,12 +212,13 @@ class SiluMulBlockQuantPattern:
     
     def register(self, pm_pass: PatternMatcherPass) -> None:
         def pattern(input: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-            result_silu_mul = self.silu_and_mul_matcher.forward_native(input)
-            result_quant, scale = self.quant_matcher.forward_native(result_silu_mul)
+            # Call matchers directly like the working patterns do
+            result_silu_mul = self.silu_and_mul_matcher(input)
+            result_quant, scale = self.quant_matcher(result_silu_mul)
             return result_quant, scale
         
         def replacement(input: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-            print(f"FUSED KERNEL TRIGGERED! input.shape={input.shape}")
+            print(f"🔥 FUSED KERNEL TRIGGERED! input.shape={input.shape}")
             if self.model_dtype is not None:
                 input = input.to(dtype=self.model_dtype)
             
@@ -248,6 +249,10 @@ class SiluMulBlockQuantPattern:
             return at[1], at[2]  # result, scale
         
         inputs = self.silu_and_mul_matcher.inputs()
+        
+        # IMPORTANT: Call pattern once with inputs like the working patterns do
+        pattern(*inputs)
+        
         register_replacement(
             pattern,
             replacement,
