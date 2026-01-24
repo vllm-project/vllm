@@ -342,7 +342,7 @@ def _extract_embeds(tensors: list[torch.Tensor]):
     if all(t.shape == first_shape for t in tensors):
         return torch.stack(tensors)
 
-    return tensors
+    return torch.cat(tensors)
 
 
 def _get_embeds_data(items_by_modality: dict[str, list[Any]], modality: str):
