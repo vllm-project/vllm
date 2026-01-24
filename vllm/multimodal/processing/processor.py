@@ -42,7 +42,11 @@ from ..parse import (
     MultiModalDataItems,
     MultiModalDataParser,
 )
-from .context import BaseProcessingInfo, get_current_request_id, timed_operation
+from .context import (
+    BaseProcessingInfo,
+    get_current_request_id,
+    timed_preprocessor_operation,
+)
 from .dummy_inputs import BaseDummyInputsBuilder
 
 if TYPE_CHECKING:
@@ -1192,7 +1196,7 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         Call the HF processor on the prompt text and
         associated multi-modal data.
         """
-        with timed_operation(self.info.ctx, "hf_processor"):
+        with timed_preprocessor_operation(self.info.ctx, "hf_processor"):
             return self.info.ctx.call_hf_processor(
                 self.info.get_hf_processor(**mm_kwargs),
                 dict(text=prompt, **mm_data),
@@ -1545,7 +1549,7 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         )
 
         # Use overrides if provided; fallback to data-dependent hashing.
-        with timed_operation(self.info.ctx, "hashing"):
+        with timed_preprocessor_operation(self.info.ctx, "hashing"):
             mm_hashes = self._hash_mm_items(
                 mm_data_items,
                 hf_processor_mm_kwargs,
@@ -1592,7 +1596,7 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
                 mm_uuids=mm_uuids,
             )
 
-        with timed_operation(self.info.ctx, "hashing"):
+        with timed_preprocessor_operation(self.info.ctx, "hashing"):
             mm_hashes = self._hash_mm_items(
                 mm_data_items,
                 hf_processor_mm_kwargs,
@@ -1600,7 +1604,7 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
                 mm_uuids=mm_uuids,
             )
 
-        with timed_operation(self.info.ctx, "cache_lookup"):
+        with timed_preprocessor_operation(self.info.ctx, "cache_lookup"):
             mm_is_cached, mm_missing_data_items = self._get_cache_missing_items(
                 cache=cache,
                 mm_data_items=mm_data_items,
@@ -1635,7 +1639,7 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
             mm_missing_kwargs,
         )
 
-        with timed_operation(self.info.ctx, "cache_lookup"):
+        with timed_preprocessor_operation(self.info.ctx, "cache_lookup"):
             mm_kwargs, mm_prompt_updates = self._merge_mm_kwargs(
                 cache,
                 mm_hashes=mm_hashes,
@@ -1846,7 +1850,7 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         )
 
         # NOTE: tokenization_kwargs are not required to init processor
-        with timed_operation(self.info.ctx, "prompt_update"):
+        with timed_preprocessor_operation(self.info.ctx, "prompt_update"):
             prompt_ids, mm_placeholders = self._maybe_apply_prompt_updates(
                 mm_items=mm_items,
                 prompt_ids=prompt_ids,
