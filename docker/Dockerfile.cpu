@@ -114,6 +114,9 @@ WORKDIR /vllm-workspace
 # Copy build requirements
 COPY requirements/cpu-build.txt requirements/build.txt
 
+# Copy build requirements
+COPY requirements/cpu-build.txt requirements/build.txt
+
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv pip install -r requirements/build.txt
 
@@ -123,13 +126,16 @@ RUN if [ "$GIT_REPO_CHECK" != 0 ]; then bash tools/check_repo.sh ; fi
 
 RUN --mount=type=cache,target=/root/.cache/uv \
     --mount=type=cache,target=/root/.cache/ccache \
-    --mount=type=cache,target=/vllm-workspace/.deps,sharing=locked \
+    --mount=type=cache,target=/workspace/vllm/.deps,sharing=locked \
     VLLM_TARGET_DEVICE=cpu python3 setup.py bdist_wheel --dist-dir=dist --py-limited-api=cp38
 
 ######################### TEST DEPS #########################
 FROM base AS vllm-test-deps
 
 WORKDIR /vllm-workspace
+
+# Copy test requirements
+COPY requirements/test.in requirements/cpu-test.in
 
 # Copy test requirements
 COPY requirements/test.in requirements/cpu-test.in
