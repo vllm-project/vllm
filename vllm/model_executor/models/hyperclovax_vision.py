@@ -17,7 +17,7 @@ from timm.models.regnet import RegStage
 from transformers import BatchFeature, CLIPVisionConfig, SiglipVisionConfig
 
 from vllm.config import VllmConfig
-from vllm.config.multimodal import BaseDummyOptions, MultiModalConfig
+from vllm.config.multimodal import BaseDummyOptions
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.cache import BaseMultiModalProcessorCache
@@ -360,7 +360,6 @@ def _build_hcxvision_hf_processor(
 def init_vision_tower_for_hcxvision(
     vision_config,
     quant_config: QuantizationConfig | None,
-    multimodal_config: MultiModalConfig | None,
     *,
     use_nth_layer: int | None = None,
     require_post_norm: bool | None = None,
@@ -378,7 +377,6 @@ def init_vision_tower_for_hcxvision(
         return CLIPVisionModel(
             vision_config,
             quant_config=quant_config,
-            multimodal_config=multimodal_config,
             num_hidden_layers_override=num_hidden_layers,
             require_post_norm=require_post_norm,
             prefix=prefix,
@@ -387,7 +385,6 @@ def init_vision_tower_for_hcxvision(
         return SiglipVisionModel(
             vision_config,
             quant_config=quant_config,
-            multimodal_config=multimodal_config,
             num_hidden_layers_override=num_hidden_layers,
             require_post_norm=require_post_norm,
             prefix=prefix,
@@ -605,7 +602,6 @@ class HCXVisionForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
         # init configs
         config = vllm_config.model_config.hf_config
         quant_config = vllm_config.quant_config
-        multimodal_config = vllm_config.model_config.multimodal_config
         # text_config
         text_config = config.text_config
         if text_config.model_type in ["gpt2", "hyperclovax", "llama"]:
@@ -628,7 +624,6 @@ class HCXVisionForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
             self.vision_model = init_vision_tower_for_hcxvision(
                 vision_config,
                 quant_config=quant_config,
-                multimodal_config=multimodal_config,
                 use_nth_layer=getattr(config, "use_nth_layer", -1),
                 require_post_norm=False,
                 prefix=maybe_prefix(prefix, "vision_model"),
