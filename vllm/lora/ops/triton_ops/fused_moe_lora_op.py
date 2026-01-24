@@ -253,6 +253,14 @@ def _fused_moe_lora_kernel(
     # remove modulo wrap-around
     offs_bn = pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N).to(tl.int32)
     offs_k = pid_sk * BLOCK_SIZE_K + tl.arange(0, BLOCK_SIZE_K)
+
+    offs_token_id = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M).to(tl.int64)
+    token_ind = stride_tl * lora_id + offs_token_id
+    offs_token = tl.load(
+        sorted_token_ids_ptr + token_ind,
+        mask=token_ind < max_loras * stride_tl,
+        other=num_valid_tokens,
+    )
     token_mask = offs_token < num_valid_tokens
 
     # get a_ptrs,b_ptrs
