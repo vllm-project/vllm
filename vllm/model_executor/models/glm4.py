@@ -87,7 +87,15 @@ class Glm4Attention(nn.Module):
             # Number of KV heads is less than TP size, so we replicate
             # the KV heads across multiple tensor parallel GPUs.
             assert tp_size % self.total_num_kv_heads == 0
-        config.rope_parameters.setdefault("partial_rotary_factor", 0.5)
+
+        rope_params = getattr(config, "rope_parameters", None)
+        if isinstance(rope_params, dict) and "partial_rotary_factor" in rope_params:
+            config.rope_parameters.setdefault(
+                "partial_rotary_factor", rope_params["partial_rotary_factor"]
+            )
+        else:
+            config.rope_parameters.setdefault("partial_rotary_factor", 0.5)
+
         self.num_kv_heads = max(1, self.total_num_kv_heads // tp_size)
         self.head_dim = head_dim or hidden_size // self.total_num_heads
         self.q_size = self.num_heads * self.head_dim

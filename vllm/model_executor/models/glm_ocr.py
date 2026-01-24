@@ -66,7 +66,6 @@ from vllm.model_executor.models.glm4_1v import (
 from vllm.multimodal import MULTIMODAL_REGISTRY
 
 from .utils import (
-    init_vllm_registered_model,
     maybe_prefix,
 )
 from .vision import (
@@ -209,7 +208,15 @@ class GlmOcrVisionBlock(Glm4vVisionBlock):
         multimodal_config: MultiModalConfig | None = None,
         prefix: str = "",
     ) -> None:
-        super().__init__()
+        super().__init__(
+            dim,
+            num_heads,
+            mlp_hidden_dim,
+            norm_layer,
+            quant_config,
+            multimodal_config,
+            prefix,
+        )
         if norm_layer is None:
             norm_layer = partial(nn.LayerNorm, eps=1e-6)
         self.norm1 = norm_layer(dim)
@@ -254,6 +261,8 @@ class GlmOcrVisionTransformer(Glm4vVisionTransformer):
         )
 
         assert multimodal_config is not None, "multimodal_config must be provided"
+        del self.post_conv_layernorm
+        del self.embeddings
 
         patch_size = vision_config.patch_size
         temporal_patch_size = vision_config.temporal_patch_size
@@ -304,9 +313,6 @@ class GlmOcrVisionTransformer(Glm4vVisionTransformer):
             prefix=f"{prefix}.merger",
         )
 
-        self.post_conv_layernorm = RMSNorm(
-            vision_config.hidden_size, eps=vision_config.rms_norm_eps
-        )
         self.downsample = Conv2dLayer(
             in_channels=vision_config.hidden_size,
             out_channels=vision_config.out_hidden_size,
@@ -378,7 +384,7 @@ class GlmOcrVisionTransformer(Glm4vVisionTransformer):
 )
 class GlmOcrForConditionalGeneration(Glm4vForConditionalGeneration):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
-        super().__init__()
+        super().__init__(vllm_config=vllm_config, prefix=prefix)
         config = vllm_config.model_config.hf_config
         quant_config = vllm_config.quant_config
         multimodal_config = vllm_config.model_config.multimodal_config
@@ -395,15 +401,3 @@ class GlmOcrForConditionalGeneration(Glm4vForConditionalGeneration):
                 multimodal_config=multimodal_config,
                 prefix=maybe_prefix(prefix, "visual"),
             )
-
-        with self._mark_language_model(vllm_config):
-            self.language_model = init_vllm_registered_model(
-                vllm_config=vllm_config,
-                hf_config=config.text_config,
-                prefix=maybe_prefix(prefix, "language_model"),
-                architectures=["Glm4ForCausalLM"],
-            )
-
-        self.make_empty_intermediate_tensors = (
-            self.language_model.make_empty_intermediate_tensors
-        )
