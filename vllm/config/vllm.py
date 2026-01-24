@@ -1215,16 +1215,21 @@ class VllmConfig:
         computed_compile_ranges_split_points = []
 
         # The upper bound of the compile ranges is the max_num_batched_tokens.
-        # For speculative decoding with draft model, the compile range must be extended
-        # by 1 for each sequence.
+        # For speculative decoding, the compile range must be extended
+        # - Sequential: + 1 * max_num_seqs (one draft token per iteration)
+        # - Parallel draft: + num_speculative_tokens * max_num_seqs
         compile_range_end = self.scheduler_config.max_num_batched_tokens
         if compile_range_end is not None:
-            do_extend: bool = (
-                self.speculative_config is not None
-                and self.speculative_config.uses_draft_model()
-            )
-            if do_extend:
-                compile_range_end += self.scheduler_config.max_num_seqs
+            if self.speculative_config is not None and (
+                self.speculative_config.uses_draft_model()
+                or self.speculative_config.use_eagle()
+            ):
+                multiplier = (
+                    self.speculative_config.num_speculative_tokens
+                    if self.speculative_config.parallel_draft
+                    else 1
+                )
+                compile_range_end += multiplier * self.scheduler_config.max_num_seqs
 
             computed_compile_ranges_split_points.append(compile_range_end)
 
