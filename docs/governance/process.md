@@ -29,18 +29,18 @@ Core Maintainers function like a project planning and decision making committee.
 
 **Project Leads:**
 
-- [@WoosukKwon](https://github.com/WoosukKwon)
-- [@zhuohan123](https://github.com/zhuohan123)
-- [@simon-mo](https://github.com/simon-mo)
-- [@youkaichao](https://github.com/youkaichao)
-- [@robertgshaw2-redhat](https://github.com/robertgshaw2-redhat)
-- [@tlrmchlsmth](https://github.com/tlrmchlsmth)
-- [@mgoin](https://github.com/mgoin)
-- [@njhill](https://github.com/njhill)
-- [@ywang96](https://github.com/ywang96)
-- [@houseroad](https://github.com/houseroad)
-- [@yeqcharlotte](https://github.com/yeqcharlotte)
-- [@ApostaC](https://github.com/ApostaC)
+- Woosuk Kwon[@WoosukKwon](https://github.com/WoosukKwon)
+- Zhuohan Li[@zhuohan123](https://github.com/zhuohan123)
+- Simon Mo[@simon-mo](https://github.com/simon-mo)
+- Kaichao You[@youkaichao](https://github.com/youkaichao)
+- Robert Shaw[@robertgshaw2-redhat](https://github.com/robertgshaw2-redhat)
+- Tyler Michael Smith[@tlrmchlsmth](https://github.com/tlrmchlsmth)
+- Michael Goin[@mgoin](https://github.com/mgoin)
+- Nick Hill[@njhill](https://github.com/njhill)
+- Roger Wang[@ywang96](https://github.com/ywang96)
+- Lu Fang[@houseroad](https://github.com/houseroad)
+- Ye (Charlotte) Qi[@yeqcharlotte](https://github.com/yeqcharlotte)
+- Yihua Cheng[@ApostaC](https://github.com/ApostaC)
 
 **Responsibilities:**
 
@@ -53,11 +53,11 @@ Core Maintainers function like a project planning and decision making committee.
 
 While Core maintainers assume the day-to-day responsibilities of the project, Lead maintainers are responsible for the overall direction and strategy of the project. The following committee currently shares this role with divided responsibilities:
 
-- [@WoosukKwon](https://github.com/WoosukKwon)
-- [@zhuohan123](https://github.com/zhuohan123)
-- [@simon-mo](https://github.com/simon-mo)
-- [@youkaichao](https://github.com/youkaichao)
-- [@robertgshaw2-redhat](https://github.com/robertgshaw2-redhat)
+- Woosuk Kwon[@WoosukKwon](https://github.com/WoosukKwon)
+- Zhuohan Li[@zhuohan123](https://github.com/zhuohan123)
+- Simon Mo[@simon-mo](https://github.com/simon-mo)
+- Kaichao You[@youkaichao](https://github.com/youkaichao)
+- Robert Shaw[@robertgshaw2-redhat](https://github.com/robertgshaw2-redhat)
 
 **Responsibilities:**
 
