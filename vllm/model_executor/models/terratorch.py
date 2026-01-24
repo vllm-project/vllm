@@ -195,7 +195,9 @@ class TerratorchMultiModalProcessor(BaseMultiModalProcessor):
             mm_items, hf_processor_mm_kwargs, tokenization_kwargs, mm_uuids=mm_uuids
         )
 
-        mm_processed_data = BatchFeature(mm_data.get("image", mm_data))
+        mm_processed_data = BatchFeature(
+            mm_data.get("image", mm_data), tensor_type="pt"
+        )
         mm_placeholders = {"image": [PlaceholderRange(offset=0, length=0)]}
 
         mm_kwargs = MultiModalKwargsItems.from_hf_inputs(
@@ -266,7 +268,7 @@ class Terratorch(nn.Module, IsAttentionFree, SupportsMultiModal):
     ):
         input_len = length_from_prompt_token_ids_or_embeds(input_ids, inputs_embeds)
 
-        batched_kwargs = {k: v[None] for k, v in kwargs.items()}
+        batched_kwargs = {k: v.unsqueeze(0) for k, v in kwargs.items()}
         model_output = self.inference_runner.forward(**batched_kwargs).output
 
         # The leading dimension of hidden states needs to equal input length
