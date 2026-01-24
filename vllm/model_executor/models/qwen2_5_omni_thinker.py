@@ -86,6 +86,7 @@ from vllm.multimodal.processing.processor import (
     PlaceholderFeaturesInfo,
     PromptReplacement,
     PromptUpdate,
+    PromptUpdateDetails,
 )
 from vllm.sequence import IntermediateTensors
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
@@ -612,11 +613,17 @@ class Qwen2_5OmniThinkerMultiModalProcessor(
             else:
                 video_second_per_grid_t = 1.0
 
-            return self.omni_get_updates_use_audio_in_video(
+            updates = self.omni_get_updates_use_audio_in_video(
                 thinker_config=thinker_config,
                 audio_len=audio_num_features,
                 video_grid_thw=video_grid_thw,
                 video_second_per_grid_t=video_second_per_grid_t,
+            )
+
+            # Only video tokens should receive video embeddings
+            return PromptUpdateDetails.select_token_id(
+                seq=updates,
+                embed_token_id=video_token_id,
             )
 
         video_replacement_fn = (
