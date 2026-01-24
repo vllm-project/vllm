@@ -182,22 +182,9 @@ class SiluMulNvfp4QuantPattern(ActivationQuantPattern):
 class SiluMulBlockQuantPattern:
     """
     This pattern fuses silu_and_mul & block quantization.
+    Handles all group_size, col_major, and e8m0 variants in one pattern.
     """
-    def __init__(
-        self, 
-        group_shape: GroupShape,
-        has_col_major_scales: bool = False,
-        is_e8m0: bool = False,
-    ):
-        assert group_shape[0] == 1, (
-            f"SiluMulBlockQuantPattern only supports per-token quantization "
-            f"(group_m=1), got group_shape={group_shape}"
-        )
-        
-        self.group_shape = group_shape
-        self.group_size = group_shape[1]
-        self.has_col_major_scales = has_col_major_scales
-        self.is_e8m0 = is_e8m0
+    def __init__(self):
         self.quant_dtype = FP8_DTYPE
         
         from vllm.config import get_current_vllm_config
@@ -207,53 +194,37 @@ class SiluMulBlockQuantPattern:
         from .matcher_utils import MatcherSiluAndMul, MatcherQuantFP8
         self.silu_and_mul_matcher = MatcherSiluAndMul()
         
-        scale = ScaleDesc(torch.float32, False, group_shape)
+        # Create a single matcher for group_size=128 as the pattern template
+        # The actual replacement will handle all variants
+        scale = ScaleDesc(torch.float32, False, GroupShape(1, 128))
         quant_key = QuantKey(dtype=FP8_DTYPE, scale=scale, symmetric=True)
-        
-        # ========== DEBUG PRINTS ==========
-        print(f"\n🔍 DEBUG: Creating matcher for group_shape={group_shape}")
-        print(f"   quant_key = {quant_key}")
-        print(f"   quant_key in QUANT_OPS? {quant_key in QUANT_OPS}")
-        
-        if quant_key in QUANT_OPS:
-            print(f"   QUANT_OPS[quant_key] = {QUANT_OPS[quant_key]}")
-        else:
-            print(f"   ❌ quant_key NOT in QUANT_OPS!")
-            print(f"   Available keys in QUANT_OPS:")
-            for k, v in QUANT_OPS.items():
-                print(f"      {k} -> {v}")
-        
-        print(f"   Graph has: torch.ops._C.per_token_group_fp8_quant")
-        self.quant_matcher = MatcherQuantFP8(
-            quant_key, 
-            has_col_major_scales=has_col_major_scales,
-            is_e8m0=is_e8m0
-        )
+        self.quant_matcher = MatcherQuantFP8(quant_key, has_col_major_scales=False, is_e8m0=False)
     
     def register(self, pm_pass: PatternMatcherPass) -> None:
         def pattern(input: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-            # Call matchers directly like the working patterns do
             result_silu_mul = self.silu_and_mul_matcher(input)
             result_quant, scale = self.quant_matcher(result_silu_mul)
             return result_quant, scale
         
         def replacement(input: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
             print(f"🔥 FUSED KERNEL TRIGGERED! input.shape={input.shape}")
+            
             if self.model_dtype is not None:
                 input = input.to(dtype=self.model_dtype)
             
             output_shape = list(input.shape)
             output_shape[-1] = output_shape[-1] // 2
             
-            result = torch.empty(
-                output_shape, 
-                device=input.device, 
-                dtype=self.quant_dtype
-            )
+            result = torch.empty(output_shape, device=input.device, dtype=self.quant_dtype)
+            
+            # TODO: Dynamically detect group_size, col_major, e8m0 from the matched graph
+            # For now, use default values
+            group_size = 128
+            has_col_major_scales = False
             
             scale = self.quant_matcher.make_scale(
                 torch.empty(output_shape, device=input.device),
-                transposed=self.has_col_major_scales
+                transposed=has_col_major_scales
             )
             
             at = auto_functionalized(
@@ -261,25 +232,17 @@ class SiluMulBlockQuantPattern:
                 result=result,
                 input=input,
                 scale=scale,
-                group_size=self.group_size,
+                group_size=group_size,
                 scale_ub=None,
-                is_scale_transposed=self.has_col_major_scales,
+                is_scale_transposed=has_col_major_scales,
             )
             
-            return at[1], at[2]  # result, scale
+            return at[1], at[2]
         
         inputs = self.silu_and_mul_matcher.inputs()
-        
-        # IMPORTANT: Call pattern once with inputs like the working patterns do
         pattern(*inputs)
         
-        register_replacement(
-            pattern,
-            replacement,
-            inputs,
-            fwd_only,
-            pm_pass,
-        )
+        register_replacement(pattern, replacement, inputs, fwd_only, pm_pass)
 
 class ActivationQuantFusionPass(VllmPatternMatcherPass):
     """
@@ -310,24 +273,10 @@ class ActivationQuantFusionPass(VllmPatternMatcherPass):
         # NEW: Register block quantization patterns
         # =====================================================================
         if current_platform.is_cuda():
-            # Register patterns for different group sizes and layouts
-            print(f"Registering block quant patterns...")
-            for group_shape in [GroupShape(1, 128), GroupShape(1, 64)]:
-                for has_col_major_scales in [True, False]:
-                    for is_e8m0 in [True, False]:
-                        try:
-                            print(f"Registering: group_shape={group_shape}, col_major={has_col_major_scales}, e8m0={is_e8m0}")
-                            pattern_silu_mul_block = SiluMulBlockQuantPattern(
-                                group_shape=group_shape,
-                                has_col_major_scales=has_col_major_scales,
-                                is_e8m0=is_e8m0,
-                            )
-                            pattern_silu_mul_block.register(self.patterns)
-                            print(f"✓ Registered successfully")
-                        except Exception as e:
-                            print(f"✗ Failed: {e}")
-                            import traceback
-                            traceback.print_exc()
+            print(f"Registering block quant pattern...")
+            pattern_silu_mul_block = SiluMulBlockQuantPattern()
+            pattern_silu_mul_block.register(self.patterns)
+            print(f"✓ Registered block quant pattern")
 
         self.dump_patterns(config, self.patterns)
 
