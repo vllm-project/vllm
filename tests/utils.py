@@ -59,7 +59,10 @@ from vllm.tokenizers import get_tokenizer
 from vllm.utils.argparse_utils import FlexibleArgumentParser
 from vllm.utils.mem_constants import GB_bytes
 from vllm.utils.network_utils import get_open_port
-from vllm.utils.torch_utils import cuda_device_count_stateless
+from vllm.utils.torch_utils import (
+    cuda_device_count_stateless,
+    set_random_seed,  # noqa: F401 - re-exported for use in test files
+)
 
 FP8_DTYPE = current_platform.fp8_dtype()
 
