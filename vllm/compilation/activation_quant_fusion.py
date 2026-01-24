@@ -204,17 +204,25 @@ class SiluMulBlockQuantPattern:
             up = input[..., d:]
             silu_out = silu * up
             
-            # Match with auto_functionalized like the working patterns
+            # Match with auto_functionalized
             x_q = torch.empty(silu_out.shape, dtype=FP8_DTYPE, device=input.device)
             num_groups = silu_out.shape[-1] // 128
             x_s = torch.empty((silu_out.shape[0], num_groups), dtype=torch.float32, device=input.device)
             
+            # Use keyword arguments based on the C++ signature
             at = auto_functionalized(
                 torch.ops._C.per_token_group_fp8_quant,
-                silu_out, x_q, x_s, 128, 1e-10, -448.0, 448.0, False
+                input=silu_out,
+                output_q=x_q,
+                output_s=x_s,
+                group_size=128,
+                eps=1e-10,
+                fp8_min=-448.0,
+                fp8_max=448.0,
+                scale_ue8m0=False,
             )
             
-            return at[1], at[2]  # Return the functionalized outputs
+            return at[1], at[2]  # Return output_q and output_s
         
         def replacement(input: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
             print(f"🔥 FUSED KERNEL TRIGGERED! input.shape={input.shape}")
