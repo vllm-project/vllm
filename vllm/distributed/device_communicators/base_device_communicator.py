@@ -84,7 +84,11 @@ class All2AllManagerBase:
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
         is_sequence_parallel: bool = False,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        extra_tensors: list[torch.Tensor] | None = None,
+    ) -> (
+        tuple[torch.Tensor, torch.Tensor, torch.Tensor]
+        | tuple[torch.Tensor, torch.Tensor, torch.Tensor, list[torch.Tensor]]
+    ):
         # Subclasses should either:
         # - implement handling for extra_tensors, or
         # - raise a clear error if extra_tensors is not supported.
@@ -318,11 +322,17 @@ class DeviceCommunicatorBase:
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
         is_sequence_parallel: bool = False,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        extra_tensors: list[torch.Tensor] | None = None,
+    ) -> (
+        tuple[torch.Tensor, torch.Tensor, torch.Tensor]
+        | tuple[torch.Tensor, torch.Tensor, torch.Tensor, list[torch.Tensor]]
+    ):
         """
         Dispatch the hidden states and router logits to the appropriate device.
         This is a no-op in the base class.
         """
+        if extra_tensors is not None:
+            return hidden_states, topk_weights, topk_ids, extra_tensors
         return hidden_states, topk_weights, topk_ids
 
     def combine(

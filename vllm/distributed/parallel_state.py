@@ -1026,13 +1026,18 @@ class GroupCoordinator:
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
         is_sequence_parallel: bool = False,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        extra_tensors: list[torch.Tensor] | None = None,
+    ) -> (
+        tuple[torch.Tensor, torch.Tensor, torch.Tensor, list[torch.Tensor]]
+        | tuple[torch.Tensor, torch.Tensor, torch.Tensor]
+    ):
         if self.device_communicator is not None:
             return self.device_communicator.dispatch(
                 hidden_states,
                 topk_weights,
                 topk_ids,
                 is_sequence_parallel,
+                extra_tensors,
             )
         else:
             return hidden_states, topk_weights, topk_ids

@@ -225,7 +225,11 @@ class XpuCommunicator(DeviceCommunicatorBase):
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
         is_sequence_parallel: bool = False,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        extra_tensors: list[torch.Tensor] | None = None,
+    ) -> (
+        tuple[torch.Tensor, torch.Tensor, torch.Tensor]
+        | tuple[torch.Tensor, torch.Tensor, torch.Tensor, list[torch.Tensor]]
+    ):
         """
         Dispatch the hidden states and router logits to the appropriate device.
         This is a no-op in the base class.
@@ -236,6 +240,7 @@ class XpuCommunicator(DeviceCommunicatorBase):
             topk_weights,
             topk_ids,
             is_sequence_parallel,
+            extra_tensors=extra_tensors,
         )
 
     def combine(
