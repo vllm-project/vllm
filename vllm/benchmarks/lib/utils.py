@@ -15,8 +15,8 @@ def use_compile(args: argparse.Namespace) -> bool:
     return not (
         args.enforce_eager
         or args.compilation_config.mode == 0
-        or ("eager" in getattr(args, "output_json", ""))
-        or ("eager" in getattr(args, "result_filename", ""))
+        or "eager" in getattr(args, "output_json", "")
+        or "eager" in getattr(args, "result_filename", "")
     )
 
 
