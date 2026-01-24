@@ -324,7 +324,6 @@ class KimiK25ForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP)
         # Build vision tower directly with KimiK25VisionConfig
         self.vision_tower = MoonViT3dPretrainedModel(
             config.vision_config,
-            multimodal_config=model_config.multimodal_config,
             prefix=maybe_prefix(prefix, "vision_tower"),
         )
         self.vision_tower = self.vision_tower.to(
@@ -452,6 +451,7 @@ class KimiK25ForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP)
         if not getattr(config, "n_routed_experts", None):
             return []
         return SharedFusedMoE.make_expert_params_mapping(
+            self,
             ckpt_gate_proj_name="gate_proj",
             ckpt_down_proj_name="down_proj",
             ckpt_up_proj_name="up_proj",

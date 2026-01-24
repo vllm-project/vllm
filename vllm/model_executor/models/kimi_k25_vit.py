@@ -395,7 +395,7 @@ class MoonViTEncoderLayer(nn.Module):
         self.attn = MMEncoderAttention(
             num_heads=self.num_attention_heads_per_partition,
             head_size=self.hidden_size_per_attention_head,
-            multimodal_config=multimodal_config,
+            scale=self.hidden_size_per_attention_head**-0.5,
             prefix=f"{prefix}.attn",
         )
 
@@ -473,7 +473,6 @@ class MoonViT3dEncoder(nn.Module):
         block_cfg: dict,
         video_attn_type: str = "spatial_temporal",
         prefix: str = "",
-        multimodal_config: MultiModalConfig | None = None,
     ) -> None:
         super().__init__()
 
@@ -487,9 +486,8 @@ class MoonViT3dEncoder(nn.Module):
         self.blocks = nn.ModuleList(
             [
                 MoonViTEncoderLayer(
-                    multimodal_config=multimodal_config,
-                    prefix=f"{prefix}.blocks.{layer_idx}",
                     **block_cfg,
+                    prefix=f"{prefix}.blocks.{layer_idx}",
                 )
                 for layer_idx in range(num_layers)
             ]
@@ -557,7 +555,6 @@ class MoonViT3dPretrainedModel(nn.Module):
     def __init__(
         self,
         config: KimiK25VisionConfig,
-        multimodal_config: MultiModalConfig | None = None,
         prefix: str = "",
     ):
         super().__init__()
@@ -588,7 +585,6 @@ class MoonViT3dPretrainedModel(nn.Module):
             },
             video_attn_type=config.video_attn_type,
             prefix=maybe_prefix(prefix, "encoder"),
-            multimodal_config=multimodal_config,
         )
 
     def forward(
