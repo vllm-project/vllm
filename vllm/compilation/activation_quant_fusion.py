@@ -197,68 +197,18 @@ class SiluMulBlockQuantPattern:
     
     def register(self, pm_pass: PatternMatcherPass) -> None:
         def pattern(input: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-            # Match silu_mul
-            d = input.shape[-1] // 2
-            gate = input[..., :d]
-            silu = torch.nn.functional.silu(gate)
-            up = input[..., d:]
-            silu_out = silu * up
-            
-            # Match with auto_functionalized
-            x_q = torch.empty(silu_out.shape, dtype=FP8_DTYPE, device=input.device)
-            num_groups = silu_out.shape[-1] // 128
-            x_s = torch.empty((silu_out.shape[0], num_groups), dtype=torch.float32, device=input.device)
-            
-            # Use keyword arguments based on the C++ signature
-            at = auto_functionalized(
-                torch.ops._C.per_token_group_fp8_quant,
-                input=silu_out,
-                output_q=x_q,
-                output_s=x_s,
-                group_size=128,
-                eps=1e-10,
-                fp8_min=-448.0,
-                fp8_max=448.0,
-                scale_ue8m0=False,
-            )
-            
-            return at[1], at[2]  # Return output_q and output_s
+            # Just match the quant part, assume input is already silu_out
+            result_quant, scale = self.quant_matcher(input)
+            return result_quant, scale
         
         def replacement(input: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-            print(f"🔥 FUSED KERNEL TRIGGERED! input.shape={input.shape}")
-            
-            if self.model_dtype is not None:
-                input = input.to(dtype=self.model_dtype)
-            
-            output_shape = list(input.shape)
-            output_shape[-1] = output_shape[-1] // 2
-            
-            result = torch.empty(output_shape, device=input.device, dtype=self.quant_dtype)
-            
-            group_size = 128
-            has_col_major_scales = False
-            
-            scale = self.quant_matcher.make_scale(
-                torch.empty(output_shape, device=input.device),
-                transposed=has_col_major_scales
-            )
-            
-            at = auto_functionalized(
-                torch.ops._C.silu_and_mul_per_block_quant.default,
-                result=result,
-                input=input,
-                scale=scale,
-                group_size=group_size,
-                scale_ub=None,
-                is_scale_transposed=has_col_major_scales,
-            )
-            
-            return at[1], at[2]
+            print(f"🔥 QUANT ONLY PATTERN TRIGGERED! input.shape={input.shape}")
+            return input, input  # Dummy replacement for now
         
-        input = torch.empty(5, 256, dtype=torch.float16, device='cuda')
-        pattern(input)
+        inputs = self.quant_matcher.inputs()
+        pattern(*inputs)
         
-        register_replacement(pattern, replacement, [input], fwd_only, pm_pass)
+        register_replacement(pattern, replacement, inputs, fwd_only, pm_pass)
         
 class ActivationQuantFusionPass(VllmPatternMatcherPass):
     """
