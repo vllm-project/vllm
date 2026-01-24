@@ -19,7 +19,6 @@
 
 from collections import OrderedDict
 from collections.abc import Iterable, Mapping, Sequence
-from typing import Any
 
 import torch
 import torch.nn as nn
@@ -40,8 +39,6 @@ from vllm.model_executor.models.utils import AutoWeightsLoader
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.cache import MultiModalProcessorOnlyCache
 from vllm.multimodal.inputs import (
-    ImageItem,
-    ModalityData,
     MultiModalDataDict,
     MultiModalFieldConfig,
     MultiModalInputs,
@@ -51,7 +48,6 @@ from vllm.multimodal.inputs import (
 )
 from vllm.multimodal.parse import (
     DictEmbeddingItems,
-    ModalityDataItems,
     MultiModalDataItems,
     MultiModalDataParser,
 )
@@ -77,25 +73,11 @@ def _terratorch_field_factory(input_definition: InputDefinition):
     def _terratorch_field_config(
         hf_inputs: Mapping[str, torch.Tensor],
     ) -> Mapping[str, MultiModalFieldConfig]:
-        valid_inputs = {
-            input_name: input
-            for input_name, input in input_definition.data.items()
-            if input.type == InputTypeEnum.tensor
-        }
-
-        modality = "image"
-        batch_size = max(input.shape[0] for input in valid_inputs.values())
-
         fields = dict[str, MultiModalFieldConfig]()
-        for input_name, input in valid_inputs.items():
-            if input.shape[0] == 1:
-                field = MultiModalFieldConfig.shared(modality, batch_size)
-            elif input.shape[0] > 1:
-                field = MultiModalFieldConfig.batched(modality)
-            else:
-                raise NotImplementedError({input_name: input})
-
-            fields[input_name] = field
+        for name, input in input_definition.data.items():
+            modality = "image"
+            if input.type == InputTypeEnum.tensor:
+                fields[name] = MultiModalFieldConfig.shared(modality, batch_size=1)
 
         return fields
 
@@ -142,19 +124,17 @@ class TerratorchMultiModalDataParser(MultiModalDataParser):
 
         self.input_definition = input_definition
 
-    def _parse_image_data(
-        self,
-        data: dict[str, torch.Tensor] | ModalityData[ImageItem],
-    ) -> ModalityDataItems[Any, Any] | None:
-        if isinstance(data, dict):
-            return DictEmbeddingItems(
-                data,
-                modality="image",
-                required_fields=_terratorch_field_names(self.input_definition),
-                fields_factory=_terratorch_field_factory(self.input_definition),
-            )
+    def parse_mm_data(self, mm_data: MultiModalDataDict) -> MultiModalDataItems:
+        mm_items = MultiModalDataItems()
 
-        return super()._parse_image_data(data)
+        mm_items["image"] = DictEmbeddingItems(
+            mm_data,
+            modality="image",
+            required_fields=_terratorch_field_names(self.input_definition),
+            fields_factory=_terratorch_field_factory(self.input_definition),
+        )
+
+        return mm_items
 
 
 class TerratorchMultiModalProcessor(BaseMultiModalProcessor):
@@ -196,23 +176,14 @@ class TerratorchMultiModalProcessor(BaseMultiModalProcessor):
         tokenization_kwargs: Mapping[str, object] | None = None,
         mm_uuids: MultiModalUUIDDict | None = None,
     ) -> MultiModalInputs:
-        if "image" in mm_data:
-            image_data = mm_data["image"]
-            image_data = {k: v.unsqueeze(0) for k, v in image_data.items()}
-        else:
-            image_data = mm_data
-            image_data = {k: v.unsqueeze(0) for k, v in image_data.items()}
-
-        mm_data = {"image": image_data}
-
         mm_items = self._to_mm_items(mm_data)
         tokenization_kwargs = tokenization_kwargs or {}
         mm_hashes = self._hash_mm_items(
             mm_items, hf_processor_mm_kwargs, tokenization_kwargs, mm_uuids=mm_uuids
         )
-        mm_placeholders = {"image": [PlaceholderRange(offset=0, length=0)]}
 
-        mm_processed_data = BatchFeature(image_data)
+        mm_processed_data = BatchFeature(mm_data)
+        mm_placeholders = {"image": [PlaceholderRange(offset=0, length=0)]}
 
         mm_kwargs = MultiModalKwargsItems.from_hf_inputs(
             mm_processed_data,
@@ -280,7 +251,8 @@ class Terratorch(nn.Module, IsAttentionFree, SupportsMultiModal):
         inputs_embeds: torch.Tensor | None = None,
         **kwargs: object,
     ):
-        model_output = self.inference_runner.forward(**kwargs)
+        batched_kwargs = {k: v[None] for k, v in kwargs.items()}
+        model_output = self.inference_runner.forward(**batched_kwargs)
 
         return model_output.output
 
