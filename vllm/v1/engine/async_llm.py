@@ -347,8 +347,8 @@ class AsyncLLM(EngineClient):
                     "does not match the EngineCoreRequest.request_id attribute. The "
                     "latter will be used, and the former will be ignored."
                 )
-        elif not isinstance(prompt, AsyncGenerator):
-            if prompt_text is None:
+        else:
+            if prompt_text is not None:
                 raise ValueError(
                     "should only provide prompt_text with EngineCoreRequest"
                 )
