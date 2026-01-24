@@ -114,7 +114,7 @@ def check_model_available(model: str) -> None:
 @pytest.mark.core_model
 @pytest.mark.cpu_model
 @pytest.mark.parametrize("model", ["openai/whisper-large-v3-turbo"])
-@pytest.mark.parametrize("dtype", ["half"])
+@pytest.mark.parametrize("dtype", ["half", "float"])
 @pytest.mark.parametrize("num_logprobs", [5])
 @pytest.mark.parametrize("enforce_eager", [True, False])
 @create_new_process_for_each_test("spawn")
@@ -176,3 +176,46 @@ def test_models_distributed(
         distributed_executor_backend=distributed_executor_backend,
         enforce_eager=False,
     )
+
+
+@pytest.mark.core_model
+@pytest.mark.parametrize("model", ["openai/whisper-large-v3-turbo"])
+def test_encoder_cache_cleanup(
+    vllm_runner,
+    model: str,
+    input_audios,
+    monkeypatch,
+) -> None:
+    """Test that encoder cache is properly cleaned up after requests complete.
+
+    This is a regression test for a bug where encoder cache entries were freed
+    in the same scheduling step they were allocated, before the model could use
+    them.
+    """
+    # Set single-process mode to access the model runner's encoder cache directly
+    monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
+    check_model_available(model)
+
+    with vllm_runner(
+        model,
+        dtype="half",
+        max_model_len=448,
+        tensor_parallel_size=1,
+        limit_mm_per_prompt={"audio": 2},
+        enforce_eager=True,
+    ) as vllm_model:
+        engine_core = vllm_model.llm.llm_engine.engine_core.engine_core
+        model_runner = engine_core.model_executor.driver_worker.worker.model_runner
+        encoder_cache = model_runner.encoder_cache
+
+        # Run multiple sequential requests to ensure cache is properly managed
+        for vllm_prompts, _, audios in input_audios:
+            vllm_model.generate_greedy(vllm_prompts, max_tokens=50, audios=audios)
+
+        # After all requests complete, encoder cache should be empty
+        cache_size = len(encoder_cache)
+        assert cache_size == 0, (
+            f"Encoder cache should be empty after all requests complete, "
+            f"but has {cache_size} entries. This indicates encoder cache "
+            f"entries are not being properly freed."
+        )

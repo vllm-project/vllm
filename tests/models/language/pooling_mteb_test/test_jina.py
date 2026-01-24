@@ -24,11 +24,10 @@ EMBEDDING_MODELS = [
         mteb_score=0.824413164,
         architecture="XLMRobertaModel",
         is_matryoshka=True,
-        pooling_type="MEAN",
+        seq_pooling_type="MEAN",
         attn_type="encoder_only",
         is_prefix_caching_supported=False,
         is_chunked_prefill_supported=False,
-        dtype="float32",
     )
 ]
 
@@ -37,7 +36,7 @@ RERANK_MODELS = [
         "jinaai/jina-reranker-v2-base-multilingual",
         mteb_score=0.33643,
         architecture="XLMRobertaForSequenceClassification",
-        pooling_type="CLS",
+        seq_pooling_type="CLS",
         attn_type="encoder_only",
         is_prefix_caching_supported=False,
         is_chunked_prefill_supported=False,
@@ -72,10 +71,8 @@ def test_embed_models_correctness(
 
 
 @pytest.mark.parametrize("model_info", RERANK_MODELS)
-def test_rerank_models_mteb(
-    hf_runner, vllm_runner, model_info: RerankModelInfo
-) -> None:
-    mteb_test_rerank_models(hf_runner, vllm_runner, model_info)
+def test_rerank_models_mteb(vllm_runner, model_info: RerankModelInfo) -> None:
+    mteb_test_rerank_models(vllm_runner, model_info)
 
 
 @pytest.mark.parametrize("model_info", EMBEDDING_MODELS)

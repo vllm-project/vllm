@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from abc import ABC, abstractmethod
-from typing import Any
+from typing import Any, NoReturn
 
 import torch
 
@@ -29,14 +29,14 @@ class Torch25CustomGraphPass(ABC):  # noqa (redefinition)
         Return None to skip inductor code caching entirely.
         """
 
-    def __getstate__(self):
+    def __getstate__(self) -> Any | None:
         """
         Pickling is used instead of uuid() in torch<2.6. Just return uuid()
          to enable subclasses to only have to implement uuid.
         """
         return self.uuid()
 
-    def __setstate__(self, state):
+    def __setstate__(self, state: Any) -> NoReturn:
         raise ValueError(
             "Cannot unpickle CustomGraphPass because pickling"
             " is used for cache key uuid. Use torch>=2.6 with"

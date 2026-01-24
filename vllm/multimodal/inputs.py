@@ -32,9 +32,7 @@ if TYPE_CHECKING:
     import torch.types
     from transformers.feature_extraction_utils import BatchFeature
 
-    from .base import MediaWithBytes
-    from .processing import MultiModalHashes
-
+    from .media import MediaWithBytes
 else:
     torch = LazyLoader("torch", globals(), "torch")
 
@@ -196,10 +194,7 @@ class PlaceholderRange:
 
     @cached_property
     def embeds_cumsum(self) -> torch.Tensor | None:
-        if self.is_embed is None:
-            return None
-
-        return self.is_embed.cumsum(dim=0)
+        return None if self.is_embed is None else self.is_embed.cumsum(dim=0)
 
     @cached_property
     def get_num_embeds(self) -> int:
@@ -333,13 +328,7 @@ def batched_tensors_equal(a: BatchedTensorInputs, b: BatchedTensorInputs) -> boo
     Equality check between
     [`BatchedTensorInputs`][vllm.multimodal.inputs.BatchedTensorInputs] objects.
     """
-    for k in a:
-        if k not in b:
-            return False
-        if not nested_tensors_equal(a[k], b[k]):
-            return False
-
-    return True
+    return all(k in b and nested_tensors_equal(a[k], b[k]) for k in a)
 
 
 @dataclass
@@ -363,6 +352,9 @@ class MultiModalFeatureSpec:
 
     mm_position: PlaceholderRange
     """e.g., PlaceholderRange(offset=2, length=336)"""
+
+    mm_hash: str | None = None
+    """Base mm_hash for processor cache (without LoRA prefix)."""
 
     @staticmethod
     def gather_kwargs(features: list["MultiModalFeatureSpec"], keys: set[str]):
@@ -1010,9 +1002,15 @@ MultiModalKwargsOptionalItems: TypeAlias = (
 )
 
 
+MultiModalHashes = dict[str, list[str]]
+"""
+A dictionary containing per-item hashes for each modality.
+"""
+
+
 MultiModalPlaceholderDict: TypeAlias = Mapping[str, Sequence[PlaceholderRange]]
 """
-A dictionary containing placeholder ranges for each modality.
+A dictionary containing per-item placeholder ranges for each modality.
 """
 
 
@@ -1032,10 +1030,10 @@ class MultiModalInputs(TypedDict):
     mm_kwargs: MultiModalKwargsOptionalItems
     """Keyword arguments to be directly passed to the model after batching."""
 
-    mm_hashes: "MultiModalHashes"
+    mm_hashes: MultiModalHashes
     """The hashes of the multi-modal data."""
 
-    mm_placeholders: "MultiModalPlaceholderDict"
+    mm_placeholders: MultiModalPlaceholderDict
     """
     For each modality, information about the placeholder tokens in
     `prompt_token_ids`.

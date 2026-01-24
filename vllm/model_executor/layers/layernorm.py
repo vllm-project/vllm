@@ -88,6 +88,7 @@ def dispatch_rocm_rmsnorm_func(
     return rms_norm
 
 
+# --8<-- [start:rms_norm]
 @CustomOp.register("rms_norm")
 class RMSNorm(CustomOp):
     """Root mean square normalization.
@@ -95,6 +96,8 @@ class RMSNorm(CustomOp):
     Computes x -> w * x / sqrt(E[x^2] + eps) where w is the learned weight.
     Refer to https://arxiv.org/abs/1910.07467
     """
+
+    # --8<-- [end:rms_norm]
 
     def __init__(
         self,
@@ -253,6 +256,7 @@ class RMSNorm(CustomOp):
         return s
 
 
+# --8<-- [start:gemma_rms_norm]
 @CustomOp.register("gemma_rms_norm")
 class GemmaRMSNorm(CustomOp):
     """RMS normalization for Gemma.
@@ -261,6 +265,8 @@ class GemmaRMSNorm(CustomOp):
         1. x * (1 + w) instead of x * w.
         2. (x * w).to(orig_dtype) instead of x.to(orig_dtype) * w.
     """
+
+    # --8<-- [end:gemma_rms_norm]
 
     def __init__(
         self,
@@ -272,21 +278,35 @@ class GemmaRMSNorm(CustomOp):
         self.variance_epsilon = eps
 
     @staticmethod
-    def forward_static(
+    def _forward_static_no_residual(
         weight: torch.Tensor,
         variance_epsilon: float,
         x: torch.Tensor,
-        residual: torch.Tensor | None,
-    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        """PyTorch-native implementation equivalent to forward()."""
+    ) -> torch.Tensor:
+        """PyTorch-native implementation equivalent to forward() without residual."""
         orig_dtype = x.dtype
-        if residual is not None:
-            x = (
-                x.float() + residual.float()
-                if orig_dtype == torch.float16
-                else x + residual
-            )
-            residual = x
+        x = x.float()
+        variance = x.pow(2).mean(dim=-1, keepdim=True)
+        x = x * torch.rsqrt(variance + variance_epsilon)
+        x = x * (1.0 + weight.float())
+        x = x.to(orig_dtype)
+        return x
+
+    @staticmethod
+    def _forward_static_with_residual(
+        weight: torch.Tensor,
+        variance_epsilon: float,
+        x: torch.Tensor,
+        residual: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """PyTorch-native implementation equivalent to forward() with residual."""
+        orig_dtype = x.dtype
+        x = (
+            x.float() + residual.float()
+            if orig_dtype == torch.float16
+            else x + residual
+        )
+        residual = x
 
         x = x.float()
         variance = x.pow(2).mean(dim=-1, keepdim=True)
@@ -295,7 +315,7 @@ class GemmaRMSNorm(CustomOp):
         # See https://github.com/huggingface/transformers/pull/29402
         x = x * (1.0 + weight.float())
         x = x.to(orig_dtype)
-        return x if residual is None else (x, residual)
+        return x, residual
 
     def forward_native(
         self,
@@ -303,7 +323,14 @@ class GemmaRMSNorm(CustomOp):
         residual: torch.Tensor | None = None,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         """PyTorch-native implementation equivalent to forward()."""
-        return self.forward_static(self.weight.data, self.variance_epsilon, x, residual)
+        if residual is None:
+            return self._forward_static_no_residual(
+                self.weight.data, self.variance_epsilon, x
+            )
+        else:
+            return self._forward_static_with_residual(
+                self.weight.data, self.variance_epsilon, x, residual
+            )
 
     def forward_cuda(
         self,
@@ -314,13 +341,17 @@ class GemmaRMSNorm(CustomOp):
             return self.forward_native(x, residual)
 
         if not getattr(self, "_is_compiled", False):
-            self.forward_static = torch.compile(  # type: ignore
-                self.forward_static
+            self._forward_static_no_residual = torch.compile(  # type: ignore
+                self._forward_static_no_residual
+            )
+            self._forward_static_with_residual = torch.compile(  # type: ignore
+                self._forward_static_with_residual
             )
             self._is_compiled = True
         return self.forward_native(x, residual)
 
 
+# --8<-- [start:rms_norm_gated]
 @CustomOp.register("rms_norm_gated")
 class RMSNormGated(CustomOp):
     """RMS Normalization with optional gating.
@@ -330,6 +361,8 @@ class RMSNormGated(CustomOp):
     - Group RMS normalization
     - Optional gating with SiLU activation
     """
+
+    # --8<-- [end:rms_norm_gated]
 
     def __init__(
         self,

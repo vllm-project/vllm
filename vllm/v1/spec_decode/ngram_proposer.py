@@ -3,6 +3,7 @@
 import os
 
 import numpy as np
+import torch
 from numba import get_num_threads, jit, njit, prange, set_num_threads
 
 from vllm.config import VllmConfig
@@ -55,10 +56,8 @@ class NgramProposer:
         # This usually takes less than 1 second.
         self.propose(
             [[]] * 1024,
-            [""] * 1024,
             np.zeros(1024, dtype=np.int32),
             np.zeros((1024, self.max_model_len), dtype=np.int32),
-            set(),
         )
 
     def batch_propose(
@@ -132,10 +131,11 @@ class NgramProposer:
     def propose(
         self,
         sampled_token_ids: list[list[int]],
-        req_ids: list[str],
         num_tokens_no_spec: np.ndarray,
         token_ids_cpu: np.ndarray,
-        spec_decode_unsupported_reqs: set,
+        slot_mappings: dict[str, torch.Tensor]
+        | list[dict[str, torch.Tensor]]
+        | None = None,  # unused
     ) -> list[list[int]]:
         # find which requests need ngram proposals
         valid_ngram_requests = []
@@ -143,12 +143,6 @@ class NgramProposer:
             num_sampled_ids = len(sampled_ids)
             if not num_sampled_ids:
                 # Skip speculative decoding.
-                continue
-
-            # Skip requests that require sampling parameters that are not
-            # supported with speculative decoding.
-            req_id = req_ids[i]
-            if req_id in spec_decode_unsupported_reqs:
                 continue
 
             num_tokens = num_tokens_no_spec[i]

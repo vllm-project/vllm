@@ -5,9 +5,12 @@ from collections.abc import Sequence
 
 from transformers import PreTrainedTokenizerBase
 
+from vllm.entrypoints.mcp.tool_server import ToolServer
+from vllm.entrypoints.openai.chat_completion.protocol import (
+    ChatCompletionRequest,
+)
+from vllm.entrypoints.openai.engine.protocol import DeltaMessage
 from vllm.entrypoints.openai.parser.harmony_utils import parse_chat_output
-from vllm.entrypoints.openai.protocol import ChatCompletionRequest, DeltaMessage
-from vllm.entrypoints.tool_server import ToolServer
 from vllm.logger import init_logger
 from vllm.reasoning import ReasoningParser
 
@@ -75,7 +78,7 @@ class GptOssReasoningParser(ReasoningParser):
         self.reasoning_end_token_ids_suffix = self.model_tokenizer.encode("<|message|>")
         self.reasoning_max_num_between_tokens = 20
 
-    def is_reasoning_end(self, input_ids: list[int]) -> bool:
+    def is_reasoning_end(self, input_ids: Sequence[int]) -> bool:
         end_token_ids_prefix = self.reasoning_end_token_ids_prefix
         end_token_ids_suffix = self.reasoning_end_token_ids_suffix
         assert len(end_token_ids_prefix) > 0, "reasoning_end_token_ids_prefix is empty"

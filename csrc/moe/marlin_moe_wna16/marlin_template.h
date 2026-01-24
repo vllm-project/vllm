@@ -23,10 +23,10 @@
   #define MARLIN_NAMESPACE_NAME marlin_moe_wna16
 #endif
 
-#include "quantization/gptq_marlin/marlin.cuh"
-#include "quantization/gptq_marlin/marlin_dtypes.cuh"
-#include "quantization/gptq_marlin/dequant.h"
-#include "quantization/gptq_marlin/marlin_mma.h"
+#include "quantization/marlin/marlin.cuh"
+#include "quantization/marlin/marlin_dtypes.cuh"
+#include "quantization/marlin/dequant.h"
+#include "quantization/marlin/marlin_mma.h"
 #include "core/scalar_type.hpp"
 
 #define STATIC_ASSERT_SCALAR_TYPE_VALID(scalar_t)               \
@@ -71,7 +71,6 @@ __global__ void Marlin(
     const float* __restrict__ topk_weights_ptr,              // moe top weights
     int top_k,              // num of experts per token
     bool mul_topk_weights,  // mul topk weights or not
-    bool is_ep,             // expert parallelism
     int num_groups,         // number of scale groups per output channel
     int prob_m,             // batch dimension m
     int prob_n,             // output dimension n
@@ -273,7 +272,6 @@ __global__ void Marlin(
     const float* __restrict__ topk_weights_ptr,              // moe top weights
     int top_k,              // num of experts per token
     bool mul_topk_weights,  // mul topk weights or not
-    bool is_ep,             // expert parallelism
     int num_groups,         // number of scale groups per output channel
     int prob_m,             // batch dimension m
     int prob_n,             // output dimension n
@@ -376,14 +374,6 @@ __global__ void Marlin(
 
   // parallel: num valid moe blocks
   int parallel = num_tokens_past_padded / moe_block_size;
-  int num_valid_blocks = parallel;
-  if (is_ep) {
-    for (int i = 0; i < parallel; i++) {
-      if (expert_ids_ptr[i] == -1) num_valid_blocks--;
-    }
-  }
-  int num_invalid_blocks = parallel - num_valid_blocks;
-  parallel = num_valid_blocks;
 
   int k_tiles = prob_k / 16 / thread_k_blocks;
   int n_tiles = prob_n / 16 / thread_n_blocks;
@@ -538,22 +528,8 @@ __global__ void Marlin(
     if (par_id >= parallel) return;
 
     old_expert_id = expert_id;
-    if (num_invalid_blocks > 0) {
-      int skip_count = par_id;
-      for (int i = 0; i < num_tokens_past_padded / moe_block_size; i++) {
-        expert_id = expert_ids_ptr[i];
-        if (expert_id != -1) {
-          if (skip_count == 0) {
-            block_id = i;
-            break;
-          };
-          skip_count--;
-        };
-      }
-    } else {
-      block_id = par_id;
-      expert_id = expert_ids_ptr[block_id];
-    }
+    block_id = par_id;
+    expert_id = expert_ids_ptr[block_id];
 
     if constexpr (b_type == vllm::kFE2M1f && s_type == vllm::kFE4M3fn) {
       uint16_t val = global_scale_ptr[expert_id];

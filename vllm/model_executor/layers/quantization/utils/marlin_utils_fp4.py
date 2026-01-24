@@ -8,6 +8,7 @@ import vllm._custom_ops as ops
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.utils.marlin_utils import (
     USE_FP32_REDUCE_DEFAULT,
+    get_marlin_input_dtype,
     marlin_make_workspace_new,
     marlin_permute_bias,
     marlin_permute_scales,
@@ -120,7 +121,7 @@ def apply_fp4_marlin_linear(
 
         inputs, a_scales = marlin_quant_input(inputs, torch.float8_e4m3fn)
 
-    output = ops.gptq_marlin_gemm(
+    output = ops.marlin_gemm(
         a=inputs,
         c=None,
         b_q_weight=weight,
@@ -224,6 +225,109 @@ def prepare_fp4_layer_for_marlin(
         layer.bias = torch.nn.Parameter(bias, requires_grad=False)
 
     return
+
+
+def prepare_nvfp4_moe_layer_for_marlin(
+    layer: torch.nn.Module,
+    w13: torch.Tensor,
+    w13_scale: torch.Tensor,
+    w13_scale_2: torch.Tensor,
+    w2: torch.Tensor,
+    w2_scale: torch.Tensor,
+    w2_scale_2: torch.Tensor,
+    is_act_and_mul: bool,
+) -> tuple[
+    torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor
+]:
+    logger.warning_once(
+        "Your GPU does not have native support for FP4 computation but "
+        "FP4 quantization is being used. Weight-only FP4 compression will "
+        "be used leveraging the Marlin kernel. This may degrade "
+        "performance for compute-heavy workloads."
+    )
+
+    input_dtype = get_marlin_input_dtype(prefix="")
+    if input_dtype is not None and input_dtype.itemsize == 1:
+        raise RuntimeError("NVFP4 weight + INT8/FP8 activation is not supported.")
+
+    GROUP_SIZE = 16
+    E = layer.num_experts
+    K = layer.hidden_size
+    N = layer.intermediate_size_per_partition
+
+    device = w13.device
+    param_dtype = layer.params_dtype
+    is_a_8bit = input_dtype is not None and input_dtype.itemsize == 1
+
+    # WORKSPACE
+    layer.workspace = marlin_make_workspace_new(device, 4)
+    perm = torch.empty(0, dtype=torch.int, device=device)
+
+    # WEIGHT
+    # Repack weights to marlin format
+    def repack_weight(weight: torch.Tensor, name: str) -> torch.Tensor:
+        tensor_list = []
+        num_shards = 2 if is_act_and_mul else 1
+        if "w13" in name:
+            size_n, size_k = N * num_shards, K
+        else:
+            size_n, size_k = K, N
+
+        assert weight.shape == (E, size_n, size_k // 2)
+
+        for i in range(E):
+            qweight = weight[i].view(torch.int32).T.contiguous()
+
+            marlin_qweight = ops.gptq_marlin_repack(
+                b_q_weight=qweight,
+                perm=perm,
+                size_k=size_k,
+                size_n=size_n,
+                num_bits=4,
+                is_a_8bit=is_a_8bit,
+            )
+            tensor_list.append(marlin_qweight)
+
+        return torch.cat([x.unsqueeze(0) for x in tensor_list], 0)
+
+    w13 = repack_weight(w13, "w13")
+    w2 = repack_weight(w2, "w2")
+
+    # WEIGHT SCALES
+    # Permute scales
+    def premute_scales(
+        scales: torch.Tensor, g_scales: torch.Tensor, name: str
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        scales = scales.to(param_dtype)
+        g_scales = g_scales.to(param_dtype)
+
+        tensor_list = []
+        num_shards = 2 if is_act_and_mul else 1
+        if "w13" in name:
+            size_n, size_k = N * num_shards, K
+        else:
+            size_n, size_k = K, N
+
+        for i in range(E):
+            scale = scales[i].T
+            marlin_scales = marlin_permute_scales(
+                s=scale,
+                size_k=size_k,
+                size_n=size_n,
+                group_size=GROUP_SIZE,
+                is_a_8bit=is_a_8bit,
+            )
+            marlin_scales = nvfp4_marlin_process_scales(marlin_scales)
+            tensor_list.append(marlin_scales)
+
+        scales = torch.cat([x.unsqueeze(0) for x in tensor_list], 0)
+        g_scales = nvfp4_marlin_process_global_scale(g_scales)
+        return scales, g_scales
+
+    w13_scale, w13_scale_2 = premute_scales(w13_scale, w13_scale_2, "w13")
+    w2_scale, w2_scale_2 = premute_scales(w2_scale, w2_scale_2, "w2")
+
+    return w13, w13_scale, w13_scale_2, w2, w2_scale, w2_scale_2
 
 
 def prepare_moe_fp4_layer_for_marlin(

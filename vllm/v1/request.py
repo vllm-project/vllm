@@ -123,7 +123,7 @@ class Request:
         # indicates that the output is corrupted
         self.num_nans_in_logits = 0
 
-        # The number of requests being preempted by the scheduler
+        # The number of times this request has been preempted by the scheduler.
         self.num_preemptions = 0
 
         # The number of tokens that have been computed remotely.
@@ -211,8 +211,7 @@ class Request:
 
     def get_num_encoder_embeds(self, input_id: int) -> int:
         assert input_id < len(self.mm_features)
-        num_embeds = self.mm_features[input_id].mm_position.get_num_embeds
-        return num_embeds
+        return self.mm_features[input_id].mm_position.get_num_embeds
 
     def record_event(
         self,

@@ -104,7 +104,9 @@ class LoRAModelManager:
         self.modules: dict[str, BaseLayerWithLoRA] = {}
         # Dict instead of a set for compatibility with LRUCache.
         self._last_mapping: LoRAMapping | None = None
-        self._is_3d_moe_model = is_moe_model(self.model) and self.model.is_3d_moe_weight
+        is_moe = is_moe_model(self.model)
+        self._is_3d_moe_model = is_moe and self.model.is_3d_moe_weight
+        self._is_non_gated_moe = is_moe and self.model.is_non_gated_moe
         self._init_punica_wrapper(max_num_batched_tokens, vllm_config)
         self._create_lora_modules()
 
@@ -128,16 +130,22 @@ class LoRAModelManager:
                 max_num_batched_tokens,
                 max_batches=self.max_num_seqs,
                 device=self.device,
-                max_loras=self.lora_config.max_loras,
+                lora_config=self.lora_config,
             )
 
             self.punica_wrapper_mapping[DEFAULT_LANGUAGE_WRAPPER_KEY] = (
                 llm_punica_wrapper
             )
 
-    def _maybe_init_mm(self, vllm_config: VllmConfig, max_num_batched_tokens) -> None:
-        self.supports_tower_connector_lora = False
+    def _maybe_init_mm(
+        self,
+        vllm_config: VllmConfig,
+        max_num_batched_tokens: int,
+    ) -> None:
         model_config: ModelConfig = vllm_config.model_config
+        mm_registry = MULTIMODAL_REGISTRY
+
+        self.supports_tower_connector_lora = False
         self.mm_mapping: MultiModelKeys = self.model.get_mm_mapping()
 
         # Only one language model can be included in the model.
@@ -148,15 +156,13 @@ class LoRAModelManager:
             max_num_batched_tokens,
             max_batches=self.max_num_seqs,
             device=self.device,
-            max_loras=self.lora_config.max_loras,
+            lora_config=self.lora_config,
         )
         lm_prefix = self.mm_mapping.language_model[0]
         self.punica_wrapper_mapping[lm_prefix] = llm_punica_wrapper
 
         if self.lora_config.enable_tower_connector_lora:
-            self.mm_processor_info = MULTIMODAL_REGISTRY.create_processor(
-                model_config
-            ).info
+            self.mm_processor_info = mm_registry.create_processor(model_config).info
             self.supports_tower_connector_lora = self.supports_mm and hasattr(
                 self.model, "get_num_mm_encoder_tokens"
             )
@@ -169,11 +175,7 @@ class LoRAModelManager:
             "GitHub if you encounter them."
         )
 
-        mm_budget = MultiModalBudget(
-            model_config,
-            vllm_config.scheduler_config,
-            MULTIMODAL_REGISTRY,
-        )
+        mm_budget = MultiModalBudget(vllm_config, mm_registry)
         limit_per_prompt: int = max(
             self.mm_processor_info.get_allowed_mm_limits().values()
         )
@@ -186,7 +188,7 @@ class LoRAModelManager:
             num_encoder_tokens,
             max_batches=self.max_num_seqs * limit_per_prompt,
             device=self.device,
-            max_loras=self.lora_config.max_loras,
+            lora_config=self.lora_config,
         )
         for prefix in self.mm_mapping.tower_model:
             self.punica_wrapper_mapping[prefix] = tower_punica_wrapper
@@ -201,7 +203,7 @@ class LoRAModelManager:
                     connector_tokens,
                     max_batches=self.max_num_seqs * limit_per_prompt,
                     device=self.device,
-                    max_loras=self.lora_config.max_loras,
+                    lora_config=self.lora_config,
                 )
                 for prefix in self.mm_mapping.connector:
                     self.punica_wrapper_mapping[prefix] = connector_punica_wrapper
@@ -256,61 +258,7 @@ class LoRAModelManager:
             if not module_lora:
                 module.reset_lora(index)
                 continue
-            # Note (gnovack) - If MOE lora weights are not split into
-            # num_experts chunks, we split them here
-            if isinstance(module, FusedMoE3DWithLoRA) and torch.is_tensor(
-                module_lora.lora_a
-            ):
-                # Handle PEFT file format where experts.base_layer is the
-                # gate_up_proj and experts is the down_proj
-                gate_up_proj_lora = self._get_lora_layer_weights(
-                    lora_model, module_name + ".base_layer"
-                )
-                down_proj_lora = module_lora
-                # FIXME Edge case where LoRA is not added to gate_up_proj
-                # or down_proj
-                assert gate_up_proj_lora is not None
-                assert down_proj_lora is not None
-                if self._is_3d_moe_model:
-                    module_lora.lora_a = [
-                        gate_up_proj_lora.lora_a,
-                        down_proj_lora.lora_a,
-                    ]
-                    module_lora.lora_b = [
-                        gate_up_proj_lora.lora_b,
-                        down_proj_lora.lora_b,
-                    ]
-                else:
-                    # Some 3D MoE models haven't added the `is_3d_moe_weight`
-                    # attribute yet, so fallback here
-                    num_experts = module_lora.lora_a.shape[0] // module_lora.rank
 
-                    gate_proj_a = gate_up_proj_lora.lora_a.chunk(num_experts, dim=0)
-                    up_proj_a = gate_up_proj_lora.lora_a.chunk(num_experts, dim=0)
-
-                    gate_proj_b = gate_up_proj_lora.lora_b[::2, ...].chunk(
-                        num_experts, dim=-1
-                    )
-                    up_proj_b = gate_up_proj_lora.lora_b[1::2, ...].chunk(
-                        num_experts, dim=-1
-                    )
-
-                    down_proj_a = down_proj_lora.lora_a.chunk(num_experts, dim=0)
-                    down_proj_b = down_proj_lora.lora_b.chunk(num_experts, dim=-1)
-
-                    lora_a = []
-                    lora_b = []
-                    for i in range(num_experts):
-                        lora_a.append(gate_proj_a[i])
-                        lora_a.append(down_proj_a[i])
-                        lora_a.append(up_proj_a[i])
-
-                        lora_b.append(gate_proj_b[i])
-                        lora_b.append(down_proj_b[i])
-                        lora_b.append(up_proj_b[i])
-
-                    module_lora.lora_a = lora_a
-                    module_lora.lora_b = lora_b
             module.set_lora(
                 index,
                 module_lora.lora_a,
@@ -393,6 +341,20 @@ class LoRAModelManager:
                 )
                 continue
 
+            # TODO: Remove this restriction
+            # peft error when generating LoRA adapter with "gate" module:
+            # "Target module NemotronHTopkRouter() is not supported."
+            # Working LoRA adapter was created using peft with:
+            # LoraConfig(target_modules="all-linear", ...)
+            if self._is_non_gated_moe and module_name.endswith("mixer.gate"):
+                logger.debug_once(
+                    "LoRA is not supported for non-gated MoE gate module."
+                    " %s will be ignored.",
+                    module_name,
+                    scope="local",
+                )
+                continue
+
             parts = module_name.split(".")[-1]
             packed_moduled_lst = self.packed_modules_mapping.get(parts, [])
             if isinstance(module, FusedMoE):
@@ -458,6 +420,22 @@ class LoRAModelManager:
             f"got {type(module)}"
         )
         self.modules[module_name] = module
+
+    @staticmethod
+    def _pad_lora_pairs_to_triplets(
+        loras: list[LoRALayerWeights | None],
+    ) -> list[LoRALayerWeights | None]:
+        """Pad LoRA weight pairs to triplets for non-gated MoE.
+
+        For non-gated MoE, each expert has 2 entries (w1, w2) that need to be
+        padded to triplets (w1, w2, None) to match pack_moe expectations.
+        """
+        assert len(loras) % 2 == 0, "Expected pairs of LoRA weights for non-gated MoE."
+        padded: list[LoRALayerWeights | None] = []
+        for i in range(0, len(loras), 2):
+            padded.extend(loras[i : i + 2])
+            padded.append(None)
+        return padded
 
     def create_dummy_lora(
         self,
@@ -545,7 +523,13 @@ class LoRAModelManager:
                     )
                     subloras.append(lora)
                 if module.__class__.__name__ == "FusedMoEWithLoRA":
-                    lora = PackedLoRALayerWeights.pack_moe(subloras, module_name)
+                    # For non-gated MoE, pad subloras to 3 elements per expert
+                    # to match pack_moe expectations (w1, w2, None for w3)
+                    if self._is_non_gated_moe and len(subloras) > 0:
+                        subloras = self._pad_lora_pairs_to_triplets(subloras)
+                    lora = PackedLoRALayerWeights.pack_moe(
+                        subloras, module_name, is_non_gated_moe=self._is_non_gated_moe
+                    )
                 else:
                     lora = PackedLoRALayerWeights.pack(subloras)
                 model.loras[module_name] = lora
@@ -613,8 +597,14 @@ class LoRAModelManager:
                 if lora_model.check_lora_name(module_name):
                     module_name = replaced_module_name
             if module_name.endswith(".experts"):
+                if self._is_non_gated_moe and len(replacement_loras) > 0:
+                    replacement_loras = self._pad_lora_pairs_to_triplets(
+                        replacement_loras
+                    )
                 lora_model.loras[module_name] = PackedLoRALayerWeights.pack_moe(
-                    replacement_loras, module_name
+                    replacement_loras,
+                    module_name,
+                    is_non_gated_moe=self._is_non_gated_moe,
                 )
             else:
                 lora_model.loras[module_name] = PackedLoRALayerWeights.pack(
@@ -626,6 +616,10 @@ class LoRAModelManager:
 
         for lora in lora_model.loras.values():
             lora.optimize()
+
+        for module_name, module in self.modules.items():
+            if isinstance(module, FusedMoE3DWithLoRA):
+                self._stack_moe_lora_weights(lora_model, module, module_name)
 
         first_lora: LoRALayerWeights = next(iter(lora_model.loras.values()))
         assert first_lora.lora_a is not None
@@ -652,6 +646,91 @@ class LoRAModelManager:
                 else:
                     lora.lora_a = lora.lora_a.pin_memory()
                     lora.lora_b = lora.lora_b.pin_memory()
+
+    def _stack_moe_lora_weights(
+        self, lora_model: LoRAModel, module: FusedMoE3DWithLoRA, module_name: str
+    ):
+        module_lora = self._get_lora_layer_weights(lora_model, module_name)
+
+        # Note (gnovack) - If MOE lora weights are not split into
+        # num_experts chunks, we split them here
+        if module_lora and torch.is_tensor(module_lora.lora_a):
+            # Handle PEFT file format where experts.base_layer is the
+            # gate_up_proj and experts is the down_proj
+            gate_up_proj_lora = self._get_lora_layer_weights(
+                lora_model, module_name + ".base_layer"
+            )
+            down_proj_lora = module_lora
+            # FIXME Edge case where LoRA is not added to gate_up_proj
+            # or down_proj
+            assert gate_up_proj_lora is not None
+            assert down_proj_lora is not None
+            if self._is_3d_moe_model:
+                num_experts = module.w13_lora_a_stacked[0].shape[1]
+
+                # (num_experts,rank,input_size)
+                gate_up_proj_lora.lora_a = gate_up_proj_lora.lora_a.reshape(
+                    num_experts, -1, gate_up_proj_lora.lora_a.shape[-1]
+                )
+                down_proj_lora.lora_a = down_proj_lora.lora_a.reshape(
+                    num_experts, -1, down_proj_lora.lora_a.shape[-1]
+                )
+
+                # (output_size,rank,num_experts)
+                gate_up_proj_lora.lora_b = gate_up_proj_lora.lora_b.reshape(
+                    gate_up_proj_lora.lora_b.shape[0], -1, num_experts
+                )
+                down_proj_lora.lora_b = down_proj_lora.lora_b.reshape(
+                    down_proj_lora.lora_b.shape[0], -1, num_experts
+                )
+
+                # (num_experts,output_size,rank)
+                gate_up_proj_lora.lora_b = gate_up_proj_lora.lora_b.permute(
+                    2, 0, 1
+                ).contiguous()
+                down_proj_lora.lora_b = down_proj_lora.lora_b.permute(
+                    2, 0, 1
+                ).contiguous()
+
+                module_lora.lora_a = [
+                    gate_up_proj_lora.lora_a,
+                    down_proj_lora.lora_a,
+                ]
+                module_lora.lora_b = [
+                    gate_up_proj_lora.lora_b,
+                    down_proj_lora.lora_b,
+                ]
+            else:
+                # Some 3D MoE models haven't added the `is_3d_moe_weight`
+                # attribute yet, so fallback here
+                num_experts = module_lora.lora_a.shape[0] // module_lora.rank
+
+                gate_proj_a = gate_up_proj_lora.lora_a.chunk(num_experts, dim=0)
+                up_proj_a = gate_up_proj_lora.lora_a.chunk(num_experts, dim=0)
+
+                gate_proj_b = gate_up_proj_lora.lora_b[::2, ...].chunk(
+                    num_experts, dim=-1
+                )
+                up_proj_b = gate_up_proj_lora.lora_b[1::2, ...].chunk(
+                    num_experts, dim=-1
+                )
+
+                down_proj_a = down_proj_lora.lora_a.chunk(num_experts, dim=0)
+                down_proj_b = down_proj_lora.lora_b.chunk(num_experts, dim=-1)
+
+                lora_a = []
+                lora_b = []
+                for i in range(num_experts):
+                    lora_a.append(gate_proj_a[i])
+                    lora_a.append(down_proj_a[i])
+                    lora_a.append(up_proj_a[i])
+
+                    lora_b.append(gate_proj_b[i])
+                    lora_b.append(down_proj_b[i])
+                    lora_b.append(up_proj_b[i])
+
+                module_lora.lora_a = lora_a
+                module_lora.lora_b = lora_b
 
     def _get_lora_layer_weights(
         self, lora_model: LoRAModel, module_name: str

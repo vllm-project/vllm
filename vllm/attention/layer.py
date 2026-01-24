@@ -8,13 +8,6 @@ import torch
 import torch.nn as nn
 
 import vllm.envs as envs
-from vllm.attention.backends.abstract import (
-    AttentionBackend,
-    AttentionType,
-    MLAAttentionImpl,
-)
-from vllm.attention.backends.registry import AttentionBackendEnum
-from vllm.attention.selector import get_attn_backend
 from vllm.attention.utils.kv_sharing_utils import validate_kv_sharing_target
 from vllm.attention.utils.kv_transfer_utils import maybe_transfer_kv_layer
 from vllm.config import CacheConfig, get_current_vllm_config
@@ -37,6 +30,13 @@ from vllm.utils.torch_utils import (
     direct_register_custom_op,
     kv_cache_dtype_str_to_dtype,
 )
+from vllm.v1.attention.backend import (
+    AttentionBackend,
+    AttentionType,
+    MLAAttentionImpl,
+)
+from vllm.v1.attention.backends.registry import AttentionBackendEnum
+from vllm.v1.attention.selector import get_attn_backend
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheSpec,
@@ -75,13 +75,16 @@ def set_default_quant_scales(layer: nn.Module, register_buffer: bool = False) ->
     layer._v_scale_float = 1.0
     layer._prob_scale_float = 1.0
 
+    # Initialize q/k/v range constants used by calc_kv_scales
+    layer.q_range = torch.tensor(envs.Q_SCALE_CONSTANT, dtype=torch.float32)
+    layer.k_range = torch.tensor(envs.K_SCALE_CONSTANT, dtype=torch.float32)
+    layer.v_range = torch.tensor(envs.V_SCALE_CONSTANT, dtype=torch.float32)
+
 
 def _init_kv_cache_quant(
     layer: nn.Module,
     quant_config: QuantizationConfig | None,
     prefix: str,
-    kv_cache_dtype: str,
-    calculate_kv_scales: bool,
 ) -> None:
     """Initializes KV cache scaling factors and quantization method.
 
@@ -94,16 +97,10 @@ def _init_kv_cache_quant(
         layer: The attention layer instance to initialize.
         quant_config: Optional quantization configuration.
         prefix: Layer name prefix for quantization method lookup.
-        kv_cache_dtype: The KV cache data type string.
-        calculate_kv_scales: Whether to calculate KV scales dynamically.
     """
-    # The default k/v_scale is set to 1.0. This is ignored
-    # when kv-cache is not fp8, and should be used with
-    # kv-cache in fp8_e5m2. For kv-cache in fp8_e4m3, we
-    # expect the pre-quantized k/v_scale to be loaded along
-    # with the model weights.
-    layer.kv_cache_dtype = kv_cache_dtype
-    layer.calculate_kv_scales = calculate_kv_scales
+    quant_method = (
+        quant_config.get_quant_method(layer, prefix=prefix) if quant_config else None
+    )
 
     # Note [Register q/k/v/prob scales in state dict]
     # When calling model.to(device), only parameters/buffers in state dict are
@@ -133,7 +130,7 @@ def _init_kv_cache_quant(
         assert isinstance(quant_method, BaseKVCacheMethod)
         # TODO (mgoin): kv cache dtype should be specified in the FP8
         # checkpoint config and become the "auto" behavior
-        if kv_cache_dtype == "fp8_e5m2":
+        if layer.kv_cache_dtype == "fp8_e5m2":
             raise ValueError("fp8_e5m2 kv-cache is not supported with fp8 checkpoints.")
         # If quantization is enabled, we make "k_scale" and "v_scale"
         # parameters so that it can be loaded from the model checkpoint.
@@ -162,6 +159,7 @@ class Attention(nn.Module, AttentionLayerBase):
         scale: float,
         num_kv_heads: int | None = None,
         alibi_slopes: list[float] | None = None,
+        use_alibi_sqrt: bool | None = None,
         cache_config: CacheConfig | None = None,
         quant_config: QuantizationConfig | None = None,
         logits_soft_cap: float | None = None,
@@ -170,6 +168,7 @@ class Attention(nn.Module, AttentionLayerBase):
         attn_type: str = AttentionType.DECODER,
         kv_sharing_target_layer_name: str | None = None,
         attn_backend: type[AttentionBackend] | None = None,
+        head_size_v: int | None = None,
         **extra_impl_args,
     ) -> None:
         """
@@ -195,9 +194,20 @@ class Attention(nn.Module, AttentionLayerBase):
             kv_cache_dtype = "auto"
             block_size = 16
             calculate_kv_scales = False
+
+        # llm-compressor mdls need to set cache_dtype to "fp8" manually.
+        if getattr(quant_config, "kv_cache_scheme", None) is not None:
+            kv_cache_dtype = "fp8"
+            calculate_kv_scales = False
+            if cache_config is not None:
+                cache_config.cache_dtype = "fp8"
+                cache_config.calculate_kv_scales = False
+
         self.kv_cache_torch_dtype = kv_cache_dtype_str_to_dtype(
             kv_cache_dtype, vllm_config.model_config
         )
+        self.kv_cache_dtype = kv_cache_dtype
+        self.calculate_kv_scales = calculate_kv_scales
         if num_kv_heads is None:
             num_kv_heads = num_heads
         assert num_heads % num_kv_heads == 0, (
@@ -206,17 +216,9 @@ class Attention(nn.Module, AttentionLayerBase):
         self.quant_config = quant_config
         self.layer_name = prefix
 
-        # Initialize KV cache quantization attributes
-        _init_kv_cache_quant(
-            self,
-            self.quant_config,
-            self.layer_name,
-            kv_cache_dtype,
-            calculate_kv_scales,
-        )
-
         self.num_heads = num_heads
         self.head_size = head_size
+        self.head_size_v = self.head_size if head_size_v is None else head_size_v
         self.num_kv_heads = num_kv_heads
         self.sliding_window = sliding_window
         self.has_sink = extra_impl_args.get("sinks") is not None
@@ -241,7 +243,16 @@ class Attention(nn.Module, AttentionLayerBase):
             )
         else:
             self.attn_backend = attn_backend
-
+        backend_supports_alibi_sqrt = self.attn_backend.supports_alibi_sqrt()
+        use_alibi_sqrt = use_alibi_sqrt if use_alibi_sqrt else False
+        if use_alibi_sqrt and not backend_supports_alibi_sqrt:
+            raise ValueError(
+                f"use_alibi_sqrt is not supported by backend "
+                f"{self.attn_backend.get_name()}."
+            )
+        self.use_alibi_sqrt = bool(use_alibi_sqrt)
+        if backend_supports_alibi_sqrt:
+            extra_impl_args["use_alibi_sqrt"] = self.use_alibi_sqrt
         # prefix caching + batch invariance is currently not supported for
         # FLASHINFER and TRITON_MLA.
         if (
@@ -274,8 +285,7 @@ class Attention(nn.Module, AttentionLayerBase):
             kv_sharing_target_layer_name,
             **extra_impl_args,
         )
-        backend_name = self.attn_backend.get_name()
-        self.backend = AttentionBackendEnum.__members__.get(backend_name)
+        self.backend = AttentionBackendEnum[self.attn_backend.get_name()]
         self.dtype = dtype
 
         # For cuda-alike (CUDA and ROCM) and cpu platforms, we control how
@@ -307,18 +317,24 @@ class Attention(nn.Module, AttentionLayerBase):
             for _ in range(vllm_config.parallel_config.pipeline_parallel_size)
         ]
 
-        # Initialize q/k/v range constants.
-        self.q_range = torch.tensor(envs.Q_SCALE_CONSTANT, dtype=torch.float32)
-        self.k_range = torch.tensor(envs.K_SCALE_CONSTANT, dtype=torch.float32)
-        self.v_range = torch.tensor(envs.V_SCALE_CONSTANT, dtype=torch.float32)
+        # Initialize KV cache quantization attributes
+        _init_kv_cache_quant(self, quant_config, prefix)
 
         # for attn backends supporting query quantization
         self.query_quant = None
-        if (
-            self.kv_cache_dtype.startswith("fp8")
-            and self.impl.supports_quant_query_input
+        if self.impl.supports_quant_query_input and self.kv_cache_dtype.startswith(
+            "fp8"
         ):
-            self.query_quant = QuantFP8(static=True, group_shape=GroupShape.PER_TENSOR)
+            is_per_head = (
+                hasattr(self, "q_scale") and self.q_scale.numel() == self.num_kv_heads
+            )
+            block_size = self.head_size * self.num_heads // self.num_kv_heads
+            self.query_quant = QuantFP8(
+                static=True,
+                group_shape=GroupShape(-1, block_size)
+                if is_per_head
+                else GroupShape.PER_TENSOR,
+            )
 
     def forward(
         self,
@@ -355,42 +371,62 @@ class Attention(nn.Module, AttentionLayerBase):
                 query, _ = self.query_quant(query, self._q_scale)
 
         if self.use_output:
-            output_shape = output_shape if output_shape is not None else query.shape
+            if output_shape is None:
+                # Handle both 2D [num_tokens, hidden] and
+                # 3D [num_tokens, heads, head_dim] query
+                num_tokens = query.shape[0]
+                output_shape = torch.Size(
+                    (num_tokens, self.num_heads * self.head_size_v)
+                )
             output = torch.empty(output_shape, dtype=output_dtype, device=query.device)
             hidden_size = output_shape[-1]
             # Reshape the query, key, and value tensors.
             # NOTE(woosuk): We do this outside the custom op to minimize the
             # CPU overheads from the non-CUDA-graph regions.
             query = query.view(-1, self.num_heads, self.head_size)
-            output = output.view(-1, self.num_heads, self.head_size)
+            output = output.view(-1, self.num_heads, self.head_size_v)
             if key is not None:
                 key = key.view(-1, self.num_kv_heads, self.head_size)
             if value is not None:
-                value = value.view(-1, self.num_kv_heads, self.head_size)
+                value = value.view(-1, self.num_kv_heads, self.head_size_v)
             if self.use_direct_call:
-                forward_context: ForwardContext = get_forward_context()
-                attn_metadata = forward_context.attn_metadata
-                if isinstance(attn_metadata, dict):
-                    attn_metadata = attn_metadata[self.layer_name]
-                self_kv_cache = self.kv_cache[forward_context.virtual_engine]
-                self.impl.forward(
-                    self, query, key, value, self_kv_cache, attn_metadata, output=output
+                kv_cache_dummy_dep = None
+                if not self.attn_backend.forward_includes_kv_cache_update:
+                    kv_cache_dummy_dep = unified_kv_cache_update(
+                        key, value, self.layer_name
+                    )
+                unified_attention_with_output(
+                    query,
+                    key,
+                    value,
+                    output,
+                    self.layer_name,
+                    kv_cache_dummy_dep=kv_cache_dummy_dep,
                 )
             else:
+                kv_cache_dummy_dep = None
+                if not self.attn_backend.forward_includes_kv_cache_update and (
+                    # torch can only dispatch custom op if a tensor is passed
+                    key is not None or value is not None
+                ):
+                    kv_cache_dummy_dep = torch.ops.vllm.unified_kv_cache_update(
+                        key, value, self.layer_name
+                    )
                 torch.ops.vllm.unified_attention_with_output(
-                    query, key, value, output, self.layer_name
+                    query,
+                    key,
+                    value,
+                    output,
+                    self.layer_name,
+                    kv_cache_dummy_dep=kv_cache_dummy_dep,
                 )
             return output.view(-1, hidden_size)
         else:
+            assert self.attn_backend.forward_includes_kv_cache_update, (
+                "Split KV cache update not supported when output tensor not provided."
+            )
             if self.use_direct_call:
-                forward_context = get_forward_context()
-                attn_metadata = forward_context.attn_metadata
-                if isinstance(attn_metadata, dict):
-                    attn_metadata = attn_metadata[self.layer_name]
-                self_kv_cache = self.kv_cache[forward_context.virtual_engine]
-                return self.impl.forward(
-                    self, query, key, value, self_kv_cache, attn_metadata
-                )
+                return unified_attention(query, key, value, self.layer_name)
             else:
                 return torch.ops.vllm.unified_attention(
                     query, key, value, self.layer_name
@@ -452,6 +488,7 @@ class Attention(nn.Module, AttentionLayerBase):
                 block_size=block_size,
                 num_kv_heads=self.num_kv_heads,
                 head_size=self.head_size,
+                head_size_v=self.head_size_v,
                 dtype=self.kv_cache_torch_dtype,
             )
 
@@ -506,13 +543,9 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         self.quant_config = quant_config
 
         # Initialize KV cache quantization attributes
-        _init_kv_cache_quant(
-            self,
-            self.quant_config,
-            self.layer_name,
-            kv_cache_dtype,
-            calculate_kv_scales,
-        )
+        self.kv_cache_dtype = kv_cache_dtype
+        self.calculate_kv_scales = calculate_kv_scales
+        _init_kv_cache_quant(self, quant_config, prefix)
 
         dtype = torch.get_default_dtype()
         self.attn_backend = get_attn_backend(
@@ -783,6 +816,55 @@ direct_register_custom_op(
 )
 
 
+def unified_kv_cache_update(
+    key: torch.Tensor,
+    value: torch.Tensor,
+    layer_name: str,
+) -> torch.Tensor:
+    """
+    Returns a dummy that is passed to unified_attention to signal a side effect and
+    the data dependency between them to ensure torch.compile preserves ordering.
+    """
+    forward_context = get_forward_context()
+    attn_layer = forward_context.no_compile_layers[layer_name]
+    kv_cache = attn_layer.kv_cache[forward_context.virtual_engine]
+
+    slot_mapping = forward_context.slot_mapping
+    assert isinstance(slot_mapping, dict), (
+        f"Expected slot_mapping to be a dict, got {type(slot_mapping)}. "
+    )
+    layer_slot_mapping = slot_mapping.get(layer_name)
+    if layer_slot_mapping is not None:
+        assert hasattr(attn_layer.impl, "do_kv_cache_update"), (
+            f"{attn_layer.impl.__class__.__name__} does not support kv cache update"
+        )
+        attn_layer.impl.do_kv_cache_update(
+            attn_layer,
+            key,
+            value,
+            kv_cache,
+            layer_slot_mapping,
+        )
+
+    return torch.empty(0, device=kv_cache.device, dtype=kv_cache.dtype)
+
+
+def unified_kv_cache_update_fake(
+    key: torch.Tensor,
+    value: torch.Tensor,
+    layer_name: str,
+) -> torch.Tensor:
+    return torch.empty(0, device=key.device, dtype=key.dtype)
+
+
+direct_register_custom_op(
+    op_name="unified_kv_cache_update",
+    op_func=unified_kv_cache_update,
+    fake_impl=unified_kv_cache_update_fake,
+    mutates_args=[],
+)
+
+
 @maybe_transfer_kv_layer
 def unified_attention_with_output(
     query: torch.Tensor,
@@ -792,8 +874,14 @@ def unified_attention_with_output(
     layer_name: str,
     output_scale: torch.Tensor | None = None,
     output_block_scale: torch.Tensor | None = None,
+    kv_cache_dummy_dep: torch.Tensor | None = None,
 ) -> None:
+    # kv_cache_dummy_dep is not used but accepting it creates a data dependency
+    # that ensures torch.compile preserves ordering between KV cache update and
+    # attention forward.
+    del kv_cache_dummy_dep
     attn_metadata, self, kv_cache = get_attention_context(layer_name)
+
     self.impl.forward(
         self,
         query,
@@ -815,6 +903,7 @@ def unified_attention_with_output_fake(
     layer_name: str,
     output_scale: torch.Tensor | None = None,
     output_block_scale: torch.Tensor | None = None,
+    kv_cache_dummy_dep: torch.Tensor | None = None,
 ) -> None:
     return
 

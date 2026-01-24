@@ -20,12 +20,6 @@ from torch.nn.attention.flex_attention import (
     or_masks,
 )
 
-from vllm.attention.backends.abstract import (
-    AttentionBackend,
-    AttentionImpl,
-    AttentionType,
-    is_quantized_kv_cache,
-)
 from vllm.config import VllmConfig
 from vllm.config.cache import CacheDType
 from vllm.logger import init_logger
@@ -35,9 +29,13 @@ from vllm.model_executor.layers.batch_invariant import (
 from vllm.platforms import current_platform
 from vllm.utils.math_utils import cdiv
 from vllm.utils.torch_utils import is_torch_equal_or_newer
-from vllm.v1.attention.backends.utils import (
+from vllm.v1.attention.backend import (
+    AttentionBackend,
+    AttentionImpl,
     AttentionMetadataBuilder,
+    AttentionType,
     CommonAttentionMetadata,
+    is_quantized_kv_cache,
 )
 from vllm.v1.kv_cache_interface import AttentionSpec
 
@@ -82,7 +80,7 @@ class FlexAttentionBackend(AttentionBackend):
         torch.bfloat16,
         torch.float32,
     ]
-    supported_kv_cache_dtypes: ClassVar[list[CacheDType]] = ["auto"]
+    supported_kv_cache_dtypes: ClassVar[list[CacheDType]] = ["auto", "bfloat16"]
 
     @staticmethod
     def get_name() -> str:
@@ -215,7 +213,7 @@ def physical_to_logical_mapping(
     )
 
     # Only process valid blocks to avoid garbage values
-    num_blocks_per_seq = cdiv(seq_lens, block_size)
+    num_blocks_per_seq: torch.Tensor = cdiv(seq_lens, block_size)
     mask = (
         torch.arange(max_num_blocks, device=device)[None, :]
         < num_blocks_per_seq[:, None]
@@ -727,9 +725,7 @@ class FlexAttentionMetadataBuilder(AttentionMetadataBuilder[FlexAttentionMetadat
             block_table_tensor, seq_lens, block_size, num_gpu_blocks
         )
 
-        offset_tensor = common_attn_metadata.num_computed_tokens_cpu.to(
-            self.device, non_blocking=True
-        )
+        offset_tensor = common_attn_metadata.compute_num_computed_tokens()
 
         out = FlexAttentionMetadata(
             causal=common_attn_metadata.causal,
