@@ -62,7 +62,7 @@ def _fused_moe_lora_kernel(
     num_experts,
     lora_ids,
     adapter_enabled,
-    MAX_LORAS_TOTAL,  # <<< PR2: new, used for masks when grid axis-2 != max_loras
+    max_loras,  # <<< PR2: rename, used for masks when grid axis-2 != max_loras
     # The stride variables represent how much to increase the ptr by when
     # moving by 1 element in a particular dimension. E.g. `stride_am` is
     # how much to increase `a_ptr` by to get the element one row down
@@ -107,7 +107,6 @@ def _fused_moe_lora_kernel(
         # Early exit for the no moe lora case.
         return
 
-    max_loras = MAX_LORAS_TOTAL  # <<< : was tl.num_programs(axis=2)
     if lora_id >= max_loras:
         return
     grid_k = tl.cdiv(K, BLOCK_SIZE_K * SPLIT_K)
@@ -258,14 +257,13 @@ def _fused_moe_lora_shrink(
     }
 
     b_ptr = _get_ptr(lora_a_stacked, device)
-    max_loras_total = sorted_token_ids.shape[0]  # <<< PR2: new
 
     grid = lambda META: (
         split_k
         * triton.cdiv(EM, META["BLOCK_SIZE_M"])
         * triton.cdiv(N, META["BLOCK_SIZE_N"]),
         len(lora_a_stacked),
-        lora_ids.numel(),  # <<< was lora_a_stacked[0].shape[0]
+        lora_a_stacked[0].shape[0],
     )
     _fused_moe_lora_kernel[grid](
         qcurr_hidden_states,
@@ -282,7 +280,7 @@ def _fused_moe_lora_shrink(
         num_experts,
         lora_ids,
         adapter_enabled,
-        max_loras_total,  #  new
+        lora_a_stacked[0].shape[0],
         qcurr_hidden_states.stride(0),
         qcurr_hidden_states.stride(1),
         w1_lora_a_stacked.stride(0),
@@ -364,12 +362,10 @@ def _fused_moe_lora_expand(
         "launch_pdl": use_gdc,  # triton kernel metadata
     }
 
-    max_loras_total = sorted_token_ids.shape[0]  # <<< PR2: new
-
     grid = lambda META: (
         triton.cdiv(EM, META["BLOCK_SIZE_M"]) * triton.cdiv(N, META["BLOCK_SIZE_N"]),
         len(lora_b_stacked),
-        lora_ids.numel(),  # <<< PR2: was lora_b_stacked[0].shape[0]
+        lora_b_stacked[0].shape[0],
     )
     _fused_moe_lora_kernel[grid](
         a_intermediate_cache1,
@@ -386,7 +382,7 @@ def _fused_moe_lora_expand(
         num_experts,
         lora_ids,
         adapter_enabled,
-        max_loras_total,  # new
+        lora_b_stacked[0].shape[0],
         a_intermediate_cache1.stride(0),
         a_intermediate_cache1.stride(1),
         w1_lora_b_stacked.stride(0),
