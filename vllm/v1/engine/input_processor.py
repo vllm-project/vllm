@@ -206,8 +206,8 @@ class InputProcessor:
         if isinstance(prompt, str):
             return
 
-        mm_data = prompt.get("multi_modal_data") or {}
-        mm_uuids = prompt.get("multi_modal_uuids") or {}
+        mm_data = cast(MultiModalDataDict, prompt.get("multi_modal_data") or {})
+        mm_uuids = cast(MultiModalUUIDDict, prompt.get("multi_modal_uuids") or {})
         if not mm_data and not mm_uuids:
             return
 
