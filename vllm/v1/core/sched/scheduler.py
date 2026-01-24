@@ -1619,7 +1619,7 @@ class Scheduler(SchedulerInterface):
         if existing is not None:
             update = StreamingUpdate.from_request(request)
             if existing.status != RequestStatus.WAITING_FOR_STREAMING_REQ:
-                assert existing.streaming_queue is not None
+                assert existing.streaming_queue is not None, "duplicate request id"
                 # Queue next input chunk (or finished sentinel).
                 existing.streaming_queue.append(update)
             elif update is not None:
