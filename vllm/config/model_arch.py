@@ -10,8 +10,8 @@ from vllm.logger import init_logger
 logger = init_logger(__name__)
 
 
-class DerivedMaxModelLenInfo(NamedTuple):
-    """Information about the derived maximum model length."""
+class MaxModelLenInfo(NamedTuple):
+    """Information about the maximum model length."""
 
     derived: float
     """Maximum supported sequence length after RoPE scaling.
@@ -26,6 +26,10 @@ class DerivedMaxModelLenInfo(NamedTuple):
     """For LongRoPE models only: original_max_position_embeddings.
     Used as the default max_model_len to avoid performance degradation.
     None for non-LongRoPE models (derived is used instead)."""
+
+    model_max_length: int | None
+    """The model_max_length from hf_config. Used as a fallback for validation
+    when user-specified max_model_len exceeds derived."""
 
 
 @dataclass(config=ConfigDict(arbitrary_types_allowed=True))
@@ -71,7 +75,7 @@ class ModelArchitectureConfig:
     is_deepseek_mla: bool
     """Whether the model is a DeepSeek MLA model."""
 
-    derived_max_model_len_info: DerivedMaxModelLenInfo
+    max_model_len_info: MaxModelLenInfo
     """Derived maximum model length information including RoPE scaling."""
 
     # RoPE-related fields

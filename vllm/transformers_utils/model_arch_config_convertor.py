@@ -9,7 +9,7 @@ from transformers import PretrainedConfig
 
 from vllm import envs
 from vllm.config.model_arch import (
-    DerivedMaxModelLenInfo,
+    MaxModelLenInfo,
     ModelArchitectureConfig,
 )
 from vllm.config.utils import getattr_iter
@@ -210,7 +210,7 @@ class ModelArchConfigConvertorBase:
             )
         return False
 
-    def derive_max_model_len_info(self) -> DerivedMaxModelLenInfo:
+    def derive_max_model_len_info(self) -> MaxModelLenInfo:
         """Derive maximum model length including RoPE scaling factors.
 
         This method computes the derived max model length by:
@@ -314,10 +314,14 @@ class ModelArchConfigConvertorBase:
         else:
             default_max_model_len = None
 
-        return DerivedMaxModelLenInfo(
+        # Get model_max_length for validation fallback
+        model_max_length = getattr(self.hf_config, "model_max_length", None)
+
+        return MaxModelLenInfo(
             derived=derived_max_model_len,
             derived_key=max_len_key,
             default=default_max_model_len,
+            model_max_length=model_max_length,
         )
 
     def get_uses_mrope(self) -> bool:
@@ -340,7 +344,7 @@ class ModelArchConfigConvertorBase:
             num_experts=self.get_num_experts(),
             quantization_config=self.get_quantization_config(),
             is_deepseek_mla=self.is_deepseek_mla(),
-            derived_max_model_len_info=self.derive_max_model_len_info(),
+            max_model_len_info=self.derive_max_model_len_info(),
             # RoPE-related fields
             uses_mrope=self.get_uses_mrope(),
             uses_xdrope_dim=self.get_uses_xdrope_dim(),
