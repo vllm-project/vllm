@@ -36,11 +36,14 @@ def _get_ptr(lora_weights: list[torch.Tensor], device: torch.device):
     return _LORA_PTR_DICT.get(key)
 
 
-def _adjust_kernel_input(
+def _adjust_kernel_inputs(
     max_loras: int,
     sorted_token_ids: torch.Tensor | None,
     expert_ids: torch.Tensor,
 ):
+    """
+    helper function to adjust kernel inputs when sorted_token_ids is None
+    """
     if sorted_token_ids is None:
         stride_tl = 0
         stride_el = 0
@@ -283,7 +286,7 @@ def _fused_moe_lora_shrink(
 
     b_ptr = _get_ptr(lora_a_stacked, device)
 
-    grid_lora_dim, stride_tl, stride_el = _adjust_kernel_input(
+    grid_lora_dim, stride_tl, stride_el = _adjust_kernel_inputs(
         w1_lora_a_stacked.shape[0], sorted_token_ids, expert_ids
     )
     grid = lambda META: (
@@ -393,7 +396,7 @@ def _fused_moe_lora_expand(
         "launch_pdl": use_gdc,  # triton kernel metadata
     }
 
-    grid_lora_dim, stride_tl, stride_el = _adjust_kernel_input(
+    grid_lora_dim, stride_tl, stride_el = _adjust_kernel_inputs(
         w1_lora_b_stacked.shape[0], sorted_token_ids, expert_ids
     )
 
