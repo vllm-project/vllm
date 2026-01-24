@@ -272,24 +272,25 @@ class SpecDecodeBaseProposer:
         # And for EAGLE + parallel drafting, we need the hidden state tensor to use
         # for those masked slots.
 
-        # For now, only PARD is supported. The token should be in the HF config.
         model_hf_config = self.draft_model_config.hf_config
         if hasattr(model_hf_config, "pard_token"):
             self.parallel_drafting_token_id = model_hf_config.pard_token
+        elif hasattr(model_hf_config, "ptd_token_id"):
+            self.parallel_drafting_token_id = model_hf_config.ptd_token_id
         else:
-            raise ValueError(
-                "For parallel drafting, the draft model config must have "
-                "`pard_token` specified in its HuggingFace config."
+            pard_token = 201020
+            self.parallel_drafting_token_id = pard_token
+            logger.info(
+                "Using default token ID of %d for parallel drafting", pard_token
             )
+            # raise ValueError(
+            #     "For parallel drafting, the draft model config must have "
+            #     "`pard_token` specified in its HuggingFace config."
+            # )
 
         if self.pass_hidden_states_to_model:
-            # The hidden state tensor should be a model parameter.
-            self.parallel_drafting_hidden_state_tensor = (
-                self.model.mask_target_hidden_state
-            )
-            assert self.parallel_drafting_hidden_state_tensor is not None, (
-                "For parallel drafting with pass_hidden_states_to_model=True, "
-                "the draft model must have `mask_target_hidden_state` parameter."
+            self.parallel_drafting_hidden_state_tensor = torch.empty(
+                self.hidden_size, dtype=self.dtype, device=self.device
             )
 
     def _get_positions(self, num_tokens: int):
@@ -689,7 +690,7 @@ class SpecDecodeBaseProposer:
             )
 
             last_token_indices = torch.empty(
-                batch_size * self.net_num_new_slots_per_request,
+                batch_size * self.extra_slots_per_request,
                 dtype=torch.int32,
                 device=self.device,
             )
@@ -733,10 +734,9 @@ class SpecDecodeBaseProposer:
             if self.pass_hidden_states_to_model:
                 assert self.parallel_drafting_hidden_state_tensor is not None
                 self.hidden_states[out_hidden_state_mapping] = target_hidden_states
-                self.hidden_states[:total_num_output_tokens].masked_fill_(
-                    self.is_masked_token_mask[:total_num_output_tokens].unsqueeze(-1),
-                    self.parallel_drafting_hidden_state_tensor,
-                )
+                self.hidden_states[:total_num_output_tokens][
+                    self.is_masked_token_mask[:total_num_output_tokens]
+                ] = self.parallel_drafting_hidden_state_tensor
 
             # 2.
             # Recompute the slot mapping based on the new positions and
@@ -1388,6 +1388,16 @@ class SpecDecodeBaseProposer:
             if hasattr(self.model, "lm_head"):
                 del self.model.lm_head
             self.model.lm_head = target_language_model.lm_head
+
+        if self.parallel_drafting and self.pass_hidden_states_to_model:
+            assert self.parallel_drafting_hidden_state_tensor is not None
+            self.parallel_drafting_hidden_state_tensor.copy_(
+                self.model.combine_hidden_states(
+                    self.model.mask_hidden.view(3 * self.hidden_size)
+                )
+                if self.eagle3_use_aux_hidden_state
+                else self.model.mask_hidden.view(self.hidden_size)
+            )
 
     @torch.inference_mode()
     def dummy_run(
