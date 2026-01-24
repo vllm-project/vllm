@@ -556,7 +556,10 @@ class PixtralForConditionalGeneration(
                     if self.patch_merger is None:
                         continue
                     # Load vision patch merger weights directly
-                    trimmed_name = ".".join(name.split(".")[1:])
+                    if name.startswith("multi_modal_projector.patch_merger"):
+                        trimmed_name = ".".join(name.split(".")[2:])
+                    else:
+                        trimmed_name = ".".join(name.split(".")[1:])
                     param = patch_merger_dict.get(trimmed_name)
                     if param is not None:
                         with torch.no_grad():
