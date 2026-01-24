@@ -1,6 +1,6 @@
 # --8<-- [start:installation]
 
-vLLM offers basic model inferencing and serving on Arm CPU platform, with support NEON, data types FP32, FP16 and BF16.
+vLLM offers basic model inferencing and serving on Arm CPU platform, with support for NEON, data types FP32, FP16 and BF16.
 
 # --8<-- [end:installation]
 # --8<-- [start:requirements]
@@ -19,12 +19,12 @@ Pre-built vLLM wheels for Arm are available since version 0.11.2. These wheels c
 
 ```bash
 export VLLM_VERSION=$(curl -s https://api.github.com/repos/vllm-project/vllm/releases/latest | jq -r .tag_name | sed 's/^v//')
-uv pip install vllm --extra-index-url https://wheels.vllm.ai/${VLLM_VERSION}/cpu --index-strategy first-index
+uv pip install https://github.com/vllm-project/vllm/releases/download/v${VLLM_VERSION}/vllm-${VLLM_VERSION}+cpu-cp38-abi3-manylinux_2_35_aarch64.whl
 ```
 
 ??? console "pip"
     ```bash
-    pip install vllm==${VLLM_VERSION}+cpu --extra-index-url https://wheels.vllm.ai/${VLLM_VERSION}/cpu
+    pip install https://github.com/vllm-project/vllm/releases/download/v${VLLM_VERSION}/vllm-${VLLM_VERSION}+cpu-cp38-abi3-manylinux_2_35_aarch64.whl
     ```
 
 !!! warning "set `LD_PRELOAD`"

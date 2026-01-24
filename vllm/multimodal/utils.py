@@ -3,28 +3,33 @@
 
 import asyncio
 import atexit
-from collections.abc import Generator, Set
+import mimetypes
+from collections.abc import Generator
 from concurrent.futures import ThreadPoolExecutor
 from itertools import groupby
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, TypeVar
-from urllib.parse import ParseResult, urlparse
 from urllib.request import url2pathname
 
 import numpy as np
 import numpy.typing as npt
 import torch
 from PIL import Image, UnidentifiedImageError
+from urllib3.util import Url, parse_url
 
 import vllm.envs as envs
 from vllm.connections import HTTPConnection, global_http_connection
 from vllm.logger import init_logger
 from vllm.utils.registry import ExtensionManager
 
-from .audio import AudioEmbeddingMediaIO, AudioMediaIO
-from .base import MediaIO
-from .image import ImageEmbeddingMediaIO, ImageMediaIO
-from .video import VideoMediaIO
+from .media import (
+    AudioEmbeddingMediaIO,
+    AudioMediaIO,
+    ImageEmbeddingMediaIO,
+    ImageMediaIO,
+    MediaIO,
+    VideoMediaIO,
+)
 
 if TYPE_CHECKING:
     from .inputs import (
@@ -100,11 +105,14 @@ class MediaConnector:
 
     def _load_data_url(
         self,
-        url_spec: ParseResult,
+        url_spec: Url,
         media_io: MediaIO[_M],
     ) -> _M:  # type: ignore[type-var]
-        data_spec, data = url_spec.path.split(",", 1)
+        url_spec_path = url_spec.path or ""
+        data_spec, data = url_spec_path.split(",", 1)
         media_type, data_type = data_spec.split(";", 1)
+        # media_type starts with a leading "/" (e.g., "/video/jpeg")
+        media_type = media_type.lstrip("/")
 
         if data_type != "base64":
             msg = "Only base64 data URLs are supported for now."
@@ -114,7 +122,7 @@ class MediaConnector:
 
     def _load_file_url(
         self,
-        url_spec: ParseResult,
+        url_spec: Url,
         media_io: MediaIO[_M],
     ) -> _M:  # type: ignore[type-var]
         allowed_local_media_path = self.allowed_local_media_path
@@ -123,7 +131,9 @@ class MediaConnector:
                 "Cannot load local files without `--allowed-local-media-path`."
             )
 
-        filepath = Path(url2pathname(url_spec.netloc + url_spec.path))
+        url_spec_path = url_spec.path or ""
+        url_spec_netloc = url_spec.netloc or ""
+        filepath = Path(url2pathname(url_spec_netloc + url_spec_path))
         if allowed_local_media_path not in filepath.resolve().parents:
             raise ValueError(
                 f"The file path {filepath} must be a subpath "
@@ -132,7 +142,7 @@ class MediaConnector:
 
         return media_io.load_file(filepath)
 
-    def _assert_url_in_allowed_media_domains(self, url_spec: ParseResult) -> None:
+    def _assert_url_in_allowed_media_domains(self, url_spec: Url) -> None:
         if (
             self.allowed_media_domains
             and url_spec.hostname not in self.allowed_media_domains
@@ -150,9 +160,9 @@ class MediaConnector:
         *,
         fetch_timeout: int | None = None,
     ) -> _M:  # type: ignore[type-var]
-        url_spec = urlparse(url)
+        url_spec = parse_url(url)
 
-        if url_spec.scheme.startswith("http"):
+        if url_spec.scheme and url_spec.scheme.startswith("http"):
             self._assert_url_in_allowed_media_domains(url_spec)
 
             connection = self.connection
@@ -180,10 +190,10 @@ class MediaConnector:
         *,
         fetch_timeout: int | None = None,
     ) -> _M:
-        url_spec = urlparse(url)
+        url_spec = parse_url(url)
         loop = asyncio.get_running_loop()
 
-        if url_spec.scheme.startswith("http"):
+        if url_spec.scheme and url_spec.scheme.startswith("http"):
             self._assert_url_in_allowed_media_domains(url_spec)
 
             connection = self.connection
@@ -357,17 +367,31 @@ class MediaConnector:
 def encode_audio_base64(
     audio: np.ndarray,
     sampling_rate: int,
+    *,
+    format: str = "WAV",
 ) -> str:
     """Encode audio as base64."""
     audio_io = AudioMediaIO()
-    return audio_io.encode_base64((audio, sampling_rate))
+    return audio_io.encode_base64((audio, sampling_rate), audio_format=format)
+
+
+def encode_audio_url(
+    audio: np.ndarray,
+    sampling_rate: int,
+    *,
+    format: str = "WAV",
+) -> str:
+    """Encode audio as a data URL."""
+    audio_b64 = encode_audio_base64(audio, sampling_rate, format=format)
+    mimetype = mimetypes.types_map.get("." + format.lower(), "audio")
+    return f"data:{mimetype};base64,{audio_b64}"
 
 
 def encode_image_base64(
     image: Image.Image,
     *,
     image_mode: str = "RGB",
-    format: str = "JPEG",
+    format: str | None = None,
 ) -> str:
     """
     Encode a pillow image to base64 format.
@@ -378,10 +402,45 @@ def encode_image_base64(
     return image_io.encode_base64(image, image_format=format)
 
 
-def encode_video_base64(frames: npt.NDArray) -> str:
+def encode_image_url(
+    image: Image.Image,
+    *,
+    image_mode: str = "RGB",
+    format: str = "PNG",
+) -> str:
+    """
+    Encode a pillow image as a data URL.
+
+    By default, the image is converted into RGB format before being encoded.
+    """
+    image_b64 = encode_image_base64(image, image_mode=image_mode, format=format)
+    mimetype = mimetypes.types_map.get("." + format.lower(), "image")
+    return f"data:{mimetype};base64,{image_b64}"
+
+
+def encode_video_base64(
+    frames: npt.NDArray,
+    *,
+    format: str = "JPEG",
+) -> str:
     image_io = ImageMediaIO()
     video_io = VideoMediaIO(image_io)
-    return video_io.encode_base64(frames)
+    return video_io.encode_base64(frames, video_format=format)
+
+
+def encode_video_url(
+    frames: npt.NDArray,
+    *,
+    format: str = "JPEG",
+) -> str:
+    video_b64 = encode_video_base64(frames, format=format)
+
+    if format.lower() == "jpeg":
+        mimetype = "video/jpeg"
+    else:
+        mimetype = mimetypes.types_map.get("." + format.lower(), "video")
+
+    return f"data:{mimetype};base64,{video_b64}"
 
 
 def argsort_mm_positions(
@@ -412,8 +471,6 @@ def group_mm_kwargs_by_modality(
     *,
     device: torch.types.Device = None,
     pin_memory: bool = False,
-    merge_by_field_config: bool | None = None,
-    multimodal_cpu_fields: Set[str] | None = None,
 ) -> Generator[tuple[str, int, BatchedTensorInputs], None, None]:
     """Group consecutive `MultiModalKwargsItem`s from `mm_kwargs` with the same
     modality together into the same `MultiModalKwargs` instance.
@@ -426,17 +483,6 @@ def group_mm_kwargs_by_modality(
     Yields:
         A tuple `(modality, num_items, grouped_kwargs)`.
     """
-    if merge_by_field_config is not None:
-        logger.warning_once(
-            "The `merge_by_field_config` argument of `group_mm_kwargs_by_modality` "
-            "is deprecated and will be removed in v0.14."
-        )
-    if multimodal_cpu_fields is not None:
-        logger.warning_once(
-            "The `multimodal_cpu_fields` argument of `group_mm_kwargs_by_modality` "
-            "is deprecated and will be removed in v0.14."
-        )
-
     from vllm.multimodal.inputs import MultiModalKwargsItems
 
     for modality, items in groupby(mm_kwargs, key=lambda item: item.modality):

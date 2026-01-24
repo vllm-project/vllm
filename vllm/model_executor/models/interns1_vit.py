@@ -14,8 +14,8 @@ import torch.nn as nn
 from transformers import PretrainedConfig
 from transformers.utils import torch_int
 
-from vllm.attention.layer import MultiHeadAttention
 from vllm.model_executor.layers.activation import get_act_fn
+from vllm.model_executor.layers.attention.mm_encoder_attention import MMEncoderAttention
 from vllm.model_executor.layers.conv import Conv2dLayer
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import ColumnParallelLinear, RowParallelLinear
@@ -214,8 +214,8 @@ class InternSdpaAttention(nn.Module):
 
         self.projection_layer = nn.Linear(self.dummy_dim, self.embed_dim)
 
-        # Use unified MultiHeadAttention with automatic backend selection
-        self.attn = MultiHeadAttention(self.num_heads, self.head_dim, self.scale)
+        # Use unified MMEncoderAttention with automatic backend selection
+        self.attn = MMEncoderAttention(self.num_heads, self.head_dim, self.scale)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """x shape: (B, N, C)"""
@@ -228,7 +228,7 @@ class InternSdpaAttention(nn.Module):
             q = self.q_norm(q)
             k = self.k_norm(k)
 
-        # Use unified MultiHeadAttention with automatic backend selection
+        # Use unified MMEncoderAttention with automatic backend selection
         x = self.attn(q, k, v)
 
         x = self.projection_layer(x)

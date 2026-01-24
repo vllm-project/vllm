@@ -69,6 +69,7 @@ class WorkerLoRAManager:
     def create_lora_manager(
         self,
         model: torch.nn.Module,
+        vllm_config: VllmConfig | None = None,
     ) -> Any:
         lora_manager = create_lora_manager(
             model,
@@ -78,6 +79,7 @@ class WorkerLoRAManager:
             lora_config=self.lora_config,
             device=self.device,
             lora_manager_cls=self._manager_cls,
+            vllm_config=vllm_config,
         )
         self._adapter_manager = lora_manager
         return lora_manager.model
@@ -161,6 +163,12 @@ class WorkerLoRAManager:
         if mapping is not None:
             self._adapter_manager.set_adapter_mapping(mapping)
 
+    def supports_tower_connector_lora(self) -> bool:
+        return (
+            self._adapter_manager.supports_mm
+            and self._adapter_manager.supports_tower_connector_lora
+        )
+
     def _apply_adapters(self, adapter_requests: set[Any]) -> None:
         existing_adapters = self.list_adapters()
         models_map = {
@@ -210,6 +218,7 @@ class LRUCacheWorkerLoRAManager(WorkerLoRAManager):
     def create_lora_manager(
         self,
         model: torch.nn.Module,
+        vllm_config: VllmConfig | None = None,
     ) -> Any:
         lora_manager = create_lora_manager(
             model,
@@ -219,6 +228,7 @@ class LRUCacheWorkerLoRAManager(WorkerLoRAManager):
             lora_config=self.lora_config,
             device=self.device,
             max_num_batched_tokens=self.max_num_batched_tokens,
+            vllm_config=vllm_config,
         )
         self._adapter_manager = lora_manager
         return lora_manager.model
@@ -244,12 +254,19 @@ class LRUCacheWorkerLoRAManager(WorkerLoRAManager):
         # This is ok because it's currently only called from
         # the single-threaded core engine loop.
 
-        if lora_request.lora_int_id not in self.list_adapters():
+        if (
+            lora_request.lora_int_id not in self.list_adapters()
+            or lora_request.load_inplace
+        ):
             # Load the new adapter first to ensure it is actually valid, before
             # evicting any existing adapters.
             # This may cause the # of loaded lora adapters to very temporarily
             # exceed `--max-cpu-loras`.
             lora = self._load_adapter(lora_request)
+
+            # Remove the existing adapter if it exists
+            # Use case for LoRA inplace
+            self._adapter_manager.remove_adapter(lora.id)
 
             # Loading succeeded, now check if we will exceed cache capacity and
             # evict if the oldest adapter if so
