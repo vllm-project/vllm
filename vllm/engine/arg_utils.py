@@ -60,6 +60,7 @@ from vllm.config.cache import (
     BlockSize,
     CacheDType,
     KVOffloadingBackend,
+    MambaCacheMode,
     MambaDType,
     PrefixCachingHashAlgo,
 )
@@ -467,6 +468,7 @@ class EngineArgs:
     mm_shm_cache_max_object_size_mb: int = (
         MultiModalConfig.mm_shm_cache_max_object_size_mb
     )
+    mm_encoder_only: bool = MultiModalConfig.mm_encoder_only
     mm_encoder_tp_mode: MMEncoderTPMode = MultiModalConfig.mm_encoder_tp_mode
     mm_encoder_attn_backend: AttentionBackendEnum | str | None = (
         MultiModalConfig.mm_encoder_attn_backend
@@ -555,6 +557,7 @@ class EngineArgs:
     mamba_cache_dtype: MambaDType = CacheConfig.mamba_cache_dtype
     mamba_ssm_cache_dtype: MambaDType = CacheConfig.mamba_ssm_cache_dtype
     mamba_block_size: int | None = get_field(CacheConfig, "mamba_block_size")
+    mamba_cache_mode: MambaCacheMode = CacheConfig.mamba_cache_mode
 
     additional_config: dict[str, Any] = get_field(VllmConfig, "additional_config")
 
@@ -939,6 +942,9 @@ class EngineArgs:
             "--mamba-block-size", **cache_kwargs["mamba_block_size"]
         )
         cache_group.add_argument(
+            "--mamba-cache-mode", **cache_kwargs["mamba_cache_mode"]
+        )
+        cache_group.add_argument(
             "--kv-offloading-size", **cache_kwargs["kv_offloading_size"]
         )
         cache_group.add_argument(
@@ -972,6 +978,9 @@ class EngineArgs:
         multimodal_group.add_argument(
             "--mm-shm-cache-max-object-size-mb",
             **multimodal_kwargs["mm_shm_cache_max_object_size_mb"],
+        )
+        multimodal_group.add_argument(
+            "--mm-encoder-only", **multimodal_kwargs["mm_encoder_only"]
         )
         multimodal_group.add_argument(
             "--mm-encoder-tp-mode", **multimodal_kwargs["mm_encoder_tp_mode"]
@@ -1256,6 +1265,7 @@ class EngineArgs:
             mm_processor_cache_gb=self.mm_processor_cache_gb,
             mm_processor_cache_type=self.mm_processor_cache_type,
             mm_shm_cache_max_object_size_mb=self.mm_shm_cache_max_object_size_mb,
+            mm_encoder_only=self.mm_encoder_only,
             mm_encoder_tp_mode=self.mm_encoder_tp_mode,
             mm_encoder_attn_backend=self.mm_encoder_attn_backend,
             pooler_config=self.pooler_config,
@@ -1411,6 +1421,7 @@ class EngineArgs:
             mamba_cache_dtype=self.mamba_cache_dtype,
             mamba_ssm_cache_dtype=self.mamba_ssm_cache_dtype,
             mamba_block_size=self.mamba_block_size,
+            mamba_cache_mode=self.mamba_cache_mode,
             kv_offloading_size=self.kv_offloading_size,
             kv_offloading_backend=self.kv_offloading_backend,
         )
@@ -1775,21 +1786,6 @@ class EngineArgs:
             != SchedulerConfig.max_long_partial_prefills
         ):
             _raise_unsupported_error(feature_name="Concurrent Partial Prefill")
-
-        # N-gram, Medusa, and Eagle are supported for speculative decoding.
-        if self.speculative_config is not None:
-            # speculative_config could still be a dict at this point
-            if isinstance(self.speculative_config, dict):
-                method = self.speculative_config.get("method", None)
-            else:
-                method = self.speculative_config.method
-
-            if method == "draft_model":
-                raise NotImplementedError(
-                    "Draft model speculative decoding is not supported yet. "
-                    "Please consider using other speculative decoding methods "
-                    "such as ngram, medusa, eagle, or mtp."
-                )
 
         if self.pipeline_parallel_size > 1:
             supports_pp = getattr(
