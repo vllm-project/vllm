@@ -61,10 +61,7 @@ def collect_mm_processor_stats(
     ]
     stats_by_stage = {key: [] for key in stat_keys}
 
-    # Skip warmup requests
-    stats_list = list(all_stats.values())[num_warmup_reqs:]
-
-    for stats_dict in stats_list:
+    for stats_dict in all_stats.values():
         for key in stat_keys:
             if key in stats_dict:
                 stats_by_stage[key].append(stats_dict[key])
