@@ -195,7 +195,7 @@ class TerratorchMultiModalProcessor(BaseMultiModalProcessor):
             mm_items, hf_processor_mm_kwargs, tokenization_kwargs, mm_uuids=mm_uuids
         )
 
-        mm_processed_data = BatchFeature(mm_data["image"])
+        mm_processed_data = BatchFeature(mm_data.get("image", mm_data))
         mm_placeholders = {"image": [PlaceholderRange(offset=0, length=0)]}
 
         mm_kwargs = MultiModalKwargsItems.from_hf_inputs(
