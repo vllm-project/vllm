@@ -26,15 +26,15 @@ class MoriPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         use_fp8_dispatch: bool = False,
     ):
         super().__init__(defer_input_quant)
+        if defer_input_quant:
+            raise NotImplementedError(
+                f"{self.__class__.__name__} does not support defer_input_quant=True. "
+                "Please select an MoE kernel that accepts quantized inputs."
+            )
         self.mori_op = mori_op
         self.num_dispatchers_ = num_dispatchers
         self.max_tokens_per_rank = max_tokens_per_rank
         self.use_fp8_dispatch = use_fp8_dispatch
-
-        if defer_input_quant:
-            raise NotImplementedError(
-                "MoriPrepareAndFinalize does not support defer_input_quant=True."
-            )
 
     @property
     def activation_format(self) -> mk.FusedMoEActivationFormat:

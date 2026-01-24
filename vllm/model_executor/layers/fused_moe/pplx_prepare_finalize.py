@@ -71,9 +71,13 @@ class PplxPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         num_local_experts: int,
         num_dispatchers: int,
     ):
-        if defer_input_quant:
-            raise NotImplementedError()
         super().__init__(defer_input_quant=defer_input_quant)
+        if defer_input_quant:
+            raise NotImplementedError(
+                f"{self.__class__.__name__} does not support defer_input_quant=True. "
+                "Please select an MoE kernel that accepts quantized inputs."
+            )
+
         assert max_num_tokens > 0
         assert num_local_experts > 0
         self.a2a = a2a

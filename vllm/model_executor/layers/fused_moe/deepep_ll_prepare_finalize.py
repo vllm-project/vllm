@@ -93,9 +93,12 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         physical_to_global: torch.Tensor | None = None,
         local_expert_global_ids: torch.Tensor | None = None,
     ):
-        if defer_input_quant:
-            raise NotImplementedError()
         super().__init__(defer_input_quant=defer_input_quant)
+        if defer_input_quant:
+            raise NotImplementedError(
+                f"{self.__class__.__name__} does not support defer_input_quant=True. "
+                "Please select an MoE kernel that accepts quantized inputs."
+            )
 
         self.buffer = buffer
         self.max_tokens_per_rank = max_tokens_per_rank
