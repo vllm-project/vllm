@@ -411,7 +411,6 @@ def use_fused_moe_lora_kernel_naive(
     )
 
 
-# test the unpermute path of fused_moe_lora kernel
 @pytest.mark.parametrize("num_tokens", [1, 2, 4, 8])
 @pytest.mark.parametrize("top_k_num", [1, 2])
 @pytest.mark.parametrize("num_experts", [64, 128])
