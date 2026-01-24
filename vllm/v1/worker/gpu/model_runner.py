@@ -882,14 +882,17 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             if self.uses_mrope:
                 assert input_batch.mrope_positions is not None
                 positions = input_batch.mrope_positions
-            slot_mappings = self.block_tables.compute_slot_mappings(
-                input_batch.idx_mapping,
-                input_batch.query_start_loc,
-                input_batch.positions[: input_batch.num_tokens],
-            )
-            slot_mappings_by_layer = build_slot_mappings_by_layer(
-                slot_mappings, self.kv_cache_config
-            )
+
+            slot_mappings_by_layer = None
+            if not skip_attn_for_dummy_run:
+                slot_mappings = self.block_tables.compute_slot_mappings(
+                    input_batch.idx_mapping,
+                    input_batch.query_start_loc,
+                    input_batch.positions[: input_batch.num_tokens],
+                )
+                slot_mappings_by_layer = build_slot_mappings_by_layer(
+                    slot_mappings, self.kv_cache_config
+                )
             with set_forward_context(
                 input_batch.attn_metadata,
                 self.vllm_config,
