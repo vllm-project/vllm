@@ -300,7 +300,7 @@ class Eagle3LlamaForCausalLM(LlamaForCausalLM):
             "mask_hidden",
             torch.zeros(
                 1,
-                (1 if self.model.use_aux_hidden_state else 3) * self.config.hidden_size,
+                (3 if self.model.use_aux_hidden_state else 1) * self.config.hidden_size,
             ),
             persistent=False,
         )
