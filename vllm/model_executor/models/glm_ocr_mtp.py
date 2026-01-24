@@ -220,7 +220,6 @@ class GlmOcrMTP(nn.Module, SupportsPP):
 
                 if is_pp_missing_parameter(name, self):
                     continue
-                print(name)
                 param = params_dict[name]
                 weight_loader = getattr(param, "weight_loader", default_weight_loader)
                 weight_loader(param, loaded_weight)
@@ -233,6 +232,8 @@ class GlmOcrMTP(nn.Module, SupportsPP):
         Add .mtp_block for modules in transformer layer block for spec layer
         and rename shared layer weights to be top level.
         """
+        name = name.replace("model.language_model.layers", "model.layers")
+
         spec_layer_weight_names = [
             "embed_tokens",
             "enorm",
@@ -257,11 +258,4 @@ class GlmOcrMTP(nn.Module, SupportsPP):
         elif shared_weight:
             # treat shared weights as top level weights
             name = name.replace(f"model.layers.{spec_layer}.", "model.")
-        elif spec_layer_weight:
-            # treat VLM model type weights to llm weights
-            name = name.replace(
-                f"model.language_model.layers.{spec_layer}.",
-                f"model.layers.{spec_layer}.",
-            )
-
         return name
