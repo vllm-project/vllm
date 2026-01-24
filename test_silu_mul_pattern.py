@@ -98,7 +98,6 @@ with pass_context(Range(start=1, end=8)):
     compiled_fn = torch.compile(silu_mul_then_quant, backend=debug_backend, fullgraph=True)
     
     print("\n4. Running compiled function...")
-    print("   (Watch for 'FUSED KERNEL TRIGGERED!')\n")
     
     with torch.no_grad():
         compiled_out, compiled_scales = compiled_fn(x)
@@ -110,7 +109,7 @@ match = torch.allclose(baseline_out.float(), compiled_out.float(), atol=1.0)
 print(f"   Results match: {match}")
 
 if not match:
-    print("\n   ⚠️  Pattern did not fire - checking why...")
+    print("\n   Pattern did not fire - checking why...")
     print("   - Did you see 'FUSED KERNEL TRIGGERED!' above?")
     print("   - If not, check the captured graph ops above")
 
