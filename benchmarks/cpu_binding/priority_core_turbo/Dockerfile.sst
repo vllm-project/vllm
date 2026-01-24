@@ -24,6 +24,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libnl-genl-3-dev \
     libnl-route-3-dev \
     kmod \
+    numactl \
+    jq \
+    bc \
     util-linux \
     python3 \
     sudo \
