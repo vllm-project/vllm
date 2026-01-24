@@ -200,7 +200,7 @@ class SiluMulBlockQuantPattern:
             # Match silu_mul
             d = input.shape[-1] // 2
             gate = input[..., :d]
-            silu = F.silu(gate)
+            silu = torch.nn.functional.silu(gate)
             up = input[..., d:]
             silu_out = silu * up
             
