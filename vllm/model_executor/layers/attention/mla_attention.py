@@ -1181,6 +1181,7 @@ class MLACommonBaseImpl(MLAAttentionImpl[A], Generic[A]):
         kv_b_proj: ColumnParallelLinear,
         indexer=None,
         q_pad_num_heads: int | None = None,
+        rotary_emb: torch.nn.Module | None = None,
     ) -> None:
         if kv_sharing_target_layer_name is not None:
             raise NotImplementedError("KV sharing is not supported for MLA")
@@ -1201,6 +1202,7 @@ class MLACommonBaseImpl(MLAAttentionImpl[A], Generic[A]):
         self.indexer = indexer
         self.q_pad_num_heads = q_pad_num_heads
         self.is_aiter_triton_fp8_bmm_enabled = rocm_aiter_ops.is_fp8bmm_enabled()
+        self.rotary_emb = rotary_emb
 
         # If kv_b_proj_weight is unquantized, quantize it to mxfp4 if supported
         self.is_aiter_triton_fp4_bmm_enabled = (
@@ -1888,6 +1890,41 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
             output_prefill = output_prefill[..., : v.shape[-1]].flatten(start_dim=-2)
             output.copy_(output_prefill)
 
+    def _fused_rope_quant(
+        self,
+        ql_nope: torch.Tensor,
+        q_pe: torch.Tensor,
+        k_nope: torch.Tensor,
+        k_pe: torch.Tensor,
+        positions: torch.Tensor,
+        q_scale: float,
+        k_scale: float,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Fused RoPE + FP8 quantization for Q and K.
+
+        This method should be overridden by subclasses that support
+        fused RoPE+quant (e.g., FlashInferMLAImpl).
+
+        Args:
+            ql_nope: Projected q_nope. Shape: [B, N, L] where L = kv_lora_rank.
+            q_pe: Raw q_pe (no RoPE yet). Shape: [B, N, R] where R = qk_rope_head_dim.
+            k_nope: k_c_normed (latent). Shape: [B, L] (2D, no head dim).
+            k_pe: Raw k_pe (no RoPE yet). Shape: [B, R] (2D, squeezed by caller).
+            positions: Position indices. Shape: [B]
+            q_scale: Scale for FP8 quantization of Q (host float).
+            k_scale: Scale for FP8 quantization of K (host float).
+
+        Returns:
+            tuple of:
+            - q_out: FP8 quantized Q with RoPE applied. Shape: [B, N, L+R]
+            - k_nope_out: FP8 quantized k_nope. Shape: [B, L]
+            - k_pe_out: FP8 quantized k_pe with RoPE. Shape: [B, R]
+        """
+        raise NotImplementedError(
+            "Fused RoPE+quant not implemented for this backend. "
+            "Set use_fused_rope_quant=False or use a backend that supports it."
+        )
+
     @abstractmethod
     def _forward_decode(
         self,
@@ -1903,12 +1940,13 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
         layer: AttentionLayer,
         q: torch.Tensor,
         k_c_normed: torch.Tensor,  # key in unified attn
-        k_pe: torch.Tensor,  # value in unified attn
+        k_pe: torch.Tensor,  # value in unified attn (raw, no RoPE yet)
         kv_cache: torch.Tensor,
         attn_metadata: M,
         output: torch.Tensor | None = None,
         output_scale: torch.Tensor | None = None,
         output_block_scale: torch.Tensor | None = None,
+        positions: torch.Tensor | None = None,
     ) -> torch.Tensor:
         assert output is not None, "Output tensor must be provided."
 
@@ -1949,6 +1987,8 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
         q = q[:num_actual_toks, ...]
         k_c_normed = k_c_normed[:num_actual_toks, ...]
         k_pe = k_pe[:num_actual_toks, ...]
+        if positions is not None:
+            positions = positions[:num_actual_toks]
 
         assert (
             attn_metadata.num_decodes is not None
@@ -1961,31 +2001,51 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
         num_decode_tokens = attn_metadata.num_decode_tokens
 
         decode_q = q[:num_decode_tokens]
+        decode_positions = (
+            positions[:num_decode_tokens] if positions is not None else None
+        )
 
         prefill_q = q[num_decode_tokens:]
         prefill_k_pe = k_pe[num_decode_tokens:]
         prefill_k_c_normed = k_c_normed[num_decode_tokens:]
+        prefill_positions = (
+            positions[num_decode_tokens:] if positions is not None else None
+        )
 
-        # write the latent and rope to kv cache
-        if kv_cache.numel() > 0:
-            ops.concat_and_cache_mla(
-                k_c_normed,
-                k_pe.squeeze(1),
-                kv_cache,
-                attn_metadata.slot_mapping.flatten(),
-                kv_cache_dtype=self.kv_cache_dtype,
-                scale=layer._k_scale,
-            )
-
-        if fp8_attention:
-            kv_cache = kv_cache.view(current_platform.fp8_dtype())
+        # NOTE: RoPE is now applied per-path (prefill vs decode) rather than
+        # upfront. This enables using self.rotary_emb() directly which uses
+        # faster flashinfer RoPE.
 
         if has_prefill:
+            # Apply RoPE to both prefill q_pe and k_pe using self.rotary_emb
+            if self.rotary_emb is not None and prefill_positions is not None:
+                prefill_q[..., self.qk_nope_head_dim :], prefill_k_pe = self.rotary_emb(
+                    prefill_positions,
+                    prefill_q[..., self.qk_nope_head_dim :],
+                    prefill_k_pe,
+                )
+
+            # Store prefill k to cache (after RoPE applied)
+            if kv_cache.numel() > 0:
+                ops.concat_and_cache_mla(
+                    prefill_k_c_normed,
+                    prefill_k_pe.squeeze(1),
+                    kv_cache,
+                    attn_metadata.slot_mapping[num_decode_tokens:].flatten(),
+                    kv_cache_dtype=self.kv_cache_dtype,
+                    scale=layer._k_scale,
+                )
+
+            if fp8_attention:
+                kv_cache_for_prefill = kv_cache.view(current_platform.fp8_dtype())
+            else:
+                kv_cache_for_prefill = kv_cache
+
             self._forward_prefill(
                 prefill_q,
                 prefill_k_c_normed,
                 prefill_k_pe,
-                kv_cache,
+                kv_cache_for_prefill,
                 attn_metadata,
                 layer._k_scale,
                 output=output[num_decode_tokens:],
@@ -1993,6 +2053,9 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
 
         if has_decode:
             assert attn_metadata.decode is not None
+
+            decode_k_c_normed = k_c_normed[:num_decode_tokens]
+            decode_k_pe = k_pe[:num_decode_tokens]
 
             decode_q_nope, decode_q_pe = decode_q.split(
                 [self.qk_nope_head_dim, self.qk_rope_head_dim], dim=-1
@@ -2047,7 +2110,38 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
                 # Convert from (N, B, L) to (B, N, L)
                 decode_ql_nope = decode_ql_nope.transpose(0, 1)
 
-            if fp8_attention:
+            # Check for fused RoPE+quant path (FlashInfer MLA + FP8)
+            use_fused = fp8_attention and getattr(self, "use_fused_rope_quant", False)
+
+            if (
+                use_fused
+                and self.rotary_emb is not None
+                and decode_positions is not None
+            ):
+                # Sub-case 2.1: Fused RoPE + FP8 quant path
+                # _fused_rope_quant applies RoPE and FP8 quant to both Q and K
+                # Squeeze k_pe from [B, 1, R] to [B, R] for MLA kernel
+                decode_q, decode_k_c_normed, decode_k_pe = self._fused_rope_quant(
+                    decode_ql_nope,
+                    decode_q_pe,
+                    decode_k_c_normed,
+                    decode_k_pe.squeeze(1),
+                    decode_positions,
+                    layer._q_scale_float,
+                    layer._k_scale_float,
+                )
+                # decode_k_c_normed and decode_k_pe are now FP8
+                # concat_and_cache_mla supports FP8 input directly
+            elif fp8_attention:
+                # Sub-case 2.2: Non-fused FP8 path
+                # Apply RoPE to both q_pe and k_pe
+                if self.rotary_emb is not None and decode_positions is not None:
+                    decode_q_pe, decode_k_pe = self.rotary_emb(
+                        decode_positions,
+                        decode_q_pe,
+                        decode_k_pe,
+                    )
+
                 ql_nope_shape = decode_ql_nope.shape
                 q_pe_shape = decode_q_pe.shape
                 assert decode_ql_nope.shape[0] == decode_q_pe.shape[0]
@@ -2057,7 +2151,8 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
                     ql_nope_shape[1],
                     ql_nope_shape[2] + q_pe_shape[2],
                 )
-                # Using empty and copy since torch.cat introduces significant overhead.
+                # Using empty and copy since torch.cat introduces significant
+                # overhead.
                 decode_q0 = torch.empty(
                     decode_q_shape,
                     device=decode_ql_nope.device,
@@ -2072,7 +2167,30 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
                 )
                 decode_q = decode_q.view(decode_q_shape)
             else:
+                # Sub-case 2.3: Non-FP8 path
+                # Apply RoPE to both q_pe and k_pe
+                if self.rotary_emb is not None and decode_positions is not None:
+                    decode_q_pe, decode_k_pe = self.rotary_emb(
+                        decode_positions,
+                        decode_q_pe,
+                        decode_k_pe,
+                    )
                 decode_q = (decode_ql_nope, decode_q_pe)
+
+            # SHARED: Store decode k to cache (after RoPE applied in all sub-cases)
+            if kv_cache.numel() > 0:
+                ops.concat_and_cache_mla(
+                    decode_k_c_normed,
+                    decode_k_pe.squeeze(1),
+                    kv_cache,
+                    attn_metadata.slot_mapping[:num_decode_tokens].flatten(),
+                    kv_cache_dtype=self.kv_cache_dtype,
+                    scale=layer._k_scale,
+                )
+
+            if fp8_attention:
+                kv_cache = kv_cache.view(current_platform.fp8_dtype())
+
             if self.dcp_world_size > 1:
                 assert not fp8_attention, "DCP not support fp8 kvcache now."
                 # concatenate decode_ql_nope and decode_q_pe -> (B, N, L + P)

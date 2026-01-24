@@ -592,6 +592,26 @@ __inline__ __device__ Tout scaled_convert(const Tin& x, const float scale) {
       }                                                                        \
     }
 
+  // Variant of DISPATCH_BY_KV_CACHE_DTYPE that also supports FP8 input
+  // (Float8_e4m3fn). Used for concat_and_cache_mla where input can be
+  // pre-quantized FP8.
+  #define DISPATCH_BY_KV_CACHE_DTYPE_FP8_INPUT(SRC_DTYPE, KV_DTYPE, FN)        \
+    if (KV_DTYPE == "fp8" || KV_DTYPE == "fp8_e4m3") {                         \
+      if (SRC_DTYPE == at::ScalarType::Float) {                                \
+        FN(float, uint8_t, vllm::Fp8KVCacheDataType::kFp8E4M3);                \
+      } else if (SRC_DTYPE == at::ScalarType::Half) {                          \
+        FN(uint16_t, uint8_t, vllm::Fp8KVCacheDataType::kFp8E4M3);             \
+      } else if (SRC_DTYPE == at::ScalarType::BFloat16) {                      \
+        FN(__nv_bfloat16, uint8_t, vllm::Fp8KVCacheDataType::kFp8E4M3);        \
+      } else if (SRC_DTYPE == at::ScalarType::Float8_e4m3fn) {                 \
+        FN(uint8_t, uint8_t, vllm::Fp8KVCacheDataType::kAuto);                 \
+      } else {                                                                 \
+        TORCH_CHECK(false, "Unsupported input type of kv cache: ", SRC_DTYPE); \
+      }                                                                        \
+    } else {                                                                   \
+      DISPATCH_BY_KV_CACHE_DTYPE(SRC_DTYPE, KV_DTYPE, FN);                     \
+    }
+
 }  // namespace fp8
 #endif  // not USE_ROCM
 }  // namespace vllm
