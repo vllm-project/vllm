@@ -707,6 +707,9 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     ),
     "Glm4vForConditionalGeneration": _HfExamplesInfo("zai-org/GLM-4.1V-9B-Thinking"),
     "Glm4vMoeForConditionalGeneration": _HfExamplesInfo("zai-org/GLM-4.5V"),
+    "GlmOcrForConditionalGeneration": _HfExamplesInfo(
+        "zai-org/GLM-OCR", is_available_online=False
+    ),
     "H2OVLChatModel": _HfExamplesInfo(
         "h2oai/h2ovl-mississippi-800m",
         trust_remote_code=True,
