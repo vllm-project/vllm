@@ -78,9 +78,6 @@ class MoEPrepareAndFinalizeNaiveEP(mk.FusedMoEPrepareAndFinalize):
                 is_fp4_scale_swizzled=False,
             )
 
-        # TODO - this is just for deepgemm?
-        expert_tokens_meta = None
-
         # Skip gathering scales if we have static quantization
         # (the scale is a scalar, replicated on all ranks) or
         # if quantization is deferred.
@@ -103,7 +100,7 @@ class MoEPrepareAndFinalizeNaiveEP(mk.FusedMoEPrepareAndFinalize):
             if quant_config.quant_dtype == "nvfp4":
                 a1q_scale = nvfp4_block_scale_interleave(a1q_scale)
 
-        return a1q, a1q_scale, expert_tokens_meta, topk_ids, topk_weights
+        return a1q, a1q_scale, None, topk_ids, topk_weights
 
     def finalize(
         self,
