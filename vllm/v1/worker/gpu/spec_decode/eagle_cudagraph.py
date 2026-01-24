@@ -40,17 +40,19 @@ class EagleCudaGraphManager:
             cudagraph_mode = CUDAGraphMode.NONE
         else:
             cudagraph_mode = self.compilation_config.cudagraph_mode
-            if cudagraph_mode == CUDAGraphMode.FULL:
+            if cudagraph_mode.decode_mode() == CUDAGraphMode.FULL:
                 # NOTE(woosuk): For Eagle, we only use CUDA graphs for decode.
                 cudagraph_mode = CUDAGraphMode.FULL_DECODE_ONLY
-
         self.cudagraph_mode = cudagraph_mode
 
-        self.cudagraph_sizes = get_cudagraph_sizes(
+        # only need to capture uniform decode cudagraph sizes (the 2nd return value)
+        _, self.cudagraph_sizes = get_cudagraph_sizes(
             self.compilation_config.cudagraph_capture_sizes,
             self.max_num_reqs,
             self.max_num_tokens,
             self.cudagraph_mode,
+            uniform_decode_query_len=1,
+            uniform_decode_cudagraph=True,
         )
 
         self.graphs: dict[int, torch.cuda.CUDAGraph] = {}

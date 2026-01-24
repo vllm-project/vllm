@@ -40,6 +40,12 @@ class CudaGraphManager:
         self.max_num_reqs = self.scheduler_config.max_num_seqs
         self.max_num_tokens = self.scheduler_config.max_num_batched_tokens
         self.dp_size = vllm_config.parallel_config.data_parallel_size
+
+        spec_config = vllm_config.speculative_config
+        self.uniform_decode_query_len = 1
+        if spec_config is not None:
+            self.uniform_decode_query_len = 1 + spec_config.num_speculative_tokens
+
         self.compilation_config = vllm_config.compilation_config
         assert self.compilation_config is not None
         self.cudagraph_mode: CUDAGraphMode
@@ -47,32 +53,19 @@ class CudaGraphManager:
             self.cudagraph_mode = CUDAGraphMode.NONE
         else:
             self.cudagraph_mode = self.compilation_config.cudagraph_mode
-        self.cudagraph_sizes = get_cudagraph_sizes(
+
+        self.use_uniform_decode_cudagraph = (
+            self.cudagraph_mode.decode_mode() == CUDAGraphMode.FULL
+            and self.cudagraph_mode.separate_routine()
+        )
+        self.cudagraph_sizes, self.uniform_decode_cudagraph_sizes = get_cudagraph_sizes(
             self.compilation_config.cudagraph_capture_sizes,
             self.max_num_reqs,
             self.max_num_tokens,
             self.cudagraph_mode,
+            self.uniform_decode_query_len,
+            self.use_uniform_decode_cudagraph,
         )
-
-        # Compute uniform decode query length for spec decode support
-        spec_config = vllm_config.speculative_config
-        self.uniform_decode_query_len = 1
-        if spec_config is not None:
-            self.uniform_decode_query_len = 1 + spec_config.num_speculative_tokens
-
-        # Compute decode-specific cudagraph sizes (for FULL decode cudagraphs).
-        self.decode_full_cudagraph_sizes: dict[int, int] = {}
-        self.use_decode_full_cudagraph = (
-            self.cudagraph_mode.decode_mode() == CUDAGraphMode.FULL
-            and self.cudagraph_mode.separate_routine()
-        )
-        if self.use_decode_full_cudagraph:
-            max_decode_tokens = self.max_num_reqs * self.uniform_decode_query_len
-            self.decode_full_cudagraph_sizes = {
-                k: v
-                for k, v in self.cudagraph_sizes.items()
-                if v <= max_decode_tokens and v >= self.uniform_decode_query_len
-            }
 
         self.graphs: dict[int, torch.cuda.CUDAGraph] = {}
         self.pool = torch.cuda.graph_pool_handle()
@@ -86,8 +79,8 @@ class CudaGraphManager:
         num_tokens: int,
         uniform_decode: bool = False,
     ) -> int | None:
-        if uniform_decode and self.use_decode_full_cudagraph:
-            return self.decode_full_cudagraph_sizes.get(num_tokens)
+        if uniform_decode and self.use_uniform_decode_cudagraph:
+            return self.uniform_decode_cudagraph_sizes.get(num_tokens)
         return self.cudagraph_sizes.get(num_tokens)
 
     def capture_graph(
@@ -290,9 +283,9 @@ class CudaGraphManager:
         # Phase 2: Capture FULL graphs for uniform decode batches if needed.
         # This is only needed if we use a separate routine for decode batches
         # and the decode_mode is FULL.
-        if self.use_decode_full_cudagraph:
+        if self.use_uniform_decode_cudagraph:
             capture_graphs(
-                cudagraph_sizes=self.decode_full_cudagraph_sizes,
+                cudagraph_sizes=self.uniform_decode_cudagraph_sizes,
                 device=self.device,
                 capture_fn=self.capture_graph,
                 capture_cudagraph_mode=CUDAGraphMode.FULL,
@@ -313,23 +306,18 @@ def get_cudagraph_sizes(
     max_num_reqs: int,
     max_num_tokens: int,
     cudagraph_mode: CUDAGraphMode,
-) -> dict[int, int]:
+    uniform_decode_query_len: int = 1,
+    uniform_decode_cudagraph: bool = False,
+) -> tuple[dict[int, int], dict[int, int]]:
     # Support both FULL and PIECEWISE cudagraph modes
     if cudagraph_mode == CUDAGraphMode.NONE:
-        return {}
+        return {}, {}
     if not capture_sizes:
-        return {}
+        return {}, {}
 
     capture_sizes = sorted(capture_sizes)
-    # Limit the capture sizes to the max number of requests or tokens.
-    upper_bound = (
-        max_num_reqs
-        if cudagraph_mode == CUDAGraphMode.FULL_DECODE_ONLY
-        else max_num_tokens
-    )
-    capture_sizes = [x for x in capture_sizes if x <= upper_bound]
     if not capture_sizes:
-        return {}
+        return {}, {}
 
     cudagraph_sizes: dict[int, int] = {}
     for i in range(1, capture_sizes[-1] + 1):
@@ -337,7 +325,16 @@ def get_cudagraph_sizes(
             if i <= x:
                 cudagraph_sizes[i] = x
                 break
-    return cudagraph_sizes
+
+    uniform_decode_cudagraph_sizes: dict[int, int] = {}
+    if uniform_decode_cudagraph:
+        max_num_tokens = max_num_reqs * uniform_decode_query_len
+        uniform_decode_cudagraph_sizes = {
+            k: v
+            for k, v in cudagraph_sizes.items()
+            if v <= max_num_tokens and v >= uniform_decode_query_len
+        }
+    return cudagraph_sizes, uniform_decode_cudagraph_sizes
 
 
 def capture_graphs(
