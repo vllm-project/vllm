@@ -60,6 +60,7 @@ include = ["vllm*"]
 "vllm/grpc/*_pb2.py" = ["ALL"]
 "vllm/grpc/*_pb2_grpc.py" = ["ALL"]
 "vllm/grpc/*_pb2.pyi" = ["ALL"]
+"docs/governance/process.md" = ["ALL"]
 
 [tool.ruff.lint]
 select = [
