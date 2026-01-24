@@ -162,7 +162,8 @@ class GlmOcrMTP(nn.Module, SupportsPP):
                 spec_layer = get_spec_layer_idx_from_weight_name(self.config, name)
                 if spec_layer is None:
                     continue
-                name = self._rewrite_spec_layer_name(spec_layer, name)
+
+            name = self._rewrite_spec_layer_name(spec_layer, name)
 
             if self.quant_config is not None and (
                 scale_name := self.quant_config.get_cache_scale(name)
@@ -176,11 +177,13 @@ class GlmOcrMTP(nn.Module, SupportsPP):
                 weight_loader(param, loaded_weight)
                 loaded_params.add(scale_name)
                 continue
+
             if "scale" in name or "zero_point" in name:
                 # Remapping the name of FP8 kv-scale or zero point.
                 name = maybe_remap_kv_scale_name(name, params_dict)
                 if name is None:
                     continue
+
             for param_name, weight_name, shard_id in stacked_params_mapping:
                 if weight_name not in name:
                     continue
@@ -200,10 +203,24 @@ class GlmOcrMTP(nn.Module, SupportsPP):
                 # Skip loading extra bias for GPTQ models.
                 if name.endswith(".bias") and name not in params_dict:
                     continue
+                # Some checkpoints include weight scale tensors for the
+                # LM head even when the quantized head isn't built. Skip
+                # them if the model does not expose a matching parameter
+                # to avoid KeyError during load.
+                if name.endswith(".weight_scale") and name not in params_dict:
+                    continue
+
+                # According to DeepSeek-V3 Technical Report, MTP modules
+                # shares embedding layer. We only load the first weights.
+                if (
+                    spec_layer != self.model.mtp_start_layer_idx
+                    and ".layers" not in name
+                ):
+                    continue
 
                 if is_pp_missing_parameter(name, self):
                     continue
-
+                print(name)
                 param = params_dict[name]
                 weight_loader = getattr(param, "weight_loader", default_weight_loader)
                 weight_loader(param, loaded_weight)
@@ -240,4 +257,11 @@ class GlmOcrMTP(nn.Module, SupportsPP):
         elif shared_weight:
             # treat shared weights as top level weights
             name = name.replace(f"model.layers.{spec_layer}.", "model.")
+        elif spec_layer_weight:
+            # treat VLM model type weights to llm weights
+            name = name.replace(
+                f"model.language_model.layers.{spec_layer}.",
+                f"model.layers.{spec_layer}.",
+            )
+
         return name
