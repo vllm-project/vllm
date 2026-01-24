@@ -67,14 +67,26 @@ def debug_backend(gm: torch.fx.GraphModule, example_inputs):
     print("CAPTURED GRAPH BEFORE FUSION:")
     print("="*80)
     print(gm.graph)
-    print("\nGRAPH OPS:")
+    print("\nGRAPH OPS BEFORE:")
     for node in gm.graph.nodes:
         print(f"  {node.op:15} {node.target if hasattr(node, 'target') else ''}")
     print("="*80 + "\n")
     
-    # Now apply the pass manager and continue compilation
+    # Apply passes and compile
     from torch._inductor.compile_fx import compile_fx
-    return compile_fx(gm, example_inputs)
+    result = compile_fx(gm, example_inputs)
+    
+    # Show graph AFTER fusion
+    print("\n" + "="*80)
+    print("GRAPH AFTER FUSION:")
+    print("="*80)
+    print(gm.graph)
+    print("\nGRAPH OPS AFTER:")
+    for node in gm.graph.nodes:
+        print(f"  {node.op:15} {node.target if hasattr(node, 'target') else ''}")
+    print("="*80 + "\n")
+    
+    return result
 
 print("\n" + "="*80)
 print("RUNNING TEST")
