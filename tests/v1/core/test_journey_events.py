@@ -149,9 +149,12 @@ def test_progress_snapshot_survives_preemption():
     if scheduled1.phase == "PREFILL":
         assert request.request_id in scheduler._journey_prefill_hiwater
         hiwater = scheduler._journey_prefill_hiwater[request.request_id]
-        assert hiwater == scheduled1.prefill_done_tokens
-        # Verify hiwater can be accessed (proving it survives in scheduler state)
-        assert hiwater >= 0
+        # Hiwater is updated in _update_after_schedule(), which runs after the
+        # SCHEDULED event is emitted, so hiwater will reflect the scheduled tokens
+        # while the event shows the state before execution
+        assert hiwater >= scheduled1.prefill_done_tokens
+        # Verify hiwater reflects the scheduled work
+        assert hiwater > 0
 
 
 def test_no_request_iteration_overhead():
@@ -326,6 +329,186 @@ def test_cleanup_on_finish():
     # Verify state is cleaned up
     assert request.request_id not in scheduler._journey_prefill_hiwater
     assert request.request_id not in scheduler._first_token_emitted
+
+
+def test_chunked_prefill_running_queue_hiwater():
+    """Hiwater updates across multiple running queue schedules (chunked prefill)."""
+    scheduler = create_scheduler(
+        enable_journey_tracing=True,
+        max_num_batched_tokens=512,
+        max_num_seqs=10,
+        long_prefill_token_threshold=256,  # Force chunked prefill
+    )
+
+    # Create request with 1000 prompt tokens
+    request = _create_request(prompt_len=1000, max_tokens=100)
+    scheduler.add_request(request)
+
+    # Track hiwater progression
+    hiwater_values = []
+
+    # Schedule multiple times until prefill completes or we hit limit
+    for iteration in range(10):
+        output = scheduler.schedule()
+
+        # Capture hiwater after schedule (schedule() calls _update_after_schedule() internally)
+        hiwater_after_update = scheduler._journey_prefill_hiwater.get(
+            request.request_id, 0
+        )
+        hiwater_values.append(hiwater_after_update)
+
+        # Monotonicity: hiwater should never decrease
+        if len(hiwater_values) > 1:
+            assert hiwater_after_update >= hiwater_values[-2], (
+                f"Hiwater decreased from {hiwater_values[-2]} to {hiwater_after_update}"
+            )
+
+        # Progress: hiwater should reflect num_computed_tokens
+        expected_hiwater = min(request.num_computed_tokens, 1000)
+        assert hiwater_after_update >= expected_hiwater, (
+            f"Hiwater {hiwater_after_update} < expected {expected_hiwater}"
+        )
+
+        # Exit if prefill complete (transitioned to decode)
+        if request.num_output_tokens > 0:
+            break
+
+    # Verify we actually did chunked prefill (multiple iterations)
+    assert len(hiwater_values) >= 3, (
+        f"Expected >= 3 scheduling iterations for chunked prefill, got {len(hiwater_values)}"
+    )
+
+    # Final hiwater should be close to prompt length
+    final_hiwater = hiwater_values[-1]
+    assert final_hiwater >= 1000 * 0.9, (
+        f"Final hiwater {final_hiwater} should be near prompt length 1000"
+    )
+
+
+def test_chunked_prefill_preemption_accurate_progress():
+    """PREEMPTED event shows correct prefill_done after chunked prefill."""
+    scheduler = create_scheduler(
+        enable_journey_tracing=True,
+        max_num_batched_tokens=512,
+        long_prefill_token_threshold=256,  # Force chunked prefill
+    )
+
+    # Create request with 1000 prompt tokens
+    request = _create_request(prompt_len=1000, max_tokens=100)
+    scheduler.add_request(request)
+
+    # Schedule 3 chunks (expect ~768 tokens scheduled)
+    computed_tokens_before_preempt = 0
+    for i in range(3):
+        output = scheduler.schedule()
+        computed_tokens_before_preempt = request.num_computed_tokens
+
+        # Don't preempt yet, let chunked prefill progress
+        assert request.status == RequestStatus.RUNNING
+        assert request.num_output_tokens == 0, "Should still be in prefill"
+
+    # Verify we've scheduled multiple chunks
+    assert computed_tokens_before_preempt >= 512, (
+        f"Expected >= 512 tokens after 3 chunks, got {computed_tokens_before_preempt}"
+    )
+
+    # Preempt the request using deterministic timestamp
+    running_req = next(iter(scheduler.running))
+    curr_step = output.scheduler_step + 1
+    scheduler._preempt_request(running_req, timestamp=1234567890.0, scheduler_step=curr_step)
+
+    # Verify num_computed_tokens was reset (standard preemption behavior)
+    assert running_req.num_computed_tokens == 0, "num_computed_tokens should be reset"
+
+    # Check PREEMPTED event
+    events = _get_buffered_events(scheduler, request.client_index)
+    preempted_events = [e for e in events if e.event_type == RequestJourneyEventType.PREEMPTED]
+    assert len(preempted_events) == 1, f"Expected 1 PREEMPTED event, got {len(preempted_events)}"
+
+    preempted_event = preempted_events[0]
+
+    # CRITICAL ASSERTION: prefill_done_tokens should match computed_tokens_before_preempt
+    # NOT zero (reset value), NOT stale first-chunk value
+    assert preempted_event.prefill_done_tokens >= computed_tokens_before_preempt * 0.95, (
+        f"PREEMPTED event shows prefill_done={preempted_event.prefill_done_tokens}, "
+        f"but we scheduled {computed_tokens_before_preempt} tokens. "
+        f"This indicates hiwater was not updated during chunked prefill."
+    )
+
+    # Verify other fields are sensible
+    assert preempted_event.prefill_total_tokens == 1000
+    assert preempted_event.phase == "PREFILL"
+    assert preempted_event.num_preemptions_so_far == 1
+
+    # Verify progress percentage is reasonable
+    progress_pct = (preempted_event.prefill_done_tokens /
+                   preempted_event.prefill_total_tokens * 100)
+    assert progress_pct >= 50, f"Expected >= 50% progress, got {progress_pct:.1f}%"
+
+
+def test_hiwater_monotonic_across_preemption_cycles():
+    """Hiwater survives preemption and is monotonically increasing."""
+    scheduler = create_scheduler(
+        enable_journey_tracing=True,
+        max_num_batched_tokens=512,
+        long_prefill_token_threshold=256,
+    )
+
+    request = _create_request(prompt_len=1000, max_tokens=100)
+    scheduler.add_request(request)
+
+    hiwater_values = []
+
+    # Schedule multiple chunks to build up hiwater
+    for cycle in range(5):
+        output = scheduler.schedule()
+
+        # Record hiwater after schedule (includes update)
+        hiwater_after = scheduler._journey_prefill_hiwater.get(request.request_id, 0)
+        hiwater_values.append(hiwater_after)
+
+        # Monotonicity: hiwater never decreases
+        if len(hiwater_values) > 1:
+            assert hiwater_after >= hiwater_values[-2], (
+                f"Hiwater decreased from {hiwater_values[-2]} to {hiwater_after}"
+            )
+
+        # Exit if we've transitioned to decode (prefill complete)
+        if request.num_output_tokens > 0:
+            break
+
+        # Test preemption on cycle 2 (after some progress) and exit
+        if cycle == 2 and request.status == RequestStatus.RUNNING:
+            # Capture hiwater before preemption
+            hiwater_before_preempt = scheduler._journey_prefill_hiwater.get(request.request_id, 0)
+            assert hiwater_before_preempt > 0, "Should have some prefill progress"
+
+            # Preempt the request using deterministic timestamp
+            req = next(iter(scheduler.running))
+            scheduler._preempt_request(req, timestamp=1234567890.0, scheduler_step=output.scheduler_step + 1)
+
+            # Verify hiwater survives preemption (not reset)
+            hiwater_after_preempt = scheduler._journey_prefill_hiwater.get(request.request_id, 0)
+            assert hiwater_after_preempt == hiwater_before_preempt, (
+                f"Hiwater changed during preemption: {hiwater_before_preempt} -> {hiwater_after_preempt}"
+            )
+
+            # Verify num_computed_tokens was reset (standard preemption behavior)
+            assert req.num_computed_tokens == 0, "num_computed_tokens should be reset"
+
+            # Exit test after verifying preemption behavior
+            break
+
+    # Verify we actually did chunked prefill (multiple iterations)
+    assert len(hiwater_values) >= 3, (
+        f"Expected >= 3 scheduling iterations, got {len(hiwater_values)}"
+    )
+
+    # Verify hiwater made reasonable progress
+    final_hiwater = hiwater_values[-1]
+    assert final_hiwater >= 256, (  # At least one full chunk
+        f"Final hiwater {final_hiwater} too low"
+    )
 
 
 if __name__ == "__main__":

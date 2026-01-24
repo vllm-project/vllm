@@ -732,17 +732,6 @@ class Scheduler(SchedulerInterface):
                 if request.num_cached_tokens < 0:
                     request.num_cached_tokens = num_computed_tokens
 
-                # Journey tracking: Update prefill progress high-water mark
-                # (survives preemption)
-                if self._enable_journey_tracing and request.num_output_tokens == 0:
-                    # Still in prefill phase, update high-water mark (never decreases)
-                    prompt_len = len(request.prompt_token_ids)
-                    prefill_done = min(num_computed_tokens, prompt_len)
-                    self._journey_prefill_hiwater[request.request_id] = max(
-                        self._journey_prefill_hiwater.get(request.request_id, 0),
-                        prefill_done,
-                    )
-
                 # Journey event: SCHEDULED
                 # Only emit for known transitions to avoid mislabeling
                 schedule_kind = None
@@ -929,6 +918,16 @@ class Scheduler(SchedulerInterface):
         for req_id, num_scheduled_token in num_scheduled_tokens.items():
             request = self.requests[req_id]
             request.num_computed_tokens += num_scheduled_token
+
+            # Journey tracking: Update prefill progress high-water mark
+            # Centralized update for all scheduling paths (waiting, running, resume)
+            if self._enable_journey_tracing and request.num_output_tokens == 0:
+                prompt_len = len(request.prompt_token_ids)
+                prefill_done = min(request.num_computed_tokens, prompt_len)
+                self._journey_prefill_hiwater[request.request_id] = max(
+                    self._journey_prefill_hiwater.get(request.request_id, 0),
+                    prefill_done,
+                )
 
             # NOTE: _free_encoder_inputs relies on num_computed_tokens, which
             # may be updated again in _update_from_output for speculative
