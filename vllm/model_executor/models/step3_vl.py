@@ -341,7 +341,7 @@ class Step3VLProcessor:
         self.image_token = "<im_patch>"
         self.image_feature_placeholder = self.image_token * self.num_image_feature_size
         self.patch_feature_placeholder = self.image_token * self.num_patch_feature_size
-        
+
         # Respect vision config switch to enable/disable patch extraction.
         # For video understanding, it's preferable to disable patch.
         enable_patch = getattr(self.config.vision_config, "enable_patch", True)
