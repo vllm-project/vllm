@@ -229,10 +229,13 @@ class SiluMulBlockQuantPattern:
             
             return result, scale
         
+        print("📌 About to trace pattern...")
         input = torch.empty(5, 256, dtype=torch.float16, device='cuda')
         pattern(input)
+        print("📌 Pattern traced, registering replacement...")
         
         register_replacement(pattern, replacement, [input], fwd_only, pm_pass)
+    print("📌 Replacement registered!")
         
 class ActivationQuantFusionPass(VllmPatternMatcherPass):
     """
