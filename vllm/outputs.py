@@ -6,6 +6,7 @@ from collections.abc import Sequence as GenericSequence
 from dataclasses import dataclass
 from typing import Any, Generic
 
+import numpy as np
 import torch
 from typing_extensions import TypeVar
 
@@ -13,7 +14,6 @@ from vllm.logger import init_logger
 from vllm.logprobs import PromptLogprobs, SampleLogprobs
 from vllm.lora.request import LoRARequest
 from vllm.multimodal.inputs import MultiModalPlaceholderDict
-from vllm.sequence import RequestMetrics
 from vllm.v1.metrics.stats import RequestStateStats
 
 logger = init_logger(__name__)
@@ -43,6 +43,7 @@ class CompletionOutput:
     token_ids: GenericSequence[int]
     cumulative_logprob: float | None
     logprobs: SampleLogprobs | None
+    routed_experts: np.ndarray | None = None  # [seq_len,layer_num,topk]
     finish_reason: str | None = None
     stop_reason: int | str | None = None
     lora_request: LoRARequest | None = None
@@ -55,6 +56,7 @@ class CompletionOutput:
             f"CompletionOutput(index={self.index}, "
             f"text={self.text!r}, "
             f"token_ids={self.token_ids}, "
+            f"routed_experts={self.routed_experts}, "
             f"cumulative_logprob={self.cumulative_logprob}, "
             f"logprobs={self.logprobs}, "
             f"finish_reason={self.finish_reason}, "
@@ -113,7 +115,7 @@ class RequestOutput:
         prompt_logprobs: PromptLogprobs | None,
         outputs: list[CompletionOutput],
         finished: bool,
-        metrics: RequestMetrics | RequestStateStats | None = None,
+        metrics: RequestStateStats | None = None,
         lora_request: LoRARequest | None = None,
         encoder_prompt: str | None = None,
         encoder_prompt_token_ids: list[int] | None = None,
@@ -189,6 +191,16 @@ class RequestOutput:
             f"multi_modal_placeholders={self.multi_modal_placeholders})"
         )
 
+
+# Sentinel to indicate request is finished, used with streaming inputs.
+STREAM_FINISHED = RequestOutput(
+    request_id="",
+    prompt=None,
+    prompt_token_ids=None,
+    prompt_logprobs=None,
+    outputs=[],
+    finished=True,
+)
 
 _O = TypeVar("_O", default=PoolingOutput)
 

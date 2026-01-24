@@ -12,8 +12,10 @@ Alternatively, you can deploy vLLM to Kubernetes using any of the following:
 
 - [Helm](frameworks/helm.md)
 - [InftyAI/llmaz](integrations/llmaz.md)
+- [llm-d](integrations/llm-d.md)
 - [KAITO](integrations/kaito.md)
 - [KServe](integrations/kserve.md)
+- [Kthena](integrations/kthena.md)
 - [KubeRay](integrations/kuberay.md)
 - [kubernetes-sigs/lws](frameworks/lws.md)
 - [meta-llama/llama-stack](integrations/llamastack.md)

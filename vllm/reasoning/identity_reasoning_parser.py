@@ -5,7 +5,10 @@ from collections.abc import Sequence
 
 from transformers import PreTrainedTokenizerBase
 
-from vllm.entrypoints.openai.protocol import ChatCompletionRequest, DeltaMessage
+from vllm.entrypoints.openai.chat_completion.protocol import (
+    ChatCompletionRequest,
+)
+from vllm.entrypoints.openai.engine.protocol import DeltaMessage
 from vllm.logger import init_logger
 from vllm.reasoning import ReasoningParser
 
@@ -28,15 +31,20 @@ class IdentityReasoningParser(ReasoningParser):
                 "constructor during construction."
             )
 
-    def is_reasoning_end(self, input_ids: list[int]) -> bool:
+    def is_reasoning_end(self, input_ids: Sequence[int]) -> bool:
         # Always return True, since we never treat reasoning specially
+        return True
+
+    def is_reasoning_end_streaming(
+        self, input_ids: Sequence[int], delta_ids: Sequence[int]
+    ) -> bool:
         return True
 
     def extract_content_ids(self, input_ids: list[int]) -> list[int]:
         # Identity: return all tokens as content
         return input_ids
 
-    def extract_reasoning_content_streaming(
+    def extract_reasoning_streaming(
         self,
         previous_text: str,
         current_text: str,
@@ -50,9 +58,9 @@ class IdentityReasoningParser(ReasoningParser):
             return DeltaMessage(content=delta_text)
         return None
 
-    def extract_reasoning_content(
+    def extract_reasoning(
         self, model_output: str, request: ChatCompletionRequest
     ) -> tuple[str | None, str | None]:
-        # No reasoning separation: return None for reasoning_content,
+        # No reasoning separation: return None for reasoning,
         # and full model_output as content
         return None, model_output

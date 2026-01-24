@@ -34,7 +34,7 @@ from transformers import BatchFeature
 from vllm.config import VllmConfig
 from vllm.config.multimodal import BaseDummyOptions
 from vllm.logger import init_logger
-from vllm.model_executor.layers.pooler import DispatchPooler, DummyPooler
+from vllm.model_executor.layers.pooler import IdentityPooler
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.utils import AutoWeightsLoader
 from vllm.multimodal import MULTIMODAL_REGISTRY
@@ -56,15 +56,15 @@ from vllm.multimodal.parse import (
     MultiModalDataParser,
 )
 from vllm.multimodal.processing import (
+    BaseDummyInputsBuilder,
     BaseMultiModalProcessor,
     BaseProcessingInfo,
     PromptUpdate,
 )
-from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from vllm.sequence import IntermediateTensors
 
 from .interfaces import IsAttentionFree, MultiModalEmbeddings, SupportsMultiModal
-from .interfaces_base import default_pooling_type
+from .interfaces_base import attn_type
 
 logger = init_logger(__name__)
 
@@ -220,14 +220,13 @@ class TerratorchMultiModalProcessor(BaseMultiModalProcessor):
         )
 
 
-@default_pooling_type("All")
+@attn_type("attention_free")
 @MULTIMODAL_REGISTRY.register_processor(
     TerratorchMultiModalProcessor,
     info=TerratorchProcessingInfo,
     dummy_inputs=TerratorchInputBuilder,
 )
 class Terratorch(nn.Module, IsAttentionFree, SupportsMultiModal):
-    merge_by_field_config = True
     supports_multimodal_raw_input_only = True
     is_pooling_model = True
 
@@ -249,9 +248,9 @@ class Terratorch(nn.Module, IsAttentionFree, SupportsMultiModal):
         pooler_config = vllm_config.model_config.pooler_config
         assert pooler_config is not None
 
-        self.pooler = DispatchPooler({"plugin": DummyPooler()})
+        self.pooler = IdentityPooler()
 
-    def get_input_embeddings(
+    def embed_input_ids(
         self,
         input_ids: torch.Tensor,
         multimodal_embeddings: MultiModalEmbeddings | None = None,

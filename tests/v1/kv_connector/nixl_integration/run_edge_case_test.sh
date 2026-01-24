@@ -85,7 +85,6 @@ run_tests_for_model() {
   --port $PREFILL_PORT \
   --enforce-eager \
   --gpu-memory-utilization 0.2 \
-  --disable-hybrid-kv-cache-manager \
   --kv-transfer-config '$KV_CONFIG'"
 
   if [ -n "$model_args" ]; then
@@ -104,7 +103,6 @@ run_tests_for_model() {
   --port $DECODE_PORT \
   --enforce-eager \
   --gpu-memory-utilization 0.2 \
-  --disable-hybrid-kv-cache-manager \
   --kv-transfer-config '$KV_CONFIG'"
 
   if [ -n "$model_args" ]; then

@@ -1,13 +1,15 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-
-from vllm.entrypoints.openai.protocol import ChatCompletionRequest, ResponsesRequest
-from vllm.reasoning.abs_reasoning_parsers import ReasoningParserManager
+from vllm.entrypoints.openai.chat_completion.protocol import (
+    ChatCompletionRequest,
+)
+from vllm.entrypoints.openai.responses.protocol import (
+    ResponsesRequest,
+)
 from vllm.reasoning.basic_parsers import BaseThinkingReasoningParser
 
 
-@ReasoningParserManager.register_module("qwen3")
 class Qwen3ReasoningParser(BaseThinkingReasoningParser):
     """
     Reasoning parser for the Qwen3 model.
@@ -29,7 +31,7 @@ class Qwen3ReasoningParser(BaseThinkingReasoningParser):
         """The token that ends reasoning content."""
         return "</think>"
 
-    def extract_reasoning_content(
+    def extract_reasoning(
         self, model_output: str, request: ChatCompletionRequest | ResponsesRequest
     ) -> tuple[str | None, str | None]:
         """
@@ -39,7 +41,7 @@ class Qwen3ReasoningParser(BaseThinkingReasoningParser):
         to be present, unlike other models that work with just the end token.
 
         For text <think>abc</think>xyz:
-        - 'abc' goes to reasoning_content
+        - 'abc' goes to reasoning
         - 'xyz' goes to content
 
         Returns:
@@ -63,7 +65,7 @@ class Qwen3ReasoningParser(BaseThinkingReasoningParser):
             return None, model_output
 
         # Extract reasoning content from the model output.
-        reasoning_content, _, content = model_output.partition(self.end_token)
+        reasoning, _, content = model_output.partition(self.end_token)
 
         final_content = content or None
-        return reasoning_content, final_content
+        return reasoning, final_content

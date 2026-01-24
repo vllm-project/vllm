@@ -103,9 +103,12 @@ try:
             output = self.worker.model_runner.execute_model(
                 scheduler_output, intermediate_tensors
             )
-            if isinstance(output, IntermediateTensors):
-                output = scheduler_output, grammar_output, output
-            elif not get_pp_group().is_last_rank:
+            if self._is_intermediate_tensors(output):
+                return scheduler_output, grammar_output, output
+
+            if isinstance(output, AsyncModelRunnerOutput):
+                output = output.get_output()
+            if not get_pp_group().is_last_rank:
                 # Case where there are no scheduled requests
                 # but may still be finished requests.
                 assert not output or not output.req_ids
@@ -121,6 +124,9 @@ try:
 
         def override_env_vars(self, vars: dict[str, str]):
             os.environ.update(vars)
+
+        def _is_intermediate_tensors(self, output) -> bool:
+            return isinstance(output, IntermediateTensors)
 
     ray_import_err = None
 
@@ -141,19 +147,16 @@ class FutureWrapper(Future):
     the result() call. If not only the first worker's output is returned.
     """
 
-    def __init__(self, refs, aggregator: KVOutputAggregator | None = None):
+    def __init__(self, ref_or_refs, aggregator: KVOutputAggregator | None = None):
         super().__init__()
-        self.refs = refs
+        self.ref_or_refs = ref_or_refs
         self.aggregator = aggregator
 
     def result(self, timeout=None):
-        if timeout is not None:
-            raise NotImplementedError("timeout is not supported")
-
+        outputs = ray.get(self.ref_or_refs, timeout=timeout)
         if self.aggregator is None:
-            return self.refs[0].get()
+            return outputs
 
-        outputs = [ref.get() for ref in self.refs]
         return self.aggregator.aggregate(outputs, output_rank=0)
 
 

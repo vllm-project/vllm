@@ -15,12 +15,13 @@ from tests.kernels.moe.utils import (
 from tests.kernels.quant_utils import native_batched_masked_quant_matmul
 from tests.kernels.utils import torch_experts
 from vllm.config import VllmConfig, set_current_vllm_config
+from vllm.model_executor.layers.fused_moe import fused_topk
 from vllm.model_executor.layers.fused_moe.fused_batched_moe import (
     invoke_moe_batched_triton_kernel,
 )
-from vllm.model_executor.layers.fused_moe.fused_moe import fused_topk
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl
+from vllm.utils.torch_utils import set_random_seed
 
 MNK_FACTORS = [
     (1, 128, 128),
@@ -39,9 +40,12 @@ MNK_FACTORS = [
 NUM_EXPERTS = [8, 64]
 TOP_KS = [1, 2, 6]
 
+DTYPES = [torch.bfloat16]
+
+if not current_platform.is_fp8_fnuz():
+    DTYPES.append(torch.float8_e4m3fn)
+
 vllm_config = VllmConfig()
-vllm_config.scheduler_config.max_num_seqs = 128
-vllm_config.scheduler_config.max_model_len = 8192
 
 
 @dataclass
@@ -98,7 +102,7 @@ class BatchedMMTensors:
 @pytest.mark.parametrize("max_tokens_per_expert", [32, 224, 512])
 @pytest.mark.parametrize("K", [128, 1024])
 @pytest.mark.parametrize("N", [128, 1024])
-@pytest.mark.parametrize("dtype", [torch.float8_e4m3fn, torch.bfloat16])
+@pytest.mark.parametrize("dtype", DTYPES)
 @pytest.mark.parametrize("block_shape", [None, [128, 128]])
 @pytest.mark.parametrize("per_act_token_quant", [False, True])
 def test_batched_mm(
@@ -112,7 +116,7 @@ def test_batched_mm(
 ):
     """Note: float8_e4m3fn is not supported on CUDA architecture < 89,
     and those tests will be skipped on unsupported hardware."""
-    current_platform.seed_everything(7)
+    set_random_seed(7)
 
     use_fp8_w8a8 = dtype == torch.float8_e4m3fn
 
@@ -231,7 +235,7 @@ def test_batched_mm(
 @pytest.mark.parametrize(("m", "n", "k"), MNK_FACTORS)
 @pytest.mark.parametrize("e", NUM_EXPERTS)
 @pytest.mark.parametrize("topk", TOP_KS)
-@pytest.mark.parametrize("dtype", [torch.float8_e4m3fn, torch.bfloat16])
+@pytest.mark.parametrize("dtype", DTYPES)
 @pytest.mark.parametrize("per_act_token_quant", [False, True])
 @pytest.mark.parametrize("block_shape", [None, [128, 128]])
 @pytest.mark.parametrize("input_scales", [False])
@@ -245,10 +249,11 @@ def test_fused_moe_batched_experts(
     per_act_token_quant: bool,
     block_shape: list[int] | None,
     input_scales: bool,
+    workspace_init,
 ):
     """Note: float8_e4m3fn is not supported on CUDA architecture < 89,
     and those tests will be skipped on unsupported hardware."""
-    current_platform.seed_everything(7)
+    set_random_seed(7)
 
     use_fp8_w8a8 = dtype == torch.float8_e4m3fn
 

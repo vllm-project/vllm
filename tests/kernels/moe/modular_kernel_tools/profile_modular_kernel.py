@@ -9,7 +9,7 @@ from typing import Any
 import torch
 
 from vllm.config import VllmConfig
-from vllm.platforms import current_platform
+from vllm.utils.torch_utils import set_random_seed
 
 from .common import Config, RankTensors, WeightTensors, make_modular_kernel
 from .parallel_utils import ProcessGroupInfo, parallel_launch_with_config
@@ -82,7 +82,7 @@ def rank_worker(
     config: Config,
     weights: WeightTensors,
 ):
-    current_platform.seed_everything(pgi.rank)
+    set_random_seed(pgi.rank)
 
     # sanity check
     from vllm import envs
