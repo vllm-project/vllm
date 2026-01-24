@@ -20,8 +20,8 @@ class LayerReloadingInfo:
     kernel_tensors: LayerTensors = field(default_factory=lambda: ({}, {}))
 
     # track how many restored elements are ready for loading
-    load_numel: int | float = 0
-    load_numel_total: int | float = float("inf")
+    load_numel: int = 0
+    load_numel_total: int | None = None
 
     # stores arguments and tensors ready for loading
     loaded_weights: list[tuple[str, BoundArguments]] = field(default_factory=list)
@@ -30,4 +30,4 @@ class LayerReloadingInfo:
         self.__init__(restore_metadata=self.restore_metadata)  # type: ignore[misc]
 
     def can_process(self) -> bool:
-        return self.load_numel_total != float("inf")
+        return self.load_numel_total is not None

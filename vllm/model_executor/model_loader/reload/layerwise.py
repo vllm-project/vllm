@@ -13,7 +13,6 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.base_config import QuantizeMethodBase
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 
-from .helpers import get_layer_params_buffers, get_layer_size, get_layer_tensors
 from .meta import (
     capture_layer_to_meta,
     get_numel_loaded,
@@ -21,6 +20,7 @@ from .meta import (
     restore_layer_on_meta,
 )
 from .types import LayerReloadingInfo
+from .utils import get_layer_params_buffers, get_layer_size, get_layer_tensors
 
 logger = init_logger(__name__)
 
@@ -32,6 +32,11 @@ __all__ = [
 ]
 
 
+# Global dict storing information used for layerwise restoring, loading, and processing.
+# For more information regarding what info is stored when, see `LayerReloadingInfo`
+#
+# Use a weak ref dictionary so that modules can be freed when the model is freed.
+# Values are sanitized from references to the layer key in order to avoid circular refs
 LAYERWISE_INFO: WeakKeyDictionary[torch.nn.Module, LayerReloadingInfo] = (
     WeakKeyDictionary()
 )
@@ -76,6 +81,10 @@ def initialize_layerwise_reload(model: torch.nn.Module):
     3. Run quantization processing if applicable
     4. Copy processed values back to original tensor storage
     """
+    # disable torchao reloading to avoid infinite recursion
+    _do_torchao_reload = getattr(model, "_do_torchao_reload", False)
+    model._do_torchao_reload = False
+
     for layer in model.modules():
         info = get_layerwise_info(layer)
 
@@ -98,6 +107,8 @@ def initialize_layerwise_reload(model: torch.nn.Module):
         for name, tensor in get_layer_tensors(layer).items():
             if _get_weight_loader(tensor).__name__ != "online_process_loader":
                 tensor.weight_loader = make_online_process_loader(layer, name)
+
+    model._do_torchao_reload = _do_torchao_reload
 
 
 def make_online_process_loader(layer: torch.nn.Module, param_name: str) -> Callable:
@@ -124,6 +135,7 @@ def make_online_process_loader(layer: torch.nn.Module, param_name: str) -> Calla
             # there's no way to reach `load_numel_total` without loading all
             # necessary weights. `weight_shape` is very small, so this is safe.
             # see Limitations(4)
+            logger.debug("%s: Excessive loading", layer.__class__.__name__)
             return
 
         # Bind and normalize arguments
@@ -143,7 +155,7 @@ def make_online_process_loader(layer: torch.nn.Module, param_name: str) -> Calla
         )
 
         # Process and copy when all weights are loaded
-        if info.load_numel >= info.load_numel_total and not isinstance(
+        if info.load_numel >= info.load_numel_total and not isinstance(  # type: ignore[operator]
             layer, (Attention, MLAAttention)
         ):
             _layerwise_process(layer, info)
@@ -166,28 +178,27 @@ def finalize_layerwise_reload(model: torch.nn.Module, model_config: ModelConfig)
         info = get_layerwise_info(layer)
 
         # Attention/MLA layers are processed after all other layers
-        if isinstance(layer, (Attention, MLAAttention)) and info.load_numel > 0:
-            raise NotImplementedError("Layerwise reloading of Q/K/V scale weights")
-            # layer.process_weights_after_loading(model_config.dtype)
+        if isinstance(layer, (Attention, MLAAttention)):
+            if info.load_numel > 0:
+                raise NotImplementedError(
+                    "Layerwise reloading of Q/K/V scale weights is not implemented yet"
+                )
+
+            else:
+                _place_kernel_tensors(layer, info)
+                layer.process_weights_after_loading(model_config.dtype)
+
+        # No weights were loaded, place kernel tensors back
+        elif info.can_process():
+            _place_kernel_tensors(layer, info)
 
         # Process non-attention layers which did not load all elements. This can happen
         # if the created weight has extra padding elements which are not loaded
         # Having too many of these delayed layers can lead to execess memory usage
         # see Limitations(4)
-        elif info.load_numel > 0 and info.load_numel < info.load_numel_total:
+        elif info.load_numel > 0 and info.load_numel < info.load_numel_total:  # type: ignore[operator]
             logger.debug("%s: Delayed processing", layer.__class__.__name__)
             _layerwise_process(layer, info)
-
-        # No weights were loaded, place kernel tensors back
-        elif info.can_process():
-            for name in get_layer_tensors(layer):
-                delattr(layer, name)
-
-            parameters, buffers = info.kernel_tensors
-            for name, param in parameters.items():
-                layer.register_parameter(name, param)
-            for name, buffer in buffers.items():
-                layer.register_buffer(name, buffer)
 
         info.reset()
 
@@ -226,10 +237,10 @@ def _layerwise_process(layer: torch.nn.Module, info: LayerReloadingInfo):
     parameters, buffers = info.kernel_tensors
     for name, param in parameters.items():
         param.data.copy_(getattr(layer, name))
-        layer.register_parameter(name, param)
     for name, buffer in buffers.items():
         buffer.data.copy_(getattr(layer, name))
-        layer.register_buffer(name, buffer)
+
+    _place_kernel_tensors(layer, info)
 
     info.reset()
     logger.debug("%s: Processed", layer.__class__.__name__)
@@ -246,3 +257,14 @@ def _get_original_loader(tensor: torch.Tensor) -> Callable:
 
 def _get_weight_loader(tensor: torch.Tensor):
     return getattr(tensor, "weight_loader", default_weight_loader)
+
+
+def _place_kernel_tensors(layer: torch.nn.Module, info: LayerReloadingInfo):
+    for name in get_layer_tensors(layer):
+        delattr(layer, name)
+
+    parameters, buffers = info.kernel_tensors
+    for name, param in parameters.items():
+        layer.register_parameter(name, param)
+    for name, buffer in buffers.items():
+        layer.register_buffer(name, buffer)

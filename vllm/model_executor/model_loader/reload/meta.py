@@ -6,9 +6,9 @@ from collections.abc import Callable
 import torch
 from torch.utils._python_dispatch import TorchDispatchMode
 
-from .helpers import get_layer_params_buffers, get_layer_tensors
 from .sanitize import restore_layer_refs, sanitize_layer_refs
 from .types import LayerReloadingInfo, LayerTensors
+from .utils import get_layer_params_buffers, get_layer_tensors
 
 __all__ = [
     "to_meta_tensor",

@@ -4219,7 +4219,7 @@ class GPUModelRunner(
         self,
         weights_iterator: Iterable[tuple[str, torch.Tensor]] | None = None,
         weights_path: str | None = None,
-        checkpoint_format: bool = True,
+        is_checkpoint_format: bool = True,
     ) -> None:
         """
         Reload weights from a weights iterator or from disk
@@ -4227,15 +4227,15 @@ class GPUModelRunner(
         :param weights_iterator: weights to load into model
         :param weights_path: path to load weights from if weights_iterator is not
             provided. Use path of original model if neither is provided.
-        :param checkpoint_format: set to False if weights have already been processed
+        :param is_checkpoint_format: set to False if weights have already been processed
             into kernel format (repacking, renaming, ect.)
         """
         # TODO(@kylesayrs): generalize to all runners and loaders
         # argument validation
-        if weights_iterator is None and not checkpoint_format:
+        if weights_iterator is None and not is_checkpoint_format:
             logger.warning(
                 "Reloading from disk means that weights will be in checkpoint format. "
-                "Please use `checkpoint_format=True` "
+                "Please use `is_checkpoint_format=True` "
                 "to avoid weight reloading errors"
             )
 
@@ -4264,11 +4264,7 @@ class GPUModelRunner(
             self.vllm_config.load_config.device or self.vllm_config.device_config.device
         )
         with torch.device(load_device):
-            if checkpoint_format:
-                # @kylesayrs @jerryzh168: disable torchao reloading
-                # assume `reload_weights` is the target entrypoint
-                model._do_torchao_reload = False
-
+            if is_checkpoint_format:
                 # load weights from checkpoint/ original model format
                 initialize_layerwise_reload(model)
                 loaded_weights = model.load_weights(weights_iterator)
@@ -4277,7 +4273,7 @@ class GPUModelRunner(
             else:
                 # load weights from kernel format
                 logger.warning_once(
-                    "Reloading with `checkpoint_format=True` requires that "
+                    "Reloading with `is_checkpoint_format=True` requires that "
                     "weights be in kernel format and already sharded",
                     scope="local",
                 )

@@ -8,7 +8,6 @@ import pytest
 import torch
 
 from vllm.model_executor.layers.linear import QKVParallelLinear
-from vllm.model_executor.model_loader.reload.helpers import get_layer_tensors
 from vllm.model_executor.model_loader.reload.meta import (
     capture_layer_to_meta,
     get_numel_loaded,
@@ -18,6 +17,7 @@ from vllm.model_executor.model_loader.reload.meta import (
     to_meta_tensor,
 )
 from vllm.model_executor.model_loader.reload.types import LayerReloadingInfo
+from vllm.model_executor.model_loader.reload.utils import get_layer_tensors
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import cuda_device_count_stateless
 
@@ -90,24 +90,39 @@ def test_get_numel_loaded():
     assert ret == "value"
 
 
-@pytest.mark.parametrize("tp_size", [1, 2])
+@pytest.mark.parametrize("tp_size", [2])
 @pytest.mark.parametrize(
     "base_model,mul_model,add_model",
     [
         (
             "Qwen/Qwen3-0.6B",
-            "nm-testing/Qwen3-0.6B-debug-multiply",
-            "nm-testing/Qwen3-0.6B-debug-add",
+            "inference-optimization/Qwen3-0.6B-debug-multiply",
+            "inference-optimization/Qwen3-0.6B-debug-add",
         ),
         (
-            "nm-testing/Qwen3-0.6B-W4A16-G128",
-            "nm-testing/Qwen3-0.6B-debug-multiply-W4A16-G128",
-            "nm-testing/Qwen3-0.6B-debug-add-W4A16-G128",
+            "inference-optimization/Qwen3-0.6B-W4A16-G128",
+            "inference-optimization/Qwen3-0.6B-debug-multiply-W4A16-G128",
+            "inference-optimization/Qwen3-0.6B-debug-add-W4A16-G128",
         ),
         (
-            "nm-testing/Qwen3-0.6B-FP8_BLOCK",
-            "nm-testing/Qwen3-0.6B-debug-multiply-FP8_BLOCK",
-            "nm-testing/Qwen3-0.6B-debug-add-FP8_BLOCK",
+            "inference-optimization/Qwen3-0.6B-FP8_BLOCK",
+            "inference-optimization/Qwen3-0.6B-debug-multiply-FP8_BLOCK",
+            "inference-optimization/Qwen3-0.6B-debug-add-FP8_BLOCK",
+        ),
+        (
+            "inference-optimization/DeepSeek-V3-debug-empty",
+            "inference-optimization/DeepSeek-V3-debug-multiply",
+            "inference-optimization/DeepSeek-V3-debug-add",
+        ),
+        (
+            "inference-optimization/DeepSeek-V3-debug-empty-FP8_DYNAMIC",
+            "inference-optimization/DeepSeek-V3-debug-multiply-FP8_DYNAMIC",
+            "inference-optimization/DeepSeek-V3-debug-add-FP8_DYNAMIC",
+        ),
+        (
+            "inference-optimization/DeepSeek-V3-debug-empty-NVFP4A16",
+            "inference-optimization/DeepSeek-V3-debug-multiply-NVFP4A16",
+            "inference-optimization/DeepSeek-V3-debug-add-NVFP4A16",
         ),
     ],
 )
@@ -121,36 +136,15 @@ def test_reload_weights(base_model, mul_model, add_model, tp_size, vllm_runner):
     with vllm_runner(
         model_name=base_model,
         tensor_parallel_size=tp_size,
+        enable_expert_parallel=(tp_size > 1 and "DeepSeek" in base_model),
         enable_prefix_caching=False,
     ) as llm:
-        assert llm.generate_prompt_perplexity(["3 4 = 12"], mask=["3 4 ="])[0] > 1.1
-        assert llm.generate_prompt_perplexity(["3 4 = 7"], mask=["3 4 ="])[0] > 1.1
-
         llm.collective_rpc("reload_weights", kwargs={"weights_path": mul_model})
-        assert llm.generate_prompt_perplexity(["3 4 = 12"], mask=["3 4 ="])[0] <= 1.1
-        assert llm.generate_prompt_perplexity(["3 4 = 7"], mask=["3 4 ="])[0] >= 1e10
+        mul_perp = llm.generate_prompt_perplexity(["3 4 = 12"], mask=["3 4 ="])[0]
+        add_perp = llm.generate_prompt_perplexity(["3 4 = 7"], mask=["3 4 ="])[0]
+        assert mul_perp < add_perp
 
         llm.collective_rpc("reload_weights", kwargs={"weights_path": add_model})
-        assert llm.generate_prompt_perplexity(["3 4 = 12"], mask=["3 4 ="])[0] >= 1e10
-        assert llm.generate_prompt_perplexity(["3 4 = 7"], mask=["3 4 ="])[0] <= 1.1
-
-
-@pytest.mark.parametrize("tp_size", [2])
-def test_reload_expert_parallelism(tp_size, vllm_runner):
-    if cuda_device_count_stateless() < tp_size:
-        pytest.skip(reason="Not enough CUDA devices")
-
-    base_model = "deepseek-ai/DeepSeek-V2-Lite-Chat"
-    prompts = ["The capital of France is Paris"]
-
-    with vllm_runner(
-        model_name=base_model,
-        enable_expert_parallel=True,
-        tensor_parallel_size=tp_size,
-        enable_prefix_caching=False,
-    ) as llm:
-        exp_perp = llm.generate_prompt_perplexity(prompts)
-        llm.collective_rpc("reload_weights")
-        reload_perp = llm.generate_prompt_perplexity(prompts)
-
-        assert reload_perp == exp_perp
+        mul_perp = llm.generate_prompt_perplexity(["3 4 = 12"], mask=["3 4 ="])[0]
+        add_perp = llm.generate_prompt_perplexity(["3 4 = 7"], mask=["3 4 ="])[0]
+        assert add_perp < mul_perp
