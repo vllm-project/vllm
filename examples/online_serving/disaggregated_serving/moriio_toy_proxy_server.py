@@ -100,11 +100,13 @@ async def send_request_to_prefill(
     endpoint, req_data, request_id, d_endpoint, dip, dport, selected_prefill_dp_rank
 ):
     req_data_copy = req_data
+    external_req_id = f"cmpl-{request_id}-0"
 
     req_data_copy["kv_transfer_params"].update(
         {
             "do_remote_decode": True,
             "do_remote_prefill": False,
+            "external_req_id": external_req_id,
             "remote_handshake_port": d_endpoint["handshake_port"],
             "remote_notify_port": d_endpoint["notify_port"],
             "remote_engine_id": None,
@@ -162,6 +164,8 @@ async def stream_decode_response(session, response, request_id):
             raise RuntimeError(
                 f"decode response.status != 200, status = {response.status}"
             )
+    except Exception:
+        raise
     finally:
         await session.close()
 
@@ -234,6 +238,7 @@ async def handle_request():
                 selected_prefill_dp_rank,
             )
         )
+
         ip, port = extract_ip_port_fast(prefill_instance_endpoint["request_address"])
 
         req_data["max_tokens"] -= 1
@@ -241,6 +246,7 @@ async def handle_request():
         req_data["kv_transfer_params"] = {
             "do_remote_decode": False,
             "do_remote_prefill": True,
+            "external_req_id": f"cmpl-{request_id}-0",
             "remote_handshake_port": prefill_instance_endpoint["handshake_port"],
             "remote_notify_port": prefill_instance_endpoint["notify_port"],
             "remote_engine_id": None,

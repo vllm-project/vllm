@@ -149,6 +149,9 @@ class Scheduler(SchedulerInterface):
 
         # req_id -> Request
         self.requests: dict[str, Request] = {}
+        # External <-> internal request ID mapping for fast KV transfer lookups.
+        self.external_to_internal_req_id: dict[str, set[str]] = {}
+        self.internal_to_external_req_id: dict[str, str] = {}
         # Scheduling policy
         try:
             self.policy = SchedulingPolicy(self.scheduler_config.policy)
@@ -1537,6 +1540,7 @@ class Scheduler(SchedulerInterface):
     def add_request(self, request: Request) -> None:
         self.waiting.add_request(request)
         self.requests[request.request_id] = request
+        self._track_external_req_id(request)
         if self.log_stats:
             request.record_event(EngineCoreEventType.QUEUED)
 
@@ -1600,6 +1604,7 @@ class Scheduler(SchedulerInterface):
     def _free_blocks(self, request: Request):
         assert request.is_finished()
         self.kv_cache_manager.free(request)
+        self._untrack_external_req_id(request.request_id)
         del self.requests[request.request_id]
 
     def get_num_unfinished_requests(self) -> int:
@@ -1828,6 +1833,66 @@ class Scheduler(SchedulerInterface):
         self.finished_recving_kv_req_ids.remove(request.request_id)
         return True
 
+    def _get_external_req_id(self, request: Request) -> str | None:
+        kv_transfer_params = request.kv_transfer_params or {}
+        external_req_id = kv_transfer_params.get("external_req_id")
+        if isinstance(external_req_id, str):
+            return external_req_id
+        return getattr(request, "external_req_id", None)
+
+    def _track_external_req_id(self, request: Request) -> None:
+        external_req_id = self._get_external_req_id(request)
+        if not external_req_id:
+            return
+        internal_id = request.request_id
+        existing_external = self.internal_to_external_req_id.get(internal_id)
+        if existing_external and existing_external != external_req_id:
+            internal_ids = self.external_to_internal_req_id.get(existing_external)
+            if internal_ids:
+                internal_ids.discard(internal_id)
+                if not internal_ids:
+                    del self.external_to_internal_req_id[existing_external]
+        self.internal_to_external_req_id[internal_id] = external_req_id
+        self.external_to_internal_req_id.setdefault(external_req_id, set()).add(
+            internal_id
+        )
+
+    def _untrack_external_req_id(self, request_id: str) -> None:
+        external_req_id = self.internal_to_external_req_id.pop(request_id, None)
+        if external_req_id is None:
+            return
+        internal_ids = self.external_to_internal_req_id.get(external_req_id)
+        if not internal_ids:
+            return
+        internal_ids.discard(request_id)
+        if not internal_ids:
+            del self.external_to_internal_req_id[external_req_id]
+
+    def _resolve_internal_req_id(self, req_id: str) -> str | None:
+        if req_id in self.requests:
+            return req_id
+        internal_ids = self.external_to_internal_req_id.get(req_id)
+        if internal_ids:
+            if len(internal_ids) == 1:
+                return next(iter(internal_ids))
+            for internal_id in self.requests:
+                if internal_id in internal_ids:
+                    return internal_id
+        for internal_id, request in self.requests.items():
+            if getattr(request, "external_req_id", None) == req_id:
+                self.external_to_internal_req_id.setdefault(req_id, set()).add(
+                    internal_id
+                )
+                self.internal_to_external_req_id[internal_id] = req_id
+                return internal_id
+            if internal_id.startswith(f"{req_id}-"):
+                self.external_to_internal_req_id.setdefault(req_id, set()).add(
+                    internal_id
+                )
+                self.internal_to_external_req_id[internal_id] = req_id
+                return internal_id
+        return None
+
     def _update_from_kv_xfer_finished(self, kv_connector_output: KVConnectorOutput):
         """
         KV Connector: update the scheduler state based on the output.
@@ -1844,12 +1909,25 @@ class Scheduler(SchedulerInterface):
 
         # KV Connector:: update recv and send status from last step.
         for req_id in kv_connector_output.finished_recving or ():
-            logger.debug("Finished recving KV transfer for request %s", req_id)
-            self.finished_recving_kv_req_ids.add(req_id)
+            internal_id = self._resolve_internal_req_id(req_id)
+            if internal_id is None:
+                logger.warning(
+                    "Finished recving KV transfer for unknown request %s",
+                    req_id,
+                )
+                continue
+            logger.debug("Finished recving KV transfer for request %s", internal_id)
+            self.finished_recving_kv_req_ids.add(internal_id)
         for req_id in kv_connector_output.finished_sending or ():
-            logger.debug("Finished sending KV transfer for request %s", req_id)
-            assert req_id in self.requests
-            self._free_blocks(self.requests[req_id])
+            internal_id = self._resolve_internal_req_id(req_id)
+            if internal_id is None:
+                logger.warning(
+                    "Finished sending KV transfer for unknown request %s",
+                    req_id,
+                )
+                continue
+            logger.debug("Finished sending KV transfer for request %s", internal_id)
+            self._free_blocks(self.requests[internal_id])
 
     def _update_requests_with_invalid_blocks(
         self,
