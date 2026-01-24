@@ -19,6 +19,7 @@
 
 from collections import OrderedDict
 from collections.abc import Iterable, Mapping, Sequence
+from typing import Any
 
 import torch
 import torch.nn as nn
@@ -39,6 +40,8 @@ from vllm.model_executor.models.utils import AutoWeightsLoader
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.cache import MultiModalProcessorOnlyCache
 from vllm.multimodal.inputs import (
+    ImageItem,
+    ModalityData,
     MultiModalDataDict,
     MultiModalFieldConfig,
     MultiModalInputs,
@@ -48,6 +51,7 @@ from vllm.multimodal.inputs import (
 )
 from vllm.multimodal.parse import (
     DictEmbeddingItems,
+    ModalityDataItems,
     MultiModalDataItems,
     MultiModalDataParser,
 )
@@ -116,7 +120,7 @@ class TerratorchInputBuilder(BaseDummyInputsBuilder[TerratorchProcessingInfo]):
                 "They are ignored for now."
             )
 
-        return self.dummy_data_generator.get_dummy_mm_data()
+        return {"image": self.dummy_data_generator.get_dummy_mm_data()}
 
 
 class TerratorchMultiModalDataParser(MultiModalDataParser):
@@ -125,17 +129,19 @@ class TerratorchMultiModalDataParser(MultiModalDataParser):
 
         self.input_definition = input_definition
 
-    def parse_mm_data(self, mm_data: MultiModalDataDict) -> MultiModalDataItems:
-        mm_items = MultiModalDataItems()
+    def _parse_image_data(
+        self,
+        data: dict[str, torch.Tensor] | ModalityData[ImageItem],
+    ) -> ModalityDataItems[Any, Any] | None:
+        if isinstance(data, dict):
+            return DictEmbeddingItems(
+                data,
+                modality="image",
+                required_fields=_terratorch_field_names(self.input_definition),
+                fields_factory=_terratorch_field_factory(self.input_definition),
+            )
 
-        mm_items["image"] = DictEmbeddingItems(
-            mm_data,
-            modality="image",
-            required_fields=_terratorch_field_names(self.input_definition),
-            fields_factory=_terratorch_field_factory(self.input_definition),
-        )
-
-        return mm_items
+        return super()._parse_image_data(data)
 
 
 class TerratorchMultiModalProcessor(BaseMultiModalProcessor):
@@ -183,7 +189,7 @@ class TerratorchMultiModalProcessor(BaseMultiModalProcessor):
             mm_items, hf_processor_mm_kwargs, tokenization_kwargs, mm_uuids=mm_uuids
         )
 
-        mm_processed_data = BatchFeature(mm_data)
+        mm_processed_data = BatchFeature(mm_data["image"])
         mm_placeholders = {"image": [PlaceholderRange(offset=0, length=0)]}
 
         mm_kwargs = MultiModalKwargsItems.from_hf_inputs(
