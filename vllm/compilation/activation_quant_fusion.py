@@ -224,8 +224,6 @@ class SiluMulBlockQuantPattern:
             
             result = torch.empty(output_shape, device=input.device, dtype=self.quant_dtype)
             
-            # TODO: Dynamically detect group_size, col_major, e8m0 from the matched graph
-            # For now, use default values
             group_size = 128
             has_col_major_scales = False
             
@@ -246,11 +244,15 @@ class SiluMulBlockQuantPattern:
             
             return at[1], at[2]
         
-        inputs = self.silu_and_mul_matcher.inputs()
-        pattern(*inputs)
+        # Create input with the right shape: (batch, hidden * 2)
+        # Pattern expects full input, not half
+        input = torch.empty(5, 256, dtype=torch.float16, device='cuda')  # 256 = 128*2
         
-        register_replacement(pattern, replacement, inputs, fwd_only, pm_pass)
-
+        # Trace the pattern
+        pattern(input)
+        
+        register_replacement(pattern, replacement, [input], fwd_only, pm_pass)
+        
 class ActivationQuantFusionPass(VllmPatternMatcherPass):
     """
     This pass fuses a pre-defined set of custom ops into fused ops.
