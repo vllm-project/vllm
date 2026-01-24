@@ -35,4 +35,7 @@ services:
     <<: *base
     profiles: ["set"]
     command: ["bash /workspace/pct_map_and_set_clos.sh"]
+  intel-speed-select-shell:
+    <<: *base
+    command: ["bash"]
 
