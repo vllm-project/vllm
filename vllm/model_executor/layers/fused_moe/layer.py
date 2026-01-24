@@ -1758,18 +1758,9 @@ class FusedMoE(CustomOp):
         self.ensure_moe_quant_config_init()
         self.ensure_dp_chunking_init()
 
-        import vllm.model_executor.layers.fused_moe.modular_kernel as mk
-
-        is_mk = isinstance(
-            getattr(self.quant_method, "kernel", None), mk.FusedMoEModularKernel
-        )
-        mk_has_shared_expert = (
-            is_mk
-            and getattr(self.quant_method.kernel, "shared_experts", None) is not None  # type: ignore[attr-defined]
-        )
-
         has_separate_shared_experts = (
-            not mk_has_shared_expert and self.shared_experts is not None
+            not self.quant_method.mk_owns_shared_expert
+            and self.shared_experts is not None
         )
 
         use_chunked_impl = self.use_dp_chunking
@@ -1792,8 +1783,6 @@ class FusedMoE(CustomOp):
                 hidden_states, router_logits, has_separate_shared_experts
             )
 
-        # NOTE(rob): WIP refactor for quant_methods to hold the MK,
-        # removes need for naive dispatch/combine in FusedMoE.forward()
         do_naive_dispatch_combine = (
             self.dp_size > 1 and not self.quant_method.supports_internal_mk
         )
