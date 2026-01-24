@@ -105,7 +105,6 @@ def with_cancellation(handler_func):
         if handler_task in done:
             return handler_task.result()
         # Client disconnected before handler completed
-        handler_task.cancel()
         raise asyncio.CancelledError("Client disconnected")
 
     return wrapper
