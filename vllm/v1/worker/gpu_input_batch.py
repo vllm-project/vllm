@@ -54,14 +54,12 @@ class CachedRequestState:
     pooling_states: PoolingStates | None = None
 
     def __post_init__(self):
-        if self.pooling_params is not None:
-            self.pooling_states = PoolingStates()
-
-    @property
-    def num_prompt_tokens(self) -> int:
-        return length_from_prompt_token_ids_or_embeds(
+        self.num_prompt_tokens = length_from_prompt_token_ids_or_embeds(
             self.prompt_token_ids, self.prompt_embeds
         )
+
+        if self.pooling_params is not None:
+            self.pooling_states = PoolingStates()
 
     @property
     def num_tokens(self) -> int:
