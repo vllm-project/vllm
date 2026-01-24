@@ -1,11 +1,10 @@
 docker compose build --no-cache
-docker compose --profile check up 
-docker compose --profile pct up 
+#docker compose --profile check up 
+docker compose --profile check up --abort-on-container-exit
+docker compose --profile set up --abort-on-container-exit
+
 
 [Shell]
 docker compose run --rm intel-speed-select-shell
 
-
-[SST Directly]
-docker compose run --rm intel-speed-select intel-speed-select core-power info
 
