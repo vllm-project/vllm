@@ -172,13 +172,9 @@ class AgRsAll2AllManager(All2AllManagerBase):
             sizes=sizes,
         )
 
-        hidden_states = gathered_tensors[0]
-        router_logits = gathered_tensors[1]
-
-        if extra_tensors is None:
-            return hidden_states, router_logits
-
-        return hidden_states, router_logits, gathered_tensors[2:]
+        if extra_tensors is not None:
+            return (gathered_tensors[0], gathered_tensors[1], gathered_tensors[2:])
+        return gathered_tensors[0], gathered_tensors[1]
 
     def dispatch(
         self,
