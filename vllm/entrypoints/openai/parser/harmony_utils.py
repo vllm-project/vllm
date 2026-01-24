@@ -658,7 +658,7 @@ def parse_output_message(message: Message) -> list[ResponseOutputItem]:
 
         # Built-in MCP tools (python, browser, container)
         elif recipient in _BUILTIN_TOOL_TO_MCP_SERVER_LABEL:
-            output_items.extend(_parse_mcp_call(message, recipient))
+            output_items.extend(_parse_reasoning_content(message))
 
         # All other recipients are MCP calls
         else:
@@ -706,16 +706,17 @@ def parse_remaining_state(parser: StreamableParser) -> list[ResponseOutputItem]:
             ]
         # Built-in MCP tools (python, browser, container)
         elif current_recipient in _BUILTIN_TOOL_TO_MCP_SERVER_LABEL:
-            rid = random_uuid()
-            server_label = _BUILTIN_TOOL_TO_MCP_SERVER_LABEL[current_recipient]
             return [
-                McpCall(
-                    arguments=parser.current_content,
-                    type="mcp_call",
-                    name=current_recipient,
-                    server_label=server_label,
-                    id=f"mcp_{rid}",
-                    status="in_progress",
+                ResponseReasoningItem(
+                    id=f"rs_{random_uuid()}",
+                    summary=[],
+                    type="reasoning",
+                    content=[
+                        ResponseReasoningTextContent(
+                            text=parser.current_content, type="reasoning_text"
+                        )
+                    ],
+                    status=None,
                 )
             ]
         # All other recipients are MCP calls
