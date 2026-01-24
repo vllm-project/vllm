@@ -197,7 +197,7 @@ class SiluMulBlockQuantPattern:
     
     def register(self, pm_pass: PatternMatcherPass) -> None:
         def pattern(input: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-            print(f"🔍 PATTERN EXECUTING - input device: {input.device}, dtype: {input.dtype}, shape: {input.shape}")
+            print(f"PATTERN EXECUTING - input device: {input.device}, dtype: {input.dtype}, shape: {input.shape}")
 
             # Write the FULL pattern explicitly - no matchers
             d = input.shape[-1] // 2
@@ -216,7 +216,7 @@ class SiluMulBlockQuantPattern:
             return x_q, x_s
         
         def replacement(input: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-            print(f"🔥 FUSED KERNEL TRIGGERED! input.shape={input.shape}")
+            print(f"FUSED KERNEL TRIGGERED! input.shape={input.shape}")
             
             output_shape = list(input.shape)
             output_shape[-1] = output_shape[-1] // 2
@@ -231,13 +231,13 @@ class SiluMulBlockQuantPattern:
             
             return result, scale
         
-        print("📌 About to trace pattern...")
+        print("About to trace pattern...")
         input = torch.empty(5, 256, dtype=torch.float16, device='cuda')
         pattern(input)
-        print("📌 Pattern traced, registering replacement...")
+        print("Pattern traced, registering replacement...")
         
         register_replacement(pattern, replacement, [input], fwd_only, pm_pass)
-    print("📌 Replacement registered!")
+    print("Replacement registered!")
         
 class ActivationQuantFusionPass(VllmPatternMatcherPass):
     """
@@ -271,7 +271,7 @@ class ActivationQuantFusionPass(VllmPatternMatcherPass):
             print(f"Registering block quant pattern...")
             pattern_silu_mul_block = SiluMulBlockQuantPattern()
             pattern_silu_mul_block.register(self.patterns)
-            print(f"✓ Registered block quant pattern")
+            print(f"Registered block quant pattern")
 
         self.dump_patterns(config, self.patterns)
 
