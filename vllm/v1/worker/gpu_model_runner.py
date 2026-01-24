@@ -112,6 +112,7 @@ from vllm.v1.attention.backends.utils import (
     get_dcp_local_seq_lens,
     reorder_batch_to_split_decodes_and_prefills,
 )
+from vllm.v1.core.sched.output import NewRequestData
 from vllm.v1.cudagraph_dispatcher import CudagraphDispatcher
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
@@ -903,6 +904,12 @@ class GPUModelRunner(
         # Add new requests to the cached states.
         for new_req_data in scheduler_output.scheduled_new_reqs:
             req_id = new_req_data.req_id
+            if req_id in self.requests:
+                # For streaming case only.
+                req_state = self._update_streaming_request(req_id, new_req_data)
+                reqs_to_add.append(req_state)
+                continue
+
             sampling_params = new_req_data.sampling_params
             pooling_params = new_req_data.pooling_params
 
@@ -1132,6 +1139,40 @@ class GPUModelRunner(
                 self.compilation_config.static_forward_context,
                 self.model.get_mamba_state_copy_func(),
             )
+
+    def _update_streaming_request(
+        self, req_id: str, new_req_data: NewRequestData
+    ) -> CachedRequestState:
+        """Updates streaming session request from `scheduled_new_reqs`.
+
+        Removes the request from InputBatch (if present), updates the cached
+        state, and prepares it for re-addition to the batch.
+
+        NOTE: prompt_token_ids includes intermediate output tokens - tokens
+        previously generated but now are input context (part of the prompt).
+        """
+        self.input_batch.remove_request(req_id)
+        req_state = self.requests[req_id]
+
+        req_state.prompt_token_ids = new_req_data.prompt_token_ids
+        req_state.mm_features = new_req_data.mm_features
+        req_state.prompt_embeds = new_req_data.prompt_embeds
+        req_state.sampling_params = new_req_data.sampling_params
+        req_state.pooling_params = new_req_data.pooling_params
+        req_state.block_ids = new_req_data.block_ids
+        req_state.num_computed_tokens = new_req_data.num_computed_tokens
+        req_state.num_prompt_tokens = length_from_prompt_token_ids_or_embeds(
+            req_state.prompt_token_ids, req_state.prompt_embeds
+        )
+
+        # Clear `output_token_ids` as previous output tokens are now part of
+        # `prompt_token_ids`.
+        req_state.output_token_ids.clear()
+
+        if self.uses_mrope:
+            self._init_mrope_positions(req_state)
+
+        return req_state
 
     def _init_mrope_positions(self, req_state: CachedRequestState):
         model = self.get_model()
