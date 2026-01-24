@@ -197,18 +197,40 @@ class SiluMulBlockQuantPattern:
     
     def register(self, pm_pass: PatternMatcherPass) -> None:
         def pattern(input: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-            # Just match the quant part, assume input is already silu_out
-            result_quant, scale = self.quant_matcher(input)
-            return result_quant, scale
+            # Manually write the full pattern with actual torch ops
+            # This is what QuantFP8._quantize_group_native does
+            
+            orig_shape = input.shape
+            hidden_dim = input.shape[-1]
+            group_size = 128
+            num_groups = (hidden_dim + group_size - 1) // group_size
+            
+            # Reshape for group quantization
+            x_grouped = input.view(-1, num_groups, group_size)
+            
+            # Compute scales
+            absmax = x_grouped.abs().max(dim=-1, keepdim=True)[0].float()
+            scales_raw = absmax / 448.0  # FP8_MAX
+            scales = scales_raw.clamp(min=1e-12)  # FP8_MIN_SCALING_FACTOR
+            
+            # Quantize
+            x_scaled = x_grouped / scales
+            x_quant = x_scaled.clamp(-448.0, 448.0).to(FP8_DTYPE)
+            
+            # Reshape back
+            x_quant = x_quant.view(orig_shape)
+            scales = scales.squeeze(-1).reshape(orig_shape[:-1] + (num_groups,))
+            
+            return x_quant, scales
         
         def replacement(input: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-            print(f"🔥 QUANT ONLY PATTERN TRIGGERED! input.shape={input.shape}")
-            return input, input  # Dummy replacement for now
+            print(f"🔥 QUANT PATTERN TRIGGERED! input.shape={input.shape}")
+            return input, input  # Dummy
         
-        inputs = self.quant_matcher.inputs()
-        pattern(*inputs)
+        input = torch.empty(5, 128, dtype=torch.float16, device='cuda')
+        pattern(input)
         
-        register_replacement(pattern, replacement, inputs, fwd_only, pm_pass)
+        register_replacement(pattern, replacement, [input], fwd_only, pm_pass)
         
 class ActivationQuantFusionPass(VllmPatternMatcherPass):
     """
