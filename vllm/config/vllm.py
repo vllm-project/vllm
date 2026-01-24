@@ -1226,7 +1226,7 @@ class VllmConfig:
             ):
                 multiplier = (
                     self.speculative_config.num_speculative_tokens
-                    if self.speculative_config.parallel_draft
+                    if self.speculative_config.parallel_drafting
                     else 1
                 )
                 compile_range_end += multiplier * self.scheduler_config.max_num_seqs
