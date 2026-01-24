@@ -42,6 +42,7 @@ except ImportError:
 
 def collect_mm_processor_stats(
     llm_engine: Any,
+    num_warmup_reqs: int = 0,
 ) -> dict[str, list[float]]:
     """
     Collect multimodal processor timing stats.
@@ -60,7 +61,10 @@ def collect_mm_processor_stats(
     ]
     stats_by_stage = {key: [] for key in stat_keys}
 
-    for stats_dict in all_stats.values():
+    # Skip warmup requests
+    stats_list = list(all_stats.values())[num_warmup_reqs:]
+
+    for stats_dict in stats_list:
         for key in stat_keys:
             if key in stats_dict:
                 stats_by_stage[key].append(stats_dict[key])
@@ -178,6 +182,25 @@ def benchmark_multimodal_processor(
 
     freeze_gc_heap()
 
+    num_warmups = getattr(args, "num_warmups", 0)
+    if num_warmups > 0:
+        print(f"Processing {num_warmups} warmup requests...")
+        # Create a temporary args object for warmup requests
+        warmup_args = argparse.Namespace(**vars(args))
+        warmup_args.num_prompts = num_warmups
+        warmup_args.seed += 1
+        warmup_requests = get_requests(warmup_args, tokenizer)
+        warmup_prompts = [req.prompt for req in warmup_requests]
+        warmup_output_lens = [req.expected_output_len for req in warmup_requests]
+        warmup_sampling_params = [
+            SamplingParams(max_tokens=output_len) for output_len in warmup_output_lens
+        ]
+        llm.chat(
+            warmup_prompts,
+            warmup_sampling_params,
+            use_tqdm=not getattr(args, "disable_tqdm", False),
+        )
+
     print(f"Processing {len(prompts)} requests...")
     start_time = time.perf_counter()
 
@@ -188,9 +211,7 @@ def benchmark_multimodal_processor(
     end_time = time.perf_counter()
     total_time = end_time - start_time
 
-    mm_stats_by_stage = collect_mm_processor_stats(
-        llm.llm_engine,
-    )
+    mm_stats_by_stage = collect_mm_processor_stats(llm.llm_engine, num_warmups)
 
     if not any(mm_stats_by_stage.values()):
         print(
@@ -212,17 +233,23 @@ def benchmark_multimodal_processor(
         if not output.finished or output.metrics is None:
             continue
         metrics = output.metrics
-        for attr in ("finished_time", "last_token_time"):
-            if (
-                getattr(metrics, attr, None) is not None
-                and getattr(metrics, "arrival_time", None) is not None
-            ):
-                e2el_times.append(
-                    (getattr(metrics, attr) - metrics.arrival_time) * 1000
-                )
-                break
+        # Calculate E2E latency as: TTFT + (last_token_ts - first_token_ts)
+        if (
+            getattr(metrics, "first_token_latency", None) is not None
+            and getattr(metrics, "last_token_ts", None) is not None
+            and getattr(metrics, "first_token_ts", None) is not None
+        ):
+            ttft = metrics.first_token_latency
+            # Decode time is the duration between the first and last token generation
+            decode_time = max(0.0, metrics.last_token_ts - metrics.first_token_ts)
+            e2el_times.append((ttft + decode_time) * 1000)
 
     if not e2el_times and completed > 0:
+        print(
+            "\n⚠️  Warning: Detailed end-to-end latency metrics not available.\n"
+            "   Falling back to average request latency "
+            "(total_time / num_completed_requests).\n"
+        )
         avg_time_per_request = total_time / completed
         e2el_times = [avg_time_per_request * 1000] * completed
 
@@ -284,6 +311,12 @@ def add_cli_args(parser: argparse.ArgumentParser) -> None:
         type=int,
         default=10,
         help="Number of prompts to process.",
+    )
+    parser.add_argument(
+        "--num-warmups",
+        type=int,
+        default=1,
+        help="Number of warmup prompts to process.",
     )
 
     from vllm.benchmarks.datasets import (
