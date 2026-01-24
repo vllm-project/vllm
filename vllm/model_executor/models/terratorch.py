@@ -58,6 +58,7 @@ from vllm.multimodal.processing import (
     PromptUpdate,
 )
 from vllm.sequence import IntermediateTensors
+from vllm.utils import length_from_prompt_token_ids_or_embeds
 
 from .interfaces import IsAttentionFree, MultiModalEmbeddings, SupportsMultiModal
 from .interfaces_base import attn_type
@@ -251,10 +252,14 @@ class Terratorch(nn.Module, IsAttentionFree, SupportsMultiModal):
         inputs_embeds: torch.Tensor | None = None,
         **kwargs: object,
     ):
-        batched_kwargs = {k: v[None] for k, v in kwargs.items()}
-        model_output = self.inference_runner.forward(**batched_kwargs)
+        input_len = length_from_prompt_token_ids_or_embeds(input_ids, inputs_embeds)
 
-        return model_output.output
+        batched_kwargs = {k: v[None] for k, v in kwargs.items()}
+        model_output = self.inference_runner.forward(**batched_kwargs).output
+
+        return model_output.expand(
+            input_len, *(-1 for _ in range(model_output.ndim - 1))
+        )
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         params_list = []
