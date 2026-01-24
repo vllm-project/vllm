@@ -871,10 +871,6 @@ class Scheduler(SchedulerInterface):
 
         Discards the last sampled output token from the prior input chunk.
         """
-        if update is None:
-            # Streaming-input request finished.
-            self.finish_requests(session.request_id, RequestStatus.FINISHED_ABORTED)
-            return
 
         # Current streaming input behaviour: Keep only computed output tokens
         # (discard final sampled output token).
@@ -1547,11 +1543,16 @@ class Scheduler(SchedulerInterface):
         existing = self.requests.get(request.request_id)
         if existing is not None:
             update = StreamingUpdate.from_request(request)
-            if existing.status == RequestStatus.WAITING_FOR_STREAMING_REQ:
+            if existing.status != RequestStatus.WAITING_FOR_STREAMING_REQ:
+                assert existing.streaming_queue is not None
+                # Queue next input chunk (or finished sentinel).
+                existing.streaming_queue.append(update)
+            elif update is not None:
+                # Commence next input chunk.
                 self._update_request_as_session(existing, update)
             else:
-                assert existing.streaming_queue is not None
-                existing.streaming_queue.append(update)
+                # Streaming-input session finished.
+                self.finish_requests(request.request_id, RequestStatus.FINISHED_ABORTED)
         else:
             if request.resumable:
                 request.streaming_queue = deque()
