@@ -50,7 +50,7 @@ def _adjust_kernel_inputs(
     else:
         stride_tl = sorted_token_ids.stride(0)
         stride_el = expert_ids.stride(0)
-    return max_loras if sorted_token_ids is not None else 1, stride_tl, stride_el
+    return max_loras + 1 if sorted_token_ids is not None else 1, stride_tl, stride_el
 
 
 @triton.jit(
