@@ -104,6 +104,8 @@ class GlmOcrMTP(nn.Module, SupportsPP):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
         self.config = vllm_config.model_config.hf_config.text_config
+        quant_config = vllm_config.quant_config
+        self.quant_config = quant_config
         self.model = GlmOcrMultiTokenPredictor(
             vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model")
         )
@@ -151,17 +153,16 @@ class GlmOcrMTP(nn.Module, SupportsPP):
         params_dict = dict(self.named_parameters())
         loaded_params: set[str] = set()
         for name, loaded_weight in weights:
-            spec_layer = get_spec_layer_idx_from_weight_name(self.config, name)
-            if spec_layer is not None:
-                continue
-            if "rotary_emb.inv_freq" in name:
-                continue
-            if "rotary_emb.cos_cached" in name or "rotary_emb.sin_cached" in name:
-                # Models trained using ColossalAI may include these tensors in
-                # the checkpoint. Skip them.
-                continue
-
-            name = self._rewrite_spec_layer_name(spec_layer, name)
+            if name == "lm_head.weight":
+                spec_layer = self.model.mtp_start_layer_idx
+                name = f"model.layers.{spec_layer}.shared_head.head.weight"
+            elif name == "model.embed_tokens.weight":
+                spec_layer = self.model.mtp_start_layer_idx
+            else:
+                spec_layer = get_spec_layer_idx_from_weight_name(self.config, name)
+                if spec_layer is None:
+                    continue
+                name = self._rewrite_spec_layer_name(spec_layer, name)
 
             if self.quant_config is not None and (
                 scale_name := self.quant_config.get_cache_scale(name)
