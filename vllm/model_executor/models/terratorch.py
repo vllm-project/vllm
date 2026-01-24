@@ -77,12 +77,14 @@ def _terratorch_field_factory(input_definition: InputDefinition):
     def _terratorch_field_config(
         hf_inputs: Mapping[str, torch.Tensor],
     ) -> Mapping[str, MultiModalFieldConfig]:
+        modality = "image"
+        batch_size = max(input.shape[0] for input in input_definition.data.values())
+
         fields = dict[str, MultiModalFieldConfig]()
         for input_name, input in input_definition.data.items():
-            modality = "image"
             if input.type == InputTypeEnum.tensor:
                 if input.shape[0] == 1:
-                    field = MultiModalFieldConfig.shared(modality, batch_size=1)
+                    field = MultiModalFieldConfig.shared(modality, batch_size)
                 elif input.shape[0] > 1:
                     field = MultiModalFieldConfig.batched(modality)
                 else:
