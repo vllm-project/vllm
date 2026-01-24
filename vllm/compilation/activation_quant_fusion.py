@@ -29,6 +29,11 @@ from .inductor_pass import enable_fake_mode
 from .matcher_utils import MatcherQuantFP8, MatcherSiluAndMul
 from .vllm_inductor_pass import VllmInductorPass, VllmPatternMatcherPass
 
+print(f"\n📋 QUANT_OPS contains:")
+for k, v in QUANT_OPS.items():
+    print(f"   {k} -> {v}")
+print()
+
 logger = init_logger(__name__)
 
 FP8_DTYPE = current_platform.fp8_dtype()
@@ -204,6 +209,21 @@ class SiluMulBlockQuantPattern:
         
         scale = ScaleDesc(torch.float32, False, group_shape)
         quant_key = QuantKey(dtype=FP8_DTYPE, scale=scale, symmetric=True)
+        
+        # ========== DEBUG PRINTS ==========
+        print(f"\n🔍 DEBUG: Creating matcher for group_shape={group_shape}")
+        print(f"   quant_key = {quant_key}")
+        print(f"   quant_key in QUANT_OPS? {quant_key in QUANT_OPS}")
+        
+        if quant_key in QUANT_OPS:
+            print(f"   QUANT_OPS[quant_key] = {QUANT_OPS[quant_key]}")
+        else:
+            print(f"   ❌ quant_key NOT in QUANT_OPS!")
+            print(f"   Available keys in QUANT_OPS:")
+            for k, v in QUANT_OPS.items():
+                print(f"      {k} -> {v}")
+        
+        print(f"   Graph has: torch.ops._C.per_token_group_fp8_quant")
         self.quant_matcher = MatcherQuantFP8(
             quant_key, 
             has_col_major_scales=has_col_major_scales,
