@@ -278,7 +278,12 @@ class Scheduler(SchedulerInterface):
             + num_new_local_computed_tokens
             + num_external_computed_tokens
         )
-        if num_computed_tokens < request.num_prompt_tokens:  # prefill
+        # Do block-aligned split at prefill phase, including
+        # * non-resumed requests: num_computed_tokens < num_prompt_tokens
+        # * resumed requests: num_computed_tokens <= (
+        #                       num_prompt_tokens + num_output_tokens
+        #                     )
+        if num_computed_tokens < request.num_tokens:
             # To enable block-aligned caching of the Mamba state, `num_new_tokens`
             # must be a multiple of `block_size`.
             # As an exception, if `num_new_tokens` is less than `block_size`, the
@@ -287,9 +292,7 @@ class Scheduler(SchedulerInterface):
             # matching block. To prevent this from causing a Mamba cache miss, the
             # last chunk must be larger than `block_size`.
             block_size = self.cache_config.block_size
-            last_cache_position = (
-                request.num_prompt_tokens - request.num_prompt_tokens % block_size
-            )
+            last_cache_position = request.num_tokens - request.num_tokens % block_size
             # eagle prune
             if self.use_eagle:
                 last_cache_position = max(last_cache_position - block_size, 0)
