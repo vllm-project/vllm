@@ -263,6 +263,7 @@ class Terratorch(nn.Module, IsAttentionFree, SupportsMultiModal):
         batched_kwargs = {k: v[None] for k, v in kwargs.items()}
         model_output = self.inference_runner.forward(**batched_kwargs).output
 
+        # The leading dimension of hidden states needs to equal input length
         return model_output.expand(
             input_len, *(-1 for _ in range(model_output.ndim - 1))
         )
