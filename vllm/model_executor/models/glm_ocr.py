@@ -173,6 +173,11 @@ class GlmOcrVisionAttention(nn.Module):
         # [s, b, 3 * head * head_dim] -> 3 * [s, b, head, head_dim]
         q, k, v = self.split_qkv(x)
 
+        # RMSNorm on q, k
+        q_shape, k_shape = q.shape, k.shape
+        q = self.q_norm(q.reshape(-1, self.head_dim)).view(q_shape)
+        k = self.k_norm(k.reshape(-1, self.head_dim)).view(k_shape)
+
         q, k, v = (rearrange(x, "s b ... -> b s ...").contiguous() for x in (q, k, v))
         if rotary_pos_emb_cos is not None and rotary_pos_emb_sin is not None:
             # [2 * b, s, heads, head_dim]
@@ -288,7 +293,7 @@ class GlmOcrVisionTransformer(Glm4vVisionTransformer):
             head_size=head_dim,
             max_position=8192,
             is_neox_style=True,
-            rope_parameters={"partial_rotary_factor": 1.0},
+            rope_parameters={"partial_rotary_factor": 0.5},
         )
         self.blocks = nn.ModuleList(
             [

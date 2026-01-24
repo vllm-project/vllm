@@ -34,6 +34,7 @@ MTPModelTypes = Literal[
     "mimo_mtp",
     "glm4_moe_mtp",
     "glm4_moe_lite_mtp",
+    "glm4_ocr_mtp",
     "ernie_mtp",
     "exaone_moe_mtp",
     "qwen3_next_mtp",
