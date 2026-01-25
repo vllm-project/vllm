@@ -628,6 +628,36 @@ def should_use_flashinfer_for_blockscale_fp8_gemm(
     return should_use_flashinfer
 
 
+# ---------------------------------------------------------------------------
+# Re-exports from flashinfer_utils for unified API
+# These imports are deferred to avoid circular dependencies
+# ---------------------------------------------------------------------------
+
+# Symbols re-exported from flashinfer_utils - lazily loaded to avoid circular imports
+_FLASHINFER_UTILS_EXPORTS = (
+    "FlashinferMoeBackend",
+    "swap_w13_to_w31",
+    "rotate_weights_for_fi_trtllm_fp8_per_tensor_moe",
+    "register_scales_for_trtllm_fp8_per_tensor_moe",
+    "apply_fi_trtllm_fp8_per_tensor_moe",
+    "make_fp8_moe_alpha_scales_for_fi",
+    "build_flashinfer_fp8_cutlass_moe_prepare_finalize",
+    "get_flashinfer_moe_backend",
+    "is_flashinfer_supporting_global_sf",
+    "align_fp8_moe_weights_for_fi",
+    "prepare_fp8_moe_layer_for_fi",
+)
+
+
+def __getattr__(name: str) -> Any:
+    """Lazy import for symbols from flashinfer_utils to avoid circular imports."""
+    if name in _FLASHINFER_UTILS_EXPORTS:
+        from vllm.model_executor.layers.quantization.utils import flashinfer_utils
+
+        return getattr(flashinfer_utils, name)
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
 __all__ = [
     "has_flashinfer",
     "flashinfer_trtllm_fp8_block_scale_moe",
@@ -655,4 +685,16 @@ __all__ = [
     "flashinfer_fp8_blockscale_gemm",
     "should_use_flashinfer_for_blockscale_fp8_gemm",
     "is_flashinfer_fp8_blockscale_gemm_supported",
+    # Re-exported from flashinfer_utils via __getattr__ lazy loading
+    "FlashinferMoeBackend",  # noqa: F822
+    "swap_w13_to_w31",  # noqa: F822
+    "rotate_weights_for_fi_trtllm_fp8_per_tensor_moe",  # noqa: F822
+    "register_scales_for_trtllm_fp8_per_tensor_moe",  # noqa: F822
+    "apply_fi_trtllm_fp8_per_tensor_moe",  # noqa: F822
+    "make_fp8_moe_alpha_scales_for_fi",  # noqa: F822
+    "build_flashinfer_fp8_cutlass_moe_prepare_finalize",  # noqa: F822
+    "get_flashinfer_moe_backend",  # noqa: F822
+    "is_flashinfer_supporting_global_sf",  # noqa: F822
+    "align_fp8_moe_weights_for_fi",  # noqa: F822
+    "prepare_fp8_moe_layer_for_fi",  # noqa: F822
 ]

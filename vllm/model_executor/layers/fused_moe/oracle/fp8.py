@@ -20,11 +20,8 @@ from vllm.model_executor.layers.fused_moe.config import (
 from vllm.model_executor.layers.fused_moe.flashinfer_trtllm_moe import (
     is_supported_config_trtllm,
 )
-from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
-    FlashinferMoeBackend,
-    get_flashinfer_moe_backend,
-    make_fp8_moe_alpha_scales_for_fi,
-    prepare_fp8_moe_layer_for_fi,
+from vllm.model_executor.layers.fused_moe.prepare_finalize import (
+    MoEPrepareAndFinalizeNoEP,
 )
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     prepare_fp8_moe_layer_for_deepgemm,
@@ -36,6 +33,12 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
 )
 from vllm.platforms import current_platform
+from vllm.utils.flashinfer import (
+    FlashinferMoeBackend,
+    get_flashinfer_moe_backend,
+    make_fp8_moe_alpha_scales_for_fi,
+    prepare_fp8_moe_layer_for_fi,
+)
 
 logger = init_logger(__name__)
 

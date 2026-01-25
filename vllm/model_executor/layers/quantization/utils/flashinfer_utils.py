@@ -1,5 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+"""FlashInfer MoE utilities.
+
+.. deprecated::
+    This module's contents are now re-exported through :mod:`vllm.utils.flashinfer`.
+    Please import from there for new code.
+"""
+
 from enum import Enum
 
 import torch

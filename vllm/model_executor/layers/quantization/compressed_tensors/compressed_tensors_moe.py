@@ -68,9 +68,6 @@ from vllm.model_executor.layers.quantization.utils.flashinfer_mxint4_moe import 
     is_flashinfer_mxint4_moe_available,
     prepare_static_weights_for_trtllm_mxint4_moe,
 )
-from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
-    apply_fi_trtllm_fp8_per_tensor_moe,
-)
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     process_fp8_input_tensor_strategy_moe,
     process_fp8_weight_tensor_strategy_moe,
@@ -101,6 +98,9 @@ from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
 )
 from vllm.model_executor.utils import replace_parameter, set_weight_attrs
 from vllm.platforms import CpuArchEnum, current_platform
+from vllm.utils.flashinfer import (
+    apply_fi_trtllm_fp8_per_tensor_moe,
+)
 
 logger = init_logger(__name__)
 
