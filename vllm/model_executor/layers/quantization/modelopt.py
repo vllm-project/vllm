@@ -1196,11 +1196,42 @@ class ModelOptNvFp4LinearMethod(LinearMethodBase):
         x: torch.Tensor,
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        return apply_nvfp4_linear(
-            backend=self.backend,
-            layer=layer,
-            x=x,
-            bias=bias,
+        if self.backend == "marlin":
+            return apply_fp4_marlin_linear(
+                input=x,
+                weight=layer.weight,
+                weight_scale=layer.weight_scale,
+                weight_scale_2=layer.weight_scale_2,
+                workspace=layer.workspace,
+                size_n=layer.output_size_per_partition,
+                size_k=layer.input_size_per_partition,
+                bias=bias,
+                input_dtype=self.marlin_input_dtype,
+            )
+
+        output_dtype = x.dtype
+        output_shape = [x.shape[0], layer.weight.shape[0]]
+
+        # quantize BF16 or FP16 to (FP4 and interleaved block scale)
+        x_fp4, x_blockscale = scaled_fp4_quant(
+            x, layer.input_scale_inv, is_sf_swizzled_layout=True, backend=self.backend
+        )
+
+        # validate dtypes of quantized input, input block scale,
+        # weight and weight_blockscale
+        assert x_fp4.dtype == torch.uint8
+        assert layer.weight.dtype == torch.uint8
+        assert x_blockscale.dtype == torch.float8_e4m3fn
+        assert layer.weight_scale.dtype == torch.float8_e4m3fn
+        assert layer.alpha.dtype == torch.float32
+
+        mm_args = (
+            x_fp4,
+            layer.weight,
+            x_blockscale,
+            layer.weight_scale,
+            layer.alpha,
+            output_dtype,
         )
 
 

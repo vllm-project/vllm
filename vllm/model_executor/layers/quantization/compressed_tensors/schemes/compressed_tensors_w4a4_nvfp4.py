@@ -116,9 +116,25 @@ class CompressedTensorsW4A4Fp4(CompressedTensorsScheme):
         x: torch.Tensor,
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        return apply_nvfp4_linear(
+        if envs.VLLM_USE_NVFP4_CT_EMULATIONS:
+            out = run_nvfp4_emulations(
+                x=x,
+                input_global_scale=layer.input_global_scale,
+                weight=layer.weight_packed,
+                weight_scale_swizzled=layer.weight_scale,
+                weight_global_scale=layer.weight_global_scale,
+            )
+            if bias is not None:
+                out = out + bias
+            return out
+
+        output_dtype = x.dtype
+        output_shape = [*x.shape[:-1], layer.weight_packed.shape[0]]
+
+        # quantize BF16 or FP16 to (FP4 and interleaved block scale)
+        x_fp4, x_blockscale = scaled_fp4_quant(
+            x,
+            layer.input_global_scale,
+            is_sf_swizzled_layout=True,
             backend=self.backend,
-            layer=layer,
-            x=x,
-            bias=bias,
         )
