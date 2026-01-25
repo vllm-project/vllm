@@ -387,7 +387,7 @@ class MultiModalMixin(SupportsMultiModal, SupportsMRoPE):
 
             if isinstance(vision_embeddings, torch.Tensor):
                 split_sizes = num_image_patches.flatten().tolist()
-                total_expected = sum(split_sizes)
+                total_patches = sum(split_sizes)
 
                 # Flatten to 2D: [total_tokens, hidden_dim]
                 if vision_embeddings.ndim == 3:
@@ -395,27 +395,35 @@ class MultiModalMixin(SupportsMultiModal, SupportsMRoPE):
                         -1, vision_embeddings.shape[-1]
                     )
 
-                # Handle profiling case where dummy embeddings may not match
-                # expected sizes from num_image_patches
-                actual_size = vision_embeddings.shape[0]
-                if actual_size != total_expected and total_expected > 0:
-                    if actual_size == 0:
+                total_tokens = vision_embeddings.shape[0]
+                if total_tokens == total_patches:
+                    # Direct match: num_image_patches are actual token counts
+                    # (e.g., Qwen2.5-VL style)
+                    token_split_sizes = split_sizes
+                elif total_patches > 0 and total_tokens % total_patches == 0:
+                    # Uniform expansion: each patch expands to N tokens
+                    # (e.g., Idefics3 style)
+                    tokens_per_patch = total_tokens // total_patches
+                    token_split_sizes = [s * tokens_per_patch for s in split_sizes]
+                elif total_patches > 0:
+                    # Mismatch (profiling with dummy data) - pad/truncate
+                    if total_tokens == 0:
                         raise ValueError(
                             "Vision encoder returned empty embeddings. "
-                            f"Expected {total_expected} tokens from "
+                            f"Expected {total_patches} patches from "
                             f"num_image_patches={split_sizes}"
                         )
-                    if actual_size < total_expected:
+                    if total_tokens < total_patches:
                         repeat_factor = (
-                            total_expected + actual_size - 1
-                        ) // actual_size
+                            total_patches + total_tokens - 1
+                        ) // total_tokens
                         vision_embeddings = vision_embeddings.repeat(repeat_factor, 1)
-                    vision_embeddings = vision_embeddings[:total_expected]
+                    vision_embeddings = vision_embeddings[:total_patches]
+                    token_split_sizes = split_sizes
+                else:
+                    return []
 
-                # Split into per-image embeddings (returns views, no copy)
-                vision_embeddings = list(
-                    torch.split(vision_embeddings, split_sizes, dim=0)
-                )
+                return list(torch.split(vision_embeddings, token_split_sizes, dim=0))
 
             return vision_embeddings
         else:
