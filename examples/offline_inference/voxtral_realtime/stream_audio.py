@@ -100,7 +100,7 @@ async def main():
     engine = AsyncLLM.from_engine_args(engine_args, usage_context=UsageContext.API_SERVER)
 
     sampling_params = SamplingParams(temperature=0.0, max_tokens=1, ignore_eos=True)
-    request_id = "session"
+    request_id = "session-123456789"
 
     streaming_generator = StreamingInputGenerator()
 
@@ -110,17 +110,6 @@ async def main():
 
         multi_modal_data = {"audio": (audio.audio_array[_start: _end], None)}
         return TokensPrompt(prompt_token_ids=tokens, multi_modal_data=multi_modal_data)
-
-        import ipdb; ipdb.set_trace()
-        engine_core_request = engine.input_processor.input_preprocessor.preprocess(prompt)
-
-        return EngineCoreRequest(
-            request_id=request_id,
-            prompt_token_ids=tokens,
-            mm_features=multi_modal_data,
-            sampling_params=sampling_params,
-            resumable= not is_last
-        )
 
     audio_len_in_samples = audio.audio_array.shape[0]
 
@@ -140,6 +129,10 @@ async def main():
             print(tokenizer.instruct_tokenizer.tokenizer.id_to_piece(t) if t != 32 else "_", end="", flush=True)
 
         req = get_core_req(prompt, start_idx, end_idx)
+
+        if is_last:
+            break
+
         await streaming_generator.add(req)
 
     left_over = audio_len_in_samples - end_idx
