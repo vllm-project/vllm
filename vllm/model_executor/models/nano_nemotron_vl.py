@@ -1646,8 +1646,9 @@ class NemotronH_Nano_VL_V2(
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
-        config = vllm_config.model_config.hf_config
-        multimodal_config = vllm_config.model_config.multimodal_config
+        model_config = vllm_config.model_config
+        config = model_config.hf_config
+        multimodal_config = model_config.multimodal_config
         image_size = config.force_image_size
         patch_size = config.patch_size
         self.patch_size = patch_size
@@ -1695,12 +1696,15 @@ class NemotronH_Nano_VL_V2(
         self.sound_encoder: ProjectedParakeet | None = None
         if getattr(config, "sound_config", None) is not None:
             self.sound_encoder = ProjectedParakeet(
-                config.sound_config, dtype=llm_dtype, llm_hidden_size=llm_hidden_size
+                config.sound_config,
+                dtype=llm_dtype,
+                llm_hidden_size=llm_hidden_size,
+                max_model_len=model_config.max_model_len,
             )
 
         # Pre-tokenize special tokens for video processing
         # to avoid repeated tokenization
-        tokenizer = cached_tokenizer_from_config(vllm_config.model_config)
+        tokenizer = cached_tokenizer_from_config(model_config)
         self._img_start_token_ids = tokenizer.encode(
             IMG_START, add_special_tokens=False
         )

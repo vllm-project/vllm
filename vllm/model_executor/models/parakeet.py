@@ -28,10 +28,15 @@ class ParakeetConfig(ParakeetEncoderConfig):
 
     @staticmethod
     def from_hf_config(
-        config: PretrainedConfig, *, llm_hidden_size: int
+        config: PretrainedConfig, *, llm_hidden_size: int, max_model_len: int
     ) -> "ParakeetConfig":
         assert isinstance(config, PretrainedConfig)
-        return ParakeetConfig(**config.to_dict(), llm_hidden_size=llm_hidden_size)
+        return ParakeetConfig(
+            **config.to_dict(),
+            llm_hidden_size=llm_hidden_size,
+            max_position_embeddings=max_model_len
+            + 1,  # + 1 because it seems like max_model_len+1 can be passed
+        )
 
 
 class ParakeetProjection(nn.Module):
@@ -62,10 +67,11 @@ class ProjectedParakeet(nn.Module):
         *,
         dtype: torch.dtype,
         llm_hidden_size: int,
+        max_model_len: int,
     ) -> None:
         super().__init__()
         self.config = ParakeetConfig.from_hf_config(
-            config, llm_hidden_size=llm_hidden_size
+            config, llm_hidden_size=llm_hidden_size, max_model_len=max_model_len
         )
         self.encoder = HFParakeetEncoder(self.config)
         self.encoder = self.encoder.to(dtype)
