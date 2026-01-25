@@ -350,7 +350,10 @@ RUN rm -f /usr/bin/sccache || true \
 
 # Unset sccache environment variables for the release image
 # This prevents S3 bucket config from leaking into production images
-RUN unset SCCACHE_BUCKET SCCACHE_REGION SCCACHE_S3_NO_CREDENTIALS SCCACHE_IDLE_TIMEOUT
+ENV SCCACHE_BUCKET=
+ENV SCCACHE_REGION=
+ENV SCCACHE_S3_NO_CREDENTIALS=
+ENV SCCACHE_IDLE_TIMEOUT=
 
 # Error related to odd state for numpy 1.20.3 where there is no METADATA etc, but an extra LICENSES_bundled.txt.
 # Manually remove it so that later steps of numpy upgrade can continue
