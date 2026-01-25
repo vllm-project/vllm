@@ -212,12 +212,17 @@ class InputProcessor:
         if not mm_data and not mm_uuids:
             return
 
-        mm_items = self._parse_mm_items(mm_data)
-        modalities = mm_items.keys() | mm_uuids.keys()
+        mm_data_parsed = self._parse_mm_items(mm_data)
+        mm_uuids_parsed = {
+            k: [v] if isinstance(v, str) else ([] if v is None else v)
+            for k, v in mm_uuids.items()
+        }
+
+        modalities = mm_data_parsed.keys() | mm_uuids_parsed.keys()
 
         for modality in modalities:
-            data_items = mm_items.get(modality) or []
-            uuid_items = mm_uuids.get(modality) or []
+            data_items = mm_data_parsed.get(modality, [])
+            uuid_items = mm_uuids_parsed.get(modality, [])
 
             if len(data_items) > 0:
                 if len(uuid_items) > 0 and len(data_items) != len(uuid_items):
