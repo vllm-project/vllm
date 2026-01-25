@@ -357,12 +357,15 @@ class OpenAIServingChat(OpenAIServing):
 
         # Create API span for dual-stream journey tracing (parent span)
         api_span = None
+        arrival_time = time.monotonic()  # Capture for latency calculations
         is_tracing_enabled = await self.engine_client.is_tracing_enabled()
         if is_tracing_enabled:
             api_span = await self._create_api_span(request_id, raw_request)
 
         request_metadata = RequestResponseMetadata(
-            request_id=request_id, api_span=api_span
+            request_id=request_id,
+            api_span=api_span,
+            arrival_time=arrival_time,
         )
         if raw_request:
             raw_request.state.request_metadata = request_metadata
@@ -423,6 +426,15 @@ class OpenAIServingChat(OpenAIServing):
                     params=sampling_params,
                     lora_request=lora_request,
                 )
+
+                # Set request metadata attributes on API span
+                if api_span and isinstance(sampling_params, SamplingParams):
+                    self._set_api_span_request_attributes(
+                        api_span,
+                        model_name,
+                        engine_prompt["prompt_token_ids"],
+                        sampling_params,
+                    )
 
                 trace_headers = (
                     None
@@ -796,6 +808,10 @@ class OpenAIServingChat(OpenAIServing):
                 # the result_generator, it needs to be sent as the FIRST
                 # response (by the try...catch).
                 if first_iteration:
+                    # Track first response time for latency calculation
+                    if request_metadata.first_response_time is None:
+                        request_metadata.first_response_time = time.monotonic()
+
                     num_cached_tokens = res.num_cached_tokens
                     # Send first response for each request.n (index) with
                     # the role
@@ -1483,9 +1499,32 @@ class OpenAIServingChat(OpenAIServing):
             try:
                 from vllm.tracing import SpanAttributes
 
+                # Calculate and set completion attributes
+                current_time = time.monotonic()
+                if request_metadata.arrival_time is not None:
+                    # E2E latency
+                    e2e_latency = current_time - request_metadata.arrival_time
+                    request_metadata.api_span.set_attribute(
+                        SpanAttributes.GEN_AI_LATENCY_E2E, e2e_latency
+                    )
+
+                    # Time to first token
+                    if request_metadata.first_response_time is not None:
+                        ttft = request_metadata.first_response_time - request_metadata.arrival_time
+                        request_metadata.api_span.set_attribute(
+                            SpanAttributes.GEN_AI_LATENCY_TIME_TO_FIRST_TOKEN, ttft
+                        )
+
+                # Completion tokens
+                if request_metadata.final_usage_info is not None:
+                    request_metadata.api_span.set_attribute(
+                        SpanAttributes.GEN_AI_USAGE_COMPLETION_TOKENS,
+                        request_metadata.final_usage_info.completion_tokens,
+                    )
+
                 request_metadata.api_span.add_event(
                     name="api.DEPARTED",
-                    attributes={SpanAttributes.EVENT_TS_MONOTONIC: time.monotonic()},
+                    attributes={SpanAttributes.EVENT_TS_MONOTONIC: current_time},
                     timestamp=time.time_ns(),
                 )
                 request_metadata.api_span.end(end_time=time.time_ns())
@@ -1507,6 +1546,9 @@ class OpenAIServingChat(OpenAIServing):
 
         try:
             async for res in result_generator:
+                # Track first response time for latency calculation
+                if request_metadata.first_response_time is None:
+                    request_metadata.first_response_time = time.monotonic()
                 final_res = res
         except asyncio.CancelledError:
             # Emit ABORTED event for client disconnect
@@ -1883,9 +1925,32 @@ class OpenAIServingChat(OpenAIServing):
             try:
                 from vllm.tracing import SpanAttributes
 
+                # Calculate and set completion attributes
+                current_time = time.monotonic()
+                if request_metadata.arrival_time is not None:
+                    # E2E latency
+                    e2e_latency = current_time - request_metadata.arrival_time
+                    request_metadata.api_span.set_attribute(
+                        SpanAttributes.GEN_AI_LATENCY_E2E, e2e_latency
+                    )
+
+                    # Time to first token
+                    if request_metadata.first_response_time is not None:
+                        ttft = request_metadata.first_response_time - request_metadata.arrival_time
+                        request_metadata.api_span.set_attribute(
+                            SpanAttributes.GEN_AI_LATENCY_TIME_TO_FIRST_TOKEN, ttft
+                        )
+
+                # Completion tokens
+                if request_metadata.final_usage_info is not None:
+                    request_metadata.api_span.set_attribute(
+                        SpanAttributes.GEN_AI_USAGE_COMPLETION_TOKENS,
+                        request_metadata.final_usage_info.completion_tokens,
+                    )
+
                 request_metadata.api_span.add_event(
                     name="api.DEPARTED",
-                    attributes={SpanAttributes.EVENT_TS_MONOTONIC: time.monotonic()},
+                    attributes={SpanAttributes.EVENT_TS_MONOTONIC: current_time},
                     timestamp=time.time_ns(),
                 )
                 request_metadata.api_span.end(end_time=time.time_ns())
@@ -2146,7 +2211,7 @@ class OpenAIServingChat(OpenAIServing):
         # Set span attributes
         api_span.set_attribute(SpanAttributes.GEN_AI_REQUEST_ID, request_id)
 
-        # Emit ARRIVED event
+        # Emit ARRIVED event with arrival timestamp
         api_span.add_event(
             name="api.ARRIVED",
             attributes={SpanAttributes.EVENT_TS_MONOTONIC: time.monotonic()},
@@ -2154,3 +2219,54 @@ class OpenAIServingChat(OpenAIServing):
         )
 
         return api_span
+
+    def _set_api_span_request_attributes(
+        self,
+        api_span: Any,
+        model_name: str,
+        prompt_token_ids: list[int],
+        sampling_params: SamplingParams,
+    ) -> None:
+        """Set request metadata attributes on API span.
+
+        Args:
+            api_span: The OTEL span object
+            model_name: Model name being used
+            prompt_token_ids: Prompt token IDs for counting prompt tokens
+            sampling_params: Sampling parameters from request
+        """
+        if not api_span:
+            return
+
+        try:
+            from vllm.tracing import SpanAttributes
+
+            # Model name
+            api_span.set_attribute(SpanAttributes.GEN_AI_RESPONSE_MODEL, model_name)
+
+            # Prompt tokens
+            api_span.set_attribute(
+                SpanAttributes.GEN_AI_USAGE_PROMPT_TOKENS, len(prompt_token_ids)
+            )
+
+            # Sampling parameters (only if not None)
+            if sampling_params.temperature is not None:
+                api_span.set_attribute(
+                    SpanAttributes.GEN_AI_REQUEST_TEMPERATURE,
+                    sampling_params.temperature,
+                )
+            if sampling_params.top_p is not None:
+                api_span.set_attribute(
+                    SpanAttributes.GEN_AI_REQUEST_TOP_P, sampling_params.top_p
+                )
+            if sampling_params.max_tokens is not None:
+                api_span.set_attribute(
+                    SpanAttributes.GEN_AI_REQUEST_MAX_TOKENS, sampling_params.max_tokens
+                )
+            if sampling_params.n is not None:
+                api_span.set_attribute(
+                    SpanAttributes.GEN_AI_REQUEST_N, sampling_params.n
+                )
+        except Exception:
+            # Don't fail request if span attribute setting fails
+            pass

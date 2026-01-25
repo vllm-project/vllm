@@ -120,6 +120,9 @@ class RequestResponseMetadata(BaseModel):
     request_id: str
     final_usage_info: UsageInfo | None = None
     api_span: Any | None = None  # OTEL Span for API-level journey tracing
+    # Timestamps for latency calculations (monotonic time)
+    arrival_time: float | None = None  # time.monotonic() when span created
+    first_response_time: float | None = None  # time.monotonic() when first output received
 
 
 class JsonSchemaResponseFormat(OpenAIBaseModel):
