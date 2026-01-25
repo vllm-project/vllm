@@ -419,7 +419,7 @@ class InputProcessor:
         if isinstance(prompt, str):
             return None
 
-        return prompt.get("multi_modal_data")
+        return prompt.get("multi_modal_data")  # type: ignore[return-value]
 
     def _extract_enc_dec_mm_data(
         self, prompt: ExplicitEncoderDecoderPrompt
