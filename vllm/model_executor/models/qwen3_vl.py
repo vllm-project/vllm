@@ -2077,7 +2077,17 @@ class Qwen3VLForConditionalGeneration(
         return self.language_model.compute_logits(hidden_states)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        loader = AutoWeightsLoader(self)
+        # Skip lm_head weights when tie_word_embeddings is True, as lm_head
+        # is tied to embed_tokens and not stored separately in the checkpoint
+        text_config = getattr(self.config, "text_config", self.config)
+        loader = AutoWeightsLoader(
+            self,
+            skip_prefixes=(
+                ["language_model.lm_head."]
+                if getattr(text_config, "tie_word_embeddings", False)
+                else None
+            ),
+        )
         return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
     def get_mm_mapping(self) -> MultiModelKeys:
