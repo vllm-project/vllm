@@ -546,7 +546,8 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   // Compute NVFP4 block quantized tensor.
   ops.def(
       "scaled_fp4_quant(Tensor! output, Tensor input,"
-      "                 Tensor! output_scale, Tensor input_scale) -> ()");
+      "                 Tensor! output_scale, Tensor input_scale, bool "
+      "is_sf_swizzled_layout) -> ()");
   ops.impl("scaled_fp4_quant", torch::kCUDA, &scaled_fp4_quant);
 
   // Compute NVFP4 experts quantization.

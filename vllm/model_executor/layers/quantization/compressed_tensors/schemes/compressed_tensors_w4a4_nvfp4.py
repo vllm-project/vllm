@@ -191,7 +191,10 @@ class CompressedTensorsW4A4Fp4(CompressedTensorsScheme):
 
         # quantize BF16 or FP16 to (FP4 and interleaved block scale)
         x_fp4, x_blockscale = scaled_fp4_quant(
-            x, layer.input_global_scale, self.backend
+            x,
+            layer.input_global_scale,
+            is_sf_swizzled_layout=True,
+            backend=self.backend,
         )
 
         mm_args = (
