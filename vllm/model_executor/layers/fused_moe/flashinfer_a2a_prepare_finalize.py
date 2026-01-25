@@ -187,6 +187,8 @@ def flashinfer_alltoall_dispatch(
 
         # Swizzle after the A2A if nvfp4.
         if quant_config.quant_dtype == "nvfp4":
+            if x_sf.element_size() == 1:
+                x_sf = x_sf.view(torch.uint8)
             x_sf = nvfp4_block_scale_interleave(x_sf)
     else:
         # Block-scale path: pass activations through without quantization

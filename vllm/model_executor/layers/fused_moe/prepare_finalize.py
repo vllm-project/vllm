@@ -98,6 +98,9 @@ class MoEPrepareAndFinalizeNaiveEP(mk.FusedMoEPrepareAndFinalize):
             assert scales is not None and len(scales) == 1
             a1q_scale = scales[0]
             if quant_config.quant_dtype == "nvfp4":
+                assert a1q_scale is not None
+                if a1q_scale.element_size() == 1:
+                    a1q_scale = a1q_scale.view(torch.uint8)
                 a1q_scale = nvfp4_block_scale_interleave(a1q_scale)
 
         return a1q, a1q_scale, None, topk_ids, topk_weights
