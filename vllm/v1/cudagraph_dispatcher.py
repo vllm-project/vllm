@@ -231,3 +231,26 @@ class CudagraphDispatcher:
 
         # finally, just return no cudagraphs and a trivial batch descriptor
         return CUDAGraphMode.NONE, BatchDescriptor(num_tokens)
+
+    def get_capture_descs(self) -> list[tuple[CUDAGraphMode, list[BatchDescriptor]]]:
+        """
+        Returns capture descriptors for cudagraph capturing.
+
+        Returns:
+            List of (runtime_mode, batch_descriptors) tuples, ordered PIECEWISE
+            first then FULL. Batch descriptors are sorted largest-first for
+            memory efficiency.
+        """
+        if not self.keys_initialized or self.cudagraph_mode == CUDAGraphMode.NONE:
+            return []
+
+        result = []
+        # Return in order: PIECEWISE first, then FULL
+        for mode in [CUDAGraphMode.PIECEWISE, CUDAGraphMode.FULL]:
+            descs = list(self.cudagraph_keys[mode])
+            if descs:
+                # Sort by num_tokens descending (largest first)
+                descs.sort(key=lambda d: d.num_tokens, reverse=True)
+                result.append((mode, descs))
+
+        return result
