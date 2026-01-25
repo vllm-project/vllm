@@ -31,7 +31,7 @@ uv pip install vllm --extra-index-url https://wheels.vllm.ai/rocm/
 To install a specific version and ROCm variant of vLLM wheel.
 
 ```bash
-uv pip install vllm --extra-index-url https://wheels.vllm.ai/rocm/0.15.0/rocm700
+uv pip install vllm --extra-index-url https://wheels.vllm.ai/rocm/0.14.1/rocm700
 ```
 
 !!! warning "Caveats for using `pip`" 
@@ -41,7 +41,7 @@ uv pip install vllm --extra-index-url https://wheels.vllm.ai/rocm/0.15.0/rocm700
     If you insist on using `pip`, you have to specify the exact vLLM version and full URL of the wheel path `https://wheels.vllm.ai/rocm/<version>/<rocm-variant>` (which can be obtained from the web page).
 
     ```bash
-    pip install vllm==0.15.0+rocm700 --extra-index-url https://wheels.vllm.ai/rocm/0.15.0/rocm700
+    pip install vllm==0.14.1+rocm700 --extra-index-url https://wheels.vllm.ai/rocm/0.14.1/rocm700
     ```
 
 # --8<-- [end:pre-built-wheels]
