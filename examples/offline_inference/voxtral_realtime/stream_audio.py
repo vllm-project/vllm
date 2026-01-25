@@ -85,6 +85,7 @@ async def main():
     start_idx = 0
     left_pad_in_samples = config.raw_audio_length_per_tok * config.n_left_pad_tokens
     end_idx = streaming_delay_in_samples + stream_size_in_samples + left_pad_in_samples
+    end_idx = 20 * end_idx
 
     engine_args = AsyncEngineArgs(
         model=model_id,
@@ -109,6 +110,9 @@ async def main():
         _start = max(0, start - look_back)
 
         multi_modal_data = {"audio": (audio.audio_array[_start: _end], None)}
+
+        if _start > 0:
+            multi_modal_data = None
         return TokensPrompt(prompt_token_ids=tokens, multi_modal_data=multi_modal_data)
 
     audio_len_in_samples = audio.audio_array.shape[0]

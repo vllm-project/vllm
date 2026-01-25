@@ -30,7 +30,7 @@ def _get_engine(path: str) -> LLM:
     return LLM(**asdict(engine_args))
 
 
-@pytest.mark.skip(reason="Voxtral streaming is not yet public")
+# @pytest.mark.skip(reason="Voxtral streaming is not yet public")
 def test_voxtral_streaming_forward():
     audio_assets = [AudioAsset("mary_had_lamb"), AudioAsset("winning_call")]
 
@@ -60,7 +60,7 @@ def test_voxtral_streaming_forward():
         num_samples = audio_array.shape[0]
         max_tokens = (
             audio_config.num_audio_tokens(num_samples)
-            - audio_config.num_delay_tokens
+            - len(tokens)
             - 1
         )
         sampling_params.append(SamplingParams(temperature=0.0, max_tokens=max_tokens))
