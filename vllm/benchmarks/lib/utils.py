@@ -8,12 +8,24 @@ import os
 from typing import Any
 
 
+def extract_compilation_mode(args: argparse.Namespace) -> str:
+    """
+    Extract the compilation_config.mode for different benchmark types
+    """
+    if hasattr(args, "compilation_config"):
+        return args.compilation_config.mode
+    elif hasattr(args, "compilation_mode"):
+        return args.compilation_mode
+    else:
+        return ""
+
+
 def use_compile(args: argparse.Namespace) -> bool:
     """
     Check if the benchmark is run with torch.compile
     """
     return not (
-        args.compilation_config.mode == 0
+        extract_compilation_mode(args) == "0"
         or "eager" in getattr(args, "output_json", "")
         or "eager" in getattr(args, "result_filename", "")
     )
@@ -37,8 +49,7 @@ def convert_to_pytorch_benchmark_format(
                 "name": "vLLM benchmark",
                 "extra_info": {
                     "args": vars(args),
-                    "enforce_eager": args.enforce_eager,
-                    "compilation_mode": args.compilation_config.mode,
+                    "compilation_mode": extract_compilation_mode(args),
                     # A boolean field used by vLLM benchmark HUD dashboard
                     "use_compile": use_compile(args),
                 },
