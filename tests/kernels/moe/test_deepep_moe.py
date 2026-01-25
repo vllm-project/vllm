@@ -151,6 +151,13 @@ def make_modular_kernel(
         )
         ht_args = DeepEPHTArgs(num_local_experts=num_local_experts)
 
+    moe_config = make_dummy_moe_config()
+    defer_input_quant = (
+        BatchedTritonExperts.expects_unquantized_inputs(moe_config, quant_config)
+        if low_latency_mode
+        else TritonExperts.expects_unquantized_inputs(moe_config, quant_config)
+    )
+
     a2a: DeepEPHTPrepareAndFinalize | DeepEPLLPrepareAndFinalize = make_deepep_a2a(
         pg=pg,
         pgi=pgi,
@@ -159,11 +166,10 @@ def make_modular_kernel(
         block_shape=None,
         deepep_ht_args=ht_args,
         deepep_ll_args=ll_args,
+        defer_input_quant=defer_input_quant,
     )
 
     num_dispatchers = pgi.world_size // dp_size
-
-    moe_config = make_dummy_moe_config()
 
     if low_latency_mode:
         assert not quant_config.per_act_token_quant, "not supported in ll mode"

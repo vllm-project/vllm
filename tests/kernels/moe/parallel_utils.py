@@ -130,6 +130,7 @@ def make_deepep_ht_a2a(
     ht_args: DeepEPHTArgs,
     q_dtype: torch.dtype | None = None,
     block_shape: list[int] | None = None,
+    defer_input_quant: bool = False,
 ):
     import deep_ep
 
@@ -144,6 +145,7 @@ def make_deepep_ht_a2a(
         num_qps_per_rank=num_qps_per_rank,
     )
     return DeepEPHTPrepareAndFinalize(
+        defer_input_quant=defer_input_quant,
         buffer=buffer,
         num_dispatchers=pgi.world_size,
         dp_size=dp_size,
@@ -157,6 +159,7 @@ def make_deepep_ll_a2a(
     deepep_ll_args: DeepEPLLArgs,
     q_dtype: torch.dtype | None = None,
     block_shape: list[int] | None = None,
+    defer_input_quant: bool = False,
 ):
     import deep_ep
 
@@ -176,6 +179,7 @@ def make_deepep_ll_a2a(
     )
 
     return DeepEPLLPrepareAndFinalize(
+        defer_input_quant=defer_input_quant,
         buffer=buffer,
         num_dispatchers=pgi.world_size,
         max_tokens_per_rank=deepep_ll_args.max_tokens_per_rank,
@@ -191,12 +195,21 @@ def make_deepep_a2a(
     deepep_ll_args: DeepEPLLArgs | None,
     q_dtype: torch.dtype | None = None,
     block_shape: list[int] | None = None,
+    defer_input_quant: bool = False,
 ):
     if deepep_ht_args is not None:
         assert deepep_ll_args is None
         return make_deepep_ht_a2a(
-            pg, pgi, dp_size, deepep_ht_args, q_dtype, block_shape
+            pg,
+            pgi,
+            dp_size,
+            deepep_ht_args,
+            q_dtype,
+            block_shape,
+            defer_input_quant,
         )
 
     assert deepep_ll_args is not None
-    return make_deepep_ll_a2a(pg, pgi, deepep_ll_args, q_dtype, block_shape)
+    return make_deepep_ll_a2a(
+        pg, pgi, deepep_ll_args, q_dtype, block_shape, defer_input_quant
+    )
