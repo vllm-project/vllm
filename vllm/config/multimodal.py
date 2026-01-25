@@ -146,13 +146,12 @@ class MultiModalConfig:
     Value sits in range [0;1) and determines fraction of media tokens
     from each video to be pruned.
     """
-    multimodal_tensor_ipc: bool | None = None
+    multimodal_tensor_ipc: bool = False
     """Enable IPC (inter-process communication) for multimodal tensors.
     When enabled, all multimodal tensors (CUDA and CPU) are transferred
     via torch.multiprocessing shared memory for zero-copy IPC.
     When disabled, all tensors use standard serialization.
-    If None, defaults to the value of VLLM_MULTIMODAL_TENSOR_IPC environment
-    variable (default: True)."""
+    Defaults to False. """
 
     @field_validator("limit_per_prompt", mode="before")
     @classmethod

@@ -531,10 +531,7 @@ class MPClient(EngineCoreClient):
                 if mm_ipc is not None:
                     multimodal_tensor_ipc = mm_ipc
                 else:
-                    # Fall back to environment variable
-                    from vllm import envs
-
-                    multimodal_tensor_ipc = envs.VLLM_MULTIMODAL_TENSOR_IPC
+                    multimodal_tensor_ipc = False
 
             self.encoder = MsgpackEncoder(
                 tensor_queues=tensor_queues,
