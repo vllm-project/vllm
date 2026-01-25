@@ -34,7 +34,7 @@ import torch.nn as nn
 from einops import rearrange
 from transformers.models.glm_ocr.configuration_glm_ocr import GlmOcrVisionConfig
 
-from vllm.config import MultiModalConfig, VllmConfig
+from vllm.config import VllmConfig
 from vllm.distributed import get_tensor_model_parallel_world_size, parallel_state
 from vllm.distributed import utils as dist_utils
 from vllm.logger import init_logger
@@ -87,7 +87,6 @@ class GlmOcrVisionAttention(nn.Module):
         num_heads: int,
         projection_size: int,
         quant_config: QuantizationConfig | None = None,
-        multimodal_config: MultiModalConfig | None = None,
         prefix: str = "",
     ) -> None:
         super().__init__()
@@ -206,7 +205,6 @@ class GlmOcrVisionBlock(Glm4vVisionBlock):
         mlp_hidden_dim: int,
         norm_layer: Callable[[int], nn.Module] | None = None,
         quant_config: QuantizationConfig | None = None,
-        multimodal_config: MultiModalConfig | None = None,
         prefix: str = "",
     ) -> None:
         super().__init__(
@@ -215,7 +213,6 @@ class GlmOcrVisionBlock(Glm4vVisionBlock):
             mlp_hidden_dim,
             norm_layer,
             quant_config,
-            multimodal_config,
             prefix,
         )
         if norm_layer is None:
@@ -227,7 +224,6 @@ class GlmOcrVisionBlock(Glm4vVisionBlock):
             num_heads=num_heads,
             projection_size=dim,
             quant_config=quant_config,
-            multimodal_config=multimodal_config,
             prefix=f"{prefix}.attn",
         )
         self.mlp = GlmOcrVisionMLP(
@@ -235,7 +231,6 @@ class GlmOcrVisionBlock(Glm4vVisionBlock):
             mlp_hidden_dim,
             bias=True,
             quant_config=quant_config,
-            multimodal_config=multimodal_config,
             prefix=f"{prefix}.mlp",
         )
 
@@ -254,14 +249,10 @@ class GlmOcrVisionTransformer(Glm4vVisionTransformer):
         vision_config: GlmOcrVisionConfig,
         norm_eps: float = 1e-5,
         quant_config: QuantizationConfig | None = None,
-        multimodal_config: MultiModalConfig | None = None,
         prefix: str = "",
     ) -> None:
-        super().__init__(
-            vision_config, norm_eps, quant_config, multimodal_config, prefix
-        )
+        super().__init__(vision_config, norm_eps, quant_config, prefix)
 
-        assert multimodal_config is not None, "multimodal_config must be provided"
         del self.post_conv_layernorm
         del self.embeddings
 
@@ -299,7 +290,6 @@ class GlmOcrVisionTransformer(Glm4vVisionTransformer):
                     mlp_hidden_dim=vision_config.intermediate_size,
                     norm_layer=norm_layer,
                     quant_config=quant_config,
-                    multimodal_config=multimodal_config,
                     prefix=f"{prefix}.blocks.{layer_idx}",
                 )
                 for layer_idx in range(depth)
@@ -309,7 +299,6 @@ class GlmOcrVisionTransformer(Glm4vVisionTransformer):
             d_model=vision_config.out_hidden_size,
             context_dim=vision_config.out_hidden_size * vision_config.in_channels,
             quant_config=quant_config,
-            multimodal_config=multimodal_config,
             bias=False,
             prefix=f"{prefix}.merger",
         )
@@ -327,7 +316,6 @@ class GlmOcrVisionTransformer(Glm4vVisionTransformer):
         self.attn_backend = get_vit_attn_backend(
             head_size=head_dim,
             dtype=torch.get_default_dtype(),
-            attn_backend_override=multimodal_config.mm_encoder_attn_backend,
         )
 
     def forward(
@@ -388,17 +376,11 @@ class GlmOcrForConditionalGeneration(Glm4vForConditionalGeneration):
         super().__init__(vllm_config=vllm_config, prefix=prefix)
         config = vllm_config.model_config.hf_config
         quant_config = vllm_config.quant_config
-        multimodal_config = vllm_config.model_config.multimodal_config
-
-        self.config = config
-        self.multimodal_config = multimodal_config
-        self.use_data_parallel = multimodal_config.mm_encoder_tp_mode == "data"
 
         with self._mark_tower_model(vllm_config, {"image", "video"}):
             self.visual = GlmOcrVisionTransformer(
                 config.vision_config,
                 norm_eps=getattr(config, "rms_norm_eps", 1e-5),
                 quant_config=quant_config,
-                multimodal_config=multimodal_config,
                 prefix=maybe_prefix(prefix, "visual"),
             )
