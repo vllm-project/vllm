@@ -263,6 +263,12 @@ class VllmConfig:
         vllm_factors.append(__version__)
         if self.model_config:
             vllm_factors.append(self.model_config.compute_hash())
+            if (
+                self.compilation_config
+                and getattr(self.compilation_config, "compile_mm_encoder", False)
+                and self.model_config.multimodal_config
+            ):
+                vllm_factors.append(self.model_config.multimodal_config.compute_hash())
         else:
             vllm_factors.append("None")
         if self.cache_config:
@@ -622,11 +628,14 @@ class VllmConfig:
 
         if self.parallel_config.disable_nccl_for_dp_synchronization is None:
             if self.scheduler_config.async_scheduling:
-                logger.info_once(
-                    "Disabling NCCL for DP synchronization "
-                    "when using async scheduling.",
-                    scope="local",
-                )
+                if self.parallel_config.data_parallel_size > 1 and (
+                    self.model_config is None or self.model_config.is_moe
+                ):
+                    logger.info_once(
+                        "Disabling NCCL for DP synchronization "
+                        "when using async scheduling.",
+                        scope="local",
+                    )
                 self.parallel_config.disable_nccl_for_dp_synchronization = True
             else:
                 self.parallel_config.disable_nccl_for_dp_synchronization = False
@@ -996,6 +1005,17 @@ class VllmConfig:
             # Default to enable HMA if not explicitly disabled by user or logic above.
             self.scheduler_config.disable_hybrid_kv_cache_manager = False
 
+        if self.cache_config.mamba_cache_mode == "align":
+            if self.scheduler_config.long_prefill_token_threshold > 0:
+                assert (
+                    self.scheduler_config.long_prefill_token_threshold
+                    >= self.cache_config.block_size
+                )
+            assert not self.scheduler_config.disable_chunked_mm_input, (
+                "Chunked MM input is required because we need the flexibility to "
+                "schedule a multiple of block_size tokens even if they are in the "
+                "middle of a mm input"
+            )
         if self.compilation_config.debug_dump_path:
             self.compilation_config.debug_dump_path = (
                 self.compilation_config.debug_dump_path.absolute().expanduser()
@@ -1214,10 +1234,19 @@ class VllmConfig:
         compilation_config = self.compilation_config
         computed_compile_ranges_split_points = []
 
-        # The upper bound of the compile ranges is the max_num_batched_tokens
-        max_num_batched_tokens = self.scheduler_config.max_num_batched_tokens
-        if max_num_batched_tokens is not None:
-            computed_compile_ranges_split_points.append(max_num_batched_tokens)
+        # The upper bound of the compile ranges is the max_num_batched_tokens.
+        # For speculative decoding with draft model, the compile range must be extended
+        # by 1 for each sequence.
+        compile_range_end = self.scheduler_config.max_num_batched_tokens
+        if compile_range_end is not None:
+            do_extend: bool = (
+                self.speculative_config is not None
+                and self.speculative_config.uses_draft_model()
+            )
+            if do_extend:
+                compile_range_end += self.scheduler_config.max_num_seqs
+
+            computed_compile_ranges_split_points.append(compile_range_end)
 
         # Add the compile ranges for flashinfer
         if compilation_config.pass_config.fuse_allreduce_rms:
@@ -1228,10 +1257,7 @@ class VllmConfig:
                     self.model_config.get_hidden_size()
                     * self.model_config.dtype.itemsize
                 )
-                if (
-                    max_num_batched_tokens is not None
-                    and max_token_num < max_num_batched_tokens
-                ):
+                if compile_range_end is not None and max_token_num < compile_range_end:
                     computed_compile_ranges_split_points.append(max_token_num)
                 else:
                     logger.debug(
@@ -1243,11 +1269,7 @@ class VllmConfig:
             for x in compilation_config.compile_ranges_split_points:
                 assert isinstance(x, int)
                 assert x > 0, f"Invalid compile range split point: {x}"
-                if (
-                    max_num_batched_tokens is not None
-                    and x < max_num_batched_tokens
-                    and x > 1
-                ):
+                if compile_range_end is not None and x < compile_range_end and x > 1:
                     computed_compile_ranges_split_points.append(x)
         compilation_config.compile_ranges_split_points = sorted(
             computed_compile_ranges_split_points
@@ -1315,6 +1337,14 @@ class VllmConfig:
         append_path = f"rank_{tp_rank}_dp_{dp_rank}"
         path = self.compilation_config.debug_dump_path / append_path
         return path
+
+    def replace(self, **kwargs):
+        """
+        Replace attributes of the config, and 'recompute' the config.
+        dataclass.replace() calls __init__() and __post_init__(), source:
+        https://docs.python.org/3/library/dataclasses.html#dataclasses.replace
+        """
+        return replace(self, **kwargs)
 
     def __str__(self):
         return (
