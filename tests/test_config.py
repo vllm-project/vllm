@@ -1140,3 +1140,42 @@ def test_eagle_draft_model_config():
     assert draft_model_config.hf_text_config.model_type == "eagle"
     assert draft_model_config.architectures == ["EagleLlamaForCausalLM"]
     assert draft_model_config.architecture == "EagleLlamaForCausalLM"
+
+
+def test_resolve_kv_cache_dtype_string():
+    """Test that resolve_kv_cache_dtype_string resolves 'auto' correctly."""
+    from unittest.mock import MagicMock
+
+    import torch
+
+    from vllm.utils.torch_utils import resolve_kv_cache_dtype_string
+
+    # Test 1: Non-auto values should be returned unchanged
+    mock_model_config = MagicMock()
+    assert resolve_kv_cache_dtype_string("fp8", mock_model_config) == "fp8"
+    assert resolve_kv_cache_dtype_string("bfloat16", mock_model_config) == "bfloat16"
+
+    # Test 2: auto with bfloat16 model dtype should return "bfloat16"
+    mock_model_config = MagicMock()
+    mock_model_config.dtype = torch.bfloat16
+    mock_model_config.hf_config = MagicMock()
+    mock_model_config.hf_config.quantization_config = None
+    assert resolve_kv_cache_dtype_string("auto", mock_model_config) == "bfloat16"
+
+    # Test 3: auto with float16 model dtype should return "auto"
+    # (since "float16" is not a valid CacheDType)
+    mock_model_config = MagicMock()
+    mock_model_config.dtype = torch.float16
+    mock_model_config.hf_config = MagicMock()
+    mock_model_config.hf_config.quantization_config = None
+    assert resolve_kv_cache_dtype_string("auto", mock_model_config) == "auto"
+
+    # Test 4: auto with FP8 quantization config should return "fp8"
+    mock_model_config = MagicMock()
+    mock_model_config.dtype = torch.bfloat16
+    mock_model_config.hf_config = MagicMock()
+    mock_model_config.hf_config.quantization_config = {
+        "quant_method": "modelopt",
+        "kv_cache_quant_algo": "FP8",
+    }
+    assert resolve_kv_cache_dtype_string("auto", mock_model_config) == "fp8"

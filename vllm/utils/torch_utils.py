@@ -325,20 +325,31 @@ def resolve_kv_cache_dtype_string(
     kv_cache_dtype: str, model_config: ModelConfig
 ) -> str:
     """Resolve 'auto' kv_cache_dtype to the actual string value from model config.
-    Returns the resolved cache_dtype string.
+
+    Returns the resolved cache_dtype string:
+    - If kv_cache_dtype != "auto": returns unchanged
+    - If model has FP8 KV cache config: returns the FP8 dtype string
+    - If model dtype is bfloat16: returns "bfloat16"
+    - Otherwise: returns "auto" (since "float16" is not a valid CacheDType)
     """
     if kv_cache_dtype != "auto":
         return kv_cache_dtype
 
+    # Check for FP8 KV cache in quantization config
     hf_cfg = getattr(model_config, "hf_config", None)
     if hf_cfg is not None:
         quant_cfg = getattr(hf_cfg, "quantization_config", None)
         if quant_cfg is not None:
             kv_algo_str = get_kv_cache_quant_algo_string(quant_cfg)
-            if kv_algo_str is not None:
+            if kv_algo_str is not None and kv_algo_str != "auto":
                 return kv_algo_str
 
-    # Default to auto (will be handled by downstream code)
+    # Note: CacheDType only includes "bfloat16", not "float16"/"half"
+    dtype = model_config.dtype if model_config else torch.half
+    if dtype == torch.bfloat16:
+        return "bfloat16"
+
+    # For float16/half, keep "auto" since "float16" is not a valid CacheDType
     return "auto"
 
 

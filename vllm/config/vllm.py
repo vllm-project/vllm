@@ -1376,6 +1376,27 @@ class VllmConfig:
             return
         self.model_config.config_updated = True
 
+        # Resolve "auto" kv_cache_dtype to actual value based on model config
+        if self.cache_config.cache_dtype == "auto":
+            from vllm.utils.torch_utils import resolve_kv_cache_dtype_string
+
+            resolved = resolve_kv_cache_dtype_string(
+                self.cache_config.cache_dtype, self.model_config
+            )
+            if resolved != "auto":
+                logger.info(
+                    "Resolved kv_cache_dtype from 'auto' to '%s' "
+                    "based on model configuration.",
+                    resolved,
+                )
+                self.cache_config.cache_dtype = resolved
+            else:
+                # For fp16 models, "auto" is kept but we inform the user
+                logger.info(
+                    "Using kv_cache_dtype='auto' (model dtype: %s).",
+                    self.model_config.dtype,
+                )
+
         architecture = self.model_config.architecture
         if architecture is None:
             return
