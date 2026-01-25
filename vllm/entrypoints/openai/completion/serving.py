@@ -72,16 +72,9 @@ class OpenAIServingCompletion(OpenAIServing):
         self.logits_processors = self.model_config.logits_processors
 
         self.enable_prompt_tokens_details = enable_prompt_tokens_details
-        self.default_sampling_params = self.model_config.get_diff_sampling_param()
         self.enable_force_include_usage = enable_force_include_usage
-        if self.default_sampling_params:
-            source = self.model_config.generation_config
-            source = "model" if source == "auto" else source
-            logger.info(
-                "Using default completion sampling params from %s: %s",
-                source,
-                self.default_sampling_params,
-            )
+
+        self.default_sampling_params = self.model_config.get_diff_sampling_param()
 
     async def render_completion_request(
         self,
@@ -117,12 +110,7 @@ class OpenAIServingCompletion(OpenAIServing):
             )
 
         try:
-            if self.model_config.skip_tokenizer_init:
-                tokenizer = None
-            else:
-                tokenizer = await self.engine_client.get_tokenizer()
-            renderer = self._get_renderer(tokenizer)
-
+            renderer = self._get_completion_renderer()
             engine_prompts = await renderer.render_prompt_and_embeds(
                 prompt_or_prompts=request.prompt,
                 prompt_embeds=request.prompt_embeds,
@@ -163,11 +151,6 @@ class OpenAIServingCompletion(OpenAIServing):
 
         try:
             lora_request = self._maybe_get_adapters(request)
-
-            if self.model_config.skip_tokenizer_init:
-                tokenizer = None
-            else:
-                tokenizer = await self.engine_client.get_tokenizer()
         except (ValueError, TypeError, RuntimeError) as e:
             logger.exception("Error preparing request components")
             return self.create_error_response(e)
@@ -280,6 +263,8 @@ class OpenAIServingCompletion(OpenAIServing):
         stream = request.stream and not request.use_beam_search
 
         # Streaming response
+        tokenizer = self.renderer.tokenizer
+
         if stream:
             return self.completion_stream_generator(
                 request,
