@@ -916,6 +916,8 @@ class OpenAIServingChat(OpenAIServing):
                         # must not contain content.
                         if tools_streamed_flag and delta_message:
                             delta_message.content = None
+                            delta_message.reasoning = None
+                            delta_message.reasoning_content = None
                     # handle streaming deltas for tools with named tool_choice
                     elif tool_choice_function_name:
                         if (
