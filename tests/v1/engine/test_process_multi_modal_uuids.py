@@ -144,7 +144,7 @@ def test_multi_modal_uuids_ignored_when_caching_disabled(monkeypatch):
     )
 
     request_id = "req-42"
-    mm_uuids = {"image": ["hash_cherry", "hash_stop"], "video": "hash_video"}
+    mm_uuids = {"image": ["hash_cherry", "hash_stop"], "video": ["hash_video"]}
     prompt = {
         "prompt": "USER: <image><image><video>\nDescribe\nASSISTANT:",
         "multi_modal_data": {
