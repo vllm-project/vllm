@@ -309,6 +309,7 @@ class ActivationQuantFusionPass(VllmPatternMatcherPass):
         # =====================================================================
         if current_platform.is_cuda():
             # Register patterns for different group sizes and layouts
+            count = 0
             for group_shape in [GroupShape(1, 128), GroupShape(1, 64)]:
                 for has_col_major_scales in [True, False]:
                     for is_e8m0 in [True, False]:
@@ -318,6 +319,8 @@ class ActivationQuantFusionPass(VllmPatternMatcherPass):
                             is_e8m0=is_e8m0,
                         )
                         pattern_silu_mul_block.register(self.patterns)
+                        count += 1
+                        print(f"  Registered pattern {count}: group_size={group_shape[1]}, col_major={has_col_major_scales}, e8m0={is_e8m0}")
 
         self.dump_patterns(config, self.patterns)
 

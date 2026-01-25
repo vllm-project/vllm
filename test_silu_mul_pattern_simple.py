@@ -60,6 +60,8 @@ except Exception as e:
 print("\n[3/3] Testing pattern matching with torch.compile...")
 
 from vllm.model_executor.layers.quantization.utils.fp8_utils import per_token_group_quant_fp8
+from vllm.compilation.inductor_pass import pass_context
+from vllm.config.utils import Range
 
 def test_function(x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
     """Function that should trigger pattern matching."""
@@ -76,30 +78,32 @@ with torch.no_grad():
     baseline_out, baseline_scales = test_function(x_test)
 print(f"   Baseline: out={baseline_out.shape}")
 
-# Compiled
+# Compiled - WRAP EVERYTHING IN pass_context
 print("   Compiling function...")
 print("   (If pattern fires, you'll see: 🔥 FUSED KERNEL TRIGGERED!)\n")
 
 import torch._inductor.config as inductor_config
 
-with set_current_vllm_config(config):
-    pm_compile = PostGradPassManager()
-    pm_compile.configure(config)
-    inductor_config.post_grad_custom_post_pass = pm_compile
-    
-    compiled_fn = torch.compile(test_function, backend="inductor")
-    
-    with torch.no_grad():
-        compiled_out, compiled_scales = compiled_fn(x_test)
-    
-    print(f"\n   Compiled: out={compiled_out.shape}")
-    
-    match = torch.allclose(baseline_out.float(), compiled_out.float(), atol=1.0)
-    print(f"   Results match: {match}")
-    
-    if match:
-        print("\n   Note: Results matching doesn't guarantee pattern fired")
-        print("   Look for '🔥 FUSED KERNEL TRIGGERED!' message above")
+# IMPORTANT: Wrap in pass_context
+with pass_context(Range(start=1, end=8)):
+    with set_current_vllm_config(config):
+        pm_compile = PostGradPassManager()
+        pm_compile.configure(config)
+        inductor_config.post_grad_custom_post_pass = pm_compile
+        
+        compiled_fn = torch.compile(test_function, backend="inductor")
+        
+        with torch.no_grad():
+            compiled_out, compiled_scales = compiled_fn(x_test)
+        
+        print(f"\n   Compiled: out={compiled_out.shape}")
+        
+        match = torch.allclose(baseline_out.float(), compiled_out.float(), atol=1.0)
+        print(f"   Results match: {match}")
+        
+        if match:
+            print("\n   Note: Results matching doesn't guarantee pattern fired")
+            print("   Look for '🔥 FUSED KERNEL TRIGGERED!' message above")
 
 print("\n" + "="*80)
 print("DONE")
