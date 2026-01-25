@@ -100,14 +100,14 @@ def test_get_numel_loaded():
             "inference-optimization/Qwen3-0.6B-debug-add",
         ),
         (
-            "inference-optimization/Qwen3-0.6B-W4A16-G128",
-            "inference-optimization/Qwen3-0.6B-debug-multiply-W4A16-G128",
-            "inference-optimization/Qwen3-0.6B-debug-add-W4A16-G128",
-        ),
-        (
             "inference-optimization/Qwen3-0.6B-FP8_BLOCK",
             "inference-optimization/Qwen3-0.6B-debug-multiply-FP8_BLOCK",
             "inference-optimization/Qwen3-0.6B-debug-add-FP8_BLOCK",
+        ),
+        (
+            "inference-optimization/Qwen3-0.6B-W4A16-G128",
+            "inference-optimization/Qwen3-0.6B-debug-multiply-W4A16-G128",
+            "inference-optimization/Qwen3-0.6B-debug-add-W4A16-G128",
         ),
         (
             "inference-optimization/DeepSeek-V3-debug-empty",

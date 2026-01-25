@@ -82,7 +82,7 @@ def initialize_layerwise_reload(model: torch.nn.Module):
     4. Copy processed values back to original tensor storage
     """
     # disable torchao reloading to avoid infinite recursion
-    _do_torchao_reload = getattr(model, "_do_torchao_reload", False)
+    model._original_do_torchao_reload = getattr(model, "_do_torchao_reload", False)
     model._do_torchao_reload = False
 
     for layer in model.modules():
@@ -107,8 +107,6 @@ def initialize_layerwise_reload(model: torch.nn.Module):
         for name, tensor in get_layer_tensors(layer).items():
             if _get_weight_loader(tensor).__name__ != "online_process_loader":
                 tensor.weight_loader = make_online_process_loader(layer, name)
-
-    model._do_torchao_reload = _do_torchao_reload
 
 
 def make_online_process_loader(layer: torch.nn.Module, param_name: str) -> Callable:
@@ -174,6 +172,8 @@ def finalize_layerwise_reload(model: torch.nn.Module, model_config: ModelConfig)
 
     Also processes Attention/MLA layers, which must be processed after all other layers
     """
+    model._do_torchao_reload = model._original_do_torchao_reload
+
     for layer in model.modules():
         info = get_layerwise_info(layer)
 
@@ -189,7 +189,7 @@ def finalize_layerwise_reload(model: torch.nn.Module, model_config: ModelConfig)
                 layer.process_weights_after_loading(model_config.dtype)
 
         # No weights were loaded, place kernel tensors back
-        elif info.can_process():
+        elif info.can_process() and info.load_numel <= 0:
             _place_kernel_tensors(layer, info)
 
         # Process non-attention layers which did not load all elements. This can happen
