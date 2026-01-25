@@ -18,7 +18,6 @@ import torch.nn as nn
 import torch.nn.functional as F
 from transformers.activations import GELUActivation
 
-from vllm.config import MultiModalConfig
 from vllm.distributed import divide, get_tensor_model_parallel_world_size
 from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import get_act_fn
@@ -30,7 +29,10 @@ from vllm.model_executor.layers.linear import (
     RowParallelLinear,
 )
 from vllm.model_executor.models.utils import maybe_prefix
-from vllm.model_executor.models.vision import run_dp_sharded_mrope_vision_model
+from vllm.model_executor.models.vision import (
+    is_vit_use_data_parallel,
+    run_dp_sharded_mrope_vision_model,
+)
 from vllm.transformers_utils.configs.kimi_k25 import KimiK25VisionConfig
 
 logger = init_logger(__name__)
@@ -348,17 +350,12 @@ class MoonViTEncoderLayer(nn.Module):
         hidden_dim: int,
         mlp_dim: int,
         prefix: str = "",
-        multimodal_config: MultiModalConfig | None = None,
         *,
         activation=F.gelu,
         attn_bias: bool = False,
     ):
         super().__init__()
-        self.use_data_parallel = (
-            multimodal_config.mm_encoder_tp_mode == "data"
-            if multimodal_config
-            else False
-        )
+        self.use_data_parallel = is_vit_use_data_parallel()
 
         self.num_heads = num_heads
         self.hidden_dim = hidden_dim
