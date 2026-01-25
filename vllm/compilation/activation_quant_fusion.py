@@ -308,10 +308,16 @@ class ActivationQuantFusionPass(VllmPatternMatcherPass):
         # NEW: Register block quantization patterns
         # =====================================================================
         if current_platform.is_cuda():
-            print(f"Registering block quant pattern...")
-            pattern_silu_mul_block = SiluMulBlockQuantPattern()
-            pattern_silu_mul_block.register(self.patterns)
-            print(f"Registered block quant pattern")
+            # Register patterns for different group sizes and layouts
+            for group_shape in [GroupShape(1, 128), GroupShape(1, 64)]:
+                for has_col_major_scales in [True, False]:
+                    for is_e8m0 in [True, False]:
+                        pattern_silu_mul_block = SiluMulBlockQuantPattern(
+                            group_shape=group_shape,
+                            has_col_major_scales=has_col_major_scales,
+                            is_e8m0=is_e8m0,
+                        )
+                        pattern_silu_mul_block.register(self.patterns)
 
         self.dump_patterns(config, self.patterns)
 
