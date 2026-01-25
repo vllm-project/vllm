@@ -41,9 +41,7 @@ from vllm.config import ModelConfig
 from vllm.logger import init_logger
 from vllm.model_executor.models import SupportsMultiModal
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalDataDict, MultiModalUUIDDict
-from vllm.multimodal.inputs import (
-    MultiModalFieldElem,
-)
+from vllm.multimodal.inputs import MultiModalFieldElem
 from vllm.multimodal.processing import BaseMultiModalProcessor
 from vllm.multimodal.utils import MEDIA_CONNECTOR_REGISTRY, MediaConnector
 from vllm.utils import random_uuid
@@ -379,6 +377,17 @@ def _get_embeds_data(
         return data_items
 
     if is_list_of(data_items, torch.Tensor):
+        if len(data_items) == 1:
+            # For backward compatibility
+            first_item = data_items[0]
+            hidden_size = mm_processor.info.ctx.model_config.get_inputs_embeds_size()
+            if (
+                first_item.ndim == 3
+                and first_item.shape[0] == 1
+                and first_item.shape[-1] == hidden_size
+            ):
+                return [first_item[0]]
+
         dict_items = [{f"{modality}_embeds": item} for item in data_items]
         merged_dict_items = _get_parsed_items(modality, dict_items, mm_processor)
         return merged_dict_items[f"{modality}_embeds"]
