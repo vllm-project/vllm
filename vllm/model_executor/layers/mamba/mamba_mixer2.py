@@ -502,6 +502,11 @@ class MambaMixer2(MambaBase, CustomOp):
             dim=-1,
         )
 
+        # Check if running on Blackwell (SM100+) for kernel tuning
+        from vllm.platforms import current_platform
+
+        self.is_blackwell = current_platform.is_device_capability_family(100)
+
     def forward_native(
         self,
         hidden_states: torch.Tensor,
@@ -883,6 +888,7 @@ class MambaMixer2(MambaBase, CustomOp):
                 state_batch_indices=state_indices_tensor_d_input,
                 dst_state_batch_indices=state_indices_tensor_d_output,
                 out=preallocated_ssm_out_d.view(num_decodes, -1, self.head_dim),
+                is_blackwell=self.is_blackwell,
             )
 
     def get_state_dtype(self) -> tuple[torch.dtype, torch.dtype]:
