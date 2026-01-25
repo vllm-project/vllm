@@ -48,18 +48,6 @@ VideoInput: TypeAlias = (
 AudioInput = list[tuple[np.ndarray, int]]
 
 
-MM_OPTIONS_OVERRIDES = {
-    # Qwen3-VL's default profiling video size (64x64) can cause trouble
-    # after resizing, so we override it here for testing.
-    "qwen3_vl": dict(
-        video=VideoDummyOptions(num_frames=128, width=256, height=256),
-    ),
-    "qwen3_vl_moe": dict(
-        video=VideoDummyOptions(num_frames=128, width=256, height=256),
-    ),
-}
-
-
 def _resize_data(
     _data: Image.Image | np.ndarray, size_factor: float
 ) -> Image.Image | np.ndarray:
@@ -73,12 +61,12 @@ def _resize_data(
     elif is_list_of(_data, Image.Image):
         W, H = next(iter(_data)).width, next(iter(_data)).height
         T = len(_data)
-        T, W, H = map(lambda x: max(int(x * size_factor), 1), (T, W, H))
+        T, W, H = map(lambda x: max(int(x * size_factor), 2), (T, W, H))
         return [d.resize((W, H)) for d in _data[:T]]
     # Video input with numpy arrays
     elif isinstance(_data, np.ndarray) and _data.ndim >= 4:
         T, H, W, C = _data.shape[-4:]
-        T, H, W = map(lambda x: max(int(x * size_factor), 1), (T, H, W))
+        T, H, W = map(lambda x: max(int(x * size_factor), 2), (T, H, W))
         return _data[..., :T, :H, :W, :C]
     # Audio input
     elif isinstance(_data, np.ndarray) and _data.ndim == 1:
@@ -103,8 +91,6 @@ def create_batched_mm_kwargs(
     processor: BaseMultiModalProcessor,
     size_factors: tuple[float, ...] = (1.0, 0.5, 0.25),
 ) -> Iterable[tuple[str, int, BatchedTensorInputs]]:
-    model_type = model_config.hf_config.model_type
-
     processing_info = processor.info
     dummy_inputs = processor.dummy_inputs
     supported_mm_limits = processing_info.get_supported_mm_limits()
@@ -115,7 +101,6 @@ def create_batched_mm_kwargs(
     processor_inputs = dummy_inputs.get_dummy_processor_inputs(
         seq_len=model_config.max_model_len,
         mm_counts=mm_counts,
-        mm_options=MM_OPTIONS_OVERRIDES.get(model_type),
     )
     mm_data = processor_inputs.mm_data
     resized_mm_data = {
