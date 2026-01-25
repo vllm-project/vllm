@@ -17,18 +17,18 @@ __device__ __forceinline__ scalar_t compute(const scalar_t& x,
 }
 
 // Check if all pointers are 16-byte aligned for int4 vectorized access
-__device__ __forceinline__ bool is_16byte_aligned(const void* ptr) {
+__host__ __device__ __forceinline__ bool is_16byte_aligned(const void* ptr) {
   return (reinterpret_cast<uintptr_t>(ptr) & 15) == 0;
 }
 
 // Check if all pointers are 16-byte aligned for longlong4_32a vectorized access
-__device__ __forceinline__ bool is_32byte_aligned(const void* ptr) {
+__host__ __device__ __forceinline__ bool is_32byte_aligned(const void* ptr) {
   return (reinterpret_cast<uintptr_t>(ptr) & 31) == 0;
 }
 
 // Activation and gating kernel template.
 template <typename scalar_t, scalar_t (*ACT_FN)(const scalar_t&),
-          bool act_first>
+          bool act_first, bool use_vec>
 __global__ void act_and_mul_kernel(
     scalar_t* __restrict__ out,          // [..., d]
     const scalar_t* __restrict__ input,  // [..., 2, d]
@@ -46,18 +46,7 @@ __global__ void act_and_mul_kernel(
   const scalar_t* y_ptr = x_ptr + d;
   scalar_t* out_ptr = out + token_idx * d;
 
-  // Check alignment for 128-bit/256-bit vectorized access.
-  // All three pointers must be 16-byte/32-byte aligned for safe vectorized
-  // operations.
-#if __CUDACC_VER_MAJOR__ >= 13 && __CUDA_ARCH__ >= 1000
-  const bool aligned = is_32byte_aligned(x_ptr) && is_32byte_aligned(y_ptr) &&
-                       is_32byte_aligned(out_ptr);
-#else
-  const bool aligned = is_16byte_aligned(x_ptr) && is_16byte_aligned(y_ptr) &&
-                       is_16byte_aligned(out_ptr);
-#endif
-
-  if (aligned && d >= VEC_SIZE) {
+  if constexpr (use_vec) {
     // Fast path: 128-bit/256-bit vectorized loop
     const vec_t* x_vec = reinterpret_cast<const vec_t*>(x_ptr);
     const vec_t* y_vec = reinterpret_cast<const vec_t*>(y_ptr);
@@ -79,11 +68,6 @@ __global__ void act_and_mul_kernel(
         rp[j] = compute<scalar_t, ACT_FN, act_first>(xp[j], yp[j]);
       }
       out_vec[i] = r;
-    }
-    // Scalar cleanup for remaining elements
-    for (int i = vec_end + threadIdx.x; i < d; i += blockDim.x) {
-      out_ptr[i] = compute<scalar_t, ACT_FN, act_first>(VLLM_LDG(&x_ptr[i]),
-                                                        VLLM_LDG(&y_ptr[i]));
     }
   } else {
     // Scalar fallback for unaligned data or small d
@@ -129,32 +113,56 @@ __device__ __forceinline__ T gelu_tanh_kernel(const T& x) {
 // Launch activation and gating kernel.
 // Use ACT_FIRST (bool) indicating whether to apply the activation function
 // first.
-#define LAUNCH_ACTIVATION_GATE_KERNEL(KERNEL, ACT_FIRST)                 \
-  int d = input.size(-1) / 2;                                            \
-  int64_t num_tokens = input.numel() / input.size(-1);                   \
-  dim3 grid(num_tokens);                                                 \
-  dim3 block(std::min(d, 1024));                                         \
-  if (num_tokens == 0) {                                                 \
-    return;                                                              \
-  }                                                                      \
-  const at::cuda::OptionalCUDAGuard device_guard(device_of(input));      \
-  const cudaStream_t stream = at::cuda::getCurrentCUDAStream();          \
-  VLLM_DISPATCH_FLOATING_TYPES(                                          \
-      input.scalar_type(), "act_and_mul_kernel", [&] {                   \
-        vllm::act_and_mul_kernel<scalar_t, KERNEL<scalar_t>, ACT_FIRST>  \
-            <<<grid, block, 0, stream>>>(out.data_ptr<scalar_t>(),       \
-                                         input.data_ptr<scalar_t>(), d); \
-      });
+#define LAUNCH_ACTIVATION_GATE_KERNEL(KERNEL, ACT_FIRST)                         \
+  int d = input.size(-1) / 2;                                                    \
+  int64_t num_tokens = input.numel() / input.size(-1);                           \
+  if (num_tokens == 0) {                                                         \
+    return;                                                                      \
+  }                                                                              \
+  dim3 grid(num_tokens);                                                         \
+  int vec_size = arch_support_vec / sizeof(scalar_t);                            \
+  const bool use_vec = (d % vec_size == 0);                                      \
+  const at::cuda::OptionalCUDAGuard device_guard(device_of(input));              \
+  const cudaStream_t stream = at::cuda::getCurrentCUDAStream();                  \
+  if (use_vec) {                                                                 \
+    dim3 block(std::min(d / vec_size, 1024));                                    \
+    VLLM_DISPATCH_FLOATING_TYPES(                                                \
+        input.scalar_type(), "act_and_mul_kernel", [&] {                         \
+          vllm::act_and_mul_kernel<scalar_t, KERNEL<scalar_t>, ACT_FIRST, true>  \
+              <<<grid, block, 0, stream>>>(out.data_ptr<scalar_t>(),             \
+                                          input.data_ptr<scalar_t>(), d);        \
+        });                                                                      \
+  } else {                                                                       \
+    dim3 block(std::min(d, 1024));                                               \
+    VLLM_DISPATCH_FLOATING_TYPES(                                                \
+        input.scalar_type(), "act_and_mul_kernel", [&] {                         \
+          vllm::act_and_mul_kernel<scalar_t, KERNEL<scalar_t>, ACT_FIRST, false> \
+              <<<grid, block, 0, stream>>>(out.data_ptr<scalar_t>(),             \
+                                          input.data_ptr<scalar_t>(), d);        \
+        });                                                                      \
+  }
 
 void silu_and_mul(torch::Tensor& out,    // [..., d]
                   torch::Tensor& input)  // [..., 2 * d]
 {
+  int arch_support_vec = 16;                                             \
+#if __CUDACC_VER_MAJOR__ >= 13
+  if (at::cuda::getCurrentDeviceProperties()->major >= 10) {
+    arch_support_vec = 32;
+  }
+#endif
   LAUNCH_ACTIVATION_GATE_KERNEL(vllm::silu_kernel, true);
 }
 
 void mul_and_silu(torch::Tensor& out,    // [..., d]
                   torch::Tensor& input)  // [..., 2 * d]
 {
+  int arch_support_vec = 16;                                             \
+#if __CUDACC_VER_MAJOR__ >= 13
+  if (at::cuda::getCurrentDeviceProperties()->major >= 10) {
+    arch_support_vec = 32;
+  }
+#endif
   // The difference between mul_and_silu and silu_and_mul is that mul_and_silu
   // applies the silu to the latter half of the input.
   LAUNCH_ACTIVATION_GATE_KERNEL(vllm::silu_kernel, false);
@@ -163,12 +171,24 @@ void mul_and_silu(torch::Tensor& out,    // [..., d]
 void gelu_and_mul(torch::Tensor& out,    // [..., d]
                   torch::Tensor& input)  // [..., 2 * d]
 {
+  int arch_support_vec = 16;                                             \
+#if __CUDACC_VER_MAJOR__ >= 13
+  if (at::cuda::getCurrentDeviceProperties()->major >= 10) {
+    arch_support_vec = 32;
+  }
+#endif
   LAUNCH_ACTIVATION_GATE_KERNEL(vllm::gelu_kernel, true);
 }
 
 void gelu_tanh_and_mul(torch::Tensor& out,    // [..., d]
                        torch::Tensor& input)  // [..., 2 * d]
 {
+  int arch_support_vec = 16;                                             \
+#if __CUDACC_VER_MAJOR__ >= 13
+  if (at::cuda::getCurrentDeviceProperties()->major >= 10) {
+    arch_support_vec = 32;
+  }
+#endif
   LAUNCH_ACTIVATION_GATE_KERNEL(vllm::gelu_tanh_kernel, true);
 }
 
@@ -180,7 +200,7 @@ __device__ __forceinline__ T fatrelu_kernel(const T& x, const float threshold) {
   return (T)(f > threshold ? f : 0.0f);
 }
 
-template <typename scalar_t, scalar_t (*ACT_FN)(const scalar_t&, const float)>
+template <typename scalar_t, scalar_t (*ACT_FN)(const scalar_t&, const float), bool use_vec>
 __global__ void act_and_mul_kernel_with_param(
     scalar_t* __restrict__ out, const scalar_t* __restrict__ input, const int d,
     const float param) {
@@ -197,18 +217,7 @@ __global__ void act_and_mul_kernel_with_param(
   const scalar_t* y_ptr = x_ptr + d;
   scalar_t* out_ptr = out + token_idx * d;
 
-  // Check alignment for 128-bit/256-bit vectorized access.
-  // All three pointers must be 16-byte/32-byte aligned for safe vectorized
-  // operations.
-#if __CUDACC_VER_MAJOR__ >= 13 && __CUDA_ARCH__ >= 1000
-  const bool aligned = is_32byte_aligned(x_ptr) && is_32byte_aligned(y_ptr) &&
-                       is_32byte_aligned(out_ptr);
-#else
-  const bool aligned = is_16byte_aligned(x_ptr) && is_16byte_aligned(y_ptr) &&
-                       is_16byte_aligned(out_ptr);
-#endif
-
-  if (aligned && d >= VEC_SIZE) {
+  if constexpr (use_vec) {
     // Fast path: 128-bit/256-bit vectorized loop
     const vec_t* x_vec = reinterpret_cast<const vec_t*>(x_ptr);
     const vec_t* y_vec = reinterpret_cast<const vec_t*>(y_ptr);
@@ -230,10 +239,6 @@ __global__ void act_and_mul_kernel_with_param(
         rp[j] = ACT_FN(xp[j], param) * yp[j];
       }
       out_vec[i] = r;
-    }
-    // Scalar cleanup for remaining elements
-    for (int i = vec_end + threadIdx.x; i < d; i += blockDim.x) {
-      out_ptr[i] = ACT_FN(VLLM_LDG(&x_ptr[i]), param) * VLLM_LDG(&y_ptr[i]);
     }
   } else {
     // Scalar fallback for unaligned data or small d
@@ -316,20 +321,33 @@ __global__ void swigluoai_and_mul_kernel(
 
 }  // namespace vllm
 
-#define LAUNCH_ACTIVATION_GATE_KERNEL_WITH_PARAM(KERNEL, PARAM)         \
-  int d = input.size(-1) / 2;                                           \
-  int64_t num_tokens = input.numel() / input.size(-1);                  \
-  dim3 grid(num_tokens);                                                \
-  dim3 block(std::min(d, 1024));                                        \
-  const at::cuda::OptionalCUDAGuard device_guard(device_of(input));     \
-  const cudaStream_t stream = at::cuda::getCurrentCUDAStream();         \
-  VLLM_DISPATCH_FLOATING_TYPES(                                         \
-      input.scalar_type(), "act_and_mul_kernel_with_param", [&] {       \
-        vllm::act_and_mul_kernel_with_param<scalar_t, KERNEL<scalar_t>> \
-            <<<grid, block, 0, stream>>>(out.data_ptr<scalar_t>(),      \
-                                         input.data_ptr<scalar_t>(), d, \
-                                         PARAM);                        \
-      });
+#define LAUNCH_ACTIVATION_GATE_KERNEL_WITH_PARAM(KERNEL, PARAM)                  \
+  int d = input.size(-1) / 2;                                                    \
+  int64_t num_tokens = input.numel() / input.size(-1);                           \
+  dim3 grid(num_tokens);                                                         \
+  int vec_size = arch_support_vec / sizeof(scalar_t);                            \
+  const bool use_vec = (d % vec_size == 0);                                      \
+  const at::cuda::OptionalCUDAGuard device_guard(device_of(input));              \
+  const cudaStream_t stream = at::cuda::getCurrentCUDAStream();                  \
+  if (use_vec) {                                                                 \
+    dim3 block(std::min(d / vec_size, 1024));                                    \
+    VLLM_DISPATCH_FLOATING_TYPES(                                                \
+        input.scalar_type(), "act_and_mul_kernel_with_param", [&] {              \
+          vllm::act_and_mul_kernel_with_param<scalar_t, KERNEL<scalar_t>, true>  \
+              <<<grid, block, 0, stream>>>(out.data_ptr<scalar_t>(),             \
+                                          input.data_ptr<scalar_t>(), d,         \
+                                          PARAM);                                \
+        });                                                                      \
+  } else {                                                                       \
+    dim3 block(std::min(d, 1024));                                               \
+    VLLM_DISPATCH_FLOATING_TYPES(                                                \
+        input.scalar_type(), "act_and_mul_kernel_with_param", [&] {              \
+          vllm::act_and_mul_kernel_with_param<scalar_t, KERNEL<scalar_t>, false> \
+              <<<grid, block, 0, stream>>>(out.data_ptr<scalar_t>(),             \
+                                          input.data_ptr<scalar_t>(), d,         \
+                                          PARAM);                                \
+        });                                                                      \
+  }
 
 #define LAUNCH_SIGLUOAI_AND_MUL(KERNEL, ALPHA, LIMIT)                          \
   int d = input.size(-1) / 2;                                                  \
@@ -349,6 +367,12 @@ __global__ void swigluoai_and_mul_kernel(
 void fatrelu_and_mul(torch::Tensor& out,    // [..., d],
                      torch::Tensor& input,  // [..., 2 * d]
                      double threshold) {
+  int arch_support_vec = 16;
+#if __CUDACC_VER_MAJOR__ >= 13
+  if (at::cuda::getCurrentDeviceProperties()->major >= 10) {
+    arch_support_vec = 32;
+  }
+#endif
   LAUNCH_ACTIVATION_GATE_KERNEL_WITH_PARAM(vllm::fatrelu_kernel, threshold);
 }
 void swigluoai_and_mul(torch::Tensor& out,    // [..., d]
@@ -359,7 +383,7 @@ void swigluoai_and_mul(torch::Tensor& out,    // [..., d]
 namespace vllm {
 
 // Element-wise activation kernel template.
-template <typename scalar_t, scalar_t (*ACT_FN)(const scalar_t&)>
+template <typename scalar_t, scalar_t (*ACT_FN)(const scalar_t&), bool use_vec>
 __global__ void activation_kernel(
     scalar_t* __restrict__ out,          // [..., d]
     const scalar_t* __restrict__ input,  // [..., d]
@@ -376,14 +400,7 @@ __global__ void activation_kernel(
   const scalar_t* in_ptr = input + token_idx * d;
   scalar_t* out_ptr = out + token_idx * d;
 
-  // Check alignment for 128-bit/256-bit vectorized access
-#if __CUDACC_VER_MAJOR__ >= 13 && __CUDA_ARCH__ >= 1000
-  const bool aligned = is_32byte_aligned(in_ptr) && is_32byte_aligned(out_ptr);
-#else
-  const bool aligned = is_16byte_aligned(in_ptr) && is_16byte_aligned(out_ptr);
-#endif
-
-  if (aligned && d >= VEC_SIZE) {
+  if constexpr (use_vec) {
     // Fast path: 128-bit/256-bit vectorized loop
     const vec_t* in_vec = reinterpret_cast<const vec_t*>(in_ptr);
     vec_t* out_vec = reinterpret_cast<vec_t*>(out_ptr);
@@ -404,10 +421,6 @@ __global__ void activation_kernel(
       }
       out_vec[i] = r;
     }
-    // Scalar cleanup for remaining elements
-    for (int i = vec_end + threadIdx.x; i < d; i += blockDim.x) {
-      out_ptr[i] = ACT_FN(VLLM_LDG(&in_ptr[i]));
-    }
   } else {
     // Scalar fallback for unaligned data or small d
     for (int64_t idx = threadIdx.x; idx < d; idx += blockDim.x) {
@@ -420,18 +433,29 @@ __global__ void activation_kernel(
 }  // namespace vllm
 
 // Launch element-wise activation kernel.
-#define LAUNCH_ACTIVATION_KERNEL(KERNEL)                                       \
-  int d = input.size(-1);                                                      \
-  int64_t num_tokens = input.numel() / d;                                      \
-  dim3 grid(num_tokens);                                                       \
-  dim3 block(std::min(d, 1024));                                               \
-  const at::cuda::OptionalCUDAGuard device_guard(device_of(input));            \
-  const cudaStream_t stream = at::cuda::getCurrentCUDAStream();                \
-  VLLM_DISPATCH_FLOATING_TYPES(input.scalar_type(), "activation_kernel", [&] { \
-    vllm::activation_kernel<scalar_t, KERNEL<scalar_t>>                        \
-        <<<grid, block, 0, stream>>>(out.data_ptr<scalar_t>(),                 \
-                                     input.data_ptr<scalar_t>(), d);           \
-  });
+#define LAUNCH_ACTIVATION_KERNEL(KERNEL)                                         \
+  int d = input.size(-1);                                                        \
+  int64_t num_tokens = input.numel() / d;                                        \
+  dim3 grid(num_tokens);                                                         \
+  int vec_size = arch_support_vec / sizeof(scalar_t);                            \
+  const bool use_vec = (d % vec_size == 0);                                      \
+  const at::cuda::OptionalCUDAGuard device_guard(device_of(input));              \
+  const cudaStream_t stream = at::cuda::getCurrentCUDAStream();                  \
+  if (use_vec) {                                                                 \
+    dim3 block(std::min(d / vec_size, 1024));                                    \
+    VLLM_DISPATCH_FLOATING_TYPES(input.scalar_type(), "activation_kernel", [&] { \
+      vllm::activation_kernel<scalar_t, KERNEL<scalar_t>, true>                  \
+          <<<grid, block, 0, stream>>>(out.data_ptr<scalar_t>(),                 \
+                                      input.data_ptr<scalar_t>(), d);            \
+    });                                                                          \
+  } else {                                                                       \
+    dim3 block(std::min(d, 1024));                                               \
+    VLLM_DISPATCH_FLOATING_TYPES(input.scalar_type(), "activation_kernel", [&] { \
+      vllm::activation_kernel<scalar_t, KERNEL<scalar_t>, false>                 \
+          <<<grid, block, 0, stream>>>(out.data_ptr<scalar_t>(),                 \
+                                      input.data_ptr<scalar_t>(), d);            \
+    });                                                                          \
+  }
 
 namespace vllm {
 
@@ -461,17 +485,35 @@ __device__ __forceinline__ T gelu_quick_kernel(const T& x) {
 void gelu_new(torch::Tensor& out,    // [..., d]
               torch::Tensor& input)  // [..., d]
 {
+  int arch_support_vec = 16;
+#if __CUDACC_VER_MAJOR__ >= 13
+  if (at::cuda::getCurrentDeviceProperties()->major >= 10) {
+    arch_support_vec = 32;
+  }
+#endif
   LAUNCH_ACTIVATION_KERNEL(vllm::gelu_new_kernel);
 }
 
 void gelu_fast(torch::Tensor& out,    // [..., d]
                torch::Tensor& input)  // [..., d]
 {
+  int arch_support_vec = 16;
+#if __CUDACC_VER_MAJOR__ >= 13
+  if (at::cuda::getCurrentDeviceProperties()->major >= 10) {
+    arch_support_vec = 32;
+  }
+#endif
   LAUNCH_ACTIVATION_KERNEL(vllm::gelu_fast_kernel);
 }
 
 void gelu_quick(torch::Tensor& out,    // [..., d]
                 torch::Tensor& input)  // [..., d]
 {
+  int arch_support_vec = 16;
+#if __CUDACC_VER_MAJOR__ >= 13
+  if (at::cuda::getCurrentDeviceProperties()->major >= 10) {
+    arch_support_vec = 32;
+  }
+#endif
   LAUNCH_ACTIVATION_KERNEL(vllm::gelu_quick_kernel);
 }
