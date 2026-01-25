@@ -226,7 +226,7 @@ class InputProcessor:
 
         for modality in modalities:
             data_items: ModalityDataItems | list[Any] = mm_data_parsed.get(modality, [])
-            uuid_items = mm_uuids_parsed.get(modality, [])
+            uuid_items: list[str | None] = mm_uuids_parsed.get(modality, [])
 
             if len(data_items) > 0:
                 if len(uuid_items) > 0 and len(data_items) != len(uuid_items):
