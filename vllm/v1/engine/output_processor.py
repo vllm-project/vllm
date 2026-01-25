@@ -522,13 +522,9 @@ class OutputProcessor:
         request_outputs: list[RequestOutput | PoolingRequestOutput] = []
         reqs_to_abort: list[str] = []
 
-        # Collect journey events by request_id for distribution
-        journey_events_by_req: dict[str, list[RequestJourneyEvent]] = {}
-        if journey_events:
-            for event in journey_events:
-                if event.request_id not in journey_events_by_req:
-                    journey_events_by_req[event.request_id] = []
-                journey_events_by_req[event.request_id].append(event)
+        # Note: Journey events buffering removed as part of dual-stream tracing.
+        # Events are now emitted directly to spans in scheduler and API layer.
+        # The journey_events parameter is ignored.
 
         for engine_core_output in engine_core_outputs:
             req_id = engine_core_output.request_id
@@ -536,11 +532,6 @@ class OutputProcessor:
             if req_state is None:
                 # Ignore output for already-aborted request.
                 continue
-
-            # Accumulate journey events for this request (consume to prevent duplication)
-            events = journey_events_by_req.pop(req_id, None)
-            if events:
-                req_state.journey_events.extend(events)
 
             # 1) Compute stats for this iteration.
             self._update_stats_from_output(
@@ -611,18 +602,10 @@ class OutputProcessor:
                 self._update_stats_from_finished(
                     req_state, finish_reason, iteration_stats
                 )
-                if self.tracer:
-                    self.do_tracing(engine_core_output, req_state, iteration_stats)
-                    # Note: do_tracing() clears journey_events after export
-                else:
-                    # If no tracer, clear events on finish to prevent memory leak
-                    req_state.journey_events.clear()
-
-        # Handle events for requests without outputs in this iteration
-        # (e.g., QUEUED events for requests added but not scheduled)
-        for req_id, events in journey_events_by_req.items():
-            if req_state := self.request_states.get(req_id):
-                req_state.journey_events.extend(events)
+                # Note: Journey tracing now uses dual-stream architecture with
+                # direct span emission in scheduler (spans) and API layer (parent spans).
+                # The old do_tracing() method and journey_events buffering have been
+                # removed in favor of real-time event emission to spans.
 
         return OutputProcessorOutput(
             request_outputs=request_outputs,
@@ -632,104 +615,9 @@ class OutputProcessor:
     def update_scheduler_stats(self, scheduler_stats: SchedulerStats | None):
         self.lora_states.update_scheduler_stats(scheduler_stats)
 
-    def do_tracing(
-        self,
-        engine_core_output: EngineCoreOutput,
-        req_state: RequestState,
-        iteration_stats: IterationStats | None,
-    ) -> None:
-        assert req_state.stats is not None
-        assert iteration_stats is not None
-        assert self.tracer is not None
-
-        arrival_time_nano_seconds = int(req_state.stats.arrival_time * 1e9)
-        trace_context = extract_trace_context(engine_core_output.trace_headers)
-        prompt_length = length_from_prompt_token_ids_or_embeds(
-            req_state.prompt_token_ids, req_state.prompt_embeds
-        )
-        with self.tracer.start_as_current_span(
-            "llm_request",
-            kind=SpanKind.SERVER,
-            context=trace_context,
-            start_time=arrival_time_nano_seconds,
-        ) as span:
-            metrics = req_state.stats
-            e2e_time = iteration_stats.iteration_timestamp - metrics.arrival_time
-            queued_time = metrics.scheduled_ts - metrics.queued_ts
-            prefill_time = metrics.first_token_ts - metrics.scheduled_ts
-            decode_time = metrics.last_token_ts - metrics.first_token_ts
-            inference_time = metrics.last_token_ts - metrics.scheduled_ts
-            span.set_attribute(
-                SpanAttributes.GEN_AI_LATENCY_TIME_TO_FIRST_TOKEN,
-                metrics.first_token_latency,
-            )
-            span.set_attribute(SpanAttributes.GEN_AI_LATENCY_E2E, e2e_time)
-            span.set_attribute(SpanAttributes.GEN_AI_LATENCY_TIME_IN_QUEUE, queued_time)
-            span.set_attribute(SpanAttributes.GEN_AI_USAGE_PROMPT_TOKENS, prompt_length)
-            span.set_attribute(
-                SpanAttributes.GEN_AI_USAGE_COMPLETION_TOKENS,
-                metrics.num_generation_tokens,
-            )
-            span.set_attribute(
-                SpanAttributes.GEN_AI_LATENCY_TIME_IN_MODEL_PREFILL, prefill_time
-            )
-            span.set_attribute(
-                SpanAttributes.GEN_AI_LATENCY_TIME_IN_MODEL_DECODE, decode_time
-            )
-            span.set_attribute(
-                SpanAttributes.GEN_AI_LATENCY_TIME_IN_MODEL_INFERENCE, inference_time
-            )
-
-            # meta
-            span.set_attribute(
-                SpanAttributes.GEN_AI_REQUEST_ID, req_state.external_req_id
-            )
-            if req_state.top_p:
-                span.set_attribute(SpanAttributes.GEN_AI_REQUEST_TOP_P, req_state.top_p)
-            if req_state.max_tokens_param:
-                span.set_attribute(
-                    SpanAttributes.GEN_AI_REQUEST_MAX_TOKENS, req_state.max_tokens_param
-                )
-            if req_state.temperature:
-                span.set_attribute(
-                    SpanAttributes.GEN_AI_REQUEST_TEMPERATURE, req_state.temperature
-                )
-            if req_state.n:
-                span.set_attribute(SpanAttributes.GEN_AI_REQUEST_N, req_state.n)
-
-            # Add journey events as span events
-            if req_state.journey_events:
-                if span is not None and span.is_recording():
-                    for event in req_state.journey_events:
-                        # Build event attributes (exclude None values)
-                        attributes = {
-                            SpanAttributes.JOURNEY_EVENT_TYPE: event.event_type.name,
-                            SpanAttributes.JOURNEY_TS_MONOTONIC: event.ts_monotonic,
-                            SpanAttributes.JOURNEY_PHASE: event.phase,
-                            SpanAttributes.JOURNEY_PREFILL_DONE_TOKENS: event.prefill_done_tokens,
-                            SpanAttributes.JOURNEY_PREFILL_TOTAL_TOKENS: event.prefill_total_tokens,
-                            SpanAttributes.JOURNEY_DECODE_DONE_TOKENS: event.decode_done_tokens,
-                            SpanAttributes.JOURNEY_DECODE_MAX_TOKENS: event.decode_max_tokens,
-                            SpanAttributes.JOURNEY_NUM_PREEMPTIONS: event.num_preemptions_so_far,
-                        }
-
-                        # Add optional fields (only if not None)
-                        if event.scheduler_step is not None:
-                            attributes[SpanAttributes.JOURNEY_SCHEDULER_STEP] = event.scheduler_step
-                        if event.schedule_kind is not None:
-                            attributes[SpanAttributes.JOURNEY_SCHEDULE_KIND] = event.schedule_kind.name
-                        if event.finish_status is not None:
-                            attributes[SpanAttributes.JOURNEY_FINISH_STATUS] = event.finish_status
-
-                        # Add as span event (timestamp omitted, will use current time)
-                        span.add_event(
-                            name=f"journey.{event.event_type.name}",
-                            attributes=attributes,
-                        )
-
-                # Clear events after export to prevent duplicate exports in subsequent iterations
-                # (whether exported or not, we've processed them for this iteration)
-                req_state.journey_events.clear()
+    # Note: do_tracing() method removed as part of dual-stream journey tracing.
+    # Journey events are now emitted directly to spans in the scheduler and API layer,
+    # eliminating the need for buffering and deferred export in OutputProcessor.
 
     def _update_stats_from_output(
         self,
