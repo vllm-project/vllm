@@ -571,6 +571,7 @@ steps:
   - vllm/attention
   - vllm/v1/attention
   - tests/kernels/attention
+  - vllm/model_executor/models/vision.py
   commands:
     - pytest -v -s kernels/attention --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
   parallelism: 2
