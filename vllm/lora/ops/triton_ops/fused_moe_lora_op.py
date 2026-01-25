@@ -106,7 +106,11 @@ def _fused_moe_lora_kernel(
     if moe_enabled == 0:
         # Early exit for the no moe lora case.
         return
-
+    # The grid's axis-2 dimension is max_loras + 1 to accommodate the -1 sentinel.
+    # This guard ensures we don't access sorted_token_ids / expert_ids /
+    # num_tokens_post_padded beyond their allocated bounds if an invalid
+    # lora_id somehow appears. Although the caller should pass correct
+    # max_loras, defensive programming prevents accidental out-of-bounds.
     if lora_id >= max_loras:
         return
     grid_k = tl.cdiv(K, BLOCK_SIZE_K * SPLIT_K)
@@ -144,7 +148,9 @@ def _fused_moe_lora_kernel(
     offs_token_id = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M).to(tl.int32)
     token_ind = stride_tl * lora_id + offs_token_id
     offs_token = tl.load(
-        sorted_token_ids_ptr + token_ind, token_ind < max_loras * stride_tl, 0
+        sorted_token_ids_ptr + token_ind,
+        mask=token_ind < max_loras * stride_tl,
+        other=num_valid_tokens,
     )
     token_mask = offs_token < num_valid_tokens
 
@@ -196,7 +202,7 @@ def _fused_moe_lora_kernel(
         b_ptrs += BLOCK_SIZE_K * SPLIT_K * stride_bk
 
     if MUL_ROUTED_WEIGHT:
-        moe_weight = tl.load(topk_weights_ptr + offs_token, mask=token_mask, other=0)
+        moe_weight = tl.load(topk_weights_ptr + offs_token, mask=token_mask, other=0.0)
         accumulator = accumulator * moe_weight[:, None]
     accumulator = accumulator.to(c_ptr.dtype.element_ty)
     # Write back the block of the output
@@ -208,6 +214,7 @@ def _fused_moe_lora_kernel(
         tl.store(c_ptrs, accumulator, mask=c_mask)
     else:
         tl.atomic_add(c_ptrs, accumulator, mask=c_mask, sem="relaxed")
+
 
 @torch.inference_mode()
 def _fused_moe_lora_shrink(
@@ -263,7 +270,8 @@ def _fused_moe_lora_shrink(
         * triton.cdiv(EM, META["BLOCK_SIZE_M"])
         * triton.cdiv(N, META["BLOCK_SIZE_N"]),
         len(lora_a_stacked),
-        lora_a_stacked[0].shape[0],
+        ## max_loras + 1 to handle the no-lora case (lora_id == -1)
+        lora_a_stacked[0].shape[0] + 1,
     )
     _fused_moe_lora_kernel[grid](
         qcurr_hidden_states,
@@ -365,7 +373,8 @@ def _fused_moe_lora_expand(
     grid = lambda META: (
         triton.cdiv(EM, META["BLOCK_SIZE_M"]) * triton.cdiv(N, META["BLOCK_SIZE_N"]),
         len(lora_b_stacked),
-        lora_b_stacked[0].shape[0],
+        ## max_loras + 1 to handle the no-lora case (lora_id == -1)
+        lora_b_stacked[0].shape[0] + 1,
     )
     _fused_moe_lora_kernel[grid](
         a_intermediate_cache1,
@@ -405,6 +414,7 @@ def _fused_moe_lora_expand(
     )
     for i in range(num_slices):
         output[:, :, i * N + offset : (i + 1) * N + offset] += b_intermediate_cache1[i]
+
 
 @torch.inference_mode()
 def _fused_moe_lora(
