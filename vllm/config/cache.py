@@ -31,6 +31,7 @@ CacheDType = Literal[
     "fp8_ds_mla",
 ]
 MambaDType = Literal["auto", "float32", "float16"]
+MambaCacheMode = Literal["all", "align", "none"]
 PrefixCachingHashAlgo = Literal["sha256", "sha256_cbor", "xxhash", "xxhash_cbor"]
 KVOffloadingBackend = Literal["native", "lmcache"]
 
@@ -123,6 +124,15 @@ class CacheConfig:
     """The data type to use for the Mamba cache (ssm state only, conv state will
     still be controlled by mamba_cache_dtype). If set to 'auto', the data type
     for the ssm state will be determined by mamba_cache_dtype."""
+    mamba_cache_mode: MambaCacheMode = "none"
+    """The cache strategy for Mamba layers.
+    - "none": set when prefix caching is disabled.
+    - "all": cache the mamba state of all tokens at position i * block_size. This is 
+           the default behavior (for models that support it) when prefix caching is
+           enabled.
+    - "align": only cache the mamba state of the last token of each scheduler step and
+           when the token is at position i * block_size.
+    """
 
     # Will be set after profiling.
     num_gpu_blocks: int | None = field(default=None, init=False)
@@ -152,13 +162,13 @@ class CacheConfig:
     kv_offloading_size: float | None = None
     """Size of the KV cache offloading buffer in GiB. When TP > 1, this is
     the total buffer size summed across all TP ranks. By default, this is set
-    to None, which means no KV offloading is enabled. When set with
-    kv_offloading_backend, vLLM will enable KV cache offloading to CPU"""
+    to None, which means no KV offloading is enabled. When set, vLLM will
+    enable KV cache offloading to CPU using the kv_offloading_backend."""
 
-    kv_offloading_backend: KVOffloadingBackend | None = None
+    kv_offloading_backend: KVOffloadingBackend = "native"
     """The backend to use for KV cache offloading. Supported backends include
-    'native' (vLLM native CPU offloading), 'lmcache' This option must be used
-    together with kv_offloading_size."""
+    'native' (vLLM native CPU offloading), 'lmcache'.
+    KV offloading is only activated when kv_offloading_size is set."""
 
     def compute_hash(self) -> str:
         """

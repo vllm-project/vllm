@@ -22,9 +22,13 @@ from typing import Any
 
 import numpy as np
 
+from vllm.benchmarks.datasets import (
+    MultiModalConversationDataset,
+    VisionArenaDataset,
+)
 from vllm.benchmarks.throughput import get_requests
 from vllm.engine.arg_utils import EngineArgs
-from vllm.multimodal.processing import (
+from vllm.multimodal.processing.context import (
     get_timing_stats_from_engine_client,
 )
 from vllm.utils.gc_utils import freeze_gc_heap
@@ -38,6 +42,7 @@ except ImportError:
 
 def collect_mm_processor_stats(
     llm_engine: Any,
+    num_warmup_reqs: int = 0,
 ) -> dict[str, list[float]]:
     """
     Collect multimodal processor timing stats.
@@ -45,26 +50,24 @@ def collect_mm_processor_stats(
     """
     all_stats = get_timing_stats_from_engine_client(llm_engine)
 
-    stats_by_stage = {
-        "hf_processor_time": [],
-        "hashing_time": [],
-        "cache_lookup_time": [],
-        "prompt_update_time": [],
-        "total_time": [],
-    }
+    stat_keys = [
+        "hf_processor_time",
+        "hashing_time",
+        "cache_lookup_time",
+        "prompt_update_time",
+        "preprocessor_total_time",
+        "encoder_forward_time",
+        "num_encoder_calls",
+    ]
+    stats_by_stage = {key: [] for key in stat_keys}
 
-    for stats_dict in all_stats.values():
-        stats_by_stage["hf_processor_time"].append(
-            stats_dict.get("hf_processor_time", 0.0)
-        )
-        stats_by_stage["hashing_time"].append(stats_dict.get("hashing_time", 0.0))
-        stats_by_stage["cache_lookup_time"].append(
-            stats_dict.get("cache_lookup_time", 0.0)
-        )
-        stats_by_stage["prompt_update_time"].append(
-            stats_dict.get("prompt_update_time", 0.0)
-        )
-        stats_by_stage["total_time"].append(stats_dict.get("total_time", 0.0))
+    # Skip warmup requests
+    stats_list = list(all_stats.values())[num_warmup_reqs:]
+
+    for stats_dict in stats_list:
+        for key in stat_keys:
+            if key in stats_dict:
+                stats_by_stage[key].append(stats_dict[key])
 
     return stats_by_stage
 
@@ -88,14 +91,14 @@ def calculate_mm_processor_metrics(
             }
             continue
 
-        times_ms = [t * 1000 for t in times]
+        is_count_metric = stage_name == "num_encoder_calls"
+        values = times if is_count_metric else [t * 1000 for t in times]
+
         metrics[stage_name] = {
-            "mean": float(np.mean(times_ms)),
-            "median": float(np.median(times_ms)),
-            "std": float(np.std(times_ms)),
-            **{
-                f"p{p}": float(np.percentile(times_ms, p)) for p in selected_percentiles
-            },
+            "mean": float(np.mean(values)),
+            "median": float(np.median(values)),
+            "std": float(np.std(values)),
+            **{f"p{p}": float(np.percentile(values, p)) for p in selected_percentiles},
         }
 
     return metrics
@@ -113,6 +116,23 @@ def validate_args(args):
         args.lora_path = None
     if not hasattr(args, "max_loras"):
         args.max_loras = None
+
+    if args.dataset_name == "hf" and not args.dataset_path:
+        raise ValueError(
+            "--dataset-path is required when using --dataset-name hf. "
+            "For multimodal benchmarking, specify a dataset like "
+            "'lmarena-ai/VisionArena-Chat'."
+        )
+    if args.dataset_name == "hf":
+        supported_mm_datasets = (
+            VisionArenaDataset.SUPPORTED_DATASET_PATHS.keys()
+            | MultiModalConversationDataset.SUPPORTED_DATASET_PATHS
+        )
+        if args.dataset_path not in supported_mm_datasets:
+            raise ValueError(
+                f"{args.dataset_path} is not a supported multimodal dataset. "
+                f"Supported multimodal datasets are: {sorted(supported_mm_datasets)}"
+            )
 
 
 def benchmark_multimodal_processor(
@@ -162,6 +182,25 @@ def benchmark_multimodal_processor(
 
     freeze_gc_heap()
 
+    num_warmups = getattr(args, "num_warmups", 0)
+    if num_warmups > 0:
+        print(f"Processing {num_warmups} warmup requests...")
+        # Create a temporary args object for warmup requests
+        warmup_args = argparse.Namespace(**vars(args))
+        warmup_args.num_prompts = num_warmups
+        warmup_args.seed += 1
+        warmup_requests = get_requests(warmup_args, tokenizer)
+        warmup_prompts = [req.prompt for req in warmup_requests]
+        warmup_output_lens = [req.expected_output_len for req in warmup_requests]
+        warmup_sampling_params = [
+            SamplingParams(max_tokens=output_len) for output_len in warmup_output_lens
+        ]
+        llm.chat(
+            warmup_prompts,
+            warmup_sampling_params,
+            use_tqdm=not getattr(args, "disable_tqdm", False),
+        )
+
     print(f"Processing {len(prompts)} requests...")
     start_time = time.perf_counter()
 
@@ -172,9 +211,7 @@ def benchmark_multimodal_processor(
     end_time = time.perf_counter()
     total_time = end_time - start_time
 
-    mm_stats_by_stage = collect_mm_processor_stats(
-        llm.llm_engine,
-    )
+    mm_stats_by_stage = collect_mm_processor_stats(llm.llm_engine, num_warmups)
 
     if not any(mm_stats_by_stage.values()):
         print(
@@ -196,17 +233,23 @@ def benchmark_multimodal_processor(
         if not output.finished or output.metrics is None:
             continue
         metrics = output.metrics
-        for attr in ("finished_time", "last_token_time"):
-            if (
-                getattr(metrics, attr, None) is not None
-                and getattr(metrics, "arrival_time", None) is not None
-            ):
-                e2el_times.append(
-                    (getattr(metrics, attr) - metrics.arrival_time) * 1000
-                )
-                break
+        # Calculate E2E latency as: TTFT + (last_token_ts - first_token_ts)
+        if (
+            getattr(metrics, "first_token_latency", None) is not None
+            and getattr(metrics, "last_token_ts", None) is not None
+            and getattr(metrics, "first_token_ts", None) is not None
+        ):
+            ttft = metrics.first_token_latency
+            # Decode time is the duration between the first and last token generation
+            decode_time = max(0.0, metrics.last_token_ts - metrics.first_token_ts)
+            e2el_times.append((ttft + decode_time) * 1000)
 
     if not e2el_times and completed > 0:
+        print(
+            "\n⚠️  Warning: Detailed end-to-end latency metrics not available.\n"
+            "   Falling back to average request latency "
+            "(total_time / num_completed_requests).\n"
+        )
         avg_time_per_request = total_time / completed
         e2el_times = [avg_time_per_request * 1000] * completed
 
@@ -223,6 +266,17 @@ def benchmark_multimodal_processor(
         std_e2el_ms = 0.0
         percentiles_e2el_ms = [(p, 0.0) for p in selected_percentiles]
 
+    encoder_summary = {}
+    if (
+        "num_encoder_calls" in mm_stats_by_stage
+        and mm_stats_by_stage["num_encoder_calls"]
+    ):
+        encoder_calls = mm_stats_by_stage["num_encoder_calls"]
+        encoder_summary = {
+            "total_encoder_calls": int(sum(encoder_calls)),
+            "num_requests_with_encoder_calls": len(encoder_calls),
+        }
+
     benchmark_result = {
         "completed": completed,
         "failed": failed,
@@ -231,6 +285,7 @@ def benchmark_multimodal_processor(
         "std_e2el_ms": std_e2el_ms,
         "percentiles_e2el_ms": percentiles_e2el_ms,
         "mm_processor_stats": mm_processor_metrics,
+        "encoder_summary": encoder_summary,
     }
 
     return benchmark_result
@@ -248,7 +303,7 @@ def add_cli_args(parser: argparse.ArgumentParser) -> None:
         "--dataset-name",
         type=str,
         default="random-mm",
-        choices=["random-mm", "random-rerank"],
+        choices=["random-mm", "hf"],
         help="Name of the dataset to benchmark on. Defaults to 'random-mm'.",
     )
     parser.add_argument(
@@ -256,6 +311,12 @@ def add_cli_args(parser: argparse.ArgumentParser) -> None:
         type=int,
         default=10,
         help="Number of prompts to process.",
+    )
+    parser.add_argument(
+        "--num-warmups",
+        type=int,
+        default=1,
+        help="Number of warmup prompts to process.",
     )
 
     from vllm.benchmarks.datasets import (
@@ -265,6 +326,34 @@ def add_cli_args(parser: argparse.ArgumentParser) -> None:
 
     add_random_dataset_base_args(parser)
     add_random_multimodal_dataset_args(parser)
+
+    # HuggingFace dataset arguments
+    parser.add_argument(
+        "--dataset-path",
+        type=str,
+        default=None,
+        help="Path to the dataset file or HuggingFace dataset name "
+        "(e.g., 'yale-nlp/MMVU', 'lmarena-ai/VisionArena-Chat').",
+    )
+    parser.add_argument(
+        "--hf-subset",
+        type=str,
+        default=None,
+        help="Subset of the HuggingFace dataset (optional).",
+    )
+    parser.add_argument(
+        "--hf-split",
+        type=str,
+        default=None,
+        help="Split of the HuggingFace dataset (e.g., 'train', 'test', 'validation').",
+    )
+    parser.add_argument(
+        "--output-len",
+        type=int,
+        default=None,
+        help="Output length for each request. "
+        "Overrides the default output lengths from the dataset.",
+    )
 
     parser.add_argument(
         "--output-json",
@@ -296,14 +385,17 @@ def main(args: argparse.Namespace) -> None:
     print("=" * 80)
 
     if "mm_processor_stats" in result:
-        print("\nMM Processor Timing (ms):")
+        print("\nMM Processor Metrics:")
         selected_percentiles = [
             float(p) for p in getattr(args, "metric_percentiles", "99").split(",")
         ]
         mm_data = []
         for stage, metrics in result["mm_processor_stats"].items():
+            is_count = stage == "num_encoder_calls"
+            unit = "" if is_count else " (ms)"
+
             row = {
-                "Stage": stage,
+                "Stage": stage + unit,
                 "Mean": f"{metrics['mean']:.2f}",
                 "Median": f"{metrics['median']:.2f}",
                 "Std": f"{metrics['std']:.2f}",
@@ -314,6 +406,14 @@ def main(args: argparse.Namespace) -> None:
 
         mm_df = pd.DataFrame(mm_data)
         print(mm_df.to_string(index=False))
+
+        if "encoder_summary" in result and result["encoder_summary"]:
+            total_calls = result["encoder_summary"]["total_encoder_calls"]
+            num_requests = result["encoder_summary"]["num_requests_with_encoder_calls"]
+            print(
+                f"\nSummary: {total_calls} total encoder calls "
+                f"across {num_requests} requests."
+            )
 
     if "mean_e2el_ms" in result:
         print("\nEnd-to-End Latency (ms):")

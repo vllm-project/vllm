@@ -7,6 +7,7 @@ from collections.abc import Mapping
 from typing import Any
 
 import msgspec
+import numpy as np
 import torch
 
 from vllm.lora.request import LoRARequest
@@ -74,6 +75,7 @@ class EngineCoreRequest(
     priority: int = 0
 
     trace_headers: Mapping[str, str] | None = None
+    resumable: bool = False
 
     # The user-provided request ID. This field is set internally,
     # copied from the provided request_id that's originally assigned
@@ -139,7 +141,7 @@ class EngineCoreOutput(
     trace_headers: Mapping[str, str] | None = None
     # The number of tokens with prefix cache hits.
     num_cached_tokens: int = 0
-
+    routed_experts: np.ndarray | None = None
     # The number of NaNs in logits.
     # A value greater than 0 indicates that the output is corrupted.
     num_nans_in_logits: int = 0

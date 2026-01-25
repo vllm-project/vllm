@@ -4,6 +4,7 @@ import functools
 from math import prod
 
 import torch
+import torch.nn.functional as F
 
 from vllm import _custom_ops as ops
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
@@ -23,7 +24,6 @@ from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
     mxfp8_e4m3_quantize,
 )
 from vllm.triton_utils import tl, triton
-from vllm.utils.flashinfer import flashinfer_fp4_quantize
 from vllm.utils.math_utils import cdiv
 from vllm.utils.torch_utils import is_torch_equal_or_newer
 
@@ -116,9 +116,7 @@ def _nvfp4_quantize(
     A_scale: torch.Tensor | None,
     is_sf_swizzled_layout: bool,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    return flashinfer_fp4_quantize(
-        A, A_scale, is_sf_swizzled_layout=is_sf_swizzled_layout
-    )
+    return ops.scaled_fp4_quant(A, A_scale, is_sf_swizzled_layout=is_sf_swizzled_layout)
 
 
 def _fp8_quantize(
@@ -322,6 +320,56 @@ def _validate_scale_shape(
 
 def activation_without_mul(activation: str) -> str:
     return activation + "_no_mul"
+
+
+RELU2_NO_MUL: str = activation_without_mul("relu2")
+SILU_NO_MUL: str = activation_without_mul("silu")
+GELU_NO_MUL: str = activation_without_mul("gelu")
+
+
+def apply_moe_activation(
+    activation: str,
+    output: torch.Tensor,
+    input: torch.Tensor,
+) -> torch.Tensor:
+    """
+    Apply MoE activation function.
+
+    For *_and_mul activations (silu, gelu, swigluoai):
+        - Expects output.size(-1) * 2 == input.size(-1)
+
+    For *_no_mul activations (silu_no_mul, gelu_no_mul, relu2_no_mul):
+        - Expects output.size(-1) == input.size(-1)
+    """
+    is_no_mul = activation.endswith("_no_mul")
+    if is_no_mul:
+        assert output.size(-1) == input.size(-1), (
+            f"{activation} expects equal sizes: {output.size(-1)} vs {input.size(-1)}"
+        )
+    else:
+        assert output.size(-1) * 2 == input.size(-1), (
+            f"{activation} expects 2x ratio: {output.size(-1) * 2} vs {input.size(-1)}"
+        )
+
+    # Activations with gated multiplication (gate × activation(up))
+    if activation == "silu":
+        torch.ops._C.silu_and_mul(output, input)
+    elif activation == "gelu":
+        torch.ops._C.gelu_and_mul(output, input)
+    elif activation == "swigluoai":
+        torch.ops._C.swigluoai_and_mul(output, input)
+    # Activations without gated multiplication
+    elif activation == SILU_NO_MUL:
+        output.copy_(F.silu(input))
+    elif activation == GELU_NO_MUL:
+        output.copy_(F.gelu(input))
+    elif activation == RELU2_NO_MUL:
+        F.relu(input, inplace=True)
+        torch.square(input, out=output)
+    else:
+        raise ValueError(f"Unsupported FusedMoe activation: {activation}")
+
+    return output
 
 
 # Torch custom ops can't deal with outputs aliasing inputs so we need to

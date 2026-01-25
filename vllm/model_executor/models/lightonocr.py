@@ -31,12 +31,12 @@ from vllm.multimodal.cache import BaseMultiModalProcessorCache
 from vllm.multimodal.inputs import MultiModalFieldConfig, MultiModalKwargsItems
 from vllm.multimodal.parse import ImageProcessorItems, MultiModalDataItems
 from vllm.multimodal.processing import (
+    BaseDummyInputsBuilder,
     BaseMultiModalProcessor,
     PromptReplacement,
     PromptUpdate,
     PromptUpdateDetails,
 )
-from vllm.multimodal.profiling import BaseDummyInputsBuilder
 
 _I = TypeVar("_I", bound=Mistral3ProcessingInfo)
 
@@ -166,7 +166,6 @@ class LightOnOCRForConditionalGeneration(Mistral3ForConditionalGeneration):
         self.vision_tower = init_vision_tower_for_llava(
             config,
             quant_config=quant_config,
-            multimodal_config=multimodal_config,
             require_post_norm=False,
             prefix=maybe_prefix(prefix, "vision_tower"),
         )

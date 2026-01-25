@@ -121,7 +121,7 @@ def apply_fp4_marlin_linear(
 
         inputs, a_scales = marlin_quant_input(inputs, torch.float8_e4m3fn)
 
-    output = ops.gptq_marlin_gemm(
+    output = ops.marlin_gemm(
         a=inputs,
         c=None,
         b_q_weight=weight,
@@ -235,6 +235,7 @@ def prepare_nvfp4_moe_layer_for_marlin(
     w2: torch.Tensor,
     w2_scale: torch.Tensor,
     w2_scale_2: torch.Tensor,
+    is_act_and_mul: bool,
 ) -> tuple[
     torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor
 ]:
@@ -266,8 +267,9 @@ def prepare_nvfp4_moe_layer_for_marlin(
     # Repack weights to marlin format
     def repack_weight(weight: torch.Tensor, name: str) -> torch.Tensor:
         tensor_list = []
+        num_shards = 2 if is_act_and_mul else 1
         if "w13" in name:
-            size_n, size_k = N * 2, K
+            size_n, size_k = N * num_shards, K
         else:
             size_n, size_k = K, N
 
@@ -300,8 +302,9 @@ def prepare_nvfp4_moe_layer_for_marlin(
         g_scales = g_scales.to(param_dtype)
 
         tensor_list = []
+        num_shards = 2 if is_act_and_mul else 1
         if "w13" in name:
-            size_n, size_k = N * 2, K
+            size_n, size_k = N * num_shards, K
         else:
             size_n, size_k = K, N
 

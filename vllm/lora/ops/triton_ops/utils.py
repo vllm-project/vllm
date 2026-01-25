@@ -13,6 +13,7 @@ from vllm import envs
 from vllm.logger import init_logger
 from vllm.model_executor.layers.batch_invariant import vllm_is_batch_invariant
 from vllm.platforms import current_platform
+from vllm.utils.math_utils import next_power_of_2
 
 logger = init_logger(__name__)
 is_batch_invariant = vllm_is_batch_invariant()
@@ -169,7 +170,7 @@ def load_lora_op_config(op_type: str, add_inputs: bool | None) -> dict | None:
 
         config_path = Path(f"{user_defined_config_folder}/{config_fname}")
         if not config_path.exists():
-            logger.warning_once(f"No LoRA kernel configs founded in {config_path}")
+            logger.warning_once(f"No LoRA kernel configs found in {config_path}")
             return None
 
         # Load json
@@ -223,14 +224,25 @@ def get_lora_op_configs(
     # The default config for fused_moe_lora ops
     elif op_type in [
         "fused_moe_lora_w13_shrink",
-        "fused_moe_lora_w13_expand",
         "fused_moe_lora_w2_shrink",
+    ]:
+        default = {
+            "block_m": 64,
+            "block_n": min(64, next_power_of_2(rank)),
+            "block_k": 32,
+            "num_warps": 4,
+            "num_stages": 3,
+            "group_size_m": 8,
+            "split_k": 1,
+        }
+    elif op_type in [
+        "fused_moe_lora_w13_expand",
         "fused_moe_lora_w2_expand",
     ]:
         default = {
             "block_m": 64,
             "block_n": 64,
-            "block_k": 32,
+            "block_k": max(16, min(32, next_power_of_2(rank))),
             "num_warps": 4,
             "num_stages": 3,
             "group_size_m": 8,
@@ -239,7 +251,7 @@ def get_lora_op_configs(
     else:
         default = {
             "block_m": 64,
-            "block_n": 128,
+            "block_n": max(64, next_power_of_2(128 // num_slices)),
             "block_k": 16,
             "num_warps": 4,
             "num_ctas": 1,
@@ -298,4 +310,9 @@ def supports_pdl(device: torch.device | None = None) -> bool:
     Refer to: https://github.com/triton-lang/triton/blob/v3.5.0/python/tutorials/11-programmatic-dependent-launch.py
     """
     # PDL requires compute capability SM90 or above
-    return current_platform.is_cuda() and current_platform.has_device_capability(90)
+
+    return (
+        current_platform.is_cuda()
+        and current_platform.has_device_capability(90)
+        and not envs.VLLM_LORA_DISABLE_PDL
+    )

@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import os
 import time
 from collections.abc import Mapping
 from typing import Any, Literal, cast
@@ -13,16 +14,17 @@ from vllm.inputs.preprocess import InputPreprocessor
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
-from vllm.multimodal.cache import processor_cache_from_config
 from vllm.multimodal.inputs import MultiModalFeatureSpec, MultiModalUUIDDict
 from vllm.multimodal.parse import MultiModalDataParser
-from vllm.multimodal.processing import EncDecMultiModalProcessor, set_request_id
+from vllm.multimodal.processing.context import set_request_id
 from vllm.multimodal.utils import argsort_mm_positions
 from vllm.pooling_params import PoolingParams
+from vllm.renderers import RendererLike
 from vllm.sampling_params import _SAMPLING_EPS, SamplingParams
 from vllm.tokenizers import TokenizerLike
 from vllm.tokenizers.mistral import MistralTokenizer
 from vllm.utils import length_from_prompt_token_ids_or_embeds, random_uuid
+from vllm.utils.torch_utils import set_default_torch_num_threads
 from vllm.v1.engine import EngineCoreRequest
 from vllm.v1.metrics.stats import MultiModalCacheStats
 from vllm.v1.structured_output.backend_guidance import (
@@ -44,7 +46,6 @@ class InputProcessor:
     def __init__(
         self,
         vllm_config: VllmConfig,
-        tokenizer: TokenizerLike | None,
         mm_registry: MultiModalRegistry = MULTIMODAL_REGISTRY,
     ) -> None:
         self.vllm_config = vllm_config
@@ -56,12 +57,11 @@ class InputProcessor:
         self.generation_config_fields = self.model_config.try_get_generation_config()
 
         self.mm_registry = mm_registry
-        self.mm_processor_cache = processor_cache_from_config(vllm_config, mm_registry)
+        self.mm_processor_cache = mm_registry.processor_cache_from_config(vllm_config)
 
         self.input_preprocessor = InputPreprocessor(
             self.model_config,
-            tokenizer,
-            self.vllm_config.observability_config,
+            vllm_config.observability_config,
             mm_registry,
             mm_processor_cache=self.mm_processor_cache,
         )
@@ -69,6 +69,13 @@ class InputProcessor:
     @property
     def tokenizer(self) -> TokenizerLike | None:
         return self.input_preprocessor.tokenizer
+
+    def get_tokenizer(self) -> TokenizerLike:
+        return self.input_preprocessor.get_tokenizer()
+
+    @property
+    def renderer(self) -> RendererLike:
+        return self.input_preprocessor.renderer
 
     def _validate_logprobs(
         self,
@@ -368,6 +375,10 @@ class InputProcessor:
             # Remember that this backend was set automatically
             params.structured_outputs._backend_was_auto = True
 
+        # Run post-init validation. This is also important to ensure subsequent
+        # roundtrip serialization/deserialization won't fail.
+        params.structured_outputs.__post_init__()
+
     def _maybe_build_mm_uuids(
         self,
         request_id: str,
@@ -448,17 +459,19 @@ class InputProcessor:
         trace_headers: Mapping[str, str] | None = None,
         priority: int = 0,
         data_parallel_rank: int | None = None,
+        resumable: bool = False,
     ) -> EngineCoreRequest:
         self._validate_lora(lora_request)
         self._validate_params(params)
 
-        data_parallel_size = self.vllm_config.parallel_config.data_parallel_size
-        if data_parallel_rank is not None and not (
-            0 <= data_parallel_rank < data_parallel_size
-        ):
+        parallel_config = self.vllm_config.parallel_config
+        dp_size = parallel_config.data_parallel_size
+        dp_local_size = parallel_config.data_parallel_size_local
+        num_ranks = dp_local_size if parallel_config.local_engines_only else dp_size
+        if data_parallel_rank is not None and not (0 <= data_parallel_rank < num_ranks):
             raise ValueError(
                 f"data_parallel_rank {data_parallel_rank} "
-                f"is out of range [0, {data_parallel_size})."
+                f"is out of range [0, {num_ranks})."
             )
 
         if arrival_time is None:
@@ -493,7 +506,15 @@ class InputProcessor:
         # 1. Tokenize text prompt, with LoRA request if one exists.
         # 2. For multimodal models with a merged preprocessor, preprocess
         #   multimodal data and expand prompt token ids accordingly.
-        with set_request_id(request_id):
+        num_threads = int(os.environ.get("OMP_NUM_THREADS", "1"))
+        if "OMP_NUM_THREADS" not in os.environ:
+            logger.debug_once(
+                "OMP_NUM_THREADS is not set; defaulting Torch threads to %d for "
+                "input preprocessing.",
+                num_threads,
+            )
+
+        with set_request_id(request_id), set_default_torch_num_threads(num_threads):
             processed_inputs: ProcessorInputs = self.input_preprocessor.preprocess(
                 prompt,
                 tokenization_kwargs=tokenization_kwargs,
@@ -583,6 +604,7 @@ class InputProcessor:
             priority=priority,
             data_parallel_rank=data_parallel_rank,
             trace_headers=trace_headers,
+            resumable=resumable,
         )
 
     def _validate_model_inputs(
@@ -641,17 +663,18 @@ class InputProcessor:
 
         max_prompt_len = self.model_config.max_model_len
         if prompt_len > max_prompt_len:
-            if prompt_type == "encoder" and model_config.is_multimodal_model:
+            if model_config.is_multimodal_model:
                 mm_registry = self.input_preprocessor.mm_registry
-                mm_processor = mm_registry.create_processor(
+                model_cls = mm_registry._get_model_cls(model_config)
+                factories = model_cls._processor_factory
+                ctx = mm_registry._create_processing_ctx(
                     model_config,
-                    self.vllm_config.observability_config,
                     tokenizer=tokenizer,
                 )
-                assert isinstance(mm_processor, EncDecMultiModalProcessor)
+                mm_info = factories.info(ctx)
 
-                if mm_processor.pad_dummy_encoder_prompt:
-                    return  # Skip encoder length check for Whisper
+                if mm_info.skip_prompt_length_check:
+                    return
 
             if model_config.is_multimodal_model:
                 suggestion = (
@@ -697,3 +720,7 @@ class InputProcessor:
 
     def clear_mm_cache(self) -> None:
         self.input_preprocessor.clear_mm_cache()
+
+    def close(self) -> None:
+        if self.mm_processor_cache is not None:
+            self.mm_processor_cache.close()

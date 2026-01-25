@@ -9,12 +9,13 @@ import torch
 from tests.v1.attention.utils import (
     create_standard_kv_cache_spec,
     create_vllm_config,
+    try_backend_includes_kv_cache_update,
     try_get_attention_backend,
 )
-from vllm.attention.backends.registry import AttentionBackendEnum
-from vllm.attention.utils.fa_utils import is_flash_attn_varlen_func_available
 from vllm.config import ParallelConfig, SpeculativeConfig
-from vllm.v1.attention.backends.utils import CommonAttentionMetadata
+from vllm.v1.attention.backend import CommonAttentionMetadata
+from vllm.v1.attention.backends.fa_utils import is_flash_attn_varlen_func_available
+from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 if not is_flash_attn_varlen_func_available():
     pytest.skip(
@@ -120,6 +121,14 @@ def forward_attention(
     key = k.view(-1, num_kv_heads, dim_per_head)
     value = v.view(-1, num_kv_heads, dim_per_head)
     output = torch.empty_like(query)
+    if not try_backend_includes_kv_cache_update(backend):
+        instance.do_kv_cache_update(
+            layer=layer,
+            key=key,
+            value=value,
+            kv_cache=kv_cache,
+            slot_mapping=attn_metadata.slot_mapping,
+        )
     return instance.forward(
         layer=layer,
         query=query,

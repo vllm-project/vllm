@@ -7,17 +7,6 @@ from typing import ClassVar
 
 import torch
 
-from vllm.attention.backends.abstract import (
-    AttentionBackend,
-    AttentionImpl,
-    AttentionType,
-    MultipleOf,
-)
-from vllm.attention.ops.chunked_prefill_paged_decode import chunked_prefill_paged_decode
-from vllm.attention.ops.paged_attn import PagedAttention
-from vllm.attention.ops.triton_reshape_and_cache_flash import (
-    triton_reshape_and_cache_flash,
-)
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
@@ -25,11 +14,22 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8StaticTensorSym,
 )
 from vllm.platforms import current_platform
-from vllm.v1.attention.backends.flash_attn import FlashAttentionMetadata
-from vllm.v1.attention.backends.utils import (
+from vllm.v1.attention.backend import (
+    AttentionBackend,
     AttentionCGSupport,
+    AttentionImpl,
     AttentionMetadataBuilder,
+    AttentionType,
     CommonAttentionMetadata,
+    MultipleOf,
+)
+from vllm.v1.attention.backends.flash_attn import FlashAttentionMetadata
+from vllm.v1.attention.ops.chunked_prefill_paged_decode import (
+    chunked_prefill_paged_decode,
+)
+from vllm.v1.attention.ops.paged_attn import PagedAttention
+from vllm.v1.attention.ops.triton_reshape_and_cache_flash import (
+    triton_reshape_and_cache_flash,
 )
 from vllm.v1.kv_cache_interface import AttentionSpec
 
@@ -167,7 +167,16 @@ class RocmAttentionBackend(AttentionBackend):
         # ROCM paged attention kernel only supports block sizes 16 and 32
         # due to shared memory (LDS) constraints on AMD GPUs.
         # See csrc/rocm/attention.cu CALL_CUSTOM_LAUNCHER_BLK macro.
-        return [16, 32]
+
+        # However, The limitations in [16, 32] are reasonable for a native C++ kernel,
+        # but vLLM should allow support for non-standard sizes via the Triton path,
+        # as addressed in this PR: https://github.com/vllm-project/vllm/pull/31380,
+        # where the Triton kernel under rocm_atten does not support inference
+        # for a non-standard qwen3-next model with a block_size of 544.
+        # We have fixed the Triton kernel so that the standard model uses the original
+        # bit-addressing logic, while the non-standard model
+        # uses our optimized kernel logic.
+        return [16, 32, 544]
 
     @classmethod
     def get_supported_head_sizes(cls) -> list[int]:
