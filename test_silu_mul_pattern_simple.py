@@ -9,7 +9,15 @@ print("="*80)
 def test_function_with_custom_ops(x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
     """Uses vLLM's custom silu_and_mul op (should match pattern!)"""
     # This calls the custom op that MatcherSiluAndMul expects
-    silu_out = torch.ops._C.silu_and_mul(x)
+    hidden = x.shape[-1] // 2
+    silu_out = torch.empty(
+        x.shape[:-1] + (hidden,),
+        dtype=x.dtype,
+        device=x.device
+    )
+    
+    # Call the custom op with pre-allocated output
+    torch.ops._C.silu_and_mul(silu_out, x)
     
     # This calls the custom quant op that MatcherQuantFP8 expects
     result, scales = per_token_group_quant_fp8(silu_out, group_size=128, use_ue8m0=False)
