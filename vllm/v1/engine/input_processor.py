@@ -221,7 +221,8 @@ class InputProcessor:
             if v is not None
         }
 
-        modalities = mm_data_parsed.keys() | mm_uuids_parsed.keys()
+        # NOTE: Include the keys corresponding to `None`
+        modalities = mm_data.keys() | mm_uuids.keys()
 
         for modality in modalities:
             data_items: ModalityDataItems | list[Any] = mm_data_parsed.get(modality, [])
