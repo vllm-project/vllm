@@ -265,7 +265,7 @@ class InputProcessor:
         if dec_prompt is not None:
             self._validate_singleton_mm_uuids(dec_prompt)
 
-    def _validate_multi_modal_uuids(self, prompt: PromptType) -> None:
+    def _validate_mm_uuids(self, prompt: PromptType) -> None:
         """
         Validate that user-provided multi_modal_uuids align with
         multi_modal_data in the incoming request prompt(s).
@@ -411,6 +411,25 @@ class InputProcessor:
         # roundtrip serialization/deserialization won't fail.
         params.structured_outputs.__post_init__()
 
+    def _extract_singleton_mm_data(
+        self, prompt: SingletonPrompt
+    ) -> MultiModalDataDict | None:
+        if isinstance(prompt, str):
+            prompt = TextPrompt(prompt=prompt)
+
+        return prompt.get("multi_modal_data")
+
+    def _extract_enc_dec_mm_data(
+        self, prompt: ExplicitEncoderDecoderPrompt
+    ) -> MultiModalDataDict | None:
+        return self._extract_singleton_mm_data(prompt["encoder_prompt"])
+
+    def _extract_mm_data(self, prompt: PromptType) -> MultiModalDataDict | None:
+        if is_explicit_encoder_decoder_prompt(prompt):
+            return self._extract_enc_dec_mm_data(prompt)
+        else:
+            return self._extract_singleton_mm_data(prompt)
+
     def _maybe_build_mm_uuids(
         self,
         request_id: str,
@@ -423,22 +442,13 @@ class InputProcessor:
         Returns a dictionary of modality -> list[str] of overrides, or None if
         disabled or no multimodal data is present.
         """
-
-        def _extract_mm_data(p: PromptType):
-            if isinstance(p, dict) and "encoder_prompt" in p:
-                enc = p.get("encoder_prompt")
-                if isinstance(enc, dict):
-                    return enc.get("multi_modal_data")
-                return None
-            if isinstance(p, dict):
-                return p.get("multi_modal_data")
-            return None
-
-        mm_data = _extract_mm_data(prompt)
+        mm_data = self._extract_mm_data(prompt)
         if not mm_data:
             return None
 
-        mm_items = self._parse_mm_items(mm_data)
+        mm_items = self._parse_mm_items(
+            {k: v for k, v in mm_data.items() if v is not None}
+        )
 
         return {
             modality: [f"{request_id}-{modality}-{i}" for i in range(data_count)]
@@ -521,7 +531,7 @@ class InputProcessor:
         else:
             # Otherwise, use user-provided uuids as multimodal hash overrides
             # if provided.
-            self._validate_multi_modal_uuids(prompt)
+            self._validate_mm_uuids(prompt)
             if isinstance(prompt, dict):
                 mm_uuids = cast(
                     MultiModalUUIDDict | None, prompt.get("multi_modal_uuids")
