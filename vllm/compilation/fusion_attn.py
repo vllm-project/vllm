@@ -16,7 +16,7 @@ from vllm.config import VllmConfig, get_layers_from_vllm_config
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
-    kNvfp4Quant,
+    kNvfp4Dynamic,
     kStaticTensorScale,
 )
 from vllm.platforms import current_platform
@@ -217,7 +217,7 @@ class AttentionNvfp4QuantPattern(AttentionQuantPattern):
     """
 
     def __init__(self, layer: Attention, dtype: torch.dtype) -> None:
-        super().__init__(layer, kNvfp4Quant, dtype)
+        super().__init__(layer, kNvfp4Dynamic, dtype)
 
     def _register(self, pm_pass: PatternMatcherPass) -> None:
         def pattern(
@@ -248,6 +248,7 @@ class AttentionNvfp4QuantPattern(AttentionQuantPattern):
                 input=attn_out_view,
                 output_scale=output_scale,
                 input_scale=input_scale,
+                is_sf_swizzled_layout=True,
             )
             output_scale_view = torch.ops.aten.view.dtype(at2[2], FP8_DTYPE)
             return at2[1], output_scale_view

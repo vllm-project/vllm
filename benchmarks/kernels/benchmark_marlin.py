@@ -239,7 +239,7 @@ def bench_run(
         "sm_version": sm_version,
         "CUBLAS_M_THRESHOLD": CUBLAS_M_THRESHOLD,
         # Kernels
-        "gptq_marlin_gemm": ops.gptq_marlin_gemm,
+        "marlin_gemm": ops.marlin_gemm,
         "gptq_marlin_24_gemm": ops.gptq_marlin_24_gemm,
         "gptq_marlin_repack": ops.gptq_marlin_repack,
         "allspark_w8a16_gemm": ops.allspark_w8a16_gemm,
@@ -263,21 +263,21 @@ def bench_run(
 
     results.append(
         benchmark.Timer(
-            stmt="output = gptq_marlin_gemm(a, None, marlin_q_w, marlin_s, None, marlin_s2, marlin_zp, marlin_g_idx, marlin_sort_indices, marlin_workspace.scratch, quant_type, size_m, size_n, size_k, is_k_full, False, False, False)",  # noqa: E501
+            stmt="output = marlin_gemm(a, None, marlin_q_w, marlin_s, None, marlin_s2, marlin_zp, marlin_g_idx, marlin_sort_indices, marlin_workspace.scratch, quant_type, size_m, size_n, size_k, is_k_full, False, False, False)",  # noqa: E501
             globals=globals,
             label=label,
             sub_label=sub_label,
-            description="gptq_marlin_gemm",
+            description="marlin_gemm",
         ).blocked_autorange(min_run_time=min_run_time)
     )
 
     results.append(
         benchmark.Timer(
-            stmt="output = gptq_marlin_gemm(a, None, marlin_q_w, marlin_s, None, marlin_s2, marlin_zp, marlin_g_idx, marlin_sort_indices, marlin_workspace.scratch, quant_type, size_m, size_n, size_k, is_k_full, False, True, False)",  # noqa: E501
+            stmt="output = marlin_gemm(a, None, marlin_q_w, marlin_s, None, marlin_s2, marlin_zp, marlin_g_idx, marlin_sort_indices, marlin_workspace.scratch, quant_type, size_m, size_n, size_k, is_k_full, False, True, False)",  # noqa: E501
             globals=globals,
             label=label,
             sub_label=sub_label,
-            description="gptq_marlin_gemm_fp32",
+            description="marlin_gemm_fp32",
         ).blocked_autorange(min_run_time=min_run_time)
     )
 
