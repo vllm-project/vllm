@@ -59,7 +59,7 @@ def test_multi_modal_uuids_missing_modality_raises():
         # Two modalities provided in data
         "multi_modal_data": {
             "image": [cherry_pil_image],
-            "video": [baby_reading_np_ndarrays],
+            "video": [None],
         },
         # Only image uuids provided; video missing should raise
         "multi_modal_uuids": {"image": ["hash_cherry"]},
@@ -149,7 +149,7 @@ def test_multi_modal_uuids_ignored_when_caching_disabled(monkeypatch):
         "prompt": "USER: <image><image><video>\nDescribe\nASSISTANT:",
         "multi_modal_data": {
             "image": [cherry_pil_image, stop_pil_image],
-            "video": baby_reading_np_ndarrays,
+            "video": [baby_reading_np_ndarrays],
         },
         "multi_modal_uuids": mm_uuids,
     }
@@ -161,16 +161,15 @@ def test_multi_modal_uuids_ignored_when_caching_disabled(monkeypatch):
     )
 
     # Expect request-id-based overrides are passed through
-    mm_uuids = captured["mm_uuids"]
     assert set(mm_uuids.keys()) == {"image", "video"}
     assert len(mm_uuids["image"]) == 2
     assert len(mm_uuids["video"]) == 1
-    assert mm_uuids["image"][0].startswith(f"{request_id}-image-") and mm_uuids[
-        "image"
-    ][0].endswith("-0")
-    assert mm_uuids["image"][1].startswith(f"{request_id}-image-") and mm_uuids[
-        "image"
-    ][1].endswith("-1")
-    assert mm_uuids["video"][0].startswith(f"{request_id}-video-") and mm_uuids[
-        "video"
-    ][0].endswith("-0")
+    assert captured["mm_uuids"]["image"][0].startswith(
+        f"{request_id}-image-"
+    ) and captured["mm_uuids"]["image"][0].endswith("-0")
+    assert captured["mm_uuids"]["image"][1].startswith(
+        f"{request_id}-image-"
+    ) and captured["mm_uuids"]["image"][1].endswith("-1")
+    assert captured["mm_uuids"]["video"][0].startswith(
+        f"{request_id}-video-"
+    ) and captured["mm_uuids"]["video"][0].endswith("-0")

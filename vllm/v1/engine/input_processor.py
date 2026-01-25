@@ -212,12 +212,14 @@ class InputProcessor:
             return
 
         mm_items = self._parse_mm_items(mm_data)
+        modalities = mm_items.keys() | mm_uuids.keys()
 
-        for modality, data_items in mm_items.items():
-            uuid_items = mm_uuids.get(modality, [])
+        for modality in modalities:
+            data_items = mm_items.get(modality) or []
+            uuid_items = mm_uuids.get(modality) or []
 
-            if data_items:
-                if uuid_items and len(data_items) != len(uuid_items):
+            if len(data_items) > 0:
+                if len(uuid_items) > 0 and len(data_items) != len(uuid_items):
                     raise ValueError(
                         f"If given, multi_modal_uuids[{modality!r}] must have "
                         f"same length as multi_modal_data[{modality!r}], but "
@@ -228,19 +230,19 @@ class InputProcessor:
                     if item is None:
                         if not uuid_items:
                             raise ValueError(
-                                f"multi_modal_data[{modality!r}][{i}] is None but "
+                                f"multi_modal_data[{modality!r}][{i}] is empty but "
                                 f"multi_modal_uuids[{modality!r}] is missing."
                             )
 
                         if uuid_items[i] is None:
                             raise ValueError(
-                                f"multi_modal_data[{modality!r}][{i}] is None but "
+                                f"multi_modal_data[{modality!r}][{i}] is empty but "
                                 f"multi_modal_uuids[{modality!r}][{i}] is missing."
                             )
             else:
-                if not uuid_items:
+                if len(uuid_items) == 0:
                     raise ValueError(
-                        f"multi_modal_data[{modality!r}] is None but "
+                        f"multi_modal_data[{modality!r}] is empty but "
                         f"multi_modal_uuids[{modality!r}] is missing."
                     )
 
