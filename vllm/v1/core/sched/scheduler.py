@@ -278,9 +278,9 @@ class Scheduler(SchedulerInterface):
             + num_new_local_computed_tokens
             + num_external_computed_tokens
         )
-        # Do block-aligned split at prefill phase, including
-        # * non-resumed requests: num_computed_tokens < num_prompt_tokens
-        # * resumed requests: num_computed_tokens <= (
+        # Perform block-aligned splitting at prefill phase, including:
+        # * non-resumed requests: num_computed_tokens < num_prompt_tokens + 0
+        # * resumed requests: num_computed_tokens < (
         #                       num_prompt_tokens + num_output_tokens
         #                     )
         if num_computed_tokens < request.num_tokens:
