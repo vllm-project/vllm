@@ -15,7 +15,7 @@
         "is_deepseek_mla": false,
         "is_multimodal_model": false,
         "dtype": "torch.float32",
-        "model_max_len": 2048
+        "max_model_len": 2048
     },
     "mistralai/Mamba-Codestral-7B-v0.1": {
         "architectures": [
@@ -33,7 +33,7 @@
         "is_deepseek_mla": false,
         "is_multimodal_model": false,
         "dtype": "torch.bfloat16",
-        "model_max_len": 128000
+        "max_model_len": 128000
     },
     "ibm-nasa-geospatial/Prithvi-EO-2.0-300M-TL-Sen1Floods11": {
         "architectures": [
@@ -51,7 +51,7 @@
         "is_deepseek_mla": false,
         "is_multimodal_model": true,
         "dtype": "torch.float32",
-        "model_max_len": 2048
+        "max_model_len": 2048
     },
     "tiiuae/falcon-mamba-7b-instruct": {
         "architectures": [
@@ -69,7 +69,7 @@
         "is_deepseek_mla": false,
         "is_multimodal_model": false,
         "dtype": "torch.bfloat16",
-        "model_max_len": 2048
+        "max_model_len": 2048
     },
     "Zyphra/Zamba2-7B-instruct": {
         "architectures": [
@@ -87,7 +87,7 @@
         "is_deepseek_mla": false,
         "is_multimodal_model": false,
         "dtype": "torch.bfloat16",
-        "model_max_len": 4096
+        "max_model_len": 4096
     },
     "mosaicml/mpt-7b": {
         "architectures": [
@@ -139,7 +139,7 @@
         "is_deepseek_mla": false,
         "is_multimodal_model": false,
         "dtype": "torch.bfloat16",
-        "model_max_len": 2048
+        "max_model_len": 2048
     },
     "tiiuae/falcon-40b": {
         "architectures": [
@@ -157,7 +157,7 @@
         "is_deepseek_mla": false,
         "is_multimodal_model": false,
         "dtype": "torch.bfloat16",
-        "model_max_len": 2048
+        "max_model_len": 2048
     },
     "luccafong/deepseek_mtp_main_random": {
         "architectures": [
@@ -175,7 +175,7 @@
         "is_deepseek_mla": true,
         "is_multimodal_model": false,
         "dtype": "torch.bfloat16",
-        "model_max_len": 163840
+        "max_model_len": 163840
     },
     "luccafong/deepseek_mtp_draft_random": {
         "architectures": [
@@ -193,7 +193,7 @@
         "is_deepseek_mla": true,
         "is_multimodal_model": false,
         "dtype": "torch.bfloat16",
-        "model_max_len": 163840
+        "max_model_len": 163840
     },
     "Qwen/Qwen3-Next-80B-A3B-Instruct": {
         "architectures": [
@@ -211,7 +211,7 @@
         "is_deepseek_mla": false,
         "is_multimodal_model": false,
         "dtype": "torch.bfloat16",
-        "model_max_len": 262144
+        "max_model_len": 262144
     },
     "tiny-random/qwen3-next-moe": {
         "architectures": [
@@ -229,7 +229,7 @@
         "is_deepseek_mla": false,
         "is_multimodal_model": false,
         "dtype": "torch.bfloat16",
-        "model_max_len": 262144
+        "max_model_len": 262144
     },
     "zai-org/GLM-4.5": {
         "architectures": [
@@ -247,7 +247,7 @@
         "is_deepseek_mla": false,
         "is_multimodal_model": false,
         "dtype": "torch.bfloat16",
-        "model_max_len": 131072
+        "max_model_len": 131072
     },
     "baidu/ERNIE-4.5-21B-A3B-PT": {
         "architectures": [
@@ -265,7 +265,7 @@
         "is_deepseek_mla": false,
         "is_multimodal_model": false,
         "dtype": "torch.bfloat16",
-        "model_max_len": 131072
+        "max_model_len": 131072
     },
     "lmsys/gpt-oss-20b-bf16": {
         "architectures": [
@@ -283,7 +283,7 @@
         "is_deepseek_mla": false,
         "is_multimodal_model": false,
         "dtype": "torch.bfloat16",
-        "model_max_len": 131072
+        "max_model_len": 131072
     },
     "deepseek-ai/DeepSeek-V3.2-Exp": {
         "architectures": [
@@ -301,7 +301,7 @@
         "is_deepseek_mla": true,
         "is_multimodal_model": false,
         "dtype": "torch.bfloat16",
-        "model_max_len": 163840
+        "max_model_len": 163840
     },
     "meta-llama/Llama-4-Scout-17B-16E-Instruct": {
         "architectures": [
@@ -319,7 +319,7 @@
         "is_deepseek_mla": false,
         "is_multimodal_model": true,
         "dtype": "torch.bfloat16",
-        "model_max_len": 10485760
+        "max_model_len": 10485760
     },
     "nvidia/Llama-3_3-Nemotron-Super-49B-v1": {
         "architectures": [
@@ -337,7 +337,7 @@
         "is_deepseek_mla": false,
         "is_multimodal_model": false,
         "dtype": "torch.bfloat16",
-        "model_max_len": 131072
+        "max_model_len": 131072
     },
     "XiaomiMiMo/MiMo-7B-RL": {
         "architectures": [
@@ -355,7 +355,7 @@
         "is_deepseek_mla": false,
         "is_multimodal_model": false,
         "dtype": "torch.bfloat16",
-        "model_max_len": 32768
+        "max_model_len": 32768
     },
     "meituan-longcat/LongCat-Flash-Chat": {
         "architectures": [
@@ -373,6 +373,6 @@
         "is_deepseek_mla": true,
         "is_multimodal_model": false,
         "dtype": "torch.float32",
-        "model_max_len": 131072
+        "max_model_len": 131072
     }
 }
