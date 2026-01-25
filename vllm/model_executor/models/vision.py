@@ -104,8 +104,11 @@ def get_vit_attn_backend(
     """
     try:
         vllm_config: VllmConfig = get_current_vllm_config()
+        model_config = (
+            vllm_config.model_config
+        )  # sometimes model_config is None, e.g., in tests
         multimodal_config: MultiModalConfig | None = (
-            vllm_config.model_config.multimodal_config
+            model_config.multimodal_config if model_config is not None else None
         )
     except AssertionError:
         multimodal_config = None
