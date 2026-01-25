@@ -45,6 +45,8 @@ requires_pplx = pytest.mark.skipif(
 
 NUM_EXPERTS = [40, 64]
 TOP_KS = [6, 8]
+# Llama4 用 topk=1 搭配 apply_router_weight_on_input=True
+TOP_KS_FOR_ROUTER_WEIGHT = [1]
 
 
 def rank_chunk(num, r, w):
@@ -80,6 +82,7 @@ def pplx_cutlass_moe(
     per_act_token: bool,
     per_out_ch: bool,
     group_name: str | None,
+    apply_router_weight_on_input: bool = False,
 ):
     from vllm.model_executor.layers.fused_moe.pplx_prepare_finalize import (
         PplxPrepareAndFinalize,
@@ -189,6 +192,7 @@ def pplx_cutlass_moe(
         chunk_topk_ids,
         global_num_experts=num_experts,
         expert_map=None,  # TODO
+        apply_router_weight_on_input=apply_router_weight_on_input,
     )
 
     torch.cuda.synchronize()
@@ -219,6 +223,7 @@ def _pplx_moe(
     per_act_token: bool,
     per_out_ch: bool,
     use_internode: bool,
+    apply_router_weight_on_input: bool = False,
 ):
     try:
         if use_internode:
@@ -235,8 +240,14 @@ def _pplx_moe(
             group_name = cpu_group.group_name
 
         with set_current_vllm_config(vllm_config):
+            # 用 torch 實作計算預期結果
             torch_output = torch_experts(
-                a_full, w1_full, w2_full, topk_weights, topk_ids
+                a_full,
+                w1_full,
+                w2_full,
+                topk_weights,
+                topk_ids,
+                apply_router_weights_on_input=apply_router_weight_on_input,
             )
             pplx_output = pplx_cutlass_moe(
                 pgi,
@@ -253,6 +264,7 @@ def _pplx_moe(
                 per_act_token,
                 per_out_ch,
                 group_name,
+                apply_router_weight_on_input,
             )
 
             torch_output = chunk_by_rank(torch_output, pgi.rank, pgi.world_size).to(
@@ -278,6 +290,7 @@ def _pplx_moe(
 @pytest.mark.parametrize("per_out_ch", [True, False])
 @pytest.mark.parametrize("world_dp_size", [[2, 1]])  # , [4, 2]])
 @pytest.mark.parametrize("use_internode", [False])
+@pytest.mark.parametrize("apply_router_weight_on_input", [False])
 @multi_gpu_test(num_gpus=2)
 @pytest.mark.skipif(
     (lambda x: x is None or not ops.cutlass_group_gemm_supported(x.to_int()))(
@@ -296,6 +309,7 @@ def test_cutlass_moe_pplx(
     per_out_ch: bool,
     world_dp_size: tuple[int, int],
     use_internode: bool,
+    apply_router_weight_on_input: bool,
 ):
     set_random_seed(7)
 
@@ -360,4 +374,105 @@ def test_cutlass_moe_pplx(
             per_act_token,
             per_out_ch,
             use_internode,
+            apply_router_weight_on_input,
+        )
+
+
+# 這個測試專門針對 Llama4 的 apply_router_weight_on_input=True 配置
+# 對應 issue #33011
+@pytest.mark.parametrize("m", [2, 224])
+@pytest.mark.parametrize("n", [3072])
+@pytest.mark.parametrize("k", [1536])
+@pytest.mark.parametrize("e", NUM_EXPERTS)
+@pytest.mark.parametrize("per_act_token", [True, False])
+@pytest.mark.parametrize("per_out_ch", [True, False])
+@pytest.mark.parametrize("world_dp_size", [[2, 1]])
+@pytest.mark.parametrize("use_internode", [False])
+@multi_gpu_test(num_gpus=2)
+@pytest.mark.skipif(
+    (lambda x: x is None or not ops.cutlass_group_gemm_supported(x.to_int()))(
+        current_platform.get_device_capability()
+    ),
+    reason="Grouped gemm is not supported on this GPU type.",
+)
+@requires_pplx
+def test_cutlass_moe_pplx_router_weight_on_input(
+    m: int,
+    n: int,
+    k: int,
+    e: int,
+    per_act_token: bool,
+    per_out_ch: bool,
+    world_dp_size: tuple[int, int],
+    use_internode: bool,
+):
+    """
+    測試 apply_router_weight_on_input=True 的情況。
+    這是 Llama4 模型使用的配置，需要 topk=1。
+    """
+    topk = 1  # apply_router_weight_on_input 只支援 topk=1
+    set_random_seed(7)
+
+    with set_current_vllm_config(vllm_config):
+        dtype = torch.half
+
+        a = torch.randn((m, k), device="cuda", dtype=dtype) / 10.0
+        w1 = torch.randn((e, 2 * n, k), device="cuda", dtype=dtype) / 10.0
+        w2 = torch.randn((e, k, n), device="cuda", dtype=dtype) / 10.0
+
+        n_b_scales = 2 * n if per_out_ch else 1
+        k_b_scales = k if per_out_ch else 1
+
+        w1_q = torch.empty((e, 2 * n, k), device="cuda", dtype=torch.float8_e4m3fn)
+        w2_q = torch.empty((e, k, n), device="cuda", dtype=torch.float8_e4m3fn)
+        w1_scale = torch.empty((e, n_b_scales, 1), device="cuda", dtype=torch.float32)
+        w2_scale = torch.empty((e, k_b_scales, 1), device="cuda", dtype=torch.float32)
+
+        for expert in range(e):
+            w1_q[expert], w1_scale[expert] = ops.scaled_fp8_quant(
+                w1[expert], use_per_token_if_dynamic=per_out_ch
+            )
+            w2_q[expert], w2_scale[expert] = ops.scaled_fp8_quant(
+                w2[expert], use_per_token_if_dynamic=per_out_ch
+            )
+
+        w1_d = torch.empty_like(w1)
+        w2_d = torch.empty_like(w2)
+        for expert in range(e):
+            w1_d[expert] = (w1_q[expert].float() * w1_scale[expert]).half()
+            w2_d[expert] = (w2_q[expert].float() * w2_scale[expert]).half()
+
+        score = torch.randn((m, e), device="cuda", dtype=dtype)
+        topk_weights, topk_ids, _ = fused_topk(a, score, topk, renormalize=False)
+
+        world_size, dp_size = world_dp_size
+        a_scale1 = (
+            torch.randn(
+                (m if per_act_token else 1, 1), device="cuda", dtype=torch.float32
+            )
+            / 10.0
+        )
+        if not per_act_token:
+            a_scale1 = a_scale1.repeat(world_size, 1)
+
+        parallel_launch(
+            world_size,
+            _pplx_moe,
+            dp_size,
+            a,
+            w1_q,
+            w2_q,
+            w1_scale,
+            w2_scale,
+            topk_weights,
+            topk_ids,
+            a_scale1,
+            dtype,
+            a,
+            w1_d,
+            w2_d,
+            per_act_token,
+            per_out_ch,
+            use_internode,
+            True,  # apply_router_weight_on_input=True
         )
