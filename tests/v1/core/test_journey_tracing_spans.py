@@ -375,5 +375,86 @@ def test_multiple_requests_separate_spans():
         assert len(set(request_ids)) == 5, "All request IDs should be unique"
 
 
+def test_cleanup_on_abort_path():
+    """Verify journey tracking state is cleaned up when request is aborted."""
+    mock_tracer = MockTracer()
+
+    with patch("vllm.tracing.init_tracer", return_value=mock_tracer):
+        scheduler = create_scheduler(
+            enable_journey_tracing=True,
+            otlp_traces_endpoint="http://localhost:4318/v1/traces"
+        )
+
+        request = _create_request()
+
+        # Add and schedule request
+        scheduler.add_request(request)
+        scheduler.schedule()
+
+        # Verify state exists before abort
+        assert request.request_id in scheduler._journey_prefill_hiwater
+        assert request.request_id in scheduler._core_spans
+
+        # Abort request (using FINISHED_ABORTED status)
+        scheduler.finish_requests(request.request_id, RequestStatus.FINISHED_ABORTED)
+
+        # Verify state is cleaned up after abort
+        assert request.request_id not in scheduler._journey_prefill_hiwater
+        assert request.request_id not in scheduler._first_token_emitted
+        assert request.request_id not in scheduler._core_spans
+
+        # Verify span was closed
+        spans = [s for s in mock_tracer.spans if s.name == "llm_core"]
+        assert len(spans) == 1
+        span = spans[0]
+        assert span.end_called, "Span should be closed after abort"
+        assert not span.is_recording(), "Span should not be recording after abort"
+
+        # Verify FINISHED event was emitted with abort status
+        finished_events = [e for e in span.events if e["name"] == "journey.FINISHED"]
+        assert len(finished_events) == 1
+        assert finished_events[0]["attributes"]["finish.status"] == "aborted"
+
+
+def test_cleanup_on_natural_completion():
+    """Verify journey tracking state is cleaned up on natural completion (EOS/max_tokens)."""
+    mock_tracer = MockTracer()
+
+    with patch("vllm.tracing.init_tracer", return_value=mock_tracer):
+        scheduler = create_scheduler(
+            enable_journey_tracing=True,
+            otlp_traces_endpoint="http://localhost:4318/v1/traces"
+        )
+
+        request = _create_request(prompt_len=10, max_tokens=10)
+
+        # Add and schedule request
+        scheduler.add_request(request)
+        scheduler.schedule()
+
+        # Verify state exists before completion
+        assert request.request_id in scheduler._core_spans
+
+        # Finish request with FINISHED_STOPPED (natural completion)
+        # This simulates the path where request completes normally (EOS or max_tokens)
+        scheduler.finish_requests(request.request_id, RequestStatus.FINISHED_STOPPED)
+
+        # Verify state is cleaned up after natural completion
+        assert request.request_id not in scheduler._core_spans
+        assert request.request_id not in scheduler._journey_prefill_hiwater
+        assert request.request_id not in scheduler._first_token_emitted
+
+        # Verify span was closed
+        spans = [s for s in mock_tracer.spans if s.name == "llm_core"]
+        assert len(spans) == 1
+        assert spans[0].end_called, "Span should be closed after natural completion"
+        assert not spans[0].is_recording(), "Span should not be recording after completion"
+
+        # Verify FINISHED event was emitted with stopped status
+        finished_events = [e for e in spans[0].events if e["name"] == "journey.FINISHED"]
+        assert len(finished_events) == 1
+        assert finished_events[0]["attributes"]["finish.status"] == "stopped"
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
