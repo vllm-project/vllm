@@ -13,7 +13,7 @@ from torch._inductor.pattern_matcher import (
 )
 from torch._ops import OpOverload
 
-from vllm.config import VllmConfig
+from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
@@ -177,67 +177,107 @@ class SiluMulNvfp4QuantPattern(ActivationQuantPattern):
 class SiluMulBlockQuantPattern:
     """
     This pattern fuses silu_and_mul & block quantization.
-    Handles all group_size, col_major, and e8m0 variants in one pattern.
+    
+    Fuses:
+        silu_and_mul(input) → per_token_group_quant_fp8(output, group_size)
+    Into:
+        silu_and_mul_per_block_quant(input, group_size)
+    
+    This is the GROUP/BLOCK quantization version (one scale per group of elements).
+    For PER-TOKEN quantization (one scale per entire token), use SiluMulFp8StaticQuantPattern.
     """
-    def __init__(self):
+    def __init__(
+        self, 
+        group_shape: GroupShape,
+        has_col_major_scales: bool = False,
+        is_e8m0: bool = False,
+    ):
+        # Validate that it's per-token quantization (group_m must be 1)
+        assert group_shape[0] == 1, (
+            f"SiluMulBlockQuantPattern only supports per-token quantization "
+            f"(group_m=1), got group_shape={group_shape}"
+        )
+        
+        self.group_shape = group_shape
+        self.group_size = group_shape[1]  # Extract for convenience
+        self.has_col_major_scales = has_col_major_scales
+        self.is_e8m0 = is_e8m0
         self.quant_dtype = FP8_DTYPE
         
-        from vllm.config import get_current_vllm_config
+        # Get current config for model dtype
         config = get_current_vllm_config()
         self.model_dtype = config.model_config.dtype if config.model_config else None
         
-        from .matcher_utils import MatcherSiluAndMul, MatcherQuantFP8
+        # Create matchers for pattern detection
         self.silu_and_mul_matcher = MatcherSiluAndMul()
         
-        # Create a single matcher for group_size=128 as the pattern template
-        # The actual replacement will handle all variants
-        scale = ScaleDesc(torch.float32, False, GroupShape(1, 128))
+        # Create quant matcher for this specific group_size
+        scale = ScaleDesc(torch.float32, False, group_shape)
         quant_key = QuantKey(dtype=FP8_DTYPE, scale=scale, symmetric=True)
-        self.quant_matcher = MatcherQuantFP8(quant_key, has_col_major_scales=False, is_e8m0=False)
+        self.quant_matcher = MatcherQuantFP8(
+            quant_key, 
+            has_col_major_scales=has_col_major_scales,
+            is_e8m0=is_e8m0
+        )
     
     def register(self, pm_pass: PatternMatcherPass) -> None:
-        def pattern(input: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-            print(f"PATTERN EXECUTING - input device: {input.device}, dtype: {input.dtype}, shape: {input.shape}")
-
-            # Write the FULL pattern explicitly - no matchers
-            d = input.shape[-1] // 2
-            gate = input[..., :d]
-            silu = torch.nn.functional.silu(gate)
-            up = input[..., d:]
-            silu_out = silu * up
-            
-            # Match the in-place quantization pattern
-            x_q = torch.empty(silu_out.shape, dtype=FP8_DTYPE, device=input.device)
-            num_groups = silu_out.shape[-1] // 128
-            x_s = torch.empty((silu_out.shape[0], num_groups), dtype=torch.float32, device=input.device)
-            
-            torch.ops._C.per_token_group_fp8_quant(silu_out, x_q, x_s, 128, 1e-10, -448.0, 448.0, False)
-            
-            return x_q, x_s
+        """Register this pattern with the pattern matcher."""
         
+        # DEFINE THE PATTERN TO MATCH
+        def pattern(input: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+            # Pattern: silu_and_mul → per_token_group_quant_fp8
+            result_silu_mul = self.silu_and_mul_matcher(input)
+            result_quant, scale = self.quant_matcher(result_silu_mul)
+            return result_quant, scale
+        
+        # DEFINE THE REPLACEMENT (fused operation)
         def replacement(input: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-            print(f"FUSED KERNEL TRIGGERED! input.shape={input.shape}")
+            print(f"FUSED KERNEL TRIGGERED! input.shape={input.shape}, group_size={self.group_size}")
             
+            # Convert to model dtype if needed
+            if self.model_dtype is not None:
+                input = input.to(dtype=self.model_dtype)
+            
+            # Calculate output shape (half of input due to gate||up → silu(gate)*up)
             output_shape = list(input.shape)
             output_shape[-1] = output_shape[-1] // 2
             
-            result = torch.empty(output_shape, device=input.device, dtype=self.quant_dtype)
-            num_groups = output_shape[-1] // 128
-            scale = torch.empty((output_shape[0], num_groups), dtype=torch.float32, device=input.device)
-            
-            torch.ops._C.silu_and_mul_per_block_quant.default(
-                result, input, scale, 128, None, False
+            # Allocate output tensor
+            result = torch.empty(
+                output_shape, 
+                device=input.device, 
+                dtype=self.quant_dtype
             )
             
-            return result, scale
+            # Allocate scale tensor with proper layout
+            scale = self.quant_matcher.make_scale(
+                torch.empty(output_shape, device=input.device),
+                transposed=self.has_col_major_scales
+            )
+            
+            # Call the fused kernel via auto_functionalized
+            at = auto_functionalized(
+                torch.ops._C.silu_and_mul_per_block_quant.default,
+                result=result,
+                input=input,
+                scale=scale,
+                group_size=self.group_size,
+                scale_ub=None,
+                is_scale_transposed=self.has_col_major_scales,
+            )
+            
+            # Return result and scale from auto_functionalized
+            return at[1], at[2]
         
-        print("About to trace pattern...")
-        input = torch.empty(5, 256, dtype=torch.float16, device='cuda')
-        pattern(input)
-        print("Pattern traced, registering replacement...")
-        
-        register_replacement(pattern, replacement, [input], fwd_only, pm_pass)
-    print("Replacement registered!")
+        # REGISTER THE PATTERN
+        inputs = self.silu_and_mul_matcher.inputs()
+        register_replacement(
+            pattern,
+            replacement,
+            inputs,
+            fwd_only,
+            pm_pass,
+        )
         
 class ActivationQuantFusionPass(VllmPatternMatcherPass):
     """
