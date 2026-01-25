@@ -26,7 +26,7 @@ from vllm.multimodal.inputs import (
     MultiModalFeatureSpec,
     MultiModalUUIDDict,
 )
-from vllm.multimodal.parse import MultiModalDataItems
+from vllm.multimodal.parse import ModalityDataItems, MultiModalDataItems
 from vllm.multimodal.processing.context import set_request_id
 from vllm.multimodal.utils import argsort_mm_positions
 from vllm.pooling_params import PoolingParams
@@ -212,16 +212,19 @@ class InputProcessor:
         if not mm_data and not mm_uuids:
             return
 
-        mm_data_parsed = self._parse_mm_items(mm_data)
+        mm_data_parsed = self._parse_mm_items(
+            {k: v for k, v in mm_data.items() if v is not None}
+        )
         mm_uuids_parsed = {
-            k: [v] if isinstance(v, str) else ([] if v is None else v)
+            k: [v] if isinstance(v, str) else v
             for k, v in mm_uuids.items()
+            if v is not None
         }
 
         modalities = mm_data_parsed.keys() | mm_uuids_parsed.keys()
 
         for modality in modalities:
-            data_items: list[Any] = mm_data_parsed.get(modality, [])
+            data_items: ModalityDataItems | list[Any] = mm_data_parsed.get(modality, [])
             uuid_items = mm_uuids_parsed.get(modality, [])
 
             if len(data_items) > 0:
