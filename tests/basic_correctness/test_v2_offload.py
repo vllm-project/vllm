@@ -25,7 +25,7 @@ def test_v2_offload_deepseek():
             "2",
             "--offload-prefetch-step",
             "1",
-            # currently not compatible with torch.compile
-            "--enforce-eager",
+            # torch.compile is automatically disabled when V2 offloading is
+            # enabled (via enable_if in @support_torch_compile decorator)
         ],
     )
