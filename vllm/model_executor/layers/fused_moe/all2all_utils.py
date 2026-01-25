@@ -80,8 +80,6 @@ def maybe_make_prepare_finalize(
     defer_input_quant: bool = False,
     allow_new_interface: bool = False,
 ) -> FusedMoEPrepareAndFinalize | None:
-    # TODO
-    # TODO: what is DP>1 and EP=1?
     # NOTE(rob): we are migrating each quant_method to hold the MK
     # in all cases. The allow_new_interface=False flag allow us to fall
     # back to the old method for methods that have not yet been migrated.
