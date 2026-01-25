@@ -2,15 +2,24 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from collections.abc import Sequence
+from typing import TYPE_CHECKING, Any
 
 from transformers import PreTrainedTokenizerBase
 
-from vllm.entrypoints.openai.protocol import ChatCompletionRequest, DeltaMessage
+from vllm.entrypoints.openai.engine.protocol import DeltaMessage
 from vllm.logger import init_logger
 from vllm.reasoning import ReasoningParser
 from vllm.reasoning.deepseek_r1_reasoning_parser import DeepSeekR1ReasoningParser
 
 from .identity_reasoning_parser import IdentityReasoningParser
+
+if TYPE_CHECKING:
+    from vllm.entrypoints.openai.chat_completion.protocol import (
+        ChatCompletionRequest,
+    )
+else:
+    ChatCompletionRequest = Any
+
 
 logger = init_logger(__name__)
 
@@ -48,7 +57,7 @@ class KimiK2ReasoningParser(ReasoningParser):
         return self._parser.extract_content_ids(input_ids)
 
     def extract_reasoning(
-        self, model_output: str, request: ChatCompletionRequest
+        self, model_output: str, request: "ChatCompletionRequest"
     ) -> tuple[str | None, str | None]:
         return self._parser.extract_reasoning(model_output, request)
 
