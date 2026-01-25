@@ -812,6 +812,21 @@ class OpenAIServingChat(OpenAIServing):
                     if request_metadata.first_response_time is None:
                         request_metadata.first_response_time = time.monotonic()
 
+                        # Emit FIRST_RESPONSE_FROM_CORE event
+                        if request_metadata.api_span:
+                            try:
+                                from vllm.tracing import SpanAttributes
+
+                                request_metadata.api_span.add_event(
+                                    name="api.FIRST_RESPONSE_FROM_CORE",
+                                    attributes={
+                                        SpanAttributes.EVENT_TS_MONOTONIC: request_metadata.first_response_time
+                                    },
+                                    timestamp=time.time_ns(),
+                                )
+                            except Exception:
+                                pass
+
                     num_cached_tokens = res.num_cached_tokens
                     # Send first response for each request.n (index) with
                     # the role
@@ -1549,6 +1564,22 @@ class OpenAIServingChat(OpenAIServing):
                 # Track first response time for latency calculation
                 if request_metadata.first_response_time is None:
                     request_metadata.first_response_time = time.monotonic()
+
+                    # Emit FIRST_RESPONSE_FROM_CORE event
+                    if request_metadata.api_span:
+                        try:
+                            from vllm.tracing import SpanAttributes
+
+                            request_metadata.api_span.add_event(
+                                name="api.FIRST_RESPONSE_FROM_CORE",
+                                attributes={
+                                    SpanAttributes.EVENT_TS_MONOTONIC: request_metadata.first_response_time
+                                },
+                                timestamp=time.time_ns(),
+                            )
+                        except Exception:
+                            pass
+
                 final_res = res
         except asyncio.CancelledError:
             # Emit ABORTED event for client disconnect
