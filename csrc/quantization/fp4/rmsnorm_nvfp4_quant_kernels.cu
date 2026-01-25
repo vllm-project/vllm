@@ -13,7 +13,12 @@
 
 #include "cuda_utils.h"
 #include "launch_bounds_utils.h"
+
+// Define before including nvfp4_utils.cuh so the header
+// can use this macro during compilation.
+#define NVFP4_ENABLE_ELTS16 1
 #include "nvfp4_utils.cuh"
+#include "../fused_kernels/layernorm_utils.cuh"
 
 namespace vllm {
 
@@ -26,7 +31,7 @@ __global__ void __launch_bounds__(1024, VLLM_BLOCKS_PER_SM(1024))
                              float const* __restrict__ scale,
                              const float epsilon, uint32_t* __restrict__ output,
                              uint32_t* __restrict__ output_scale) {
-  using PackedVecT = PackedVec<scalar_t>;
+  using PackedVecT = vllm::PackedVec<scalar_t>;
 
   static constexpr int CVT_FP4_NUM_THREADS_PER_SF =
       CVT_FP4_SF_VEC_SIZE / CVT_FP4_ELTS_PER_THREAD;
@@ -34,7 +39,7 @@ __global__ void __launch_bounds__(1024, VLLM_BLOCKS_PER_SM(1024))
   __shared__ float s_rms_inv;
 
   const int32_t num_k_tiles = (hidden_size + 63) / 64;
-  const float global_scale = scale == nullptr ? 1.0f : scale[0];
+  const float global_scale = (scale == nullptr) ? 1.0f : scale[0];
   const int vecs_per_row = hidden_size / CVT_FP4_ELTS_PER_THREAD;
 
   // SF layout requires rows padded to 128 and cols padded to 64
@@ -50,9 +55,22 @@ __global__ void __launch_bounds__(1024, VLLM_BLOCKS_PER_SM(1024))
     for (int col_idx = threadIdx.x; col_idx < vecs_per_row_padded;
          col_idx += blockDim.x) {
       const int elem_idx = col_idx * CVT_FP4_ELTS_PER_THREAD;
-      if (valid_row && elem_idx < hidden_size) {
-        PackedVecT vec =
-            reinterpret_cast<const PackedVecT*>(row_input)[col_idx];
+      PackedVecT vec{};
+
+      bool valid = valid_row && (elem_idx < hidden_size);
+      if constexpr (CVT_FP4_PACK16) {
+        ld256_or_zero_cg_u32<scalar_t>(
+            vec,
+            &reinterpret_cast<const uint32_t*>(row_input)[col_idx * 8],
+            valid);
+      } else {
+        ld128_or_zero_cg_u32<scalar_t>(
+            vec,
+            &reinterpret_cast<const uint32_t*>(row_input)[col_idx * 4],
+            valid);
+      }
+
+      if (valid) {
         variance += compute_packed_sum_squares(vec);
       }
     }
@@ -74,11 +92,28 @@ __global__ void __launch_bounds__(1024, VLLM_BLOCKS_PER_SM(1024))
          col_idx += blockDim.x) {
       const int elem_idx = col_idx * CVT_FP4_ELTS_PER_THREAD;
       const bool valid_col = elem_idx < hidden_size;
+      const bool valid = valid_row && valid_col;
+
       PackedVecT in_vec{}, w_vec{};
 
-      if (valid_row && valid_col) {
-        in_vec = reinterpret_cast<const PackedVecT*>(row_input)[col_idx];
-        w_vec = reinterpret_cast<const PackedVecT*>(weight)[col_idx];
+      if constexpr (CVT_FP4_PACK16) {
+        ld256_or_zero_cg_u32<scalar_t>(
+            in_vec,
+            &reinterpret_cast<const uint32_t*>(row_input)[col_idx * 8],
+            valid);
+        ld256_or_zero_cg_u32<scalar_t>(
+            w_vec,
+            &reinterpret_cast<const uint32_t*>(weight)[col_idx * 8],
+            valid);
+      } else {
+        ld128_or_zero_cg_u32<scalar_t>(
+            in_vec,
+            &reinterpret_cast<const uint32_t*>(row_input)[col_idx * 4],
+            valid);
+        ld128_or_zero_cg_u32<scalar_t>(
+            w_vec,
+            &reinterpret_cast<const uint32_t*>(weight)[col_idx * 4],
+            valid);
       }
 
       PackedVecT norm_vec = compute_rms_norm(in_vec, w_vec, rms_inv);
@@ -88,11 +123,19 @@ __global__ void __launch_bounds__(1024, VLLM_BLOCKS_PER_SM(1024))
                                              CVT_FP4_NUM_THREADS_PER_SF>(
               row_idx, col_idx, num_k_tiles, output_scale);
 
-      uint32_t fp4_packed = cvt_warp_fp16_to_fp4<scalar_t, UE8M0_SF>(
-          norm_vec, global_scale, sf_out);
+      auto fp4_packed =
+          cvt_warp_fp16_to_fp4<scalar_t, CVT_FP4_NUM_THREADS_PER_SF, UE8M0_SF>(
+              norm_vec, global_scale, sf_out);
 
-      if (valid_row && valid_col) {
-        row_out[col_idx] = fp4_packed;
+      if (valid) {
+        if constexpr (CVT_FP4_PACK16) {
+          int64_t out_offset = row_idx * (hidden_size / 8) + col_idx * 2;
+          uint64_t packed64 =
+              (uint64_t(fp4_packed.hi) << 32) | uint64_t(fp4_packed.lo);
+          reinterpret_cast<uint64_t*>(output)[out_offset >> 1] = packed64;
+        } else {
+          row_out[col_idx] = fp4_packed;
+        }
       }
     }
 

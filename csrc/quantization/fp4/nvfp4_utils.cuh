@@ -18,83 +18,16 @@
 
 #include <cuda_runtime.h>
 #include <cuda_fp8.h>
+#include "../cuda_type_utils.cuh"
 
 #if (defined(NVFP4_ENABLE_ELTS16) && (CUDART_VERSION >= 12090) && \
      defined(ENABLE_NVFP4_SM100) && ENABLE_NVFP4_SM100)
   #define ELTS_PER_THREAD 16
-constexpr int CVT_FP4_ELTS_PER_THREAD = 16;
-constexpr bool CVT_FP4_PACK16 = true;
 #else
   #define ELTS_PER_THREAD 8
-constexpr int CVT_FP4_ELTS_PER_THREAD = 8;
-constexpr bool CVT_FP4_PACK16 = false;
 #endif
-
-constexpr int CVT_FP4_SF_VEC_SIZE = 16;
 
 namespace vllm {
-
-// Convert PyTorch cpp type to CUDA type
-template <typename T>
-struct CUDATypeConverter {
-  using Type = T;
-};
-
-template <>
-struct CUDATypeConverter<at::Half> {
-  using Type = half;
-};
-
-template <>
-struct CUDATypeConverter<at::BFloat16> {
-  using Type = __nv_bfloat16;
-};
-
-// Get type2 from type or vice versa (applied to half and bfloat16)
-template <typename T>
-struct TypeConverter {
-  using Type = half2;
-};  // keep for generality
-
-template <>
-struct TypeConverter<half2> {
-  using Type = half;
-};
-
-template <>
-struct TypeConverter<half> {
-  using Type = half2;
-};
-
-template <>
-struct TypeConverter<__nv_bfloat162> {
-  using Type = __nv_bfloat16;
-};
-
-template <>
-struct TypeConverter<__nv_bfloat16> {
-  using Type = __nv_bfloat162;
-};
-
-#if (defined(NVFP4_ENABLE_ELTS16) && (CUDART_VERSION >= 12090) && \
-     defined(ENABLE_NVFP4_SM100) && ENABLE_NVFP4_SM100)
-// Define a 32 bytes packed data type.
-template <class Type>
-struct alignas(32) PackedVec {
-  typename TypeConverter<Type>::Type elts[8];
-};
-#else
-// Define a 16 bytes packed data type.
-template <class Type>
-struct alignas(16) PackedVec {
-  typename TypeConverter<Type>::Type elts[4];
-};
-#endif
-
-template <>
-struct PackedVec<__nv_fp8_e4m3> {
-  __nv_fp8x2_e4m3 elts[8];
-};
 
 template <typename Int>
 __host__ __device__ inline Int round_up(Int x, Int y) {
@@ -410,56 +343,6 @@ __inline__ __device__ PackedVec<Type> compute_silu_mul(
       float2 silu_vec = silu2(__bfloat1622float2(x_vec.elts[i]));
       result.elts[i] = __float22bfloat162_rn(
           __fmul2_rn(silu_vec, __bfloat1622float2(y_vec.elts[i])));
-    }
-  }
-  return result;
-}
-
-// Compute sum of squares for a PackedVec (8 elements).
-// Used in RMSNorm variance calculation.
-template <class Type>
-__device__ __forceinline__ float compute_packed_sum_squares(
-    const PackedVec<Type>& vec) {
-  float sum = 0.0f;
-#pragma unroll
-  for (int i = 0; i < CVT_FP4_ELTS_PER_THREAD / 2; i++) {
-    float2 fp2;
-    if constexpr (std::is_same_v<Type, half>) {
-      fp2 = __half22float2(vec.elts[i]);
-    } else {
-      fp2 = __bfloat1622float2(vec.elts[i]);
-    }
-    sum += fp2.x * fp2.x + fp2.y * fp2.y;
-  }
-  return sum;
-}
-
-// output = input * rms_inv * weight
-// rms_inv = rsqrt(mean(x^2) + epsilon)
-template <class Type>
-__device__ __forceinline__ PackedVec<Type> compute_rms_norm(
-    const PackedVec<Type>& in_vec, const PackedVec<Type>& w_vec,
-    float rms_inv) {
-  PackedVec<Type> result{};
-#pragma unroll
-  for (int i = 0; i < CVT_FP4_ELTS_PER_THREAD / 2; i++) {
-    float2 in_fp2, w_fp2;
-    if constexpr (std::is_same_v<Type, half>) {
-      in_fp2 = __half22float2(in_vec.elts[i]);
-      w_fp2 = __half22float2(w_vec.elts[i]);
-    } else {
-      in_fp2 = __bfloat1622float2(in_vec.elts[i]);
-      w_fp2 = __bfloat1622float2(w_vec.elts[i]);
-    }
-
-    float2 out_fp2;
-    out_fp2.x = in_fp2.x * rms_inv * w_fp2.x;
-    out_fp2.y = in_fp2.y * rms_inv * w_fp2.y;
-
-    if constexpr (std::is_same_v<Type, half>) {
-      result.elts[i] = __float22half2_rn(out_fp2);
-    } else {
-      result.elts[i] = __float22bfloat162_rn(out_fp2);
     }
   }
   return result;
