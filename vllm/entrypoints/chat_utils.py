@@ -41,7 +41,10 @@ from vllm.config import ModelConfig
 from vllm.logger import init_logger
 from vllm.model_executor.models import SupportsMultiModal
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalDataDict, MultiModalUUIDDict
-from vllm.multimodal.parse import ModalityDataItems, MultiModalDataParser
+from vllm.multimodal.inputs import (
+    MultiModalFieldElem,
+)
+from vllm.multimodal.processing import BaseMultiModalProcessor
 from vllm.multimodal.utils import MEDIA_CONNECTOR_REGISTRY, MediaConnector
 from vllm.utils import random_uuid
 from vllm.utils.collection_utils import is_list_of
@@ -49,7 +52,9 @@ from vllm.utils.import_utils import LazyLoader
 
 if TYPE_CHECKING:
     import torch
+    import transformers
 else:
+    transformers = LazyLoader("transformers", globals(), "transformers")
     torch = LazyLoader("torch", globals(), "torch")
 
 logger = init_logger(__name__)
@@ -332,41 +337,60 @@ ModalityStr = Literal["image", "audio", "video", "image_embeds", "audio_embeds"]
 _T = TypeVar("_T")
 
 
-def _extract_embeds(tensors: list[torch.Tensor]):
-    if len(tensors) <= 1:
-        return tensors
+def _get_parsed_items(
+    modality: str,
+    data_items: list[dict[str, "torch.Tensor"]],
+    mm_processor: BaseMultiModalProcessor,
+):
+    if not data_items:
+        return {}
 
-    first_shape = tensors[0].shape
-    if all(t.shape == first_shape for t in tensors):
-        return torch.stack(tensors)
+    first_keys = set(data_items[0].keys())
+    if any(set(item.keys()) != first_keys for item in data_items[1:]):
+        raise ValueError(
+            "All dictionaries in the list of embeddings must have the same keys."
+        )
 
-    return torch.cat(tensors)
+    # TODO: Handle per-request mm_processor_kwargs
+    config_by_key = mm_processor._get_mm_fields_config(
+        transformers.BatchFeature(data_items[0]),
+        {},
+    )
+
+    elems_by_key = {
+        key: [
+            MultiModalFieldElem(modality, key, item[key], config.field)
+            for item in data_items
+        ]
+        for key, config in config_by_key.items()
+    }
+
+    return {
+        key: elems[0].field.reduce_data(elems) for key, elems in elems_by_key.items()
+    }
 
 
-def _get_embeds_data(data_items: list[Any]):
+def _get_embeds_data(
+    modality: str,
+    data_items: list[Any],
+    mm_processor: BaseMultiModalProcessor,
+):
     if len(data_items) == 0:
         return data_items
+
     if is_list_of(data_items, torch.Tensor):
-        return _extract_embeds(data_items)
+        dict_items = [{f"{modality}_embeds": item} for item in data_items]
+        merged_dict_items = _get_parsed_items(modality, dict_items, mm_processor)
+        return merged_dict_items[f"{modality}_embeds"]
+
     if is_list_of(data_items, dict):
-        if not data_items:
-            return {}
+        return _get_parsed_items(modality, data_items, mm_processor)
 
-        first_keys = set(data_items[0].keys())
-        if any(set(item.keys()) != first_keys for item in data_items[1:]):
-            raise ValueError(
-                "All dictionaries in the list of embeddings must have the same keys."
-            )
-
-        return {
-            k: _extract_embeds([item[k] for item in data_items]) for k in first_keys
-        }
-
-    return data_items
+    raise NotImplementedError(type(data_items))
 
 
-def _get_embeds_uuids(uuid_items: list[Any], data_items: ModalityDataItems | None):
-    if data_items is None or all(uuid is None for uuid in uuid_items):
+def _get_embeds_uuids(uuid_items: list[str | None]):
+    if all(uuid is None for uuid in uuid_items):
         return uuid_items
 
     raise NotImplementedError("Passing UUIDs for embedding inputs is not supported yet")
@@ -437,7 +461,7 @@ class BaseMultiModalItemTracker(ABC, Generic[_T]):
 
 def _resolve_items(
     items_by_modality: dict[str, list[tuple[object, str | None]]],
-    data_parser: MultiModalDataParser,
+    mm_processor: BaseMultiModalProcessor,
 ) -> tuple[MultiModalDataDict, MultiModalUUIDDict]:
     if "image" in items_by_modality and "image_embeds" in items_by_modality:
         raise ValueError("Mixing raw image and embedding inputs is not allowed")
@@ -448,22 +472,24 @@ def _resolve_items(
     mm_uuids = {}
     if "image_embeds" in items_by_modality:
         mm_data["image"] = _get_embeds_data(
-            [data for data, uuid in items_by_modality["image_embeds"]]
+            "image",
+            [data for data, uuid in items_by_modality["image_embeds"]],
+            mm_processor,
         )
         mm_uuids["image"] = _get_embeds_uuids(
             [uuid for data, uuid in items_by_modality["image_embeds"]],
-            data_parser._parse_image_data(mm_data["image"]),
         )
     if "image" in items_by_modality:
         mm_data["image"] = [data for data, uuid in items_by_modality["image"]]
         mm_uuids["image"] = [uuid for data, uuid in items_by_modality["image"]]
     if "audio_embeds" in items_by_modality:
         mm_data["audio"] = _get_embeds_data(
-            [data for data, uuid in items_by_modality["audio_embeds"]]
+            "audio",
+            [data for data, uuid in items_by_modality["audio_embeds"]],
+            mm_processor,
         )
         mm_uuids["audio"] = _get_embeds_uuids(
             [uuid for data, uuid in items_by_modality["audio_embeds"]],
-            data_parser._parse_audio_data(mm_data["audio"]),
         )
     if "audio" in items_by_modality:
         mm_data["audio"] = [data for data, uuid in items_by_modality["audio"]]
@@ -482,9 +508,7 @@ class MultiModalItemTracker(BaseMultiModalItemTracker[tuple[object, str | None]]
         if not self._items_by_modality:
             return None, None
 
-        return _resolve_items(
-            dict(self._items_by_modality), self.mm_processor.data_parser
-        )
+        return _resolve_items(dict(self._items_by_modality), self.mm_processor)
 
     def create_parser(self) -> "BaseMultiModalContentParser":
         return MultiModalContentParser(self)
@@ -504,7 +528,7 @@ class AsyncMultiModalItemTracker(
             for modality, coros in self._items_by_modality.items()
         }
 
-        return _resolve_items(resolved_items_by_modality, self.mm_processor.data_parser)
+        return _resolve_items(resolved_items_by_modality, self.mm_processor)
 
     def create_parser(self) -> "BaseMultiModalContentParser":
         return AsyncMultiModalContentParser(self)

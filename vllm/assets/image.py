@@ -55,7 +55,7 @@ class ImageAsset:
         Image embeddings, only used for testing purposes with llava 1.5.
         """
         image_path = self.get_path("pt")
-        return torch.load(image_path, map_location="cpu", weights_only=True)
+        return torch.load(image_path, map_location="cpu", weights_only=True).squeeze(0)
 
     def read_bytes(self, ext: str) -> bytes:
         p = Path(self.get_path(ext))

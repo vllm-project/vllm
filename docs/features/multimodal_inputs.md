@@ -902,11 +902,8 @@ To input pre-computed embeddings belonging to a data type (i.e. image, video, or
 pass a tensor of shape `(..., hidden_size of LM)` for each item to the corresponding field of the multi-modal dictionary.
 
 !!! important
-    Unlike offline inference, the embeddings for each item must be passed separately in order for placeholder tokens to be applied correctly.
-
-    Multiple image embedding inputs for models that concatenate tensors across items (such as Qwen2-VL) currently don't work when the tensors have the same shape for each item, because
-    we don't know whether they are supposed to be stacked or concatenated when merging tensors
-    from multiple items.
+    Unlike offline inference, the embeddings for each item must be passed separately
+    in order for placeholder tokens to be applied correctly by the chat template.
 
 You must enable this feature via the `--enable-mm-embeds` flag in `vllm serve`.
 

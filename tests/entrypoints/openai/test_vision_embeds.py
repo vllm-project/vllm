@@ -16,7 +16,7 @@ from ...utils import RemoteOpenAIServer
 @pytest.mark.parametrize(
     "model_name", ["ibm-nasa-geospatial/Prithvi-EO-2.0-300M-TL-Sen1Floods11"]
 )
-def test_stacked_fields(model_name: str):
+def test_single_content(model_name: str):
     args = [
         "--runner",
         "pooling",
@@ -68,7 +68,7 @@ def test_stacked_fields(model_name: str):
 
 
 @pytest.mark.parametrize("model_name", ["Qwen/Qwen3-VL-2B-Instruct"])
-def test_mixed_fields(model_name: str):
+def test_multi_content(model_name: str):
     args = [
         "--enforce-eager",
         "--max-num-seqs",
@@ -81,6 +81,40 @@ def test_mixed_fields(model_name: str):
     with RemoteOpenAIServer(model_name, args) as server:
         client = server.get_client()
 
+        # Image only
+        chat_completion = client.chat.completions.create(
+            model=model_name,
+            messages=[
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "image_embeds",
+                            "image_embeds": {
+                                "image_embeds": tensor2base64(torch.zeros(220, 8192)),
+                                "image_grid_thw": tensor2base64(
+                                    torch.tensor([1, 22, 40])
+                                ),
+                            },
+                        },
+                        {
+                            "type": "image_embeds",
+                            "image_embeds": {
+                                "image_embeds": tensor2base64(torch.zeros(220, 8192)),
+                                "image_grid_thw": tensor2base64(
+                                    torch.tensor([1, 22, 40])
+                                ),
+                            },
+                        },
+                    ],
+                }
+            ],
+        )
+
+        assert chat_completion.id is not None
+        assert len(chat_completion.choices) == 1
+
+        # Interleaved text and image
         chat_completion = client.chat.completions.create(
             model=model_name,
             messages=[
@@ -100,9 +134,9 @@ def test_mixed_fields(model_name: str):
                         {
                             "type": "image_embeds",
                             "image_embeds": {
-                                "image_embeds": tensor2base64(torch.zeros(440, 8192)),
+                                "image_embeds": tensor2base64(torch.zeros(220, 8192)),
                                 "image_grid_thw": tensor2base64(
-                                    torch.tensor([1, 22, 80])
+                                    torch.tensor([1, 22, 40])
                                 ),
                             },
                         },

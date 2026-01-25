@@ -56,8 +56,10 @@ def _mock_input_processor(
         mm_processor_cache_gb=mm_cache_gb,
         generation_config="vllm",
     )
+    model_config.convert_type = "none"
     model_config.runner_type = "generate"
     model_config.multimodal_config = MultiModalConfig(mm_processor_cache_gb=mm_cache_gb)
+    model_config.hf_config = {"architectures": ["LlavaForConditionalGeneration"]}
 
     vllm_config = VllmConfig(
         model_config=model_config,
