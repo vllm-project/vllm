@@ -41,6 +41,7 @@ from vllm.model_executor.model_loader.weight_utils import (
     sharded_weight_loader,
 )
 from vllm.model_executor.utils import set_weight_attrs
+from vllm.platforms import current_platform
 from vllm.utils.torch_utils import direct_register_custom_op
 from vllm.v1.attention.backend import AttentionMetadata
 from vllm.v1.attention.backends.mamba2_attn import Mamba2AttentionMetadata
@@ -503,8 +504,6 @@ class MambaMixer2(MambaBase, CustomOp):
         )
 
         # Check if running on Blackwell (SM100+) for kernel tuning
-        from vllm.platforms import current_platform
-
         self.is_blackwell = current_platform.is_device_capability_family(100)
 
     def forward_native(
