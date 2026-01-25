@@ -21,6 +21,11 @@ __device__ __forceinline__ bool is_16byte_aligned(const void* ptr) {
   return (reinterpret_cast<uintptr_t>(ptr) & 15) == 0;
 }
 
+// Check if all pointers are 16-byte aligned for longlong4_32a vectorized access
+__device__ __forceinline__ bool is_32byte_aligned(const void* ptr) {
+  return (reinterpret_cast<uintptr_t>(ptr) & 31) == 0;
+}
+
 // Activation and gating kernel template.
 template <typename scalar_t, scalar_t (*ACT_FN)(const scalar_t&),
           bool act_first>
@@ -28,27 +33,40 @@ __global__ void act_and_mul_kernel(
     scalar_t* __restrict__ out,          // [..., d]
     const scalar_t* __restrict__ input,  // [..., 2, d]
     const int d) {
-  constexpr int VEC_SIZE = 16 / sizeof(scalar_t);
+#if __CUDACC_VER_MAJOR__ >= 13 && __CUDA_ARCH__ >= 1000
+  constexpr int ARCH_MAX_VEC_SIZE = 32;
+  using vec_t = longlong4_32a;
+#else
+  constexpr int ARCH_MAX_VEC_SIZE = 16;
+  using vec_t = int4;
+#endif
+  constexpr int VEC_SIZE = ARCH_MAX_VEC_SIZE / sizeof(scalar_t);
   const int64_t token_idx = blockIdx.x;
   const scalar_t* x_ptr = input + token_idx * 2 * d;
   const scalar_t* y_ptr = x_ptr + d;
   scalar_t* out_ptr = out + token_idx * d;
 
-  // Check alignment for 128-bit vectorized access.
-  // All three pointers must be 16-byte aligned for safe int4 operations.
+  // Check alignment for 128-bit/256-bit vectorized access.
+  // All three pointers must be 16-byte/32-byte aligned for safe vectorized
+  // operations.
+#if __CUDACC_VER_MAJOR__ >= 13 && __CUDA_ARCH__ >= 1000
+  const bool aligned = is_32byte_aligned(x_ptr) && is_32byte_aligned(y_ptr) &&
+                       is_32byte_aligned(out_ptr);
+#else
   const bool aligned = is_16byte_aligned(x_ptr) && is_16byte_aligned(y_ptr) &&
                        is_16byte_aligned(out_ptr);
+#endif
 
   if (aligned && d >= VEC_SIZE) {
-    // Fast path: 128-bit vectorized loop
-    const int4* x_vec = reinterpret_cast<const int4*>(x_ptr);
-    const int4* y_vec = reinterpret_cast<const int4*>(y_ptr);
-    int4* out_vec = reinterpret_cast<int4*>(out_ptr);
+    // Fast path: 128-bit/256-bit vectorized loop
+    const vec_t* x_vec = reinterpret_cast<const vec_t*>(x_ptr);
+    const vec_t* y_vec = reinterpret_cast<const vec_t*>(y_ptr);
+    vec_t* out_vec = reinterpret_cast<vec_t*>(out_ptr);
     const int num_vecs = d / VEC_SIZE;
     const int vec_end = num_vecs * VEC_SIZE;
 
     for (int i = threadIdx.x; i < num_vecs; i += blockDim.x) {
-      int4 x = VLLM_LDG(&x_vec[i]), y = VLLM_LDG(&y_vec[i]), r;
+      vec_t x = VLLM_LDG(&x_vec[i]), y = VLLM_LDG(&y_vec[i]), r;
       auto* xp = reinterpret_cast<scalar_t*>(&x);
       auto* yp = reinterpret_cast<scalar_t*>(&y);
       auto* rp = reinterpret_cast<scalar_t*>(&r);
@@ -162,26 +180,40 @@ template <typename scalar_t, scalar_t (*ACT_FN)(const scalar_t&, const float)>
 __global__ void act_and_mul_kernel_with_param(
     scalar_t* __restrict__ out, const scalar_t* __restrict__ input, const int d,
     const float param) {
-  constexpr int VEC_SIZE = 16 / sizeof(scalar_t);
+#if __CUDACC_VER_MAJOR__ >= 13 && __CUDA_ARCH__ >= 1000
+  constexpr int ARCH_MAX_VEC_SIZE = 32;
+  using vec_t = longlong4_32a;
+#else
+  constexpr int ARCH_MAX_VEC_SIZE = 16;
+  using vec_t = int4;
+#endif
+  constexpr int VEC_SIZE = ARCH_MAX_VEC_SIZE / sizeof(scalar_t);
   const int64_t token_idx = blockIdx.x;
   const scalar_t* x_ptr = input + token_idx * 2 * d;
   const scalar_t* y_ptr = x_ptr + d;
   scalar_t* out_ptr = out + token_idx * d;
 
-  // Check alignment for 128-bit vectorized access
+  // Check alignment for 128-bit/256-bit vectorized access.
+  // All three pointers must be 16-byte/32-byte aligned for safe vectorized
+  // operations.
+#if __CUDACC_VER_MAJOR__ >= 13 && __CUDA_ARCH__ >= 1000
+  const bool aligned = is_32byte_aligned(x_ptr) && is_32byte_aligned(y_ptr) &&
+                       is_32byte_aligned(out_ptr);
+#else
   const bool aligned = is_16byte_aligned(x_ptr) && is_16byte_aligned(y_ptr) &&
                        is_16byte_aligned(out_ptr);
+#endif
 
   if (aligned && d >= VEC_SIZE) {
-    // Fast path: 128-bit vectorized loop
-    const int4* x_vec = reinterpret_cast<const int4*>(x_ptr);
-    const int4* y_vec = reinterpret_cast<const int4*>(y_ptr);
-    int4* out_vec = reinterpret_cast<int4*>(out_ptr);
+    // Fast path: 128-bit/256-bit vectorized loop
+    const vec_t* x_vec = reinterpret_cast<const vec_t*>(x_ptr);
+    const vec_t* y_vec = reinterpret_cast<const vec_t*>(y_ptr);
+    vec_t* out_vec = reinterpret_cast<vec_t*>(out_ptr);
     const int num_vecs = d / VEC_SIZE;
     const int vec_end = num_vecs * VEC_SIZE;
 
     for (int i = threadIdx.x; i < num_vecs; i += blockDim.x) {
-      int4 x = VLLM_LDG(&x_vec[i]), y = VLLM_LDG(&y_vec[i]), r;
+      vec_t x = VLLM_LDG(&x_vec[i]), y = VLLM_LDG(&y_vec[i]), r;
       auto* xp = reinterpret_cast<scalar_t*>(&x);
       auto* yp = reinterpret_cast<scalar_t*>(&y);
       auto* rp = reinterpret_cast<scalar_t*>(&r);
@@ -324,23 +356,34 @@ __global__ void activation_kernel(
     scalar_t* __restrict__ out,          // [..., d]
     const scalar_t* __restrict__ input,  // [..., d]
     const int d) {
-  constexpr int VEC_SIZE = 16 / sizeof(scalar_t);
+#if __CUDACC_VER_MAJOR__ >= 13 && __CUDA_ARCH__ >= 1000
+  constexpr int ARCH_MAX_VEC_SIZE = 32;
+  using vec_t = longlong4_32a;
+#else
+  constexpr int ARCH_MAX_VEC_SIZE = 16;
+  using vec_t = int4;
+#endif
+  constexpr int VEC_SIZE = ARCH_MAX_VEC_SIZE / sizeof(scalar_t);
   const int64_t token_idx = blockIdx.x;
   const scalar_t* in_ptr = input + token_idx * d;
   scalar_t* out_ptr = out + token_idx * d;
 
-  // Check alignment for 128-bit vectorized access
+  // Check alignment for 128-bit/256-bit vectorized access
+#if __CUDACC_VER_MAJOR__ >= 13 && __CUDA_ARCH__ >= 1000
+  const bool aligned = is_32byte_aligned(in_ptr) && is_32byte_aligned(out_ptr);
+#else
   const bool aligned = is_16byte_aligned(in_ptr) && is_16byte_aligned(out_ptr);
+#endif
 
   if (aligned && d >= VEC_SIZE) {
-    // Fast path: 128-bit vectorized loop
-    const int4* in_vec = reinterpret_cast<const int4*>(in_ptr);
-    int4* out_vec = reinterpret_cast<int4*>(out_ptr);
+    // Fast path: 128-bit/256-bit vectorized loop
+    const vec_t* in_vec = reinterpret_cast<const vec_t*>(in_ptr);
+    vec_t* out_vec = reinterpret_cast<vec_t*>(out_ptr);
     const int num_vecs = d / VEC_SIZE;
     const int vec_end = num_vecs * VEC_SIZE;
 
     for (int i = threadIdx.x; i < num_vecs; i += blockDim.x) {
-      int4 v = VLLM_LDG(&in_vec[i]), r;
+      vec_t v = VLLM_LDG(&in_vec[i]), r;
       auto* vp = reinterpret_cast<scalar_t*>(&v);
       auto* rp = reinterpret_cast<scalar_t*>(&r);
 #pragma unroll
