@@ -104,29 +104,3 @@ with set_current_vllm_config(config):
 print("\n" + "="*80)
 print("DONE")
 print("="*80)
-```
-
-**What this tests:**
-
-1. ✅ **Pattern is registered** in `ActivationQuantFusionPass`
-2. ✅ **Kernel is callable** directly via `ops.silu_and_mul_per_block_quant`
-3. ⚠️ **Pattern matching with torch.compile** (look for debug print)
-
-**Expected output if working:**
-```
-[1/3] Checking pattern registration...
-   ✓ Found: ActivationQuantFusionPass
-   ✓ Patterns: 8
-
-[2/3] Checking if kernel is callable...
-   ✓ Kernel callable: out=torch.Size([16, 4096]), scales=torch.Size([16, 32])
-
-[3/3] Testing pattern matching...
-   Running baseline...
-   Baseline: out=torch.Size([16, 4096])
-   Compiling...
-   
-🔥 FUSED KERNEL TRIGGERED! input.shape=torch.Size([16, 8192]), group_size=128
-
-   Compiled: out=torch.Size([16, 4096])
-   Results match: True
