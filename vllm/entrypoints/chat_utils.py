@@ -386,6 +386,11 @@ def _get_embeds_data(
                 and first_item.shape[0] == 1
                 and first_item.shape[-1] == hidden_size
             ):
+                logger.warning(
+                    "Batched multi-modal embedding inputs are deprecated for Chat API. "
+                    "Please pass a separate content part for each multi-modal item."
+                )
+
                 return [first_item[0]]
 
         dict_items = [{f"{modality}_embeds": item} for item in data_items]
