@@ -7,6 +7,9 @@ from tests.kernels.utils import opcheck
 from vllm import _custom_ops as ops  # noqa: F401
 
 
+
+pytestmark = [pytest.mark.kernels, pytest.mark.quantization]
+
 def test_gptq_shuffle_opcheck():
     weight = torch.randint(
         -2000000, 2000000, (1792, 4096), device="cuda", dtype=torch.int32
