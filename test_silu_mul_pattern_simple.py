@@ -1,108 +1,106 @@
-# test_silu_mul_pattern_simple.py
+# test_with_custom_ops.py
 import torch
-import torch.nn.functional as F
-
-print("="*80)
-print("SIMPLE PATTERN TEST")
-print("="*80)
-
-# Step 1: Check if pattern is registered
-print("\n[1/3] Checking pattern registration...")
-
-from vllm.config import VllmConfig, ModelConfig, CompilationConfig
-from vllm.compilation.pass_manager import PostGradPassManager
-from vllm.config import set_current_vllm_config
-
-config = VllmConfig(
-    model_config=ModelConfig(model="facebook/opt-125m", dtype=torch.float16, seed=0),
-    compilation_config=CompilationConfig(
-        custom_ops=["+quant_fp8"],
-        pass_config={"fuse_act_quant": True}
-    )
-)
-
-with set_current_vllm_config(config):
-    pm = PostGradPassManager()
-    pm.configure(config)
-    
-    found = False
-    for p in pm.passes:
-        if "ActivationQuant" in type(p).__name__:
-            print(f"   ✓ Found: {type(p).__name__}")
-            if hasattr(p, 'patterns'):
-                print(f"   ✓ Patterns: {len(p.patterns.patterns)}")
-            found = True
-    
-    if not found:
-        print("   ✗ Pattern NOT found!")
-        exit(1)
-
-# Step 2: Check if kernel is callable
-print("\n[2/3] Checking if kernel is callable...")
-
-import vllm._custom_ops as ops
-
-x = torch.randn(16, 4096*2, dtype=torch.float16, device="cuda")
-
-try:
-    out, scales = ops.silu_and_mul_per_block_quant(
-        x,
-        group_size=128,
-        quant_dtype=torch.float8_e4m3fn,
-        is_scale_transposed=False,
-    )
-    print(f"   ✓ Kernel callable: out={out.shape}, scales={scales.shape}")
-except Exception as e:
-    print(f"   ✗ Kernel failed: {e}")
-    exit(1)
-
-# Step 3: Test pattern matching with torch.compile
-print("\n[3/3] Testing pattern matching with torch.compile...")
-
 from vllm.model_executor.layers.quantization.utils.fp8_utils import per_token_group_quant_fp8
-from vllm.compilation.inductor_pass import pass_context
-from vllm.config.utils import Range
 
-def test_function(x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-    """Function that should trigger pattern matching."""
+print("="*80)
+print("TESTING WITH CUSTOM OPS")
+print("="*80)
+
+def test_function_with_custom_ops(x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    """Uses vLLM's custom silu_and_mul op (should match pattern!)"""
+    # This calls the custom op that MatcherSiluAndMul expects
     silu_out = torch.ops._C.silu_and_mul(x)
+    
+    # This calls the custom quant op that MatcherQuantFP8 expects
     result, scales = per_token_group_quant_fp8(silu_out, group_size=128, use_ue8m0=False)
     return result, scales
 
-# Baseline
-print("   Running baseline (no compilation)...")
-x_test = torch.randn(16, 4096*2, dtype=torch.float16, device="cuda")
+x = torch.randn(4, 256*2, dtype=torch.float16, device="cuda")
+
+# Step 1: Capture graph
+print("\n[1] Capturing graph to verify custom ops are present...")
+
+from torch._dynamo import optimize
+
+captured_graphs = []
+
+def capturing_backend(gm, example_inputs):
+    print("\n[CAPTURED GRAPH]")
+    for node in gm.graph.nodes:
+        if node.op == 'call_function':
+            print(f"  {node.target}")
+    captured_graphs.append(gm)
+    return gm.forward
+
+compiled_fn = torch.compile(test_function_with_custom_ops, backend=capturing_backend)
+
 with torch.no_grad():
-    baseline_out, baseline_scales = test_function(x_test)
-print(f"   Baseline: out={baseline_out.shape}")
+    _ = compiled_fn(x)
 
-# Compiled - WRAP EVERYTHING IN pass_context
-print("   Compiling function...")
-print("   (If pattern fires, you'll see: 🔥 FUSED KERNEL TRIGGERED!)\n")
+# Step 2: Check if both custom ops are present
+print("\n[2] Checking for required custom ops...")
 
-import torch._inductor.config as inductor_config
+has_silu_and_mul = False
+has_quant = False
 
-# IMPORTANT: Wrap in pass_context
-with pass_context(Range(start=1, end=8)):
-    with set_current_vllm_config(config):
-        pm_compile = PostGradPassManager()
-        pm_compile.configure(config)
-        inductor_config.post_grad_custom_post_pass = pm_compile
-        
-        compiled_fn = torch.compile(test_function, backend="inductor")
-        
-        with torch.no_grad():
-            compiled_out, compiled_scales = compiled_fn(x_test)
-        
-        print(f"\n   Compiled: out={compiled_out.shape}")
-        
-        match = torch.allclose(baseline_out.float(), compiled_out.float(), atol=1.0)
-        print(f"   Results match: {match}")
-        
-        if match:
-            print("\n   Note: Results matching doesn't guarantee pattern fired")
-            print("   Look for '🔥 FUSED KERNEL TRIGGERED!' message above")
+if captured_graphs:
+    for node in captured_graphs[0].graph.nodes:
+        if node.op == 'call_function':
+            op_name = str(node.target)
+            if 'silu_and_mul' in op_name:
+                has_silu_and_mul = True
+                print(f"  ✓ Found: {op_name}")
+            if 'per_token_group' in op_name and 'fp8' in op_name:
+                has_quant = True
+                print(f"  ✓ Found: {op_name}")
+
+if has_silu_and_mul and has_quant:
+    print("\n✅ Both custom ops present - pattern CAN match!")
+else:
+    print("\n❌ Missing custom ops - pattern CANNOT match")
+    if not has_silu_and_mul:
+        print("   Missing: silu_and_mul")
+    if not has_quant:
+        print("   Missing: per_token_group_fp8_quant")
+
+# Step 3: Test with vLLM's pass manager
+if has_silu_and_mul and has_quant:
+    print("\n[3] Testing with vLLM pass manager...")
+    
+    from vllm.config import VllmConfig, ModelConfig, CompilationConfig
+    from vllm.compilation.pass_manager import PostGradPassManager
+    from vllm.config import set_current_vllm_config
+    from vllm.compilation.inductor_pass import pass_context
+    from vllm.config.utils import Range
+    import torch._inductor.config as inductor_config
+    
+    config = VllmConfig(
+        model_config=ModelConfig(model="facebook/opt-125m", dtype=torch.float16, seed=0),
+        compilation_config=CompilationConfig(
+            custom_ops=["+quant_fp8"],
+            pass_config={"fuse_act_quant": True}
+        )
+    )
+    
+    with pass_context(Range(start=1, end=8)):
+        with set_current_vllm_config(config):
+            pm = PostGradPassManager()
+            pm.configure(config)
+            inductor_config.post_grad_custom_post_pass = pm
+            
+            print("   Compiling with pattern matching enabled...")
+            print("   (Watch for 🔥 FUSED KERNEL TRIGGERED!)\n")
+            
+            compiled_fn_fused = torch.compile(
+                test_function_with_custom_ops,
+                backend="inductor",
+                fullgraph=True,
+            )
+            
+            with torch.no_grad():
+                result, scales = compiled_fn_fused(x)
+            
+            print(f"\n   Output: {result.shape}")
+            print(f"   Scales: {scales.shape}")
 
 print("\n" + "="*80)
-print("DONE")
-print("="*80)
