@@ -818,7 +818,6 @@ class FusedMoEModularKernel(torch.nn.Module):
         self.prepare_finalize = prepare_finalize
         self.fused_experts = fused_experts
         self.shared_experts = shared_experts
-        print(f"{self.shared_experts=}")
 
         # prefer an explicit FusedMoEParallelConfig when available (from
         # FusedMoE layers / tests).

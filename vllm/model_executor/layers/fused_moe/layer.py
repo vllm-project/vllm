@@ -645,7 +645,7 @@ class FusedMoE(CustomOp):
     def maybe_init_modular_kernel(self) -> None:
         # NOTE(rob): WIP refactor. For quant methods that own the MK
         # we create the MK during process_weights_after_loading.
-        if self.quant_method.supports_internal_mk:
+        if self.quant_method.supports_internal_mk or self.quant_method.is_monolithic:
             return None
 
         self.ensure_moe_quant_config_init()
