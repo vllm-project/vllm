@@ -1534,6 +1534,7 @@ def permute_cols(a: torch.Tensor, perm: torch.Tensor) -> torch.Tensor:
 def scaled_fp4_quant(
     input: torch.Tensor,
     input_global_scale: torch.Tensor,
+    is_sf_swizzled_layout: bool = True,
     backend: str = "none",
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """
@@ -1577,21 +1578,25 @@ def scaled_fp4_quant(
     else:
         # Two fp4 values will be packed into an uint8.
         output = torch.empty((m, n // 2), device=device, dtype=torch.uint8)
+        if is_sf_swizzled_layout:
+            # We use the rounded values to store the swizzled values. Due to the
+            # requirement of the Tensor Core, the minimum tile is 128x4 for the scales.
+            # So, we first pad the scales to multiples of 128 and 4. Then, the scales
+            # (in float8_e4m3fn) are packed into an int32 for every 4 values. More:
+            # https://docs.nvidia.com/cuda/parallel-thread-execution/#tcgen05-mma-scale-factor-b-layout-4x
+            round_up = lambda x, y: (x + y - 1) // y * y
+            rounded_m = round_up(m, 128)
+            scale_n = n // block_size
+            rounded_n = round_up(scale_n, 4)
+            output_scale = torch.empty(
+                (rounded_m, rounded_n // 4), device=device, dtype=torch.int32
+            )
+        else:
+            output_scale = torch.empty((m, n // 16), device=device, dtype=torch.uint8)
 
-        # We use the rounded values to store the swizzled values. Due to the
-        # requirement of the Tensor Core, the minimum tile is 128x4 for the scales.
-        # So, we first pad the scales to multiples of 128 and 4. Then, the scales
-        # (in float8_e4m3fn) are packed into an int32 for every 4 values. More:
-        # https://docs.nvidia.com/cuda/parallel-thread-execution/#tcgen05-mma-scale-factor-b-layout-4x
-        round_up = lambda x, y: (x + y - 1) // y * y
-        rounded_m = round_up(m, 128)
-        scale_n = n // block_size
-        rounded_n = round_up(scale_n, 4)
-        output_scale = torch.empty(
-            (rounded_m, rounded_n // 4), device=device, dtype=torch.int32
+        torch.ops._C.scaled_fp4_quant(
+            output, input, output_scale, input_global_scale, is_sf_swizzled_layout
         )
-
-        torch.ops._C.scaled_fp4_quant(output, input, output_scale, input_global_scale)
 
     output_scale = output_scale.view(torch.float8_e4m3fn)
     return output, output_scale
