@@ -70,6 +70,7 @@ from .utils import (
 )
 from .vision import (
     get_vit_attn_backend,
+    is_vit_use_data_parallel,
 )
 
 logger = init_logger(__name__)
@@ -91,11 +92,7 @@ class GlmOcrVisionAttention(nn.Module):
     ) -> None:
         super().__init__()
         # Per attention head and per partition values.
-        use_data_parallel = (
-            multimodal_config.mm_encoder_tp_mode == "data"
-            if multimodal_config
-            else False
-        )
+        use_data_parallel = is_vit_use_data_parallel()
         self.tp_size = (
             1 if use_data_parallel else get_tensor_model_parallel_world_size()
         )
@@ -138,7 +135,6 @@ class GlmOcrVisionAttention(nn.Module):
             num_heads=self.num_attention_heads_per_partition,
             head_size=self.hidden_size_per_attention_head,
             scale=self.hidden_size_per_attention_head**-0.5,
-            multimodal_config=multimodal_config,
         )
         self.apply_rotary_emb = ApplyRotaryEmb(enforce_enable=True)
 

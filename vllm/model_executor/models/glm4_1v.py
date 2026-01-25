@@ -1419,7 +1419,7 @@ class Glm4vForConditionalGeneration(
                 prefix=maybe_prefix(prefix, "visual"),
             )
 
-        if config.model_type == "glm4v" or config.model_type == "glm_ocr":
+        if config.model_type in ("glm4v", "glm_ocr"):
             architectures = ["Glm4ForCausalLM"]
         elif config.model_type == "glm4v_moe":
             architectures = ["Glm4MoeForCausalLM"]
