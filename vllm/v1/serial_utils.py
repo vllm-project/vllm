@@ -575,15 +575,12 @@ class MsgpackDecoder:
                         handle.request_id is not None
                         and handle.request_id in self._request_to_tensors
                     ):
-                        try:
-                            self._request_to_tensors[handle.request_id].remove(
-                                lookup_key
-                            )
-                            if not self._request_to_tensors[handle.request_id]:
+                        tensors = self._request_to_tensors.get(handle.request_id)
+                        if tensors:
+                            tensors.remove(lookup_key)
+                            # Clean up if this is the last tensor for the request
+                            if not tensors:
                                 del self._request_to_tensors[handle.request_id]
-                        except ValueError:
-                            # Tensor was already removed, ignore
-                            pass
 
                     return tensor
 
