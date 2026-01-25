@@ -517,12 +517,12 @@ class RMSNormNvfp4QuantPattern:
         self.FUSED_OP = FUSED_OPS[FusedRMSQuantKey(kNvfp4Dynamic, False)]
 
     def get_inputs(self) -> list[torch.Tensor]:
-        # result (uint8), output_scale (int32)
-        # input (bf16), weight (bf16), input_scale (fp32)
+        # Use rmsnorm_matcher.inputs() to respect model dtype (bf16 or fp16)
+        rms_inputs = self.rmsnorm_matcher.inputs()  # [input, weight]
+        input_ = rms_inputs[0]
+        weight = rms_inputs[1]
         result = torch.empty(5, 32, dtype=FP4_DTYPE, device="cuda")
         output_scale = empty_i32(128, 4)
-        input_ = empty_bf16(5, 64)
-        weight = empty_bf16(64)
         input_scale = empty_fp32(1, 1)
         return [result, output_scale, input_, weight, input_scale]
 
