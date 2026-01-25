@@ -19,7 +19,7 @@ def _build_input_processor(
     *, mm_cache_gb: float = 4.0, enable_prefix_caching: bool = True
 ) -> InputProcessor:
     model_config = ModelConfig(
-        model="llava-hf/llava-1.5-7b-hf",
+        model="Qwen/Qwen3-VL-2B-Instruct",
         skip_tokenizer_init=True,
         max_model_len=128,
         mm_processor_cache_gb=mm_cache_gb,
