@@ -266,7 +266,7 @@ class AiterFusedAddRMSFp8GroupQuantPattern(AiterRMSNormQuantPattern):
         )
 
 
-class RocmAiterRMSNormFusionPass(VllmPatternMatcherPass):
+class RocmAiterRMSNormQuantFusionPass(VllmPatternMatcherPass):
     """
     This pass fuses aiter rms_norm & vllm/aiter quant custom ops
     into a fused rms_norm_quant op.
@@ -399,3 +399,74 @@ class RocmAiterSiluMulFp8GroupQuantFusionPass(VllmPatternMatcherPass):
             AiterSiluMulFp8GroupQuantPattern,
         ]
         return VllmInductorPass.hash_source(self, *fusion_patterns)
+
+
+class AddAiterRMSNormPadPattern:
+    """
+    This pattern replaces an aiter_rmsnorm_with_add & a pad op
+    with a custom triton_add_rmsnorm_pad op from AITER.
+    """
+
+    AITER_TRITON_ADD_RMSNORM_PAD_OP = rocm_aiter_ops.get_triton_add_rmsnorm_pad_op()
+    PAD_SIZE = 192
+    PAD_TO_MULTIPLE = 256
+
+    def __init__(self, epsilon: float):
+        self.epsilon = epsilon
+        self.rmsnorm_matcher = MatcherFusedAddRMSNorm(epsilon, match_rocm_aiter=True)
+
+    def register(self, pm_pass: PatternMatcherPass) -> None:
+        def pattern(
+            input: torch.Tensor, weight: torch.Tensor, residual: torch.Tensor
+        ) -> tuple[torch.Tensor, torch.Tensor]:
+            N, _ = input.shape
+            result_rms, residual_out = self.rmsnorm_matcher(input, weight, residual)
+            result = torch.nn.functional.pad(
+                result_rms, (0, self.PAD_SIZE), mode="constant", value=0.0
+            )
+            return result, residual_out
+
+        def replacement(
+            input: torch.Tensor, weight: torch.Tensor, residual: torch.Tensor
+        ) -> tuple[torch.Tensor, torch.Tensor]:
+            at = self.AITER_TRITON_ADD_RMSNORM_PAD_OP(
+                x=input,
+                weight=weight,
+                variance_epsilon=self.epsilon,
+                residual=residual,
+                x_pad_to_multiple=self.PAD_TO_MULTIPLE,
+            )
+            # result_padded, residual
+            return at[0], at[1]
+
+        pm.register_replacement(
+            pattern, replacement, self.rmsnorm_matcher.inputs(), pm.fwd_only, pm_pass
+        )
+
+
+class RocmAiterTritonAddRMSNormPadFusionPass(VllmPatternMatcherPass):
+    """
+    This pass replaces an AITER CK RMSNorm + residual add and a pad op
+    with an triton_add_rmsnorm_pad op from AITER.
+    """
+
+    def __init__(self, config: VllmConfig):
+        super().__init__(config)
+        self.patterns: PatternMatcherPass = PatternMatcherPass(
+            pass_name="rocm_aiter_triton_add_rmsnorm_pad_fusion_pass"
+        )
+
+        for epsilon in [1e-5, 1e-6]:
+            # TODO (Rohan138): Support multiple of 128 for MI300
+            AddAiterRMSNormPadPattern(epsilon).register(self.patterns)
+
+        self.dump_patterns(config, self.patterns)
+
+    @VllmInductorPass.time_and_log
+    def __call__(self, graph: torch.fx.Graph) -> None:
+        self.matched_count = self.patterns.apply(graph)
+        logger.debug("Replaced %s patterns", self.matched_count)
+        graph.print_tabular()
+
+    def uuid(self) -> str:
+        return VllmInductorPass.hash_source(self, AddAiterRMSNormPadPattern)

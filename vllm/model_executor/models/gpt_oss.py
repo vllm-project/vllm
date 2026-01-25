@@ -182,12 +182,21 @@ class MLPBlock(torch.nn.Module):
             x = sequence_parallel_chunk(x)
 
         if current_platform.is_rocm():
+            # Pad before router GEMM to enable fusion with preceding rmsnorm_with_add
+            # TODO (Rohan138): Gate this padding behind a shape or aiter_enabled check?
+            if x.shape[-1] < self.experts.hidden_size:
+                x = torch.nn.functional.pad(
+                    x,
+                    (0, self.experts.hidden_size - x.shape[-1]),
+                    mode="constant",
+                    value=0.0,
+                )
             g = rocm_unquantized_gemm(
                 self, x[:, : self.hidden_size], self.router.weight, self.router.bias
             )
         else:
             g = self.router(x)
-        x = self.experts(hidden_states=x, router_logits=g)
+        x = self.experts(hidden_states=x, router_logits=g)[:, : self.hidden_size]
 
         if self.is_sequence_parallel:
             x = tensor_model_parallel_all_gather(x.contiguous(), 0)
