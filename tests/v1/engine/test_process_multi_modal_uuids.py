@@ -59,13 +59,13 @@ def test_multi_modal_uuids_missing_modality_raises():
         # Two modalities provided in data
         "multi_modal_data": {
             "image": [cherry_pil_image],
-            "video": [None],
+            "video": None,
         },
         # Only image uuids provided; video missing should raise
         "multi_modal_uuids": {"image": ["hash_cherry"]},
     }
 
-    with pytest.raises(ValueError, match="must be provided if multi_modal_data"):
+    with pytest.raises(ValueError, match="is empty but .* is missing"):
         input_processor.process_inputs(
             request_id="req-2",
             prompt=prompt,  # type: ignore[arg-type]

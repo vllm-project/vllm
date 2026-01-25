@@ -398,13 +398,6 @@ def _get_embeds_data(
     raise NotImplementedError(type(data_items))
 
 
-def _get_embeds_uuids(uuid_items: list[str | None]):
-    if all(uuid is None for uuid in uuid_items):
-        return uuid_items
-
-    raise NotImplementedError("Passing UUIDs for embedding inputs is not supported yet")
-
-
 class BaseMultiModalItemTracker(ABC, Generic[_T]):
     """
     Tracks multi-modal items in a given request and ensures that the number
@@ -485,9 +478,7 @@ def _resolve_items(
             [data for data, uuid in items_by_modality["image_embeds"]],
             mm_processor,
         )
-        mm_uuids["image"] = _get_embeds_uuids(
-            [uuid for data, uuid in items_by_modality["image_embeds"]],
-        )
+        mm_uuids["image"] = [uuid for data, uuid in items_by_modality["image_embeds"]]
     if "image" in items_by_modality:
         mm_data["image"] = [data for data, uuid in items_by_modality["image"]]
         mm_uuids["image"] = [uuid for data, uuid in items_by_modality["image"]]
@@ -497,9 +488,7 @@ def _resolve_items(
             [data for data, uuid in items_by_modality["audio_embeds"]],
             mm_processor,
         )
-        mm_uuids["audio"] = _get_embeds_uuids(
-            [uuid for data, uuid in items_by_modality["audio_embeds"]],
-        )
+        mm_uuids["audio"] = [uuid for data, uuid in items_by_modality["audio_embeds"]]
     if "audio" in items_by_modality:
         mm_data["audio"] = [data for data, uuid in items_by_modality["audio"]]
         mm_uuids["audio"] = [uuid for data, uuid in items_by_modality["audio"]]
