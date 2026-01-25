@@ -167,8 +167,10 @@ class PplxPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
 
             orig_a_scale_block_shape = a1q_scale.shape[-1]
 
-            if (not quant_config.is_block_quantized
-                    and not quant_config.is_per_act_token):
+            if (
+                not quant_config.is_block_quantized
+                and not quant_config.is_per_act_token
+            ):
                 # TODO (bnell): use group_broadcast instead?
                 # Skip repeat for per_act_token since scale shape [M, 1] is
                 # already correct and repeating would corrupt it to [M, 4]

@@ -45,8 +45,6 @@ requires_pplx = pytest.mark.skipif(
 
 NUM_EXPERTS = [40, 64]
 TOP_KS = [6, 8]
-# Llama4 用 topk=1 搭配 apply_router_weight_on_input=True
-TOP_KS_FOR_ROUTER_WEIGHT = [1]
 
 
 def rank_chunk(num, r, w):
@@ -240,7 +238,7 @@ def _pplx_moe(
             group_name = cpu_group.group_name
 
         with set_current_vllm_config(vllm_config):
-            # 用 torch 實作計算預期結果
+            # Compute expected result using torch reference implementation
             torch_output = torch_experts(
                 a_full,
                 w1_full,
@@ -290,7 +288,6 @@ def _pplx_moe(
 @pytest.mark.parametrize("per_out_ch", [True, False])
 @pytest.mark.parametrize("world_dp_size", [[2, 1]])  # , [4, 2]])
 @pytest.mark.parametrize("use_internode", [False])
-@pytest.mark.parametrize("apply_router_weight_on_input", [False])
 @multi_gpu_test(num_gpus=2)
 @pytest.mark.skipif(
     (lambda x: x is None or not ops.cutlass_group_gemm_supported(x.to_int()))(
@@ -309,7 +306,6 @@ def test_cutlass_moe_pplx(
     per_out_ch: bool,
     world_dp_size: tuple[int, int],
     use_internode: bool,
-    apply_router_weight_on_input: bool,
 ):
     set_random_seed(7)
 
@@ -374,12 +370,12 @@ def test_cutlass_moe_pplx(
             per_act_token,
             per_out_ch,
             use_internode,
-            apply_router_weight_on_input,
+            False,  # apply_router_weight_on_input
         )
 
 
-# 這個測試專門針對 Llama4 的 apply_router_weight_on_input=True 配置
-# 對應 issue #33011
+# Test for Llama4's apply_router_weight_on_input=True configuration
+# Related to issue #33011
 @pytest.mark.parametrize("m", [2, 224])
 @pytest.mark.parametrize("n", [3072])
 @pytest.mark.parametrize("k", [1536])
@@ -407,10 +403,10 @@ def test_cutlass_moe_pplx_router_weight_on_input(
     use_internode: bool,
 ):
     """
-    測試 apply_router_weight_on_input=True 的情況。
-    這是 Llama4 模型使用的配置，需要 topk=1。
+    Test apply_router_weight_on_input=True case.
+    This is the configuration used by Llama4 models, which requires topk=1.
     """
-    topk = 1  # apply_router_weight_on_input 只支援 topk=1
+    topk = 1  # apply_router_weight_on_input only supports topk=1
     set_random_seed(7)
 
     with set_current_vllm_config(vllm_config):
