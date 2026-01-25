@@ -7,6 +7,7 @@ import torch
 from vllm.distributed import (
     get_ep_group,
 )
+from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
     FusedMoEParallelConfig,
@@ -24,6 +25,8 @@ from vllm.model_executor.layers.fused_moe.prepare_finalize import (
 )
 from vllm.platforms import current_platform
 from vllm.utils.import_utils import has_deep_ep, has_mori, has_pplx
+
+logger = init_logger(__name__)
 
 if current_platform.is_cuda_alike():
     if has_pplx():
@@ -95,10 +98,24 @@ def maybe_make_prepare_finalize(
     #     always return a PrepareAndFinalize object and the quant method
     #     holds the ModularKernel.
     if not moe.moe_parallel_config.use_all2all_kernels:
-        if allow_new_interface:
-            return MoEPrepareAndFinalizeNoEP(defer_input_quant)
-        else:
+        if not allow_new_interface:
             return None
+
+        # For DP/TP case, fall back to naive P/F.
+        if moe.moe_parallel_config.dp_size > 1:
+            logger.info_once(
+                "Detected DP deployment with no --enable-expert-parallel. "
+                "Falling back to AllGather+ReduceScatter dispatch/combine."
+            )
+            return MoEPrepareAndFinalizeNaiveEP(
+                defer_input_quant,
+                is_sequence_parallel=moe.moe_parallel_config.is_sequence_parallel,
+                num_dispatchers=(
+                    get_ep_group().device_communicator.all2all_manager.world_size
+                ),
+            )
+        else:
+            return MoEPrepareAndFinalizeNoEP(defer_input_quant)
 
     all2all_manager = get_ep_group().device_communicator.all2all_manager
     assert all2all_manager is not None
