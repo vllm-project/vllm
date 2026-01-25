@@ -1322,6 +1322,8 @@ class Scheduler(SchedulerInterface):
             routed_experts = None
             if stopped:
                 routed_experts = self._get_routed_experts(request)
+                # End core span BEFORE freeing request (prevent span leak)
+                self._end_core_span_and_cleanup(request)
                 kv_transfer_params = self._free_request(request)
                 if status_before_stop == RequestStatus.RUNNING:
                     stopped_running_reqs.add(request)

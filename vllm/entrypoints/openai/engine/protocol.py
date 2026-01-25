@@ -114,6 +114,9 @@ class UsageInfo(OpenAIBaseModel):
 
 
 class RequestResponseMetadata(BaseModel):
+    # Allow arbitrary types (OTEL Span) without validation
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
     request_id: str
     final_usage_info: UsageInfo | None = None
     api_span: Any | None = None  # OTEL Span for API-level journey tracing

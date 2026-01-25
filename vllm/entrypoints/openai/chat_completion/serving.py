@@ -493,6 +493,19 @@ class OpenAIServingChat(OpenAIServing):
         assert len(generators) == 1
         (result_generator,) = generators
 
+        # Emit HANDOFF_TO_CORE event after submitting to engine
+        if request_metadata.api_span:
+            try:
+                from vllm.tracing import SpanAttributes
+
+                request_metadata.api_span.add_event(
+                    name="api.HANDOFF_TO_CORE",
+                    attributes={SpanAttributes.EVENT_TS_MONOTONIC: time.monotonic()},
+                    timestamp=time.time_ns(),
+                )
+            except Exception:
+                pass
+
         # Streaming response
         tokenizer = self.renderer.tokenizer
 
@@ -1435,6 +1448,8 @@ class OpenAIServingChat(OpenAIServing):
                 except Exception:
                     pass
             yield f"data: {self._convert_generation_error_to_streaming_response(e)}\n\n"
+            yield "data: [DONE]\n\n"
+            return  # Prevent double span.end() - span already closed above
         except Exception as e:
             # Emit ABORTED event for unexpected errors
             if request_metadata.api_span:
@@ -1458,6 +1473,8 @@ class OpenAIServingChat(OpenAIServing):
             logger.exception("Error in chat completion stream generator.")
             data = self.create_streaming_error_response(e)
             yield f"data: {data}\n\n"
+            yield "data: [DONE]\n\n"
+            return  # Prevent double span.end() - span already closed above
         # Send the final done message after all response.n are finished
         yield "data: [DONE]\n\n"
 
