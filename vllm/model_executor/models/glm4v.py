@@ -663,7 +663,7 @@ class GLM4VForCausalLM(
                 3, -1
             )
             llm_pos_ids_list.append(grid_indices + text_len + st_idx)
-            st = offset + llm_grid_t * llm_grid_h * llm_grid_w
+            st = offset + 2 + llm_grid_t * llm_grid_h * llm_grid_w
 
         if st < len(input_tokens):
             text_len = len(input_tokens) - st
