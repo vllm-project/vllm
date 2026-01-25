@@ -167,13 +167,12 @@ class PplxPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
 
             orig_a_scale_block_shape = a1q_scale.shape[-1]
 
-            if (
-                not quant_config.is_block_quantized
-                and not quant_config.is_per_act_token
-            ):
+            if quant_config.is_per_tensor:
+                # Per-tensor (static FP8) quantization has scale shape [1, 1]
+                # which needs to be repeated to [M, 4] for PPLX data format.
+                # Per-token scale [M, 1] should NOT be repeated as it is
+                # already in the correct format.
                 # TODO (bnell): use group_broadcast instead?
-                # Skip repeat for per_act_token since scale shape [M, 1] is
-                # already correct and repeating would corrupt it to [M, 4]
                 a1q_scale = a1q_scale.repeat(repeat_rows, repeat_cols)
 
         assert a1q_scale is None or a1q_scale.ndim == 2, (
