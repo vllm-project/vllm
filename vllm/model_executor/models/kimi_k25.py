@@ -405,6 +405,7 @@ class KimiK25ForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP)
             media_input["pixel_values"],
             media_input["grid_thws"],
             mm_projector=self.mm_projector,
+            use_data_parallel=self.use_data_parallel,
         )
         return media_features
 

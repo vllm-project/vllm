@@ -629,19 +629,23 @@ def vision_tower_forward(
     pixel_values: torch.Tensor,
     grid_thw: torch.Tensor,
     mm_projector: Any,
+    use_data_parallel: bool,
 ) -> list[torch.Tensor]:
     """DP-sharded vision tower forward with mrope.
 
     Uses vLLM's standard data parallelism utility to shard the batch
     across available GPUs, enabling parallel processing of vision features.
     """
-    grid_thw_list = grid_thw.tolist()
-    vt_outputs = run_dp_sharded_mrope_vision_model(
-        vision_model=vision_tower,
-        pixel_values=pixel_values,
-        grid_thw_list=grid_thw_list,
-        rope_type="rope_2d",
-    )
+    if use_data_parallel:
+        grid_thw_list = grid_thw.tolist()
+        vt_outputs = run_dp_sharded_mrope_vision_model(
+            vision_model=vision_tower,
+            pixel_values=pixel_values,
+            grid_thw_list=grid_thw_list,
+            rope_type="rope_2d",
+        )
+    else:
+        vt_outputs = vision_tower(pixel_values, grid_thw)
     tensors = mm_projector_forward(mm_projector, list(vt_outputs))
     return list(tensors)
 
