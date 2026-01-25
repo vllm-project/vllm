@@ -672,6 +672,7 @@ steps:
 
         # Build vLLM ROCm release image using cached base
         DOCKER_BUILDKIT=1 docker build \
+          --build-arg max_jobs=16 \
           --build-arg BASE_IMAGE="$${BASE_IMAGE_TAG}" \
           --build-arg ARG_PYTORCH_ROCM_ARCH="$${PYTORCH_ROCM_ARCH}" \
           --build-arg USE_SCCACHE=1 \
