@@ -1526,7 +1526,7 @@ class FusedMoE(CustomOp):
         assert self.quant_method is not None
         return (
             isinstance(self.quant_method, FusedMoEModularMethod)
-            and self.quant_method.fused_experts.output_is_reduced()
+            and self.quant_method.moe_mk.output_is_reduced()
         )
 
     def maybe_all_reduce_tensor_model_parallel(self, final_hidden_states: torch.Tensor):

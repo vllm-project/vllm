@@ -169,7 +169,7 @@ def _fused_moe_grouped_gemm_may_use_deep_gemm(module: torch.nn.Module) -> bool:
         # modular kernels could invoke deep_gemm_moe_fp8
         return True
 
-    mk: FusedMoEModularKernel = module.quant_method.fused_experts
+    mk: FusedMoEModularKernel = module.quant_method.moe_mk
     # Further check if the ModularKernel implementation uses the DeepGemmExperts
     return isinstance(mk.fused_experts, (DeepGemmExperts, TritonOrDeepGemmExperts))
 
