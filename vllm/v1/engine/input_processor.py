@@ -417,7 +417,7 @@ class InputProcessor:
         self, prompt: SingletonPrompt
     ) -> MultiModalDataDict | None:
         if isinstance(prompt, str):
-            prompt = TextPrompt(prompt=prompt)
+            return None
 
         return prompt.get("multi_modal_data")
 
