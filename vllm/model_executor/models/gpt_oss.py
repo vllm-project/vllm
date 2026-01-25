@@ -182,7 +182,7 @@ class MLPBlock(torch.nn.Module):
             x = sequence_parallel_chunk(x)
 
         if current_platform.is_rocm():
-            # Pad before router GEMM to enable fusion with preceding rmsnorm_with_add
+            # Pad before router GEMM to enable fusion with preceding aiter_rmsnorm_with_add
             # TODO (Rohan138): Gate this padding behind a shape or aiter_enabled check?
             if x.shape[-1] < self.experts.hidden_size:
                 x = torch.nn.functional.pad(
