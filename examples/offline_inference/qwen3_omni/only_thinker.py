@@ -146,15 +146,17 @@ query_map = {
 
 
 def main(args):
-    model_name = "Qwen/Qwen3-Omni-30B-A3B-Instruct"
+    model_name = args.model
     query_result = query_map[args.query_type]()
 
     llm = LLM(
         model=model_name,
-        max_model_len=12800,
+        max_model_len=args.max_model_len,
         max_num_seqs=5,
         limit_mm_per_prompt=query_result.limit_mm_per_prompt,
         seed=args.seed,
+        tensor_parallel_size=args.tensor_parallel_size,
+        gpu_memory_utilization=args.gpu_memory_utilization,
     )
 
     # We set temperature to 0.2 so that outputs can be different
@@ -186,6 +188,31 @@ def parse_args():
         type=int,
         default=0,
         help="Set the seed when initializing `vllm.LLM`.",
+    )
+    parser.add_argument(
+        "--model",
+        type=str,
+        default="Qwen/Qwen3-Omni-30B-A3B-Instruct",
+        help="Model name or path.",
+    )
+    parser.add_argument(
+        "--tensor-parallel-size",
+        "-tp",
+        type=int,
+        default=1,
+        help="Tensor parallel size for distributed inference.",
+    )
+    parser.add_argument(
+        "--gpu-memory-utilization",
+        type=float,
+        default=0.9,
+        help="GPU memory utilization (0.0 to 1.0).",
+    )
+    parser.add_argument(
+        "--max-model-len",
+        type=int,
+        default=12800,
+        help="Maximum model context length.",
     )
 
     return parser.parse_args()
