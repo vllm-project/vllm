@@ -14,6 +14,7 @@ from vllm.inputs import (
     PromptType,
     SingletonInputs,
     SingletonPrompt,
+    TextPrompt,
 )
 from vllm.inputs.parse import is_explicit_encoder_decoder_prompt, split_enc_dec_inputs
 from vllm.inputs.preprocess import InputPreprocessor
@@ -204,7 +205,7 @@ class InputProcessor:
 
     def _validate_singleton_mm_uuids(self, prompt: SingletonPrompt) -> None:
         if isinstance(prompt, str):
-            return
+            prompt = TextPrompt(prompt=prompt)
 
         mm_data = cast(MultiModalDataDict, prompt.get("multi_modal_data") or {})
         mm_uuids = cast(MultiModalUUIDDict, prompt.get("multi_modal_uuids") or {})
