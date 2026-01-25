@@ -91,6 +91,7 @@ from vllm.multimodal.processing import (
 )
 from vllm.sequence import IntermediateTensors
 from vllm.utils.collection_utils import is_list_of
+from vllm.utils.math_utils import round_up
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 from .interfaces import (
@@ -129,8 +130,9 @@ from .vision import (
 
 logger = init_logger(__name__)
 
-# Official recommended max frames is 2048
-_MAX_FRAMES_PER_VIDEO = 2048
+# We use 2048 dummy video frames that would generate vision embeddings
+# of the maximum size.
+DUMMY_VIDEO_NUM_FRAMES = 2048
 
 
 class Qwen3_VisionPatchEmbed(nn.Module):
@@ -662,7 +664,7 @@ class Qwen3VLProcessingInfo(Qwen2VLProcessingInfo):
         else:
             preprocessed_size = ImageSize(width=image_width, height=image_height)
 
-        padded_num_frames = num_frames + num_frames % temporal_patch_size
+        padded_num_frames = round_up(num_frames, temporal_patch_size)
 
         grid_t = max(padded_num_frames // temporal_patch_size, 1)
         grid_h = preprocessed_size.height // patch_size
@@ -684,7 +686,7 @@ class Qwen3VLProcessingInfo(Qwen2VLProcessingInfo):
         mm_counts: Mapping[str, int],
     ) -> int:
         return super().get_num_frames_with_most_features(
-            seq_len, mm_counts, max_frames_per_video=_MAX_FRAMES_PER_VIDEO
+            seq_len, mm_counts, max_frames_per_video=DUMMY_VIDEO_NUM_FRAMES
         )
 
     def get_max_video_tokens(
@@ -692,11 +694,17 @@ class Qwen3VLProcessingInfo(Qwen2VLProcessingInfo):
         seq_len: int,
         mm_counts: Mapping[str, int],
     ) -> int:
-        target_width, target_height = self.get_image_size_with_most_features()
+        video_processor = self.get_video_processor()
+        video_max_pixels = video_processor.size["longest_edge"]
+        # video_max_pixels contains the temporal compression factor,
+        # so we divide by 2 to get the maximum number of image pixels.
+        target_width, target_height = self.get_image_size_with_most_features(
+            max_pixels=video_max_pixels // video_processor.temporal_patch_size
+        )
         num_video_soft_tokens = self.get_num_video_tokens(
             image_width=target_width,
             image_height=target_height,
-            num_frames=self.get_num_frames_with_most_features(seq_len, mm_counts),
+            num_frames=2,
             image_processor=None,
         )
         return num_video_soft_tokens
@@ -779,11 +787,12 @@ class Qwen3VLDummyInputsBuilder(BaseDummyInputsBuilder[Qwen3VLProcessingInfo]):
         image_overrides = mm_options.get("image") if mm_options else None
         video_overrides = mm_options.get("video") if mm_options else None
 
-        target_width, target_height = self.info.get_image_size_with_most_features()
-        target_num_frames = self.info.get_num_frames_with_most_features(
-            seq_len, mm_counts
+        target_image_width, target_image_height = (
+            self.info.get_image_size_with_most_features()
         )
 
+        # treat videos as special images
+        target_num_frames = 2
         if video_overrides:
             assert isinstance(video_overrides, VideoDummyOptions)
             num_frames_override = video_overrides.num_frames
@@ -804,48 +813,60 @@ class Qwen3VLDummyInputsBuilder(BaseDummyInputsBuilder[Qwen3VLProcessingInfo]):
                 target_num_frames = min(target_num_frames, num_frames_override)
         target_num_frames = max(target_num_frames, 2)
 
+        video_processor = self.info.get_video_processor()
+        video_max_pixels = video_processor.size["longest_edge"]
+        # video_max_pixels contains the temporal compression factor,
+        # so we divide by 2 to get the maximum number of image pixels.
+        target_video_width, target_video_height = (
+            self.info.get_image_size_with_most_features(
+                max_pixels=video_max_pixels // video_processor.temporal_patch_size
+            )
+        )
         target_video_size, _ = self.info._get_vision_info(
-            image_width=target_width,
-            image_height=target_height,
+            image_width=target_video_width,
+            image_height=target_video_height,
             num_frames=target_num_frames,
-            image_processor=self.info.get_video_processor(),
+            image_processor=video_processor,
         )
         # NOTE: we need to do this check here since Qwen3-VL resizes video
         # frames depending on how many frames there are.
-        width, height = target_video_size.width, target_video_size.height
+        target_video_width, target_video_height = (
+            target_video_size.width,
+            target_video_size.height,
+        )
         if video_overrides:
             assert isinstance(video_overrides, VideoDummyOptions)
             width_override = video_overrides.width
             if width_override:
-                if width_override > width:
+                if width_override > target_video_width:
                     logger.warning(
                         "video.width override (%d) exceeds model's "
                         "maximum width (%d), will be ignored",
                         width_override,
-                        width,
+                        target_video_width,
                     )
-                width = min(width, width_override)
+                target_video_width = min(target_video_width, width_override)
             height_override = video_overrides.height
             if height_override:
-                if height_override > height:
+                if height_override > target_video_height:
                     logger.warning(
                         "video.height override (%d) exceeds model's "
                         "maximum height (%d), will be ignored",
                         height_override,
-                        height,
+                        target_video_height,
                     )
-                height = min(height, height_override)
+                target_video_height = min(target_video_height, height_override)
 
         return {
             "image": self._get_dummy_images(
-                width=target_width,
-                height=target_height,
+                width=target_image_width,
+                height=target_image_height,
                 num_images=num_images,
                 overrides=image_overrides,
             ),
             "video": self._get_dummy_videos(
-                width=width,
-                height=height,
+                width=target_video_width,
+                height=target_video_height,
                 num_frames=target_num_frames,
                 num_videos=num_videos,
             ),
