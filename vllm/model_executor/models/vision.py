@@ -132,7 +132,7 @@ def is_vit_use_data_parallel():
         multimodal_config: MultiModalConfig | None = (
             vllm_config.model_config.multimodal_config
         )
-    except AssertionError:
+    except (AssertionError, AttributeError):
         multimodal_config = None
 
     mm_encoder_tp_mode = (
