@@ -43,6 +43,46 @@ def expand_block_ids(
         output_idx = output_end_idx
 
 
+def _is_contiguous_range(block_ids: np.ndarray) -> bool:
+    if block_ids.ndim != 1:
+        return False
+    if block_ids.size <= 1:
+        return True
+    return bool(np.all(np.diff(block_ids) == 1))
+
+
+def _find_blocks_dim(tensor: torch.Tensor, max_block_id_inclusive: int) -> int:
+    need = int(max_block_id_inclusive) + 1
+    for dim, size in enumerate(tensor.shape):
+        if size >= need:
+            return dim
+    raise ValueError(
+        "Unable to infer blocks dimension for tensor shape="
+        f"{tuple(tensor.shape)} need_size>={need}"
+    )
+
+
+def _copy_contiguous_blocks(
+    *,
+    src_tensor: torch.Tensor,
+    dst_tensor: torch.Tensor,
+    src_start: int,
+    dst_start: int,
+    num_blocks: int,
+) -> None:
+    if num_blocks <= 0:
+        return
+    src_start_i = int(src_start)
+    dst_start_i = int(dst_start)
+    n = int(num_blocks)
+    src_dim = _find_blocks_dim(src_tensor, src_start_i + n - 1)
+    dst_dim = _find_blocks_dim(dst_tensor, dst_start_i + n - 1)
+    dst_tensor.narrow(dst_dim, dst_start_i, n).copy_(
+        src_tensor.narrow(src_dim, src_start_i, n),
+        non_blocking=True,
+    )
+
+
 class SingleDirectionOffloadingHandler(OffloadingHandler):
     def __init__(
         self,
@@ -51,6 +91,7 @@ class SingleDirectionOffloadingHandler(OffloadingHandler):
         kv_dim_before_num_blocks: list[bool],
         src_block_size_factor: int,
         dst_block_size_factor: int,
+        layer_group_size: int | None = None,
     ):
         assert len(src_tensors) == len(dst_tensors) == len(kv_dim_before_num_blocks)
 
@@ -59,6 +100,7 @@ class SingleDirectionOffloadingHandler(OffloadingHandler):
         self.kv_dim_before_num_blocks: list[bool] = kv_dim_before_num_blocks
         self.src_block_size_factor: int = src_block_size_factor
         self.dst_block_size_factor: int = dst_block_size_factor
+        self.layer_group_size: int | None = layer_group_size
 
         assert len(src_tensors) > 0
         self.gpu_to_cpu: bool = self.src_tensors[0].is_cuda
@@ -78,21 +120,37 @@ class SingleDirectionOffloadingHandler(OffloadingHandler):
         assert src_blocks.ndim == 1
         assert dst_blocks.ndim == 1
 
+        layer_group_id = getattr(src_spec, "layer_group_id", None)
+        if layer_group_id is None:
+            layer_group_id = getattr(dst_spec, "layer_group_id", None)
+
+        fast_path = (
+            self.src_block_size_factor == 1
+            and self.dst_block_size_factor == 1
+            and src_blocks.size == dst_blocks.size
+            and _is_contiguous_range(src_blocks)
+            and _is_contiguous_range(dst_blocks)
+        )
+
         src_sub_block_count = src_blocks.size * self.src_block_size_factor
         dst_sub_block_count = dst_blocks.size * self.dst_block_size_factor
         src_sub_blocks_to_skip = -dst_sub_block_count % self.src_block_size_factor
 
         assert dst_sub_block_count == src_sub_block_count - src_sub_blocks_to_skip
 
-        src_to_dst = np.empty((dst_sub_block_count, 2), dtype=np.int64)
-        expand_block_ids(
-            src_blocks,
-            self.src_block_size_factor,
-            src_to_dst[:, 0],
-            skip_count=src_sub_blocks_to_skip,
-        )
-        expand_block_ids(dst_blocks, self.dst_block_size_factor, src_to_dst[:, 1])
-        src_to_dst_tensor = torch.from_numpy(src_to_dst)
+        src_to_dst_tensor: torch.Tensor | None
+        if fast_path:
+            src_to_dst_tensor = None
+        else:
+            src_to_dst = np.empty((dst_sub_block_count, 2), dtype=np.int64)
+            expand_block_ids(
+                src_blocks,
+                self.src_block_size_factor,
+                src_to_dst[:, 0],
+                skip_count=src_sub_blocks_to_skip,
+            )
+            expand_block_ids(dst_blocks, self.dst_block_size_factor, src_to_dst[:, 1])
+            src_to_dst_tensor = torch.from_numpy(src_to_dst)
 
         stream = self._stream_pool.pop() if self._stream_pool else torch.cuda.Stream()
         event = self._event_pool.pop() if self._event_pool else torch.Event()
@@ -106,13 +164,74 @@ class SingleDirectionOffloadingHandler(OffloadingHandler):
             for src_tensor, dst_tensor, kv_dim in zip(
                 self.src_tensors, self.dst_tensors, self.kv_dim_before_num_blocks
             ):
+                if layer_group_id is not None and self.layer_group_size is not None and not kv_dim:
+                    group_size = int(self.layer_group_size)
+                    if group_size <= 0:
+                        raise ValueError(
+                            f"Invalid layer_group_size={self.layer_group_size} for layer-group transfer"
+                        )
+                    if src_tensor.ndim < 2 or dst_tensor.ndim < 2:
+                        raise ValueError(
+                            "Layer-group transfer requires tensors with a layers dimension; "
+                            f"got src_shape={tuple(src_tensor.shape)} dst_shape={tuple(dst_tensor.shape)}"
+                        )
+                    num_layers = int(src_tensor.shape[1])
+                    if int(dst_tensor.shape[1]) != num_layers:
+                        raise ValueError(
+                            "Mismatched num_layers between src/dst tensors for layer-group transfer: "
+                            f"src_layers={num_layers} dst_layers={int(dst_tensor.shape[1])}"
+                        )
+                    if num_layers % group_size != 0:
+                        raise ValueError(
+                            "num_layers must be divisible by layer_group_size for layer-group transfer: "
+                            f"num_layers={num_layers} layer_group_size={group_size}"
+                        )
+                    num_groups = num_layers // group_size
+                    gid = int(layer_group_id)
+                    if gid < 0 or gid >= num_groups:
+                        raise ValueError(
+                            "layer_group_id out of range for layer-group transfer: "
+                            f"layer_group_id={gid} num_groups={num_groups}"
+                        )
+                    layer_start = gid * group_size
+                    src_tensor = src_tensor.narrow(1, layer_start, group_size)
+                    dst_tensor = dst_tensor.narrow(1, layer_start, group_size)
                 if kv_dim:
                     src_key_cache, src_value_cache = src_tensor
                     dst_key_cache, dst_value_cache = dst_tensor
-                    ops.swap_blocks(src_key_cache, dst_key_cache, src_to_dst_tensor)
-                    ops.swap_blocks(src_value_cache, dst_value_cache, src_to_dst_tensor)
+                    if fast_path:
+                        _copy_contiguous_blocks(
+                            src_tensor=src_key_cache,
+                            dst_tensor=dst_key_cache,
+                            src_start=int(src_blocks[0]),
+                            dst_start=int(dst_blocks[0]),
+                            num_blocks=int(dst_blocks.size),
+                        )
+                        _copy_contiguous_blocks(
+                            src_tensor=src_value_cache,
+                            dst_tensor=dst_value_cache,
+                            src_start=int(src_blocks[0]),
+                            dst_start=int(dst_blocks[0]),
+                            num_blocks=int(dst_blocks.size),
+                        )
+                    else:
+                        assert src_to_dst_tensor is not None
+                        ops.swap_blocks(src_key_cache, dst_key_cache, src_to_dst_tensor)
+                        ops.swap_blocks(
+                            src_value_cache, dst_value_cache, src_to_dst_tensor
+                        )
                 else:
-                    ops.swap_blocks(src_tensor, dst_tensor, src_to_dst_tensor)
+                    if fast_path:
+                        _copy_contiguous_blocks(
+                            src_tensor=src_tensor,
+                            dst_tensor=dst_tensor,
+                            src_start=int(src_blocks[0]),
+                            dst_start=int(dst_blocks[0]),
+                            num_blocks=int(dst_blocks.size),
+                        )
+                    else:
+                        assert src_to_dst_tensor is not None
+                        ops.swap_blocks(src_tensor, dst_tensor, src_to_dst_tensor)
             event.record(stream)
 
         self._transfer_events[job_id] = event
@@ -144,6 +263,7 @@ class LoomGPUCxlOffloadingHandlers:
         num_cxl_blocks: int,
         gpu_caches: dict[str, torch.Tensor],
         attn_backends: dict[str, type[AttentionBackend]],
+        layer_group_size: int | None = None,
         numa_node: int | None = None,
     ):
         assert gpu_caches
@@ -230,12 +350,19 @@ class LoomGPUCxlOffloadingHandlers:
         self.kv_dim_before_num_blocks = kv_dim_before_num_blocks
         self.cxl_block_size_factor = cxl_block_size_factor
 
+        effective_layer_group_size: int | None = None
+        if layer_group_size is not None:
+            layer_group_size_i = int(layer_group_size)
+            if layer_group_size_i > 0:
+                effective_layer_group_size = layer_group_size_i
+
         self.gpu_to_cxl_handler = SingleDirectionOffloadingHandler(
             src_tensors=gpu_tensors,
             dst_tensors=cxl_tensors,
             kv_dim_before_num_blocks=kv_dim_before_num_blocks,
             src_block_size_factor=gpu_block_size_factor,
             dst_block_size_factor=cxl_block_size_factor,
+            layer_group_size=effective_layer_group_size,
         )
 
         self.cxl_to_gpu_handler = SingleDirectionOffloadingHandler(
@@ -244,4 +371,5 @@ class LoomGPUCxlOffloadingHandlers:
             kv_dim_before_num_blocks=kv_dim_before_num_blocks,
             src_block_size_factor=cxl_block_size_factor,
             dst_block_size_factor=gpu_block_size_factor,
+            layer_group_size=effective_layer_group_size,
         )

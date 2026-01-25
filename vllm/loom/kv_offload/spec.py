@@ -373,6 +373,7 @@ class LoomOffloadingSpec(OffloadingSpec):
                 cxl_block_size=self.offloaded_block_size,
                 num_cxl_blocks=num_cxl_blocks,
                 gpu_caches=kv_caches,
+                layer_group_size=int(self.loom_config.layer_group_size or 0),
                 numa_node=self.loom_config.cxl_numa_node,
             )
 

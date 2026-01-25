@@ -12,7 +12,11 @@ from vllm.v1.kv_offload.abstract import (
     PrepareStoreOutput,
 )
 from vllm.v1.kv_offload.backend import Backend, BlockStatus
-from vllm.v1.kv_offload.mediums import CXLLoadStoreSpec
+from vllm.v1.kv_offload.mediums import (
+    CXLExtentLoadStoreSpec,
+    CXLLayerGroupExtentLoadStoreSpec,
+    CXLLoadStoreSpec,
+)
 
 
 class Tier(str, Enum):
@@ -140,18 +144,29 @@ class LoomManager(OffloadingManager):
         if not group_ids:
             raise ValueError(f"shared prefix not found in directory: prefix_id={prefix_id}")
 
-        # Phase-2 MVP: only support a single layer-group (group_id=0) so that
-        # block-wise swapping does not overwrite non-target layers.
-        if group_ids != {0}:
-            raise RuntimeError(
-                "prepare_load_prefix currently requires a single layer-group (id=0); "
-                f"got group_ids={sorted(group_ids)} for prefix_id={prefix_id}"
+        layer_group_id = 0
+        if extra is not None and "layer_group_id" in extra:
+            try:
+                layer_group_id = int(extra["layer_group_id"])  # type: ignore[arg-type]
+            except (TypeError, ValueError) as e:
+                raise ValueError(
+                    "Invalid layer_group_id in prepare_load_prefix extra params: "
+                    f"{extra.get('layer_group_id')!r}"
+                ) from e
+        if layer_group_id not in group_ids:
+            raise ValueError(
+                "shared prefix extent missing for requested layer_group_id: "
+                f"prefix_id={prefix_id} layer_group_id={layer_group_id} available={sorted(group_ids)}"
             )
 
-        extent = self.get_shared_prefix_extent(prefix_id=prefix_id, layer_group_id=0)
+        extent = self.get_shared_prefix_extent(
+            prefix_id=prefix_id,
+            layer_group_id=layer_group_id,
+        )
         if extent is None:
             raise ValueError(
-                f"shared prefix extent missing for prefix_id={prefix_id} layer_group_id=0"
+                "shared prefix extent missing for prefix_id="
+                f"{prefix_id} layer_group_id={layer_group_id}"
             )
         if int(extent.num_blocks) < num_blocks:
             raise ValueError(
@@ -160,8 +175,11 @@ class LoomManager(OffloadingManager):
             )
 
         base = int(extent.base_block_id)
-        block_ids = list(range(base + start_block_idx, base + num_blocks))
-        return CXLLoadStoreSpec(block_ids)
+        return CXLLayerGroupExtentLoadStoreSpec(
+            base_block_id=base + start_block_idx,
+            num_blocks=num_blocks - start_block_idx,
+            layer_group_id=layer_group_id,
+        )
 
     def lookup(self, block_hashes: Iterable[BlockHash]) -> int:
         hit_count = 0
