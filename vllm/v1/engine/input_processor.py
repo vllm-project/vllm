@@ -221,7 +221,7 @@ class InputProcessor:
         modalities = mm_data_parsed.keys() | mm_uuids_parsed.keys()
 
         for modality in modalities:
-            data_items = mm_data_parsed.get(modality, [])
+            data_items: list[Any] = mm_data_parsed.get(modality, [])
             uuid_items = mm_uuids_parsed.get(modality, [])
 
             if len(data_items) > 0:
