@@ -299,7 +299,7 @@ class Scheduler(SchedulerInterface):
             # state is simply not cached, requiring no special handling.
             # Additionally, when Eagle mode is enabled, FullAttn prunes the last
             # matching block. To prevent this from causing a Mamba cache miss, the
-            # last chunk must be larger than `block_size`.
+            # last chunk must be not smaller than `block_size`.
             num_tokens_to_cache = request.num_tokens
             if request.num_output_tokens > 0:  # resumed requests
                 # Perform separate block-aligned splits for prompt and output tokens
