@@ -12,7 +12,7 @@ import importlib.util
 import os
 import shutil
 from collections.abc import Callable
-from typing import Any, NoReturn
+from typing import TYPE_CHECKING, Any, NoReturn
 
 import requests
 import torch
@@ -647,6 +647,21 @@ _FLASHINFER_UTILS_EXPORTS = (
     "align_fp8_moe_weights_for_fi",
     "prepare_fp8_moe_layer_for_fi",
 )
+
+if TYPE_CHECKING:
+    from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
+        FlashinferMoeBackend,
+        align_fp8_moe_weights_for_fi,
+        apply_fi_trtllm_fp8_per_tensor_moe,
+        build_flashinfer_fp8_cutlass_moe_prepare_finalize,
+        get_flashinfer_moe_backend,
+        is_flashinfer_supporting_global_sf,
+        make_fp8_moe_alpha_scales_for_fi,
+        prepare_fp8_moe_layer_for_fi,
+        register_scales_for_trtllm_fp8_per_tensor_moe,
+        rotate_weights_for_fi_trtllm_fp8_per_tensor_moe,
+        swap_w13_to_w31,
+    )
 
 
 def __getattr__(name: str) -> Any:
