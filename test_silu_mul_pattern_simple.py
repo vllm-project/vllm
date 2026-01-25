@@ -65,9 +65,7 @@ from vllm.config.utils import Range
 
 def test_function(x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
     """Function that should trigger pattern matching."""
-    hidden = x.shape[-1] // 2
-    gate, up = x.split(hidden, dim=-1)
-    silu_out = F.silu(gate) * up
+    silu_out = torch.ops._C.silu_and_mul(x)
     result, scales = per_token_group_quant_fp8(silu_out, group_size=128, use_ue8m0=False)
     return result, scales
 
