@@ -14,7 +14,10 @@ from vllm.distributed.parallel_state import graph_capture, is_global_first_rank
 from vllm.forward_context import set_forward_context
 from vllm.v1.attention.backend import AttentionMetadataBuilder
 from vllm.v1.kv_cache_interface import KVCacheConfig
-from vllm.v1.worker.gpu.attn_utils import build_attn_metadata
+from vllm.v1.worker.gpu.attn_utils import (
+    build_attn_metadata,
+    build_slot_mappings_by_layer,
+)
 from vllm.v1.worker.gpu.block_table import BlockTables
 from vllm.v1.worker.gpu.dp_utils import make_num_tokens_across_dp
 from vllm.v1.worker.gpu.input_batch import InputBuffers
@@ -88,7 +91,7 @@ class CudaGraphManager:
             positions = mrope_positions[:, :num_tokens]
         if inputs_embeds is not None:
             inputs_embeds = inputs_embeds[:num_tokens]
-        attn_metadata = prepare_inputs_to_capture(
+        attn_metadata, slot_mappings = prepare_inputs_to_capture(
             num_reqs,
             num_tokens,
             input_buffers,
@@ -98,6 +101,9 @@ class CudaGraphManager:
             kv_cache_config,
         )
         num_tokens_across_dp = make_num_tokens_across_dp(self.dp_size, num_tokens)
+        slot_mappings_by_layer = build_slot_mappings_by_layer(
+            slot_mappings, kv_cache_config
+        )
 
         # Warm up.
         with set_forward_context(
@@ -106,6 +112,7 @@ class CudaGraphManager:
             num_tokens=num_tokens,
             cudagraph_runtime_mode=CUDAGraphMode.NONE,
             num_tokens_across_dp=num_tokens_across_dp,
+            slot_mapping=slot_mappings_by_layer,
         ):
             hidden_states = model(
                 input_ids=input_ids,
@@ -125,6 +132,7 @@ class CudaGraphManager:
                 num_tokens=num_tokens,
                 cudagraph_runtime_mode=CUDAGraphMode.NONE,
                 num_tokens_across_dp=num_tokens_across_dp,
+                slot_mapping=slot_mappings_by_layer,
             ),
             torch.cuda.graph(graph, self.pool),
         ):
@@ -244,7 +252,7 @@ def prepare_inputs_to_capture(
     attn_metadata_builders: list[AttentionMetadataBuilder],
     max_model_len: int,
     kv_cache_config: KVCacheConfig,
-) -> dict[str, Any]:
+) -> tuple[dict[str, Any], torch.Tensor]:
     num_tokens_per_req = num_tokens // num_reqs
 
     query_start_loc_np = np.arange(num_reqs + 1, dtype=np.int32) * num_tokens_per_req
@@ -274,4 +282,4 @@ def prepare_inputs_to_capture(
         slot_mappings=slot_mappings,
         kv_cache_config=kv_cache_config,
     )
-    return attn_metadata
+    return attn_metadata, slot_mappings
