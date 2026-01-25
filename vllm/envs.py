@@ -162,6 +162,7 @@ if TYPE_CHECKING:
     VLLM_USE_DEEP_GEMM: bool = True
     VLLM_MOE_USE_DEEP_GEMM: bool = True
     VLLM_USE_DEEP_GEMM_E8M0: bool = True
+    VLLM_USE_DEEP_GEMM_TMA_ALIGNED_SCALES: bool = True
     VLLM_DEEP_GEMM_WARMUP: Literal[
         "skip",
         "full",
@@ -1201,6 +1202,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_USE_DEEP_GEMM_E8M0": lambda: bool(
         int(os.getenv("VLLM_USE_DEEP_GEMM_E8M0", "1"))
     ),
+    # Whether to create TMA-aligned scale tensor when DeepGEMM is used.
+    "VLLM_USE_DEEP_GEMM_TMA_ALIGNED_SCALES": lambda: bool(
+        int(os.getenv("VLLM_USE_DEEP_GEMM_TMA_ALIGNED_SCALES", "1"))
+    ),
     # DeepGemm JITs the kernels on-demand. The warmup attempts to make DeepGemm
     # JIT all the required kernels before model execution so there is no
     # JIT'ing in the hot-path. However, this warmup increases the engine
@@ -1730,6 +1735,7 @@ def compile_factors() -> dict[str, object]:
         "VLLM_MAX_AUDIO_CLIP_FILESIZE_MB",
         "VLLM_VIDEO_LOADER_BACKEND",
         "VLLM_MEDIA_CONNECTOR",
+        "VLLM_OBJECT_STORAGE_SHM_BUFFER_NAME",
         "VLLM_ASSETS_CACHE",
         "VLLM_ASSETS_CACHE_MODEL_CLEAN",
         "VLLM_WORKER_MULTIPROC_METHOD",
