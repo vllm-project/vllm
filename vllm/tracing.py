@@ -127,6 +127,8 @@ class SpanAttributes:
     # Journey event attributes (for request lifecycle span events)
     JOURNEY_EVENT_TYPE = "event.type"
     JOURNEY_TS_MONOTONIC = "ts.monotonic"
+    # Generic monotonic timestamp attribute (for both API and core events)
+    EVENT_TS_MONOTONIC = "ts.monotonic"
     JOURNEY_PHASE = "phase"
     JOURNEY_PREFILL_DONE_TOKENS = "prefill.done_tokens"
     JOURNEY_PREFILL_TOTAL_TOKENS = "prefill.total_tokens"

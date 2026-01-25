@@ -355,7 +355,15 @@ class OpenAIServingChat(OpenAIServing):
             f"chatcmpl-{self._base_request_id(raw_request, request.request_id)}"
         )
 
-        request_metadata = RequestResponseMetadata(request_id=request_id)
+        # Create API span for dual-stream journey tracing (parent span)
+        api_span = None
+        is_tracing_enabled = await self.engine_client.is_tracing_enabled()
+        if is_tracing_enabled:
+            api_span = await self._create_api_span(request_id, raw_request)
+
+        request_metadata = RequestResponseMetadata(
+            request_id=request_id, api_span=api_span
+        )
         if raw_request:
             raw_request.state.request_metadata = request_metadata
 
@@ -421,6 +429,31 @@ class OpenAIServingChat(OpenAIServing):
                     if raw_request is None
                     else await self._get_trace_headers(raw_request.headers)
                 )
+
+                # Inject API span context into trace_headers for child span linking
+                if api_span:
+                    try:
+                        from opentelemetry import trace
+                        from opentelemetry.trace.propagation.tracecontext import (
+                            TraceContextTextMapPropagator,
+                        )
+
+                        # Set API span as current in context
+                        ctx = trace.set_span_in_context(api_span)
+
+                        # Inject into carrier
+                        carrier: dict[str, str] = {}
+                        propagator = TraceContextTextMapPropagator()
+                        propagator.inject(carrier, context=ctx)
+
+                        # Merge with existing trace_headers
+                        if trace_headers is None:
+                            trace_headers = carrier
+                        else:
+                            trace_headers = {**trace_headers, **carrier}
+                    except Exception:
+                        # If injection fails, continue without it
+                        pass
 
                 if isinstance(sampling_params, BeamSearchParams):
                     generator = self.beam_search(
@@ -1380,13 +1413,67 @@ class OpenAIServingChat(OpenAIServing):
                     )
 
         except GenerationError as e:
+            # Emit ABORTED event for generation errors
+            if request_metadata.api_span:
+                try:
+                    from vllm.tracing import SpanAttributes
+
+                    from opentelemetry.trace import Status, StatusCode
+
+                    request_metadata.api_span.add_event(
+                        name="api.ABORTED",
+                        attributes={
+                            SpanAttributes.EVENT_TS_MONOTONIC: time.monotonic(),
+                            "error": str(e),
+                        },
+                        timestamp=time.time_ns(),
+                    )
+                    request_metadata.api_span.set_status(
+                        Status(StatusCode.ERROR, f"Generation error: {e}")
+                    )
+                    request_metadata.api_span.end(end_time=time.time_ns())
+                except Exception:
+                    pass
             yield f"data: {self._convert_generation_error_to_streaming_response(e)}\n\n"
         except Exception as e:
+            # Emit ABORTED event for unexpected errors
+            if request_metadata.api_span:
+                try:
+                    from vllm.tracing import SpanAttributes
+
+                    from opentelemetry.trace import Status, StatusCode
+
+                    request_metadata.api_span.add_event(
+                        name="api.ABORTED",
+                        attributes={
+                            SpanAttributes.EVENT_TS_MONOTONIC: time.monotonic(),
+                            "error": str(e),
+                        },
+                        timestamp=time.time_ns(),
+                    )
+                    request_metadata.api_span.set_status(Status(StatusCode.ERROR, str(e)))
+                    request_metadata.api_span.end(end_time=time.time_ns())
+                except Exception:
+                    pass
             logger.exception("Error in chat completion stream generator.")
             data = self.create_streaming_error_response(e)
             yield f"data: {data}\n\n"
         # Send the final done message after all response.n are finished
         yield "data: [DONE]\n\n"
+
+        # Emit DEPARTED event after successful completion
+        if request_metadata.api_span:
+            try:
+                from vllm.tracing import SpanAttributes
+
+                request_metadata.api_span.add_event(
+                    name="api.DEPARTED",
+                    attributes={SpanAttributes.EVENT_TS_MONOTONIC: time.monotonic()},
+                    timestamp=time.time_ns(),
+                )
+                request_metadata.api_span.end(end_time=time.time_ns())
+            except Exception:
+                pass
 
     async def chat_completion_full_generator(
         self,
@@ -1405,8 +1492,48 @@ class OpenAIServingChat(OpenAIServing):
             async for res in result_generator:
                 final_res = res
         except asyncio.CancelledError:
+            # Emit ABORTED event for client disconnect
+            if request_metadata.api_span:
+                try:
+                    from vllm.tracing import SpanAttributes
+
+                    from opentelemetry.trace import Status, StatusCode
+
+                    request_metadata.api_span.add_event(
+                        name="api.ABORTED",
+                        attributes={
+                            SpanAttributes.EVENT_TS_MONOTONIC: time.monotonic(),
+                            "reason": "client_disconnect",
+                        },
+                        timestamp=time.time_ns(),
+                    )
+                    request_metadata.api_span.set_status(
+                        Status(StatusCode.ERROR, "Client disconnected")
+                    )
+                    request_metadata.api_span.end(end_time=time.time_ns())
+                except Exception:
+                    pass
             return self.create_error_response("Client disconnected")
         except ValueError as e:
+            # Emit ABORTED event for value errors
+            if request_metadata.api_span:
+                try:
+                    from vllm.tracing import SpanAttributes
+
+                    from opentelemetry.trace import Status, StatusCode
+
+                    request_metadata.api_span.add_event(
+                        name="api.ABORTED",
+                        attributes={
+                            SpanAttributes.EVENT_TS_MONOTONIC: time.monotonic(),
+                            "error": str(e),
+                        },
+                        timestamp=time.time_ns(),
+                    )
+                    request_metadata.api_span.set_status(Status(StatusCode.ERROR, str(e)))
+                    request_metadata.api_span.end(end_time=time.time_ns())
+                except Exception:
+                    pass
             return self.create_error_response(e)
 
         assert final_res is not None
@@ -1734,6 +1861,20 @@ class OpenAIServingChat(OpenAIServing):
                         delta=False,
                     )
 
+        # Emit DEPARTED event before returning response (non-streaming)
+        if request_metadata.api_span:
+            try:
+                from vllm.tracing import SpanAttributes
+
+                request_metadata.api_span.add_event(
+                    name="api.DEPARTED",
+                    attributes={SpanAttributes.EVENT_TS_MONOTONIC: time.monotonic()},
+                    timestamp=time.time_ns(),
+                )
+                request_metadata.api_span.end(end_time=time.time_ns())
+            except Exception:
+                pass
+
         return response
 
     def _get_top_logprobs(
@@ -1937,3 +2078,62 @@ class OpenAIServingChat(OpenAIServing):
             engine_prompt["cache_salt"] = request.cache_salt
 
         return messages, [engine_prompt]
+
+    async def _create_api_span(
+        self, request_id: str, raw_request: Request | None
+    ) -> Any | None:
+        """Create parent span for API-level journey tracing.
+
+        Extracts incoming trace context from request headers (if present) and
+        creates parent span that will be linked to child span in engine-core.
+
+        Args:
+            request_id: The request ID (e.g., chatcmpl-xxx)
+            raw_request: The FastAPI request object with headers
+
+        Returns:
+            Span object if tracer available, None otherwise
+        """
+        try:
+            from vllm.tracing import SpanAttributes, extract_trace_context
+
+            from opentelemetry import trace
+            from opentelemetry.trace import SpanKind
+        except ImportError:
+            return None
+
+        # Get tracer from engine (it's set in LLMEngine/AsyncLLM)
+        # We need to get it indirectly since it's not directly accessible here
+        # For now, we'll get it via a module-level tracer provider
+        try:
+            tracer_provider = trace.get_tracer_provider()
+            tracer = tracer_provider.get_tracer("vllm.api")
+        except Exception:
+            return None
+
+        # Extract incoming trace context (if client provided traceparent header)
+        parent_context = None
+        if raw_request:
+            trace_headers = await self._get_trace_headers(raw_request.headers)
+            if trace_headers:
+                parent_context = extract_trace_context(trace_headers)
+
+        # Create parent span (becomes child if parent_context exists, root otherwise)
+        api_span = tracer.start_span(
+            name="llm_request",
+            kind=SpanKind.SERVER,
+            context=parent_context,
+            start_time=time.time_ns(),
+        )
+
+        # Set span attributes
+        api_span.set_attribute(SpanAttributes.GEN_AI_REQUEST_ID, request_id)
+
+        # Emit ARRIVED event
+        api_span.add_event(
+            name="api.ARRIVED",
+            attributes={SpanAttributes.EVENT_TS_MONOTONIC: time.monotonic()},
+            timestamp=time.time_ns(),
+        )
+
+        return api_span

@@ -116,6 +116,7 @@ class UsageInfo(OpenAIBaseModel):
 class RequestResponseMetadata(BaseModel):
     request_id: str
     final_usage_info: UsageInfo | None = None
+    api_span: Any | None = None  # OTEL Span for API-level journey tracing
 
 
 class JsonSchemaResponseFormat(OpenAIBaseModel):
