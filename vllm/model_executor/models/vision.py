@@ -104,11 +104,10 @@ def get_vit_attn_backend(
     """
     try:
         vllm_config: VllmConfig = get_current_vllm_config()
-        model_config = vllm_config.model_config  # Can be None, e.g., in tests.
         multimodal_config: MultiModalConfig | None = (
-            model_config.multimodal_config if model_config is not None else None
+            vllm_config.model_config.multimodal_config
         )
-    except AssertionError:
+    except (AssertionError, AttributeError):
         multimodal_config = None
 
     attn_backend_override = (
