@@ -66,7 +66,11 @@ __global__ void act_and_mul_kernel(
     const int vec_end = num_vecs * VEC_SIZE;
 
     for (int i = threadIdx.x; i < num_vecs; i += blockDim.x) {
+#if __CUDACC_VER_MAJOR__ >= 13 && __CUDA_ARCH__ >= 1000
+      vec_t x = x_vec[i], y = y_vec[i], r;
+#else
       vec_t x = VLLM_LDG(&x_vec[i]), y = VLLM_LDG(&y_vec[i]), r;
+#endif
       auto* xp = reinterpret_cast<scalar_t*>(&x);
       auto* yp = reinterpret_cast<scalar_t*>(&y);
       auto* rp = reinterpret_cast<scalar_t*>(&r);
@@ -213,7 +217,11 @@ __global__ void act_and_mul_kernel_with_param(
     const int vec_end = num_vecs * VEC_SIZE;
 
     for (int i = threadIdx.x; i < num_vecs; i += blockDim.x) {
+#if __CUDACC_VER_MAJOR__ >= 13 && __CUDA_ARCH__ >= 1000
+      vec_t x = x_vec[i], y = y_vec[i], r;
+#else
       vec_t x = VLLM_LDG(&x_vec[i]), y = VLLM_LDG(&y_vec[i]), r;
+#endif
       auto* xp = reinterpret_cast<scalar_t*>(&x);
       auto* yp = reinterpret_cast<scalar_t*>(&y);
       auto* rp = reinterpret_cast<scalar_t*>(&r);
@@ -383,7 +391,11 @@ __global__ void activation_kernel(
     const int vec_end = num_vecs * VEC_SIZE;
 
     for (int i = threadIdx.x; i < num_vecs; i += blockDim.x) {
+#if __CUDACC_VER_MAJOR__ >= 13 && __CUDA_ARCH__ >= 1000
+      vec_t v = in_vec[i], r;
+#else
       vec_t v = VLLM_LDG(&in_vec[i]), r;
+#endif
       auto* vp = reinterpret_cast<scalar_t*>(&v);
       auto* rp = reinterpret_cast<scalar_t*>(&r);
 #pragma unroll
