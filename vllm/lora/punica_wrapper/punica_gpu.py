@@ -12,6 +12,7 @@ from typing import final
 import torch
 
 from vllm.lora.layers import LoRAMapping
+from vllm.lora.utils import get_captured_lora_counts
 from vllm.triton_utils import HAS_TRITON, triton
 from vllm.utils.math_utils import round_up
 
@@ -49,13 +50,9 @@ class PunicaWrapperGPU(PunicaWrapperBase):
         self.max_loras = self.lora_config.max_loras
 
         # Compute captured LoRA counts for cudagraph specialization.
-        # This must match the logic in CudagraphDispatcher._get_lora_cases().
-        captured_lora_counts: list[int] = []
-        if self.lora_config.specialize_active_lora:
-            for n in range(1, self.max_loras + 2):
-                # Powers of 2 or max_loras + 1
-                if (n & (n - 1)) == 0 or n == self.max_loras + 1:
-                    captured_lora_counts.append(n)
+        captured_lora_counts = get_captured_lora_counts(
+            self.max_loras, self.lora_config.specialize_active_lora
+        )
 
         self.token_mapping_meta = LoRAKernelMeta.make(
             self.max_loras,
@@ -119,7 +116,6 @@ class PunicaWrapperGPU(PunicaWrapperBase):
             y,
             *self.token_mapping_meta.meta_args(x.size(0)),
             scale,
-            specialize_active_lora=self.lora_config.specialize_active_lora,
         )
 
     def add_expand(
@@ -162,7 +158,6 @@ class PunicaWrapperGPU(PunicaWrapperBase):
             *self.token_mapping_meta.meta_args(num_tokens),
             offset_start=offset_start,
             add_inputs=True,
-            specialize_active_lora=self.lora_config.specialize_active_lora,
         )
 
         y = y.view_as(y_org)

@@ -141,7 +141,6 @@ def _lora_expand(
     num_active_loras: int,  # number of active LoRAs (unused here, for API compat)
     offset_start: int = 0,
     add_inputs: bool = False,
-    specialize_active_lora: bool = False,
 ) -> None:
     """
     Args:
@@ -236,10 +235,9 @@ def _lora_expand(
     grid = (
         triton.cdiv(M, BLOCK_M) * triton.cdiv(MAX_N, BLOCK_N),
         NUM_SLICES,
-        # Each LoRA receives its own set of thread blocks for output
-        # computation. If some LoRA doesn't have any tokens to process, its
-        # thread blocks simply exit.
-        num_active_loras if specialize_active_lora else MAX_LORAS,
+        # Using active loras to construct grid if specialize_lora_count is true
+        # else using MAX_LORAS if specialize_lora_count is false
+        num_active_loras,
     )
     # We disable PDL temporarily because LoRA kernels are not launching back-to-back,
     # making PDL invalid and affecting the kernel performance.

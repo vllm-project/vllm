@@ -5,6 +5,7 @@ from itertools import product
 from vllm.config import CUDAGraphMode, VllmConfig
 from vllm.forward_context import BatchDescriptor
 from vllm.logger import init_logger
+from vllm.lora.utils import get_captured_lora_counts
 
 logger = init_logger(__name__)
 
@@ -116,14 +117,11 @@ class CudagraphDispatcher:
         # Always include the no-LoRA case (for requests without adapters)
         cases: list[tuple[bool, int]] = [(False, 0)]
 
-        if self.specialize_lora_count:
-            for n in range(1, lora_config.max_loras + 2):
-                # if n is power of 2 or n == lora_config.max_loras + 1
-                if (n & (n - 1)) == 0 or n == lora_config.max_loras + 1:
-                    cases.append((True, n))
-        else:
-            # Use max_loras + 1 to account for the -1 (no-lora) case in lora_ids
-            cases.append((True, lora_config.max_loras + 1))
+        captured_counts = get_captured_lora_counts(
+            lora_config.max_loras, self.specialize_lora_count
+        )
+        for n in captured_counts:
+            cases.append((True, n))
 
         return cases
 

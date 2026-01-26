@@ -4,8 +4,6 @@
 Define LoRA functionality mixin for model runners.
 """
 
-from __future__ import annotations
-
 from contextlib import contextmanager
 from typing import TypeAlias
 

@@ -136,7 +136,6 @@ def _lora_shrink(
     no_lora_flag_cpu: torch.Tensor,  # shape [1]
     num_active_loras: int,  # number of active LoRAs (unused here, for API compat)
     scaling: float,
-    specialize_active_lora: bool = False,
 ) -> None:
     """
     Args:
@@ -216,10 +215,9 @@ def _lora_shrink(
     grid = (
         SPLIT_K * triton.cdiv(M, BLOCK_M) * triton.cdiv(N, BLOCK_N),
         NUM_SLICES,
-        # Each LoRA receives its own set of thread blocks for output
-        # computation. If some LoRA doesn't have any tokens to process, its
-        # thread blocks exit early.
-        num_active_loras if specialize_active_lora else MAX_LORAS,
+        # Using active loras to construct grid if specialize_lora_count is true
+        # else using MAX_LORAS if specialize_lora_count is false
+        num_active_loras,
     )
     # We disable PDL temporarily because LoRA kernels are not launching back-to-back,
     # making PDL invalid and affecting the kernel performance.

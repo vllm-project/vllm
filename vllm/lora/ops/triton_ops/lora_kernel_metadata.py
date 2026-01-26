@@ -91,6 +91,7 @@ class LoRAKernelMeta:
         self.lora_token_start_loc.fill_(0)
         self.no_lora_flag_cpu.fill_(False)
         self.num_active_loras = 0
+        self.captured_lora_counts = []
 
     def prepare_tensors(self, token_lora_mapping: torch.Tensor) -> None:
         """
@@ -135,11 +136,8 @@ class LoRAKernelMeta:
         self.num_tokens_per_lora[: num_tokens_per_lora.size(0)].copy_(
             num_tokens_per_lora, non_blocking=True
         )
-        # Store num_active_loras as Python int (excludes -1 which means no LoRA)
-        # Valid LoRA IDs are >= 0, so count those
-        self.num_active_loras = int((lora_ids >= 0).sum().item())
-        if self.num_active_loras > 0 and lora_ids[0] == -1:
-            self.num_active_loras += 1  # account for the -1 lora id for base model
+
+        self.num_active_loras = lora_ids.size(0)
 
         # Round up num_active_loras to match cudagraph capture keys.
         # This ensures the kernel grid dimension matches the captured graph.
@@ -155,7 +153,9 @@ class LoRAKernelMeta:
         )
 
     def meta_args(
-        self, token_nums: int
+        self,
+        token_nums: int,
+        specialize_active_lora: bool,
     ) -> tuple[
         torch.Tensor,
         torch.Tensor,
@@ -182,5 +182,7 @@ class LoRAKernelMeta:
             self.lora_token_start_loc,
             self.active_lora_ids,
             self.no_lora_flag_cpu,
-            self.num_active_loras,
+            self.num_active_loras
+            if specialize_active_lora
+            else self.active_lora_ids.size(0),
         )
