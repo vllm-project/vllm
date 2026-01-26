@@ -49,9 +49,6 @@ from transformers import __version__ as TRANSFORMERS_VERSION
 
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import VllmConfig
-
-from vllm.platforms import current_platform
-
 from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
 from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import _ACTIVATION_REGISTRY
@@ -81,6 +78,7 @@ from vllm.multimodal.processing.processor import (
     PromptUpdate,
     PromptUpdateDetails,
 )
+from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
