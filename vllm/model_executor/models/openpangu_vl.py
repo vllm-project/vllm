@@ -470,9 +470,7 @@ class OpenPanguVisionTransformer(nn.Module):
                 for i in range(len(self.select_layer))
             ]
         )
-        self.vision_projection = ProjectionSingle(
-            out_hidden_size, hidden_size
-        )
+        self.vision_projection = ProjectionSingle(out_hidden_size, hidden_size)
 
     @property
     def dtype(self) -> torch.dtype:
@@ -1161,7 +1159,6 @@ class OpenPanguVLForConditionalGeneration(
         hf_config = self.config
         image_token_id = hf_config.image_token_id
         video_token_id = hf_config.video_token_id
-        vision_start_token_id = hf_config.vision_start_token_id
         spatial_merge_size = hf_config.vision_config.spatial_merge_size
         image_nums = len(image_grid_thw)
         video_nums = len(video_grid_thw)
@@ -1211,21 +1208,31 @@ class OpenPanguVLForConditionalGeneration(
                 eot_bot_pos = torch.full((3, 1), 0, dtype=torch.long)
                 offset_pos = max(llm_grid_h, llm_grid_w)
                 current_pos = text_len + st_idx
-                grid_h = torch.arange(llm_grid_h).view(-1, 1).expand(-1, llm_grid_w).flatten()
-                grid_w = torch.arange(llm_grid_w).view(1, -1).expand(llm_grid_h, -1).flatten()
+                grid_h = (
+                    torch.arange(llm_grid_h)
+                    .view(-1, 1)
+                    .expand(-1, llm_grid_w)
+                    .flatten()
+                )
+                grid_w = (
+                    torch.arange(llm_grid_w)
+                    .view(1, -1)
+                    .expand(llm_grid_h, -1)
+                    .flatten()
+                )
                 frame_pos = torch.stack(
                     [
-                        torch.full_like(grid_h, 0, dtype=torch.long), # t
-                        grid_h, # h
-                        grid_w, # w
+                        torch.full_like(grid_h, 0, dtype=torch.long),  # t
+                        grid_h,  # h
+                        grid_w,  # w
                     ]
                 )
-                llm_pos_ids_list.append((frame_pos + current_pos))
-                for _ in range((llm_grid_t - 1)):
+                llm_pos_ids_list.append(frame_pos + current_pos)
+                for _ in range(llm_grid_t - 1):
                     current_pos = current_pos + offset_pos
-                    llm_pos_ids_list.append((eot_bot_pos + current_pos))
-                    llm_pos_ids_list.append((eot_bot_pos + current_pos + 1))
-                    llm_pos_ids_list.append((frame_pos + current_pos + 2))
+                    llm_pos_ids_list.append(eot_bot_pos + current_pos)
+                    llm_pos_ids_list.append(eot_bot_pos + current_pos + 1)
+                    llm_pos_ids_list.append(frame_pos + current_pos + 2)
                     current_pos += 2
                 st = ed + llm_grid_t * llm_grid_h * llm_grid_w + (llm_grid_t - 1) * 2
             else:
@@ -1261,7 +1268,7 @@ class OpenPanguVLForConditionalGeneration(
                 torch.arange(text_len).view(1, -1).expand(3, -1) + st_idx
             )
         llm_positions = torch.cat(llm_pos_ids_list, dim=1).reshape(3, -1)
-        mrope_position_delta = (llm_positions.max() + 1 -len(input_tokens)).item()
+        mrope_position_delta = (llm_positions.max() + 1 - len(input_tokens)).item()
         return llm_positions, mrope_position_delta
 
 
