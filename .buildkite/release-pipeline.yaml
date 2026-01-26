@@ -627,6 +627,24 @@ steps:
     env:
       S3_BUCKET: "vllm-wheels-dev"
 
+  # ROCm Job 5: Generate Root Index for ROCm Wheels (for release only)
+  # This is the job to create https://wheels.vllm.ai/rocm/ index allowing
+  # users to install with `uv pip install vllm --extra-index-url https://wheels.vllm.ai/rocm/`
+  - block: "Generate Root Index for ROCm Wheels for Release"
+    key: block-generate-root-index-rocm-wheels
+    depends_on: upload-rocm-wheels
+
+  - label: ":package: Generate Root Index for ROCm Wheels for Release"
+    depends_on: block-generate-root-index-rocm-wheels
+    id: generate-root-index-rocm-wheels
+    agents:
+      queue: cpu_queue_postmerge
+    commands:
+      - "bash tools/vllm-rocm/generate-rocm-wheels-root-index.sh"
+    env:
+      S3_BUCKET: "vllm-wheels-dev"
+      VARIANT: "rocm700"
+
   # ROCm Job 5: Build ROCm Release Docker Image
   - label: ":rocm: :docker: Build ROCm Release Docker Image"
     id: build-rocm-release-image
