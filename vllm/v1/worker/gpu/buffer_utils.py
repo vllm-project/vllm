@@ -11,6 +11,31 @@ from vllm.utils.platform_utils import is_uva_available
 from vllm.utils.torch_utils import get_cuda_view_from_cpu_tensor
 
 
+def async_copy_to_gpu(
+    x: torch.Tensor | np.ndarray,
+    out: torch.Tensor | None = None,
+    device: torch.device | None = None,
+    pin_memory: bool = True,
+) -> torch.Tensor:
+    if isinstance(x, np.ndarray):
+        x = torch.from_numpy(x)
+    assert x.is_cpu
+
+    if out is None:
+        assert device is not None
+        out = torch.empty_like(x, device=device)
+    assert out.is_cuda
+
+    if not pin_memory:
+        return out.copy_(x, non_blocking=True)
+
+    tmp = torch.empty_like(x, device="cpu", pin_memory=True)
+    # CPU-to-CPU copy
+    tmp.copy_(x)
+    # CPU-to-GPU copy
+    return out.copy_(tmp, non_blocking=True)
+
+
 class UvaBuffer:
     def __init__(self, size: int | Sequence[int], dtype: torch.dtype):
         if not is_uva_available():
