@@ -12,7 +12,8 @@ jobs:
   test:
     runs-on: ubuntu-latest
     env:
-      VLLM_USE_CPU: "1"
+      CI: "true"
+      VLLM_TARGET_DEVICE: "cpu"
       VLLM_WORKER_MULTIPROC_METHOD: "spawn"
 
     steps:
