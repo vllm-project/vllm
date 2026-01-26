@@ -134,9 +134,6 @@ class CudaGraphManager:
             ),
         )
         num_tokens_across_dp = make_num_tokens_across_dp(self.dp_size, num_tokens)
-        slot_mappings_by_layer = build_slot_mappings_by_layer(
-            slot_mappings, kv_cache_config
-        )
 
         # Warm up.
         with set_forward_context(
@@ -145,7 +142,7 @@ class CudaGraphManager:
             num_tokens=num_tokens,
             cudagraph_runtime_mode=CUDAGraphMode.NONE,
             num_tokens_across_dp=num_tokens_across_dp,
-            slot_mapping=slot_mappings_by_layer,
+            slot_mapping=slot_mappings,
         ):
             hidden_states = model(
                 input_ids=input_ids,
@@ -164,7 +161,7 @@ class CudaGraphManager:
             inputs_embeds=inputs_embeds,
             num_tokens_across_dp=num_tokens_across_dp,
             attn_metadata=attn_metadata,
-            slot_mappings_by_layer=slot_mappings_by_layer,
+            slot_mappings=slot_mappings,
             has_lora=has_lora,
         )
 
@@ -178,7 +175,7 @@ class CudaGraphManager:
         inputs_embeds: torch.Tensor | None,
         num_tokens_across_dp: torch.Tensor,
         attn_metadata: dict[str, Any] | None,
-        slot_mappings_by_layer: dict[str, torch.Tensor] | None,
+        slot_mappings: dict[str, torch.Tensor] | None,
         has_lora: bool = False,
     ) -> None:
         assert attn_metadata is not None
@@ -192,7 +189,7 @@ class CudaGraphManager:
                 num_tokens=num_tokens,
                 cudagraph_runtime_mode=CUDAGraphMode.NONE,
                 num_tokens_across_dp=num_tokens_across_dp,
-                slot_mapping=slot_mappings_by_layer,
+                slot_mapping=slot_mappings,
             ),
             torch.cuda.graph(graph, self.pool),
         ):
@@ -215,7 +212,7 @@ class CudaGraphManager:
         inputs_embeds: torch.Tensor | None,
         num_tokens_across_dp: torch.Tensor,
         attn_metadata: dict[str, Any] | None,
-        slot_mappings_by_layer: dict[str, torch.Tensor] | None,
+        slot_mappings: dict[str, torch.Tensor] | None,
         has_lora: bool = False,
     ) -> None:
         # create batch descriptor for piecewise cudagraph dispatch key
@@ -234,7 +231,7 @@ class CudaGraphManager:
             cudagraph_runtime_mode=CUDAGraphMode.PIECEWISE,
             num_tokens_across_dp=num_tokens_across_dp,
             batch_descriptor=batch_descriptor,
-            slot_mapping=slot_mappings_by_layer,
+            slot_mapping=slot_mappings,
         ):
             hidden_states = model(
                 input_ids=input_ids,
@@ -370,7 +367,7 @@ def prepare_inputs_to_capture(
     max_model_len: int,
     kv_cache_config: KVCacheConfig,
     uniform_decode_query_len: int = 0,
-) -> tuple[dict[str, Any], torch.Tensor]:
+) -> tuple[dict[str, Any], dict[str, torch.Tensor]]:
     if uniform_decode_query_len > 0:
         num_tokens_per_req = uniform_decode_query_len
     else:
@@ -390,6 +387,9 @@ def prepare_inputs_to_capture(
 
     input_block_tables = [x[:num_reqs] for x in block_tables.input_block_tables]
     slot_mappings = block_tables.slot_mappings[:, :num_tokens]
+    slot_mappings_by_layer = build_slot_mappings_by_layer(
+        slot_mappings, kv_cache_config
+    )
 
     attn_metadata = build_attn_metadata(
         attn_metadata_builders=attn_metadata_builders,
@@ -403,4 +403,4 @@ def prepare_inputs_to_capture(
         slot_mappings=slot_mappings,
         kv_cache_config=kv_cache_config,
     )
-    return attn_metadata, slot_mappings
+    return attn_metadata, slot_mappings_by_layer
