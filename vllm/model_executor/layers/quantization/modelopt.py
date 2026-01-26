@@ -735,6 +735,10 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
             weight_key=kFp8StaticTensorSym,
             activation_key=kFp8StaticTensorSym,
         )
+        if self.fp8_backend == Fp8MoeBackend.NONE:
+            raise NotImplementedError(
+                "No FP8 MoE backend supports the deployment configuration."
+            )
 
         # Delay creation of the kernel until after process-weights.
         self.kernel: mk.FusedMoEModularKernel | None = None
