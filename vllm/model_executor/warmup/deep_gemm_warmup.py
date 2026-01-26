@@ -135,7 +135,7 @@ def _fp8_linear_may_use_deep_gemm(module: torch.nn.Module) -> bool:
         isinstance(module, LinearBase)
         and isinstance(module.quant_method, Fp8LinearMethod)
         and module.quant_method.block_quant
-        and not module.quant_method.use_marlin
+        and not module.quant_method.use_fp8_woq
     ):
         return False
 
