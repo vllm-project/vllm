@@ -354,6 +354,10 @@ def make_nvfp4_moe_quant_config(
         a2_gscale=(1.0 / a2_scale),
         w1_scale=w13_scale,
         w2_scale=w2_scale,
+        # NOTE(rob): this is a hack until the MoE kernels
+        # create their own quant configs. TRTLLM kernel
+        # does not accept swizzled input quant scales.
+        is_nvfp4_scale_swizzled=(backend != NvFp4MoeBackend.FLASHINFER_TRTLLM),
     )
 
 
