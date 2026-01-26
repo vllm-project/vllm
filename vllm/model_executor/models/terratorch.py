@@ -19,7 +19,6 @@
 
 from collections import OrderedDict
 from collections.abc import Iterable, Mapping, Sequence
-from functools import cached_property
 from typing import Any
 
 import torch
@@ -161,13 +160,55 @@ class TerratorchInputBuilder(BaseDummyInputsBuilder[TerratorchProcessingInfo]):
         return self.dummy_data_generator.get_dummy_mm_data()
 
 
-class TerratorchMultiModalProcessor(BaseMultiModalProcessor[TerratorchProcessingInfo]):
+class TerratorchMultiModalDataParser(MultiModalDataParser):
+    def __init__(self, input_definition: InputDefinition, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+
+        self.input_definition = input_definition
+
+    def _parse_image_data(
+        self,
+        data: dict[str, torch.Tensor] | ModalityData[ImageItem],
+    ) -> ModalityDataItems[Any, Any] | None:
+        if isinstance(data, dict):
+            return DictEmbeddingItems(
+                data,
+                modality="image",
+                required_fields=_terratorch_field_names(self.input_definition),
+                fields_factory=_terratorch_field_factory(self.input_definition),
+            )
+
+        return super()._parse_image_data(data)
+
+    def parse_mm_data(self, mm_data: MultiModalDataDict) -> MultiModalDataItems:
+        if "image" not in mm_data:
+            mm_data = {"image": mm_data}
+
+        return super().parse_mm_data(mm_data)
+
+
+class TerratorchMultiModalProcessor(BaseMultiModalProcessor):
+    def __init__(
+        self,
+        info: TerratorchProcessingInfo,
+        dummy_inputs: "BaseDummyInputsBuilder[TerratorchProcessingInfo]",
+        *,
+        cache: MultiModalProcessorOnlyCache | None = None,
+    ) -> None:
+        pretrained_cfg = info.get_hf_config().to_dict()["pretrained_cfg"]
+        self._input_definition = InputDefinition(**pretrained_cfg["input"])
+
+        super().__init__(info=info, dummy_inputs=dummy_inputs, cache=cache)
+
+    def _get_data_parser(self) -> MultiModalDataParser:
+        return TerratorchMultiModalDataParser(self._input_definition)
+
     def _get_mm_fields_config(
         self,
         hf_inputs: BatchFeature,
         hf_processor_mm_kwargs: Mapping[str, object],
     ) -> Mapping[str, MultiModalFieldConfig]:
-        return _terratorch_field_factory(self.info.input_definition)(hf_inputs)
+        return _terratorch_field_factory(self._input_definition)(hf_inputs)
 
     def _get_prompt_updates(
         self,
@@ -185,15 +226,15 @@ class TerratorchMultiModalProcessor(BaseMultiModalProcessor[TerratorchProcessing
         tokenization_kwargs: Mapping[str, object] | None = None,
         mm_uuids: MultiModalUUIDDict | None = None,
     ) -> MultiModalInputs:
-        if tokenization_kwargs is None:
-            tokenization_kwargs = {}
-
+        mm_items = self._to_mm_items(mm_data)
+        tokenization_kwargs = tokenization_kwargs or {}
         mm_hashes = self._hash_mm_items(
             mm_items, hf_processor_mm_kwargs, tokenization_kwargs, mm_uuids=mm_uuids
         )
 
-        _, passthrough_data = self._get_hf_mm_data(mm_items)
-        mm_processed_data = BatchFeature(dict(passthrough_data), tensor_type="pt")
+        mm_processed_data = BatchFeature(
+            mm_data.get("image", mm_data), tensor_type="pt"
+        )
         mm_placeholders = {"image": [PlaceholderRange(offset=0, length=0)]}
 
         mm_kwargs = MultiModalKwargsItems.from_hf_inputs(
