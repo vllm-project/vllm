@@ -16,6 +16,7 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
     FusedMoEParallelConfig,
     FusedMoEQuantConfig,
+    RoutingMethodType,
 )
 from vllm.model_executor.layers.fused_moe.utils import (
     _resize_cache,
@@ -498,6 +499,10 @@ class FusedMoEPermuteExpertsUnpermute(ABC):
             return False, _make_reason("quantization scheme")
         elif not cls._supports_parallel_config(moe_config.moe_parallel_config):
             return False, _make_reason("parallel config")
+        elif not cls._supports_routing_method(
+            moe_config.routing_method, weight_key, activation_key
+        ):
+            return False, _make_reason("routing method")
         elif activation_format != cls.activation_format():
             return False, _make_reason(f"{activation_format.value} activation format")
         return True, None
@@ -543,6 +548,19 @@ class FusedMoEPermuteExpertsUnpermute(ABC):
         Whether the kernel supports deployment in expert parallel.
         """
         raise NotImplementedError
+
+    @staticmethod
+    def _supports_routing_method(
+        routing_method: RoutingMethodType,
+        weight_key: QuantKey | None,
+        activation_key: QuantKey | None,
+    ) -> bool:
+        """
+        Whether the kernel supports a routing method. Can be overriden
+        by monolithic kernels that excute the router in addition to the
+        fused experts.
+        """
+        return True
 
     #
     # Various helpers for accessing quantization parameters from the

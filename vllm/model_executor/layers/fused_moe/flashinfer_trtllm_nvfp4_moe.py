@@ -28,7 +28,7 @@ class FlashInferTrtLlmNvFp4Experts(mk.FusedMoEPermuteExpertsUnpermute):
         moe_config: FusedMoEConfig,
         quant_config: FusedMoEQuantConfig,
     ):
-        super().__init__(quant_config)
+        super().__init__(moe_config=moe_config, quant_config=quant_config)
 
         self.moe_config = moe_config
         # TODO: set this via the constructor
@@ -91,6 +91,8 @@ class FlashInferTrtLlmNvFp4Experts(mk.FusedMoEPermuteExpertsUnpermute):
     @staticmethod
     def _supports_routing_method(
         routing_method_type: RoutingMethodType,
+        weight_key: QuantKey | None,
+        activation_key: QuantKey | None,
     ) -> bool:
         # NOTE(rob): this is a conservative list.
         return routing_method_type in [
