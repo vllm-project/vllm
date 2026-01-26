@@ -12,7 +12,6 @@ from vllm.model_executor.layers.fused_moe.config import (
 )
 from vllm.model_executor.layers.fused_moe.utils import moe_kernel_quantize_input
 from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
-    calculate_tile_tokens_dim,
     make_fp8_moe_alpha_scales_for_fi,
 )
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
@@ -72,9 +71,6 @@ def fi_trtllm_fp8_per_tensor_moe(
         local_num_experts=local_num_experts,
         routed_scaling_factor=routed_scaling_factor,
         use_routing_scales_on_input=use_routing_scales_on_input,
-        tile_tokens_dim=calculate_tile_tokens_dim(
-            hidden_states.shape[0], top_k, num_experts
-        ),
         routing_method_type=routing_method_type,
     )
 
@@ -305,9 +301,6 @@ class FlashInferTrtLlmFp8Experts(mk.FusedMoEPermuteExpertsUnpermute):
             local_num_experts=self.local_num_experts,
             routed_scaling_factor=self.routing_scaling_factor,
             use_routing_scales_on_input=apply_router_weight_on_input,
-            tile_tokens_dim=calculate_tile_tokens_dim(
-                hidden_states.shape[0], self.topk, self.local_num_experts
-            ),
             routing_method_type=self.routing_method_type,
         )
 

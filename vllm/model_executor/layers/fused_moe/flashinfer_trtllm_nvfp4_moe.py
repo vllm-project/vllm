@@ -7,12 +7,19 @@ import torch
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
+    FusedMoEParallelConfig,
     FusedMoEQuantConfig,
     RoutingMethodType,
 )
 from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceNoOP,
 )
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    QuantKey,
+    kNvfp4Dynamic,
+    kNvfp4Static,
+)
+from vllm.platforms import current_platform
 
 
 class FlashInferTrtLlmNvFp4Experts(mk.FusedMoEPermuteExpertsUnpermute):
@@ -49,14 +56,53 @@ class FlashInferTrtLlmNvFp4Experts(mk.FusedMoEPermuteExpertsUnpermute):
         assert self.quant_config.a2_gscale is not None
         self.g1_scale_c = self.quant_config.g1_alphas * self.quant_config.a2_gscale
 
-    @property
-    def activation_formats(
-        self,
-    ) -> tuple[mk.FusedMoEActivationFormat, mk.FusedMoEActivationFormat]:
-        return (
-            mk.FusedMoEActivationFormat.Standard,
-            mk.FusedMoEActivationFormat.Standard,
-        )
+    @staticmethod
+    def _supports_current_device() -> bool:
+        """Supports only Blackwell-family GPUs."""
+        p = current_platform
+        return p.is_cuda() and p.is_device_capability_family(100)
+
+    @staticmethod
+    def _supports_no_act_and_mul() -> bool:
+        """Does not support non-gated MoE (i.e. Nemotron-Nano)."""
+        return True
+
+    @staticmethod
+    def _supports_quant_scheme(
+        weight_key: QuantKey | None,
+        activation_key: QuantKey | None,
+    ) -> bool:
+        """Supports Nvfp4 quantization."""
+        SUPPORTED_W_A = [
+            (kNvfp4Static, kNvfp4Dynamic),
+        ]
+        return (weight_key, activation_key) in SUPPORTED_W_A
+
+    @staticmethod
+    def _supports_activation(activation: str) -> bool:
+        """Supports only SiLU activation."""
+        return activation in ["silu"]
+
+    @staticmethod
+    def _supports_parallel_config(moe_parallel_config: FusedMoEParallelConfig) -> bool:
+        """Supports EP and TP."""
+        return True
+
+    @staticmethod
+    def _supports_routing_method(
+        routing_method_type: RoutingMethodType,
+    ) -> bool:
+        # NOTE(rob): this is a conservative list.
+        return routing_method_type in [
+            RoutingMethodType.DeepSeekV3,
+            RoutingMethodType.Renormalize,
+            RoutingMethodType.RenormalizeNaive,
+            RoutingMethodType.Llama4,
+        ]
+
+    @staticmethod
+    def activation_format() -> mk.FusedMoEActivationFormat:
+        return mk.FusedMoEActivationFormat.Standard
 
     def supports_chunking(self) -> bool:
         return False
