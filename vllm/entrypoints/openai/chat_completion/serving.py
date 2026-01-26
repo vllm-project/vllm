@@ -638,9 +638,11 @@ class OpenAIServingChat(OpenAIServing):
         request_id: str,
         model_name: str,
         conversation: list[ConversationMessage],
-        tokenizer: TokenizerLike | None,
+        tokenizer: TokenizerLike,
         request_metadata: RequestResponseMetadata,
     ) -> AsyncGenerator[str, None]:
+        from vllm.tokenizers.mistral import MistralTokenizer
+
         created_time = int(time.time())
         chunk_object_type: Final = "chat.completion.chunk"
         first_iteration = True
@@ -1402,9 +1404,11 @@ class OpenAIServingChat(OpenAIServing):
         request_id: str,
         model_name: str,
         conversation: list[ConversationMessage],
-        tokenizer: TokenizerLike | None,
+        tokenizer: TokenizerLike,
         request_metadata: RequestResponseMetadata,
     ) -> ErrorResponse | ChatCompletionResponse:
+        from vllm.tokenizers.mistral import MistralTokenizer
+
         created_time = int(time.time())
         final_res: RequestOutput | None = None
 
