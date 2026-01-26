@@ -221,19 +221,21 @@ def get_max_tokens(
     prompt: TokensPrompt | EmbedsPrompt,
     default_sampling_params: dict,
 ) -> int:
-    from vllm.config.utils import getattr_iter
-
     # NOTE: Avoid isinstance() for better efficiency
-    max_tokens = getattr_iter(
-        request,
-        [
-            # ChatCompletionRequest
-            "max_completion_tokens",
-            # ResponsesRequest
-            "max_output_tokens",
-            # CompletionRequest (also a fallback for ChatCompletionRequest)
-            "max_tokens",
-        ],
+    max_tokens: int | None = next(
+        (
+            val
+            for attr in [
+                # ChatCompletionRequest
+                "max_completion_tokens",
+                # ResponsesRequest
+                "max_output_tokens",
+                # CompletionRequest (also a fallback for ChatCompletionRequest)
+                "max_tokens",
+            ]
+            if (val := getattr(request, attr, None)) is not None
+        ),
+        None,
     )
 
     input_length = length_from_prompt_token_ids_or_embeds(
