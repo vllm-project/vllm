@@ -58,6 +58,7 @@ def _fused_moe_lora_kernel(
     EM,
     num_valid_tokens,
     num_experts,  # Original number of experts (for decoding lora_id)
+    adapter_enabled,
     # The stride variables represent how much to increase the ptr by when
     # moving by 1 element in a particular dimension. E.g. `stride_am` is
     # how much to increase `a_ptr` by to get the element one row down
@@ -125,6 +126,10 @@ def _fused_moe_lora_kernel(
 
     # Decode lora_id and expert_id from combined index
     lora_id = expert_id_lora // num_experts
+    moe_enabled = tl.load(adapter_enabled + lora_id)
+    if moe_enabled == 0:
+        # Early exit for the no moe lora case.
+        return
     expert_id = expert_id_lora % num_experts
 
     # get a_ptr, b_ptr, c_ptr
@@ -213,6 +218,7 @@ def _fused_moe_lora_shrink(
     expert_ids: torch.Tensor,  # 1D tensor (combined lora_id * num_experts + expert_id)
     num_tokens_post_padded: torch.Tensor,  # scalar tensor
     top_k_num: int,
+    adapter_enabled: torch.Tensor,
     ## adding for kernel
     device: torch.device,
     N: int,
@@ -266,6 +272,7 @@ def _fused_moe_lora_shrink(
         EM,
         num_tokens,
         num_experts,
+        adapter_enabled,
         qcurr_hidden_states.stride(0),
         qcurr_hidden_states.stride(1),
         w1_lora_a_stacked.stride(0),
@@ -298,6 +305,7 @@ def _fused_moe_lora_expand(
     expert_ids: torch.Tensor,  # 1D tensor (combined lora_id * num_experts + expert_id)
     num_tokens_post_padded: torch.Tensor,  # scalar tensor
     top_k_num: int,
+    adapter_enabled: torch.Tensor,
     ## adding for kernel
     device: torch.device,
     N: int,
@@ -359,6 +367,7 @@ def _fused_moe_lora_expand(
         EM,
         num_tokens,
         num_experts,
+        adapter_enabled,
         a_intermediate_cache1.stride(0),
         a_intermediate_cache1.stride(1),
         w1_lora_b_stacked.stride(0),
@@ -396,6 +405,7 @@ def _fused_moe_lora(
     num_tokens_post_padded: torch.Tensor,  # scalar tensor
     max_lora_rank: int,
     top_k_num: int,
+    adapter_enabled: torch.Tensor,
     shrink_block_size_m: int,
     shrink_block_size_n: int,
     shrink_block_size_k: int,
@@ -452,6 +462,7 @@ def _fused_moe_lora(
         expert_ids,
         num_tokens_post_padded,
         top_k_num,
+        adapter_enabled,
         ## adding for kernel
         device,
         N,

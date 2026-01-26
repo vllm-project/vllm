@@ -14,6 +14,10 @@ import torch
 from vllm.lora.layers import LoRAMapping
 from vllm.triton_utils import HAS_TRITON
 
+from vllm.model_executor.layers.fused_moe.moe_align_block_size import (
+            moe_align_block_size,
+        )
+
 if HAS_TRITON:
     from vllm.lora.ops.triton_ops import (
         LoRAKernelMeta,
@@ -319,9 +323,6 @@ class PunicaWrapperGPU(PunicaWrapperBase):
         For tokens without LoRA (token_lora_mapping == -1), we set
         topk_ids_lora to -1 to indicate they should be skipped.
         """
-        from vllm.model_executor.layers.fused_moe.moe_align_block_size import (
-            moe_align_block_size,
-        )
 
         (token_lora_mapping, _, _, _, _, _) = self.token_mapping_meta.meta_args(
             num_tokens
@@ -337,21 +338,22 @@ class PunicaWrapperGPU(PunicaWrapperBase):
         topk_ids_lora = torch.where(
             has_lora,
             token_lora_expanded * num_experts + topk_ids,
-            torch.tensor(-1, dtype=topk_ids.dtype, device=topk_ids.device),
+            torch.tensor(
+                -1, dtype=topk_ids.dtype, device=topk_ids.device
+            ),
         )
 
-        # Call standard moe_align_block_size with num_expert_lora virtual experts
-        # Use ignore_invalid_experts=True to skip -1 entries
-        sorted_token_ids, expert_ids, num_tokens_post_pad = moe_align_block_size(
+        # Call standard moe_align_block_size with num_expert_lora + 1 virtual
+        # experts (the extra slot absorbs non-LoRA tokens harmlessly).
+        sorted_ids, expert_ids, num_tokens_post_pad = moe_align_block_size(
             topk_ids_lora,
             block_size,
             num_expert_lora,
-            expert_map=None,  # Ignore expert_map for now per requirements
+            expert_map=None,
             pad_sorted_ids=pad_sorted_ids,
-            ignore_invalid_experts=True,  # Skip -1 entries
         )
 
-        return sorted_token_ids, expert_ids, num_tokens_post_pad
+        return sorted_ids, expert_ids, num_tokens_post_pad
 
     def add_lora_fused_moe(
         self,
@@ -360,9 +362,9 @@ class PunicaWrapperGPU(PunicaWrapperBase):
         lora_a_stacked: tuple[torch.Tensor, ...],
         lora_b_stacked: tuple[torch.Tensor, ...],
         topk_weights: torch.Tensor,
-        sorted_token_ids: torch.Tensor,  # 1D tensor
+        sorted_token_ids: torch.Tensor,
         expert_ids: torch.Tensor,
-        num_tokens_post_padded: torch.Tensor,  # scalar tensor
+        num_tokens_post_padded: torch.Tensor,
         max_lora_rank: int,
         top_k_num: int,
         shrink_config,
@@ -389,6 +391,7 @@ class PunicaWrapperGPU(PunicaWrapperBase):
             num_tokens_post_padded,
             max_lora_rank,
             top_k_num,
+            adapter_enabled,
             shrink_config.get("BLOCK_SIZE_M", 64),
             shrink_config.get("BLOCK_SIZE_N", 64),
             shrink_config.get("BLOCK_SIZE_K", 32),
