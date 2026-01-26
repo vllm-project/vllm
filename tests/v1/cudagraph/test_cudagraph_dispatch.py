@@ -17,6 +17,7 @@ from vllm.config import (
     SchedulerConfig,
     VllmConfig,
 )
+from vllm.config.lora import LoRAConfig
 from vllm.forward_context import BatchDescriptor, set_forward_context
 from vllm.platforms import current_platform
 from vllm.v1.cudagraph_dispatcher import CudagraphDispatcher
@@ -47,6 +48,12 @@ def _create_vllm_config(
     mock_config.speculative_config = None  # No speculative decoding
     if not lora_config:
         mock_config.lora_config = None
+    else:
+        # Create a real LoRAConfig with specialize_active_lora enabled
+        mock_config.lora_config = LoRAConfig(
+            max_loras=4,
+            specialize_active_lora=True,
+        )
     # Mimic the behavior of VllmConfig.__post_init__()
     if compilation_config.mode == CompilationMode.VLLM_COMPILE:
         compilation_config.set_splitting_ops_for_v1(

@@ -5271,6 +5271,7 @@ class GPUModelRunner(
         for batch_desc in batch_descriptors:
             num_tokens = batch_desc.num_tokens
             activate_lora = batch_desc.has_lora
+            num_active_loras = batch_desc.num_active_loras
 
             # We currently only capture ubatched graphs when its a FULL
             # cudagraph, a uniform decode batch, and the number of tokens

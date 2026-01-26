@@ -58,8 +58,11 @@ class CudagraphDispatcher:
         )
 
         self.keys_initialized = False
-<<<<<<< HEAD
-        self.specialize_lora_count = self.vllm_config.lora_config.specialize_active_lora
+        self.specialize_lora_count = (
+            self.vllm_config.lora_config.specialize_active_lora
+            if self.vllm_config.lora_config is not None
+            else False
+        )
         # Default cudagraph_mode to NONE until initialize_cudagraph_keys is called
         self.cudagraph_mode = CUDAGraphMode.NONE
 
@@ -94,14 +97,6 @@ class CudagraphDispatcher:
                             "values that won't be changed by cudagraph padding. "
                             "Use values from cudagraph_capture_sizes."
                         )
-=======
-        self.specialize_lora_count = (
-            self.vllm_config.lora_config.specialize_active_lora
-            if self.vllm_config.lora_config
-            else False
-        )
-        self.captured_lora_counts: list[int] = []
->>>>>>> bb040594f (Fix bugs)
 
     def _get_lora_cases(self) -> list[tuple[bool, int]]:
         """
