@@ -92,33 +92,6 @@ class EngineCoreRequest(
         return self.pooling_params
 
 
-class EngineCoreEventType(enum.IntEnum):
-    """The type of engine core request event."""
-
-    QUEUED = 1
-    SCHEDULED = 2
-    PREEMPTED = 3
-
-
-class EngineCoreEvent(msgspec.Struct):
-    """A timestamped engine core event associated with a request.
-
-    The timestamp is a monotonic timestamps and is used for by the engine
-    frontend to calculate intervals between engine core events. These
-    timestamps should not be compared with timestamps from other processes.
-    """
-
-    type: EngineCoreEventType
-    timestamp: float
-
-    @classmethod
-    def new_event(
-        cls, event_type: EngineCoreEventType, timestamp: float | None = None
-    ) -> "EngineCoreEvent":
-        timestamp = time.monotonic() if timestamp is None else timestamp
-        return cls(event_type, timestamp)
-
-
 class EngineCoreOutput(
     msgspec.Struct,
     array_like=True,  # type: ignore[call-arg]
@@ -135,7 +108,6 @@ class EngineCoreOutput(
 
     finish_reason: FinishReason | None = None
     stop_reason: int | str | None = None
-    events: list[EngineCoreEvent] | None = None
     kv_transfer_params: dict[str, Any] | None = None
 
     trace_headers: Mapping[str, str] | None = None

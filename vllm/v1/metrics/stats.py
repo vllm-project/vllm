@@ -12,7 +12,7 @@ from vllm.v1.metrics.perf import PerfStats
 from vllm.v1.spec_decode.metrics import SpecDecodingStats
 
 if TYPE_CHECKING:
-    from vllm.v1.engine import EngineCoreEvent, EngineCoreOutput, FinishReason
+    from vllm.v1.engine import EngineCoreOutput, FinishReason
 
 
 @dataclass
@@ -284,17 +284,6 @@ class IterationStats:
         ):
             req_stats.is_corrupted = True
 
-        # Process request-level engine core events
-        if output.events is not None:
-            self.update_from_events(
-                output.request_id,
-                output.events,
-                is_prefilling,
-                req_stats,
-                lora_states,
-                lora_name,
-            )
-
         # Process the batch-level "new tokens" engine core event
         if is_prefilling:
             req_stats.first_token_ts = engine_core_timestamp
@@ -303,30 +292,6 @@ class IterationStats:
             self.inter_token_latencies_iter.append(itl)
 
         req_stats.last_token_ts = engine_core_timestamp
-
-    def update_from_events(
-        self,
-        req_id: str,
-        events: list["EngineCoreEvent"],
-        is_prefilling: bool,
-        req_stats: RequestStateStats,
-        lora_states: "LoRARequestStates",
-        lora_name: str | None,
-    ):
-        # Avoid circular dependency
-        from vllm.v1.engine import EngineCoreEventType
-
-        for event in events:
-            if event.type == EngineCoreEventType.QUEUED:
-                req_stats.queued_ts = event.timestamp
-                lora_states.request_waiting(req_id, lora_name)
-            elif event.type == EngineCoreEventType.SCHEDULED:
-                if req_stats.scheduled_ts == 0.0:  # ignore preemptions
-                    req_stats.scheduled_ts = event.timestamp
-                lora_states.request_running(req_id, lora_name)
-            elif event.type == EngineCoreEventType.PREEMPTED:
-                self.num_preempted_reqs += 1
-                lora_states.request_waiting(req_id, lora_name)
 
     def update_from_finished_request(
         self,

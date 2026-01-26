@@ -52,7 +52,7 @@ from vllm.v1.core.sched.output import (
 )
 from vllm.v1.core.sched.request_queue import SchedulingPolicy, create_request_queue
 from vllm.v1.core.sched.utils import check_stop, remove_all
-from vllm.v1.engine import EngineCoreEventType, EngineCoreOutput, EngineCoreOutputs
+from vllm.v1.engine import EngineCoreOutput, EngineCoreOutputs
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.metrics.perf import ModelMetrics, PerfStats
 from vllm.v1.metrics.stats import (
@@ -704,10 +704,6 @@ class Scheduler(SchedulerInterface):
                 self._update_connector_prefix_cache_stats(request)
 
                 self.running.append(request)
-                if self.log_stats:
-                    request.record_event(
-                        EngineCoreEventType.SCHEDULED, scheduled_timestamp
-                    )
                 if request.status == RequestStatus.WAITING:
                     scheduled_new_reqs.append(request)
                 elif request.status == RequestStatus.PREEMPTED:
@@ -891,9 +887,6 @@ class Scheduler(SchedulerInterface):
         request.num_computed_tokens = 0
         request.spec_token_ids.clear()
         request.num_preemptions += 1
-        if self.log_stats:
-            request.record_event(EngineCoreEventType.PREEMPTED, timestamp)
-
         # Journey event: PREEMPTED
         self._emit_journey_event(
             request,
@@ -1351,7 +1344,6 @@ class Scheduler(SchedulerInterface):
                         new_prompt_logprobs_tensors=prompt_logprobs_tensors,
                         pooling_output=pooler_output,
                         stop_reason=request.stop_reason,
-                        events=request.take_events(),
                         kv_transfer_params=kv_transfer_params,
                         trace_headers=request.trace_headers,
                         num_cached_tokens=request.num_cached_tokens,
@@ -1383,7 +1375,6 @@ class Scheduler(SchedulerInterface):
                         request_id=request.request_id,
                         new_token_ids=[],
                         finish_reason=request.get_finished_reason(),
-                        events=request.take_events(),
                         trace_headers=request.trace_headers,
                         num_cached_tokens=request.num_cached_tokens,
                     )
@@ -1595,8 +1586,6 @@ class Scheduler(SchedulerInterface):
     def add_request(self, request: Request) -> None:
         self.waiting.add_request(request)
         self.requests[request.request_id] = request
-        if self.log_stats:
-            request.record_event(EngineCoreEventType.QUEUED)
         # Journey event: QUEUED (before first schedule, so step=None)
         self._emit_journey_event(
             request, RequestJourneyEventType.QUEUED, scheduler_step=None

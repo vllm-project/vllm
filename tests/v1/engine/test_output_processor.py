@@ -20,14 +20,17 @@ from vllm.outputs import CompletionOutput, RequestOutput
 from vllm.sampling_params import RequestOutputKind, SamplingParams
 from vllm.tokenizers import TokenizerLike
 from vllm.v1.engine import (
-    EngineCoreEvent,
-    EngineCoreEventType,
     EngineCoreOutputs,
     EngineCoreRequest,
     FinishReason,
 )
 from vllm.v1.engine.output_processor import OutputProcessor, RequestOutputCollector
 from vllm.v1.metrics.stats import IterationStats, SchedulerStats
+from vllm.v1.core.sched.journey_events import (
+    RequestJourneyEvent,
+    RequestJourneyEventType,
+    ScheduleKind,
+)
 
 
 def _ref_convert_id_to_token(
@@ -1013,14 +1016,10 @@ def test_lora_request_tracking(log_stats: bool, dummy_test_vectors):
     for request in requests:
         output_processor.add_request(request, None)
 
-    # First iteration: process outputs with QUEUED events
+    # First iteration: process outputs
     outputs = EngineCoreOutputs(
         outputs=engine_core.get_outputs(), scheduler_stats=SchedulerStats()
     )
-    for output in outputs.outputs:
-        output.events = [
-            EngineCoreEvent.new_event(EngineCoreEventType.QUEUED, engine_core_timestamp)
-        ]
 
     iteration_stats = IterationStats() if log_stats else None
     output_processor.process_outputs(
@@ -1043,16 +1042,10 @@ def test_lora_request_tracking(log_stats: bool, dummy_test_vectors):
         assert iteration_stats is None
         assert len(output_processor.lora_states.requests) == 0
 
-    # Second iteration: process outputs with SCHEDULED events
+    # Second iteration: process outputs
     outputs = EngineCoreOutputs(
         outputs=engine_core.get_outputs(), scheduler_stats=SchedulerStats()
     )
-    for output in outputs.outputs:
-        output.events = [
-            EngineCoreEvent.new_event(
-                EngineCoreEventType.SCHEDULED, engine_core_timestamp
-            )
-        ]
 
     iteration_stats = IterationStats() if log_stats else None
     output_processor.process_outputs(
@@ -1137,6 +1130,169 @@ def test_lora_request_tracking(log_stats: bool, dummy_test_vectors):
 
     # Verify all requests are finished
     assert output_processor.get_num_unfinished_requests() == 0
+
+
+def test_journey_events_populate_prometheus_timestamps():
+    """Test that journey events correctly populate queued_ts and scheduled_ts
+    for Prometheus metrics, remaining stable across preemption/resume."""
+
+    # Create minimal OutputProcessor without tokenizer dependency
+    output_processor = OutputProcessor(
+        tokenizer=None,
+        log_stats=True,
+    )
+
+    # Create test request with minimal dependencies
+    request_id = "request-0-int"
+    external_req_id = "request-0"
+    prompt_tokens = [1, 2, 3, 4, 5]  # Simple hardcoded prompt
+    request = EngineCoreRequest(
+        request_id=request_id,
+        external_req_id=external_req_id,
+        prompt_token_ids=prompt_tokens,
+        mm_features=None,
+        eos_token_id=None,
+        arrival_time=0,
+        lora_request=None,
+        cache_salt=None,
+        data_parallel_rank=None,
+        sampling_params=SamplingParams(),
+        pooling_params=None,
+    )
+
+    output_processor.add_request(request, None)
+    req_state = output_processor.request_states[request_id]
+
+    # Verify initial state: timestamps are 0.0 (sentinel)
+    assert req_state.stats.queued_ts == 0.0
+    assert req_state.stats.scheduled_ts == 0.0
+
+    # Iteration 1: QUEUED event
+    journey_events_queued = [
+        RequestJourneyEvent(
+            request_id=request_id,
+            event_type=RequestJourneyEventType.QUEUED,
+            ts_monotonic=100.0,
+            scheduler_step=None,
+            prefill_done_tokens=0,
+            prefill_total_tokens=len(prompt_tokens),
+            decode_done_tokens=0,
+            decode_max_tokens=10,
+            phase="PREFILL",
+            num_preemptions_so_far=0,
+            schedule_kind=None,
+            finish_status=None,
+        ),
+    ]
+
+    from vllm.v1.engine import EngineCoreOutput
+
+    output_1 = EngineCoreOutput(
+        request_id=request_id,
+        new_token_ids=[100],
+    )
+
+    output_processor.process_outputs([output_1], journey_events=journey_events_queued)
+
+    # Verify queued_ts set, scheduled_ts still unset
+    assert req_state.stats.queued_ts == 100.0
+    assert req_state.stats.scheduled_ts == 0.0
+
+    # Iteration 2: SCHEDULED event (first time)
+    journey_events_scheduled = [
+        RequestJourneyEvent(
+            request_id=request_id,
+            event_type=RequestJourneyEventType.SCHEDULED,
+            ts_monotonic=150.0,
+            scheduler_step=1,
+            prefill_done_tokens=0,
+            prefill_total_tokens=len(prompt_tokens),
+            decode_done_tokens=0,
+            decode_max_tokens=10,
+            phase="PREFILL",
+            num_preemptions_so_far=0,
+            schedule_kind=ScheduleKind.FIRST,
+            finish_status=None,
+        ),
+    ]
+
+    output_2 = EngineCoreOutput(
+        request_id=request_id,
+        new_token_ids=[101],
+    )
+
+    output_processor.process_outputs(
+        [output_2], journey_events=journey_events_scheduled
+    )
+
+    # Verify both timestamps now set
+    assert req_state.stats.queued_ts == 100.0
+    assert req_state.stats.scheduled_ts == 150.0
+
+    # Iteration 3: PREEMPTED event
+    journey_events_preempted = [
+        RequestJourneyEvent(
+            request_id=request_id,
+            event_type=RequestJourneyEventType.PREEMPTED,
+            ts_monotonic=160.0,
+            scheduler_step=2,
+            prefill_done_tokens=3,
+            prefill_total_tokens=len(prompt_tokens),
+            decode_done_tokens=0,
+            decode_max_tokens=10,
+            phase="PREFILL",
+            num_preemptions_so_far=1,
+            schedule_kind=None,
+            finish_status=None,
+        ),
+    ]
+
+    output_3 = EngineCoreOutput(
+        request_id=request_id,
+        new_token_ids=[102],
+    )
+
+    output_processor.process_outputs(
+        [output_3], journey_events=journey_events_preempted
+    )
+
+    # Verify timestamps unchanged after preemption
+    assert req_state.stats.queued_ts == 100.0
+    assert req_state.stats.scheduled_ts == 150.0
+
+    # Iteration 4: SCHEDULED event (resume after preemption)
+    journey_events_resume = [
+        RequestJourneyEvent(
+            request_id=request_id,
+            event_type=RequestJourneyEventType.SCHEDULED,
+            ts_monotonic=200.0,  # New timestamp (later time)
+            scheduler_step=3,
+            prefill_done_tokens=3,
+            prefill_total_tokens=len(prompt_tokens),
+            decode_done_tokens=0,
+            decode_max_tokens=10,
+            phase="PREFILL",
+            num_preemptions_so_far=1,
+            schedule_kind=ScheduleKind.RESUME,
+            finish_status=None,
+        ),
+    ]
+
+    output_4 = EngineCoreOutput(
+        request_id=request_id,
+        new_token_ids=[103],
+    )
+
+    output_processor.process_outputs([output_4], journey_events=journey_events_resume)
+
+    # CRITICAL: Verify timestamps were NOT overwritten by resume
+    assert req_state.stats.queued_ts == 100.0  # Still original
+    assert req_state.stats.scheduled_ts == 150.0  # Still original (NOT 200.0)
+
+    # Verify timestamps are usable for Prometheus delta calculations
+    queued_time = req_state.stats.scheduled_ts - req_state.stats.queued_ts
+    assert queued_time == 50.0  # 150.0 - 100.0
+    assert queued_time > 0  # Sanity check: positive delta
 
 
 @pytest.mark.asyncio

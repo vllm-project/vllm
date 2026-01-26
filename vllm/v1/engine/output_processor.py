@@ -21,7 +21,10 @@ from vllm.sampling_params import RequestOutputKind
 from vllm.tokenizers import TokenizerLike
 from vllm.tracing import SpanAttributes, SpanKind, Tracer, extract_trace_context
 from vllm.utils import length_from_prompt_token_ids_or_embeds
-from vllm.v1.core.sched.journey_events import RequestJourneyEvent
+from vllm.v1.core.sched.journey_events import (
+    RequestJourneyEvent,
+    RequestJourneyEventType,
+)
 from vllm.v1.engine import EngineCoreOutput, EngineCoreRequest, FinishReason
 from vllm.v1.engine.detokenizer import IncrementalDetokenizer
 from vllm.v1.engine.logprobs import LogprobsProcessor
@@ -542,6 +545,30 @@ class OutputProcessor:
             if events:
                 req_state.journey_events.extend(events)
 
+                # Extract timestamps for Prometheus metrics from journey events.
+                # This replaces the removed update_from_events() logic that previously
+                # extracted timestamps from EngineCoreEvents.
+                #
+                # Time domain: journey events use ts_monotonic (time.monotonic()), which
+                # matches first_token_ts/last_token_ts. All delta calculations in
+                # update_from_finished_request() operate on monotonic timestamps.
+                if req_state.stats:
+                    for event in events:
+                        event_type = event.event_type
+
+                        # Set queued_ts from first QUEUED event only (sentinel: 0.0).
+                        # Once set, never overwrite (preemption-safe).
+                        if event_type == RequestJourneyEventType.QUEUED:
+                            if req_state.stats.queued_ts == 0.0:
+                                req_state.stats.queued_ts = event.ts_monotonic
+
+                        # Set scheduled_ts from first SCHEDULED event only (sentinel: 0.0).
+                        # This ignores subsequent SCHEDULED events from resume-after-preemption,
+                        # matching the original update_from_events() behavior.
+                        elif event_type == RequestJourneyEventType.SCHEDULED:
+                            if req_state.stats.scheduled_ts == 0.0:
+                                req_state.stats.scheduled_ts = event.ts_monotonic
+
             # 1) Compute stats for this iteration.
             self._update_stats_from_output(
                 req_state, engine_core_output, engine_core_timestamp, iteration_stats
@@ -654,30 +681,10 @@ class OutputProcessor:
             start_time=arrival_time_nano_seconds,
         ) as span:
             metrics = req_state.stats
-            e2e_time = iteration_stats.iteration_timestamp - metrics.arrival_time
-            queued_time = metrics.scheduled_ts - metrics.queued_ts
-            prefill_time = metrics.first_token_ts - metrics.scheduled_ts
-            decode_time = metrics.last_token_ts - metrics.first_token_ts
-            inference_time = metrics.last_token_ts - metrics.scheduled_ts
-            span.set_attribute(
-                SpanAttributes.GEN_AI_LATENCY_TIME_TO_FIRST_TOKEN,
-                metrics.first_token_latency,
-            )
-            span.set_attribute(SpanAttributes.GEN_AI_LATENCY_E2E, e2e_time)
-            span.set_attribute(SpanAttributes.GEN_AI_LATENCY_TIME_IN_QUEUE, queued_time)
             span.set_attribute(SpanAttributes.GEN_AI_USAGE_PROMPT_TOKENS, prompt_length)
             span.set_attribute(
                 SpanAttributes.GEN_AI_USAGE_COMPLETION_TOKENS,
                 metrics.num_generation_tokens,
-            )
-            span.set_attribute(
-                SpanAttributes.GEN_AI_LATENCY_TIME_IN_MODEL_PREFILL, prefill_time
-            )
-            span.set_attribute(
-                SpanAttributes.GEN_AI_LATENCY_TIME_IN_MODEL_DECODE, decode_time
-            )
-            span.set_attribute(
-                SpanAttributes.GEN_AI_LATENCY_TIME_IN_MODEL_INFERENCE, inference_time
             )
 
             # meta
