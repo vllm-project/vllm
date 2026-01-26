@@ -220,20 +220,6 @@ async def test_voxtral_streaming_generator(audio_assets, tokenizer, async_engine
         audio = Audio.from_file(audio_asset.get_local_path(), strict=False)
         streaming_input = await RealTimeAudioInput.create(audio=audio, tokenizer=tokenizer)
 
-        # def decode_print(tokens: list[int]) -> None: 
-        #     # TODO(Patrick) - make these easier to access via tokenizer
-        #     stream_pad_id = 32
-        #     stream_word_id = 33
-
-        #     id_to_piece = tokenizer.instruct_tokenizer.tokenizer.id_to_piece
-
-        #     map = {
-        #         stream_pad_id: "_",
-        #         stream_word_id: "{w}",
-        #     }
-        #     for t in tokens:
-        #         print(id_to_piece(t) if t not in map else map[t], end="", flush=True)
-
         request_id = f"session-{i}"
 
         async for resp in async_engine.generate(
