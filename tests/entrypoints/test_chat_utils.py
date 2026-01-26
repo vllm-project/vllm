@@ -94,6 +94,16 @@ def audio_embeds_model_config():
 
 
 @pytest.fixture(scope="function")
+def qwen25omni_model_config_image_embeds():
+    return ModelConfig(
+        QWEN25OMNI_MODEL_ID,
+        runner="generate",
+        limit_mm_per_prompt={"image": 2},
+        enable_mm_embeds=True,
+    )
+
+
+@pytest.fixture(scope="function")
 def qwen25omni_model_config_mm_interleaved():
     return ModelConfig(
         QWEN25OMNI_MODEL_ID,
@@ -1149,12 +1159,12 @@ def test_parse_chat_messages_empty_dict_image_embeds(
 
 
 def test_parse_chat_messages_multiple_dict_image_embeds(
-    qwen25omni_model_config_mm_interleaved,
+    qwen25omni_model_config_image_embeds,
 ):
     """Test that multiple dictionaries for image_embeds is handled without errors."""
     # Create two sample image embedding tensors
     batch_size = 2
-    hidden_size = qwen25omni_model_config_mm_interleaved.get_inputs_embeds_size()
+    hidden_size = qwen25omni_model_config_image_embeds.get_inputs_embeds_size()
     image_embeds = torch.randn(batch_size, 220, hidden_size)
     image_grid_thw = torch.tensor([1, 22, 40])
 
@@ -1177,7 +1187,7 @@ def test_parse_chat_messages_multiple_dict_image_embeds(
                 ],
             }
         ],
-        qwen25omni_model_config_mm_interleaved,
+        qwen25omni_model_config_image_embeds,
         content_format="string",
     )
 
