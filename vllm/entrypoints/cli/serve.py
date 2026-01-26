@@ -311,6 +311,13 @@ def run_multi_api_server(args: argparse.Namespace):
         )
         api_server_manager = APIServerProcessManager(**api_server_manager_kwargs)
 
+    # convert SIGTERM to KeyboardInterrupt so drain logic in
+    # wait_for_completion_or_failure handles it properly
+    def sigterm_to_interrupt(signum, frame):
+        raise KeyboardInterrupt
+
+    signal.signal(signal.SIGTERM, sigterm_to_interrupt)
+
     # Wait for API servers
     wait_for_completion_or_failure(
         api_server_manager=api_server_manager,
