@@ -688,6 +688,9 @@ _MULTIMODAL_EXAMPLE_MODELS = {
         "baidu/ERNIE-4.5-VL-28B-A3B-PT",
         trust_remote_code=True,
     ),
+    "FunAudioChatForConditionalGeneration": _HfExamplesInfo(
+        "funaudiochat", is_available_online=False
+    ),
     "FuyuForCausalLM": _HfExamplesInfo("adept/fuyu-8b"),
     "Gemma3ForConditionalGeneration": _HfExamplesInfo("google/gemma-3-4b-it"),
     "Gemma3nForConditionalGeneration": _HfExamplesInfo("google/gemma-3n-E2B-it"),

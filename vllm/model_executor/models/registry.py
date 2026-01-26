@@ -311,6 +311,10 @@ _MULTIMODAL_MODELS = {
         "ernie45_vl",
         "Ernie4_5_VLMoeForConditionalGeneration",
     ),
+    "FunAudioChatForConditionalGeneration": (
+        "funaudiochat",
+        "FunAudioChatForConditionalGeneration",
+    ),
     "FuyuForCausalLM": ("fuyu", "FuyuForCausalLM"),
     "Gemma3ForConditionalGeneration": ("gemma3_mm", "Gemma3ForConditionalGeneration"),  # noqa: E501
     "Gemma3nForConditionalGeneration": (
