@@ -1592,7 +1592,12 @@ class Glm4vForConditionalGeneration(
                 yield offset, t, h // spatial_merge_size, w // spatial_merge_size
             elif mm_feature.modality == "video":
                 t, h, w = mm_feature.data["video_grid_thw"].data.tolist()
-                yield offset, t, h // spatial_merge_size, w // spatial_merge_size
+                yield (
+                    offset,
+                    t,
+                    h // spatial_merge_size,
+                    w // spatial_merge_size,
+                )
             else:
                 raise ValueError(f"Unsupported modality: {mm_feature.modality}")
 

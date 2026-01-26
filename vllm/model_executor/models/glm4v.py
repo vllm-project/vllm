@@ -635,10 +635,8 @@ class GLM4VForCausalLM(
                 t, h, w = mm_feature.data["image_grid_thw"].data.tolist()
                 assert t == 1, f"Image must have 1 frame, got {t}"
                 yield offset, t, h // spatial_merge_size, w // spatial_merge_size
-            elif mm_feature.modality == "video":
-                t, h, w = mm_feature.data["video_grid_thw"].data.tolist()
-                yield offset, t, h // spatial_merge_size, w // spatial_merge_size
             else:
+                # glm4v only supports image modality
                 raise ValueError(f"Unsupported modality: {mm_feature.modality}")
 
     def get_mrope_input_positions(
