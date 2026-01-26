@@ -1,7 +1,7 @@
 # Fast fork Dockerfile - builds on vLLM's official image
 # Only overlays Python changes, reuses all compiled C++/CUDA extensions
 
-ARG VLLM_BASE_VERSION=v0.14.0
+ARG VLLM_BASE_VERSION=v0.14.1
 FROM vllm/vllm-openai:${VLLM_BASE_VERSION}
 
 # Find where vLLM is installed in the base image
