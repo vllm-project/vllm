@@ -1,21 +1,29 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import copy
-import logging
 from contextlib import nullcontext
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 from pydantic import ValidationError
 
 from vllm.compilation.counter import compilation_counter
 from vllm.compilation.fix_functionalization import FixFunctionalizationPass
-from vllm.config import CompilationConfig, CUDAGraphMode, VllmConfig
+from vllm.config import (
+    CompilationConfig,
+    CUDAGraphMode,
+    ParallelConfig,
+    SchedulerConfig,
+    VllmConfig,
+)
 from vllm.config.compilation import CompilationMode, PassConfig
 from vllm.engine.arg_utils import EngineArgs
-from vllm.logger import _print_warning_once
 from vllm.platforms import current_platform
-from vllm.utils.torch_utils import _is_torch_equal_or_newer
+from vllm.utils.torch_utils import (
+    _is_torch_equal_or_newer,
+    is_torch_equal,
+)
+from vllm.v1.cudagraph_dispatcher import CudagraphDispatcher
 
 # This import automatically registers `torch.ops.silly.attention`
 from . import silly_attention  # noqa: F401
@@ -28,6 +36,29 @@ def test_version():
     assert _is_torch_equal_or_newer("2.8.0", "2.8.0.dev")
     assert _is_torch_equal_or_newer("2.8.1", "2.8.0.dev")
     assert not _is_torch_equal_or_newer("2.7.1", "2.8.0.dev")
+
+
+def test_get_raw_stream_patch():
+    """Test that get_raw_stream patch is applied only for torch 2.9.0 or 2.9.1."""
+    import builtins
+
+    # Check if get_raw_stream exists in builtins
+    has_patch = hasattr(builtins, "get_raw_stream")
+
+    # Import torch to get actual version
+
+    is_torch_2_9 = is_torch_equal("2.9.0") or is_torch_equal("2.9.1")
+
+    if is_torch_2_9:
+        # For torch 2.9.x, the patch should be applied
+        assert has_patch, "get_raw_stream should be patched for torch 2.9.x"
+        # Verify it's callable (it should be the _cuda_getCurrentRawStream function)
+        get_raw_stream = builtins.get_raw_stream  # type: ignore[attr-defined]
+        assert callable(get_raw_stream)
+        # Verify it's the correct function from torch._C
+        from torch._C import _cuda_getCurrentRawStream
+
+        assert get_raw_stream is _cuda_getCurrentRawStream
 
 
 def test_copy_pass():
@@ -235,6 +266,32 @@ def test_splitting_ops_dynamic():
     assert config.compilation_config.cudagraph_mode == CUDAGraphMode.PIECEWISE
 
 
+def test_moe_splitting_ops_deepep_ht_inductor_partition():
+    # Inductor partition case: user-provided splitting_ops should be
+    # preserved and MoE ops should be appended for DeepEP HT with dp>1.
+    config = VllmConfig(
+        parallel_config=ParallelConfig(
+            all2all_backend="deepep_high_throughput",
+            data_parallel_size=8,
+        ),
+        compilation_config=CompilationConfig(
+            mode=CompilationMode.VLLM_COMPILE,
+            use_inductor_graph_partition=True,
+            splitting_ops=[
+                "vllm::unified_attention",
+                "vllm::moe_forward",
+                "vllm::moe_forward_shared",
+            ],
+        ),
+    )
+    splitting_ops = config.compilation_config.splitting_ops
+    assert splitting_ops == [
+        "vllm::unified_attention",
+        "vllm::moe_forward",
+        "vllm::moe_forward_shared",
+    ]
+
+
 def test_should_split():
     import torch
 
@@ -380,51 +437,133 @@ def test_cudagraph_sizes_post_init(
         )
 
 
-def test_pass_config_deprecation(caplog_vllm):
-    caplog_vllm.set_level(logging.WARNING)
+def test_cached_compilation_config(default_vllm_config):
+    import torch
+    from torch._inductor.utils import run_and_get_code
 
-    # Clear cache to ensure warnings are re-issued
-    _print_warning_once.cache_clear()
+    from vllm.config import get_cached_compilation_config, set_current_vllm_config
+    from vllm.model_executor.layers.quantization.input_quant_fp8 import QuantFP8
+    from vllm.model_executor.layers.quantization.utils.quant_utils import GroupShape
 
-    # Test enable_fusion -> fuse_norm_quant, fuse_act_quant
-    caplog_vllm.clear()
-    config = PassConfig(enable_fusion=True)
-    assert "enable_fusion is deprecated" in caplog_vllm.text
-    assert config.fuse_norm_quant is True
-    assert config.fuse_act_quant is True
-    assert config.enable_fusion is None
+    dtype = torch.bfloat16
+    device = torch.device("cuda:0")
+    batch_size, num_qo_heads, head_size = 8, 16, 128
 
-    # Test enable_attn_fusion -> fuse_attn_quant
-    caplog_vllm.clear()
-    config = PassConfig(enable_attn_fusion=True)
-    assert "enable_attn_fusion is deprecated" in caplog_vllm.text
-    assert config.fuse_attn_quant is True
-    assert config.enable_attn_fusion is None
+    # access and cache default compilation config
+    # default compilation config does not contain +quant_fp8 custom op. If this is
+    # used, the generated code would use inductor-generated triton kernel instead
+    # of the custom op `torch.ops._C.static_scaled_fp8_quant`.
+    get_cached_compilation_config()
 
-    # Test enable_noop -> eliminate_noops
-    caplog_vllm.clear()
-    config = PassConfig(enable_noop=True)
-    assert "enable_noop is deprecated" in caplog_vllm.text
-    assert config.eliminate_noops is True
-    assert config.enable_noop is None
+    vllm_config = VllmConfig(
+        compilation_config=CompilationConfig(
+            mode=CompilationMode.VLLM_COMPILE,
+            custom_ops=["+quant_fp8"],
+        )
+    )
 
-    # Test enable_sequence_parallelism -> enable_sp
-    caplog_vllm.clear()
-    config = PassConfig(enable_sequence_parallelism=True)
-    assert "enable_sequence_parallelism is deprecated" in caplog_vllm.text
-    assert config.enable_sp is True
-    assert config.enable_sequence_parallelism is None
+    # set_current_vllm_config should clear cached compilation config and
+    # use the new compilation_config in vllm_config
+    with set_current_vllm_config(vllm_config):
+        query_quant = QuantFP8(static=True, group_shape=GroupShape.PER_TENSOR)
+        query_quant = torch.compile(query_quant)
 
-    # Test enable_async_tp -> fuse_gemm_comms
-    caplog_vllm.clear()
-    config = PassConfig(enable_async_tp=True)
-    assert "enable_async_tp is deprecated" in caplog_vllm.text
-    assert config.fuse_gemm_comms is True
-    assert config.enable_async_tp is None
+        _q_scale = torch.tensor(1.0, dtype=torch.float32, device="cuda")
+        query = torch.randn(
+            batch_size, num_qo_heads * head_size, dtype=dtype, device=device
+        )
 
-    # Test enable_fi_allreduce_fusion -> fuse_allreduce_rms
-    caplog_vllm.clear()
-    config = PassConfig(enable_fi_allreduce_fusion=True)
-    assert "enable_fi_allreduce_fusion is deprecated" in caplog_vllm.text
-    assert config.fuse_allreduce_rms is True
-    assert config.enable_fi_allreduce_fusion is None
+        _, code = run_and_get_code(query_quant, query, _q_scale)
+
+    code = " ".join(code)
+    assert "torch.ops._C.static_scaled_fp8_quant.default(" in code
+
+
+def _create_vllm_config_for_validation(
+    compilation_config: CompilationConfig,
+) -> MagicMock:
+    """Helper to create a mock VllmConfig for padding validation testing."""
+    mock_config = MagicMock(spec=VllmConfig)
+    mock_config.compilation_config = compilation_config
+    mock_config.scheduler_config = SchedulerConfig.default_factory(max_num_seqs=8)
+    mock_config.parallel_config = ParallelConfig()
+    mock_config.speculative_config = None
+    mock_config.lora_config = None
+    return mock_config
+
+
+def test_compile_sizes_padding_validation():
+    """Test that compile_sizes with values that would be padded raises an error."""
+    # cudagraph_capture_sizes=[1, 2, 4, 8] means:
+    # - size 1 -> padded to 1
+    # - size 2 -> padded to 2
+    # - size 3 -> padded to 4
+    # - size 4 -> padded to 4
+    # - size 5 -> padded to 8
+    # etc.
+    # So compile_sizes=[3] should fail because 3 would be padded to 4
+
+    with pytest.raises(ValueError, match="would be padded to"):
+        config = CompilationConfig(
+            cudagraph_capture_sizes=[1, 2, 4, 8],
+            max_cudagraph_capture_size=8,
+            compile_sizes=[3],
+            cudagraph_mode=CUDAGraphMode.FULL,
+        )
+        config.post_init_cudagraph_sizes()
+        dispatcher = CudagraphDispatcher(_create_vllm_config_for_validation(config))
+        dispatcher.initialize_cudagraph_keys(CUDAGraphMode.FULL)
+
+    with pytest.raises(ValueError, match="would be padded to"):
+        config = CompilationConfig(
+            cudagraph_capture_sizes=[1, 2, 4, 8],
+            max_cudagraph_capture_size=8,
+            compile_sizes=[5],
+            cudagraph_mode=CUDAGraphMode.FULL,
+        )
+        config.post_init_cudagraph_sizes()
+        dispatcher = CudagraphDispatcher(_create_vllm_config_for_validation(config))
+        dispatcher.initialize_cudagraph_keys(CUDAGraphMode.FULL)
+
+    config = CompilationConfig(
+        cudagraph_capture_sizes=[1, 2, 4, 8],
+        max_cudagraph_capture_size=8,
+        compile_sizes=[1, 2, 4, 8],
+        cudagraph_mode=CUDAGraphMode.FULL,
+    )
+    config.post_init_cudagraph_sizes()
+    assert sorted(config.compile_sizes) == [1, 2, 4, 8]
+    dispatcher = CudagraphDispatcher(_create_vllm_config_for_validation(config))
+    dispatcher.initialize_cudagraph_keys(CUDAGraphMode.FULL)  # Should not raise
+
+    config = CompilationConfig(
+        cudagraph_capture_sizes=[1, 2, 4, 8],
+        max_cudagraph_capture_size=8,
+        compile_sizes=["cudagraph_capture_sizes"],
+        cudagraph_mode=CUDAGraphMode.FULL,
+    )
+    config.post_init_cudagraph_sizes()
+    assert sorted(config.compile_sizes) == [1, 2, 4, 8]
+
+    # When cudagraphs are disabled (max_cudagraph_capture_size=0),
+    # padding validation should be skipped
+    config = CompilationConfig(
+        cudagraph_capture_sizes=[],
+        max_cudagraph_capture_size=0,
+        compile_sizes=[3, 5, 7],  # would be invalid with cudagraphs
+    )
+    config.post_init_cudagraph_sizes()
+    assert sorted(config.compile_sizes) == [3, 5, 7]
+
+    # When cudagraph_mode is NONE but capture_sizes is non-empty,
+    # padding validation should still be skipped
+    config = CompilationConfig(
+        cudagraph_capture_sizes=[1, 2, 4, 8],
+        max_cudagraph_capture_size=8,
+        cudagraph_mode=CUDAGraphMode.NONE,
+        compile_sizes=[3, 5, 7],  # would be invalid if cudagraphs were enabled
+    )
+    config.post_init_cudagraph_sizes()
+    assert sorted(config.compile_sizes) == [3, 5, 7]
+    dispatcher = CudagraphDispatcher(_create_vllm_config_for_validation(config))
+    dispatcher.initialize_cudagraph_keys(CUDAGraphMode.NONE)  # Should not raise

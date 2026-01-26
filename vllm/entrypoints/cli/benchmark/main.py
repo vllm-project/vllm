@@ -32,6 +32,7 @@ class BenchmarkSubcommand(CLISubcommand):
     ) -> FlexibleArgumentParser:
         bench_parser = subparsers.add_parser(
             self.name,
+            help=self.help,
             description=self.help,
             usage=f"vllm {self.name} <bench_type> [options]",
         )

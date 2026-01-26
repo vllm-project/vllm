@@ -269,6 +269,7 @@ class Ernie4_5_VLMoeMoE(nn.Module):
                 quant_config=quant_config,
                 e_score_correction_bias=self.e_score_correction_bias[0],
                 prefix=f"{prefix}.text_experts",
+                router_logits_dtype=torch.float32,
             )
         else:
             self.text_experts = Ernie4_5_VLMoeMLP(
@@ -306,6 +307,7 @@ class Ernie4_5_VLMoeMoE(nn.Module):
                 quant_config=quant_config,
                 e_score_correction_bias=self.e_score_correction_bias[1],
                 prefix=f"{prefix}.vision_experts",
+                router_logits_dtype=torch.float32,
             )
         else:
             self.vision_experts = Ernie4_5_VLMoeMLP(
@@ -563,7 +565,7 @@ class Ernie4_5_VLMoeModel(nn.Module):
 
     def forward(
         self,
-        input_ids: torch.Tensor,
+        input_ids: torch.Tensor | None,
         positions: torch.Tensor,
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,
@@ -644,7 +646,7 @@ class Ernie4_5_VLMoeForCausalLM(nn.Module, SupportsPP):
 
     def forward(
         self,
-        input_ids: torch.Tensor,
+        input_ids: torch.Tensor | None,
         positions: torch.Tensor,
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,
@@ -675,6 +677,7 @@ class Ernie4_5_VLMoeForCausalLM(nn.Module, SupportsPP):
         # Params for weights, fp8 weight scales, fp8 activation scales
         # (param_name, weight_name, expert_id, shard_id)
         expert_params_mapping = SharedFusedMoE.make_expert_params_mapping(
+            self,
             ckpt_gate_proj_name="gate_proj",
             ckpt_down_proj_name="down_proj",
             ckpt_up_proj_name="up_proj",

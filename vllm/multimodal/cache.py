@@ -20,12 +20,12 @@ from vllm.logger import init_logger
 from vllm.utils.cache import CacheInfo, LRUCache
 from vllm.utils.jsontree import json_count_leaves, json_map_leaves, json_reduce_leaves
 from vllm.utils.mem_constants import GiB_bytes, MiB_bytes
+from vllm.utils.mem_utils import format_gib
 
 from .inputs import (
     MultiModalBatchedField,
     MultiModalFeatureSpec,
     MultiModalFieldElem,
-    MultiModalKwargs,
     MultiModalKwargsItem,
     MultiModalKwargsItems,
     NestedTensors,
@@ -34,8 +34,7 @@ from .inputs import (
 if TYPE_CHECKING:
     from vllm.config import ModelConfig, VllmConfig
 
-    from .processing import ResolvedPromptUpdate
-    from .registry import MultiModalRegistry
+    from .processing.processor import ResolvedPromptUpdate
 
 logger = init_logger(__name__)
 
@@ -90,7 +89,6 @@ MultiModalCacheValue: TypeAlias = (
     | MultiModalProcessorCacheItemMetadata
     | MultiModalKwargsItems
     | MultiModalKwargsItem
-    | MultiModalKwargs
     | Mapping[str, NestedTensors]
 )
 
@@ -108,12 +106,7 @@ class MultiModalCache:
         # These are not subclasses of dict
         if isinstance(
             leaf,
-            (
-                MultiModalKwargs,
-                MultiModalKwargsItems,
-                MultiModalKwargsItem,
-                MultiModalFieldElem,
-            ),
+            (MultiModalKwargsItems, MultiModalKwargsItem, MultiModalFieldElem),
         ):
             return cls.get_item_size(leaf.data)  # type: ignore
 
@@ -137,9 +130,9 @@ class MultiModalCache:
         if debug:
             leaf_count = json_count_leaves(value)
             logger.debug(
-                "Calculated size of %s to be %.2f GiB (%d leaves)",
+                "Calculated size of %s to be %s GiB (%d leaves)",
                 type(value),
-                size / GiB_bytes,
+                format_gib(size),
                 leaf_count,
             )
 
@@ -301,6 +294,10 @@ class BaseMultiModalProcessorCache(
             For each item, `True` if the item is cached, otherwise `False`.
         """
         return [self.is_cached_item(mm_hash) for mm_hash in mm_hashes]
+
+    def close(self) -> None:
+        """Close the underlying cache, if needed."""
+        pass
 
     @abstractmethod
     def touch_sender_cache_item(self, mm_hash: str) -> None:
@@ -541,6 +538,10 @@ class ShmObjectStoreSenderCache(BaseMultiModalProcessorCache):
     def make_stats(self, *, delta: bool = False) -> CacheInfo:
         return self._stat(delta=delta)
 
+    @override
+    def close(self) -> None:
+        self._shm_cache.close()
+
     def remove_dangling_items(self) -> None:
         """Remove items that are no longer in the shared memory cache."""
         cached_hashes = self._shm_cache.key_index.keys()
@@ -567,67 +568,6 @@ class ShmObjectStoreSenderCache(BaseMultiModalProcessorCache):
         return mm_item
 
 
-def _enable_processor_cache(
-    model_config: "ModelConfig",
-    mm_registry: "MultiModalRegistry",
-) -> bool:
-    if not mm_registry.supports_multimodal_inputs(model_config):
-        return False
-
-    mm_config = model_config.get_multimodal_config()
-    return mm_config.mm_processor_cache_gb > 0
-
-
-def _enable_ipc_cache(vllm_config: "VllmConfig") -> bool:
-    parallel_config = vllm_config.parallel_config
-    supports_ipc_cache = (
-        parallel_config._api_process_count == 1
-        and parallel_config.data_parallel_size == 1
-    ) or parallel_config.data_parallel_external_lb
-
-    return supports_ipc_cache
-
-
-def _enable_mm_input_shm_cache(vllm_config: "VllmConfig") -> bool:
-    """Whether the shared memory based cache should be enabled."""
-
-    if not _enable_ipc_cache(vllm_config):
-        return False
-
-    mm_config = vllm_config.model_config.get_multimodal_config()
-
-    return mm_config.mm_processor_cache_type == "shm"
-
-
-def processor_cache_from_config(
-    vllm_config: "VllmConfig",
-    mm_registry: "MultiModalRegistry",
-) -> BaseMultiModalProcessorCache | None:
-    """Return a `BaseMultiModalProcessorCache`, if enabled."""
-    model_config = vllm_config.model_config
-
-    if not _enable_processor_cache(model_config, mm_registry):
-        return None
-
-    if not _enable_ipc_cache(vllm_config):
-        return MultiModalProcessorOnlyCache(model_config)
-
-    if not _enable_mm_input_shm_cache(vllm_config):
-        return MultiModalProcessorSenderCache(model_config)
-    return ShmObjectStoreSenderCache(vllm_config)
-
-
-def processor_only_cache_from_config(
-    model_config: "ModelConfig",
-    mm_registry: "MultiModalRegistry",
-):
-    """Return a `MultiModalProcessorOnlyCache`, if enabled."""
-    if not _enable_processor_cache(model_config, mm_registry):
-        return None
-
-    return MultiModalProcessorOnlyCache(model_config)
-
-
 class BaseMultiModalReceiverCache(
     BaseMultiModalCache[MultiModalKwargsItem | None, MultiModalKwargsItem]
 ):
@@ -641,12 +581,17 @@ class BaseMultiModalReceiverCache(
         Update multimodal features with cached encoder outputs.
         Touch all identifier at first before update to avoid
         item in updated list evict during update.
+
+        Uses mm_hash for cache key to share across LoRAs (falls back to
+        identifier for backward compatibility).
         """
         for feature in mm_features:
-            self.touch_receiver_cache_item(feature.identifier, feature.data)
+            cache_key = feature.mm_hash or feature.identifier
+            self.touch_receiver_cache_item(cache_key, feature.data)
 
         for feature in mm_features:
-            feature.data = self.get_and_update_item(feature.data, feature.identifier)
+            cache_key = feature.mm_hash or feature.identifier
+            feature.data = self.get_and_update_item(feature.data, cache_key)
         return mm_features
 
     @abstractmethod
@@ -781,50 +726,3 @@ class ShmObjectStoreReceiverCache(BaseMultiModalReceiverCache):
     @override
     def clear_cache(self) -> None:
         self._shm_cache.clear()
-
-
-def engine_receiver_cache_from_config(
-    vllm_config: "VllmConfig",
-    mm_registry: "MultiModalRegistry",
-) -> BaseMultiModalReceiverCache | None:
-    """
-    This is used in the engine process.
-    Return a `BaseMultiModalReceiverCache` only when IPC caching is enabled and
-    mm_processor_cache_type=="lru".
-    """
-    model_config = vllm_config.model_config
-
-    if not _enable_processor_cache(model_config, mm_registry):
-        return None
-
-    if not _enable_ipc_cache(vllm_config):
-        return None
-
-    if not _enable_mm_input_shm_cache(vllm_config):
-        return MultiModalReceiverCache(model_config)
-
-    return None
-
-
-def worker_receiver_cache_from_config(
-    vllm_config: "VllmConfig",
-    mm_registry: "MultiModalRegistry",
-    shared_worker_lock: LockType,
-) -> BaseMultiModalReceiverCache | None:
-    """
-    This is used in the worker process.
-    Return a `BaseMultiModalReceiverCache` only when IPC caching is enabled and
-    mm_processor_cache_type=="shm".
-    """
-    model_config = vllm_config.model_config
-
-    if not _enable_processor_cache(model_config, mm_registry):
-        return None
-
-    if not _enable_ipc_cache(vllm_config):
-        return None
-
-    if not _enable_mm_input_shm_cache(vllm_config):
-        return None
-
-    return ShmObjectStoreReceiverCache(vllm_config, shared_worker_lock)

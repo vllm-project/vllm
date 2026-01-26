@@ -6,7 +6,7 @@ import torch
 
 from vllm.config import VllmConfig
 from vllm.config.compilation import CUDAGraphMode
-from vllm.v1.attention.backends.utils import AttentionMetadataBuilder
+from vllm.v1.attention.backend import AttentionMetadataBuilder
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.worker.gpu.block_table import BlockTables
 from vllm.v1.worker.gpu.cudagraph_utils import (
@@ -69,7 +69,7 @@ class EagleCudaGraphManager:
         kv_cache_config: KVCacheConfig,
     ) -> None:
         num_reqs = min(num_tokens, self.max_num_reqs)
-        attn_metadata = prepare_inputs_to_capture(
+        attn_metadata, slot_mappings = prepare_inputs_to_capture(
             num_reqs,
             num_tokens,
             input_buffers,
@@ -81,13 +81,13 @@ class EagleCudaGraphManager:
         num_tokens_across_dp = make_num_tokens_across_dp(self.dp_size, num_tokens)
 
         # Warm up.
-        generate_fn(num_tokens, attn_metadata, num_tokens_across_dp)
+        generate_fn(num_tokens, attn_metadata, slot_mappings, num_tokens_across_dp)
 
         # Capture the graph.
         assert num_tokens not in self.graphs
         graph = torch.cuda.CUDAGraph()
         with torch.cuda.graph(graph, self.pool):
-            generate_fn(num_tokens, attn_metadata, num_tokens_across_dp)
+            generate_fn(num_tokens, attn_metadata, slot_mappings, num_tokens_across_dp)
         self.graphs[num_tokens] = graph
 
     @torch.inference_mode()

@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 import logging
 import os
 from dataclasses import MISSING, Field, asdict, dataclass, field
@@ -12,8 +13,10 @@ from vllm.compilation.backends import VllmBackend
 from vllm.config import (
     CompilationConfig,
     ModelConfig,
+    ParallelConfig,
     PoolerConfig,
     SchedulerConfig,
+    SpeculativeConfig,
     VllmConfig,
     update_config,
 )
@@ -24,7 +27,6 @@ from vllm.config.vllm import (
     OPTIMIZATION_LEVEL_TO_CONFIG,
     OptimizationLevel,
 )
-from vllm.model_executor.layers.pooler import PoolingType
 from vllm.platforms import current_platform
 
 
@@ -87,64 +89,6 @@ def test_update_config():
     # Nested update with invalid type
     with pytest.raises(AssertionError):
         new_config3 = update_config(config3, {"a": "new_value"})
-
-
-# Can remove once --task option is fully deprecated
-@pytest.mark.parametrize(
-    ("model_id", "expected_runner_type", "expected_convert_type", "expected_task"),
-    [
-        ("distilbert/distilgpt2", "generate", "none", "generate"),
-        ("intfloat/multilingual-e5-small", "pooling", "none", "embed"),
-        ("jason9693/Qwen2.5-1.5B-apeach", "pooling", "classify", "classify"),
-        ("cross-encoder/ms-marco-MiniLM-L-6-v2", "pooling", "none", "classify"),
-        ("Qwen/Qwen2.5-Math-RM-72B", "pooling", "none", "reward"),
-        ("openai/whisper-small", "generate", "none", "transcription"),
-    ],
-)
-def test_auto_task(
-    model_id, expected_runner_type, expected_convert_type, expected_task
-):
-    config = ModelConfig(model_id, task="auto")
-
-    assert config.runner_type == expected_runner_type
-    assert config.convert_type == expected_convert_type
-
-
-# Can remove once --task option is fully deprecated
-@pytest.mark.parametrize(
-    ("model_id", "expected_runner_type", "expected_convert_type", "expected_task"),
-    [
-        ("distilbert/distilgpt2", "pooling", "embed", "embed"),
-        ("intfloat/multilingual-e5-small", "pooling", "embed", "embed"),
-        ("jason9693/Qwen2.5-1.5B-apeach", "pooling", "classify", "classify"),
-        ("cross-encoder/ms-marco-MiniLM-L-6-v2", "pooling", "classify", "classify"),
-        ("Qwen/Qwen2.5-Math-RM-72B", "pooling", "embed", "embed"),
-        ("openai/whisper-small", "pooling", "embed", "embed"),
-    ],
-)
-def test_score_task(
-    model_id, expected_runner_type, expected_convert_type, expected_task
-):
-    config = ModelConfig(model_id, task="score")
-
-    assert config.runner_type == expected_runner_type
-    assert config.convert_type == expected_convert_type
-
-
-# Can remove once --task option is fully deprecated
-@pytest.mark.parametrize(
-    ("model_id", "expected_runner_type", "expected_convert_type", "expected_task"),
-    [
-        ("openai/whisper-small", "generate", "none", "transcription"),
-    ],
-)
-def test_transcription_task(
-    model_id, expected_runner_type, expected_convert_type, expected_task
-):
-    config = ModelConfig(model_id, task="transcription")
-
-    assert config.runner_type == expected_runner_type
-    assert config.convert_type == expected_convert_type
 
 
 @pytest.mark.parametrize(
@@ -218,8 +162,9 @@ def test_get_pooling_config():
     model_config = ModelConfig(model_id)
 
     assert model_config.pooler_config is not None
-    assert model_config.pooler_config.normalize
-    assert model_config.pooler_config.pooling_type == PoolingType.MEAN.name
+    assert model_config.pooler_config.use_activation
+    assert model_config.pooler_config.seq_pooling_type == "MEAN"
+    assert model_config.pooler_config.tok_pooling_type == "ALL"
 
 
 @pytest.mark.skipif(
@@ -227,7 +172,7 @@ def test_get_pooling_config():
 )
 def test_get_pooling_config_from_args():
     model_id = "sentence-transformers/all-MiniLM-L12-v2"
-    pooler_config = PoolerConfig(pooling_type="CLS", normalize=True)
+    pooler_config = PoolerConfig(seq_pooling_type="CLS", normalize=True)
     model_config = ModelConfig(model_id, pooler_config=pooler_config)
 
     assert asdict(model_config.pooler_config) == asdict(pooler_config)
@@ -238,14 +183,25 @@ def test_get_pooling_config_from_args():
     [
         ("tomaarsen/Qwen3-Reranker-0.6B-seq-cls", "LAST", "LAST"),  # LLM
         ("intfloat/e5-small", "CLS", "MEAN"),  # BertModel
+    ],
+)
+def test_default_seq_pooling_type(model_id, default_pooling_type, pooling_type):
+    model_config = ModelConfig(model_id)
+    assert model_config._model_info.default_seq_pooling_type == default_pooling_type
+    assert model_config.pooler_config.seq_pooling_type == pooling_type
+
+
+@pytest.mark.parametrize(
+    ("model_id", "default_pooling_type", "pooling_type"),
+    [
         ("Qwen/Qwen2.5-Math-RM-72B", "ALL", "ALL"),  # reward
         ("Qwen/Qwen2.5-Math-PRM-7B", "STEP", "STEP"),  # step reward
     ],
 )
-def test_default_pooling_type(model_id, default_pooling_type, pooling_type):
+def test_default_tok_pooling_type(model_id, default_pooling_type, pooling_type):
     model_config = ModelConfig(model_id)
-    assert model_config._model_info.default_pooling_type == default_pooling_type
-    assert model_config.pooler_config.pooling_type == pooling_type
+    assert model_config._model_info.default_tok_pooling_type == default_pooling_type
+    assert model_config.pooler_config.tok_pooling_type == pooling_type
 
 
 @pytest.mark.parametrize(
@@ -263,8 +219,8 @@ def test_default_pooling_type(model_id, default_pooling_type, pooling_type):
 )
 def test_moe_model_detection(model_id, expected_is_moe_model):
     model_config = ModelConfig(model_id)
-    # Just check that is_moe_model field exists and is a boolean
-    assert model_config.is_model_moe() == expected_is_moe_model
+    # Just check that is_moe field exists and is a boolean
+    assert model_config.is_moe == expected_is_moe_model
 
 
 @pytest.mark.parametrize(
@@ -282,7 +238,7 @@ def test_moe_model_detection(model_id, expected_is_moe_model):
 def test_is_quantized(model_id, quantized):
     model_config = ModelConfig(model_id)
     # Just check that quantized field exists and is a boolean
-    assert model_config.is_quantized() == quantized
+    assert model_config.is_quantized == quantized
 
 
 @pytest.mark.skipif(
@@ -612,100 +568,100 @@ def test_s3_url_different_models_create_different_directories(mock_pull_files):
             "jason9693/Qwen2.5-1.5B-apeach",
             "decoder",
             True,
-            "Pooling models with causal attn and last pooling support chunked prefill.",
+            "Pooling models with causal attn and LAST/ALL pooling support chunked prefill.",  # noqa: E501
         ),
         (
             "Qwen/Qwen3-Embedding-0.6B",
             "decoder",
             True,
-            "Pooling models with causal attn and last pooling support chunked prefill.",
+            "Pooling models with causal attn and LAST/ALL pooling support chunked prefill.",  # noqa: E501
         ),
         (
             "Qwen/Qwen2.5-Math-PRM-7B",
             "decoder",
             False,
-            "Pooling models with step pooling does not support chunked prefill.",
+            "Pooling models with causal attn and LAST/STEP pooling do not support chunked prefill.",  # noqa: E501
         ),
         (
             "internlm/internlm2-1_8b-reward",
             "decoder",
-            False,
-            "Pooling models with all pooling does not support chunked prefill.",
+            True,
+            "Pooling models with causal attn and LAST/ALL pooling support chunked prefill.",  # noqa: E501
         ),
         (
             "BAAI/bge-base-en",
             "encoder_only",
             False,
-            "Pooling models with bidirectional attn does not support chunked prefill.",
+            "Pooling models with bidirectional attn do not support chunked prefill.",  # noqa: E501
         ),
         (
             "boltuix/NeuroBERT-NER",
             "encoder_only",
             False,
-            "Pooling models with bidirectional attn does not support chunked prefill.",
+            "Pooling models with bidirectional attn do not support chunked prefill.",  # noqa: E501
         ),
         (
             "papluca/xlm-roberta-base-language-detection",
             "encoder_only",
             False,
-            "Pooling models with bidirectional attn does not support chunked prefill.",
+            "Pooling models with bidirectional attn do not support chunked prefill.",  # noqa: E501
         ),
         (
             "Alibaba-NLP/gte-Qwen2-1.5B-instruct",
             "encoder_only",
             False,
-            "Pooling models with bidirectional attn does not support chunked prefill.",
+            "Pooling models with bidirectional attn do not support chunked prefill.",  # noqa: E501
         ),
         (
             "intfloat/e5-small",
             "encoder_only",
             False,
-            "Pooling models with bidirectional attn does not support chunked prefill.",
+            "Pooling models with bidirectional attn do not support chunked prefill.",  # noqa: E501
         ),
         # multimodal models
         (
             "openai/clip-vit-base-patch32",
             "decoder",
             True,
-            "Pooling models with causal attn and last pooling support chunked prefill.",
+            "Pooling models with causal attn and LAST/ALL pooling support chunked prefill.",  # noqa: E501
         ),
         (
             "google/siglip-base-patch16-224",
             "encoder_only",
             False,
-            "Pooling models with bidirectional attn does not support chunked prefill.",
+            "Pooling models with bidirectional attn do not support chunked prefill.",  # noqa: E501
         ),
         # generate models
         (
             "Qwen/Qwen3-0.6B",
             "decoder",
             True,
-            "Generative models support chunked prefill.",
+            "Generative models support chunked prefill.",  # noqa: E501
         ),
         (
             "Qwen/Qwen3-Next-80B-A3B-Instruct",
             "hybrid",
             True,
-            "Generative models support chunked prefill.",
+            "Generative models support chunked prefill.",  # noqa: E501
         ),
         (
             "ibm-granite/granite-4.0-h-small",
             "hybrid",
             True,
-            "Generative models support chunked prefill.",
+            "Generative models support chunked prefill.",  # noqa: E501
         ),
         (
             "state-spaces/mamba-130m-hf",
             "attention_free",
             True,
-            "Generative models support chunked prefill.",
+            "Generative models support chunked prefill.",  # noqa: E501
         ),
         # encoder_decoder models
         (
             "openai/whisper-small",
             "encoder_decoder",
             False,
-            "Encoder decoder models does not support chunked prefill.",
+            "Encoder decoder models do not support chunked prefill.",  # noqa: E501
         ),
     ],
 )
@@ -731,100 +687,100 @@ def test_is_chunked_prefill_supported(
             "jason9693/Qwen2.5-1.5B-apeach",
             "decoder",
             True,
-            "Pooling models with causal attn and last pooling support prefix caching.",
+            "Pooling models with causal attn and LAST/ALL pooling support prefix caching.",  # noqa: E501
         ),
         (
             "Qwen/Qwen3-Embedding-0.6B",
             "decoder",
             True,
-            "Pooling models with causal attn and last pooling support prefix caching.",
+            "Pooling models with causal attn and LAST/ALL pooling support prefix caching.",  # noqa: E501
         ),
         (
             "Qwen/Qwen2.5-Math-PRM-7B",
             "decoder",
             False,
-            "Pooling models with step pooling does not support prefix caching.",
+            "Pooling models with causal attn and LAST/STEP pooling do not support prefix caching.",  # noqa: E501
         ),
         (
             "internlm/internlm2-1_8b-reward",
             "decoder",
-            False,
-            "Pooling models with all pooling does not support prefix caching.",
+            True,
+            "Pooling models with causal attn and LAST/ALL pooling support prefix caching.",  # noqa: E501
         ),
         (
             "BAAI/bge-base-en",
             "encoder_only",
             False,
-            "Pooling models with bidirectional attn does not support prefix caching.",
+            "Pooling models with bidirectional attn do not support prefix caching.",  # noqa: E501
         ),
         (
             "boltuix/NeuroBERT-NER",
             "encoder_only",
             False,
-            "Pooling models with bidirectional attn does not support prefix caching.",
+            "Pooling models with bidirectional attn do not support prefix caching.",  # noqa: E501
         ),
         (
             "papluca/xlm-roberta-base-language-detection",
             "encoder_only",
             False,
-            "Pooling models with bidirectional attn does not support prefix caching.",
+            "Pooling models with bidirectional attn do not support prefix caching.",  # noqa: E501
         ),
         (
             "Alibaba-NLP/gte-Qwen2-1.5B-instruct",
             "encoder_only",
             False,
-            "Pooling models with bidirectional attn does not support prefix caching.",
+            "Pooling models with bidirectional attn do not support prefix caching.",  # noqa: E501
         ),
         (
             "intfloat/e5-small",
             "encoder_only",
             False,
-            "Pooling models with bidirectional attn does not support prefix caching.",
+            "Pooling models with bidirectional attn do not support prefix caching.",  # noqa: E501
         ),
         # multimodal models
         (
             "openai/clip-vit-base-patch32",
             "decoder",
             True,
-            "Pooling models with causal attn and last pooling support prefix caching.",
+            "Pooling models with causal attn and LAST/ALL pooling support prefix caching.",  # noqa: E501
         ),
         (
             "google/siglip-base-patch16-224",
             "encoder_only",
             False,
-            "Pooling models with bidirectional attn does not support prefix caching.",
+            "Pooling models with bidirectional attn do not support prefix caching.",  # noqa: E501
         ),
         # generate models
         (
             "Qwen/Qwen3-0.6B",
             "decoder",
             True,
-            "Generative models support prefix caching.",
+            "Generative models support prefix caching.",  # noqa: E501
         ),
         (
             "Qwen/Qwen3-Next-80B-A3B-Instruct",
             "hybrid",
             False,
-            "Hybrid models does not support prefix caching since the feature is still experimental.",  # noqa: E501
+            "Hybrid models do not support prefix caching since the feature is still experimental.",  # noqa: E501
         ),
         (
             "ibm-granite/granite-4.0-h-small",
             "hybrid",
             False,
-            "Hybrid models does not support prefix caching since the feature is still experimental.",  # noqa: E501
+            "Hybrid models do not support prefix caching since the feature is still experimental.",  # noqa: E501
         ),
         (
             "state-spaces/mamba-130m-hf",
             "attention_free",
             False,
-            "Attention free models does not support prefix caching since the feature is still experimental.",  # noqa: E501
+            "Attention free models do not support prefix caching since the feature is still experimental.",  # noqa: E501
         ),
         # encoder_decoder models
         (
             "openai/whisper-small",
             "encoder_decoder",
             False,
-            "Encoder decoder models does not support prefix caching.",
+            "Encoder decoder models do not support prefix caching.",  # noqa: E501
         ),
     ],
 )
@@ -983,7 +939,7 @@ def test_vllm_config_callable_defaults():
         model_config=quantized_model, optimization_level=OptimizationLevel.O2
     )
     enable_if_quantized = lambda cfg: (
-        cfg.model_config is not None and cfg.model_config.is_quantized()
+        cfg.model_config is not None and cfg.model_config.is_quantized
     )
     assert enable_if_quantized(config_quantized) is True
     assert enable_if_quantized(config_no_model) is False
@@ -994,7 +950,7 @@ def test_vllm_config_callable_defaults():
         model_config=moe_model, optimization_level=OptimizationLevel.O2
     )
     enable_if_sequential = lambda cfg: (
-        cfg.model_config is not None and not cfg.model_config.is_model_moe()
+        cfg.model_config is not None and not cfg.model_config.is_moe
     )
     assert enable_if_sequential(config_moe) is False
     assert enable_if_sequential(config_quantized) is True
@@ -1085,7 +1041,7 @@ def test_vllm_config_explicit_overrides():
     )
 
     # Override one field but not others
-    pass_config = PassConfig(enable_noop=False)
+    pass_config = PassConfig(eliminate_noops=False)
     compilation_config = CompilationConfig(pass_config=pass_config)
     config = VllmConfig(
         model_config=regular_model,
@@ -1108,3 +1064,66 @@ def test_scheduler_config_init():
     with pytest.raises(AttributeError):
         # InitVar does not become an attribute
         print(SchedulerConfig.default_factory().max_model_len)
+
+
+@pytest.mark.parametrize(
+    (
+        "model_id",
+        "data_parallel_size",
+        "external_lb",
+        "expected_needs_coordinator",
+    ),
+    [
+        # Non-MoE model with DP=1 should not need coordinator
+        ("facebook/opt-125m", 1, False, False),
+        # Non-MoE model with DP>1 internal LB should need coordinator
+        ("facebook/opt-125m", 2, False, True),
+        # Non-MoE model with DP>1 external LB should not need coordinator
+        ("facebook/opt-125m", 2, True, False),
+        # MoE model with DP=1 should not need coordinator
+        ("mistralai/Mixtral-8x7B-Instruct-v0.1", 1, False, False),
+        # MoE model with DP>1 internal LB should need both coordinator
+        # and wave coordination
+        ("mistralai/Mixtral-8x7B-Instruct-v0.1", 2, False, True),
+        # MoE model with DP>1 external LB needs coordinator for wave coordination
+        # (wave coordination runs in coordinator process)
+        ("mistralai/Mixtral-8x7B-Instruct-v0.1", 2, True, True),
+    ],
+)
+def test_needs_dp_coordination(
+    model_id,
+    data_parallel_size,
+    external_lb,
+    expected_needs_coordinator,
+):
+    """Test that DP coordinator and wave coordination are configured correctly."""
+    from vllm.config import ParallelConfig
+
+    model_config = ModelConfig(model_id)
+    parallel_config = ParallelConfig(
+        data_parallel_size=data_parallel_size,
+        data_parallel_external_lb=external_lb,
+    )
+    vllm_config = VllmConfig(model_config=model_config, parallel_config=parallel_config)
+
+    assert vllm_config.needs_dp_coordinator == expected_needs_coordinator
+
+
+def test_eagle_draft_model_config():
+    """Test that EagleDraft model config is correctly set."""
+    target_model_config = ModelConfig(
+        "meta-llama/Meta-Llama-3-8B-Instruct", trust_remote_code=True
+    )
+    speculative_config = SpeculativeConfig(
+        model="yuhuili/EAGLE-LLaMA3-Instruct-8B",
+        num_speculative_tokens=1,
+        target_model_config=target_model_config,
+        target_parallel_config=ParallelConfig(),
+    )
+    draft_model_config = speculative_config.draft_model_config
+    assert draft_model_config.hf_config.architectures == ["EagleLlamaForCausalLM"]
+    assert draft_model_config.hf_text_config.architectures == ["EagleLlamaForCausalLM"]
+    assert draft_model_config.hf_config.model_type == "eagle"
+    assert draft_model_config.hf_text_config.model_type == "eagle"
+    assert draft_model_config.architectures == ["EagleLlamaForCausalLM"]
+    assert draft_model_config.architecture == "EagleLlamaForCausalLM"

@@ -8,8 +8,8 @@
 import numpy as np
 import torch
 
-from vllm.attention.backends.utils import PAD_SLOT_ID
 from vllm.triton_utils import tl, triton
+from vllm.v1.attention.backends.utils import PAD_SLOT_ID
 
 
 @triton.jit()

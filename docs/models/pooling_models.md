@@ -33,8 +33,8 @@ shown in the table below.
 | Architecture                                    | `--convert` | Supported pooling tasks               |
 |-------------------------------------------------|-------------|---------------------------------------|
 | `*ForTextEncoding`, `*EmbeddingModel`, `*Model` | `embed`     | `token_embed`, `embed`                |
+| `*ForRewardModeling`, `*RewardModel`            | `embed`     | `token_embed`, `embed`                |
 | `*For*Classification`, `*ClassificationModel`   | `classify`  | `token_classify`, `classify`, `score` |
-| `*ForRewardModeling`, `*RewardModel`            | `reward`    | `token_classify`                      |
 
 !!! tip
     You can explicitly set `--convert <type>` to specify how to convert the model.
@@ -70,7 +70,6 @@ the pooler assigned to each task has the following attributes by default:
 
 | Task       | Pooling Type | Normalization | Softmax |
 |------------|--------------|---------------|---------|
-| `reward`   | `ALL`        | ❌            | ❌     |
 | `embed`    | `LAST`       | ✅︎            | ❌      |
 | `classify` | `LAST`       | ❌            | ✅︎      |
 
@@ -274,7 +273,7 @@ outputs = llm.embed(
 print(outputs[0].outputs)
 ```
 
-A code example can be found here: [examples/pooling/embed/embed_matryoshka_fy.py](../../examples/pooling/embed/embed_matryoshka_fy.py)
+A code example can be found here: [examples/pooling/embed/embed_matryoshka_fy_offline.py](../../examples/pooling/embed/embed_matryoshka_fy_offline.py)
 
 ### Online Inference
 
@@ -304,7 +303,45 @@ Expected output:
 {"id":"embd-5c21fc9a5c9d4384a1b021daccaf9f64","object":"list","created":1745476417,"model":"jinaai/jina-embeddings-v3","data":[{"index":0,"object":"embedding","embedding":[-0.3828125,-0.1357421875,0.03759765625,0.125,0.21875,0.09521484375,-0.003662109375,0.1591796875,-0.130859375,-0.0869140625,-0.1982421875,0.1689453125,-0.220703125,0.1728515625,-0.2275390625,-0.0712890625,-0.162109375,-0.283203125,-0.055419921875,-0.0693359375,0.031982421875,-0.04052734375,-0.2734375,0.1826171875,-0.091796875,0.220703125,0.37890625,-0.0888671875,-0.12890625,-0.021484375,-0.0091552734375,0.23046875]}],"usage":{"prompt_tokens":8,"total_tokens":8,"completion_tokens":0,"prompt_tokens_details":null}}
 ```
 
-An OpenAI client example can be found here: [examples/pooling/embed/openai_embedding_matryoshka_fy.py](../../examples/pooling/embed/openai_embedding_matryoshka_fy.py)
+An OpenAI client example can be found here: [examples/pooling/embed/openai_embedding_matryoshka_fy_client.py](../../examples/pooling/embed/openai_embedding_matryoshka_fy_client.py)
+
+## Specific models
+
+### BAAI/bge-m3
+
+The `BAAI/bge-m3` model comes with extra weights for sparse and colbert embeddings but unfortunately in its `config.json`
+the architecture is declared as `XLMRobertaModel`, which makes `vLLM` load it as a vanilla ROBERTA model without the
+extra weights. To load the full model weights, override its architecture like this:
+
+```shell
+vllm serve BAAI/bge-m3 --hf-overrides '{"architectures": ["BgeM3EmbeddingModel"]}'
+```
+
+Then you obtain the sparse embeddings like this:
+
+```shell
+curl -s http://localhost:8000/pooling -H "Content-Type: application/json" -d '{
+     "model": "BAAI/bge-m3",
+     "task": "token_classify",
+     "input": ["What is BGE M3?", "Defination of BM25"]
+}'
+```
+
+Due to limitations in the the output schema, the output consists of a list of
+token scores for each token for each input. This means that you'll have to call
+`/tokenize` as well to be able to pair tokens with scores.
+Refer to the tests in  `tests/models/language/pooling/test_bge_m3.py` to see how
+to do that.
+
+You can obtain the colbert embeddings like this:
+
+```shell
+curl -s http://localhost:8000/pooling -H "Content-Type: application/json" -d '{
+     "model": "BAAI/bge-m3",
+     "task": "token_embed",
+     "input": ["What is BGE M3?", "Defination of BM25"]
+}'
+```
 
 ## Deprecated Features
 
@@ -317,4 +354,14 @@ We have split the `encode` task into two more specific token-wise tasks: `token_
 
 ### Remove softmax from PoolingParams
 
-We are going to remove `softmax` and `activation` from `PoolingParams`. Instead, use `use_activation`, since we allow `classify` and `token_classify` to use any activation function.
+We are going to remove `softmax` and `activation` from `PoolingParams` in v0.15. Instead, use `use_activation`, since we allow `classify` and `token_classify` to use any activation function.
+
+### as_reward_model
+
+!!! warning
+    We are going to remove `--convert reward` in v0.15, use `--convert embed` instead.
+
+Pooling models now default support all pooling, you can use it without any settings.
+
+- Extracting hidden states prefers using `token_embed` task.
+- Reward models prefers using `token_classify` task.

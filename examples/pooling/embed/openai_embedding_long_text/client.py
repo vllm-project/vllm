@@ -14,7 +14,7 @@ Prerequisites:
    # MEAN pooling (processes all chunks, recommended for complete coverage)
    vllm serve intfloat/multilingual-e5-large \
      --pooler-config \
-      '{"pooling_type": "MEAN", "normalize": true, ' \
+      '{"pooling_type": "MEAN", "use_activation": true, ' \
       '"enable_chunked_processing": true, "max_embed_len": 3072000}' \
      --served-model-name multilingual-e5-large \
      --trust-remote-code \
@@ -24,7 +24,7 @@ Prerequisites:
    # OR CLS pooling (native CLS within chunks, MEAN aggregation across chunks)
    vllm serve BAAI/bge-large-en-v1.5 \
      --pooler-config \
-      '{"pooling_type": "CLS", "normalize": true, ' \
+      '{"pooling_type": "CLS", "use_activation": true, ' \
       '"enable_chunked_processing": true, "max_embed_len": 1048576}' \
      --served-model-name bge-large-en-v1.5 \
      --trust-remote-code \

@@ -103,8 +103,10 @@ class UBatchWrapper:
         self.vllm_config = vllm_config
         self.compilation_config = vllm_config.compilation_config
         self.comm_stream = torch.cuda.Stream(device=device)
-        # Two ubatch threads plus the main thread
-        self.ready_barrier = threading.Barrier(3)
+        # Ubatch threads plus the main thread
+        self.ready_barrier = threading.Barrier(
+            self.vllm_config.parallel_config.num_ubatches + 1
+        )
 
         self.cudagraphs: dict[int, CUDAGraphMetaData] = {}
 
@@ -293,6 +295,7 @@ class UBatchWrapper:
         self,
         ubatch_slices,
         attn_metadata,
+        slot_mapping,
         input_ids,
         positions,
         inputs_embeds,
@@ -304,14 +307,18 @@ class UBatchWrapper:
     ) -> list[UbatchMetadata]:
         # Create one forward context per ubatch
         forward_contexts = []
+        # slot_mapping can be None, an empty dict (from create_forward_context
+        # converting None to {}), or a list of dicts (one per ubatch)
+        has_slot_mapping = slot_mapping and isinstance(slot_mapping, list)
         for i, ubatch_slice in enumerate(ubatch_slices):
             forward_contexts.append(
                 create_forward_context(
                     attn_metadata[i] if attn_metadata is not None else None,
                     self.vllm_config,
-                    dp_metadata=dp_metadata,
+                    dp_metadata=dp_metadata[i],
                     batch_descriptor=batch_descriptor,
                     cudagraph_runtime_mode=cudagraph_runtime_mode,
+                    slot_mapping=slot_mapping[i] if has_slot_mapping else None,
                 )
             )
 
@@ -404,6 +411,7 @@ class UBatchWrapper:
                 return self.cudagraph_wrapper(*args, **kwargs)
 
         attn_metadata = forward_context.attn_metadata
+        slot_mapping = forward_context.slot_mapping
         num_tokens = (
             ubatch_slices[0].token_slice.stop - ubatch_slices[0].token_slice.start
         ) * 2
@@ -417,18 +425,19 @@ class UBatchWrapper:
 
         # We shouldn't be here unless we are running with multiple DP ranks
         assert dp_metadata is not None
-        num_tokens_per_ubatch = (
-            ubatch_slices[0].token_slice.stop - ubatch_slices[0].token_slice.start
-        )
-        dp_size = self.vllm_config.parallel_config.data_parallel_size
-        ubatch_num_tokens_across_dp = torch.tensor(
-            [num_tokens_per_ubatch] * dp_size, device="cpu", dtype=torch.int32
-        )
-        ubatch_dp_metadata = DPMetadata.make(
-            self.vllm_config.parallel_config,
-            num_tokens_per_ubatch,
-            ubatch_num_tokens_across_dp,
-        )
+        ubatch_dp_metadata = []
+        for ubatch_slice in ubatch_slices:
+            dp_size = self.vllm_config.parallel_config.data_parallel_size
+            ubatch_num_tokens_across_dp = torch.tensor(
+                [ubatch_slice.num_tokens] * dp_size, device="cpu", dtype=torch.int32
+            )
+            ubatch_dp_metadata.append(
+                DPMetadata.make(
+                    self.vllm_config.parallel_config,
+                    ubatch_slice.num_tokens,
+                    ubatch_num_tokens_across_dp,
+                )
+            )
 
         if (
             num_tokens not in self.cudagraphs
@@ -437,6 +446,7 @@ class UBatchWrapper:
             ubatch_metadata = self._make_ubatch_metadata(
                 ubatch_slices=ubatch_slices,
                 attn_metadata=attn_metadata,
+                slot_mapping=slot_mapping,
                 input_ids=input_ids,
                 positions=positions,
                 intermediate_tensors=intermediate_tensors,
@@ -459,12 +469,13 @@ class UBatchWrapper:
             ubatch_metadata = self._make_ubatch_metadata(
                 ubatch_slices=ubatch_slices,
                 attn_metadata=attn_metadata,
+                slot_mapping=slot_mapping,
                 input_ids=input_ids,
                 positions=positions,
                 intermediate_tensors=intermediate_tensors,
                 inputs_embeds=inputs_embeds,
                 compute_stream=compute_stream,
-                dp_metadata=dp_metadata,
+                dp_metadata=ubatch_dp_metadata,
                 batch_descriptor=batch_descriptor,
                 cudagraph_runtime_mode=CUDAGraphMode.NONE,
             )

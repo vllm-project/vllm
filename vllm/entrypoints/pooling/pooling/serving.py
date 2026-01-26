@@ -14,12 +14,12 @@ from typing_extensions import assert_never
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.chat_utils import ChatTemplateContentFormatOption
 from vllm.entrypoints.logger import RequestLogger
-from vllm.entrypoints.openai.protocol import (
+from vllm.entrypoints.openai.engine.protocol import (
     ErrorResponse,
     UsageInfo,
 )
-from vllm.entrypoints.openai.serving_engine import OpenAIServing
-from vllm.entrypoints.openai.serving_models import OpenAIServingModels
+from vllm.entrypoints.openai.engine.serving import OpenAIServing
+from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.entrypoints.pooling.pooling.protocol import (
     IOProcessorRequest,
     IOProcessorResponse,
@@ -94,12 +94,6 @@ class OpenAIServingPooling(OpenAIServing):
         try:
             lora_request = self._maybe_get_adapters(request)
 
-            if self.model_config.skip_tokenizer_init:
-                tokenizer = None
-            else:
-                tokenizer = await self.engine_client.get_tokenizer()
-            renderer = self._get_renderer(tokenizer)
-
             if getattr(request, "dimensions", None) is not None:
                 return self.create_error_response(
                     "dimensions is currently not supported"
@@ -137,23 +131,19 @@ class OpenAIServingPooling(OpenAIServing):
                 )
                 if error_check_ret is not None:
                     return error_check_ret
-                (
-                    _,
-                    _,
-                    engine_prompts,
-                ) = await self._preprocess_chat(
+
+                _, engine_prompts = await self._preprocess_chat(
                     request,
-                    tokenizer,
+                    self.renderer,
                     request.messages,
                     chat_template=request.chat_template or self.chat_template,
                     chat_template_content_format=self.chat_template_content_format,
-                    # In pooling requests, we are not generating tokens,
-                    # so there is no need to append extra tokens to the input
-                    add_generation_prompt=False,
-                    continue_final_message=False,
+                    add_generation_prompt=request.add_generation_prompt,
+                    continue_final_message=request.continue_final_message,
                     add_special_tokens=request.add_special_tokens,
                 )
             elif isinstance(request, PoolingCompletionRequest):
+                renderer = self._get_completion_renderer()
                 engine_prompts = await renderer.render_prompt(
                     prompt_or_prompts=request.input,
                     config=self._build_render_config(request),
@@ -314,29 +304,38 @@ class OpenAIServingPooling(OpenAIServing):
                 usage=usage,
             )
 
-        def encode_bytes():
-            body, items, usage = encode_pooling_bytes(
+        def encode_bytes(bytes_only: bool) -> PoolingBytesResponse:
+            content, items, usage = encode_pooling_bytes(
                 pooling_outputs=final_res_batch,
                 embed_dtype=embed_dtype,
                 endianness=endianness,
             )
 
-            metadata = {
-                "id": request_id,
-                "created": created_time,
-                "model": model_name,
-                "data": items,
-                "usage": usage,
-            }
+            headers = (
+                None
+                if bytes_only
+                else {
+                    "metadata": json.dumps(
+                        {
+                            "id": request_id,
+                            "created": created_time,
+                            "model": model_name,
+                            "data": items,
+                            "usage": usage,
+                        }
+                    )
+                }
+            )
+
             return PoolingBytesResponse(
-                body=body,
-                metadata=json.dumps(metadata),
+                content=content,
+                headers=headers,
             )
 
         if encoding_format == "float" or encoding_format == "base64":
             return encode_float_base64()
-        elif encoding_format == "bytes":
-            return encode_bytes()
+        elif encoding_format == "bytes" or encoding_format == "bytes_only":
+            return encode_bytes(bytes_only=encoding_format == "bytes_only")
         else:
             assert_never(encoding_format)
 

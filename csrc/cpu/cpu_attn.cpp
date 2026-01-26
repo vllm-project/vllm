@@ -15,6 +15,7 @@
 
 #ifdef __aarch64__
   #include "cpu_attn_neon.hpp"
+  // NEON requires head_dim to be a multiple of 32
   #define NEON_DISPATCH(...)                                                   \
     case cpu_attention::ISA::NEON: {                                           \
       using attn_impl = cpu_attention::AttentionImpl<cpu_attention::ISA::NEON, \
@@ -36,7 +37,9 @@
     switch (HEAD_DIM) {                                         \
       CPU_ATTN_DISPATCH_CASE(32, __VA_ARGS__)                   \
       CPU_ATTN_DISPATCH_CASE(64, __VA_ARGS__)                   \
+      CPU_ATTN_DISPATCH_CASE(80, __VA_ARGS__)                   \
       CPU_ATTN_DISPATCH_CASE(96, __VA_ARGS__)                   \
+      CPU_ATTN_DISPATCH_CASE(112, __VA_ARGS__)                  \
       CPU_ATTN_DISPATCH_CASE(128, __VA_ARGS__)                  \
       CPU_ATTN_DISPATCH_CASE(160, __VA_ARGS__)                  \
       CPU_ATTN_DISPATCH_CASE(192, __VA_ARGS__)                  \
@@ -117,7 +120,6 @@ torch::Tensor get_scheduler_metadata(
   input.casual = casual;
   input.isa = isa;
   input.enable_kv_split = enable_kv_split;
-  TORCH_CHECK(casual, "Only supports casual mask for now.");
 
   VLLM_DISPATCH_FLOATING_TYPES(dtype, "get_scheduler_metadata", [&]() {
     CPU_ATTN_DISPATCH_CASE_HEADDIM(head_dim, [&] {

@@ -1,5 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import torch
+
 from vllm.config import VllmConfig
 from vllm.v1.worker.gpu_input_batch import InputBatch
 
@@ -33,6 +35,9 @@ class SuffixDecodingProposer:
         self,
         input_batch: InputBatch,
         sampled_token_ids: list[list[int]],
+        slot_mappings: dict[str, torch.Tensor]
+        | list[dict[str, torch.Tensor]]
+        | None = None,  # unused
     ) -> list[list[int]]:
         """
         Propose speculative tokens for each request in the input batch. Suffix Decoding
@@ -46,13 +51,7 @@ class SuffixDecodingProposer:
                 draft_token_ids.append([])
                 continue
 
-            # Skip requests that require sampling parameters that are not
-            # supported with speculative decoding.
             req_id = input_batch.req_ids[i]
-            if req_id in input_batch.spec_decode_unsupported_reqs:
-                draft_token_ids.append([])
-                continue
-
             num_tokens = input_batch.num_tokens_no_spec[i]
             if num_tokens >= self.max_model_len:
                 # Skip requests that have already reached the max model length.

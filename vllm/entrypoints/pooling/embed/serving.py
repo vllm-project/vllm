@@ -12,17 +12,16 @@ from typing_extensions import assert_never, override
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.chat_utils import ChatTemplateContentFormatOption
 from vllm.entrypoints.logger import RequestLogger
-from vllm.entrypoints.openai.protocol import (
+from vllm.entrypoints.openai.engine.protocol import (
     ErrorResponse,
     UsageInfo,
 )
-from vllm.entrypoints.openai.serving_engine import (
+from vllm.entrypoints.openai.engine.serving import (
     EmbeddingServeContext,
     OpenAIServing,
     ServeContext,
-    TextTokensPrompt,
 )
-from vllm.entrypoints.openai.serving_models import OpenAIServingModels
+from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.entrypoints.pooling.embed.protocol import (
     EmbeddingBytesResponse,
     EmbeddingChatRequest,
@@ -32,7 +31,7 @@ from vllm.entrypoints.pooling.embed.protocol import (
     EmbeddingResponseData,
 )
 from vllm.entrypoints.renderer import RenderConfig
-from vllm.inputs.data import TokensPrompt as EngineTokensPrompt
+from vllm.inputs.data import TokensPrompt
 from vllm.logger import init_logger
 from vllm.outputs import (
     EmbeddingRequestOutput,
@@ -79,25 +78,19 @@ class EmbeddingMixin(OpenAIServing):
         try:
             ctx.lora_request = self._maybe_get_adapters(ctx.request)
 
-            tokenizer = await self.engine_client.get_tokenizer()
-            renderer = self._get_renderer(tokenizer)
-
             if isinstance(ctx.request, EmbeddingChatRequest):
-                (
-                    _,
-                    _,
-                    ctx.engine_prompts,
-                ) = await self._preprocess_chat(
+                _, ctx.engine_prompts = await self._preprocess_chat(
                     ctx.request,
-                    tokenizer,
+                    self.renderer,
                     ctx.request.messages,
                     chat_template=ctx.request.chat_template or ctx.chat_template,
                     chat_template_content_format=ctx.chat_template_content_format,
                     add_generation_prompt=ctx.request.add_generation_prompt,
-                    continue_final_message=False,
+                    continue_final_message=ctx.request.continue_final_message,
                     add_special_tokens=ctx.request.add_special_tokens,
                 )
             else:
+                renderer = self._get_completion_renderer()
                 ctx.engine_prompts = await renderer.render_prompt(
                     prompt_or_prompts=ctx.request.input,
                     config=self._build_render_config(ctx.request),
@@ -163,29 +156,35 @@ class EmbeddingMixin(OpenAIServing):
                 usage=usage,
             )
 
-        def encode_bytes():
-            body, items, usage = encode_pooling_bytes(
+        def encode_bytes(bytes_only: bool) -> EmbeddingBytesResponse:
+            content, items, usage = encode_pooling_bytes(
                 pooling_outputs=final_res_batch_checked,
                 embed_dtype=embed_dtype,
                 endianness=endianness,
             )
 
-            metadata = {
-                "id": ctx.request_id,
-                "created": ctx.created_time,
-                "model": ctx.model_name,
-                "data": items,
-                "usage": usage,
-            }
-            return EmbeddingBytesResponse(
-                body=body,
-                metadata=json.dumps(metadata),
+            headers = (
+                None
+                if bytes_only
+                else {
+                    "metadata": json.dumps(
+                        {
+                            "id": ctx.request_id,
+                            "created": ctx.created_time,
+                            "model": ctx.model_name,
+                            "data": items,
+                            "usage": usage,
+                        }
+                    )
+                }
             )
+
+            return EmbeddingBytesResponse(content=content, headers=headers)
 
         if encoding_format == "float" or encoding_format == "base64":
             return encode_float_base64()
-        elif encoding_format == "bytes":
-            return encode_bytes()
+        elif encoding_format == "bytes" or encoding_format == "bytes_only":
+            return encode_bytes(bytes_only=encoding_format == "bytes_only")
         else:
             assert_never(encoding_format)
 
@@ -203,14 +202,13 @@ class EmbeddingMixin(OpenAIServing):
     async def _process_chunked_request(
         self,
         ctx: EmbeddingServeContext,
-        original_prompt: TextTokensPrompt,
+        token_ids: list[int],
         pooling_params,
         trace_headers,
         prompt_idx: int,
     ) -> list[AsyncGenerator[PoolingRequestOutput, None]]:
         """Process a single prompt using chunked processing."""
         generators: list[AsyncGenerator[PoolingRequestOutput, None]] = []
-        token_ids = original_prompt["prompt_token_ids"]
 
         # Split into chunks using max_position_embeddings
         max_pos_embeddings = self._get_max_position_embeddings()
@@ -222,18 +220,12 @@ class EmbeddingMixin(OpenAIServing):
             chunk_request_id = f"{ctx.request_id}-prompt-{prompt_idx}-chunk-{chunk_idx}"
 
             # Create engine prompt for this chunk
-            chunk_engine_prompt = EngineTokensPrompt(prompt_token_ids=chunk_tokens)
-
-            # Create chunk request prompt for logging
-            chunk_text = ""
-            chunk_request_prompt = TextTokensPrompt(
-                prompt=chunk_text, prompt_token_ids=chunk_tokens
-            )
+            chunk_engine_prompt = TokensPrompt(prompt_token_ids=chunk_tokens)
 
             # Log the chunk
             self._log_inputs(
                 chunk_request_id,
-                chunk_request_prompt,
+                chunk_engine_prompt,
                 params=pooling_params,
                 lora_request=ctx.lora_request,
             )
@@ -257,7 +249,7 @@ class EmbeddingMixin(OpenAIServing):
         request,
         input_ids: list[int],
         input_text: str,
-    ) -> TextTokensPrompt:
+    ) -> TokensPrompt:
         """Override to support chunked processing for embedding requests."""
         token_num = len(input_ids)
 
@@ -322,23 +314,15 @@ class EmbeddingMixin(OpenAIServing):
                         )
                     )
 
-            return TextTokensPrompt(prompt=input_text, prompt_token_ids=input_ids)
+            return TokensPrompt(prompt=input_text, prompt_token_ids=input_ids)
 
         # For other request types, use the parent's implementation
         return super()._validate_input(request, input_ids, input_text)
 
-    def _is_text_tokens_prompt(self, prompt) -> bool:
-        """Check if a prompt is a TextTokensPrompt (has prompt_token_ids)."""
-        return (
-            isinstance(prompt, dict)
-            and "prompt_token_ids" in prompt
-            and "prompt_embeds" not in prompt
-        )
-
     async def _create_single_prompt_generator(
         self,
         ctx: EmbeddingServeContext,
-        engine_prompt: EngineTokensPrompt,
+        engine_prompt: TokensPrompt,
         pooling_params: PoolingParams,
         trace_headers: Mapping[str, str] | None,
         prompt_index: int,
@@ -407,14 +391,16 @@ class EmbeddingMixin(OpenAIServing):
 
             for i, engine_prompt in enumerate(ctx.engine_prompts):
                 # Check if this specific prompt needs chunked processing
-                if self._is_text_tokens_prompt(engine_prompt):
-                    # Cast to TextTokensPrompt since we've verified
-                    # prompt_token_ids
-                    text_tokens_prompt = cast(TextTokensPrompt, engine_prompt)
-                    if len(text_tokens_prompt["prompt_token_ids"]) > max_pos_embeddings:
+                if "prompt_token_ids" in engine_prompt:
+                    prompt_token_ids = engine_prompt["prompt_token_ids"]
+                    if len(prompt_token_ids) > max_pos_embeddings:
                         # Use chunked processing for this prompt
                         chunk_generators = await self._process_chunked_request(
-                            ctx, text_tokens_prompt, pooling_params, trace_headers, i
+                            ctx,
+                            prompt_token_ids,
+                            pooling_params,
+                            trace_headers,
+                            i,
                         )
                         generators.extend(chunk_generators)
                         continue
@@ -572,14 +558,13 @@ class EmbeddingMixin(OpenAIServing):
 
                         # Get original prompt token IDs for this prompt
                         original_prompt = ctx.engine_prompts[prompt_idx]
-                        if not self._is_text_tokens_prompt(original_prompt):
+                        if "prompt_token_ids" not in original_prompt:
                             return self.create_error_response(
-                                f"Chunked prompt {prompt_idx} is not a TextTokensPrompt"
+                                f"Chunked prompt {prompt_idx} does not contain "
+                                "token IDs"
                             )
 
-                        original_token_ids = cast(TextTokensPrompt, original_prompt)[
-                            "prompt_token_ids"
-                        ]
+                        original_token_ids = original_prompt["prompt_token_ids"]
 
                         pooling_request_output = PoolingRequestOutput(
                             request_id=aggregator["request_id"],

@@ -45,6 +45,8 @@ from vllm.model_executor.layers.linear import (
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.mamba.mamba_mixer2 import MambaMixer2
 from vllm.model_executor.layers.mamba.mamba_utils import (
+    MambaStateCopyFunc,
+    MambaStateCopyFuncCalculator,
     MambaStateDtypeCalculator,
     MambaStateShapeCalculator,
 )
@@ -83,6 +85,7 @@ class NemotronHMLP(nn.Module):
     def __init__(
         self,
         config: NemotronHConfig,
+        hidden_size: int,
         intermediate_size: int,
         quant_config: QuantizationConfig | None = None,
         bias: bool = False,
@@ -93,7 +96,7 @@ class NemotronHMLP(nn.Module):
         super().__init__()
 
         self.up_proj = ColumnParallelLinear(
-            input_size=config.hidden_size,
+            input_size=hidden_size,
             output_size=intermediate_size,
             bias=bias,
             quant_config=quant_config,
@@ -102,7 +105,7 @@ class NemotronHMLP(nn.Module):
         )
         self.down_proj = RowParallelLinear(
             input_size=intermediate_size,
-            output_size=config.hidden_size,
+            output_size=hidden_size,
             bias=bias,
             quant_config=quant_config,
             reduce_results=reduce_results,
@@ -135,6 +138,10 @@ class NemotronHMoE(nn.Module):
         self.ep_size = self.ep_group.size()
         self.n_routed_experts: int = config.n_routed_experts
         self.n_shared_experts: int = config.n_shared_experts
+        self.use_latent_moe: bool = getattr(config, "moe_latent_size", None) is not None
+        self.moe_hidden_size: int = (
+            config.moe_latent_size if self.use_latent_moe else config.hidden_size
+        )
 
         self.is_sequence_parallel = parallel_config.use_sequence_parallel_moe
 
@@ -172,6 +179,7 @@ class NemotronHMoE(nn.Module):
 
             self.shared_experts = NemotronHMLP(
                 config=config,
+                hidden_size=config.hidden_size,
                 intermediate_size=intermediate_size,
                 quant_config=quant_config,
                 reduce_results=False,
@@ -180,10 +188,12 @@ class NemotronHMoE(nn.Module):
             )
 
         self.experts = SharedFusedMoE(
-            shared_experts=self.shared_experts,
+            # TODO: make it possible for shared experts to have
+            # different input in SharedFusedMoE
+            shared_experts=self.shared_experts if not self.use_latent_moe else None,
             num_experts=config.n_routed_experts,
             top_k=config.num_experts_per_tok,
-            hidden_size=config.hidden_size,
+            hidden_size=self.moe_hidden_size,
             intermediate_size=config.moe_intermediate_size,
             reduce_results=False,
             renormalize=config.norm_topk_prob,
@@ -201,6 +211,28 @@ class NemotronHMoE(nn.Module):
             is_sequence_parallel=self.is_sequence_parallel,
         )
 
+        if self.use_latent_moe:
+            self.fc1_latent_proj = ReplicatedLinear(
+                input_size=config.hidden_size,
+                output_size=self.moe_hidden_size,
+                bias=config.mlp_bias,
+                quant_config=quant_config,
+                disable_tp=self.is_sequence_parallel,
+                prefix=f"{prefix}.fc1_latent_proj",
+            )
+            self.fc2_latent_proj = ReplicatedLinear(
+                input_size=self.moe_hidden_size,
+                output_size=config.hidden_size,
+                bias=config.mlp_bias,
+                quant_config=quant_config,
+                disable_tp=self.is_sequence_parallel,
+                prefix=f"{prefix}.fc2_latent_proj",
+            )
+
+        else:
+            self.fc1_latent_proj = None
+            self.fc2_latent_proj = None
+
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         num_tokens, hidden_dim = hidden_states.shape
         hidden_states = hidden_states.view(-1, hidden_dim)
@@ -210,12 +242,20 @@ class NemotronHMoE(nn.Module):
 
         # router_logits: (num_tokens, n_experts)
         router_logits, _ = self.gate(hidden_states.to(dtype=torch.float32))
+        shared_output = None
+        if self.use_latent_moe:
+            if self.shared_experts is not None:
+                shared_output = self.shared_experts(hidden_states)
+            hidden_states, _ = self.fc1_latent_proj(hidden_states)
 
         fused_moe_out = self.experts(
             hidden_states=hidden_states, router_logits=router_logits
         )
 
-        shared_output, final_hidden_states = fused_moe_out
+        if self.use_latent_moe:
+            _, final_hidden_states = fused_moe_out
+        else:
+            shared_output, final_hidden_states = fused_moe_out
 
         # Fix FP16 overflow
         # See DeepseekV2DecoderLayer for more details.
@@ -224,6 +264,13 @@ class NemotronHMoE(nn.Module):
         elif self.shared_experts is not None:
             assert shared_output is not None
             shared_output *= 1.0 / self.routed_scaling_factor
+
+        # TODO: currently latent up_proj is done before all-reduce for simplicity.
+        #  if and when shared experts will be part of SharedFusedMoE,
+        #  we should do the up_proj after all-reduce,
+        #  to have the all-reduce in the smaller latent dimension.
+        if self.use_latent_moe:
+            final_hidden_states, _ = self.fc2_latent_proj(final_hidden_states)
 
         if self.shared_experts is not None:
             assert shared_output is not None
@@ -268,6 +315,7 @@ class NemotronHMLPDecoderLayer(nn.Module):
 
         self.mixer = NemotronHMLP(
             config,
+            hidden_size=config.hidden_size,
             intermediate_size=intermediate_size,
             quant_config=quant_config,
             bias=config.mlp_bias,
@@ -437,6 +485,7 @@ class NemotronHAttention(nn.Module):
             self.scaling,
             num_kv_heads=self.num_kv_heads,
             cache_config=cache_config,
+            quant_config=quant_config,
             prefix=f"{prefix}.attn",
         )
 
@@ -552,7 +601,7 @@ class NemotronHModel(nn.Module):
 
     def forward(
         self,
-        input_ids: torch.Tensor,
+        input_ids: torch.Tensor | None,
         positions: torch.Tensor,
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,
@@ -582,6 +631,25 @@ class NemotronHModel(nn.Module):
         hidden_states, _ = self.norm_f(hidden_states, residual)
         return hidden_states
 
+    def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:
+        if self.has_moe:
+            # (param_name, weight_name, expert_id, shard_id)
+            expert_params_mapping = FusedMoE.make_expert_params_mapping(
+                # - FusedMoe.w1 (aka gate_proj) should be up_proj since that's
+                #   what the activation is applied to
+                # - FusedMoe.w3 (aka up_proj) should be ignored since we're
+                #   using non-gated MoE
+                self,
+                ckpt_gate_proj_name="up_proj",
+                ckpt_down_proj_name="down_proj",
+                ckpt_up_proj_name="",
+                num_experts=self.config.n_routed_experts,
+                num_redundant_experts=getattr(self, "num_redundant_experts", 0),
+            )
+            return expert_params_mapping
+
+        return []
+
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         stacked_params_mapping = [
             # (param_name, shard_name, shard_id)
@@ -590,26 +658,12 @@ class NemotronHModel(nn.Module):
             ("qkv_proj", "v_proj", "v"),
         ]
 
-        if self.has_moe:
-            # (param_name, weight_name, expert_id, shard_id)
-            expert_params_mapping = FusedMoE.make_expert_params_mapping(
-                # - FusedMoe.w1 (aka gate_proj) should be up_proj since that's
-                #   what the activation is applied to
-                # - FusedMoe.w3 (aka up_proj) should be ignored since we're
-                #   using non-gated MoE
-                ckpt_gate_proj_name="up_proj",
-                ckpt_down_proj_name="down_proj",
-                ckpt_up_proj_name="",
-                num_experts=self.config.n_routed_experts,
-                num_redundant_experts=getattr(self, "num_redundant_experts", 0),
-            )
-        else:
-            expert_params_mapping = []
+        expert_params_mapping = self.get_expert_mapping()
 
         params_dict = dict(self.named_parameters())
         loaded_params: set[str] = set()
         for name, loaded_weight in weights:
-            if "scale" in name:
+            if "scale" in name or "zero_point" in name:
                 # Remapping the name of FP8 kv-scale.
                 name = maybe_remap_kv_scale_name(name, params_dict)
                 if name is None:
@@ -695,6 +749,9 @@ class NemotronHForCausalLM(
     MixtureOfExperts,
     SupportsMambaPrefixCaching,
 ):
+    # Relevant only if self.has_moe is True
+    is_non_gated_moe: bool = True
+
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_prefix={"backbone": "model"},
         orig_to_new_substr={"A_log": "A", "embeddings": "embed_tokens"},
@@ -753,6 +810,10 @@ class NemotronHForCausalLM(
             state_size=hf_config.ssm_state_size,
             conv_kernel=hf_config.conv_kernel,
         )
+
+    @classmethod
+    def get_mamba_state_copy_func(cls) -> tuple[MambaStateCopyFunc, MambaStateCopyFunc]:
+        return MambaStateCopyFuncCalculator.mamba2_state_copy_func()
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         config = vllm_config.model_config.hf_config
@@ -826,7 +887,7 @@ class NemotronHForCausalLM(
 
     def forward(
         self,
-        input_ids: torch.Tensor,
+        input_ids: torch.Tensor | None,
         positions: torch.Tensor,
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,
@@ -846,5 +907,5 @@ class NemotronHForCausalLM(
         return logits
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        loader = AutoWeightsLoader(self)
+        loader = AutoWeightsLoader(self, skip_prefixes=["mtp"])
         return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)

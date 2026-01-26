@@ -7,10 +7,11 @@ from collections.abc import Iterable, Iterator
 from torch import fx
 from torch._higher_order_ops.auto_functionalize import auto_functionalized
 from torch._ops import OpOverload, OpOverloadPacket
+from torch.fx.node import Target
 
 
-def is_func(node: fx.Node, target) -> bool:
-    return node.op == "call_function" and node.target == target
+def is_func(node: fx.Node, target: Target) -> bool:
+    return bool(node.op == "call_function" and node.target == target)
 
 
 def is_auto_func(node: fx.Node, op: OpOverload) -> bool:

@@ -17,6 +17,7 @@ from types import MethodType
 from typing import Any, Literal, cast
 
 import vllm.envs as envs
+from vllm.logging_utils import ColoredFormatter, NewLineFormatter
 
 _FORMAT = (
     f"{envs.VLLM_LOGGING_PREFIX}%(levelname)s %(asctime)s "
@@ -224,10 +225,27 @@ def suppress_logging(level: int = logging.INFO) -> Generator[None, Any, None]:
     logging.disable(current_level)
 
 
+def current_formatter_type(lgr: Logger) -> Literal["color", "newline", None]:
+    while lgr is not None:
+        if lgr.handlers and len(lgr.handlers) == 1 and lgr.handlers[0].name == "vllm":
+            formatter = lgr.handlers[0].formatter
+            if isinstance(formatter, ColoredFormatter):
+                return "color"
+            if isinstance(formatter, NewLineFormatter):
+                return "newline"
+        lgr = lgr.parent
+    return None
+
+
 # The root logger is initialized when the module is imported.
 # This is thread-safe as the module is only imported once,
 # guaranteed by the Python GIL.
 _configure_vllm_root_logger()
+
+# Transformers uses httpx to access the Hugging Face Hub. httpx is quite verbose,
+# so we set its logging level to WARNING when vLLM's logging level is INFO.
+if envs.VLLM_LOGGING_LEVEL == "INFO":
+    logging.getLogger("httpx").setLevel(logging.WARNING)
 
 logger = init_logger(__name__)
 

@@ -7,7 +7,6 @@ from prometheus_client import Counter, Gauge, Histogram
 
 from vllm.config import KVTransferConfig, VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.factory import KVConnectorFactory
-from vllm.distributed.kv_transfer.kv_transfer_state import has_kv_transfer_group
 from vllm.logger import init_logger
 
 PromMetric: TypeAlias = Gauge | Counter | Histogram
@@ -53,8 +52,6 @@ class KVConnectorStats:
 
 class KVConnectorLogging:
     def __init__(self, kv_transfer_config: KVTransferConfig | None):
-        # This should be called on frontend process.
-        assert not has_kv_transfer_group()
         # Instantiate the connector's stats class.
         if kv_transfer_config and kv_transfer_config.kv_connector:
             self.connector_cls = KVConnectorFactory.get_connector_class(

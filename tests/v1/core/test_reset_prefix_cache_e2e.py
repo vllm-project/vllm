@@ -11,7 +11,9 @@ PROMPTS = [
 ]
 
 
-def test_reset_prefix_cache_e2e():
+def test_reset_prefix_cache_e2e(monkeypatch):
+    # "spawn" is required for test to be deterministic
+    monkeypatch.setenv("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
     engine_args = EngineArgs(
         model="Qwen/Qwen3-0.6B",
         gpu_memory_utilization=0.2,
@@ -19,6 +21,7 @@ def test_reset_prefix_cache_e2e():
         max_num_batched_tokens=32,
         max_model_len=2048,
         compilation_config={"mode": 0},
+        dtype="float16",
     )
     engine = LLMEngine.from_engine_args(engine_args)
     sampling_params = SamplingParams(

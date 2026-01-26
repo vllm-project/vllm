@@ -3,18 +3,19 @@
 import asyncio
 import time
 from collections.abc import AsyncGenerator, Mapping
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
 from fastapi import Request
 
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.logger import RequestLogger
-from vllm.entrypoints.openai.protocol import (
+from vllm.entrypoints.openai.engine.protocol import (
     ErrorResponse,
     UsageInfo,
 )
-from vllm.entrypoints.openai.serving_engine import OpenAIServing
-from vllm.entrypoints.openai.serving_models import OpenAIServingModels
+from vllm.entrypoints.openai.engine.serving import OpenAIServing
+from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.entrypoints.pooling.score.protocol import (
     RerankDocument,
     RerankRequest,
@@ -25,7 +26,7 @@ from vllm.entrypoints.pooling.score.protocol import (
     ScoreResponse,
     ScoreResponseData,
 )
-from vllm.entrypoints.score_utils import (
+from vllm.entrypoints.pooling.score.utils import (
     ScoreContentPartParam,
     ScoreMultiModalParam,
     _cosine_similarity,
@@ -38,7 +39,8 @@ from vllm.inputs.data import TokensPrompt
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.outputs import PoolingRequestOutput, ScoringRequestOutput
-from vllm.tokenizers import MistralTokenizer, TokenizerLike
+from vllm.tokenizers import TokenizerLike
+from vllm.tokenizers.mistral import MistralTokenizer
 from vllm.utils.async_utils import make_async, merge_async_iterators
 
 logger = init_logger(__name__)
@@ -51,6 +53,7 @@ class ServingScores(OpenAIServing):
         models: OpenAIServingModels,
         *,
         request_logger: RequestLogger | None,
+        score_template: str | None = None,
         log_error_stack: bool = False,
     ) -> None:
         super().__init__(
@@ -59,19 +62,22 @@ class ServingScores(OpenAIServing):
             request_logger=request_logger,
             log_error_stack=log_error_stack,
         )
+        self.score_template = score_template
+
+        self._tokenizer_executor = ThreadPoolExecutor(max_workers=1)
 
     async def _embedding_score(
         self,
         tokenizer: TokenizerLike,
-        texts_1: list[str],
-        texts_2: list[str],
+        data_1: list[str],
+        data_2: list[str],
         request: RerankRequest | ScoreRequest,
         request_id: str,
         tokenization_kwargs: dict[str, Any] | None = None,
         lora_request: LoRARequest | None | None = None,
         trace_headers: Mapping[str, str] | None = None,
     ) -> list[PoolingRequestOutput] | ErrorResponse:
-        input_texts = texts_1 + texts_2
+        input_texts = data_1 + data_2
 
         engine_prompts: list[TokensPrompt] = []
         tokenize_async = make_async(
@@ -132,22 +138,22 @@ class ServingScores(OpenAIServing):
         async for i, res in result_generator:
             embeddings[i] = res
 
-        emb_texts_1: list[PoolingRequestOutput] = []
-        emb_texts_2: list[PoolingRequestOutput] = []
+        emb_data_1: list[PoolingRequestOutput] = []
+        emb_data_2: list[PoolingRequestOutput] = []
 
-        for i in range(0, len(texts_1)):
+        for i in range(0, len(data_1)):
             assert (emb := embeddings[i]) is not None
-            emb_texts_1.append(emb)
+            emb_data_1.append(emb)
 
-        for i in range(len(texts_1), len(embeddings)):
+        for i in range(len(data_1), len(embeddings)):
             assert (emb := embeddings[i]) is not None
-            emb_texts_2.append(emb)
+            emb_data_2.append(emb)
 
-        if len(emb_texts_1) == 1:
-            emb_texts_1 = emb_texts_1 * len(emb_texts_2)
+        if len(emb_data_1) == 1:
+            emb_data_1 = emb_data_1 * len(emb_data_2)
 
         final_res_batch = _cosine_similarity(
-            tokenizer=tokenizer, embed_1=emb_texts_1, embed_2=emb_texts_2
+            tokenizer=tokenizer, embed_1=emb_data_1, embed_2=emb_data_2
         )
 
         return final_res_batch
@@ -168,6 +174,7 @@ class ServingScores(OpenAIServing):
             data_2=data_2,
             tokenizer=tokenizer,
             tokenization_kwargs=tokenization_kwargs,
+            score_template=self.score_template,
         )
         self._validate_input(request, engine_prompt["prompt_token_ids"], full_prompt)
         if request.mm_processor_kwargs is not None:
@@ -279,8 +286,7 @@ class ServingScores(OpenAIServing):
         raw_request: Request | None = None,
     ) -> list[PoolingRequestOutput] | ErrorResponse:
         lora_request = self._maybe_get_adapters(request)
-
-        tokenizer = await self.engine_client.get_tokenizer()
+        tokenizer = self.renderer.get_tokenizer()
 
         truncate_prompt_tokens = getattr(request, "truncate_prompt_tokens", None)
 
@@ -329,8 +335,8 @@ class ServingScores(OpenAIServing):
         else:
             return await self._embedding_score(
                 tokenizer=tokenizer,
-                texts_1=data_1,  # type: ignore[arg-type]
-                texts_2=data_2,  # type: ignore[arg-type]
+                data_1=data_1,  # type: ignore[arg-type]
+                data_2=data_2,  # type: ignore[arg-type]
                 request=request,
                 request_id=request_id,
                 tokenization_kwargs=tokenization_kwargs,
@@ -357,8 +363,8 @@ class ServingScores(OpenAIServing):
 
         try:
             final_res_batch = await self._run_scoring(
-                request.text_1,
-                request.text_2,
+                request.data_1,
+                request.data_2,
                 request,
                 request_id,
                 raw_request,
@@ -501,5 +507,7 @@ class ServingScores(OpenAIServing):
             id=request_id,
             model=model_name,
             results=results,
-            usage=RerankUsage(total_tokens=num_prompt_tokens),
+            usage=RerankUsage(
+                total_tokens=num_prompt_tokens, prompt_tokens=num_prompt_tokens
+            ),
         )

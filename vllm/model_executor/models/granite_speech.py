@@ -52,12 +52,12 @@ from vllm.multimodal.parse import (
     MultiModalDataParser,
 )
 from vllm.multimodal.processing import (
+    BaseDummyInputsBuilder,
     BaseMultiModalProcessor,
     BaseProcessingInfo,
     PromptReplacement,
     PromptUpdate,
 )
-from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from vllm.sequence import IntermediateTensors
 from vllm.tokenizers import cached_tokenizer_from_config
 from vllm.transformers_utils.processor import cached_processor_from_config
@@ -348,7 +348,9 @@ class GraniteSpeechConformerAttention(nn.Module):
 
         if self.context_size <= 0 or self.context_size > self.max_pos_emb:
             raise ValueError(
-                "Context size is either less than 0 or exceeds the max_pos_emb"
+                f"Context size should be > 0 and "
+                f"<= max_pos_emb ({self.max_pos_emb}), "
+                f"got {self.context_size}."
             )
 
     def forward(
@@ -564,7 +566,6 @@ class GraniteSpeechForConditionalGeneration(
     SupportsLoRA,
     SupportsTranscription,
 ):
-    merge_by_field_config = True
     supported_languages = ISO639_1_SUPPORTED_LANGS
 
     packed_modules_mapping = {
@@ -596,27 +597,29 @@ class GraniteSpeechForConditionalGeneration(
         self.quant_config = quant_config
         self.cache_config = cache_config
 
-        # The language model is typically a Granite LLM
-        self.language_model = init_vllm_registered_model(
-            vllm_config=vllm_config,
-            hf_config=config.text_config,
-            prefix=maybe_prefix(prefix, "language_model"),
-        )
+        with self._mark_language_model(vllm_config):
+            # The language model is typically a Granite LLM
+            self.language_model = init_vllm_registered_model(
+                vllm_config=vllm_config,
+                hf_config=config.text_config,
+                prefix=maybe_prefix(prefix, "language_model"),
+            )
 
-        # Conformer encoder
-        self.encoder = GraniteSpeechCTCEncoder(
-            config=config.encoder_config,
-            quant_config=quant_config,
-            prefix=f"{prefix}.encoder",
-        )
+        with self._mark_tower_model(vllm_config, "audio"):
+            # Conformer encoder
+            self.encoder = GraniteSpeechCTCEncoder(
+                config=config.encoder_config,
+                quant_config=quant_config,
+                prefix=f"{prefix}.encoder",
+            )
 
-        # Blip2 QFormer
-        self.projector = GraniteSpeechEncoderProjector(
-            config=config,
-            quant_config=quant_config,
-            cache_config=cache_config,
-            prefix=f"{prefix}.projector",
-        )
+            # Blip2 QFormer
+            self.projector = GraniteSpeechEncoderProjector(
+                config=config,
+                quant_config=quant_config,
+                cache_config=cache_config,
+                prefix=f"{prefix}.projector",
+            )
 
         self.make_empty_intermediate_tensors = (
             self.language_model.make_empty_intermediate_tensors
@@ -671,7 +674,13 @@ class GraniteSpeechForConditionalGeneration(
 
         else:
             # Otherwise we have a list of tensors, which are almost certainly
-            # differing in their respective numbers of audio features;
+            # differing in their respective numbers of audio features; when
+            # passed as a batch, we expect a list of 2D var len input features
+            # so unsqueeze them.
+            input_features = [
+                feat.unsqueeze(dim=0) for feat in input_features if feat.ndim == 2
+            ]
+
             # stack them into a 3D tensor of size [bsz, most_num_features, 160].
             input_features = self._pad_and_stack_input_features(
                 input_features,
@@ -723,13 +732,12 @@ class GraniteSpeechForConditionalGeneration(
 
         Args:
             input_features: list[torch.Tensor]
-                Input features to be coerced into a tensor.
+                3D Input features to be coerced into a tensor.
         Returns:
             torch.Tensor: Tensor of shape [bsz, num_features, 160], where
             num_features is the max number of features of any entry in the
             batch.
         """
-        # Input features are of shape [bsz, num_features, 160]
         feat_lens = [feats.shape[1] for feats in input_features]
         padding = [max(feat_lens) - length for length in feat_lens]
         # TODO (Alex) - Validate that it's okay to zero pad like this;
@@ -763,9 +771,6 @@ class GraniteSpeechForConditionalGeneration(
         masked_embeds = projected_embeds[audio_input["input_features_mask"]]
         # Split variable length features into a tuple
         return torch.split(masked_embeds, audio_input["audio_embed_sizes"])
-
-    def get_language_model(self) -> torch.nn.Module:
-        return self.language_model
 
     def embed_multimodal(
         self,
@@ -801,7 +806,7 @@ class GraniteSpeechForConditionalGeneration(
 
     def forward(
         self,
-        input_ids: torch.Tensor,
+        input_ids: torch.Tensor | None,
         positions: torch.Tensor,
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,

@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+
 import numpy as np
 import torch
 import torch.distributed as dist
@@ -9,11 +10,8 @@ from vllm.config import ParallelConfig
 from vllm.distributed.parallel_state import get_dp_group
 from vllm.logger import init_logger
 from vllm.v1.worker.ubatch_utils import (
-    UBatchSlice,
-    UBatchSlices,
     check_ubatch_thresholds,
-    create_ubatch_slices,
-    is_second_ubatch_empty,
+    is_last_ubatch_empty,
 )
 
 logger = init_logger(__name__)
@@ -42,21 +40,23 @@ def _run_ar(
     should_dp_pad: bool,
     orig_num_tokens_per_ubatch: int,
     padded_num_tokens_per_ubatch: int,
+    cudagraph_mode: int,
     parallel_config: ParallelConfig,
 ) -> torch.Tensor:
     dp_size = parallel_config.data_parallel_size
     dp_rank = parallel_config.data_parallel_rank
     device, group = _get_device_and_group(parallel_config)
-    tensor = torch.zeros(4, dp_size, device=device, dtype=torch.int32)
+    tensor = torch.zeros(5, dp_size, device=device, dtype=torch.int32)
     tensor[0][dp_rank] = orig_num_tokens_per_ubatch
     tensor[1][dp_rank] = padded_num_tokens_per_ubatch
     tensor[2][dp_rank] = 1 if should_ubatch else 0
     tensor[3][dp_rank] = 1 if should_dp_pad else 0
+    tensor[4][dp_rank] = cudagraph_mode
     dist.all_reduce(tensor, group=group)
     return tensor
 
 
-def _post_process_ubatch(tensor: torch.Tensor) -> bool:
+def _post_process_ubatch(tensor: torch.Tensor, num_ubatches: int) -> bool:
     orig_num_tokens_tensor = tensor[0, :]
     padded_num_tokens_tensor = tensor[1, :]
 
@@ -68,7 +68,7 @@ def _post_process_ubatch(tensor: torch.Tensor) -> bool:
     # there are no "empty" second ubatches
     orig_min_num_tokens = int(orig_num_tokens_tensor.min().item())
     padded_max_num_tokens = int(padded_num_tokens_tensor.max().item())
-    if is_second_ubatch_empty(orig_min_num_tokens, padded_max_num_tokens):
+    if is_last_ubatch_empty(orig_min_num_tokens, padded_max_num_tokens, num_ubatches):
         logger.debug(
             "Aborting ubatching %s %s", orig_min_num_tokens, padded_max_num_tokens
         )
@@ -91,18 +91,13 @@ def _post_process_dp_padding(tensor: torch.Tensor, should_dp_pad: bool) -> torch
         return num_tokens_across_dp.cpu()
 
 
-# This just pads the second ubatch slice out to the total number of tokens
-# (num_tokens + padding) since we do `create_ubatch_slices` before applying DP padding.
-def _pad_out_ubatch_slice(
-    ubatch_slices: UBatchSlices, num_total_tokens: int
-) -> UBatchSlices:
-    padded_second_token_slice = slice(
-        ubatch_slices[1].token_slice.start, num_total_tokens
-    )
-    ubatch_slices[1] = UBatchSlice(
-        ubatch_slices[1].request_slice, padded_second_token_slice
-    )
-    return ubatch_slices
+def _post_process_cudagraph_mode(tensor: torch.Tensor) -> int:
+    """
+    Synchronize cudagraph_mode across DP ranks by taking the minimum.
+    If any rank has NONE (0), all ranks use NONE.
+    This ensures all ranks send consistent values (all padded or all unpadded).
+    """
+    return int(tensor[4, :].min().item())
 
 
 def _synchronize_dp_ranks(
@@ -110,8 +105,9 @@ def _synchronize_dp_ranks(
     num_tokens_padded: int,
     should_attempt_ubatching: bool,
     should_attempt_dp_padding: bool,
+    cudagraph_mode: int,
     parallel_config: ParallelConfig,
-) -> tuple[bool, torch.Tensor | None]:
+) -> tuple[bool, torch.Tensor | None, int]:
     """
     1. Decides if each DP rank is going to microbatch. Either all ranks
     run with microbatching or none of them do.
@@ -120,10 +116,13 @@ def _synchronize_dp_ranks(
     When running microbatched or if should_attempt_dp_padding is True, all
     ranks will be padded out so that the run with the same number of tokens
 
+    3. Synchronizes cudagraph_mode across ranks by taking the minimum.
+
     Returns: tuple[
         should_ubatch: Are all DP ranks going to microbatch
         num_tokens_after_padding: A tensor containing the total number of
         tokens per-microbatch for each DP rank including any DP padding.
+        synced_cudagraph_mode: The synchronized cudagraph mode (min across ranks)
     ]
 
     """
@@ -137,6 +136,7 @@ def _synchronize_dp_ranks(
         should_dp_pad=should_attempt_dp_padding,
         orig_num_tokens_per_ubatch=num_tokens_unpadded,
         padded_num_tokens_per_ubatch=num_tokens_padded,
+        cudagraph_mode=cudagraph_mode,
         parallel_config=parallel_config,
     )
 
@@ -146,7 +146,7 @@ def _synchronize_dp_ranks(
     assert should_attempt_dp_padding == should_dp_pad
 
     # Check conditions for microbatching
-    should_ubatch = _post_process_ubatch(tensor)
+    should_ubatch = _post_process_ubatch(tensor, parallel_config.num_ubatches)
 
     if should_ubatch and not should_dp_pad:
         logger.debug_once(
@@ -164,7 +164,10 @@ def _synchronize_dp_ranks(
         should_dp_pad,
     )
 
-    return should_ubatch, num_tokens_after_padding
+    # Synchronize cudagraph_mode across ranks (take min)
+    synced_cudagraph_mode = _post_process_cudagraph_mode(tensor)
+
+    return should_ubatch, num_tokens_after_padding, synced_cudagraph_mode
 
 
 def coordinate_batch_across_dp(
@@ -175,7 +178,8 @@ def coordinate_batch_across_dp(
     num_tokens_padded: int | None = None,
     uniform_decode: bool | None = None,
     num_scheduled_tokens_per_request: np.ndarray | None = None,
-) -> tuple[UBatchSlices | None, torch.Tensor | None]:
+    cudagraph_mode: int = 0,
+) -> tuple[bool, torch.Tensor | None, int]:
     """
     Coordinates amongst all DP ranks to determine if and how the full batch
     should be split into microbatches.
@@ -191,6 +195,7 @@ def coordinate_batch_across_dp(
             only contains single token decodes
         num_scheduled_tokens_per_request: Only used if allow_microbatching is True. The
             number of tokens per request.
+        cudagraph_mode: The cudagraph mode for this rank (0=NONE, 1=PIECEWISE, 2=FULL)
 
     Returns: tuple[
         ubatch_slices: if this is set then all DP ranks have agreed to
@@ -199,12 +204,13 @@ def coordinate_batch_across_dp(
         tokens per-microbatch for each DP rank including padding. Will be
         padded up to the max value across all DP ranks when allow_dp_padding
         is True.
+        synced_cudagraph_mode: The synchronized cudagraph mode (min across ranks)
     ]
 
     """
     if parallel_config.data_parallel_size == 1:
         # Early exit.
-        return None, None
+        return False, None, cudagraph_mode
 
     # If the caller has explicitly enabled microbatching.
     should_attempt_ubatching = False
@@ -220,31 +226,15 @@ def coordinate_batch_across_dp(
     if num_tokens_padded is None:
         num_tokens_padded = num_tokens_unpadded
 
-    (should_ubatch, num_tokens_after_padding) = _synchronize_dp_ranks(
-        num_tokens_unpadded,
-        num_tokens_padded,
-        should_attempt_ubatching,
-        allow_dp_padding,
-        parallel_config,
+    (should_ubatch, num_tokens_after_padding, synced_cudagraph_mode) = (
+        _synchronize_dp_ranks(
+            num_tokens_unpadded,
+            num_tokens_padded,
+            should_attempt_ubatching,
+            allow_dp_padding,
+            cudagraph_mode,
+            parallel_config,
+        )
     )
 
-    # Don't microbatch unless every other DP worker is also microbatching
-    if not should_ubatch:
-        return (None, num_tokens_after_padding)
-
-    # This doesn't actually pad the ubatch slices. It just initializes the
-    # split point to the padded value so that padding can be applied
-    # to the second ubatch in pad_out_ubatch_slice after attention
-    # metadata creation
-    assert num_tokens_after_padding is not None
-    num_tokens_padded = int(num_tokens_after_padding[0].item())
-    token_split_point = int(num_tokens_padded) // 2
-
-    assert num_scheduled_tokens_per_request is not None
-    ubatch_slices = create_ubatch_slices(
-        num_scheduled_tokens_per_request, token_split_point
-    )
-    ubatch_slices = _pad_out_ubatch_slice(ubatch_slices, num_tokens_padded)
-    assert sum(s.num_tokens for s in ubatch_slices) == num_tokens_padded
-
-    return (ubatch_slices, num_tokens_after_padding)
+    return (should_ubatch, num_tokens_after_padding, synced_cudagraph_mode)

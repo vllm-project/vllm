@@ -8,7 +8,7 @@ import ray
 import torch
 from transformers import AutoConfig
 
-from vllm.model_executor.layers.fused_moe.fused_moe import *
+from vllm.model_executor.layers.fused_moe import fused_topk
 from vllm.model_executor.layers.fused_moe.moe_permute_unpermute import (
     _moe_permute,
     _moe_unpermute_and_reduce,
@@ -18,6 +18,7 @@ from vllm.model_executor.layers.fused_moe.moe_permute_unpermute import (
 from vllm.model_executor.layers.fused_moe.utils import _fp8_quantize
 from vllm.platforms import current_platform
 from vllm.utils.argparse_utils import FlexibleArgumentParser
+from vllm.utils.torch_utils import set_random_seed
 
 FP8_DTYPE = current_platform.fp8_dtype()
 
@@ -85,9 +86,7 @@ def benchmark_permute(
                 sorted_token_ids,
                 expert_ids,
                 inv_perm,
-            ) = _moe_permute(
-                qhidden_states, None, topk_ids, num_experts, None, align_block_size
-            )
+            ) = _moe_permute(qhidden_states, None, topk_ids, num_experts, None, 16)
 
     # JIT compilation & warmup
     run()
@@ -181,7 +180,7 @@ def benchmark_unpermute(
                 expert_ids,
                 inv_perm,
             ) = _moe_permute(
-                qhidden_states, None, topk_ids, num_experts, None, align_block_size
+                qhidden_states, None, topk_ids, num_experts, None, block_m=16
             )
             # convert to fp16/bf16 as gemm output
             return (
@@ -261,7 +260,7 @@ def benchmark_unpermute(
 class BenchmarkWorker:
     def __init__(self, seed: int) -> None:
         torch.set_default_device("cuda")
-        current_platform.seed_everything(seed)
+        set_random_seed(seed)
         self.seed = seed
         # Get the device ID to allocate tensors and kernels
         # on the respective GPU. This is required for Ray to work
@@ -279,7 +278,7 @@ class BenchmarkWorker:
         use_int8_w8a16: bool,
         use_customized_permute: bool = False,
     ) -> tuple[dict[str, int], float]:
-        current_platform.seed_everything(self.seed)
+        set_random_seed(self.seed)
 
         permute_time = benchmark_permute(
             num_tokens,
@@ -329,6 +328,7 @@ def main(args: argparse.Namespace):
         config.architectures[0] == "DeepseekV3ForCausalLM"
         or config.architectures[0] == "DeepseekV2ForCausalLM"
         or config.architectures[0] == "Glm4MoeForCausalLM"
+        or config.architectures[0] == "Glm4MoeLiteForCausalLM"
     ):
         E = config.n_routed_experts
         topk = config.num_experts_per_tok

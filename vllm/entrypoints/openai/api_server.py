@@ -14,87 +14,63 @@ import socket
 import tempfile
 import uuid
 from argparse import Namespace
-from collections.abc import AsyncGenerator, AsyncIterator, Awaitable
+from collections.abc import AsyncIterator, Awaitable
 from contextlib import asynccontextmanager
 from http import HTTPStatus
-from typing import Annotated, Any, Literal
+from typing import Any
 
 import model_hosting_container_standards.sagemaker as sagemaker_standards
 import pydantic
 import uvloop
-from fastapi import APIRouter, Depends, FastAPI, Form, HTTPException, Query, Request
+from fastapi import APIRouter, FastAPI, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse, Response, StreamingResponse
+from fastapi.responses import JSONResponse
 from starlette.concurrency import iterate_in_threadpool
 from starlette.datastructures import URL, Headers, MutableHeaders, State
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 import vllm.envs as envs
-from vllm.config import VllmConfig
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.protocol import EngineClient
-from vllm.entrypoints.anthropic.protocol import (
-    AnthropicError,
-    AnthropicErrorResponse,
-    AnthropicMessagesRequest,
-    AnthropicMessagesResponse,
-)
-from vllm.entrypoints.anthropic.serving_messages import AnthropicServingMessages
+from vllm.entrypoints.anthropic.serving import AnthropicServingMessages
+from vllm.entrypoints.chat_utils import load_chat_template
 from vllm.entrypoints.launcher import serve_http
 from vllm.entrypoints.logger import RequestLogger
+from vllm.entrypoints.mcp.tool_server import DemoToolServer, MCPToolServer, ToolServer
+from vllm.entrypoints.openai.chat_completion.serving import OpenAIServingChat
 from vllm.entrypoints.openai.cli_args import make_arg_parser, validate_parsed_serve_args
-from vllm.entrypoints.openai.orca_metrics import metrics_header
-from vllm.entrypoints.openai.protocol import (
-    ChatCompletionRequest,
-    ChatCompletionResponse,
-    CompletionRequest,
-    CompletionResponse,
+from vllm.entrypoints.openai.completion.serving import OpenAIServingCompletion
+from vllm.entrypoints.openai.engine.protocol import (
     ErrorInfo,
     ErrorResponse,
-    ResponsesRequest,
-    ResponsesResponse,
-    StreamingResponsesResponse,
-    TranscriptionRequest,
-    TranscriptionResponseVariant,
-    TranslationRequest,
-    TranslationResponseVariant,
 )
-from vllm.entrypoints.openai.serving_chat import OpenAIServingChat
-from vllm.entrypoints.openai.serving_completion import OpenAIServingCompletion
-from vllm.entrypoints.openai.serving_engine import OpenAIServing
-from vllm.entrypoints.openai.serving_models import (
-    BaseModelPath,
+from vllm.entrypoints.openai.engine.serving import OpenAIServing
+from vllm.entrypoints.openai.models.protocol import BaseModelPath
+from vllm.entrypoints.openai.models.serving import (
     OpenAIServingModels,
 )
-from vllm.entrypoints.openai.serving_responses import OpenAIServingResponses
-from vllm.entrypoints.openai.serving_transcription import (
+from vllm.entrypoints.openai.responses.serving import OpenAIServingResponses
+from vllm.entrypoints.openai.translations.serving import (
     OpenAIServingTranscription,
     OpenAIServingTranslation,
 )
-from vllm.entrypoints.openai.tool_parsers import ToolParserManager
-from vllm.entrypoints.openai.utils import validate_json_request
-from vllm.entrypoints.pooling.classify.serving import ServingClassification
-from vllm.entrypoints.pooling.embed.serving import OpenAIServingEmbedding
-from vllm.entrypoints.pooling.pooling.serving import OpenAIServingPooling
-from vllm.entrypoints.pooling.score.serving import ServingScores
 from vllm.entrypoints.serve.disagg.serving import ServingTokens
 from vllm.entrypoints.serve.elastic_ep.middleware import (
     ScalingMiddleware,
 )
 from vllm.entrypoints.serve.tokenize.serving import OpenAIServingTokenization
-from vllm.entrypoints.tool_server import DemoToolServer, MCPToolServer, ToolServer
 from vllm.entrypoints.utils import (
     cli_env_setup,
-    load_aware_call,
     log_non_default_args,
-    process_chat_template,
+    log_version_and_model,
     process_lora_modules,
-    with_cancellation,
+    sanitize_message,
 )
+from vllm.exceptions import VLLMValidationError
 from vllm.logger import init_logger
 from vllm.reasoning import ReasoningParserManager
-from vllm.tasks import POOLING_TASKS
+from vllm.tool_parsers import ToolParserManager
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils.argparse_utils import FlexibleArgumentParser
 from vllm.utils.gc_utils import freeze_gc_heap
@@ -107,7 +83,6 @@ prometheus_multiproc_dir: tempfile.TemporaryDirectory
 # Cannot use __name__ (https://github.com/vllm-project/vllm/pull/4765)
 logger = init_logger("vllm.entrypoints.openai.api_server")
 
-ENDPOINT_LOAD_METRICS_FORMAT_HEADER_LABEL = "endpoint-load-metrics-format"
 
 _running_tasks: set[asyncio.Task] = set()
 
@@ -239,50 +214,22 @@ def base(request: Request) -> OpenAIServing:
     return tokenization(request)
 
 
-def models(request: Request) -> OpenAIServingModels:
-    return request.app.state.openai_serving_models
-
-
-def responses(request: Request) -> OpenAIServingResponses | None:
-    return request.app.state.openai_serving_responses
-
-
-def messages(request: Request) -> AnthropicServingMessages:
-    return request.app.state.anthropic_serving_messages
-
-
-def chat(request: Request) -> OpenAIServingChat | None:
-    return request.app.state.openai_serving_chat
-
-
-def completion(request: Request) -> OpenAIServingCompletion | None:
-    return request.app.state.openai_serving_completion
-
-
 def tokenization(request: Request) -> OpenAIServingTokenization:
     return request.app.state.openai_serving_tokenization
-
-
-def transcription(request: Request) -> OpenAIServingTranscription:
-    return request.app.state.openai_serving_transcription
-
-
-def translation(request: Request) -> OpenAIServingTranslation:
-    return request.app.state.openai_serving_translation
 
 
 def engine_client(request: Request) -> EngineClient:
     return request.app.state.engine_client
 
 
-def generate_tokens(request: Request) -> ServingTokens | None:
-    return request.app.state.serving_tokens
-
-
 @router.get("/load")
 async def get_server_load_metrics(request: Request):
     # This endpoint returns the current server load metrics.
     # It tracks requests utilizing the GPU from the following routes:
+    # - /v1/responses
+    # - /v1/responses/{response_id}
+    # - /v1/responses/{response_id}/cancel
+    # - /v1/messages
     # - /v1/chat/completions
     # - /v1/completions
     # - /v1/audio/transcriptions
@@ -298,423 +245,10 @@ async def get_server_load_metrics(request: Request):
     return JSONResponse(content={"server_load": request.app.state.server_load_metrics})
 
 
-@router.get("/v1/models")
-async def show_available_models(raw_request: Request):
-    handler = models(raw_request)
-
-    models_ = await handler.show_available_models()
-    return JSONResponse(content=models_.model_dump())
-
-
 @router.get("/version")
 async def show_version():
     ver = {"version": VLLM_VERSION}
     return JSONResponse(content=ver)
-
-
-async def _convert_stream_to_sse_events(
-    generator: AsyncGenerator[StreamingResponsesResponse, None],
-) -> AsyncGenerator[str, None]:
-    """Convert the generator to a stream of events in SSE format"""
-    async for event in generator:
-        event_type = getattr(event, "type", "unknown")
-        # https://developer.mozilla.org/en-US/docs/Web/API/Server-sent_events/Using_server-sent_events#event_stream_format
-        event_data = (
-            f"event: {event_type}\ndata: {event.model_dump_json(indent=None)}\n\n"
-        )
-        yield event_data
-
-
-@router.post(
-    "/v1/responses",
-    dependencies=[Depends(validate_json_request)],
-    responses={
-        HTTPStatus.OK.value: {"content": {"text/event-stream": {}}},
-        HTTPStatus.BAD_REQUEST.value: {"model": ErrorResponse},
-        HTTPStatus.NOT_FOUND.value: {"model": ErrorResponse},
-        HTTPStatus.INTERNAL_SERVER_ERROR.value: {"model": ErrorResponse},
-    },
-)
-@with_cancellation
-async def create_responses(request: ResponsesRequest, raw_request: Request):
-    handler = responses(raw_request)
-    if handler is None:
-        return base(raw_request).create_error_response(
-            message="The model does not support Responses API"
-        )
-    try:
-        generator = await handler.create_responses(request, raw_request)
-    except Exception as e:
-        raise HTTPException(
-            status_code=HTTPStatus.INTERNAL_SERVER_ERROR.value, detail=str(e)
-        ) from e
-
-    if isinstance(generator, ErrorResponse):
-        return JSONResponse(
-            content=generator.model_dump(), status_code=generator.error.code
-        )
-    elif isinstance(generator, ResponsesResponse):
-        return JSONResponse(content=generator.model_dump())
-
-    return StreamingResponse(
-        content=_convert_stream_to_sse_events(generator), media_type="text/event-stream"
-    )
-
-
-@router.get("/v1/responses/{response_id}")
-async def retrieve_responses(
-    response_id: str,
-    raw_request: Request,
-    starting_after: int | None = None,
-    stream: bool | None = False,
-):
-    handler = responses(raw_request)
-    if handler is None:
-        return base(raw_request).create_error_response(
-            message="The model does not support Responses API"
-        )
-
-    try:
-        response = await handler.retrieve_responses(
-            response_id,
-            starting_after=starting_after,
-            stream=stream,
-        )
-    except Exception as e:
-        raise HTTPException(
-            status_code=HTTPStatus.INTERNAL_SERVER_ERROR.value, detail=str(e)
-        ) from e
-
-    if isinstance(response, ErrorResponse):
-        return JSONResponse(
-            content=response.model_dump(), status_code=response.error.code
-        )
-    elif isinstance(response, ResponsesResponse):
-        return JSONResponse(content=response.model_dump())
-    return StreamingResponse(
-        content=_convert_stream_to_sse_events(response), media_type="text/event-stream"
-    )
-
-
-@router.post("/v1/responses/{response_id}/cancel")
-async def cancel_responses(response_id: str, raw_request: Request):
-    handler = responses(raw_request)
-    if handler is None:
-        return base(raw_request).create_error_response(
-            message="The model does not support Responses API"
-        )
-
-    try:
-        response = await handler.cancel_responses(response_id)
-    except Exception as e:
-        raise HTTPException(
-            status_code=HTTPStatus.INTERNAL_SERVER_ERROR.value, detail=str(e)
-        ) from e
-
-    if isinstance(response, ErrorResponse):
-        return JSONResponse(
-            content=response.model_dump(), status_code=response.error.code
-        )
-    return JSONResponse(content=response.model_dump())
-
-
-@router.post(
-    "/v1/messages",
-    dependencies=[Depends(validate_json_request)],
-    responses={
-        HTTPStatus.OK.value: {"content": {"text/event-stream": {}}},
-        HTTPStatus.BAD_REQUEST.value: {"model": AnthropicErrorResponse},
-        HTTPStatus.NOT_FOUND.value: {"model": AnthropicErrorResponse},
-        HTTPStatus.INTERNAL_SERVER_ERROR.value: {"model": AnthropicErrorResponse},
-    },
-)
-@with_cancellation
-@load_aware_call
-async def create_messages(request: AnthropicMessagesRequest, raw_request: Request):
-    def translate_error_response(response: ErrorResponse) -> JSONResponse:
-        anthropic_error = AnthropicErrorResponse(
-            error=AnthropicError(
-                type=response.error.type,
-                message=response.error.message,
-            )
-        )
-        return JSONResponse(
-            status_code=response.error.code, content=anthropic_error.model_dump()
-        )
-
-    handler = messages(raw_request)
-    if handler is None:
-        error = base(raw_request).create_error_response(
-            message="The model does not support Messages API"
-        )
-        return translate_error_response(error)
-
-    try:
-        generator = await handler.create_messages(request, raw_request)
-    except Exception as e:
-        logger.exception("Error in create_messages: %s", e)
-        return JSONResponse(
-            status_code=HTTPStatus.INTERNAL_SERVER_ERROR.value,
-            content=AnthropicErrorResponse(
-                error=AnthropicError(
-                    type="internal_error",
-                    message=str(e),
-                )
-            ).model_dump(),
-        )
-
-    if isinstance(generator, ErrorResponse):
-        return translate_error_response(generator)
-
-    elif isinstance(generator, AnthropicMessagesResponse):
-        resp = generator.model_dump(exclude_none=True)
-        logger.debug("Anthropic Messages Response: %s", resp)
-        return JSONResponse(content=resp)
-
-    return StreamingResponse(content=generator, media_type="text/event-stream")
-
-
-@router.post(
-    "/v1/chat/completions",
-    dependencies=[Depends(validate_json_request)],
-    responses={
-        HTTPStatus.OK.value: {"content": {"text/event-stream": {}}},
-        HTTPStatus.BAD_REQUEST.value: {"model": ErrorResponse},
-        HTTPStatus.NOT_FOUND.value: {"model": ErrorResponse},
-        HTTPStatus.INTERNAL_SERVER_ERROR.value: {"model": ErrorResponse},
-    },
-)
-@with_cancellation
-@load_aware_call
-async def create_chat_completion(request: ChatCompletionRequest, raw_request: Request):
-    metrics_header_format = raw_request.headers.get(
-        ENDPOINT_LOAD_METRICS_FORMAT_HEADER_LABEL, ""
-    )
-    handler = chat(raw_request)
-    if handler is None:
-        return base(raw_request).create_error_response(
-            message="The model does not support Chat Completions API"
-        )
-    try:
-        generator = await handler.create_chat_completion(request, raw_request)
-    except Exception as e:
-        raise HTTPException(
-            status_code=HTTPStatus.INTERNAL_SERVER_ERROR.value, detail=str(e)
-        ) from e
-    if isinstance(generator, ErrorResponse):
-        return JSONResponse(
-            content=generator.model_dump(), status_code=generator.error.code
-        )
-
-    elif isinstance(generator, ChatCompletionResponse):
-        return JSONResponse(
-            content=generator.model_dump(),
-            headers=metrics_header(metrics_header_format),
-        )
-
-    return StreamingResponse(content=generator, media_type="text/event-stream")
-
-
-@router.post(
-    "/v1/completions",
-    dependencies=[Depends(validate_json_request)],
-    responses={
-        HTTPStatus.OK.value: {"content": {"text/event-stream": {}}},
-        HTTPStatus.BAD_REQUEST.value: {"model": ErrorResponse},
-        HTTPStatus.NOT_FOUND.value: {"model": ErrorResponse},
-        HTTPStatus.INTERNAL_SERVER_ERROR.value: {"model": ErrorResponse},
-    },
-)
-@with_cancellation
-@load_aware_call
-async def create_completion(request: CompletionRequest, raw_request: Request):
-    metrics_header_format = raw_request.headers.get(
-        ENDPOINT_LOAD_METRICS_FORMAT_HEADER_LABEL, ""
-    )
-    handler = completion(raw_request)
-    if handler is None:
-        return base(raw_request).create_error_response(
-            message="The model does not support Completions API"
-        )
-
-    try:
-        generator = await handler.create_completion(request, raw_request)
-    except OverflowError as e:
-        raise HTTPException(
-            status_code=HTTPStatus.BAD_REQUEST.value, detail=str(e)
-        ) from e
-    except Exception as e:
-        raise HTTPException(
-            status_code=HTTPStatus.INTERNAL_SERVER_ERROR.value, detail=str(e)
-        ) from e
-
-    if isinstance(generator, ErrorResponse):
-        return JSONResponse(
-            content=generator.model_dump(), status_code=generator.error.code
-        )
-    elif isinstance(generator, CompletionResponse):
-        return JSONResponse(
-            content=generator.model_dump(),
-            headers=metrics_header(metrics_header_format),
-        )
-
-    return StreamingResponse(content=generator, media_type="text/event-stream")
-
-
-@router.post(
-    "/v1/audio/transcriptions",
-    responses={
-        HTTPStatus.OK.value: {"content": {"text/event-stream": {}}},
-        HTTPStatus.BAD_REQUEST.value: {"model": ErrorResponse},
-        HTTPStatus.UNPROCESSABLE_ENTITY.value: {"model": ErrorResponse},
-        HTTPStatus.INTERNAL_SERVER_ERROR.value: {"model": ErrorResponse},
-    },
-)
-@with_cancellation
-@load_aware_call
-async def create_transcriptions(
-    raw_request: Request, request: Annotated[TranscriptionRequest, Form()]
-):
-    handler = transcription(raw_request)
-    if handler is None:
-        return base(raw_request).create_error_response(
-            message="The model does not support Transcriptions API"
-        )
-
-    audio_data = await request.file.read()
-    try:
-        generator = await handler.create_transcription(audio_data, request, raw_request)
-    except Exception as e:
-        raise HTTPException(
-            status_code=HTTPStatus.INTERNAL_SERVER_ERROR.value, detail=str(e)
-        ) from e
-
-    if isinstance(generator, ErrorResponse):
-        return JSONResponse(
-            content=generator.model_dump(), status_code=generator.error.code
-        )
-
-    elif isinstance(generator, TranscriptionResponseVariant):
-        return JSONResponse(content=generator.model_dump())
-
-    return StreamingResponse(content=generator, media_type="text/event-stream")
-
-
-@router.post(
-    "/v1/audio/translations",
-    responses={
-        HTTPStatus.OK.value: {"content": {"text/event-stream": {}}},
-        HTTPStatus.BAD_REQUEST.value: {"model": ErrorResponse},
-        HTTPStatus.UNPROCESSABLE_ENTITY.value: {"model": ErrorResponse},
-        HTTPStatus.INTERNAL_SERVER_ERROR.value: {"model": ErrorResponse},
-    },
-)
-@with_cancellation
-@load_aware_call
-async def create_translations(
-    request: Annotated[TranslationRequest, Form()], raw_request: Request
-):
-    handler = translation(raw_request)
-    if handler is None:
-        return base(raw_request).create_error_response(
-            message="The model does not support Translations API"
-        )
-
-    audio_data = await request.file.read()
-    try:
-        generator = await handler.create_translation(audio_data, request, raw_request)
-    except Exception as e:
-        raise HTTPException(
-            status_code=HTTPStatus.INTERNAL_SERVER_ERROR.value, detail=str(e)
-        ) from e
-
-    if isinstance(generator, ErrorResponse):
-        return JSONResponse(
-            content=generator.model_dump(), status_code=generator.error.code
-        )
-
-    elif isinstance(generator, TranslationResponseVariant):
-        return JSONResponse(content=generator.model_dump())
-
-    return StreamingResponse(content=generator, media_type="text/event-stream")
-
-
-if envs.VLLM_SERVER_DEV_MODE:
-    logger.warning(
-        "SECURITY WARNING: Development endpoints are enabled! "
-        "This should NOT be used in production!"
-    )
-
-    PydanticVllmConfig = pydantic.TypeAdapter(VllmConfig)
-
-    @router.get("/server_info")
-    async def show_server_info(
-        raw_request: Request,
-        config_format: Annotated[Literal["text", "json"], Query()] = "text",
-    ):
-        vllm_config: VllmConfig = raw_request.app.state.vllm_config
-        server_info = {
-            "vllm_config": str(vllm_config)
-            if config_format == "text"
-            else PydanticVllmConfig.dump_python(vllm_config, mode="json", fallback=str)
-            # fallback=str is needed to handle e.g. torch.dtype
-        }
-        return JSONResponse(content=server_info)
-
-    @router.post("/reset_prefix_cache")
-    async def reset_prefix_cache(
-        raw_request: Request, reset_running_requests: bool = Query(default=False)
-    ):
-        """
-        Reset the prefix cache. Note that we currently do not check if the
-        prefix cache is successfully reset in the API server.
-        """
-        logger.info("Resetting prefix cache...")
-        await engine_client(raw_request).reset_prefix_cache(reset_running_requests)
-        return Response(status_code=200)
-
-    @router.post("/reset_mm_cache")
-    async def reset_mm_cache(raw_request: Request):
-        """
-        Reset the multi-modal cache. Note that we currently do not check if the
-        multi-modal cache is successfully reset in the API server.
-        """
-        logger.info("Resetting multi-modal cache...")
-        await engine_client(raw_request).reset_mm_cache()
-        return Response(status_code=200)
-
-    @router.post("/collective_rpc")
-    async def collective_rpc(raw_request: Request):
-        try:
-            body = await raw_request.json()
-        except json.JSONDecodeError as e:
-            raise HTTPException(
-                status_code=HTTPStatus.BAD_REQUEST.value,
-                detail=f"JSON decode error: {e}",
-            ) from e
-        method = body.get("method")
-        if method is None:
-            raise HTTPException(
-                status_code=HTTPStatus.BAD_REQUEST.value,
-                detail="Missing 'method' in request body",
-            )
-        # For security reason, only serialized string args/kwargs are passed.
-        # User-defined `method` is responsible for deserialization if needed.
-        args: list[str] = body.get("args", [])
-        kwargs: dict[str, str] = body.get("kwargs", {})
-        timeout: float | None = body.get("timeout")
-        results = await engine_client(raw_request).collective_rpc(
-            method=method, timeout=timeout, args=tuple(args), kwargs=kwargs
-        )
-        if results is None:
-            return Response(status_code=200)
-        response: list[Any] = []
-        for result in results:
-            if result is None or isinstance(result, dict | list):
-                response.append(result)
-            else:
-                response.append(str(result))
-        return JSONResponse(content={"results": response})
 
 
 def load_log_config(log_config_file: str | None) -> dict | None:
@@ -845,8 +379,10 @@ class XRequestIdMiddleware:
 def _extract_content_from_chunk(chunk_data: dict) -> str:
     """Extract content from a streaming response chunk."""
     try:
-        from vllm.entrypoints.openai.protocol import (
+        from vllm.entrypoints.openai.chat_completion.protocol import (
             ChatCompletionStreamResponse,
+        )
+        from vllm.entrypoints.openai.completion.protocol import (
             CompletionStreamResponse,
         )
 
@@ -982,13 +518,46 @@ def build_app(args: Namespace) -> FastAPI:
         app = FastAPI(
             openapi_url=None, docs_url=None, redoc_url=None, lifespan=lifespan
         )
+    elif args.enable_offline_docs:
+        app = FastAPI(docs_url=None, redoc_url=None, lifespan=lifespan)
     else:
         app = FastAPI(lifespan=lifespan)
     app.state.args = args
     from vllm.entrypoints.serve import register_vllm_serve_api_routers
 
     register_vllm_serve_api_routers(app)
+    from vllm.entrypoints.openai.chat_completion.api_router import (
+        attach_router as register_chat_api_router,
+    )
 
+    register_chat_api_router(app)
+
+    from vllm.entrypoints.openai.responses.api_router import (
+        attach_router as register_responses_api_router,
+    )
+
+    register_responses_api_router(app)
+    from vllm.entrypoints.openai.translations.api_router import (
+        attach_router as register_translations_api_router,
+    )
+
+    register_translations_api_router(app)
+
+    from vllm.entrypoints.openai.completion.api_router import (
+        attach_router as register_completion_api_router,
+    )
+
+    register_completion_api_router(app)
+    from vllm.entrypoints.anthropic.api_router import (
+        attach_router as register_anthropic_api_router,
+    )
+
+    register_anthropic_api_router(app)
+    from vllm.entrypoints.openai.models.api_router import (
+        attach_router as register_models_api_router,
+    )
+
+    register_models_api_router(app)
     from vllm.entrypoints.sagemaker.routes import register_sagemaker_routes
 
     register_sagemaker_routes(router)
@@ -1012,7 +581,7 @@ def build_app(args: Namespace) -> FastAPI:
     async def http_exception_handler(_: Request, exc: HTTPException):
         err = ErrorResponse(
             error=ErrorInfo(
-                message=exc.detail,
+                message=sanitize_message(exc.detail),
                 type=HTTPStatus(exc.status_code).phrase,
                 code=exc.status_code,
             )
@@ -1021,19 +590,29 @@ def build_app(args: Namespace) -> FastAPI:
 
     @app.exception_handler(RequestValidationError)
     async def validation_exception_handler(_: Request, exc: RequestValidationError):
-        exc_str = str(exc)
-        errors_str = str(exc.errors())
+        param = None
+        errors = exc.errors()
+        for error in errors:
+            if "ctx" in error and "error" in error["ctx"]:
+                ctx_error = error["ctx"]["error"]
+                if isinstance(ctx_error, VLLMValidationError):
+                    param = ctx_error.parameter
+                    break
 
-        if exc.errors() and errors_str and errors_str != exc_str:
+        exc_str = str(exc)
+        errors_str = str(errors)
+
+        if errors and errors_str and errors_str != exc_str:
             message = f"{exc_str} {errors_str}"
         else:
             message = exc_str
 
         err = ErrorResponse(
             error=ErrorInfo(
-                message=message,
+                message=sanitize_message(message),
                 type=HTTPStatus.BAD_REQUEST.phrase,
                 code=HTTPStatus.BAD_REQUEST,
+                param=param,
             )
         )
         return JSONResponse(err.model_dump(), status_code=HTTPStatus.BAD_REQUEST)
@@ -1118,9 +697,7 @@ async def init_app_state(
     supported_tasks = await engine_client.get_supported_tasks()
     logger.info("Supported tasks: %s", supported_tasks)
 
-    resolved_chat_template = await process_chat_template(
-        args.chat_template, engine_client, vllm_config.model_config
-    )
+    resolved_chat_template = load_chat_template(args.chat_template)
 
     if args.tool_server == "demo":
         tool_server: ToolServer | None = DemoToolServer()
@@ -1180,6 +757,7 @@ async def init_app_state(
             request_logger=request_logger,
             chat_template=resolved_chat_template,
             chat_template_content_format=args.chat_template_content_format,
+            default_chat_template_kwargs=args.default_chat_template_kwargs,
             trust_request_chat_template=args.trust_request_chat_template,
             return_tokens_as_token_ids=args.return_tokens_as_token_ids,
             enable_auto_tools=args.enable_auto_tool_choice,
@@ -1189,11 +767,15 @@ async def init_app_state(
             enable_prompt_tokens_details=args.enable_prompt_tokens_details,
             enable_force_include_usage=args.enable_force_include_usage,
             enable_log_outputs=args.enable_log_outputs,
+            enable_log_deltas=args.enable_log_deltas,
             log_error_stack=args.log_error_stack,
         )
         if "generate" in supported_tasks
         else None
     )
+    # Warm up chat template processing to avoid first-request latency
+    if state.openai_serving_chat is not None:
+        await state.openai_serving_chat.warmup()
     state.openai_serving_completion = (
         OpenAIServingCompletion(
             engine_client,
@@ -1205,58 +787,6 @@ async def init_app_state(
             log_error_stack=args.log_error_stack,
         )
         if "generate" in supported_tasks
-        else None
-    )
-    state.openai_serving_pooling = (
-        (
-            OpenAIServingPooling(
-                engine_client,
-                state.openai_serving_models,
-                supported_tasks=supported_tasks,
-                request_logger=request_logger,
-                chat_template=resolved_chat_template,
-                chat_template_content_format=args.chat_template_content_format,
-                trust_request_chat_template=args.trust_request_chat_template,
-                log_error_stack=args.log_error_stack,
-            )
-        )
-        if any(task in POOLING_TASKS for task in supported_tasks)
-        else None
-    )
-    state.openai_serving_embedding = (
-        OpenAIServingEmbedding(
-            engine_client,
-            state.openai_serving_models,
-            request_logger=request_logger,
-            chat_template=resolved_chat_template,
-            chat_template_content_format=args.chat_template_content_format,
-            trust_request_chat_template=args.trust_request_chat_template,
-            log_error_stack=args.log_error_stack,
-        )
-        if "embed" in supported_tasks
-        else None
-    )
-    state.openai_serving_classification = (
-        ServingClassification(
-            engine_client,
-            state.openai_serving_models,
-            request_logger=request_logger,
-            chat_template=resolved_chat_template,
-            chat_template_content_format=args.chat_template_content_format,
-            trust_request_chat_template=args.trust_request_chat_template,
-            log_error_stack=args.log_error_stack,
-        )
-        if "classify" in supported_tasks
-        else None
-    )
-    state.openai_serving_scores = (
-        ServingScores(
-            engine_client,
-            state.openai_serving_models,
-            request_logger=request_logger,
-            log_error_stack=args.log_error_stack,
-        )
-        if ("embed" in supported_tasks or "score" in supported_tasks)
         else None
     )
     state.openai_serving_tokenization = OpenAIServingTokenization(
@@ -1323,6 +853,10 @@ async def init_app_state(
         else None
     )
 
+    from vllm.entrypoints.pooling import init_pooling_state
+
+    await init_pooling_state(engine_client, state, args)
+
     state.enable_server_load_tracking = args.enable_server_load_tracking
     state.server_load_metrics = 0
 
@@ -1368,7 +902,7 @@ def setup_server(args):
     """Validate API server args, set up signal handler, create socket
     ready to serve."""
 
-    logger.info("vLLM API server version %s", VLLM_VERSION)
+    log_version_and_model(logger, VLLM_VERSION, args.model)
     log_non_default_args(args)
 
     if args.tool_parser_plugin and len(args.tool_parser_plugin) > 3:
@@ -1462,6 +996,7 @@ async def run_server_worker(
             ssl_certfile=args.ssl_certfile,
             ssl_ca_certs=args.ssl_ca_certs,
             ssl_cert_reqs=args.ssl_cert_reqs,
+            ssl_ciphers=args.ssl_ciphers,
             h11_max_incomplete_event_size=args.h11_max_incomplete_event_size,
             h11_max_header_count=args.h11_max_header_count,
             **uvicorn_kwargs,

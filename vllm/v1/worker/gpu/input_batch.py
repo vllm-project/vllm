@@ -8,8 +8,6 @@ import torch
 
 from vllm.triton_utils import tl, triton
 from vllm.utils import random_uuid
-from vllm.utils.math_utils import cdiv
-from vllm.v1.utils import CpuGpuBuffer
 
 
 class InputBuffers:
@@ -17,34 +15,18 @@ class InputBuffers:
         self,
         max_num_reqs: int,
         max_num_tokens: int,
-        inputs_embeds_size: int,
-        vocab_size: int,
-        dtype: torch.dtype,
         device: torch.device,
-        pin_memory: bool,
     ):
         self.max_num_reqs = max_num_reqs
         self.max_num_tokens = max_num_tokens
         self.device = device
-        self.pin_memory = pin_memory
 
-        self.idx_mapping = self._make_buffer(max_num_reqs, dtype=torch.int32)
         self.input_ids = torch.zeros(max_num_tokens, dtype=torch.int32, device=device)
         self.positions = torch.zeros(max_num_tokens, dtype=torch.int64, device=device)
-        self.query_start_loc = self._make_buffer(max_num_reqs + 1, dtype=torch.int32)
+        self.query_start_loc = torch.zeros(
+            max_num_reqs + 1, dtype=torch.int32, device=device
+        )
         self.seq_lens = torch.zeros(max_num_reqs, dtype=torch.int32, device=device)
-        self.cu_num_logits = self._make_buffer(max_num_reqs + 1, dtype=torch.int32)
-
-        # Structured outputs.
-        self.bitmask_indices = self._make_buffer(max_num_reqs, dtype=torch.int32)
-        self.grammar_bitmask = self._make_buffer(
-            max_num_reqs, cdiv(vocab_size, 32), dtype=torch.int32
-        )
-
-    def _make_buffer(self, *args, dtype: torch.dtype) -> CpuGpuBuffer:
-        return CpuGpuBuffer(
-            *args, dtype=dtype, pin_memory=self.pin_memory, device=self.device
-        )
 
 
 @dataclass
@@ -56,6 +38,8 @@ class InputBatch:
     # batch_idx -> req_state_idx
     idx_mapping: torch.Tensor
     idx_mapping_np: np.ndarray
+    # Identical to idx_mapping except for spec decoding.
+    expanded_idx_mapping: torch.Tensor
 
     # [num_reqs]
     # batch_idx -> num_scheduled_tokens
@@ -70,20 +54,26 @@ class InputBatch:
     query_start_loc_np: np.ndarray
     # [num_reqs]
     seq_lens: torch.Tensor
-    seq_lens_np: np.ndarray
 
     # [num_tokens_after_padding]
     input_ids: torch.Tensor
     # [num_tokens_after_padding]
     positions: torch.Tensor
+    # [3, num_tokens_after_padding]
+    mrope_positions: torch.Tensor | None
+    # [num_tokens_after_padding, hidden_size]
+    inputs_embeds: torch.Tensor | None
 
     # layer_name -> Metadata
     attn_metadata: dict[str, Any]
+    # layer_name -> slot_mapping
+    slot_mappings: dict[str, torch.Tensor]
 
     # [total_num_logits]
     logits_indices: torch.Tensor
     # [num_reqs + 1]
     cu_num_logits: torch.Tensor
+    cu_num_logits_np: np.ndarray
 
     @classmethod
     def make_dummy(
@@ -97,35 +87,42 @@ class InputBatch:
         req_ids = [f"req_{i}_{random_uuid()}" for i in range(num_reqs)]
         idx_mapping_np = np.arange(num_reqs, dtype=np.int32)
         idx_mapping = torch.arange(num_reqs, dtype=torch.int32, device=device)
+        expanded_idx_mapping = idx_mapping
         num_scheduled_tokens = np.full(num_reqs, num_tokens // num_reqs, dtype=np.int32)
         num_scheduled_tokens[-1] += num_tokens % num_reqs
         assert int(num_scheduled_tokens.sum()) == num_tokens
 
-        input_buffers.query_start_loc.np[0] = 0
-        input_buffers.query_start_loc.np[1 : num_reqs + 1] = np.cumsum(
-            num_scheduled_tokens
-        )
-        input_buffers.query_start_loc.np[num_reqs + 1 :] = num_tokens
-        query_start_loc_np = input_buffers.query_start_loc.np[: num_reqs + 1]
-        query_start_loc = input_buffers.query_start_loc.copy_to_gpu()[: num_reqs + 1]
         # seq_len equals to query_len
-        seq_lens_np = np.full(num_reqs, num_tokens // num_reqs, dtype=np.int32)
-        seq_lens_np[-1] += num_tokens % num_reqs
         input_buffers.seq_lens[:num_reqs] = num_tokens // num_reqs
         input_buffers.seq_lens[num_reqs - 1] += num_tokens % num_reqs
+        # Pad for full CUDA graph mode.
         input_buffers.seq_lens[num_reqs:] = 0
         seq_lens = input_buffers.seq_lens[:num_reqs]
 
-        input_ids = input_buffers.input_ids[:num_tokens]
-        positions = input_buffers.positions[:num_tokens]
+        query_start_loc_np = np.empty(num_reqs + 1, dtype=np.int32)
+        query_start_loc_np[0] = 0
+        np.cumsum(num_scheduled_tokens, out=query_start_loc_np[1:])
+        input_buffers.query_start_loc[0] = 0
+        torch.cumsum(
+            seq_lens, dim=0, out=input_buffers.query_start_loc[1 : num_reqs + 1]
+        )
+        # Pad for full CUDA graph mode.
+        input_buffers.query_start_loc[num_reqs + 1 :] = num_tokens
+        query_start_loc = input_buffers.query_start_loc[: num_reqs + 1]
+
+        input_ids = input_buffers.input_ids[:num_tokens].zero_()
+        positions = input_buffers.positions[:num_tokens].zero_()
+
         # attn_metadata = defaultdict(lambda: None)
         logits_indices = query_start_loc[1:] - 1
         cu_num_logits = torch.arange(num_reqs + 1, device=device, dtype=torch.int32)
+        cu_num_logits_np = np.arange(num_reqs + 1, dtype=np.int32)
         return cls(
             req_ids=req_ids,
             num_reqs=num_reqs,
             idx_mapping=idx_mapping,
             idx_mapping_np=idx_mapping_np,
+            expanded_idx_mapping=expanded_idx_mapping,
             num_scheduled_tokens=num_scheduled_tokens,
             num_tokens=num_tokens,
             num_tokens_after_padding=num_tokens,
@@ -133,12 +130,15 @@ class InputBatch:
             query_start_loc=query_start_loc,
             query_start_loc_np=query_start_loc_np,
             seq_lens=seq_lens,
-            seq_lens_np=seq_lens_np,
             input_ids=input_ids,
             positions=positions,
+            mrope_positions=None,
+            inputs_embeds=None,
             attn_metadata=None,  # type: ignore
+            slot_mappings=None,  # type: ignore
             logits_indices=logits_indices,
             cu_num_logits=cu_num_logits,
+            cu_num_logits_np=cu_num_logits_np,
         )
 
 
@@ -355,6 +355,55 @@ def combine_sampled_and_draft_tokens(
 
 
 @triton.jit
+def _get_num_sampled_and_rejected_kernel(
+    num_sampled_ptr,
+    num_rejected_ptr,
+    seq_lens_ptr,
+    cu_num_logits_ptr,
+    idx_mapping_ptr,
+    prefill_len_ptr,
+):
+    batch_idx = tl.program_id(0)
+    req_state_idx = tl.load(idx_mapping_ptr + batch_idx)
+
+    seq_len = tl.load(seq_lens_ptr + batch_idx)
+    prefill_len = tl.load(prefill_len_ptr + req_state_idx)
+    is_chunked_prefilling = seq_len < prefill_len
+
+    num_sampled = tl.load(num_sampled_ptr + batch_idx)
+    num_sampled = tl.where(is_chunked_prefilling, 0, num_sampled)
+    tl.store(num_sampled_ptr + batch_idx, num_sampled)
+
+    logits_start = tl.load(cu_num_logits_ptr + batch_idx)
+    logits_end = tl.load(cu_num_logits_ptr + batch_idx + 1)
+    num_logits = logits_end - logits_start
+
+    num_rejected = num_logits - num_sampled
+    num_rejected = tl.where(is_chunked_prefilling, 0, num_rejected)
+    tl.store(num_rejected_ptr + batch_idx, num_rejected)
+
+
+def get_num_sampled_and_rejected(
+    num_sampled: torch.Tensor,
+    seq_lens: torch.Tensor,
+    cu_num_logits: torch.Tensor,
+    idx_mapping: torch.Tensor,
+    prefill_len: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    num_reqs = idx_mapping.shape[0]
+    num_rejected = torch.empty_like(num_sampled)
+    _get_num_sampled_and_rejected_kernel[(num_reqs,)](
+        num_sampled,
+        num_rejected,
+        seq_lens,
+        cu_num_logits,
+        idx_mapping,
+        prefill_len,
+    )
+    return num_sampled, num_rejected
+
+
+@triton.jit
 def _post_update_kernel(
     idx_mapping_ptr,
     num_computed_tokens_ptr,
@@ -428,3 +477,38 @@ def post_update(
         query_start_loc,
         num_warps=1,
     )
+
+
+@triton.jit
+def _expand_idx_mapping_kernel(
+    idx_mapping_ptr,
+    expanded_idx_mapping_ptr,
+    cu_num_logits_ptr,
+    BLOCK_SIZE: tl.constexpr,
+):
+    req_idx = tl.program_id(0)
+    start_idx = tl.load(cu_num_logits_ptr + req_idx)
+    end_idx = tl.load(cu_num_logits_ptr + req_idx + 1)
+    num_tokens = end_idx - start_idx
+
+    block = tl.arange(0, BLOCK_SIZE)
+    mask = block < num_tokens
+    req_state_idx = tl.load(idx_mapping_ptr + req_idx)
+    tl.store(expanded_idx_mapping_ptr + start_idx + block, req_state_idx, mask=mask)
+
+
+def expand_idx_mapping(
+    idx_mapping: torch.Tensor,
+    total_num_logits: int,
+    cu_num_logits: torch.Tensor,
+    max_expand_len: int,
+) -> torch.Tensor:
+    num_reqs = idx_mapping.shape[0]
+    expanded_idx_mapping = idx_mapping.new_empty(total_num_logits)
+    _expand_idx_mapping_kernel[(num_reqs,)](
+        idx_mapping,
+        expanded_idx_mapping,
+        cu_num_logits,
+        BLOCK_SIZE=triton.next_power_of_2(max_expand_len),
+    )
+    return expanded_idx_mapping
