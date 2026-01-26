@@ -195,17 +195,11 @@ def bench_run(
             g1_alphas=w1_gs,
             g2_alphas=w2_gs,
         )
-        moe_config = make_dummy_moe_config()
 
         kernel = mk.FusedMoEModularKernel(
-            MoEPrepareAndFinalizeNoEP(
-                CutlassExpertsFp4.expects_unquantized_inputs(
-                    moe_config=moe_config,
-                    quant_config=quant_config,
-                )
-            ),
+            MoEPrepareAndFinalizeNoEP(),
             CutlassExpertsFp4(
-                moe_config=moe_config,
+                moe_config=make_dummy_moe_config(),
                 quant_config=quant_config,
             ),
         )
@@ -246,17 +240,11 @@ def bench_run(
             g1_alphas=w1_gs,
             g2_alphas=w2_gs,
         )
-        moe_config = make_dummy_moe_config()
 
         kernel = mk.FusedMoEModularKernel(
-            MoEPrepareAndFinalizeNoEP(
-                CutlassExpertsFp4.expects_unquantized_inputs(
-                    moe_config=moe_config,
-                    quant_config=quant_config,
-                )
-            ),
+            MoEPrepareAndFinalizeNoEP(),
             CutlassExpertsFp4(
-                moe_config=moe_config,
+                moe_config=make_dummy_moe_config(),
                 quant_config=quant_config,
             ),
         )
