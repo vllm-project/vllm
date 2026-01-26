@@ -125,10 +125,7 @@ class FlashInferTrtLlmFp8Experts(mk.FusedMoEPermuteExpertsUnpermute):
     ):
         super().__init__(moe_config, quant_config)
 
-        self.moe_config = moe_config
-
         self.routing_method_type = moe_config.routing_method
-
         self.routing_bias = None
         # TODO: to: in_dtype.shape
         self.e_score_correction_bias = None
@@ -144,6 +141,7 @@ class FlashInferTrtLlmFp8Experts(mk.FusedMoEPermuteExpertsUnpermute):
         self.local_num_experts = moe_config.num_local_experts
         self.ep_rank = moe_config.moe_parallel_config.ep_rank
 
+        # Make additional scales for per-tensor interface.
         if self.quant_config.is_per_tensor:
             self._g1_alphas, self._g2_alphas = make_fp8_moe_alpha_scales_for_fi(
                 w13_scale=self.quant_config.w1_scale,
@@ -208,7 +206,7 @@ class FlashInferTrtLlmFp8Experts(mk.FusedMoEPermuteExpertsUnpermute):
 
     @staticmethod
     def _supports_parallel_config(moe_parallel_config: FusedMoEParallelConfig) -> bool:
-        """Supports TRTLLM Kernel does not support EPLB."""
+        """TRTLLMGenKernel does not support EPLB."""
         return not moe_parallel_config.enable_eplb
 
     def supports_chunking(self) -> bool:
