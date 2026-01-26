@@ -175,16 +175,12 @@ def oai_triton_moe_impl(
         w2_scale=w2_scale,
     )
 
-    moe_config = make_dummy_moe_config()
     if unfused:
-        fused_experts = UnfusedOAITritonExperts(moe_config, quant_config)
+        fused_experts = UnfusedOAITritonExperts(make_dummy_moe_config(), quant_config)
     else:
-        fused_experts = OAITritonExperts(moe_config, quant_config)
+        fused_experts = OAITritonExperts(make_dummy_moe_config(), quant_config)
 
-    mk = FusedMoEModularKernel(
-        MoEPrepareAndFinalizeNoEP(),
-        fused_experts,
-    )
+    mk = FusedMoEModularKernel(MoEPrepareAndFinalizeNoEP(), fused_experts)
 
     return mk.forward(
         hidden_states=x,
