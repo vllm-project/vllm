@@ -949,8 +949,6 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
         x: torch.Tensor,
         router_logits: torch.Tensor,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        assert self.is_monolithic
-        assert self.fp8_backend == Fp8MoeBackend.FLASHINFER_TRTLLM
         if layer.enable_eplb:
             raise NotImplementedError(
                 "EPLB not supported for FlashInfer TRTLLM FP8 MoE Backend."
@@ -965,6 +963,10 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
             global_num_experts=layer.global_num_experts,
             expert_map=layer.expert_map,
             apply_router_weight_on_input=layer.apply_router_weight_on_input,
+            num_expert_group=layer.num_expert_group,
+            topk_group=layer.topk_group,
+            e_score_correction_bias=layer.e_score_correction_bias,
+            routed_scaling_factor=layer.routed_scaling_factor,
         )
 
     def apply(
@@ -974,16 +976,6 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        assert not self.is_monolithic
-
-        # TODO(rob): this validation should happen at kernel selection
-        # time in the oracle rather than here.
-        if self.fp8_backend == Fp8MoeBackend.FLASHINFER_CUTLASS:
-            assert layer.activation in ("silu", "relu2_no_mul"), (
-                "Expected activation to be in ('silu', 'relu2_no_mul'),"
-                f"but got {layer.activation}"
-            )
-
         assert self.kernel is not None
         return self.kernel(
             x,
@@ -1636,10 +1628,6 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
         x: torch.Tensor,
         router_logits: torch.Tensor,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        assert self.nvfp4_backend == NvFp4MoeBackend.FLASHINFER_TRTLLM
-        assert not layer.enable_eplb
-
-        # In monolithic case, router is fused with expert.
         assert self.kernel is not None
         return self.kernel.forward_monolithic(
             x,
@@ -1650,6 +1638,10 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
             global_num_experts=layer.global_num_experts,
             expert_map=layer.expert_map,
             apply_router_weight_on_input=layer.apply_router_weight_on_input,
+            num_expert_group=layer.num_expert_group,
+            topk_group=layer.topk_group,
+            e_score_correction_bias=layer.e_score_correction_bias,
+            routed_scaling_factor=layer.routed_scaling_factor,
         )
 
     def apply(
@@ -1659,7 +1651,6 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        assert not self.is_monolithic
         assert self.kernel is not None
         return self.kernel(
             x,

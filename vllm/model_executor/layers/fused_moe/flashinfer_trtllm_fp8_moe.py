@@ -29,13 +29,6 @@ class FlashInferTrtLlmFp8Experts(mk.FusedMoEPermuteExpertsUnpermute):
         super().__init__(moe_config, quant_config)
 
         self.routing_method_type = moe_config.routing_method
-        self.routing_bias = None
-        # TODO: to: in_dtype.shape
-        self.e_score_correction_bias = None
-        self.topk_group = None
-        self.num_expert_group = None
-        self.routing_scaling_factor = None
-
         self.topk = moe_config.experts_per_token
         self.intermediate_size_per_partition = (
             moe_config.intermediate_size_per_partition
@@ -176,18 +169,21 @@ class FlashInferTrtLlmFp8Experts(mk.FusedMoEPermuteExpertsUnpermute):
         expert_map: torch.Tensor | None,
         a1q_scale: torch.Tensor | None,
         apply_router_weight_on_input: bool,
+        # grouped topk + fused topk bias parameters
+        num_expert_group: int | None = None,
+        e_score_correction_bias: torch.Tensor | None = None,
+        routed_scaling_factor: float | None = None,
+        topk_group: int | None = None,
     ) -> torch.Tensor:
         assert not apply_router_weight_on_input
         assert activation == "silu"
         assert (
-            self.e_score_correction_bias is None
-            or self.e_score_correction_bias.dtype == hidden_states.dtype
+            e_score_correction_bias is None
+            or e_score_correction_bias.dtype == hidden_states.dtype
         )
 
         if self.routing_method_type == RoutingMethodType.DeepSeekV3:
             router_logits = router_logits.to(torch.float32)
-
-        topk_group = self.topk_group if self.topk_group is not None else 0
 
         assert self.topk <= global_num_experts
         assert self.topk <= 10
@@ -203,7 +199,7 @@ class FlashInferTrtLlmFp8Experts(mk.FusedMoEPermuteExpertsUnpermute):
 
         return flashinfer.fused_moe.trtllm_fp8_block_scale_moe(
             routing_logits=router_logits,
-            routing_bias=self.e_score_correction_bias,
+            routing_bias=e_score_correction_bias,
             hidden_states=hidden_states,
             hidden_states_scale=a1q_scale_t,
             gemm1_weights=w1,
@@ -212,12 +208,12 @@ class FlashInferTrtLlmFp8Experts(mk.FusedMoEPermuteExpertsUnpermute):
             gemm2_weights_scale=self.quant_config.w2_scale,
             num_experts=global_num_experts,
             top_k=self.topk,
-            n_group=self.num_expert_group,
-            topk_group=topk_group,
+            n_group=num_expert_group,
+            topk_group=(topk_group or 0),
             intermediate_size=self.intermediate_size_per_partition,
             local_expert_offset=self.ep_rank * self.local_num_experts,
             local_num_experts=self.local_num_experts,
-            routed_scaling_factor=self.routing_scaling_factor,
+            routed_scaling_factor=routed_scaling_factor,
             routing_method_type=self.routing_method_type,
         )
 
@@ -232,15 +228,23 @@ class FlashInferTrtLlmFp8Experts(mk.FusedMoEPermuteExpertsUnpermute):
         expert_map: torch.Tensor | None,
         a1q_scale: torch.Tensor | None,
         apply_router_weight_on_input: bool,
+        # grouped topk + fused topk bias parameters
+        num_expert_group: int | None = None,
+        e_score_correction_bias: torch.Tensor | None = None,
+        routed_scaling_factor: float | None = None,
+        topk_group: int | None = None,
     ) -> torch.Tensor:
         assert self.routing_method_type == RoutingMethodType.Llama4
         assert apply_router_weight_on_input
 
-        topk_group = self.topk_group if self.topk_group is not None else 0
+        # Should only have Llama4 routing here.
+        assert routed_scaling_factor is None
+        assert e_score_correction_bias is None
+        assert num_expert_group is None
 
         return flashinfer.fused_moe.trtllm_fp8_per_tensor_scale_moe(
             routing_logits=router_logits,
-            routing_bias=self.e_score_correction_bias,
+            routing_bias=e_score_correction_bias,
             hidden_states=hidden_states,
             gemm1_weights=w1,
             output1_scales_scalar=self.g1_scale_c,
@@ -249,12 +253,12 @@ class FlashInferTrtLlmFp8Experts(mk.FusedMoEPermuteExpertsUnpermute):
             output2_scales_scalar=self._g2_alphas,
             num_experts=global_num_experts,
             top_k=self.topk,
-            n_group=self.num_expert_group,
-            topk_group=topk_group,
+            n_group=num_expert_group,
+            topk_group=topk_group or 0,
             intermediate_size=self.intermediate_size_per_partition,
             local_expert_offset=self.ep_rank * self.local_num_experts,
             local_num_experts=self.local_num_experts,
-            routed_scaling_factor=self.routing_scaling_factor,
+            routed_scaling_factor=routed_scaling_factor,
             use_routing_scales_on_input=apply_router_weight_on_input,
             routing_method_type=self.routing_method_type,
         )
@@ -270,6 +274,11 @@ class FlashInferTrtLlmFp8Experts(mk.FusedMoEPermuteExpertsUnpermute):
         expert_map: torch.Tensor | None,
         a1q_scale: torch.Tensor | None,
         apply_router_weight_on_input: bool,
+        # grouped topk + fused topk bias parameters
+        num_expert_group: int | None = None,
+        e_score_correction_bias: torch.Tensor | None = None,
+        routed_scaling_factor: float | None = None,
+        topk_group: int | None = None,
     ) -> torch.Tensor:
         if self.quant_config.block_shape is not None:
             return self._apply_per_block_monolithic(
@@ -282,6 +291,9 @@ class FlashInferTrtLlmFp8Experts(mk.FusedMoEPermuteExpertsUnpermute):
                 expert_map,
                 a1q_scale,
                 apply_router_weight_on_input,
+                num_expert_group=num_expert_group,
+                e_score_correction_bias=e_score_correction_bias,
+                routed_scaling_factor=routed_scaling_factor,
             )
         elif self.quant_config.is_per_tensor:
             return self._apply_per_tensor_monolithic(
@@ -294,6 +306,9 @@ class FlashInferTrtLlmFp8Experts(mk.FusedMoEPermuteExpertsUnpermute):
                 expert_map,
                 a1q_scale,
                 apply_router_weight_on_input,
+                num_expert_group=num_expert_group,
+                e_score_correction_bias=e_score_correction_bias,
+                routed_scaling_factor=routed_scaling_factor,
             )
         else:
             raise NotImplementedError(

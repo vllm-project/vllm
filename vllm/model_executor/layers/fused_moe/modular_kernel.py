@@ -853,6 +853,11 @@ class FusedMoEPermuteExpertsUnpermute(ABC):
         expert_map: torch.Tensor | None,
         a1q_scale: torch.Tensor | None,
         apply_router_weight_on_input: bool,
+        # grouped topk + fused topk bias parameters
+        num_expert_group: int | None = None,
+        e_score_correction_bias: torch.Tensor | None = None,
+        routed_scaling_factor: float | None = None,
+        topk_group: int | None = None,
     ) -> torch.Tensor:
         """
         Same as apply(), except uses router_logits as opposed
@@ -1459,6 +1464,11 @@ class FusedMoEModularKernel(torch.nn.Module):
         global_num_experts: int,
         expert_map: torch.Tensor | None,
         apply_router_weight_on_input: bool,
+        # grouped topk + fused topk bias parameters
+        num_expert_group: int | None = None,
+        e_score_correction_bias: torch.Tensor | None = None,
+        routed_scaling_factor: float | None = None,
+        topk_group: int | None = None,
     ) -> torch.Tensor:
         """
         Same as forward(), except uses router_logits as opposed
@@ -1481,6 +1491,11 @@ class FusedMoEModularKernel(torch.nn.Module):
             expert_map=expert_map,
             apply_router_weight_on_input=apply_router_weight_on_input,
             a1q_scale=a1q_scale,
+            # grouped topk + fused topk bias parameters
+            num_expert_group=num_expert_group,
+            e_score_correction_bias=e_score_correction_bias,
+            routed_scaling_factor=routed_scaling_factor,
+            topk_group=topk_group,
         )
 
         # TODO(rob): once naive P/F Dp/Ep lands, we will need to
