@@ -265,6 +265,14 @@ class InputProcessor:
         auto-hashed downstream.
         """
 
+        if is_explicit_encoder_decoder_prompt(prompt):
+            self._validate_singleton_mm_uuids(prompt["encoder_prompt"])
+
+            if (dec_prompt := prompt["decoder_prompt"]) is not None:
+                self._validate_singleton_mm_uuids(dec_prompt)
+        else:
+            self._validate_singleton_mm_uuids(prompt)
+
     def _validate_lora(self, lora_request: LoRARequest | None) -> None:
         if lora_request is None:
             return
