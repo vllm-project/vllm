@@ -404,21 +404,22 @@ def _merge_embeds(
             transformers.BatchFeature(data_merged),
             {},
         )
-    except Exception:
-        pass
-    else:
         parsed_fields = {key: parsed_configs[key].field for key in first_keys}
         keys_to_update = [
-            key for key in first_keys if fields[key] != parsed_fields[key]
+            key
+            for key in first_keys
+            if (
+                fields[key] != parsed_fields[key]
+                and not isinstance(fields[key], _BatchedSingleItemField)
+            )
         ]
 
         for key in keys_to_update:
-            if isinstance(fields[key], _BatchedSingleItemField):
-                continue
-
             data_merged[key] = parsed_fields[key]._reduce_data(
                 [item[key] for item in data_items], pin_memory=False
             )
+    except Exception:
+        logger.exception("Error when parsing merged embeddings")
 
     return data_merged
 
