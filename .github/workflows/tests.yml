@@ -45,11 +45,12 @@ jobs:
           python -m pip install --upgrade pip
           # Install PyTorch CPU (pre-compiled wheel, no compilation)
           pip install torch torchaudio torchvision --index-url https://download.pytorch.org/whl/cpu
-          # Install test dependencies, excluding torch packages (already installed)
+          # Install common dependencies, excluding torch packages
+          grep -v -E "^(torch|torchaudio|torchvision)==" requirements/common.txt > /tmp/common-requirements.txt
+          pip install -r /tmp/common-requirements.txt
+          # Install test dependencies, excluding torch packages
           grep -v -E "^(torch|torchaudio|torchvision)==" requirements/test.txt > /tmp/test-requirements.txt
           pip install -r /tmp/test-requirements.txt
-          # Install minimal runtime dependencies
-          pip install msgspec opentelemetry-api opentelemetry-sdk
 
       - name: Run journey tracing tests
         env:
