@@ -591,8 +591,8 @@ if hasattr(torch.ops._C, "gptq_marlin_24_gemm"):
     ) -> torch.Tensor:
         return torch.empty((size_m, size_n), device=a.device, dtype=a.dtype)
 
-    @register_fake("_C::gptq_marlin_gemm")
-    def _gptq_marlin_gemm_fake(
+    @register_fake("_C::marlin_gemm")
+    def _marlin_gemm_fake(
         a: torch.Tensor,
         c: torch.Tensor | None,
         b_q_weight: torch.Tensor,
@@ -1312,7 +1312,7 @@ def marlin_int4_fp8_preprocess(
     return torch.ops._C.marlin_int4_fp8_preprocess(qweight, qzeros_or_none, inplace)
 
 
-def gptq_marlin_gemm(
+def marlin_gemm(
     a: torch.Tensor,
     c: torch.Tensor | None,
     b_q_weight: torch.Tensor,
@@ -1333,7 +1333,7 @@ def gptq_marlin_gemm(
     use_fp32_reduce: bool = False,
     is_zp_float: bool = False,
 ) -> torch.Tensor:
-    return torch.ops._C.gptq_marlin_gemm(
+    return torch.ops._C.marlin_gemm(
         a,
         c,
         b_q_weight,
@@ -1534,6 +1534,7 @@ def permute_cols(a: torch.Tensor, perm: torch.Tensor) -> torch.Tensor:
 def scaled_fp4_quant(
     input: torch.Tensor,
     input_global_scale: torch.Tensor,
+    is_sf_swizzled_layout: bool = True,
     backend: str = "none",
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """
@@ -1577,21 +1578,25 @@ def scaled_fp4_quant(
     else:
         # Two fp4 values will be packed into an uint8.
         output = torch.empty((m, n // 2), device=device, dtype=torch.uint8)
+        if is_sf_swizzled_layout:
+            # We use the rounded values to store the swizzled values. Due to the
+            # requirement of the Tensor Core, the minimum tile is 128x4 for the scales.
+            # So, we first pad the scales to multiples of 128 and 4. Then, the scales
+            # (in float8_e4m3fn) are packed into an int32 for every 4 values. More:
+            # https://docs.nvidia.com/cuda/parallel-thread-execution/#tcgen05-mma-scale-factor-b-layout-4x
+            round_up = lambda x, y: (x + y - 1) // y * y
+            rounded_m = round_up(m, 128)
+            scale_n = n // block_size
+            rounded_n = round_up(scale_n, 4)
+            output_scale = torch.empty(
+                (rounded_m, rounded_n // 4), device=device, dtype=torch.int32
+            )
+        else:
+            output_scale = torch.empty((m, n // 16), device=device, dtype=torch.uint8)
 
-        # We use the rounded values to store the swizzled values. Due to the
-        # requirement of the Tensor Core, the minimum tile is 128x4 for the scales.
-        # So, we first pad the scales to multiples of 128 and 4. Then, the scales
-        # (in float8_e4m3fn) are packed into an int32 for every 4 values. More:
-        # https://docs.nvidia.com/cuda/parallel-thread-execution/#tcgen05-mma-scale-factor-b-layout-4x
-        round_up = lambda x, y: (x + y - 1) // y * y
-        rounded_m = round_up(m, 128)
-        scale_n = n // block_size
-        rounded_n = round_up(scale_n, 4)
-        output_scale = torch.empty(
-            (rounded_m, rounded_n // 4), device=device, dtype=torch.int32
+        torch.ops._C.scaled_fp4_quant(
+            output, input, output_scale, input_global_scale, is_sf_swizzled_layout
         )
-
-        torch.ops._C.scaled_fp4_quant(output, input, output_scale, input_global_scale)
 
     output_scale = output_scale.view(torch.float8_e4m3fn)
     return output, output_scale
@@ -2027,20 +2032,35 @@ def selective_scan_fwd(
     )
 
 
+# NOTE: The wvSplitK kernel (and all of the kernels in skinny_gemms.cu)
+# are unable to properly handle non-contiguous
+# tensors.  It might be a good TODO(rasmith) to augment these kernels
+# to be able to handle non-contiguous kernels for better performance.
+def rocm_enforce_contiguous_skinny_gemm_inputs(
+    a: torch.Tensor, b: torch.Tensor
+) -> tuple[torch.Tensor, torch.Tensor]:
+    a = a.contiguous()  # no-op if already contiguous, else clone
+    b = b.contiguous()  # no-op if already contiguous, else clone
+    return a, b
+
+
 # ROCm skinny gemms
 def LLMM1(a: torch.Tensor, b: torch.Tensor, rows_per_block: int) -> torch.Tensor:
+    a, b = rocm_enforce_contiguous_skinny_gemm_inputs(a, b)
     return torch.ops._rocm_C.LLMM1(a, b, rows_per_block)
 
 
 def wvSplitK(
     a: torch.Tensor, b: torch.Tensor, cu_count: int, bias: torch.Tensor = None
 ) -> torch.Tensor:
+    a, b = rocm_enforce_contiguous_skinny_gemm_inputs(a, b)
     return torch.ops._rocm_C.wvSplitK(a, b, bias, cu_count)
 
 
 def wvSplitKrc(
     a: torch.Tensor, b: torch.Tensor, cu_count: int, bias: torch.Tensor = None
 ) -> torch.Tensor:
+    a, b = rocm_enforce_contiguous_skinny_gemm_inputs(a, b)
     return torch.ops._rocm_C.wvSplitKrc(a, b, bias, cu_count)
 
 
@@ -2053,6 +2073,7 @@ def wvSplitKQ(
     cu_count: int,
     bias: torch.Tensor = None,
 ) -> torch.Tensor:
+    a, b = rocm_enforce_contiguous_skinny_gemm_inputs(a, b)
     out = torch.empty((b.shape[0], a.shape[0]), dtype=out_dtype, device=b.device)
     torch.ops._rocm_C.wvSplitKQ(a, b, bias, out, scale_a, scale_b, cu_count)
     return out

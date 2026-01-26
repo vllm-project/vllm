@@ -8,6 +8,7 @@ import torch
 
 import vllm.envs as envs
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
+from vllm import _custom_ops as ops
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
@@ -341,10 +342,8 @@ def flashinfer_trtllm_fp4_moe(
         hidden_states_fp4, hidden_states_scale_linear_fp4 = x
     else:
         # hidden_states is the already quantized
-        (hidden_states_fp4, hidden_states_scale_linear_fp4) = flashinfer.fp4_quantize(
-            x,
-            layer.a1_gscale,
-            is_sf_swizzled_layout=False,
+        (hidden_states_fp4, hidden_states_scale_linear_fp4) = ops.scaled_fp4_quant(
+            x, layer.a1_gscale, is_sf_swizzled_layout=False
         )
 
     # Determine routing method type
@@ -443,10 +442,8 @@ def flashinfer_trtllm_fp4_routed_moe(
         hidden_states_fp4, hidden_states_scale_linear_fp4 = x
     else:
         # Quantize input to FP4
-        (hidden_states_fp4, hidden_states_scale_linear_fp4) = flashinfer.fp4_quantize(
-            x,
-            layer.a1_gscale,
-            is_sf_swizzled_layout=False,
+        (hidden_states_fp4, hidden_states_scale_linear_fp4) = ops.scaled_fp4_quant(
+            x, layer.a1_gscale, is_sf_swizzled_layout=False
         )
 
     # Call TRT-LLM FP4 block-scale MoE kernel
