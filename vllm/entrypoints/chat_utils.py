@@ -340,6 +340,11 @@ ModalityStr = Literal["image", "audio", "video", "image_embeds", "audio_embeds"]
 _T = TypeVar("_T")
 
 
+# Backward compatibility for single item input
+class _BatchedSingleItemField(MultiModalSharedField):
+    pass
+
+
 def _detect_field(
     tensors: list[torch.Tensor],
     mm_processor: BaseMultiModalProcessor,
@@ -347,7 +352,6 @@ def _detect_field(
     first_item = tensors[0]
     hidden_size = mm_processor.info.ctx.model_config.get_inputs_embeds_size()
 
-    # Backward compatibility for single item input
     if (
         len(tensors) == 1
         and first_item.ndim == 3
@@ -358,7 +362,7 @@ def _detect_field(
             "Batched multi-modal embedding inputs are deprecated for Chat API. "
             "Please pass a separate content part for each multi-modal item."
         )
-        return MultiModalSharedField(batch_size=1)
+        return _BatchedSingleItemField(batch_size=1)
 
     first_shape = first_item.shape
     if all(t.shape == first_shape for t in tensors):
@@ -404,14 +408,17 @@ def _merge_embeds(
         pass
     else:
         parsed_fields = {key: parsed_configs[key].field for key in first_keys}
+        keys_to_update = [
+            key for key in first_keys if fields[key] != parsed_fields[key]
+        ]
 
-        if fields != parsed_fields:
-            data_merged = {
-                key: field._reduce_data(
-                    [item[key] for item in data_items], pin_memory=False
-                )
-                for key, field in parsed_fields.items()
-            }
+        for key in keys_to_update:
+            if isinstance(fields[key], _BatchedSingleItemField):
+                continue
+
+            data_merged[key] = parsed_fields[key]._reduce_data(
+                [item[key] for item in data_items], pin_memory=False
+            )
 
     return data_merged
 
