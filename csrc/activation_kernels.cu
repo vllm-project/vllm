@@ -120,7 +120,7 @@ __device__ __forceinline__ T gelu_tanh_kernel(const T& x) {
     return;                                                                      \
   }                                                                              \
   dim3 grid(num_tokens);                                                         \
-  int vec_size = arch_support_vec / sizeof(scalar_t);                            \
+  int vec_size = arch_support_vec / at::elementSize(input.scalar_type());        \
   const bool use_vec = (d % vec_size == 0);                                      \
   const at::cuda::OptionalCUDAGuard device_guard(device_of(input));              \
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();                  \
@@ -325,7 +325,7 @@ __global__ void swigluoai_and_mul_kernel(
   int d = input.size(-1) / 2;                                                    \
   int64_t num_tokens = input.numel() / input.size(-1);                           \
   dim3 grid(num_tokens);                                                         \
-  int vec_size = arch_support_vec / sizeof(scalar_t);                            \
+  int vec_size = arch_support_vec / at::elementSize(input.scalar_type());        \ 
   const bool use_vec = (d % vec_size == 0);                                      \
   const at::cuda::OptionalCUDAGuard device_guard(device_of(input));              \
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();                  \
@@ -437,7 +437,7 @@ __global__ void activation_kernel(
   int d = input.size(-1);                                                        \
   int64_t num_tokens = input.numel() / d;                                        \
   dim3 grid(num_tokens);                                                         \
-  int vec_size = arch_support_vec / sizeof(scalar_t);                            \
+  int vec_size = arch_support_vec / at::elementSize(input.scalar_type());        \
   const bool use_vec = (d % vec_size == 0);                                      \
   const at::cuda::OptionalCUDAGuard device_guard(device_of(input));              \
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();                  \
