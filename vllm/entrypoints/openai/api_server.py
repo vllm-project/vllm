@@ -510,6 +510,12 @@ def build_app(args: Namespace) -> FastAPI:
 
     register_translations_api_router(app)
 
+    from vllm.entrypoints.openai.realtime.api_router import (
+        attach_router as register_realtime_api_router,
+    )
+
+    register_realtime_api_router(app)
+
     from vllm.entrypoints.openai.completion.api_router import (
         attach_router as register_completion_api_router,
     )
@@ -778,6 +784,19 @@ async def init_app_state(
     )
     state.openai_serving_translation = (
         OpenAIServingTranslation(
+            engine_client,
+            state.openai_serving_models,
+            request_logger=request_logger,
+            log_error_stack=args.log_error_stack,
+            enable_force_include_usage=args.enable_force_include_usage,
+        )
+        if "transcription" in supported_tasks
+        else None
+    )
+    from vllm.entrypoints.openai.realtime.serving import OpenAIServingRealtime
+
+    state.openai_serving_realtime = (
+        OpenAIServingRealtime(
             engine_client,
             state.openai_serving_models,
             request_logger=request_logger,
