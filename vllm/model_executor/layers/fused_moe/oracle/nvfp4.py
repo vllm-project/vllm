@@ -354,6 +354,9 @@ def make_nvfp4_moe_quant_config(
         a2_gscale=(1.0 / a2_scale),
         w1_scale=w13_scale,
         w2_scale=w2_scale,
+        # NOTE(rob): this is a hack until the expets_cls()
+        # constructs the quant configs.
+        skip_nvfp4_swizzle=(backend == NvFp4MoeBackend.FLASHINFER_TRTLLM),
     )
 
 

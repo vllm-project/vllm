@@ -204,6 +204,7 @@ class FusedMoEQuantConfig:
     _a2: FusedMoEQuantDesc
     _w1: FusedMoEQuantDesc
     _w2: FusedMoEQuantDesc
+    skip_nvfp4_swizzle: bool = False
 
     def __post_init__(self):
         assert not self.per_act_token_quant or self.block_shape is None, (
@@ -443,6 +444,7 @@ class FusedMoEQuantConfig:
         w1_zp: torch.Tensor | None = None,
         w2_zp: torch.Tensor | None = None,
         weight_dtype: torch.dtype | str | None = None,
+        skip_nvfp4_swizzle: bool = False,
     ) -> "FusedMoEQuantConfig":
         """
         General builder function for a FusedMoEQuantConfig.
@@ -472,6 +474,7 @@ class FusedMoEQuantConfig:
         - w2_bias: Optional biases for w1 (GPT OSS Triton).
         - w1_zp: Optional w1 zero points for int4/int8 quantization.
         - w2_zp: Optional w2 zero points for int4/int8 quantization.
+        - skip_nvfp4_swizzle: Whether to skip nvfp4 scale swizzling.
         """
         assert not isinstance(quant_dtype, str) or quant_dtype in {
             "nvfp4",
@@ -502,6 +505,7 @@ class FusedMoEQuantConfig:
             _w2=FusedMoEQuantDesc(
                 weight_dtype, w_shape, w2_scale, g2_alphas, w2_zp, w2_bias
             ),
+            skip_nvfp4_swizzle=skip_nvfp4_swizzle,
         )
         assert quant_config.per_act_token_quant == per_act_token_quant
         assert quant_config.per_out_ch_quant == per_out_ch_quant
@@ -673,6 +677,7 @@ def nvfp4_moe_quant_config(
     a2_gscale: torch.Tensor,
     w1_scale: torch.Tensor,
     w2_scale: torch.Tensor,
+    skip_nvfp4_swizzle: bool = False,
 ) -> FusedMoEQuantConfig:
     """
     Construct a quant config for mxfp4 activations and nvp4 weights.
@@ -688,6 +693,7 @@ def nvfp4_moe_quant_config(
         per_act_token_quant=False,
         per_out_ch_quant=False,
         block_shape=None,
+        skip_nvfp4_swizzle=skip_nvfp4_swizzle,
     )
 
 
