@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from dataclasses import dataclass
-from enum import IntEnum
 from typing import Optional, Union
 
 import torch
@@ -99,30 +98,6 @@ def _quant_flags_to_group_shape(
             w_shape = GroupShape.PER_TOKEN
 
     return a_shape, w_shape
-
-
-# The type of method in top-K routing
-# Please keep this in sync with the counterpart defined in https://github.com/flashinfer-ai/flashinfer/blob/main/include/flashinfer/trtllm/fused_moe/runner.h
-class RoutingMethodType(IntEnum):
-    # Default: Softmax -> TopK
-    Default = (0,)
-    # Renormalize: TopK -> Softmax/Sigmoid
-    Renormalize = (1,)
-    # DeepSeekV3: Sigmoid -> RoutingBiasAdd -> Top2 in group -> Top4 groups
-    # -> Top8 experts from the Top4 groups
-    DeepSeekV3 = (2,)
-    # Llama4: Top1 -> Sigmoid
-    Llama4 = (3,)
-    # RenormalizeNaive: Softmax/Sigmoid -> TopK -> Renormalize
-    RenormalizeNaive = (4,)
-    # TopK: TopK (no softmax)
-    TopK = (5,)
-    # Custom
-    Custom = (6,)
-    # Simulated
-    Simulated = (7,)
-    # Unspecified
-    Unspecified = 8.0
 
 
 @dataclass
@@ -1064,7 +1039,6 @@ class FusedMoEConfig:
     num_local_experts: int
     activation: str
     device: torch.device | str
-    routing_method: RoutingMethodType
     moe_parallel_config: FusedMoEParallelConfig
 
     # The activation type.

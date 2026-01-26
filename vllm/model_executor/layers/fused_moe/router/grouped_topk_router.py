@@ -13,7 +13,6 @@ from vllm.model_executor.custom_op import CustomOp
 from vllm.model_executor.layers.batch_invariant import (
     vllm_is_batch_invariant,
 )
-from vllm.model_executor.layers.fused_moe.config import RoutingMethodType
 from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (
     rocm_aiter_grouped_topk,
 )
@@ -276,17 +275,6 @@ class GroupedTopKRouter(BaseRouter):
         self.routed_scaling_factor = routed_scaling_factor
         self.e_score_correction_bias = e_score_correction_bias
         self.num_fused_shared_experts = num_fused_shared_experts
-
-        if scoring_func == "sigmoid":
-            self._routing_method_type = RoutingMethodType.DeepSeekV3
-        else:
-            # NOTE: this prohibits the FLASHINFER_TRTLLM kernels from
-            # being selected, since they only support DeepSeek-style.
-            self._routing_method_type = RoutingMethodType.Unspecified
-
-    @property
-    def routing_method_type(self) -> RoutingMethodType:
-        return self._routing_method_type
 
     def _compute_routing(
         self,

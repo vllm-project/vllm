@@ -4,19 +4,12 @@ from abc import ABC, abstractmethod
 
 import torch
 
-from vllm.model_executor.layers.fused_moe.config import RoutingMethodType
-
 
 class FusedMoERouter(ABC):
     """
     FusedMoERouter is an abstract class that provides a 'select_experts'
     method that is used for routing hidden states based on router logits.
     """
-
-    @property
-    @abstractmethod
-    def routing_method_type(self) -> RoutingMethodType:
-        raise NotImplementedError
 
     @abstractmethod
     def select_experts(

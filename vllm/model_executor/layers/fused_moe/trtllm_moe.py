@@ -119,6 +119,10 @@ class TrtLlmGenExperts(mk.FusedMoEPermuteExpertsUnpermute):
         expert_tokens_meta: mk.ExpertTokensMetadata | None,
         apply_router_weight_on_input: bool,
     ):
+        from flashinfer import trtllm_fp4_block_scale_routed_moe
+
+        from vllm.utils.flashinfer import RoutingMethodType, autotune
+
         topk = topk_ids.size(-1)
         local_num_experts = w1.size(0)
         intermediate_size = w2.size(1)
@@ -160,15 +164,11 @@ class TrtLlmGenExperts(mk.FusedMoEPermuteExpertsUnpermute):
             "local_expert_offset": local_expert_offset,
             "local_num_experts": local_num_experts,
             "routed_scaling_factor": None,
-            "routing_method_type": 1,
+            "routing_method_type": int(RoutingMethodType.Renormalize),
             "do_finalize": True,
             "output": output,
             "tune_max_num_tokens": max(self.max_capture_size, 1),
         }
-
-        from flashinfer import trtllm_fp4_block_scale_routed_moe
-
-        from vllm.utils.flashinfer import autotune
 
         with autotune(False):
             # Enable autotune when,

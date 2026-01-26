@@ -104,6 +104,13 @@ def _lazy_import_wrapper(
     return wrapper
 
 
+def _maybe_import(module_name: str, attr_name: str) -> Any:
+    if not has_flashinfer():
+        return None
+    mod = _get_submodule(module_name)
+    return getattr(mod, attr_name, None) if mod else None
+
+
 # Create lazy wrappers for each function
 flashinfer_trtllm_fp8_block_scale_moe = _lazy_import_wrapper(
     "flashinfer.fused_moe", "trtllm_fp8_block_scale_moe"
@@ -131,6 +138,9 @@ nvfp4_block_scale_interleave = _lazy_import_wrapper(
 trtllm_fp4_block_scale_moe = _lazy_import_wrapper(
     "flashinfer", "trtllm_fp4_block_scale_moe"
 )
+
+# Is this bad?
+RoutingMethodType = _maybe_import("flashinfer", "RoutingMethodType")
 
 # Special case for autotune since it returns a context manager
 autotune = _lazy_import_wrapper(

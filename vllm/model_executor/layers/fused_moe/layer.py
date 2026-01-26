@@ -33,7 +33,6 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
     FusedMoEParallelConfig,
     FusedMoEQuantConfig,
-    RoutingMethodType,
 )
 from vllm.model_executor.layers.fused_moe.fused_moe_method_base import (
     FusedMoEMethodBase,
@@ -552,7 +551,6 @@ class FusedMoE(CustomOp):
             # can make this a value.
             indices_type_getter=lambda: self.quant_method.topk_indices_dtype,
         )
-        self.routing_method_type: RoutingMethodType = self.router.routing_method_type
 
         self.moe_config: FusedMoEConfig = FusedMoEConfig(
             num_experts=self.global_num_experts,
@@ -569,7 +567,6 @@ class FusedMoE(CustomOp):
             is_lora_enabled=vllm_config.lora_config is not None,
             activation=activation,
             device=vllm_config.device_config.device,
-            routing_method=self.routing_method_type,
         )
         self.moe_config_use_flashinfer_cutlass_kernels = (
             self.moe_config.use_flashinfer_cutlass_kernels

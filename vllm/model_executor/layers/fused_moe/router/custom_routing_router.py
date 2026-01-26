@@ -5,7 +5,6 @@ from collections.abc import Callable
 import torch
 
 from vllm.distributed.eplb.eplb_state import EplbLayerState
-from vllm.model_executor.layers.fused_moe.config import RoutingMethodType
 from vllm.model_executor.layers.fused_moe.router.base_router import BaseRouter
 
 
@@ -31,15 +30,6 @@ class CustomRoutingRouter(BaseRouter):
         )
         self.custom_routing_function = custom_routing_function
         self.renormalize = renormalize
-
-    @property
-    def routing_method_type(self) -> RoutingMethodType:
-        from vllm.model_executor.models.llama4 import Llama4MoE
-
-        # NOTE: FLASHINFER_TRTLLM support the Llama4 router.
-        if self.custom_routing_function == Llama4MoE.custom_routing_function:
-            return RoutingMethodType.Llama4
-        return RoutingMethodType.Custom
 
     def _compute_routing(
         self,
