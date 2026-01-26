@@ -156,25 +156,78 @@ docker pull public.ecr.aws/q9t5s3a7/vllm-ci-postmerge-repo:${VLLM_COMMIT}-arm64-
 
 # --8<-- [end:pre-built-images]
 # --8<-- [start:build-image-from-source]
+
+## Building for your target ARM CPU
+
 ```bash
 docker build -f docker/Dockerfile.cpu \
-        --tag vllm-cpu-env .
+        --platform=linux/arm64 \
+        --build-arg VLLM_CPU_ARM_BF16=<false (default)|true> \
+        --tag vllm-cpu-env \
+        --target vllm-openai .
+```
 
-# Launching OpenAI server
+!!! note "Auto-detection by default"
+    By default, ARM CPU instruction sets (BF16, NEON, etc.) are automatically detected from the build system's CPU flags. The `VLLM_CPU_ARM_BF16` build argument is used for cross-compilation:
+
+    - `VLLM_CPU_ARM_BF16=true` - Force-enable ARM BF16 support (build with BF16 regardless of build system capabilities)
+    - `VLLM_CPU_ARM_BF16=false` - Rely on auto-detection (default)
+
+### Examples
+
+**Auto-detection build (native ARM)**
+
+```bash
+# Building on ARM64 system - platform auto-detected
+docker build -f docker/Dockerfile.cpu \
+        --tag vllm-cpu-arm64 \
+        --target vllm-openai .
+```
+
+**Cross-compile for ARM with BF16 support**
+
+```bash
+# Building on ARM64 for newer ARM CPUs with BF16
+docker build -f docker/Dockerfile.cpu \
+        --build-arg VLLM_CPU_ARM_BF16=true \
+        --tag vllm-cpu-arm64-bf16 \
+        --target vllm-openai .
+```
+
+**Cross-compile from x86_64 to ARM64 with BF16**
+
+```bash
+# Requires Docker buildx with ARM emulation (QEMU)
+docker buildx build -f docker/Dockerfile.cpu \
+        --platform=linux/arm64 \
+        --build-arg VLLM_CPU_ARM_BF16=true \
+        --build-arg max_jobs=4 \
+        --tag vllm-cpu-arm64-bf16 \
+        --target vllm-openai \
+        --load .
+```
+
+!!! note "ARM BF16 requirements"
+    ARM BF16 support requires ARMv8.6-A or later (FEAT_BF16). Supported on AWS Graviton3/4, Ampere Altra Max, and other recent ARM processors.
+
+## Launching the OpenAI server
+
+```bash
 docker run --rm \
-            --privileged=true \
+            --security-opt seccomp=unconfined \
+            --cap-add SYS_NICE \
             --shm-size=4g \
             -p 8000:8000 \
             -e VLLM_CPU_KVCACHE_SPACE=<KV cache space> \
             -e VLLM_CPU_OMP_THREADS_BIND=<CPU cores for inference> \
-            vllm-cpu-env \
-            --model=meta-llama/Llama-3.2-1B-Instruct \
+            vllm-cpu-arm64 \
+            meta-llama/Llama-3.2-1B-Instruct \
             --dtype=bfloat16 \
             other vLLM OpenAI server arguments
 ```
 
-!!! tip
-    An alternative of `--privileged=true` is `--cap-add SYS_NICE --security-opt seccomp=unconfined`.
+!!! tip "Alternative to --privileged"
+    Instead of `--privileged=true`, use `--cap-add SYS_NICE --security-opt seccomp=unconfined` for better security.
 
 # --8<-- [end:build-image-from-source]
 # --8<-- [start:extra-information]

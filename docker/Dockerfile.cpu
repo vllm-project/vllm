@@ -20,6 +20,7 @@
 #   VLLM_CPU_AVX512BF16=false (default)|true (for cross-compilation)
 #   VLLM_CPU_AVX512VNNI=false (default)|true (for cross-compilation)
 #   VLLM_CPU_AMXBF16=false (default)|true (for cross-compilation)
+#   VLLM_CPU_ARM_BF16=false (default)|true (for cross-compilation)
 #
 
 ######################### COMMON BASE IMAGE #########################
@@ -108,8 +109,21 @@ ENV VLLM_CPU_AVX512VNNI=${VLLM_CPU_AVX512VNNI}
 # Support for building with AMXBF16 ISA: docker build --build-arg VLLM_CPU_AMXBF16="true" ...
 ARG VLLM_CPU_AMXBF16=1
 ENV VLLM_CPU_AMXBF16=${VLLM_CPU_AMXBF16}
+# Support for cross-compilation with ARM BF16 ISA: docker build --build-arg VLLM_CPU_ARM_BF16="true" ...
+ARG VLLM_CPU_ARM_BF16=0
+ENV VLLM_CPU_ARM_BF16=${VLLM_CPU_ARM_BF16}
 
 WORKDIR /workspace/vllm
+
+# Validate build arguments - prevent mixing incompatible ISA flags
+RUN if [ "$TARGETARCH" = "arm64" ] && { [ "$VLLM_CPU_AVX2" != "0" ] || [ "$VLLM_CPU_AVX512" != "0" ] || [ "$VLLM_CPU_AVX512BF16" != "0" ] || [ "$VLLM_CPU_AVX512VNNI" != "0" ]; }; then \
+        echo "ERROR: Cannot use x86-specific ISA flags (AVX2, AVX512, etc.) when building for ARM64 (--platform=linux/arm64)"; \
+        exit 1; \
+    fi && \
+    if [ "$TARGETARCH" = "amd64" ] && [ "$VLLM_CPU_ARM_BF16" != "0" ]; then \
+        echo "ERROR: Cannot use ARM-specific ISA flags (ARM_BF16) when building for x86_64 (--platform=linux/amd64)"; \
+        exit 1; \
+    fi
 
 # Copy build requirements
 COPY requirements/cpu-build.txt requirements/build.txt
@@ -228,6 +242,7 @@ ARG VLLM_CPU_AVX512
 ARG VLLM_CPU_AVX512BF16
 ARG VLLM_CPU_AVX512VNNI
 ARG VLLM_CPU_AMXBF16
+ARG VLLM_CPU_ARM_BF16
 ARG PYTHON_VERSION
 
 LABEL ai.vllm.build.target-arch="${TARGETARCH}"
@@ -237,6 +252,7 @@ LABEL ai.vllm.build.cpu-avx512="${VLLM_CPU_AVX512:-false}"
 LABEL ai.vllm.build.cpu-avx512bf16="${VLLM_CPU_AVX512BF16:-false}"
 LABEL ai.vllm.build.cpu-avx512vnni="${VLLM_CPU_AVX512VNNI:-false}"
 LABEL ai.vllm.build.cpu-amxbf16="${VLLM_CPU_AMXBF16:-false}"
+LABEL ai.vllm.build.cpu-arm-bf16="${VLLM_CPU_ARM_BF16:-false}"
 LABEL ai.vllm.build.python-version="${PYTHON_VERSION:-3.12}"
 
 ENTRYPOINT ["vllm", "serve"]
