@@ -216,8 +216,14 @@ def dispatch_cpu_unquantized_gemm(
     layer: torch.nn.Module,
     remove_weight: bool,
 ) -> None:
+    # skip for missing layers
+    if layer.weight.is_meta:
+        layer.cpu_linear = torch.nn.functional.linear
+        return
+
     N, K = layer.weight.size()
     dtype = layer.weight.dtype
+
     if envs.VLLM_CPU_SGL_KERNEL and check_cpu_sgl_kernel(N, K, dtype):
         packed_weight = torch.ops._C.convert_weight_packed(layer.weight)
         if getattr(layer, "bias", None) is not None:

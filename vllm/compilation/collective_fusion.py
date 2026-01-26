@@ -946,6 +946,7 @@ class AllReduceFusedRMSNormStaticQuantNVFP4Pattern(BasePattern):
                 input=rms,
                 output_scale=output_scale,
                 input_scale=input_global_scale,
+                is_sf_swizzled_layout=True,
             )
 
             # quant_out, allreduce_output, output_scale
@@ -1043,6 +1044,7 @@ class AllReduceFusedAddRMSNormStaticQuantNVFP4Pattern(BasePattern):
                 input=rms,
                 output_scale=output_scale,
                 input_scale=input_global_scale,
+                is_sf_swizzled_layout=True,
             )
 
             # quant_out, allreduce_output, output_scale
