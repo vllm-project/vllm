@@ -207,6 +207,7 @@ from vllm.config import CacheConfig, ModelConfig, VllmConfig, get_current_vllm_c
 from vllm.distributed.parallel_state import get_dcp_group, is_global_first_rank
 from vllm.forward_context import ForwardContext, get_forward_context
 from vllm.logger import init_logger
+from vllm.model_executor.custom_op import CustomOp
 from vllm.model_executor.layers.attention.attention import (
     _init_kv_cache_quant,
     get_attention_context,
@@ -222,7 +223,9 @@ from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
 )
 from vllm.model_executor.layers.quantization import QuantizationConfig
+from vllm.model_executor.layers.quantization.input_quant_fp8 import QuantFP8
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    GroupShape,
     get_and_maybe_dequant_weights,
 )
 from vllm.platforms import current_platform
@@ -310,13 +313,9 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         self.quant_config = quant_config
 
         # Initialize KV cache quantization attributes
-        _init_kv_cache_quant(
-            self,
-            self.quant_config,
-            self.layer_name,
-            kv_cache_dtype,
-            calculate_kv_scales,
-        )
+        self.kv_cache_dtype = kv_cache_dtype
+        self.calculate_kv_scales = calculate_kv_scales
+        _init_kv_cache_quant(self, quant_config, prefix)
 
         dtype = torch.get_default_dtype()
         self.attn_backend = get_attn_backend(
@@ -620,6 +619,37 @@ def dynamic_per_batched_tensor_quant(
 
 logger = init_logger(__name__)
 
+
+@CustomOp.register("mla_decode_concat_quant_fp8")
+class _DecodeConcatQuantFP8(QuantFP8):
+    """
+    QuantFP8 variant that concatenates decode_ql_nope and decode_q_pe before
+    quantization. When disabled, forward_native is compiled via torch.compile,
+    fusing cat/reshape/quant/view together.
+    """
+
+    def _make_forward(quant_fn):  # noqa: N805
+        """Factory to create forward methods that concat before quantization."""
+
+        def forward(
+            self,
+            decode_ql_nope: torch.Tensor,
+            decode_q_pe: torch.Tensor,
+            scale: torch.Tensor,
+            scale_ub: torch.Tensor | None = None,
+        ) -> torch.Tensor:
+            decode_q0 = torch.cat((decode_ql_nope, decode_q_pe), dim=-1)
+            decode_q_flat = decode_q0.reshape(decode_q0.shape[0], -1)
+            decode_q, _ = quant_fn(self, decode_q_flat, scale, scale_ub)
+            return decode_q.view(decode_q0.shape)
+
+        return forward
+
+    forward_native = _make_forward(QuantFP8.forward_native)  # type: ignore[arg-type]
+    forward_cuda = _make_forward(QuantFP8.forward_cuda)  # type: ignore[arg-type]
+    forward_hip = _make_forward(QuantFP8.forward_hip)  # type: ignore[arg-type]
+
+
 CUDNN_WORKSPACE_SIZE = 12800
 
 
@@ -773,18 +803,34 @@ M = TypeVar("M", bound=MLACommonMetadata)
 A = TypeVar("A", bound=AttentionMetadata)
 
 
+def is_deepseek_r1_mla_compatible(vllm_config: VllmConfig) -> bool:
+    # Check if model has DeepSeek R1 compatible MLA dimensions:
+    # qk_nope_head_dim = 128, qk_rope_head_dim = 64, v_head_dim = 128
+    # which results in query/key head dim = 192.
+    if vllm_config.model_config is None:
+        return False
+    hf_text_config = vllm_config.model_config.hf_text_config
+    qk_nope_head_dim = getattr(hf_text_config, "qk_nope_head_dim", 1)
+    qk_rope_head_dim = getattr(hf_text_config, "qk_rope_head_dim", 1)
+    v_head_dim = getattr(hf_text_config, "v_head_dim", 1)
+    return qk_nope_head_dim == 128 and qk_rope_head_dim == 64 and v_head_dim == 128
+
+
 def use_flashinfer_prefill() -> bool:
     # For blackwell default to flashinfer prefill if it's available since
     # it is faster than FA2.
     from vllm.config import get_current_vllm_config
 
     vllm_config = get_current_vllm_config()
-    return (
+    if not (
         not vllm_config.attention_config.disable_flashinfer_prefill
         and flashinfer_available()
         and not vllm_config.attention_config.use_cudnn_prefill
         and current_platform.is_device_capability_family(100)
-    )
+    ):
+        return False
+
+    return is_deepseek_r1_mla_compatible(vllm_config)
 
 
 def use_cudnn_prefill() -> bool:
@@ -804,11 +850,14 @@ def use_trtllm_ragged_deepseek_prefill() -> bool:
     from vllm.config import get_current_vllm_config
 
     vllm_config = get_current_vllm_config()
-    return (
-        flashinfer_available()
+    if not (
+        flashinfer_available
         and vllm_config.attention_config.use_trtllm_ragged_deepseek_prefill
         and current_platform.is_device_capability_family(100)
-    )
+    ):
+        return False
+
+    return is_deepseek_r1_mla_compatible(vllm_config)
 
 
 @dataclass
@@ -1670,7 +1719,7 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
             self._run_prefill_new_tokens = self._run_prefill_new_tokens_trtllm_ragged
             self._pad_v = False
         elif use_flashinfer_prefill():
-            logger.info_once("Using FlashInfer prefill for MLA")
+            logger.info_once("Using FlashInfer prefill for MLA", scope="local")
             self._run_prefill_context_chunk = self._run_prefill_context_chunk_fi
             self._run_prefill_new_tokens = self._run_prefill_new_tokens_fi
             self._pad_v = False
@@ -1715,6 +1764,11 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
         )
         self.cp_kv_cache_interleave_size: int = (
             get_current_vllm_config().parallel_config.cp_kv_cache_interleave_size
+        )
+        self._decode_concat_quant_fp8_op = _DecodeConcatQuantFP8(
+            static=True,
+            group_shape=GroupShape.PER_TENSOR,
+            compile_native=True,
         )
 
     def _flash_attn_varlen_diff_headdims(
@@ -2370,29 +2424,11 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
                 decode_ql_nope = decode_ql_nope.transpose(0, 1)
 
             if fp8_attention:
-                ql_nope_shape = decode_ql_nope.shape
-                q_pe_shape = decode_q_pe.shape
                 assert decode_ql_nope.shape[0] == decode_q_pe.shape[0]
                 assert decode_ql_nope.shape[1] == decode_q_pe.shape[1]
-                decode_q_shape = (
-                    ql_nope_shape[0],
-                    ql_nope_shape[1],
-                    ql_nope_shape[2] + q_pe_shape[2],
+                decode_q = self._decode_concat_quant_fp8_op(
+                    decode_ql_nope, decode_q_pe, layer._q_scale
                 )
-                # Using empty and copy since torch.cat introduces significant overhead.
-                decode_q0 = torch.empty(
-                    decode_q_shape,
-                    device=decode_ql_nope.device,
-                    dtype=decode_ql_nope.dtype,
-                )
-                decode_q0[..., : ql_nope_shape[2]].copy_(decode_ql_nope)
-                decode_q0[..., ql_nope_shape[2] :].copy_(decode_q_pe)
-
-                decode_q, _ = ops.scaled_fp8_quant(
-                    decode_q0.view(decode_q_shape[0], -1),
-                    layer._q_scale,
-                )
-                decode_q = decode_q.view(decode_q_shape)
             else:
                 decode_q = (decode_ql_nope, decode_q_pe)
             if self.dcp_world_size > 1:

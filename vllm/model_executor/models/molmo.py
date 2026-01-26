@@ -870,7 +870,7 @@ class MolmoModel(nn.Module, SupportsQuant):
 
     def forward(
         self,
-        input_ids: torch.Tensor,
+        input_ids: torch.Tensor | None,
         positions: torch.Tensor,
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,
@@ -1440,15 +1440,20 @@ class MolmoForCausalLM(
         self.multimodal_config = multimodal_config
 
         vision_config = VisionBackboneConfig()
-        self.vision_backbone = MolmoVisionBackbone(
-            config,
-            vision_config,
-            quant_config,
-            prefix=maybe_prefix(prefix, "vision_backbone"),
-        )
-        self.model = MolmoModel(
-            vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model")
-        )
+
+        with self._mark_tower_model(vllm_config, "image"):
+            self.vision_backbone = MolmoVisionBackbone(
+                config,
+                vision_config,
+                quant_config,
+                prefix=maybe_prefix(prefix, "vision_backbone"),
+            )
+
+        with self._mark_language_model(vllm_config):
+            self.model = MolmoModel(
+                vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model")
+            )
+
         self.img_patch_id = None
 
         if self.config.weight_tying:
@@ -1523,9 +1528,6 @@ class MolmoForCausalLM(
             order = torch.argsort(valid_img_idx)
             results.append(feats[is_valid][order])
         return results
-
-    def get_language_model(self) -> torch.nn.Module:
-        return self.model
 
     def embed_multimodal(self, **kwargs: object) -> MultiModalEmbeddings:
         image_input = self._parse_and_validate_image_input(**kwargs)

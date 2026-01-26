@@ -132,6 +132,9 @@ class FrontendArgs:
     """Refresh SSL Context when SSL certificate files change"""
     ssl_cert_reqs: int = int(ssl.CERT_NONE)
     """Whether client certificate is required (see stdlib ssl module's)."""
+    ssl_ciphers: str | None = None
+    """SSL cipher suites for HTTPS (TLS 1.2 and below only).
+    Example: 'ECDHE-RSA-AES256-GCM-SHA384:ECDHE-RSA-CHACHA20-POLY1305'"""
     root_path: str | None = None
     """FastAPI root_path when app is behind a path based routing proxy."""
     middleware: list[str] = field(default_factory=lambda: [])
@@ -283,8 +286,9 @@ def make_arg_parser(parser: FlexibleArgumentParser) -> FlexibleArgumentParser:
         "--api-server-count",
         "-asc",
         type=int,
-        default=1,
-        help="How many API server processes to run.",
+        default=None,
+        help="How many API server processes to run. "
+        "Defaults to data_parallel_size if not specified.",
     )
     parser.add_argument(
         "--config",
