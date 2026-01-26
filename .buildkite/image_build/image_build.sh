@@ -169,7 +169,7 @@ BRANCH=$4
 VLLM_USE_PRECOMPILED=$5
 VLLM_MERGE_BASE_COMMIT=$6
 IMAGE_TAG=$7
-IMAGE_TAG_LATEST=$8
+IMAGE_TAG_LATEST=${8:-} # only used for main branch, optional
 
 # print out all args
 echo "--- :mag: Arguments"

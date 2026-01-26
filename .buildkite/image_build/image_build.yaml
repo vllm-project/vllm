@@ -4,7 +4,8 @@ steps:
     key: image-build
     depends_on: []
     commands:
-    - .buildkite/image_build/image_build.sh $REGISTRY $REPO $BUILDKITE_COMMIT $BRANCH $VLLM_USE_PRECOMPILED $VLLM_MERGE_BASE_COMMIT $IMAGE_TAG $IMAGE_TAG_LATEST
+    - if [[ "$BUILDKITE_BRANCH" != "main" ]]; then .buildkite/image_build/image_build.sh $REGISTRY $REPO $BUILDKITE_COMMIT $BRANCH $VLLM_USE_PRECOMPILED $VLLM_MERGE_BASE_COMMIT $IMAGE_TAG; fi
+    - if [[ "$BUILDKITE_BRANCH" == "main" ]]; then .buildkite/image_build/image_build.sh $REGISTRY $REPO $BUILDKITE_COMMIT $BRANCH $VLLM_USE_PRECOMPILED $VLLM_MERGE_BASE_COMMIT $IMAGE_TAG_LATEST; fi
     retry:
       automatic:
         - exit_status: -1  # Agent was lost
