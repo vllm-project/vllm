@@ -2,8 +2,6 @@ name: Build and Push Docker Image
 
 on:
   push:
-    branches:
-      - main
     tags:
       - 'v*'
   workflow_dispatch:  # Manual trigger available
