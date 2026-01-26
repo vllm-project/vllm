@@ -93,6 +93,7 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         local_expert_global_ids: torch.Tensor | None = None,
     ):
         super().__init__()
+
         self.buffer = buffer
         self.max_tokens_per_rank = max_tokens_per_rank
         self.use_fp8_dispatch = use_fp8_dispatch

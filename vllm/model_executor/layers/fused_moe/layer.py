@@ -1783,6 +1783,8 @@ class FusedMoE(CustomOp):
                 hidden_states, router_logits, has_separate_shared_experts
             )
 
+        # NOTE(rob): once we finish migrating all the quant methods to use
+        # MKs, we can remove the naive dispatch/combine path from here.
         do_naive_dispatch_combine = (
             self.dp_size > 1 and not self.quant_method.supports_internal_mk
         )
