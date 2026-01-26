@@ -144,25 +144,6 @@ class OpenAIServingChat(OpenAIServing):
         self.enable_prompt_tokens_details = enable_prompt_tokens_details
         self.enable_force_include_usage = enable_force_include_usage
         self.default_sampling_params = self.model_config.get_diff_sampling_param()
-        # Determine the effective model_type for kimi_k2, prioritising
-        # hf_overrides then fallback to hf_text_config (VLM-robust) or hf_config.
-        config_obj = getattr(
-            self.model_config, "hf_text_config", self.model_config.hf_config
-        )
-        effective_model_type = config_obj.model_type
-        if isinstance(getattr(self.model_config, "hf_overrides", None), dict):
-            effective_model_type = self.model_config.hf_overrides.get(
-                "model_type", effective_model_type
-            )
-
-        if effective_model_type == "kimi_k2":
-            self.tool_call_id_type = "kimi_k2"
-        else:
-            self.tool_call_id_type = "random"
-
-        # NOTE: self.use_harmony must only rely on the original hf_config
-        # to avoid accidentally triggering Harmony logic for other models
-        # that might use overrides or have text_config during tests.
         self.use_harmony = self.model_config.hf_config.model_type == "gpt_oss"
         if self.use_harmony:
             if "stop_token_ids" not in self.default_sampling_params:
@@ -170,6 +151,16 @@ class OpenAIServingChat(OpenAIServing):
             self.default_sampling_params["stop_token_ids"].extend(
                 get_stop_tokens_for_assistant_actions()
             )
+
+        # Handle tool call ID type for Kimi K2 (supporting test mocking via overrides)
+        hf_overrides = getattr(self.model_config, "hf_overrides", None)
+        if self.model_config.hf_config.model_type == "kimi_k2" or (
+            isinstance(hf_overrides, dict)
+            and hf_overrides.get("model_type") == "kimi_k2"
+        ):
+            self.tool_call_id_type = "kimi_k2"
+        else:
+            self.tool_call_id_type = "random"
 
         # NOTE(woosuk): While OpenAI's chat completion API supports browsing
         # for some models, currently vLLM doesn't support it. Please use the
