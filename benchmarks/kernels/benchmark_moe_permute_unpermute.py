@@ -61,29 +61,14 @@ def benchmark_permute(
         input_gating.copy_(gating_output[i])
 
     def run():
-        if use_customized_permute:
-            (
-                permuted_hidden_states,
-                a1q_scale,
-                first_token_off,
-                inv_perm_idx,
-                m_indices,
-            ) = moe_permute(
-                qhidden_states,
-                a1q_scale=None,
-                topk_ids=topk_ids,
-                n_expert=num_experts,
-                expert_map=None,
-                align_block_size=align_block_size,
-            )
-        else:
-            (
-                permuted_hidden_states,
-                a1q_scale,
-                sorted_token_ids,
-                expert_ids,
-                inv_perm,
-            ) = _moe_permute(qhidden_states, None, topk_ids, num_experts, None, 16)
+        moe_permute(
+            qhidden_states,
+            a1q_scale=None,
+            topk_ids=topk_ids,
+            n_expert=num_experts,
+            expert_map=None,
+            align_block_size=align_block_size,
+        )
 
     # JIT compilation & warmup
     run()
@@ -145,46 +130,26 @@ def benchmark_unpermute(
     )
 
     def prepare():
-        if use_customized_permute:
-            (
-                permuted_hidden_states,
-                a1q_scale,
-                first_token_off,
-                inv_perm_idx,
-                m_indices,
-            ) = moe_permute(
-                qhidden_states,
-                a1q_scale=None,
-                topk_ids=topk_ids,
-                n_expert=num_experts,
-                expert_map=None,
-                align_block_size=align_block_size,
-            )
-            # convert to fp16/bf16 as gemm output
-            return (
-                permuted_hidden_states.to(dtype),
-                first_token_off,
-                inv_perm_idx,
-                m_indices,
-            )
-        else:
-            (
-                permuted_qhidden_states,
-                a1q_scale,
-                sorted_token_ids,
-                expert_ids,
-                inv_perm,
-            ) = _moe_permute(
-                qhidden_states, None, topk_ids, num_experts, None, block_m=16
-            )
-            # convert to fp16/bf16 as gemm output
-            return (
-                permuted_qhidden_states.to(dtype),
-                a1q_scale,
-                sorted_token_ids,
-                expert_ids,
-                inv_perm,
-            )
+        (
+            permuted_hidden_states,
+            _,
+            first_token_off,
+            inv_perm_idx,
+            _,
+        ) = moe_permute(
+            qhidden_states,
+            a1q_scale=None,
+            topk_ids=topk_ids,
+            n_expert=num_experts,
+            expert_map=None,
+            align_block_size=align_block_size,
+        )
+        # convert to fp16/bf16 as gemm output
+        return (
+            permuted_hidden_states.to(dtype),
+            first_token_off,
+            inv_perm_idx,
+        )
 
     def run(input: tuple):
         (permuted_hidden_states, first_token_off, inv_perm_idx) = input
