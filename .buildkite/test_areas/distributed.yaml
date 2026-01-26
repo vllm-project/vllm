@@ -196,7 +196,7 @@ steps:
 - label: DP EP Distributed NixlConnector PD accuracy tests (4 GPUs)
   timeout_in_minutes: 30
   working_dir: "/vllm-workspace/tests"
-  num_gpus: 4
+  num_devices: 4
   source_file_dependencies:
     - vllm/distributed/kv_transfer/kv_connector/v1/nixl_connector.py
     - tests/v1/kv_connector/nixl_integration/
