@@ -2307,12 +2307,7 @@ def modular_triton_fused_moe(
     shared_experts: torch.nn.Module | None = None,
 ) -> mk.FusedMoEModularKernel:
     return mk.FusedMoEModularKernel(
-        MoEPrepareAndFinalizeNoEP(
-            TritonExperts.expects_unquantized_inputs(
-                moe_config=moe_config,
-                quant_config=quant_config,
-            )
-        ),
+        MoEPrepareAndFinalizeNoEP(),
         TritonExperts(moe_config, quant_config),
         shared_experts,
     )
