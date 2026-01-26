@@ -39,7 +39,7 @@ from vllm.utils.serial_utils import (
 logger = init_logger(__name__)
 
 
-EmbeddingServeContext = ServeContext[EmbeddingRequest, PoolingRequestOutput]
+EmbeddingServeContext = ServeContext[EmbeddingRequest]
 
 
 class OpenAIServingEmbedding(OpenAIServing):
@@ -108,6 +108,7 @@ class OpenAIServingEmbedding(OpenAIServing):
                     prompt_input=ctx.request.input,
                     prompt_embeds=None,
                 )
+            else:
                 return self.create_error_response("Invalid classification request type")
 
             return None
