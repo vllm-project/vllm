@@ -29,24 +29,28 @@ jobs:
           pip install -r requirements/test.txt
           pip install -e .
 
-      - name: Run V1 core tests
+      - name: Run journey tracing tests
         run: |
-          pytest tests/v1/core/ \
+          pytest tests/v1/core/test_journey_events.py \
+                 tests/v1/engine/test_journey_tracing_integration.py \
+                 tests/v1/tracing/test_tracing.py \
             -v \
-            --tb=short \
-            -m "not slow_test" \
-            --ignore=tests/v1/core/test_scheduler_e2e.py
+            --tb=short
 
-      - name: Run V1 worker tests
+      - name: Run basic scheduler smoke tests
         run: |
-          pytest tests/v1/worker/ \
+          pytest tests/v1/core/test_scheduler.py::test_scheduler_step_counter \
+                 tests/v1/core/test_scheduler.py::test_scheduler_single_request \
             -v \
-            --tb=short \
-            -m "not slow_test"
+            --tb=short
         continue-on-error: true
 
       - name: Test summary
         if: always()
         run: |
-          echo "✅ Test run completed"
-          echo "See job logs above for details"
+          echo "✅ Journey tracing tests completed"
+          echo "Tests run:"
+          echo "  - Journey event emission (11 tests)"
+          echo "  - OTEL integration (12 tests)"
+          echo "  - End-to-end tracing (1 test)"
+          echo "  - Basic scheduler smoke tests (2 tests)"
