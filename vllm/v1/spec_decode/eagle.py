@@ -1150,7 +1150,6 @@ class SpecDecodeBaseProposer:
                 "Qwen2_5_VLForConditionalGeneration",
                 "Qwen3VLForConditionalGeneration",
                 "Qwen3VLMoeForConditionalGeneration",
-                "HunYuanVLForConditionalGeneration",
                 "GlmOcrForConditionalGeneration",
             ]:
                 self.model.config.image_token_index = target_model.config.image_token_id
