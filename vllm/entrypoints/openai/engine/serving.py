@@ -180,11 +180,10 @@ AnyResponse: TypeAlias = (
 
 
 RequestT = TypeVar("RequestT", bound=AnyRequest)
-OutputT = TypeVar("OutputT", bound=RequestOutput | PoolingRequestOutput)
 
 
 @dataclass(kw_only=True)
-class ServeContext(Generic[RequestT, OutputT]):
+class ServeContext(Generic[RequestT]):
     request: RequestT
     raw_request: Request | None = None
     model_name: str
@@ -193,8 +192,10 @@ class ServeContext(Generic[RequestT, OutputT]):
     lora_request: LoRARequest | None = None
     engine_prompts: list[TokensPrompt] | None = None
 
-    result_generator: AsyncGenerator[tuple[int, OutputT], None] | None = None
-    final_res_batch: list[OutputT] = field(default_factory=list)
+    result_generator: AsyncGenerator[tuple[int, PoolingRequestOutput], None] | None = (
+        None
+    )
+    final_res_batch: list[PoolingRequestOutput] = field(default_factory=list)
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
 

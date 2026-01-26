@@ -29,7 +29,7 @@ from vllm.pooling_params import PoolingParams
 logger = init_logger(__name__)
 
 
-ClassificationServeContext = ServeContext[ClassificationRequest, PoolingRequestOutput]
+ClassificationServeContext = ServeContext[ClassificationRequest]
 
 
 class ServingClassification(OpenAIServing):

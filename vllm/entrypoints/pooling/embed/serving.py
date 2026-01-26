@@ -41,7 +41,7 @@ from vllm.utils.serial_utils import (
 logger = init_logger(__name__)
 
 
-EmbeddingServeContext = ServeContext[EmbeddingRequest, PoolingRequestOutput]
+EmbeddingServeContext = ServeContext[EmbeddingRequest]
 
 
 class OpenAIServingEmbedding(OpenAIServing):
