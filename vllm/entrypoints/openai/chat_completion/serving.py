@@ -253,8 +253,8 @@ class OpenAIServingChat(OpenAIServing):
                 # because of issues with pydantic we need to potentially
                 # re-serialize the tool_calls field of the request
                 # for more info: see comment in `maybe_serialize_tool_calls`
-                maybe_serialize_tool_calls(request)
-                truncate_tool_call_ids(request)
+                maybe_serialize_tool_calls(request)  # type: ignore[arg-type]
+                truncate_tool_call_ids(request)  # type: ignore[arg-type]
                 validate_request_params(request)
 
             # Check if tool parsing is unavailable (common condition)
@@ -1977,7 +1977,7 @@ class OpenAIServingChat(OpenAIServing):
         # because of issues with pydantic we need to potentially
         # re-serialize the tool_calls field of the request
         # for more info: see comment in `maybe_serialize_tool_calls`
-        maybe_serialize_tool_calls(request)
+        maybe_serialize_tool_calls(request)  # type: ignore[arg-type]
 
         # Add system message.
         # NOTE: In Chat Completion API, browsing is enabled by default
@@ -1995,7 +1995,7 @@ class OpenAIServingChat(OpenAIServing):
         # Add developer message.
         if request.tools:
             dev_msg = get_developer_message(
-                tools=request.tools if should_include_tools else None
+                tools=request.tools if should_include_tools else None  # type: ignore[arg-type]
             )
             messages.append(dev_msg)
 
