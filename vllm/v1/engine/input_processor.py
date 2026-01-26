@@ -421,14 +421,9 @@ class InputProcessor:
 
         return prompt.get("multi_modal_data")  # type: ignore[return-value]
 
-    def _extract_enc_dec_mm_data(
-        self, prompt: ExplicitEncoderDecoderPrompt
-    ) -> MultiModalDataDict | None:
-        return self._extract_singleton_mm_data(prompt["encoder_prompt"])
-
     def _extract_mm_data(self, prompt: PromptType) -> MultiModalDataDict | None:
         if is_explicit_encoder_decoder_prompt(prompt):
-            return self._extract_enc_dec_mm_data(prompt)
+            return self._extract_singleton_mm_data(prompt["encoder_prompt"])
         else:
             return self._extract_singleton_mm_data(prompt)
 

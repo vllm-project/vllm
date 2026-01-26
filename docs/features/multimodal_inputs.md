@@ -20,67 +20,6 @@ To input multi-modal data, follow this schema in [vllm.inputs.PromptType][]:
 - `prompt`: The prompt should follow the format that is documented on HuggingFace.
 - `multi_modal_data`: This is a dictionary that follows the schema defined in [vllm.multimodal.inputs.MultiModalDataDict][].
 
-### Stable UUIDs for Caching (multi_modal_uuids)
-
-When using multi-modal inputs, vLLM normally hashes each media item by content to enable caching across requests. You can optionally pass `multi_modal_uuids` to provide your own stable IDs for each item so caching can reuse work across requests without rehashing the raw content.
-
-??? code
-
-    ```python
-    from vllm import LLM
-    from PIL import Image
-
-    # Qwen2.5-VL example with two images
-    llm = LLM(model="Qwen/Qwen2.5-VL-3B-Instruct")
-
-    prompt = "USER: <image><image>\nDescribe the differences.\nASSISTANT:"
-    img_a = Image.open("/path/to/a.jpg")
-    img_b = Image.open("/path/to/b.jpg")
-
-    outputs = llm.generate({
-        "prompt": prompt,
-        "multi_modal_data": {"image": [img_a, img_b]},
-        # Provide stable IDs for caching.
-        # Requirements (matched by this example):
-        #  - Include every modality present in multi_modal_data.
-        #  - For lists, provide the same number of entries.
-        #  - Use None to fall back to content hashing for that item.
-        "multi_modal_uuids": {"image": ["sku-1234-a", None]},
-    })
-
-    for o in outputs:
-        print(o.outputs[0].text)
-    ```
-
-Using UUIDs, you can also skip sending media data entirely if you expect cache hits for respective items. Note that the request will fail if the skipped media doesn't have a corresponding UUID, or if the UUID fails to hit the cache.
-
-??? code
-
-    ```python
-    from vllm import LLM
-    from PIL import Image
-
-    # Qwen2.5-VL example with two images
-    llm = LLM(model="Qwen/Qwen2.5-VL-3B-Instruct")
-
-    prompt = "USER: <image><image>\nDescribe the differences.\nASSISTANT:"
-    img_b = Image.open("/path/to/b.jpg")
-
-    outputs = llm.generate({
-        "prompt": prompt,
-        "multi_modal_data": {"image": [None, img_b]},
-        # Since img_a is expected to be cached, we can skip sending the actual
-        # image entirely.
-        "multi_modal_uuids": {"image": ["sku-1234-a", None]},
-    })
-
-    for o in outputs:
-        print(o.outputs[0].text)
-    ```
-
-!!! warning
-    If both multimodal processor caching and prefix caching are disabled, user-provided `multi_modal_uuids` are ignored.
-
 ### Image Inputs
 
 You can pass a single image to the `'image'` field of the multi-modal dictionary, as shown in the following examples:
@@ -498,6 +437,67 @@ You can pass pre-computed audio embeddings similar to image embeddings:
         print(generated_text)
     ```
 
+### Cached Inputs
+
+When using multi-modal inputs, vLLM normally hashes each media item by content to enable caching across requests. You can optionally pass `multi_modal_uuids` to provide your own stable IDs for each item so caching can reuse work across requests without rehashing the raw content.
+
+??? code
+
+    ```python
+    from vllm import LLM
+    from PIL import Image
+
+    # Qwen2.5-VL example with two images
+    llm = LLM(model="Qwen/Qwen2.5-VL-3B-Instruct")
+
+    prompt = "USER: <image><image>\nDescribe the differences.\nASSISTANT:"
+    img_a = Image.open("/path/to/a.jpg")
+    img_b = Image.open("/path/to/b.jpg")
+
+    outputs = llm.generate({
+        "prompt": prompt,
+        "multi_modal_data": {"image": [img_a, img_b]},
+        # Provide stable IDs for caching.
+        # Requirements (matched by this example):
+        #  - Include every modality present in multi_modal_data.
+        #  - For lists, provide the same number of entries.
+        #  - Use None to fall back to content hashing for that item.
+        "multi_modal_uuids": {"image": ["sku-1234-a", None]},
+    })
+
+    for o in outputs:
+        print(o.outputs[0].text)
+    ```
+
+Using UUIDs, you can also skip sending media data entirely if you expect cache hits for respective items. Note that the request will fail if the skipped media doesn't have a corresponding UUID, or if the UUID fails to hit the cache.
+
+??? code
+
+    ```python
+    from vllm import LLM
+    from PIL import Image
+
+    # Qwen2.5-VL example with two images
+    llm = LLM(model="Qwen/Qwen2.5-VL-3B-Instruct")
+
+    prompt = "USER: <image><image>\nDescribe the differences.\nASSISTANT:"
+    img_b = Image.open("/path/to/b.jpg")
+
+    outputs = llm.generate({
+        "prompt": prompt,
+        "multi_modal_data": {"image": [None, img_b]},
+        # Since img_a is expected to be cached, we can skip sending the actual
+        # image entirely.
+        "multi_modal_uuids": {"image": ["sku-1234-a", None]},
+    })
+
+    for o in outputs:
+        print(o.outputs[0].text)
+    ```
+
+!!! warning
+    If both multimodal processor caching and prefix caching are disabled, user-provided `multi_modal_uuids` are ignored.
+
 ## Online Serving
 
 Our OpenAI-compatible server accepts multi-modal data via the [Chat Completions API](https://platform.openai.com/docs/api-reference/chat). Media inputs also support optional UUIDs users can provide to uniquely identify each media, which is used to cache the media results across requests.
@@ -511,43 +511,6 @@ Our OpenAI-compatible server accepts multi-modal data via the [Chat Completions 
 
     For certain models, we provide alternative chat templates inside [examples](../../examples).
     For example, VLM2Vec uses [examples/template_vlm2vec_phi3v.jinja](../../examples/template_vlm2vec_phi3v.jinja) which is different from the default one for Phi-3-Vision.
-
-### Stable UUIDs for Caching (multi_modal_uuids)
-
-Just like with offline inference, you can skip sending media if you expect cache hits with provided UUIDs. You can do so by sending media like this:
-
-??? code
-
-    ```python
-        # Image/video/audio URL:
-        {
-            "type": "image_url",
-            "image_url": None,
-            "uuid": image_uuid,
-        },
-
-        # image_embeds
-        {
-            "type": "image_embeds",
-            "image_embeds": None,
-            "uuid": image_uuid,
-        },
-
-        # input_audio:
-        {
-            "type": "input_audio",
-            "input_audio": None,
-            "uuid": audio_uuid,
-        },
-
-        # PIL Image:
-        {
-            "type": "image_pil",
-            "image_pil": None,
-            "uuid": image_uuid,
-        },
-
-    ```
 
 ### Image Inputs
 
@@ -1021,4 +984,41 @@ The following example demonstrates how to pass image embeddings to the OpenAI se
         ],
         model=model,
     )
+    ```
+
+### Cached Inputs
+
+Just like with offline inference, you can skip sending media if you expect cache hits with provided UUIDs. You can do so by sending media like this:
+
+??? code
+
+    ```python
+        # Image/video/audio URL:
+        {
+            "type": "image_url",
+            "image_url": None,
+            "uuid": image_uuid,
+        },
+
+        # image_embeds
+        {
+            "type": "image_embeds",
+            "image_embeds": None,
+            "uuid": image_uuid,
+        },
+
+        # input_audio:
+        {
+            "type": "input_audio",
+            "input_audio": None,
+            "uuid": audio_uuid,
+        },
+
+        # PIL Image:
+        {
+            "type": "image_pil",
+            "image_pil": None,
+            "uuid": image_uuid,
+        },
+
     ```
