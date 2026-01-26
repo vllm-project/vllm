@@ -133,6 +133,13 @@ def pplx_cutlass_moe(
     num_local_experts = cdiv(num_experts, world_size)
     num_dispatchers = pgi.world_size // dp_size
 
+    prepare_finalize = PplxPrepareAndFinalize(
+        a2a=ata,
+        max_num_tokens=max_num_tokens,
+        num_local_experts=num_local_experts,
+        num_dispatchers=num_dispatchers,
+    )
+
     def make_moe_config() -> FusedMoEConfig:
         return FusedMoEConfig(
             num_experts=num_experts,
@@ -147,27 +154,17 @@ def pplx_cutlass_moe(
             routing_method=RoutingMethodType.Llama4,
         )
 
-    moe_config = make_moe_config()
-    quant_config = fp8_w8a8_moe_quant_config(
-        per_act_token_quant=per_act_token,
-        per_out_ch_quant=per_out_ch,
-        w1_scale=chunk_by_rank(w1_scale, rank, world_size),
-        w2_scale=chunk_by_rank(w2_scale, rank, world_size),
-        a1_scale=chunk_by_rank(a1_scale, rank, world_size)
-        if per_act_token
-        else a1_scale[rank],
-    )
-
-    prepare_finalize = PplxPrepareAndFinalize(
-        a2a=ata,
-        max_num_tokens=max_num_tokens,
-        num_local_experts=num_local_experts,
-        num_dispatchers=num_dispatchers,
-    )
-
     experts = CutlassBatchedExpertsFp8(
-        moe_config=moe_config,
-        quant_config=quant_config,
+        moe_config=make_moe_config(),
+        quant_config=fp8_w8a8_moe_quant_config(
+            per_act_token_quant=per_act_token,
+            per_out_ch_quant=per_out_ch,
+            w1_scale=chunk_by_rank(w1_scale, rank, world_size),
+            w2_scale=chunk_by_rank(w2_scale, rank, world_size),
+            a1_scale=chunk_by_rank(a1_scale, rank, world_size)
+            if per_act_token
+            else a1_scale[rank],
+        ),
         max_num_tokens=max_num_tokens,
         num_dispatchers=num_dispatchers,
     )
