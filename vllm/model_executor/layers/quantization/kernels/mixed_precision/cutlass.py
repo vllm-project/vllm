@@ -77,6 +77,7 @@ class CutlassW4A8LinearKernel(MPLinearKernel):
         def transform_w_q(x):
             assert isinstance(x, BasevLLMParameter)
             convert_packed_uint4b8_to_signed_int4_inplace(x.data)
+            torch.cuda.synchronize(x.data.device)
             permute_param_layout_(x, input_dim=0, output_dim=1, packed_dim=0)
             x.data = ops.cutlass_encode_and_reorder_int4b(x.data.t().contiguous().t())
             return x
