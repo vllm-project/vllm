@@ -10,11 +10,12 @@ steps:
       --build-arg REMOTE_VLLM=1
       --build-arg ARG_PYTORCH_ROCM_ARCH='gfx90a;gfx942'
       --build-arg VLLM_BRANCH=$BUILDKITE_COMMIT
-      --tag {{ docker_image_amd }}
+      --tag "rocm/vllm-ci:${BUILDKITE_COMMIT}"
       -f docker/Dockerfile.rocm
       --target test
       --no-cache
       --progress plain .
+    - docker push "rocm/vllm-ci:${BUILDKITE_COMMIT}"
     env:
       DOCKER_BUILDKIT: "1"
     retry:
