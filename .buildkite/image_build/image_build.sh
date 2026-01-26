@@ -1,11 +1,7 @@
 #!/bin/bash
 set -euo pipefail
 
-#################################
-#         Helper Functions      #
-#################################
-
-# Function to replace invalid characters in Docker image tags and truncate to 128 chars
+# replace invalid characters in Docker image tags and truncate to 128 chars
 clean_docker_tag() {
     local input="$1"
     echo "$input" | sed 's/[^a-zA-Z0-9._-]/_/g' | cut -c1-128
@@ -78,7 +74,7 @@ setup_buildx_builder() {
         docker buildx inspect --bootstrap
     fi
 
-    # Show builder info
+    # builder info
     echo "Active builder:"
     docker buildx ls | grep -E '^\*|^NAME' || docker buildx ls
 }
@@ -95,14 +91,13 @@ check_and_skip_if_image_exists() {
     fi
 }
 
-# Helper to authenticate with AWS ECR
 ecr_login() {
     aws ecr-public get-login-password --region us-east-1 | docker login --username AWS --password-stdin "$REGISTRY"
     aws ecr get-login-password --region us-east-1 | docker login --username AWS --password-stdin 936637512419.dkr.ecr.us-east-1.amazonaws.com
 }
 
 prepare_cache_tags() {
-    # Expects and sets: CACHE_TO, CACHE_FROM, CACHE_FROM_BASE_BRANCH, CACHE_FROM_MAIN
+    # resolve and set: CACHE_TO, CACHE_FROM, CACHE_FROM_BASE_BRANCH, CACHE_FROM_MAIN
     TEST_CACHE_ECR="936637512419.dkr.ecr.us-east-1.amazonaws.com/vllm-ci-test-cache"
     MAIN_CACHE_ECR="936637512419.dkr.ecr.us-east-1.amazonaws.com/vllm-ci-postmerge-cache"
 
@@ -159,12 +154,11 @@ print_bake_config() {
 #################################
 print_instance_info
 
-# Argument check
 if [[ $# -lt 7 ]]; then
     print_usage_and_exit
 fi
 
-# Input arguments
+# input args
 REGISTRY=$1
 REPO=$2
 BUILDKITE_COMMIT=$3
@@ -174,7 +168,7 @@ VLLM_MERGE_BASE_COMMIT=$6
 IMAGE_TAG=$7
 IMAGE_TAG_LATEST=${8:-} # only used for main branch, optional
 
-# Configuration with sensible defaults
+# build config
 TARGET="test-ci"
 CI_HCL_URL="${CI_HCL_URL:-https://raw.githubusercontent.com/vllm-project/ci-infra/main/docker/ci.hcl}"
 VLLM_BAKE_FILE="${VLLM_BAKE_FILE:-docker/docker-bake.hcl}"
@@ -182,10 +176,7 @@ BUILDER_NAME="${BUILDER_NAME:-vllm-builder}"
 CI_HCL_PATH="/tmp/ci.hcl"
 BUILDKIT_SOCKET="/run/buildkit/buildkitd.sock"
 
-# Prepare cache tags based on PR/branch context
 prepare_cache_tags
-
-# Authenticate with AWS ECR
 ecr_login
 
 # Environment info (for docs and human readers)
@@ -206,7 +197,7 @@ export CACHE_TO
 export VLLM_USE_PRECOMPILED
 export VLLM_MERGE_BASE_COMMIT
 
-# print out all args
+# print args
 echo "--- :mag: Arguments"
 echo "REGISTRY: ${REGISTRY}"
 echo "REPO: ${REPO}"
@@ -217,7 +208,7 @@ echo "VLLM_MERGE_BASE_COMMIT: ${VLLM_MERGE_BASE_COMMIT}"
 echo "IMAGE_TAG: ${IMAGE_TAG}"
 echo "IMAGE_TAG_LATEST: ${IMAGE_TAG_LATEST}"
 
-# print out all build configuration
+# print build configuration
 echo "--- :mag: Build configuration"
 echo "TARGET: ${TARGET}"
 echo "CI HCL URL: ${CI_HCL_URL}"
@@ -232,7 +223,6 @@ echo "CACHE_FROM: ${CACHE_FROM}"
 echo "CACHE_FROM_BASE_BRANCH: ${CACHE_FROM_BASE_BRANCH}"
 echo "CACHE_FROM_MAIN: ${CACHE_FROM_MAIN}"
 
-# Short-circuit for existing image
 check_and_skip_if_image_exists
 
 echo "--- :docker: Setting up Docker buildx bake"
@@ -240,32 +230,25 @@ echo "Target: ${TARGET}"
 echo "CI HCL URL: ${CI_HCL_URL}"
 echo "vLLM bake file: ${VLLM_BAKE_FILE}"
 
-# Check if vLLM bake file exists
 if [[ ! -f "${VLLM_BAKE_FILE}" ]]; then
     echo "Error: vLLM bake file not found at ${VLLM_BAKE_FILE}"
     echo "Make sure you're running from the vLLM repository root"
     exit 1
 fi
 
-# Download ci.hcl file
 echo "--- :arrow_down: Downloading ci.hcl"
 curl -sSfL -o "${CI_HCL_PATH}" "${CI_HCL_URL}"
 echo "Downloaded to ${CI_HCL_PATH}"
 
-# Setup docker buildx builder
 setup_buildx_builder
 
 # Compute parent commit for cache fallback (if not already set)
 resolve_parent_commit
 export PARENT_COMMIT
 
-# Print resolved config for diagnostic artifact
 print_bake_config
 
-# Building
 echo "--- :docker: Building ${TARGET}"
 docker --debug buildx bake -f "${VLLM_BAKE_FILE}" -f "${CI_HCL_PATH}" --progress plain "${TARGET}"
 
 echo "--- :white_check_mark: Build complete"
-
-buildkite-agent artifact upload "bake-config-build-${BUILDKITE_BUILD_NUMBER:-local}.json"
