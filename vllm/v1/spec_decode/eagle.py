@@ -734,9 +734,14 @@ class SpecDecodeBaseProposer:
             if self.pass_hidden_states_to_model:
                 assert self.parallel_drafting_hidden_state_tensor is not None
                 self.hidden_states[out_hidden_state_mapping] = target_hidden_states
-                self.hidden_states[:total_num_output_tokens][
-                    self.is_masked_token_mask[:total_num_output_tokens]
-                ] = self.parallel_drafting_hidden_state_tensor
+                # Use torch.where to avoid DtoH sync from boolean indexing
+                mask = self.is_masked_token_mask[:total_num_output_tokens]
+                torch.where(
+                    mask.unsqueeze(1),
+                    self.parallel_drafting_hidden_state_tensor,
+                    self.hidden_states[:total_num_output_tokens],
+                    out=self.hidden_states[:total_num_output_tokens],
+                )
 
             # 2.
             # Recompute the slot mapping based on the new positions and
