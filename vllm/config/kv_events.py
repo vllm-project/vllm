@@ -28,6 +28,10 @@ class KVEventsConfig:
     """The zmq endpoint to use for publishing kv events.
     """
 
+    bind: bool = True
+    """If True, bind the publisher socket to the endpoint. If False, connect.
+    """
+
     replay_endpoint: str | None = None
     """The zmq endpoint to use for replaying kv events.
     """
