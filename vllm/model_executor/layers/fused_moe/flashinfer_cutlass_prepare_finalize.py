@@ -106,6 +106,7 @@ class FlashInferAllToAllMoEPrepareAndFinalize(FlashInferCutlassMoEPrepareAndFina
 
         if not self.use_dp:
             # Non-DP case: quantize activations unless using block-scale path
+            # TODO(rob): fix this one the P/F merged.
             if not self.use_deepseek_fp8_block_scale:
                 a1q, a1q_scale = moe_kernel_quantize_input(
                     a1,
