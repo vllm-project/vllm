@@ -1181,7 +1181,7 @@ def test_parse_chat_messages_multiple_dict_image_embeds(
                         },
                     }
                     for embeds, grid_thw in zip(
-                        image_embeds.split(batch_size), image_grid_thw
+                        image_embeds.chunk(batch_size), image_grid_thw
                     )
                 ]
                 + [
