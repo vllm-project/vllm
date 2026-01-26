@@ -16,7 +16,7 @@ from transformers import (
 
 from vllm.attention.layer import Attention
 from vllm.config import VllmConfig
-from vllm.config.multimodal import BaseDummyOptions, MultiModalConfig
+from vllm.config.multimodal import BaseDummyOptions
 from vllm.distributed import divide, get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.attention.mm_encoder_attention import MMEncoderAttention
@@ -59,6 +59,7 @@ from .vision import (
     VisionFeatureSelectStrategy,
     VisionFeatureSelectStrategyStr,
     get_num_selected_vision_tokens,
+    is_vit_use_data_parallel,
     resolve_visual_encoder_outputs,
 )
 
@@ -353,7 +354,6 @@ class CLIPAttention(nn.Module):
         self,
         config: CLIPTextConfig | CLIPVisionConfig,
         quant_config: QuantizationConfig | None = None,
-        multimodal_config: MultiModalConfig | None = None,
         *,
         prefix: str = "",
         attn_cls: type[Attention] | type[MMEncoderAttention],
@@ -372,11 +372,7 @@ class CLIPAttention(nn.Module):
             )
         self.scale = self.head_dim**-0.5
 
-        use_data_parallel = (
-            multimodal_config.mm_encoder_tp_mode == "data"
-            if multimodal_config
-            else False
-        )
+        use_data_parallel = is_vit_use_data_parallel()
         self.qkv_proj = QKVParallelLinear(
             hidden_size=self.embed_dim,
             head_size=self.head_dim,
@@ -405,7 +401,6 @@ class CLIPAttention(nn.Module):
                 self.head_dim,
                 self.scale,
                 prefix=f"{prefix}.attn",
-                multimodal_config=multimodal_config,
             )
         else:
             self.attn = attn_cls(
@@ -434,17 +429,12 @@ class CLIPMLP(nn.Module):
         self,
         config: CLIPTextConfig | CLIPVisionConfig,
         quant_config: QuantizationConfig | None = None,
-        multimodal_config: MultiModalConfig | None = None,
         prefix: str = "",
     ) -> None:
         super().__init__()
 
         self.config = config
-        use_data_parallel = (
-            multimodal_config.mm_encoder_tp_mode == "data"
-            if multimodal_config
-            else False
-        )
+        use_data_parallel = is_vit_use_data_parallel()
         self.activation_fn = get_act_fn(config.hidden_act)
 
         self.fc1 = ColumnParallelLinear(
@@ -477,7 +467,6 @@ class CLIPEncoderLayer(nn.Module):
         self,
         config: CLIPTextConfig | CLIPVisionConfig,
         quant_config: QuantizationConfig | None = None,
-        multimodal_config: MultiModalConfig | None = None,
         *,
         prefix: str = "",
         attn_cls: type[Attention] | type[MMEncoderAttention],
@@ -487,7 +476,6 @@ class CLIPEncoderLayer(nn.Module):
         self.self_attn = CLIPAttention(
             config,
             quant_config=quant_config,
-            multimodal_config=multimodal_config,
             prefix=f"{prefix}.self_attn",
             attn_cls=attn_cls,
         )
@@ -495,7 +483,6 @@ class CLIPEncoderLayer(nn.Module):
         self.mlp = CLIPMLP(
             config,
             quant_config=quant_config,
-            multimodal_config=multimodal_config,
             prefix=f"{prefix}.mlp",
         )
         self.layer_norm2 = nn.LayerNorm(config.hidden_size, eps=config.layer_norm_eps)
@@ -528,7 +515,6 @@ class CLIPEncoder(nn.Module):
         self,
         config: CLIPTextConfig | CLIPVisionConfig,
         quant_config: QuantizationConfig | None = None,
-        multimodal_config: MultiModalConfig | None = None,
         num_hidden_layers_override: int | None = None,
         *,
         prefix: str = "",
@@ -548,7 +534,6 @@ class CLIPEncoder(nn.Module):
                 CLIPEncoderLayer(
                     config=config,
                     quant_config=quant_config,
-                    multimodal_config=multimodal_config,
                     prefix=f"{prefix}.layers.{layer_idx}",
                     attn_cls=attn_cls,
                 )
@@ -658,7 +643,6 @@ class CLIPVisionTransformer(nn.Module):
         self,
         config: CLIPVisionConfig,
         quant_config: QuantizationConfig | None = None,
-        multimodal_config: MultiModalConfig | None = None,
         *,
         num_hidden_layers_override: int | None = None,
         require_post_norm: bool | None = None,
@@ -678,7 +662,6 @@ class CLIPVisionTransformer(nn.Module):
         self.encoder = CLIPEncoder(
             config=config,
             quant_config=quant_config,
-            multimodal_config=multimodal_config,
             num_hidden_layers_override=num_hidden_layers_override,
             prefix=f"{prefix}.encoder",
             attn_cls=MMEncoderAttention,
@@ -780,7 +763,6 @@ class CLIPVisionModel(nn.Module):
         self,
         config: CLIPVisionConfig,
         quant_config: QuantizationConfig | None = None,
-        multimodal_config: MultiModalConfig | None = None,
         *,
         num_hidden_layers_override: int | None = None,
         require_post_norm: bool | None = None,
@@ -791,7 +773,6 @@ class CLIPVisionModel(nn.Module):
         self.vision_model = CLIPVisionTransformer(
             config=config,
             quant_config=quant_config,
-            multimodal_config=multimodal_config,
             num_hidden_layers_override=num_hidden_layers_override,
             require_post_norm=require_post_norm,
             prefix=f"{prefix}.vision_model",
@@ -869,7 +850,6 @@ class CLIPEmbeddingModel(nn.Module, SupportsMultiModal, SupportsQuant):
             self.vision_model = CLIPVisionTransformer(
                 vision_config,
                 quant_config=quant_config,
-                multimodal_config=multimodal_config,
                 prefix=maybe_prefix(prefix, "vision_model"),
             )
             self.visual_projection = nn.Linear(
