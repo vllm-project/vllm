@@ -157,7 +157,7 @@ print_bake_config() {
 #################################
 
 # Argument check
-if [[ $# -lt 8 ]]; then
+if [[ $# -lt 6 ]]; then
     print_usage_and_exit
 fi
 
