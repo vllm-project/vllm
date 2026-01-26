@@ -32,6 +32,7 @@ class InputQuantConfig:
     column_major_scales: bool = False
     use_ue8m0: bool = False
     num_token_padding: int | None = None
+    tma_aligned_scales: bool = False
 
 
 _ConfigT = TypeVar("_ConfigT", bound=InputQuantConfig)

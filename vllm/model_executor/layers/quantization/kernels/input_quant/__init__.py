@@ -42,6 +42,7 @@ def select_quant_kernel(
     column_major_scales: bool = False,
     use_ue8m0: bool = False,
     num_token_padding: int | None = None,
+    tma_aligned_scales: bool = False,
 ) -> InputQuantKernel:
     """
     Select the appropriate input quantization kernel based on the current platform.
@@ -62,6 +63,7 @@ def select_quant_kernel(
         column_major_scales=column_major_scales,
         use_ue8m0=use_ue8m0,
         num_token_padding=num_token_padding,
+        tma_aligned_scales=tma_aligned_scales,
     )
 
     platform_enum = current_platform._enum

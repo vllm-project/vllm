@@ -6,6 +6,9 @@ import torch
 from vllm import _custom_ops as ops
 from vllm.model_executor.layers.quantization.utils.quant_utils import GroupShape
 from vllm.platforms import current_platform
+from vllm.utils.deep_gemm import (
+    get_tma_aligned_size,
+)
 
 from .InputQuantKernel import (
     _FP8_DTYPE,
@@ -26,6 +29,7 @@ def per_token_group_quant_fp8_cuda(
     column_major_scales: bool = False,
     out_q: torch.Tensor | None = None,
     use_ue8m0: bool = False,
+    tma_aligned_scales: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """CUDA implementation of per-token-group FP8 quantization.
 
@@ -62,8 +66,24 @@ def per_token_group_quant_fp8_cuda(
 
     # Allocate the scale tensor in either row- or column-major format.
     if column_major_scales:
-        shape = (x.shape[-1] // group_size,) + x.shape[:-1]
-        x_s = torch.empty(shape, device=x.device, dtype=torch.float32).permute(-1, -2)
+        if tma_aligned_scales:
+            m = x.shape[-2]
+            sf_k = x.shape[-1] // group_size
+            tma_aligned_m = get_tma_aligned_size(m, 4)
+            shape = x.shape[:-2] + (m, sf_k)
+            stride = (
+                (1, tma_aligned_m)
+                if x.dim() == 2
+                else (tma_aligned_m * sf_k, 1, tma_aligned_m)
+            )
+            x_s = torch.empty_strided(
+                shape, stride, device=x.device, dtype=torch.float32
+            )
+        else:
+            shape = x.shape[:-2] + (x.shape[-1] // group_size, x.shape[-2])
+            x_s = torch.empty(shape, device=x.device, dtype=torch.float32).permute(
+                -1, -2
+            )
     else:
         shape = x.shape[:-1] + (x.shape[-1] // group_size,)
         x_s = torch.empty(shape, device=x.device, dtype=torch.float32)
@@ -100,6 +120,18 @@ class CudaInputQuantKernel(InputQuantKernel[InputQuantConfig]):
         return [TritonInputQuantKernel, PytorchInputQuantKernel]
 
     def apply_group_quant(self, x, scale=None, scale_ub=None):
+        if not x.is_contiguous():
+            fall_backs = self.ordered_fallback_kernels()
+            for kernel in fall_backs:
+                if kernel.is_supported()[0] and kernel.can_implement(self.config)[0]:
+                    return kernel(self.config).apply(x, scale, scale_ub)
+
+            raise ValueError(
+                f"No suitable fallback kernel found for quantization. "
+                f"Input contiguous: {x.is_contiguous()},"
+                f"config: {self.config}"
+            )
+
         assert not self.is_static_quant, (
             "Cuda group quantization does not support static quantization."
         )

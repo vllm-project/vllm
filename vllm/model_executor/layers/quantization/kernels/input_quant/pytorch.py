@@ -7,6 +7,7 @@ import torch.nn.functional as F
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     GroupShape,
     group_broadcast,
+    prep_scale_for_group_broadcast,
 )
 
 from .InputQuantKernel import (
@@ -27,6 +28,11 @@ class PytorchInputQuantKernel(InputQuantKernel[InputQuantConfig]):
 
     @classmethod
     def can_implement(cls, config: InputQuantConfig):
+        if config.group_shape.is_per_group() and config.static:
+            return (
+                False,
+                "Native pytorch group quant does not support static quantization.",
+            )
         return True, ""
 
     @classmethod
@@ -36,8 +42,7 @@ class PytorchInputQuantKernel(InputQuantKernel[InputQuantConfig]):
     def apply_group_quant(
         self, x, scale=None, scale_ub=None
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        if self.is_group_quant and not self.is_static_quant:
-            assert scale is None, "Dynamic group quantization does not use scale"
+        assert scale is None, "Dynamic group quantization does not use scale"
 
         orig_shape = x.shape
         hidden_dim = x.shape[-1]
@@ -91,6 +96,8 @@ class PytorchInputQuantKernel(InputQuantKernel[InputQuantConfig]):
                 x_max = x.abs().max().unsqueeze(-1).to(torch.float32)
 
             scale = (x_max / _FP8_MAX).clamp(min=_FP8_MIN_SCALING_FACTOR)
+        else:
+            scale = prep_scale_for_group_broadcast(scale, x, self.group_shape)
 
         out = (
             x.to(torch.float32)

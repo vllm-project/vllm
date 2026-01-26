@@ -10,7 +10,7 @@ import torch
 import torch.nn as nn
 from transformers import BaseImageProcessor, BatchFeature, PretrainedConfig
 
-from vllm.config import MultiModalConfig, VllmConfig
+from vllm.config import VllmConfig
 from vllm.config.multimodal import BaseDummyOptions
 from vllm.model_executor.layers.linear import ReplicatedLinear
 from vllm.model_executor.layers.quantization import QuantizationConfig
@@ -103,7 +103,6 @@ class VisualTokenizer(torch.nn.Module):
         config: PretrainedConfig,
         visual_vocab_size: int,
         quant_config: QuantizationConfig | None = None,
-        multimodal_config: MultiModalConfig | None = None,
         prefix: str = "",
     ):
         super().__init__()
@@ -111,7 +110,6 @@ class VisualTokenizer(torch.nn.Module):
         self.vit = self._init_backbone(
             config=config,
             quant_config=quant_config,
-            multimodal_config=multimodal_config,
             prefix=f"{prefix}.vit",
         )
         # reserved tokens for INDICATOR_IDS
@@ -130,7 +128,6 @@ class VisualTokenizer(torch.nn.Module):
         self,
         config: PretrainedConfig,
         quant_config: QuantizationConfig | None = None,
-        multimodal_config: QuantizationConfig | None = None,
         prefix: str = "",
     ):
         model_type = config.model_type
@@ -138,7 +135,6 @@ class VisualTokenizer(torch.nn.Module):
             return Siglip2NavitModel(
                 config=config,
                 quant_config=quant_config,
-                multimodal_config=multimodal_config,
                 prefix=prefix,
             )
         raise ValueError(f"Unsupported visual tokenizer model_type: {model_type}")
@@ -464,7 +460,6 @@ class Ovis2_5(nn.Module, SupportsMultiModal, SupportsPP):
         super().__init__()
         config = vllm_config.model_config.hf_config
         quant_config = vllm_config.quant_config
-        multimodal_config = vllm_config.model_config.multimodal_config
 
         self.config: PretrainedConfig = config
 
@@ -478,7 +473,6 @@ class Ovis2_5(nn.Module, SupportsMultiModal, SupportsPP):
             self.visual_tokenizer = VisualTokenizer(
                 config=config.vit_config,
                 visual_vocab_size=config.visual_vocab_size,
-                multimodal_config=multimodal_config,
                 quant_config=quant_config,
                 prefix=f"{prefix}.visual_tokenizer",
             )
