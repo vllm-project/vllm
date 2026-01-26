@@ -1052,6 +1052,12 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
                 x_quant, x_scale = mxfp8_quantize(x, False)  # to mxfp8
                 x_scale = x_scale.view(torch.float8_e4m3fn).reshape(*x.shape[:-1], -1)
 
+            # Since this case doesn't call layer.select_experts,
+            # manually override the routing behavior.
+            routing_strategy = envs.VLLM_MOE_ROUTING_SIMULATION_STRATEGY
+            if routing_strategy == "uniform_random":
+                router_logits = torch.rand_like(router_logits)
+
             trtllm_gen_output = trtllm_fp4_block_scale_moe(
                 router_logits.to(torch.bfloat16),
                 None,  # routing_bias

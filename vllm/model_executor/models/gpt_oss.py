@@ -112,8 +112,15 @@ class OAIAttention(nn.Module):
         self.num_local_attention_heads = config.num_attention_heads // tp_size
         self.num_local_key_value_heads = config.num_key_value_heads // tp_size
 
-        # Only apply sliding window to every other layer
-        sliding_window = config.sliding_window if self.layer_idx % 2 == 0 else None
+        # Apply sliding window based on layer_types from config
+        # "sliding_attention" uses sliding window, "full_attention" uses full context
+        layer_types = getattr(config, "layer_types", None)
+        if layer_types is not None and self.layer_idx < len(layer_types):
+            use_sliding_window = layer_types[self.layer_idx] == "sliding_attention"
+        else:
+            # Fallback to legacy behavior if layer_types not specified
+            use_sliding_window = self.layer_idx % 2 == 0
+        sliding_window = config.sliding_window if use_sliding_window else None
         self.attn = Attention(
             self.num_local_attention_heads,
             self.head_dim,
