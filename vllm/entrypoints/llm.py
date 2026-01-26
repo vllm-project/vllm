@@ -1752,6 +1752,36 @@ class LLM:
                 self.llm_engine.abort_request(added_request_ids, internal=True)
             raise e
 
+    def _process_inputs(
+        self,
+        request_id: str,
+        engine_prompt: PromptType,
+        params: SamplingParams | PoolingParams,
+        *,
+        lora_request: LoRARequest | None,
+        priority: int,
+        tokenization_kwargs: dict[str, Any] | None = None,
+    ) -> tuple[EngineCoreRequest, dict[str, Any]]:
+        """Use the Processor to process inputs for LLMEngine."""
+
+        local_kwargs = tokenization_kwargs or {}
+        tokenization_kwargs = local_kwargs.copy()
+        _validate_truncation_size(
+            self.model_config.max_model_len,
+            params.truncate_prompt_tokens,
+            tokenization_kwargs,
+        )
+
+        engine_request = self.input_processor.process_inputs(
+            request_id,
+            engine_prompt,
+            params,
+            lora_request=lora_request,
+            tokenization_kwargs=tokenization_kwargs,
+            priority=priority,
+        )
+        return engine_request, tokenization_kwargs
+
     def _add_request(
         self,
         prompt: PromptType,

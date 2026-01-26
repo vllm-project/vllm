@@ -5,14 +5,8 @@ import pytest
 
 from vllm.assets.image import ImageAsset
 from vllm.assets.video import VideoAsset
-from vllm.config import (
-    CacheConfig,
-    DeviceConfig,
-    ModelConfig,
-    MultiModalConfig,
-    VllmConfig,
-)
-from vllm.multimodal import MultiModalRegistry, MultiModalUUIDDict
+from vllm.config import CacheConfig, ModelConfig, VllmConfig
+from vllm.multimodal import MultiModalUUIDDict
 from vllm.sampling_params import SamplingParams
 from vllm.v1.engine.input_processor import InputProcessor
 
@@ -25,14 +19,11 @@ def _build_input_processor(
     *, mm_cache_gb: float = 4.0, enable_prefix_caching: bool = True
 ) -> InputProcessor:
     model_config = ModelConfig(
-        tokenizer="dummy",
+        model="Qwen/Qwen2.5-VL-3B-Instruct",
         skip_tokenizer_init=True,
         max_model_len=128,
         mm_processor_cache_gb=mm_cache_gb,
-        generation_config="vllm",
     )
-    model_config.runner_type = "generate"
-    model_config.multimodal_config = MultiModalConfig(mm_processor_cache_gb=mm_cache_gb)
 
     vllm_config = VllmConfig(
         model_config=model_config,
