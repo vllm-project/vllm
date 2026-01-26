@@ -137,6 +137,7 @@ def per_token_group_quant_fp8_triton(
     column_major_scales: bool = False,
     out_q: torch.Tensor | None = None,
     use_ue8m0: bool = False,
+    tma_aligned_scales: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Triton implementation of per-token-group FP8 quantization.
 
@@ -230,6 +231,9 @@ class TritonInputQuantKernel(InputQuantKernel[InputQuantConfig]):
 
     @classmethod
     def can_implement(cls, config: InputQuantConfig):
+        if config.group_shape.is_per_group() and config.static:
+            return False, "triton per group kernel does not support static quantization"
+
         if config.group_shape.is_per_tensor():
             return False, "triton per tensor kernel is not implement per tensor"
 
