@@ -1,0 +1,18 @@
+# This directory contains tuned configuration files for the Mamba SSM
+# selective_state_update kernel.
+#
+# Configuration files can be generated using:
+#   python benchmarks/kernels/benchmark_ssm.py --tune --save-dir .
+#
+# File naming convention:
+#   dim={dim},dstate={dstate},device_name={device_name}.json
+#   dim={dim},dstate={dstate},nheads={nheads},device_name={device_name}.json
+#
+# Example config format:
+# {
+#     "triton_version": "3.0.0",
+#     "1": {"BLOCK_SIZE_M": 32, "num_warps": 4},
+#     "2": {"BLOCK_SIZE_M": 32, "num_warps": 4},
+#     "4": {"BLOCK_SIZE_M": 16, "num_warps": 4},
+#     ...
+# }

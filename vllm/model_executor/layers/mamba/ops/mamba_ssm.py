@@ -4,12 +4,156 @@
 # Copyright (c) 2024, Tri Dao, Albert Gu.
 # Adapted from https://github.com/state-spaces/mamba/blob/v2.2.4/mamba_ssm/ops/triton/selective_state_update.py
 
+import functools
+import json
+import os
+from typing import Any
+
 import torch
 from packaging import version
 
+import vllm.envs as envs
 from vllm import _custom_ops as ops
+from vllm.logger import init_logger
+from vllm.platforms import current_platform
 from vllm.triton_utils import HAS_TRITON, tl, triton
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID
+
+logger = init_logger(__name__)
+
+
+def get_ssm_config_file_name(
+    dim: int,
+    dstate: int,
+    nheads: int | None = None,
+) -> str:
+    """Generate config file name for SSM kernel tuning results.
+
+    Args:
+        dim: The dimension size (head_dim for multi-head case)
+        dstate: The state dimension
+        nheads: Number of heads (optional, for multi-head Mamba)
+    """
+    device_name = current_platform.get_device_name().replace(" ", "_")
+    # Set device_name to H200 if a device from the H200 family is detected
+    if "H200" in device_name.split("_"):
+        device_name = "NVIDIA_H200"
+
+    if nheads is not None:
+        return f"dim={dim},dstate={dstate},nheads={nheads},device_name={device_name}.json"
+    return f"dim={dim},dstate={dstate},device_name={device_name}.json"
+
+
+@functools.lru_cache
+def get_ssm_configs(
+    dim: int, dstate: int, nheads: int | None = None
+) -> dict[int, Any] | None:
+    """Load SSM kernel configurations from a JSON file.
+
+    Args:
+        dim: The dimension size
+        dstate: The state dimension
+        nheads: Number of heads (optional)
+
+    Returns:
+        Dictionary mapping batch sizes to kernel configurations, or None if
+        no config file exists.
+    """
+    config_file_name = get_ssm_config_file_name(dim, dstate, nheads)
+
+    # First check user-specified config directory
+    if envs.VLLM_TUNED_CONFIG_FOLDER:
+        config_path = os.path.join(envs.VLLM_TUNED_CONFIG_FOLDER, config_file_name)
+        if os.path.exists(config_path):
+            with open(config_path) as f:
+                logger.info("Loading SSM config from %s", config_path)
+                return json.load(f)
+
+    # Fall back to default configs directory
+    config_path = os.path.join(
+        os.path.dirname(os.path.dirname(os.path.realpath(__file__))),
+        "configs",
+        config_file_name,
+    )
+    if os.path.exists(config_path):
+        with open(config_path) as f:
+            logger.info("Loading SSM config from %s", config_path)
+            return json.load(f)
+
+    return None
+
+
+def get_default_ssm_config(dstate: int) -> tuple[int, int]:
+    """Get default SSM configuration based on dstate.
+
+    This implements the backward-compatible heuristics for when no tuned
+    config file is available.
+
+    Args:
+        dstate: The state dimension
+
+    Returns:
+        Tuple of (BLOCK_SIZE_M, num_warps)
+    """
+    if dstate <= 16:
+        return (32, 4)
+    elif dstate <= 32:
+        return (16, 4)
+    elif dstate <= 64:
+        return (8, 4)
+    elif dstate <= 128:
+        return (4, 4)
+    else:
+        return (4, 8)
+
+
+def get_ssm_config(
+    batch_size: int,
+    dim: int,
+    dstate: int,
+    nheads: int | None = None,
+) -> tuple[int, int]:
+    """Get optimal SSM kernel configuration for given parameters.
+
+    Tries to load tuned configuration from a JSON file first. If no config
+    file exists, falls back to default heuristics.
+
+    Args:
+        batch_size: The batch size (N)
+        dim: The dimension size
+        dstate: The state dimension
+        nheads: Number of heads (optional)
+
+    Returns:
+        Tuple of (BLOCK_SIZE_M, num_warps)
+    """
+    configs = get_ssm_configs(dim, dstate, nheads)
+
+    if configs is not None:
+        # Find the best config for this batch size
+        # Try exact match first, then find the closest smaller batch size
+        if str(batch_size) in configs:
+            config = configs[str(batch_size)]
+            return (config["BLOCK_SIZE_M"], config["num_warps"])
+
+        # Find the closest batch size that is <= requested batch size
+        available_sizes = sorted(
+            [int(k) for k in configs.keys() if k != "triton_version"]
+        )
+        best_size = None
+        for size in available_sizes:
+            if size <= batch_size:
+                best_size = size
+            else:
+                break
+
+        if best_size is not None:
+            config = configs[str(best_size)]
+            return (config["BLOCK_SIZE_M"], config["num_warps"])
+
+    # Fall back to default heuristics
+    return get_default_ssm_config(dstate)
+
 
 TRITON3 = HAS_TRITON and (version.parse(triton.__version__) >= version.parse("3.0.0"))
 
@@ -392,15 +536,12 @@ def selective_state_update(
         else (0, 0)
     )
     # We don't want autotune since it will overwrite the state
-    # We instead tune by hand.
-    BLOCK_SIZE_M, num_warps = (
-        (32, 4)
-        if dstate <= 16
-        else (
-            (16, 4)
-            if dstate <= 32
-            else ((8, 4) if dstate <= 64 else ((4, 4) if dstate <= 128 else ((4, 8))))
-        )
+    # We instead use tuned configs or fall back to default heuristics.
+    BLOCK_SIZE_M, num_warps = get_ssm_config(
+        batch_size=N,
+        dim=dim,
+        dstate=dstate,
+        nheads=nheads if nheads > 1 else None,
     )
     tie_hdim = (
         A.stride(-1) == 0
