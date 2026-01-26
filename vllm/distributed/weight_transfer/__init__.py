@@ -11,16 +11,12 @@ from vllm.distributed.weight_transfer.base import (
     WeightTransferEngine,
     WeightUpdateRequest,
 )
-from vllm.distributed.weight_transfer.ipc_engine import (
-    IPCWeightTransferEngine,
-)
 from vllm.distributed.weight_transfer.nccl_engine import (
     NCCLWeightTransferEngine,
 )
 
 WEIGHT_TRANSFER_ENGINE_REGISTRY = {
     "nccl": NCCLWeightTransferEngine,
-    "ipc": IPCWeightTransferEngine,
 }
 
 
@@ -45,6 +41,5 @@ __all__ = [
     "NCCLWeightTransferEngine",
     "register_weight_transfer_engine",
     "WEIGHT_TRANSFER_ENGINE_REGISTRY",
-    "IPCWeightTransferEngine",
     "WeightUpdateRequest",
 ]

@@ -52,7 +52,7 @@ class WeightTransferEngine(ABC, Generic[TInitInfo, TUpdateInfo]):
     from a trainer to inference workers.
 
     This abstraction separates weight transfer transport logic from the worker
-    implementation, allowing different backends (NCCL, CUDA IPC, RDMA) to be
+    implementation, allowing different backends (NCCL, CUDA IPC[TODO], RDMA[TODO]) to be
     plugged in.
 
     Subclasses should define:
@@ -139,7 +139,7 @@ class WeightTransferEngine(ABC, Generic[TInitInfo, TUpdateInfo]):
 
         Args:
             update_info: Backend-specific update info containing parameter metadata
-                        and any backend-specific data (e.g., IPC handles)
+                        and any backend-specific data
             load_weights: Callable that loads weights into the model. Called
                          incrementally for each weight to avoid OOM.
         """

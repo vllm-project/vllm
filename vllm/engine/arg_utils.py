@@ -580,7 +580,7 @@ class EngineArgs:
     tokens_only: bool = False
 
     weight_transfer_backend: str | None = None
-    """Backend for weight transfer during RL training. Options: nccl, ipc"""
+    """Backend for weight transfer during RL training. Options: nccl"""
 
     weight_transfer_config: WeightTransferConfig = field(
         default_factory=WeightTransferConfig
@@ -1195,10 +1195,10 @@ class EngineArgs:
         vllm_group.add_argument(
             "--weight-transfer-backend",
             type=str,
-            choices=["nccl", "ipc"],
+            choices=["nccl"],
             default="nccl",
             help="Backend for weight transfer during RL training. "
-            "Options: nccl (distributed), ipc (same-node shared memory)"
+            "Options: nccl (distributed)"
             "Default: nccl when enabled.",
         )
 
