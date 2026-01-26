@@ -148,7 +148,7 @@ class CompressedTensorsMoEMethod(FusedMoEMethodBase):
         format = scheme_dict.get("format")
 
         if quant_config._is_xpu_w8a16_fp8(weight_quant, input_quant):
-            return XPUFp8MoEMethod(quant_config, layer.moe_config, layer)
+            return CompressedTensorsW8A16Fp8MoEMethod(quant_config, layer.moe_config, layer)
 
         if quant_config._is_mxfp4(weight_quant):
             return CompressedTensorsW4A4Mxfp4MoEMethod(layer.moe_config)
@@ -232,7 +232,7 @@ class CompressedTensorsMoEMethod(FusedMoEMethodBase):
             )
 
 
-class XPUFp8MoEMethod(CompressedTensorsMoEMethod):
+class CompressedTensorsW8A16Fp8MoEMethod(CompressedTensorsMoEMethod):
     """
     MoE method for FP8 quantization on Intel XPU hardware.
 
