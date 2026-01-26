@@ -285,7 +285,9 @@ def test_eagle3_acceptance_length(
 
             if expected_per_pos and len(expected_per_pos) == len(actual_per_pos):
                 # Per-position checks use model-specific rtol if provided
-                rtol = model_config.rtol if model_config.rtol is not None else DEFAULT_RTOL
+                rtol = (
+                    model_config.rtol if model_config.rtol is not None else DEFAULT_RTOL
+                )
                 for pos, (actual, exp) in enumerate(
                     zip(actual_per_pos, expected_per_pos)
                 ):
