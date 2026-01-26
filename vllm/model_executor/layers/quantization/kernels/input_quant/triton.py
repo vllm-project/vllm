@@ -245,7 +245,7 @@ class TritonInputQuantKernel(InputQuantKernel[InputQuantConfig]):
     def apply_group_quant(self, x, scale=None, scale_ub=None):
         return per_token_group_quant_fp8_triton(
             x,
-            scale,
+            self.group_size,
             column_major_scales=self.is_column_major_scales,
             use_ue8m0=self.use_ue8m0,
         )
