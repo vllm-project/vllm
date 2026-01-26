@@ -212,7 +212,10 @@ def extract_acceptance_metrics(metrics, num_spec_tokens: int) -> dict:
 @large_gpu_mark(min_gb=40)
 @pytest.mark.parametrize(
     "model_config",
-    [pytest.param(config, id=config.id, marks=config.marks) for config in EAGLE3_MODEL_CONFIGS],
+    [
+        pytest.param(config, id=config.id, marks=config.marks)
+        for config in EAGLE3_MODEL_CONFIGS
+    ],
 )
 @pytest.mark.parametrize("num_spec_tokens", [DEFAULT_NUM_SPEC_TOKENS])
 @pytest.mark.parametrize("tp_size", get_tp_size_params())
