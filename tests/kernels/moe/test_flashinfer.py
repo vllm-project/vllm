@@ -266,13 +266,9 @@ def test_flashinfer_cutlass_moe_fp8_no_graph(
 
         quant_config = fp8_w8a8_moe_quant_config(
             w1_scale=td.w13_weight_scale,
-            g1_alphas=(td.w13_weight_scale * td.a1_scale).squeeze(),
             w2_scale=td.w2_weight_scale,
-            g2_alphas=(td.w2_weight_scale * td.a2_scale).squeeze(),
             a1_scale=td.a1_scale,
-            a1_gscale=td.a1_scale,
             a2_scale=td.a2_scale,
-            a2_gscale=1.0 / td.a2_scale,
             per_act_token_quant=False,
         )
 
