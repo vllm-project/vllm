@@ -1,20 +1,23 @@
 # Fast fork Dockerfile - builds on vLLM's official image
-# Only rebuilds your Python changes, skips all C++/CUDA compilation
+# Only overlays Python changes, reuses all compiled C++/CUDA extensions
 
 ARG VLLM_BASE_VERSION=v0.14.0
 FROM vllm/vllm-openai:${VLLM_BASE_VERSION}
 
-# Set working directory
-WORKDIR /workspace
+# Find where vLLM is installed in the base image
+RUN VLLM_LOCATION=$(python3 -c "import vllm; import os; print(os.path.dirname(vllm.__file__))") && \
+    echo "vLLM installed at: $VLLM_LOCATION" && \
+    echo "$VLLM_LOCATION" > /tmp/vllm_location.txt
 
-# Copy your fork's code
-COPY vllm /workspace/vllm
-COPY tests /workspace/tests
-COPY pyproject.toml setup.py /workspace/
+# Copy your fork's Python code
+COPY vllm /tmp/vllm-fork/
 
-# Reinstall vLLM from your fork (Python-only, no C++ rebuild)
-RUN pip uninstall -y vllm && \
-    pip install --no-cache-dir -e . --no-build-isolation
+# Overlay your Python changes on top of the installed vLLM
+# This preserves all compiled .so files while updating Python code
+RUN VLLM_LOCATION=$(cat /tmp/vllm_location.txt) && \
+    cp -r /tmp/vllm-fork/* "$VLLM_LOCATION/" && \
+    rm -rf /tmp/vllm-fork && \
+    echo "Overlaid fork Python code at $VLLM_LOCATION"
 
 # Labels for your fork
 LABEL org.opencontainers.image.source="https://github.com/inference-sim/vllm"
