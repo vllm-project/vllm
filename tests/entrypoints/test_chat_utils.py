@@ -1166,7 +1166,7 @@ def test_parse_chat_messages_multiple_dict_image_embeds(
     batch_size = 2
     hidden_size = qwen25omni_model_config_image_embeds.get_inputs_embeds_size()
     image_embeds = torch.randn(batch_size, 220, hidden_size)
-    image_grid_thw = torch.tensor([1, 22, 40])
+    image_grid_thw = torch.tensor([[1, 22, 40] for _ in range(batch_size)])
 
     conversation, mm_data, mm_uuids = parse_chat_messages(
         [
