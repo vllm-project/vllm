@@ -84,13 +84,11 @@ class CudaInputQuantKernel(InputQuantKernel[InputQuantConfig]):
         if (
             config.group_shape.is_per_group()
             and current_platform.is_rocm()
-            and not current_platform.is_fp8_fnuz()
         ):
             return (
                 False,
                 (
-                    f"Cuda group quantization only support \
-                {torch.float8_e4m3fnuz} data types."
+                    f"Cuda group quantization only supported on Cuda platform."
                 ),
             )
 
