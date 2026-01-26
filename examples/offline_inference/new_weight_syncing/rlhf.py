@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """
 Demonstrates reinforcement learning from human feedback (RLHF) using vLLM and Ray,
-with new weight syncing APIs.
+with native weight syncing APIs at engine instance.
 
 The script separates training and inference workloads onto distinct GPUs
 so that Ray can manage process placement and inter-process communication.
@@ -13,11 +13,10 @@ The example performs the following steps:
 
 * Load the training model on GPU 0.
 * Split the inference model across GPUs 1–2 using vLLM's tensor parallelism
-  and Ray placement groups.
+  and Ray placement groups with dummy weights.
 * Generate text from a list of prompts using the inference engine.
 * Update the weights of the training model and broadcast the updated weights
-  to the inference engine by using a Ray collective RPC group. Note that
-  for demonstration purposes we simply zero out the weights.
+  to the inference engine by using a Ray collective RPC group.
 
 This example assumes a single-node cluster with three GPUs, but Ray
 supports multi-node clusters. vLLM expects the GPUs are only used for vLLM
@@ -55,9 +54,7 @@ class MyLLM(LLM):
     """Configure the vLLM worker for Ray placement group execution."""
 
     def __init__(self, *args, **kwargs):
-        # Remove the top-level CUDA_VISIBLE_DEVICES variable set by Ray
-        # so that vLLM can manage its own device placement within the worker.
-        os.environ.pop("CUDA_VISIBLE_DEVICES", None)
+        os.environ["VLLM_RAY_BUNDLE_INDICES"] = "0,1"
         super().__init__(*args, **kwargs)
 
 
@@ -72,11 +69,6 @@ class TrainModel:
             model_name, dtype=torch.bfloat16
         )
         self.model.to(self.device)
-
-    def zero_weights(self):
-        """Zero out all model weights (simulates training step)."""
-        for name, p in self.model.named_parameters():
-            p.data.zero_()
 
     def get_weight_metadata(self):
         """Return weight names, dtypes, and shapes for weight transfer."""
@@ -140,7 +132,7 @@ llm = ray.remote(
     data_parallel_size=1,
     distributed_executor_backend="ray",
     weight_transfer_config=WeightTransferConfig(backend="nccl"),
-    # enable_expert_parallel=True,
+    load_format="dummy",
 )
 
 # Generate text from the prompts.
@@ -155,6 +147,8 @@ sampling_params = SamplingParams(temperature=0)
 
 outputs = ray.get(llm.generate.remote(prompts, sampling_params))
 
+# Generate text with the initial model. The output is expected to be nonsense
+# because the weights are randomly initialized.
 print("-" * 50)
 for output in outputs:
     prompt = output.prompt
@@ -187,11 +181,6 @@ train_handle = train_model.init_weight_transfer_group.remote(
 )
 ray.get([train_handle, inference_handle])
 
-# Simulate a training step by zeroing out all model weights.
-# In a real RLHF training loop the weights would be updated using the gradient
-# from an RL objective such as PPO on a reward model.
-ray.get(train_model.zero_weights.remote())
-
 # Synchronize the updated weights to the inference engine using batched API.
 # Collect all weight metadata from the training actor
 names, dtype_names, shapes = ray.get(train_model.get_weight_metadata.remote())
@@ -215,11 +204,11 @@ inference_handle = llm.update_weights.remote(
 train_handle = train_model.broadcast_weights.remote(packed=True)
 ray.get([train_handle, inference_handle])
 
-# Finalize the weight update (processes weights for quantization/kernel format)
+# Finalize the weight update
 ray.get(llm.finalize_weight_update.remote())
 
-# Generate text with the updated model. The output is expected to be nonsense
-# because the weights are zero.
+# Generate text with the updated model. The output is expected to be normal
+# because the weights are updated.
 outputs_updated = ray.get(llm.generate.remote(prompts, sampling_params))
 print("-" * 50)
 for output in outputs_updated:

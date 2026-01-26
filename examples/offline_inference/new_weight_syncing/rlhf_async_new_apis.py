@@ -103,6 +103,7 @@ class MyLLM:
     """Simple wrapper over AsyncLLM for supporting async RL."""
 
     def __init__(self, **kwargs):
+        os.environ["VLLM_RAY_BUNDLE_INDICES"] = "0,1"
         self.engine = vllm.AsyncLLMEngine.from_engine_args(
             vllm.AsyncEngineArgs(**kwargs)
         )
@@ -162,7 +163,6 @@ class MyLLM:
 # be placed on GPUs 1 and 2.
 os.environ["CUDA_VISIBLE_DEVICES"] = "0,1,2"
 ray.init(runtime_env={"excludes": [".git/objects/pack/"]})
-# ray.init()
 
 # Launch the training model actor. Ray's resource scheduler will allocate
 # 1 GPU (via num_gpus=1 in the decorator), ensuring pg_inference gets different GPUs.

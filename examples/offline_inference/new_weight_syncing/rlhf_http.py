@@ -15,7 +15,8 @@ Prerequisites:
 
     $ vllm serve facebook/opt-125m \
         --enforce-eager \
-        --weight-transfer-backend nccl
+        --weight-transfer-backend nccl \
+        --load-format dummy
 
     Then run this script:
 
@@ -24,12 +25,12 @@ Prerequisites:
 The example performs the following steps:
 
 * Load the training model on GPU 0.
-* Generate text using the vLLM server via OpenAI-compatible API.
+* Generate text using the vLLM server via OpenAI-compatible API. The output
+  is expected to be nonsense because the server is initialized with dummy weights.
 * Initialize weight transfer via HTTP endpoint.
-* Update the weights of the training model and broadcast the updated weights
-  to the vLLM server using NCCL. Note that for demonstration purposes we
-  simply zero out the weights.
-* Generate text again to show the effect of the weight update.
+* Broadcast the real weights from the training model to the vLLM server
+  using NCCL.
+* Generate text again to show normal output after the weight update.
 """
 
 from dataclasses import asdict
@@ -152,9 +153,10 @@ def main():
         "The future of AI is",
     ]
 
-    # Generate text before weight update
+    # Generate text before weight update. The output is expected to be nonsense
+    # because the server is initialized with dummy weights.
     print("-" * 50)
-    print("Generating text BEFORE weight update:")
+    print("Generating text BEFORE weight update (expect nonsense):")
     print("-" * 50)
     outputs = generate_completions(client, MODEL_NAME, prompts)
     for prompt, generated_text in zip(prompts, outputs):
@@ -186,13 +188,6 @@ def main():
 
     # Wait for init_weight_transfer to complete
     init_thread.join()
-
-    # Simulate a training step by zeroing out all model weights.
-    # In a real RLHF training loop the weights would be updated using the
-    # gradient from an RL objective such as PPO on a reward model.
-    print("Simulating training step (zeroing out weights)...")
-    for name, p in train_model.named_parameters():
-        p.data.zero_()
 
     # Collect weight metadata for the update request
     names = []
@@ -226,10 +221,10 @@ def main():
     # Finalize the weight update (processes weights for quantization/kernel format)
     finalize_weight_update(BASE_URL)
 
-    # Generate text after weight update. The output is expected to be nonsense
-    # because the weights are zero.
+    # Generate text after weight update. The output is expected to be normal
+    # because the real weights are now loaded.
     print("-" * 50)
-    print("Generating text AFTER weight update (expect nonsense):")
+    print("Generating text AFTER weight update:")
     print("-" * 50)
     outputs_updated = generate_completions(client, MODEL_NAME, prompts)
     for prompt, generated_text in zip(prompts, outputs_updated):
