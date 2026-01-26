@@ -9,7 +9,6 @@ from typing import Any, Literal, cast
 from vllm.config import VllmConfig
 from vllm.exceptions import VLLMValidationError
 from vllm.inputs import (
-    ExplicitEncoderDecoderPrompt,
     ProcessorInputs,
     PromptType,
     SingletonInputs,
@@ -258,15 +257,6 @@ class InputProcessor:
                         f"multi_modal_uuids[{modality!r}] is missing."
                     )
 
-    def _validate_enc_dec_mm_uuids(self, prompt: ExplicitEncoderDecoderPrompt) -> None:
-        enc_prompt = prompt["encoder_prompt"]
-        dec_prompt = prompt["decoder_prompt"]
-
-        self._validate_singleton_mm_uuids(enc_prompt)
-
-        if dec_prompt is not None:
-            self._validate_singleton_mm_uuids(dec_prompt)
-
     def _validate_mm_uuids(self, prompt: PromptType) -> None:
         """
         Validate that user-provided multi_modal_uuids align with
@@ -276,7 +266,10 @@ class InputProcessor:
         """
 
         if is_explicit_encoder_decoder_prompt(prompt):
-            self._validate_enc_dec_mm_uuids(prompt)
+            self._validate_singleton_mm_uuids(prompt["encoder_prompt"])
+
+            if (dec_prompt := prompt["decoder_prompt"]) is not None:
+                self._validate_singleton_mm_uuids(dec_prompt)
         else:
             self._validate_singleton_mm_uuids(prompt)
 

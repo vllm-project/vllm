@@ -41,7 +41,6 @@ from vllm.config import ModelConfig
 from vllm.logger import init_logger
 from vllm.model_executor.models import SupportsMultiModal
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalDataDict, MultiModalUUIDDict
-from vllm.multimodal.inputs import MultiModalFieldElem
 from vllm.multimodal.processing import BaseMultiModalProcessor
 from vllm.multimodal.utils import MEDIA_CONNECTOR_REGISTRY, MediaConnector
 from vllm.utils import random_uuid
@@ -335,8 +334,42 @@ ModalityStr = Literal["image", "audio", "video", "image_embeds", "audio_embeds"]
 _T = TypeVar("_T")
 
 
-def _get_parsed_items(
-    modality: str,
+def _extract_embeds(
+    tensors: list[torch.Tensor],
+    mm_processor: BaseMultiModalProcessor,
+):
+    if len(tensors) == 0:
+        return tensors
+
+    first_item = tensors[0]
+    hidden_size = mm_processor.info.ctx.model_config.get_inputs_embeds_size()
+
+    # Backward compatibility for single item input
+    if (
+        len(tensors) == 1
+        and first_item.ndim == 3
+        and first_item.shape[0] == 1
+        and first_item.shape[-1] == hidden_size
+    ):
+        logger.warning(
+            "Batched multi-modal embedding inputs are deprecated for Chat API. "
+            "Please pass a separate content part for each multi-modal item."
+        )
+        return first_item
+
+    first_shape = first_item.shape
+    if first_item.ndim == 3 and first_item.shape[-1] == hidden_size:
+        return torch.stack(tensors)
+    if first_item.ndim == 2 and first_item.shape[-1] == hidden_size:
+        return torch.cat(tensors)
+
+    if all(t.shape == first_shape for t in tensors):
+        return torch.stack(tensors)
+
+    return torch.cat(tensors)
+
+
+def _extract_dict_embeds(
     data_items: list[dict[str, "torch.Tensor"]],
     mm_processor: BaseMultiModalProcessor,
 ):
@@ -349,56 +382,27 @@ def _get_parsed_items(
             "All dictionaries in the list of embeddings must have the same keys."
         )
 
-    # TODO: Handle per-request mm_processor_kwargs
-    config_by_key = mm_processor._get_mm_fields_config(
-        transformers.BatchFeature(data_items[0]),
-        {},
-    )
-
-    elems_by_key = {
-        key: [
-            MultiModalFieldElem(modality, key, item[key], config.field)
-            for item in data_items
-        ]
-        for key, config in config_by_key.items()
-    }
-
     return {
-        key: elems[0].field.reduce_data(elems) for key, elems in elems_by_key.items()
+        key: _extract_embeds([item[key] for item in data_items], mm_processor)
+        for key in first_keys
     }
 
 
 def _get_embeds_data(
-    modality: str,
     data_items: list[Any],
     mm_processor: BaseMultiModalProcessor,
 ):
     if len(data_items) == 0:
         return data_items
 
+    if all(item is None for item in data_items):
+        return data_items
+
     if is_list_of(data_items, torch.Tensor):
-        if len(data_items) == 1:
-            # For backward compatibility
-            first_item = data_items[0]
-            hidden_size = mm_processor.info.ctx.model_config.get_inputs_embeds_size()
-            if (
-                first_item.ndim == 3
-                and first_item.shape[0] == 1
-                and first_item.shape[-1] == hidden_size
-            ):
-                logger.warning(
-                    "Batched multi-modal embedding inputs are deprecated for Chat API. "
-                    "Please pass a separate content part for each multi-modal item."
-                )
-
-                return [first_item[0]]
-
-        dict_items = [{f"{modality}_embeds": item} for item in data_items]
-        merged_dict_items = _get_parsed_items(modality, dict_items, mm_processor)
-        return merged_dict_items[f"{modality}_embeds"]
+        return _extract_embeds(data_items, mm_processor)
 
     if is_list_of(data_items, dict):
-        return _get_parsed_items(modality, data_items, mm_processor)
+        return _extract_dict_embeds(data_items, mm_processor)
 
     raise NotImplementedError(type(data_items))
 
@@ -479,7 +483,6 @@ def _resolve_items(
     mm_uuids = {}
     if "image_embeds" in items_by_modality:
         mm_data["image"] = _get_embeds_data(
-            "image",
             [data for data, uuid in items_by_modality["image_embeds"]],
             mm_processor,
         )
@@ -489,7 +492,6 @@ def _resolve_items(
         mm_uuids["image"] = [uuid for data, uuid in items_by_modality["image"]]
     if "audio_embeds" in items_by_modality:
         mm_data["audio"] = _get_embeds_data(
-            "audio",
             [data for data, uuid in items_by_modality["audio_embeds"]],
             mm_processor,
         )
