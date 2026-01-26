@@ -87,6 +87,7 @@ if TYPE_CHECKING:
     VLLM_HTTP_TIMEOUT_KEEP_ALIVE: int = 5  # seconds
     VLLM_PLUGINS: list[str] | None = None
     VLLM_LORA_RESOLVER_CACHE_DIR: str | None = None
+    VLLM_LORA_RESOLVER_HF_REPO_LIST: str | None = None
     # Deprecated env variables for profiling, kept for backward compatibility
     # See also vllm/config/profiler.py and `--profiler-config` argument
     VLLM_TORCH_CUDA_PROFILE: str | None = None
@@ -251,6 +252,7 @@ if TYPE_CHECKING:
     VLLM_LOG_MODEL_INSPECTION: bool = False
     VLLM_DEBUG_MFU_METRICS: bool = False
     VLLM_DISABLE_LOG_LOGO: bool = False
+    VLLM_LORA_DISABLE_PDL: bool = False
 
 
 def get_default_cache_root():
@@ -866,6 +868,13 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # VLLM_ALLOW_RUNTIME_LORA_UPDATING is enabled.
     "VLLM_LORA_RESOLVER_CACHE_DIR": lambda: os.getenv(
         "VLLM_LORA_RESOLVER_CACHE_DIR", None
+    ),
+    # A remote HF repo(s) containing one or more LoRA adapters, which
+    # may be downloaded and leveraged as needed. Only works if plugins
+    # are enabled and VLLM_ALLOW_RUNTIME_LORA_UPDATING is enabled.
+    # Values should be comma separated.
+    "VLLM_LORA_RESOLVER_HF_REPO_LIST": lambda: os.getenv(
+        "VLLM_LORA_RESOLVER_HF_REPO_LIST", None
     ),
     # Enables torch CUDA profiling if set to 1.
     # Deprecated, see profiler_config.
@@ -1613,7 +1622,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
     ),
     # Disable logging of vLLM logo at server startup time.
     "VLLM_DISABLE_LOG_LOGO": lambda: bool(int(os.getenv("VLLM_DISABLE_LOG_LOGO", "0"))),
+    # Disable PDL for LoRA, as enabling PDL with LoRA on SM100 causes
+    # Triton compilation to fail.
+    "VLLM_LORA_DISABLE_PDL": lambda: bool(int(os.getenv("VLLM_LORA_DISABLE_PDL", "0"))),
 }
+
 
 # --8<-- [end:env-vars-definition]
 
@@ -1730,6 +1743,7 @@ def compile_factors() -> dict[str, object]:
         "VLLM_MAX_AUDIO_CLIP_FILESIZE_MB",
         "VLLM_VIDEO_LOADER_BACKEND",
         "VLLM_MEDIA_CONNECTOR",
+        "VLLM_OBJECT_STORAGE_SHM_BUFFER_NAME",
         "VLLM_ASSETS_CACHE",
         "VLLM_ASSETS_CACHE_MODEL_CLEAN",
         "VLLM_WORKER_MULTIPROC_METHOD",
