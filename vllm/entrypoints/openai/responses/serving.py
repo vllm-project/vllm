@@ -115,6 +115,7 @@ from vllm.entrypoints.openai.responses.utils import (
     extract_tool_types,
     should_continue_final_message,
 )
+from vllm.entrypoints.utils import get_max_tokens
 from vllm.exceptions import VLLMValidationError
 from vllm.inputs.data import TokensPrompt
 from vllm.logger import init_logger
@@ -423,8 +424,11 @@ class OpenAIServingResponses(OpenAIServing):
                 if maybe_error is not None:
                     return maybe_error
 
-                default_max_tokens = self.max_model_len - len(
-                    engine_prompt["prompt_token_ids"]
+                default_max_tokens = get_max_tokens(
+                    self.max_model_len,
+                    request,
+                    engine_prompt,
+                    self.default_sampling_params,
                 )
 
                 sampling_params = request.to_sampling_params(

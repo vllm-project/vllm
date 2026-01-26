@@ -67,6 +67,7 @@ from vllm.entrypoints.openai.parser.harmony_utils import (
 from vllm.entrypoints.openai.utils import maybe_filter_parallel_tool_calls
 from vllm.entrypoints.utils import get_max_tokens, should_include_usage
 from vllm.inputs.data import TokensPrompt
+from vllm.inputs.parse import get_prompt_components
 from vllm.logger import init_logger
 from vllm.logprobs import Logprob
 from vllm.outputs import CompletionOutput, RequestOutput
@@ -368,20 +369,18 @@ class OpenAIServingChat(OpenAIServing):
         generators: list[AsyncGenerator[RequestOutput, None]] = []
         try:
             for i, engine_prompt in enumerate(engine_prompts):
-                prompt_text, _, _ = self._get_prompt_components(engine_prompt)
+                prompt_text, _, _ = get_prompt_components(engine_prompt)
+
                 # If we are creating sub requests for multiple prompts, ensure that they
                 # have unique request ids.
                 sub_request_id = (
                     request_id if len(engine_prompts) == 1 else f"{request_id}_{i}"
                 )
 
-                if self.default_sampling_params is None:
-                    self.default_sampling_params = {}
-
                 max_tokens = get_max_tokens(
                     max_model_len=self.max_model_len,
                     request=request,
-                    input_length=len(engine_prompt["prompt_token_ids"]),
+                    prompt=engine_prompt,
                     default_sampling_params=self.default_sampling_params,
                 )
 
