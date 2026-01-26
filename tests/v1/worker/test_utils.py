@@ -58,7 +58,7 @@ def test_bind_kv_cache_non_attention(default_vllm_config):
 
 
 def test_bind_kv_cache_draft_model(default_vllm_config):
-    from vllm.attention.layer import Attention
+    from vllm.model_executor.layers.attention import Attention
 
     layer_names = [
         "model.layers.0.attn",
