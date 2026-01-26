@@ -4032,10 +4032,10 @@ class GPUModelRunner(
             new_config = update_config(config, config_overrides)
             setattr(self, config_name, new_config)
 
-    def load_model(self, dummy_weights: bool = False) -> None:
+    def load_model(self, load_dummy_weights: bool = False) -> None:
         """
         Args:
-            dummy_weights: load dummy weights instead of real weights.
+            load_dummy_weights: load dummy weights instead of real weights.
         """
         logger.info_once(
             "Starting to load model %s...",
@@ -4050,7 +4050,7 @@ class GPUModelRunner(
         try:
             with DeviceMemoryProfiler() as m:
                 time_before_load = time.perf_counter()
-                if dummy_weights:
+                if load_dummy_weights:
                     self.load_config.load_format = "dummy"
                 model_loader = get_model_loader(self.load_config)
                 self.model = model_loader.load_model(
@@ -4126,7 +4126,7 @@ class GPUModelRunner(
             time_after_load - time_before_load,
             scope="local",
         )
-        if not dummy_weights:
+        if not load_dummy_weights:
             prepare_communication_buffer_for_model(self.model)
             if (drafter := getattr(self, "drafter", None)) and (
                 drafter_model := getattr(drafter, "model", None)
@@ -4142,7 +4142,7 @@ class GPUModelRunner(
         if (
             is_mixture_of_experts(self.model)
             and self.parallel_config.enable_eplb
-            and not dummy_weights
+            and not load_dummy_weights
         ):
             logger.info_once("EPLB is enabled for model %s.", self.model_config.model)
             assert self.eplb_state is not None

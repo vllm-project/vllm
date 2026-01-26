@@ -283,7 +283,7 @@ class Worker(WorkerBase):
         with self._maybe_get_memory_pool_context(
             tag="weights"
         ) and set_current_vllm_config(self.vllm_config):
-            self.model_runner.load_model(dummy_weights=eep_scale_up)
+            self.model_runner.load_model(load_dummy_weights=eep_scale_up)
 
         if eep_scale_up:
             self.model_runner.setup_eplb_from_mapping(
