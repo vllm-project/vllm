@@ -30,6 +30,10 @@ class DeepseekV32IndexerBackend(AttentionBackend):
         return "DEEPSEEK_V32_INDEXER"
 
     @staticmethod
+    def get_builder_cls():
+        return None  # type: ignore
+
+    @staticmethod
     def get_supported_kernel_block_sizes() -> list[int | MultipleOf]:
         return [1 if current_platform.is_rocm() else 64]
 
