@@ -165,7 +165,7 @@ class CpuCommunicator(DeviceCommunicatorBase):
         | tuple[torch.Tensor, torch.Tensor, torch.Tensor, list[torch.Tensor]]
     ):
         """
-        Dispatch the hidden states and router logits to the appropriate device.
+        Dispatch the hidden states and topk weights/ids to the appropriate device.
         This is a no-op in the base class.
         """
         assert self.all2all_manager is not None
