@@ -1195,7 +1195,8 @@ def test_parse_chat_messages_multiple_dict_image_embeds(
     assert conversation == [
         {
             "role": "user",
-            "content": "<|image_1|>\n<|image_2|>\nDescribe these two images.",
+            "content": "<|vision_start|><|IMAGE|><|vision_end|>\n"
+            "<|vision_start|><|IMAGE|><|vision_end|>\nDescribe these two images.",
         }
     ]
 

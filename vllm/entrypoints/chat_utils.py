@@ -419,7 +419,10 @@ def _merge_embeds(
                 [item[key] for item in data_items], pin_memory=False
             )
     except Exception:
-        logger.exception("Error when parsing merged embeddings")
+        logger.exception(
+            "Error when parsing merged embeddings. "
+            "Falling back to auto-detected fields."
+        )
 
     return data_merged
 
