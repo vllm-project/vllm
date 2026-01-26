@@ -46,6 +46,7 @@ from vllm.model_executor.layers.linear import (
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.quantization.gptq import GPTQConfig
 from vllm.model_executor.layers.quantization.gptq_marlin import GPTQMarlinConfig
+from vllm.model_executor.layers.rotary_embedding.common import ApplyRotaryEmb
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.interfaces import (
     MultiModalEmbeddings,
@@ -126,18 +127,7 @@ class OpenPanguVisionAttention(nn.Module):
             scale=self.hidden_size_per_attention_head**-0.5,
             multimodal_config=multimodal_config,
         )
-
-    def rotate_half(self, x):
-        """Rotates half the hidden dims of the input."""
-        x1 = x[..., : x.shape[-1] // 2]
-        x2 = x[..., x.shape[-1] // 2 :]
-        return torch.cat((-x2, x1), dim=-1)
-
-    def apply_rotary_pos_emb(self, q, k, cos, sin, offset: int = 0):
-        target_dtype = q.dtype
-        q_embed = (q * cos) + (self.rotate_half(q) * sin)
-        k_embed = (k * cos) + (self.rotate_half(k) * sin)
-        return q_embed.to(target_dtype), k_embed.to(target_dtype)
+        self.apply_rotary_emb = ApplyRotaryEmb(enforce_enable=True)
 
     def forward(
         self,
@@ -158,7 +148,9 @@ class OpenPanguVisionAttention(nn.Module):
             ).contiguous()
             for x in (q, k, v)
         )
-        q, k = self.apply_rotary_pos_emb(q, k, cos, sin)
+        qk_concat = torch.cat([q, k], dim=0)
+        qk_rotated = self.apply_rotary_emb(qk_concat, cos, sin)
+        q, k = torch.chunk(qk_rotated, 2, dim=0)
 
         max_seqlen = (cu_seqlens[1:] - cu_seqlens[:-1]).max()
         context_layer = self.attn(
@@ -388,6 +380,8 @@ class OpenPanguVisionTransformer(nn.Module):
     def __init__(
         self,
         vision_config,
+        out_hidden_size,
+        hidden_size,
         norm_eps: float = 1e-6,
         quant_config: QuantizationConfig | None = None,
         multimodal_config: MultiModalConfig | None = None,
@@ -476,6 +470,9 @@ class OpenPanguVisionTransformer(nn.Module):
                 for i in range(len(self.select_layer))
             ]
         )
+        self.vision_projection = ProjectionSingle(
+            out_hidden_size, hidden_size
+        )
 
     @property
     def dtype(self) -> torch.dtype:
@@ -488,20 +485,7 @@ class OpenPanguVisionTransformer(nn.Module):
     def cal_cos_sin(self, rotary_pos_emb):
         cos = rotary_pos_emb.cos()
         sin = rotary_pos_emb.sin()
-
-        if not self.interleaved:
-            cos_new = torch.cat((cos, cos), dim=-1)
-            sin_new = torch.cat((sin, sin), dim=-1)
-        else:
-            cos_new = rearrange(
-                torch.stack((cos, cos), dim=-1), "... d two -> ...(d two)", two=2
-            )
-            sin_new = rearrange(
-                torch.stack((sin, sin), dim=-1), "... d two -> ...(d two)", two=2
-            )
-        cos_new = cos_new.reshape(1, -1, 1, self.hidden_size_per_attention_head)
-        sin_new = sin_new.reshape(1, -1, 1, self.hidden_size_per_attention_head)
-        return cos_new, sin_new
+        return cos, sin
 
     def rot_pos_emb(self, grid_thw: torch.Tensor) -> torch.Tensor:
         # see https://github.com/huggingface/transformers/blob/main/src/transformers/models/qwen2_5_vl/modular_qwen2_5_vl.py for details. #L209 # noqa: E501
@@ -616,7 +600,7 @@ class OpenPanguVisionTransformer(nn.Module):
         rotary_pos_emb = rotary_pos_emb[window_index, :, :]
         rotary_pos_emb = rotary_pos_emb.reshape(seq_len, -1)
 
-        cos, sin = self.cal_cos_sin(rotary_pos_emb)
+        cos, sin = self.cal_cos_sin(rotary_pos_emb.to(x.dtype))
 
         intermediates = []
         for layer_num, blk in enumerate(self.blocks):
@@ -636,6 +620,7 @@ class OpenPanguVisionTransformer(nn.Module):
 
         reverse_indices = torch.argsort(window_index)
         x = x[reverse_indices, :]
+        x = self.vision_projection(x)
         return x
 
     def load_weights(self, weights) -> set[str]:
@@ -848,13 +833,12 @@ class OpenPanguVLForConditionalGeneration(
         quant_config = vllm_config.quant_config
         self.visual = OpenPanguVisionTransformer(
             vision_config=config.vision_config,
+            out_hidden_size=config.vision_config.out_hidden_size,
+            hidden_size=config.hidden_size,
             norm_eps=getattr(config.vision_config, "rms_norm_eps", 1e-6),
             quant_config=self._maybe_ignore_quant_config(quant_config),
             multimodal_config=multimodal_config,
             prefix=maybe_prefix(prefix, "visual"),
-        )
-        self.visual.vision_projection = ProjectionSingle(
-            config.vision_config.out_hidden_size, config.hidden_size
         )
 
         self.language_model = init_vllm_registered_model(
@@ -1062,32 +1046,6 @@ class OpenPanguVLForConditionalGeneration(
             )
         return inputs_embeds
 
-    def get_input_embeddings_v0(
-        self,
-        input_ids: torch.Tensor,
-        image_input=None,
-        video_input=None,
-    ) -> torch.Tensor:
-        inputs_embeds = self.get_input_embeddings(input_ids)
-        if image_input is not None:
-            image_embeds = self._process_image_input(image_input)
-            inputs_embeds = self.embed_input_ids(
-                input_ids,
-                inputs_embeds,
-                image_embeds,
-                placeholder_token_id=self.config.image_token_id,
-            )
-
-        if video_input is not None:
-            video_embeds = self._process_video_input(video_input)
-            inputs_embeds = self.embed_input_ids(
-                input_ids,
-                inputs_embeds,
-                video_embeds,
-                placeholder_token_id=self.config.video_token_id,
-            )
-        return inputs_embeds
-
     def _process_image_input(self, image_input) -> tuple[torch.Tensor, ...]:
         grid_thw = image_input["image_grid_thw"]
         if grid_thw.ndim != 2:
@@ -1114,7 +1072,6 @@ class OpenPanguVLForConditionalGeneration(
             )
             image_embeds = self.visual(pixel_values, grid_thw=grid_thw)
 
-            image_embeds = self.visual.vision_projection(image_embeds)
         # Split concatenated embeddings for each image item.
         merge_size = self.visual.spatial_merge_size
         sizes = grid_thw.prod(-1) // merge_size // merge_size
@@ -1133,7 +1090,6 @@ class OpenPanguVLForConditionalGeneration(
             )
             video_embeds = self.visual(pixel_values_videos, grid_thw=grid_thw)
 
-            video_embeds = self.visual.vision_projection(video_embeds)
         # Split concatenated embeddings for each video item.
         merge_size = self.visual.spatial_merge_size
         sizes = grid_thw.prod(-1) // merge_size // merge_size
@@ -1150,20 +1106,6 @@ class OpenPanguVLForConditionalGeneration(
     ) -> torch.Tensor | IntermediateTensors:
         if intermediate_tensors is not None:
             inputs_embeds = None
-
-        # NOTE: In v1, inputs_embeds is always generated at model runner, this
-        # condition is for v0 compatibility.
-        elif inputs_embeds is None:
-            image_input = self._parse_and_validate_image_input(**kwargs)
-            video_input = self._parse_and_validate_video_input(**kwargs)
-
-            if image_input is None and video_input is None:
-                inputs_embeds = None
-            else:
-                inputs_embeds = self.get_input_embeddings_v0(
-                    input_ids, image_input=image_input, video_input=video_input
-                )
-                input_ids = None
 
         hidden_states = self.language_model.model(
             input_ids=input_ids,
@@ -1211,153 +1153,116 @@ class OpenPanguVLForConditionalGeneration(
         """Get mrope input positions and delta value."""
         kwargs = MultiModalFeatureSpec.gather_kwargs(
             mm_features,
-            {"image_grid_thw", "video_grid_thw", "second_per_grid_ts"},
+            {"image_grid_thw", "video_grid_thw"},
         )
         image_grid_thw = [item.tolist() for item in kwargs.get("image_grid_thw", [])]
         video_grid_thw = [item.tolist() for item in kwargs.get("video_grid_thw", [])]
-        second_per_grid_ts = kwargs.get("second_per_grid_ts", [])
 
         hf_config = self.config
         image_token_id = hf_config.image_token_id
         video_token_id = hf_config.video_token_id
         vision_start_token_id = hf_config.vision_start_token_id
-        vision_end_token_id = hf_config.vision_end_token_id
         spatial_merge_size = hf_config.vision_config.spatial_merge_size
-        tokens_per_second = getattr(hf_config.vision_config, "tokens_per_second", 1.0)
+        image_nums = len(image_grid_thw)
+        video_nums = len(video_grid_thw)
+        llm_pos_ids_list: list = []
 
-        if isinstance(image_grid_thw, list):
-            image_grid_thw = torch.tensor(image_grid_thw)
-        if isinstance(video_grid_thw, list):
-            video_grid_thw = torch.tensor(video_grid_thw)
-
-        src_item = input_tokens
-        if not second_per_grid_ts:
-            second_per_grid_ts = [1] * video_grid_thw.shape[0]
-        video_idx = 0
-        image_idx = 0
-        new_src_item: list[int] = []
-        llm_pos_ids_list: list[torch.Tensor] = []
-
-        idx = 0
-        while idx < len(src_item):
-            new_src_item_len = len(new_src_item)
-            start_idx = (
-                llm_pos_ids_list[-1].max() + 1 if len(llm_pos_ids_list) > 0 else 0
-            )
-            if src_item[idx] not in [video_token_id, image_token_id]:
-                new_src_item.append(src_item[idx])
-                llm_pos_ids = torch.tensor([start_idx], dtype=torch.long).expand(3, -1)
-                llm_pos_ids_list.append(llm_pos_ids)
-            elif src_item[idx] == image_token_id:
-                grid_t = image_grid_thw[image_idx][0]
-                grid_hs = image_grid_thw[:, 1]
-                grid_ws = image_grid_thw[:, 2]
-                t_index = (torch.arange(grid_t) * 1 * tokens_per_second).long()
-                llm_pos_ids = self._get_llm_pos_ids_for_vision(
-                    start_idx, image_idx, spatial_merge_size, t_index, grid_hs, grid_ws
-                )
-                llm_pos_ids_list.append(llm_pos_ids)
-                vision_seqlen = image_grid_thw[image_idx].prod() // (
-                    spatial_merge_size**2
-                )
-                new_src_item.extend([image_token_id] * vision_seqlen)
-                image_idx += 1
+        st = 0
+        remain_images, remain_videos = image_nums, video_nums
+        image_index, video_index = 0, 0
+        for _ in range(image_nums + video_nums):
+            is_video = False
+            if remain_images > 0:
+                try:
+                    ed_image = input_tokens.index(image_token_id, st)
+                except ValueError:
+                    ed_image = len(input_tokens) + 1
             else:
-                # Processing video token position
-                # Get the grid information of the current video
-                T = video_grid_thw[video_idx][0].item()
-                H = video_grid_thw[video_idx][1].item()
-                W = video_grid_thw[video_idx][2].item()
-                llm_H = H // spatial_merge_size
-                llm_W = W // spatial_merge_size
-                tokens_per_frame = llm_H * llm_W
-                # Calculate the current starting position
-                start_pos = (
-                    llm_pos_ids_list[-1].max().item() + 1 if llm_pos_ids_list else 0
+                ed_image = len(input_tokens) + 1
+            if remain_videos > 0:
+                try:
+                    ed_video = input_tokens.index(video_token_id, st)
+                except ValueError:
+                    ed_video = len(input_tokens) + 1
+            else:
+                ed_video = len(input_tokens) + 1
+            if ed_image < ed_video:
+                t, h, w = image_grid_thw[image_index]
+                image_index += 1
+                remain_images -= 1
+                ed = ed_image
+            else:
+                is_video = True
+                t, h, w = video_grid_thw[video_index]
+                video_index += 1
+                remain_videos -= 1
+                ed = ed_video
+            llm_grid_t, llm_grid_h, llm_grid_w = (
+                t,
+                h // spatial_merge_size,
+                w // spatial_merge_size,
+            )
+            text_len = ed - st
+            st_idx = llm_pos_ids_list[-1].max() + 1 if len(llm_pos_ids_list) > 0 else 0
+            llm_pos_ids_list.append(
+                torch.arange(text_len).view(1, -1).expand(3, -1) + st_idx
+            )
+            if is_video:
+                eot_bot_pos = torch.full((3, 1), 0, dtype=torch.long)
+                offset_pos = max(llm_grid_h, llm_grid_w)
+                current_pos = text_len + st_idx
+                grid_h = torch.arange(llm_grid_h).view(-1, 1).expand(-1, llm_grid_w).flatten()
+                grid_w = torch.arange(llm_grid_w).view(1, -1).expand(llm_grid_h, -1).flatten()
+                frame_pos = torch.stack(
+                    [
+                        torch.full_like(grid_h, 0, dtype=torch.long), # t
+                        grid_h, # h
+                        grid_w, # w
+                    ]
                 )
-                current_pos = start_pos
-                # frame by frame processing
-                final_frame_time = T - 1  # Record the order of the last frame
-                for t in range(T):
-                    # 1. Calculate the left placeholder position of the first frame, skip # noqa: E501
-                    if t != 0:
-                        new_src_item.append(vision_start_token_id)  # For looping, count
-                        bot_pos = torch.full((3, 1), current_pos, dtype=torch.long)
-                        llm_pos_ids_list.append(bot_pos)
-                        current_pos += 1
-                    # 2. Video tokens for frame t
-                    # Construct a single frame of (t, h, w)
-                    grid_h = torch.arange(llm_H).view(-1, 1).expand(-1, llm_W).flatten()
-                    grid_w = torch.arange(llm_W).view(1, -1).expand(llm_H, -1).flatten()
-                    # Here we don't add current_pos to h/w, just keep the original (t, h, w) # noqa: E501
-                    frame_pos = torch.stack(
-                        [
-                            torch.full_like(grid_h, 0, dtype=torch.long),  # t
-                            grid_h,  # h
-                            grid_w,  # w
-                        ]
-                    )  # shape: (3, tokens_per_frame)
-                    frame_pos_with_offset = (
-                        frame_pos + current_pos
-                    )  # Current frame position offset
-                    new_src_item.extend(
-                        [video_token_id] * tokens_per_frame
-                    )  # For looping, count
-                    llm_pos_ids_list.append(frame_pos_with_offset)
-                    current_pos += max(llm_H, llm_W)
-                    # 3. Calculate the right placeholder position of the last frame and skip it # noqa: E501
-                    if t != final_frame_time:
-                        new_src_item.append(vision_end_token_id)  # For looping, count
-                        eot_pos = torch.full((3, 1), current_pos, dtype=torch.long)
-                        llm_pos_ids_list.append(eot_pos)
-                        current_pos += 1
-                video_idx += 1
-            # move to the next token
-            idx += len(new_src_item) - new_src_item_len
-
-        llm_positions = torch.cat(llm_pos_ids_list, dim=1)
-        mrope_position_delta = (
-            torch.cat(llm_pos_ids_list, dim=1).max() + 1 - len(src_item)
-        )
-
+                llm_pos_ids_list.append((frame_pos + current_pos))
+                for _ in range((llm_grid_t - 1)):
+                    current_pos = current_pos + offset_pos
+                    llm_pos_ids_list.append((eot_bot_pos + current_pos))
+                    llm_pos_ids_list.append((eot_bot_pos + current_pos + 1))
+                    llm_pos_ids_list.append((frame_pos + current_pos + 2))
+                    current_pos += 2
+                st = ed + llm_grid_t * llm_grid_h * llm_grid_w + (llm_grid_t - 1) * 2
+            else:
+                t_index = (
+                    (
+                        torch.arange(llm_grid_t)
+                        .view(-1, 1)
+                        .expand(-1, llm_grid_h * llm_grid_w)
+                    )
+                    .long()
+                    .flatten()
+                )
+                h_index = (
+                    torch.arange(llm_grid_h)
+                    .view(1, -1, 1)
+                    .expand(llm_grid_t, -1, llm_grid_w)
+                    .flatten()
+                )
+                w_index = (
+                    torch.arange(llm_grid_w)
+                    .view(1, 1, -1)
+                    .expand(llm_grid_t, llm_grid_h, -1)
+                    .flatten()
+                )
+                llm_pos_ids_list.append(
+                    torch.stack([t_index, h_index, w_index]) + text_len + st_idx
+                )
+                st = ed + llm_grid_t * llm_grid_h * llm_grid_w
+        if st < len(input_tokens):
+            st_idx = llm_pos_ids_list[-1].max() + 1 if len(llm_pos_ids_list) > 0 else 0
+            text_len = len(input_tokens) - st
+            llm_pos_ids_list.append(
+                torch.arange(text_len).view(1, -1).expand(3, -1) + st_idx
+            )
+        llm_positions = torch.cat(llm_pos_ids_list, dim=1).reshape(3, -1)
+        mrope_position_delta = (llm_positions.max() + 1 -len(input_tokens)).item()
         return llm_positions, mrope_position_delta
-
-    def _get_llm_pos_ids_for_vision(
-        self,
-        start_idx: int,
-        vision_idx: int,
-        spatial_merge_size: int,
-        t_index: list[int],
-        grid_hs: torch.Tensor,
-        grid_ws: torch.Tensor,
-    ) -> torch.Tensor:
-        llm_pos_ids_list = []
-        llm_grid_h = grid_hs[vision_idx] // spatial_merge_size
-        llm_grid_w = grid_ws[vision_idx] // spatial_merge_size
-        h_index = (
-            torch.arange(llm_grid_h)
-            .view(1, -1, 1)
-            .expand(len(t_index), -1, llm_grid_w)
-            .flatten()
-        )
-        w_index = (
-            torch.arange(llm_grid_w)
-            .view(1, 1, -1)
-            .expand(len(t_index), llm_grid_h, -1)
-            .flatten()
-        )
-        t_index_tensor = (
-            torch.Tensor(t_index)
-            .to(llm_grid_h.device)
-            .view(-1, 1)
-            .expand(-1, llm_grid_h * llm_grid_w)
-            .long()
-            .flatten()
-        )
-        _llm_pos_ids = torch.stack([t_index_tensor, h_index, w_index])
-        llm_pos_ids_list.append(_llm_pos_ids + start_idx)
-        llm_pos_ids = torch.cat(llm_pos_ids_list, dim=1)
-        return llm_pos_ids
 
 
 def rescale(image, scale):
