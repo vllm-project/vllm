@@ -44,57 +44,57 @@ Further update the model as follows:
     ```
 
 - Remove the embedding part from the [forward][torch.nn.Module.forward] method:
-  - Move the multi-modal embedding to [embed_multimodal][vllm.model_executor.models.interfaces.SupportsMultiModal.embed_multimodal].
-  - The text embedding and embedding merge are handled automatically by a default implementation of [embed_input_ids][vllm.model_executor.models.interfaces.SupportsMultiModal.embed_input_ids]. It does not need to be overridden in most cases.
+    - Move the multi-modal embedding to [embed_multimodal][vllm.model_executor.models.interfaces.SupportsMultiModal.embed_multimodal].
+    - The text embedding and embedding merge are handled automatically by a default implementation of [embed_input_ids][vllm.model_executor.models.interfaces.SupportsMultiModal.embed_input_ids]. It does not need to be overridden in most cases.
 
-  ```diff
-    def forward(
-        self,
-        input_ids: torch.Tensor | None,
-  -     pixel_values: torch.Tensor,
-        positions: torch.Tensor,
-        intermediate_tensors: IntermediateTensors | None = None,
-        inputs_embeds: torch.Tensor | None = None,
-    ) -> torch.Tensor:
-  -     if inputs_embeds is None:
-  -         inputs_embeds = self.get_input_embeddings()(input_ids)
-  -
-  -     if pixel_values is not None:
-  -         image_features = self.get_image_features(
-  -             pixel_values=pixel_values,
-  -         )
-  -         special_image_mask = self.get_placeholder_mask(
-  -             input_ids,
-  -             inputs_embeds=inputs_embeds,
-  -             image_features=image_features,
-  -         )
-  -         inputs_embeds = inputs_embeds.masked_scatter(
-  -             special_image_mask,
-  -             image_features,
-  -         )
+    ```diff
+      def forward(
+          self,
+          input_ids: torch.Tensor | None,
+    -     pixel_values: torch.Tensor,
+          positions: torch.Tensor,
+          intermediate_tensors: IntermediateTensors | None = None,
+          inputs_embeds: torch.Tensor | None = None,
+      ) -> torch.Tensor:
+    -     if inputs_embeds is None:
+    -         inputs_embeds = self.get_input_embeddings()(input_ids)
+    -
+    -     if pixel_values is not None:
+    -         image_features = self.get_image_features(
+    -             pixel_values=pixel_values,
+    -         )
+    -         special_image_mask = self.get_placeholder_mask(
+    -             input_ids,
+    -             inputs_embeds=inputs_embeds,
+    -             image_features=image_features,
+    -         )
+    -         inputs_embeds = inputs_embeds.masked_scatter(
+    -             special_image_mask,
+    -             image_features,
+    -         )
 
-         hidden_states = self.language_model(
-             input_ids,
-             positions,
-             intermediate_tensors,
-             inputs_embeds=inputs_embeds,
-         )
+           hidden_states = self.language_model(
+               input_ids,
+               positions,
+               intermediate_tensors,
+               inputs_embeds=inputs_embeds,
+           )
          ...
+  
+    +  def embed_multimodal(
+    +      self,
+    +      pixel_values: torch.Tensor,
+    +  ) -> MultiModalEmbeddings | None:
+    +      return self.get_image_features(
+    +          pixel_values=pixel_values,
+    +      )
+    ```
 
-  +  def embed_multimodal(
-  +      self,
-  +      pixel_values: torch.Tensor,
-  +  ) -> MultiModalEmbeddings | None:
-  +      return self.get_image_features(
-  +          pixel_values=pixel_values,
-  +      )
-  ```
+    Below we provide a boilerplate of a typical implementation pattern of [embed_multimodal][vllm.model_executor.models.interfaces.SupportsMultiModal.embed_multimodal], but feel free to adjust it to your own needs.
 
-  Below we provide a boilerplate of a typical implementation pattern of [embed_multimodal][vllm.model_executor.models.interfaces.SupportsMultiModal.embed_multimodal], but feel free to adjust it to your own needs.
+        ??? code
 
-    ??? code
-
-        ```python
+            ```python
             def _process_image_input(self, image_input: YourModelImageInputs) -> torch.Tensor:
                 image_features = self.vision_encoder(image_input)
                 return self.multi_modal_projector(image_features)
@@ -111,7 +111,7 @@ Further update the model as follows:
                 # Run multimodal inputs through encoder and projector
                 vision_embeddings = self._process_image_input(image_input)
                 return vision_embeddings
-        ```
+            ```
 
 !!! important
     The returned `multimodal_embeddings` must be either a **3D [torch.Tensor][]** of shape `(num_items, feature_size, hidden_size)`, or a **list / tuple of 2D [torch.Tensor][]'s** of shape `(feature_size, hidden_size)`, so that `multimodal_embeddings[i]` retrieves the embeddings generated from the `i`-th multimodal data item (e.g, image) of the request.
