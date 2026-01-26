@@ -25,11 +25,13 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements/common.txt
           pip install -r requirements/test.txt
-          pip install -e .
+          # Install only runtime dependencies needed for tests, not full vLLM
+          pip install msgspec opentelemetry-api opentelemetry-sdk pytest
 
       - name: Run journey tracing tests
+        env:
+          PYTHONPATH: ${{ github.workspace }}
         run: |
           pytest tests/v1/core/test_journey_events.py \
                  tests/v1/engine/test_journey_tracing_integration.py \
@@ -38,6 +40,8 @@ jobs:
             --tb=short
 
       - name: Run basic scheduler smoke tests
+        env:
+          PYTHONPATH: ${{ github.workspace }}
         run: |
           pytest tests/v1/core/test_scheduler.py::test_scheduler_step_counter \
                  tests/v1/core/test_scheduler.py::test_scheduler_single_request \
