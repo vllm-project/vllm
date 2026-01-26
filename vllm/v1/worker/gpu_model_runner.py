@@ -1111,11 +1111,6 @@ class GPUModelRunner(
         if not self.speculative_config or not self.model_config.is_hybrid:
             return
 
-        # For async spec decode, skip CPU sync - we'll use
-        # valid_sampled_token_count_gpu directly in _prepare_inputs.
-        if self.use_async_spec_decode:
-            return
-
         # Find the number of accepted tokens for each sequence.
         num_accepted_tokens = (
             (
