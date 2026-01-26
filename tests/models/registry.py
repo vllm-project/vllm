@@ -273,7 +273,7 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
     "Glm4MoeForCausalLM": _HfExamplesInfo("zai-org/GLM-4.5"),
     "Glm4MoeLiteForCausalLM": _HfExamplesInfo(
         "zai-org/GLM-4.7-Flash",
-        min_transformers_version="5.0.0.dev",
+        min_transformers_version="5.0.0",
     ),
     "GPT2LMHeadModel": _HfExamplesInfo("openai-community/gpt2", {"alias": "gpt2"}),
     "GPTBigCodeForCausalLM": _HfExamplesInfo(
@@ -660,9 +660,6 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     "AudioFlamingo3ForConditionalGeneration": _HfExamplesInfo(
         "nvidia/audio-flamingo-3-hf", min_transformers_version="5.0.0"
     ),
-    "MusicFlamingoForConditionalGeneration": _HfExamplesInfo(
-        "nvidia/music-flamingo-2601-hf", min_transformers_version="5.0.0.dev"
-    ),
     "AyaVisionForConditionalGeneration": _HfExamplesInfo("CohereLabs/aya-vision-8b"),
     "BagelForConditionalGeneration": _HfExamplesInfo("ByteDance-Seed/BAGEL-7B-MoT"),
     "BeeForConditionalGeneration": _HfExamplesInfo(
@@ -723,7 +720,7 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     "GlmOcrForConditionalGeneration": _HfExamplesInfo(
         "zai-org/GLM-OCR",
         is_available_online=False,
-        min_transformers_version="5.0.0.dev",
+        min_transformers_version="5.1.0",
     ),
     "H2OVLChatModel": _HfExamplesInfo(
         "h2oai/h2ovl-mississippi-800m",
@@ -1087,13 +1084,13 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
     "Glm4MoeLiteMTPModel": _HfExamplesInfo(
         "zai-org/GLM-4.7-Flash",
         speculative_model="zai-org/GLM-4.7-Flash",
-        min_transformers_version="5.0.0.dev",
+        min_transformers_version="5.0.0",
     ),
     "GlmOcrMTPModel": _HfExamplesInfo(
         "zai-org/GLM-OCR",
         speculative_model="zai-org/GLM-OCR",
         is_available_online=False,
-        min_transformers_version="5.0.0.dev",
+        min_transformers_version="5.1.0",
     ),
     "LongCatFlashMTPModel": _HfExamplesInfo(
         "meituan-longcat/LongCat-Flash-Chat",
