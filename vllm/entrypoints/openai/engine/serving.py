@@ -263,6 +263,15 @@ class OpenAIServing:
         self.model_config = self.models.model_config
         self.max_model_len = self.model_config.max_model_len
 
+        # Cache for journey tracing enabled status (avoid per-request async call)
+        self._is_tracing_enabled_cache: bool | None = None
+
+    async def _get_is_tracing_enabled(self) -> bool:
+        """Get journey tracing enabled status with caching to avoid per-request overhead."""
+        if self._is_tracing_enabled_cache is None:
+            self._is_tracing_enabled_cache = await self.engine_client.is_tracing_enabled()
+        return self._is_tracing_enabled_cache
+
     def _get_tool_parser(
         self, tool_parser_name: str | None = None, enable_auto_tools: bool = False
     ) -> Callable[[TokenizerLike], ToolParser] | None:
@@ -1426,7 +1435,7 @@ class OpenAIServing:
         self,
         headers: Headers,
     ) -> Mapping[str, str] | None:
-        is_tracing_enabled = await self.engine_client.is_tracing_enabled()
+        is_tracing_enabled = await self._get_is_tracing_enabled()
 
         if is_tracing_enabled:
             return extract_trace_headers(headers)

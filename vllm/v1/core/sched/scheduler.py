@@ -39,7 +39,6 @@ from vllm.v1.core.kv_cache_manager import KVCacheBlocks, KVCacheManager
 from vllm.v1.core.kv_cache_metrics import KVCacheMetricsCollector
 from vllm.v1.core.sched.interface import SchedulerInterface
 from vllm.v1.core.sched.journey_events import (
-    RequestJourneyEvent,
     RequestJourneyEventType,
     ScheduleKind,
     _map_finish_status,
@@ -66,6 +65,13 @@ from vllm.v1.structured_output import StructuredOutputManager
 from vllm.v1.utils import record_function_or_nullcontext
 
 logger = init_logger(__name__)
+
+# Optional OTEL tracing import
+try:
+    from vllm.tracing import SpanAttributes
+except Exception:
+    # ImportError or other issues if OTEL deps are missing
+    SpanAttributes = None  # type: ignore
 
 
 class Scheduler(SchedulerInterface):
@@ -130,10 +136,6 @@ class Scheduler(SchedulerInterface):
                 from vllm.tracing import init_tracer
                 self.tracer = init_tracer("vllm.scheduler", endpoint)
 
-            # Per-client event buffers (flushed in update_from_output)
-            self._journey_events_buffer_by_client: dict[
-                int, list[RequestJourneyEvent]
-            ] = defaultdict(list)
             # Track which requests have emitted FIRST_TOKEN (dedup)
             self._first_token_emitted: set[str] = set()
             # Prefill progress high-water marks (survives preemption)
@@ -1321,9 +1323,31 @@ class Scheduler(SchedulerInterface):
 
             routed_experts = None
             if stopped:
-                routed_experts = self._get_routed_experts(request)
-                # End core span BEFORE freeing request (prevent span leak)
-                self._end_core_span_and_cleanup(request)
+                # Exception-safe completion: ensure cleanup always happens
+                try:
+                    routed_experts = self._get_routed_experts(request)
+
+                    # Emit FINISHED event before cleanup
+                    if self._enable_journey_tracing:
+                        core_span = self._core_spans.get(request.request_id)
+                        try:
+                            self._emit_journey_event(
+                                request,
+                                RequestJourneyEventType.FINISHED,
+                                scheduler_step=scheduler_output.scheduler_step,
+                                span=core_span,
+                                finish_status=_map_finish_status(request.status),
+                            )
+                        except Exception:
+                            # Tracing must never break request completion
+                            pass
+                except Exception:
+                    # routed_experts is optional; failures must not prevent cleanup
+                    pass
+                finally:
+                    # Always cleanup, even if tracing or routed_experts fails
+                    self._end_core_span_and_cleanup(request)
+
                 kv_transfer_params = self._free_request(request)
                 if status_before_stop == RequestStatus.RUNNING:
                     stopped_running_reqs.add(request)
@@ -1450,29 +1474,6 @@ class Scheduler(SchedulerInterface):
                         finished_requests=finished_set
                     )
             finished_req_ids.clear()
-
-        # Flush journey events for all clients with buffered events
-        # This ensures SCHEDULED/PREEMPTED events reach output even if
-        # no tokens generated
-        if self._enable_journey_tracing:
-            for (
-                client_index,
-                buffered_events,
-            ) in self._journey_events_buffer_by_client.items():
-                if buffered_events:
-                    journey_events = buffered_events.copy()
-                    buffered_events.clear()
-
-                    # Get or create EngineCoreOutputs for this client
-                    if client_index in engine_core_outputs:
-                        engine_core_outputs[client_index].journey_events = (
-                            journey_events
-                        )
-                    else:
-                        # Create new EngineCoreOutputs just for events
-                        engine_core_outputs[client_index] = EngineCoreOutputs(
-                            journey_events=journey_events
-                        )
 
         if (
             stats := self.make_stats(
@@ -1725,13 +1726,14 @@ class Scheduler(SchedulerInterface):
         """Create child span for engine-core journey tracing.
 
         Extracts parent span context from request.trace_headers and creates
-        child span in the same distributed trace.
+        child span in the same distributed trace. Defensive: if any step fails,
+        cleans up and returns None rather than leaking a partially-initialized span.
 
         Args:
             request: The request for which to create a span
 
         Returns:
-            Span object if tracer available, None otherwise
+            Span object if tracer available and creation succeeds, None otherwise
         """
         if not self.tracer:
             return None
@@ -1743,21 +1745,34 @@ class Scheduler(SchedulerInterface):
         except ImportError:
             return None
 
-        # Extract parent span context from request
-        parent_context = extract_trace_context(request.trace_headers)
+        core_span = None
+        try:
+            # Extract parent span context from request
+            parent_context = extract_trace_context(request.trace_headers)
 
-        # Create child span (linked to parent API span if context exists)
-        core_span = self.tracer.start_span(
-            name="llm_core",
-            kind=SpanKind.INTERNAL,
-            context=parent_context,
-            start_time=time.time_ns(),
-        )
+            # Create child span (linked to parent API span if context exists)
+            core_span = self.tracer.start_span(
+                name="llm_core",
+                kind=SpanKind.INTERNAL,
+                context=parent_context,
+                start_time=time.time_ns(),
+            )
 
-        # Set span attributes
-        core_span.set_attribute(SpanAttributes.GEN_AI_REQUEST_ID, request.request_id)
+            # Set span attributes (may throw)
+            core_span.set_attribute(SpanAttributes.GEN_AI_REQUEST_ID, request.request_id)
 
-        return core_span
+            return core_span
+
+        except Exception as e:
+            # If anything fails, close the span if created and return None
+            logger.debug("Failed to create core span for %s: %s",
+                        request.request_id, e)
+            if core_span is not None:
+                try:
+                    core_span.end(end_time=time.time_ns())
+                except Exception:
+                    pass  # Best effort close
+            return None
 
     def _end_core_span_and_cleanup(self, request: Request) -> None:
         """End core span and cleanup all journey tracing state for a request.
@@ -2265,22 +2280,27 @@ class Scheduler(SchedulerInterface):
         schedule_kind: ScheduleKind | None = None,
         finish_status: str | None = None,
     ) -> None:
-        """Emit journey event to OTEL span or buffer per-client.
+        """Emit journey event directly to OTEL span.
 
-        This is the central emission point for all journey events. With the
-        dual-stream tracing architecture, events are emitted directly to spans
-        if available. Legacy buffering is maintained for backward compatibility.
+        This is the central emission point for all journey events. Events are
+        emitted directly to spans in real-time. When no span is available
+        (tracer not configured), events are silently dropped.
 
         Args:
             request: The request this event is for
             event_type: Type of lifecycle event
             scheduler_step: Scheduler step counter (never None in dual-stream)
-            span: OTEL span to emit to (dual-stream mode)
+            span: OTEL span to emit to (required for event emission)
             schedule_kind: FIRST or RESUME (SCHEDULED events only)
             finish_status: Terminal status string (FINISHED events only)
         """
         if not self._enable_journey_tracing:
             return  # Near-zero overhead: single boolean check
+
+        # Early return if no span available - events are silently dropped
+        # This is the expected behavior when tracer is not configured
+        if not span or not span.is_recording() or SpanAttributes is None:
+            return
 
         # Compute progress snapshot (handles preemption correctly)
         progress = self._compute_progress_snapshot(request)
@@ -2289,57 +2309,39 @@ class Scheduler(SchedulerInterface):
         ts_monotonic = time.monotonic()
         ts_epoch_ns = time.time_ns()
 
-        # Emit directly to span if available (dual-stream mode)
-        if span and span.is_recording():
-            from vllm.tracing import SpanAttributes
+        # Build event attributes
+        attributes = {
+            SpanAttributes.JOURNEY_EVENT_TYPE: event_type.name,
+            SpanAttributes.JOURNEY_TS_MONOTONIC: ts_monotonic,
+            SpanAttributes.JOURNEY_SCHEDULER_STEP: scheduler_step,
+            SpanAttributes.JOURNEY_PHASE: progress["phase"],
+            SpanAttributes.JOURNEY_PREFILL_DONE_TOKENS: progress["prefill_done_tokens"],
+            SpanAttributes.JOURNEY_PREFILL_TOTAL_TOKENS: progress[
+                "prefill_total_tokens"
+            ],
+            SpanAttributes.JOURNEY_DECODE_DONE_TOKENS: progress["decode_done_tokens"],
+            SpanAttributes.JOURNEY_DECODE_MAX_TOKENS: progress["decode_max_tokens"],
+            SpanAttributes.JOURNEY_NUM_PREEMPTIONS: request.num_preemptions,
+        }
 
-            # Build event attributes
-            attributes = {
-                SpanAttributes.JOURNEY_EVENT_TYPE: event_type.name,
-                SpanAttributes.JOURNEY_TS_MONOTONIC: ts_monotonic,
-                SpanAttributes.JOURNEY_SCHEDULER_STEP: scheduler_step,
-                SpanAttributes.JOURNEY_PHASE: progress["phase"],
-                SpanAttributes.JOURNEY_PREFILL_DONE_TOKENS: progress[
-                    "prefill_done_tokens"
-                ],
-                SpanAttributes.JOURNEY_PREFILL_TOTAL_TOKENS: progress[
-                    "prefill_total_tokens"
-                ],
-                SpanAttributes.JOURNEY_DECODE_DONE_TOKENS: progress[
-                    "decode_done_tokens"
-                ],
-                SpanAttributes.JOURNEY_DECODE_MAX_TOKENS: progress["decode_max_tokens"],
-                SpanAttributes.JOURNEY_NUM_PREEMPTIONS: request.num_preemptions,
-            }
+        # Add optional fields
+        if schedule_kind is not None:
+            attributes[SpanAttributes.JOURNEY_SCHEDULE_KIND] = schedule_kind.name
+        if finish_status is not None:
+            attributes[SpanAttributes.JOURNEY_FINISH_STATUS] = finish_status
 
-            # Add optional fields
-            if schedule_kind is not None:
-                attributes[SpanAttributes.JOURNEY_SCHEDULE_KIND] = schedule_kind.name
-            if finish_status is not None:
-                attributes[SpanAttributes.JOURNEY_FINISH_STATUS] = finish_status
-
-            # Add event to span with epoch timestamp for correct timeline ordering
+        # Add event to span with epoch timestamp for correct timeline ordering
+        # Defensive: ensure tracing failures never break request processing
+        try:
             span.add_event(
                 name=f"journey.{event_type.name}",
                 attributes=attributes,
                 timestamp=ts_epoch_ns,
             )
-        else:
-            # Legacy: Buffer per-client (for OutputProcessor.do_tracing fallback)
-            event = RequestJourneyEvent(
-                request_id=request.request_id,
-                event_type=event_type,
-                ts_monotonic=ts_monotonic,
-                scheduler_step=scheduler_step,
-                prefill_done_tokens=progress["prefill_done_tokens"],
-                prefill_total_tokens=progress["prefill_total_tokens"],
-                decode_done_tokens=progress["decode_done_tokens"],
-                decode_max_tokens=progress["decode_max_tokens"],
-                phase=progress["phase"],
-                num_preemptions_so_far=request.num_preemptions,
-                schedule_kind=schedule_kind,
-                finish_status=finish_status,
+        except Exception:
+            # Tracing must never break request processing
+            logger.debug(
+                "Failed to emit journey event %s for request %s",
+                event_type.name,
+                request.request_id,
             )
-
-            # Buffer per-client
-            self._journey_events_buffer_by_client[request.client_index].append(event)

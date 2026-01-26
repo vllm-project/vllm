@@ -358,7 +358,7 @@ class OpenAIServingChat(OpenAIServing):
         # Create API span for dual-stream journey tracing (parent span)
         api_span = None
         arrival_time = time.monotonic()  # Capture for latency calculations
-        is_tracing_enabled = await self.engine_client.is_tracing_enabled()
+        is_tracing_enabled = await self._get_is_tracing_enabled()
         if is_tracing_enabled:
             api_span = await self._create_api_span(request_id, raw_request)
 
@@ -463,9 +463,9 @@ class OpenAIServingChat(OpenAIServing):
                             trace_headers = carrier
                         else:
                             trace_headers = {**trace_headers, **carrier}
-                    except Exception:
+                    except Exception as e:
                         # If injection fails, continue without it
-                        pass
+                        logger.debug("Failed to inject trace context into trace_headers: %s", e)
 
                 if isinstance(sampling_params, BeamSearchParams):
                     generator = self.beam_search(
@@ -1457,50 +1457,14 @@ class OpenAIServingChat(OpenAIServing):
                     )
 
         except GenerationError as e:
-            # Emit ABORTED event for generation errors
-            if request_metadata.api_span:
-                try:
-                    from vllm.tracing import SpanAttributes
-
-                    from opentelemetry.trace import Status, StatusCode
-
-                    request_metadata.api_span.add_event(
-                        name="api.ABORTED",
-                        attributes={
-                            SpanAttributes.EVENT_TS_MONOTONIC: time.monotonic(),
-                            "error": str(e),
-                        },
-                        timestamp=time.time_ns(),
-                    )
-                    request_metadata.api_span.set_status(
-                        Status(StatusCode.ERROR, f"Generation error: {e}")
-                    )
-                    request_metadata.api_span.end(end_time=time.time_ns())
-                except Exception:
-                    pass
+            self._safe_emit_aborted_event(
+                request_metadata.api_span, f"Generation error: {e}", "generation_error"
+            )
             yield f"data: {self._convert_generation_error_to_streaming_response(e)}\n\n"
             yield "data: [DONE]\n\n"
             return  # Prevent double span.end() - span already closed above
         except Exception as e:
-            # Emit ABORTED event for unexpected errors
-            if request_metadata.api_span:
-                try:
-                    from vllm.tracing import SpanAttributes
-
-                    from opentelemetry.trace import Status, StatusCode
-
-                    request_metadata.api_span.add_event(
-                        name="api.ABORTED",
-                        attributes={
-                            SpanAttributes.EVENT_TS_MONOTONIC: time.monotonic(),
-                            "error": str(e),
-                        },
-                        timestamp=time.time_ns(),
-                    )
-                    request_metadata.api_span.set_status(Status(StatusCode.ERROR, str(e)))
-                    request_metadata.api_span.end(end_time=time.time_ns())
-                except Exception:
-                    pass
+            self._safe_emit_aborted_event(request_metadata.api_span, str(e), "exception")
             logger.exception("Error in chat completion stream generator.")
             data = self.create_streaming_error_response(e)
             yield f"data: {data}\n\n"
@@ -1510,41 +1474,7 @@ class OpenAIServingChat(OpenAIServing):
         yield "data: [DONE]\n\n"
 
         # Emit DEPARTED event after successful completion
-        if request_metadata.api_span:
-            try:
-                from vllm.tracing import SpanAttributes
-
-                # Calculate and set completion attributes
-                current_time = time.monotonic()
-                if request_metadata.arrival_time is not None:
-                    # E2E latency
-                    e2e_latency = current_time - request_metadata.arrival_time
-                    request_metadata.api_span.set_attribute(
-                        SpanAttributes.GEN_AI_LATENCY_E2E, e2e_latency
-                    )
-
-                    # Time to first token
-                    if request_metadata.first_response_time is not None:
-                        ttft = request_metadata.first_response_time - request_metadata.arrival_time
-                        request_metadata.api_span.set_attribute(
-                            SpanAttributes.GEN_AI_LATENCY_TIME_TO_FIRST_TOKEN, ttft
-                        )
-
-                # Completion tokens
-                if request_metadata.final_usage_info is not None:
-                    request_metadata.api_span.set_attribute(
-                        SpanAttributes.GEN_AI_USAGE_COMPLETION_TOKENS,
-                        request_metadata.final_usage_info.completion_tokens,
-                    )
-
-                request_metadata.api_span.add_event(
-                    name="api.DEPARTED",
-                    attributes={SpanAttributes.EVENT_TS_MONOTONIC: current_time},
-                    timestamp=time.time_ns(),
-                )
-                request_metadata.api_span.end(end_time=time.time_ns())
-            except Exception:
-                pass
+        self._safe_emit_departed_event(request_metadata.api_span, request_metadata)
 
     async def chat_completion_full_generator(
         self,
@@ -1558,437 +1488,384 @@ class OpenAIServingChat(OpenAIServing):
     ) -> ErrorResponse | ChatCompletionResponse:
         created_time = int(time.time())
         final_res: RequestOutput | None = None
+        span_closed = False
 
+        # Outer try/finally ensures span cleanup on ANY exception path
         try:
-            async for res in result_generator:
-                # Track first response time for latency calculation
-                if request_metadata.first_response_time is None:
-                    request_metadata.first_response_time = time.monotonic()
+            # Generator iteration
+            try:
+                async for res in result_generator:
+                    # Track first response time for latency calculation
+                    if request_metadata.first_response_time is None:
+                        request_metadata.first_response_time = time.monotonic()
 
-                    # Emit FIRST_RESPONSE_FROM_CORE event
-                    if request_metadata.api_span:
-                        try:
-                            from vllm.tracing import SpanAttributes
+                        # Emit FIRST_RESPONSE_FROM_CORE event
+                        if request_metadata.api_span:
+                            try:
+                                from vllm.tracing import SpanAttributes
 
-                            request_metadata.api_span.add_event(
-                                name="api.FIRST_RESPONSE_FROM_CORE",
-                                attributes={
-                                    SpanAttributes.EVENT_TS_MONOTONIC: request_metadata.first_response_time
-                                },
-                                timestamp=time.time_ns(),
-                            )
-                        except Exception:
-                            pass
+                                request_metadata.api_span.add_event(
+                                    name="api.FIRST_RESPONSE_FROM_CORE",
+                                    attributes={
+                                        SpanAttributes.EVENT_TS_MONOTONIC: request_metadata.first_response_time
+                                    },
+                                    timestamp=time.time_ns(),
+                                )
+                            except Exception:
+                                pass
 
-                final_res = res
-        except asyncio.CancelledError:
-            # Emit ABORTED event for client disconnect
-            if request_metadata.api_span:
-                try:
-                    from vllm.tracing import SpanAttributes
-
-                    from opentelemetry.trace import Status, StatusCode
-
-                    request_metadata.api_span.add_event(
-                        name="api.ABORTED",
-                        attributes={
-                            SpanAttributes.EVENT_TS_MONOTONIC: time.monotonic(),
-                            "reason": "client_disconnect",
-                        },
-                        timestamp=time.time_ns(),
-                    )
-                    request_metadata.api_span.set_status(
-                        Status(StatusCode.ERROR, "Client disconnected")
-                    )
-                    request_metadata.api_span.end(end_time=time.time_ns())
-                except Exception:
-                    pass
-            return self.create_error_response("Client disconnected")
-        except ValueError as e:
-            # Emit ABORTED event for value errors
-            if request_metadata.api_span:
-                try:
-                    from vllm.tracing import SpanAttributes
-
-                    from opentelemetry.trace import Status, StatusCode
-
-                    request_metadata.api_span.add_event(
-                        name="api.ABORTED",
-                        attributes={
-                            SpanAttributes.EVENT_TS_MONOTONIC: time.monotonic(),
-                            "error": str(e),
-                        },
-                        timestamp=time.time_ns(),
-                    )
-                    request_metadata.api_span.set_status(Status(StatusCode.ERROR, str(e)))
-                    request_metadata.api_span.end(end_time=time.time_ns())
-                except Exception:
-                    pass
-            return self.create_error_response(e)
-
-        assert final_res is not None
-
-        choices: list[ChatCompletionResponseChoice] = []
-        if self.tool_call_id_type == "kimi_k2":
-            history_tool_call_cnt = get_history_tool_calls_cnt(conversation)
-        else:
-            history_tool_call_cnt = 0
-
-        role = self.get_chat_request_role(request)
-        for output in final_res.outputs:
-            # check for error finish reason and raise GenerationError
-            # finish_reason='error' indicates a retryable request-level internal error
-            self._raise_if_error(output.finish_reason, request_id)
-            token_ids = output.token_ids
-            out_logprobs = output.logprobs
-            tool_call_info = None
-
-            if request.logprobs and request.top_logprobs is not None:
-                assert out_logprobs is not None, "Did not output logprobs"
-                logprobs = self._create_chat_logprobs(
-                    token_ids=token_ids,
-                    top_logprobs=out_logprobs,
-                    num_output_top_logprobs=request.top_logprobs,
-                    tokenizer=tokenizer,
-                    return_as_token_id=request.return_tokens_as_token_ids,
+                        final_res = res
+            except asyncio.CancelledError:
+                self._safe_emit_aborted_event(
+                    request_metadata.api_span, "Client disconnected", "client_disconnect"
                 )
+                span_closed = True
+                return self.create_error_response("Client disconnected")
+            except ValueError as e:
+                self._safe_emit_aborted_event(
+                    request_metadata.api_span, str(e), "validation_error"
+                )
+                span_closed = True
+                return self.create_error_response(e)
+
+            # Response building
+            assert final_res is not None
+
+            choices: list[ChatCompletionResponseChoice] = []
+            if self.tool_call_id_type == "kimi_k2":
+                history_tool_call_cnt = get_history_tool_calls_cnt(conversation)
             else:
-                logprobs = None
+                history_tool_call_cnt = 0
 
-            if self.use_harmony:
-                reasoning, content, _ = parse_chat_output(token_ids)
-                if not request.include_reasoning:
-                    reasoning = None
+            role = self.get_chat_request_role(request)
+            for output in final_res.outputs:
+                # check for error finish reason and raise GenerationError
+                # finish_reason='error' indicates a retryable request-level internal error
+                self._raise_if_error(output.finish_reason, request_id)
+                token_ids = output.token_ids
+                out_logprobs = output.logprobs
+                tool_call_info = None
 
-                if self.tool_parser is not None:
-                    if tokenizer is None:
-                        raise ValueError(
-                            "Tokenizer not available when `skip_tokenizer_init=True`"
-                        )
-
-                    tool_parser = self.tool_parser(tokenizer)
-                    # NOTE: We use token_ids for openai tool parser
-                    tool_call_info = tool_parser.extract_tool_calls(
-                        "",
-                        request=request,
-                        token_ids=token_ids,  # type: ignore
-                    )
-                    content = tool_call_info.content
-                    message = ChatMessage(
-                        role=role,
-                        reasoning=reasoning,
-                        content=content,
-                        tool_calls=tool_call_info.tool_calls,
+                if request.logprobs and request.top_logprobs is not None:
+                    assert out_logprobs is not None, "Did not output logprobs"
+                    logprobs = self._create_chat_logprobs(
+                        token_ids=token_ids,
+                        top_logprobs=out_logprobs,
+                        num_output_top_logprobs=request.top_logprobs,
+                        tokenizer=tokenizer,
+                        return_as_token_id=request.return_tokens_as_token_ids,
                     )
                 else:
+                    logprobs = None
+
+                if self.use_harmony:
+                    reasoning, content, _ = parse_chat_output(token_ids)
+                    if not request.include_reasoning:
+                        reasoning = None
+
+                    if self.tool_parser is not None:
+                        if tokenizer is None:
+                            raise ValueError(
+                                "Tokenizer not available when `skip_tokenizer_init=True`"
+                            )
+
+                        tool_parser = self.tool_parser(tokenizer)
+                        # NOTE: We use token_ids for openai tool parser
+                        tool_call_info = tool_parser.extract_tool_calls(
+                            "",
+                            request=request,
+                            token_ids=token_ids,  # type: ignore
+                        )
+                        content = tool_call_info.content
+                        message = ChatMessage(
+                            role=role,
+                            reasoning=reasoning,
+                            content=content,
+                            tool_calls=tool_call_info.tool_calls,
+                        )
+                    else:
+                        message = ChatMessage(
+                            role=role,
+                            reasoning=reasoning,
+                            content=content,
+                        )
+
+                    choice_data = ChatCompletionResponseChoice(
+                        index=output.index,
+                        message=message,
+                        logprobs=logprobs,
+                        finish_reason=(
+                            "tool_calls"
+                            if (tool_call_info is not None and tool_call_info.tools_called)
+                            else output.finish_reason
+                            if output.finish_reason
+                            else "stop"
+                        ),
+                        stop_reason=output.stop_reason,
+                        token_ids=(
+                            as_list(output.token_ids) if request.return_token_ids else None
+                        ),
+                    )
+                    choices.append(choice_data)
+                    continue
+
+                if self.reasoning_parser:
+                    try:
+                        if tokenizer is None:
+                            raise ValueError(
+                                "Tokenizer not available when `skip_tokenizer_init=True`"
+                            )
+
+                        # Pass the same chat template kwargs as used in tokenization
+                        chat_template_kwargs = self._prepare_extra_chat_template_kwargs(
+                            request.chat_template_kwargs,
+                            self.default_chat_template_kwargs,
+                        )
+                        reasoning_parser = self.reasoning_parser(
+                            tokenizer,
+                            chat_template_kwargs=chat_template_kwargs,  # type: ignore[call-arg]
+                        )
+                    except RuntimeError as e:
+                        logger.exception("Error in reasoning parser creation.")
+                        return self.create_error_response(str(e))
+                    # If the reasoning parser is enabled,
+                    # tool calls are extracted exclusively from the content.
+                    reasoning, content = reasoning_parser.extract_reasoning(
+                        output.text, request=request
+                    )
+                    if not request.include_reasoning:
+                        reasoning = None
+                else:
+                    reasoning = None
+                    content = output.text
+
+                auto_tools_called = False
+                # if auto tools are not enabled, and a named tool choice using
+                #   outlines is not being used
+                tool_calls, content = self._parse_tool_calls_from_content(
+                    request=request,
+                    tokenizer=tokenizer,
+                    content=content,
+                    enable_auto_tools=self.enable_auto_tools,
+                    tool_parser_cls=self.tool_parser,
+                )
+                tool_call_class = (
+                    MistralToolCall if isinstance(tokenizer, MistralTokenizer) else ToolCall
+                )
+                if (not self.enable_auto_tools or not self.tool_parser) and (
+                    not isinstance(request.tool_choice, ChatCompletionNamedToolChoiceParam)
+                    and request.tool_choice != "required"
+                ):
+                    message = ChatMessage(role=role, reasoning=reasoning, content=content)
+
+                # if the request uses tools and specified a tool choice
+                elif (
+                    request.tool_choice
+                    and type(request.tool_choice) is ChatCompletionNamedToolChoiceParam
+                ):
+                    assert tool_calls is not None and len(tool_calls) > 0
                     message = ChatMessage(
                         role=role,
                         reasoning=reasoning,
-                        content=content,
+                        content="",
+                        tool_calls=[tool_call_class(function=tc) for tc in tool_calls],
                     )
+
+                elif request.tool_choice and request.tool_choice == "required":
+                    tool_call_class_items = []
+                    assert tool_calls is not None and len(tool_calls) > 0
+                    for tool_call in tool_calls:
+                        tool_call_class_items.append(
+                            tool_call_class(
+                                id=make_tool_call_id(
+                                    id_type=self.tool_call_id_type,
+                                    func_name=tool_call.name,
+                                    idx=history_tool_call_cnt,
+                                ),
+                                function=tool_call,
+                            )
+                        )
+                        history_tool_call_cnt += 1
+                    message = ChatMessage(
+                        role=role,
+                        content="",
+                        tool_calls=tool_call_class_items,
+                        reasoning=reasoning,
+                    )
+
+                # if the request doesn't use tool choice
+                # OR specifies to not use a tool
+                elif not request.tool_choice or request.tool_choice == "none":
+                    message = ChatMessage(role=role, reasoning=reasoning, content=content)
+
+                # handle when there are tools and tool choice is auto
+                elif (
+                    request.tools
+                    and (request.tool_choice == "auto" or request.tool_choice is None)
+                    and self.enable_auto_tools
+                    and self.tool_parser
+                ):
+                    # In the OpenAI API the finish_reason is "tools_called"
+                    # if the tool choice is auto and the model produced a tool
+                    # call. The same is not true for named function calls
+                    auto_tools_called = tool_calls is not None and len(tool_calls) > 0
+                    if tool_calls:
+                        message = ChatMessage(
+                            role=role,
+                            reasoning=reasoning,
+                            content=content,
+                            tool_calls=[
+                                ToolCall(
+                                    function=tc,
+                                    type="function",
+                                )
+                                for tc in tool_calls
+                            ],
+                        )
+
+                    else:
+                        # FOR NOW make it a chat message; we will have to detect
+                        # the type to make it later.
+                        ret_content = content
+
+                        # try to use content return from tool parser first,
+                        # tool parser may do some modify for the content.
+                        if content and len(content) > 0:
+                            ret_content = content
+                        message = ChatMessage(
+                            role=role,
+                            reasoning=reasoning,
+                            content=ret_content,
+                        )
+
+                # undetermined case that is still important to handle
+                else:
+                    logger.error(
+                        "Error in chat_completion_full_generator - cannot determine"
+                        " if tools should be extracted. Returning a standard chat "
+                        "completion."
+                    )
+                    message = ChatMessage(role=role, reasoning=reasoning, content=content)
+                # In OpenAI's API, when a tool is called, the finish_reason is:
+                # "tool_calls" for "auto" or "required" tool calls,
+                # and "stop" for named tool calls.
+                is_finish_reason_tool_calls = auto_tools_called or (
+                    request.tool_choice
+                    and request.tool_choice == "required"
+                    and output.finish_reason == "stop"
+                )
 
                 choice_data = ChatCompletionResponseChoice(
                     index=output.index,
                     message=message,
                     logprobs=logprobs,
-                    finish_reason=(
-                        "tool_calls"
-                        if (tool_call_info is not None and tool_call_info.tools_called)
-                        else output.finish_reason
-                        if output.finish_reason
-                        else "stop"
-                    ),
+                    finish_reason="tool_calls"
+                    if is_finish_reason_tool_calls
+                    else output.finish_reason
+                    if output.finish_reason
+                    else "stop",
                     stop_reason=output.stop_reason,
                     token_ids=(
                         as_list(output.token_ids) if request.return_token_ids else None
                     ),
                 )
+                choice_data = maybe_filter_parallel_tool_calls(choice_data, request)
+
                 choices.append(choice_data)
-                continue
 
-            if self.reasoning_parser:
-                try:
-                    if tokenizer is None:
-                        raise ValueError(
-                            "Tokenizer not available when `skip_tokenizer_init=True`"
-                        )
+            if request.echo:
+                last_msg_content: str | list[dict[str, str]] = ""
+                if (
+                    conversation
+                    and "content" in conversation[-1]
+                    and conversation[-1].get("role") == role
+                ):
+                    last_msg_content = conversation[-1]["content"] or ""
+                if isinstance(last_msg_content, list):
+                    last_msg_content = "\n".join(msg["text"] for msg in last_msg_content)
 
-                    # Pass the same chat template kwargs as used in tokenization
-                    chat_template_kwargs = self._prepare_extra_chat_template_kwargs(
-                        request.chat_template_kwargs,
-                        self.default_chat_template_kwargs,
-                    )
-                    reasoning_parser = self.reasoning_parser(
-                        tokenizer,
-                        chat_template_kwargs=chat_template_kwargs,  # type: ignore[call-arg]
-                    )
-                except RuntimeError as e:
-                    logger.exception("Error in reasoning parser creation.")
-                    return self.create_error_response(str(e))
-                # If the reasoning parser is enabled,
-                # tool calls are extracted exclusively from the content.
-                reasoning, content = reasoning_parser.extract_reasoning(
-                    output.text, request=request
-                )
-                if not request.include_reasoning:
-                    reasoning = None
-            else:
-                reasoning = None
-                content = output.text
+                for choice in choices:
+                    full_message = last_msg_content + (choice.message.content or "")
+                    choice.message.content = full_message
 
-            auto_tools_called = False
-            # if auto tools are not enabled, and a named tool choice using
-            #   outlines is not being used
-            tool_calls, content = self._parse_tool_calls_from_content(
-                request=request,
-                tokenizer=tokenizer,
-                content=content,
-                enable_auto_tools=self.enable_auto_tools,
-                tool_parser_cls=self.tool_parser,
+            assert final_res.prompt_token_ids is not None
+            num_prompt_tokens = len(final_res.prompt_token_ids)
+            if final_res.encoder_prompt_token_ids is not None:
+                num_prompt_tokens += len(final_res.encoder_prompt_token_ids)
+            num_generated_tokens = sum(
+                len(output.token_ids) for output in final_res.outputs
             )
-            tool_call_class = (
-                MistralToolCall if isinstance(tokenizer, MistralTokenizer) else ToolCall
+            usage = UsageInfo(
+                prompt_tokens=num_prompt_tokens,
+                completion_tokens=num_generated_tokens,
+                total_tokens=num_prompt_tokens + num_generated_tokens,
             )
-            if (not self.enable_auto_tools or not self.tool_parser) and (
-                not isinstance(request.tool_choice, ChatCompletionNamedToolChoiceParam)
-                and request.tool_choice != "required"
-            ):
-                message = ChatMessage(role=role, reasoning=reasoning, content=content)
-
-            # if the request uses tools and specified a tool choice
-            elif (
-                request.tool_choice
-                and type(request.tool_choice) is ChatCompletionNamedToolChoiceParam
-            ):
-                assert tool_calls is not None and len(tool_calls) > 0
-                message = ChatMessage(
-                    role=role,
-                    reasoning=reasoning,
-                    content="",
-                    tool_calls=[tool_call_class(function=tc) for tc in tool_calls],
+            if self.enable_prompt_tokens_details and final_res.num_cached_tokens:
+                usage.prompt_tokens_details = PromptTokenUsageInfo(
+                    cached_tokens=final_res.num_cached_tokens
                 )
 
-            elif request.tool_choice and request.tool_choice == "required":
-                tool_call_class_items = []
-                assert tool_calls is not None and len(tool_calls) > 0
-                for tool_call in tool_calls:
-                    tool_call_class_items.append(
-                        tool_call_class(
-                            id=make_tool_call_id(
-                                id_type=self.tool_call_id_type,
-                                func_name=tool_call.name,
-                                idx=history_tool_call_cnt,
-                            ),
-                            function=tool_call,
-                        )
-                    )
-                    history_tool_call_cnt += 1
-                message = ChatMessage(
-                    role=role,
-                    content="",
-                    tool_calls=tool_call_class_items,
-                    reasoning=reasoning,
-                )
+            request_metadata.final_usage_info = usage
 
-            # if the request doesn't use tool choice
-            # OR specifies to not use a tool
-            elif not request.tool_choice or request.tool_choice == "none":
-                message = ChatMessage(role=role, reasoning=reasoning, content=content)
-
-            # handle when there are tools and tool choice is auto
-            elif (
-                request.tools
-                and (request.tool_choice == "auto" or request.tool_choice is None)
-                and self.enable_auto_tools
-                and self.tool_parser
-            ):
-                # In the OpenAI API the finish_reason is "tools_called"
-                # if the tool choice is auto and the model produced a tool
-                # call. The same is not true for named function calls
-                auto_tools_called = tool_calls is not None and len(tool_calls) > 0
-                if tool_calls:
-                    message = ChatMessage(
-                        role=role,
-                        reasoning=reasoning,
-                        content=content,
-                        tool_calls=[
-                            ToolCall(
-                                function=tc,
-                                type="function",
-                            )
-                            for tc in tool_calls
-                        ],
-                    )
-
-                else:
-                    # FOR NOW make it a chat message; we will have to detect
-                    # the type to make it later.
-                    ret_content = content
-
-                    # try to use content return from tool parser first,
-                    # tool parser may do some modify for the content.
-                    if content and len(content) > 0:
-                        ret_content = content
-                    message = ChatMessage(
-                        role=role,
-                        reasoning=reasoning,
-                        content=ret_content,
-                    )
-
-            # undetermined case that is still important to handle
-            else:
-                logger.error(
-                    "Error in chat_completion_full_generator - cannot determine"
-                    " if tools should be extracted. Returning a standard chat "
-                    "completion."
-                )
-                message = ChatMessage(role=role, reasoning=reasoning, content=content)
-            # In OpenAI's API, when a tool is called, the finish_reason is:
-            # "tool_calls" for "auto" or "required" tool calls,
-            # and "stop" for named tool calls.
-            is_finish_reason_tool_calls = auto_tools_called or (
-                request.tool_choice
-                and request.tool_choice == "required"
-                and output.finish_reason == "stop"
-            )
-
-            choice_data = ChatCompletionResponseChoice(
-                index=output.index,
-                message=message,
-                logprobs=logprobs,
-                finish_reason="tool_calls"
-                if is_finish_reason_tool_calls
-                else output.finish_reason
-                if output.finish_reason
-                else "stop",
-                stop_reason=output.stop_reason,
-                token_ids=(
-                    as_list(output.token_ids) if request.return_token_ids else None
+            response = ChatCompletionResponse(
+                id=request_id,
+                created=created_time,
+                model=model_name,
+                choices=choices,
+                usage=usage,
+                prompt_logprobs=clamp_prompt_logprobs(final_res.prompt_logprobs),
+                prompt_token_ids=(
+                    final_res.prompt_token_ids if request.return_token_ids else None
                 ),
-            )
-            choice_data = maybe_filter_parallel_tool_calls(choice_data, request)
-
-            choices.append(choice_data)
-
-        if request.echo:
-            last_msg_content: str | list[dict[str, str]] = ""
-            if (
-                conversation
-                and "content" in conversation[-1]
-                and conversation[-1].get("role") == role
-            ):
-                last_msg_content = conversation[-1]["content"] or ""
-            if isinstance(last_msg_content, list):
-                last_msg_content = "\n".join(msg["text"] for msg in last_msg_content)
-
-            for choice in choices:
-                full_message = last_msg_content + (choice.message.content or "")
-                choice.message.content = full_message
-
-        assert final_res.prompt_token_ids is not None
-        num_prompt_tokens = len(final_res.prompt_token_ids)
-        if final_res.encoder_prompt_token_ids is not None:
-            num_prompt_tokens += len(final_res.encoder_prompt_token_ids)
-        num_generated_tokens = sum(
-            len(output.token_ids) for output in final_res.outputs
-        )
-        usage = UsageInfo(
-            prompt_tokens=num_prompt_tokens,
-            completion_tokens=num_generated_tokens,
-            total_tokens=num_prompt_tokens + num_generated_tokens,
-        )
-        if self.enable_prompt_tokens_details and final_res.num_cached_tokens:
-            usage.prompt_tokens_details = PromptTokenUsageInfo(
-                cached_tokens=final_res.num_cached_tokens
+                kv_transfer_params=final_res.kv_transfer_params,
             )
 
-        request_metadata.final_usage_info = usage
+            # Log complete response if output logging is enabled
+            if self.enable_log_outputs and self.request_logger:
+                for choice in choices:
+                    output_text = ""
+                    if choice.message.content:
+                        output_text = choice.message.content
+                    elif choice.message.tool_calls:
+                        # For tool calls, log the function name and arguments
+                        tool_call_descriptions = []
+                        for tc in choice.message.tool_calls:
+                            if hasattr(tc.function, "name") and hasattr(
+                                tc.function, "arguments"
+                            ):
+                                tool_call_descriptions.append(
+                                    f"{tc.function.name}({tc.function.arguments})"
+                                )
+                        tool_calls_str = ", ".join(tool_call_descriptions)
+                        output_text = f"[tool_calls: {tool_calls_str}]"
 
-        response = ChatCompletionResponse(
-            id=request_id,
-            created=created_time,
-            model=model_name,
-            choices=choices,
-            usage=usage,
-            prompt_logprobs=clamp_prompt_logprobs(final_res.prompt_logprobs),
-            prompt_token_ids=(
-                final_res.prompt_token_ids if request.return_token_ids else None
-            ),
-            kv_transfer_params=final_res.kv_transfer_params,
-        )
+                    if output_text:
+                        # Get the corresponding output token IDs
+                        output_token_ids = None
+                        if choice.index < len(final_res.outputs):
+                            output_token_ids = final_res.outputs[choice.index].token_ids
 
-        # Log complete response if output logging is enabled
-        if self.enable_log_outputs and self.request_logger:
-            for choice in choices:
-                output_text = ""
-                if choice.message.content:
-                    output_text = choice.message.content
-                elif choice.message.tool_calls:
-                    # For tool calls, log the function name and arguments
-                    tool_call_descriptions = []
-                    for tc in choice.message.tool_calls:
-                        if hasattr(tc.function, "name") and hasattr(
-                            tc.function, "arguments"
-                        ):
-                            tool_call_descriptions.append(
-                                f"{tc.function.name}({tc.function.arguments})"
-                            )
-                    tool_calls_str = ", ".join(tool_call_descriptions)
-                    output_text = f"[tool_calls: {tool_calls_str}]"
-
-                if output_text:
-                    # Get the corresponding output token IDs
-                    output_token_ids = None
-                    if choice.index < len(final_res.outputs):
-                        output_token_ids = final_res.outputs[choice.index].token_ids
-
-                    self.request_logger.log_outputs(
-                        request_id=request_id,
-                        outputs=output_text,
-                        output_token_ids=output_token_ids,
-                        finish_reason=choice.finish_reason,
-                        is_streaming=False,
-                        delta=False,
-                    )
-
-        # Emit DEPARTED event before returning response (non-streaming)
-        if request_metadata.api_span:
-            try:
-                from vllm.tracing import SpanAttributes
-
-                # Calculate and set completion attributes
-                current_time = time.monotonic()
-                if request_metadata.arrival_time is not None:
-                    # E2E latency
-                    e2e_latency = current_time - request_metadata.arrival_time
-                    request_metadata.api_span.set_attribute(
-                        SpanAttributes.GEN_AI_LATENCY_E2E, e2e_latency
-                    )
-
-                    # Time to first token
-                    if request_metadata.first_response_time is not None:
-                        ttft = request_metadata.first_response_time - request_metadata.arrival_time
-                        request_metadata.api_span.set_attribute(
-                            SpanAttributes.GEN_AI_LATENCY_TIME_TO_FIRST_TOKEN, ttft
+                        self.request_logger.log_outputs(
+                            request_id=request_id,
+                            outputs=output_text,
+                            output_token_ids=output_token_ids,
+                            finish_reason=choice.finish_reason,
+                            is_streaming=False,
+                            delta=False,
                         )
 
-                # Completion tokens
-                if request_metadata.final_usage_info is not None:
-                    request_metadata.api_span.set_attribute(
-                        SpanAttributes.GEN_AI_USAGE_COMPLETION_TOKENS,
-                        request_metadata.final_usage_info.completion_tokens,
-                    )
+            # Emit DEPARTED event before returning response (non-streaming)
+            self._safe_emit_departed_event(request_metadata.api_span, request_metadata)
+            span_closed = True
 
-                request_metadata.api_span.add_event(
-                    name="api.DEPARTED",
-                    attributes={SpanAttributes.EVENT_TS_MONOTONIC: current_time},
-                    timestamp=time.time_ns(),
+            return response
+        finally:
+            # Outer finally ensures span cleanup on ANY exception path
+            if not span_closed and request_metadata.api_span:
+                self._safe_emit_aborted_event(
+                    request_metadata.api_span,
+                    "Unexpected error during request processing",
                 )
-                request_metadata.api_span.end(end_time=time.time_ns())
-            except Exception:
-                pass
-
-        return response
 
     def _get_top_logprobs(
         self,
@@ -2300,4 +2177,127 @@ class OpenAIServingChat(OpenAIServing):
                 )
         except Exception:
             # Don't fail request if span attribute setting fails
+            pass
+
+    def _safe_set_completion_attributes(
+        self,
+        api_span: Any,
+        request_metadata: RequestResponseMetadata,
+    ) -> None:
+        """Set completion attributes on API span (E2E latency, TTFT, tokens).
+
+        Safe to call even if span ended or attributes unavailable.
+
+        Args:
+            api_span: The OTEL span object
+            request_metadata: Request metadata with timing info
+        """
+        if not api_span or not api_span.is_recording():
+            return
+
+        try:
+            from vllm.tracing import SpanAttributes
+
+            current_time = time.monotonic()
+            if request_metadata.arrival_time is not None:
+                # E2E latency
+                e2e_latency = current_time - request_metadata.arrival_time
+                api_span.set_attribute(SpanAttributes.GEN_AI_LATENCY_E2E, e2e_latency)
+
+                # Time to first token
+                if request_metadata.first_response_time is not None:
+                    ttft = request_metadata.first_response_time - request_metadata.arrival_time
+                    api_span.set_attribute(
+                        SpanAttributes.GEN_AI_LATENCY_TIME_TO_FIRST_TOKEN, ttft
+                    )
+
+            # Completion tokens
+            if request_metadata.final_usage_info is not None:
+                api_span.set_attribute(
+                    SpanAttributes.GEN_AI_USAGE_COMPLETION_TOKENS,
+                    request_metadata.final_usage_info.completion_tokens,
+                )
+        except Exception:
+            # Never fail request due to attribute setting
+            pass
+
+    def _safe_emit_departed_event(
+        self,
+        api_span: Any,
+        request_metadata: RequestResponseMetadata,
+    ) -> None:
+        """Emit api.DEPARTED event, set completion attributes, and end span.
+
+        Idempotent - safe to call even if span already ended.
+
+        Args:
+            api_span: The OTEL span object
+            request_metadata: Request metadata with timing info
+        """
+        if not api_span or not api_span.is_recording():
+            return
+
+        try:
+            from vllm.tracing import SpanAttributes
+
+            # Set completion attributes
+            self._safe_set_completion_attributes(api_span, request_metadata)
+
+            # Emit DEPARTED event
+            api_span.add_event(
+                name="api.DEPARTED",
+                attributes={SpanAttributes.EVENT_TS_MONOTONIC: time.monotonic()},
+                timestamp=time.time_ns(),
+            )
+
+            # End span
+            api_span.end(end_time=time.time_ns())
+        except Exception:
+            # Best effort close
+            pass
+
+    def _safe_emit_aborted_event(
+        self,
+        api_span: Any,
+        error_message: str,
+        reason: str | None = None,
+    ) -> None:
+        """Emit api.ABORTED event, set error status, and end span.
+
+        Idempotent - safe to call even if span already ended.
+
+        Args:
+            api_span: The OTEL span object
+            error_message: Error message to record
+            reason: Optional reason code (e.g., "client_disconnect")
+        """
+        if not api_span or not api_span.is_recording():
+            return
+
+        try:
+            from vllm.tracing import SpanAttributes
+            from opentelemetry.trace import Status, StatusCode
+
+            # Set error status
+            api_span.set_status(Status(StatusCode.ERROR, error_message))
+
+            # Build event attributes
+            attributes: dict[str, Any] = {
+                SpanAttributes.EVENT_TS_MONOTONIC: time.monotonic(),
+                "error": error_message,
+            }
+            if reason:
+                attributes["reason"] = reason
+
+            # Emit ABORTED event
+            api_span.add_event(
+                name="api.ABORTED",
+                attributes=attributes,
+                timestamp=time.time_ns(),
+            )
+
+            # End span
+            api_span.end(end_time=time.time_ns())
+        except Exception:
+            # Best effort close
             pass

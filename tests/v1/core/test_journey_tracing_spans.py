@@ -16,7 +16,6 @@ from vllm.sampling_params import SamplingParams
 from vllm.tracing import SpanAttributes
 from vllm.utils.hashing import sha256
 from vllm.v1.core.kv_cache_utils import get_request_block_hasher, init_none_hash
-from vllm.v1.core.sched.journey_events import RequestJourneyEventType
 from vllm.v1.request import Request, RequestStatus
 
 EOS_TOKEN_ID = 50256
@@ -279,7 +278,11 @@ def test_cleanup_on_finish_with_spans():
 
 
 def test_no_spans_when_tracer_not_configured():
-    """Verify no spans created when tracer is None (no OTLP endpoint)."""
+    """Verify no spans created when tracer is None (no OTLP endpoint).
+
+    When enable_journey_tracing=True but no OTLP endpoint is configured,
+    journey events should be silently dropped (no buffering, no spans).
+    """
     # Don't provide otlp_traces_endpoint - tracer should be None
     scheduler = create_scheduler(
         enable_journey_tracing=True,
@@ -288,13 +291,29 @@ def test_no_spans_when_tracer_not_configured():
 
     assert scheduler.tracer is None, "Tracer should be None when no endpoint configured"
 
+    # Verify no buffer exists (buffering was removed to prevent memory leaks)
+    assert not hasattr(scheduler, "_journey_events_buffer_by_client"), (
+        "Buffer should not exist - events are silently dropped when tracer=None"
+    )
+
     request = _create_request()
 
     # Add request - should not crash, should not create spans
+    # Events are silently dropped (no buffering)
     scheduler.add_request(request)
 
     # Verify no spans in _core_spans
     assert len(scheduler._core_spans) == 0, "No spans should be created without tracer"
+
+    # Schedule request - should not crash (events silently dropped)
+    scheduler.schedule()
+
+    # Finish request - should not crash (cleanup still works)
+    scheduler.finish_requests(request.request_id, RequestStatus.FINISHED_STOPPED)
+
+    # Verify cleanup happened (state is clean)
+    assert request.request_id not in scheduler._journey_prefill_hiwater
+    assert request.request_id not in scheduler._first_token_emitted
 
 
 def test_span_attributes_set_correctly():
@@ -454,6 +473,222 @@ def test_cleanup_on_natural_completion():
         finished_events = [e for e in spans[0].events if e["name"] == "journey.FINISHED"]
         assert len(finished_events) == 1
         assert finished_events[0]["attributes"]["finish.status"] == "stopped"
+
+
+def test_update_from_output_completion_path():
+    """Verify FINISHED event and span cleanup when request completes via _update_from_output().
+
+    This tests the natural completion path where update_from_output() detects EOS/max_tokens
+    and sets stopped=True, triggering _update_from_output() completion logic.
+    """
+    mock_tracer = MockTracer()
+
+    with patch("vllm.tracing.init_tracer", return_value=mock_tracer):
+        scheduler = create_scheduler(
+            enable_journey_tracing=True,
+            otlp_traces_endpoint="http://localhost:4318/v1/traces",
+            num_speculative_tokens=1
+        )
+
+        # Create and manually set up request (similar to test_stop_via_update_from_output)
+        request = _create_request(prompt_len=10, max_tokens=10)
+        request.num_computed_tokens = request.num_tokens
+        request.status = RequestStatus.RUNNING
+
+        # Manually set up scheduler state
+        scheduler.requests[request.request_id] = request
+        scheduler.running.append(request)
+
+        # Manually create core span and journey tracking (simulating what add_request does)
+        if scheduler.tracer:
+            from opentelemetry.trace import SpanKind
+            core_span = scheduler.tracer.start_span(
+                name="llm_core",
+                kind=SpanKind.INTERNAL,
+                start_time=time.time_ns(),
+            )
+            core_span.set_attribute(SpanAttributes.GEN_AI_REQUEST_ID, request.request_id)
+            scheduler._core_spans[request.request_id] = core_span
+            scheduler._journey_prefill_hiwater[request.request_id] = 0
+
+        # Import ModelRunnerOutput for creating the output
+        from vllm.v1.core.sched.output import SchedulerOutput, CachedRequestData
+        from vllm.v1.outputs import ModelRunnerOutput
+
+        # Create scheduler output
+        scheduler_output = SchedulerOutput(
+            scheduled_new_reqs=[],
+            scheduled_cached_reqs=CachedRequestData.make_empty(),
+            num_scheduled_tokens={request.request_id: 1},
+            total_num_scheduled_tokens=1,
+            scheduled_encoder_inputs={},
+            scheduled_spec_decode_tokens={request.request_id: []},
+            num_common_prefix_blocks=[],
+            finished_req_ids=set(),
+            free_encoder_mm_hashes=[],
+            scheduler_step=1,  # Use a fixed step number
+        )
+
+        # Create model output with EOS token (triggers natural completion)
+        model_output = ModelRunnerOutput(
+            req_ids=[request.request_id],
+            req_id_to_index={request.request_id: 0},
+            sampled_token_ids=[[EOS_TOKEN_ID]],  # EOS triggers stop
+            logprobs=None,
+            prompt_logprobs_dict={},
+            pooler_output=[],
+        )
+
+        # Verify span exists before update
+        assert request.request_id in scheduler._core_spans
+
+        # Call update_from_output (this triggers the _update_from_output completion path)
+        scheduler.update_from_output(scheduler_output, model_output)
+
+        # Verify request stopped
+        assert request.status == RequestStatus.FINISHED_STOPPED
+        assert request.request_id in scheduler.finished_req_ids
+
+        # Verify FINISHED event was emitted
+        spans = [s for s in mock_tracer.spans if s.name == "llm_core"]
+        assert len(spans) == 1, "Should have exactly one core span"
+        span = spans[0]
+
+        finished_events = [e for e in span.events if e["name"] == "journey.FINISHED"]
+        assert len(finished_events) == 1, "Should have one FINISHED event"
+        assert finished_events[0]["attributes"]["finish.status"] == "stopped"
+        assert SpanAttributes.JOURNEY_SCHEDULER_STEP in finished_events[0]["attributes"]
+
+        # Verify span was closed and cleaned up
+        assert span.end_called, "Span should be closed after natural completion"
+        assert not span.is_recording(), "Span should not be recording after completion"
+        assert request.request_id not in scheduler._core_spans, "Span should be removed from _core_spans"
+        assert request.request_id not in scheduler._journey_prefill_hiwater
+        assert request.request_id not in scheduler._first_token_emitted
+
+
+def test_exception_safety_in_completion_path():
+    """Verify cleanup happens even if _get_routed_experts or _emit_journey_event throws.
+
+    This tests the exception-safety fix where cleanup must happen in finally block
+    to prevent memory leaks even when tracing or routed_experts operations fail.
+    """
+    mock_tracer = MockTracer()
+
+    with patch("vllm.tracing.init_tracer", return_value=mock_tracer):
+        scheduler = create_scheduler(
+            enable_journey_tracing=True,
+            otlp_traces_endpoint="http://localhost:4318/v1/traces",
+            num_speculative_tokens=1
+        )
+
+        # Create and manually set up request
+        request = _create_request(prompt_len=10, max_tokens=10)
+        request.num_computed_tokens = request.num_tokens
+        request.status = RequestStatus.RUNNING
+
+        # Manually set up scheduler state
+        scheduler.requests[request.request_id] = request
+        scheduler.running.append(request)
+
+        # Manually create core span and journey tracking
+        if scheduler.tracer:
+            from opentelemetry.trace import SpanKind
+            core_span = scheduler.tracer.start_span(
+                name="llm_core",
+                kind=SpanKind.INTERNAL,
+                start_time=time.time_ns(),
+            )
+            core_span.set_attribute(SpanAttributes.GEN_AI_REQUEST_ID, request.request_id)
+            scheduler._core_spans[request.request_id] = core_span
+            scheduler._journey_prefill_hiwater[request.request_id] = 0
+
+        from vllm.v1.core.sched.output import SchedulerOutput, CachedRequestData
+        from vllm.v1.outputs import ModelRunnerOutput
+
+        # Create scheduler output
+        scheduler_output = SchedulerOutput(
+            scheduled_new_reqs=[],
+            scheduled_cached_reqs=CachedRequestData.make_empty(),
+            num_scheduled_tokens={request.request_id: 1},
+            total_num_scheduled_tokens=1,
+            scheduled_encoder_inputs={},
+            scheduled_spec_decode_tokens={request.request_id: []},
+            num_common_prefix_blocks=[],
+            finished_req_ids=set(),
+            free_encoder_mm_hashes=[],
+            scheduler_step=1,
+        )
+
+        # Create model output with EOS token
+        model_output = ModelRunnerOutput(
+            req_ids=[request.request_id],
+            req_id_to_index={request.request_id: 0},
+            sampled_token_ids=[[EOS_TOKEN_ID]],
+            logprobs=None,
+            prompt_logprobs_dict={},
+            pooler_output=[],
+        )
+
+        # Verify span exists before update
+        assert request.request_id in scheduler._core_spans
+
+        # Patch _get_routed_experts to throw an exception
+        with patch.object(scheduler, '_get_routed_experts', side_effect=RuntimeError("Test exception")):
+            # Call update_from_output - should not crash despite exception
+            scheduler.update_from_output(scheduler_output, model_output)
+
+        # Verify cleanup still happened despite the exception
+        assert request.request_id not in scheduler._core_spans, "Cleanup must happen even if _get_routed_experts throws"
+        assert request.request_id not in scheduler._journey_prefill_hiwater
+        assert request.request_id not in scheduler._first_token_emitted
+
+        # Verify span was closed
+        spans = [s for s in mock_tracer.spans if s.name == "llm_core"]
+        assert len(spans) == 1
+        assert spans[0].end_called, "Span should be closed even after exception"
+
+
+def test_create_core_span_handles_attribute_failure():
+    """Verify _create_core_span is defensive and handles attribute setting failures.
+
+    If span.set_attribute() throws, the method should close the span and return None
+    rather than leaking a partially-initialized span.
+    """
+    mock_tracer = MockTracer()
+
+    # Create a mock span that throws on set_attribute
+    class FailingSpan(MockSpan):
+        def set_attribute(self, _key, _value):
+            raise RuntimeError("Simulated attribute setting failure")
+
+    # Replace start_span to return FailingSpan
+    def failing_start_span(name, kind=None, context=None, start_time=None):
+        span = FailingSpan(name, kind, context, start_time)
+        mock_tracer.spans.append(span)
+        return span
+    mock_tracer.start_span = failing_start_span
+
+    with patch("vllm.tracing.init_tracer", return_value=mock_tracer):
+        scheduler = create_scheduler(
+            enable_journey_tracing=True,
+            otlp_traces_endpoint="http://localhost:4318/v1/traces"
+        )
+
+        request = _create_request()
+
+        # Add request - should not crash, should handle failure gracefully
+        scheduler.add_request(request)
+
+        # Verify no span stored in _core_spans (failure was handled)
+        assert request.request_id not in scheduler._core_spans, (
+            "_create_core_span should return None on failure, not store partial span"
+        )
+
+        # Verify the failing span was closed (cleanup on failure)
+        spans = [s for s in mock_tracer.spans if s.name == "llm_core"]
+        assert len(spans) == 1
+        assert spans[0].end_called, "Failed span should be closed to prevent leak"
 
 
 if __name__ == "__main__":
