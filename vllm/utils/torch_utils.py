@@ -333,6 +333,8 @@ def set_random_seed(seed: int | None) -> None:
         random.seed(seed)
         np.random.seed(seed)
         torch.manual_seed(seed)
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed_all(seed)
 
 
 def create_kv_caches_with_random_flash(
@@ -613,8 +615,9 @@ def weak_ref_tensor(tensor: Any) -> Any:
     Create a weak reference to a tensor.
     The new tensor will share the same data as the original tensor,
     but will not keep the original tensor alive.
+    This ignores 0-size tensors as those don't allocate any memory.
     """
-    if isinstance(tensor, torch.Tensor):
+    if isinstance(tensor, torch.Tensor) and tensor.numel() > 0:
         return torch.ops._C.weak_ref_tensor(tensor)
     else:
         return tensor
@@ -704,24 +707,11 @@ def is_torch_equal(target: str) -> bool:
         return Version(importlib.metadata.version("torch")) == Version(target)
 
 
-# Using dynamo with vLLM doesn't really work well with PyTorch versions < 2.4.0.
-# In particular, the FakeScalarType is not supported for earlier versions of
-# PyTorch which breaks dynamo for any ops registered using ScalarType.
-def supports_dynamo() -> bool:
-    return is_torch_equal_or_newer("2.4.0")
-
-
 # Supports xccl with PyTorch versions >= 2.8.0.dev for XPU platform
 def supports_xccl() -> bool:
     return (
         is_torch_equal_or_newer("2.8.0.dev") and torch.distributed.is_xccl_available()
     )
-
-
-# Some backends use pytorch version < 2.4.0 which doesn't
-# support `torch.library.custom_op`.
-def supports_custom_op() -> bool:
-    return hasattr(torch.library, "custom_op")
 
 
 # create a library to hold the custom op
@@ -752,18 +742,6 @@ def direct_register_custom_op(
     library object. If you want to bind the operator to a different library,
     make sure the library object is alive when the operator is used.
     """
-    if not supports_custom_op():
-        from vllm.platforms import current_platform
-
-        assert not current_platform.is_cuda_alike(), (
-            "cuda platform needs torch>=2.4 to support custom op, "
-            "chances are you are using an old version of pytorch "
-            "or a custom build of pytorch. It is recommended to "
-            "use vLLM in a fresh new environment and let it install "
-            "the required dependencies."
-        )
-        return
-
     if mutates_args is None:
         mutates_args = []
 

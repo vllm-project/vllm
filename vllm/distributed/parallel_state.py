@@ -53,7 +53,6 @@ from vllm.utils.network_utils import get_distributed_init_method
 from vllm.utils.system_utils import suppress_stdout
 from vllm.utils.torch_utils import (
     direct_register_custom_op,
-    supports_custom_op,
 )
 
 
@@ -246,33 +245,32 @@ def patched_fused_scaled_matmul_reduce_scatter(
     )
 
 
-if supports_custom_op():
-    direct_register_custom_op(
-        op_name="all_reduce",
-        op_func=all_reduce,
-        fake_impl=all_reduce_fake,
-    )
+direct_register_custom_op(
+    op_name="all_reduce",
+    op_func=all_reduce,
+    fake_impl=all_reduce_fake,
+)
 
-    direct_register_custom_op(
-        op_name="reduce_scatter",
-        op_func=reduce_scatter,
-        fake_impl=reduce_scatter_fake,
-    )
+direct_register_custom_op(
+    op_name="reduce_scatter",
+    op_func=reduce_scatter,
+    fake_impl=reduce_scatter_fake,
+)
 
-    direct_register_custom_op(
-        op_name="all_gather",
-        op_func=all_gather,
-        fake_impl=all_gather_fake,
-    )
+direct_register_custom_op(
+    op_name="all_gather",
+    op_func=all_gather,
+    fake_impl=all_gather_fake,
+)
 
-    # TODO: Remove this once the pytorch fix
-    # (https://github.com/pytorch/pytorch/pull/165086) gets released,
-    # in either 2.9.1 or 2.10
-    direct_register_custom_op(
-        op_name="patched_fused_scaled_matmul_reduce_scatter",
-        op_func=patched_fused_scaled_matmul_reduce_scatter,
-        fake_impl=patched_fused_scaled_matmul_reduce_scatter_fake,
-    )
+# TODO: Remove this once the pytorch fix
+# (https://github.com/pytorch/pytorch/pull/165086) gets released,
+# in either 2.9.1 or 2.10
+direct_register_custom_op(
+    op_name="patched_fused_scaled_matmul_reduce_scatter",
+    op_func=patched_fused_scaled_matmul_reduce_scatter,
+    fake_impl=patched_fused_scaled_matmul_reduce_scatter_fake,
+)
 
 
 class GroupCoordinator:
@@ -1529,22 +1527,22 @@ def patch_tensor_parallel_group(tp_group: GroupCoordinator):
         _TP = old_tp_group
 
 
-def get_tensor_model_parallel_world_size():
+def get_tensor_model_parallel_world_size() -> int:
     """Return world size for the tensor model parallel group."""
     return get_tp_group().world_size
 
 
-def get_tensor_model_parallel_rank():
+def get_tensor_model_parallel_rank() -> int:
     """Return my rank for the tensor model parallel group."""
     return get_tp_group().rank_in_group
 
 
-def get_decode_context_model_parallel_world_size():
+def get_decode_context_model_parallel_world_size() -> int:
     """Return world size for the decode context model parallel group."""
     return get_dcp_group().world_size
 
 
-def get_decode_context_model_parallel_rank():
+def get_decode_context_model_parallel_rank() -> int:
     """Return my rank for the decode context model parallel group."""
     return get_dcp_group().rank_in_group
 

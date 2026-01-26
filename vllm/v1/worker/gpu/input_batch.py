@@ -15,9 +15,6 @@ class InputBuffers:
         self,
         max_num_reqs: int,
         max_num_tokens: int,
-        inputs_embeds_size: int,
-        vocab_size: int,
-        dtype: torch.dtype,
         device: torch.device,
     ):
         self.max_num_reqs = max_num_reqs
@@ -62,9 +59,15 @@ class InputBatch:
     input_ids: torch.Tensor
     # [num_tokens_after_padding]
     positions: torch.Tensor
+    # [3, num_tokens_after_padding]
+    mrope_positions: torch.Tensor | None
+    # [num_tokens_after_padding, hidden_size]
+    inputs_embeds: torch.Tensor | None
 
     # layer_name -> Metadata
     attn_metadata: dict[str, Any]
+    # layer_name -> slot_mapping
+    slot_mappings: dict[str, torch.Tensor]
 
     # [total_num_logits]
     logits_indices: torch.Tensor
@@ -107,8 +110,9 @@ class InputBatch:
         input_buffers.query_start_loc[num_reqs + 1 :] = num_tokens
         query_start_loc = input_buffers.query_start_loc[: num_reqs + 1]
 
-        input_ids = input_buffers.input_ids[:num_tokens]
-        positions = input_buffers.positions[:num_tokens]
+        input_ids = input_buffers.input_ids[:num_tokens].zero_()
+        positions = input_buffers.positions[:num_tokens].zero_()
+
         # attn_metadata = defaultdict(lambda: None)
         logits_indices = query_start_loc[1:] - 1
         cu_num_logits = torch.arange(num_reqs + 1, device=device, dtype=torch.int32)
@@ -128,7 +132,10 @@ class InputBatch:
             seq_lens=seq_lens,
             input_ids=input_ids,
             positions=positions,
+            mrope_positions=None,
+            inputs_embeds=None,
             attn_metadata=None,  # type: ignore
+            slot_mappings=None,  # type: ignore
             logits_indices=logits_indices,
             cu_num_logits=cu_num_logits,
             cu_num_logits_np=cu_num_logits_np,

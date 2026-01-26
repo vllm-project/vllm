@@ -3,7 +3,10 @@
 
 from collections.abc import Sequence
 
-from vllm.entrypoints.openai.protocol import ChatCompletionRequest, DeltaMessage
+from vllm.entrypoints.openai.chat_completion.protocol import (
+    ChatCompletionRequest,
+)
+from vllm.entrypoints.openai.engine.protocol import DeltaMessage
 from vllm.logger import init_logger
 from vllm.reasoning import (
     ReasoningParser,
@@ -58,7 +61,7 @@ class Holo2ReasoningParser(ReasoningParser):
         return self._parser.is_reasoning_end(input_ids)
 
     def is_reasoning_end_streaming(
-        self, input_ids: list[int], delta_ids: list[int]
+        self, input_ids: Sequence[int], delta_ids: Sequence[int]
     ) -> bool:
         return self._parser.is_reasoning_end_streaming(input_ids, delta_ids)
 

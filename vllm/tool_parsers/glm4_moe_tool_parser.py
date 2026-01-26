@@ -8,9 +8,11 @@ from typing import Any
 
 import regex as re
 
-from vllm.entrypoints.openai.protocol import (
+from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionRequest,
     ChatCompletionToolsParam,
+)
+from vllm.entrypoints.openai.engine.protocol import (
     DeltaFunctionCall,
     DeltaMessage,
     DeltaToolCall,
@@ -113,9 +115,15 @@ class Glm4MoeModelToolParser(ToolParser):
             tool_calls = []
             for match in matched_tool_calls:
                 tc_detail = self.func_detail_regex.search(match)
+                if not tc_detail:
+                    logger.warning(
+                        "Failed to parse tool call details from: %s",
+                        match,
+                    )
+                    continue
                 tc_name = tc_detail.group(1)
                 tc_args = tc_detail.group(2)
-                pairs = self.func_arg_regex.findall(tc_args)
+                pairs = self.func_arg_regex.findall(tc_args) if tc_args else []
                 arg_dct = {}
                 for key, value in pairs:
                     arg_key = key.strip()

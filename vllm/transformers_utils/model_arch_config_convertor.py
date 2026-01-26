@@ -189,6 +189,8 @@ class ModelArchConfigConvertorBase:
             "deepseek_v3",
             "deepseek_v32",
             "deepseek_mtp",
+            "glm4_moe_lite",
+            "glm4_moe_lite_mtp",
             "kimi_k2",
             "kimi_linear",
             "longcat_flash",
@@ -201,7 +203,7 @@ class ModelArchConfigConvertorBase:
             # underlying architecture
             return (
                 self.hf_text_config.model.model_type
-                in ("deepseek_v2", "deepseek_v3", "deepseek_v32")
+                in ("deepseek_v2", "deepseek_v3", "deepseek_v32", "deepseek_mtp")
                 and self.hf_text_config.kv_lora_rank is not None
             )
         return False
@@ -396,6 +398,7 @@ MODEL_ARCH_CONFIG_CONVERTORS = {
     "qwen3_next_mtp": Qwen3NextMTPModelArchConfigConvertor,
     "mimo_mtp": MimoMTPModelArchConfigConvertor,
     "glm4_moe_mtp": GLM4MoeMTPModelArchConfigConvertor,
+    "glm_ocr_mtp": GLM4MoeMTPModelArchConfigConvertor,
     "ernie_mtp": ErnieMTPModelArchConfigConvertor,
     "pangu_ultra_moe_mtp": PanguUltraMoeMTPModelArchConfigConvertor,
     "longcat_flash_mtp": LongCatFlashMTPModelArchConfigConvertor,

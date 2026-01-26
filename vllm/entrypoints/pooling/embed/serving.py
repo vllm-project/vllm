@@ -12,16 +12,16 @@ from typing_extensions import assert_never, override
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.chat_utils import ChatTemplateContentFormatOption
 from vllm.entrypoints.logger import RequestLogger
-from vllm.entrypoints.openai.protocol import (
+from vllm.entrypoints.openai.engine.protocol import (
     ErrorResponse,
     UsageInfo,
 )
-from vllm.entrypoints.openai.serving_engine import (
+from vllm.entrypoints.openai.engine.serving import (
     EmbeddingServeContext,
     OpenAIServing,
     ServeContext,
 )
-from vllm.entrypoints.openai.serving_models import OpenAIServingModels
+from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.entrypoints.pooling.embed.protocol import (
     EmbeddingBytesResponse,
     EmbeddingChatRequest,
@@ -78,13 +78,10 @@ class EmbeddingMixin(OpenAIServing):
         try:
             ctx.lora_request = self._maybe_get_adapters(ctx.request)
 
-            tokenizer = await self.engine_client.get_tokenizer()
-            renderer = self._get_renderer(tokenizer)
-
             if isinstance(ctx.request, EmbeddingChatRequest):
                 _, ctx.engine_prompts = await self._preprocess_chat(
                     ctx.request,
-                    tokenizer,
+                    self.renderer,
                     ctx.request.messages,
                     chat_template=ctx.request.chat_template or ctx.chat_template,
                     chat_template_content_format=ctx.chat_template_content_format,
@@ -93,6 +90,7 @@ class EmbeddingMixin(OpenAIServing):
                     add_special_tokens=ctx.request.add_special_tokens,
                 )
             else:
+                renderer = self._get_completion_renderer()
                 ctx.engine_prompts = await renderer.render_prompt(
                     prompt_or_prompts=ctx.request.input,
                     config=self._build_render_config(ctx.request),

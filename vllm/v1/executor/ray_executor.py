@@ -111,9 +111,8 @@ class RayDistributedExecutor(Executor):
         """Ray distributed executor supports pipeline parallelism,
         meaning that it allows PP size batches to be executed concurrently.
         """
-        if self.scheduler_config.async_scheduling:
-            return 2
-        return self.parallel_config.pipeline_parallel_size
+        pp_size = self.parallel_config.pipeline_parallel_size
+        return 2 if pp_size <= 1 and self.scheduler_config.async_scheduling else pp_size
 
     def shutdown(self) -> None:
         if logger:

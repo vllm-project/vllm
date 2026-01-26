@@ -1,6 +1,6 @@
 # --8<-- [start:installation]
 
-vLLM offers basic model inferencing and serving on Arm CPU platform, with support NEON, data types FP32, FP16 and BF16.
+vLLM offers basic model inferencing and serving on Arm CPU platform, with support for NEON, data types FP32, FP16 and BF16.
 
 # --8<-- [end:installation]
 # --8<-- [start:requirements]

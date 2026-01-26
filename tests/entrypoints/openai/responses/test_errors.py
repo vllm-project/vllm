@@ -6,8 +6,8 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from vllm.entrypoints.openai.protocol import ErrorResponse
-from vllm.entrypoints.openai.serving_engine import GenerationError, OpenAIServing
+from vllm.entrypoints.openai.engine.protocol import ErrorResponse
+from vllm.entrypoints.openai.engine.serving import GenerationError, OpenAIServing
 
 
 @pytest.mark.asyncio

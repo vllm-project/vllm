@@ -33,7 +33,6 @@ from .gguf_utils import (
     split_remote_gguf,
 )
 from .repo_utils import (
-    _get_hf_token,
     file_or_path_exists,
     get_hf_file_to_dict,
     list_repo_files,
@@ -135,7 +134,6 @@ class HFConfigParser(ConfigParserBase):
             revision=revision,
             code_revision=code_revision,
             trust_remote_code=trust_remote_code,
-            token=_get_hf_token(),
             **kwargs,
         )
         # Use custom model class if it's in our registry
@@ -157,7 +155,6 @@ class HFConfigParser(ConfigParserBase):
                 revision=revision,
                 code_revision=code_revision,
                 trust_remote_code=trust_remote_code,
-                token=_get_hf_token(),
                 **kwargs,
             )
         else:
@@ -168,7 +165,6 @@ class HFConfigParser(ConfigParserBase):
                     trust_remote_code=trust_remote_code,
                     revision=revision,
                     code_revision=code_revision,
-                    token=_get_hf_token(),
                     **kwargs,
                 )
             except ValueError as e:
@@ -218,7 +214,6 @@ class MistralConfigParser(ConfigParserBase):
                 model,
                 revision=revision,
                 code_revision=code_revision,
-                token=_get_hf_token(),
                 **kwargs,
             )
         except OSError:  # Not found
@@ -529,7 +524,6 @@ def maybe_override_with_speculators(
         model if gguf_model_repo is None else gguf_model_repo,
         revision=revision,
         trust_remote_code=trust_remote_code,
-        token=_get_hf_token(),
         **kwargs,
     )
     speculators_config = config_dict.get("speculators_config")
@@ -801,7 +795,7 @@ def get_pooling_config(
 
         logger.info("Found pooling configuration.")
 
-        config: dict[str, Any] = {"normalize": normalize}
+        config: dict[str, Any] = {"use_activation": normalize}
         for key, val in pooling_dict.items():
             if val is True:
                 pooling_type = parse_pooling_type(key)
@@ -871,9 +865,7 @@ def get_sentence_transformer_tokenizer_config(
     if not encoder_dict and not Path(model).is_absolute():
         try:
             # If model is on HuggingfaceHub, get the repo files
-            repo_files = list_repo_files(
-                model, revision=revision, token=_get_hf_token()
-            )
+            repo_files = list_repo_files(model, revision=revision)
         except Exception:
             repo_files = []
 
@@ -1042,10 +1034,7 @@ def try_get_safetensors_metadata(
     revision: str | None = None,
 ):
     get_safetensors_metadata_partial = partial(
-        get_safetensors_metadata,
-        model,
-        revision=revision,
-        token=_get_hf_token(),
+        get_safetensors_metadata, model, revision=revision
     )
 
     try:

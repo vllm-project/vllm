@@ -197,7 +197,7 @@ The following [sampling parameters](../api/README.md#inference-parameters) are s
 ??? code
 
     ```python
-    --8<-- "vllm/entrypoints/openai/protocol.py:completion-sampling-params"
+    --8<-- "vllm/entrypoints/openai/completion/protocol.py:completion-sampling-params"
     ```
 
 The following extra parameters are supported:
@@ -205,7 +205,7 @@ The following extra parameters are supported:
 ??? code
 
     ```python
-    --8<-- "vllm/entrypoints/openai/protocol.py:completion-extra-params"
+    --8<-- "vllm/entrypoints/openai/completion/protocol.py:completion-extra-params"
     ```
 
 ### Chat API
@@ -228,7 +228,7 @@ The following [sampling parameters](../api/README.md#inference-parameters) are s
 ??? code
 
     ```python
-    --8<-- "vllm/entrypoints/openai/protocol.py:chat-completion-sampling-params"
+    --8<-- "vllm/entrypoints/openai/chat_completion/protocol.py:chat-completion-sampling-params"
     ```
 
 The following extra parameters are supported:
@@ -236,7 +236,7 @@ The following extra parameters are supported:
 ??? code
 
     ```python
-    --8<-- "vllm/entrypoints/openai/protocol.py:chat-completion-extra-params"
+    --8<-- "vllm/entrypoints/openai/chat_completion/protocol.py:chat-completion-extra-params"
     ```
 
 ### Responses API
@@ -253,7 +253,7 @@ The following extra parameters in the request object are supported:
 ??? code
 
     ```python
-    --8<-- "vllm/entrypoints/openai/protocol.py:responses-extra-params"
+    --8<-- "vllm/entrypoints/openai/responses/protocol.py:responses-extra-params"
     ```
 
 The following extra parameters in the response object are supported:
@@ -261,7 +261,7 @@ The following extra parameters in the response object are supported:
 ??? code
 
     ```python
-    --8<-- "vllm/entrypoints/openai/protocol.py:responses-response-extra-params"
+    --8<-- "vllm/entrypoints/openai/responses/protocol.py:responses-response-extra-params"
     ```
 
 ### Embeddings API
@@ -378,23 +378,53 @@ The following [pooling parameters][vllm.PoolingParams] are supported.
 
 ```python
 --8<-- "vllm/pooling_params.py:common-pooling-params"
---8<-- "vllm/pooling_params.py:embedding-pooling-params"
+--8<-- "vllm/pooling_params.py:embed-pooling-params"
 ```
 
-The following extra parameters are supported by default:
+The following Embeddings API parameters are supported:
 
 ??? code
 
     ```python
-    --8<-- "vllm/entrypoints/pooling/embed/protocol.py:embedding-extra-params"
+    --8<-- "vllm/entrypoints/pooling/base/protocol.py:pooling-common-params"
+    --8<-- "vllm/entrypoints/pooling/base/protocol.py:completion-params"
+    --8<-- "vllm/entrypoints/pooling/base/protocol.py:encoding-params"
+    --8<-- "vllm/entrypoints/pooling/base/protocol.py:embed-params"
     ```
 
-For chat-like input (i.e. if `messages` is passed), these extra parameters are supported instead:
+The following extra parameters are supported:
 
 ??? code
 
     ```python
-    --8<-- "vllm/entrypoints/pooling/embed/protocol.py:chat-embedding-extra-params"
+    --8<-- "vllm/entrypoints/pooling/base/protocol.py:pooling-common-extra-params"
+    --8<-- "vllm/entrypoints/pooling/base/protocol.py:completion-extra-params"
+    --8<-- "vllm/entrypoints/pooling/base/protocol.py:encoding-extra-params"
+    --8<-- "vllm/entrypoints/pooling/base/protocol.py:embed-extra-params"
+    ```
+
+For chat-like input (i.e. if `messages` is passed), the following parameters are supported:
+
+The following parameters are supported by default:
+
+??? code
+
+    ```python
+    --8<-- "vllm/entrypoints/pooling/base/protocol.py:pooling-common-params"
+    --8<-- "vllm/entrypoints/pooling/base/protocol.py:chat-params"
+    --8<-- "vllm/entrypoints/pooling/base/protocol.py:encoding-params"
+    --8<-- "vllm/entrypoints/pooling/base/protocol.py:embed-params"
+    ```
+
+these extra parameters are supported instead:
+
+??? code
+
+    ```python
+    --8<-- "vllm/entrypoints/pooling/base/protocol.py:pooling-common-extra-params"
+    --8<-- "vllm/entrypoints/pooling/base/protocol.py:chat-extra-params"
+    --8<-- "vllm/entrypoints/pooling/base/protocol.py:encoding-extra-params"
+    --8<-- "vllm/entrypoints/pooling/base/protocol.py:embed-extra-params"
     ```
 
 ### Transcriptions API
@@ -491,7 +521,7 @@ For `verbose_json` response format:
       ]
     }
     ```
-Currently “verbose_json” response format doesn’t support avg_logprob, compression_ratio, no_speech_prob.
+Currently “verbose_json” response format doesn’t support no_speech_prob.
 
 #### Extra Parameters
 
@@ -551,7 +581,7 @@ Our Pooling API encodes input prompts using a [pooling model](../models/pooling_
 
 The input format is the same as [Embeddings API](#embeddings-api), but the output data can contain an arbitrary nested list, not just a 1-D list of floats.
 
-Code example: [examples/pooling/pooling/openai_pooling_client.py](../../examples/pooling/pooling/openai_pooling_client.py)
+Code example: [examples/pooling/pooling/pooling_online.py](../../examples/pooling/pooling/pooling_online.py)
 
 ### Classification API
 
@@ -559,7 +589,7 @@ Our Classification API directly supports Hugging Face sequence-classification mo
 
 We automatically wrap any other transformer via `as_seq_cls_model()`, which pools on the last token, attaches a `RowParallelLinear` head, and applies a softmax to produce per-class probabilities.
 
-Code example: [examples/pooling/classify/openai_classification_client.py](../../examples/pooling/classify/openai_classification_client.py)
+Code example: [examples/pooling/classify/classification_online.py](../../examples/pooling/classify/classification_online.py)
 
 #### Example Requests
 
@@ -659,14 +689,48 @@ The following [pooling parameters][vllm.PoolingParams] are supported.
 
 ```python
 --8<-- "vllm/pooling_params.py:common-pooling-params"
---8<-- "vllm/pooling_params.py:classification-pooling-params"
+--8<-- "vllm/pooling_params.py:classify-pooling-params"
 ```
+
+The following Classification API parameters are supported:
+
+??? code
+
+    ```python
+    --8<-- "vllm/entrypoints/pooling/base/protocol.py:pooling-common-params"
+    --8<-- "vllm/entrypoints/pooling/base/protocol.py:completion-params"
+    --8<-- "vllm/entrypoints/pooling/base/protocol.py:classify-params"
+    ```
 
 The following extra parameters are supported:
 
-```python
---8<-- "vllm/entrypoints/pooling/classify/protocol.py:classification-extra-params"
-```
+??? code
+
+    ```python
+    --8<-- "vllm/entrypoints/pooling/base/protocol.py:pooling-common-extra-params"
+    --8<-- "vllm/entrypoints/pooling/base/protocol.py:completion-extra-params"
+    --8<-- "vllm/entrypoints/pooling/base/protocol.py:classify-extra-params"
+    ```
+
+For chat-like input (i.e. if `messages` is passed), the following parameters are supported:
+
+??? code
+
+    ```python
+    --8<-- "vllm/entrypoints/pooling/base/protocol.py:pooling-common-params"
+    --8<-- "vllm/entrypoints/pooling/base/protocol.py:chat-params"
+    --8<-- "vllm/entrypoints/pooling/base/protocol.py:classify-params"
+    ```
+
+these extra parameters are supported instead:
+
+??? code
+
+    ```python
+    --8<-- "vllm/entrypoints/pooling/base/protocol.py:pooling-common-extra-params"
+    --8<-- "vllm/entrypoints/pooling/base/protocol.py:chat-extra-params"
+    --8<-- "vllm/entrypoints/pooling/base/protocol.py:classify-extra-params"
+    ```
 
 ### Score API
 
@@ -694,7 +758,7 @@ Example template file: [examples/pooling/score/template/nemotron-rerank.jinja](.
 
 #### Single inference
 
-You can pass a string to both `text_1` and `text_2`, forming a single sentence pair.
+You can pass a string to both `queries` and `documents`, forming a single sentence pair.
 
 ```bash
 curl -X 'POST' \
@@ -704,8 +768,8 @@ curl -X 'POST' \
   -d '{
   "model": "BAAI/bge-reranker-v2-m3",
   "encoding_format": "float",
-  "text_1": "What is the capital of France?",
-  "text_2": "The capital of France is Paris."
+  "queries": "What is the capital of France?",
+  "documents": "The capital of France is Paris."
 }'
 ```
 
@@ -730,9 +794,9 @@ curl -X 'POST' \
 
 #### Batch inference
 
-You can pass a string to `text_1` and a list to `text_2`, forming multiple sentence pairs
-where each pair is built from `text_1` and a string in `text_2`.
-The total number of pairs is `len(text_2)`.
+You can pass a string to `queries` and a list to `documents`, forming multiple sentence pairs
+where each pair is built from `queries` and a string in `documents`.
+The total number of pairs is `len(documents)`.
 
 ??? console "Request"
 
@@ -743,8 +807,8 @@ The total number of pairs is `len(text_2)`.
       -H 'Content-Type: application/json' \
       -d '{
       "model": "BAAI/bge-reranker-v2-m3",
-      "text_1": "What is the capital of France?",
-      "text_2": [
+      "queries": "What is the capital of France?",
+      "documents": [
         "The capital of Brazil is Brasilia.",
         "The capital of France is Paris."
       ]
@@ -775,9 +839,9 @@ The total number of pairs is `len(text_2)`.
     }
     ```
 
-You can pass a list to both `text_1` and `text_2`, forming multiple sentence pairs
-where each pair is built from a string in `text_1` and the corresponding string in `text_2` (similar to `zip()`).
-The total number of pairs is `len(text_2)`.
+You can pass a list to both `queries` and `documents`, forming multiple sentence pairs
+where each pair is built from a string in `queries` and the corresponding string in `documents` (similar to `zip()`).
+The total number of pairs is `len(documents)`.
 
 ??? console "Request"
 
@@ -789,11 +853,11 @@ The total number of pairs is `len(text_2)`.
       -d '{
       "model": "BAAI/bge-reranker-v2-m3",
       "encoding_format": "float",
-      "text_1": [
+      "queries": [
         "What is the capital of Brazil?",
         "What is the capital of France?"
       ],
-      "text_2": [
+      "documents": [
         "The capital of Brazil is Brasilia.",
         "The capital of France is Paris."
       ]
@@ -847,8 +911,8 @@ You can pass multi-modal inputs to scoring models by passing `content` including
             "http://localhost:8000/v1/score",
             json={
                 "model": "jinaai/jina-reranker-m0",
-                "text_1": "slm markdown",
-                "text_2": {
+                "queries": "slm markdown",
+                "documents": {
                     "content": [
                         {
                             "type": "image_url",
@@ -874,7 +938,7 @@ You can pass multi-modal inputs to scoring models by passing `content` including
 Full example:
 
 - [examples/pooling/score/vision_score_api_online.py](../../examples/pooling/score/vision_score_api_online.py)
-- examples/pooling/score/vision_rerank_api_online.py](../../examples/pooling/score/vision_rerank_api_online.py)
+- [examples/pooling/score/vision_rerank_api_online.py](../../examples/pooling/score/vision_rerank_api_online.py)
 
 #### Extra parameters
 
@@ -882,12 +946,21 @@ The following [pooling parameters][vllm.PoolingParams] are supported.
 
 ```python
 --8<-- "vllm/pooling_params.py:common-pooling-params"
---8<-- "vllm/pooling_params.py:classification-pooling-params"
+--8<-- "vllm/pooling_params.py:classify-pooling-params"
+```
+
+The following Score API parameters are supported:
+
+```python
+--8<-- "vllm/entrypoints/pooling/base/protocol.py:pooling-common-params"
+--8<-- "vllm/entrypoints/pooling/score/protocol.py:score-extra-params"
 ```
 
 The following extra parameters are supported:
 
 ```python
+--8<-- "vllm/entrypoints/pooling/base/protocol.py:pooling-common-extra-params"
+--8<-- "vllm/entrypoints/pooling/base/protocol.py:classify-extra-params"
 --8<-- "vllm/entrypoints/pooling/score/protocol.py:score-extra-params"
 ```
 
@@ -963,12 +1036,22 @@ The following [pooling parameters][vllm.PoolingParams] are supported.
 
 ```python
 --8<-- "vllm/pooling_params.py:common-pooling-params"
---8<-- "vllm/pooling_params.py:classification-pooling-params"
+--8<-- "vllm/pooling_params.py:classify-pooling-params"
+```
+
+The following Re-rank API parameters are supported:
+
+```python
+--8<-- "vllm/entrypoints/pooling/base/protocol.py:pooling-common-params"
+--8<-- "vllm/entrypoints/pooling/base/protocol.py:classify-extra-params"
+--8<-- "vllm/entrypoints/pooling/score/protocol.py:score-extra-params"
 ```
 
 The following extra parameters are supported:
 
 ```python
+--8<-- "vllm/entrypoints/pooling/base/protocol.py:pooling-common-extra-params"
+--8<-- "vllm/entrypoints/pooling/base/protocol.py:classify-extra-params"
 --8<-- "vllm/entrypoints/pooling/score/protocol.py:rerank-extra-params"
 ```
 

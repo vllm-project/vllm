@@ -133,9 +133,6 @@ class SchedulerConfig:
     async_scheduling: bool = Field(default=None)
     """If set to False, disable async scheduling. Async scheduling helps to
     avoid gaps in GPU utilization, leading to better latency and throughput.
-    It is currently not supported with some features such as
-    speculative decoding and pipeline parallelism, and will be automatically
-    disabled in those cases.
     """
 
     stream_interval: int = Field(default=1, ge=1)
@@ -209,9 +206,7 @@ class SchedulerConfig:
     @classmethod
     def _skip_none_validation(cls, value: Any, handler: Callable) -> Any:
         """Skip validation if the value is `None` when initialisation is delayed."""
-        if value is None:
-            return value
-        return handler(value)
+        return None if value is None else handler(value)
 
     def __post_init__(self, max_model_len: int, is_encoder_decoder: bool) -> None:
         if is_encoder_decoder:

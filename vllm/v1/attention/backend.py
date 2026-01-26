@@ -2,17 +2,22 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from abc import ABC, abstractmethod
+from dataclasses import dataclass, replace
 from enum import Enum
-from typing import TYPE_CHECKING, ClassVar, Generic, Protocol, TypeVar, get_args
+from typing import TYPE_CHECKING, Any, ClassVar, Generic, Protocol, TypeVar, get_args
 
+import numpy as np
 import torch
+from typing_extensions import deprecated
 
 if TYPE_CHECKING:
+    from vllm.config import VllmConfig
     from vllm.config.cache import CacheDType
     from vllm.model_executor.layers.linear import ColumnParallelLinear
     from vllm.model_executor.layers.quantization.utils.quant_utils import QuantKey
     from vllm.platforms.interface import DeviceCapability
     from vllm.v1.attention.backends.utils import KVCacheLayoutType
+    from vllm.v1.kv_cache_interface import AttentionSpec
 
 
 class AttentionType(str, Enum):
@@ -46,7 +51,10 @@ class AttentionBackend(ABC):
     # makes sure the output tensor is allocated inside the cudagraph.
     accept_output_buffer: bool = False
     supported_dtypes: ClassVar[list[torch.dtype]] = [torch.float16, torch.bfloat16]
-    supported_kv_cache_dtypes: ClassVar[list["CacheDType"]] = ["auto"]
+    supported_kv_cache_dtypes: ClassVar[list["CacheDType"]] = ["auto", "bfloat16"]
+
+    # Does attention's forward() include kv cache update?
+    forward_includes_kv_cache_update: bool = True
 
     @staticmethod
     def get_supported_kernel_block_sizes() -> list[int | MultipleOf]:
@@ -168,6 +176,10 @@ class AttentionBackend(ABC):
         return False
 
     @classmethod
+    def supports_alibi_sqrt(cls) -> bool:
+        return False
+
+    @classmethod
     def supports_mm_prefix(cls) -> bool:
         return False
 
@@ -271,6 +283,298 @@ class AttentionMetadata:
 T = TypeVar("T", bound=AttentionMetadata)
 
 
+@dataclass
+class CommonAttentionMetadata:
+    """
+    Per-batch attention metadata, shared across layers and backends.
+    AttentionMetadataBuilder instances use it to construct per-layer metadata.
+
+    For many of the tensors we keep both GPU and CPU versions.
+    """
+
+    query_start_loc: torch.Tensor
+    query_start_loc_cpu: torch.Tensor
+    """(batch_size + 1,), the start location of each request in query Tensor"""
+
+    seq_lens: torch.Tensor
+    """(batch_size,), the number of computed tokens for each request"""
+
+    num_reqs: int
+    """Number of requests"""
+    # TODO(lucas): rename to num_tokens since it may be padded and this is misleading
+    num_actual_tokens: int
+    """Total number of tokens in batch"""
+    max_query_len: int
+    """Longest query in batch"""
+    max_seq_len: int
+    """Longest context length (may be an upper bound)"""
+
+    block_table_tensor: torch.Tensor
+    slot_mapping: torch.Tensor
+
+    causal: bool = True
+
+    # Needed by FastPrefillAttentionBuilder
+    logits_indices_padded: torch.Tensor | None = None
+    num_logits_indices: int | None = None
+
+    # Needed by CrossAttentionBuilder
+    encoder_seq_lens: torch.Tensor | None = None
+    encoder_seq_lens_cpu: np.ndarray | None = None
+
+    dcp_local_seq_lens: torch.Tensor | None = None
+    dcp_local_seq_lens_cpu: torch.Tensor | None = None
+    """Sequence lengths of the local rank in decode context parallelism world"""
+
+    # WARNING: Deprecated fields. Will be removed in a future release (v0.15.0)
+    _seq_lens_cpu: torch.Tensor | None = None
+    _num_computed_tokens_cpu: torch.Tensor | None = None
+
+    _num_computed_tokens_cache: torch.Tensor | None = None
+
+    def batch_size(self) -> int:
+        return self.seq_lens.shape[0]
+
+    def naive_query_lens(self) -> torch.Tensor:
+        """Naive because it assumes that query ends where the next query starts."""
+        return self.query_start_loc[1:] - self.query_start_loc[:-1]
+
+    def replace(self, **kwargs) -> "CommonAttentionMetadata":
+        return replace(self, **kwargs)
+
+    @property
+    @deprecated(
+        """
+    Prefer using device seq_lens directly to avoid implicit H<>D sync.
+    If a CPU copy is needed, use `seq_lens.cpu()` instead.
+    Will be removed in a future release (v0.15.0)
+    """
+    )
+    def seq_lens_cpu(self) -> torch.Tensor:
+        if self._seq_lens_cpu is None:
+            self._seq_lens_cpu = self.seq_lens.to("cpu")
+        return self._seq_lens_cpu
+
+    @property
+    @deprecated(
+        """
+    Prefer using device seq_lens directly to avoid implicit H<>D sync which breaks full
+    async scheduling. If a CPU copy is needed, it can be derived from 
+    query_start_loc_cpu and seq_lens.
+    Will be removed in a future release (v0.15.0)
+    """
+    )
+    def num_computed_tokens_cpu(self) -> torch.Tensor:
+        if self._num_computed_tokens_cpu is None:
+            query_seq_lens = (
+                self.query_start_loc_cpu[1:] - self.query_start_loc_cpu[:-1]
+            )
+            self._num_computed_tokens_cpu = self.seq_lens_cpu - query_seq_lens
+        return self._num_computed_tokens_cpu
+
+    def compute_num_computed_tokens(self) -> torch.Tensor:
+        """Compute num_computed_tokens on device (seq_lens - query_lens)."""
+        if self._num_computed_tokens_cache is None:
+            query_lens = self.query_start_loc[1:] - self.query_start_loc[:-1]
+            self._num_computed_tokens_cache = self.seq_lens - query_lens
+        return self._num_computed_tokens_cache
+
+    # TODO(lucas): remove once we have FULL-CG spec-decode support
+    def unpadded(
+        self, num_actual_tokens: int, num_actual_reqs: int
+    ) -> "CommonAttentionMetadata":
+        maybe_slice_reqs = lambda x: x[:num_actual_reqs] if x is not None else None
+        return CommonAttentionMetadata(
+            query_start_loc=self.query_start_loc[: num_actual_reqs + 1],
+            query_start_loc_cpu=self.query_start_loc_cpu[: num_actual_reqs + 1],
+            seq_lens=self.seq_lens[:num_actual_reqs],
+            _seq_lens_cpu=self._seq_lens_cpu[:num_actual_reqs]
+            if self._seq_lens_cpu is not None
+            else None,
+            _num_computed_tokens_cpu=self._num_computed_tokens_cpu[:num_actual_reqs]
+            if self._num_computed_tokens_cpu is not None
+            else None,
+            num_reqs=num_actual_reqs,
+            num_actual_tokens=num_actual_tokens,
+            max_query_len=self.max_query_len,
+            max_seq_len=self.max_seq_len,
+            block_table_tensor=self.block_table_tensor[:num_actual_reqs],
+            slot_mapping=self.slot_mapping[:num_actual_tokens],
+            causal=self.causal,
+            logits_indices_padded=self.logits_indices_padded,
+            num_logits_indices=self.num_logits_indices,
+            encoder_seq_lens=maybe_slice_reqs(self.encoder_seq_lens),
+            encoder_seq_lens_cpu=maybe_slice_reqs(self.encoder_seq_lens_cpu),
+            dcp_local_seq_lens=maybe_slice_reqs(self.dcp_local_seq_lens),
+            dcp_local_seq_lens_cpu=maybe_slice_reqs(self.dcp_local_seq_lens_cpu),
+        )
+
+
+M = TypeVar("M")
+
+
+class AttentionCGSupport(Enum):
+    """Constants for the cudagraph support of the attention backend
+    Here we do not consider the cascade attention, as currently
+    it is never cudagraph supported."""
+
+    ALWAYS = 3
+    """Cudagraph always supported; supports mixed-prefill-decode"""
+    UNIFORM_BATCH = 2
+    """Cudagraph supported for batches the only contain query lengths that are
+    the same, this can be used for spec-decode
+        i.e. "decodes" are 1 + num_speculative_tokens"""
+    UNIFORM_SINGLE_TOKEN_DECODE = 1
+    """Cudagraph supported for batches the only contain query_len==1 decodes"""
+    NEVER = 0
+    """NO cudagraph support"""
+
+
+class AttentionMetadataBuilder(ABC, Generic[M]):
+    # Does this backend/builder support CUDA Graphs for attention (default: no).
+    # Do not access directly. Call get_cudagraph_support() instead.
+    _cudagraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.NEVER
+    # Does this backend/builder reorder the batch?
+    # If not, set this to None. Otherwise set it to the query
+    # length that will be pulled into the front of the batch.
+    reorder_batch_threshold: int | None = None
+    # Does this backend/builder support updating the block table in existing
+    # metadata
+    supports_update_block_table: bool = False
+
+    @abstractmethod
+    def __init__(
+        self,
+        kv_cache_spec: "AttentionSpec",
+        layer_names: list[str],
+        vllm_config: "VllmConfig",
+        device: torch.device,
+    ):
+        self.kv_cache_spec = kv_cache_spec
+        self.layer_names = layer_names
+        self.vllm_config = vllm_config
+        self.device = device
+
+    @classmethod
+    def get_cudagraph_support(
+        cls: type["AttentionMetadataBuilder"],
+        vllm_config: "VllmConfig",
+        kv_cache_spec: "AttentionSpec",
+    ) -> AttentionCGSupport:
+        """Get the cudagraph support level of this builder class."""
+        return cls._cudagraph_support
+
+    def _init_reorder_batch_threshold(
+        self,
+        reorder_batch_threshold: int | None = 1,
+        supports_spec_as_decode: bool = False,
+        supports_dcp_with_varlen: bool = False,
+    ) -> None:
+        self.reorder_batch_threshold = reorder_batch_threshold
+        if self.reorder_batch_threshold is not None and supports_spec_as_decode:
+            # If the backend supports spec-as-decode kernels, then we can set
+            # the reorder_batch_threshold based on the number of speculative
+            # tokens from the config.
+            speculative_config = self.vllm_config.speculative_config
+            if (
+                speculative_config is not None
+                and speculative_config.num_speculative_tokens is not None
+            ):
+                self.reorder_batch_threshold = max(
+                    self.reorder_batch_threshold,
+                    1 + speculative_config.num_speculative_tokens,
+                )
+
+        if (
+            self.vllm_config.parallel_config.decode_context_parallel_size > 1
+            and not supports_dcp_with_varlen
+        ):
+            self.reorder_batch_threshold = 1
+
+    @abstractmethod
+    def build(
+        self,
+        common_prefix_len: int,
+        common_attn_metadata: CommonAttentionMetadata,
+        fast_build: bool = False,
+    ) -> M:
+        """
+        Central method that builds attention metadata.
+        Some builders (MLA) require reorder_batch to be called prior to build.
+
+        Args:
+            common_prefix_len: The length of the common prefix of the batch.
+            common_attn_metadata: The common attention metadata.
+            fast_build: The meta-data will prioritize speed of building over
+                then speed at execution. Can be used for spec-decode where the
+                result of a build call may only be used for few layers/iters.
+        """
+        raise NotImplementedError
+
+    def update_block_table(
+        self,
+        metadata: M,
+        blk_table: torch.Tensor,
+        slot_mapping: torch.Tensor,
+    ) -> M:
+        """
+        Update the block table for the attention metadata.
+        Faster when theres multiple kv-cache groups that create virtually the
+        same metadata but just with different block tables.
+
+        Only needs to be implemented if supports_update_block_table is True.
+        """
+        raise NotImplementedError
+
+    def build_for_cudagraph_capture(
+        self, common_attn_metadata: CommonAttentionMetadata
+    ) -> M:
+        """
+        Build attention metadata for CUDA graph capture. Uses build by default.
+        Subclasses that override this method should call self.build or
+        super().build_for_cudagraph_capture.
+        """
+        return self.build(
+            common_prefix_len=0, common_attn_metadata=common_attn_metadata
+        )
+
+    def build_for_drafting(
+        self,
+        common_attn_metadata: CommonAttentionMetadata,
+        draft_index: int,
+    ) -> M:
+        """
+        Build attention metadata for draft model. Uses build by default.
+
+        Args:
+            common_attn_metadata: The common attention metadata.
+            draft_index: The index of the current draft operation.
+                When speculating a chain of tokens, this index refers to the
+                draft attempt for the i-th token.
+                For tree-based attention, this index instead refers to the
+                draft attempt for the i-th level in the tree of tokens.
+        """
+        return self.build(
+            common_prefix_len=0,
+            common_attn_metadata=common_attn_metadata,
+            fast_build=True,
+        )
+
+    def use_cascade_attention(
+        self,
+        common_prefix_len: int,
+        query_lens: np.ndarray,
+        num_query_heads: int,
+        num_kv_heads: int,
+        use_alibi: bool,
+        use_sliding_window: bool,
+        use_local_attention: bool,
+        num_sms: int,
+        dcp_world_size: int,
+    ) -> bool:
+        return False
+
+
 class AttentionLayer(Protocol):
     _q_scale: torch.Tensor
     _k_scale: torch.Tensor
@@ -319,6 +623,7 @@ class AttentionImpl(ABC, Generic[T]):
     # TODO add support to more backends:
     # https://github.com/vllm-project/vllm/issues/25584
     supports_quant_query_input: bool = False
+    supports_per_head_quant_scales: bool = False
 
     dcp_world_size: int
     dcp_rank: int
@@ -446,4 +751,28 @@ class MLAAttentionImpl(AttentionImpl[T], Generic[T]):
 
 
 def is_quantized_kv_cache(kv_cache_dtype: str) -> bool:
-    return kv_cache_dtype != "auto"
+    return kv_cache_dtype.startswith("fp8")
+
+
+def subclass_attention_backend(
+    name_prefix: str,
+    attention_backend_cls: type[AttentionBackend],
+    builder_cls: type[AttentionMetadataBuilder[M]],
+) -> type[AttentionBackend]:
+    """
+    Return a new subclass where `get_builder_cls` returns `builder_cls`.
+    """
+    name: str = name_prefix + attention_backend_cls.__name__  # type: ignore
+
+    return type(
+        name, (attention_backend_cls,), {"get_builder_cls": lambda: builder_cls}
+    )
+
+
+def subclass_attention_backend_with_overrides(
+    name_prefix: str,
+    attention_backend_cls: type[AttentionBackend],
+    overrides: dict[str, Any],
+) -> type[AttentionBackend]:
+    name: str = name_prefix + attention_backend_cls.__name__  # type: ignore
+    return type(name, (attention_backend_cls,), overrides)

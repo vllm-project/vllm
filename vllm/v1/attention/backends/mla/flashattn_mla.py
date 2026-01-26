@@ -9,11 +9,20 @@ import torch
 from vllm.config import VllmConfig
 from vllm.config.cache import CacheDType
 from vllm.logger import init_logger
+from vllm.model_executor.layers.attention.mla_attention import (
+    MLACommonBackend,
+    MLACommonDecodeMetadata,
+    MLACommonImpl,
+    MLACommonMetadata,
+    MLACommonMetadataBuilder,
+    QueryLenSupport,
+)
 from vllm.model_executor.layers.batch_invariant import (
     vllm_is_batch_invariant,
 )
 from vllm.platforms.interface import DeviceCapability
 from vllm.v1.attention.backend import (
+    AttentionCGSupport,
     AttentionLayer,
     AttentionType,
     MultipleOf,
@@ -23,15 +32,6 @@ from vllm.v1.attention.backends.fa_utils import (
     flash_attn_supports_mla,
     get_flash_attn_version,
 )
-from vllm.v1.attention.backends.mla.common import (
-    MLACommonBackend,
-    MLACommonDecodeMetadata,
-    MLACommonImpl,
-    MLACommonMetadata,
-    MLACommonMetadataBuilder,
-    QueryLenSupport,
-)
-from vllm.v1.attention.backends.utils import AttentionCGSupport
 from vllm.v1.kv_cache_interface import AttentionSpec
 from vllm.vllm_flash_attn import (  # type: ignore[attr-defined]
     flash_attn_varlen_func,
@@ -43,7 +43,10 @@ logger = init_logger(__name__)
 
 class FlashAttnMLABackend(MLACommonBackend):
     supported_dtypes: ClassVar[list[torch.dtype]] = [torch.float16, torch.bfloat16]
-    supported_kv_cache_dtypes: ClassVar[list[CacheDType]] = ["auto"]
+    supported_kv_cache_dtypes: ClassVar[list[CacheDType]] = [
+        "auto",
+        "bfloat16",
+    ]
 
     @staticmethod
     def get_supported_kernel_block_sizes() -> list[int | MultipleOf]:

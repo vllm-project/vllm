@@ -5,10 +5,19 @@ from typing import TypeAlias
 
 import torch
 
-from vllm.config import PoolerConfig
-from vllm.model_executor.layers.pooler import ClassifierFn, PoolingParamsUpdate
+from vllm.config import PoolerConfig, get_current_vllm_config
+from vllm.model_executor.layers.pooler import (
+    ClassifierFn,
+    PoolingParamsUpdate,
+    ProjectorFn,
+)
 from vllm.model_executor.layers.pooler.abstract import Pooler
-from vllm.model_executor.layers.pooler.activations import PoolerActivation
+from vllm.model_executor.layers.pooler.activations import (
+    PoolerActivation,
+    PoolerNormalize,
+    resolve_classifier_act_fn,
+)
+from vllm.model_executor.models.adapters import _load_st_projector
 from vllm.tasks import POOLING_TASKS, PoolingTask
 from vllm.v1.pool.metadata import PoolingMetadata
 
@@ -84,9 +93,20 @@ class TokenPooler(Pooler):
         return pooled_data
 
 
-def pooler_for_token_embed(pooler_config: PoolerConfig):
+def pooler_for_token_embed(
+    pooler_config: PoolerConfig, projector: ProjectorFn | None = None
+) -> TokenPooler:
     pooling = get_tok_pooling_method(pooler_config.get_tok_pooling_type())
-    head = TokenEmbeddingPoolerHead()
+
+    vllm_config = get_current_vllm_config()
+    model_config = vllm_config.model_config
+    head = TokenEmbeddingPoolerHead(
+        head_dtype=model_config.head_dtype,
+        projector=projector
+        if projector is not None
+        else _load_st_projector(model_config),
+        activation=PoolerNormalize(),
+    )
 
     return TokenPooler(pooling=pooling, head=head)
 
@@ -101,6 +121,15 @@ def pooler_for_token_classify(
     if pooling is None:
         pooling = get_tok_pooling_method(pooler_config.get_tok_pooling_type())
 
-    head = TokenClassifierPoolerHead(classifier=classifier, act_fn=act_fn)
+    vllm_config = get_current_vllm_config()
+    model_config = vllm_config.model_config
+    head = TokenClassifierPoolerHead(
+        head_dtype=model_config.head_dtype,
+        classifier=classifier,
+        logit_bias=model_config.pooler_config.logit_bias,
+        activation=resolve_classifier_act_fn(
+            model_config, static_num_labels=False, act_fn=act_fn
+        ),
+    )
 
     return TokenPooler(pooling=pooling, head=head)

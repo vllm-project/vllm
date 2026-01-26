@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from collections.abc import Sequence
+from collections.abc import Iterable, Sequence
 
 import numpy as np
 import torch
@@ -92,9 +92,10 @@ class StagedWriteTensor:
         max_concurrency: int = 2,
         uva_instead_of_gpu: bool = False,
     ):
-        if dtype not in [torch.int32, torch.int64]:
+        supported_dtypes = [torch.int32, torch.int64, torch.float32]
+        if dtype not in supported_dtypes:
             raise ValueError(
-                f"Unsupported dtype {dtype}: should be either int32 or int64"
+                f"Unsupported dtype {dtype}: should be one of {supported_dtypes}"
             )
         self.num_rows = size if isinstance(size, int) else size[0]
         self.dtype = dtype
@@ -111,7 +112,7 @@ class StagedWriteTensor:
 
         self._staged_write_indices: list[int] = []
         self._staged_write_starts: list[int] = []
-        self._staged_write_contents: list[int] = []
+        self._staged_write_contents: list[int | float] = []
         self._staged_write_cu_lens: list[int] = []
 
         self.write_indices = UvaBufferPool(
@@ -128,7 +129,12 @@ class StagedWriteTensor:
             self.num_rows, dtype=torch.int32, max_concurrency=max_concurrency
         )
 
-    def stage_write(self, index: int, start: int, x: list[int]) -> None:
+    def stage_write(
+        self,
+        index: int,
+        start: int,
+        x: Iterable[int] | Iterable[float],
+    ) -> None:
         assert index >= 0
         assert start >= 0
         if not x:

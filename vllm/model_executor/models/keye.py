@@ -16,7 +16,7 @@ from transformers.feature_extraction_utils import BatchFeature
 from transformers.modeling_outputs import BaseModelOutput, BaseModelOutputWithPooling
 from transformers.utils import torch_int
 
-from vllm.config import MultiModalConfig, VllmConfig
+from vllm.config import VllmConfig
 from vllm.config.multimodal import BaseDummyOptions
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.logger import init_logger
@@ -56,12 +56,12 @@ from vllm.multimodal.parse import (
     MultiModalDataParser,
 )
 from vllm.multimodal.processing import (
+    BaseDummyInputsBuilder,
     BaseMultiModalProcessor,
     BaseProcessingInfo,
     PromptReplacement,
     PromptUpdate,
 )
-from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from vllm.sequence import IntermediateTensors
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
@@ -80,6 +80,7 @@ from .utils import (
     is_pp_missing_parameter,
     maybe_prefix,
 )
+from .vision import is_vit_use_data_parallel
 
 logger = init_logger(__name__)
 
@@ -358,7 +359,6 @@ class KeyeSiglipAttention(nn.Module):
         self,
         config: PretrainedConfig,
         quant_config: QuantizationConfig | None = None,
-        multimodal_config: MultiModalConfig | None = None,
         prefix: str = "",
     ):
         super().__init__()
@@ -366,7 +366,8 @@ class KeyeSiglipAttention(nn.Module):
 
         hidden_size = config.hidden_size
         self.hidden_size = config.hidden_size
-        tp_size = get_tensor_model_parallel_world_size()
+        use_data_parallel = is_vit_use_data_parallel()
+        tp_size = 1 if use_data_parallel else get_tensor_model_parallel_world_size()
         self.total_num_heads = config.num_attention_heads
         assert self.total_num_heads % tp_size == 0
         self.num_heads = self.total_num_heads // tp_size
@@ -403,7 +404,6 @@ class KeyeSiglipAttention(nn.Module):
             scale=self.scale,
             num_kv_heads=self.num_kv_heads,
             prefix=f"{prefix}.attn",
-            multimodal_config=multimodal_config,
         )
 
         self.apply_rotary_emb = ApplyRotaryEmb(
@@ -497,7 +497,6 @@ class KeyeSiglipEncoderLayer(nn.Module):
         self,
         config: PretrainedConfig,
         quant_config: QuantizationConfig | None = None,
-        multimodal_config: MultiModalConfig | None = None,
         prefix: str = "",
     ):
         super().__init__()
@@ -506,14 +505,12 @@ class KeyeSiglipEncoderLayer(nn.Module):
         self.self_attn = KeyeSiglipAttention(
             config,
             quant_config=quant_config,
-            multimodal_config=multimodal_config,
             prefix=f"{prefix}.self_attn",
         )
         self.layer_norm2 = nn.LayerNorm(self.embed_dim, eps=config.layer_norm_eps)
         self.mlp = SiglipMLP(
             config,
             quant_config=quant_config,
-            multimodal_config=multimodal_config,
             prefix=f"{prefix}.mlp",
         )
 
@@ -552,7 +549,6 @@ class KeyeSiglipEncoder(nn.Module):
         self,
         config: PretrainedConfig,
         quant_config: QuantizationConfig | None = None,
-        multimodal_config: MultiModalConfig | None = None,
         prefix: str = "",
     ):
         super().__init__()
@@ -565,7 +561,6 @@ class KeyeSiglipEncoder(nn.Module):
                 KeyeSiglipEncoderLayer(
                     config,
                     quant_config=quant_config,
-                    multimodal_config=multimodal_config,
                     prefix=f"{prefix}.layers.{layer_idx}",
                 )
                 for layer_idx in range(config.num_hidden_layers)
@@ -647,7 +642,6 @@ class KeyeSiglipVisionTransformer(nn.Module):
         self,
         config: PretrainedConfig,
         quant_config: QuantizationConfig | None = None,
-        multimodal_config: MultiModalConfig | None = None,
         prefix: str = "",
     ):
         super().__init__()
@@ -658,7 +652,6 @@ class KeyeSiglipVisionTransformer(nn.Module):
         self.encoder = KeyeSiglipEncoder(
             config,
             quant_config=quant_config,
-            multimodal_config=multimodal_config,
             prefix=f"{prefix}.encoder",
         )
         self.post_layernorm = nn.LayerNorm(embed_dim, eps=config.layer_norm_eps)
@@ -730,7 +723,6 @@ class KeyeSiglipVisionModel(nn.Module):
         self,
         config: PretrainedConfig,
         quant_config: QuantizationConfig | None = None,
-        multimodal_config: MultiModalConfig | None = None,
         prefix: str = "",
     ):
         super().__init__()
@@ -738,7 +730,6 @@ class KeyeSiglipVisionModel(nn.Module):
         self.vision_model = KeyeSiglipVisionTransformer(
             config,
             quant_config=quant_config,
-            multimodal_config=multimodal_config,
             prefix=f"{prefix}.vision_model",
         )
         self.quant_config = quant_config
@@ -1242,7 +1233,7 @@ class KeyeMultiModalProcessor(BaseMultiModalProcessor[KeyeProcessingInfo]):
         return _keye_field_config(hf_inputs)
 
 
-class BaseKeyeModule(nn.Module):
+class BaseKeyeModule(nn.Module, SupportsMultiModal):
     packed_modules_mapping = {
         "qkv_proj": [
             "q_proj",
@@ -1275,30 +1266,28 @@ class BaseKeyeModule(nn.Module):
         super().__init__()
         config: PretrainedConfig = vllm_config.model_config.hf_config
         quant_config = vllm_config.quant_config
-        multimodal_config = vllm_config.model_config.multimodal_config
 
         self.config = config
-        self.multimodal_config = multimodal_config
 
-        self.visual = KeyeSiglipVisionModel(
-            config.vision_config,
-            quant_config=quant_config,
-            multimodal_config=multimodal_config,
-            prefix=maybe_prefix(prefix, "visual"),
-        )
+        with self._mark_tower_model(vllm_config, {"image", "video"}):
+            self.visual = KeyeSiglipVisionModel(
+                config.vision_config,
+                quant_config=quant_config,
+                prefix=maybe_prefix(prefix, "visual"),
+            )
+            self.mlp_AR = self._build_projector(
+                config,
+                config.vision_config,
+                quant_config=quant_config,
+                prefix=maybe_prefix(prefix, "mlp_AR"),
+            )
 
-        self.mlp_AR = self._build_projector(
-            config,
-            config.vision_config,
-            quant_config=quant_config,
-            prefix=maybe_prefix(prefix, "mlp_AR"),
-        )
-
-        self.language_model = init_vllm_registered_model(
-            vllm_config=vllm_config,
-            prefix=maybe_prefix(prefix, "language_model"),
-            architectures=["Qwen3ForCausalLM"],
-        )
+        with self._mark_language_model(vllm_config):
+            self.language_model = init_vllm_registered_model(
+                vllm_config=vllm_config,
+                prefix=maybe_prefix(prefix, "language_model"),
+                architectures=["Qwen3ForCausalLM"],
+            )
 
         self.make_empty_intermediate_tensors = (
             self.language_model.make_empty_intermediate_tensors
@@ -1312,7 +1301,7 @@ class BaseKeyeModule(nn.Module):
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
     ) -> nn.Module:
-        raise ValueError("Need projector")
+        raise NotImplementedError("Need projector")
 
     def _process_image_input(self, image_input: Any) -> tuple[torch.Tensor, ...]:
         siglip_position_ids = list()
@@ -1429,9 +1418,6 @@ class BaseKeyeModule(nn.Module):
 
         return modalities
 
-    def get_language_model(self) -> torch.nn.Module:
-        return self.language_model
-
     def embed_multimodal(self, **kwargs: object) -> MultiModalEmbeddings | None:
         modalities = self._parse_and_validate_multimodal_inputs(**kwargs)
         if not modalities:
@@ -1452,7 +1438,7 @@ class BaseKeyeModule(nn.Module):
 
     def forward(
         self,
-        input_ids: torch.Tensor,
+        input_ids: torch.Tensor | None,
         positions: torch.Tensor,
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,

@@ -57,7 +57,7 @@ def test_act_and_mul(
     torch.set_default_device(device)
     x = torch.randn(num_tokens, 2 * d, dtype=dtype)
     if activation == "silu_and_mul":
-        layer = SiluAndMul()
+        layer = SiluAndMul(compile_native=False)
         fn = torch.ops._C.silu_and_mul
     if activation == "mul_and_silu":
         layer = MulAndSilu()
