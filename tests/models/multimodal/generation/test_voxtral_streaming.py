@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import asyncio
 from dataclasses import asdict
 
 import pytest
@@ -9,22 +10,14 @@ from mistral_common.protocol.transcription.request import (
     StreamingMode,
     TranscriptionRequest,
 )
+from mistral_common.tokens.tokenizers.audio import Audio, AudioConfig
 from mistral_common.tokens.tokenizers.mistral import MistralTokenizer
 
 from vllm import LLM, EngineArgs, SamplingParams
 from vllm.assets.audio import AudioAsset
-import asyncio
-
-from mistral_common.protocol.instruct.chunk import RawAudio
-from mistral_common.protocol.transcription.request import StreamingMode, TranscriptionRequest
-from mistral_common.tokens.tokenizers.audio import Audio, AudioConfig
-from mistral_common.tokens.tokenizers.mistral import MistralTokenizer
-
-from vllm import SamplingParams
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.inputs.data import TokensPrompt
 from vllm.v1.engine.async_llm import AsyncLLM, StreamingInput
-
 
 MODEL_NAME = "mistralai/Voxtral-Mini-3B-Realtime-2602"
 ENGINE_CONFIG = dict(
@@ -57,13 +50,16 @@ EXPECTED_TEXT = [
     ),
 ]
 
+
 @pytest.fixture
 def audio_assets() -> list[AudioAsset]:
     return [AudioAsset("mary_had_lamb"), AudioAsset("winning_call")]
 
+
 @pytest.fixture
 def tokenizer() -> MistralTokenizer:
     return MistralTokenizer.from_hf_hub(MODEL_NAME)
+
 
 @pytest.fixture
 def engine() -> LLM:
@@ -75,6 +71,7 @@ def engine() -> LLM:
 def async_engine() -> AsyncLLM:
     engine_args = AsyncEngineArgs(**ENGINE_CONFIG)
     return AsyncLLM.from_engine_args(engine_args)
+
 
 @pytest.mark.skip(reason="Voxtral streaming is not yet public")
 def test_voxtral_streaming_forward(audio_assets, tokenizer, engine):
@@ -100,11 +97,7 @@ def test_voxtral_streaming_forward(audio_assets, tokenizer, engine):
 
     for tokens, audio_array in tokenized_list:
         num_samples = audio_array.shape[0]
-        max_tokens = (
-            audio_config.num_audio_tokens(num_samples)
-            - len(tokens)
-            - 1
-        )
+        max_tokens = audio_config.num_audio_tokens(num_samples) - len(tokens) - 1
         sampling_params.append(SamplingParams(temperature=0.0, max_tokens=max_tokens))
 
         input_dict = {
@@ -124,16 +117,19 @@ def test_voxtral_streaming_forward(audio_assets, tokenizer, engine):
 
 class RealTimeAudioInput:
     """
-        This class is used to stream an audio file just as
-        if it would be streamed in real-time.
+    This class is used to stream an audio file just as
+    if it would be streamed in real-time.
     """
+
     def __init__(self, tokenizer: MistralTokenizer) -> None:
         # TODO(Patrick) - put these into the tokenizer config
         self._look_ahead_in_ms = 2.5
         self._look_back_in_ms = 52.5
 
         self._tokenizer = tokenizer
-        self._config: AudioConfig = self._tokenizer.instruct_tokenizer.audio_encoder.audio_config
+        self._config: AudioConfig = (
+            self._tokenizer.instruct_tokenizer.audio_encoder.audio_config
+        )
         self._sampling_rate = self._config.sampling_rate
 
         self._audio: Audio | None = None
@@ -141,7 +137,9 @@ class RealTimeAudioInput:
         # mutable objects
         self._start = 0
 
-        n_left_pad_samples = self._config.raw_audio_length_per_tok * self._config.n_left_pad_tokens
+        n_left_pad_samples = (
+            self._config.raw_audio_length_per_tok * self._config.n_left_pad_tokens
+        )
         self._end = self.streaming_delay + n_left_pad_samples + self.streaming_size
         self._queue: asyncio.Queue[StreamingInput | None] = asyncio.Queue()
 
@@ -151,9 +149,13 @@ class RealTimeAudioInput:
 
         # we're doing "OFFLINE" encoding here to right & left pad the audio since
         # we have access to the whole audio
-        # if we'd do an actual online realtime streaming application we 
+        # if we'd do an actual online realtime streaming application we
         # should instead pass `StreamingMode.ONLINE`
-        req = TranscriptionRequest(streaming=StreamingMode.OFFLINE, audio=RawAudio.from_audio(audio), language=None)
+        req = TranscriptionRequest(
+            streaming=StreamingMode.OFFLINE,
+            audio=RawAudio.from_audio(audio),
+            language=None,
+        )
         audio_enc = self._tokenizer.encode_transcription(req)
         self._audio = audio_enc.audios[0]
 
@@ -195,23 +197,24 @@ class RealTimeAudioInput:
         _end = self._end + self.look_ahead
         _start = max(0, self._start - self.look_back)
 
-        multi_modal_data = {"audio": (self._audio.audio_array[_start: _end], None)}
+        multi_modal_data = {"audio": (self._audio.audio_array[_start:_end], None)}
 
-        prompt = TokensPrompt(prompt_token_ids=tokens, multi_modal_data=multi_modal_data)
+        prompt = TokensPrompt(
+            prompt_token_ids=tokens, multi_modal_data=multi_modal_data
+        )
 
         await self._queue.put(StreamingInput(prompt))
 
         # increase
         self._start = self._end
         self._end = self._end + self.streaming_size
-    
+
     def stop(self):
         self._queue.put_nowait(None)
 
     async def generator(self):
         while (item := await self._queue.get()) is not None:
             yield item
-
 
 
 @pytest.mark.asyncio
@@ -223,14 +226,16 @@ async def test_voxtral_streaming_generator(audio_assets, tokenizer, async_engine
     for i, audio_asset in enumerate(audio_assets):
         output_tokens = []
         audio = Audio.from_file(audio_asset.get_local_path(), strict=False)
-        streaming_input = await RealTimeAudioInput.create(audio=audio, tokenizer=tokenizer)
+        streaming_input = await RealTimeAudioInput.create(
+            audio=audio, tokenizer=tokenizer
+        )
 
         request_id = f"session-{i}"
 
         async for resp in async_engine.generate(
-            prompt=streaming_input.generator(), 
-            sampling_params=sampling_params, 
-            request_id=request_id
+            prompt=streaming_input.generator(),
+            sampling_params=sampling_params,
+            request_id=request_id,
         ):
             tokens = resp.outputs[0].token_ids[-1:]
 
