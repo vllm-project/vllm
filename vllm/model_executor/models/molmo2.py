@@ -1217,7 +1217,7 @@ class Molmo2TextModel(nn.Module, SupportsQuant):
 
     def forward(
         self,
-        input_ids: torch.Tensor,
+        input_ids: torch.Tensor | None,
         positions: torch.Tensor,
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,
@@ -2514,16 +2514,19 @@ class Molmo2ForConditionalGeneration(
             kwargs[field.name] = getattr(config.adapter_config, field.name)
         adapter_config = AdapterConfig(**kwargs)
 
-        self.vision_backbone = Molmo2VisionBackbone(
-            vit_config,
-            adapter_config,
-            quant_config,
-            prefix=maybe_prefix(prefix, "vision_backbone"),
-        )
-        self.model = Molmo2TextModel(
-            vllm_config=vllm_config,
-            prefix=maybe_prefix(prefix, "model"),
-        )
+        with self._mark_tower_model(vllm_config, {"image", "video"}):
+            self.vision_backbone = Molmo2VisionBackbone(
+                vit_config,
+                adapter_config,
+                quant_config,
+                prefix=maybe_prefix(prefix, "vision_backbone"),
+            )
+
+        with self._mark_language_model(vllm_config):
+            self.model = Molmo2TextModel(
+                vllm_config=vllm_config,
+                prefix=maybe_prefix(prefix, "model"),
+            )
 
         self.img_patch_id = config.image_patch_id
 
@@ -2686,9 +2689,6 @@ class Molmo2ForConditionalGeneration(
             out_features[is_image_patch] = image_features_i
             out.append(out_features)
         return tuple(out)
-
-    def get_language_model(self) -> torch.nn.Module:
-        return self.model
 
     def embed_multimodal(self, **kwargs: object) -> MultiModalEmbeddings | None:
         modalities = self._parse_and_validate_multimodal_inputs(**kwargs)

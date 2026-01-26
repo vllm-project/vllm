@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from collections.abc import Callable, Iterable, Mapping, MutableSequence
+from contextlib import ExitStack, contextmanager, nullcontext
 from typing import (
     TYPE_CHECKING,
     ClassVar,
@@ -23,7 +24,9 @@ from vllm.config import ModelConfig, SpeechToTextConfig
 from vllm.inputs import TokensPrompt
 from vllm.inputs.data import PromptType
 from vllm.logger import init_logger
+from vllm.model_executor.layers.mamba.mamba_utils import MambaStateCopyFunc
 from vllm.model_executor.layers.quantization import QuantizationConfig
+from vllm.utils.collection_utils import common_prefix
 from vllm.utils.func_utils import supports_kw
 
 from .interfaces_base import VllmModel, is_pooling_model
@@ -69,6 +72,10 @@ def _require_is_multimodal(is_multimodal: Tensor | None) -> Tensor:
     return is_multimodal
 
 
+# Cache results of `SupportsMultiModal.get_language_model`
+_language_model_by_module = dict[nn.Module, VllmModel]()
+
+
 @runtime_checkable
 class SupportsMultiModal(Protocol):
     """The interface required for all multi-modal models."""
@@ -105,6 +112,16 @@ class SupportsMultiModal(Protocol):
     Set internally by `MultiModalRegistry.register_processor`.
     """
 
+    _language_model_names: list[str] = []
+    """
+    Set internally by `_mark_language_model`.
+    """
+
+    _tower_model_names: list[str] = []
+    """
+    Set internally by `_mark_tower_model`.
+    """
+
     @classmethod
     def get_placeholder_str(cls, modality: str, i: int) -> str | None:
         """
@@ -134,7 +151,142 @@ class SupportsMultiModal(Protocol):
         Returns:
             torch.nn.Module: The core language model component.
         """
-        ...
+        # Cached
+        if self in _language_model_by_module:
+            return _language_model_by_module[self]
+
+        if self._language_model_names:
+            mod = self
+            for attr in common_prefix(
+                [name.split(".") for name in self._language_model_names]
+            ):
+                if attr:
+                    mod = getattr(mod, attr)
+
+            if mod is not self and hasattr(mod, "embed_input_ids"):
+                _language_model_by_module[self] = mod
+                return mod
+
+        # Fallback
+        for mod in self.children():
+            if hasattr(mod, "embed_input_ids"):
+                _language_model_by_module[self] = mod
+                return mod
+
+        raise NotImplementedError(
+            f"No language model found in {type(self).__name__}! "
+            "You should initialize it via `_mark_language_model`."
+        )
+
+    @contextmanager
+    def _mark_language_model(
+        self,
+        vllm_config: VllmConfig,
+        *,
+        targets: type[nn.Module] | tuple[type[nn.Module], ...] | None = None,
+    ):
+        """
+        Mark each child module that was assigned to this model during this context
+        as a language model component.
+
+        Language model components are automatically skipped in `--mm-encoder-only`
+        mode.
+
+        If `targets` is set, instead include descendants that are an instance
+        of `targets`, even if they aren't direct children.
+        """
+        from .utils import StageMissingLayer, collect_children, no_init_weights
+
+        mm_config = vllm_config.model_config.multimodal_config
+
+        with collect_children(self, targets=targets) as children_names:  # noqa: SIM117
+            with (
+                no_init_weights(
+                    self,
+                    lambda mod: StageMissingLayer("language_model", mod),
+                    targets=targets,
+                )
+                if mm_config.mm_encoder_only
+                else nullcontext()
+            ):
+                yield
+
+        self._language_model_names = children_names
+
+    @contextmanager
+    def _mark_tower_model(
+        self,
+        vllm_config: VllmConfig,
+        modalities: set[str] | str,
+        *,
+        targets: type[nn.Module] | tuple[type[nn.Module], ...] | None = None,
+    ):
+        """
+        Mark each child module that was assigned to this model during this context
+        as a tower model component.
+
+        Tower model components are automatically skipped when `--limit-mm-per-prompt`
+        is set to zero for all of their modalities.
+
+        If `targets` is set, instead include descendants that are an instance
+        of `targets`, even if they aren't direct children.
+        """
+        from .utils import StageMissingLayer, collect_children, no_init_weights
+
+        if isinstance(modalities, str):
+            modalities = {modalities}
+
+        if modalities == {"image", "video"}:
+            stage_name = "vision_tower"
+        else:
+            stage_name = "_".join([*modalities, "tower"])
+
+        mm_config = vllm_config.model_config.multimodal_config
+
+        with collect_children(self, targets=targets) as children_names:  # noqa: SIM117
+            with (
+                no_init_weights(
+                    self,
+                    lambda mod: StageMissingLayer(stage_name, mod),
+                    targets=targets,
+                )
+                if all(mm_config.get_limit_per_prompt(m) == 0 for m in modalities)
+                else nullcontext()
+            ):
+                yield
+
+        self._tower_model_names = children_names
+
+    @contextmanager
+    def _mark_composite_model(
+        self,
+        vllm_config: VllmConfig,
+        *,
+        language_targets: type[nn.Module] | tuple[type[nn.Module], ...],
+        tower_targets: dict[str, type[nn.Module] | tuple[type[nn.Module], ...]],
+    ):
+        """
+        Composite wrapper over `_mark_language_model` and
+        `_mark_tower_model` by modality.
+        """
+        with ExitStack() as stack:
+            stack.enter_context(
+                self._mark_language_model(
+                    vllm_config,
+                    targets=language_targets,
+                )
+            )
+
+            for modality, modality_targets in tower_targets.items():
+                stack.enter_context(
+                    self._mark_tower_model(
+                        vllm_config,
+                        modality,
+                        targets=modality_targets,
+                    )
+                )
+
+            yield
 
     def get_num_mm_encoder_tokens(self, num_image_tokens: int) -> int:
         """
@@ -153,14 +305,6 @@ class SupportsMultiModal(Protocol):
         multi-modal connector tokens.
         """
         ...
-
-    @classmethod
-    def get_language_model_spec(cls) -> tuple[nn.Module | None, str | None]:
-        """
-        Return the language model spec:
-        (language model class, language model attr)
-        """
-        return None, None
 
     @overload
     def embed_input_ids(self, input_ids: Tensor) -> Tensor: ...
@@ -297,10 +441,6 @@ def requires_raw_input_tokens(model: type[object] | object) -> bool:
 
 def supports_multimodal_encoder_tp_data(model: type[object] | object) -> bool:
     return getattr(model, "supports_encoder_tp_data", False)
-
-
-def supports_mm_encoder_only(model: type[object] | object) -> bool:
-    return getattr(model, "is_mm_encoder_only_model", False)
 
 
 @overload
@@ -463,6 +603,8 @@ class SupportsPP(Protocol):
 
     def forward(
         self,
+        input_ids: Tensor | None,
+        positions: Tensor,
         *,
         intermediate_tensors: IntermediateTensors | None,
     ) -> IntermediateTensors | None:
@@ -491,6 +633,8 @@ class _SupportsPPType(Protocol):
 
     def forward(
         self,
+        input_ids: Tensor | None,
+        positions: Tensor,
         *,
         intermediate_tensors: IntermediateTensors | None,
     ) -> Tensor | IntermediateTensors: ...
@@ -634,6 +778,19 @@ class IsHybrid(Protocol):
             Tuple containing:
             - conv_state_shape: Shape for convolutional state cache
             - temporal_state_shape: Shape for state space model cache
+        """
+        ...
+
+    @classmethod
+    def get_mamba_state_copy_func(cls) -> tuple[MambaStateCopyFunc, ...]:
+        """Calculate copy-function callables for each Mamba state.
+
+        Returns:
+            A tuple of MambaStateCopyFunc callables that correspond, in order,
+            to the Mamba states produced by the model. Each callable accepts
+            (state, block_ids, cur_block_idx, num_accepted_tokens) and returns
+            a MambaCopySpec describing the memory-copy parameters for prefix
+            caching in align mode.
         """
         ...
 

@@ -56,7 +56,7 @@ class TestSingleWriterShmObjectStorage(unittest.TestCase):
     def tearDown(self):
         """Clean up after each test."""
         if self.storage:
-            del self.storage
+            self.storage.close()
 
     def test_minimal_put_get_cycle(self):
         """Test basic put and get operations."""

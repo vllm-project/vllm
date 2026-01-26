@@ -34,6 +34,7 @@ MTPModelTypes = Literal[
     "mimo_mtp",
     "glm4_moe_mtp",
     "glm4_moe_lite_mtp",
+    "glm_ocr_mtp",
     "ernie_mtp",
     "exaone_moe_mtp",
     "qwen3_next_mtp",
@@ -77,6 +78,9 @@ class SpeculativeConfig:
     draft_tensor_parallel_size: int | None = Field(default=None, ge=1)
     """The degree of the tensor parallelism for the draft model. Can only be 1
     or the same as the target model's tensor parallel size."""
+    tensor_parallel_size: int | None = None
+    """Users should pass "draft_tensor_parallel_size". This parameter's purpose is to
+    warn users when they mistakenly provide the wrong argument."""
 
     # Draft model configuration
     quantization: me_quant.QuantizationMethods | None = None
@@ -215,6 +219,17 @@ class SpeculativeConfig:
                     "num_hidden_layers": 0,
                     "n_predict": n_predict,
                     "architectures": ["Glm4MoeLiteMTPModel"],
+                }
+            )
+
+        if hf_config.architectures[0] == "GlmOcrForConditionalGeneration":
+            hf_config.model_type = "glm_ocr_mtp"
+            n_predict = getattr(hf_config, "num_nextn_predict_layers", None)
+            hf_config.update(
+                {
+                    "num_hidden_layers": 0,
+                    "n_predict": n_predict,
+                    "architectures": ["GlmOcrMTPModel"],
                 }
             )
 
@@ -397,13 +412,11 @@ class SpeculativeConfig:
                             "one layer. Might need some code changes "
                             "to support multiple layers."
                         )
+                elif self.method == "draft_model":
+                    pass
                 else:
-                    self.method = "draft_model"
                     raise NotImplementedError(
-                        "Speculative decoding with draft model is not "
-                        "supported yet. Please consider using other "
-                        "speculative decoding methods such as ngram, medusa, "
-                        "eagle, or mtp."
+                        f"Unsupported speculative method: '{self.method}'"
                     )
 
                 # Replace hf_config for EAGLE draft_model
@@ -631,6 +644,12 @@ class SpeculativeConfig:
 
     @model_validator(mode="after")
     def _verify_args(self) -> Self:
+        if self.tensor_parallel_size is not None:
+            raise ValueError(
+                "'tensor_parallel_size' is not a valid argument in the "
+                "speculative_config. Please pass 'draft_tensor_parallel_size' instead."
+            )
+
         if self.num_speculative_tokens is None:
             raise ValueError(
                 "num_speculative_tokens must be provided with "
@@ -669,11 +688,31 @@ class SpeculativeConfig:
                 f"Eagle3 is only supported for {eagle3_target_supported} models. "  # noqa: E501
                 f"Got {self.target_model_config.hf_text_config.model_type=}"
             )
-
+        self.verify_equal_vocab_size_if_draft_model()
         return self
+
+    def verify_equal_vocab_size_if_draft_model(self):
+        if (
+            self.method == "draft_model"
+            and self.target_model_config is not None
+            and self.draft_model_config is not None
+        ):
+            target_vocab_size = self.target_model_config.get_vocab_size()
+            draft_vocab_size = self.draft_model_config.get_vocab_size()
+            if target_vocab_size != draft_vocab_size:
+                raise ValueError(
+                    f"Target and draft model should have the same vocabulary size. "
+                    f"Target model vocab_size={target_vocab_size}. "
+                    f"Draft model vocab_size={draft_vocab_size}. "
+                    f"Using models with different tokenizers can cause out-of-bounds "
+                    f"errors during speculative decoding."
+                )
 
     def use_eagle(self) -> bool:
         return self.method in ("eagle", "eagle3", "mtp")
+
+    def uses_draft_model(self) -> bool:
+        return self.method == "draft_model"
 
     def __repr__(self) -> str:
         method = self.method
