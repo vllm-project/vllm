@@ -48,14 +48,8 @@ from vllm.model_executor.layers.quantization.base_config import (
 from vllm.model_executor.layers.quantization.kernels.scaled_mm import (
     init_fp8_linear_kernel,
 )
-from vllm.model_executor.layers.quantization.kernels.scaled_mm.ScaledMMLinearKernel import (  # noqa: E501
-    FP8ScaledMMLinearKernel,
-)
 from vllm.model_executor.layers.quantization.kernels.wFP8a16 import (
     init_wfp8a16_kernels,
-)
-from vllm.model_executor.layers.quantization.kernels.wFP8a16.WFP8A16_kernel import (  # noqa: E501
-    FP8WoQLinearKernel,
 )
 from vllm.model_executor.layers.quantization.kv_cache import BaseKVCacheMethod
 from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
@@ -328,8 +322,6 @@ class Fp8LinearMethod(LinearMethodBase):
         self.weight_block_size = self.quant_config.weight_block_size
         self.block_quant = self.weight_block_size is not None
         self.act_q_static = self.quant_config.activation_scheme == "static"
-
-        self.fp8_linear: FP8ScaledMMLinearKernel | FP8WoQLinearKernel = None
 
         if self.use_fp8_woq:
             self.fp8_linear = init_wfp8a16_kernels(

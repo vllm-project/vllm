@@ -4,6 +4,9 @@ import torch
 
 import vllm.envs as envs
 from vllm.logger import init_logger
+from vllm.model_executor.layers.quantization.kernels.scaled_mm.ScaledMMLinearKernel import (  # noqa: E501
+    FP8LinearKernel,
+)
 from vllm.model_executor.layers.quantization.kernels.wFP8a16.fp8_marlin import (
     FP8MarlinLinearKernel,
 )
@@ -110,7 +113,7 @@ def init_wfp8a16_kernels(
     is_block_quant: bool = False,
     force_kernel: type[FP8WoQLinearKernel] | None = None,
     module_name: str | None = None,
-) -> FP8WoQLinearKernel:
+) -> FP8LinearKernel:
     """Initialize wFP8a16 kernels."""
     kernel_config = FP8WoQLinearLayerConfig(
         weight_quant_key=weight_quant_key,
