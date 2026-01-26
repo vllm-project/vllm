@@ -202,13 +202,16 @@ from vllm._aiter_ops import rocm_aiter_ops
 from vllm.config import ModelConfig, VllmConfig, get_current_vllm_config
 from vllm.distributed.parallel_state import get_dcp_group, is_global_first_rank
 from vllm.logger import init_logger
+from vllm.model_executor.custom_op import CustomOp
 from vllm.model_executor.layers.batch_invariant import (
     vllm_is_batch_invariant,
 )
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
 )
+from vllm.model_executor.layers.quantization.input_quant_fp8 import QuantFP8
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    GroupShape,
     get_and_maybe_dequant_weights,
 )
 from vllm.platforms import current_platform
@@ -286,6 +289,37 @@ def dynamic_per_batched_tensor_quant(
 
 
 logger = init_logger(__name__)
+
+
+@CustomOp.register("mla_decode_concat_quant_fp8")
+class _DecodeConcatQuantFP8(QuantFP8):
+    """
+    QuantFP8 variant that concatenates decode_ql_nope and decode_q_pe before
+    quantization. When disabled, forward_native is compiled via torch.compile,
+    fusing cat/reshape/quant/view together.
+    """
+
+    def _make_forward(quant_fn):  # noqa: N805
+        """Factory to create forward methods that concat before quantization."""
+
+        def forward(
+            self,
+            decode_ql_nope: torch.Tensor,
+            decode_q_pe: torch.Tensor,
+            scale: torch.Tensor,
+            scale_ub: torch.Tensor | None = None,
+        ) -> torch.Tensor:
+            decode_q0 = torch.cat((decode_ql_nope, decode_q_pe), dim=-1)
+            decode_q_flat = decode_q0.reshape(decode_q0.shape[0], -1)
+            decode_q, _ = quant_fn(self, decode_q_flat, scale, scale_ub)
+            return decode_q.view(decode_q0.shape)
+
+        return forward
+
+    forward_native = _make_forward(QuantFP8.forward_native)  # type: ignore[arg-type]
+    forward_cuda = _make_forward(QuantFP8.forward_cuda)  # type: ignore[arg-type]
+    forward_hip = _make_forward(QuantFP8.forward_hip)  # type: ignore[arg-type]
+
 
 CUDNN_WORKSPACE_SIZE = 12800
 
@@ -440,19 +474,34 @@ M = TypeVar("M", bound=MLACommonMetadata)
 A = TypeVar("A", bound=AttentionMetadata)
 
 
+def is_deepseek_r1_mla_compatible(vllm_config: VllmConfig) -> bool:
+    # Check if model has DeepSeek R1 compatible MLA dimensions:
+    # qk_nope_head_dim = 128, qk_rope_head_dim = 64, v_head_dim = 128
+    # which results in query/key head dim = 192.
+    if vllm_config.model_config is None:
+        return False
+    hf_text_config = vllm_config.model_config.hf_text_config
+    qk_nope_head_dim = getattr(hf_text_config, "qk_nope_head_dim", 1)
+    qk_rope_head_dim = getattr(hf_text_config, "qk_rope_head_dim", 1)
+    v_head_dim = getattr(hf_text_config, "v_head_dim", 1)
+    return qk_nope_head_dim == 128 and qk_rope_head_dim == 64 and v_head_dim == 128
+
+
 def use_flashinfer_prefill() -> bool:
     # For blackwell default to flashinfer prefill if it's available since
     # it is faster than FA2.
     from vllm.config import get_current_vllm_config
 
     vllm_config = get_current_vllm_config()
-    return (
+    if not (
         not vllm_config.attention_config.disable_flashinfer_prefill
         and flashinfer_available
         and not vllm_config.attention_config.use_cudnn_prefill
-        and not vllm_config.attention_config.use_trtllm_ragged_deepseek_prefill
         and current_platform.is_device_capability_family(100)
-    )
+    ):
+        return False
+
+    return is_deepseek_r1_mla_compatible(vllm_config)
 
 
 def use_cudnn_prefill() -> bool:
@@ -472,11 +521,14 @@ def use_trtllm_ragged_deepseek_prefill() -> bool:
     from vllm.config import get_current_vllm_config
 
     vllm_config = get_current_vllm_config()
-    return (
+    if not (
         flashinfer_available
         and vllm_config.attention_config.use_trtllm_ragged_deepseek_prefill
         and current_platform.is_device_capability_family(100)
-    )
+    ):
+        return False
+
+    return is_deepseek_r1_mla_compatible(vllm_config)
 
 
 @dataclass
@@ -1184,6 +1236,12 @@ class MLACommonBaseImpl(MLAAttentionImpl[A], Generic[A]):
         self.q_pad_num_heads = q_pad_num_heads
         self.is_aiter_triton_fp8_bmm_enabled = rocm_aiter_ops.is_fp8bmm_enabled()
 
+        # If kv_b_proj_weight is unquantized, quantize it to mxfp4 if supported
+        self.is_aiter_triton_fp4_bmm_enabled = (
+            rocm_aiter_ops.is_fp4bmm_enabled()
+            and self.kv_b_proj.weight.dtype == torch.bfloat16
+        )
+
     def process_weights_after_loading(self, act_dtype: torch.dtype):
         # we currently do not have quantized bmm's which are needed for
         # `W_UV` and `W_UK_T`, we just store fp16/bf16 copies and perform
@@ -1212,7 +1270,21 @@ class MLACommonBaseImpl(MLAAttentionImpl[A], Generic[A]):
             [self.qk_nope_head_dim, self.v_head_dim], dim=-1
         )
 
-        if self.is_aiter_triton_fp8_bmm_enabled:
+        # If kv_b_proj_weight is unquantized, quantize it to mxfp4 if supported
+        if self.is_aiter_triton_fp4_bmm_enabled:
+            from vllm.model_executor.layers.quantization.quark.utils import (
+                quark_quantize_weight_to_mxfp4,
+            )
+
+            self.W_K, self.W_K_scale = quark_quantize_weight_to_mxfp4(W_UK)
+            # Convert from (L, N, P) to (N, L, P)
+            self.W_K = self.W_K.transpose(0, 1)
+            self.W_K_scale = self.W_K_scale.transpose(0, 1)
+
+            self.W_V, self.W_V_scale = quark_quantize_weight_to_mxfp4(
+                W_UV.permute(1, 2, 0)
+            )
+        elif self.is_aiter_triton_fp8_bmm_enabled:
             W_K = W_UK.transpose(0, 1)  # 16 512 128
             W_V = W_UV.permute(1, 2, 0)  # 16 128 512
             self.W_K, self.W_K_scale = dynamic_per_batched_tensor_quant(
@@ -1262,16 +1334,26 @@ class MLACommonBaseImpl(MLAAttentionImpl[A], Generic[A]):
     def _v_up_proj(self, x: torch.Tensor, out: torch.Tensor):
         # Convert from (B, N, L) to (N, B, L)
         x = x.view(-1, self.num_heads, self.kv_lora_rank).transpose(0, 1)
-
-        if self.is_aiter_triton_fp8_bmm_enabled:
-            out = out.view(-1, self.num_heads, self.v_head_dim)
+        out = out.view(-1, self.num_heads, self.v_head_dim)
+        if self.is_aiter_triton_fp4_bmm_enabled:
+            out = rocm_aiter_ops.batched_gemm_a16wfp4(
+                x,
+                self.W_V,
+                self.W_V_scale,
+                out,
+                transpose_bm=True,
+                prequant=True,
+                y_scale=None,
+            )
+            x = out.view(-1, self.num_heads * self.v_head_dim)
+        elif self.is_aiter_triton_fp8_bmm_enabled:
             # Multiply + Transpose (N, B, L) x (N, L, V)->(N, B, V)->(B, N, V)
             x = rocm_aiter_ops.triton_fp8_bmm(
                 x, self.W_V, self.W_V_scale, group_size=128, transpose_bm=True, YQ=out
             )
         else:
             # Convert from (B, N * V) to (N, B, V)
-            out = out.view(-1, self.num_heads, self.v_head_dim).transpose(0, 1)
+            out = out.transpose(0, 1)
 
             # Multiply (N, B, L) x (N, L, V) -> (N, B, V)
             torch.bmm(x, self.W_UV, out=out)  # Reuse "out" to make it "hot"
@@ -1294,25 +1376,27 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
 
-        if use_flashinfer_prefill():
-            logger.debug_once("Using FlashInfer prefill for MLA")
-            self._run_prefill_context_chunk = self._run_prefill_context_chunk_fi
-            self._run_prefill_new_tokens = self._run_prefill_new_tokens_fi
-            self._pad_v = False
-        elif use_trtllm_ragged_deepseek_prefill():
-            logger.debug_once("Using TRT-LLM ragged DeepSeek prefill for MLA")
+        if use_trtllm_ragged_deepseek_prefill():
+            logger.info_once(
+                "Using TRT-LLM ragged DeepSeek prefill for MLA", scope="local"
+            )
             self._run_prefill_context_chunk = (
                 self._run_prefill_context_chunk_trtllm_ragged
             )
             self._run_prefill_new_tokens = self._run_prefill_new_tokens_trtllm_ragged
             self._pad_v = False
+        elif use_flashinfer_prefill():
+            logger.info_once("Using FlashInfer prefill for MLA", scope="local")
+            self._run_prefill_context_chunk = self._run_prefill_context_chunk_fi
+            self._run_prefill_new_tokens = self._run_prefill_new_tokens_fi
+            self._pad_v = False
         elif use_cudnn_prefill():
-            logger.debug_once("Using CUDNN prefill for MLA")
+            logger.info_once("Using CUDNN prefill for MLA", scope="local")
             self._run_prefill_context_chunk = self._run_prefill_context_chunk_cudnn
             self._run_prefill_new_tokens = self._run_prefill_new_tokens_cudnn
             self._pad_v = False
         else:  # Use FlashAttention
-            logger.debug_once("Using FlashAttention prefill for MLA")
+            logger.info_once("Using FlashAttention prefill for MLA", scope="local")
             self._run_prefill_context_chunk = self._run_prefill_context_chunk_fa
             self._run_prefill_new_tokens = self._run_prefill_new_tokens_fa
 
@@ -1347,6 +1431,11 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
         )
         self.cp_kv_cache_interleave_size: int = (
             get_current_vllm_config().parallel_config.cp_kv_cache_interleave_size
+        )
+        self._decode_concat_quant_fp8_op = _DecodeConcatQuantFP8(
+            static=True,
+            group_shape=GroupShape.PER_TENSOR,
+            compile_native=True,
         )
 
     def _flash_attn_varlen_diff_headdims(
@@ -1577,80 +1666,6 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
 
         # Convert from (q_len, num_heads) to (num_heads, q_len)
         return attn_out, lse.transpose(0, 1).contiguous()
-
-    def process_weights_after_loading(self, act_dtype: torch.dtype):
-        # we currently do not have quantized bmm's which are needed for
-        # `W_UV` and `W_UK_T`, we just store fp16/bf16 copies and perform
-        # the bmm's in 16-bit, the extra memory overhead of this is fairly low
-        kv_b_proj_weight = get_and_maybe_dequant_weights(
-            self.kv_b_proj, out_dtype=act_dtype
-        ).T
-        assert kv_b_proj_weight.shape == (
-            self.kv_lora_rank,
-            self.num_heads * (self.qk_nope_head_dim + self.v_head_dim),
-        ), (
-            f"{kv_b_proj_weight.shape=}, "
-            f"{self.kv_lora_rank=}, "
-            f"{self.num_heads=}, "
-            f"{self.qk_nope_head_dim=}, "
-            f"{self.v_head_dim=}"
-        )
-        kv_b_proj_weight = kv_b_proj_weight.view(
-            self.kv_lora_rank,
-            self.num_heads,
-            self.qk_nope_head_dim + self.v_head_dim,
-        )
-
-        W_UK, W_UV = kv_b_proj_weight.split(
-            [self.qk_nope_head_dim, self.v_head_dim], dim=-1
-        )
-
-        if self.is_aiter_triton_fp8_bmm_enabled:
-            W_K = W_UK.transpose(0, 1)  # 16 512 128
-            W_V = W_UV.permute(1, 2, 0)  # 16 128 512
-            self.W_K, self.W_K_scale = dynamic_per_batched_tensor_quant(
-                W_K, dtype=current_platform.fp8_dtype()
-            )
-            self.W_V, self.W_V_scale = dynamic_per_batched_tensor_quant(
-                W_V, dtype=current_platform.fp8_dtype()
-            )
-
-            # The kernel operates on non-padded inputs. Hence, pre-compiling
-            # triton kernel to avoid runtime compilation for unseen batch sizes
-            # Pre-compile for batch sizes 1 to 1024 to cover most use-cases.
-            # On DS-R1, this step adds roughly 50s to the model loading time.
-            max_batch_size = 1024  # [ToDo] Find the optimal upper limit
-            pre_compilation_list = list(range(1, max_batch_size + 1))
-            if is_global_first_rank():
-                pre_compilation_list = tqdm(
-                    pre_compilation_list,
-                    desc="[Aiter Triton] Pre-compiling fp8 BMM kernel",
-                    total=max_batch_size,
-                )
-
-            for m in pre_compilation_list:
-                x = torch.empty(
-                    (self.W_K.shape[0], m, self.W_K.shape[2]),
-                    dtype=torch.bfloat16,
-                    device=self.W_K.device,
-                )
-                rocm_aiter_ops.triton_fp8_bmm(
-                    x, self.W_K, self.W_K_scale, group_size=128, transpose_bm=True
-                )
-
-                x = torch.empty(
-                    (self.W_V.shape[0], m, self.W_V.shape[2]),
-                    dtype=torch.bfloat16,
-                    device=self.W_V.device,
-                )
-                rocm_aiter_ops.triton_fp8_bmm(
-                    x, self.W_V, self.W_V_scale, group_size=128, transpose_bm=True
-                )
-        else:
-            # Convert from (L, N, V) to (N, L, V)
-            self.W_UV = W_UV.transpose(0, 1)
-            # Convert from (L, N, P) to (N, P, L)
-            self.W_UK_T = W_UK.permute(1, 2, 0)
 
     def _concat_k_nope_k_pe(
         self, k_nope: torch.Tensor, k_pe: torch.Tensor
@@ -2032,7 +2047,18 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
                 decode_pe_padded.copy_(decode_q_pe)
                 decode_q_pe = decode_pe_padded
 
-            if self.is_aiter_triton_fp8_bmm_enabled:
+            if self.is_aiter_triton_fp4_bmm_enabled:
+                from aiter.ops.triton.batched_gemm_a16wfp4 import batched_gemm_a16wfp4
+
+                decode_ql_nope = batched_gemm_a16wfp4(
+                    decode_q_nope,
+                    self.W_K,
+                    self.W_K_scale,
+                    transpose_bm=True,
+                    prequant=True,
+                    y_scale=layer._q_scale if fp8_attention else None,
+                )
+            elif self.is_aiter_triton_fp8_bmm_enabled:
                 # Multiply+Transpose (N, B, P)x(N, P, L)->(N, B, L)->(B, N, L)
                 decode_ql_nope = rocm_aiter_ops.triton_fp8_bmm(
                     decode_q_nope,
@@ -2061,29 +2087,11 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
                 decode_ql_nope = decode_ql_nope.transpose(0, 1)
 
             if fp8_attention:
-                ql_nope_shape = decode_ql_nope.shape
-                q_pe_shape = decode_q_pe.shape
                 assert decode_ql_nope.shape[0] == decode_q_pe.shape[0]
                 assert decode_ql_nope.shape[1] == decode_q_pe.shape[1]
-                decode_q_shape = (
-                    ql_nope_shape[0],
-                    ql_nope_shape[1],
-                    ql_nope_shape[2] + q_pe_shape[2],
+                decode_q = self._decode_concat_quant_fp8_op(
+                    decode_ql_nope, decode_q_pe, layer._q_scale
                 )
-                # Using empty and copy since torch.cat introduces significant overhead.
-                decode_q0 = torch.empty(
-                    decode_q_shape,
-                    device=decode_ql_nope.device,
-                    dtype=decode_ql_nope.dtype,
-                )
-                decode_q0[..., : ql_nope_shape[2]].copy_(decode_ql_nope)
-                decode_q0[..., ql_nope_shape[2] :].copy_(decode_q_pe)
-
-                decode_q, _ = ops.scaled_fp8_quant(
-                    decode_q0.view(decode_q_shape[0], -1),
-                    layer._q_scale,
-                )
-                decode_q = decode_q.view(decode_q_shape)
             else:
                 decode_q = (decode_ql_nope, decode_q_pe)
             if self.dcp_world_size > 1:

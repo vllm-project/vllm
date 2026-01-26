@@ -8,10 +8,13 @@ import torch
 from torch.distributed import ProcessGroup
 
 from vllm.distributed.utils import pickle
+from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.platforms.interface import CpuArchEnum
 
 from .base_device_communicator import DeviceCommunicatorBase
+
+logger = init_logger(__name__)
 
 
 class CpuCommunicator(DeviceCommunicatorBase):
@@ -26,11 +29,28 @@ class CpuCommunicator(DeviceCommunicatorBase):
         self.dist_module = torch.distributed
 
         if (
-            (current_platform.get_cpu_architecture() == CpuArchEnum.X86)
+            (
+                current_platform.get_cpu_architecture() == CpuArchEnum.X86
+                or current_platform.get_cpu_architecture() == CpuArchEnum.ARM
+            )
             and hasattr(torch.ops._C, "init_shm_manager")
             and (unique_name.startswith("tp") or unique_name.startswith("pp"))
         ):
             self.dist_module = _CPUSHMDistributed(self)
+
+        if self.use_all2all:
+            if self.all2all_backend != "naive":  # type: ignore[has-type]
+                logger.warning(
+                    "`%s` all2all manager is not supported on CPU. "
+                    "Falling back to `naive` all2all manager for CPU.",
+                    self.all2all_backend,  # type: ignore[has-type]
+                )
+                self.all2all_backend = "naive"
+            if self.all2all_backend == "naive":
+                from .all2all import NaiveAll2AllManager
+
+                self.all2all_manager = NaiveAll2AllManager(self.cpu_group)
+                logger.info("Using naive all2all manager.")
 
     def all_reduce(self, input_):
         self.dist_module.all_reduce(input_, group=self.device_group)
@@ -109,6 +129,30 @@ class CpuCommunicator(DeviceCommunicatorBase):
         src: int,
     ) -> dict[str, torch.Tensor | Any]:
         return self.dist_module.recv_tensor_dict(src)
+
+    def dispatch(  # type: ignore[override]
+        self,
+        hidden_states: torch.Tensor,
+        router_logits: torch.Tensor,
+        is_sequence_parallel: bool = False,
+        extra_tensors: list[torch.Tensor] | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        assert self.all2all_manager is not None
+        return self.all2all_manager.dispatch(
+            hidden_states,
+            router_logits,
+            is_sequence_parallel,
+            extra_tensors,  # type: ignore[call-arg]
+        )
+
+    def combine(
+        self, hidden_states: torch.Tensor, is_sequence_parallel: bool = False
+    ) -> torch.Tensor:
+        assert self.all2all_manager is not None
+        hidden_states = self.all2all_manager.combine(
+            hidden_states, is_sequence_parallel
+        )
+        return hidden_states
 
 
 class _CPUSHMDistributed:

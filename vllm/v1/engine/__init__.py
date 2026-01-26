@@ -84,6 +84,7 @@ class EngineCoreRequest(
     priority: int = 0
 
     trace_headers: Mapping[str, str] | None = None
+    resumable: bool = False
 
     # The user-provided request ID. This field is set internally,
     # copied from the provided request_id that's originally assigned

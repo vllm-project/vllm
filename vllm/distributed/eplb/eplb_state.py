@@ -876,8 +876,23 @@ class EplbState:
         ep_group: ProcessGroup,
         is_profile: bool = False,
     ):
-        if not model_state.buffer_lock.acquire(blocking=False):
-            return
+        # We call move_to_workspace only when ep_buffer_ready is 1.
+        # It means we only need to wait for the lock for a short time.
+        max_retries = 6  # 1 minute max
+        retries = 0
+        while not model_state.buffer_lock.acquire(blocking=True, timeout=10.0):
+            retries += 1
+            if retries >= max_retries:
+                raise RuntimeError(
+                    f"Rank {ep_group.rank()}: buffer_lock timeout after "
+                    "{max_retries * 10}s"
+                )
+            logger.warning(
+                "Rank %d: EPLB buffer_lock acquire failed, retrying (%d/%d)",
+                ep_group.rank(),
+                retries,
+                max_retries,
+            )
         try:
             assert model_state.new_physical_to_logical_map is not None
             device_index = model_state.cuda_device_index or self.cuda_device_index
@@ -1024,6 +1039,15 @@ class EplbState:
         eplb_model_state.logical_to_physical_map.copy_(logical_to_physical_map)
         eplb_model_state.logical_replica_count.copy_(logical_replica_count)
         return eplb_state
+
+
+@dataclass
+class EplbLayerState:
+    """Runtime EPLB data stored in the MoE layer."""
+
+    expert_load_view: torch.Tensor | None = None
+    logical_to_physical_map: torch.Tensor | None = None
+    logical_replica_count: torch.Tensor | None = None
 
 
 def _node_count_with_rank_mapping(
