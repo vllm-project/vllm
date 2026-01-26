@@ -67,7 +67,7 @@ def test_single_content(model_name: str):
         assert len(np_response) == 524288
 
 
-@pytest.mark.parametrize("model_name", ["Qwen/Qwen2.5-VL-3B-Instruct"])
+@pytest.mark.parametrize("model_name", ["Qwen/Qwen3-VL-2B-Instruct"])
 def test_multi_content(model_name: str):
     args = [
         "--enforce-eager",
@@ -109,6 +109,7 @@ def test_multi_content(model_name: str):
                     ],
                 }
             ],
+            max_tokens=5,
         )
 
         assert chat_completion.id is not None
@@ -143,6 +144,7 @@ def test_multi_content(model_name: str):
                     ],
                 }
             ],
+            max_tokens=5,
         )
 
         assert chat_completion.id is not None
