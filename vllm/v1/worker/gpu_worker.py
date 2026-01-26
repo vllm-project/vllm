@@ -466,11 +466,8 @@ class Worker(WorkerBase):
         kernel_warmup(self)
 
         cuda_graph_memory_bytes = 0
-        full_graph_memory_bytes = 0
         if not self.model_config.enforce_eager:
-            cuda_graph_memory_bytes, full_graph_memory_bytes = (
-                self.model_runner.capture_model()
-            )
+            cuda_graph_memory_bytes = self.model_runner.capture_model()
 
         # Compare actual vs estimated CUDA graph memory (if we did profiling)
         if (

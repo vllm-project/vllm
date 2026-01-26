@@ -5332,7 +5332,7 @@ class GPUModelRunner(
 
         return int(full_first_capture_memory), int(graph_estimate)
 
-    def capture_model(self) -> tuple[int, int]:
+    def capture_model(self) -> int:
         """Capture CUDA graphs for the model.
 
         Returns:
@@ -5343,7 +5343,7 @@ class GPUModelRunner(
                 "Skipping CUDA graph capture. To turn on CUDA graph capture, "
                 "ensure `cudagraph_mode` was not manually set to `NONE`"
             )
-            return 0, 0
+            return 0
 
         compilation_counter.num_gpu_runner_capture_triggers += 1
 
@@ -5358,20 +5358,15 @@ class GPUModelRunner(
             torch.cuda.empty_cache()
             start_free_gpu_memory = torch.cuda.mem_get_info()[0]
 
-            full_graph_memory = 0
-
             for (
                 runtime_mode,
                 batch_descs,
             ) in self.cudagraph_dispatcher.get_capture_descs():
-                before_capture = torch.cuda.mem_get_info()[0]
                 self._capture_cudagraphs(
                     batch_descriptors=batch_descs,
                     cudagraph_runtime_mode=runtime_mode,
                 )
                 torch.cuda.synchronize()
-                if runtime_mode == CUDAGraphMode.FULL:
-                    full_graph_memory += before_capture - torch.cuda.mem_get_info()[0]
 
             torch.cuda.synchronize()
             end_free_gpu_memory = torch.cuda.mem_get_info()[0]
@@ -5401,7 +5396,7 @@ class GPUModelRunner(
             cuda_graph_size / (1 << 30),
             scope="local",
         )
-        return cuda_graph_size, full_graph_memory
+        return cuda_graph_size
 
     def _warmup_and_capture(
         self,
