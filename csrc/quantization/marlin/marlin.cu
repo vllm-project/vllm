@@ -46,7 +46,7 @@ __global__ void permute_cols_kernel(int4 const* __restrict__ a_int4_ptr,
 
 }  // namespace marlin
 
-torch::Tensor gptq_marlin_gemm(
+torch::Tensor marlin_gemm(
     torch::Tensor& a, std::optional<torch::Tensor> c_or_none,
     torch::Tensor& b_q_weight,
     std::optional<torch::Tensor> const& b_bias_or_none, torch::Tensor& b_scales,
@@ -528,7 +528,7 @@ void marlin_mm(const void* A, const void* B, void* C, void* C_tmp, void* b_bias,
 
 }  // namespace marlin
 
-torch::Tensor gptq_marlin_gemm(
+torch::Tensor marlin_gemm(
     torch::Tensor& a, std::optional<torch::Tensor> c_or_none,
     torch::Tensor& b_q_weight,
     std::optional<torch::Tensor> const& b_bias_or_none, torch::Tensor& b_scales,
@@ -856,5 +856,5 @@ torch::Tensor gptq_marlin_gemm(
 #endif
 
 TORCH_LIBRARY_IMPL_EXPAND(TORCH_EXTENSION_NAME, CUDA, m) {
-  m.impl("gptq_marlin_gemm", &gptq_marlin_gemm);
+  m.impl("marlin_gemm", &marlin_gemm);
 }

@@ -809,7 +809,7 @@ class LLM:
     ) -> list[_TokenizedPrompt | _TokenizedEncDecPrompt]:
         """
         Convert prompt inputs from LLM APIs (other than [LLM.chat][]) into
-        a format that can be pasesed to [LLM._process_inputs][].
+        a format that can be pasesed to [LLM._add_request][].
 
         Refer to [LLM.generate][] for a complete description of the arguments.
 
