@@ -48,7 +48,7 @@ You can tune the performance by adjusting `max_num_batched_tokens`:
 - If `max_num_batched_tokens` is the same as `max_model_len`, that's almost the equivalent to the V0 default scheduling policy (except that it still prioritizes decodes).
 
 !!! warning
-    **When chunked prefill is disabled** – `max_num_batched_tokens` must be **greater than** `max_model_len`.  
+    When chunked prefill is disabled, `max_num_batched_tokens` must be greater than `max_model_len`.  
     In that case, if `max_num_batched_tokens < max_model_len`, vLLM may crash at server start‑up.
 
 ```python
